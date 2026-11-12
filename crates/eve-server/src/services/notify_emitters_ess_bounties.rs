@@ -5,14 +5,14 @@
 
 use crate::router::cache_notifications::PendingMachoNotification;
 use crate::router::{NotificationTarget, ServerContext};
+use eve_db::lock_rank::AnyRwLock;
 use eve_proto::PyRep;
 use std::collections::HashMap;
-use std::sync::RwLock;
 use tokio::sync::broadcast;
 
 pub(crate) fn push_char_notification_with_db(
     db: &eve_db::WorldRepository,
-    pending_notifications: Option<&RwLock<HashMap<i64, Vec<PendingMachoNotification>>>>,
+    pending_notifications: Option<&dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>>,
     notify_tx: Option<&broadcast::Sender<(i64, PendingMachoNotification)>>,
     char_id: i64,
     event: &str,
@@ -70,7 +70,7 @@ pub(crate) fn emit_progression_advanced(
 /// DB-backed variant of [`emit_progression_advanced`] for `SystemActor` / dungeon death hooks.
 pub(crate) fn emit_progression_advanced_with_db(
     db: &eve_db::WorldRepository,
-    pending_notifications: Option<&RwLock<HashMap<i64, Vec<PendingMachoNotification>>>>,
+    pending_notifications: Option<&dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>>,
     notify_tx: Option<&broadcast::Sender<(i64, PendingMachoNotification)>>,
     char_id: i64,
     objective_id: i64,
@@ -104,7 +104,7 @@ pub(crate) fn emit_progression_task_completed(ctx: &ServerContext, char_id: i64,
 /// DB-backed variant of [`emit_progression_task_completed`] for `SystemActor` / dungeon death hooks.
 pub(crate) fn emit_progression_task_completed_with_db(
     db: &eve_db::WorldRepository,
-    pending_notifications: Option<&RwLock<HashMap<i64, Vec<PendingMachoNotification>>>>,
+    pending_notifications: Option<&dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>>,
     notify_tx: Option<&broadcast::Sender<(i64, PendingMachoNotification)>>,
     char_id: i64,
     task_id: i64,

@@ -515,8 +515,8 @@ async fn celestials_gate_cloak_wormhole_group_velocity_and_fast_forward_boundari
 
     // 4. fast_forward_clock_in_actor: missing ball, stationary non-invuln early return, stationary invuln 65s cap
     let mut bp = Ballpark::new(30_000_142);
-    let pos_cache = Arc::new(RwLock::new(HashMap::new()));
-    let scram_cache = Arc::new(RwLock::new(std::collections::HashSet::new()));
+    let pos_cache = Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new()));
+    let scram_cache = Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new()));
     let (tx, _rx) = tokio::sync::broadcast::channel(16);
     let mut sim_elapsed = 0.0_f64;
 
@@ -683,20 +683,20 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
         solar_system_id: 30_000_142,
         cmd_tx,
         event_tx,
-        ball_positions: Arc::new(std::sync::RwLock::new(HashMap::new())),
-        scrambled_balls: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
-        committed_warp_balls: Arc::new(std::sync::RwLock::new(HashMap::new())),
-        active_module_ships: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
-        ballpark: Arc::new(std::sync::RwLock::new(Ballpark::new(30_000_142))),
-        actor_state: Arc::new(std::sync::RwLock::new(super::super::SystemActorState::default())),
+        ball_positions: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
+        scrambled_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
+        committed_warp_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
+        active_module_ships: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
+        ballpark: Arc::new(eve_db::lock_rank::RankedRwLock::new(Ballpark::new(30_000_142))),
+        actor_state: Arc::new(eve_db::lock_rank::RankedRwLock::new(super::super::SystemActorState::default())),
         last_auto_stepped_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         tidi_factor_bits: Arc::new(std::sync::atomic::AtomicU64::new(1.0_f64.to_bits())),
         command_panics: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         panic_next_command_for_test: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        npc_death_hook: Arc::new(std::sync::RwLock::new(None)),
-        module_deactivation_hook: Arc::new(std::sync::RwLock::new(None)),
-        target_lock_completed_hook: Arc::new(std::sync::RwLock::new(None)),
-        system_step_hook: Arc::new(std::sync::RwLock::new(None)),
+        npc_death_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
+        module_deactivation_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
+        target_lock_completed_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
+        system_step_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
     };
 
     assert!(dead.spawn_ball(make_ball(1, 606, DVec3::ZERO)).await.is_err());
@@ -862,20 +862,20 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
         solar_system_id: 30_000_142,
         cmd_tx: drop_tx,
         event_tx: drop_evt_tx,
-        ball_positions: Arc::new(std::sync::RwLock::new(HashMap::new())),
-        scrambled_balls: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
-        committed_warp_balls: Arc::new(std::sync::RwLock::new(HashMap::new())),
-        active_module_ships: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
-        ballpark: Arc::new(std::sync::RwLock::new(Ballpark::new(30_000_142))),
-        actor_state: Arc::new(std::sync::RwLock::new(super::super::SystemActorState::default())),
+        ball_positions: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
+        scrambled_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
+        committed_warp_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
+        active_module_ships: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
+        ballpark: Arc::new(eve_db::lock_rank::RankedRwLock::new(Ballpark::new(30_000_142))),
+        actor_state: Arc::new(eve_db::lock_rank::RankedRwLock::new(super::super::SystemActorState::default())),
         last_auto_stepped_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         tidi_factor_bits: Arc::new(std::sync::atomic::AtomicU64::new(1.0_f64.to_bits())),
         command_panics: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         panic_next_command_for_test: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        npc_death_hook: Arc::new(std::sync::RwLock::new(None)),
-        module_deactivation_hook: Arc::new(std::sync::RwLock::new(None)),
-        target_lock_completed_hook: Arc::new(std::sync::RwLock::new(None)),
-        system_step_hook: Arc::new(std::sync::RwLock::new(None)),
+        npc_death_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
+        module_deactivation_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
+        target_lock_completed_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
+        system_step_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
     };
     assert!(drop_h.spawn_ball(make_ball(1, 606, DVec3::ZERO)).await.is_err());
     assert!(drop_h.set_ball_max_velocity(1, 100.0).await.is_err());
@@ -1327,20 +1327,20 @@ async fn system_handle_stopped_actor_returns_error_or_false_on_all_commands() {
         solar_system_id: 30_000_142,
         cmd_tx,
         event_tx,
-        ball_positions: Arc::new(std::sync::RwLock::new(HashMap::new())),
-        scrambled_balls: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
-        committed_warp_balls: Arc::new(std::sync::RwLock::new(HashMap::new())),
-        active_module_ships: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
-        ballpark: Arc::new(std::sync::RwLock::new(eve_destiny::Ballpark::new(30_000_142))),
-        actor_state: Arc::new(std::sync::RwLock::new(super::super::SystemActorState::default())),
+        ball_positions: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
+        scrambled_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
+        committed_warp_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
+        active_module_ships: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
+        ballpark: Arc::new(eve_db::lock_rank::RankedRwLock::new(eve_destiny::Ballpark::new(30_000_142))),
+        actor_state: Arc::new(eve_db::lock_rank::RankedRwLock::new(super::super::SystemActorState::default())),
         last_auto_stepped_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         tidi_factor_bits: Arc::new(std::sync::atomic::AtomicU64::new(1.0_f64.to_bits())),
         command_panics: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         panic_next_command_for_test: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        npc_death_hook: Arc::new(std::sync::RwLock::new(None)),
-        module_deactivation_hook: Arc::new(std::sync::RwLock::new(None)),
-        target_lock_completed_hook: Arc::new(std::sync::RwLock::new(None)),
-        system_step_hook: Arc::new(std::sync::RwLock::new(None)),
+        npc_death_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
+        module_deactivation_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
+        target_lock_completed_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
+        system_step_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
     };
 
     assert!(handle.spawn_ball(make_ball(1, 587, DVec3::ZERO)).await.is_err());
@@ -1422,4 +1422,68 @@ async fn system_handle_stopped_actor_returns_error_or_false_on_all_commands() {
     let bp = sys_sync.ballpark.read().unwrap();
     assert!((bp.balls[&sync_ship].max_velocity - 375.0).abs() < 1e-6);
     assert_eq!(bp.combat_states[&sync_ship].base_max_shield_hp, Some(500.0));
+}
+
+#[tokio::test]
+async fn ranked_cmd_sender_panics_when_lock_held_and_sync_registry_wrappers_respect_rank() {
+    let ctx = test_ctx();
+    let sys = ctx.systems.get_or_spawn(30_000_142);
+    let ship_id = 9_190_601;
+    sys.try_spawn_ball_with_combat(
+        make_ball(ship_id, 587, DVec3::new(1_200.0, 3_400.0, -500.0)),
+        make_combat_state(100.0, 100.0, 100.0, 100.0),
+    );
+    {
+        let mut bp = sys.ballpark.write().unwrap();
+        bp.balls.get_mut(&ship_id).unwrap().max_velocity = 420.0;
+        super::super::sync_ball_positions(&bp, &sys.ball_positions, &sys.scrambled_balls);
+    }
+    assert_eq!(
+        ctx.systems.get_ball_position_sync(30_000_142, ship_id),
+        Some(DVec3::new(1_200.0, 3_400.0, -500.0))
+    );
+    assert!(!ctx.systems.is_ball_scrambled_sync(30_000_142, ship_id));
+    assert_eq!(
+        ctx.systems.find_ball_position_sync(ship_id),
+        Some(DVec3::new(1_200.0, 3_400.0, -500.0))
+    );
+    assert_eq!(ctx.systems.find_ball_system_sync(ship_id), Some(30_000_142));
+
+    if cfg!(any(debug_assertions, feature = "lock-rank")) {
+        let _bp = sys.ballpark.read().unwrap();
+        let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = sys.cmd_sender();
+        }))
+        .expect_err("cmd_sender() while holding RankedRwLock must panic");
+        let msg = err
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| err.downcast_ref::<&'static str>().map(|s| (*s).to_string()))
+            .unwrap_or_default();
+        assert!(msg.contains("lock-rank"), "unexpected panic msg: {msg}");
+    }
+    let _ = sys.cmd_sender();
+    assert!(eve_db::lock_rank::held_lock_ranks().is_empty());
+
+    if cfg!(any(debug_assertions, feature = "lock-rank")) {
+        {
+            let _bp = sys.ballpark.read().unwrap();
+            let _actor = sys.actor_state.read().unwrap();
+            let _pos = sys.ball_positions.read().unwrap();
+            assert_eq!(
+                eve_db::lock_rank::held_lock_ranks(),
+                vec![
+                    eve_db::lock_rank::RANK_BALLPARK,
+                    eve_db::lock_rank::RANK_ACTOR_STATE,
+                    eve_db::lock_rank::RANK_LEAF,
+                ]
+            );
+        }
+        let _leaf = sys.ball_positions.read().unwrap();
+        let inv = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = sys.ballpark.read();
+        }));
+        assert!(inv.is_err(), "acquiring RANK_BALLPARK under RANK_LEAF must panic");
+    }
+    assert!(eve_db::lock_rank::held_lock_ranks().is_empty());
 }

@@ -1101,3 +1101,41 @@ async fn step_concord_validation_despawns_kill_rights_and_tick_concord_responses
     });
     assert_eq!(unknown_pending, Some(50_000.0));
 }
+
+#[test]
+fn crimewatch_lock_ranks_and_unmutated_drop_fast_path() {
+    let ctx = test_ctx();
+    let now = ctx.now_unix();
+    let lock = CrimeWatchLock::new(Arc::clone(&ctx.db));
+
+    // Read-only use of a write guard leaves `mutated == false` and skips DB snapshot reads/compares on Drop.
+    {
+        let wg_readonly = lock.write().unwrap();
+        assert!(wg_readonly.states.is_empty());
+        // Acquire a RANK_LEAF lock (30 < 60 is valid), then drop `wg_readonly` first.
+        // Without `!self.mutated`, Drop would acquire RANK_WORLD_INNER (40) under RANK_LEAF (60) and panic.
+        let _leaf = ctx.pending_notifications.read().unwrap();
+        drop(wg_readonly);
+    }
+    assert!(!ctx.db.with_snapshot(|s| s.dirty_hints.crimewatch_dirty));
+    assert!(eve_db::lock_rank::held_lock_ranks().is_empty());
+
+    // Mutating through DerefMut sets `mutated = true` and still persists cleanly on Drop.
+    {
+        let mut wg_mut = lock.write().unwrap();
+        wg_mut.trigger_suspect_flag(90_000_001, now);
+    }
+    assert!(ctx.db.with_snapshot(|s| s.dirty_hints.crimewatch_dirty));
+
+    // Holding RANK_CRIMEWATCH (30) permits reading RANK_LEAF (60) clock, whereas the inverse panics.
+    let ts_inside = lock.with_crimewatch(|_| ctx.now_unix());
+    assert!(ts_inside >= now);
+    if cfg!(any(debug_assertions, feature = "lock-rank")) {
+        let _leaf = ctx.pending_notifications.read().unwrap();
+        let inv = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = lock.read();
+        }));
+        assert!(inv.is_err(), "acquiring CrimeWatchLock under RANK_LEAF must panic");
+    }
+    assert!(eve_db::lock_rank::held_lock_ranks().is_empty());
+}

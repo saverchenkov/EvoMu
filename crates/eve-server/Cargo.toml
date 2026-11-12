@@ -33,6 +33,7 @@ miniz_oxide = "0.9"
 [features]
 default = []
 demo-seed = ["eve-db/demo-seed"]
+lock-rank = ["eve-db/lock-rank"]
 
 [dev-dependencies]
 eve-db = { path = "../eve-db", features = ["demo-seed"] }

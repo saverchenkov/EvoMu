@@ -17,6 +17,7 @@ pub mod fw_seed;
 pub mod gateway_tokens;
 pub mod inventory;
 pub mod ledger;
+pub mod lock_rank;
 pub mod persistence;
 pub mod seed;
 pub mod service_domains;

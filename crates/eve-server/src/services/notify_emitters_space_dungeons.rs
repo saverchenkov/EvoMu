@@ -668,12 +668,13 @@ pub fn flush_module_ewar_end(
     let ewar_targets: Vec<(i64, &'static str)> = if !started_targets.is_empty() {
         started_targets
     } else {
-        let source_matches = ctx
+        let cached_source = ctx
             .projected_ewar_sources
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .get(&module_id)
-            .copied()
+            .copied();
+        let source_matches = cached_source
             .map(|sid| sid == ship_id)
             .unwrap_or_else(|| {
                 ctx.db
@@ -828,30 +829,52 @@ pub fn flush_ship_all_ewar_sync(
         }
     }
     {
-        let src_guard = ctx
-            .projected_ewar_sources
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        for (&mod_id, &src_sid) in src_guard.iter() {
-            if src_sid == ship_id && !pairs.contains(&(src_sid, mod_id)) {
-                pairs.push((src_sid, mod_id));
-            }
-        }
-        let pe_guard = ctx
-            .projected_ewar
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(list) = pe_guard.get(&ship_id) {
-            for eff in list {
-                let mod_id = eff.source_module_id;
-                let src_sid = src_guard.get(&mod_id).copied().unwrap_or_else(|| {
-                    ctx.db
-                        .with_snapshot(|s| s.items.get(&mod_id).map(|i| i.location_id))
-                        .unwrap_or(0)
-                });
-                if src_sid > 0 && !pairs.contains(&(src_sid, mod_id)) {
+        let mut target_mod_ids = Vec::new();
+        {
+            let src_guard = ctx
+                .projected_ewar_sources
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            for (&mod_id, &src_sid) in src_guard.iter() {
+                if src_sid == ship_id && !pairs.contains(&(src_sid, mod_id)) {
                     pairs.push((src_sid, mod_id));
                 }
+            }
+        }
+        {
+            let pe_guard = ctx
+                .projected_ewar
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(list) = pe_guard.get(&ship_id) {
+                for eff in list {
+                    target_mod_ids.push(eff.source_module_id);
+                }
+            }
+        }
+        let mut unresolved = Vec::new();
+        if !target_mod_ids.is_empty() {
+            let src_guard = ctx
+                .projected_ewar_sources
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            for mod_id in target_mod_ids {
+                if let Some(&src_sid) = src_guard.get(&mod_id) {
+                    if src_sid > 0 && !pairs.contains(&(src_sid, mod_id)) {
+                        pairs.push((src_sid, mod_id));
+                    }
+                } else {
+                    unresolved.push(mod_id);
+                }
+            }
+        }
+        for mod_id in unresolved {
+            let src_sid = ctx
+                .db
+                .with_snapshot(|s| s.items.get(&mod_id).map(|i| i.location_id))
+                .unwrap_or(0);
+            if src_sid > 0 && !pairs.contains(&(src_sid, mod_id)) {
+                pairs.push((src_sid, mod_id));
             }
         }
     }

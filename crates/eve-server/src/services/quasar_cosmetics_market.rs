@@ -30,6 +30,7 @@ use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
     STATUS_NOT_FOUND, STATUS_PRECONDITION_FAILED, STATUS_UNAUTHORIZED,
 };
+use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WorldRepository};
 use eve_proto::quasar::{
     encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
@@ -46,7 +47,7 @@ pub struct CosmeticsMarketState {
     db: Arc<WorldRepository>,
     pub data: RwLock<CosmeticsMarketData>,
     pub skinr: Arc<SkinrCosmeticsState>,
-    macho_notify_sink: Arc<RwLock<Option<crate::quasar_gateway::MachoNotifySink>>>,
+    macho_notify_sink: Arc<RankedRwLock<Option<crate::quasar_gateway::MachoNotifySink>, RANK_LEAF>>,
 }
 
 fn db_cosmetics_market_map(
@@ -109,14 +110,14 @@ pub(crate) fn purge_revoked_skin_listings(db: &WorldRepository, seller_id: u32, 
 
 impl CosmeticsMarketState {
     pub fn load(db: Arc<WorldRepository>, sde: Arc<SdeRegistry>, skinr: Arc<SkinrCosmeticsState>) -> Arc<Self> {
-        Self::load_with_sink(db, sde, skinr, Arc::new(RwLock::new(None)))
+        Self::load_with_sink(db, sde, skinr, Arc::new(RankedRwLock::new(None)))
     }
 
     pub fn load_with_sink(
         db: Arc<WorldRepository>,
         sde: Arc<SdeRegistry>,
         skinr: Arc<SkinrCosmeticsState>,
-        macho_notify_sink: Arc<RwLock<Option<crate::quasar_gateway::MachoNotifySink>>>,
+        macho_notify_sink: Arc<RankedRwLock<Option<crate::quasar_gateway::MachoNotifySink>, RANK_LEAF>>,
     ) -> Arc<Self> {
         let mut data: CosmeticsMarketData = db.with_snapshot(|s| {
             s.quasar_state_blobs.get(BLOB_KEY).and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default()
@@ -134,7 +135,12 @@ impl CosmeticsMarketState {
     }
 
     fn emit_account_change(&self, char_id: i64, new_bal: IskCents) {
-        if let Some(sink) = self.macho_notify_sink.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        let sink = self
+            .macho_notify_sink
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(sink) = sink {
             sink(crate::router::NotificationTarget::Character(char_id), "OnAccountChange", "charid", vec![
                 eve_proto::PyRep::String("cash".into()), eve_proto::PyRep::Integer(char_id), eve_proto::PyRep::Real(new_bal.to_wire_f64()),
             ]);

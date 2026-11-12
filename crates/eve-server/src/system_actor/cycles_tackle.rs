@@ -1365,9 +1365,7 @@ impl SystemHandle {
 
 impl SystemRegistry {
     pub fn is_ball_in_committed_warp_sync(&self, solar_system_id: SolarSystemId, ball_id: BallId) -> bool {
-        let guard = self.systems.read().unwrap_or_else(|e| e.into_inner());
-        guard
-            .get(&solar_system_id)
+        self.get_handle(solar_system_id)
             .is_some_and(|h| h.committed_warp_destination_sync(ball_id).is_some())
     }
 
@@ -1378,9 +1376,7 @@ impl SystemRegistry {
         cyno_expiry_unix: u64,
         now_unix: u64,
     ) -> u64 {
-        let guard = self.systems.read().unwrap_or_else(|e| e.into_inner());
-        guard
-            .get(&solar_system_id)
+        self.get_handle(solar_system_id)
             .map(|h| h.max_active_module_cycle_expiry_unix_sync(ship_id, cyno_expiry_unix, now_unix))
             .unwrap_or(cyno_expiry_unix)
     }

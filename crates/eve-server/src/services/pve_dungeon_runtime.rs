@@ -13,6 +13,7 @@ use crate::services::notify_emitters_space_dungeons::{
 use crate::services::pve_exploration::with_pve_exploration_reg;
 use crate::services::pve_exploration_seeding::build_type_combat_state_from_sde;
 use crate::services::pve_special_sites::make_site_npc_ball;
+use eve_db::lock_rank::AnyRwLock;
 use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::SolarSystemId;
@@ -746,7 +747,7 @@ pub async fn despawn_completed_dungeon_core(
     systems: &std::sync::Arc<crate::system_actor::SystemRegistry>,
     db: &std::sync::Arc<eve_db::WorldRepository>,
     pending_notifications: Option<
-        &std::sync::RwLock<
+        &dyn AnyRwLock<
             HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>,
         >,
     >,
@@ -847,7 +848,7 @@ async fn apply_dungeon_trigger_actions_core(
     db: &std::sync::Arc<eve_db::WorldRepository>,
     sde: &eve_sde::SdeRegistry,
     pending_notifications: Option<
-        &std::sync::RwLock<
+        &dyn AnyRwLock<
             HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>,
         >,
     >,
@@ -1002,7 +1003,7 @@ pub async fn on_dungeon_npc_killed(ctx: &ServerContext, sys_id: SolarSystemId, n
 #[allow(clippy::too_many_arguments)]
 pub async fn on_dungeon_npc_killed_core(
     systems: &std::sync::Arc<crate::system_actor::SystemRegistry>, db: &std::sync::Arc<eve_db::WorldRepository>, sde: &eve_sde::SdeRegistry,
-    pending_notifications: Option<&std::sync::RwLock<HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>>>,
+    pending_notifications: Option<&dyn AnyRwLock<HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>>>,
     notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, crate::router::cache_notifications::PendingMachoNotification)>>,
     sys_id: SolarSystemId, npc_ball_id: i64, killer_char_id: i64,
 ) {

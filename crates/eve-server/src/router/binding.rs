@@ -585,27 +585,44 @@ impl ServerContext {
         if matches!(reason, "set_account_key" | "login") {
             return;
         }
-        let mut removed = Vec::new();
-        self.bound_objects
-            .write()
+        let candidates: Vec<(u64, BoundObjectEntry)> = self
+            .bound_objects
+            .read()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|&_bid, b| {
-                if b.character_id != char_id {
-                    return true;
+            .iter()
+            .filter(|(_, b)| b.character_id == char_id)
+            .map(|(&bid, b)| (bid, b.clone()))
+            .collect();
+        if candidates.is_empty() {
+            return;
+        }
+        let mut to_remove_ids = Vec::new();
+        for (bid, b) in &candidates {
+            if crate::router::binding_auth::should_invalidate_bound_object(
+                self,
+                b,
+                system_id,
+                active_dock_id,
+                reason,
+            ) {
+                to_remove_ids.push(*bid);
+            }
+        }
+        if to_remove_ids.is_empty() {
+            return;
+        }
+        let mut removed = Vec::with_capacity(to_remove_ids.len());
+        {
+            let mut map = self
+                .bound_objects
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            for bid in to_remove_ids {
+                if let Some(entry) = map.remove(&bid) {
+                    removed.push(entry);
                 }
-                if crate::router::binding_auth::should_invalidate_bound_object(
-                    self,
-                    b,
-                    system_id,
-                    active_dock_id,
-                    reason,
-                ) {
-                    removed.push(b.clone());
-                    false
-                } else {
-                    true
-                }
-            });
+            }
+        }
         for entry in &removed {
             self.emit_macho_object_disconnect(entry);
         }
@@ -1125,7 +1142,7 @@ impl ServerContext {
         let quasar_gateway = Arc::clone(&self.quasar_gateway);
         let inv_roll = Arc::clone(&self.invention_roll_override);
         let cd_map = Arc::clone(&self.module_reactivation_cooldowns);
-        let active_fighters = Arc::clone(&self.active_fighters);
+        let fighters = Arc::clone(&self.fighters);
         let projected_ewar = Arc::clone(&self.projected_ewar);
         let projected_ewar_sources = Arc::clone(&self.projected_ewar_sources);
         let active_ewar_starts = Arc::clone(&self.active_ewar_starts);
@@ -1183,7 +1200,7 @@ impl ServerContext {
                     Arc::clone(&quasar_gateway),
                     Arc::clone(&inv_roll),
                     Arc::clone(&cd_map),
-                    Arc::clone(&active_fighters),
+                    Arc::clone(&fighters),
                     Arc::clone(&projected_ewar),
                     Arc::clone(&projected_ewar_sources),
                     Arc::clone(&active_ewar_starts),
@@ -1408,24 +1425,26 @@ impl ServerContext {
         db: std::sync::Arc<eve_db::WorldRepository>,
         sde: std::sync::Arc<eve_sde::SdeRegistry>,
         mechanic_rng: std::sync::Arc<crate::rng::MechanicRng>,
-        ship_fittings: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<i64, eve_dogma::ShipFittingEngine>>>,
-        pending_notifications: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<i64, Vec<super::cache_notifications::PendingMachoNotification>>>>,
+        ship_fittings: std::sync::Arc<eve_db::lock_rank::RankedRwLock<std::collections::HashMap<i64, eve_dogma::ShipFittingEngine>, { eve_db::lock_rank::RANK_LEAF }>>,
+        pending_notifications: std::sync::Arc<eve_db::lock_rank::RankedRwLock<std::collections::HashMap<i64, Vec<super::cache_notifications::PendingMachoNotification>>, { eve_db::lock_rank::RANK_LEAF }>>,
         notify_tx: tokio::sync::broadcast::Sender<(i64, super::cache_notifications::PendingMachoNotification)>,
-        combat_ephemeral: std::sync::Arc<std::sync::RwLock<crate::services::combat_crimewatch::CombatRuntimeState>>,
+        combat_ephemeral: std::sync::Arc<eve_db::lock_rank::RankedRwLock<crate::services::combat_crimewatch::CombatRuntimeState, { eve_db::lock_rank::RANK_LEAF }>>,
         quasar_gateway: std::sync::Arc<crate::quasar_gateway::PublicGatewayRouter>,
-        invention_roll_override: std::sync::Arc<std::sync::RwLock<Option<f64>>>,
-        module_reactivation_cooldowns: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<(i64, i64, u32), super::context::ModuleCooldownEntry>>>,
-        active_fighters: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<i64, super::context::ActiveFighterSquadron>>>,
-        projected_ewar: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<i64, Vec<eve_dogma::ProjectedEwarEffect>>>>,
-        projected_ewar_sources: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<i64, i64>>>,
-        active_ewar_starts: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<(i64, i64), Vec<(i64, &'static str)>>>>,
-        tactical_state: std::sync::Arc<std::sync::RwLock<crate::services::tactical_modules::TacticalModulesState>>,
+        invention_roll_override: std::sync::Arc<eve_db::lock_rank::RankedRwLock<Option<f64>, { eve_db::lock_rank::RANK_LEAF }>>,
+        module_reactivation_cooldowns: std::sync::Arc<eve_db::lock_rank::RankedRwLock<std::collections::HashMap<(i64, i64, u32), super::context::ModuleCooldownEntry>, { eve_db::lock_rank::RANK_LEAF }>>,
+        fighters: std::sync::Arc<eve_db::lock_rank::RankedRwLock<super::context::FighterRuntimeState, { eve_db::lock_rank::RANK_LEAF }>>,
+        projected_ewar: std::sync::Arc<eve_db::lock_rank::RankedRwLock<std::collections::HashMap<i64, Vec<eve_dogma::ProjectedEwarEffect>>, { eve_db::lock_rank::RANK_LEAF }>>,
+        projected_ewar_sources: std::sync::Arc<eve_db::lock_rank::RankedRwLock<std::collections::HashMap<i64, i64>, { eve_db::lock_rank::RANK_LEAF }>>,
+        active_ewar_starts: std::sync::Arc<eve_db::lock_rank::RankedRwLock<std::collections::HashMap<(i64, i64), Vec<(i64, &'static str)>>, { eve_db::lock_rank::RANK_LEAF }>>,
+        tactical_state: std::sync::Arc<eve_db::lock_rank::RankedRwLock<crate::services::tactical_modules::TacticalModulesState, { eve_db::lock_rank::RANK_LEAF }>>,
     ) -> Self {
         let crimewatch = crate::combat::crimewatch::CrimeWatchLock::new(std::sync::Arc::clone(&db));
-        let clock = std::sync::RwLock::new(db.clock());
+        let clock = eve_db::lock_rank::RankedRwLock::new(db.clock());
         let living_world = std::sync::Arc::new(crate::living_world::LivingWorldDirector::new());
         let esi_state = std::sync::Arc::new(crate::esi::runtime_state::EsiRuntimeState::new());
-        let cluster_state = std::sync::Arc::new(std::sync::RwLock::new(crate::services::macho_cluster_mgmt::MachoClusterState::default()));
+        let cluster_state = std::sync::Arc::new(eve_db::lock_rank::RankedRwLock::new(crate::services::macho_cluster_mgmt::MachoClusterState::default()));
+        let (fighter_cooldown_state, fighter_charge_state, active_fighters, fighter_tube_loads) =
+            super::context::make_fighter_lenses(&fighters);
         Self {
             instance_id,
             sde,
@@ -1436,57 +1455,58 @@ impl ServerContext {
             quasar_gateway,
             cataloged_services: std::collections::HashSet::new(),
             quasar_domains: std::collections::HashSet::new(),
-            bound_objects: std::sync::RwLock::new(std::collections::HashMap::new()),
-            object_cache: std::sync::RwLock::new(std::collections::HashMap::new()),
-            object_cache_timestamps: std::sync::RwLock::new(std::collections::HashMap::new()),
-            notification_records: std::sync::RwLock::new(Vec::new()),
+            bound_objects: eve_db::lock_rank::RankedRwLock::new(std::collections::HashMap::new()),
+            object_cache: eve_db::lock_rank::RankedRwLock::new(std::collections::HashMap::new()),
+            object_cache_timestamps: eve_db::lock_rank::RankedRwLock::new(std::collections::HashMap::new()),
+            notification_records: eve_db::lock_rank::RankedRwLock::new(Vec::new()),
             pending_notifications,
             notify_tx,
-            map_landmarks: std::sync::RwLock::new(Vec::new()),
-            session_closers: std::sync::RwLock::new(std::collections::HashMap::new()),
+            map_landmarks: eve_db::lock_rank::RankedRwLock::new(Vec::new()),
+            session_closers: eve_db::lock_rank::RankedRwLock::new(std::collections::HashMap::new()),
             ship_fittings,
             projected_ewar,
             projected_ewar_sources,
             active_ewar_starts,
-            weapon_cycle_state: std::sync::RwLock::new(std::collections::HashMap::new()),
-            fighter_cooldown_state: std::sync::RwLock::new(std::collections::HashMap::new()),
-            fighter_charge_state: std::sync::RwLock::new(std::collections::HashMap::new()),
+            weapon_cycle_state: eve_db::lock_rank::RankedRwLock::new(std::collections::HashMap::new()),
+            fighters,
+            fighter_cooldown_state,
+            fighter_charge_state,
             active_fighters,
-            fighter_tube_loads: std::sync::RwLock::new(std::collections::HashMap::new()),
-            active_scanner_probes: std::sync::RwLock::new(std::collections::HashMap::new()),
-            active_moon_probes: std::sync::RwLock::new(Vec::new()),
-            scanned_signatures: std::sync::RwLock::new(std::collections::HashSet::new()),
-            character_scan_progress: std::sync::RwLock::new(std::collections::HashMap::new()),
+            fighter_tube_loads,
+            active_scanner_probes: eve_db::lock_rank::RankedRwLock::new(std::collections::HashMap::new()),
+            active_moon_probes: eve_db::lock_rank::RankedRwLock::new(Vec::new()),
+            scanned_signatures: eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new()),
+            character_scan_progress: eve_db::lock_rank::RankedRwLock::new(std::collections::HashMap::new()),
             invention_roll_override,
             mechanic_rng,
             module_reactivation_cooldowns,
-            mining_cycles: std::sync::RwLock::new(std::collections::HashMap::new()),
-            phased_asteroid_fields: std::sync::RwLock::new(std::collections::HashMap::new()),
+            mining_cycles: eve_db::lock_rank::RankedRwLock::new(std::collections::HashMap::new()),
+            phased_asteroid_fields: eve_db::lock_rank::RankedRwLock::new(std::collections::HashMap::new()),
             crimewatch,
             combat_ephemeral,
             tactical_state,
-            session_change_timers: std::sync::Mutex::new(std::collections::HashMap::new()),
-            active_warps: std::sync::Mutex::new(std::collections::HashMap::new()),
-            return_warps: std::sync::Mutex::new(std::collections::HashSet::new()),
-            location_change_invuln: std::sync::Mutex::new(std::collections::HashMap::new()),
+            session_change_timers: eve_db::lock_rank::RankedMutex::new(std::collections::HashMap::new()),
+            active_warps: eve_db::lock_rank::RankedMutex::new(std::collections::HashMap::new()),
+            return_warps: eve_db::lock_rank::RankedMutex::new(std::collections::HashSet::new()),
+            location_change_invuln: eve_db::lock_rank::RankedMutex::new(std::collections::HashMap::new()),
             feature_flags: crate::config::FeatureFlagsConfig::default(),
             esi_port: 0,
             xmpp_port: 5222,
             esi_state,
-            fleet_extras: std::sync::Mutex::new(Default::default()),
-            social_extras: std::sync::Mutex::new(Default::default()),
-            cluster_misc_state: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+            fleet_extras: eve_db::lock_rank::RankedMutex::new(Default::default()),
+            social_extras: eve_db::lock_rank::RankedMutex::new(Default::default()),
+            cluster_misc_state: std::sync::Arc::new(eve_db::lock_rank::RankedMutex::new(Default::default())),
             cluster_state,
-            global_config_values: std::sync::RwLock::new(std::collections::HashMap::new()),
-            alert_telemetry: std::sync::Mutex::new(Default::default()),
+            global_config_values: eve_db::lock_rank::RankedRwLock::new(std::collections::HashMap::new()),
+            alert_telemetry: eve_db::lock_rank::RankedMutex::new(Default::default()),
             flight_recorder: std::sync::Arc::new(crate::flight_recorder::FlightRecorder::new()),
             bug_reporting: std::sync::Arc::new(crate::bug_reporting::BugReportingRuntime::new()),
-            npc_spawns: std::sync::RwLock::new(std::collections::HashMap::new()),
+            npc_spawns: eve_db::lock_rank::RankedRwLock::new(std::collections::HashMap::new()),
             combat_rng_seq: std::sync::atomic::AtomicU64::new(0),
             cluster_tick_last_unix: std::sync::atomic::AtomicU64::new(0),
             cluster_tick_persisted_unix: std::sync::atomic::AtomicU64::new(0),
             dedicated_physics_ticker_active: std::sync::atomic::AtomicBool::new(false),
-            fw_idle_last_step_unix: std::sync::RwLock::new(std::collections::HashMap::new()),
+            fw_idle_last_step_unix: eve_db::lock_rank::RankedRwLock::new(std::collections::HashMap::new()),
         }
     }
 
@@ -1523,15 +1543,28 @@ impl ServerContext {
     }
 
     pub fn remove_projected_ewar_by_module(&self, source_ship_id: i64, source_module_id: i64) -> Vec<i64> {
-        {
-            let mut owners = self.projected_ewar_sources.write().unwrap_or_else(|e| e.into_inner());
-            if let Some(&recorded_ship) = owners.get(&source_module_id) {
-                if recorded_ship != source_ship_id {
+        let recorded = self
+            .projected_ewar_sources
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&source_module_id)
+            .copied();
+        match recorded {
+            Some(recorded_ship) if recorded_ship != source_ship_id => return Vec::new(),
+            Some(_) => {
+                self.projected_ewar_sources
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&source_module_id);
+            }
+            None => {
+                if !self.db.with_snapshot(|s| {
+                    s.items
+                        .get(&source_module_id)
+                        .is_some_and(|i| i.location_id == source_ship_id)
+                }) {
                     return Vec::new();
                 }
-                owners.remove(&source_module_id);
-            } else if !self.db.with_snapshot(|s| s.items.get(&source_module_id).is_some_and(|i| i.location_id == source_ship_id)) {
-                return Vec::new();
             }
         }
         let mut affected_ships = Vec::new();

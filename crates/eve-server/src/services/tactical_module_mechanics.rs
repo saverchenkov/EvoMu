@@ -7,6 +7,7 @@ use crate::router::ServerContext;
 use crate::services::inventory_fitting::fitting_module_cycles::set_modules_reload_until;
 use crate::services::tactical_modules::{self, TacticalModulesState};
 use crate::system_actor::{ActiveModuleCycle, SystemHandle};
+use eve_db::lock_rank::AnyRwLock;
 use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository, WorldStateSnapshot};
 use eve_destiny::{Ball, BallId, Ballpark, CombatState, MovementMode, SlimItemMeta};
 use eve_dogma::{FittedModule, ShipFittingEngine};
@@ -14,7 +15,7 @@ use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{attr_ids, InvType, SdeRegistry};
 use glam::DVec3;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ActiveInterdictionProbe {
@@ -593,7 +594,7 @@ pub async fn is_untargetable_interdiction_probe(
 pub fn on_probe_ball_removed_in_actor(
     ballpark: &mut Ballpark,
     db_opt: &Option<Arc<WorldRepository>>,
-    tactical_state: &RwLock<TacticalModulesState>,
+    tactical_state: &dyn AnyRwLock<TacticalModulesState>,
     probe_id: BallId,
 ) {
     ballpark.remove_warp_bubble(probe_id);
@@ -610,7 +611,7 @@ pub fn on_probe_ball_removed_in_actor(
 pub fn step_interdiction_probes_lifetime(
     ballpark: &mut Ballpark,
     db_opt: &Option<Arc<WorldRepository>>,
-    tactical_state: &RwLock<TacticalModulesState>,
+    tactical_state: &dyn AnyRwLock<TacticalModulesState>,
     dt: f64,
 ) {
     let Some(db_ref) = db_opt else {

@@ -15,6 +15,7 @@ use std::collections::HashMap;
 
 use crate::router::cache_notifications::PendingMachoNotification;
 use crate::router::{NotificationTarget, ServerContext};
+use eve_db::lock_rank::AnyRwLock;
 use eve_proto::PyRep;
 use tokio::sync::broadcast;
 
@@ -110,7 +111,7 @@ pub fn emit_cloak_module_force_deactivated(
 fn push_char_notification_core(
     db: &eve_db::WorldRepository,
     pending_notifications: Option<
-        &std::sync::RwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
+        &dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
     >,
     notify_tx: Option<&broadcast::Sender<(i64, PendingMachoNotification)>>,
     char_id: i64,
@@ -156,7 +157,7 @@ fn push_char_notification_core(
 pub fn emit_dungeon_camera_interest_core(
     db: &eve_db::WorldRepository,
     pending_notifications: Option<
-        &std::sync::RwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
+        &dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
     >,
     notify_tx: Option<&broadcast::Sender<(i64, PendingMachoNotification)>>,
     char_id: i64,
@@ -182,7 +183,7 @@ pub fn emit_dungeon_camera_interest_core(
 pub fn emit_dungeon_trigger_ambient_sound_core(
     db: &eve_db::WorldRepository,
     pending_notifications: Option<
-        &std::sync::RwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
+        &dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
     >,
     notify_tx: Option<&broadcast::Sender<(i64, PendingMachoNotification)>>,
     char_id: i64,
@@ -209,7 +210,7 @@ pub fn emit_dungeon_trigger_ambient_sound_core(
 pub fn emit_dungeon_trigger_audio_core(
     db: &eve_db::WorldRepository,
     pending_notifications: Option<
-        &std::sync::RwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
+        &dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
     >,
     notify_tx: Option<&broadcast::Sender<(i64, PendingMachoNotification)>>,
     char_id: i64,
@@ -233,7 +234,7 @@ pub fn emit_dungeon_trigger_audio_core(
 pub fn emit_dungeon_trigger_message_core(
     db: &eve_db::WorldRepository,
     pending_notifications: Option<
-        &std::sync::RwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
+        &dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
     >,
     notify_tx: Option<&broadcast::Sender<(i64, PendingMachoNotification)>>,
     char_id: i64,
@@ -254,7 +255,7 @@ pub fn emit_dungeon_trigger_message_core(
 pub fn emit_dungeon_trigger_music_core(
     db: &eve_db::WorldRepository,
     pending_notifications: Option<
-        &std::sync::RwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
+        &dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
     >,
     notify_tx: Option<&broadcast::Sender<(i64, PendingMachoNotification)>>,
     char_id: i64,
@@ -277,7 +278,7 @@ pub fn emit_dungeon_trigger_music_core(
 pub fn dispatch_dungeon_trigger_notify_actions(
     db: &eve_db::WorldRepository,
     pending_notifications: Option<
-        &std::sync::RwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
+        &dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
     >,
     notify_tx: Option<&broadcast::Sender<(i64, PendingMachoNotification)>>,
     char_id: i64,

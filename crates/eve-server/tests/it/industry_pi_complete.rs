@@ -950,6 +950,7 @@ async fn run_pi_full_suite() -> (Option<bool>, Option<i64>, f64, i64, i64) {
     let pers_notifs = ctx.notification_records.read().unwrap();
     assert!(pers_notifs.iter().any(|r| r.receiver_id == char_id && r.data.contains("PlanetExtractorFinished")));
     assert!(pers_notifs.iter().any(|r| r.receiver_id == char_id && r.data.contains("PlanetStorageFull")));
+    drop(pers_notifs);
     ctx.db.with_mut_snapshot(|snap| {
         let mut net = eve_server::services::industry_pi::load_pi_network(snap, char_id, JITA_PLANET_ID, 3);
         if let Some(pin) = net.pins.iter_mut().find(|p| p.pin_id == cc_pin_id) {

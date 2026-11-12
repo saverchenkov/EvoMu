@@ -91,8 +91,8 @@ async fn test_system_registry_multi_system_sync_queries_tidi_and_hooks() {
     let db = Arc::new(eve_db::WorldRepository::new_empty());
     let sde = Arc::new(SdeRegistry::with_canonical_seed());
     let (notif_tx, _) = tokio::sync::broadcast::channel(16);
-    let pending_notifs = Arc::new(RwLock::new(HashMap::new()));
-    let tactical = Arc::new(RwLock::new(Default::default()));
+    let pending_notifs = Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new()));
+    let tactical = Arc::new(eve_db::lock_rank::RankedRwLock::new(Default::default()));
     let rng = Arc::new(crate::rng::MechanicRng::seeded(42));
 
     let reg = SystemRegistry::with_sde_and_db(sde, db)

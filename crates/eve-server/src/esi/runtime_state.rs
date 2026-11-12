@@ -4,10 +4,10 @@
 
 #![forbid(unsafe_code)]
 
+use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::RwLock;
 
 #[derive(Debug, Clone)]
 pub struct EsiMailLabel {
@@ -65,31 +65,31 @@ pub struct EsiCorpHistoryEntry {
 
 #[derive(Debug)]
 pub struct EsiRuntimeState {
-    pub deleted_mails: RwLock<HashSet<(i64, i64)>>,
-    pub mail_meta: RwLock<HashMap<(i64, i64), EsiMailMeta>>,
-    pub mail_labels: RwLock<HashMap<i64, Vec<EsiMailLabel>>>,
+    pub deleted_mails: RankedRwLock<HashSet<(i64, i64)>, RANK_LEAF>,
+    pub mail_meta: RankedRwLock<HashMap<(i64, i64), EsiMailMeta>, RANK_LEAF>,
+    pub mail_labels: RankedRwLock<HashMap<i64, Vec<EsiMailLabel>>, RANK_LEAF>,
     /// Legacy empty map retained only for integration test `.clear()` compatibility;
     /// mailing lists are persisted canonically in `WorldStateSnapshot::mailing_lists`.
-    pub mail_lists: RwLock<HashMap<i64, Vec<(i64, String)>>>,
-    pub char_contacts: RwLock<HashMap<i64, Vec<EsiContactEntry>>>,
+    pub mail_lists: RankedRwLock<HashMap<i64, Vec<(i64, String)>>, RANK_LEAF>,
+    pub char_contacts: RankedRwLock<HashMap<i64, Vec<EsiContactEntry>>, RANK_LEAF>,
     /// Legacy empty maps retained only for integration test `.clear()` compatibility;
     /// contact labels and corp/alliance contacts live canonically in `WorldStateSnapshot`.
-    pub char_contact_labels: RwLock<HashMap<i64, Vec<(i64, String)>>>,
-    pub corp_contacts: RwLock<HashMap<i64, Vec<EsiContactEntry>>>,
-    pub corp_contact_labels: RwLock<HashMap<i64, Vec<(i64, String)>>>,
-    pub alliance_contacts: RwLock<HashMap<i64, Vec<EsiContactEntry>>>,
-    pub alliance_contact_labels: RwLock<HashMap<i64, Vec<(i64, String)>>>,
-    pub calendar_events: RwLock<HashMap<i64, EsiCalendarEvent>>,
-    pub calendar_responses: RwLock<HashMap<(i64, i64), String>>,
-    pub contact_notifications: RwLock<HashMap<i64, Vec<EsiContactNotification>>>,
-    pub char_corp_history: RwLock<HashMap<i64, Vec<EsiCorpHistoryEntry>>>,
-    pub char_titles: RwLock<HashMap<i64, Vec<(i64, String)>>>,
-    pub fleet_motd: RwLock<HashMap<i64, String>>,
-    pub fleet_wing_names: RwLock<HashMap<(i64, i64), String>>,
-    pub fleet_squads: RwLock<HashMap<(i64, i64), (i64, String)>>,
-    pub fleet_member_meta: RwLock<HashMap<(i64, i64), (String, i64, i64)>>,
-    pub war_allies: RwLock<HashMap<i64, Vec<Value>>>,
-    pub custom_item_names: RwLock<HashMap<i64, String>>,
+    pub char_contact_labels: RankedRwLock<HashMap<i64, Vec<(i64, String)>>, RANK_LEAF>,
+    pub corp_contacts: RankedRwLock<HashMap<i64, Vec<EsiContactEntry>>, RANK_LEAF>,
+    pub corp_contact_labels: RankedRwLock<HashMap<i64, Vec<(i64, String)>>, RANK_LEAF>,
+    pub alliance_contacts: RankedRwLock<HashMap<i64, Vec<EsiContactEntry>>, RANK_LEAF>,
+    pub alliance_contact_labels: RankedRwLock<HashMap<i64, Vec<(i64, String)>>, RANK_LEAF>,
+    pub calendar_events: RankedRwLock<HashMap<i64, EsiCalendarEvent>, RANK_LEAF>,
+    pub calendar_responses: RankedRwLock<HashMap<(i64, i64), String>, RANK_LEAF>,
+    pub contact_notifications: RankedRwLock<HashMap<i64, Vec<EsiContactNotification>>, RANK_LEAF>,
+    pub char_corp_history: RankedRwLock<HashMap<i64, Vec<EsiCorpHistoryEntry>>, RANK_LEAF>,
+    pub char_titles: RankedRwLock<HashMap<i64, Vec<(i64, String)>>, RANK_LEAF>,
+    pub fleet_motd: RankedRwLock<HashMap<i64, String>, RANK_LEAF>,
+    pub fleet_wing_names: RankedRwLock<HashMap<(i64, i64), String>, RANK_LEAF>,
+    pub fleet_squads: RankedRwLock<HashMap<(i64, i64), (i64, String)>, RANK_LEAF>,
+    pub fleet_member_meta: RankedRwLock<HashMap<(i64, i64), (String, i64, i64)>, RANK_LEAF>,
+    pub war_allies: RankedRwLock<HashMap<i64, Vec<Value>>, RANK_LEAF>,
+    pub custom_item_names: RankedRwLock<HashMap<i64, String>, RANK_LEAF>,
     pub next_custom_id: AtomicI64,
 }
 
@@ -102,27 +102,27 @@ impl Default for EsiRuntimeState {
 impl EsiRuntimeState {
     pub fn new() -> Self {
         Self {
-            deleted_mails: RwLock::new(HashSet::new()),
-            mail_meta: RwLock::new(HashMap::new()),
-            mail_labels: RwLock::new(HashMap::new()),
-            mail_lists: RwLock::new(HashMap::new()),
-            char_contacts: RwLock::new(HashMap::new()),
-            char_contact_labels: RwLock::new(HashMap::new()),
-            corp_contacts: RwLock::new(HashMap::new()),
-            corp_contact_labels: RwLock::new(HashMap::new()),
-            alliance_contacts: RwLock::new(HashMap::new()),
-            alliance_contact_labels: RwLock::new(HashMap::new()),
-            calendar_events: RwLock::new(HashMap::new()),
-            calendar_responses: RwLock::new(HashMap::new()),
-            contact_notifications: RwLock::new(HashMap::new()),
-            char_corp_history: RwLock::new(HashMap::new()),
-            char_titles: RwLock::new(HashMap::new()),
-            fleet_motd: RwLock::new(HashMap::new()),
-            fleet_wing_names: RwLock::new(HashMap::new()),
-            fleet_squads: RwLock::new(HashMap::new()),
-            fleet_member_meta: RwLock::new(HashMap::new()),
-            war_allies: RwLock::new(HashMap::new()),
-            custom_item_names: RwLock::new(HashMap::new()),
+            deleted_mails: RankedRwLock::new(HashSet::new()),
+            mail_meta: RankedRwLock::new(HashMap::new()),
+            mail_labels: RankedRwLock::new(HashMap::new()),
+            mail_lists: RankedRwLock::new(HashMap::new()),
+            char_contacts: RankedRwLock::new(HashMap::new()),
+            char_contact_labels: RankedRwLock::new(HashMap::new()),
+            corp_contacts: RankedRwLock::new(HashMap::new()),
+            corp_contact_labels: RankedRwLock::new(HashMap::new()),
+            alliance_contacts: RankedRwLock::new(HashMap::new()),
+            alliance_contact_labels: RankedRwLock::new(HashMap::new()),
+            calendar_events: RankedRwLock::new(HashMap::new()),
+            calendar_responses: RankedRwLock::new(HashMap::new()),
+            contact_notifications: RankedRwLock::new(HashMap::new()),
+            char_corp_history: RankedRwLock::new(HashMap::new()),
+            char_titles: RankedRwLock::new(HashMap::new()),
+            fleet_motd: RankedRwLock::new(HashMap::new()),
+            fleet_wing_names: RankedRwLock::new(HashMap::new()),
+            fleet_squads: RankedRwLock::new(HashMap::new()),
+            fleet_member_meta: RankedRwLock::new(HashMap::new()),
+            war_allies: RankedRwLock::new(HashMap::new()),
+            custom_item_names: RankedRwLock::new(HashMap::new()),
             next_custom_id: AtomicI64::new(16),
         }
     }

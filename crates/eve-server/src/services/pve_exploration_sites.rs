@@ -4,7 +4,8 @@
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use eve_db::lock_rank::AnyRwLock;
 use glam::DVec3;
 use eve_db::{InventoryFlag, InventoryItemRecord, SolarSystemId, TypeId, WorldRepository};
 use eve_destiny::{Ball, MovementMode};
@@ -345,7 +346,7 @@ pub async fn spawn_sleeper_wave_core(
     systems: &Arc<SystemRegistry>,
     db: &Arc<WorldRepository>,
     sde: &Arc<SdeRegistry>,
-    combat_ephemeral: &Arc<RwLock<CombatRuntimeState>>,
+    combat_ephemeral: &dyn AnyRwLock<CombatRuntimeState>,
     solar_system_id: SolarSystemId,
     wh_class: u8,
     wave: u8,

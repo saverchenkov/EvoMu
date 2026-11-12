@@ -20,8 +20,9 @@ use eve_destiny::{Ball, CombatState, DamageVector, MovementMode, SlimItemMeta};
 use eve_sde::{SdeRegistry, SolarSystemId, TypeId};
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
+use eve_db::lock_rank::AnyRwLock;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ActiveCapitalEscalationEntry {
@@ -53,7 +54,7 @@ pub async fn spawn_upgraded_avengers_core(
     systems: &Arc<SystemRegistry>,
     db: &Arc<WorldRepository>,
     sde: &Arc<SdeRegistry>,
-    combat_ephemeral: &Arc<RwLock<CombatRuntimeState>>,
+    combat_ephemeral: &dyn AnyRwLock<CombatRuntimeState>,
     solar_system_id: SolarSystemId,
     wh_class: u8,
     center: DVec3,
@@ -147,7 +148,7 @@ pub async fn spawn_decloaked_transmission_relay_core(
     systems: &Arc<SystemRegistry>,
     db: &Arc<WorldRepository>,
     sde: &Arc<SdeRegistry>,
-    combat_ephemeral: &Arc<RwLock<CombatRuntimeState>>,
+    combat_ephemeral: &dyn AnyRwLock<CombatRuntimeState>,
     solar_system_id: SolarSystemId,
     site_id: &str,
     pos: [f64; 3],

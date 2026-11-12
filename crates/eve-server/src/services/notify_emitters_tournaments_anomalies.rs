@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::router::cache_notifications::PendingMachoNotification;
 use crate::router::{NotificationTarget, ServerContext};
+use eve_db::lock_rank::AnyRwLock;
 use eve_proto::PyRep;
 use glam::DVec3;
 
@@ -371,7 +372,7 @@ pub fn emit_signal_tracker_full_state_for_system(
 pub fn push_dungeon_room_trigger_notify(
     db: &eve_db::WorldRepository,
     pending_notifications: Option<
-        &std::sync::RwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
+        &dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
     >,
     notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>>,
     recipient_char_id: i64,
@@ -409,7 +410,7 @@ pub fn push_dungeon_room_trigger_notify(
 pub fn emit_dungeon_camera_interest_core(
     db: &eve_db::WorldRepository,
     pending_notifications: Option<
-        &std::sync::RwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
+        &dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
     >,
     notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>>,
     char_id: i64,
@@ -435,7 +436,7 @@ pub fn emit_dungeon_camera_interest_core(
 pub fn emit_dungeon_trigger_ambient_sound_core(
     db: &eve_db::WorldRepository,
     pending_notifications: Option<
-        &std::sync::RwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
+        &dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
     >,
     notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>>,
     char_id: i64,
@@ -460,7 +461,7 @@ pub fn emit_dungeon_trigger_ambient_sound_core(
 pub fn emit_dungeon_trigger_audio_core(
     db: &eve_db::WorldRepository,
     pending_notifications: Option<
-        &std::sync::RwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
+        &dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
     >,
     notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>>,
     char_id: i64,
@@ -483,7 +484,7 @@ pub fn emit_dungeon_trigger_audio_core(
 pub fn emit_dungeon_trigger_message_core(
     db: &eve_db::WorldRepository,
     pending_notifications: Option<
-        &std::sync::RwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
+        &dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
     >,
     notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>>,
     char_id: i64,
@@ -506,7 +507,7 @@ pub fn emit_dungeon_trigger_message_core(
 pub fn emit_dungeon_trigger_music_core(
     db: &eve_db::WorldRepository,
     pending_notifications: Option<
-        &std::sync::RwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
+        &dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
     >,
     notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>>,
     char_id: i64,
@@ -607,7 +608,7 @@ pub fn emit_tale_remove_for_constellation(
 pub fn emit_incursion_completion_combat_notifications(
     db: &std::sync::Arc<eve_db::WorldRepository>,
     sde: &eve_sde::SdeRegistry,
-    pending_notifications: Option<&std::sync::RwLock<HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>>>,
+    pending_notifications: Option<&dyn AnyRwLock<HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>>>,
     notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, crate::router::cache_notifications::PendingMachoNotification)>>,
     result: &crate::services::pve_incursion_sites::IncursionCompletionResult,
 ) {
@@ -933,7 +934,7 @@ pub fn sync_deathzone_state_notifications(ctx: &ServerContext, sys_id: u32) {
 
 pub fn emit_expedition_combat_notifications(
     db: &eve_db::WorldRepository,
-    pending_notifications: &std::sync::RwLock<
+    pending_notifications: &dyn AnyRwLock<
         std::collections::HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>,
     >,
     notify_tx: &tokio::sync::broadcast::Sender<(

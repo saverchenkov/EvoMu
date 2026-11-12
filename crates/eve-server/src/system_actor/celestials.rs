@@ -6,6 +6,9 @@ use super::{
     build_tick_broadcast, ActiveModuleCycle, ActiveNaniteRepair, AsteroidState, CharacterId,
     MiningExtractionResult, SystemCommand, TickBroadcast,
 };
+use eve_db::lock_rank::{
+    assert_no_locks_held, RankedRwLock, RANK_ACTOR_STATE, RANK_BALLPARK, RANK_LEAF,
+};
 use eve_destiny::{
     Ball, BallId, Ballpark, CombatState, DamageVector, DestinyEvent, MovementMode, SlimItemMeta,
     TargetLock,
@@ -14,7 +17,7 @@ use eve_proto::PyRep;
 use eve_sde::SolarSystemId;
 use glam::DVec3;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 #[derive(Clone)]
@@ -22,41 +25,67 @@ pub struct SystemHandle {
     pub solar_system_id: SolarSystemId,
     pub(crate) cmd_tx: mpsc::Sender<SystemCommand>,
     pub(crate) event_tx: broadcast::Sender<TickBroadcast>,
-    pub(crate) ball_positions: Arc<RwLock<HashMap<BallId, DVec3>>>,
-    pub(crate) scrambled_balls: Arc<RwLock<std::collections::HashSet<BallId>>>,
-    pub(crate) committed_warp_balls: Arc<RwLock<HashMap<BallId, DVec3>>>,
-    pub(crate) active_module_ships: Arc<RwLock<std::collections::HashSet<BallId>>>,
-    pub ballpark: Arc<RwLock<Ballpark>>,
-    pub(crate) actor_state: Arc<RwLock<super::SystemActorState>>,
+    pub(crate) ball_positions: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+    pub(crate) scrambled_balls: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
+    pub(crate) committed_warp_balls: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+    pub(crate) active_module_ships: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
+    pub ballpark: Arc<RankedRwLock<Ballpark, RANK_BALLPARK>>,
+    pub(crate) actor_state: Arc<RankedRwLock<super::SystemActorState, RANK_ACTOR_STATE>>,
     pub(crate) last_auto_stepped_unix: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) tidi_factor_bits: Arc<std::sync::atomic::AtomicU64>,
     pub command_panics: Arc<std::sync::atomic::AtomicU64>,
     #[cfg(test)]
     pub(crate) panic_next_command_for_test: Arc<std::sync::atomic::AtomicBool>,
-    pub(crate) npc_death_hook: Arc<RwLock<Option<super::NpcDeathHook>>>,
-    pub(crate) module_deactivation_hook: Arc<RwLock<Option<super::ModuleDeactivationHook>>>,
-    pub(crate) target_lock_completed_hook: Arc<RwLock<Option<super::TargetLockCompletedHook>>>,
-    pub(crate) system_step_hook: Arc<RwLock<Option<super::SystemStepHook>>>,
+    pub(crate) npc_death_hook: Arc<RankedRwLock<Option<super::NpcDeathHook>, RANK_LEAF>>,
+    pub(crate) module_deactivation_hook: Arc<RankedRwLock<Option<super::ModuleDeactivationHook>, RANK_LEAF>>,
+    pub(crate) target_lock_completed_hook: Arc<RankedRwLock<Option<super::TargetLockCompletedHook>, RANK_LEAF>>,
+    pub(crate) system_step_hook: Arc<RankedRwLock<Option<super::SystemStepHook>, RANK_LEAF>>,
 }
 
 impl SystemHandle {
+    #[track_caller]
+    pub(crate) fn cmd_sender(&self) -> &mpsc::Sender<SystemCommand> {
+        assert_no_locks_held();
+        &self.cmd_tx
+    }
     pub fn subscribe(&self) -> broadcast::Receiver<TickBroadcast> {
         self.event_tx.subscribe()
     }
 
     pub fn get_ball_position_sync(&self, ball_id: BallId) -> Option<DVec3> {
-        self.ball_positions
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&ball_id)
-            .copied()
+        if eve_db::lock_rank::held_lock_ranks()
+            .iter()
+            .any(|&r| r >= eve_db::lock_rank::RANK_LEAF)
+        {
+            self.ball_positions
+                .read_unranked()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&ball_id)
+                .copied()
+        } else {
+            self.ball_positions
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&ball_id)
+                .copied()
+        }
     }
 
     pub fn is_ball_scrambled_sync(&self, ball_id: BallId) -> bool {
-        self.scrambled_balls
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains(&ball_id)
+        if eve_db::lock_rank::held_lock_ranks()
+            .iter()
+            .any(|&r| r >= eve_db::lock_rank::RANK_LEAF)
+        {
+            self.scrambled_balls
+                .read_unranked()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&ball_id)
+        } else {
+            self.scrambled_balls
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&ball_id)
+        }
     }
 
     pub fn try_set_ball_position(&self, ball_id: BallId, position: DVec3) {
@@ -87,7 +116,7 @@ impl SystemHandle {
 
     pub async fn spawn_ball(&self, ball: Ball) -> Result<u64, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::SpawnBall { ball, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
@@ -101,7 +130,7 @@ impl SystemHandle {
         max_velocity: f64,
     ) -> Result<bool, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::SetBallMaxVelocity {
                 ball_id,
                 max_velocity,
@@ -119,7 +148,7 @@ impl SystemHandle {
         cap: Option<f64>,
     ) -> Result<bool, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::SetBallMaxVelocityCap {
                 ball_id,
                 cap,
@@ -137,7 +166,7 @@ impl SystemHandle {
         combat_state: CombatState,
     ) -> Result<u64, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::SpawnBallWithCombat {
                 ball,
                 combat_state,
@@ -156,7 +185,7 @@ impl SystemHandle {
         slim_meta: SlimItemMeta,
     ) -> Result<u64, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::SpawnBallWithMeta {
                 ball,
                 combat_state,
@@ -177,7 +206,7 @@ impl SystemHandle {
         slim_meta: SlimItemMeta,
     ) -> Result<bool, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::ChangeSlimItem {
                 ball_id,
                 slim_meta,
@@ -196,7 +225,7 @@ impl SystemHandle {
         wormhole_size: f64,
     ) -> Result<bool, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::SetBallWormholeStages {
                 ball_id,
                 wormhole_age,
@@ -214,7 +243,7 @@ impl SystemHandle {
         ball_id: BallId,
     ) -> Result<Option<eve_proto::PyRep>, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::GetBallSlimItem { ball_id, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
@@ -228,7 +257,7 @@ impl SystemHandle {
         ball: Ball,
     ) -> Result<BallId, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::SpawnAsteroid {
                 asteroid,
                 ball,
@@ -258,7 +287,7 @@ impl SystemHandle {
         persist_db: bool,
     ) -> Result<MiningExtractionResult, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::MineAsteroid {
                 asteroid_id,
                 requested_units,
@@ -277,7 +306,7 @@ impl SystemHandle {
         asteroid_id: BallId,
     ) -> Result<Option<AsteroidState>, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::GetAsteroidState {
                 asteroid_id,
                 reply: tx,
@@ -290,7 +319,7 @@ impl SystemHandle {
 
     pub async fn break_gate_cloak(&self, ball_id: BallId) -> Result<bool, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::BreakGateCloak {
                 ball_id,
                 reply: tx,
@@ -303,7 +332,7 @@ impl SystemHandle {
 
     pub async fn populate_asteroid_belt_entities(&self) -> Result<Vec<AsteroidState>, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::PopulateAsteroids { reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
@@ -319,7 +348,7 @@ impl SystemHandle {
             .remove(&ball_id);
         let (tx, rx) = oneshot::channel();
         let _ = self
-            .cmd_tx
+            .cmd_sender()
             .send(SystemCommand::RemoveBall {
                 ball_id,
                 reply: tx,
@@ -341,7 +370,7 @@ impl SystemHandle {
             .remove(&ship_id);
         let (tx, rx) = oneshot::channel();
         let _ = self
-            .cmd_tx
+            .cmd_sender()
             .send(SystemCommand::AcceptDocking {
                 ship_id,
                 station_id,
@@ -364,7 +393,7 @@ impl SystemHandle {
             .remove(&ball_id);
         let (tx, rx) = oneshot::channel();
         let _ = self
-            .cmd_tx
+            .cmd_sender()
             .send(SystemCommand::TakeBall {
                 ball_id,
                 accept_docking_target: None,
@@ -390,7 +419,7 @@ impl SystemHandle {
             .remove(&ship_id);
         let (tx, rx) = oneshot::channel();
         let _ = self
-            .cmd_tx
+            .cmd_sender()
             .send(SystemCommand::TakeBall {
                 ball_id: ship_id,
                 accept_docking_target: Some((station_id, station_pos)),
@@ -404,7 +433,7 @@ impl SystemHandle {
     /// when a handoff's subsequent DB transaction fails (`#842`, `#917` E-2).
     pub async fn restore_ball(&self, taken: super::TakenBall) -> Result<u64, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::RestoreBall { taken, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
@@ -419,7 +448,7 @@ impl SystemHandle {
     ) -> bool {
         let (tx, rx) = oneshot::channel();
         if self
-            .cmd_tx
+            .cmd_sender()
             .send(SystemCommand::EmitPackagedActions {
                 ball_id,
                 events,
@@ -435,38 +464,75 @@ impl SystemHandle {
 
     pub fn try_remove_ball(&self, ball_id: BallId) {
         self.cancel_ship_nanite_repairs_sync(ball_id, true);
-        let (removed_cycles, fallback_slim_owner, db_opt, deact_guard) = {
-            let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            let deact_guard = self.module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
-            let super::SystemActorState {
-                active_module_cycles,
-                base_scramble_strengths,
-                base_core_strengths,
-                db_opt,
-                ..
-            } = &mut *st;
-            let removed_cycles = super::cycles::remove_all_ship_module_cycles(
-                &mut bp,
-                active_module_cycles,
-                base_scramble_strengths,
-                base_core_strengths,
-                &None,
-                ball_id,
-                None,
-            );
-            let fallback_slim_owner = bp
-                .ball_slim_meta
-                .get(&ball_id)
-                .and_then(|m| (m.owner_id > 0).then_some(m.owner_id));
-            base_scramble_strengths.remove(&ball_id);
-            base_core_strengths.remove(&ball_id);
-            let _ = bp.remove_ball(ball_id);
-            super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-            (removed_cycles, fallback_slim_owner, db_opt.clone(), deact_guard)
-        };
+        let remove_from_bp_and_st =
+            |bp: &mut Ballpark, st: &mut super::SystemActorState| {
+                let deact_guard = if eve_db::lock_rank::held_lock_ranks()
+                    .iter()
+                    .any(|&r| r >= eve_db::lock_rank::RANK_LEAF)
+                {
+                    self.module_deactivation_hook
+                        .read_unranked()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone()
+                } else {
+                    self.module_deactivation_hook
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone()
+                };
+                let super::SystemActorState {
+                    active_module_cycles,
+                    base_scramble_strengths,
+                    base_core_strengths,
+                    db_opt,
+                    ..
+                } = st;
+                let removed_cycles = super::cycles::remove_all_ship_module_cycles(
+                    bp,
+                    active_module_cycles,
+                    base_scramble_strengths,
+                    base_core_strengths,
+                    &None,
+                    ball_id,
+                    None,
+                );
+                let fallback_slim_owner = bp
+                    .ball_slim_meta
+                    .get(&ball_id)
+                    .and_then(|m| (m.owner_id > 0).then_some(m.owner_id));
+                base_scramble_strengths.remove(&ball_id);
+                base_core_strengths.remove(&ball_id);
+                let _ = bp.remove_ball(ball_id);
+                super::sync_ball_positions(bp, &self.ball_positions, &self.scrambled_balls);
+                (removed_cycles, fallback_slim_owner, db_opt.clone(), deact_guard)
+            };
+        let (removed_cycles, fallback_slim_owner, db_opt, deact_guard) =
+            if eve_db::lock_rank::held_lock_ranks()
+                .iter()
+                .any(|&r| r >= eve_db::lock_rank::RANK_BALLPARK)
+            {
+                let mut bp = match self.ballpark.try_write_unranked() {
+                    Ok(g) => g,
+                    Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => return,
+                };
+                let mut st = match self.actor_state.try_write_unranked() {
+                    Ok(g) => g,
+                    Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => return,
+                };
+                remove_from_bp_and_st(&mut bp, &mut st)
+            } else {
+                let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+                let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+                remove_from_bp_and_st(&mut bp, &mut st)
+            };
         if let Some(db_ref) = db_opt {
-            if !db_ref.is_write_locked_by_current_thread() {
+            if !db_ref.is_write_locked_by_current_thread()
+                && !eve_db::lock_rank::held_lock_ranks()
+                    .iter()
+                    .any(|&r| r >= eve_db::lock_rank::RANK_WORLD_INNER)
+            {
                 db_ref.with_mut_snapshot(|snap| {
                     let ship_mod_ids: Vec<i64> = snap
                         .items
@@ -566,8 +632,7 @@ impl SystemHandle {
     }
 
     pub fn cancel_ship_nanite_repairs_sync(&self, ship_id: BallId, refund_paste: bool) {
-        let (cancelled, db_opt, sde_opt) = {
-            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+        let drain_fn = |st: &mut super::SystemActorState| {
             let mut cancelled = Vec::new();
             st.active_nanite_repairs.retain(|r| {
                 if r.ship_id == ship_id {
@@ -584,6 +649,19 @@ impl SystemHandle {
                 }
             });
             (cancelled, st.db_opt.clone(), st.sde_opt.clone())
+        };
+        let (cancelled, db_opt, sde_opt) = if eve_db::lock_rank::held_lock_ranks()
+            .iter()
+            .any(|&r| r >= eve_db::lock_rank::RANK_ACTOR_STATE)
+        {
+            match self.actor_state.try_write_unranked() {
+                Ok(mut st) => drain_fn(&mut st),
+                Err(std::sync::TryLockError::Poisoned(e)) => drain_fn(&mut e.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) => return,
+            }
+        } else {
+            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+            drain_fn(&mut st)
         };
         if !cancelled.is_empty() {
             if let Some(db) = db_opt {
@@ -690,29 +768,43 @@ impl SystemHandle {
         combat_state: CombatState,
         slim_meta: SlimItemMeta,
     ) {
-        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        let ball_id = ball.id;
-        if bp.balls.contains_key(&ball_id) {
-            let _ = bp.remove_ball(ball_id);
-        }
-        if matches!(ball.mode, eve_destiny::MovementMode::Rigid) {
-            bp.add_static_ball_with_meta(ball.clone(), slim_meta);
-            bp.combat_states.insert(ball_id, combat_state);
-            bp.pending_events
-                .push(eve_destiny::DestinyEvent::AddBall { ball: ball.clone() });
-            bp.queue_event_for_all_grid_observers(
-                Some(ball_id),
-                &eve_destiny::DestinyEvent::AddBalls2 { balls: vec![ball] },
-            );
-        } else {
-            if super::should_pin_stationary_ball(&ball, Some(&slim_meta)) {
-                bp.mark_ball_non_free(ball_id, false);
+        let apply_spawn = |bp: &mut Ballpark| {
+            let ball_id = ball.id;
+            if bp.balls.contains_key(&ball_id) {
+                let _ = bp.remove_ball(ball_id);
             }
-            bp.set_ball_slim_meta(ball_id, slim_meta);
-            bp.add_ball(ball);
-            bp.combat_states.insert(ball_id, combat_state);
+            if matches!(ball.mode, eve_destiny::MovementMode::Rigid) {
+                bp.add_static_ball_with_meta(ball.clone(), slim_meta);
+                bp.combat_states.insert(ball_id, combat_state);
+                bp.pending_events
+                    .push(eve_destiny::DestinyEvent::AddBall { ball: ball.clone() });
+                bp.queue_event_for_all_grid_observers(
+                    Some(ball_id),
+                    &eve_destiny::DestinyEvent::AddBalls2 { balls: vec![ball] },
+                );
+            } else {
+                if super::should_pin_stationary_ball(&ball, Some(&slim_meta)) {
+                    bp.mark_ball_non_free(ball_id, false);
+                }
+                bp.set_ball_slim_meta(ball_id, slim_meta);
+                bp.add_ball(ball);
+                bp.combat_states.insert(ball_id, combat_state);
+            }
+            super::sync_ball_positions(bp, &self.ball_positions, &self.scrambled_balls);
+        };
+        if eve_db::lock_rank::held_lock_ranks()
+            .iter()
+            .any(|&r| r >= eve_db::lock_rank::RANK_BALLPARK)
+        {
+            match self.ballpark.try_write_unranked() {
+                Ok(mut bp) => apply_spawn(&mut bp),
+                Err(std::sync::TryLockError::Poisoned(e)) => apply_spawn(&mut e.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) => {}
+            }
+        } else {
+            let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+            apply_spawn(&mut bp);
         }
-        super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
     }
 
     pub fn try_push_set_state(&self, observer_ball_id: BallId) -> bool {
@@ -920,7 +1012,7 @@ impl SystemHandle {
         mode: MovementMode,
     ) -> Result<u64, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::SetMovementMode {
                 ball_id,
                 mode,
@@ -938,7 +1030,7 @@ impl SystemHandle {
         strength: i32,
     ) -> Result<u64, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::SetWarpScrambleStrength {
                 ball_id,
                 strength,
@@ -956,7 +1048,7 @@ impl SystemHandle {
         strength: i32,
     ) -> Result<u64, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::SetWarpCoreStrength {
                 ball_id,
                 strength,
@@ -975,7 +1067,7 @@ impl SystemHandle {
         radius: f64,
     ) -> Result<u64, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::AddWarpBubble {
                 id,
                 position,
@@ -990,7 +1082,7 @@ impl SystemHandle {
 
     pub async fn remove_warp_bubble(&self, id: BallId) -> Result<bool, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::RemoveWarpBubble { id, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
@@ -1000,7 +1092,7 @@ impl SystemHandle {
 
     pub async fn set_speed_fraction(&self, ball_id: BallId, fraction: f64) -> Result<u64, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::SetSpeedFraction {
                 ball_id,
                 fraction,
@@ -1015,7 +1107,7 @@ impl SystemHandle {
     pub async fn set_ball_position(&self, ball_id: BallId, position: glam::DVec3) -> bool {
         let (tx, rx) = oneshot::channel();
         if self
-            .cmd_tx
+            .cmd_sender()
             .send(SystemCommand::SetBallPosition {
                 ball_id,
                 position,
@@ -1033,7 +1125,7 @@ impl SystemHandle {
     pub async fn emit_destiny_event(&self, ball_id: BallId, event: DestinyEvent) -> bool {
         let (tx, rx) = oneshot::channel();
         if self
-            .cmd_tx
+            .cmd_sender()
             .send(SystemCommand::EmitDestinyEvent { ball_id, event, reply: tx })
             .await
             .is_err()
@@ -1051,7 +1143,7 @@ impl SystemHandle {
     ) -> bool {
         let (tx, rx) = oneshot::channel();
         if self
-            .cmd_tx
+            .cmd_sender()
             .send(SystemCommand::EmitObserverDestinyEvent {
                 observer_ball_id,
                 event,
@@ -1068,7 +1160,7 @@ impl SystemHandle {
     /// Steers `ball_id` toward `point` (`beyonce.CmdGotoPoint`) and returns the current tick.
     pub async fn goto_point(&self, ball_id: BallId, point: glam::DVec3) -> Result<u64, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::GotoPoint { ball_id, point, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
@@ -1079,7 +1171,7 @@ impl SystemHandle {
     /// Queues a `SetState` destiny update for `observer_ball_id` (`P-7`).
     pub async fn push_set_state(&self, observer_ball_id: BallId) -> Result<u64, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::PushSetState {
                 observer_ball_id,
                 reply: tx,
@@ -1098,7 +1190,7 @@ impl SystemHandle {
         exclude_ball_id: Option<BallId>,
     ) -> Result<usize, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::FlushPeerObserverUpdates {
                 exclude_ball_id,
                 reply: tx,
@@ -1111,7 +1203,7 @@ impl SystemHandle {
 
     pub async fn get_ball_snapshot(&self, ball_id: BallId) -> Result<Option<(u64, Ball)>, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::GetBallSnapshot { ball_id, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
@@ -1121,7 +1213,7 @@ impl SystemHandle {
 
     pub async fn get_ball_group_id(&self, ball_id: BallId) -> Result<Option<u32>, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::GetBallGroupId { ball_id, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
@@ -1131,7 +1223,7 @@ impl SystemHandle {
 
     pub async fn list_balls(&self) -> Result<Vec<Ball>, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::ListBalls { reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
@@ -1143,7 +1235,7 @@ impl SystemHandle {
     /// plus dynamic balls within the same shared `GridBubble`).
     pub async fn list_balls_in_bubble(&self, observer_ball_id: BallId) -> Result<Vec<Ball>, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::ListBallsInBubble {
                 observer_ball_id,
                 dynamic_only: false,
@@ -1161,7 +1253,7 @@ impl SystemHandle {
         observer_ball_id: BallId,
     ) -> Result<Vec<Ball>, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::ListBallsInBubble {
                 observer_ball_id,
                 dynamic_only: true,
@@ -1179,7 +1271,7 @@ impl SystemHandle {
         observer_ball_id: BallId,
     ) -> Result<(u64, PyRep, PyRep), String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::GetSetState {
                 observer_ball_id,
                 reply: tx,
@@ -1192,7 +1284,7 @@ impl SystemHandle {
 
     pub async fn get_bubble_id_for_ball(&self, ball_id: BallId) -> Result<Option<u64>, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::GetBubbleIdForBall { ball_id, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
@@ -1206,7 +1298,7 @@ impl SystemHandle {
         observer_ball_id: BallId,
     ) -> Result<(u64, Vec<DestinyEvent>, PyRep), String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::DrainObserverUpdates {
                 observer_ball_id,
                 reply: tx,
@@ -1223,7 +1315,7 @@ impl SystemHandle {
 
     pub async fn apply_true_damage(&self, ball_id: BallId, amount: f64) -> Result<Option<(f64, bool, Ball)>, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::ApplyTrueDamage { ball_id, amount, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
@@ -1237,7 +1329,7 @@ impl SystemHandle {
         attacker_id: Option<CharacterId>,
     ) -> Result<Option<(f64, bool, Ball)>, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::ApplyDamage { ball_id, damage, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
@@ -1258,7 +1350,7 @@ impl SystemHandle {
 
     pub async fn step_manual(&self, dt: f64) -> Result<TickBroadcast, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.send(SystemCommand::StepManual { dt, reply: tx }).await.map_err(|_| "Solar system actor stopped".to_string())?;
+        self.cmd_sender().send(SystemCommand::StepManual { dt, reply: tx }).await.map_err(|_| "Solar system actor stopped".to_string())?;
         let (broadcast, destroyed_balls) = rx.await.map_err(|_| "Solar system reply dropped".to_string())?;
         let hook = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
         for &(target_ball_id, owner_char_id) in &destroyed_balls {
@@ -1275,7 +1367,7 @@ impl SystemHandle {
 
     pub(crate) async fn step_manual_tick_only(&self, dt: f64) -> Result<u64, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.send(SystemCommand::StepManualTickOnly { dt, reply: tx }).await.map_err(|_| "Solar system actor stopped".to_string())?;
+        self.cmd_sender().send(SystemCommand::StepManualTickOnly { dt, reply: tx }).await.map_err(|_| "Solar system actor stopped".to_string())?;
         let (tick, destroyed_balls) = rx.await.map_err(|_| "Solar system reply dropped".to_string())?;
         let hook = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
         for &(target_ball_id, owner_char_id) in &destroyed_balls {
@@ -1292,7 +1384,7 @@ impl SystemHandle {
 
     pub async fn fast_forward_clock(&self, ship_id: BallId, secs: u64) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::FastForwardClock { ship_id, secs, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
@@ -1301,31 +1393,31 @@ impl SystemHandle {
 
     pub async fn get_target_locks(&self, ball_id: BallId) -> Result<Vec<TargetLock>, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.send(SystemCommand::GetTargetLocks { ball_id, reply: tx }).await.map_err(|_| "Solar system actor stopped".to_string())?;
+        self.cmd_sender().send(SystemCommand::GetTargetLocks { ball_id, reply: tx }).await.map_err(|_| "Solar system actor stopped".to_string())?;
         rx.await.map_err(|_| "Solar system reply dropped".to_string())
     }
 
     pub async fn add_target_lock(&self, source_id: BallId, lock: TargetLock) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.send(SystemCommand::AddTargetLock { source_id, lock, reply: tx }).await.map_err(|_| "Solar system actor stopped".to_string())?;
+        self.cmd_sender().send(SystemCommand::AddTargetLock { source_id, lock, reply: tx }).await.map_err(|_| "Solar system actor stopped".to_string())?;
         rx.await.map_err(|_| "Solar system reply dropped".to_string())?
     }
 
     pub async fn remove_target_lock(&self, source_id: BallId, target_id: BallId) -> Result<bool, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.send(SystemCommand::RemoveTargetLock { source_id, target_id, reply: tx }).await.map_err(|_| "Solar system actor stopped".to_string())?;
+        self.cmd_sender().send(SystemCommand::RemoveTargetLock { source_id, target_id, reply: tx }).await.map_err(|_| "Solar system actor stopped".to_string())?;
         rx.await.map_err(|_| "Solar system reply dropped".to_string())
     }
 
     pub async fn clear_target_locks(&self, source_id: BallId) -> Result<usize, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.send(SystemCommand::ClearTargetLocks { source_id, reply: tx }).await.map_err(|_| "Solar system actor stopped".to_string())?;
+        self.cmd_sender().send(SystemCommand::ClearTargetLocks { source_id, reply: tx }).await.map_err(|_| "Solar system actor stopped".to_string())?;
         rx.await.map_err(|_| "Solar system reply dropped".to_string())
     }
 
     pub async fn set_capacitor(&self, ball_id: BallId, capacitor: f64) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::SetCapacitor { ball_id, capacitor, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
@@ -1334,7 +1426,7 @@ impl SystemHandle {
 
     pub async fn heal_combat_state(&self, ball_id: BallId) -> Result<CombatState, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::HealCombatState { ball_id, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
@@ -1343,7 +1435,7 @@ impl SystemHandle {
 
     pub async fn set_combat_state(&self, ball_id: BallId, combat_state: CombatState) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::SetCombatState { ball_id, combat_state, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
@@ -1352,7 +1444,7 @@ impl SystemHandle {
 
     pub async fn get_combat_state(&self, ball_id: BallId) -> Result<Option<CombatState>, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::GetCombatState { ball_id, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
@@ -1368,7 +1460,7 @@ impl SystemHandle {
         f: impl FnOnce(&mut CombatState) + Send + 'static,
     ) -> Result<Option<CombatState>, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::ModifyCombatState {
                 ball_id,
                 f: Box::new(f),
@@ -1381,7 +1473,7 @@ impl SystemHandle {
 
     pub async fn add_module_cycle(&self, cycle: ActiveModuleCycle) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::AddModuleCycle { cycle, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
@@ -1390,7 +1482,7 @@ impl SystemHandle {
 
     pub async fn remove_module_cycle(&self, ship_id: BallId, module_id: i64) -> Result<Option<f64>, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::RemoveModuleCycle { ship_id, module_id, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
@@ -1400,7 +1492,7 @@ impl SystemHandle {
     pub async fn has_module_cycle(&self, ship_id: BallId, module_id: i64) -> bool {
         let (tx, rx) = oneshot::channel();
         if self
-            .cmd_tx
+            .cmd_sender()
             .send(SystemCommand::HasModuleCycle {
                 ship_id,
                 module_id,
@@ -1417,7 +1509,7 @@ impl SystemHandle {
     /// Parity: [plan:DG-4] Entering warp halts active non-warp module cycles.
     pub async fn stop_non_warp_module_cycles(&self, ship_id: BallId) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::StopNonWarpModuleCycles { ship_id, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
@@ -1426,7 +1518,7 @@ impl SystemHandle {
 
     pub async fn set_interdiction_nullified(&self, ball_id: BallId, nullified: bool) -> Result<bool, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::SetInterdictionNullified { ball_id, nullified, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
@@ -1435,7 +1527,7 @@ impl SystemHandle {
 
     pub async fn micro_jump(&self, ball_id: BallId, distance_meters: f64) -> Result<DVec3, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::MicroJump { ball_id, distance_meters, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
@@ -1450,7 +1542,7 @@ impl SystemHandle {
         max_jumped_ships: usize,
     ) -> Result<Vec<BallId>, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::MicroJumpField {
                 ball_id,
                 distance_meters,
@@ -1469,7 +1561,7 @@ impl SystemHandle {
 
     pub async fn is_ball_scrambled(&self, ball_id: BallId) -> Result<bool, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::IsBallScrambled { ball_id, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
@@ -1478,7 +1570,7 @@ impl SystemHandle {
 
     pub async fn add_interdiction_sphere(&self, id: BallId, position: DVec3, radius: f64) -> Result<bool, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::AddInterdictionSphere { id, position, radius, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
@@ -1487,7 +1579,7 @@ impl SystemHandle {
 
     pub async fn add_mobile_warp_disruptor(&self, id: BallId, position: DVec3, radius: f64) -> Result<bool, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::AddMobileWarpDisruptor { id, position, radius, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
@@ -1496,7 +1588,7 @@ impl SystemHandle {
 
     pub async fn apply_ecm_jam(&self, target_id: BallId, duration_s: f64) -> Result<bool, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::ApplyEcmJam {
                 target_id,
                 duration_s,
@@ -1529,7 +1621,7 @@ impl SystemHandle {
         ship_eval_overrides: Option<HashMap<BallId, (usize, f64, f64)>>,
     ) -> Result<Vec<BallId>, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::ApplyEcmBurst {
                 source_id,
                 burst_radius_m,
@@ -1553,7 +1645,7 @@ impl SystemHandle {
         anchoring_delay_s: f64,
     ) -> Result<bool, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::ScheduleMobileWarpDisruptor {
                 id,
                 type_id,
@@ -1574,7 +1666,7 @@ impl SystemHandle {
         is_overloaded: bool,
     ) -> Result<bool, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::UpdateModuleOverload {
                 ship_id,
                 module_id,
@@ -1588,7 +1680,7 @@ impl SystemHandle {
 
     pub async fn start_nanite_repair(&self, repair: ActiveNaniteRepair) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::StartNaniteRepair { repair, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
@@ -1601,7 +1693,7 @@ impl SystemHandle {
         module_id: i64,
     ) -> Result<Option<(f64, i32)>, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::StopNaniteRepair {
                 ship_id,
                 module_id,
@@ -1676,7 +1768,7 @@ impl SystemHandle {
         damage: [f64; 4],
     ) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_sender()
             .send(SystemCommand::RecordIncomingArmorDamage {
                 ship_id,
                 damage,

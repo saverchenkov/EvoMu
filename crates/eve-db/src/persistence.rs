@@ -1,12 +1,15 @@
 //! Durable transactional snapshot persistence, WAL journaling, and SQLite relational storage.
 
+use crate::lock_rank::{
+    RankedMutex, RankedRwLock, RANK_CLOCK, RANK_LEAF, RANK_SQLITE_CONN, RANK_SQLITE_FP,
+    RANK_WAL_LOCK, RANK_WORLD_INNER,
+};
 use crate::sqlite_store;
 use crate::types::AuthRuntimeState;
 use crate::types::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::RwLock;
 
 pub(crate) const WAL_CHECKPOINT_INTERVAL: usize = 64;
 
@@ -401,14 +404,14 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
 /// Encapsulated transactional world repository backed by SQLite (`D-3`, `D-4`).
 pub struct WorldRepository {
     pub(crate) instance_id: u64,
-    pub(crate) inner: RwLock<std::sync::Arc<WorldStateSnapshot>>,
-    pub(crate) sqlite_conn: std::sync::Mutex<rusqlite::Connection>,
-    pub(crate) sqlite_fp: std::sync::Mutex<sqlite_store::TableFingerprints>,
+    pub(crate) inner: RankedRwLock<std::sync::Arc<WorldStateSnapshot>, RANK_WORLD_INNER>,
+    pub(crate) sqlite_conn: RankedMutex<rusqlite::Connection, RANK_SQLITE_CONN>,
+    pub(crate) sqlite_fp: RankedMutex<sqlite_store::TableFingerprints, RANK_SQLITE_FP>,
     pub(crate) sqlite_path: Option<std::path::PathBuf>,
     pub(crate) quarantine_unreadable: bool,
-    pub(crate) auth_runtime: RwLock<AuthRuntimeState>,
-    pub(crate) clock: std::sync::RwLock<std::sync::Arc<dyn crate::clock::ServerClock>>,
-    pub(crate) wal_lock: std::sync::Mutex<()>,
+    pub(crate) auth_runtime: RankedRwLock<AuthRuntimeState, RANK_LEAF>,
+    pub(crate) clock: RankedRwLock<std::sync::Arc<dyn crate::clock::ServerClock>, RANK_CLOCK>,
+    pub(crate) wal_lock: RankedMutex<(), RANK_WAL_LOCK>,
     pub(crate) snapshot_path: Option<std::path::PathBuf>,
     pub(crate) pending_wal_records: std::sync::atomic::AtomicUsize,
     pub(crate) state_epoch: std::sync::atomic::AtomicU64,
@@ -551,16 +554,16 @@ impl WorldRepository {
         let auth_runtime = sqlite_store::load_auth_runtime_from_sqlite(&conn, jwt_secret)?;
         Ok(Self {
             instance_id: Self::next_instance_id(),
-            inner: RwLock::new(std::sync::Arc::new(snap)),
-            sqlite_conn: std::sync::Mutex::new(conn),
-            sqlite_fp: std::sync::Mutex::new(fp),
+            inner: RankedRwLock::new(std::sync::Arc::new(snap)),
+            sqlite_conn: RankedMutex::new(conn),
+            sqlite_fp: RankedMutex::new(fp),
             sqlite_path: Some(target.to_path_buf()),
             quarantine_unreadable,
-            auth_runtime: RwLock::new(auth_runtime),
-            clock: std::sync::RwLock::new(std::sync::Arc::new(
+            auth_runtime: RankedRwLock::new(auth_runtime),
+            clock: RankedRwLock::new(std::sync::Arc::new(
                 crate::clock::VirtualServerClock::new(),
             )),
-            wal_lock: std::sync::Mutex::new(()),
+            wal_lock: RankedMutex::new(()),
             snapshot_path: None,
             pending_wal_records: std::sync::atomic::AtomicUsize::new(0),
             state_epoch: std::sync::atomic::AtomicU64::new(1),
@@ -599,10 +602,13 @@ impl WorldRepository {
     /// Prunes expired `revoked_jtis` and expired `refresh_tokens` from both in-memory
     /// `AuthRuntimeState` and SQLite storage relative to `now_unix` (`#540`).
     pub fn prune_expired_auth_runtime(&self, now_unix: u64) -> usize {
-        let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
-        let mem_pruned = sqlite_store::prune_auth_runtime_locked(&mut rt, now_unix);
+        let (mem_pruned, cutoff) = {
+            let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
+            let mem_pruned = sqlite_store::prune_auth_runtime_locked(&mut rt, now_unix);
+            (mem_pruned, rt.last_auth_now_unix)
+        };
         let mut conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = sqlite_store::persist_prune_expired(&mut conn, rt.last_auth_now_unix);
+        let _ = sqlite_store::persist_prune_expired(&mut conn, cutoff);
         mem_pruned
     }
 
@@ -721,16 +727,16 @@ impl WorldRepository {
 
         let mut repo = Self {
             instance_id: Self::next_instance_id(),
-            inner: RwLock::new(std::sync::Arc::new(initial_snap)),
-            sqlite_conn: std::sync::Mutex::new(conn),
-            sqlite_fp: std::sync::Mutex::new(fp),
+            inner: RankedRwLock::new(std::sync::Arc::new(initial_snap)),
+            sqlite_conn: RankedMutex::new(conn),
+            sqlite_fp: RankedMutex::new(fp),
             sqlite_path: None,
             quarantine_unreadable: sqlite_store::default_quarantine_unreadable(),
-            auth_runtime: RwLock::new(AuthRuntimeState::new(jwt_secret)),
-            clock: std::sync::RwLock::new(std::sync::Arc::new(
+            auth_runtime: RankedRwLock::new(AuthRuntimeState::new(jwt_secret)),
+            clock: RankedRwLock::new(std::sync::Arc::new(
                 crate::clock::VirtualServerClock::new(),
             )),
-            wal_lock: std::sync::Mutex::new(()),
+            wal_lock: RankedMutex::new(()),
             snapshot_path: None,
             pending_wal_records: std::sync::atomic::AtomicUsize::new(0),
             state_epoch: std::sync::atomic::AtomicU64::new(1),
@@ -952,19 +958,23 @@ impl WorldRepository {
         Ok(())
     }
 
+    #[track_caller]
     pub(crate) fn read_state(&self) -> std::sync::Arc<WorldStateSnapshot> {
         std::sync::Arc::clone(&self.inner.read().unwrap_or_else(|e| e.into_inner()))
     }
 
+    #[track_caller]
     pub(crate) fn try_read_state(&self) -> Option<std::sync::Arc<WorldStateSnapshot>> {
         self.inner.try_read().ok().map(|g| std::sync::Arc::clone(&g))
     }
 
+    #[track_caller]
     fn run_read_snapshot(&self, f: &mut dyn FnMut(&WorldStateSnapshot)) {
         let guard = self.read_state();
         f(&guard);
     }
 
+    #[track_caller]
     fn run_try_read_snapshot(&self, f: &mut dyn FnMut(&WorldStateSnapshot)) -> bool {
         if let Some(guard) = self.try_read_state() {
             f(&guard);
@@ -1051,6 +1061,7 @@ impl WorldRepository {
         }
     }
 
+    #[track_caller]
     fn run_mut_snapshot_tx(
         &self,
         f: &mut dyn FnMut(&mut WorldStateSnapshot) -> bool,
@@ -1058,10 +1069,10 @@ impl WorldRepository {
         let mut arc_guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
         let _write_depth_guard = DbWriteLockDepthGuard::enter();
         let guard = std::sync::Arc::make_mut(&mut *arc_guard);
-        let mut conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
-        let mut fp = self.sqlite_fp.lock().unwrap_or_else(|e| e.into_inner());
         guard.dirty_hints.clear();
         let closure_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(guard)));
+        let mut conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut fp = self.sqlite_fp.lock().unwrap_or_else(|e| e.into_inner());
         let should_commit = match closure_res {
             Ok(commit) => commit,
             Err(panic_payload) => {
@@ -1131,6 +1142,7 @@ impl WorldRepository {
         }
     }
 
+    #[track_caller]
     pub fn with_snapshot<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&WorldStateSnapshot) -> R,
@@ -1145,6 +1157,7 @@ impl WorldRepository {
         out.expect("with_snapshot closure must run")
     }
 
+    #[track_caller]
     pub fn try_with_snapshot<F, R>(&self, f: F) -> Option<R>
     where
         F: FnOnce(&WorldStateSnapshot) -> R,
@@ -1169,6 +1182,7 @@ impl WorldRepository {
     /// If the closure itself panics, `run_mut_snapshot_tx` catches the panic, rolls back
     /// `WorldStateSnapshot` from SQLite, increments `tx_panics_total()`, releases all locks without
     /// poisoning, and then propagates the panic (`#904` / `#833`).
+    #[track_caller]
     pub fn with_mut_snapshot<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut WorldStateSnapshot) -> R,
@@ -1199,8 +1213,8 @@ impl WorldRepository {
     {
         let mut arc_guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
         let guard = std::sync::Arc::make_mut(&mut *arc_guard);
-        let mut fp = self.sqlite_fp.lock().unwrap_or_else(|e| e.into_inner());
         let out = f(guard);
+        let mut fp = self.sqlite_fp.lock().unwrap_or_else(|e| e.into_inner());
         *fp = sqlite_store::compute_fingerprints(guard);
         out
     }
@@ -1216,6 +1230,7 @@ impl WorldRepository {
     /// cloning) and commits dirty rows inside an immediate `rusqlite::Transaction` ONLY when `f` returns
     /// `Ok(val)` AND durable persistence succeeds, rolling back in-memory state from the committed SQLite
     /// tables on any error or closure panic (`D-3`, `R21-P1-5`, `R24-P1-1`, `#903`, `#904`).
+    #[track_caller]
     pub fn try_with_mut_snapshot<F, T, E>(&self, f: F) -> Result<T, E>
     where
         F: FnOnce(&mut WorldStateSnapshot) -> Result<T, E>,
@@ -1354,6 +1369,22 @@ mod r4_persistence_tests {
         });
         drop(repo);
         let _ = std::fs::remove_file(&tmp_path);
+    }
+
+    #[test]
+    fn test_prune_expired_auth_runtime_respects_lock_ranks() {
+        let repo = WorldRepository::new_empty();
+        assert_eq!(repo.prune_expired_auth_runtime(1_000), 0);
+        assert!(crate::lock_rank::held_lock_ranks().is_empty());
+
+        let _leaf = repo.auth_runtime.read().unwrap();
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            repo.with_snapshot(|_| ());
+        }));
+        assert!(
+            res.is_err(),
+            "world transaction entry while holding RANK_LEAF must panic"
+        );
     }
 }
 #[cfg(test)] #[path = "persistence_unit_tests.rs"] mod persistence_unit_tests;

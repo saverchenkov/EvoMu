@@ -1,6 +1,7 @@
 //! Scanning & Dungeons (`SO-5`) and Wormholes (`SO-6`).
 
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
+use eve_db::lock_rank::AnyRwLock;
 use eve_db::CosmicSignatureRecord;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -1322,7 +1323,7 @@ pub(crate) fn dispatch_signal_tracker_notifications(
 
 pub(crate) fn emit_signal_tracker_site_removed_with_db(
     db: &eve_db::WorldRepository,
-    pending_notifications: &std::sync::RwLock<
+    pending_notifications: &dyn AnyRwLock<
         HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>,
     >,
     notify_tx: &tokio::sync::broadcast::Sender<(

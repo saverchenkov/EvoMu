@@ -1570,3 +1570,112 @@ fn esi_contacts_mail_economy_markets_contracts_sov_fw_and_sample_routes() {
         200
     );
 }
+
+#[tokio::test]
+async fn lock_rank_enforcement_across_fixed_subsystems_and_inversion_panic() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let now = ctx.now_unix();
+
+    // 1. Auth runtime prune + empty lock stack.
+    let _pruned = ctx.db.prune_expired_auth_runtime(now);
+    assert!(eve_db::lock_rank::held_lock_ranks().is_empty());
+
+    // 2. SystemHandle ranked locks + try_sync_ship_ballpark_stats.
+    let sys = ctx.systems.get_or_spawn(30_000_142);
+    let ship_id = 980_001_001;
+    let init_cs = eve_destiny::CombatState {
+        shield_hp: 250.0,
+        max_shield_hp: 250.0,
+        armor_hp: 250.0,
+        max_armor_hp: 250.0,
+        structure_hp: 250.0,
+        max_structure_hp: 250.0,
+        capacitor: 500.0,
+        max_capacitor: 500.0,
+        base_max_velocity: Some(300.0),
+        ..Default::default()
+    };
+    sys.spawn_ball_with_combat(
+        eve_destiny::Ball {
+            id: ship_id,
+            type_id: 587,
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 35.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        },
+        init_cs.clone(),
+    )
+    .await
+    .expect("spawn_ball_with_combat");
+    let mut updated_cs = init_cs;
+    updated_cs.base_max_velocity = Some(410.0);
+    assert!(sys.try_sync_ship_ballpark_stats(ship_id, &updated_cs));
+
+    // 3. machoNet.GetMetrics avoids nested cluster_state -> notification_records locks (#910).
+    let mut gm = eve_machonet::SessionState::default();
+    gm.user_id = Some(1);
+    gm.character_id = Some(90_000_001);
+    gm.solar_system_id = Some(30_000_142);
+    gm.role = eve_machonet::service_roles::ROLE_GMH | eve_machonet::service_roles::ROLE_ADMIN;
+    let metrics = ctx
+        .dispatch_rpc(&mut gm, "machoNet", None, "GetMetrics", &[], &HashMap::new(), None)
+        .await
+        .expect("machoNet.GetMetrics");
+    assert!(matches!(metrics, eve_proto::PyRep::List(_)));
+
+    // 4. Consolidated FighterRuntimeState + lenses, CrimeWatchLock + tick_concord_responses, target-tag cleanup.
+    ctx.fighter_tube_loads
+        .write()
+        .unwrap()
+        .insert((ship_id, 0), 980_001_002);
+    assert_eq!(
+        ctx.fighters.read().unwrap().tube_loads.get(&(ship_id, 0)).copied(),
+        Some(980_001_002)
+    );
+    eve_server::services::fleet_social::fleet_social_finder_tactical::clear_destroyed_target_tag(
+        &ctx, ship_id,
+    );
+    {
+        let wg_noop = ctx.crimewatch.write().unwrap();
+        let _ = wg_noop.states.len();
+    }
+    assert!(!ctx.db.with_snapshot(|s| s.dirty_hints.crimewatch_dirty));
+    eve_server::combat::crimewatch::tick_concord_responses(&ctx, now).await;
+
+    // 5. Explicit lock-rank inversions panic when enforcement is active.
+    if cfg!(any(debug_assertions, feature = "lock-rank")) {
+        let leaf_world = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _leaf = ctx.pending_notifications.read().unwrap();
+            ctx.db.with_snapshot(|_| ());
+        }));
+        assert!(leaf_world.is_err(), "RANK_LEAF -> RANK_WORLD_INNER must panic");
+
+        let leaf_cw = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _leaf = ctx.pending_notifications.read().unwrap();
+            let _ = ctx.crimewatch.read();
+        }));
+        assert!(leaf_cw.is_err(), "RANK_LEAF -> RANK_CRIMEWATCH must panic");
+
+        let leaf_bp = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _leaf = ctx.pending_notifications.read().unwrap();
+            let _ = sys.ballpark.read();
+        }));
+        assert!(leaf_bp.is_err(), "RANK_LEAF -> RANK_BALLPARK must panic");
+
+        let leaf_leaf = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _leaf = ctx.pending_notifications.read().unwrap();
+            let _ = ctx.notification_records.read();
+        }));
+        assert!(leaf_leaf.is_err(), "RANK_LEAF -> RANK_LEAF must panic");
+    }
+    eve_db::lock_rank::assert_no_locks_held();
+    assert!(eve_db::lock_rank::held_lock_ranks().is_empty());
+}

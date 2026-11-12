@@ -272,24 +272,36 @@ fn auth_sqlite_dedicated_connection_fail_closed_persistence_and_lock_ordering_83
     // 2. Lock-order regression (#838): holding `sqlite_conn` (world write lock) on another thread
     // does NOT block auth operations because auth uses its own dedicated SQLite connection and
     // never acquires `inner` while holding `auth_runtime`.
-    let world_conn_guard = repo.sqlite_conn.lock().unwrap();
-    let code2 = repo
-        .authorize_pkce(
-            "demo",
-            "demo-secret",
-            90_000_001,
-            "evomu-launcher",
-            "https://localhost/cb",
-            vec!["esi-mail".into()],
-            &challenge,
-            "S256",
-            1_700_000_200,
-        )
-        .unwrap();
-    let fresh_bundle = repo
-        .exchange_pkce_code(&code2, "evomu-launcher", verifier, 1_700_000_202)
-        .expect("auth mint succeeds even while world sqlite_conn mutex is held");
-    drop(world_conn_guard);
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let repo_ref = &repo;
+    let fresh_bundle = std::thread::scope(|s| {
+        let holder = s.spawn(move || {
+            let _world_conn_guard = repo_ref.sqlite_conn.lock().unwrap();
+            locked_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        locked_rx.recv().unwrap();
+        let code2 = repo
+            .authorize_pkce(
+                "demo",
+                "demo-secret",
+                90_000_001,
+                "evomu-launcher",
+                "https://localhost/cb",
+                vec!["esi-mail".into()],
+                &challenge,
+                "S256",
+                1_700_000_200,
+            )
+            .unwrap();
+        let bundle = repo
+            .exchange_pkce_code(&code2, "evomu-launcher", verifier, 1_700_000_202)
+            .expect("auth mint succeeds even while world sqlite_conn mutex is held");
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        bundle
+    });
     assert!(repo
         .verify_sso_access_token(&fresh_bundle.access_token, 1_700_000_205)
         .is_ok());

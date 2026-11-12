@@ -20,15 +20,16 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use crate::lock_rank::{RankedMutex, RANK_LEAF};
+use std::sync::{Arc, LazyLock};
 
 struct DedicatedAuthConn {
-    conn: Mutex<rusqlite::Connection>,
+    conn: RankedMutex<rusqlite::Connection, RANK_LEAF>,
     force_fail: AtomicBool,
 }
 
-static AUTH_SQLITE_CONNS: LazyLock<Mutex<HashMap<u64, Arc<DedicatedAuthConn>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static AUTH_SQLITE_CONNS: LazyLock<RankedMutex<HashMap<u64, Arc<DedicatedAuthConn>>, RANK_LEAF>> =
+    LazyLock::new(|| RankedMutex::new(HashMap::new()));
 
 /// Normalizes IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) to canonical `IpAddr::V4` so dual-stack
 /// sockets on `:26000` and `:26005` compare identically (`#472`).
@@ -194,7 +195,7 @@ impl WorldRepository {
             c
         };
         let entry = Arc::new(DedicatedAuthConn {
-            conn: Mutex::new(conn),
+            conn: RankedMutex::new(conn),
             force_fail: AtomicBool::new(false),
         });
         let mut map = AUTH_SQLITE_CONNS.lock().unwrap_or_else(|e| e.into_inner());

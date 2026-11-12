@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::router::RpcArgs;
+use eve_db::lock_rank::AnyRwLock;
 
 /// Rejects superweapon activation if `ship_id` is currently tethered (`CantActivateWhileTethered`, `#496`).
 pub(crate) async fn check_superweapon_tether_guard(
@@ -298,6 +299,7 @@ pub async fn activate_superweapon_with_args(
     target_id_opt: Option<i64>,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
+    crate::services::inventory_fitting::fitting_cyno_portal::sweep_expired_cyno_beacons(ctx);
     if ctx.is_module_in_reactivation_delay(ship_id, module_id) {
         return Err(BridgeRpcError {
             code: "ModuleInReactivationDelay".into(),
@@ -903,7 +905,7 @@ pub(crate) fn fire_lance_warmup_in_ballpark(
     cycle: &crate::system_actor::ActiveModuleCycle,
     sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
-    tactical_state: &std::sync::RwLock<TacticalModulesState>,
+    tactical_state: &dyn AnyRwLock<TacticalModulesState>,
     pending_cycle_actions: &mut Vec<crate::system_actor::PendingCycleAction>,
     destroyed_balls: &mut Vec<(i64, Option<i64>)>,
 ) {

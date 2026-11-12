@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 use crate::system_actor::*;
+use eve_db::lock_rank::AnyRwLock;
 use eve_destiny::{BallId, Ballpark, MovementMode};
 use glam::DVec3;
 use std::collections::HashMap;
@@ -93,7 +94,7 @@ pub(crate) fn step_cycles_and_capacitor(
     sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     mechanic_rng_opt: &Option<Arc<crate::rng::MechanicRng>>,
-    tactical_state: &std::sync::RwLock<crate::services::tactical_modules::TacticalModulesState>,
+    tactical_state: &dyn AnyRwLock<crate::services::tactical_modules::TacticalModulesState>,
     pending_cycle_actions: &mut Vec<PendingCycleAction>,
     dt: f64,
     deactivation_hook: Option<&ModuleDeactivationHook>,
@@ -1499,10 +1500,15 @@ impl SystemHandle {
             &bp,
             &events,
             db_opt.as_ref(),
-            pending_notifications_opt.as_deref(),
+            pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>),
             notify_tx_opt.as_ref(),
         );
-        if let Some(lock_hook) = self.target_lock_completed_hook.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        let lock_hook_opt = self
+            .target_lock_completed_hook
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(lock_hook) = lock_hook_opt {
             for ev in &events {
                 if let eve_destiny::DestinyEvent::OnTarget { mode, source_id, target_id } = ev {
                     if mode == "locked" {
@@ -1530,7 +1536,7 @@ impl SystemHandle {
         );
         let pg_dead = crate::services::pvp_filament_arena::step_proving_grounds_arena_hazards_in_ballpark_for_tick(
             &mut bp, sde_opt.as_deref(), db_opt.as_ref(), self.solar_system_id,
-            pending_notifications_opt.as_deref(), notify_tx_opt.as_ref(),
+            pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>), notify_tx_opt.as_ref(),
         );
         let step_now_unix = db_opt.as_ref().map(|db| db.clock().now_unix_secs()).unwrap_or(0);
         let deact_hook_guard = self.module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
@@ -1544,11 +1550,11 @@ impl SystemHandle {
         let mut destroyed = step_cycles_and_capacitor(
             &mut bp, active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
-            sde_opt, db_opt, mechanic_rng_opt, tactical_state, pending_cycle_actions, dt, deact_hook_guard.as_ref(),
+            sde_opt, db_opt, mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions, dt, deact_hook_guard.as_ref(),
         );
         flush_pending_cycle_damage_notifications(
             db_opt.as_ref(),
-            pending_notifications_opt.as_deref(),
+            pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>),
             notify_tx_opt.as_ref(),
             pending_cycle_actions,
         );
@@ -1562,7 +1568,7 @@ impl SystemHandle {
             crate::services::tactical_module_mechanics::on_probe_ball_removed_in_actor(
                 &mut bp,
                 db_opt,
-                tactical_state,
+                tactical_state.as_ref(),
                 target_ball_id,
             );
             if let Some(db) = db_opt.as_ref() {
@@ -1687,7 +1693,7 @@ pub(crate) fn flush_target_lost_notifications(
     events: &[eve_destiny::DestinyEvent],
     db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
     pending_opt: Option<
-        &std::sync::RwLock<
+        &dyn AnyRwLock<
             std::collections::HashMap<i64, Vec<crate::router::PendingMachoNotification>>,
         >,
     >,
@@ -1790,7 +1796,7 @@ pub(crate) fn flush_target_lost_notifications(
 pub(crate) fn flush_pending_cycle_damage_notifications(
     db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
     pending_opt: Option<
-        &std::sync::RwLock<
+        &dyn AnyRwLock<
             std::collections::HashMap<i64, Vec<crate::router::PendingMachoNotification>>,
         >,
     >,

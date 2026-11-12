@@ -11,6 +11,7 @@
 //! - `serviceGatewayMgr` QA hijack mode (`qa_enable_hijack_mode`, `qa_disable_hijack_mode`,
 //!   `qa_is_hijack_mode_enabled` consumed by `eve/devtools/script/quasarHijackWnd.pyj`).
 
+use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
 use eve_db::WorldRepository;
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
@@ -356,22 +357,22 @@ pub struct PublicGatewayRouter {
     pub gateway_instance_uuid: Vec<u8>,
     pub tenant: String,
     pub handlers: RwLock<HashMap<String, QuasarHandlerFn>>,
-    pub idempotency_cache: RwLock<BoundedIdempotencyCache>,
-    pub subscribers: Arc<RwLock<HashMap<u64, GatewaySubscriber>>>,
-    pub stream_receivers: RwLock<HashMap<u64, mpsc::Receiver<EvePublicNotice>>>,
-    pub routing_cache: RwLock<NoticeRoutingCache>,
-    pub published_events: Arc<RwLock<VecDeque<EvePublicEvent>>>,
-    pub server_hijack_state: RwLock<QuasarHijackState>,
+    pub idempotency_cache: RankedRwLock<BoundedIdempotencyCache, RANK_LEAF>,
+    pub subscribers: Arc<RankedRwLock<HashMap<u64, GatewaySubscriber>, RANK_LEAF>>,
+    pub stream_receivers: RankedRwLock<HashMap<u64, mpsc::Receiver<EvePublicNotice>>, RANK_LEAF>,
+    pub routing_cache: RankedRwLock<NoticeRoutingCache, RANK_LEAF>,
+    pub published_events: Arc<RankedRwLock<VecDeque<EvePublicEvent>, RANK_LEAF>>,
+    pub server_hijack_state: RankedRwLock<QuasarHijackState, RANK_LEAF>,
     pub next_notice_seq: AtomicU64,
     pub pending_notices: Arc<RwLock<Vec<(NoticeScope, GoogleAny)>>>,
-    pub macho_notify_sink: Arc<RwLock<Option<MachoNotifySink>>>,
+    pub macho_notify_sink: Arc<RankedRwLock<Option<MachoNotifySink>, RANK_LEAF>>,
     pub free_fast_checkout_plex: Arc<std::sync::atomic::AtomicBool>,
     pub has_persisted_free_fast_checkout_plex: Arc<std::sync::atomic::AtomicBool>,
     pub progression: Arc<crate::services::quasar_progression::ProgressionManagers>,
     pub chat_moderation: Arc<crate::services::quasar_social_chat::ChatModerationState>,
     pub synced_rollback_epoch: AtomicU64,
-    pub rehydrate_hooks: RwLock<Vec<Arc<dyn Fn() + Send + Sync>>>,
-    pub sync_hooks: RwLock<Vec<Arc<dyn Fn() + Send + Sync>>>,
+    pub rehydrate_hooks: RankedRwLock<Vec<Arc<dyn Fn() + Send + Sync>>, RANK_LEAF>,
+    pub sync_hooks: RankedRwLock<Vec<Arc<dyn Fn() + Send + Sync>>, RANK_LEAF>,
 }
 
 impl PublicGatewayRouter {
@@ -392,20 +393,20 @@ impl PublicGatewayRouter {
             gateway_instance_uuid: b"evomu-quasar-gw1".to_vec(),
             tenant: "tranquility".to_string(),
             handlers: RwLock::new(HashMap::new()),
-            idempotency_cache: RwLock::new(BoundedIdempotencyCache::default()),
-            subscribers: Arc::new(RwLock::new(HashMap::new())),
-            stream_receivers: RwLock::new(HashMap::new()),
-            routing_cache: RwLock::new(NoticeRoutingCache::new(NOTICE_CACHE_MAX_SIZE_BYTES)),
-            published_events: Arc::new(RwLock::new(VecDeque::new())),
-            server_hijack_state: RwLock::new(QuasarHijackState::default()),
+            idempotency_cache: RankedRwLock::new(BoundedIdempotencyCache::default()),
+            subscribers: Arc::new(RankedRwLock::new(HashMap::new())),
+            stream_receivers: RankedRwLock::new(HashMap::new()),
+            routing_cache: RankedRwLock::new(NoticeRoutingCache::new(NOTICE_CACHE_MAX_SIZE_BYTES)),
+            published_events: Arc::new(RankedRwLock::new(VecDeque::new())),
+            server_hijack_state: RankedRwLock::new(QuasarHijackState::default()),
             next_notice_seq: AtomicU64::new(1),
             pending_notices: Arc::new(RwLock::new(Vec::new())),
-            macho_notify_sink: Arc::new(RwLock::new(None)),
+            macho_notify_sink: Arc::new(RankedRwLock::new(None)),
             free_fast_checkout_plex: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             has_persisted_free_fast_checkout_plex: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             synced_rollback_epoch: AtomicU64::new(initial_rollback_epoch),
-            rehydrate_hooks: RwLock::new(Vec::new()),
-            sync_hooks: RwLock::new(Vec::new()),
+            rehydrate_hooks: RankedRwLock::new(Vec::new()),
+            sync_hooks: RankedRwLock::new(Vec::new()),
         };
         router.hydrate_meta_from_db();
         router.register_builtin_core_handlers(Arc::clone(&db), Arc::clone(&sde));
@@ -838,19 +839,26 @@ impl PublicGatewayRouter {
     /// Updates a subscriber's session tenancy attributes (`charid`, `corpid`, `allianceid`, `solarsystemid2`, `fleetid`)
     /// and flushes any newly valid notices from `NoticeRoutingCache`.
     pub fn on_session_changed(&self, session: &SessionState, now_unix: u64) -> usize {
-        if !self.has_subscriber(session.session_id) {
+        let updated_sub = {
+            let mut subs = self.subscribers.write().unwrap_or_else(|e| e.into_inner());
+            let Some(sub) = subs.get_mut(&session.session_id) else {
+                return 0;
+            };
+            sub.update_from_session(session);
+            sub.clone()
+        };
+        let newly_valid = self
+            .routing_cache
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain_newly_valid_for_subscriber(&updated_sub, now_unix);
+        if newly_valid.is_empty() {
             return 0;
         }
         let mut subs = self.subscribers.write().unwrap_or_else(|e| e.into_inner());
         let Some(sub) = subs.get_mut(&session.session_id) else {
             return 0;
         };
-        sub.update_from_session(session);
-        let newly_valid = self
-            .routing_cache
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .drain_newly_valid_for_subscriber(sub, now_unix);
         let mut delivered = 0usize;
         for notice in newly_valid {
             if sub.accepts_payload_type(

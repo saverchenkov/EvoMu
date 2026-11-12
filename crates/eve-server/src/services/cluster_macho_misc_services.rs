@@ -522,7 +522,9 @@ pub fn with_misc_state<R>(
 }
 
 pub(crate) fn with_misc_state_arc<R>(
-    misc: &std::sync::Arc<std::sync::Mutex<ClusterMiscRuntimeState>>,
+    misc: &std::sync::Arc<
+        eve_db::lock_rank::RankedMutex<ClusterMiscRuntimeState, { eve_db::lock_rank::RANK_LEAF }>,
+    >,
     sde: &SdeRegistry,
     f: impl FnOnce(&mut ClusterMiscRuntimeState) -> R,
 ) -> R {
@@ -537,7 +539,9 @@ pub(crate) fn persist_misc_state(ctx: &ServerContext) {
 }
 
 pub(crate) fn persist_misc_state_arc(
-    misc: &std::sync::Arc<std::sync::Mutex<ClusterMiscRuntimeState>>,
+    misc: &std::sync::Arc<
+        eve_db::lock_rank::RankedMutex<ClusterMiscRuntimeState, { eve_db::lock_rank::RANK_LEAF }>,
+    >,
     sde: &SdeRegistry,
     db: &WorldRepository,
 ) {

@@ -16,6 +16,7 @@ use crate::services::insurgency_services::{
     init_insurgency_campaign, insurgency_stage, spawn_pirate_stronghold, with_insurgency_runtime,
     PHASE_ACTIVE, PHASE_FORECASTING, PHASE_WINDDOWN, WINDDOWN_DURATION_SECS,
 };
+use eve_db::lock_rank::AnyRwLock;
 use eve_destiny::{Ball, MovementMode};
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
@@ -448,7 +449,7 @@ pub fn emit_campaign_resolution_effects_core(
     db: &eve_db::WorldRepository,
     gw: Option<&crate::quasar_gateway::PublicGatewayRouter>,
     pending_notifications: Option<
-        &std::sync::RwLock<
+        &dyn AnyRwLock<
             HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>,
         >,
     >,

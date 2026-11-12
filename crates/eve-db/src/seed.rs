@@ -1,11 +1,11 @@
 //! Pre-seeded canonical demonstration world fixtures for offline testing.
 
 use crate::accounts::service_roles;
+use crate::lock_rank::{RankedMutex, RankedRwLock};
 use crate::persistence::WorldRepository;
 use crate::sqlite_store;
 use crate::types::*;
 use std::collections::{HashMap, HashSet};
-use std::sync::RwLock;
 
 impl WorldRepository {
     pub fn create_demo_snapshot() -> WorldStateSnapshot {
@@ -602,16 +602,16 @@ impl WorldRepository {
 
         let mut repo = Self {
             instance_id: Self::next_instance_id(),
-            inner: RwLock::new(std::sync::Arc::new(initial_snap)),
-            sqlite_conn: std::sync::Mutex::new(conn),
-            sqlite_fp: std::sync::Mutex::new(fp),
+            inner: RankedRwLock::new(std::sync::Arc::new(initial_snap)),
+            sqlite_conn: RankedMutex::new(conn),
+            sqlite_fp: RankedMutex::new(fp),
             sqlite_path: None,
             quarantine_unreadable: sqlite_store::default_quarantine_unreadable(),
-            auth_runtime: RwLock::new(AuthRuntimeState::new(jwt_secret)),
-            clock: std::sync::RwLock::new(std::sync::Arc::new(
+            auth_runtime: RankedRwLock::new(AuthRuntimeState::new(jwt_secret)),
+            clock: RankedRwLock::new(std::sync::Arc::new(
                 crate::clock::VirtualServerClock::new(),
             )),
-            wal_lock: std::sync::Mutex::new(()),
+            wal_lock: RankedMutex::new(()),
             snapshot_path: None,
             pending_wal_records: std::sync::atomic::AtomicUsize::new(0),
             state_epoch: std::sync::atomic::AtomicU64::new(1),

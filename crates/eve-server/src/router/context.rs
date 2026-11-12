@@ -3,13 +3,17 @@
 use crate::living_world::LivingWorldDirector;
 use crate::system_actor::SystemRegistry;
 use crate::world_seeder;
+use eve_db::lock_rank::{
+    AnyRwLock, RankedMutex, RankedRwLock, RankedRwLockReadGuard, RankedRwLockWriteGuard,
+    RANK_CLOCK, RANK_LEAF, RANK_NPC_SPAWNS,
+};
 use eve_db::WorldRepository;
 use eve_dogma::ShipFittingEngine;
 use eve_proto::BridgeRpcError;
 use eve_sde::SdeRegistry;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LockResult, PoisonError, TryLockError, TryLockResult};
 
 pub static NEXT_BOUND_ID: AtomicU64 = AtomicU64::new(10_000);
 
@@ -36,68 +40,69 @@ pub struct ServerContext {
     pub instance_id: u64,
     pub sde: Arc<SdeRegistry>,
     pub db: Arc<WorldRepository>,
-    pub clock: RwLock<Arc<dyn eve_db::ServerClock>>,
+    pub clock: RankedRwLock<Arc<dyn eve_db::ServerClock>, RANK_CLOCK>,
     pub systems: Arc<SystemRegistry>,
     pub living_world: Arc<LivingWorldDirector>,
     pub quasar_gateway: Arc<crate::quasar_gateway::PublicGatewayRouter>,
     pub cataloged_services: HashSet<String>,
     pub quasar_domains: HashSet<String>,
-    pub bound_objects: RwLock<HashMap<u64, BoundObjectEntry>>,
-    pub object_cache: RwLock<HashMap<String, crate::router::cache_notifications::CachedObjectRecord>>,
-    pub object_cache_timestamps: RwLock<HashMap<String, i64>>,
-    pub notification_records: RwLock<Vec<crate::router::cache_notifications::NotificationRecord>>,
-    pub pending_notifications: Arc<RwLock<HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>>>,
+    pub bound_objects: RankedRwLock<HashMap<u64, BoundObjectEntry>, RANK_LEAF>,
+    pub object_cache: RankedRwLock<HashMap<String, crate::router::cache_notifications::CachedObjectRecord>, RANK_LEAF>,
+    pub object_cache_timestamps: RankedRwLock<HashMap<String, i64>, RANK_LEAF>,
+    pub notification_records: RankedRwLock<Vec<crate::router::cache_notifications::NotificationRecord>, RANK_LEAF>,
+    pub pending_notifications: Arc<RankedRwLock<HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>, RANK_LEAF>>,
     pub notify_tx: tokio::sync::broadcast::Sender<(i64, crate::router::cache_notifications::PendingMachoNotification)>,
-    pub map_landmarks: RwLock<Vec<(i64, String, f64, f64, f64)>>,
-    pub session_closers: RwLock<HashMap<u64, tokio::sync::mpsc::UnboundedSender<(String, String)>>>,
-    pub ship_fittings: Arc<RwLock<HashMap<i64, ShipFittingEngine>>>,
-    pub projected_ewar: Arc<RwLock<HashMap<i64, Vec<eve_dogma::ProjectedEwarEffect>>>>,
-    pub projected_ewar_sources: Arc<RwLock<HashMap<i64, i64>>>,
-    pub active_ewar_starts: Arc<RwLock<HashMap<(i64, i64), Vec<(i64, &'static str)>>>>,
-    pub weapon_cycle_state: RwLock<HashMap<i64, (Option<u64>, u32, Option<i64>)>>,
-    pub fighter_cooldown_state: RwLock<HashMap<(i64, u32), u64>>,
-    pub fighter_charge_state: RwLock<HashMap<(i64, u32), u32>>,
-    pub active_fighters: Arc<RwLock<HashMap<i64, ActiveFighterSquadron>>>,
-    pub fighter_tube_loads: RwLock<HashMap<(i64, usize), i64>>,
-    pub active_scanner_probes: RwLock<HashMap<i64, ActiveScannerProbe>>,
-    pub active_moon_probes: RwLock<Vec<ActiveMoonSurveyProbe>>,
-    pub scanned_signatures: RwLock<HashSet<(i64, u32, i64)>>,
-    pub character_scan_progress: RwLock<HashMap<(i64, u32, String), f64>>,
-    pub invention_roll_override: Arc<RwLock<Option<f64>>>,
+    pub map_landmarks: RankedRwLock<Vec<(i64, String, f64, f64, f64)>, RANK_LEAF>,
+    pub session_closers: RankedRwLock<HashMap<u64, tokio::sync::mpsc::UnboundedSender<(String, String)>>, RANK_LEAF>,
+    pub ship_fittings: Arc<RankedRwLock<HashMap<i64, ShipFittingEngine>, RANK_LEAF>>,
+    pub projected_ewar: Arc<RankedRwLock<HashMap<i64, Vec<eve_dogma::ProjectedEwarEffect>>, RANK_LEAF>>,
+    pub projected_ewar_sources: Arc<RankedRwLock<HashMap<i64, i64>, RANK_LEAF>>,
+    pub active_ewar_starts: Arc<RankedRwLock<HashMap<(i64, i64), Vec<(i64, &'static str)>>, RANK_LEAF>>,
+    pub weapon_cycle_state: RankedRwLock<HashMap<i64, (Option<u64>, u32, Option<i64>)>, RANK_LEAF>,
+    pub fighters: Arc<RankedRwLock<FighterRuntimeState, RANK_LEAF>>,
+    pub fighter_cooldown_state: FighterStateLens<HashMap<(i64, u32), u64>>,
+    pub fighter_charge_state: FighterStateLens<HashMap<(i64, u32), u32>>,
+    pub active_fighters: FighterStateLens<HashMap<i64, ActiveFighterSquadron>>,
+    pub fighter_tube_loads: FighterStateLens<HashMap<(i64, usize), i64>>,
+    pub active_scanner_probes: RankedRwLock<HashMap<i64, ActiveScannerProbe>, RANK_LEAF>,
+    pub active_moon_probes: RankedRwLock<Vec<ActiveMoonSurveyProbe>, RANK_LEAF>,
+    pub scanned_signatures: RankedRwLock<HashSet<(i64, u32, i64)>, RANK_LEAF>,
+    pub character_scan_progress: RankedRwLock<HashMap<(i64, u32, String), f64>, RANK_LEAF>,
+    pub invention_roll_override: Arc<RankedRwLock<Option<f64>, RANK_LEAF>>,
     pub mechanic_rng: Arc<crate::rng::MechanicRng>, // seeded test RNG: shared with `systems`; OS CSPRNG unless seeded
-    pub module_reactivation_cooldowns: Arc<RwLock<HashMap<(i64, i64, u32), ModuleCooldownEntry>>>,
+    pub module_reactivation_cooldowns: Arc<RankedRwLock<HashMap<(i64, i64, u32), ModuleCooldownEntry>, RANK_LEAF>>,
     /// Repeating mining-module cycles keyed by module item ID (`MN-04`).
-    pub mining_cycles: RwLock<HashMap<i64, crate::services::mining_cycle::ActiveMiningCycle>>,
+    pub mining_cycles: RankedRwLock<HashMap<i64, crate::services::mining_cycle::ActiveMiningCycle>, RANK_LEAF>,
     /// Active Phased Asteroid Fields keyed by solar system ID (`MN-08`).
-    pub phased_asteroid_fields: RwLock<HashMap<u32, crate::services::space_mining_harvest::PhasedAsteroidFieldState>>,
+    pub phased_asteroid_fields: RankedRwLock<HashMap<u32, crate::services::space_mining_harvest::PhasedAsteroidFieldState>, RANK_LEAF>,
     pub crimewatch: crate::combat::crimewatch::CrimeWatchLock,
-    pub(crate) combat_ephemeral: Arc<RwLock<crate::services::combat_crimewatch::CombatRuntimeState>>,
-    pub tactical_state: Arc<RwLock<crate::services::tactical_modules::TacticalModulesState>>,
-    pub session_change_timers: std::sync::Mutex<HashMap<i64, crate::services::space_destiny::SessionChangeTimerState>>,
-    pub active_warps: std::sync::Mutex<HashMap<i64, i64>>,
-    pub return_warps: std::sync::Mutex<HashSet<i64>>,
-    pub location_change_invuln: std::sync::Mutex<HashMap<i64, u64>>,
+    pub(crate) combat_ephemeral: Arc<RankedRwLock<crate::services::combat_crimewatch::CombatRuntimeState, RANK_LEAF>>,
+    pub tactical_state: Arc<RankedRwLock<crate::services::tactical_modules::TacticalModulesState, RANK_LEAF>>,
+    pub session_change_timers: RankedMutex<HashMap<i64, crate::services::space_destiny::SessionChangeTimerState>, RANK_LEAF>,
+    pub active_warps: RankedMutex<HashMap<i64, i64>, RANK_LEAF>,
+    pub return_warps: RankedMutex<HashSet<i64>, RANK_LEAF>,
+    pub location_change_invuln: RankedMutex<HashMap<i64, u64>, RANK_LEAF>,
     pub feature_flags: crate::config::FeatureFlagsConfig,
     pub esi_port: u16,
     pub xmpp_port: u16,
     pub esi_state: Arc<crate::esi::runtime_state::EsiRuntimeState>,
     /// Per-world fleet state not persisted in `WorldRepository` (names, invites, adverts, watchlists).
-    pub(crate) fleet_extras: std::sync::Mutex<crate::services::fleet_social::fleet_social_fleets::FleetExtrasState>,
+    pub(crate) fleet_extras: RankedMutex<crate::services::fleet_social::fleet_social_fleets::FleetExtrasState, RANK_LEAF>,
     /// Per-world social state not persisted in `WorldRepository` (mailing lists, calendar, chat moderation).
-    pub(crate) social_extras: std::sync::Mutex<crate::services::fleet_social::fleet_social_chat::SocialExtrasState>,
+    pub(crate) social_extras: RankedMutex<crate::services::fleet_social::fleet_social_chat::SocialExtrasState, RANK_LEAF>,
     /// Per-world cluster/macho/misc service state (`cluster_macho_misc_services`).
-    pub(crate) cluster_misc_state: Arc<std::sync::Mutex<crate::services::cluster_macho_misc_services::ClusterMiscRuntimeState>>,
-    pub cluster_state: Arc<RwLock<crate::services::macho_cluster_mgmt::MachoClusterState>>,
-    pub global_config_values: RwLock<HashMap<String, eve_proto::PyRep>>,
-    pub alert_telemetry: std::sync::Mutex<crate::services::client_login::AlertTelemetryState>,
+    pub(crate) cluster_misc_state: Arc<RankedMutex<crate::services::cluster_macho_misc_services::ClusterMiscRuntimeState, RANK_LEAF>>,
+    pub cluster_state: Arc<RankedRwLock<crate::services::macho_cluster_mgmt::MachoClusterState, RANK_LEAF>>,
+    pub global_config_values: RankedRwLock<HashMap<String, eve_proto::PyRep>, RANK_LEAF>,
+    pub alert_telemetry: RankedMutex<crate::services::client_login::AlertTelemetryState, RANK_LEAF>,
     pub flight_recorder: Arc<crate::flight_recorder::FlightRecorder>,
     pub bug_reporting: Arc<crate::bug_reporting::BugReportingRuntime>,
-    pub npc_spawns: RwLock<HashMap<u32, crate::combat::npc_ai::NpcSpawnManager>>,
+    pub npc_spawns: RankedRwLock<HashMap<u32, crate::combat::npc_ai::NpcSpawnManager>, RANK_NPC_SPAWNS>,
     pub combat_rng_seq: AtomicU64,
     pub cluster_tick_last_unix: AtomicU64,
     pub cluster_tick_persisted_unix: AtomicU64,
     pub dedicated_physics_ticker_active: AtomicBool,
-    pub fw_idle_last_step_unix: RwLock<HashMap<i64, u64>>,
+    pub fw_idle_last_step_unix: RankedRwLock<HashMap<i64, u64>, RANK_LEAF>,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -107,6 +112,179 @@ pub struct ModuleCooldownEntry { pub recorded_unix_f64: f64, pub delay_s: f64, p
 pub struct ActiveFighterSquadron {
     pub ball_id: i64, pub item_id: i64, pub type_id: u32, pub owner_char_id: i64, pub parent_ship_id: i64,
     pub tube_index: usize, pub squadron_size: u32, pub target_id: Option<i64>, pub is_abandoned: bool, pub mwd_active: bool,
+}
+
+/// Consolidated carrier fighter runtime maps guarded under a single `RANK_LEAF` lock so
+/// multi-map fighter operations cannot invert or trigger same-rank assertions (`RFC-1 §4.3`).
+#[derive(Debug, Default)]
+pub struct FighterRuntimeState {
+    pub cooldown_state: HashMap<(i64, u32), u64>,
+    pub charge_state: HashMap<(i64, u32), u32>,
+    pub active_fighters: HashMap<i64, ActiveFighterSquadron>,
+    pub tube_loads: HashMap<(i64, usize), i64>,
+}
+
+/// Safe, zero-`unsafe` projection wrapper exposing a single map inside [`FighterRuntimeState`]
+/// with `.read()` / `.write()` ergonomics compatible with existing call sites and tests.
+pub struct FighterStateLens<T: 'static> {
+    lock: Arc<RankedRwLock<FighterRuntimeState, RANK_LEAF>>,
+    project_ref: fn(&FighterRuntimeState) -> &T,
+    project_mut: fn(&mut FighterRuntimeState) -> &mut T,
+}
+
+impl<T: 'static> Clone for FighterStateLens<T> {
+    fn clone(&self) -> Self {
+        Self {
+            lock: Arc::clone(&self.lock),
+            project_ref: self.project_ref,
+            project_mut: self.project_mut,
+        }
+    }
+}
+
+pub struct FighterLensReadGuard<'a, T: 'static> {
+    guard: RankedRwLockReadGuard<'a, FighterRuntimeState, RANK_LEAF>,
+    project: fn(&FighterRuntimeState) -> &T,
+}
+
+impl<T: 'static> std::ops::Deref for FighterLensReadGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        (self.project)(&self.guard)
+    }
+}
+
+pub struct FighterLensWriteGuard<'a, T: 'static> {
+    guard: RankedRwLockWriteGuard<'a, FighterRuntimeState, RANK_LEAF>,
+    project_ref: fn(&FighterRuntimeState) -> &T,
+    project_mut: fn(&mut FighterRuntimeState) -> &mut T,
+}
+
+impl<T: 'static> std::ops::Deref for FighterLensWriteGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        (self.project_ref)(&self.guard)
+    }
+}
+
+impl<T: 'static> std::ops::DerefMut for FighterLensWriteGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        (self.project_mut)(&mut self.guard)
+    }
+}
+
+impl<T: 'static> FighterStateLens<T> {
+    pub fn new(
+        lock: Arc<RankedRwLock<FighterRuntimeState, RANK_LEAF>>,
+        project_ref: fn(&FighterRuntimeState) -> &T,
+        project_mut: fn(&mut FighterRuntimeState) -> &mut T,
+    ) -> Self {
+        Self {
+            lock,
+            project_ref,
+            project_mut,
+        }
+    }
+
+    #[track_caller]
+    pub fn read(&self) -> LockResult<FighterLensReadGuard<'_, T>> {
+        let project = self.project_ref;
+        match (*self.lock).read() {
+            Ok(guard) => Ok(FighterLensReadGuard { guard, project }),
+            Err(poisoned) => Err(PoisonError::new(FighterLensReadGuard {
+                guard: poisoned.into_inner(),
+                project,
+            })),
+        }
+    }
+
+    #[track_caller]
+    pub fn try_read(&self) -> TryLockResult<FighterLensReadGuard<'_, T>> {
+        let project = self.project_ref;
+        match self.lock.try_read() {
+            Ok(guard) => Ok(FighterLensReadGuard { guard, project }),
+            Err(TryLockError::Poisoned(poisoned)) => Err(TryLockError::Poisoned(PoisonError::new(
+                FighterLensReadGuard {
+                    guard: poisoned.into_inner(),
+                    project,
+                },
+            ))),
+            Err(TryLockError::WouldBlock) => Err(TryLockError::WouldBlock),
+        }
+    }
+
+    #[track_caller]
+    pub fn write(&self) -> LockResult<FighterLensWriteGuard<'_, T>> {
+        let project_ref = self.project_ref;
+        let project_mut = self.project_mut;
+        match (*self.lock).write() {
+            Ok(guard) => Ok(FighterLensWriteGuard {
+                guard,
+                project_ref,
+                project_mut,
+            }),
+            Err(poisoned) => Err(PoisonError::new(FighterLensWriteGuard {
+                guard: poisoned.into_inner(),
+                project_ref,
+                project_mut,
+            })),
+        }
+    }
+
+    #[track_caller]
+    pub fn try_write(&self) -> TryLockResult<FighterLensWriteGuard<'_, T>> {
+        let project_ref = self.project_ref;
+        let project_mut = self.project_mut;
+        match self.lock.try_write() {
+            Ok(guard) => Ok(FighterLensWriteGuard {
+                guard,
+                project_ref,
+                project_mut,
+            }),
+            Err(TryLockError::Poisoned(poisoned)) => Err(TryLockError::Poisoned(PoisonError::new(
+                FighterLensWriteGuard {
+                    guard: poisoned.into_inner(),
+                    project_ref,
+                    project_mut,
+                },
+            ))),
+            Err(TryLockError::WouldBlock) => Err(TryLockError::WouldBlock),
+        }
+    }
+}
+
+pub(crate) fn make_fighter_lenses(
+    fighters: &Arc<RankedRwLock<FighterRuntimeState, RANK_LEAF>>,
+) -> (
+    FighterStateLens<HashMap<(i64, u32), u64>>,
+    FighterStateLens<HashMap<(i64, u32), u32>>,
+    FighterStateLens<HashMap<i64, ActiveFighterSquadron>>,
+    FighterStateLens<HashMap<(i64, usize), i64>>,
+) {
+    (
+        FighterStateLens::new(
+            Arc::clone(fighters),
+            |s| &s.cooldown_state,
+            |s| &mut s.cooldown_state,
+        ),
+        FighterStateLens::new(
+            Arc::clone(fighters),
+            |s| &s.charge_state,
+            |s| &mut s.charge_state,
+        ),
+        FighterStateLens::new(
+            Arc::clone(fighters),
+            |s| &s.active_fighters,
+            |s| &mut s.active_fighters,
+        ),
+        FighterStateLens::new(
+            Arc::clone(fighters),
+            |s| &s.tube_loads,
+            |s| &mut s.tube_loads,
+        ),
+    )
 }
 
 pub type ActiveScannerProbe = eve_db::PersistedScannerProbe;
@@ -144,14 +322,14 @@ impl ServerContext {
             .clone();
         let (notify_tx, _) = tokio::sync::broadcast::channel(256);
         let instance_id = NEXT_CTX_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let pending_notifications = Arc::new(RwLock::new(HashMap::new()));
-        let ship_fittings = Arc::new(RwLock::new(HashMap::new()));
-        let projected_ewar = Arc::new(RwLock::new(HashMap::new()));
-        let projected_ewar_sources = Arc::new(RwLock::new(HashMap::new()));
-        let active_ewar_starts = Arc::new(RwLock::new(HashMap::new()));
-        let invention_roll_override = Arc::new(RwLock::new(None));
+        let pending_notifications = Arc::new(RankedRwLock::new(HashMap::new()));
+        let ship_fittings = Arc::new(RankedRwLock::new(HashMap::new()));
+        let projected_ewar = Arc::new(RankedRwLock::new(HashMap::new()));
+        let projected_ewar_sources = Arc::new(RankedRwLock::new(HashMap::new()));
+        let active_ewar_starts = Arc::new(RankedRwLock::new(HashMap::new()));
+        let invention_roll_override = Arc::new(RankedRwLock::new(None));
         let mechanic_rng = Arc::new(crate::rng::MechanicRng::os());
-        let tactical_state = Arc::new(RwLock::new(
+        let tactical_state = Arc::new(RankedRwLock::new(
             crate::services::tactical_modules::TacticalModulesState::default(),
         ));
         let systems = Arc::new(
@@ -163,7 +341,7 @@ impl ServerContext {
         let combat_ephemeral = {
             let mut rt = crate::services::combat_crimewatch::CombatRuntimeState::default();
             db.with_snapshot(|snap| rt.sync_from_persisted(&snap.combat_crimewatch_state));
-            Arc::new(RwLock::new(rt))
+            Arc::new(RankedRwLock::new(rt))
         };
         let quasar_gateway = Arc::new(crate::quasar_gateway::PublicGatewayRouter::new(
             eve_proto::quasar::QuasarDescriptorRegistry::open_default_or_empty(),
@@ -182,7 +360,7 @@ impl ServerContext {
             notify_tx.clone(),
             Arc::downgrade(&combat_ephemeral),
         );
-        let cluster_misc_arc = Arc::new(std::sync::Mutex::new(
+        let cluster_misc_arc = Arc::new(RankedMutex::new(
             crate::services::cluster_macho_misc_services::ClusterMiscRuntimeState::from_db(&db),
         ));
         let misc_w = Arc::downgrade(&cluster_misc_arc);
@@ -206,7 +384,11 @@ impl ServerContext {
                     }
                     if let Some(Ok(r)) = &inc {
                         crate::services::notify_emitters_tournaments_anomalies::emit_incursion_completion_combat_notifications(
-                            &db, &sde, pw.upgrade().as_deref(), Some(&tx), r,
+                            &db,
+                            &sde,
+                            pw.upgrade().as_deref().map(|r| r as &dyn AnyRwLock<_>),
+                            Some(&tx),
+                            r,
                         );
                     }
                     let acct_changes = crate::services::pve_special_sites::on_special_site_npc_destroyed_core(&sys, &db, &sde, sys_id, npc_id, killer_opt).await;
@@ -217,7 +399,16 @@ impl ServerContext {
                     }
                     crate::services::agents_missions::on_mission_npc_destroyed_core(&db, sys_id, npc_id, killer_opt);
                     if let Some(misc) = mw.upgrade() {
-                        crate::services::shipcaster_ops::on_landing_pad_ball_destroyed_core(&misc, &sys, &db, &sde, pw.upgrade().as_deref(), &tx, npc_id).await;
+                        crate::services::shipcaster_ops::on_landing_pad_ball_destroyed_core(
+                            &misc,
+                            &sys,
+                            &db,
+                            &sde,
+                            pw.upgrade().as_deref().map(|r| r as &dyn AnyRwLock<_>),
+                            &tx,
+                            npc_id,
+                        )
+                        .await;
                     }
                     if let Some(ce) = cew.upgrade() {
                         crate::services::combat_npc_encounters::handle_npc_destroyed_in_space(&sys, &db, &sde, &ce, sys_id, npc_id, killer_opt).await;
@@ -232,13 +423,23 @@ impl ServerContext {
                         }
                         if let Some(pws) = pw.upgrade() { crate::services::pve_exploration::notify_pve_destruction_events(&db, &pws, &tx, kid, clr, esc, step); }
                     }
-                    crate::services::pve_dungeon_runtime::on_dungeon_npc_killed_core(&sys, &db, &sde, pw.upgrade().as_deref(), Some(&tx), sys_id, npc_id, killer_opt.unwrap_or(0)).await;
+                    crate::services::pve_dungeon_runtime::on_dungeon_npc_killed_core(
+                        &sys,
+                        &db,
+                        &sde,
+                        pw.upgrade().as_deref().map(|r| r as &dyn AnyRwLock<_>),
+                        Some(&tx),
+                        sys_id,
+                        npc_id,
+                        killer_opt.unwrap_or(0),
+                    )
+                    .await;
                     if let Some((sh_info, res_opt)) = crate::services::insurgency_services::on_insurgency_stronghold_destroyed_with_sde(&sys, &db, Some(&sde), sys_id, npc_id, killer_opt).await {
                         if let Some(res) = res_opt {
                             crate::services::fw_gameplay::fw_gameplay_insurgency::emit_campaign_resolution_effects_core(
                                 &db,
                                 gww.upgrade().as_deref(),
-                                pw.upgrade().as_deref(),
+                                pw.upgrade().as_deref().map(|r| r as &dyn AnyRwLock<_>),
                                 Some(&tx),
                                 &res,
                             );
@@ -246,7 +447,7 @@ impl ServerContext {
                         crate::services::insurgency_services::notify_stronghold_destruction(
                             &db,
                             gww.upgrade().as_deref(),
-                            pw.upgrade().as_deref(),
+                            pw.upgrade().as_deref().map(|r| r as &dyn AnyRwLock<_>),
                             Some(&tx),
                             &sh_info,
                         );
@@ -259,10 +460,10 @@ impl ServerContext {
             Arc::downgrade(&ship_fittings), Arc::downgrade(&pending_notifications), notify_tx.clone(),
             Arc::downgrade(&combat_ephemeral), Arc::downgrade(&quasar_gateway), Arc::downgrade(&invention_roll_override),
         );
-        let module_reactivation_cooldowns = Arc::new(RwLock::new(HashMap::new()));
-        let active_fighters = Arc::new(RwLock::new(HashMap::new()));
+        let module_reactivation_cooldowns = Arc::new(RankedRwLock::new(HashMap::new()));
+        let fighters = Arc::new(RankedRwLock::new(FighterRuntimeState::default()));
         let (step_cd_w, step_af_w, step_pe_w, step_pes_w, step_aes_w, step_tac_w) = (
-            Arc::downgrade(&module_reactivation_cooldowns), Arc::downgrade(&active_fighters),
+            Arc::downgrade(&module_reactivation_cooldowns), Arc::downgrade(&fighters),
             Arc::downgrade(&projected_ewar), Arc::downgrade(&projected_ewar_sources),
             Arc::downgrade(&active_ewar_starts), Arc::downgrade(&tactical_state),
         );
@@ -273,10 +474,10 @@ impl ServerContext {
                 step_cd_w.clone(), step_af_w.clone(), step_pe_w.clone(), step_pes_w.clone(), step_aes_w.clone(), step_tac_w.clone(),
             );
             Box::pin(async move {
-                let (Some(sys), Some(db), Some(sde), Some(rng), Some(fit), Some(pend), Some(ce), Some(gw), Some(inv_roll), Some(cd_map), Some(af_map), Some(pe), Some(pes), Some(aes), Some(tac)) = (
+                let (Some(sys), Some(db), Some(sde), Some(rng), Some(fit), Some(pend), Some(ce), Some(gw), Some(inv_roll), Some(cd_map), Some(fighters_map), Some(pe), Some(pes), Some(aes), Some(tac)) = (
                     sw.upgrade(), dw.upgrade(), sdw.upgrade(), rw.upgrade(), fit_w.upgrade(), pend_w.upgrade(), cew.upgrade(), gww.upgrade(), inw.upgrade(), cdw.upgrade(), afw.upgrade(), pew.upgrade(), pesw.upgrade(), aesw.upgrade(), tacw.upgrade(),
                 ) else { return; };
-                let ctx = ServerContext::from_step_components(instance_id, sys, db, sde, rng, fit, pend, ntx, ce, gw, inv_roll, cd_map, af_map, pe, pes, aes, tac);
+                let ctx = ServerContext::from_step_components(instance_id, sys, db, sde, rng, fit, pend, ntx, ce, gw, inv_roll, cd_map, fighters_map, pe, pes, aes, tac);
                 for (tid, killer_opt) in destroyed_balls {
                     crate::services::fw_gameplay::on_space_entity_destroyed(&ctx, sys_id, killer_opt, tid, 0).await;
                     crate::services::notify_emitters_seasons_tactical::on_deployable_deactivated(&ctx, None, tid);
@@ -340,67 +541,70 @@ impl ServerContext {
                 })
                 .collect()
         });
+        let (fighter_cooldown_state, fighter_charge_state, active_fighters, fighter_tube_loads) =
+            make_fighter_lenses(&fighters);
         let ctx = Self {
             instance_id,
             sde,
             db,
-            clock: RwLock::new(clock),
+            clock: RankedRwLock::new(clock),
             systems,
             living_world: Arc::new(LivingWorldDirector::new()),
             quasar_gateway,
             cataloged_services,
             quasar_domains,
-            bound_objects: RwLock::new(HashMap::new()),
-            object_cache: RwLock::new(HashMap::new()),
-            object_cache_timestamps: RwLock::new(HashMap::new()),
-            notification_records: RwLock::new(persisted_notifications),
+            bound_objects: RankedRwLock::new(HashMap::new()),
+            object_cache: RankedRwLock::new(HashMap::new()),
+            object_cache_timestamps: RankedRwLock::new(HashMap::new()),
+            notification_records: RankedRwLock::new(persisted_notifications),
             pending_notifications,
             notify_tx,
-            map_landmarks: RwLock::new(Vec::new()),
-            session_closers: RwLock::new(HashMap::new()),
+            map_landmarks: RankedRwLock::new(Vec::new()),
+            session_closers: RankedRwLock::new(HashMap::new()),
             ship_fittings,
             projected_ewar,
             projected_ewar_sources,
             active_ewar_starts,
-            weapon_cycle_state: RwLock::new(HashMap::new()),
-            fighter_cooldown_state: RwLock::new(HashMap::new()),
-            fighter_charge_state: RwLock::new(HashMap::new()),
+            weapon_cycle_state: RankedRwLock::new(HashMap::new()),
+            fighters,
+            fighter_cooldown_state,
+            fighter_charge_state,
             active_fighters,
-            fighter_tube_loads: RwLock::new(HashMap::new()),
-            active_scanner_probes: RwLock::new(persisted_probes),
-            active_moon_probes: RwLock::new(Vec::new()),
-            scanned_signatures: RwLock::new(HashSet::new()),
-            character_scan_progress: RwLock::new(HashMap::new()),
+            fighter_tube_loads,
+            active_scanner_probes: RankedRwLock::new(persisted_probes),
+            active_moon_probes: RankedRwLock::new(Vec::new()),
+            scanned_signatures: RankedRwLock::new(HashSet::new()),
+            character_scan_progress: RankedRwLock::new(HashMap::new()),
             invention_roll_override,
             mechanic_rng,
             module_reactivation_cooldowns,
-            mining_cycles: RwLock::new(HashMap::new()),
-            phased_asteroid_fields: RwLock::new(HashMap::new()),
+            mining_cycles: RankedRwLock::new(HashMap::new()),
+            phased_asteroid_fields: RankedRwLock::new(HashMap::new()),
             crimewatch,
             combat_ephemeral,
             tactical_state,
-            session_change_timers: std::sync::Mutex::new(HashMap::new()),
-            active_warps: std::sync::Mutex::new(HashMap::new()),
-            return_warps: std::sync::Mutex::new(HashSet::new()),
-            location_change_invuln: std::sync::Mutex::new(HashMap::new()),
+            session_change_timers: RankedMutex::new(HashMap::new()),
+            active_warps: RankedMutex::new(HashMap::new()),
+            return_warps: RankedMutex::new(HashSet::new()),
+            location_change_invuln: RankedMutex::new(HashMap::new()),
             feature_flags: crate::config::FeatureFlagsConfig::default(),
             esi_port: 26_004,
             xmpp_port: 5222,
             esi_state: Arc::new(crate::esi::runtime_state::EsiRuntimeState::new()),
-            fleet_extras: std::sync::Mutex::new(Default::default()),
-            social_extras: std::sync::Mutex::new(crate::services::fleet_social::fleet_social_chat::SocialExtrasState::new()),
+            fleet_extras: RankedMutex::new(Default::default()),
+            social_extras: RankedMutex::new(crate::services::fleet_social::fleet_social_chat::SocialExtrasState::new()),
             cluster_misc_state: cluster_misc_arc,
-            cluster_state: Arc::new(RwLock::new(crate::services::macho_cluster_mgmt::MachoClusterState::default())),
-            global_config_values: RwLock::new(persisted_global_config),
-            alert_telemetry: std::sync::Mutex::new(crate::services::client_login::AlertTelemetryState::default()),
+            cluster_state: Arc::new(RankedRwLock::new(crate::services::macho_cluster_mgmt::MachoClusterState::default())),
+            global_config_values: RankedRwLock::new(persisted_global_config),
+            alert_telemetry: RankedMutex::new(crate::services::client_login::AlertTelemetryState::default()),
             flight_recorder: Arc::new(crate::flight_recorder::FlightRecorder::new()),
             bug_reporting: Arc::new(crate::bug_reporting::BugReportingRuntime::new()),
-            npc_spawns: RwLock::new(HashMap::new()),
+            npc_spawns: RankedRwLock::new(HashMap::new()),
             combat_rng_seq: AtomicU64::new(1),
             cluster_tick_last_unix: AtomicU64::new(0),
             cluster_tick_persisted_unix: AtomicU64::new(0),
             dedicated_physics_ticker_active: AtomicBool::new(false),
-            fw_idle_last_step_unix: RwLock::new(HashMap::new()),
+            fw_idle_last_step_unix: RankedRwLock::new(HashMap::new()),
         };
         ctx.db.with_mut_snapshot(|snap| {
             snap.module_active_states.clear();
@@ -647,7 +851,12 @@ impl ServerContext {
     }
 
     pub fn mark_signature_scanned(&self, char_id: i64, solar_system_id: u32, sig_ball_id: i64) {
-        if self.scanned_signatures.write().unwrap_or_else(|e| e.into_inner()).insert((char_id, solar_system_id, sig_ball_id)) {
+        let inserted = self
+            .scanned_signatures
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert((char_id, solar_system_id, sig_ball_id));
+        if inserted {
             self.quasar_gateway.progression.daily_goals.on_gameplay_event(char_id as u32, 3, 1, &self.quasar_gateway);
             self.quasar_gateway.progression.career_goals.on_gameplay_event(char_id as u32, "exploration", 1, &self.quasar_gateway);
             self.quasar_gateway.progression.extra.on_campaign_gameplay_event(char_id as u32, crate::services::quasar_campaign_state::CampaignEvent { method: "ScanSignature", type_id: None, solar_system_id: Some(solar_system_id), faction_id: None }, 1, self.now_unix(), &self.quasar_gateway);

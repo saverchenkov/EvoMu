@@ -362,29 +362,31 @@ impl PersistedServerRuntimeState {
             .map(|(k, &v)| (k.clone(), v))
             .collect();
         character_scan_progress.sort_by(|(a, _), (b, _)| a.cmp(b));
-        let mut fighter_cooldown_state: Vec<_> = ctx
-            .fighter_cooldown_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .map(|(&k, &v)| (k, v))
-            .collect();
+        let (
+            active_fighters,
+            mut fighter_cooldown_state,
+            mut fighter_charge_state,
+            mut fighter_tube_loads,
+        ) = {
+            let fg = ctx.fighters.read().unwrap_or_else(|e| e.into_inner());
+            (
+                fg.active_fighters.clone(),
+                fg.cooldown_state
+                    .iter()
+                    .map(|(&k, &v)| (k, v))
+                    .collect::<Vec<_>>(),
+                fg.charge_state
+                    .iter()
+                    .map(|(&k, &v)| (k, v))
+                    .collect::<Vec<_>>(),
+                fg.tube_loads
+                    .iter()
+                    .map(|(&k, &v)| (k, v))
+                    .collect::<Vec<_>>(),
+            )
+        };
         fighter_cooldown_state.sort_by_key(|(k, _)| *k);
-        let mut fighter_charge_state: Vec<_> = ctx
-            .fighter_charge_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .map(|(&k, &v)| (k, v))
-            .collect();
         fighter_charge_state.sort_by_key(|(k, _)| *k);
-        let mut fighter_tube_loads: Vec<_> = ctx
-            .fighter_tube_loads
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .map(|(&k, &v)| (k, v))
-            .collect();
         fighter_tube_loads.sort_by_key(|(k, _)| *k);
         let mut module_reactivation_cooldowns: Vec<_> = ctx
             .module_reactivation_cooldowns
@@ -403,69 +405,76 @@ impl PersistedServerRuntimeState {
             .collect();
         active_ewar_starts.sort_by_key(|(k, _)| *k);
 
+        let active_moon_probes = ctx
+            .active_moon_probes
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let mining_cycles = ctx
+            .mining_cycles
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let phased_asteroid_fields = ctx
+            .phased_asteroid_fields
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let session_change_timers = ctx
+            .session_change_timers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let active_warps = ctx
+            .active_warps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let location_change_invuln = ctx
+            .location_change_invuln
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let weapon_cycle_state = ctx
+            .weapon_cycle_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let projected_ewar = ctx
+            .projected_ewar
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let projected_ewar_sources = ctx
+            .projected_ewar_sources
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let map_landmarks = ctx
+            .map_landmarks
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+
         Self {
-            active_moon_probes: ctx
-                .active_moon_probes
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
+            active_moon_probes,
             scanned_signatures,
             character_scan_progress,
-            active_fighters: ctx
-                .active_fighters
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
+            active_fighters,
             fighter_cooldown_state,
             fighter_charge_state,
             fighter_tube_loads,
             module_reactivation_cooldowns,
-            mining_cycles: ctx
-                .mining_cycles
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
-            phased_asteroid_fields: ctx
-                .phased_asteroid_fields
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
-            session_change_timers: ctx
-                .session_change_timers
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
-            active_warps: ctx
-                .active_warps
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
-            location_change_invuln: ctx
-                .location_change_invuln
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
-            weapon_cycle_state: ctx
-                .weapon_cycle_state
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
-            projected_ewar: ctx
-                .projected_ewar
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
-            projected_ewar_sources: ctx
-                .projected_ewar_sources
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
+            mining_cycles,
+            phased_asteroid_fields,
+            session_change_timers,
+            active_warps,
+            location_change_invuln,
+            weapon_cycle_state,
+            projected_ewar,
+            projected_ewar_sources,
             active_ewar_starts,
-            map_landmarks: ctx
-                .map_landmarks
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
+            map_landmarks,
             tactical_state,
             fleet_extras_runtime,
             social_extras_runtime,
@@ -522,18 +531,13 @@ impl PersistedServerRuntimeState {
         *ctx.character_scan_progress
             .write()
             .unwrap_or_else(|e| e.into_inner()) = self.character_scan_progress.into_iter().collect();
-        *ctx.active_fighters
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = self.active_fighters;
-        *ctx.fighter_cooldown_state
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = self.fighter_cooldown_state.into_iter().collect();
-        *ctx.fighter_charge_state
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = self.fighter_charge_state.into_iter().collect();
-        *ctx.fighter_tube_loads
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = self.fighter_tube_loads.into_iter().collect();
+        {
+            let mut fg = ctx.fighters.write().unwrap_or_else(|e| e.into_inner());
+            fg.active_fighters = self.active_fighters;
+            fg.cooldown_state = self.fighter_cooldown_state.into_iter().collect();
+            fg.charge_state = self.fighter_charge_state.into_iter().collect();
+            fg.tube_loads = self.fighter_tube_loads.into_iter().collect();
+        }
         *ctx.module_reactivation_cooldowns
             .write()
             .unwrap_or_else(|e| e.into_inner()) =
@@ -1105,11 +1109,13 @@ mod tests {
 
         ctx.hydrate_server_runtime_from_db();
 
-        let probes = ctx.active_scanner_probes.read().unwrap();
-        assert_eq!(probes.len(), 1);
-        assert_eq!(probes[&501].state, 0);
-        assert_eq!(probes[&501].warp_end_ft, None);
-        assert!(!probes.contains_key(&502));
+        {
+            let probes = ctx.active_scanner_probes.read().unwrap();
+            assert_eq!(probes.len(), 1);
+            assert_eq!(probes[&501].state, 0);
+            assert_eq!(probes[&501].warp_end_ft, None);
+            assert!(!probes.contains_key(&502));
+        }
 
         let notifs = ctx.notification_records.read().unwrap();
         assert_eq!(notifs.len(), 2);
