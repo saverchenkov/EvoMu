@@ -125,9 +125,28 @@ pub(crate) fn map_call_req_error_body(
                 (PyRep::ascii_bytes("maxCnt"), PyRep::Integer(max_cnt)),
             ],
         )
+    } else if err.code == "InsureShipFailedSingleContract" {
+        let owner_id = err
+            .message
+            .split_once("ownerName=")
+            .and_then(|(_, rest)| {
+                let digits: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '-')
+                    .collect();
+                digits.parse::<i64>().ok()
+            })
+            .or_else(|| err.message.trim().parse::<i64>().ok())
+            .filter(|&id| id > 0)
+            .unwrap_or(90_000_001);
+        eve_machonet::wrapped_user_error_with_dict_body(
+            MachoPacketType::CallReq as i64,
+            "InsureShipFailedSingleContract",
+            vec![(PyRep::ascii_bytes("ownerName"), PyRep::Integer(owner_id))],
+        )
     } else if matches!(
         err.code.as_str(),
-        "InsureShipFailedSingleContract" | "InsureShipInvalidCost" | "InsureShipFailed"
+        "InsureShipInvalidCost" | "InsureShipFailed"
     ) {
         eve_machonet::wrapped_user_error_with_dict_body(
             MachoPacketType::CallReq as i64,
@@ -962,7 +981,16 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                     named_payload,
                                 }
                             }
-                            Err(err) => {
+                            Err(mut err) => {
+                                if err.code == "InsureShipFailedSingleContract"
+                                    && !err.message.contains("ownerName=")
+                                {
+                                    if let Some(cid) = session.character_id {
+                                        err.message = format!(
+                                            "InsureShipFailedSingleContract (ownerName={cid})"
+                                        );
+                                    }
+                                }
                                 let payload = map_call_req_error_body(&service, &method, &err);
                                 MachoPacket {
                                     packet_type: MachoPacketType::ErrorResponse,

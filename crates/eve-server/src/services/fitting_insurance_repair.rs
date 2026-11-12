@@ -159,8 +159,20 @@ pub(super) fn handle_insure_ship(
             .get(&ship_id)
             .cloned()
             .filter(|c| c.end_unix > now_unix);
-        if existing.is_some() && !void_old {
-            return Err(BridgeRpcError::user_error("InsureShipFailedSingleContract"));
+        if let Some(existing_contract) = existing {
+            if !void_old {
+                let contract_owner_id = if existing_contract.owner_id > 0 {
+                    existing_contract.owner_id
+                } else {
+                    owner_id
+                };
+                return Err(BridgeRpcError {
+                    code: "InsureShipFailedSingleContract".into(),
+                    message: format!(
+                        "InsureShipFailedSingleContract (ownerName={contract_owner_id})"
+                    ),
+                });
+            }
         }
         let live_prices =
             crate::services::industry_pi::industry_rigs::collect_live_market_adjusted_prices(snap);

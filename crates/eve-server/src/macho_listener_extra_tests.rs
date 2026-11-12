@@ -414,11 +414,29 @@ fn decode_wrapped_user_error(body: PyRep) -> (String, Vec<(String, PyRep)>) {
 
 #[test]
 fn map_call_req_error_body_preserves_exact_insurance_user_error_keys() {
-    for code in [
-        "InsureShipFailedSingleContract",
-        "InsureShipInvalidCost",
-        "InsureShipFailed",
+    for (msg, expected_owner_id) in [
+        ("InsureShipFailedSingleContract (ownerName=90000001)", 90_000_001i64),
+        ("InsureShipFailedSingleContract (ownerName=1000009)", 1_000_009i64),
+        ("InsureShipFailedSingleContract", 90_000_001i64),
     ] {
+        let err = eve_proto::BridgeRpcError {
+            code: "InsureShipFailedSingleContract".into(),
+            message: msg.into(),
+        };
+        let (key, dict) = decode_wrapped_user_error(map_call_req_error_body(
+            "insuranceSvc",
+            "InsureShip",
+            &err,
+        ));
+        assert_eq!(key, "InsureShipFailedSingleContract");
+        assert_eq!(
+            dict,
+            vec![("ownerName".to_string(), PyRep::Integer(expected_owner_id))],
+            "InsureShipFailedSingleContract must include integer ownerName for V24 base_insurance.pyj"
+        );
+    }
+
+    for code in ["InsureShipInvalidCost", "InsureShipFailed"] {
         let err = eve_proto::BridgeRpcError::user_error(code);
         let (key, dict) = decode_wrapped_user_error(map_call_req_error_body(
             "insuranceSvc",
