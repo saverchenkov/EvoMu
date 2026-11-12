@@ -869,12 +869,18 @@ fn test_t2_sde_control_tower_resources_raw_client_verification() {
     // Strontium Clathrates (16275, qty 400, purpose 4), and 6 empire starbase charters.
     let amarr_tower = &ctr[&12_235];
     assert_eq!(amarr_tower.len(), 8);
-    assert_eq!(amarr_tower[0].resource_type_id, 4_247);
-    assert_eq!(amarr_tower[0].purpose, 1);
-    assert_eq!(amarr_tower[0].quantity, 40);
-    assert_eq!(amarr_tower[1].resource_type_id, 16_275);
-    assert_eq!(amarr_tower[1].purpose, 4);
-    assert_eq!(amarr_tower[1].quantity, 400);
+    let helium = amarr_tower
+        .iter()
+        .find(|r| r.resource_type_id == 4_247)
+        .expect("Amarr Control Tower Helium Fuel Block");
+    assert_eq!(helium.purpose, 1);
+    assert_eq!(helium.quantity, 40);
+    let strontium = amarr_tower
+        .iter()
+        .find(|r| r.resource_type_id == 16_275)
+        .expect("Amarr Control Tower Strontium Clathrates");
+    assert_eq!(strontium.purpose, 4);
+    assert_eq!(strontium.quantity, 400);
 
     // Minmatar Control Tower (16214) in null-sec with sov discount (0.75): 40 * 0.75 = 30 Hydrogen Fuel Blocks (4246).
     let minmatar_null = sde
