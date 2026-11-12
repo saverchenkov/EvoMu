@@ -7,7 +7,6 @@
 
 use crate::snapshot_ext::WorldStateSnapshot;
 use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::BTreeMap;
 
 /// Default maximum serialized JSON payload size (64 KiB) for a single `(ns, entity_id, sub_key)` row.
 pub const DEFAULT_ENTITY_KV_MAX_VALUE_BYTES: usize = 65_536;
@@ -273,7 +272,7 @@ pub mod entity_kv_map_serde {
     use super::{EntityKvKey, EntityKvRow};
     use serde::de::{MapAccess, Visitor};
     use serde::ser::SerializeMap;
-    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::{Deserializer, Serializer};
     use std::collections::BTreeMap;
     use std::fmt;
 
