@@ -504,3 +504,308 @@ async fn build_all_info_and_item_get_info_populate_effect_online_16_for_online_m
     let PyRep::Dict(item_off_effs) = item_off.dict_get("activeEffects").unwrap() else { panic!() };
     assert!(item_off_effs.is_empty());
 }
+
+#[test]
+fn unload_ammo_docked_station_hangar_destination_and_invalid_dest_946() {
+    let ctx = test_ctx();
+    let char_id = 93_000_060;
+    let other_char_id = 93_000_061;
+    let sys_id = 30_000_142;
+    let station_id = 60_003_760_i64;
+    let ship_id = 1_000_300_601;
+    let gun_id = 1_000_300_602;
+    let charge_id = 1_000_300_603;
+    let filler_cargo_id = 1_000_300_604;
+
+    ensure_char(&ctx, char_id, 98_000_001, sys_id, ship_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(station_id);
+        }
+    });
+    insert_item(&ctx, ship_id, 587, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, gun_id, 484, char_id, ship_id, InventoryFlag::HiSlot0, 1, true);
+    insert_item(&ctx, charge_id, 179, char_id, ship_id, InventoryFlag::HiSlot0, 40, false);
+    // Fill ship cargo beyond capacity so unloading to Cargo would fail, proving station hangar bypasses ship cargo cap
+    insert_item(&ctx, filler_cargo_id, 179, char_id, ship_id, InventoryFlag::Cargo, 500_000, false);
+
+    let sess = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(98_000_001),
+        station_id: Some(station_id),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+
+    // 1. Foreign destination owner rejected
+    let err_owner = handle_unload_ammo(
+        &ctx,
+        &sess,
+        &[
+            PyRep::Integer(ship_id),
+            PyRep::List(vec![PyRep::Integer(gun_id)]),
+            PyRep::Tuple(vec![
+                PyRep::Integer(station_id),
+                PyRep::Integer(other_char_id),
+                PyRep::Integer(InventoryFlag::Hangar as i64),
+            ]),
+        ],
+    )
+    .unwrap_err();
+    assert_eq!(err_owner.code, "ItemOwnershipViolation");
+
+    // 2. Invalid destination flag rejected
+    let err_flag = handle_unload_ammo(
+        &ctx,
+        &sess,
+        &[
+            PyRep::Integer(ship_id),
+            PyRep::List(vec![PyRep::Integer(gun_id)]),
+            PyRep::Tuple(vec![
+                PyRep::Integer(station_id),
+                PyRep::Integer(char_id),
+                PyRep::Integer(27),
+            ]),
+        ],
+    )
+    .unwrap_err();
+    assert_eq!(err_flag.code, "InvalidInventoryFlag");
+
+    // 3. Unreachable station rejected
+    let err_dest = handle_unload_ammo(
+        &ctx,
+        &sess,
+        &[
+            PyRep::Integer(ship_id),
+            PyRep::List(vec![PyRep::Integer(gun_id)]),
+            PyRep::Tuple(vec![
+                PyRep::Integer(60_009_999),
+                PyRep::Integer(char_id),
+                PyRep::Integer(InventoryFlag::Hangar as i64),
+            ]),
+        ],
+    )
+    .unwrap_err();
+    assert_eq!(err_dest.code, "InvalidDestination");
+
+    // 3b. Active module rejected with ModuleIsActive, Hangar(4) on ship rejected, 2-tuple (ship_id, Cargo) supported
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.insert(gun_id);
+    });
+    let err_active = handle_unload_ammo(
+        &ctx,
+        &sess,
+        &[PyRep::Integer(ship_id), PyRep::List(vec![PyRep::Integer(gun_id)])],
+    )
+    .unwrap_err();
+    assert_eq!(err_active.code, "ModuleIsActive");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.remove(&gun_id);
+    });
+
+    let err_ship_hangar = handle_unload_ammo(
+        &ctx,
+        &sess,
+        &[
+            PyRep::Integer(ship_id),
+            PyRep::List(vec![PyRep::Integer(gun_id)]),
+            PyRep::Tuple(vec![
+                PyRep::Integer(ship_id),
+                PyRep::Integer(InventoryFlag::Hangar as i64),
+            ]),
+        ],
+    )
+    .unwrap_err();
+    assert_eq!(err_ship_hangar.code, "InvalidInventoryFlag");
+
+    // 4. Unloading to ship cargo when cargo is full or ship capacity is unknown/zero fails closed with NotEnoughCargoSpace
+    let err_cargo = handle_unload_ammo(
+        &ctx,
+        &sess,
+        &[
+            PyRep::Integer(ship_id),
+            PyRep::List(vec![PyRep::Integer(gun_id)]),
+            PyRep::Tuple(vec![
+                PyRep::Integer(ship_id),
+                PyRep::Integer(InventoryFlag::Cargo as i64),
+            ]),
+        ],
+    )
+    .unwrap_err();
+    assert_eq!(err_cargo.code, "NotEnoughCargoSpace");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.type_id = 999_999_999; // unknown ship type -> eval_cargo_cap is None -> fail closed
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    let err_unknown_cap = handle_unload_ammo(
+        &ctx,
+        &sess,
+        &[PyRep::Integer(ship_id), PyRep::List(vec![PyRep::Integer(gun_id)])],
+    )
+    .unwrap_err();
+    assert_eq!(err_unknown_cap.code, "NotEnoughCargoSpace");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.type_id = 587;
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    // 4b. Unloading into a packaged container (!singleton) or another owned ship in station hangar is rejected
+    let packaged_cont_id = 1_000_300_605;
+    let other_ship_id = 1_000_300_606;
+    insert_item(&ctx, packaged_cont_id, 3297, char_id, station_id, InventoryFlag::Hangar, 1, false);
+    insert_item(&ctx, other_ship_id, 587, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    let err_pkg_cont = handle_unload_ammo(
+        &ctx,
+        &sess,
+        &[
+            PyRep::Integer(ship_id),
+            PyRep::List(vec![PyRep::Integer(gun_id)]),
+            PyRep::Integer(packaged_cont_id),
+        ],
+    )
+    .unwrap_err();
+    assert_eq!(err_pkg_cont.code, "ContainerNotAssembled");
+
+    let err_other_ship = handle_unload_ammo(
+        &ctx,
+        &sess,
+        &[
+            PyRep::Integer(ship_id),
+            PyRep::List(vec![PyRep::Integer(gun_id)]),
+            PyRep::Integer(other_ship_id),
+        ],
+    )
+    .unwrap_err();
+    assert_eq!(err_other_ship.code, "InvalidDestination");
+
+    // 4c. Malformed args[2] (<= 0 or non-integer), CorpSAG flag (116), or Hangar flag (4) on container fail closed
+    assert_eq!(
+        handle_unload_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::List(vec![PyRep::Integer(gun_id)]), PyRep::Integer(0)]).unwrap_err().code,
+        "InvalidDestination"
+    );
+    assert_eq!(
+        handle_unload_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::List(vec![PyRep::Integer(gun_id)]), PyRep::Tuple(vec![PyRep::Integer(station_id), PyRep::Integer(116)])]).unwrap_err().code,
+        "InvalidInventoryFlag"
+    );
+    let assembled_cont_id = 1_000_300_607;
+    insert_item(&ctx, assembled_cont_id, 3297, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    assert_eq!(
+        handle_unload_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::List(vec![PyRep::Integer(gun_id)]), PyRep::Tuple(vec![PyRep::Integer(assembled_cont_id), PyRep::Integer(InventoryFlag::Hangar as i64)])]).unwrap_err().code,
+        "InvalidInventoryFlag"
+    );
+
+    // 5. Unloading to docked station hangar (station_id, char_id, 4) succeeds and moves charge to station hangar
+    let _ = ctx.drain_notifications_for_char(char_id);
+    handle_unload_ammo(
+        &ctx,
+        &sess,
+        &[
+            PyRep::Integer(ship_id),
+            PyRep::List(vec![PyRep::Integer(gun_id)]),
+            PyRep::Tuple(vec![
+                PyRep::Integer(station_id),
+                PyRep::Integer(char_id),
+                PyRep::Integer(InventoryFlag::Hangar as i64),
+            ]),
+        ],
+    )
+    .expect("unload to docked station hangar");
+
+    let moved_charge = ctx.db.get_item(charge_id).expect("charge still exists");
+    assert_eq!(moved_charge.location_id, station_id);
+    assert_eq!(moved_charge.flag, InventoryFlag::Hangar);
+    assert_eq!(moved_charge.quantity, 40);
+    assert!(!moved_charge.singleton);
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs.iter().any(|n| n.event == "OnItemChange"
+            && format!("{:?}", n.args).contains(&charge_id.to_string())
+            && format!("{:?}", n.args).contains(&station_id.to_string())),
+        "expected OnItemChange for charge moving from ship to station hangar, got {notifs:?}"
+    );
+}
+
+#[test]
+fn get_all_info_and_prime_ship_include_loaded_charges_941_948() {
+    let ctx = test_ctx();
+    let char_id = 93_000_070;
+    let sys_id = 30_000_142;
+    let ship_id = 1_000_300_701;
+    let launcher_id = 1_000_300_702;
+    let charge_id = 1_000_300_703;
+
+    ensure_char(&ctx, char_id, 98_000_001, sys_id, ship_id);
+    insert_item(&ctx, ship_id, 587, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    insert_item(&ctx, launcher_id, 484, char_id, ship_id, InventoryFlag::HiSlot0, 1, true);
+    insert_item(&ctx, charge_id, 179, char_id, ship_id, InventoryFlag::HiSlot0, 40, false);
+
+    let sess = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        ship_id: Some(ship_id),
+        solar_system_id: Some(sys_id),
+        ..Default::default()
+    };
+
+    let (ship_tid, active_stance, entries, module_entries) =
+        evaluate_ship_dogma_attributes(&ctx, char_id, ship_id).expect("eval ship dogma");
+    assert!(
+        module_entries.iter().any(|(k, _)| k.as_i64() == Some(charge_id)),
+        "module_entries must include loaded charge {charge_id}: {module_entries:?}"
+    );
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let all_info = build_all_info(
+        &ctx,
+        &sess,
+        char_id,
+        ship_id,
+        ship_tid,
+        active_stance,
+        entries,
+        module_entries,
+        &[],
+    );
+    let PyRep::Dict(ship_entries) = all_info.dict_get("shipInfo").expect("shipInfo") else {
+        panic!("expected shipInfo Dict");
+    };
+    let charge_entry = ship_entries
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(charge_id))
+        .map(|(_, v)| v)
+        .expect("shipInfo must contain loaded charge entry (#941/#948)");
+
+    // Verify invItem preserves stacksize=40 (singleton=false -> quantity cell is 40, not -1)
+    let inv_item_str = format!("{:?}", charge_entry.dict_get("invItem"));
+    assert!(
+        inv_item_str.contains("Integer(40)"),
+        "loaded charge invItem DBRow must encode stacksize 40 (singleton=false), got {inv_item_str}"
+    );
+
+    // Verify attributes dict includes attributeQuantity (80) = 40.0
+    let PyRep::Dict(c_attrs) = charge_entry.dict_get("attributes").expect("charge attributes") else {
+        panic!("expected charge attributes Dict");
+    };
+    assert!(
+        c_attrs.iter().any(|(k, v)| k.as_i64() == Some(80) && v.as_f64() == Some(40.0)),
+        "charge attributes must include QUANTITY (80) = 40.0: {c_attrs:?}"
+    );
+
+    // Verify ProcessGodmaPrimeLocation notification on prime_ship_on_board (undock #948) also includes charge_id
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let _ = prime_ship_on_board(&ctx, &sess, char_id, ship_id);
+    let prime_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        prime_notifs.iter().any(|n| n.event == "ProcessGodmaPrimeLocation"
+            && format!("{:?}", n.args).contains(&charge_id.to_string())),
+        "prime_ship_on_board must include loaded charge in ProcessGodmaPrimeLocation (#948)"
+    );
+}

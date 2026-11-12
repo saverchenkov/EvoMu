@@ -635,9 +635,14 @@ pub(crate) async fn handle_dogma_im(
                         }
                     } else if item.owner_id != char_id {
                         return Err(BridgeRpcError { code: "ItemNotOwnedByCharacter".into(), message: "Cannot destroy an item not owned by character".into() });
-                    } else if undocked && (Some(loc) != session.ship_id || !matches!(flag_u16, 11..=34 | 92..=94 | 125..=132 | 164..=171)) {
-                        return Err(BridgeRpcError { code: "ItemNotFittedToActiveShip".into(), message: "In-space DestroyFitting requires a fitted item on the active ship".into() });
+                    } else if Some(item_id) == session.ship_id
+                        || snap.characters.get(&char_id).is_some_and(|c| c.active_ship_id == item_id)
+                        || (undocked && (Some(loc) != session.ship_id || !matches!(flag_u16, 11..=34 | 92..=94 | 125..=132 | 164..=171)))
+                        || (!undocked && flag_u16 != 4 && !matches!(flag_u16, 11..=34 | 92..=94 | 125..=132 | 164..=171))
+                    {
+                        return Err(BridgeRpcError { code: "ItemNotFittedToActiveShip".into(), message: "DestroyFitting requires a fitted item".into() });
                     }
+                    crate::services::fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, item)?;
                     if snap.module_active_states.contains(&item_id) {
                         return Err(BridgeRpcError { code: "ModuleIsActive".into(), message: format!("Module {item_id} cannot be destroyed while active") });
                     }
@@ -649,15 +654,44 @@ pub(crate) async fn handle_dogma_im(
                             return Err(BridgeRpcError { code: "SubsystemHasFittedModules".into(), message: "Cannot destroy a T3 Strategic Cruiser subsystem while modules are fitted".into() });
                         }
                     }
-                    let found = (loc, item.flag as i64, item.type_id as i64, item.quantity as i64);
+                    let old_flag = item.flag;
+                    let found = (loc, old_flag as i64, item.type_id as i64, item.quantity as i64);
+                    let mut removed_charges = Vec::new();
+                    if (11..=34).contains(&flag_u16)
+                        && ctx.sde.types.get(&item.type_id).is_none_or(|t| t.category_id != 8)
+                    {
+                        let charge_ids: Vec<i64> = snap
+                            .items
+                            .values()
+                            .filter(|other| {
+                                other.location_id == loc
+                                    && other.flag == old_flag
+                                    && other.item_id != item_id
+                                    && ctx.sde.types.get(&other.type_id).is_some_and(|t| t.category_id == 8)
+                            })
+                            .map(|other| other.item_id)
+                            .collect();
+                        for cid in charge_ids {
+                            if let Some(c_rec) = snap.items.get(&cid).cloned() {
+                                removed_charges.push(c_rec);
+                            }
+                            snap.remove_system_cleanup_item(cid);
+                        }
+                    }
+                    if let Some(banks) = snap.weapon_banks.get_mut(&loc) {
+                        for list in banks.values_mut() {
+                            list.retain(|&id| id != item_id);
+                        }
+                        banks.retain(|k, v| *k != item_id && v.len() > 1);
+                    }
                     snap.remove_system_cleanup_item(item_id);
-                    Ok(Some(found))
+                    Ok(Some((found, removed_charges)))
                 } else {
                     Ok(None)
                 }
             });
             let loc_opt = match destroy_res { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            if let Some((loc, flag, type_id, qty)) = loc_opt {
+            if let Some(((loc, flag, type_id, qty), removed_charges)) = loc_opt {
                 if let Some(sys_id) = session.solar_system_id {
                     let sys = ctx.systems.get_or_spawn(sys_id);
                     let _ = sys.remove_module_cycle(loc, item_id).await;
@@ -679,6 +713,9 @@ pub(crate) async fn handle_dogma_im(
                     }
                 }
                 crate::services::tactical_modules::remove_projected_remote_assistance(ctx, loc, item_id);
+                for c_rec in &removed_charges {
+                    ctx.notify_item_mutation(char_id, Some(c_rec), None);
+                }
                 ctx.invalidate_ship_fitting(loc);
                 if let Ok(new_fit) = ctx.get_or_rebuild_ship_fitting(char_id, loc) {
                     if let Some((old_cpu, old_pg)) = old_fit_loads {

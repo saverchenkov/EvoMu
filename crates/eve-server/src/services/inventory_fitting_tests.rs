@@ -38,6 +38,17 @@ async fn inventory_fitting_get_item_descriptor_list_and_add_module_and_cargo() {
         ch.solar_system_id = 30_000_142;
         ch.active_ship_id = ship_id;
         snap.characters.insert(char_id, ch);
+        let sk = snap.skills.entry(char_id).or_default();
+        for sid in [3300_u32, 3302] {
+            sk.insert(
+                sid,
+                eve_db::TrainedSkillRecord {
+                    type_id: sid,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
 
         snap.items.insert(
             ship_id,
@@ -504,6 +515,17 @@ async fn issue_630_fitting_module_sets_singleton_and_emits_dbrow_item_change() {
         ch.solar_system_id = 30_000_142;
         ch.active_ship_id = ship_id;
         snap.characters.insert(char_id, ch);
+        let sk = snap.skills.entry(char_id).or_default();
+        for sid in [3300_u32, 3302] {
+            sk.insert(
+                sid,
+                eve_db::TrainedSkillRecord {
+                    type_id: sid,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
 
         snap.items.insert(
             ship_id,
@@ -705,6 +727,17 @@ async fn invbroker_add_bound_ship_ignores_source_arg_and_autofits_slot_0() {
         ch.solar_system_id = 30_000_142;
         ch.active_ship_id = ship_id;
         snap.characters.insert(char_id, ch);
+        let sk = snap.skills.entry(char_id).or_default();
+        for sid in [3300_u32, 3302] {
+            sk.insert(
+                sid,
+                eve_db::TrainedSkillRecord {
+                    type_id: sid,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
 
         let sk_map = snap.skills.entry(char_id).or_default();
         for sk in [3300_u32, 3301, 3302, 3426] {
@@ -885,6 +918,17 @@ async fn bound_ship_add_with_station_arg_fits_into_ship_and_emits_full_dbrow_ite
         ch.solar_system_id = 30_000_142;
         ch.active_ship_id = ship_id;
         snap.characters.insert(char_id, ch);
+        let sk = snap.skills.entry(char_id).or_default();
+        for sid in [3300_u32, 3302] {
+            sk.insert(
+                sid,
+                eve_db::TrainedSkillRecord {
+                    type_id: sid,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
 
         snap.items.insert(
             ship_id,
@@ -1071,6 +1115,17 @@ async fn toctou_concurrent_invbroker_add_slot_and_cargo_cap() {
         ch.solar_system_id = sys_id;
         ch.active_ship_id = ship_id;
         snap.characters.insert(char_id, ch);
+        let sk = snap.skills.entry(char_id).or_default();
+        for sid in [3300_u32, 3302] {
+            sk.insert(
+                sid,
+                eve_db::TrainedSkillRecord {
+                    type_id: sid,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
 
         snap.items.insert(
             ship_id,
@@ -1218,6 +1273,17 @@ async fn toctou_concurrent_ship_jettison_enforces_cooldown() {
         ch.solar_system_id = sys_id;
         ch.active_ship_id = ship_id;
         snap.characters.insert(char_id, ch);
+        let sk = snap.skills.entry(char_id).or_default();
+        for sid in [3300_u32, 3302] {
+            sk.insert(
+                sid,
+                eve_db::TrainedSkillRecord {
+                    type_id: sid,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
 
         snap.items.insert(
             ship_id,
@@ -1658,5 +1724,251 @@ async fn toctou_concurrent_dock_stargate_anchor_filament_loot_hacking() {
         [&hr1, &hr2].iter().filter(|r| matches!(r, Some(Ok(_)))).count(),
         1,
         "only one concurrent StartNewGameInstance may claim an in-progress structure hack: hr1={hr1:?} hr2={hr2:?}"
+    );
+}
+
+#[tokio::test]
+async fn unfitting_loaded_module_relocates_charge_and_emits_on_item_change_947() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 91_609_470_i64;
+    let station_id = 60_003_760_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_id = 91_609_471_i64;
+    let gun_id = 91_609_472_i64;
+    let charge_id = 91_609_473_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = 1;
+        ch.station_id = Some(station_id);
+        ch.solar_system_id = sys_id;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+        let sk = snap.skills.entry(char_id).or_default();
+        for sid in [3300_u32, 3302] {
+            sk.insert(
+                sid,
+                eve_db::TrainedSkillRecord {
+                    type_id: sid,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            gun_id,
+            InventoryItemRecord {
+                item_id: gun_id,
+                type_id: 484, // 125mm Gatling AutoCannon I
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            charge_id,
+            InventoryItemRecord {
+                item_id: charge_id,
+                type_id: 179, // Depleted Uranium S
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 40,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(gun_id, true);
+        snap.weapon_banks
+            .entry(ship_id)
+            .or_default()
+            .insert(gun_id, vec![gun_id, 91_609_499]);
+    });
+
+    let mut session = SessionState {
+        user_id: Some(1),
+        character_id: Some(char_id),
+        station_id: Some(station_id),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    ctx.db
+        .acquire_online_lock(1, 1, Some(char_id), true, ctx.now_unix_secs())
+        .expect("online lock");
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let unfit_res = handle(
+        &ctx,
+        &mut session,
+        None,
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(gun_id),
+            PyRep::Integer(station_id),
+            PyRep::Integer(InventoryFlag::Hangar as i64),
+        ],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("unfit module to station hangar");
+    assert_eq!(unfit_res.dict_get("locationID").and_then(|v| v.as_i64()), Some(station_id));
+    assert!(
+        ctx.db.with_snapshot(|s| s.weapon_banks.get(&ship_id).is_none_or(|b| b.is_empty())),
+        "unfitting banked weapon must remove it from ship weapon_banks"
+    );
+
+    let gun_after = ctx.db.get_item(gun_id).expect("gun exists");
+    assert_eq!(gun_after.location_id, station_id);
+    assert_eq!(gun_after.flag, InventoryFlag::Hangar);
+
+    let charge_after = ctx.db.get_item(charge_id).expect("charge exists");
+    assert_eq!(
+        charge_after.location_id, station_id,
+        "loaded charge must move with unfitted module instead of staying stranded on ship (#947)"
+    );
+    assert_eq!(charge_after.flag, InventoryFlag::Hangar);
+    assert_eq!(charge_after.quantity, 40);
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs.iter().any(|n| n.event == "OnItemChange" && format!("{:?}", n.args).contains(&charge_id.to_string())),
+        "unfitting loaded module must emit OnItemChange for the relocated charge (#947), got {notifs:?}"
+    );
+
+    // 2. Re-fit module + charge into HiSlot0, then move module directly from HiSlot0 -> HiSlot1:
+    //    loaded charge must move with the module to HiSlot1 (never stranded in HiSlot0).
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(g) = snap.items.get_mut(&gun_id) {
+            g.location_id = ship_id;
+            g.flag = InventoryFlag::HiSlot0;
+            g.singleton = true;
+        }
+        if let Some(c) = snap.items.get_mut(&charge_id) {
+            c.location_id = ship_id;
+            c.flag = InventoryFlag::HiSlot0;
+            c.singleton = false;
+        }
+        snap.module_online_states.insert(gun_id, true);
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+    handle(
+        &ctx,
+        &mut session,
+        None,
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(gun_id),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(InventoryFlag::HiSlot1 as i64),
+        ],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("reslot module HiSlot0 -> HiSlot1");
+    assert_eq!(ctx.db.get_item(gun_id).unwrap().flag, InventoryFlag::HiSlot1);
+    assert_eq!(
+        ctx.db.get_item(charge_id).unwrap().flag,
+        InventoryFlag::HiSlot1,
+        "reslotting fitted module must move loaded charge to new slot flag"
+    );
+    let reslot_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        reslot_notifs.iter().any(|n| n.event == "OnItemChange"
+            && format!("{:?}", n.args).contains(&charge_id.to_string())
+            && format!("{:?}", n.args).contains(&(InventoryFlag::HiSlot0 as i64).to_string())
+            && format!("{:?}", n.args).contains(&(InventoryFlag::HiSlot1 as i64).to_string())),
+        "reslotting fitted module HiSlot0 -> HiSlot1 must emit OnItemChange for relocated charge (#947), got {reslot_notifs:?}"
+    );
+
+    // 3. Unfitting loaded module to ship Cargo or cargo container fails when module + charge volume exceeds capacity
+    let cont_id = 91_609_474_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.items.get_mut(&charge_id) {
+            c.quantity = 100_000;
+        }
+        snap.items.insert(
+            cont_id,
+            InventoryItemRecord {
+                item_id: cont_id,
+                type_id: 3297, // Small Standard Container (120 m3 capacity; fits 5 m3 gun alone, not gun + 100k charges)
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let cap_err = handle(
+        &ctx,
+        &mut session,
+        None,
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(gun_id),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .unwrap_err();
+    assert!(
+        cap_err.code.contains("NotEnoughCargoSpace"),
+        "expected NotEnoughCargoSpace when loaded charge overflows ship hold capacity, got {cap_err:?}"
+    );
+
+    let cont_err = handle(
+        &ctx,
+        &mut session,
+        None,
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(gun_id),
+            PyRep::Integer(cont_id),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .unwrap_err();
+    assert_eq!(
+        cont_err.code, "CapacityExceeded",
+        "expected CapacityExceeded when loaded charge overflows container capacity, got {cont_err:?}"
     );
 }

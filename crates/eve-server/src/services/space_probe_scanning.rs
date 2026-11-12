@@ -276,9 +276,12 @@ pub async fn activate_scan_probe_launcher(
         let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), ci.owner_id);
         opts.reject_fitted = false;
         opts.active_ship_id = Some(ship_id);
-        let rem = match snap.consume_exact_item_quantity(charge_item_id, actual_launch, opts) {
-            Ok(Some(it)) => it.quantity,
-            Ok(None) => 0,
+        let (rem, post_ci) = match snap.consume_exact_item_quantity(charge_item_id, actual_launch, opts) {
+            Ok(Some(it)) => {
+                let q = it.quantity;
+                (q, Some(it))
+            }
+            Ok(None) => (0, None),
             Err(e) => {
                 return Err(BridgeRpcError {
                     code: "ItemLocked".into(),
@@ -286,14 +289,15 @@ pub async fn activate_scan_probe_launcher(
                 });
             }
         };
+        snap.module_active_states.remove(&module_id);
         let mut ids = Vec::with_capacity(actual_launch as usize);
         for _ in 0..actual_launch {
             snap.next_entity_id += 1;
             ids.push(snap.next_entity_id);
         }
-        Ok((ids, rem, actual_launch))
+        Ok((ids, rem, actual_launch, ci, post_ci))
     });
-    let (allocated_probe_ids, remaining_in_launcher, to_launch) = match db_res {
+    let (allocated_probe_ids, remaining_in_launcher, to_launch, pre_charge_item, post_charge_item) = match db_res {
         Ok(v) => v,
         Err(e) => {
             let mut probes = ctx.active_scanner_probes.write().unwrap_or_else(|e| e.into_inner());
@@ -303,6 +307,7 @@ pub async fn activate_scan_probe_launcher(
             return Err(e);
         }
     };
+    ctx.notify_item_mutation(char_id, Some(&pre_charge_item), post_charge_item.as_ref());
     ctx.invalidate_ship_fitting(ship_id);
 
     let probe_sde = ctx.sde.types.get(&probe_type_id);
@@ -413,6 +418,17 @@ pub async fn activate_scan_probe_launcher(
     }
 
     let _ = ctx.notify_module_effect_started(char_id, ship_id, module_id, module_type_id, Some(effect_name), target_id_opt);
+    let stop_eff_id = ctx
+        .effect_id_for_module(module_type_id, Some(effect_name))
+        .unwrap_or(101) as i32;
+    let _ = ctx.notify_godma_ship_effect(
+        crate::router::NotificationTarget::Character(char_id),
+        module_id,
+        stop_eff_id,
+        false,
+        0,
+        0,
+    );
     let expiry_ft = ctx.now_blueos_filetime_ticks().saturating_add((max_flight_time_s.round() as i64).saturating_mul(10_000_000));
     for &(pid, ppos) in &spawned_probe_positions {
         let pt = PyRep::Tuple(vec![PyRep::Real(ppos.x), PyRep::Real(ppos.y), PyRep::Real(ppos.z)]);
@@ -1620,17 +1636,20 @@ async fn handle_recover_probes(
         })
         .unwrap_or(400.0);
 
-    let (recovered_probes, unrecovered_probes, to_launcher, to_cargo) = if !candidate_probes.is_empty() {
+    let (recovered_probes, unrecovered_probes, to_launcher, to_cargo, item_diffs) = if !candidate_probes.is_empty() {
         ctx.db.with_mut_snapshot(|snap| {
             let (mut in_launcher, mut in_cargo) = (0i32, 0i32);
             let (mut rec, mut unrec) = (Vec::new(), Vec::new());
-            let add_stack = |items: &mut HashMap<i64, eve_db::InventoryItemRecord>, next_id: &mut i64, ship_id: i64, flag: InventoryFlag, p_type_id: u32, qty: i32, exclude_id: i64| {
+            let mut touched_pre: HashMap<i64, Option<eve_db::InventoryItemRecord>> = HashMap::new();
+            let mut add_stack = |items: &mut HashMap<i64, eve_db::InventoryItemRecord>, next_id: &mut i64, ship_id: i64, flag: InventoryFlag, p_type_id: u32, qty: i32, exclude_id: i64| {
                 if let Some(st) = items.values_mut().find(|i| i.owner_id == char_id && i.location_id == ship_id && i.flag == flag && i.item_id != exclude_id && i.type_id == p_type_id) {
+                    touched_pre.entry(st.item_id).or_insert_with(|| Some(st.clone()));
                     st.quantity += qty;
                     st.version += 1;
                 } else {
                     *next_id += 1;
                     let new_id = *next_id;
+                    touched_pre.insert(new_id, None);
                     items.insert(new_id, eve_db::InventoryItemRecord {
                         item_id: new_id, type_id: p_type_id, owner_id: char_id, location_id: ship_id,
                         flag, quantity: qty, singleton: false, version: 1, ..Default::default()
@@ -1673,11 +1692,24 @@ async fn handle_recover_probes(
                     }
                 }
             }
-            (rec, unrec, in_launcher, in_cargo)
+            let mut diffs: Vec<(Option<eve_db::InventoryItemRecord>, eve_db::InventoryItemRecord)> = touched_pre
+                .into_iter()
+                .filter_map(|(iid, pre_opt)| snap.items.get(&iid).cloned().map(|post| (pre_opt, post)))
+                .collect();
+            diffs.sort_by_key(|(_, post)| post.item_id);
+            (rec, unrec, in_launcher, in_cargo, diffs)
         })
     } else {
-        (Vec::new(), Vec::new(), 0, 0)
+        (Vec::new(), Vec::new(), 0, 0, Vec::new())
     };
+    for (pre_opt, post) in item_diffs {
+        ctx.notify_item_mutation(char_id, pre_opt.as_ref(), Some(&post));
+    }
+    if let Some(sid) = ship_id_opt {
+        if !recovered_probes.is_empty() {
+            ctx.invalidate_ship_fitting(sid);
+        }
+    }
 
     if !unrecovered_probes.is_empty() {
         if let Ok(mut map) = ctx.active_scanner_probes.write() {

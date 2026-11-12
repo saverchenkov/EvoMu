@@ -105,6 +105,8 @@ async fn launcher_activation_clamping_incompatible_and_max_probes() {
     let charge_id = 96_700_101_i64;
 
     ctx.db.with_mut_snapshot(|snap| {
+        snap.items
+            .retain(|_, i| !(i.location_id == ship_id && i.flag == InventoryFlag::HiSlot0));
         snap.items.insert(
             launcher_id,
             InventoryItemRecord {
@@ -1078,4 +1080,120 @@ async fn w4_mutant_killers_launcher_skills_custom_scale_target_classes_and_sync(
     });
     // Repeat unchanged sync to exercise !probes_differ fast path
     sync_scanner_probes_to_db(&ctx);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probe_launcher_emits_effect_stop_and_charge_item_mutations_on_launch_and_recover_937() {
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let (ctx, mut sess) = make_ctx_and_session(char_id, sys_id);
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let kw = HashMap::new();
+    let ship_id = 100_000_001_i64;
+    let launcher_id = 96_709_370_i64;
+    let charge_id = 96_709_371_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items
+            .retain(|_, i| !(i.location_id == ship_id && i.flag == InventoryFlag::HiSlot0));
+        snap.items.insert(
+            launcher_id,
+            InventoryItemRecord {
+                item_id: launcher_id,
+                type_id: 17938, // Core Probe Launcher I
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            charge_id,
+            InventoryItemRecord {
+                item_id: charge_id,
+                type_id: 30013, // Core Scanner Probe I
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 8,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(launcher_id, true);
+        snap.module_active_states.insert(launcher_id);
+    });
+    ctx.db
+        .acquire_online_lock(1, 9830, Some(char_id), true, ctx.now_unix_secs())
+        .expect("online lock");
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let launch_rep = activate_scan_probe_launcher(
+        &ctx,
+        &sess,
+        &sys,
+        char_id,
+        ship_id,
+        sys_id,
+        launcher_id,
+        17_938,
+        InventoryFlag::HiSlot0 as u16,
+        "useMissiles",
+        None,
+        &kw,
+    )
+    .await
+    .expect("launch 8 probes");
+    assert_eq!(launch_rep.dict_get("launchedCount").and_then(|v| v.as_i64()), Some(8));
+    assert_eq!(launch_rep.dict_get("remainingInLauncher").and_then(|v| v.as_i64()), Some(0));
+
+    // 1. Launcher active state is cleared immediately so module is not stuck active (#937)
+    let is_active = ctx.db.with_snapshot(|s| s.module_active_states.contains(&launcher_id));
+    assert!(!is_active, "probe launcher must not remain in module_active_states after launch (#937)");
+
+    // 2. Both start (active=1) and stop (active=0) OnGodmaShipEffect notifications + OnItemChange for consumed charge
+    let launch_notifs = ctx.drain_notifications_for_char(char_id);
+    let godma_effects: Vec<_> = launch_notifs
+        .iter()
+        .filter(|n| n.event == "OnGodmaShipEffect" && n.args.first().and_then(|a| a.as_i64()) == Some(launcher_id))
+        .collect();
+    assert!(
+        godma_effects.iter().any(|n| n.args.get(3).and_then(|a| a.as_i64()) == Some(1)),
+        "expected OnGodmaShipEffect start (active=1), got {godma_effects:?}"
+    );
+    assert!(
+        godma_effects.iter().any(|n| n.args.get(3).and_then(|a| a.as_i64()) == Some(0)),
+        "expected OnGodmaShipEffect stop (active=0) so HUD button stops cycling (#937), got {godma_effects:?}"
+    );
+    assert!(
+        launch_notifs.iter().any(|n| n.event == "OnItemChange" && format!("{:?}", n.args).contains(&charge_id.to_string())),
+        "expected OnItemChange for consumed probe charge stack (#937), got {launch_notifs:?}"
+    );
+
+    // 3. RecoverProbes returns probes to launcher slot and emits OnItemChange for the restored charge stack
+    let probe_ids_rep = launch_rep.dict_get("probeIDs").cloned().unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let rec_res = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        None,
+        "scanMgr",
+        "RecoverProbes",
+        &[probe_ids_rep],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("RecoverProbes ok");
+    assert_eq!(rec_res.dict_get("returnedToLauncher").and_then(|v| v.as_i64()), Some(8));
+
+    let rec_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        rec_notifs.iter().any(|n| n.event == "OnItemChange"),
+        "RecoverProbes must emit OnItemChange for restored launcher charge stack (#937), got {rec_notifs:?}"
+    );
 }

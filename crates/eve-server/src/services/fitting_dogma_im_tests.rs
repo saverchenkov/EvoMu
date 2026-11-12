@@ -1048,3 +1048,132 @@ async fn venture_lock_spawned_veldspar_preserves_progress_emits_single_add_and_m
         .await;
     assert!(act_res.is_ok(), "Miner I activation on locked Veldspar failed: {act_res:?}");
 }
+
+#[tokio::test]
+async fn destroy_fitting_removes_loaded_charges_and_notifies_947() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 96_309_470_i64;
+    let station_id = 60_003_760_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_id = 96_309_471_i64;
+    let gun_id = 96_309_472_i64;
+    let charge_id = 96_309_473_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = 1;
+        ch.station_id = Some(station_id);
+        ch.solar_system_id = sys_id;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            gun_id,
+            InventoryItemRecord {
+                item_id: gun_id,
+                type_id: 484, // 125mm Gatling AutoCannon I
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            charge_id,
+            InventoryItemRecord {
+                item_id: charge_id,
+                type_id: 179, // Depleted Uranium S
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 40,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.weapon_banks
+            .entry(ship_id)
+            .or_default()
+            .insert(gun_id, vec![gun_id, 96_309_499]);
+    });
+
+    let mut session = SessionState {
+        user_id: Some(1),
+        character_id: Some(char_id),
+        station_id: Some(station_id),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    ctx.db
+        .acquire_online_lock(1, 1, Some(char_id), true, ctx.now_unix_secs())
+        .expect("online lock");
+
+    // Destroying the active ship itself via DestroyFitting while docked must be rejected
+    let active_ship_err = handle_dogma_im(
+        &ctx,
+        &mut session,
+        None,
+        "dogmaIM",
+        "DestroyFitting",
+        &[PyRep::Integer(ship_id)],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .unwrap_err();
+    assert_eq!(active_ship_err.code, "ItemNotFittedToActiveShip");
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let res = handle_dogma_im(
+        &ctx,
+        &mut session,
+        None,
+        "dogmaIM",
+        "DestroyFitting",
+        &[PyRep::Integer(gun_id)],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("DestroyFitting ok");
+    assert_eq!(res.dict_get("destroyed").and_then(|v| v.as_bool()), Some(true));
+    assert!(
+        ctx.db.with_snapshot(|s| s.weapon_banks.get(&ship_id).is_none_or(|b| b.is_empty())),
+        "DestroyFitting must remove destroyed weapon from weapon_banks"
+    );
+
+    assert!(ctx.db.get_item(gun_id).is_none(), "destroyed module must be removed");
+    assert!(
+        ctx.db.get_item(charge_id).is_none(),
+        "loaded charge in destroyed module slot must also be removed (#947)"
+    );
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs.iter().any(|n| n.event == "OnItemChange" && format!("{:?}", n.args).contains(&charge_id.to_string())),
+        "DestroyFitting must emit OnItemChange deletion for loaded charge (#947), got {notifs:?}"
+    );
+}

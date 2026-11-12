@@ -1154,6 +1154,16 @@ async fn handle_invbroker_add(
                 .as_ref()
                 .filter(|src| matches!(src.flag as u16, 11..=34 | 92..=94 | 125..=132))
                 .map(|src| src.location_id);
+            let old_src_fit_loads = unfit_ship_id
+                .filter(|&sid| sid != new_loc)
+                .and_then(|sid| {
+                    ctx.get_or_rebuild_ship_fitting(char_id, sid).ok().map(|f| {
+                        (
+                            f.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde),
+                            f.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde),
+                        )
+                    })
+                });
             let old_fit_loads = if is_fitting_slot {
                 ctx.get_or_rebuild_ship_fitting(char_id, new_loc).ok().map(|f| {
                     (
@@ -1190,6 +1200,7 @@ async fn handle_invbroker_add(
                     old_was_fitted: bool,
                     st_fuel: Option<u32>,
                     dst_corp_owner: i64,
+                    unfitted_charges: Vec<(eve_db::InventoryItemRecord, eve_db::InventoryItemRecord)>,
                 },
             }
 
@@ -1329,7 +1340,22 @@ async fn handle_invbroker_add(
                                 }
                                 let hold_capacity = crate::services::fitting_saved_apply::get_ship_hold_capacity(flag_u16, ship_type, eval_cargo_cap);
                                 let eff_qty = split_qty_opt.unwrap_or(orig_item.quantity);
-                                let item_vol = effective_item_unit_volume(&ctx.sde, &orig_item) * (eff_qty as f64);
+                                let mut item_vol = effective_item_unit_volume(&ctx.sde, &orig_item) * (eff_qty as f64);
+                                if !is_fitting_slot && item_type.category_id != 8 && (11..=34).contains(&(orig_item.flag as u16)) {
+                                    for ci in snap.items.values().filter(|i| {
+                                        i.location_id == orig_item.location_id
+                                            && i.flag == orig_item.flag
+                                            && i.item_id != orig_item_id
+                                            && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 8)
+                                    }) {
+                                        if let Some(ct) = ctx.sde.types.get(&ci.type_id) {
+                                            if !crate::services::fitting_saved_apply::is_item_allowed_in_ship_hold(flag_u16, ct, ship_type) {
+                                                return Err(BridgeRpcError::user_error("InvalidItemTypeForHold"));
+                                            }
+                                        }
+                                        item_vol += effective_item_unit_volume(&ctx.sde, ci) * (ci.quantity.max(1) as f64);
+                                    }
+                                }
                                 if flag_u16 != 5 && hold_capacity <= 0.0 {
                                     return Err(ship_hold_capacity_error(flag_u16, 0.0, 0.0, item_vol));
                                 }
@@ -1340,6 +1366,32 @@ async fn handle_invbroker_add(
                                     if used_vol + item_vol > hold_capacity + 1e-4 {
                                         return Err(ship_hold_capacity_error(flag_u16, hold_capacity, used_vol, item_vol));
                                     }
+                                }
+                            }
+                        }
+                    }
+                } else if !is_fitting_slot {
+                    if let (Some(dest_item), Some(item_type)) = (snap.items.get(&new_loc), ctx.sde.types.get(&orig_item.type_id)) {
+                        if let Some(dest_type) = ctx.sde.types.get(&dest_item.type_id) {
+                            let eff_qty = split_qty_opt.unwrap_or(orig_item.quantity).max(1) as f64;
+                            let mut moving_vol = effective_item_unit_volume(&ctx.sde, &orig_item) * eff_qty;
+                            if item_type.category_id != 8 && (11..=34).contains(&(orig_item.flag as u16)) {
+                                moving_vol += snap.items.values()
+                                    .filter(|i| i.location_id == orig_item.location_id && i.flag == orig_item.flag && i.item_id != orig_item_id && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 8))
+                                    .map(|i| effective_item_unit_volume(&ctx.sde, i) * (i.quantity.max(1) as f64)).sum::<f64>();
+                            }
+                            if fitting_containers_ships::is_container_group(dest_type.group_id, dest_type.type_id) {
+                                let cap = dest_item.dynamic_attributes.get(&eve_sde::attr_ids::CAPACITY).copied().filter(|&c| c > 0.0)
+                                    .unwrap_or_else(|| if dest_type.capacity > 0.0 { dest_type.capacity } else { dest_type.default_attributes.get(&eve_sde::attr_ids::CAPACITY).copied().unwrap_or(0.0) });
+                                let used: f64 = snap.items.values().filter(|i| i.location_id == new_loc && i.item_id != orig_item_id).map(|i| effective_item_unit_volume(&ctx.sde, i) * (i.quantity as f64)).sum();
+                                if cap <= 0.0 || used + moving_vol > cap + 1e-4 {
+                                    return Err(BridgeRpcError { code: "CapacityExceeded".into(), message: format!("Container capacity of {cap} m³ exceeded") });
+                                }
+                            } else if flag_u16 == 155 && dest_type.category_id == 6 {
+                                let fh_cap = dest_type.default_attributes.get(&912).copied().unwrap_or(0.0);
+                                let used_fh: f64 = snap.items.values().filter(|i| i.location_id == new_loc && (i.flag as u16) == 155 && i.item_id != orig_item_id).map(|i| effective_item_unit_volume(&ctx.sde, i) * (i.quantity as f64)).sum();
+                                if fh_cap <= 0.0 || used_fh + moving_vol > fh_cap + 1e-4 {
+                                    return Err(BridgeRpcError { code: "CapacityExceeded".into(), message: format!("Fleet Hangar capacity {fh_cap} m³ exceeded") });
                                 }
                             }
                         }
@@ -1358,6 +1410,7 @@ async fn handle_invbroker_add(
                                 old_was_fitted: false,
                                 st_fuel: None,
                                 dst_corp_owner: 0,
+                                unfitted_charges: Vec::new(),
                             });
                         }
                     }
@@ -1562,12 +1615,50 @@ async fn handle_invbroker_add(
                     updated = fin;
                 }
 
+                let mut unfitted_charges = Vec::new();
                 if is_fitting_slot {
                     snap.module_online_states.insert(effective_item_id, online);
                 } else if old_was_fitted {
                     snap.module_online_states.remove(&effective_item_id);
                     snap.module_active_states.remove(&effective_item_id);
                     snap.module_active_charges.remove(&effective_item_id);
+                }
+                if old_was_fitted && (old_loc_id != new_loc || orig_item.flag != flag) {
+                    if let Some(banks) = snap.weapon_banks.get_mut(&old_loc_id) {
+                        for list in banks.values_mut() {
+                            list.retain(|&id| id != effective_item_id);
+                        }
+                        banks.retain(|k, v| *k != effective_item_id && v.len() > 1);
+                    }
+                }
+                if old_was_fitted
+                    && active_cat != 8
+                    && (11..=34).contains(&(old_flag_id as u16))
+                    && (old_loc_id != new_loc || orig_item.flag != flag)
+                {
+                    let old_slot_flag = orig_item.flag;
+                    let charge_ids: Vec<i64> = snap
+                        .items
+                        .values()
+                        .filter(|i| {
+                            i.location_id == old_loc_id
+                                && i.flag == old_slot_flag
+                                && i.item_id != effective_item_id
+                                && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 8)
+                        })
+                        .map(|i| i.item_id)
+                        .collect();
+                    for cid in charge_ids {
+                        if let Some(ci) = snap.items.get_mut(&cid) {
+                            let pre = ci.clone();
+                            ci.location_id = new_loc;
+                            ci.flag = flag;
+                            ci.singleton = false;
+                            ci.owner_id = updated.owner_id;
+                            ci.version += 1;
+                            unfitted_charges.push((pre, ci.clone()));
+                        }
+                    }
                 }
 
                 Ok(AddTxOutcome::Moved {
@@ -1579,6 +1670,7 @@ async fn handle_invbroker_add(
                     old_was_fitted,
                     st_fuel,
                     dst_corp_owner,
+                    unfitted_charges,
                 })
             });
 
@@ -1642,7 +1734,7 @@ async fn handle_invbroker_add(
                         ("version", PyRep::Integer(merged_item.version as i64)), ("suspectFlagged", PyRep::Bool(looted_foreign_jetcan)),
                     ])))
                 }
-                Ok(AddTxOutcome::Moved { updated, effective_item_id, old_loc_id, old_flag_id, old_owner_id, old_was_fitted, st_fuel, dst_corp_owner }) => {
+                Ok(AddTxOutcome::Moved { updated, effective_item_id, old_loc_id, old_flag_id, old_owner_id, old_was_fitted, st_fuel, dst_corp_owner, unfitted_charges }) => {
                     item_id = effective_item_id;
                     if updated.owner_id != old_owner_id {
                         crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &[updated.item_id]);
@@ -1699,8 +1791,14 @@ async fn handle_invbroker_add(
                         }
                         if matches!(flag_u16, 90 | 155) {
                             st.custom_item_flags.insert(item_id, flag_u16);
+                            for (_, post_c) in &unfitted_charges {
+                                st.custom_item_flags.insert(post_c.item_id, flag_u16);
+                            }
                         } else {
                             st.custom_item_flags.remove(&item_id);
+                            for (_, post_c) in &unfitted_charges {
+                                st.custom_item_flags.remove(&post_c.item_id);
+                            }
                         }
                     });
                     if looted_foreign_jetcan {
@@ -1760,7 +1858,20 @@ async fn handle_invbroker_add(
                         vec![PyRep::Integer(updated.item_id), PyRep::Integer(updated.location_id), PyRep::Integer(updated.flag as i64)],
                     );
 
+                    if old_was_fitted {
+                        for (pre_c, post_c) in &unfitted_charges {
+                            ctx.notify_item_mutation(char_id, Some(pre_c), Some(post_c));
+                        }
+                    }
                     if is_fitting_slot {
+                        if old_was_fitted && old_loc_id != new_loc {
+                            ctx.invalidate_ship_fitting(old_loc_id);
+                            if let (Some((src_old_cpu, src_old_pg)), Ok(src_new_fit)) = (old_src_fit_loads, ctx.get_or_rebuild_ship_fitting(char_id, old_loc_id)) {
+                                let src_new_cpu = src_new_fit.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde);
+                                let src_new_pg = src_new_fit.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde);
+                                let _ = ctx.notify_ship_fitting_load_changes(char_id, old_loc_id, src_old_cpu, src_new_cpu, src_old_pg, src_new_pg);
+                            }
+                        }
                         ctx.invalidate_ship_fitting(new_loc);
                         let new_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, new_loc).ok();
                         let group_id = ctx
