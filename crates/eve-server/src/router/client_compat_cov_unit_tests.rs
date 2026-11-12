@@ -887,7 +887,10 @@ fn issue_771_and_776_get_members_paged_crowset_and_reprocess_list_compat() {
         ])])),
     )
     .expect("normalize GetBlueprintDataByOwner");
-    let Some(PyRep::List(owner_bps)) = bp_owner.dict_get("bps") else {
+    let PyRep::Tuple(bp_owner_pair) = &bp_owner else {
+        panic!("expected (bps, locs) tuple in GetBlueprintDataByOwner");
+    };
+    let Some(PyRep::List(owner_bps)) = bp_owner_pair.first() else {
         panic!("expected bps list in GetBlueprintDataByOwner");
     };
     assert_eq!(owner_bps.len(), 1);
@@ -922,14 +925,18 @@ fn issue_771_and_776_get_members_paged_crowset_and_reprocess_list_compat() {
         panic!("expected objectives list");
     };
     let PyRep::Tuple(obj0) = &objs[0] else {
-        panic!("expected objective tuple");
+        panic!("expected agent objective tuple");
     };
-    assert_eq!(obj0[0], PyRep::String("transport".into()));
-    let PyRep::Tuple(transport_vals) = &obj0[1] else {
-        panic!("expected transport 3-tuple");
+    assert_eq!(obj0[0], PyRep::String("agent".into()));
+    let PyRep::Tuple(obj1) = &objs[1] else {
+        panic!("expected transport objective tuple");
     };
-    assert_eq!(transport_vals[0].dict_get("ownerID"), Some(&PyRep::Integer(3_008_416)));
-    assert_eq!(transport_vals[1].dict_get("ownerID"), Some(&PyRep::Integer(3_008_416)));
+    assert_eq!(obj1[0], PyRep::String("transport".into()));
+    let PyRep::Tuple(transport_vals) = &obj1[1] else {
+        panic!("expected transport 5-tuple");
+    };
+    assert_eq!(transport_vals[0], PyRep::Integer(3_008_416));
+    assert_eq!(transport_vals[2], PyRep::Integer(3_008_416));
 
     let dungeon_obj_info = normalize_macho_rpc_reply(
         "agentMgr",
@@ -949,7 +956,7 @@ fn issue_771_and_776_get_members_paged_crowset_and_reprocess_list_compat() {
     };
     assert_eq!(dungeons.len(), 1);
     assert_eq!(dungeons[0].dict_get("optional"), Some(&PyRep::Bool(false)));
-    assert_eq!(dungeons[0].dict_get("objectiveCompleted"), Some(&PyRep::Bool(false)));
+    assert_eq!(dungeons[0].dict_get("objectiveCompleted"), Some(&PyRep::None));
     assert_eq!(dungeons[0].dict_get("ownerID"), Some(&PyRep::Integer(3_008_416)));
     assert!(dungeons[0].dict_get("location").is_some());
     assert!(dungeons[0].dict_get("completionStatus").is_none());

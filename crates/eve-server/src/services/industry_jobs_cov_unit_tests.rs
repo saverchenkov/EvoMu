@@ -1002,6 +1002,10 @@ fn lifecycle_cancel_paused_ceo_refund_stacking_and_complete_edge_paths() {
         snap.items.insert(74_030, mk_item(74_030, 688, char_id, station_id, InventoryFlag::Hangar, 1, true));
         snap.items.insert(74_031, mk_item(74_031, 34, char_id, station_id, InventoryFlag::Hangar, 50_000, false));
     });
+    let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    let _ = ctx
+        .db
+        .acquire_online_lock(uid, 101, Some(char_id), false, ctx.now_unix());
     let _ = ctx.drain_notifications(char_id);
     let mfg_1run = handle_industry_jobs(
         &ctx,
