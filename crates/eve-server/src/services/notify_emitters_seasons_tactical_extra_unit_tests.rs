@@ -1068,8 +1068,8 @@ fn issue_961_cleartimers_resets_crimewatch_and_emits_timer_cleared_notices() {
     }
 }
 
-#[test]
-fn issue_975_module_activation_does_not_orphan_def_effect_and_item_get_info_includes_active_effect() {
+#[tokio::test]
+async fn issue_975_module_activation_does_not_orphan_def_effect_and_item_get_info_includes_active_effect() {
     let mut sde = SdeRegistry::default();
     sde.types.insert(587, make_type(587, 25, 6, 2500.0, 400.0, &[(38, 400.0)]));
     let mut mwd_type = make_type(434, 46, 7, 5.0, 0.0, &[(6, 15.0), (73, 10_000.0)]);
@@ -1148,12 +1148,14 @@ fn issue_975_module_activation_does_not_orphan_def_effect_and_item_get_info_incl
 
     let info = crate::services::inventory_fitting::fitting_dogma_im::handle_dogma_im(
         &ctx,
-        &sess,
+        &mut sess,
         None,
         "dogmaIM",
         "ItemGetInfo",
         &[PyRep::Integer(mwd_id)],
+        &std::collections::HashMap::new(),
     )
+    .await
     .expect("dogmaIM.ItemGetInfo handled")
     .expect("dogmaIM.ItemGetInfo ok");
     let PyRep::Dict(ref active_effs) = info
