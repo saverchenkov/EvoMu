@@ -1140,7 +1140,7 @@ async fn death_pipeline_escape_bay_pod_implants_insurance_kill_rights_and_struct
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn b3_destruction_pipeline_idempotency_unpiloted_hull_kills_and_sqlite_reload() {
-    use crate::services::SessionState;
+    use eve_machonet::SessionState;
     use eve_proto::PyRep;
 
     let db_path = std::env::temp_dir().join(format!(
