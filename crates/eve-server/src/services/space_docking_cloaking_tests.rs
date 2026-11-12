@@ -516,3 +516,159 @@ async fn criminal_cosmic_wormhole_jump_into_highsec_schedules_concord() {
     let pending = ctx.crimewatch.read().unwrap().states[&char_id].pending_concord_arrival;
     assert_eq!(pending.map(|p| (p.0, p.2)), Some((dest_sys, ship_id)));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cosmic_wormhole_jump_gates_missing_ball_and_serializes_concurrent_jump() {
+    let mut ctx = test_ctx();
+    let wh_type_id = 99_802_u32;
+    let ship_tid = 99_812_u32;
+    clone_type_with(&mut ctx.sde, 31_790, wh_type_id, 988, 2, 10.0, 0.0, 20_000_000.0);
+    clone_type_with(&mut ctx.sde, 588, ship_tid, 25, 6, 2500.0, 150.0, 2_000_000.0);
+
+    let host_sys = 31_000_005_u32;
+    let dest_sys = 31_000_006_u32;
+    let char_id = 96_202_i64;
+    let ship_id = 78_202_i64;
+    let sig_id = "WHC-301".to_string();
+    let wh_pos = DVec3::new(10_000.0, 0.0, 0.0);
+    let now_u = ctx.now_unix();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("char");
+        ch.character_id = char_id;
+        ch.solar_system_id = host_sys;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: ship_tid,
+                owner_id: char_id,
+                location_id: host_sys as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.cosmic_signatures.insert(
+            host_sys,
+            vec![CosmicSignatureRecord {
+                signature_id: sig_id.clone(),
+                solar_system_id: host_sys,
+                sig_group: "Wormhole".to_string(),
+                type_name: "Wormhole Custom".to_string(),
+                signal_strength: 100.0,
+                position: [wh_pos.x, wh_pos.y, wh_pos.z],
+                wormhole_type_id: Some(wh_type_id),
+                destination_system_id: Some(dest_sys),
+                created_unix: now_u.saturating_sub(60),
+                lifetime_seconds: 86_400,
+                max_mass_kg: 10_000_000.0,
+                remaining_mass_kg: 5_000_000.0,
+                max_jump_mass_kg: 20_000_000.0,
+                collapsed: false,
+            }],
+        );
+    });
+
+    // 1. Absent ship ball -> returns SystemTransitionFailed WITHOUT deducting mass or recording polarization
+    let near_ball = make_ship_ball(ship_id, ship_tid, 2_000_000.0, DVec3::new(11_000.0, 0.0, 0.0));
+    let mut sess_a = make_session(char_id, 98000011, Some(host_sys), Some(ship_id));
+    let missing_err = execute_cosmic_wormhole_jump(
+        &ctx,
+        &mut sess_a,
+        char_id,
+        host_sys,
+        ship_id,
+        near_ball.clone(),
+        None,
+        Some(&sig_id),
+    )
+    .await
+    .expect("matched")
+    .expect_err("absent ball must reject before mass/polarization mutation");
+    assert_eq!(missing_err.code, "SystemTransitionFailed");
+    let (rem_mass, collapsed, has_pol, cur_sys) = ctx.db.with_snapshot(|snap| {
+        let sig = snap.cosmic_signatures[&host_sys]
+            .iter()
+            .find(|s| s.signature_id == sig_id)
+            .unwrap();
+        (
+            sig.remaining_mass_kg,
+            sig.collapsed,
+            !snap.wh_polarizations.is_empty(),
+            snap.characters[&char_id].solar_system_id,
+        )
+    });
+    assert!((rem_mass - 5_000_000.0).abs() < 1e-3);
+    assert!(!collapsed);
+    assert!(!has_pol);
+    assert_eq!(cur_sys, host_sys);
+
+    // 2. Concurrent double-jump race -> take_ball serializes so mass is deducted only once
+    let mut cs = eve_destiny::CombatState::new();
+    cs.shield_hp = 500.0;
+    cs.max_shield_hp = 1000.0;
+    cs.capacitor = 150.0;
+    cs.max_capacitor = 300.0;
+    let host_h = ctx.systems.get_or_spawn(host_sys);
+    let _ = host_h.spawn_ball_with_combat(near_ball.clone(), cs).await;
+    let wh_id = wormhole_item_id_for_signature(host_sys, &sig_id);
+    let _ = host_h
+        .spawn_ball(Ball {
+            id: wh_id,
+            type_id: wh_type_id,
+            position: wh_pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e7,
+            radius: 1500.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Rigid,
+        })
+        .await;
+    let mut sess_b = sess_a.clone();
+    let (r1, r2) = tokio::join!(
+        execute_cosmic_wormhole_jump(
+            &ctx,
+            &mut sess_a,
+            char_id,
+            host_sys,
+            ship_id,
+            near_ball.clone(),
+            None,
+            Some(&sig_id),
+        ),
+        execute_cosmic_wormhole_jump(
+            &ctx,
+            &mut sess_b,
+            char_id,
+            host_sys,
+            ship_id,
+            near_ball,
+            None,
+            Some(&sig_id),
+        ),
+    );
+    let ok_count = [r1.as_ref().is_some_and(|r| r.is_ok()), r2.as_ref().is_some_and(|r| r.is_ok())]
+        .into_iter()
+        .filter(|&b| b)
+        .count();
+    assert_eq!(ok_count, 1, "exactly one concurrent jump may succeed: r1={r1:?}, r2={r2:?}");
+    let rem_after = ctx.db.with_snapshot(|snap| {
+        snap.cosmic_signatures[&host_sys]
+            .iter()
+            .find(|s| s.signature_id == sig_id)
+            .unwrap()
+            .remaining_mass_kg
+    });
+    assert!((rem_after - 3_000_000.0).abs() < 1e-3, "remaining mass must drop once: {rem_after}");
+    assert!(host_h.get_ball_snapshot(ship_id).await.unwrap().is_none());
+    let dest_h = ctx.systems.get_or_spawn(dest_sys);
+    assert!(dest_h.get_ball_snapshot(ship_id).await.unwrap().is_some());
+}

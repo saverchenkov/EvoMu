@@ -564,12 +564,14 @@ async fn handle_cmd_warp_to_stuff(
     let req_cap = cap_per_m * requested_dist_m;
 
     if let Ok(Some(mut cs)) = handle.get_combat_state(ship_id).await {
+        let mut repaired_max_cap = false;
         if (cs.max_capacitor - 250.0).abs() < 1e-6
             && (cs.capacitor - 250.0).abs() < 1e-6
             && sde_max_cap > 250.0
         {
             cs.max_capacitor = sde_max_cap;
             cs.capacitor = sde_max_cap;
+            repaired_max_cap = true;
         }
         if cs.capacitor < req_cap {
             let affordable_dist_m = if cap_per_m > 0.0 {
@@ -591,14 +593,18 @@ async fn handle_cmd_warp_to_stuff(
         } else {
             cs.capacitor = (cs.capacitor - req_cap).max(0.0);
         }
-        let new_cap = cs.capacitor;
-        let new_max_cap = cs.max_capacitor;
-        let _ = handle
-            .modify_combat_state(ship_id, move |live_cs| {
-                live_cs.max_capacitor = new_max_cap;
-                live_cs.capacitor = new_cap;
-            })
-            .await;
+        if repaired_max_cap {
+            let new_cap = cs.capacitor;
+            let new_max_cap = cs.max_capacitor;
+            let _ = handle
+                .modify_combat_state(ship_id, move |live_cs| {
+                    live_cs.max_capacitor = new_max_cap;
+                    live_cs.capacitor = new_cap;
+                })
+                .await;
+        } else {
+            let _ = handle.set_capacitor(ship_id, cs.capacitor).await;
+        }
         ctx.notify(
             crate::router::NotificationTarget::Character(char_id),
             "OnCapacitorChange",

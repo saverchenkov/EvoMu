@@ -641,6 +641,28 @@ async fn test_abyssal_gates_and_void_space_all_error_and_fleet_cleanup_branches(
         );
     });
 
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(mut mate_ch) = snap.characters.get(&char_id).cloned() {
+            mate_ch.character_id = mate_id;
+            mate_ch.active_ship_id = mate_ship;
+            mate_ch.solar_system_id = abyss_sys;
+            mate_ch.station_id = None;
+            mate_ch.structure_id = None;
+            snap.characters.insert(mate_id, mate_ch);
+        }
+        snap.items.insert(
+            mate_ship,
+            crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_item(
+                mate_ship,
+                621,
+                mate_id,
+                abyss_sys as i64,
+                InventoryFlag::None,
+                1,
+            ),
+        );
+    });
+
     let abyss_h = ctx.systems.get_or_spawn(abyss_sys);
     for (bid, pos) in [
         (ship_id, DVec3::ZERO),
@@ -832,4 +854,305 @@ async fn test_abyssal_gates_and_void_space_all_error_and_fleet_cleanup_branches(
     assert!(super::is_valid_void_exit_gate(80_944));
     assert!(super::is_valid_void_exit_gate(82_139));
     assert!(!super::is_valid_void_exit_gate(587));
+}
+
+#[tokio::test]
+async fn test_abyssal_and_void_gate_handoffs_gate_missing_ball_and_restore_on_db_err() {
+    use crate::services::pve_special_sites::{
+        with_abyssal_state, AbyssalPocketSession, AbyssalRoomRecord, AbyssalWeatherKind,
+        VoidSpaceSessionRecord,
+    };
+    use eve_db::InventoryFlag;
+    use eve_destiny::CombatState;
+
+    // 1. handle_void_space_player_jump: absent ship ball leaves cargo filament & DB untouched;
+    //    DB failure after take_ball restores ship ball + combat state in origin system.
+    let (mut ctx, mut session, char_id, ship_id, origin_sys) = make_fighter_ctx_and_session();
+    let abyss_sys = crate::services::abyssal_void_mgr::ABYSSAL_SPACE_SYSTEM_ID;
+    let void_fil_type = 950_009_u32;
+    let void_fil_id = 777_009_i64;
+    std::sync::Arc::make_mut(&mut ctx.sde).types.insert(
+        void_fil_type,
+        crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_type(
+            void_fil_type,
+            4145,
+            66,
+            0.1,
+            vec![],
+        ),
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.type_id = 621;
+        }
+        snap.items.insert(
+            void_fil_id,
+            crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_item(
+                void_fil_id,
+                void_fil_type,
+                char_id,
+                ship_id,
+                InventoryFlag::Cargo,
+                2,
+            ),
+        );
+        snap.item_positions.insert(ship_id, [500_000_000.0; 3]);
+    });
+
+    // 1a. Absent ball -> rejects before consuming cargo filament or creating void session
+    let missing_err = handle_void_space_player_jump(
+        &ctx,
+        &mut session,
+        char_id,
+        &[PyRep::Integer(void_fil_id), PyRep::Integer(1)],
+    )
+    .await
+    .unwrap_err();
+    assert!(!missing_err.code.is_empty());
+    assert_eq!(
+        ctx.db.with_snapshot(|s| (
+            s.items.get(&void_fil_id).map(|i| i.quantity),
+            s.characters.get(&char_id).map(|c| c.solar_system_id),
+            s.abyssal_state.void_space_content.contains_key(&char_id),
+        )),
+        (Some(2), Some(origin_sys), false)
+    );
+    assert!(with_abyssal_state(&ctx, |st| st.void_space_sessions.is_empty()));
+
+    // 1b. Spawn ball with custom CombatState, then provoke DB snapshot rejection (stale solar system in DB)
+    let origin_handle = ctx.systems.get_or_spawn(origin_sys);
+    let mut custom_cs = CombatState::new();
+    custom_cs.shield_hp = 123.0;
+    custom_cs.capacitor = 77.0;
+    let _ = origin_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 621,
+                position: DVec3::splat(500_000_000.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.0,
+                mass: 10_000_000.0,
+                radius: 100.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            custom_cs,
+        )
+        .await;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = 30_002_187; // concurrent move mismatch
+        }
+    });
+    let db_err = handle_void_space_player_jump(
+        &ctx,
+        &mut session,
+        char_id,
+        &[PyRep::Integer(void_fil_id), PyRep::Integer(1)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(db_err.code, "SystemTransitionFailed");
+    assert!(origin_handle.get_ball_snapshot(ship_id).await.unwrap().is_some());
+    let restored_cs = origin_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert_eq!(restored_cs.shield_hp, 123.0);
+    assert_eq!(restored_cs.capacitor, 77.0);
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.items.get(&void_fil_id).map(|i| i.quantity)),
+        Some(2)
+    );
+    assert!(with_abyssal_state(&ctx, |st| st.void_space_sessions.is_empty()));
+
+    // 2. handle_void_space_end_gate_activation: absent ball preserves session; DB failure restores ball
+    let void_handle = ctx.systems.get_or_spawn(VOID_SPACE_SYSTEM_ID);
+    let _ = void_handle
+        .spawn_ball(Ball {
+            id: 888_001,
+            type_id: 47_686,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e6,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    let now = ctx.now_unix();
+    with_abyssal_state(&ctx, |st| {
+        st.void_space_sessions.insert(
+            char_id,
+            VoidSpaceSessionRecord {
+                char_id,
+                ship_id,
+                origin_solar_system_id: origin_sys,
+                origin_position: [0.0; 3],
+                target_id: 777,
+                entered_unix: now,
+                expires_at_sec: now + 600,
+                ..Default::default()
+            },
+        );
+    });
+    session.solar_system_id = Some(VOID_SPACE_SYSTEM_ID);
+    session.station_id = None;
+    session.structure_id = None;
+    let void_missing_err = handle_void_space_end_gate_activation(
+        &ctx,
+        &mut session,
+        char_id,
+        &[PyRep::Integer(888_001)],
+    )
+    .await
+    .unwrap_err();
+    assert!(!void_missing_err.code.is_empty());
+    assert!(with_abyssal_state(&ctx, |st| st.void_space_sessions.contains_key(&char_id)));
+
+    let mut void_cs = CombatState::new();
+    void_cs.shield_hp = 234.0;
+    void_cs.capacitor = 88.0;
+    let _ = void_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 621,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.0,
+                mass: 1e7,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            void_cs,
+        )
+        .await;
+    let saved_ch = ctx.db.with_mut_snapshot(|snap| snap.characters.remove(&char_id));
+    let void_db_err = handle_void_space_end_gate_activation(
+        &ctx,
+        &mut session,
+        char_id,
+        &[PyRep::Integer(888_001)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(void_db_err.code, "SystemTransitionFailed");
+    assert!(void_handle.get_ball_snapshot(ship_id).await.unwrap().is_some());
+    let void_restored = void_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert_eq!(void_restored.shield_hp, 234.0);
+    assert_eq!(void_restored.capacitor, 88.0);
+    assert!(with_abyssal_state(&ctx, |st| st.void_space_sessions.contains_key(&char_id)));
+
+    // 3. handle_abyssal_end_gate_activation: absent ball preserves pocket; DB failure restores ball
+    let pid = 42_i64;
+    let r3_gate = 1_895_000_000 + pid * 10 + 3;
+    let make_r = |idx: u8| AbyssalRoomRecord {
+        room_index: idx,
+        dungeon_id: idx as u32,
+        dungeon_name: "R".into(),
+        npc_ball_ids: vec![],
+        cache_item_id: 0,
+        cleared: true,
+        gate_unlocked_at_sec: Some(now),
+    };
+    with_abyssal_state(&ctx, |st| {
+        st.pockets.insert(
+            char_id,
+            AbyssalPocketSession {
+                pocket_id: pid,
+                character_id: char_id,
+                ship_id,
+                origin_solar_system_id: origin_sys,
+                abyssal_solar_system_id: abyss_sys,
+                origin_position: [0.0; 3],
+                grid_offset: [0.0; 3],
+                filament_type_id: 47_762,
+                tier: 1,
+                weather: AbyssalWeatherKind::Electrical,
+                weather_penalty_pct: -30.0,
+                weather_bonus_pct: 50.0,
+                npc_difficulty_mult: 1.0,
+                current_room: 3,
+                rooms: [make_r(1), make_r(2), make_r(3)],
+                started_at_sec: now,
+                collapse_at_sec: now + 600,
+                completed: false,
+                collapsed_destroyed: false,
+                trace_ball_id: 0,
+                fleet_ship_ids: vec![ship_id],
+                ship_room: HashMap::from([(ship_id, 3)]),
+                max_ships: 1,
+            },
+        );
+    });
+    let abyss_handle = ctx.systems.get_or_spawn(abyss_sys);
+    let _ = abyss_handle
+        .spawn_ball(Ball {
+            id: r3_gate,
+            type_id: 47_686,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e6,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    session.solar_system_id = Some(abyss_sys);
+    let ab_missing = handle_abyssal_end_gate_activation(
+        &ctx,
+        &mut session,
+        char_id,
+        &[PyRep::Integer(r3_gate)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(ab_missing.code, "GateNotFound");
+    assert!(with_abyssal_state(&ctx, |st| st.pockets.contains_key(&char_id)));
+
+    let mut ab_cs = CombatState::new();
+    ab_cs.shield_hp = 345.0;
+    ab_cs.capacitor = 99.0;
+    let _ = abyss_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 621,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.0,
+                mass: 1e7,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            ab_cs,
+        )
+        .await;
+    let ab_db_err = handle_abyssal_end_gate_activation(
+        &ctx,
+        &mut session,
+        char_id,
+        &[PyRep::Integer(r3_gate)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(ab_db_err.code, "SystemTransitionFailed");
+    assert!(abyss_handle.get_ball_snapshot(ship_id).await.unwrap().is_some());
+    let ab_restored = abyss_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert_eq!(ab_restored.shield_hp, 345.0);
+    assert_eq!(ab_restored.capacitor, 99.0);
+    assert!(with_abyssal_state(&ctx, |st| st.pockets.contains_key(&char_id)));
+    if let Some(ch) = saved_ch {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.characters.insert(char_id, ch);
+        });
+    }
 }

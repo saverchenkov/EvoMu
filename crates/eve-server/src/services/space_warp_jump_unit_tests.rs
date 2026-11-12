@@ -897,3 +897,113 @@ async fn e2_handoffs_b4_b8_c27_take_restore_absent_ball_and_capacitor_persistenc
     assert_eq!(cond_after_jump.in_space_system, Some(perim_sys));
     assert_eq!(cond_after_jump.capacitor, Some(92.5));
 }
+
+#[tokio::test]
+async fn cmd_warp_to_stuff_preserves_custom_ball_kinematics_on_normal_warp() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let ship_id = 895_099_i64;
+    let sys_id = 30_000_142_u32;
+    let st_id = 60_003_760_i64;
+    let st_pos = ctx.sde.stations[&st_id].position;
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 606,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle.try_spawn_ball_with_combat(
+        Ball {
+            id: ship_id,
+            type_id: 606,
+            position: st_pos + DVec3::new(10_000_000_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 420.0,
+            inertia: 1.75,
+            mass: 2_345_678.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        CombatState {
+            shield_hp: 500.0,
+            max_shield_hp: 500.0,
+            armor_hp: 500.0,
+            max_armor_hp: 500.0,
+            structure_hp: 500.0,
+            max_structure_hp: 500.0,
+            capacitor: 600.0,
+            max_capacitor: 600.0,
+            base_inertia: Some(9.9),
+            base_mass: Some(9_999_999.0),
+            ..Default::default()
+        },
+    );
+
+    let mut sess = SessionState {
+        user_id: Some(1),
+        character_id: Some(char_id),
+        solar_system_id: Some(sys_id),
+        station_id: None,
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+
+    handle(
+        &ctx,
+        &mut sess,
+        None,
+        "beyonce",
+        "CmdWarpToStuff",
+        &[PyRep::String("item".into()), PyRep::Integer(st_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("CmdWarpToStuff should initiate warp");
+
+    let (_, ball_after) = sys_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .expect("ship ball still in space");
+    assert!(matches!(ball_after.mode, MovementMode::Warp { .. }));
+    assert!(
+        (ball_after.inertia - 1.75).abs() < 1e-6,
+        "CmdWarpToStuff must not clobber live ball inertia ({})",
+        ball_after.inertia
+    );
+    assert!(
+        (ball_after.mass - 2_345_678.0).abs() < 1e-3,
+        "CmdWarpToStuff must not clobber live ball mass ({})",
+        ball_after.mass
+    );
+    let cs_after = sys_handle
+        .get_combat_state(ship_id)
+        .await
+        .unwrap()
+        .expect("ship combat_state");
+    assert!(
+        cs_after.capacitor < 600.0,
+        "CmdWarpToStuff must deduct warp capacitor via set_capacitor"
+    );
+}

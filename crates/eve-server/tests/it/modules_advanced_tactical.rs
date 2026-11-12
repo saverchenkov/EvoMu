@@ -2976,8 +2976,6 @@ async fn test_nanite_repair_and_overload_cross_module_lockout() {
     let ctx = build_ctx();
     let (char_id, ship_id, mod_a, mod_b) = (94_081, 84_081, 75_801, 75_802);
     let mut sess = seed_pilot(&ctx, char_id, ship_id, 24_690, 30_000_142, false);
-    let sys = ctx.systems.get_or_spawn(30_000_142);
-    sys.set_capacitor(ship_id, 10_000.0).await.unwrap();
     give_item(&ctx, mod_a, 12_058, char_id, ship_id, InventoryFlag::MedSlot0, 1);
     give_item(&ctx, mod_b, 3_530, char_id, ship_id, InventoryFlag::LoSlot0, 1);
     give_item(&ctx, 75_803, 28668, char_id, ship_id, InventoryFlag::Cargo, 50);
@@ -2985,6 +2983,10 @@ async fn test_nanite_repair_and_overload_cross_module_lockout() {
         s.skills.entry(char_id).or_default().insert(28164, eve_db::TrainedSkillRecord { type_id: 28164, level: 5, skill_points: 256_000.0 });
         s.items.get_mut(&mod_a).unwrap().dynamic_attributes.insert(3, 10.0);
     });
+    ctx.invalidate_ship_fitting(ship_id);
+    spawn_in_space(&ctx, char_id, ship_id, 24_690, 30_000_142, DVec3::ZERO).await;
+    let sys = ctx.systems.get_or_spawn(30_000_142);
+    sys.set_capacitor(ship_id, 10_000.0).await.unwrap();
     rpc(&ctx, &mut sess, "dogmaIM", "SetModuleOnline", vec![PyRep::Integer(ship_id), PyRep::Integer(mod_a)]).await.unwrap();
     rpc(&ctx, &mut sess, "dogmaIM", "SetModuleOnline", vec![PyRep::Integer(ship_id), PyRep::Integer(mod_b)]).await.unwrap();
     // Direction 1: Active nanite repair on mod_a blocks overloading mod_b
