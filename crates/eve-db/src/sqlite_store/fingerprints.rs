@@ -762,7 +762,7 @@ pub(crate) fn fp_market_orders_digest_entry(oid: i64, order_fp: u64) -> u64 {
 }
 
 #[inline]
-pub(crate) fn fp_market_orders_digest(orders: &HashMap<i64, MarketOrderRecord>) -> u64 {
+pub(crate) fn fp_market_orders_digest(orders: &CowMap<i64, MarketOrderRecord>) -> u64 {
     let mut acc = 0u64;
     for (&oid, ord) in orders {
         acc ^= fp_market_orders_digest_entry(oid, fp_market_order(ord));

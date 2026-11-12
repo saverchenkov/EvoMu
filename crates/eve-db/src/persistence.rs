@@ -243,42 +243,45 @@ impl WorldStateWalDelta {
             next_entity_id: new.next_entity_id,
             ..Default::default()
         };
-        for (id, ch) in &new.characters {
-            if old.characters.get(id) != Some(ch) {
+        for item in old.characters.diff(&new.characters) {
+            if let Some(ch) = item.after_val() {
                 delta.upserted_characters.push(ch.clone());
             }
         }
-        for (&cid, new_m) in &new.skills {
-            let old_m = old.skills.get(&cid);
-            for (tid, sk) in new_m {
-                if old_m.and_then(|m| m.get(tid)) != Some(sk) {
-                    delta.upserted_skills.push((cid, sk.clone()));
+        for item in old.skills.diff(&new.skills) {
+            let cid = *item.key();
+            if let Some(new_m) = item.after_val() {
+                let old_m = item.before_val();
+                for (tid, sk) in new_m {
+                    if old_m.and_then(|m| m.get(tid)) != Some(sk) {
+                        delta.upserted_skills.push((cid, sk.clone()));
+                    }
                 }
             }
         }
-        for (&cid, new_q) in &new.skill_queues {
-            if old.skill_queues.get(&cid) != Some(new_q) {
-                delta.upserted_skill_queues.push((cid, new_q.clone()));
+        for item in old.skill_queues.diff(&new.skill_queues) {
+            if let Some(new_q) = item.after_val() {
+                delta.upserted_skill_queues.push((*item.key(), new_q.clone()));
             }
         }
-        for (id, item) in &new.items {
-            if old.items.get(id) != Some(item) {
-                delta.upserted_items.push(item.clone());
+        for item in old.items.diff(&new.items) {
+            match item {
+                CowDiffItem::Add(_, v) | CowDiffItem::Update { new: (_, v), .. } => {
+                    delta.upserted_items.push((**v).clone());
+                }
+                CowDiffItem::Remove(&id, _) => {
+                    delta.removed_items.push(id);
+                }
             }
         }
-        for id in old.items.keys() {
-            if !new.items.contains_key(id) {
-                delta.removed_items.push(*id);
-            }
-        }
-        for (id, ord) in &new.market_orders {
-            if old.market_orders.get(id) != Some(ord) {
-                delta.upserted_market_orders.push(ord.clone());
-            }
-        }
-        for id in old.market_orders.keys() {
-            if !new.market_orders.contains_key(id) {
-                delta.removed_market_orders.push(*id);
+        for item in old.market_orders.diff(&new.market_orders) {
+            match item {
+                CowDiffItem::Add(_, v) | CowDiffItem::Update { new: (_, v), .. } => {
+                    delta.upserted_market_orders.push((**v).clone());
+                }
+                CowDiffItem::Remove(&id, _) => {
+                    delta.removed_market_orders.push(id);
+                }
             }
         }
         if new.wallet_journal.len() > old.wallet_journal.len() {
@@ -640,19 +643,19 @@ impl WorldRepository {
             }
         }
 
-        let market_orders = HashMap::new();
+        let market_orders = CowMap::new();
         let system_states = HashMap::new();
         let mut initial_snap = WorldStateSnapshot {
             next_entity_id: 200_000_000,
             wal_seq: 0,
             markets_seeded: false,
             accounts: HashMap::new(),
-            characters: HashMap::new(),
-            skills: HashMap::new(),
-            skill_queues: HashMap::new(),
+            characters: CowMap::new(),
+            skills: CowMap::new(),
+            skill_queues: CowMap::new(),
             jump_clones: HashMap::new(),
             active_implants: HashMap::new(),
-            items: HashMap::new(),
+            items: CowMap::new(),
             saved_fittings: HashMap::new(),
             market_orders,
             wallet_journal: Vec::new(),

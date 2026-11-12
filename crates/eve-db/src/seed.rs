@@ -33,7 +33,7 @@ impl WorldRepository {
             },
         );
 
-        let mut characters = HashMap::new();
+        let mut characters = CowMap::new();
         characters.insert(
             90_000_001,
             CharacterRecord {
@@ -123,7 +123,7 @@ impl WorldRepository {
             },
         );
 
-        let mut items = HashMap::new();
+        let mut items = CowMap::new();
         items.insert(
             100_000_001,
             InventoryItemRecord {
@@ -231,7 +231,7 @@ impl WorldRepository {
         }
 
         // Seed NPC & synthetic market orders in Jita 4-4 (60_003_760)
-        let mut market_orders = HashMap::new();
+        let mut market_orders = CowMap::new();
         market_orders.insert(
             700_000_001,
             MarketOrderRecord {
@@ -312,7 +312,7 @@ impl WorldRepository {
             },
         );
 
-        let mut skills = HashMap::new();
+        let mut skills = CowMap::new();
         let starter_skill_map = HashMap::from([
             (
                 3300,
@@ -478,7 +478,7 @@ impl WorldRepository {
             accounts,
             characters,
             skills,
-            skill_queues: HashMap::new(),
+            skill_queues: CowMap::new(),
             jump_clones: HashMap::new(),
             active_implants: HashMap::new(),
             items,
