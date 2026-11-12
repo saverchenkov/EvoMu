@@ -156,8 +156,12 @@ fn pos_mgr_moon_lookup_permissions_sentry_notifications_password_and_links() {
     );
     assert_eq!(
         call_ws(&ctx, &mut ceo_sess, "posMgr", "RunMoonProcessCycleforTower", &[]).unwrap_err().code,
-        "UnimplementedRPC"
+        "MissingArgument"
     );
+    assert!(matches!(
+        call_ws(&ctx, &mut ceo_sess, "posMgr", "RunMoonProcessCycleforTower", &[PyRep::Integer(tower_id)]).unwrap(),
+        PyRep::List(_)
+    ));
     assert_eq!(
         call_ws(&ctx, &mut ceo_sess, "posMgr", "GetSiloCapacityByItemID", &[PyRep::Integer(999_999)])
             .unwrap()

@@ -129,7 +129,6 @@ const INTENTIONALLY_UNIMPLEMENTED_RPCS: &[&str] = &[
     "node_graph.qa_stop_node_graph",
     "node_graph.qa_subscribe",
     "node_graph.qa_unsubscribe",
-    "posMgr.RunMoonProcessCycleforTower",
 ];
 
 fn expectations_path() -> PathBuf {

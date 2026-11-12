@@ -52,6 +52,340 @@ fn check_starbase_auth(
     Ok(())
 }
 
+fn compute_starbase_consumption_factor(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+    tower_id: i64,
+) -> (f64, u32, u32) {
+    let char_rec = snap.characters.get(&char_id);
+    let fallback_sys = session
+        .solar_system_id
+        .or_else(|| char_rec.map(|c| c.solar_system_id))
+        .unwrap_or(0);
+    let fallback_corp = session
+        .corporation_id
+        .or_else(|| char_rec.map(|c| c.corporation_id))
+        .unwrap_or(0);
+    let (sys_id, owner_id, tower_type_id) = snap
+        .structures
+        .get(&tower_id)
+        .map(|s| (s.solar_system_id, s.owner_corp_id, s.type_id))
+        .or_else(|| {
+            snap.items
+                .get(&tower_id)
+                .map(|i| (i.location_id as u32, i.owner_id, i.type_id))
+        })
+        .unwrap_or((fallback_sys, fallback_corp, 12_235));
+    let tower_corp_id = if snap.corporations.contains_key(&owner_id) {
+        owner_id
+    } else {
+        snap.characters
+            .get(&owner_id)
+            .map(|c| c.corporation_id)
+            .unwrap_or(owner_id)
+    };
+    let tower_ally = snap
+        .corporations
+        .get(&tower_corp_id)
+        .and_then(|c| c.alliance_id);
+    let sov_ally = snap
+        .system_states
+        .get(&sys_id)
+        .and_then(|st| st.sov_alliance_id);
+    let has_fuel_table = ctx
+        .sde
+        .control_tower_resources_for_purpose(tower_type_id, 1)
+        .map(|rows| !rows.is_empty())
+        .unwrap_or(false)
+        || ctx.sde.types.contains_key(&tower_type_id);
+    let factor = match (has_fuel_table, sov_ally, tower_ally) {
+        (true, Some(s), Some(t)) if s == t && s > 0 => 0.75,
+        _ => 1.0,
+    };
+    (factor, sys_id, tower_type_id)
+}
+
+fn compute_silo_capacity(ctx: &ServerContext, snap: &WorldStateSnapshot, item_id: i64) -> f64 {
+    if let Some(it) = snap.items.get(&item_id) {
+        if let Some(&dyn_cap) = it.dynamic_attributes.get(&eve_sde::attr_ids::CAPACITY) {
+            if dyn_cap > 0.0 {
+                return dyn_cap;
+            }
+        }
+        let base_cap = ctx
+            .sde
+            .types
+            .get(&it.type_id)
+            .map(|t| t.capacity)
+            .filter(|&c| c > 0.0)
+            .unwrap_or(20_000.0);
+        let parent_tower_type = snap
+            .structures
+            .get(&it.location_id)
+            .map(|s| s.type_id)
+            .or_else(|| snap.items.get(&it.location_id).map(|p| p.type_id));
+        let bonus_pct = parent_tower_type
+            .and_then(|tid| ctx.sde.types.get(&tid))
+            .and_then(|t| t.default_attributes.get(&757).copied())
+            .unwrap_or(0.0);
+        return base_cap * (1.0 + (bonus_pct / 100.0).max(0.0));
+    }
+    if let Some(st) = snap.structures.get(&item_id) {
+        if let Some(cap) = ctx
+            .sde
+            .types
+            .get(&st.type_id)
+            .map(|t| t.capacity)
+            .filter(|&c| c > 0.0)
+        {
+            return cap;
+        }
+    }
+    20_000.0
+}
+
+fn perm_rep_to_flag(rep: &PyRep) -> Option<String> {
+    if let Some(s) = rep.as_str() {
+        return Some(s.to_string());
+    }
+    rep.as_i64().map(|v| match v {
+        2 => "alliance".to_string(),
+        3 => "starbase".to_string(),
+        _ => "corp".to_string(),
+    })
+}
+
+fn extract_deploy_flags_from_rep(rep: &PyRep) -> Option<(String, String, String, String)> {
+    match rep {
+        PyRep::Object { type_name, args } if type_name.ends_with("Row") => {
+            if let PyRep::Tuple(items) = args.as_ref() {
+                if let (Some(PyRep::List(cols)), Some(PyRep::List(vals))) =
+                    (items.first(), items.get(1))
+                {
+                    let mut map = HashMap::new();
+                    for (c, v) in cols.iter().zip(vals.iter()) {
+                        if let (Some(k), Some(f)) = (c.as_str(), perm_rep_to_flag(v)) {
+                            map.insert(k.to_string(), f);
+                        }
+                    }
+                    return Some((
+                        map.remove("anchor").unwrap_or_else(|| "corp".into()),
+                        map.remove("unanchor").unwrap_or_else(|| "corp".into()),
+                        map.remove("online").unwrap_or_else(|| "corp".into()),
+                        map.remove("offline").unwrap_or_else(|| "corp".into()),
+                    ));
+                }
+            }
+            None
+        }
+        PyRep::KeyVal(map) => Some((
+            map.get("anchor")
+                .and_then(perm_rep_to_flag)
+                .unwrap_or_else(|| "corp".into()),
+            map.get("unanchor")
+                .and_then(perm_rep_to_flag)
+                .unwrap_or_else(|| "corp".into()),
+            map.get("online")
+                .and_then(perm_rep_to_flag)
+                .unwrap_or_else(|| "corp".into()),
+            map.get("offline")
+                .and_then(perm_rep_to_flag)
+                .unwrap_or_else(|| "corp".into()),
+        )),
+        PyRep::Dict(entries) => {
+            let mut map = HashMap::new();
+            for (k, v) in entries {
+                if let (Some(ks), Some(f)) = (k.as_str(), perm_rep_to_flag(v)) {
+                    map.insert(ks.to_string(), f);
+                }
+            }
+            Some((
+                map.remove("anchor").unwrap_or_else(|| "corp".into()),
+                map.remove("unanchor").unwrap_or_else(|| "corp".into()),
+                map.remove("online").unwrap_or_else(|| "corp".into()),
+                map.remove("offline").unwrap_or_else(|| "corp".into()),
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn handle_run_moon_process_cycle_for_tower(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let rpc = RpcArgs::new(args, kwargs);
+    let tower_id = rpc.req_positive_i64(0, "towerID")?;
+    let harvest_amount_default = ctx
+        .sde
+        .types
+        .get(&16_221)
+        .and_then(|t| t.default_attributes.get(&726).copied())
+        .unwrap_or(100.0)
+        .max(1.0) as i32;
+
+    ctx.db.try_with_mut_snapshot(|snap| -> Result<PyRep, BridgeRpcError> {
+        check_starbase_auth(snap, session, char_id, tower_id)?;
+        let (factor, sys_id, raw_tower_type_id) =
+            compute_starbase_consumption_factor(ctx, snap, session, char_id, tower_id);
+        let tower_type_id = if ctx
+            .sde
+            .control_tower_resources_for_purpose(raw_tower_type_id, 1)
+            .map(|r| !r.is_empty())
+            .unwrap_or(false)
+        {
+            raw_tower_type_id
+        } else {
+            12_235
+        };
+        let (sys_sec, sys_faction) = ctx
+            .sde
+            .solar_systems
+            .get(&sys_id)
+            .map(|s| (s.security, s.faction_id))
+            .unwrap_or((0.0, None));
+        let fuel_reqs = ctx
+            .sde
+            .control_tower_hourly_fuel_requirements(tower_type_id, sys_sec, sys_faction, factor)
+            .unwrap_or_default();
+        let hourly_fuel_blocks: u32 = fuel_reqs
+            .iter()
+            .map(|(_, qty)| *qty)
+            .sum::<u32>()
+            .max(1);
+
+        // Deduct required resources from fuel items stored inside the tower when present.
+        for &(req_type_id, req_qty) in &fuel_reqs {
+            let mut rem = req_qty as i32;
+            let mut empty_ids = Vec::new();
+            for (&iid, item) in snap.items.iter_mut() {
+                if rem <= 0 {
+                    break;
+                }
+                if item.location_id == tower_id && item.type_id == req_type_id && item.quantity > 0
+                {
+                    let take = item.quantity.min(rem);
+                    item.quantity -= take;
+                    rem -= take;
+                    if item.quantity <= 0 {
+                        empty_ids.push(iid);
+                    }
+                }
+            }
+            for iid in empty_ids {
+                snap.items.remove(&iid);
+            }
+        }
+
+        let remaining_tower_fuel = if let Some(st) = snap.structures.get_mut(&tower_id) {
+            st.fuel_blocks = st.fuel_blocks.saturating_sub(hourly_fuel_blocks);
+            i64::from(st.fuel_blocks)
+        } else {
+            0
+        };
+
+        let tower_owner_id = snap
+            .structures
+            .get(&tower_id)
+            .map(|s| s.owner_corp_id)
+            .or_else(|| snap.items.get(&tower_id).map(|i| i.owner_id))
+            .unwrap_or(char_id);
+
+        let mut linked_silos = snap
+            .starbase_settings
+            .get(&tower_id)
+            .map(|s| s.linked_resources.clone())
+            .unwrap_or_default();
+        for (&iid, item) in &snap.items {
+            if item.location_id == tower_id
+                && item.type_id == 14_343
+                && snap.orbital_provision_types.contains_key(&iid)
+                && !linked_silos.contains(&iid)
+            {
+                linked_silos.push(iid);
+            }
+        }
+
+        let mut cycle_entries = Vec::with_capacity(linked_silos.len());
+        for silo_id in linked_silos {
+            let prov_type_id = snap
+                .orbital_provision_types
+                .get(&silo_id)
+                .copied()
+                .or_else(|| snap.orbital_provision_types.get(&tower_id).copied())
+                .unwrap_or(16_634) as u32;
+            let unit_vol = ctx
+                .sde
+                .types
+                .get(&prov_type_id)
+                .map(|t| t.volume)
+                .filter(|&v| v > 0.0)
+                .unwrap_or(1.0);
+            let silo_cap = compute_silo_capacity(ctx, snap, silo_id);
+            let max_units = (silo_cap / unit_vol).floor().max(0.0) as i32;
+
+            let existing_stack_id = snap
+                .items
+                .values()
+                .find(|it| it.location_id == silo_id && it.type_id == prov_type_id)
+                .map(|it| it.item_id);
+            let current_units: i32 = snap
+                .items
+                .values()
+                .filter(|it| it.location_id == silo_id)
+                .map(|it| it.quantity.max(0))
+                .sum();
+            let room_units = (max_units - current_units).max(0);
+            let added_units = harvest_amount_default.min(room_units);
+
+            let new_total_units = if added_units > 0 {
+                if let Some(stack_id) = existing_stack_id {
+                    let stack = snap.items.get_mut(&stack_id).expect("existing silo stack");
+                    stack.quantity += added_units;
+                    stack.quantity
+                } else {
+                    let new_id = snap.alloc_entity_id();
+                    snap.items.insert(
+                        new_id,
+                        eve_db::InventoryItemRecord {
+                            item_id: new_id,
+                            type_id: prov_type_id,
+                            owner_id: tower_owner_id,
+                            location_id: silo_id,
+                            flag: InventoryFlag::Unlocked,
+                            quantity: added_units,
+                            singleton: false,
+                            version: 1,
+                            ..Default::default()
+                        },
+                    );
+                    added_units
+                }
+            } else {
+                existing_stack_id
+                    .and_then(|id| snap.items.get(&id).map(|it| it.quantity))
+                    .unwrap_or(current_units)
+            };
+
+            cycle_entries.push(PyRep::Tuple(vec![
+                PyRep::Integer(silo_id),
+                PyRep::Integer(i64::from(prov_type_id)),
+                PyRep::Integer(i64::from(added_units)),
+                PyRep::Integer(i64::from(new_total_units)),
+                PyRep::Integer(i64::from(hourly_fuel_blocks)),
+                PyRep::Integer(remaining_tower_fuel),
+            ]));
+        }
+
+        Ok(PyRep::List(cycle_entries))
+    })
+}
+
 /// Creates a corporation or personal bill (office rent `bill_type_id = 2`, infrastructure `6`, alliance maintenance `5`).
 pub fn create_bill(
     ctx: &ServerContext,
@@ -311,8 +645,50 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let prov = ctx.db.with_snapshot(|snap| snap.orbital_provision_types.get(&item_id).copied());
-            Some(Ok(prov.map(PyRep::Integer).unwrap_or(PyRep::None)))
+            let rep = ctx.db.with_snapshot(|snap| {
+                if let Some(&prov) = snap.orbital_provision_types.get(&item_id) {
+                    return PyRep::Integer(prov);
+                }
+                if let Some(st) = snap.starbase_settings.get(&item_id) {
+                    if !st.linked_resources.is_empty() {
+                        let harvest_rate = ctx
+                            .sde
+                            .types
+                            .get(&16_221)
+                            .and_then(|t| t.default_attributes.get(&726).copied())
+                            .unwrap_or(100.0) as i64;
+                        let rows: Vec<PyRep> = st
+                            .linked_resources
+                            .iter()
+                            .map(|&silo_id| {
+                                let prov_type = snap
+                                    .orbital_provision_types
+                                    .get(&silo_id)
+                                    .copied()
+                                    .unwrap_or(16_634);
+                                let stored_qty: i64 = snap
+                                    .items
+                                    .values()
+                                    .filter(|it| it.location_id == silo_id)
+                                    .map(|it| i64::from(it.quantity.max(0)))
+                                    .sum();
+                                let cap = compute_silo_capacity(ctx, snap, silo_id) as i64;
+                                PyRep::Tuple(vec![
+                                    PyRep::Integer(silo_id),
+                                    PyRep::Integer(prov_type),
+                                    PyRep::Integer(harvest_rate),
+                                    PyRep::Integer(stored_qty),
+                                    PyRep::Integer(cap),
+                                    PyRep::Integer(40),
+                                ])
+                            })
+                            .collect();
+                        return PyRep::List(rows);
+                    }
+                }
+                PyRep::None
+            });
+            Some(Ok(rep))
         }
         ("posMgr", "SetSessionCheck") => {
             let (_, char_id) = match ServerContext::require_character(session) {
@@ -357,8 +733,6 @@ pub fn handle(
             Some(Ok(PyRep::None))
         }
 
-
-
         ("posMgr", "RelinquishStructureControl") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let rpc = RpcArgs::new(args, kwargs);
@@ -370,6 +744,17 @@ pub fn handle(
                 Ok(())
             });
             if let Err(e) = res { return Some(Err(e)); }
+            ctx.notify(
+                NotificationTarget::Character(char_id),
+                "OnTargetOBO",
+                "charid",
+                vec![
+                    PyRep::String("clear".into()),
+                    PyRep::Integer(item_id),
+                    PyRep::None,
+                    PyRep::None,
+                ],
+            );
             ctx.notify(NotificationTarget::Character(char_id), "OnRelinquishStructureControl", "charid", vec![PyRep::Integer(char_id), PyRep::Integer(item_id)]);
             Some(Ok(PyRep::None))
         }
@@ -410,10 +795,45 @@ pub fn handle(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let rpc = RpcArgs::new(args, kwargs);
             let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let flag_anchor = match rpc.opt_str(1, "anchor") { Ok(v) => v.unwrap_or("corp").to_string(), Err(e) => return Some(Err(e)) };
-            let flag_unanchor = match rpc.opt_str(2, "unanchor") { Ok(v) => v.unwrap_or("corp").to_string(), Err(e) => return Some(Err(e)) };
-            let flag_online = match rpc.opt_str(3, "online") { Ok(v) => v.unwrap_or("corp").to_string(), Err(e) => return Some(Err(e)) };
-            let flag_offline = match rpc.opt_str(4, "offline") { Ok(v) => v.unwrap_or("corp").to_string(), Err(e) => return Some(Err(e)) };
+            let (flag_anchor, flag_unanchor, flag_online, flag_offline) = if let Some(extracted) =
+                args.get(1).and_then(extract_deploy_flags_from_rep)
+            {
+                extracted
+            } else {
+                let fa = match rpc.opt_str(1, "anchor") {
+                    Ok(Some(v)) => v.to_string(),
+                    Ok(None) => "corp".to_string(),
+                    Err(e) => match args.get(1).and_then(perm_rep_to_flag) {
+                        Some(s) => s,
+                        None => return Some(Err(e)),
+                    },
+                };
+                let fu = match rpc.opt_str(2, "unanchor") {
+                    Ok(Some(v)) => v.to_string(),
+                    Ok(None) => "corp".to_string(),
+                    Err(e) => match args.get(2).and_then(perm_rep_to_flag) {
+                        Some(s) => s,
+                        None => return Some(Err(e)),
+                    },
+                };
+                let fon = match rpc.opt_str(3, "online") {
+                    Ok(Some(v)) => v.to_string(),
+                    Ok(None) => "corp".to_string(),
+                    Err(e) => match args.get(3).and_then(perm_rep_to_flag) {
+                        Some(s) => s,
+                        None => return Some(Err(e)),
+                    },
+                };
+                let foff = match rpc.opt_str(4, "offline") {
+                    Ok(Some(v)) => v.to_string(),
+                    Ok(None) => "corp".to_string(),
+                    Err(e) => match args.get(4).and_then(perm_rep_to_flag) {
+                        Some(s) => s,
+                        None => return Some(Err(e)),
+                    },
+                };
+                (fa, fu, fon, foff)
+            };
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
                 check_starbase_auth(snap, session, char_id, item_id)?;
                 let entry = snap.starbase_settings.entry(item_id).or_default();
@@ -527,14 +947,22 @@ pub fn handle(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let rpc = RpcArgs::new(args, kwargs);
             let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let password = match rpc.req_str(1, "password") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let new_password: Option<String> = match args.get(1) {
+                Some(PyRep::Bool(false) | PyRep::Integer(0) | PyRep::None) => None,
+                _ => match rpc.req_str(1, "password") {
+                    Ok(v) => Some(v.to_string()),
+                    Err(e) => return Some(Err(e)),
+                },
+            };
             let allow_corp = match rpc.opt_bool(2, "allowCorp") { Ok(v) => v.unwrap_or(true), Err(e) => return Some(Err(e)) };
             let allow_alliance = match rpc.opt_bool(3, "allowAlliance") { Ok(v) => v.unwrap_or(true), Err(e) => return Some(Err(e)) };
 
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
                 check_starbase_auth(snap, session, char_id, item_id)?;
                 let st = snap.starbase_settings.entry(item_id).or_default();
-                st.password = Some(password.to_string());
+                if let Some(pw) = new_password {
+                    st.password = Some(pw);
+                }
                 st.allow_corporation_members = allow_corp;
                 st.allow_alliance_members = allow_alliance;
                 Ok(())
@@ -547,24 +975,7 @@ pub fn handle(
             let rpc = RpcArgs::new(args, kwargs);
             let tower_id = match rpc.req_positive_i64(0, "towerID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let factor = ctx.db.with_snapshot(|snap| {
-                let char_rec = snap.characters.get(&char_id);
-                let fallback_sys = session.solar_system_id.or_else(|| char_rec.map(|c| c.solar_system_id)).unwrap_or(0);
-                let fallback_corp = session.corporation_id.or_else(|| char_rec.map(|c| c.corporation_id)).unwrap_or(0);
-                let (sys_id, owner_id) = snap.structures.get(&tower_id)
-                    .map(|s| (s.solar_system_id, s.owner_corp_id))
-                    .or_else(|| snap.items.get(&tower_id).map(|i| (i.location_id as u32, i.owner_id)))
-                    .unwrap_or((fallback_sys, fallback_corp));
-                let tower_corp_id = if snap.corporations.contains_key(&owner_id) {
-                    owner_id
-                } else {
-                    snap.characters.get(&owner_id).map(|c| c.corporation_id).unwrap_or(owner_id)
-                };
-                let tower_ally = snap.corporations.get(&tower_corp_id).and_then(|c| c.alliance_id);
-                let sov_ally = snap.system_states.get(&sys_id).and_then(|st| st.sov_alliance_id);
-                match (sov_ally, tower_ally) {
-                    (Some(s), Some(t)) if s == t && s > 0 => 0.75,
-                    _ => 1.0,
-                }
+                compute_starbase_consumption_factor(ctx, snap, session, char_id, tower_id).0
             });
             Some(Ok(PyRep::Real(factor)))
         }
@@ -573,9 +984,7 @@ pub fn handle(
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let rpc = RpcArgs::new(args, kwargs);
             let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let cap = ctx.db.with_snapshot(|snap| {
-                snap.items.get(&item_id).and_then(|it| ctx.sde.types.get(&it.type_id)).map(|t| t.capacity).unwrap_or(20_000.0)
-            });
+            let cap = ctx.db.with_snapshot(|snap| compute_silo_capacity(ctx, snap, item_id));
             Some(Ok(PyRep::Real(cap)))
         }
 
@@ -610,12 +1019,9 @@ pub fn handle(
             Some(res.map(|()| PyRep::None))
         }
 
-        // Legacy POS moon mining was superseded by Upwell Refineries in Lifeblood (V24.01);
-        // intentionally returns UnimplementedRPC (`INTENTIONALLY_UNIMPLEMENTED_RPCS`).
-        ("posMgr", "RunMoonProcessCycleforTower") => Some(Err(BridgeRpcError {
-            code: "UnimplementedRPC".into(),
-            message: "posMgr.RunMoonProcessCycleforTower is not implemented".into(),
-        })),
+        ("posMgr", "RunMoonProcessCycleforTower") => {
+            Some(handle_run_moon_process_cycle_for_tower(ctx, session, args, kwargs))
+        }
 
         ("posMgr", "ChangeStructureProvisionType") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };

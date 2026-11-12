@@ -597,7 +597,7 @@ fn pos_mgr_all_arms_bill_mgr_autopay_count_give_cash_contact_cost_and_telemetry_
     );
     assert_eq!(
         handle(&ctx, &mut ceo_sess, "posMgr", "RunMoonProcessCycleforTower", &[], &kw).unwrap().unwrap_err().code,
-        "UnimplementedRPC"
+        "MissingArgument"
     );
     assert_eq!(
         handle(&ctx, &mut ceo_sess, "posMgr", "LinkResourceForTower", &[PyRep::Integer(tower_id), PyRep::Integer(moon_item_id)], &kw).unwrap().unwrap_err().code,
@@ -605,6 +605,8 @@ fn pos_mgr_all_arms_bill_mgr_autopay_count_give_cash_contact_cost_and_telemetry_
     );
     handle(&ctx, &mut ceo_sess, "posMgr", "LinkResourceForTower", &[PyRep::Integer(tower_id), PyRep::List(vec![PyRep::Integer(silo_id)])], &kw).unwrap().unwrap();
     ctx.db.with_snapshot(|snap| assert!(snap.starbase_settings[&tower_id].linked_resources.contains(&silo_id)));
+    let cycle_rep = handle(&ctx, &mut ceo_sess, "posMgr", "RunMoonProcessCycleforTower", &[PyRep::Integer(tower_id)], &kw).unwrap().unwrap();
+    assert!(matches!(cycle_rep, PyRep::List(ref rows) if rows.len() == 1));
 
     // posMgr.UnanchorOrbital error gates + distance + RoleNotAuthorized + cargo move vs hangar move
     assert_eq!(

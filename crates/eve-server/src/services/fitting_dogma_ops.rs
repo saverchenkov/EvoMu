@@ -47,7 +47,13 @@ pub(crate) async fn handle_dogma_ops(
                 }));
             }
 
+            let is_assumed_structure = ctx.db.with_snapshot(|s| {
+                s.starbase_settings
+                    .get(&source_id)
+                    .is_some_and(|st| st.active_controller_id == Some(char_id))
+            });
             let is_authorized = session.ship_id == Some(source_id)
+                || is_assumed_structure
                 || ctx.db.with_snapshot(|s| s.items.get(&source_id).is_some_and(|it| it.owner_id == char_id))
                 || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
                     rt.active_drones_in_space.values().any(|d| {
@@ -263,6 +269,20 @@ pub(crate) async fn handle_dogma_ops(
                 );
             }
 
+            if is_assumed_structure {
+                ctx.notify(
+                    NotificationTarget::Character(char_id),
+                    "OnTargetOBO",
+                    "charid",
+                    vec![
+                        PyRep::String("add".into()),
+                        PyRep::Integer(source_id),
+                        PyRep::Integer(target_id),
+                        PyRep::None,
+                    ],
+                );
+            }
+
             Some(Ok(PyRep::Tuple(vec![
                 PyRep::Integer(1),
                 PyRep::List(Vec::new()),
@@ -322,7 +342,13 @@ pub(crate) async fn handle_dogma_ops(
                 Err(e) => return Some(Err(e)),
             };
 
+            let is_assumed_structure = ctx.db.with_snapshot(|s| {
+                s.starbase_settings
+                    .get(&source_id)
+                    .is_some_and(|st| st.active_controller_id == Some(char_id))
+            });
             let is_authorized = session.ship_id == Some(source_id)
+                || is_assumed_structure
                 || ctx.db.with_snapshot(|s| s.items.get(&source_id).is_some_and(|it| it.owner_id == char_id))
                 || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
                     rt.active_drones_in_space.values().any(|d| {
@@ -343,6 +369,19 @@ pub(crate) async fn handle_dogma_ops(
                 let _ = sys.remove_target_lock(source_id, target_id).await;
             }
             crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, source_id, Some(target_id));
+            if is_assumed_structure {
+                ctx.notify(
+                    NotificationTarget::Character(char_id),
+                    "OnTargetOBO",
+                    "charid",
+                    vec![
+                        PyRep::String("lost".into()),
+                        PyRep::Integer(source_id),
+                        PyRep::Integer(target_id),
+                        PyRep::String("unlocked".into()),
+                    ],
+                );
+            }
             ctx.notify(
                 NotificationTarget::Character(char_id),
                 "OnTarget",

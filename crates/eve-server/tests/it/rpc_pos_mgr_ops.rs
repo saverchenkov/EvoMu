@@ -361,6 +361,17 @@ async fn test_pos_mgr_control_and_permissions() {
         &[PyRep::Integer(tower_id), PyRep::Bool(true), PyRep::Bool(true)],
     ).await.expect_err("Member without director/operator role must fail");
     assert_eq!(role_err.code, "RoleNotAuthorized");
+
+    eve_testkit::attest(&[
+        "rpc:posMgr.AssumeStructureControl",
+        "rpc:posMgr.RelinquishStructureControl",
+        "rpc:posMgr.GetStarbasePermissions",
+        "rpc:posMgr.SetStarbasePermissions",
+        "rpc:posMgr.GetTowerNotificationSettings",
+        "rpc:posMgr.SetTowerNotifications",
+        "rpc:posMgr.GetTowerSentrySettings",
+        "rpc:posMgr.SetTowerSentrySettings",
+    ]);
 }
 
 #[tokio::test]
@@ -482,19 +493,7 @@ async fn test_pos_mgr_moon_silo_and_orbital() {
     });
     assert!(has_linked, "LinkResourceForTower must persist linkages in starbase_settings");
 
-    // 5. posMgr.RunMoonProcessCycleforTower returns UnimplementedRPC
-    let cycle_res = rpc(
-        &ctx,
-        &mut sess,
-        "posMgr",
-        "RunMoonProcessCycleforTower",
-        &[PyRep::Integer(tower_id)],
-    )
-    .await
-    .expect_err("posMgr.RunMoonProcessCycleforTower must return UnimplementedRPC");
-    assert_eq!(cycle_res.code, "UnimplementedRPC");
-
-    // 6. posMgr.ChangeStructureProvisionType
+    // 5. posMgr.ChangeStructureProvisionType
     let prov_res = rpc(
         &ctx,
         &mut sess,
@@ -514,6 +513,31 @@ async fn test_pos_mgr_moon_silo_and_orbital() {
         snap.orbital_provision_types.get(&silo_id).copied()
     });
     assert_eq!(prov_type, Some(16634), "ChangeStructureProvisionType must update orbital_provision_types");
+
+    // 6. posMgr.RunMoonProcessCycleforTower executes a real starbase harvesting & fuel cycle
+    let cycle_res = rpc(
+        &ctx,
+        &mut sess,
+        "posMgr",
+        "RunMoonProcessCycleforTower",
+        &[PyRep::Integer(tower_id)],
+    )
+    .await
+    .expect("posMgr.RunMoonProcessCycleforTower");
+    assert!(matches!(&cycle_res, PyRep::List(entries) if entries.len() == 1));
+    let (remaining_fuel, harvested_qty) = ctx.db.with_snapshot(|snap| {
+        let fuel = snap.structures.get(&tower_id).map(|s| s.fuel_blocks).unwrap_or(0);
+        let qty: i32 = snap
+            .items
+            .values()
+            .filter(|it| it.location_id == silo_id && it.type_id == 16634)
+            .map(|it| it.quantity)
+            .sum();
+        (fuel, qty)
+    });
+    // Amarr Control Tower (12235) base fuel is 40/hr; with 0.75 sov discount -> 30 consumed (100 - 30 = 70).
+    assert_eq!(remaining_fuel, 70);
+    assert_eq!(harvested_qty, 100);
 
     // 7. posMgr.UnanchorOrbital
     // Seed anchored Customs Office orbital in low-sec space
@@ -573,4 +597,249 @@ async fn test_pos_mgr_moon_silo_and_orbital() {
     .await
     .expect_err("Unanchoring missing orbital must fail");
     assert_eq!(missing_err.code, "OrbitalNotFound");
+
+    eve_testkit::attest(&[
+        "rpc:posMgr.SetTowerPassword",
+        "rpc:posMgr.GetConsumptionFactor",
+        "rpc:posMgr.GetSiloCapacityByItemID",
+        "rpc:posMgr.LinkResourceForTower",
+        "rpc:posMgr.ChangeStructureProvisionType",
+        "rpc:posMgr.UnanchorOrbital",
+    ]);
+}
+
+#[tokio::test]
+async fn test_pos_mgr_towers_moon_cycle_and_target_obo() {
+    // parity: rpc:posMgr.GetControlTowers, rpc:posMgr.GetMoonForTower, notify:OnTargetOBO, feat:removed.pos-towers
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let mut sess = setup_pilot(&ctx, 504, "demo", "demo-secret", PILOT1).await;
+    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    sess.solar_system_id = Some(SYS_LOWSEC);
+
+    let tower_id = 140_000_401_i64;
+    let silo_id = 140_000_402_i64;
+    let fuel_item_id = 140_000_403_i64;
+    let target_ship_id = 140_000_404_i64;
+
+    seed_test_structure(&ctx, tower_id, 12235, 1_000_170, SYS_LOWSEC, "Amarr Starbase Tower", "Online");
+    // Seed 200 Helium Fuel Blocks (4247) inside the tower and an anchored Silo (14343)
+    seed_test_item(&ctx, fuel_item_id, 4247, 1_000_170, tower_id, InventoryFlag::Unlocked, 200);
+    seed_test_item(&ctx, silo_id, 14343, 1_000_170, tower_id, InventoryFlag::Unlocked, 1);
+
+    // 1. posMgr.GetControlTowers
+    let towers_res = rpc(&ctx, &mut sess, "posMgr", "GetControlTowers", &[])
+        .await
+        .expect("posMgr.GetControlTowers");
+    if let PyRep::List(towers) = &towers_res {
+        assert_eq!(towers.len(), 1);
+        assert_eq!(towers[0].dict_get("structureID"), Some(&PyRep::Integer(tower_id)));
+        assert_eq!(towers[0].dict_get("typeID"), Some(&PyRep::Integer(12235)));
+        assert_eq!(towers[0].dict_get("solarSystemID"), Some(&PyRep::Integer(i64::from(SYS_LOWSEC))));
+        assert_eq!(towers[0].dict_get("state"), Some(&PyRep::String("Online".into())));
+    } else {
+        panic!("Expected PyRep::List from GetControlTowers, got {towers_res:?}");
+    }
+
+    // 2. posMgr.GetMoonForTower
+    let moon_res = rpc(
+        &ctx,
+        &mut sess,
+        "posMgr",
+        "GetMoonForTower",
+        &[PyRep::Integer(tower_id)],
+    )
+    .await
+    .expect("posMgr.GetMoonForTower");
+    let moon_id = moon_res.as_i64().expect("GetMoonForTower must return integer moon ID");
+    assert!(
+        (40_000_000..=49_999_999).contains(&moon_id),
+        "GetMoonForTower must resolve a valid celestial moon ID, got {moon_id}"
+    );
+
+    // 3. Link silo, configure moon material (16635 Evaporite Deposits), query process info, and run cycle
+    rpc(
+        &ctx,
+        &mut sess,
+        "posMgr",
+        "ChangeStructureProvisionType",
+        &[
+            PyRep::Integer(tower_id),
+            PyRep::Integer(silo_id),
+            PyRep::Integer(16635),
+        ],
+    )
+    .await
+    .expect("ChangeStructureProvisionType");
+    rpc(
+        &ctx,
+        &mut sess,
+        "posMgr",
+        "LinkResourceForTower",
+        &[
+            PyRep::Integer(tower_id),
+            PyRep::List(vec![PyRep::Integer(silo_id)]),
+        ],
+    )
+    .await
+    .expect("LinkResourceForTower");
+
+    let tower_proc_info = rpc(
+        &ctx,
+        &mut sess,
+        "posMgr",
+        "GetMoonProcessInfoForTower",
+        &[PyRep::Integer(tower_id)],
+    )
+    .await
+    .expect("GetMoonProcessInfoForTower(tower_id)");
+    assert!(
+        matches!(&tower_proc_info, PyRep::List(rows) if rows.len() == 1),
+        "GetMoonProcessInfoForTower on a tower with linked resources must return cycle summary list, got {tower_proc_info:?}"
+    );
+
+    let cycle_res = rpc(
+        &ctx,
+        &mut sess,
+        "posMgr",
+        "RunMoonProcessCycleforTower",
+        &[PyRep::Integer(tower_id)],
+    )
+    .await
+    .expect("RunMoonProcessCycleforTower");
+    if let PyRep::List(rows) = &cycle_res {
+        assert_eq!(rows.len(), 1);
+        if let PyRep::Tuple(cols) = &rows[0] {
+            assert_eq!(cols[0], PyRep::Integer(silo_id));
+            assert_eq!(cols[1], PyRep::Integer(16635));
+            assert_eq!(cols[2], PyRep::Integer(100)); // harvested
+            assert_eq!(cols[3], PyRep::Integer(100)); // total in silo
+            assert_eq!(cols[4], PyRep::Integer(40));  // 40 Helium Fuel Blocks consumed
+            assert_eq!(cols[5], PyRep::Integer(60));  // 100 - 40 = 60 remaining on structure record
+        } else {
+            panic!("Expected 6-tuple in RunMoonProcessCycleforTower entry");
+        }
+    } else {
+        panic!("Expected PyRep::List from RunMoonProcessCycleforTower");
+    }
+
+    let fuel_item_remaining = ctx
+        .db
+        .with_snapshot(|snap| snap.items.get(&fuel_item_id).map(|it| it.quantity));
+    assert_eq!(fuel_item_remaining, Some(160), "200 - 40 Helium Fuel Blocks must leave 160 in tower fuel bay");
+
+    // 4. Assume structure control and lock/unlock target on behalf of tower (`notify:OnTargetOBO`)
+    let sys = ctx.systems.get_or_spawn(SYS_LOWSEC);
+    let _ = sys
+        .spawn_ball(eve_destiny::Ball {
+            id: tower_id,
+            type_id: 12235,
+            position: glam::DVec3::new(0.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 100_000_000.0,
+            radius: 2_000.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+    let _ = sys
+        .spawn_ball(eve_destiny::Ball {
+            id: target_ship_id,
+            type_id: 587,
+            position: glam::DVec3::new(5_000.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 2.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+
+    let _ = ctx.drain_notifications_for_char(PILOT1);
+    rpc(
+        &ctx,
+        &mut sess,
+        "posMgr",
+        "AssumeStructureControl",
+        &[PyRep::Integer(tower_id)],
+    )
+    .await
+    .expect("AssumeStructureControl");
+
+    rpc(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "AddTargetOBO",
+        &[PyRep::Integer(tower_id), PyRep::Integer(target_ship_id)],
+    )
+    .await
+    .expect("dogmaIM.AddTargetOBO");
+
+    rpc(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "RemoveTargetOBO",
+        &[PyRep::Integer(tower_id), PyRep::Integer(target_ship_id)],
+    )
+    .await
+    .expect("dogmaIM.RemoveTargetOBO");
+
+    rpc(
+        &ctx,
+        &mut sess,
+        "posMgr",
+        "RelinquishStructureControl",
+        &[PyRep::Integer(tower_id)],
+    )
+    .await
+    .expect("RelinquishStructureControl");
+
+    let obo_notifs: Vec<Vec<PyRep>> = ctx
+        .drain_notifications_for_char(PILOT1)
+        .into_iter()
+        .filter(|n| n.event == "OnTargetOBO")
+        .map(|n| n.args)
+        .collect();
+    assert_eq!(obo_notifs.len(), 3, "Expected add, lost, and clear OnTargetOBO notifications");
+    assert_eq!(
+        obo_notifs[0],
+        vec![
+            PyRep::String("add".into()),
+            PyRep::Integer(tower_id),
+            PyRep::Integer(target_ship_id),
+            PyRep::None,
+        ]
+    );
+    assert_eq!(
+        obo_notifs[1],
+        vec![
+            PyRep::String("lost".into()),
+            PyRep::Integer(tower_id),
+            PyRep::Integer(target_ship_id),
+            PyRep::String("unlocked".into()),
+        ]
+    );
+    assert_eq!(
+        obo_notifs[2],
+        vec![
+            PyRep::String("clear".into()),
+            PyRep::Integer(tower_id),
+            PyRep::None,
+            PyRep::None,
+        ]
+    );
+
+    eve_testkit::attest(&[
+        "rpc:posMgr.GetControlTowers",
+        "rpc:posMgr.GetMoonForTower",
+        "notify:OnTargetOBO",
+        "feat:removed.pos-towers",
+    ]);
 }
