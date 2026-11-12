@@ -1137,3 +1137,280 @@ async fn death_pipeline_escape_bay_pod_implants_insurance_kill_rights_and_struct
         .unwrap()
         .is_none());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn b3_destruction_pipeline_idempotency_unpiloted_hull_kills_and_sqlite_reload() {
+    use crate::router::SessionState;
+    use eve_proto::PyRep;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("b3_destruction.sqlite");
+    let sde = {
+        let base_ctx = test_ctx();
+        Arc::clone(&base_ctx.sde)
+    };
+    let repo = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("open sqlite"));
+    let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), repo)
+        .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
+    ctx.set_clock(Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(
+        1_800_500_000,
+    )));
+
+    let sys_id = 30_000_142_u32;
+    let victim = 90_000_001_i64;
+    let attacker = 90_000_002_i64;
+    let now = ctx.now_unix();
+
+    // 1. Idempotent death transaction + no module resurrection (`#918` AC 1 & AC 4, `#858`):
+    //    Two destroy requests for one ship produce 1 wreck, 1 capsule, 1 killmail, 1 insurance payout,
+    //    and a stale cached module in `ctx.ship_fittings` that was removed from `snap.items` is never resurrected.
+    let dup_ship = 300_100_001_i64;
+    let ghost_mod = 300_100_002_i64;
+    let real_cargo = 300_100_003_i64;
+    spawn_ship(
+        &ctx,
+        sys_id,
+        dup_ship,
+        victim,
+        587,
+        DVec3::new(1_000.0, 0.0, 0.0),
+        400_000.0,
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            real_cargo,
+            make_item(real_cargo, 34, victim, dup_ship, InventoryFlag::Cargo, 50, 0.0),
+        );
+    });
+    {
+        let mut guard = ctx.ship_fittings.write().unwrap();
+        let mut fit = eve_dogma::ShipFittingEngine::from_sde(dup_ship, 587, &ctx.sde);
+        fit.modules.insert(
+            ghost_mod,
+            eve_dogma::FittedModule {
+                item_id: ghost_mod,
+                type_id: 2048,
+                flag_id: 11,
+                state: eve_dogma::ModuleState::Online,
+                damage_hp: 0.0,
+                max_hp: 40.0,
+                charge_type_id: None,
+                charge_quantity: 0,
+                dynamic_attribute_overrides: HashMap::new(),
+            },
+        );
+        guard.insert(dup_ship, fit);
+    }
+    let bal_before = ctx.db.with_snapshot(|s| s.characters[&victim].balance);
+    let km_count_before = ctx.db.with_snapshot(|s| s.killmails.len());
+
+    let first_kill = on_ball_destroyed_sync(
+        &ctx,
+        sys_id,
+        dup_ship,
+        Some(attacker),
+        DVec3::new(1_000.0, 0.0, 0.0),
+    )
+    .expect("first destroy succeeds")
+    .expect("ship death result");
+    let first_cap_id = first_kill.ejected_capsule_id.expect("piloted ship ejects capsule");
+    assert_eq!(first_kill.insurance_payout_isk, 400_000.0);
+    assert!(!first_kill.loot_dropped_item_ids.contains(&ghost_mod));
+    assert!(!first_kill.loot_destroyed_item_ids.contains(&ghost_mod));
+
+    // Second destroy request for the same ship must fail without creating a second wreck/killmail/payout
+    let second_kill = execute_death_pipeline_sync(
+        &ctx,
+        sys_id,
+        victim,
+        dup_ship,
+        attacker,
+        DVec3::new(1_000.0, 0.0, 0.0),
+        now,
+    );
+    assert!(second_kill.is_err(), "duplicate destroy must return Err");
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&dup_ship));
+        assert!(!snap.items.contains_key(&ghost_mod));
+        assert_eq!(snap.characters[&victim].active_ship_id, first_cap_id);
+        assert_eq!(
+            snap.characters[&victim].balance,
+            bal_before
+                .checked_add(IskCents::from_f64_isk(400_000.0))
+                .unwrap()
+        );
+        assert_eq!(snap.killmails.len(), km_count_before + 1);
+    });
+
+    // Reload from SQLite (`#918` AC 4): destroyed ship is absent, and exactly one wreck and killmail exist
+    {
+        let reloaded = eve_db::WorldRepository::open_sqlite(&db_path).expect("reload sqlite");
+        reloaded.with_snapshot(|snap| {
+            assert!(!snap.items.contains_key(&dup_ship));
+            assert!(!snap.item_positions.contains_key(&dup_ship));
+            assert!(snap.items.contains_key(&first_kill.wreck_item_id));
+            assert!(snap.killmails.contains_key(&first_kill.killmail_id));
+            assert_eq!(snap.killmails.len(), km_count_before + 1);
+        });
+    }
+
+    // 2. Eject at low hull + unpiloted ship destruction (`#918` AC 2 & AC 3, `#835`, `T-3`):
+    //    Board a ship in space, eject via `ship.Eject`, verify `snap.item_positions` has the abandoned hull's
+    //    position immediately, restart from SQLite, verify actor boot restores the unpiloted hull ball and
+    //    `ship.Board` re-boards it, then eject again and destroy the unpiloted hull across all 3 combat paths!
+    let eject_ship = 300_200_001_i64;
+    let eject_cargo = 300_200_002_i64;
+    let eject_pos = DVec3::new(5_000.0, 2_000.0, -1_000.0);
+    spawn_ship(&ctx, sys_id, eject_ship, victim, 587, eject_pos, 250_000.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            eject_cargo,
+            make_item(eject_cargo, 34, victim, eject_ship, InventoryFlag::Cargo, 100, 0.0),
+        );
+    });
+
+    let mut sess = SessionState::new(701);
+    sess.user_id = Some(1);
+    sess.character_id = Some(victim);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(eject_ship);
+
+    let kw = HashMap::new();
+    let eject_resp = ctx
+        .dispatch_rpc(&mut sess, "ship", None, "Eject", &[], &kw, None)
+        .await
+        .expect("ship.Eject succeeds");
+    let ejected_pod_id = match eject_resp {
+        PyRep::Integer(cid) => cid,
+        other => panic!("expected capsule id from ship.Eject, got {other:?}"),
+    };
+    assert_ne!(ejected_pod_id, eject_ship);
+    assert_eq!(sess.ship_id, Some(ejected_pod_id));
+
+    // Verify `T-3`: `snap.item_positions` persisted both `eject_ship` and `ejected_pod_id` inside the eject transaction
+    let saved_hull_pos = ctx
+        .db
+        .with_snapshot(|s| s.item_positions.get(&eject_ship).copied())
+        .expect("abandoned hull position saved in snap.item_positions");
+    assert_eq!(DVec3::from_array(saved_hull_pos), eject_pos);
+
+    // Simulate server restart from SQLite and verify actor boot restores the abandoned hull and allows `ship.Board` (`#918` AC 3)
+    let restarted_repo =
+        Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("reopen sqlite"));
+    let restarted_ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), restarted_repo)
+        .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
+    let restarted_sys = restarted_ctx.systems.get_or_spawn(sys_id);
+    let restored_hull_ball = restarted_sys
+        .get_ball_snapshot(eject_ship)
+        .await
+        .expect("query ball")
+        .expect("abandoned hull restored on actor boot");
+    assert_eq!(restored_hull_ball.1.type_id, 587);
+    assert_eq!(restored_hull_ball.1.position, eject_pos);
+
+    let mut restarted_sess = SessionState::new(702);
+    restarted_sess.user_id = Some(1);
+    restarted_sess.character_id = Some(victim);
+    restarted_sess.solar_system_id = Some(sys_id);
+    restarted_sess.ship_id = Some(ejected_pod_id);
+
+    restarted_ctx
+        .dispatch_rpc(
+            &mut restarted_sess,
+            "ship",
+            None,
+            "Board",
+            &[PyRep::Integer(eject_ship)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("ship.Board on restored abandoned hull after restart succeeds");
+    assert_eq!(restarted_sess.ship_id, Some(eject_ship));
+
+    // Eject again on `restarted_ctx` so `eject_ship` is unpiloted in space, then destroy it via `on_ball_destroyed`
+    let _ = restarted_ctx
+        .dispatch_rpc(&mut restarted_sess, "ship", None, "Eject", &[], &kw, None)
+        .await
+        .expect("second ship.Eject succeeds");
+    let pod_after_second_eject = restarted_sess.ship_id.expect("pod id");
+    assert_ne!(pod_after_second_eject, eject_ship);
+
+    let unpiloted_kill = on_ball_destroyed(&restarted_ctx, sys_id, eject_ship, Some(attacker), eject_pos)
+        .await
+        .expect("unpiloted hull kill succeeds")
+        .expect("unpiloted hull produces DeathPipelineResult");
+    assert_eq!(
+        unpiloted_kill.ejected_capsule_id, None,
+        "unpiloted hull kill must NOT spawn a capsule"
+    );
+    assert!(unpiloted_kill.wreck_item_id > 0);
+    assert!(unpiloted_kill.killmail_id > 0);
+    assert_eq!(unpiloted_kill.insurance_payout_isk, 250_000.0);
+    restarted_ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&eject_ship));
+        assert_eq!(
+            snap.characters[&victim].active_ship_id, pod_after_second_eject,
+            "owner active_ship_id must remain their existing pod"
+        );
+        assert_eq!(
+            snap.killmails[&unpiloted_kill.killmail_id].victim_character_id,
+            victim
+        );
+    });
+
+    // Also verify missile/AoE (`handle_destroyed_ball_from_missile_or_aoe`) and NPC AI (`handle_npc_ai_ball_destructions`)
+    // on unpiloted ships produce wrecks & killmails without transitioning the owner!
+    let unpiloted_missile_ship = 300_200_010_i64;
+    let unpiloted_npc_ship = 300_200_011_i64;
+    restarted_ctx.db.with_mut_snapshot(|snap| {
+        for sid in [unpiloted_missile_ship, unpiloted_npc_ship] {
+            snap.items.insert(
+                sid,
+                make_item(sid, 587, victim, sys_id as i64, InventoryFlag::None, 1, 0.0),
+            );
+            snap.item_positions.insert(sid, [eject_pos.x, eject_pos.y, eject_pos.z]);
+        }
+    });
+    let kms_before = restarted_ctx.db.with_snapshot(|s| s.killmails.len());
+    crate::services::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(
+        &restarted_ctx,
+        sys_id,
+        attacker,
+        unpiloted_missile_ship,
+        587,
+        eject_pos,
+        now,
+    )
+    .await;
+    crate::combat::npc_ai::handle_npc_ai_ball_destructions(
+        &restarted_ctx,
+        sys_id,
+        vec![(
+            1_895_000_001,
+            unpiloted_npc_ship,
+            Ball {
+                id: unpiloted_npc_ship,
+                type_id: 587,
+                position: eject_pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 2.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+        )],
+    );
+    restarted_ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&unpiloted_missile_ship));
+        assert!(!snap.items.contains_key(&unpiloted_npc_ship));
+        assert_eq!(snap.killmails.len(), kms_before + 2);
+        assert_eq!(
+            snap.characters[&victim].active_ship_id,
+            pod_after_second_eject
+        );
+    });
+}

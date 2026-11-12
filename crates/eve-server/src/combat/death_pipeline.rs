@@ -320,63 +320,48 @@ pub fn execute_death_pipeline_sync_inner(
     rng_seed: u64,
     is_self_destruct: bool,
 ) -> Result<DeathPipelineResult, String> {
-    let (victim_ship_type_id, base_price, insured_payout) = ctx.db.with_snapshot(|snap| {
-        let ship = snap
-            .items
-            .get(&victim_ship_id)
-            .ok_or_else(|| format!("Ship {victim_ship_id} not found in world repository"))?;
-        let cat_id = ctx
-            .sde
-            .types
-            .get(&ship.type_id)
-            .map(|t| t.category_id)
-            .unwrap_or(6);
-        if cat_id != 6 {
-            return Err(format!(
-                "Item {victim_ship_id} (type {}, category {cat_id}) is not a ship",
-                ship.type_id
-            ));
-        }
-        let base = ctx
-            .sde
-            .types
-            .get(&ship.type_id)
-            .map(|t| t.base_price)
-            .unwrap_or(230_000.0);
-        Ok::<_, String>((ship.type_id, base, ship.insured_payout_isk))
-    })?;
-
-    let _ = crate::services::notify_emitters_space_dungeons::flush_ship_all_ewar_sync(
-        ctx,
-        victim_char_id,
-        Some(sys_id),
-        victim_ship_id,
-    );
-
-    crate::services::fleet_social::fleet_social_finder_tactical::clear_destroyed_target_tag(
-        ctx,
-        victim_ship_id,
-    );
-    let fitted_mods: Vec<(i64, u32, u16)> = ctx
-        .ship_fittings
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&victim_ship_id)
-        .map(|f| {
-            f.modules
-                .values()
-                .map(|m| (m.item_id, m.type_id, m.flag_id))
-                .collect()
-        })
-        .unwrap_or_default();
-    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(
-        ctx,
-        victim_char_id,
-        victim_ship_id,
-        sys_id,
-    );
-    crate::services::inventory_fitting::fitting_cyno_portal::on_cyno_ship_destroyed(ctx, victim_ship_id);
-    crate::services::doomsday_aoe_ops::cancel_aoe_superweapon_cycles_for_ship(ctx, victim_ship_id);
+    let (victim_ship_type_id, base_price, insured_payout, victim_char_id) =
+        ctx.db.with_snapshot(|snap| {
+            let ship = snap
+                .items
+                .get(&victim_ship_id)
+                .ok_or_else(|| format!("Ship {victim_ship_id} not found in world repository"))?;
+            let cat_id = ctx
+                .sde
+                .types
+                .get(&ship.type_id)
+                .map(|t| t.category_id)
+                .unwrap_or(6);
+            if cat_id != 6 {
+                return Err(format!(
+                    "Item {victim_ship_id} (type {}, category {cat_id}) is not a ship",
+                    ship.type_id
+                ));
+            }
+            let base = ctx
+                .sde
+                .types
+                .get(&ship.type_id)
+                .map(|t| t.base_price)
+                .unwrap_or(230_000.0);
+            let resolved_vic = if victim_char_id > 0 {
+                victim_char_id
+            } else {
+                snap.characters
+                    .values()
+                    .find(|c| c.active_ship_id == victim_ship_id)
+                    .map(|c| c.character_id)
+                    .or_else(|| {
+                        snap.sp6_lifecycle
+                            .disconnected_ships
+                            .values()
+                            .find(|d| d.ship_id == victim_ship_id)
+                            .map(|d| d.char_id)
+                    })
+                    .unwrap_or(ship.owner_id)
+            };
+            Ok::<_, String>((ship.type_id, base, ship.insured_payout_isk, resolved_vic))
+        })?;
 
     let is_pod = victim_ship_type_id == 670
         || victim_ship_type_id == 33328
@@ -386,7 +371,6 @@ pub fn execute_death_pipeline_sync_inner(
             .get(&victim_ship_type_id)
             .map(|t| t.group_id == 29)
             .unwrap_or(false);
-    let nested_fitted_mods = drain_nested_ship_fittings(ctx, victim_ship_id, !is_pod);
     let wreck_type_id = if is_pod {
         25
     } else {
@@ -405,13 +389,14 @@ pub fn execute_death_pipeline_sync_inner(
         .get(&victim_char_id)
         .map(|s| s.is_criminal(now_unix))
         .unwrap_or(false);
-    let rt_contract = crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-        rt.insurance_contracts.remove(&victim_ship_id)
+    let rt_contract = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+        rt.insurance_contracts.get(&victim_ship_id).cloned()
     });
-    let cs_contract = crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(
-        ctx,
-        |st| st.insurance_contracts.remove(&victim_ship_id),
-    );
+    let cs_contract =
+        crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state(ctx)
+            .insurance_contracts
+            .get(&victim_ship_id)
+            .cloned();
     let (calculated_insurance_payout, ins_owner_id, ins_is_corp) = if is_pod || is_criminal || is_self_destruct {
         (0.0, victim_char_id, false)
     } else if let Some(c) = rt_contract {
@@ -457,6 +442,22 @@ pub fn execute_death_pipeline_sync_inner(
         )
     };
 
+    let active_fighter_item_ids: Vec<i64> = ctx
+        .active_fighters
+        .read()
+        .ok()
+        .map(|fighters| {
+            fighters
+                .values()
+                .filter(|f| {
+                    (f.owner_char_id == victim_char_id || f.parent_ship_id == victim_ship_id)
+                        && !f.is_abandoned
+                })
+                .map(|f| f.item_id)
+                .collect()
+        })
+        .unwrap_or_default();
+
     let (
         wreck_item_id,
         dropped_ids,
@@ -472,7 +473,59 @@ pub fn execute_death_pipeline_sync_inner(
         att_all,
         att_ship_type_id,
         ins_notify,
+        victim_piloting_ship,
+        nested_ship_ids,
     ) = ctx.db.try_with_mut_snapshot(|snap| {
+        let ship = snap
+            .items
+            .get(&victim_ship_id)
+            .cloned()
+            .ok_or_else(|| format!("Ship {victim_ship_id} not found in world repository"))?;
+        let cat_id = ctx
+            .sde
+            .types
+            .get(&ship.type_id)
+            .map(|t| t.category_id)
+            .unwrap_or(6);
+        if cat_id != 6 {
+            return Err(format!(
+                "Item {victim_ship_id} (type {}, category {cat_id}) is not a ship",
+                ship.type_id
+            ));
+        }
+
+        let victim_piloting_ship = snap
+            .characters
+            .get(&victim_char_id)
+            .is_some_and(|v| {
+                v.active_ship_id == victim_ship_id
+                    && !snap.structures.contains_key(&v.active_ship_id)
+            })
+            || snap
+                .sp6_lifecycle
+                .disconnected_ships
+                .get(&victim_char_id)
+                .is_some_and(|d| d.ship_id == victim_ship_id);
+
+        for &fighter_iid in &active_fighter_item_ids {
+            if let Some(fit_it) = snap.items.get_mut(&fighter_iid) {
+                if fit_it.location_id == victim_ship_id {
+                    fit_it.location_id = sys_id as i64;
+                    fit_it.flag = InventoryFlag::None;
+                }
+            }
+        }
+
+        let nested_ship_ids: Vec<i64> = snap
+            .items
+            .values()
+            .filter(|i| {
+                i.location_id == victim_ship_id
+                    && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 6)
+            })
+            .map(|i| i.item_id)
+            .collect();
+
         snap.next_entity_id += 1;
         let wreck_id = snap.next_entity_id;
 
@@ -538,34 +591,7 @@ pub fn execute_death_pipeline_sync_inner(
             snap.items.remove(&wid);
         }
 
-        for &(mid, mtype, mflag) in &fitted_mods {
-            snap.items.entry(mid).or_insert_with(|| InventoryItemRecord {
-                item_id: mid,
-                type_id: mtype,
-                owner_id: victim_char_id,
-                location_id: victim_ship_id,
-                flag: InventoryFlag::from_u16(mflag),
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                ..Default::default()
-            });
-        }
-        for &(sid, mid, mtype, mflag) in &nested_fitted_mods {
-            snap.items.entry(mid).or_insert_with(|| InventoryItemRecord {
-                item_id: mid,
-                type_id: mtype,
-                owner_id: victim_char_id,
-                location_id: sid,
-                flag: InventoryFlag::from_u16(mflag),
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                ..Default::default()
-            });
-        }
-
-        let escape_frigate_id: Option<i64> = if !is_pod {
+        let escape_frigate_id: Option<i64> = if !is_pod && victim_piloting_ship {
             let has_feb = ctx
                 .sde
                 .types
@@ -687,12 +713,10 @@ pub fn execute_death_pipeline_sync_inner(
 
         snap.items.remove(&victim_ship_id);
         snap.item_positions.remove(&victim_ship_id);
+        snap.insurance_contracts.remove(&victim_ship_id);
+        snap.sp6_lifecycle.ship_combat_hp.remove(&victim_ship_id);
 
-        let victim_controlling_structure = snap
-            .characters
-            .get(&victim_char_id)
-            .is_some_and(|v| snap.structures.contains_key(&v.active_ship_id));
-        let cap_id = if !is_pod && !victim_controlling_structure {
+        let cap_id = if !is_pod && victim_piloting_ship {
             if let Some(esc_id) = escape_frigate_id {
                 if let Some(esc_item) = snap.items.get_mut(&esc_id) {
                     esc_item.location_id = sys_id as i64;
@@ -848,8 +872,54 @@ pub fn execute_death_pipeline_sync_inner(
             att_a,
             att_stid,
             ins_notify,
+            victim_piloting_ship,
+            nested_ship_ids,
         ))
     })?;
+
+    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+        rt.insurance_contracts.remove(&victim_ship_id);
+    });
+    crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(
+        ctx,
+        |st| {
+            st.insurance_contracts.remove(&victim_ship_id);
+        },
+    );
+    {
+        let mut fittings = ctx
+            .ship_fittings
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        fittings.remove(&victim_ship_id);
+        for nsid in &nested_ship_ids {
+            if Some(*nsid) != ejected_cap_id {
+                fittings.remove(nsid);
+            }
+        }
+    }
+    let _ = drain_nested_ship_fittings(ctx, victim_ship_id, !is_pod);
+    let _ = crate::services::notify_emitters_space_dungeons::flush_ship_all_ewar_sync(
+        ctx,
+        victim_char_id,
+        Some(sys_id),
+        victim_ship_id,
+    );
+    crate::services::fleet_social::fleet_social_finder_tactical::clear_destroyed_target_tag(
+        ctx,
+        victim_ship_id,
+    );
+    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(
+        ctx,
+        victim_char_id,
+        victim_ship_id,
+        sys_id,
+    );
+    crate::services::inventory_fitting::fitting_cyno_portal::on_cyno_ship_destroyed(
+        ctx,
+        victim_ship_id,
+    );
+    crate::services::doomsday_aoe_ops::cancel_aoe_superweapon_cycles_for_ship(ctx, victim_ship_id);
 
     // Commit ballpark state (remove destroyed ship ball, spawn wreck ball, spawn capsule/escape
     // ship ball, and push `SetState(ego=cid)`) BEFORE emitting any notifications (`ctx.notify`),
@@ -1191,32 +1261,34 @@ pub fn execute_death_pipeline_sync_inner(
         );
     }
 
-    let (new_sys_id, new_dock_id) = ctx
-        .db
-        .with_snapshot(|s| {
-            s.characters
-                .get(&victim_char_id)
-                .map(|c| (c.solar_system_id, c.station_id.or(c.structure_id)))
-        })
-        .unwrap_or((sys_id, None));
-    let death_reason = if is_pod { "podding" } else { "ship_loss" };
-    crate::services::space_destiny::record_session_change_timer(
-        ctx,
-        victim_char_id,
-        now_unix,
-        new_sys_id,
-        0,
-        death_reason,
-    );
-    ctx.invalidate_bound_objects_for_session_transition(
-        victim_char_id,
-        new_sys_id,
-        new_dock_id,
-        death_reason,
-    );
+    if is_pod || victim_piloting_ship {
+        let (new_sys_id, new_dock_id) = ctx
+            .db
+            .with_snapshot(|s| {
+                s.characters
+                    .get(&victim_char_id)
+                    .map(|c| (c.solar_system_id, c.station_id.or(c.structure_id)))
+            })
+            .unwrap_or((sys_id, None));
+        let death_reason = if is_pod { "podding" } else { "ship_loss" };
+        crate::services::space_destiny::record_session_change_timer(
+            ctx,
+            victim_char_id,
+            now_unix,
+            new_sys_id,
+            0,
+            death_reason,
+        );
+        ctx.invalidate_bound_objects_for_session_transition(
+            ctx_victim_for_invalidation(victim_char_id),
+            new_sys_id,
+            new_dock_id,
+            death_reason,
+        );
 
-    if is_pod {
-        crate::services::map_service::record_solar_system_visit(ctx, victim_char_id, new_sys_id);
+        if is_pod {
+            crate::services::map_service::record_solar_system_visit(ctx, victim_char_id, new_sys_id);
+        }
     }
 
     let total_damage = base_price.max(1000.0);
@@ -1260,6 +1332,294 @@ pub fn execute_death_pipeline_sync_inner(
         insurance_payout_isk: calculated_insurance_payout,
         killmail_id,
     })
+}
+
+#[inline]
+const fn ctx_victim_for_invalidation(victim_char_id: i64) -> i64 {
+    victim_char_id
+}
+
+/// Canonical unified ball destruction router (`#918`, `#835`, `#858`).
+///
+/// Routes any ball reaching 0 structure HP — whether from a weapon/turret module cycle,
+/// missile/smartbomb/bomb/doomsday impact, or NPC AI tick — through one entry point:
+/// 1. Active player drones in space (`rt.active_drones_in_space`) -> cleaned up without ship death.
+/// 2. Extended NPC entities (`rt.npc_entities`) -> cleaned up without player ship death.
+/// 3. Ships (`category_id == 6` in `snap.items`, whether piloted, disconnected, or unpiloted) ->
+///    routed through `execute_death_pipeline_sync` (producing wreck, loot roll, insurance payout,
+///    and killmail; only piloted/disconnected ships spawn a capsule or transition the character).
+/// 4. Non-ship space objects (fighters, wrecks, jetcans, deployables, POCOs) -> cleaned up via
+///    `cleanup_destroyed_non_ship_ball_sync`.
+pub fn on_ball_destroyed_sync(
+    ctx: &ServerContext,
+    sys_id: u32,
+    ball_id: i64,
+    killer_id_opt: Option<i64>,
+    fallback_pos: DVec3,
+) -> Result<Option<DeathPipelineResult>, String> {
+    if ctx.db.with_snapshot(|s| s.structures.contains_key(&ball_id)) {
+        return Ok(None);
+    }
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let pos = sys_handle
+        .get_ball_position_sync(ball_id)
+        .or_else(|| {
+            ctx.db
+                .with_snapshot(|s| s.item_positions.get(&ball_id).copied())
+                .map(DVec3::from_array)
+        })
+        .unwrap_or(fallback_pos);
+
+    // 1. Active player drone in space
+    let removed_drone = if crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+        rt.active_drones_in_space.contains_key(&ball_id)
+    }) {
+        crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+            let d = rt.active_drones_in_space.remove(&ball_id);
+            if d.is_some() {
+                rt.active_drone_miners.remove(&ball_id);
+                rt.drone_next_ready_unix.remove(&ball_id);
+            }
+            d
+        })
+    } else {
+        None
+    };
+    if let Some(d) = removed_drone {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.remove(&d.drone_item_id);
+            snap.item_positions.remove(&d.ball_id);
+            snap.sp6_lifecycle.space_object_meta.remove(&d.ball_id);
+        });
+        sys_handle.try_remove_ball(ball_id);
+        return Ok(None);
+    }
+
+    // 2. Extended NPC entity
+    let removed_ext_npc = if crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+        rt.npc_entities.contains_key(&ball_id)
+    }) {
+        crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+            rt.npc_entities.remove(&ball_id).is_some()
+        })
+    } else {
+        false
+    };
+    if removed_ext_npc {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.remove(&ball_id);
+            snap.item_positions.remove(&ball_id);
+            snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
+        });
+        sys_handle.try_remove_ball(ball_id);
+        return Ok(None);
+    }
+
+    // 3. Ship (`category_id == 6` in `snap.items`, piloted, disconnected, or unpiloted)
+    let ship_victim_and_killer_opt = ctx.db.with_snapshot(|snap| {
+        let item = snap.items.get(&ball_id)?;
+        let is_ship = ctx
+            .sde
+            .types
+            .get(&item.type_id)
+            .is_some_and(|t| t.category_id == 6);
+        if !is_ship {
+            return None;
+        }
+        let vic = snap
+            .characters
+            .values()
+            .find(|c| c.active_ship_id == ball_id)
+            .map(|c| c.character_id)
+            .or_else(|| {
+                snap.sp6_lifecycle
+                    .disconnected_ships
+                    .values()
+                    .find(|d| d.ship_id == ball_id)
+                    .map(|d| d.char_id)
+            })
+            .unwrap_or(item.owner_id);
+        let resolved_killer = killer_id_opt.map(|kid| {
+            snap.characters
+                .get(&kid)
+                .map(|c| c.character_id)
+                .or_else(|| {
+                    snap.characters
+                        .values()
+                        .find(|c| c.active_ship_id == kid)
+                        .map(|c| c.character_id)
+                })
+                .unwrap_or(kid)
+        });
+        Some((vic, resolved_killer))
+    });
+
+    if let Some((victim_char_id, resolved_killer_opt)) = ship_victim_and_killer_opt {
+        let now_unix = ctx.now_unix();
+        let direct_player_killer = resolved_killer_opt.filter(|&k| {
+            k >= 90_000_000
+                && !crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                    rt.npc_entities.contains_key(&k)
+                })
+        });
+        let final_blow_id = direct_player_killer.unwrap_or_else(|| {
+            crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                let mut latest: Option<(u64, i64)> = None;
+                for key in [ball_id, victim_char_id] {
+                    if let Some(list) = rt.aggression_assist_log.get(&key) {
+                        for e in list {
+                            if now_unix.saturating_sub(e.last_action_unix)
+                                <= crate::services::combat_crimewatch::KILLMAIL_ASSIST_WINDOW_SECS
+                                && e.attacker_char_id != victim_char_id
+                                && latest.is_none_or(|(ts, _)| e.last_action_unix >= ts)
+                            {
+                                latest = Some((e.last_action_unix, e.attacker_char_id));
+                            }
+                        }
+                    }
+                }
+                latest.map(|(_, cid)| cid)
+            })
+            .unwrap_or_else(|| resolved_killer_opt.unwrap_or(0))
+        });
+
+        let death_res = execute_death_pipeline_sync(
+            ctx,
+            sys_id,
+            victim_char_id,
+            ball_id,
+            final_blow_id,
+            pos,
+            now_unix,
+        )?;
+        crate::services::pve_abyssal_pylons::on_abyssal_boundary_death_hook(
+            ctx,
+            sys_id,
+            victim_char_id,
+            ball_id,
+            death_res.ejected_capsule_id,
+        );
+        return Ok(Some(death_res));
+    }
+
+    // 4. Non-ship space object (fighter, wreck, jetcan, deployable, POCO)
+    cleanup_destroyed_non_ship_ball_sync(ctx, sys_id, ball_id);
+    Ok(None)
+}
+
+/// Async counterpart of [`on_ball_destroyed_sync`] (`#918`, `#835`, `#858`).
+pub async fn on_ball_destroyed(
+    ctx: &ServerContext,
+    sys_id: u32,
+    ball_id: i64,
+    killer_id_opt: Option<i64>,
+    fallback_pos: DVec3,
+) -> Result<Option<DeathPipelineResult>, String> {
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let pos = sys_handle
+        .get_ball_snapshot(ball_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|(_, b)| b.position)
+        .unwrap_or(fallback_pos);
+    on_ball_destroyed_sync(ctx, sys_id, ball_id, killer_id_opt, pos)
+}
+
+/// Synchronous cleanup of a destroyed non-ship ball (fighter, wreck, jetcan, deployable, POCO).
+pub fn cleanup_destroyed_non_ship_ball_sync(ctx: &ServerContext, sys_id: u32, ball_id: i64) {
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+
+    let removed_drone = crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+        let d = rt.active_drones_in_space.remove(&ball_id);
+        if d.is_some() {
+            rt.active_drone_miners.remove(&ball_id);
+            rt.drone_next_ready_unix.remove(&ball_id);
+        }
+        d
+    });
+    if let Some(d) = removed_drone {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.remove(&d.drone_item_id);
+            snap.item_positions.remove(&d.ball_id);
+            snap.sp6_lifecycle.space_object_meta.remove(&d.ball_id);
+        });
+        sys_handle.try_remove_ball(ball_id);
+        return;
+    }
+
+    let removed_fighter = if let Ok(mut fighters) = ctx.active_fighters.write() {
+        let key = fighters
+            .iter()
+            .find(|(_, f)| f.ball_id == ball_id || f.item_id == ball_id)
+            .map(|(k, _)| *k);
+        key.and_then(|k| fighters.remove(&k))
+    } else {
+        None
+    };
+    if let Some(f) = removed_fighter {
+        if let Ok(mut loads) = ctx.fighter_tube_loads.write() {
+            loads.remove(&(f.parent_ship_id, f.tube_index));
+        }
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.remove(&f.item_id);
+            snap.item_positions.remove(&f.ball_id);
+            snap.sp6_lifecycle.space_object_meta.remove(&f.ball_id);
+        });
+        sys_handle.try_remove_ball(ball_id);
+        return;
+    }
+
+    let is_poco = ctx
+        .db
+        .with_snapshot(|snap| snap.customs_offices.contains_key(&ball_id));
+    if is_poco {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.customs_offices.remove(&ball_id);
+            snap.items.remove(&ball_id);
+            snap.item_positions.remove(&ball_id);
+            snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
+        });
+        sys_handle.try_remove_ball(ball_id);
+        return;
+    }
+
+    let is_destroyable_space_item = ctx.db.with_snapshot(|snap| {
+        snap.items.get(&ball_id).is_some_and(|it| {
+            it.location_id == i64::from(sys_id)
+                && ctx
+                    .sde
+                    .types
+                    .get(&it.type_id)
+                    .is_some_and(|t| t.category_id != 6)
+        })
+    });
+    if is_destroyable_space_item {
+        crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+            rt.container_lifetimes.remove(&ball_id);
+        });
+        crate::services::notify_emitters_seasons_tactical::on_deployable_deactivated(
+            ctx,
+            None,
+            ball_id,
+        );
+        ctx.db.with_mut_snapshot(|snap| {
+            let child_ids: Vec<i64> = snap
+                .items
+                .values()
+                .filter(|it| it.location_id == ball_id)
+                .map(|it| it.item_id)
+                .collect();
+            for cid in child_ids {
+                snap.items.remove(&cid);
+                snap.item_positions.remove(&cid);
+            }
+            snap.items.remove(&ball_id);
+            snap.item_positions.remove(&ball_id);
+            snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
+        });
+        sys_handle.try_remove_ball(ball_id);
+    }
 }
 
 /// Executes the full EVE death pipeline when a ship's structure HP reaches 0:
@@ -1341,7 +1701,8 @@ pub fn execute_live_self_destruct_sync(
     pos: DVec3,
     now_unix: u64,
 ) -> Result<Option<DeathPipelineResult>, String> {
-    let still_valid = ctx.db.with_snapshot(|snap| {
+    let still_valid = crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, snap| {
+        st.self_destructs.remove(&ship_id);
         let Some(ship) = snap.items.get(&ship_id) else {
             return false;
         };
@@ -1355,6 +1716,9 @@ pub fn execute_live_self_destruct_sync(
             && ch.station_id.is_none()
             && ch.structure_id.is_none()
             && ch.active_ship_id == ship_id
+    });
+    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+        rt.self_destruct_countdowns.remove(&ship_id);
     });
     if !still_valid {
         return Ok(None);

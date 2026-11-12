@@ -484,17 +484,13 @@ impl ServerContext {
                     crate::services::shipcaster_ops::on_landing_pad_ball_destroyed(&ctx, tid).await;
                     let _ = crate::services::notify_emitters_space_dungeons::flush_ship_all_ewar_sync(&ctx, 0, Some(sys_id), tid);
                     let _ = crate::services::wormhole_pve_escalations::on_decloaked_relay_attacked_sync(&ctx, sys_id, tid);
-                    if let Some((vcid, acid, pos)) = ctx.db.with_snapshot(|s| {
-                        let vc = s.characters.values().find(|c| c.active_ship_id == tid)?;
-                        let acid = killer_opt.and_then(|kid| {
-                            s.characters.get(&kid).map(|c| c.character_id).or_else(|| s.characters.values().find(|c| c.active_ship_id == kid).map(|c| c.character_id))
-                        }).unwrap_or(0);
-                        Some((vc.character_id, acid, s.item_positions.get(&tid).copied().unwrap_or([0.0; 3])))
-                    }) {
-                        if let Ok(death_res) = crate::combat::death_pipeline::execute_death_pipeline_sync(&ctx, sys_id, vcid, tid, acid, glam::DVec3::from_array(pos), ctx.now_unix()) {
-                            crate::services::pve_abyssal_pylons::on_abyssal_boundary_death_hook(&ctx, sys_id, vcid, tid, death_res.ejected_capsule_id);
-                        }
-                    }
+                    let _ = crate::combat::death_pipeline::on_ball_destroyed_sync(
+                        &ctx,
+                        sys_id,
+                        tid,
+                        killer_opt,
+                        glam::DVec3::ZERO,
+                    );
                 }
                 crate::services::combat_weapons_spool::step_system_entropic_spools(&ctx, sys_id, dt).await;
                 crate::services::inventory_fitting::execute_pending_cycle_actions(&ctx, sys_id).await;

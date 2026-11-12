@@ -13,10 +13,13 @@ pub(crate) fn is_combatant_ship_or_entity_ball(ctx: &ServerContext, ball_id: i64
     ) || (1_895_000_000..1_900_000_000).contains(&ball_id)
 }
 
-/// Returns `Some(char_id)` only if `ball_id` is an active capsuleer ship (`category_id == 6`
-/// and `ch.active_ship_id == ball_id`). Non-ship balls (drones, wrecks, jetcans, corpses)
-/// return `None` so they never trigger `execute_death_pipeline`.
+/// Returns `Some(char_id)` if `ball_id` is a capsuleer ship (`category_id == 6`), resolving
+/// the active pilot, disconnected pilot, or hull owner (for unpiloted ships in space, `#835`).
+/// Non-ship balls (drones, wrecks, jetcans, corpses, NPCs) return `None`.
 pub(crate) fn active_ship_victim_char_id(ctx: &ServerContext, ball_id: i64) -> Option<i64> {
+    if with_combat_runtime(ctx, |rt| rt.npc_entities.contains_key(&ball_id)) {
+        return None;
+    }
     ctx.db.with_snapshot(|snap| {
         let item = snap.items.get(&ball_id)?;
         let cat_id = ctx
@@ -32,6 +35,14 @@ pub(crate) fn active_ship_victim_char_id(ctx: &ServerContext, ball_id: i64) -> O
             .values()
             .find(|c| c.active_ship_id == ball_id)
             .map(|c| c.character_id)
+            .or_else(|| {
+                snap.sp6_lifecycle
+                    .disconnected_ships
+                    .values()
+                    .find(|d| d.ship_id == ball_id)
+                    .map(|d| d.char_id)
+            })
+            .or(Some(item.owner_id))
     })
 }
 
@@ -103,20 +114,18 @@ pub async fn handle_destroyed_ball_from_missile_or_aoe(
     ball_id: i64,
     ball_type_id: u32,
     ball_pos: DVec3,
-    now_unix: u64,
+    _now_unix: u64,
 ) {
     if ctx.db.with_snapshot(|s| s.structures.contains_key(&ball_id)) {
         return;
     }
-    if let Some(vcid) = active_ship_victim_char_id(ctx, ball_id) {
-        let _ = crate::combat::death_pipeline::execute_death_pipeline(
+    if active_ship_victim_char_id(ctx, ball_id).is_some() {
+        let _ = crate::combat::death_pipeline::on_ball_destroyed(
             ctx,
             sys_id,
-            vcid,
             ball_id,
-            attacker_char_id,
+            Some(attacker_char_id),
             ball_pos,
-            now_unix,
         )
         .await;
     } else if with_combat_runtime(ctx, |rt| {
@@ -349,20 +358,52 @@ pub async fn step_missiles_and_breachers(
 
     // Complete any self-destruct countdowns in `solar_system_id` whose timer has elapsed (`feat:ships.self-destruct-countdown`)
     let now_unix = ctx.now_unix();
-    let due_countdowns: Vec<SelfDestructCountdown> = with_mut_combat_runtime(ctx, |rt| {
-        let due_ids: Vec<i64> = rt
-            .self_destruct_countdowns
+    let rt_self_destructs: Vec<SelfDestructCountdown> = with_combat_runtime(ctx, |rt| {
+        rt.self_destruct_countdowns
             .values()
-            .filter(|cd| cd.solar_system_id == solar_system_id && now_unix >= cd.detonate_at_unix)
-            .map(|cd| cd.ship_id)
-            .collect();
-        due_ids
-            .into_iter()
-            .filter_map(|sid| rt.self_destruct_countdowns.remove(&sid))
+            .filter(|cd| cd.solar_system_id == solar_system_id)
+            .cloned()
             .collect()
     });
+    let due_countdowns: Vec<SelfDestructCountdown> =
+        crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _snap| {
+            for cd in &rt_self_destructs {
+                st.self_destructs
+                    .entry(cd.ship_id)
+                    .or_insert(eve_db::SelfDestructPersistedEntry {
+                        ship_id: cd.ship_id,
+                        char_id: cd.char_id,
+                        solar_system_id: cd.solar_system_id,
+                        started_unix: cd.started_unix,
+                        detonate_at_unix: cd.detonate_at_unix,
+                    });
+            }
+            let due_ids: Vec<i64> = st
+                .self_destructs
+                .values()
+                .filter(|cd| cd.solar_system_id == solar_system_id && now_unix >= cd.detonate_at_unix)
+                .map(|cd| cd.ship_id)
+                .collect();
+            due_ids
+                .into_iter()
+                .filter_map(|sid| st.self_destructs.remove(&sid))
+                .map(|cd| SelfDestructCountdown {
+                    ship_id: cd.ship_id,
+                    char_id: cd.char_id,
+                    solar_system_id: cd.solar_system_id,
+                    started_unix: cd.started_unix,
+                    detonate_at_unix: cd.detonate_at_unix,
+                })
+                .collect()
+        });
+    if !due_countdowns.is_empty() {
+        with_mut_combat_runtime(ctx, |rt| {
+            for cd in &due_countdowns {
+                rt.self_destruct_countdowns.remove(&cd.ship_id);
+            }
+        });
+    }
     for cd in due_countdowns {
-        crate::sp6_lifecycle::abort_self_destruct_countdown(ctx, cd.ship_id);
         let pos = sys_handle
             .get_ball_snapshot(cd.ship_id)
             .await
