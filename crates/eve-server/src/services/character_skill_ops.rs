@@ -369,6 +369,7 @@ pub(crate) fn handle_omega_weekly_free_sp_offer(
     let (user_id, char_id) = ServerContext::require_character(session)?;
     let now_unix = ctx.now_unix();
     let week_id = current_tuesday_downtime_week_id(now_unix);
+    let uid_i64 = user_id as i64;
     let blob_key = format!("omega_weekly_sp_claim:{user_id}");
 
     if !is_buy {
@@ -382,9 +383,13 @@ pub(crate) fn handle_omega_weekly_free_sp_offer(
                 return false;
             }
             let last_week = snap
-                .service_state_blobs
-                .get(&blob_key)
-                .and_then(|s| s.parse::<u64>().ok());
+                .kv(eve_db::Ns::OmegaWeeklySpClaim)
+                .get::<u64>(uid_i64, "")
+                .or_else(|| {
+                    snap.service_state_blobs
+                        .get(&blob_key)
+                        .and_then(|s| s.parse::<u64>().ok())
+                });
             last_week != Some(week_id)
         });
         return Ok(PyRep::Bool(can_claim));
@@ -409,16 +414,22 @@ pub(crate) fn handle_omega_weekly_free_sp_offer(
             });
         }
         let last_week = snap
-            .service_state_blobs
-            .get(&blob_key)
-            .and_then(|s| s.parse::<u64>().ok());
+            .kv(eve_db::Ns::OmegaWeeklySpClaim)
+            .get::<u64>(uid_i64, "")
+            .or_else(|| {
+                snap.service_state_blobs
+                    .get(&blob_key)
+                    .and_then(|s| s.parse::<u64>().ok())
+            });
         if last_week == Some(week_id) {
             return Err(BridgeRpcError {
                 code: "WeeklyOfferAlreadyClaimed".into(),
                 message: "Weekly free SP offer has already been claimed this week".into(),
             });
         }
-        snap.set_service_state_blob(blob_key, week_id.to_string())
+        snap.service_state_blobs.remove(&blob_key);
+        snap.kv_mut(eve_db::Ns::OmegaWeeklySpClaim)
+            .set_with_unix(uid_i64, "", &week_id, now_unix)
             .map_err(|e| BridgeRpcError {
                 code: "ServiceStateLimitExceeded".into(),
                 message: e,

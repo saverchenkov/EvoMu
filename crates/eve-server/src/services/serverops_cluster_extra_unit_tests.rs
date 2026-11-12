@@ -634,6 +634,10 @@ async fn downtime_shutdown_logs_off_headless_sessions_and_preserves_shutdown_not
     assert!(!online_after.iter().any(|&(u, _)| u == player_uid));
     assert!(crate::sp6_lifecycle::has_active_disconnected_ship(&ctx.db, char_id));
     ctx.db.with_snapshot(|snap| {
+        assert!(snap
+            .kv(eve_db::Ns::XmppAuthToken)
+            .get::<String>(char_id, "")
+            .is_none());
         assert!(!snap
             .service_state_blobs
             .contains_key(&format!("xmpp:token:{char_id}")));

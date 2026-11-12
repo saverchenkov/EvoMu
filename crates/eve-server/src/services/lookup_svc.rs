@@ -43,7 +43,11 @@ const DEFAULT_BANNED_WORDS: [&str; 6] = [
 fn load_banned_words(ctx: &ServerContext) -> Vec<String> {
     let mut words: Vec<String> = DEFAULT_BANNED_WORDS.iter().map(|w| (*w).to_string()).collect();
     ctx.db.with_snapshot(|snap| {
-        if let Some(extra) = snap.service_state_blobs.get("bannedwords:words") {
+        if let Some(extra) = snap
+            .kv(eve_db::Ns::BannedWords)
+            .get::<String>(0, "words")
+            .or_else(|| snap.service_state_blobs.get("bannedwords:words").cloned())
+        {
             for token in extra
                 .split(|c: char| c == ',' || c == '\n' || c == ';')
                 .map(|t| t.trim().to_ascii_lowercase())
@@ -62,7 +66,11 @@ fn load_banned_regexes(ctx: &ServerContext) -> Vec<String> {
     let words = load_banned_words(ctx);
     let mut regexes = vec![format!(r"(?i)\b(?:{})\b", words.join("|"))];
     ctx.db.with_snapshot(|snap| {
-        if let Some(extra) = snap.service_state_blobs.get("bannedwords:regexes") {
+        if let Some(extra) = snap
+            .kv(eve_db::Ns::BannedWords)
+            .get::<String>(0, "regexes")
+            .or_else(|| snap.service_state_blobs.get("bannedwords:regexes").cloned())
+        {
             for pat in extra
                 .lines()
                 .map(str::trim)

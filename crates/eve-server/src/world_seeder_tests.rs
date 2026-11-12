@@ -303,9 +303,9 @@ fn seed_dual_anchor_and_full_catalog_create_tier1_and_tier2_orders_idempotently(
 
     db.with_snapshot(|snap| {
         assert_eq!(
-            snap.service_state_blobs
-                .get(MARKET_SEEDER_VERSION_KEY)
-                .map(String::as_str),
+            snap.kv(eve_db::Ns::MarketSeederVersion)
+                .get::<String>(0, "")
+                .as_deref(),
             Some(MARKET_SEEDER_VERSION_V2)
         );
         // T2 item 880_002 (BOM 115.0) gets both ask and bid in Jita.

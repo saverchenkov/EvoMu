@@ -268,7 +268,9 @@ async fn test_r5_239_240_246_247_quasar_transfer_steam_omega_gift_and_entitlemen
     assert_ne!(r_self.status_code, STATUS_OK);
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert("char_transfer_consent_token:2".into(), "consent-tok-2".into());
+        let _ = snap
+            .kv_mut(eve_db::Ns::CharTransferConsentToken)
+            .set(2, "", &"consent-tok-2");
     });
     let mut exec_buf = Vec::new();
     encode_varint_field(91, char_id as u64, &mut exec_buf);
@@ -282,8 +284,14 @@ async fn test_r5_239_240_246_247_quasar_transfer_steam_omega_gift_and_entitlemen
         let ch = snap.characters.get(&char_id).unwrap();
         assert_eq!(ch.user_id, 2);
         assert_eq!(ch.clone_grade, 1, "Transferred character must sync clone_grade to destination account");
-        assert!(!snap.service_state_blobs.contains_key("char_transfer_consent_token:2"));
-        assert!(snap.service_state_blobs.contains_key(&format!("char_transfer_evict_session:{char_id}")));
+        assert!(snap
+            .kv(eve_db::Ns::CharTransferConsentToken)
+            .get::<String>(2, "")
+            .is_none());
+        assert!(snap
+            .kv(eve_db::Ns::CharTransferEvictSession)
+            .get::<u64>(char_id, "")
+            .is_some());
     });
 
     // #240: AuthenticateSteamRequest requires authenticated caller and blocks cross-account hijacking

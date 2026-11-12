@@ -19,21 +19,10 @@ use crate::services::notify_emitters_space_dungeons::{
 };
 use std::collections::{BTreeMap, HashMap};
 
-const BLOB_ALPHA_AVAIL_NOTIFIED: &str = "alpha_avail_notified";
-
-fn load_alpha_avail_notified(snap: &WorldStateSnapshot) -> HashMap<i64, bool> {
-    snap.service_state_blobs
-        .get(BLOB_ALPHA_AVAIL_NOTIFIED)
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default()
-}
-
-fn save_alpha_avail_notified(snap: &mut WorldStateSnapshot, map: &HashMap<i64, bool>) {
-    if let Ok(s) = serde_json::to_string(map) {
-        if let Err(err) = snap.set_service_state_blob(BLOB_ALPHA_AVAIL_NOTIFIED.to_string(), s) {
-            tracing::warn!(error = %err, "failed to persist alpha_avail_notified blob");
-        }
-    }
+fn is_alpha_avail_notified(snap: &WorldStateSnapshot, char_id: i64) -> bool {
+    snap.kv(eve_db::Ns::AlphaAvailNotified)
+        .get::<bool>(char_id, "")
+        .unwrap_or(false)
 }
 
 fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
@@ -108,10 +97,8 @@ pub(crate) fn emit_ship_fitting_attr_changes(
     }
 }
 pub fn clear_alpha_avail_notified(snap: &mut WorldStateSnapshot, char_id: i64) {
-    let mut map = load_alpha_avail_notified(snap);
-    if map.remove(&char_id).is_some() {
-        save_alpha_avail_notified(snap, &map);
-    }
+    snap.kv_mut(eve_db::Ns::AlphaAvailNotified)
+        .remove(char_id, "");
 }
 
 /// Emits `OnNonDiminishingInjectionsAdded(amount)` (`1` arg, `id_type = "charid"`).
@@ -199,7 +186,6 @@ pub fn sweep_due_login_milestones_and_alpha_injectors(ctx: &ServerContext, _now_
         if cooldowns.is_empty() {
             return Vec::new();
         }
-        let notified_map = load_alpha_avail_notified(snap);
         let mut alpha_ready = Vec::new();
         let mut cd_cids: Vec<i64> = cooldowns.keys().copied().collect();
         cd_cids.sort_unstable();
@@ -214,7 +200,7 @@ pub fn sweep_due_login_milestones_and_alpha_injectors(ctx: &ServerContext, _now_
             if !is_alpha
                 || now_ft
                     < last_ft.saturating_add(super::implant_plugging::ALPHA_INJECTOR_COOLDOWN_TICKS)
-                || notified_map.get(&cid).copied().unwrap_or(false)
+                || is_alpha_avail_notified(snap, cid)
             {
                 continue;
             }
@@ -228,16 +214,14 @@ pub fn sweep_due_login_milestones_and_alpha_injectors(ctx: &ServerContext, _now_
     }
 
     let ready_alpha_chars = ctx.db.with_mut_snapshot(|snap| {
-        let mut notified_map = load_alpha_avail_notified(snap);
         let mut to_emit = Vec::new();
         for cid in candidates {
-            if !notified_map.get(&cid).copied().unwrap_or(false) {
-                notified_map.insert(cid, true);
+            if !is_alpha_avail_notified(snap, cid) {
+                let _ = snap
+                    .kv_mut(eve_db::Ns::AlphaAvailNotified)
+                    .set(cid, "", &true);
                 to_emit.push(cid);
             }
-        }
-        if !to_emit.is_empty() {
-            save_alpha_avail_notified(snap, &notified_map);
         }
         to_emit
     });

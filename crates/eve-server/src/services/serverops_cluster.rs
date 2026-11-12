@@ -963,14 +963,16 @@ pub fn execute_daily_maintenance_jobs(ctx: &ServerContext) -> HashMap<String, i6
                 })
             })
             .count() as i64;
-        if let Ok(meta_json) = serde_json::to_string(&serde_json::json!({
+        let meta_val = serde_json::json!({
             "recomputed_at_unix": now,
             "total_systems": sci_rows.len(),
             "active_systems": active_sci_count,
-        })) {
-            snap.service_state_blobs
-                .insert("industry_system_cost_indices_daily".into(), meta_json);
-        }
+        });
+        snap.service_state_blobs
+            .remove("industry_system_cost_indices_daily");
+        let _ = snap
+            .kv_mut(eve_db::Ns::IndustrySystemCostIndicesDaily)
+            .set_with_unix(0, "", &meta_val, now);
 
         // 4. Expired Market Orders (Contracts resolved with full client notifications after snapshot unlock)
         let expired_order_list = super::market_contracts::sweep_expired_orders(snap, now);

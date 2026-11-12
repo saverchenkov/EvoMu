@@ -769,6 +769,8 @@ async fn test_home_station_and_jump_clones_parity() {
             c1.station_id = Some(STATION_JITA);
             c1.balance = IskCents(100_000_000);
         }
+        snap.kv_mut(eve_db::service_domains::Ns::HomeStationRemoteCooldown)
+            .remove(PILOT1, "");
         snap.owner_notes.remove(&(-10_000_099 - PILOT1));
     });
     s1.station_id = Some(STATION_JITA);
@@ -793,17 +795,9 @@ async fn test_home_station_and_jump_clones_parity() {
 
     let future_cooldown = 1_800_000_000i64;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.owner_notes.insert(
-            -10_000_099 - PILOT1,
-            OwnerNoteRecord {
-                note_id: -10_000_099 - PILOT1,
-                character_id: -PILOT1,
-                item_id: STATION_JITA,
-                label: "home_station_remote_cooldown".into(),
-                note: future_cooldown.to_string(),
-                timestamp_unix: future_cooldown as u64,
-            },
-        );
+        let _ = snap
+            .kv_mut(eve_db::Ns::HomeStationRemoteCooldown)
+            .set_with_unix(PILOT1, "", &(future_cooldown as u64), future_cooldown as u64);
     });
 
     let next_time_active = rpc(&ctx, &mut s1, "home_station", "get_next_remote_change_time", &[])

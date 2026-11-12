@@ -24,8 +24,6 @@ pub(crate) fn should_grant_default_starter_plex() -> bool {
     SKIP_DEFAULT_STARTER_PLEX.try_with(|_| ()).is_err()
 }
 
-const STARTER_PLEX_GRANTED_USERS_BLOB: &str = "starter_plex_granted_users";
-
 /// Credits `plex_grant` PLEX (if positive, once per `user_id`) to `(user_id, char_id)` inside an
 /// active world-state snapshot mutation and records a `"Starter PLEX Grant"` ledger entry.
 pub(crate) fn grant_starter_plex_in_snapshot(
@@ -38,12 +36,12 @@ pub(crate) fn grant_starter_plex_in_snapshot(
     if plex_grant <= 0 {
         return;
     }
-    let mut granted_users: std::collections::BTreeSet<u64> = snap
-        .service_state_blobs
-        .get(STARTER_PLEX_GRANTED_USERS_BLOB)
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default();
-    if !granted_users.insert(user_id) {
+    let uid_i64 = user_id as i64;
+    if snap
+        .kv(eve_db::Ns::StarterPlexGranted)
+        .get::<bool>(uid_i64, "")
+        .unwrap_or(false)
+    {
         return;
     }
     let Some(new_bal) = snap
@@ -63,10 +61,11 @@ pub(crate) fn grant_starter_plex_in_snapshot(
         "Starter PLEX Grant",
         now_unix,
     );
-    if let Ok(json) = serde_json::to_string(&granted_users) {
-        if let Err(err) = snap.set_service_state_blob(STARTER_PLEX_GRANTED_USERS_BLOB.to_string(), json) {
-            warn!(error = %err, "failed to persist starter_plex_granted_users blob");
-        }
+    if let Err(err) = snap
+        .kv_mut(eve_db::Ns::StarterPlexGranted)
+        .set_with_unix(uid_i64, "", &true, now_unix)
+    {
+        warn!(error = %err, "failed to persist starter_plex_granted entity_kv row");
     }
 }
 

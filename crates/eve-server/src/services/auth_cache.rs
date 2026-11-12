@@ -351,6 +351,7 @@ pub async fn handle(
                 [PyRep::String(k)] if !k.is_empty() => ("zsystem", k.as_str(), None, false),
                 _ => return Some(Err(BridgeRpcError::user_error("InvalidArguments"))),
             };
+            let sub_key = format!("{section}:{key}");
             if clear_val {
                 if let Err(e) = ServerContext::require_auth(session) {
                     return Some(Err(e));
@@ -364,6 +365,7 @@ pub async fn handle(
                 let blob_key = format!("cache_setting:{section}:{key}");
                 ctx.db.with_mut_snapshot(|snap| {
                     snap.service_state_blobs.remove(&blob_key);
+                    snap.kv_mut(eve_db::Ns::CacheSetting).remove(0, &sub_key);
                 });
                 return Some(Ok(PyRep::None));
             }
@@ -379,16 +381,24 @@ pub async fn handle(
                 }
                 let blob_key = format!("cache_setting:{section}:{key}");
                 let safe_val: String = v.chars().take(1000).collect();
+                let now_unix = ctx.now_unix();
                 ctx.db.with_mut_snapshot(|snap| {
-                    snap.service_state_blobs.insert(blob_key, safe_val.clone());
+                    snap.service_state_blobs.remove(&blob_key);
+                    let _ = snap
+                        .kv_mut(eve_db::Ns::CacheSetting)
+                        .set_with_unix(0, &sub_key, &safe_val, now_unix);
                 });
                 return Some(Ok(PyRep::String(safe_val)));
             }
-            // Read-only path: do not insert arbitrary caller keys into service_state_blobs
+            // Read-only path: do not insert arbitrary caller keys into entity_kv / service_state_blobs
             let blob_key = format!("cache_setting:{section}:{key}");
             let val = ctx.db.with_snapshot(|snap| {
-                if let Some(existing) = snap.service_state_blobs.get(&blob_key) {
-                    existing.clone()
+                if let Some(existing) = snap
+                    .kv(eve_db::Ns::CacheSetting)
+                    .get::<String>(0, &sub_key)
+                    .or_else(|| snap.service_state_blobs.get(&blob_key).cloned())
+                {
+                    existing
                 } else if key == "SP-Allowed-Extensions" {
                     "txt,csv,log,png,jpg,dds,json,yaml".to_string()
                 } else {

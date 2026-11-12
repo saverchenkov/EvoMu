@@ -1,8 +1,10 @@
+pub mod entity_kv;
 pub mod progression_seasons;
 pub mod pve_sites;
 pub mod pvp_tourney_deployables;
 pub mod quasar_and_social;
 
+pub use entity_kv::*;
 pub use progression_seasons::*;
 pub use pve_sites::*;
 pub use pvp_tourney_deployables::*;
@@ -1266,5 +1268,265 @@ pub fn migrate_legacy_service_state(snap: &mut WorldStateSnapshot) {
             }
         }
         // character_medals:* / char_medals:* were redundant copies of snap.char_medals and are dropped.
+    }
+
+    // 4. Legacy per-entity & global `service_state_blobs` and `#945` sentinel `owner_notes` -> `entity_kv` (`#913`)
+    migrate_legacy_entity_kv(snap);
+}
+
+fn migrate_kv_if_absent<T: serde::Serialize>(
+    snap: &mut WorldStateSnapshot,
+    ns: Ns,
+    entity_id: i64,
+    sub_key: &str,
+    val: &T,
+    updated_unix: u64,
+) {
+    if !snap.kv(ns).contains(entity_id, sub_key) {
+        let _ = snap
+            .kv_mut(ns)
+            .set_with_unix(entity_id, sub_key, val, updated_unix);
+    }
+}
+
+fn migrate_legacy_entity_kv(snap: &mut WorldStateSnapshot) {
+    let default_unix = snap
+        .service_state_blobs
+        .get("__server_now_unix")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+
+    // 4a. Sentinel `owner_notes` entries (`note_id < -10_000_099`, `label == "home_station_remote_cooldown"`, `#945`).
+    let hs_keys: Vec<i64> = snap
+        .owner_notes
+        .iter()
+        .filter(|(&nid, rec)| {
+            nid < -10_000_099 && rec.label == "home_station_remote_cooldown"
+        })
+        .map(|(&nid, _)| nid)
+        .collect();
+    for nid in hs_keys {
+        if let Some(rec) = snap.owner_notes.remove(&nid) {
+            let char_id = if rec.character_id < 0 {
+                -rec.character_id
+            } else {
+                -10_000_099 - nid
+            };
+            if char_id > 0 {
+                if let Ok(next_time) = rec.note.parse::<u64>() {
+                    migrate_kv_if_absent(
+                        snap,
+                        Ns::HomeStationRemoteCooldown,
+                        char_id,
+                        "",
+                        &next_time,
+                        rec.timestamp_unix,
+                    );
+                }
+            }
+        }
+    }
+
+    // 4b. Unbounded per-character / per-user JSON map blobs in `service_state_blobs`.
+    if let Some(raw) = snap.service_state_blobs.remove("alpha_avail_notified") {
+        if let Ok(map) = serde_json::from_str::<HashMap<i64, bool>>(&raw) {
+            for (cid, notified) in map {
+                if notified {
+                    migrate_kv_if_absent(
+                        snap,
+                        Ns::AlphaAvailNotified,
+                        cid,
+                        "",
+                        &true,
+                        default_unix,
+                    );
+                }
+            }
+        }
+    }
+    if let Some(raw) = snap.service_state_blobs.remove("starter_plex_granted_users") {
+        if let Ok(set) = serde_json::from_str::<std::collections::BTreeSet<u64>>(&raw) {
+            for uid in set {
+                migrate_kv_if_absent(
+                    snap,
+                    Ns::StarterPlexGranted,
+                    uid as i64,
+                    "",
+                    &true,
+                    default_unix,
+                );
+            }
+        } else if let Ok(map) = serde_json::from_str::<HashMap<u64, bool>>(&raw) {
+            for (uid, granted) in map {
+                if granted {
+                    migrate_kv_if_absent(
+                        snap,
+                        Ns::StarterPlexGranted,
+                        uid as i64,
+                        "",
+                        &true,
+                        default_unix,
+                    );
+                }
+            }
+        }
+    }
+
+    // 4c. Global single-key entries in `service_state_blobs` -> `entity_kv` (`entity_id = 0`).
+    if let Some(raw) = snap.service_state_blobs.remove("community_track_qa_mode") {
+        let b = matches!(raw.trim(), "1" | "true" | "True");
+        migrate_kv_if_absent(snap, Ns::CommunityTrackQaMode, 0, "", &b, default_unix);
+    }
+    if let Some(raw) = snap.service_state_blobs.remove("zarzakh_horizon_siege_active") {
+        let b = matches!(raw.trim(), "1" | "true" | "True");
+        migrate_kv_if_absent(snap, Ns::ZarzakhHorizonSiegeActive, 0, "", &b, default_unix);
+    }
+    if let Some(raw) = snap
+        .service_state_blobs
+        .remove("industry_system_cost_indices_daily")
+    {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+            migrate_kv_if_absent(
+                snap,
+                Ns::IndustrySystemCostIndicesDaily,
+                0,
+                "",
+                &val,
+                default_unix,
+            );
+        }
+    }
+    if let Some(raw) = snap.service_state_blobs.remove("dynamic_resource_settings") {
+        if let Ok(val) = serde_json::from_str::<HashMap<String, serde_json::Value>>(&raw) {
+            migrate_kv_if_absent(snap, Ns::DynamicResourceSettings, 0, "", &val, default_unix);
+        }
+    }
+    if let Some(raw) = snap.service_state_blobs.remove("market_seeder_version") {
+        migrate_kv_if_absent(snap, Ns::MarketSeederVersion, 0, "", &raw, default_unix);
+    }
+    if let Some(raw) = snap.service_state_blobs.remove("xmpp:hostname") {
+        migrate_kv_if_absent(snap, Ns::XmppHostname, 0, "", &raw, default_unix);
+    }
+    if let Some(raw) = snap
+        .service_state_blobs
+        .remove("kiring:eveguard_server_address")
+    {
+        migrate_kv_if_absent(
+            snap,
+            Ns::KiringConfig,
+            0,
+            "eveguard_server_address",
+            &raw,
+            default_unix,
+        );
+    }
+    if let Some(raw) = snap.service_state_blobs.remove("bannedwords:words") {
+        migrate_kv_if_absent(snap, Ns::BannedWords, 0, "words", &raw, default_unix);
+    }
+    if let Some(raw) = snap.service_state_blobs.remove("bannedwords:regexes") {
+        migrate_kv_if_absent(snap, Ns::BannedWords, 0, "regexes", &raw, default_unix);
+    }
+
+    // 4d. Prefixed per-entity and sub-key entries in `service_state_blobs` -> `entity_kv`.
+    let kv_keys: Vec<String> = snap
+        .service_state_blobs
+        .keys()
+        .filter(|k| {
+            k.starts_with("omega_weekly_sp_claim:")
+                || k.starts_with("contract_orig_flag:")
+                || k.starts_with("contract_bid_div:")
+                || k.starts_with("char_transfer_consent_token:")
+                || k.starts_with("char_transfer_last_unix:")
+                || k.starts_with("char_transfer_evict_session:")
+                || k.starts_with("xmpp:token:")
+                || k.starts_with("xmpp:help_channel:")
+                || k.starts_with("cache_setting:")
+        })
+        .cloned()
+        .collect();
+
+    for key in kv_keys {
+        let Some(val) = snap.service_state_blobs.remove(&key) else {
+            continue;
+        };
+        if let Some(uid_str) = key.strip_prefix("omega_weekly_sp_claim:") {
+            if let (Ok(uid), Ok(ts)) = (uid_str.parse::<u64>(), val.parse::<u64>()) {
+                migrate_kv_if_absent(
+                    snap,
+                    Ns::OmegaWeeklySpClaim,
+                    uid as i64,
+                    "",
+                    &ts,
+                    default_unix,
+                );
+            }
+        } else if let Some(rest) = key.strip_prefix("contract_orig_flag:") {
+            if let Some((cid_str, iid_str)) = rest.split_once(':') {
+                if let (Ok(cid), Ok(flag_u16)) = (cid_str.parse::<i64>(), val.parse::<u16>()) {
+                    migrate_kv_if_absent(
+                        snap,
+                        Ns::ContractOrigFlag,
+                        cid,
+                        iid_str,
+                        &flag_u16,
+                        default_unix,
+                    );
+                }
+            }
+        } else if let Some(rest) = key.strip_prefix("contract_bid_div:") {
+            if let Some((cid_str, bidder_str)) = rest.split_once(':') {
+                if let (Ok(cid), Ok(div_u8)) = (cid_str.parse::<i64>(), val.parse::<u8>()) {
+                    migrate_kv_if_absent(
+                        snap,
+                        Ns::ContractBidDiv,
+                        cid,
+                        bidder_str,
+                        &div_u8,
+                        default_unix,
+                    );
+                }
+            }
+        } else if let Some(uid_str) = key.strip_prefix("char_transfer_consent_token:") {
+            if let Ok(uid) = uid_str.parse::<u64>() {
+                migrate_kv_if_absent(
+                    snap,
+                    Ns::CharTransferConsentToken,
+                    uid as i64,
+                    "",
+                    &val,
+                    default_unix,
+                );
+            }
+        } else if let Some(cid_str) = key.strip_prefix("char_transfer_last_unix:") {
+            if let (Ok(cid), Ok(ts)) = (cid_str.parse::<i64>(), val.parse::<u64>()) {
+                migrate_kv_if_absent(
+                    snap,
+                    Ns::CharTransferLastUnix,
+                    cid,
+                    "",
+                    &ts,
+                    default_unix,
+                );
+            }
+        } else if let Some(cid_str) = key.strip_prefix("char_transfer_evict_session:") {
+            if let (Ok(cid), Ok(ts)) = (cid_str.parse::<i64>(), val.parse::<u64>()) {
+                migrate_kv_if_absent(
+                    snap,
+                    Ns::CharTransferEvictSession,
+                    cid,
+                    "",
+                    &ts,
+                    default_unix,
+                );
+            }
+        } else if let Some(cid_str) = key.strip_prefix("xmpp:token:") {
+            if let Ok(cid) = cid_str.parse::<i64>() {
+                migrate_kv_if_absent(snap, Ns::XmppAuthToken, cid, "", &val, default_unix);
+            }
+        } else if let Some(lang) = key.strip_prefix("xmpp:help_channel:") {
+            migrate_kv_if_absent(snap, Ns::XmppHelpChannel, 0, lang, &val, default_unix);
+        } else if let Some(sub) = key.strip_prefix("cache_setting:") {
+            migrate_kv_if_absent(snap, Ns::CacheSetting, 0, sub, &val, default_unix);
+        }
     }
 }

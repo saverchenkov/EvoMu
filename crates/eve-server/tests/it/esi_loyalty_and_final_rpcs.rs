@@ -258,8 +258,9 @@ async fn test_chat_community_track_and_population_cap() {
     assert_eq!(qa_res, PyRep::Bool(true));
     ctx.db.with_snapshot(|snap| {
         assert_eq!(
-            snap.service_state_blobs.get("community_track_qa_mode"),
-            Some(&"true".to_string())
+            snap.kv(eve_db::Ns::CommunityTrackQaMode)
+                .get::<bool>(0, ""),
+            Some(true)
         );
     });
 

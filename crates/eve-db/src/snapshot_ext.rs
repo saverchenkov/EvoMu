@@ -934,6 +934,11 @@ pub struct WorldStateSnapshot {
     pub fleet_and_social_ops: crate::service_domains::FleetAndSocialOpsStore,
     #[serde(default)]
     pub cluster_and_runtime: crate::service_domains::ClusterAndRuntimeStore,
+    #[serde(default, with = "crate::service_domains::entity_kv_map_serde")]
+    pub entity_kv: std::collections::BTreeMap<
+        crate::service_domains::EntityKvKey,
+        crate::service_domains::EntityKvRow,
+    >,
     #[serde(default)]
     pub insurance_contracts: HashMap<i64, PersistedInsuranceContractRecord>,
     /// Transaction-scoped dirty tracking hints.
@@ -1604,6 +1609,8 @@ impl WorldStateSnapshot {
                         };
                         let mut transferred_ids = Vec::new();
                         for iid in &c.item_ids {
+                            self.kv_mut(crate::service_domains::Ns::ContractOrigFlag)
+                                .remove(contract_id, &iid.to_string());
                             self.service_state_blobs.remove(&format!("contract_orig_flag:{contract_id}:{iid}"));
                             if let Some(item) = self.items.get_mut(iid) {
                                 if item.owner_id != winner_id {
@@ -1623,6 +1630,8 @@ impl WorldStateSnapshot {
                             .collect();
                         extra_ids.sort_unstable();
                         for iid in extra_ids {
+                            self.kv_mut(crate::service_domains::Ns::ContractOrigFlag)
+                                .remove(contract_id, &iid.to_string());
                             self.service_state_blobs.remove(&format!("contract_orig_flag:{contract_id}:{iid}"));
                             if let Some(item) = self.items.get_mut(&iid) {
                                 if item.owner_id != winner_id {
@@ -1634,6 +1643,8 @@ impl WorldStateSnapshot {
                                 item.version += 1;
                             }
                         }
+                        self.kv_mut(crate::service_domains::Ns::ContractBidDiv)
+                            .clear_entity(contract_id);
                         self.strip_ship_cosmetics(&transferred_ids);
                         if let Some(c_mut) = self.contracts.get_mut(&contract_id) {
                             c_mut.acceptor_id = Some(winner_id);
@@ -1656,10 +1667,18 @@ impl WorldStateSnapshot {
                     self.credit_contract_issuer(&c, IskCents(dep_raw));
                 }
                 for iid in &c.item_ids {
-                    let orig_flag = self
-                        .service_state_blobs
-                        .remove(&format!("contract_orig_flag:{contract_id}:{iid}"))
-                        .and_then(|s| s.parse::<u16>().ok())
+                    let iid_sub = iid.to_string();
+                    let kv_flag = self
+                        .kv(crate::service_domains::Ns::ContractOrigFlag)
+                        .get::<u16>(contract_id, &iid_sub);
+                    self.kv_mut(crate::service_domains::Ns::ContractOrigFlag)
+                        .remove(contract_id, &iid_sub);
+                    let orig_flag = kv_flag
+                        .or_else(|| {
+                            self.service_state_blobs
+                                .remove(&format!("contract_orig_flag:{contract_id}:{iid}"))
+                                .and_then(|s| s.parse::<u16>().ok())
+                        })
                         .map(InventoryFlag::from_u16)
                         .filter(|f| *f != InventoryFlag::Locked)
                         .unwrap_or(InventoryFlag::Hangar);
@@ -1678,10 +1697,18 @@ impl WorldStateSnapshot {
                     .collect();
                 extra_ids.sort_unstable();
                 for iid in extra_ids {
-                    let orig_flag = self
-                        .service_state_blobs
-                        .remove(&format!("contract_orig_flag:{contract_id}:{iid}"))
-                        .and_then(|s| s.parse::<u16>().ok())
+                    let iid_sub = iid.to_string();
+                    let kv_flag = self
+                        .kv(crate::service_domains::Ns::ContractOrigFlag)
+                        .get::<u16>(contract_id, &iid_sub);
+                    self.kv_mut(crate::service_domains::Ns::ContractOrigFlag)
+                        .remove(contract_id, &iid_sub);
+                    let orig_flag = kv_flag
+                        .or_else(|| {
+                            self.service_state_blobs
+                                .remove(&format!("contract_orig_flag:{contract_id}:{iid}"))
+                                .and_then(|s| s.parse::<u16>().ok())
+                        })
                         .map(InventoryFlag::from_u16)
                         .filter(|f| *f != InventoryFlag::Locked)
                         .unwrap_or(InventoryFlag::Hangar);
@@ -1692,6 +1719,8 @@ impl WorldStateSnapshot {
                         item.version += 1;
                     }
                 }
+                self.kv_mut(crate::service_domains::Ns::ContractBidDiv)
+                    .clear_entity(contract_id);
                 if let Some(c_mut) = self.contracts.get_mut(&contract_id) {
                     c_mut.status = "Expired".into();
                 }
@@ -1993,6 +2022,31 @@ impl WorldStateSnapshot {
     /// the typed domain fields on `WorldStateSnapshot`.
     pub fn migrate_legacy_service_state(&mut self) {
         crate::service_domains::migrate_legacy_service_state(self);
+    }
+
+    /// Returns a read-only handle to the `entity_kv` namespace `ns` (`#913`).
+    #[inline]
+    pub fn kv(&self, ns: crate::service_domains::Ns) -> crate::service_domains::EntityKvReader<'_> {
+        crate::service_domains::EntityKvReader::new(self, ns)
+    }
+
+    /// Returns a mutable handle to the `entity_kv` namespace `ns` (`#913`).
+    #[inline]
+    pub fn kv_mut(
+        &mut self,
+        ns: crate::service_domains::Ns,
+    ) -> crate::service_domains::EntityKvWriter<'_> {
+        crate::service_domains::EntityKvWriter::new(self, ns)
+    }
+
+    /// Cascade-deletes all `entity_kv` rows belonging to `(scope, entity_id)` across all namespaces
+    /// with `cascade_on_owner_delete == true` (`#913`).
+    pub fn cascade_delete_entity_kv(
+        &mut self,
+        scope: crate::service_domains::EntityKvScope,
+        entity_id: i64,
+    ) -> usize {
+        crate::service_domains::cascade_delete_entity_kv(self, scope, entity_id)
     }
 }
 

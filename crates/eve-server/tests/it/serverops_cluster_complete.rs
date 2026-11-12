@@ -638,12 +638,10 @@ async fn test_daily_maintenance_jobs_mutate_belts_ice_market_history_sci_sov_mis
         assert_eq!(candle.open_price, Some(5.0));
         assert_eq!(candle.close_price, Some(7.0));
 
-        let sci_meta: serde_json::Value = serde_json::from_str(
-            snap.service_state_blobs
-                .get("industry_system_cost_indices_daily")
-                .expect("28d SCI daily recompute metadata"),
-        )
-        .unwrap();
+        let sci_meta: serde_json::Value = snap
+            .kv(eve_db::Ns::IndustrySystemCostIndicesDaily)
+            .get(0, "")
+            .expect("28d SCI daily recompute metadata");
         assert_eq!(sci_meta["recomputed_at_unix"].as_u64(), Some(now));
         assert!(sci_meta["active_systems"].as_i64().unwrap_or(0) >= 1);
 
