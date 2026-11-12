@@ -188,7 +188,7 @@ fn normalize_contract_reply(rep: PyRep) -> PyRep {
         "InProgress" | "in_progress" => 1,
         "FinishedIssuer" | "finished_issuer" => 2,
         "FinishedContractor" | "finished_contractor" => 3,
-        "Finished" | "finished" => 4,
+        "Finished" | "finished" | "Completed" | "completed" => 4,
         "Cancelled" | "cancelled" => 5,
         "Rejected" | "rejected" => 6,
         "Failed" | "failed" => 7,

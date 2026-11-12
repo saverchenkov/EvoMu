@@ -1948,7 +1948,8 @@ pub fn handle(
                         Some(3) => c.status == "FinishedContractor",
                         Some(4) => matches!(
                             c.status.as_str(),
-                            "Finished"
+                            "Completed"
+                                | "Finished"
                                 | "FinishedIssuer"
                                 | "FinishedContractor"
                                 | "Cancelled"
