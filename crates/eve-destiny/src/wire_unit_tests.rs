@@ -962,7 +962,7 @@ fn slim_item_meta_boundaries_wire_type_remapping_and_remaining_events() {
             top[0],
             PyRep::Tuple(vec![
                 PyRep::Real(1.0),
-                PyRep::Real(120_000.0),
+                PyRep::Real(24_000.0),
                 PyRep::Integer(12),
             ])
         );
@@ -985,7 +985,7 @@ fn slim_item_meta_boundaries_wire_type_remapping_and_remaining_events() {
             top[0],
             PyRep::Tuple(vec![
                 PyRep::Real(1.0),
-                PyRep::Real(45_000.0),
+                PyRep::Real(9_000.0),
                 PyRep::Integer(15),
             ])
         );
@@ -1125,13 +1125,85 @@ fn slim_item_meta_boundaries_wire_type_remapping_and_remaining_events() {
                         state[0],
                         PyRep::Tuple(vec![
                             PyRep::Real(0.6),
-                            PyRep::Real(45_000.0),
+                            PyRep::Real(9_000.0),
                             PyRep::Integer(7),
                         ])
                     );
                 }
             }
         }
+    }
+}
+
+#[test]
+fn issue_871_cloaked_spawn_suppresses_add_balls2_and_avoids_repeated_remove_balls() {
+    let mut park = Ballpark::new(30_000_142);
+    let obs = sample_ball(100, MovementMode::Stop);
+    park.add_ball(obs);
+    let _ = park.drain_observer_events(100);
+    park.pending_events.clear();
+
+    // 1. Insert combat_state with is_cloaked = true BEFORE add_ball (#871 spawn leak)
+    let mut cloaked_cs = CombatState::default();
+    cloaked_cs.is_cloaked = true;
+    park.combat_states.insert(200, cloaked_cs);
+    let mut cloaked_ship = sample_ball(200, MovementMode::Stop);
+    cloaked_ship.position = DVec3::new(15_000.0, 20_000.0, 30_000.0);
+    park.add_ball(cloaked_ship);
+
+    assert!(
+        park.drain_observer_events(100).is_empty(),
+        "Observer must not receive AddBalls2 when a cloaked ship spawns on grid (#871)"
+    );
+    assert!(
+        park.pending_events.is_empty(),
+        "Global pending_events must not announce AddBall for a cloaked ship (#871)"
+    );
+
+    // 2. Step physics multiple ticks: observer must NOT receive RemoveBalls every tick (#871)
+    for _ in 0..3 {
+        let _ = park.step(1.0);
+        let evs = park.drain_observer_events(100);
+        assert!(
+            !evs.iter().any(|e| matches!(e, DestinyEvent::RemoveBalls { .. })),
+            "Observer must not receive repeated RemoveBalls while ball 200 remains cloaked: {evs:?}"
+        );
+    }
+
+    // 3. Decloak and re-cloak transitions emit AddBalls2 once and RemoveBalls once, never repeating
+    assert!(park.deactivate_cloak(200));
+    let decloak_evs = park.drain_observer_events(100);
+    assert_eq!(
+        decloak_evs
+            .iter()
+            .filter(|e| matches!(e, DestinyEvent::AddBalls2 { .. }))
+            .count(),
+        1
+    );
+    let _ = park.step(1.0);
+    assert!(
+        !park
+            .drain_observer_events(100)
+            .iter()
+            .any(|e| matches!(e, DestinyEvent::AddBalls2 { .. } | DestinyEvent::RemoveBalls { .. }))
+    );
+
+    park.activate_cloak(200, true, 5.0, 900.0).expect("activate_cloak");
+    let cloak_evs = park.drain_observer_events(100);
+    assert_eq!(
+        cloak_evs
+            .iter()
+            .filter(|e| matches!(e, DestinyEvent::RemoveBalls { .. }))
+            .count(),
+        1
+    );
+    for _ in 0..3 {
+        let _ = park.step(1.0);
+        let evs = park.drain_observer_events(100);
+        assert!(
+            !evs.iter().any(|e| matches!(e, DestinyEvent::RemoveBalls { .. })),
+            "Subsequent ticks after activate_cloak must not re-emit RemoveBalls: {evs:?}"
+        );
     }
 }
 

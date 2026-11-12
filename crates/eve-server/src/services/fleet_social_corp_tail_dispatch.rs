@@ -756,6 +756,27 @@ pub(crate) fn build_aggression_settings_object(
     }
 }
 
+fn corp_app_status_code(status: &str) -> i64 {
+    match status {
+        "Applied" | "Pending" => 0,
+        "Invited" => 1,
+        "Rejected" | "Declined" => 2,
+        "Withdrawn" | "Cancelled" => 4,
+        "Accepted" => 6,
+        _ => 0,
+    }
+}
+
+fn corp_app_filetime(created_unix: u64, now_unix: u64) -> i64 {
+    if created_unix > 0 && created_unix < 10_000_000_000 {
+        crate::sp6_lifecycle::unix_to_filetime(created_unix)
+    } else if created_unix == 0 {
+        crate::sp6_lifecycle::unix_to_filetime(now_unix)
+    } else {
+        created_unix as i64
+    }
+}
+
 pub(crate) fn handle_get_my_applications_rpc(
     ctx: &ServerContext,
     session: &SessionState,
@@ -765,27 +786,87 @@ pub(crate) fn handle_get_my_applications_rpc(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let rows = ctx.db.with_snapshot(|snap| {
-        let mut out = Vec::new();
-        for corp in snap.corporations.values() {
-            for app in corp.applications.values() {
-                let is_open = matches!(app.status.as_str(), "Applied" | "Pending" | "Invited");
-                let ok = if is_old { !is_open } else { is_open };
-                if app.character_id == char_id && ok {
-                    out.push(vec![
-                        PyRep::Integer(app.application_id), PyRep::Integer(app.corporation_id),
-                        PyRep::Integer(app.character_id), PyRep::String(app.message.clone()),
-                        PyRep::String(app.status.clone()), PyRep::Integer(app.created_unix as i64),
-                    ]);
+    let now_unix = ctx.now_unix();
+    let rep = ctx.db.with_snapshot(|snap| {
+        if is_old {
+            let mut rows = Vec::new();
+            for corp in snap.corporations.values() {
+                for app in corp.applications.values() {
+                    let is_open = matches!(app.status.as_str(), "Applied" | "Pending" | "Invited");
+                    if app.character_id == char_id && !is_open {
+                        let dt = corp_app_filetime(app.created_unix, now_unix);
+                        rows.push(vec![
+                            PyRep::Integer(app.application_id),
+                            PyRep::Integer(app.corporation_id),
+                            PyRep::Integer(app.character_id),
+                            PyRep::String(app.message.clone()),
+                            PyRep::String(app.message.clone()),
+                            PyRep::Integer(corp_app_status_code(&app.status)),
+                            PyRep::Integer(dt),
+                            PyRep::Integer(dt),
+                            PyRep::Integer(0),
+                            PyRep::Integer(0),
+                            PyRep::Integer(0),
+                            PyRep::None,
+                        ]);
+                    }
                 }
             }
+            PyRep::rowset(
+                vec![
+                    "applicationID",
+                    "corporationID",
+                    "characterID",
+                    "applicationText",
+                    "message",
+                    "status",
+                    "applicationDateTime",
+                    "createdDate",
+                    "roles",
+                    "grantableRoles",
+                    "deleted",
+                    "lastCorpUpdaterID",
+                ],
+                rows,
+            )
+        } else {
+            let mut by_corp: std::collections::BTreeMap<i64, Vec<PyRep>> =
+                std::collections::BTreeMap::new();
+            for corp in snap.corporations.values() {
+                for app in corp.applications.values() {
+                    let is_open = matches!(app.status.as_str(), "Applied" | "Pending" | "Invited");
+                    if app.character_id == char_id && is_open {
+                        let dt = corp_app_filetime(app.created_unix, now_unix);
+                        by_corp
+                            .entry(app.corporation_id)
+                            .or_default()
+                            .push(PyRep::keyval([
+                                ("applicationID", PyRep::Integer(app.application_id)),
+                                ("corporationID", PyRep::Integer(app.corporation_id)),
+                                ("characterID", PyRep::Integer(app.character_id)),
+                                ("applicationText", PyRep::String(app.message.clone())),
+                                ("message", PyRep::String(app.message.clone())),
+                                ("status", PyRep::Integer(corp_app_status_code(&app.status))),
+                                ("applicationDateTime", PyRep::Integer(dt)),
+                                ("createdDateTime", PyRep::Integer(dt)),
+                                ("createdDate", PyRep::Integer(dt)),
+                                ("roles", PyRep::Integer(0)),
+                                ("grantableRoles", PyRep::Integer(0)),
+                                ("deleted", PyRep::Integer(0)),
+                                ("lastCorpUpdaterID", PyRep::None),
+                            ]));
+                    }
+                }
+            }
+            PyRep::Dict(
+                by_corp
+                    .into_iter()
+                    .map(|(cid, list)| (PyRep::Integer(cid), PyRep::List(list)))
+                    .collect(),
+            )
         }
-        out
     });
-    Some(Ok(PyRep::rowset(
-        vec!["applicationID", "corporationID", "characterID", "message", "status", "createdDate"],
-        rows,
-    )))
+    Some(Ok(rep))
 }
 
 pub(crate) fn handle_get_corp_applications_rpc(
@@ -812,29 +893,85 @@ pub(crate) fn handle_get_corp_applications_rpc(
         if !is_ceo && (eff_roles & (corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_PERSONNEL_MANAGER)) == 0 {
             return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Viewing applications requires Personnel Manager or Director role".into() });
         }
-        let rows: Vec<Vec<PyRep>> = corp
-            .applications
-            .values()
-            .filter(|app| {
-                let is_open = matches!(app.status.as_str(), "Applied" | "Pending" | "Invited");
-                if is_old { !is_open } else { is_open }
-            })
-            .map(|app| {
+        if is_old {
+            let rows: Vec<Vec<PyRep>> = corp
+                .applications
+                .values()
+                .filter(|app| {
+                    let is_open = matches!(app.status.as_str(), "Applied" | "Pending" | "Invited");
+                    !is_open
+                })
+                .map(|app| {
+                    let dt = corp_app_filetime(app.created_unix, now_unix);
+                    vec![
+                        PyRep::Integer(app.application_id),
+                        PyRep::Integer(app.corporation_id),
+                        PyRep::Integer(app.character_id),
+                        PyRep::String(app.message.clone()),
+                        PyRep::String(app.message.clone()),
+                        PyRep::Integer(corp_app_status_code(&app.status)),
+                        PyRep::Integer(dt),
+                        PyRep::Integer(dt),
+                        PyRep::Integer(0),
+                        PyRep::Integer(0),
+                        PyRep::Integer(0),
+                        PyRep::None,
+                    ]
+                })
+                .collect();
+            Ok(PyRep::rowset(
                 vec![
-                    PyRep::Integer(app.application_id),
-                    PyRep::Integer(app.character_id),
-                    PyRep::String(app.message.clone()),
-                    PyRep::String(app.status.clone()),
-                    PyRep::Integer(app.created_unix as i64),
-                ]
-            })
-            .collect();
-        Ok(rows)
+                    "applicationID",
+                    "corporationID",
+                    "characterID",
+                    "applicationText",
+                    "message",
+                    "status",
+                    "applicationDateTime",
+                    "createdDate",
+                    "roles",
+                    "grantableRoles",
+                    "deleted",
+                    "lastCorpUpdaterID",
+                ],
+                rows,
+            ))
+        } else {
+            let mut by_char: std::collections::BTreeMap<i64, Vec<PyRep>> =
+                std::collections::BTreeMap::new();
+            for app in corp.applications.values() {
+                let is_open = matches!(app.status.as_str(), "Applied" | "Pending" | "Invited");
+                if is_open {
+                    let dt = corp_app_filetime(app.created_unix, now_unix);
+                    by_char
+                        .entry(app.character_id)
+                        .or_default()
+                        .push(PyRep::keyval([
+                            ("applicationID", PyRep::Integer(app.application_id)),
+                            ("corporationID", PyRep::Integer(app.corporation_id)),
+                            ("characterID", PyRep::Integer(app.character_id)),
+                            ("applicationText", PyRep::String(app.message.clone())),
+                            ("message", PyRep::String(app.message.clone())),
+                            ("status", PyRep::Integer(corp_app_status_code(&app.status))),
+                            ("applicationDateTime", PyRep::Integer(dt)),
+                            ("createdDateTime", PyRep::Integer(dt)),
+                            ("createdDate", PyRep::Integer(dt)),
+                            ("roles", PyRep::Integer(0)),
+                            ("grantableRoles", PyRep::Integer(0)),
+                            ("deleted", PyRep::Integer(0)),
+                            ("lastCorpUpdaterID", PyRep::None),
+                        ]));
+                }
+            }
+            Ok(PyRep::Dict(
+                by_char
+                    .into_iter()
+                    .map(|(cid, list)| (PyRep::Integer(cid), PyRep::List(list)))
+                    .collect(),
+            ))
+        }
     });
-    match res {
-        Ok(rows) => Some(Ok(PyRep::rowset(vec!["applicationID", "characterID", "message", "status", "createdDate"], rows))),
-        Err(e) => Some(Err(e)),
-    }
+    Some(res)
 }
 
 #[cfg(test)] #[path = "fleet_social_corp_tail_dispatch_tests.rs"]

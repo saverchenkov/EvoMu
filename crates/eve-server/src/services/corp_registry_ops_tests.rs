@@ -1079,6 +1079,12 @@ async fn test_corp_registry_ops_remaining_branches() {
         .unwrap();
     assert!(matches!(mkt, PyRep::Rowset { .. }));
 
+    // #892: NPC corporation market info is public for any pilot without CrpAccessDenied
+    let npc_mkt = handle_get_corp_market_info(&ctx, &mut sess, &[PyRep::Integer(1_000_031)])
+        .unwrap()
+        .unwrap();
+    assert!(matches!(npc_mkt, PyRep::Rowset { .. }));
+
     // 7. handle_get_info_window_data_for_char: CharacterNotFound, corp_id_override, active title slots
     assert_eq!(
         handle_get_info_window_data_for_char(&ctx, &mut sess, &[PyRep::Integer(888_777_666)])

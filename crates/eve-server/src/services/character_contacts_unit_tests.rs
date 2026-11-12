@@ -373,12 +373,24 @@ fn home_station_assets_and_self_destruct_clone_enforce_rules() {
             .dict_get("station_id")
             .is_some()
     );
-    assert!(matches!(
-        handle_contacts(&ctx, &mut sess, "home_station", "get_home_station_candidates", &[], &kw)
+    let cands_rep = handle_contacts(&ctx, &mut sess, "home_station", "get_home_station_candidates", &[], &kw)
+        .unwrap()
+        .unwrap();
+    let PyRep::List(ref l) = cands_rep else {
+        panic!("expected List from get_home_station_candidates (#944)");
+    };
+    assert!(!l.is_empty());
+    assert!(l[0].dict_get("type_id").is_some());
+    assert!(l[0].dict_get("solar_system_id").is_some());
+    assert!(l[0].dict_get("is_current_station").is_some());
+    assert!(l[0].dict_get("is_school_hq").is_some());
+    assert_eq!(l[0].dict_get("errors"), Some(&PyRep::List(Vec::new())));
+    assert_eq!(
+        handle_contacts(&ctx, &mut sess, "home_station", "get_next_remote_change_time", &[], &kw)
             .unwrap()
             .unwrap(),
-        PyRep::List(ref l) if !l.is_empty()
-    ));
+        PyRep::None
+    );
 
     let set_res = handle_contacts(&ctx, &mut sess, "charMgr", "SetHomeStation", &[PyRep::Integer(st_id)], &kw)
         .unwrap()

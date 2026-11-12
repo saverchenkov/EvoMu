@@ -682,7 +682,7 @@ fn online_status_blocks_home_station_and_mail_block_edges() {
     sess.role = eve_machonet::service_roles::ROLE_GMH;
     let _ = call_home(&ctx, &mut sess, "reset_remote_change_time").unwrap();
     let after_reset = call_home(&ctx, &mut sess, "get_next_remote_change_time").unwrap();
-    assert_eq!(after_reset, PyRep::Integer(0));
+    assert_eq!(after_reset, PyRep::None);
 }
 
 fn call_home(ctx: &ServerContext, sess: &mut SessionState, method: &str) -> Result<PyRep, BridgeRpcError> {

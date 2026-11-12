@@ -401,7 +401,10 @@ fn home_station_candidates_self_destruct_in_structure_and_mail_blocks_cover_boun
     else {
         panic!("expected PyRep::List");
     };
-    let cand_ids: Vec<i64> = cands.iter().filter_map(|v| v.as_i64()).collect();
+    let cand_ids: Vec<i64> = cands
+        .iter()
+        .filter_map(|v| v.dict_get("id").and_then(|id| id.as_i64()))
+        .collect();
     assert_eq!(
         cand_ids,
         vec![
@@ -435,7 +438,10 @@ fn home_station_candidates_self_destruct_in_structure_and_mail_blocks_cover_boun
     else {
         panic!("expected list");
     };
-    let cand2_ids: Vec<i64> = cands2.iter().filter_map(|v| v.as_i64()).collect();
+    let cand2_ids: Vec<i64> = cands2
+        .iter()
+        .filter_map(|v| v.dict_get("id").and_then(|id| id.as_i64()))
+        .collect();
     assert_eq!(cand2_ids, vec![home_station_id, docked_structure_id]);
 
     // Self destruct in Upwell structure (station_id = None, structure_id = Some)

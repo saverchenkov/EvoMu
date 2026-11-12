@@ -244,9 +244,20 @@ fn corp_gov_tail_settings_assets_and_applications() {
     assert_eq!(get_agg.dict_get("corporationID").and_then(|v| v.as_i64()), Some(corp_id));
 
     let my_apps = handle_get_my_applications_rpc(&ctx, &session, false).unwrap().unwrap();
-    assert!(!matches!(my_apps, PyRep::None));
+    let PyRep::Dict(my_entries) = &my_apps else { panic!("expected Dict from GetMyApplications (#943)") };
+    assert_eq!(my_entries.len(), 1);
+    assert_eq!(my_entries[0].0, PyRep::Integer(corp_id));
+    assert_eq!(my_entries[0].1.dict_get("applicationText"), Some(&PyRep::String("apply".into())));
+    assert_eq!(
+        my_entries[0].1.dict_get("applicationDateTime"),
+        Some(&PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(1000)))
+    );
+
     let corp_apps = handle_get_corp_applications_rpc(&ctx, &session, &[PyRep::Integer(corp_id)], false)
         .unwrap()
         .unwrap();
-    assert!(!matches!(corp_apps, PyRep::None));
+    let PyRep::Dict(corp_entries) = &corp_apps else { panic!("expected Dict from GetApplications (#943)") };
+    assert_eq!(corp_entries.len(), 1);
+    assert_eq!(corp_entries[0].0, PyRep::Integer(char_id));
+    assert_eq!(corp_entries[0].1.dict_get("applicationText"), Some(&PyRep::String("apply".into())));
 }

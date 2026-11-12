@@ -372,6 +372,17 @@ pub fn normalize_macho_rpc_reply(
             }
         }
     }
+    if service == "XmppChatMgr" && method == "CreatePlayerOwnedChannel" {
+        if let Ok(ref rep) = rpc_res {
+            if let Some(s) = rep
+                .dict_get("channelID")
+                .and_then(|v| v.as_str())
+                .or_else(|| rep.as_str())
+            {
+                return Ok(PyRep::String(s.replace(':', "_")));
+            }
+        }
+    }
     if service == "fleetProxy" && matches!(method, "GetAvailableFleetAds" | "GetFleetAdsForChar") {
         if let Ok(rep) = rpc_res {
             return Ok(rowset_to_dict_by_key(rep, "fleetID"));
@@ -470,6 +481,16 @@ pub fn normalize_macho_rpc_reply(
     if service == "facilityManager" && method == "GetFacility" {
         if let Ok(rep) = rpc_res {
             return Ok(normalize_facility_rep(rep));
+        }
+    }
+    if service == "facilityManager" && method == "GetFacilityLocations" {
+        if let Ok(PyRep::List(items)) = rpc_res {
+            return Ok(PyRep::List(
+                items
+                    .into_iter()
+                    .map(normalize_facility_location_rep)
+                    .collect(),
+            ));
         }
     }
     if service == "map" && method == "GetIncursionGlobalReport" {
@@ -959,27 +980,6 @@ pub fn normalize_macho_rpc_reply(
                 let state = rep.dict_get("state").cloned().unwrap_or(PyRep::Integer(0));
                 return Ok(PyRep::Tuple(vec![sys_id, state]));
             }
-        }
-    } else if service == "home_station" && method == "get_home_station_candidates" {
-        if let Ok(PyRep::List(items)) = rpc_res {
-            let mut out = Vec::new();
-            for it in items {
-                match it {
-                    PyRep::Integer(sid) => {
-                        out.push(PyRep::keyval([
-                            ("id", PyRep::Integer(sid)),
-                            ("station_id", PyRep::Integer(sid)),
-                            ("type_id", PyRep::Integer(1529)),
-                            ("solar_system_id", PyRep::Integer(0)),
-                            ("is_current_station", PyRep::Bool(true)),
-                            ("is_school_hq", PyRep::Bool(true)),
-                            ("errors", PyRep::List(Vec::new())),
-                        ]));
-                    }
-                    other => out.push(other),
-                }
-            }
-            return Ok(PyRep::List(out));
         }
     } else if service == "invbroker" && method == "ALSCLogGet" {
         if let Ok(ref rep) = rpc_res {
@@ -2022,6 +2022,69 @@ fn normalize_facility_rep(rep: PyRep) -> PyRep {
             ])
         });
     PyRep::KeyVal(entries)
+}
+
+fn normalize_facility_location_rep(rep: PyRep) -> PyRep {
+    if !matches!(rep, PyRep::KeyVal(_) | PyRep::Dict(_)) {
+        return rep;
+    }
+    let item_id = rep
+        .dict_get("itemID")
+        .or_else(|| rep.dict_get("facilityID"))
+        .cloned()
+        .unwrap_or(PyRep::Integer(0));
+    let facility_id = rep
+        .dict_get("facilityID")
+        .cloned()
+        .unwrap_or_else(|| item_id.clone());
+    let type_id = rep
+        .dict_get("typeID")
+        .cloned()
+        .unwrap_or(PyRep::Integer(1529));
+    let owner_id = rep
+        .dict_get("ownerID")
+        .cloned()
+        .unwrap_or(PyRep::Integer(0));
+    let flag_id = rep
+        .dict_get("flagID")
+        .cloned()
+        .unwrap_or(PyRep::Integer(4));
+    let solar_system_id = rep
+        .dict_get("solarSystemID")
+        .cloned()
+        .unwrap_or(PyRep::Integer(0));
+    let region_id = rep
+        .dict_get("regionID")
+        .cloned()
+        .unwrap_or(PyRep::Integer(0));
+    let can_view = rep
+        .dict_get("canView")
+        .cloned()
+        .unwrap_or(PyRep::Bool(true));
+    let can_take = rep
+        .dict_get("canTake")
+        .cloned()
+        .unwrap_or(PyRep::Bool(true));
+    let state_dict = PyRep::Dict(vec![
+        (PyRep::String("itemID".into()), item_id),
+        (PyRep::String("facilityID".into()), facility_id),
+        (PyRep::String("typeID".into()), type_id),
+        (PyRep::String("ownerID".into()), owner_id),
+        (PyRep::String("flagID".into()), flag_id),
+        (PyRep::String("solarSystemID".into()), solar_system_id),
+        (PyRep::String("regionID".into()), region_id),
+        (PyRep::String("canView".into()), can_view),
+        (PyRep::String("canTake".into()), can_take),
+    ]);
+    PyRep::ObjectEx {
+        is_type_2: true,
+        header: Box::new(PyRep::Tuple(vec![
+            PyRep::Tuple(vec![PyRep::Token("industry.job.Location".into())]),
+            state_dict,
+        ])),
+        list: Vec::new(),
+        dict: Vec::new(),
+    }
 }
 
 fn normalize_incursion_report_rep(rep: PyRep) -> PyRep {

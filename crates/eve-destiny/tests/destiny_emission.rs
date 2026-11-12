@@ -195,7 +195,7 @@ async fn test_set_state_full_state_buffer_for_observer() {
     // damageState: {ballID: ((shield, rechargeMs, stamp), armor, structure)} (Destiny.xmlp:303-317).
     let PyRep::Dict(dmg) = &bag["damageState"] else { panic!("damageState dict") };
     assert_eq!(dmg.len(), 2);
-    assert_eq!(dmg[0], (PyRep::Integer(SHIP_A), damage_tuple(1.0, 120_000.0, tick, 1.0, 1.0)));
+    assert_eq!(dmg[0], (PyRep::Integer(SHIP_A), damage_tuple(1.0, 24_000.0, tick, 1.0, 1.0)));
     let PyRep::Tuple(b_dmg) = &dmg[1].1 else { panic!() };
     let PyRep::Tuple(b_shield) = &b_dmg[0] else { panic!() };
     let PyRep::Real(b_ratio) = b_shield[0] else { panic!() };
@@ -277,7 +277,7 @@ async fn test_add_balls_on_grid_entry_and_add_balls2_for_resident() {
     assert!(matches!(slim_state.as_ref(), PyRep::Dict(_)));
     assert_eq!(slims[0].dict_get("itemID"), Some(&PyRep::Integer(SHIP_B)));
     assert_eq!(slims[0].dict_get("charID"), Some(&PyRep::Integer(90_000_002)));
-    assert_eq!(chunk[2], PyRep::Dict(vec![(PyRep::Integer(SHIP_B), damage_tuple(1.0, 120_000.0, tick, 1.0, 1.0))]));
+    assert_eq!(chunk[2], PyRep::Dict(vec![(PyRep::Integer(SHIP_B), damage_tuple(1.0, 24_000.0, tick, 1.0, 1.0))]));
     let PyRep::Bytes(state) = &chunk[0] else { panic!("state bytes") };
     let mut c = Cur(state, 0);
     assert_eq!(c.u8(), 1, "AddBall_header.packet_type 1 = balls (SystemBubble.cpp:713)");
@@ -302,7 +302,7 @@ async fn test_add_balls_on_grid_entry_and_add_balls2_for_resident() {
     let PyRep::Dict(slim) = &pair[0] else { panic!("AddBalls2 slim must be a plain dict") };
     assert!(slim.contains(&(PyRep::String("itemID".into()), PyRep::Integer(SHIP_A))));
     assert!(slim.contains(&(PyRep::String("corpID".into()), PyRep::Integer(1_000_170))));
-    assert_eq!(pair[1], damage_tuple(1.0, 120_000.0, tick, 1.0, 1.0));
+    assert_eq!(pair[1], damage_tuple(1.0, 24_000.0, tick, 1.0, 1.0));
     let PyRep::Bytes(state) = &chunk[0] else { panic!() };
     let mut c = Cur(state, 0);
     assert_eq!(c.u8(), 1);
@@ -564,7 +564,7 @@ async fn test_damage_state_change_and_destruction_effect() {
     let actions = wire_for(&mut park, SHIP_A);
     let dmg = args_of(&actions, "OnDamageStateChange");
     assert_eq!(dmg.len(), 1);
-    assert_eq!(dmg[0], &[PyRep::Integer(SHIP_B), damage_tuple(0.8, 120_000.0, tick, 1.0, 1.0)]);
+    assert_eq!(dmg[0], &[PyRep::Integer(SHIP_B), damage_tuple(0.8, 24_000.0, tick, 1.0, 1.0)]);
 
     // Lethal damage: neighbours get the final damage state, the destruction effect, then the
     // removal. Client `Park.TerminalPlayDestructionEffect(shipID, destructionEffectId)`
@@ -580,7 +580,7 @@ async fn test_damage_state_change_and_destruction_effect() {
     assert_eq!(order, vec!["OnDamageStateChange", "TerminalPlayDestructionEffect", "RemoveBall"]);
     assert_eq!(args_of(&actions, "OnDamageStateChange")[0], &[
         PyRep::Integer(SHIP_B),
-        damage_tuple(0.0, 120_000.0, tick, 0.0, 0.0),
+        damage_tuple(0.0, 24_000.0, tick, 0.0, 0.0),
     ]);
     assert_eq!(args_of(&actions, "TerminalPlayDestructionEffect")[0], &[PyRep::Integer(SHIP_B), PyRep::None]);
     assert_eq!(args_of(&actions, "RemoveBall")[0], &[PyRep::Integer(SHIP_B)]);
@@ -715,7 +715,7 @@ async fn test_sov_controller_fleet_ship_state_dbuff_dot_and_drone_state_emission
         args_of(&actions, "OnClientControllerEvent")[0],
         &[PyRep::Integer(SHIP_A), PyRep::Integer(SHIP_B), PyRep::String("GateActivate".into()), PyRep::Integer(1), PyRep::Real(0.25)]
     );
-    assert_eq!(args_of(&actions, "OnFleetDamageStateChange")[0], &[PyRep::Integer(SHIP_B), damage_tuple(0.8, 120_000.0, tick, 1.0, 1.0)]);
+    assert_eq!(args_of(&actions, "OnFleetDamageStateChange")[0], &[PyRep::Integer(SHIP_B), damage_tuple(0.8, 24_000.0, tick, 1.0, 1.0)]);
     assert_eq!(args_of(&actions, "OnShipStateUpdate").len(), 1);
     assert_eq!(args_of(&actions, "OnDbuffUpdated")[0][0], PyRep::Integer(SHIP_A));
     assert_eq!(args_of(&actions, "OnDotVictimUpdated")[0][0], PyRep::Integer(SHIP_B));

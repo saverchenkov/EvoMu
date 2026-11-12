@@ -565,6 +565,7 @@ impl Ballpark {
             );
             if let Some(c) = self.combat_states.get_mut(&decloaked_id) {
                 c.cloak_velocity_multiplier = None;
+                c.was_cloaked_last_tick = false;
             }
             let speed_change = self.recompute_ball_attributes_quiet(decloaked_id);
             if let Some(meta) = self.ball_slim_meta.get_mut(&decloaked_id) {
@@ -700,29 +701,35 @@ impl Ballpark {
             self.contract_or_delete_grid(gid);
         }
 
-        // Emit AddBalls2 and RemoveBalls for grid wall crossings (`SP-2`).
+        // Emit AddBalls2 and RemoveBalls for grid wall crossings and cloak transitions (`SP-2`, `#871`).
         let mut any_changed_or_cloaked = false;
-        let dyn_grid_info: Vec<(BallId, u64, u64, bool)> = dynamic_ids
+        let dyn_grid_info: Vec<(BallId, u64, u64, bool, bool)> = dynamic_ids
             .iter()
             .filter_map(|&id| {
                 let &before = grids_before.get(&id)?;
                 let &after = self.ball_grid_ids.get(&id)?;
-                let cloaked = self.combat_states.get(&id).is_some_and(|c| c.is_cloaked);
-                if before != after || cloaked {
+                let (cloaked, was_cloaked) = self
+                    .combat_states
+                    .get(&id)
+                    .map(|c| (c.is_cloaked, c.was_cloaked_last_tick))
+                    .unwrap_or((false, false));
+                if before != after || cloaked != was_cloaked {
                     any_changed_or_cloaked = true;
                 }
-                Some((id, before, after, cloaked))
+                Some((id, before, after, cloaked, was_cloaked))
             })
             .collect();
         if any_changed_or_cloaked {
-            for &(obs_id, obs_before, obs_after, _) in &dyn_grid_info {
+            for &(obs_id, obs_before, obs_after, _, _) in &dyn_grid_info {
                 let mut entered = Vec::new();
                 let mut left = Vec::new();
-                for &(other_id, other_before, other_after, other_cloaked) in &dyn_grid_info {
+                for &(other_id, other_before, other_after, other_cloaked, other_was_cloaked) in
+                    &dyn_grid_info
+                {
                     if obs_id == other_id {
                         continue;
                     }
-                    let was_same = obs_before == other_before;
+                    let was_same = obs_before == other_before && !other_was_cloaked;
                     let now_same = obs_after == other_after && !other_cloaked;
                     if !was_same && now_same {
                         if let Some(other_ball) = self.balls.get(&other_id) {
@@ -750,6 +757,11 @@ impl Ballpark {
                         .or_default()
                         .push(DestinyEvent::RemoveBalls { ball_ids: left });
                 }
+            }
+        }
+        for &id in &dynamic_ids {
+            if let Some(cs) = self.combat_states.get_mut(&id) {
+                cs.was_cloaked_last_tick = cs.is_cloaked;
             }
         }
 
@@ -1406,6 +1418,9 @@ pub fn is_warp_finishing_within_1s(ball: &Ball) -> bool {
 
 impl Ballpark {
     pub(crate) fn reveal_ball_to_grid_observers(&mut self, ball_id: BallId) {
+        if let Some(c) = self.combat_states.get_mut(&ball_id) {
+            c.was_cloaked_last_tick = false;
+        }
         if let (Some(&gid), Some(b)) = (
             self.ball_grid_ids.get(&ball_id),
             self.balls.get(&ball_id).cloned(),
@@ -1437,6 +1452,7 @@ impl Ballpark {
         );
         if let Some(c) = self.combat_states.get_mut(&ball_id) {
             c.cloak_velocity_multiplier = None;
+            c.was_cloaked_last_tick = false;
         }
         let speed_change = self.recompute_ball_attributes_quiet(ball_id);
         if let Some(meta) = self.ball_slim_meta.get_mut(&ball_id) {

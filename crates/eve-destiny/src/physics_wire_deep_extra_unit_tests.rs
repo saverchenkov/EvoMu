@@ -481,7 +481,7 @@ fn wire_slim_meta_damage_state_set_state_and_destiny_event_edge_cases() {
         PyRep::Tuple(vec![
             PyRep::Tuple(vec![
                 PyRep::Real(1.0),
-                PyRep::Real(120_000.0),
+                PyRep::Real(24_000.0),
                 PyRep::Integer(77),
             ]),
             PyRep::Real(1.0),

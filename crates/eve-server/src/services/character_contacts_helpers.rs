@@ -108,7 +108,50 @@ pub(crate) fn handle_home_station_candidates(
             cands.push(st);
         }
     }
-    Ok(PyRep::List(cands.into_iter().map(PyRep::Integer).collect()))
+    let docked_id = session
+        .station_id
+        .or(session.structure_id)
+        .or(ch.station_id)
+        .or(ch.structure_id);
+    let school_or_default = school_st.unwrap_or(ch.home_station_id);
+    let out = ctx.db.with_snapshot(|snap| {
+        cands
+            .into_iter()
+            .map(|sid| {
+                let (st_type_id, st_sys_id) = ctx
+                    .sde
+                    .stations
+                    .get(&sid)
+                    .map(|st| (st.station_type_id, st.solar_system_id))
+                    .or_else(|| {
+                        ctx.sde.solar_systems.values().find_map(|sys| {
+                            sys.stations
+                                .iter()
+                                .find(|st| st.station_id == sid)
+                                .map(|st| (st.station_type_id, sys.solar_system_id))
+                        })
+                    })
+                    .or_else(|| {
+                        snap.structures
+                            .get(&sid)
+                            .map(|st| (st.type_id, st.solar_system_id))
+                    })
+                    .unwrap_or((1529, ch.solar_system_id));
+                let is_current = docked_id == Some(sid);
+                let is_school = sid == school_or_default;
+                PyRep::keyval([
+                    ("id", PyRep::Integer(sid)),
+                    ("station_id", PyRep::Integer(sid)),
+                    ("type_id", PyRep::Integer(st_type_id as i64)),
+                    ("solar_system_id", PyRep::Integer(st_sys_id as i64)),
+                    ("is_current_station", PyRep::Bool(is_current)),
+                    ("is_school_hq", PyRep::Bool(is_school)),
+                    ("errors", PyRep::List(Vec::new())),
+                ])
+            })
+            .collect()
+    });
+    Ok(PyRep::List(out))
 }
 
 pub(crate) fn handle_self_destruct_clone(

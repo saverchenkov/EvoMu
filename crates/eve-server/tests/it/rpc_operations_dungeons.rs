@@ -491,18 +491,28 @@ async fn test_dungeon_instance_cache_queries_and_counts() {
     let combat_cnt = rpc(&ctx, &mut p1, "dungeonInstanceCacheMgr", "GetCombatAnomaliesCount", &[])
         .await
         .expect("GetCombatAnomaliesCount");
-    let PyRep::Integer(c_count) = combat_cnt else {
-        panic!("expected Integer from GetCombatAnomaliesCount");
+    let PyRep::Dict(c_map) = combat_cnt else {
+        panic!("expected Dict from GetCombatAnomaliesCount");
     };
+    let c_count = c_map
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(sys_id as i64))
+        .and_then(|(_, v)| v.as_i64())
+        .expect("sys_id in GetCombatAnomaliesCount");
     assert!(c_count >= 0);
 
     // 4. Ore anomalies: count and range (multi-system stargate BFS)
     let ore_cnt = rpc(&ctx, &mut p1, "dungeonInstanceCacheMgr", "GetOreAnomaliesCount", &[])
         .await
         .expect("GetOreAnomaliesCount");
-    let PyRep::Integer(o_count) = ore_cnt else {
-        panic!("expected Integer from GetOreAnomaliesCount");
+    let PyRep::Dict(o_map) = ore_cnt else {
+        panic!("expected Dict from GetOreAnomaliesCount");
     };
+    let o_count = o_map
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(sys_id as i64))
+        .and_then(|(_, v)| v.as_i64())
+        .expect("sys_id in GetOreAnomaliesCount");
     assert!(o_count >= 0);
 
     let ore_range = rpc(
@@ -540,9 +550,14 @@ async fn test_dungeon_instance_cache_queries_and_counts() {
     let ice_cnt = rpc(&ctx, &mut p1, "dungeonInstanceCacheMgr", "GetIceBeltsCount", &[])
         .await
         .expect("GetIceBeltsCount");
-    let PyRep::Integer(i_count) = ice_cnt else {
-        panic!("expected Integer from GetIceBeltsCount");
+    let PyRep::Dict(i_map) = ice_cnt else {
+        panic!("expected Dict from GetIceBeltsCount");
     };
+    let i_count = i_map
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(sys_id as i64))
+        .and_then(|(_, v)| v.as_i64())
+        .expect("sys_id in GetIceBeltsCount");
     assert!(i_count >= 0);
 
     // 6. Signatures and Bulwark mining counts (archetype 81 / BulwarkMiningSite)

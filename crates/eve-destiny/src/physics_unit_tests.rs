@@ -686,3 +686,73 @@ fn step_scales_gate_cloak_warp_and_undock_tick_timers_with_dt() {
     assert!(!cs.is_cloaked);
     assert!(!cs.sync_invuln_with_undock_timer);
 }
+
+#[test]
+fn gate_cloak_expiry_and_proximity_decloak_emit_single_add_balls2_to_observers_871() {
+    let mut park = Ballpark::new(30_000_142);
+    let obs = make_ball(1, DVec3::ZERO, DVec3::ZERO, MovementMode::Stop);
+    park.add_ball(obs);
+    let _ = park.drain_observer_events(1);
+
+    // 1. Gate-cloak expiry decloak
+    let mut gate_ship = make_ball(
+        2,
+        DVec3::new(5_000.0, 0.0, 0.0),
+        DVec3::ZERO,
+        MovementMode::Stop,
+    );
+    gate_ship.speed_fraction = 0.0;
+    park.combat_states.insert(
+        2,
+        crate::CombatState {
+            is_cloaked: true,
+            gate_cloak_remaining_ticks: 1,
+            ..Default::default()
+        },
+    );
+    park.add_ball(gate_ship);
+    assert!(park.drain_observer_events(1).is_empty());
+
+    park.step(1.0);
+    let evs = park.drain_observer_events(1);
+    let add_balls2_count = evs
+        .iter()
+        .filter(|e| matches!(e, crate::DestinyEvent::AddBalls2 { balls } if balls.iter().any(|b| b.id == 2)))
+        .count();
+    assert_eq!(
+        add_balls2_count, 1,
+        "gate-cloak expiry must emit exactly one AddBalls2 for decloaked ball, got: {evs:?}"
+    );
+    assert!(!park.combat_states[&2].was_cloaked_last_tick);
+
+    // 2. Proximity decloak (within 2,000 m surface distance)
+    let mut prox_ship = make_ball(
+        3,
+        DVec3::new(1_000.0, 0.0, 0.0),
+        DVec3::ZERO,
+        MovementMode::Stop,
+    );
+    prox_ship.speed_fraction = 0.0;
+    park.combat_states.insert(
+        3,
+        crate::CombatState {
+            is_cloaked: true,
+            cloak_stabilization_remaining_s: 0.0,
+            ..Default::default()
+        },
+    );
+    park.add_ball(prox_ship);
+    let _ = park.drain_observer_events(1);
+
+    park.step(1.0);
+    let evs2 = park.drain_observer_events(1);
+    let prox_add_balls2_count = evs2
+        .iter()
+        .filter(|e| matches!(e, crate::DestinyEvent::AddBalls2 { balls } if balls.iter().any(|b| b.id == 3)))
+        .count();
+    assert_eq!(
+        prox_add_balls2_count, 1,
+        "proximity decloak must emit exactly one AddBalls2 for decloaked ball, got: {evs2:?}"
+    );
+    assert!(!park.combat_states[&3].was_cloaked_last_tick);
+}

@@ -1025,7 +1025,7 @@ async fn test_corp_registry_operations_kills_and_naming() {
         });
     });
 
-    assert!(is_rowset(&call(&ctx, &mut sess2, "corpRegistry", "GetMyApplications", vec![]).await.unwrap()));
+    assert!(matches!(call(&ctx, &mut sess2, "corpRegistry", "GetMyApplications", vec![]).await.unwrap(), PyRep::Dict(_)));
     assert!(is_rowset(&call(&ctx, &mut sess1, "corpRegistry", "GetOldApplications", vec![]).await.unwrap()));
     assert!(is_rowset(&call(&ctx, &mut sess2, "corpRegistry", "GetMyOldApplications", vec![]).await.unwrap()));
     assert_eq!(field(&call(&ctx, &mut sess1, "corpRegistry", "DeleteAllianceApplication", vec![PyRep::Integer(99_000_001)]).await.unwrap(), "deleted"), PyRep::Bool(true));

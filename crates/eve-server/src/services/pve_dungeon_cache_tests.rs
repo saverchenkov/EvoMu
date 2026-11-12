@@ -106,6 +106,9 @@ async fn dungeon_cache_and_editor_metadata_rpc_handlers() {
         .expect("handled")
         .expect(method);
         assert!(!matches!(res, PyRep::None));
+        if matches!(method, "GetCombatAnomaliesCount" | "GetOreAnomaliesCount" | "GetIceBeltsCount") {
+            assert!(matches!(res, PyRep::Dict(_)), "{method} must return Dict (#942)");
+        }
     }
 
     // GM dungeon authoring metadata calls

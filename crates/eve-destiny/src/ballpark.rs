@@ -403,20 +403,22 @@ impl Ballpark {
             self.warp_bubble_mgr
                 .add_bubble(WarpBubble::new(ball_id, ball_pos, ball.radius));
         }
-        self.pending_events
-            .push(DestinyEvent::AddBall { ball: ball.clone() });
         self.balls.insert(ball_id, ball.clone());
-        self.combat_states.entry(ball_id).or_default();
+        let is_cloaked = {
+            let cs = self.combat_states.entry(ball_id).or_default();
+            cs.was_cloaked_last_tick = cs.is_cloaked;
+            cs.is_cloaked
+        };
+        if !is_cloaked {
+            self.pending_events
+                .push(DestinyEvent::AddBall { ball: ball.clone() });
+        }
         self.observer_events.insert(ball_id, Vec::new());
         let grid_id = self.find_or_create_grid_for_position(ball_pos);
         if let Some(g) = self.grids.get_mut(&grid_id) {
             g.members.insert(ball_id);
         }
         self.ball_grid_ids.insert(ball_id, grid_id);
-        let is_cloaked = self
-            .combat_states
-            .get(&ball_id)
-            .is_some_and(|c| c.is_cloaked);
         if !is_cloaked {
             self.queue_event_for_grid_observers(
                 grid_id,
@@ -993,6 +995,7 @@ impl Ballpark {
             cs.capture_missing_baselines(b);
         }
         cs.is_cloaked = true;
+        cs.was_cloaked_last_tick = true;
         cs.is_covert_cloak = is_covert;
         cs.cloak_configured_targeting_delay_s = targeting_delay_s.max(0.0);
         cs.cloak_stabilization_remaining_s = stabilization_s.max(0.0);
@@ -1023,6 +1026,7 @@ impl Ballpark {
                 was_cloaked = true;
                 was_gate_cloak = cs.gate_cloak_remaining_ticks > 0;
                 cs.is_cloaked = false;
+                cs.was_cloaked_last_tick = false;
                 cs.is_covert_cloak = false;
                 cs.gate_cloak_remaining_ticks = 0;
                 cs.cloak_stabilization_remaining_s = 0.0;

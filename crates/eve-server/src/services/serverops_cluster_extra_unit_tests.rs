@@ -383,6 +383,7 @@ fn mutant_kill_downtime_persistence_maintenance_map_and_admin_cluster_rpcs() {
         "npcWrecksCleaned",
         "missionNpcsRespawned",
         "wormholeSitesDespawned",
+        "fwSystemsCaptured",
     ];
     for key in expected_keys {
         assert!(dt_report.contains_key(key), "missing maintenance key {key}");

@@ -570,14 +570,20 @@ async fn test_corp_applications_and_invitations() {
     )
     .await
     .expect("GetApplications");
-    let (_, a_rows) = rowset_data(&apps);
-    assert!(a_rows.iter().any(|r| r[0] == PyRep::Integer(app_id)));
+    let PyRep::Dict(a_dict) = &apps else { panic!("expected Dict from GetApplications") };
+    assert!(a_dict.iter().any(|(k, v)| {
+        k == &PyRep::Integer(PILOT_2)
+            && matches!(v, PyRep::List(list) if list.iter().any(|a| a.dict_get("applicationID") == Some(&PyRep::Integer(app_id))))
+    }));
 
     let my_apps = rpc(&ctx, &mut sess2, "corpRegistry", "GetMyApplications", &[])
         .await
         .expect("GetMyApplications");
-    let (_, ma_rows) = rowset_data(&my_apps);
-    assert!(ma_rows.iter().any(|r| r[0] == PyRep::Integer(app_id)));
+    let PyRep::Dict(ma_dict) = &my_apps else { panic!("expected Dict from GetMyApplications") };
+    assert!(ma_dict.iter().any(|(k, v)| {
+        k == &PyRep::Integer(corp_id)
+            && matches!(v, PyRep::List(list) if list.iter().any(|a| a.dict_get("applicationID") == Some(&PyRep::Integer(app_id))))
+    }));
 
     let old_before = rpc(&ctx, &mut sess1, "corpRegistry", "GetOldApplications", &[])
         .await
@@ -629,18 +635,18 @@ async fn test_corp_applications_and_invitations() {
     )
     .await
     .expect("GetApplications after");
-    let (_, aa_rows) = rowset_data(&apps_after);
+    let PyRep::Dict(aa_dict) = &apps_after else { panic!("expected Dict from GetApplications after") };
     assert!(
-        !aa_rows.iter().any(|r| r[0] == PyRep::Integer(app_id)),
+        !aa_dict.iter().any(|(_, v)| matches!(v, PyRep::List(list) if list.iter().any(|a| a.dict_get("applicationID") == Some(&PyRep::Integer(app_id))))),
         "closed application must not appear in active GetApplications"
     );
 
     let my_apps_after = rpc(&ctx, &mut sess2, "corpRegistry", "GetMyApplications", &[])
         .await
         .expect("GetMyApplications after");
-    let (_, maa_rows) = rowset_data(&my_apps_after);
+    let PyRep::Dict(maa_dict) = &my_apps_after else { panic!("expected Dict from GetMyApplications after") };
     assert!(
-        !maa_rows.iter().any(|r| r[0] == PyRep::Integer(app_id)),
+        !maa_dict.iter().any(|(_, v)| matches!(v, PyRep::List(list) if list.iter().any(|a| a.dict_get("applicationID") == Some(&PyRep::Integer(app_id))))),
         "closed application must not appear in active GetMyApplications"
     );
 

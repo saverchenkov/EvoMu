@@ -489,10 +489,16 @@ async fn test_phased_asteroid_field_lifecycle_and_mobile_phase_anchor_live() {
     let breached_yield = qty_of(&ctx, &mut miner_p.sess, miner_p.ship_id, 90_041, Some(ORE_HOLD)).await;
     assert!(breached_yield > 0, "Breached Prismaticite must yield non-zero base ore");
 
-    let anoms_early = ok(&ctx, &mut orca1.sess, "dungeonInstanceCacheMgr", "GetOreAnomaliesCount", &[]).await.as_i64().unwrap();
+    let anoms_early = match ok(&ctx, &mut orca1.sess, "dungeonInstanceCacheMgr", "GetOreAnomaliesCount", &[]).await {
+        PyRep::Dict(entries) => entries.iter().find(|(k, _)| k.as_i64() == Some(NULL_SYS as i64)).and_then(|(_, v)| v.as_i64()).unwrap(),
+        other => panic!("expected Dict from GetOreAnomaliesCount, got {other:?}"),
+    };
     ctx.advance_secs(7_250);
     tick_background_cluster(&ctx).await;
-    let anoms_half = ok(&ctx, &mut orca1.sess, "dungeonInstanceCacheMgr", "GetOreAnomaliesCount", &[]).await.as_i64().unwrap();
+    let anoms_half = match ok(&ctx, &mut orca1.sess, "dungeonInstanceCacheMgr", "GetOreAnomaliesCount", &[]).await {
+        PyRep::Dict(entries) => entries.iter().find(|(k, _)| k.as_i64() == Some(NULL_SYS as i64)).and_then(|(_, v)| v.as_i64()).unwrap(),
+        other => panic!("expected Dict from GetOreAnomaliesCount, got {other:?}"),
+    };
     assert_eq!(anoms_half, anoms_early + 1, "50% fracture must spawn OreAnomaly beacon");
 
     let anchor_id = common::slash_cmd(&ctx, &mut orca1.sess, "/createitem 90037 1").await.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
@@ -528,7 +534,10 @@ async fn test_phased_asteroid_field_lifecycle_and_mobile_phase_anchor_live() {
     assert_eq!(phased_yield, breached_yield * 10, "Phased-in field must yield exact 10x breached quantity");
     ctx.advance_secs(7_500);
     tick_background_cluster(&ctx).await;
-    let anoms_collapsed = ok(&ctx, &mut orca1.sess, "dungeonInstanceCacheMgr", "GetOreAnomaliesCount", &[]).await.as_i64().unwrap();
+    let anoms_collapsed = match ok(&ctx, &mut orca1.sess, "dungeonInstanceCacheMgr", "GetOreAnomaliesCount", &[]).await {
+        PyRep::Dict(entries) => entries.iter().find(|(k, _)| k.as_i64() == Some(NULL_SYS as i64)).and_then(|(_, v)| v.as_i64()).unwrap(),
+        other => panic!("expected Dict from GetOreAnomaliesCount, got {other:?}"),
+    };
     assert_eq!(anoms_collapsed, anoms_early, "Collapsed field must remove OreAnomaly beacon");
 }
 

@@ -959,7 +959,7 @@ pub fn handle_industry_facilities_bps(
                             .or_else(|| ctx.sde.stations.get(&fid).map(|st| st.station_type_id as i64))
                             .unwrap_or(1529);
                         let reg = ctx.sde.solar_systems.get(&sys_id).map(|sys| sys.region_id as i64).unwrap_or(0);
-                        Some(PyRep::keyval([("facilityID", PyRep::Integer(fid)), ("itemID", PyRep::Integer(fid)), ("typeID", PyRep::Integer(type_id)), ("solarSystemID", PyRep::Integer(sys_id as i64)), ("regionID", PyRep::Integer(reg)), ("flagID", PyRep::Integer(4)), ("ownerID", PyRep::Integer(char_id))]))
+                        Some(PyRep::keyval([("facilityID", PyRep::Integer(fid)), ("itemID", PyRep::Integer(fid)), ("typeID", PyRep::Integer(type_id)), ("solarSystemID", PyRep::Integer(sys_id as i64)), ("regionID", PyRep::Integer(reg)), ("flagID", PyRep::Integer(4)), ("ownerID", PyRep::Integer(char_id)), ("canView", PyRep::Bool(true)), ("canTake", PyRep::Bool(true))]))
                     }).collect::<Vec<_>>()
                 });
                 return Some(Ok(PyRep::List(locs)));
@@ -981,7 +981,7 @@ pub fn handle_industry_facilities_bps(
                 let reg = ctx.sde.solar_systems.get(&sys_id).map(|sys| sys.region_id as i64).unwrap_or(0);
                 let mut out = Vec::new();
                 if owner_filter.is_none() || owner_filter == Some(char_id) {
-                    out.push(PyRep::keyval([("facilityID", PyRep::Integer(fid)), ("itemID", PyRep::Integer(fid)), ("typeID", PyRep::Integer(type_id)), ("ownerID", PyRep::Integer(char_id)), ("flagID", PyRep::Integer(4)), ("solarSystemID", PyRep::Integer(sys_id as i64)), ("regionID", PyRep::Integer(reg))]));
+                    out.push(PyRep::keyval([("facilityID", PyRep::Integer(fid)), ("itemID", PyRep::Integer(fid)), ("typeID", PyRep::Integer(type_id)), ("ownerID", PyRep::Integer(char_id)), ("flagID", PyRep::Integer(4)), ("solarSystemID", PyRep::Integer(sys_id as i64)), ("regionID", PyRep::Integer(reg)), ("canView", PyRep::Bool(true)), ("canTake", PyRep::Bool(true))]));
                 }
                 let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
                 if corp_id > 0 && (owner_filter.is_none() || owner_filter == Some(corp_id)) {
@@ -998,7 +998,7 @@ pub fn handle_industry_facilities_bps(
                             let div_mask = (128u64 << d) | (1024u64 << d) | (1_048_576u64 << d) | (8_388_608u64 << d);
                             if full || (roles & div_mask) != 0 {
                                 let flag = 115 + i64::from(d);
-                                out.push(PyRep::keyval([("facilityID", PyRep::Integer(fid)), ("itemID", PyRep::Integer(fid)), ("typeID", PyRep::Integer(type_id)), ("ownerID", PyRep::Integer(corp_id)), ("flagID", PyRep::Integer(flag)), ("solarSystemID", PyRep::Integer(sys_id as i64)), ("regionID", PyRep::Integer(reg))]));
+                                out.push(PyRep::keyval([("facilityID", PyRep::Integer(fid)), ("itemID", PyRep::Integer(fid)), ("typeID", PyRep::Integer(type_id)), ("ownerID", PyRep::Integer(corp_id)), ("flagID", PyRep::Integer(flag)), ("solarSystemID", PyRep::Integer(sys_id as i64)), ("regionID", PyRep::Integer(reg)), ("canView", PyRep::Bool(true)), ("canTake", PyRep::Bool(true))]));
                             }
                         }
                     }

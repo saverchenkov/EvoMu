@@ -261,7 +261,7 @@ async fn test_damage_state_change_emitted_on_damage() {
         assert_eq!(state.len(), 3);
         let PyRep::Tuple(shield) = &state[0] else { panic!("(shield, tau, stamp)") };
         assert!((real(&shield[0]) - cs.shield_hp / cs.max_shield_hp).abs() < 1e-9);
-        assert_eq!(real(&shield[1]), cs.shield_recharge_time_ms, "tau is the ship's shield recharge time");
+        assert_eq!(real(&shield[1]), cs.shield_recharge_time_ms / 5.0, "tau is the ship's shield recharge time / 5.0");
         assert!(matches!(shield[2], PyRep::Integer(_)));
         assert!((real(&state[1]) - cs.armor_hp / cs.max_armor_hp).abs() < 1e-9);
         assert!((real(&state[2]) - cs.structure_hp / cs.max_structure_hp).abs() < 1e-9);
