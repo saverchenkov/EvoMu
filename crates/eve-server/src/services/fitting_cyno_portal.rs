@@ -51,7 +51,12 @@ pub(crate) struct FleetModuleBeacon {
 }
 
 pub fn is_ship_cyno_active(ctx: &ServerContext, ship_id: i64) -> bool {
-    sweep_expired_cyno_beacons(ctx);
+    if eve_db::lock_rank::held_lock_ranks()
+        .iter()
+        .all(|&r| r < eve_db::lock_rank::RANK_BALLPARK)
+    {
+        sweep_expired_cyno_beacons(ctx);
+    }
     let key = ctx_key(ctx);
     let now_unix = ctx.now_unix_secs();
     if let Ok(state) = cyno_state().read() {
