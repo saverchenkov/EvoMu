@@ -1198,8 +1198,8 @@ fn handle_char_mgr(
                         let attacker_ship_type_id = snap
                             .characters
                             .get(&km.attacker_character_id)
-                            .and_then(|c| c.active_ship_item_id)
-                            .and_then(|sid| snap.inventory.get(&sid))
+                            .map(|c| c.active_ship_id)
+                            .and_then(|sid| snap.items.get(&sid))
                             .map(|it| it.type_id as i64)
                             .unwrap_or(km.ship_type_id as i64);
                         vec![
