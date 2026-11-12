@@ -2,8 +2,186 @@
 
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
+use eve_server::outbound_sequencer::OutFrame;
+use eve_server::router::client_wire::{
+    dispatch_call_on_wire, ClientWireCallOutcome, ClientWireSession,
+};
 use eve_server::router::ServerContext;
+use eve_testkit::client_contract::SemanticLookupContext;
+use eve_testkit::client_harness::{
+    extract_bound_id_from_wire_rep, ClientErrorResponse, ClientHarness, ClientWireExchange,
+    ClientWireFrame, ClientWireFrameKind, ClientWireTransport,
+};
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+
+#[allow(dead_code)]
+fn to_wire_exchange(out: ClientWireCallOutcome) -> ClientWireExchange {
+    let rpc_result = match out.rpc_result {
+        Ok(rep) => Ok(rep),
+        Err(err) => Err(ClientErrorResponse {
+            code: err.code,
+            message: err.message,
+            wire_body: out.error_wire_body.unwrap_or(PyRep::None),
+        }),
+    };
+    let frames = out
+        .out_frames
+        .into_iter()
+        .zip(out.wire_packets)
+        .map(|(f, wire_packet)| {
+            let kind = match f {
+                OutFrame::CallRsp { call_id, .. } => match &rpc_result {
+                    Ok(reply) => ClientWireFrameKind::CallRsp {
+                        call_id,
+                        reply: reply.clone(),
+                    },
+                    Err(err) => ClientWireFrameKind::ErrorResponse {
+                        call_id,
+                        body: err.wire_body.clone(),
+                    },
+                },
+                OutFrame::SessionChange { frame } => {
+                    ClientWireFrameKind::SessionChange { packet: frame }
+                }
+                OutFrame::DoDestinyUpdate {
+                    epoch,
+                    stamp,
+                    has_set_state,
+                    updates,
+                    wait_for_bubble,
+                } => ClientWireFrameKind::DoDestinyUpdate {
+                    epoch,
+                    stamp,
+                    has_set_state,
+                    updates,
+                    wait_for_bubble,
+                },
+                OutFrame::Notification { event, args } => {
+                    ClientWireFrameKind::Notification { event, args }
+                }
+            };
+            ClientWireFrame { kind, wire_packet }
+        })
+        .collect();
+    ClientWireExchange {
+        rpc_result,
+        frames,
+        marshal_errors: out.marshal_errors,
+    }
+}
+
+/// Persistent `ClientWireTransport` backed by `eve_server::router::client_wire::ClientWireSession` (`C-2`).
+#[allow(dead_code)]
+pub struct ServerWireTransport<'c> {
+    pub inner: ClientWireSession<'c>,
+}
+
+impl<'c> ClientWireTransport for ServerWireTransport<'c> {
+    fn send_wire_call<'a>(
+        &'a mut self,
+        service: &'a str,
+        bound_id: Option<u64>,
+        method: &'a str,
+        args: &'a [PyRep],
+        kwargs: &'a HashMap<String, PyRep>,
+    ) -> Pin<Box<dyn Future<Output = ClientWireExchange> + Send + 'a>> {
+        Box::pin(async move {
+            let out = self
+                .inner
+                .call_wire(service, bound_id, method, args, kwargs)
+                .await;
+            to_wire_exchange(out)
+        })
+    }
+
+    fn semantic_lookup(&self) -> Option<SemanticLookupContext<'_>> {
+        Some(SemanticLookupContext {
+            sde: &self.inner.ctx.sde,
+            db: &self.inner.ctx.db,
+        })
+    }
+}
+
+/// Single-call borrowed `ClientWireTransport` over `(&ServerContext, &mut SessionState)` (`C-2`).
+#[allow(dead_code)]
+pub struct SessionBorrowWireTransport<'s, 'c> {
+    pub ctx: &'c ServerContext,
+    pub session: &'s mut SessionState,
+    pub preserve_char_notifications: bool,
+}
+
+impl<'s, 'c> ClientWireTransport for SessionBorrowWireTransport<'s, 'c> {
+    fn send_wire_call<'a>(
+        &'a mut self,
+        service: &'a str,
+        bound_id: Option<u64>,
+        method: &'a str,
+        args: &'a [PyRep],
+        kwargs: &'a HashMap<String, PyRep>,
+    ) -> Pin<Box<dyn Future<Output = ClientWireExchange> + Send + 'a>> {
+        Box::pin(async move {
+            let out = dispatch_call_on_wire(
+                self.ctx,
+                self.session,
+                service,
+                bound_id,
+                method,
+                args,
+                kwargs,
+            )
+            .await;
+            if self.preserve_char_notifications {
+                self.ctx
+                    .restore_pending_notifications(out.drained_char_notifications.clone());
+            }
+            to_wire_exchange(out)
+        })
+    }
+
+    fn semantic_lookup(&self) -> Option<SemanticLookupContext<'_>> {
+        Some(SemanticLookupContext {
+            sde: &self.ctx.sde,
+            db: &self.ctx.db,
+        })
+    }
+}
+
+/// Opens a new persistent [`ClientHarness`] on the exact client wire path for `session_id` (`C-2`).
+#[allow(dead_code)]
+pub fn new_wire_harness<'c>(
+    ctx: &'c ServerContext,
+    session_id: u64,
+) -> ClientHarness<ServerWireTransport<'c>> {
+    ClientHarness::new(ServerWireTransport {
+        inner: ClientWireSession::new(ctx, session_id),
+    })
+}
+
+/// Wraps an existing `SessionState` in a persistent [`ClientHarness`] on the wire path (`C-2`).
+#[allow(dead_code)]
+pub fn wrap_wire_harness<'c>(
+    ctx: &'c ServerContext,
+    session: SessionState,
+) -> ClientHarness<ServerWireTransport<'c>> {
+    ClientHarness::new(ServerWireTransport {
+        inner: ClientWireSession::from_session(ctx, session),
+    })
+}
+
+/// Wraps borrowed `(&ServerContext, &mut SessionState)` in a wire [`ClientHarness`] (`C-2`).
+#[allow(dead_code)]
+pub fn borrow_wire_harness<'s, 'c>(
+    ctx: &'c ServerContext,
+    session: &'s mut SessionState,
+) -> ClientHarness<SessionBorrowWireTransport<'s, 'c>> {
+    ClientHarness::new(SessionBorrowWireTransport {
+        ctx,
+        session,
+        preserve_char_notifications: false,
+    })
+}
 
 /// Fixed virtual-clock base (Unix seconds) shared by time-dependent integration tests.
 #[allow(dead_code)]
@@ -27,20 +205,19 @@ pub async fn login_pilot(
     password: &str,
 ) {
     let kw = HashMap::new();
-    ctx.dispatch_rpc(
-        sess,
-        "authentication",
-        None,
-        "Login",
-        &[
-            PyRep::String(username.into()),
-            PyRep::String(password.into()),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Login");
+    let mut harness = borrow_wire_harness(ctx, sess);
+    harness
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[
+                PyRep::String(username.into()),
+                PyRep::String(password.into()),
+            ],
+            &kw,
+        )
+        .await;
 }
 
 /// Ensures the session pilot has 8 launched Core Scanner Probes in the current system (fitting a Core Probe
@@ -61,7 +238,7 @@ pub async fn probe_scan(ctx: &ServerContext, sess: &mut SessionState, center: gl
     if active(ctx).is_empty() {
         let launcher_id = ctx.db.with_mut_snapshot(|snap| {
             let skills = snap.skills.entry(char_id).or_default();
-            for sid in [3402u32, 3412, 3413, 3426] {
+            for sid in [3402_u32, 3412, 3413, 3426] {
                 skills.insert(sid, eve_db::TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 });
             }
             let ids = [snap.next_entity_id + 1, snap.next_entity_id + 2];
@@ -75,9 +252,10 @@ pub async fn probe_scan(ctx: &ServerContext, sess: &mut SessionState, center: gl
             ids[0]
         });
         ctx.invalidate_ship_fitting(ship_id);
-        ctx.dispatch_rpc(sess, "dogmaIM", None, "Activate", &[PyRep::Integer(launcher_id), PyRep::String("launchScanners".into()), PyRep::None, PyRep::Integer(0)], &kw, None)
-            .await
-            .expect("launch scanner probes");
+        let mut harness = borrow_wire_harness(ctx, sess);
+        harness
+            .call_ok("dogmaIM", None, "Activate", &[PyRep::Integer(launcher_id), PyRep::String("launchScanners".into()), PyRep::None, PyRep::Integer(0)], &kw)
+            .await;
     }
     let d = range_m * 0.4;
     let offs = [glam::DVec3::ZERO, glam::DVec3::X * d, -glam::DVec3::X * d, glam::DVec3::Y * d, -glam::DVec3::Y * d, glam::DVec3::Z * d, -glam::DVec3::Z * d, glam::DVec3::splat(d * 0.5)];
@@ -88,9 +266,10 @@ pub async fn probe_scan(ctx: &ServerContext, sess: &mut SessionState, center: gl
             ("scanRange", PyRep::Real(range_m)),
         ]))
     }).collect());
-    let bound = ctx.dispatch_rpc(sess, "scanMgr", None, "GetSystemScanMgr", &[], &kw, None).await.expect("GetSystemScanMgr");
-    let bound_id = bound.dict_get("boundID").and_then(|v| v.as_i64()).map(|v| v as u64);
-    match ctx.dispatch_rpc(sess, "scanMgr", bound_id, "RequestScans", &[dict], &kw, None).await.expect("scanMgr.RequestScans") {
+    let mut harness = borrow_wire_harness(ctx, sess);
+    let bound = harness.call_ok("scanMgr", None, "GetSystemScanMgr", &[], &kw).await;
+    let bound_id = extract_bound_id_from_wire_rep(&bound);
+    match harness.call_ok("scanMgr", bound_id, "RequestScans", &[dict], &kw).await {
         PyRep::List(rows) => rows,
         other => panic!("scanMgr.RequestScans must return a row list, got {other:?}"),
     }
@@ -211,7 +390,19 @@ pub struct LivePilot {
 /// Dispatches a GM `slash.SlashCmd` and panics with the command text on failure.
 #[allow(dead_code)]
 pub async fn slash_cmd(ctx: &ServerContext, sess: &mut SessionState, cmd: &str) -> PyRep {
-    ctx.dispatch_rpc(sess, "slash", None, "SlashCmd", &[PyRep::String(cmd.into())], &HashMap::new(), None)
+    let mut harness = ClientHarness::new(SessionBorrowWireTransport {
+        ctx,
+        session: sess,
+        preserve_char_notifications: true,
+    });
+    harness
+        .call(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(cmd.into())],
+            &HashMap::new(),
+        )
         .await
         .unwrap_or_else(|e| panic!("{cmd} failed: {e:?}"))
 }
@@ -224,31 +415,72 @@ pub async fn gm_pilot_in_space(ctx: &ServerContext, sess_id: u64, char_id: i64, 
     let user = format!("live{char_id}");
     let pass = format!("{user}-secret");
     ctx.db.provision_gm_account(&user, &pass, char_id, &format!("Live Pilot {char_id}"));
-    let mut sess = SessionState::new(sess_id);
-    login_pilot(ctx, &mut sess, &user, &pass).await;
-    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw, None)
-        .await
-        .expect("SelectCharacterID");
-    let created = slash_cmd(ctx, &mut sess, &format!("/createitem {ship_type_id} 1")).await;
+    let mut harness = new_wire_harness(ctx, sess_id);
+    harness
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[PyRep::String(user), PyRep::String(pass)],
+            &kw,
+        )
+        .await;
+    harness
+        .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw)
+        .await;
+    let created = harness
+        .call_ok(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(format!("/createitem {ship_type_id} 1"))],
+            &kw,
+        )
+        .await;
     let ship_id = created.dict_get("itemID").and_then(|v| v.as_i64()).expect("/createitem itemID");
     let required: Vec<u32> = ctx.sde.types.get(&ship_type_id).map(|t| {
         [182_u16, 183, 184, 1285, 1289, 1290].iter().filter_map(|a| t.default_attributes.get(a)).map(|v| v.round() as u32).filter(|&s| s > 0).collect()
     }).unwrap_or_default();
     for skill_id in required {
-        slash_cmd(ctx, &mut sess, &format!("/giveskill {skill_id} 5")).await;
+        harness
+            .call_ok(
+                "slash",
+                None,
+                "SlashCmd",
+                &[PyRep::String(format!("/giveskill {skill_id} 5"))],
+                &kw,
+            )
+            .await;
     }
     ctx.advance_secs(31);
-    ctx.dispatch_rpc(&mut sess, "ship", None, "Board", &[PyRep::Integer(ship_id)], &kw, None).await.expect("ship.Board");
+    harness
+        .call_ok("ship", None, "Board", &[PyRep::Integer(ship_id)], &kw)
+        .await;
     ctx.advance_secs(31);
-    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None).await.expect("stationSvc.Undock");
-    slash_cmd(ctx, &mut sess, &format!("/tr {sys_id}")).await;
-    sess.ship_id = Some(ship_id);
-    let bind = ctx.dispatch_rpc(&mut sess, "beyonce", None, "MachoBindObject", &[PyRep::Integer(i64::from(sys_id)), PyRep::None], &kw, None)
-        .await
-        .expect("beyonce.MachoBindObject");
-    let PyRep::Tuple(bound) = bind else { panic!("bind tuple") };
-    let beyonce = bound[0].as_i64().expect("beyonce bound id") as u64;
+    harness.call_ok("stationSvc", None, "Undock", &[], &kw).await;
+    harness
+        .call_ok(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(format!("/tr {sys_id}"))],
+            &kw,
+        )
+        .await;
+    harness.transport_mut().inner.session.ship_id = Some(ship_id);
+    let bind = harness
+        .call_ok(
+            "beyonce",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(i64::from(sys_id)), PyRep::None],
+            &kw,
+        )
+        .await;
+    let beyonce = extract_bound_id_from_wire_rep(&bind).expect("beyonce bound id");
     ctx.advance_secs(31);
+    let mut sess = harness.into_transport().inner.into_session();
+    sess.live_notify_listener = false;
     let _ = sess.drain_notifications();
     let _ = ctx.drain_notifications_for_char(char_id);
     LivePilot { sess, char_id, ship_id, beyonce }
@@ -260,7 +492,15 @@ pub async fn gm_pilot_in_space(ctx: &ServerContext, sess_id: u64, char_id: i64, 
 pub async fn stock_ship_bay(ctx: &ServerContext, p: &mut LivePilot, type_id: u32, qty: i32, flag: i64) -> i64 {
     let created = slash_cmd(ctx, &mut p.sess, &format!("/createitem {type_id} {qty}")).await;
     let item_id = created.dict_get("itemID").and_then(|v| v.as_i64()).expect("/createitem itemID");
-    ctx.dispatch_rpc(&mut p.sess, "invbroker", None, "Add", &[PyRep::Integer(item_id), PyRep::Integer(p.ship_id), PyRep::Integer(flag)], &HashMap::new(), None)
+    let mut harness = borrow_wire_harness(ctx, &mut p.sess);
+    harness
+        .call(
+            "invbroker",
+            None,
+            "Add",
+            &[PyRep::Integer(item_id), PyRep::Integer(p.ship_id), PyRep::Integer(flag)],
+            &HashMap::new(),
+        )
         .await
         .unwrap_or_else(|e| panic!("invbroker.Add {type_id} -> flag {flag} failed: {e:?}"));
     item_id
@@ -272,9 +512,16 @@ pub async fn stock_ship_bay(ctx: &ServerContext, p: &mut LivePilot, type_id: u32
 pub async fn fly_to(ctx: &ServerContext, p: &mut LivePilot, dest: glam::DVec3) -> glam::DVec3 {
     let kw = HashMap::new();
     let sys = ctx.systems.get_or_spawn(p.sess.solar_system_id.expect("in space"));
-    ctx.dispatch_rpc(&mut p.sess, "beyonce", Some(p.beyonce), "CmdGotoPoint", &[PyRep::Real(dest.x), PyRep::Real(dest.y), PyRep::Real(dest.z)], &kw, None)
-        .await
-        .expect("CmdGotoPoint");
+    let mut harness = borrow_wire_harness(ctx, &mut p.sess);
+    harness
+        .call_ok(
+            "beyonce",
+            Some(p.beyonce),
+            "CmdGotoPoint",
+            &[PyRep::Real(dest.x), PyRep::Real(dest.y), PyRep::Real(dest.z)],
+            &kw,
+        )
+        .await;
     let mut best = f64::MAX;
     for _ in 0..600 {
         sys.step_manual(1.0).await.unwrap();
@@ -284,7 +531,9 @@ pub async fn fly_to(ctx: &ServerContext, p: &mut LivePilot, dest: glam::DVec3) -
         }
         best = d;
     }
-    ctx.dispatch_rpc(&mut p.sess, "beyonce", Some(p.beyonce), "CmdStop", &[], &kw, None).await.expect("CmdStop");
+    harness
+        .call_ok("beyonce", Some(p.beyonce), "CmdStop", &[], &kw)
+        .await;
     for _ in 0..10 {
         sys.step_manual(1.0).await.unwrap();
     }

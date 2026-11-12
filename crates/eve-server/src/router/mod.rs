@@ -8,6 +8,7 @@ mod binding_auth;
 mod binding_effects;
 pub mod cache_notifications;
 pub mod client_compat;
+pub mod client_wire;
 pub mod context;
 mod context_charges;
 mod context_runtime_persistence;
