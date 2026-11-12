@@ -1074,6 +1074,7 @@ async fn issue_975_module_activation_does_not_orphan_def_effect_and_item_get_inf
     sde.types.insert(587, make_type(587, 25, 6, 2500.0, 400.0, &[(38, 400.0)]));
     let mut mwd_type = make_type(434, 46, 7, 5.0, 0.0, &[(6, 15.0), (73, 10_000.0)]);
     mwd_type.effect_ids = vec![16, 48];
+    mwd_type.default_effect_id = Some(48);
     sde.types.insert(434, mwd_type);
 
     let db = Arc::new(WorldRepository::with_demo_seed());

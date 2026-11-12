@@ -313,7 +313,14 @@ fn handle_item_get_info(
                     &ctx.sde,
                     show_info.type_id,
                     Some("defaultEffect"),
-                ) {
+                )
+                .or_else(|| {
+                    ctx.sde
+                        .types
+                        .get(&show_info.type_id)
+                        .and_then(|t| t.effect_ids.iter().copied().find(|&eid| eid != 16))
+                        .map(|eid| eid as i64)
+                }) {
                     if eff_id != 16 {
                         if let PyRep::Dict(ref mut entries) = effs {
                             entries.push((
