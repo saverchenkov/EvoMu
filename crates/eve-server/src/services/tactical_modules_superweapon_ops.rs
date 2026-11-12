@@ -299,6 +299,7 @@ pub async fn activate_superweapon_with_args(
     target_id_opt: Option<i64>,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
+    crate::services::inventory_fitting::fitting_cyno_portal::sweep_expired_cyno_beacons(ctx);
     if ctx.is_module_in_reactivation_delay(ship_id, module_id) {
         return Err(BridgeRpcError {
             code: "ModuleInReactivationDelay".into(),
