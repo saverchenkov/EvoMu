@@ -327,14 +327,16 @@ async fn clone_vat_bay_activation_and_jump_to_ship_clone_vat_bay_branches() {
     let cvb_mod = 97_500_200i64;
     let cloak_mod = 97_500_201i64;
 
-    let hs_st = ctx
+    let (hs_sys, hs_st) = ctx
         .sde
         .solar_systems
         .values()
-        .flat_map(|s| &s.stations)
-        .find(|st| st.has_clone_bay && st.station_id != 60_015_187)
-        .unwrap()
-        .station_id;
+        .filter(|s| s.solar_system_id < 31_000_000 && s.region_id != POCHVEN_REGION_ID && s.security_status >= 0.5)
+        .flat_map(|s| s.stations.iter().map(move |st| (s.solar_system_id, st)))
+        .filter(|(_, st)| st.has_clone_bay && st.station_id != 60_015_187)
+        .min_by_key(|(_, st)| st.station_id)
+        .map(|(sid, st)| (sid, st.station_id))
+        .expect("deterministic highsec non-Pochven clone bay station");
 
     ctx.db.with_mut_snapshot(|snap| {
         let mut base_ch = snap.characters.values().next().cloned().unwrap();
@@ -351,7 +353,7 @@ async fn clone_vat_bay_activation_and_jump_to_ship_clone_vat_bay_branches() {
         let mut j = base_ch;
         j.character_id = jumper_pilot;
         j.user_id = jumper_pilot as u64;
-        j.solar_system_id = 30_000_142;
+        j.solar_system_id = hs_sys;
         j.station_id = Some(hs_st);
         j.structure_id = None;
         j.balance = IskCents::from_isk(10_000_000);
