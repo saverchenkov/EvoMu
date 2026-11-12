@@ -1035,17 +1035,11 @@ fn issue_961_cleartimers_resets_crimewatch_and_emits_timer_cleared_notices() {
     );
     let _ = ctx.drain_notifications_for_char(char_id);
 
-    let mut sess = SessionState::new(601);
-    sess.user_id = Some(1);
-    sess.character_id = Some(char_id);
-
-    let res = crate::services::notify_emitters_character_services::handle(
+    let res = crate::services::notify_emitters_character_services::handle_batch3_gm_slash_cmd(
         &ctx,
-        &sess,
-        "slash",
-        "SlashCmd",
-        &[PyRep::String("/cleartimers".into())],
-        &std::collections::HashMap::new(),
+        char_id,
+        None,
+        "/cleartimers",
     )
     .expect("slash /cleartimers handled")
     .expect("/cleartimers ok");
@@ -1152,7 +1146,7 @@ fn issue_975_module_activation_does_not_orphan_def_effect_and_item_get_info_incl
     sess.ship_id = Some(ship_id);
     sess.solar_system_id = Some(30_000_142);
 
-    let info = crate::services::fitting_dogma_im::handle_dogma_im(
+    let info = crate::services::inventory_fitting::fitting_dogma_im::handle_dogma_im(
         &ctx,
         &sess,
         None,
