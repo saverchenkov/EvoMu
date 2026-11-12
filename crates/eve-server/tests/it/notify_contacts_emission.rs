@@ -33,12 +33,14 @@ fn events(ctx: &ServerContext, char_id: i64, event: &str) -> Vec<Vec<PyRep>> {
 
 #[tokio::test]
 async fn test_personal_contacts_and_watchlist_presence_notifications() {
-    // parity: notify:OnPersonalContactsAdded, notify:OnPersonalContactsUpdated, notify:OnPersonalContactsDeleted, notify:OnClientContactChange, rpc:charMgr.EditContactsRelationshipID
+    // parity: notify:OnPersonalContactsAdded, notify:OnPersonalContactsUpdated, notify:OnPersonalContactsDeleted, notify:OnClientContactChange, notify:OnContactLoggedOn, notify:OnContactLoggedOff, rpc:charMgr.EditContactsRelationshipID
     eve_testkit::attest(&[
         "notify:OnPersonalContactsAdded",
         "notify:OnPersonalContactsUpdated",
         "notify:OnPersonalContactsDeleted",
         "notify:OnClientContactChange",
+        "notify:OnContactLoggedOn",
+        "notify:OnContactLoggedOff",
     ]);
     let ctx = ServerContext::new();
     let mut s1 = select(&ctx, 601, "demo", "demo-secret", P1).await;
@@ -61,20 +63,26 @@ async fn test_personal_contacts_and_watchlist_presence_notifications() {
     );
     assert!(events(&ctx, P2, "OnPersonalContactsAdded").is_empty(), "the added character is not notified");
 
-    // Watchlist presence: P2 logging out / back in sends OnClientContactChange(charID, online) to the
-    // watcher P1 only (P3 does not watch P2; P2 never gets its own presence).
+    // Watchlist presence: P2 logging out / back in sends OnContactLoggedOff(charID) /
+    // OnContactLoggedOn(charID) and OnClientContactChange(charID, online) to watcher P1 only
+    // (P3 does not watch P2; P2 never gets its own presence).
     call(&ctx, &mut s2, "authentication", "Logout", &[]).await;
-    assert_eq!(events(&ctx, P1, "OnClientContactChange"), vec![vec![PyRep::Integer(P2), PyRep::Bool(false)]]);
-    assert!(events(&ctx, p3, "OnClientContactChange").is_empty());
+    let p1_logoff = ctx.drain_notifications_for_char(P1);
+    assert!(p1_logoff.iter().any(|n| n.event == "OnContactLoggedOff" && n.args == vec![PyRep::Integer(P2)]));
+    assert!(p1_logoff.iter().any(|n| n.event == "OnClientContactChange" && n.args == vec![PyRep::Integer(P2), PyRep::Bool(false)]));
+    assert!(events(&ctx, p3, "OnContactLoggedOff").is_empty());
     let mut s2 = select(&ctx, 604, "other", "other-secret", P2).await;
-    assert_eq!(events(&ctx, P1, "OnClientContactChange"), vec![vec![PyRep::Integer(P2), PyRep::Bool(true)]]);
-    assert!(events(&ctx, p3, "OnClientContactChange").is_empty());
-    assert!(events(&ctx, P2, "OnClientContactChange").is_empty());
+    let p1_logon = ctx.drain_notifications_for_char(P1);
+    assert!(p1_logon.iter().any(|n| n.event == "OnContactLoggedOn" && n.args == vec![PyRep::Integer(P2)]));
+    assert!(p1_logon.iter().any(|n| n.event == "OnClientContactChange" && n.args == vec![PyRep::Integer(P2), PyRep::Bool(true)]));
+    assert!(events(&ctx, p3, "OnContactLoggedOn").is_empty());
+    assert!(events(&ctx, P2, "OnContactLoggedOn").is_empty());
 
     // A watcher that P2 has blocked gets no presence updates.
     call(&ctx, &mut s2, "charMgr", "BlockOwners", &[PyRep::List(vec![PyRep::Integer(P1)])]).await;
     call(&ctx, &mut s2, "authentication", "Logout", &[]).await;
-    assert!(events(&ctx, P1, "OnClientContactChange").is_empty(), "blocked watcher must not see presence");
+    let p1_blocked = ctx.drain_notifications_for_char(P1);
+    assert!(!p1_blocked.iter().any(|n| n.event == "OnContactLoggedOff" || n.event == "OnClientContactChange"), "blocked watcher must not see presence");
 
     // EditContact(contactID, relationshipID, inWatchlist): OnPersonalContactsUpdated(contactIDs,
     // standing, inWatchlist). EditContactsRelationshipID leaves the watchlist as None (keep current).

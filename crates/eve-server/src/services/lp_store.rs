@@ -1374,6 +1374,7 @@ pub fn handle(
         }
         // Resource Wars (`RWManager`): retired in live EVE Online (2020), queried by V24 `lpStoreSvc` / `rwService`.
         // Return authentic empty/no-RW-sites responses so LP Store and station service UI open cleanly.
+        // parity: rpc:RWManager.solarsystem_contains_rw_instances
         ("RWManager", "solarsystem_contains_rw_instances") => {
             if let Err(e) = ServerContext::require_character(session) {
                 return Some(Err(e));

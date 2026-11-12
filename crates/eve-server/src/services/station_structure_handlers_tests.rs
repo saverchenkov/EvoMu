@@ -368,4 +368,11 @@ async fn resolve_upwell_dock_target_denies_npc_fobs_and_non_dockable_groups_allo
         snap.characters.get_mut(&char_id).unwrap().war_faction_id = Some(500_011);
     });
     assert!(resolve_upwell_dock_target(&ctx, angel_fob, sys_id, char_id, 587, 25).is_ok());
+    // Freighters (group 513, e.g. Charon 20185) are excluded from docking at Pirate FOBs by graphiclocations/docking rules
+    assert_eq!(
+        resolve_upwell_dock_target(&ctx, angel_fob, sys_id, char_id, 20_185, 513)
+            .unwrap_err()
+            .code,
+        "ShipTooLargeForStructure"
+    );
 }

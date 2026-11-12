@@ -300,7 +300,12 @@ async fn test_destiny_ballpark_state_events_fleet_and_controllers() {
     let PyRep::Tuple(fsc_outer) = &fsc_rep else { panic!("Expected tuple") };
     let PyRep::Tuple(fsc_action) = &fsc_outer[1] else { panic!("Expected action tuple") };
     assert_eq!(fsc_action[0].as_str(), Some("OnFleetStateChange"));
-    assert_eq!(fsc_action[1], PyRep::Tuple(vec![PyRep::Integer(99_000_100), PyRep::Integer(ship_id), PyRep::Integer(2)]));
+    let PyRep::Tuple(fsc_args) = &fsc_action[1] else { panic!("Expected 1-arg tuple") };
+    assert_eq!(fsc_args.len(), 1);
+    assert_eq!(fsc_args[0].dict_get("fleetID"), Some(&PyRep::Integer(99_000_100)));
+    assert_eq!(fsc_args[0].dict_get("characterID"), Some(&PyRep::Integer(ship_id)));
+    assert_eq!(fsc_args[0].dict_get("fleetState"), Some(&PyRep::Integer(2)));
+    assert_eq!(fsc_args[0].dict_get("targetTags"), Some(&PyRep::Dict(Vec::new())));
 
     // 4. OnShipStateUpdate
     let ssu_rep = encode_destiny_event(45, &DestinyEvent::OnShipStateUpdate {

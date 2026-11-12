@@ -521,6 +521,11 @@ async fn test_ui_browser_lockdown_policy_and_persistence() {
         PyRep::List(vec![])
     );
     let h0 = rpc(&ctx, &mut pilot, "browserLockdownSvc", "GetFlaggedSitesHash", &[]).await.unwrap();
+    assert_eq!(
+        h0,
+        PyRep::String("d751713988987e9331980363e24189ce".to_string()),
+        "Empty flaggedSites list must return MD5('[]')"
+    );
 
     // Persist updated policy and verify RPCs reflect it
     ctx.db.with_mut_snapshot(|snap| {
@@ -549,6 +554,11 @@ async fn test_ui_browser_lockdown_policy_and_persistence() {
     );
     let h1 = rpc(&ctx, &mut pilot, "browserLockdownSvc", "GetFlaggedSitesHash", &[]).await.unwrap();
     assert_ne!(h0, h1);
+    assert_eq!(
+        h1.as_str().map(str::len),
+        Some(32),
+        "GetFlaggedSitesHash must return a 32-character lowercase hex MD5 digest"
+    );
 }
 
 #[tokio::test]

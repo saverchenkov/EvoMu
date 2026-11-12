@@ -2244,6 +2244,8 @@ async fn test_world_invariants_and_persist_reload_equivalence_guard_908() {
 
 #[tokio::test]
 async fn test_v24_live_client_bug_report_regressions_330_to_352() {
+    // parity: rpc:RWManager.solarsystem_contains_rw_instances
+    eve_testkit::attest(&["rpc:RWManager.solarsystem_contains_rw_instances"]);
     let ctx = shared_demo_ctx();
     common::pin_clock(&ctx);
 
@@ -2700,6 +2702,21 @@ async fn test_v24_live_client_bug_report_regressions_330_to_352() {
     }
 
     // 8. #614: RWManager RPCs unblocked when opening LP Store in station services
+    let mut unauth_rw = SessionState::new(77_309);
+    assert!(
+        ctx.dispatch_rpc(
+            &mut unauth_rw,
+            "RWManager",
+            None,
+            "solarsystem_contains_rw_instances",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .is_err(),
+        "RWManager.solarsystem_contains_rw_instances must reject unauthenticated sessions"
+    );
     let rw_sys = ctx
         .dispatch_rpc(
             &mut sess,

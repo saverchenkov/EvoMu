@@ -1788,6 +1788,30 @@ impl Ballpark {
             },
         );
     }
+
+    /// Emits `OnFleetStateChange(fleetState)` to all observers in `member_id`'s bubble
+    /// (`eve/client/script/parklife/michelle.pyj:1934` `Park.OnFleetStateChange(self, fleetState)`).
+    ///
+    /// parity: destiny:OnFleetStateChange
+    pub fn update_fleet_state(
+        &mut self,
+        fleet_id: i64,
+        member_id: BallId,
+        fleet_state: i64,
+    ) -> bool {
+        if !self.balls.contains_key(&member_id) {
+            return false;
+        }
+        self.push_event_for_ball(
+            member_id,
+            DestinyEvent::OnFleetStateChange {
+                fleet_id,
+                member_id,
+                fleet_state,
+            },
+        );
+        true
+    }
 }
 #[cfg(test)] #[path = "destiny_lib_unit_tests.rs"] mod destiny_lib_unit_tests;
 
