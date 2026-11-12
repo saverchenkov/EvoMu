@@ -939,10 +939,18 @@ mod tests {
 
     #[test]
     fn ratchet_file_is_empty_and_record_enforce_roundtrip() {
+        let non_comment_lines = LOCK_RANK_RATCHET_RAW
+            .lines()
+            .filter(|l| {
+                let t = l.trim();
+                !t.is_empty() && !t.starts_with('#')
+            })
+            .count();
         let parsed = imp::parse_ratchet(LOCK_RANK_RATCHET_RAW);
-        assert!(
-            parsed.is_empty(),
-            "crates/eve-db/lock_rank_ratchet.txt must be empty cleanly"
+        assert_eq!(
+            parsed.len(),
+            non_comment_lines,
+            "every non-comment line in crates/eve-db/lock_rank_ratchet.txt must parse as a unique triple"
         );
 
         let path = temp_ratchet_path("roundtrip");

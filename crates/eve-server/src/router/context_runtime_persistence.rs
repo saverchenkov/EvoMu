@@ -1109,11 +1109,13 @@ mod tests {
 
         ctx.hydrate_server_runtime_from_db();
 
-        let probes = ctx.active_scanner_probes.read().unwrap();
-        assert_eq!(probes.len(), 1);
-        assert_eq!(probes[&501].state, 0);
-        assert_eq!(probes[&501].warp_end_ft, None);
-        assert!(!probes.contains_key(&502));
+        {
+            let probes = ctx.active_scanner_probes.read().unwrap();
+            assert_eq!(probes.len(), 1);
+            assert_eq!(probes[&501].state, 0);
+            assert_eq!(probes[&501].warp_end_ft, None);
+            assert!(!probes.contains_key(&502));
+        }
 
         let notifs = ctx.notification_records.read().unwrap();
         assert_eq!(notifs.len(), 2);

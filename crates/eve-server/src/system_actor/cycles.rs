@@ -1503,7 +1503,12 @@ impl SystemHandle {
             pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>),
             notify_tx_opt.as_ref(),
         );
-        if let Some(lock_hook) = self.target_lock_completed_hook.read().unwrap_or_else(|e| e.into_inner()).clone() {
+        let lock_hook_opt = self
+            .target_lock_completed_hook
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(lock_hook) = lock_hook_opt {
             for ev in &events {
                 if let eve_destiny::DestinyEvent::OnTarget { mode, source_id, target_id } = ev {
                     if mode == "locked" {

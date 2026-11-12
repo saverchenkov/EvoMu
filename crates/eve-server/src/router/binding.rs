@@ -1543,15 +1543,28 @@ impl ServerContext {
     }
 
     pub fn remove_projected_ewar_by_module(&self, source_ship_id: i64, source_module_id: i64) -> Vec<i64> {
-        {
-            let mut owners = self.projected_ewar_sources.write().unwrap_or_else(|e| e.into_inner());
-            if let Some(&recorded_ship) = owners.get(&source_module_id) {
-                if recorded_ship != source_ship_id {
+        let recorded = self
+            .projected_ewar_sources
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&source_module_id)
+            .copied();
+        match recorded {
+            Some(recorded_ship) if recorded_ship != source_ship_id => return Vec::new(),
+            Some(_) => {
+                self.projected_ewar_sources
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&source_module_id);
+            }
+            None => {
+                if !self.db.with_snapshot(|s| {
+                    s.items
+                        .get(&source_module_id)
+                        .is_some_and(|i| i.location_id == source_ship_id)
+                }) {
                     return Vec::new();
                 }
-                owners.remove(&source_module_id);
-            } else if !self.db.with_snapshot(|s| s.items.get(&source_module_id).is_some_and(|i| i.location_id == source_ship_id)) {
-                return Vec::new();
             }
         }
         let mut affected_ships = Vec::new();
