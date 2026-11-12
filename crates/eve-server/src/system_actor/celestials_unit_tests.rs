@@ -1424,8 +1424,8 @@ async fn system_handle_stopped_actor_returns_error_or_false_on_all_commands() {
     assert_eq!(bp.combat_states[&sync_ship].base_max_shield_hp, Some(500.0));
 }
 
-#[test]
-fn ranked_cmd_sender_panics_when_lock_held_and_sync_registry_wrappers_respect_rank() {
+#[tokio::test]
+async fn ranked_cmd_sender_panics_when_lock_held_and_sync_registry_wrappers_respect_rank() {
     let ctx = test_ctx();
     let sys = ctx.systems.get_or_spawn(30_000_142);
     let ship_id = 9_190_601;
