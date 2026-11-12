@@ -732,28 +732,46 @@ pub async fn handle_weapons(
                     let vol_dmg = charge_attr(784, 0.01).max(0.0);
                     let crystal_hp = charge_attr(9, 1.0).max(0.0001);
                     if ctx.mechanic_rng.roll(vol_chance) {
-                        let (prev_dmg, next_dmg) = ctx.db.with_mut_snapshot(|snap| {
+                        let (prev_dmg, next_dmg, shatter_subloc) = ctx.db.with_mut_snapshot(|snap| {
                             if let Some(ci) = snap.items.get_mut(&charge_item_id) {
                                 let cur = ci.dynamic_attributes.get(&3).copied().unwrap_or(0.0);
                                 let next_dmg = cur + vol_dmg;
                                 crystal_damage_after = (next_dmg / crystal_hp).min(1.0);
                                 if next_dmg + 1e-9 >= crystal_hp {
                                     crystal_shattered = true;
-                                    if ci.quantity > 1 {
+                                    let pre_qty = ci.quantity;
+                                    let slot_flag = ci.flag;
+                                    let c_tid = ci.type_id;
+                                    let new_qty = if ci.quantity > 1 {
                                         ci.quantity -= 1;
                                         ci.dynamic_attributes.insert(3, 0.0);
+                                        ci.quantity
                                     } else {
                                         snap.items.remove(&charge_item_id);
-                                    }
-                                    (cur, 0.0)
+                                        0
+                                    };
+                                    (cur, 0.0, Some((slot_flag, c_tid, pre_qty, new_qty)))
                                 } else {
                                     ci.dynamic_attributes.insert(3, next_dmg);
-                                    (cur, next_dmg)
+                                    (cur, next_dmg, None)
                                 }
                             } else {
-                                (0.0, 0.0)
+                                (0.0, 0.0, None)
                             }
                         });
+                        if let Some((slot_flag, c_tid, pre_qty, new_qty)) = shatter_subloc {
+                            if matches!(slot_flag as u16, 11..=34 | 125..=132) {
+                                crate::services::inventory_fitting::fitting_module_cycles::emit_charge_sublocation_quantity_change(
+                                    ctx,
+                                    char_id,
+                                    ship_id,
+                                    slot_flag,
+                                    c_tid,
+                                    pre_qty,
+                                    new_qty,
+                                );
+                            }
+                        }
                         ctx.notify(
                             NotificationTarget::Character(char_id),
                             "OnModuleAttributeChanges",
@@ -781,16 +799,37 @@ pub async fn handle_weapons(
                 }
             } else {
                 // Consume 1 round of projectile/hybrid/exotic-plasma/vorton/missile/breacher ammo
-                ctx.db.with_mut_snapshot(|snap| {
+                let ammo_delta = ctx.db.with_mut_snapshot(|snap| {
                     if let Some(ci) = snap.items.get_mut(&charge_item_id) {
-                        if ci.quantity > 1 {
+                        let pre_qty = ci.quantity;
+                        let slot_flag = ci.flag;
+                        let c_tid = ci.type_id;
+                        let new_qty = if ci.quantity > 1 {
                             ci.quantity -= 1;
                             ci.version += 1;
+                            ci.quantity
                         } else {
                             snap.items.remove(&charge_item_id);
-                        }
+                            0
+                        };
+                        Some((slot_flag, c_tid, pre_qty, new_qty))
+                    } else {
+                        None
                     }
                 });
+                if let Some((slot_flag, c_tid, pre_qty, new_qty)) = ammo_delta {
+                    if matches!(slot_flag as u16, 11..=34 | 125..=132) {
+                        crate::services::inventory_fitting::fitting_module_cycles::emit_charge_sublocation_quantity_change(
+                            ctx,
+                            char_id,
+                            ship_id,
+                            slot_flag,
+                            c_tid,
+                            pre_qty,
+                            new_qty,
+                        );
+                    }
+                }
             }
 
             // Weapon damage calculation (evaluated via `ShipFittingEngine` for both charge & launcher/turret)

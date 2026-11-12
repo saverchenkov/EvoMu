@@ -610,3 +610,359 @@ async fn test_scanning_probe_range_deviation_targets_thresholds_and_levels() {
     assert!(scanned_ids.contains(&target_ship) && scanned_ids.contains(&drone_id) && scanned_ids.contains(&structure_id));
     assert!(!scanned_ids.contains(&cloaked_ship) && !scanned_ids.contains(&wreck_id) && !scanned_ids.contains(&cargo_can));
 }
+
+#[tokio::test]
+async fn test_gh962_probe_launcher_sublocations_godma_and_ship_state() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(7962);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    let char_id = 90_000_001i64;
+    let ship_id = sess.ship_id.unwrap_or(100_000_001);
+    let hi_slot = InventoryFlag::HiSlot0 as i64;
+
+    let launcher_id = 610_962_010i64;
+    let cargo_core_id = 610_962_011i64;
+    let cargo_combat_id = 610_962_012i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.dynamic_attributes.insert(48, 2_000.0);
+            sh.dynamic_attributes.insert(11, 2_000.0);
+        }
+        snap.items
+            .retain(|_, i| !(i.location_id == ship_id && matches!(i.flag, InventoryFlag::HiSlot0)));
+        let sk = snap.skills.entry(char_id).or_default();
+        for sid in [3412u32, 3426, 3413] {
+            sk.insert(
+                sid,
+                TrainedSkillRecord {
+                    type_id: sid,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+        // Expanded Probe Launcher I (18639, 8.0 m3 capacity) supports both Core and Combat Scanner Probes.
+        snap.items.insert(
+            launcher_id,
+            make_item(launcher_id, 18639, char_id, ship_id, InventoryFlag::HiSlot0, 1, true),
+        );
+        snap.module_online_states.insert(launcher_id, true);
+        snap.items.insert(
+            cargo_core_id,
+            make_item(cargo_core_id, 30013, char_id, ship_id, InventoryFlag::Cargo, 8, false),
+        );
+        snap.items.insert(
+            cargo_combat_id,
+            make_item(cargo_combat_id, 30028, char_id, ship_id, InventoryFlag::Cargo, 8, false),
+        );
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    let subloc_key = |charge_type_id: u32| -> PyRep {
+        PyRep::Tuple(vec![
+            PyRep::Integer(ship_id),
+            PyRep::Integer(hi_slot),
+            PyRep::Integer(i64::from(charge_type_id)),
+        ])
+    };
+    let collect_notes = |s: &mut SessionState| -> Vec<(String, Vec<PyRep>)> {
+        let mut all = s.drain_notifications();
+        all.extend(
+            ctx.drain_notifications_for_char(char_id)
+                .into_iter()
+                .map(|n| (n.event, n.args)),
+        );
+        all
+    };
+    let assert_ship_state_subloc =
+        |ship_state: &[PyRep], expected: Option<(u32, i32)>| {
+            assert_eq!(ship_state.len(), 4);
+            let PyRep::Dict(ref cache) = ship_state[1] else {
+                panic!("shipState[1] must be Dict, got {:?}", ship_state[1]);
+            };
+            let flag_dict = cache
+                .iter()
+                .find(|(k, _)| k.as_i64() == Some(ship_id))
+                .map(|(_, v)| v);
+            match expected {
+                None => {
+                    let has_hi = flag_dict.is_some_and(|fd| {
+                        matches!(fd, PyRep::Dict(m) if m.iter().any(|(fk, _)| fk.as_i64() == Some(hi_slot)))
+                    });
+                    assert!(!has_hi, "empty launcher must not emit shipState[1] sublocation row");
+                }
+                Some((exp_tid, exp_qty)) => {
+                    let Some(PyRep::Dict(ref fdict)) = flag_dict else {
+                        panic!("shipState[1] missing ship_id {ship_id}: {cache:?}");
+                    };
+                    let row = fdict
+                        .iter()
+                        .find(|(fk, _)| fk.as_i64() == Some(hi_slot))
+                        .map(|(_, rv)| rv)
+                        .expect("shipState[1][ship_id] missing HiSlot0");
+                    assert!(
+                        row.dbrow_columns().is_some(),
+                        "shipState[1] entry must be a packed DBRow: {row:?}"
+                    );
+                    assert_eq!(row.dbrow_get("locationID").and_then(|v| v.as_i64()), Some(ship_id));
+                    assert_eq!(row.dbrow_get("flagID").and_then(|v| v.as_i64()), Some(hi_slot));
+                    assert_eq!(row.dbrow_get("typeID").and_then(|v| v.as_i64()), Some(i64::from(exp_tid)));
+                    assert_eq!(row.dbrow_get("quantity").and_then(|v| v.as_i64()), Some(i64::from(exp_qty)));
+                }
+            }
+        };
+
+    // 1. Negative check: empty launcher must have empty `shipState[1]` for HiSlot0.
+    let empty_all = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "GetAllInfo",
+            &[PyRep::Bool(true), PyRep::Bool(true)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetAllInfo empty");
+    let PyRep::Tuple(ref empty_ship_state) =
+        empty_all.dict_get("shipState").expect("shipState on GetAllInfo")
+    else {
+        panic!("shipState must be 4-tuple");
+    };
+    assert_ship_state_subloc(empty_ship_state, None);
+    let _ = collect_notes(&mut sess);
+
+    // 2. Live `dogmaIM.LoadAmmo` (Core Scanner Probe I, 30013 x8): must prime sublocation BEFORE `OnChargeLoadedToModule`.
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "LoadAmmo",
+        &[
+            PyRep::Integer(ship_id),
+            PyRep::List(vec![PyRep::Integer(launcher_id)]),
+            PyRep::List(vec![PyRep::Integer(cargo_core_id)]),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("LoadAmmo 30013");
+    let load_notes = collect_notes(&mut sess);
+    let prime_idx = load_notes
+        .iter()
+        .position(|(ev, args)| {
+            ev == "OnGodmaPrimeItem"
+                && args.get(1).and_then(|info| info.dict_get("itemID")) == Some(&subloc_key(30013))
+        })
+        .expect("LoadAmmo must emit OnGodmaPrimeItem for sublocation (ship_id, HiSlot0, 30013)");
+    let loaded_idx = load_notes
+        .iter()
+        .position(|(ev, _)| ev == "OnChargeLoadedToModule")
+        .expect("LoadAmmo must emit OnChargeLoadedToModule");
+    assert!(
+        prime_idx < loaded_idx,
+        "OnGodmaPrimeItem sublocation prime must precede OnChargeLoadedToModule"
+    );
+    let prime_kv = &load_notes[prime_idx].1[1];
+    assert_eq!(prime_kv.dict_get("invItem"), Some(&PyRep::None));
+    let PyRep::Dict(ref prime_attrs) = prime_kv.dict_get("attributes").expect("prime attributes") else {
+        panic!("prime attributes must be Dict");
+    };
+    assert!(
+        prime_attrs
+            .iter()
+            .any(|(k, v)| k.as_i64() == Some(80) && v.as_f64() == Some(8.0)),
+        "primed sublocation must include attributeQuantity (80) = 8.0: {prime_attrs:?}"
+    );
+
+    // 3. Cold reconnect `GetAllInfo`, `ItemGetInfo` sublocation key lookup, and `ship.Board` prime.
+    let loaded_all = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "GetAllInfo",
+            &[PyRep::Bool(true), PyRep::Bool(true)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetAllInfo loaded");
+    let PyRep::Dict(ref ship_info) = loaded_all.dict_get("shipInfo").expect("shipInfo") else {
+        panic!("shipInfo must be Dict");
+    };
+    let (_, subloc_entry) = ship_info
+        .iter()
+        .find(|(k, _)| *k == subloc_key(30013))
+        .expect("GetAllInfo.shipInfo must contain sublocation tuple key (ship_id, HiSlot0, 30013)");
+    assert_eq!(subloc_entry.dict_get("invItem"), Some(&PyRep::None));
+    let PyRep::Dict(ref sub_attrs) = subloc_entry.dict_get("attributes").expect("subloc attributes") else {
+        panic!("sublocation attributes must be Dict");
+    };
+    assert!(
+        sub_attrs
+            .iter()
+            .any(|(k, v)| k.as_i64() == Some(80) && v.as_f64() == Some(8.0)),
+        "GetAllInfo sublocation must carry attributeQuantity (80) = 8.0: {sub_attrs:?}"
+    );
+    let PyRep::Tuple(ref loaded_ship_state) =
+        loaded_all.dict_get("shipState").expect("shipState")
+    else {
+        panic!("shipState must be 4-tuple");
+    };
+    assert_ship_state_subloc(loaded_ship_state, Some((30013, 8)));
+
+    let get_info_sub = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "ItemGetInfo",
+            &[subloc_key(30013)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("ItemGetInfo with 3-tuple sublocation key");
+    assert_eq!(get_info_sub.dict_get("invItem"), Some(&PyRep::None));
+
+    // Re-board ship to verify `ship.Board` returns `shipState[1]` DBRow and emits `ProcessGodmaPrimeLocation`.
+    ctx.advance_secs(31);
+    let _ = collect_notes(&mut sess);
+    let board_rep = ctx
+        .dispatch_rpc(&mut sess, "ship", None, "Board", &[PyRep::Integer(ship_id)], &kw, None)
+        .await
+        .expect("ship.Board");
+    let PyRep::Tuple(ref board_ship_state) = board_rep else {
+        panic!("ship.Board must return 4-tuple shipState");
+    };
+    assert_ship_state_subloc(board_ship_state, Some((30013, 8)));
+    let board_notes = collect_notes(&mut sess);
+    let prime_loc = board_notes
+        .iter()
+        .find(|(ev, _)| ev == "ProcessGodmaPrimeLocation")
+        .expect("ship.Board must emit ProcessGodmaPrimeLocation");
+    let PyRep::Dict(ref loc_items) = prime_loc.1[1] else {
+        panic!("ProcessGodmaPrimeLocation[1] must be Dict");
+    };
+    assert!(
+        loc_items.iter().any(|(k, _)| *k == subloc_key(30013)),
+        "ProcessGodmaPrimeLocation must prime probe sublocation key"
+    );
+
+    // 4. Probe type swap (`LoadAmmo` with 30028 Combat Scanner Probe I): must expel old 30013 (`attr 80 -> 0.0`) & prime 30028.
+    let _ = collect_notes(&mut sess);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "LoadAmmo",
+        &[
+            PyRep::Integer(ship_id),
+            PyRep::List(vec![PyRep::Integer(launcher_id)]),
+            PyRep::List(vec![PyRep::Integer(cargo_combat_id)]),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("LoadAmmo swap to 30028");
+    let swap_notes = collect_notes(&mut sess);
+    let has_attr80_delta = |notes: &[(String, Vec<PyRep>)], charge_tid: u32, expected_new: f64| -> bool {
+        let key = subloc_key(charge_tid);
+        notes.iter().any(|(ev, args)| {
+            ev == "OnModuleAttributeChanges"
+                && matches!(args.first(), Some(PyRep::List(entries)) if entries.iter().any(|entry| {
+                    matches!(entry, PyRep::Tuple(t)
+                        if t.get(2) == Some(&key)
+                            && t.get(3).and_then(|v| v.as_i64()) == Some(80)
+                            && t.get(5).and_then(|v| v.as_f64()) == Some(expected_new))
+                }))
+        })
+    };
+    assert!(
+        has_attr80_delta(&swap_notes, 30013, 0.0),
+        "swapping probe types must expel old 30013 sublocation with attr 80 = 0.0: {swap_notes:?}"
+    );
+    assert!(
+        swap_notes.iter().any(|(ev, args)| {
+            ev == "OnGodmaPrimeItem"
+                && args.get(1).and_then(|info| info.dict_get("itemID")) == Some(&subloc_key(30028))
+        }),
+        "swapping probe types must prime new 30028 sublocation: {swap_notes:?}"
+    );
+
+    // 5. Undock -> `launchProbe` (`attr 80 -> 0.0`) -> `RecoverProbes` (`OnGodmaPrimeItem` + `OnChargeLoadedToModule`) -> `UnloadAmmo` (`attr 80 -> 0.0`).
+    ctx.advance_secs(31);
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock");
+    let _ = collect_notes(&mut sess);
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[PyRep::Integer(launcher_id), PyRep::String("launchProbe".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("launchProbe");
+    let launch_notes = collect_notes(&mut sess);
+    assert!(
+        has_attr80_delta(&launch_notes, 30028, 0.0),
+        "launching last 8 probes must update sublocation attr 80 -> 0.0: {launch_notes:?}"
+    );
+
+    ctx.dispatch_rpc(&mut sess, "scanMgr", None, "RecoverProbes", &[], &kw, None)
+        .await
+        .expect("RecoverProbes");
+    let recover_notes = collect_notes(&mut sess);
+    assert!(
+        recover_notes.iter().any(|(ev, args)| {
+            ev == "OnGodmaPrimeItem"
+                && args.get(1).and_then(|info| info.dict_get("itemID")) == Some(&subloc_key(30028))
+        }),
+        "RecoverProbes into empty launcher must emit OnGodmaPrimeItem sublocation prime: {recover_notes:?}"
+    );
+    assert!(
+        recover_notes.iter().any(|(ev, _)| ev == "OnChargeLoadedToModule"),
+        "RecoverProbes must emit OnChargeLoadedToModule: {recover_notes:?}"
+    );
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "UnloadAmmo",
+        &[PyRep::Integer(ship_id), PyRep::PySet(vec![PyRep::Integer(launcher_id)])],
+        &kw,
+        None,
+    )
+    .await
+    .expect("UnloadAmmo");
+    let unload_notes = collect_notes(&mut sess);
+    assert!(
+        has_attr80_delta(&unload_notes, 30028, 0.0),
+        "UnloadAmmo must expel sublocation with attr 80 -> 0.0: {unload_notes:?}"
+    );
+}

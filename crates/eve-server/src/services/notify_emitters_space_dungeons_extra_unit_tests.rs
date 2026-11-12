@@ -220,6 +220,41 @@ fn projected_ewar_flush_fallback_victim_notification_and_solar_system_fallback()
     flush_module_profile_and_ewar_end(&ctx, char1, Some(sys_id), 0, scram_mod_id);
     assert!(ctx.drain_notifications_for_char(char1).is_empty());
 
+    // 1b. flush_module_ewar_end emits OnEwarEnd WITHOUT OnGodmaFlushLocationProfile (GH #963),
+    //     whereas flush_module_profile_and_ewar_end emits both when module_id != ship_id.
+    ctx.active_ewar_starts
+        .write()
+        .unwrap()
+        .insert((ship1, scram_mod_id), vec![(ship2, "warpScrambler")]);
+    let _ = flush_module_ewar_end(&ctx, char1, Some(sys_id), ship1, scram_mod_id);
+    let ewar_only_notifs = ctx.drain_notifications_for_char(char1);
+    assert!(ewar_only_notifs.iter().any(|n| n.event == "OnEwarEnd"));
+    assert!(
+        !ewar_only_notifs.iter().any(|n| n.event == "OnGodmaFlushLocationProfile"),
+        "flush_module_ewar_end must preserve still-fitted module in godma.invitems"
+    );
+    ctx.active_ewar_starts
+        .write()
+        .unwrap()
+        .insert((ship1, scram_mod_id), vec![(ship2, "warpScrambler")]);
+    let _ = flush_module_profile_and_ewar_end(&ctx, char1, Some(sys_id), ship1, scram_mod_id);
+    let unfit_notifs = ctx.drain_notifications_for_char(char1);
+    let flush_notif = unfit_notifs
+        .iter()
+        .find(|n| n.event == "OnGodmaFlushLocationProfile")
+        .expect("flush_module_profile_and_ewar_end must emit OnGodmaFlushLocationProfile on unfit");
+    assert_eq!(
+        flush_notif.args,
+        vec![
+            PyRep::Integer(ship1),
+            PyRep::Tuple(vec![
+                PyRep::String("effect".into()),
+                PyRep::Integer(scram_mod_id),
+            ]),
+        ]
+    );
+    assert!(unfit_notifs.iter().any(|n| n.event == "OnEwarEnd"));
+
     // 2. Populate projected_ewar and projected_ewar_sources (without active_ewar_starts)
     //    targeting ship2 (owned by char2), then call flush_ship_all_ewar_sync on victim ship2!
     let mut eff_mod = DogmaItemState::from_sde(scram_mod_id, 447, &ctx.sde);
@@ -243,10 +278,11 @@ fn projected_ewar_flush_fallback_victim_notification_and_solar_system_fallback()
     let flushed_pairs = flush_ship_all_ewar_sync(&ctx, char2, Some(sys_id), ship2);
     assert_eq!(flushed_pairs, vec![(ship1, scram_mod_id)]);
 
-    // Both attacker (char1) and victim (char2) must receive OnEwarEnd
+    // Both attacker (char1) and victim (char2) must receive OnEwarEnd without purging scram_mod_id
     let d1 = ctx.drain_notifications_for_char(char1);
     let d2 = ctx.drain_notifications_for_char(char2);
     assert!(d1.iter().any(|n| n.event == "OnEwarEnd"));
+    assert!(!d1.iter().any(|n| n.event == "OnGodmaFlushLocationProfile"));
     assert!(d2.iter().any(|n| n.event == "OnEwarEnd"));
 
     // 3. SolarSystem fallback when char_id == 0 and target_owner == 0 (NPC attacker -> NPC target)

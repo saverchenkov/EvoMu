@@ -1002,7 +1002,7 @@ fn evaluate_drone_or_probe_state_with_overrides(
     let mut st = fit.drone_state(item_id, &ctx.sde)?;
     if let Some(it) = item_opt {
         for (&aid, &val) in &it.dynamic_attributes {
-            if !matches!(aid, 3 | 18 | 265 | 266) {
+            if !matches!(aid, 3 | 18 | 264 | 265 | 266) {
                 st.base_attributes.insert(aid, val);
             }
         }
@@ -1041,7 +1041,7 @@ fn get_item_attribute_value(
 
     if let Some((owner_id, ship_id)) = parent_ship_opt {
         if item_id == ship_id && ship_id > 0 {
-            if matches!(attr_id, 1175 | 1176 | 1177 | 3 | 18 | 265 | 266) {
+            if matches!(attr_id, 1175 | 1176 | 1177 | 3 | 18 | 264 | 265 | 266) {
                 if let Some(&live_val) =
                     item_opt.as_ref().and_then(|it| it.dynamic_attributes.get(&attr_id))
                 {
@@ -1120,7 +1120,7 @@ fn get_item_attribute_value(
                 if let Some(d_state) =
                     evaluate_drone_or_probe_state_with_overrides(ctx, &fit, item_id, item_opt.as_ref())
                 {
-                    if matches!(attr_id, 3 | 18 | 265 | 266) {
+                    if matches!(attr_id, 3 | 18 | 264 | 265 | 266) {
                         if let Some(&live_val) =
                             item_opt.as_ref().and_then(|it| it.dynamic_attributes.get(&attr_id))
                         {
@@ -1171,7 +1171,7 @@ fn get_all_item_attributes(
                 }
                 if let Some(ref it) = item_opt {
                     for (&aid, &v) in &it.dynamic_attributes {
-                        if matches!(aid, 3 | 18 | 265 | 266 | 1175 | 1176 | 1177)
+                        if matches!(aid, 3 | 18 | 264 | 265 | 266 | 1175 | 1176 | 1177)
                             || !fit.ship.modifiers.iter().any(|m| m.target_attribute_id == aid)
                         {
                             map.insert(aid, v);

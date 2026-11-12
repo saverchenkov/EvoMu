@@ -170,12 +170,30 @@ fn godma_ewar_drones_cloak_pvp_deathzone_and_dungeon_trigger_emitters() {
         Some(999_001),
     );
 
+    let pre_ewar_notifs = ctx.drain_notifications_for_char(char_id);
     ctx.active_ewar_starts
         .write()
         .unwrap()
         .insert((ship_id, mod_id), vec![(999_001, "warpScrambler")]);
     let pairs = flush_ship_all_ewar_sync(&ctx, char_id, Some(sys_id), ship_id);
     assert_eq!(pairs, vec![(ship_id, mod_id)]);
+    let ewar_sync_notifs = ctx.drain_notifications_for_char(char_id);
+    let ewar_sync_events: HashSet<&str> = ewar_sync_notifs
+        .iter()
+        .map(|n| n.event.as_str())
+        .collect();
+    assert!(ewar_sync_events.contains("OnEwarEnd"));
+    assert!(
+        !ewar_sync_events.contains("OnGodmaFlushLocationProfile"),
+        "flush_ship_all_ewar_sync must not purge still-fitted modules via OnGodmaFlushLocationProfile"
+    );
+
+    // Genuine module unfit/destroy flushes the module profile AND ends EWAR.
+    ctx.active_ewar_starts
+        .write()
+        .unwrap()
+        .insert((ship_id, mod_id), vec![(999_001, "warpScrambler")]);
+    let _ = flush_module_profile_and_ewar_end(&ctx, char_id, Some(sys_id), ship_id, mod_id);
 
     emit_ecm_jam_landed(&ctx, sys_id, char_id, ship_id, mod_id, 999_001, 20.0);
     emit_fleet_boosted(&ctx, char_id, 42526, 4);
@@ -202,7 +220,9 @@ fn godma_ewar_drones_cloak_pvp_deathzone_and_dungeon_trigger_emitters() {
     emit_ess_reserve_bank_inventory_full(&ctx, sys_id);
     emit_jump_queue_update(&ctx, char_id, sys_id, 10, 2, vec![1, 2], 60);
 
-    let drained = ctx.drain_notifications_for_char(char_id);
+    let mut drained = pre_ewar_notifs;
+    drained.extend(ewar_sync_notifs);
+    drained.extend(ctx.drain_notifications_for_char(char_id));
     let events: HashSet<&str> = drained.iter().map(|n| n.event.as_str()).collect();
     assert!(events.contains("OnDroneActivityChange"));
     assert!(events.contains("OnGodmaEffectInfo"));

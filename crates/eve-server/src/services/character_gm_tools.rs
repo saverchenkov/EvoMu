@@ -491,6 +491,400 @@ fn is_me_or_myship(tok: &str) -> bool {
 /// `/heal [target_id]`, `/spawn <type_id> [qty]`, `/unspawn <id>`, `/setattr <item_id> <attr_id> <val>`,
 /// `/getattr <item_id> <attr_id>`, `/fit [ship_id|"me"] <type_id> [flag]`, `/load [target|"me"] <type_id> [qty]`,
 /// `/kill <target_id>`, `/location [char_id]`, and `/online`.
+/// Executes `/heal [target_id]` across the live ballpark `CombatState`, persisted SP6/DB HP &
+/// capacitor dynamic attributes, fitting heat/damage state, Destiny `DoDestinyUpdate`
+/// `OnDamageStateChange`, and `godma` `OnModuleAttributeChanges` (`GH #949`).
+pub(crate) async fn execute_gm_heal(
+    ctx: &ServerContext,
+    session: &SessionState,
+    cid: i64,
+    cmd: &str,
+) -> Result<PyRep, BridgeRpcError> {
+    let tokens = parse_slash_tokens(cmd.strip_prefix("/heal").unwrap_or(""));
+    let arg_id = tokens
+        .first()
+        .filter(|s| !is_me_or_myship(s))
+        .and_then(|s| s.parse::<i64>().ok());
+
+    let (target_char_id, sys_id, target_ship_id, ship_type_id) = ctx.db.with_snapshot(|snap| {
+        let caller_sys = session
+            .solar_system_id
+            .or_else(|| snap.characters.get(&cid).map(|c| c.solar_system_id))
+            .unwrap_or(0);
+        let caller_ship = session
+            .ship_id
+            .or_else(|| snap.characters.get(&cid).map(|c| c.active_ship_id))
+            .unwrap_or(0);
+        if let Some(tid) = arg_id {
+            if let Some(ch) = snap.characters.get(&tid) {
+                let sid = ch.active_ship_id;
+                let stid = snap.items.get(&sid).map(|i| i.type_id).unwrap_or(0);
+                (tid, ch.solar_system_id, sid, stid)
+            } else if let Some(item) = snap.items.get(&tid) {
+                let owner_sys = snap
+                    .characters
+                    .get(&item.owner_id)
+                    .map(|c| c.solar_system_id)
+                    .unwrap_or(caller_sys);
+                (item.owner_id, owner_sys, tid, item.type_id)
+            } else {
+                (cid, caller_sys, tid, 0)
+            }
+        } else {
+            let stid = snap.items.get(&caller_ship).map(|i| i.type_id).unwrap_or(0);
+            (cid, caller_sys, caller_ship, stid)
+        }
+    });
+
+    let fit_opt = if target_ship_id > 0 && target_char_id > 0 {
+        ctx.get_or_rebuild_ship_fitting(target_char_id, target_ship_id)
+            .ok()
+    } else {
+        None
+    };
+    let (fit_max_hull, fit_max_armor, fit_max_shield, fit_max_cap) = if let Some(ref fit) = fit_opt
+    {
+        let mut eff_attrs: std::collections::HashMap<u16, f64> = [
+            eve_sde::attr_ids::HP_STRUCT,
+            eve_sde::attr_ids::ARMOR_HP,
+            eve_sde::attr_ids::SHIELD_CAPACITY,
+            eve_sde::attr_ids::CAPACITOR_CAPACITY,
+        ]
+        .into_iter()
+        .map(|aid| (aid, fit.ship.get_attribute(aid, &ctx.sde)))
+        .collect();
+        crate::services::inventory_fitting::fitting_scanners_superweapons::apply_active_dbuffs_and_system_effects_to_ship_attrs(
+            ctx,
+            target_ship_id,
+            &mut eff_attrs,
+        );
+        (
+            eff_attrs
+                .get(&eve_sde::attr_ids::HP_STRUCT)
+                .copied()
+                .unwrap_or(0.0),
+            eff_attrs
+                .get(&eve_sde::attr_ids::ARMOR_HP)
+                .copied()
+                .unwrap_or(0.0),
+            eff_attrs
+                .get(&eve_sde::attr_ids::SHIELD_CAPACITY)
+                .copied()
+                .unwrap_or(0.0),
+            eff_attrs
+                .get(&eve_sde::attr_ids::CAPACITOR_CAPACITY)
+                .copied()
+                .unwrap_or(0.0),
+        )
+    } else if let Some(t) = ctx.sde.types.get(&ship_type_id) {
+        (
+            t.default_attributes
+                .get(&eve_sde::attr_ids::HP_STRUCT)
+                .copied()
+                .unwrap_or(0.0),
+            t.default_attributes
+                .get(&eve_sde::attr_ids::ARMOR_HP)
+                .copied()
+                .unwrap_or(0.0),
+            t.default_attributes
+                .get(&eve_sde::attr_ids::SHIELD_CAPACITY)
+                .copied()
+                .unwrap_or(0.0),
+            t.default_attributes
+                .get(&eve_sde::attr_ids::CAPACITOR_CAPACITY)
+                .copied()
+                .unwrap_or(0.0),
+        )
+    } else {
+        (0.0, 0.0, 0.0, 0.0)
+    };
+
+    let handle_opt = if target_ship_id > 0 {
+        Some(ctx.systems.get_or_spawn(sys_id))
+    } else {
+        None
+    };
+    let pre_cs = if let Some(ref handle) = handle_opt {
+        handle
+            .get_combat_state(target_ship_id)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    let unified_fallback_maxes = if let Some(ref cs) = pre_cs {
+        (
+            if cs.max_structure_hp > 0.0 {
+                cs.max_structure_hp
+            } else {
+                fit_max_hull
+            },
+            if cs.max_armor_hp > 0.0 {
+                cs.max_armor_hp
+            } else {
+                fit_max_armor
+            },
+            if cs.max_shield_hp > 0.0 {
+                cs.max_shield_hp
+            } else {
+                fit_max_shield
+            },
+        )
+    } else {
+        (fit_max_hull, fit_max_armor, fit_max_shield)
+    };
+    let (pre_unified, pre_dyn_shield_charge, pre_dyn_cap, mut repaired_child_attrs, pre_ship_heat) =
+        ctx.db.with_snapshot(|snap| {
+            let unified = if target_ship_id > 0 {
+                Some(crate::sp6_lifecycle::read_unified_ship_damage_state(
+                    ctx,
+                    snap,
+                    target_ship_id,
+                    ship_type_id,
+                    Some(unified_fallback_maxes),
+                ))
+            } else {
+                None
+            };
+            let ship_it = snap.items.get(&target_ship_id);
+            let dyn_shield = ship_it.and_then(|it| {
+                it.dynamic_attributes
+                    .get(&eve_sde::attr_ids::SHIELD_CHARGE)
+                    .copied()
+            });
+            let dyn_cap = ship_it.and_then(|it| it.dynamic_attributes.get(&18u16).copied());
+            let ship_heat = ship_it
+                .and_then(|it| it.dynamic_attributes.get(&1211u16).copied())
+                .unwrap_or(0.0);
+            let mut child_changes: Vec<(i64, u16, f64)> = Vec::new();
+            if target_ship_id > 0 {
+                for item in snap.items.values() {
+                    if item.location_id == target_ship_id {
+                        if let Some(&old_d) = item.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE)
+                        {
+                            if old_d > 0.0 {
+                                child_changes.push((
+                                    item.item_id,
+                                    eve_sde::attr_ids::DAMAGE,
+                                    old_d,
+                                ));
+                            }
+                        }
+                        if let Some(&old_h) = item.dynamic_attributes.get(&1211u16) {
+                            if old_h > 0.0 {
+                                child_changes.push((item.item_id, 1211u16, old_h));
+                            }
+                        }
+                    }
+                }
+            }
+            (unified, dyn_shield, dyn_cap, child_changes, ship_heat)
+        });
+
+    let mut combat_healed = CombatState::default();
+    if let Some(ref handle) = handle_opt {
+        if let Ok(cs) = handle.heal_combat_state(target_ship_id).await {
+            combat_healed = cs;
+        }
+        // Flush `DoDestinyUpdate(OnDamageStateChange)` to ALL ready observers, including the healed ship itself.
+        let _ = handle.flush_peer_observer_updates(None).await;
+    }
+
+    // Clear module and hull dynamic damage + shield/cap/heat attributes in DB, SP6 HP, and fitting cache.
+    if target_ship_id > 0 {
+        ctx.db.with_mut_snapshot(|snap| {
+            crate::sp6_lifecycle::clear_ship_combat_damage_in_snap(snap, target_ship_id);
+            for item in snap.items.values_mut() {
+                if item.item_id == target_ship_id || item.location_id == target_ship_id {
+                    let r1 = item
+                        .dynamic_attributes
+                        .remove(&eve_sde::attr_ids::DAMAGE)
+                        .is_some();
+                    let r2 = item
+                        .dynamic_attributes
+                        .remove(&eve_sde::attr_ids::ARMOR_DAMAGE)
+                        .is_some();
+                    let r3 = item.dynamic_attributes.remove(&1211u16).is_some(); // heatDamage
+                    if (r1 || r2 || r3) && item.item_id != target_ship_id {
+                        item.version += 1;
+                    }
+                }
+            }
+        });
+    }
+    let pre_rack_heat = fit_opt
+        .as_ref()
+        .map(|f| f.rack_heat)
+        .unwrap_or([0.0, 0.0, 0.0]);
+    if let Some(mut fit) = fit_opt {
+        for m in fit.modules.values_mut() {
+            if m.damage_hp > 0.0
+                && !repaired_child_attrs
+                    .iter()
+                    .any(|&(id, aid, _)| id == m.item_id && aid == eve_sde::attr_ids::DAMAGE)
+            {
+                repaired_child_attrs.push((m.item_id, eve_sde::attr_ids::DAMAGE, m.damage_hp));
+            }
+            m.damage_hp = 0.0;
+        }
+        fit.rack_heat = [0.0, 0.0, 0.0];
+        ctx.store_ship_fitting(target_ship_id, fit);
+    }
+
+    let eff_max_shield = combat_healed.max_shield_hp.max(fit_max_shield);
+    let eff_max_armor = combat_healed.max_armor_hp.max(fit_max_armor);
+    let eff_max_hull = combat_healed.max_structure_hp.max(fit_max_hull);
+    let eff_max_cap = combat_healed.max_capacitor.max(fit_max_cap);
+
+    let final_shield = if combat_healed.max_shield_hp > 0.0 {
+        combat_healed.shield_hp
+    } else {
+        eff_max_shield
+    };
+    let final_armor = if combat_healed.max_armor_hp > 0.0 {
+        combat_healed.armor_hp
+    } else {
+        eff_max_armor
+    };
+    let final_hull = if combat_healed.max_structure_hp > 0.0 {
+        combat_healed.structure_hp
+    } else {
+        eff_max_hull
+    };
+    let final_cap = if combat_healed.max_capacitor > 0.0 {
+        combat_healed.capacitor
+    } else {
+        eff_max_cap
+    };
+
+    if target_char_id > 0 && target_ship_id > 0 {
+        let now_ft = ctx.now_blueos_filetime_ticks();
+        let mut attr_changes: Vec<PyRep> = Vec::new();
+        let push_change =
+            |list: &mut Vec<PyRep>, item_id: i64, attr_id: u16, new_val: f64, old_val: f64| {
+                list.push(PyRep::Tuple(vec![
+                    PyRep::String("OnModuleAttributeChange".into()),
+                    PyRep::Integer(target_char_id),
+                    PyRep::Integer(item_id),
+                    PyRep::Integer(i64::from(attr_id)),
+                    PyRep::Integer(now_ft),
+                    PyRep::Real(new_val),
+                    PyRep::Real(old_val),
+                    PyRep::None,
+                ]));
+            };
+
+        let (old_shield, old_armor_dmg, old_hull_dmg) = if let Some(u) = pre_unified {
+            let s = match pre_dyn_shield_charge {
+                Some(dc) if pre_cs.as_ref().is_none_or(|c| c.max_shield_hp <= 0.0) => {
+                    dc.clamp(0.0, final_shield.max(dc))
+                }
+                Some(dc) => u.shield_hp.min(dc).max(0.0),
+                None => u.shield_hp,
+            };
+            (s, u.armor_damage, u.hull_damage)
+        } else {
+            (pre_dyn_shield_charge.unwrap_or(final_shield), 0.0, 0.0)
+        };
+
+        let old_cap = match (pre_cs.as_ref().filter(|c| c.max_capacitor > 0.0), pre_dyn_cap) {
+            (Some(cs), Some(dc)) => cs.capacitor.min(dc).max(0.0),
+            (Some(cs), None) => cs.capacitor.max(0.0),
+            (None, Some(dc)) => dc.max(0.0),
+            (None, None) => final_cap,
+        };
+
+        if final_shield > 0.0 || pre_dyn_shield_charge.is_some() {
+            push_change(
+                &mut attr_changes,
+                target_ship_id,
+                eve_sde::attr_ids::SHIELD_CHARGE,
+                final_shield,
+                old_shield,
+            );
+        }
+        if final_armor > 0.0 || old_armor_dmg > 0.0 {
+            push_change(
+                &mut attr_changes,
+                target_ship_id,
+                eve_sde::attr_ids::ARMOR_DAMAGE,
+                0.0,
+                old_armor_dmg,
+            );
+        }
+        if final_hull > 0.0 || old_hull_dmg > 0.0 {
+            push_change(
+                &mut attr_changes,
+                target_ship_id,
+                eve_sde::attr_ids::DAMAGE,
+                0.0,
+                old_hull_dmg,
+            );
+        }
+        if final_cap > 0.0 || pre_dyn_cap.is_some() {
+            push_change(
+                &mut attr_changes,
+                target_ship_id,
+                18u16,
+                final_cap,
+                old_cap,
+            );
+        }
+        if pre_ship_heat > 0.0 {
+            push_change(&mut attr_changes, target_ship_id, 1211, 0.0, pre_ship_heat);
+        }
+        for (idx, rack_attr) in [1175u16, 1176, 1177].into_iter().enumerate() {
+            if pre_rack_heat[idx] > 0.0 {
+                push_change(
+                    &mut attr_changes,
+                    target_ship_id,
+                    rack_attr,
+                    0.0,
+                    pre_rack_heat[idx],
+                );
+            }
+        }
+        repaired_child_attrs.sort_unstable_by_key(|&(id, aid, _)| (id, aid));
+        for (mod_id, aid, old_val) in repaired_child_attrs {
+            push_change(&mut attr_changes, mod_id, aid, 0.0, old_val);
+        }
+        if !attr_changes.is_empty() {
+            ctx.notify(
+                crate::router::NotificationTarget::Character(target_char_id),
+                "OnModuleAttributeChanges",
+                "charid",
+                vec![PyRep::List(attr_changes)],
+            );
+        }
+        let _ = ctx.notify_damage_state_change(
+            crate::router::NotificationTarget::Character(target_char_id),
+            target_ship_id,
+            1.0,
+            1.0,
+            1.0,
+        );
+        let _ = ctx.notify_remote_message(
+            crate::router::NotificationTarget::Character(target_char_id),
+            "CustomNotify",
+            vec![("notify", PyRep::String("Ship healed".into()))],
+        );
+    }
+
+    Ok(PyRep::keyval([
+        ("command", PyRep::String(cmd.to_string())),
+        ("characterID", PyRep::Integer(target_char_id)),
+        ("shipID", PyRep::Integer(target_ship_id)),
+        ("targetID", PyRep::Integer(target_ship_id)),
+        ("shieldHP", PyRep::Real(final_shield)),
+        ("armorHP", PyRep::Real(final_armor)),
+        ("hullHP", PyRep::Real(final_hull)),
+        ("capacitor", PyRep::Real(final_cap)),
+        ("moduleHeatCleared", PyRep::Bool(true)),
+        ("healed", PyRep::Bool(true)),
+    ]))
+}
+
 pub async fn handle_gm_slash_ext(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -498,69 +892,7 @@ pub async fn handle_gm_slash_ext(
     cmd: &str,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     if cmd == "/heal" || cmd.starts_with("/heal ") {
-        let tokens = parse_slash_tokens(cmd.strip_prefix("/heal").unwrap_or(""));
-        let arg_id = tokens
-            .first()
-            .filter(|s| !is_me_or_myship(s))
-            .and_then(|s| s.parse::<i64>().ok());
-
-        let (target_char_id, sys_id, target_ship_id) = ctx.db.with_snapshot(|snap| {
-            let caller_sys = session.solar_system_id.or_else(|| snap.characters.get(&cid).map(|c| c.solar_system_id)).unwrap_or(0);
-            let caller_ship = session.ship_id.or_else(|| snap.characters.get(&cid).map(|c| c.active_ship_id)).unwrap_or(0);
-            if let Some(tid) = arg_id {
-                if let Some(ch) = snap.characters.get(&tid) {
-                    (tid, ch.solar_system_id, ch.active_ship_id)
-                } else if let Some(item) = snap.items.get(&tid) {
-                    let owner_sys = snap.characters.get(&item.owner_id).map(|c| c.solar_system_id).unwrap_or(caller_sys);
-                    (item.owner_id, owner_sys, tid)
-                } else {
-                    (cid, caller_sys, tid)
-                }
-            } else {
-                (cid, caller_sys, caller_ship)
-            }
-        });
-
-        let mut combat_healed = CombatState::default();
-        if target_ship_id > 0 {
-            let handle = ctx.systems.get_or_spawn(sys_id);
-            if let Ok(cs) = handle.heal_combat_state(target_ship_id).await {
-                combat_healed = cs;
-            }
-            let _ = handle.flush_peer_observer_updates(session.ship_id).await;
-        }
-
-        // Clear module and hull dynamic damage + heat attributes in DB, SP6 HP, and fitting cache
-        ctx.db.with_mut_snapshot(|snap| {
-            crate::sp6_lifecycle::clear_ship_combat_damage_in_snap(snap, target_ship_id);
-            for item in snap.items.values_mut() {
-                if item.item_id == target_ship_id || item.location_id == target_ship_id {
-                    item.dynamic_attributes.remove(&eve_sde::attr_ids::DAMAGE);
-                    item.dynamic_attributes.remove(&eve_sde::attr_ids::ARMOR_DAMAGE);
-                    item.dynamic_attributes.remove(&1211u16); // heatDamage
-                }
-            }
-        });
-        if let Ok(mut fit) = ctx.get_or_rebuild_ship_fitting(target_char_id, target_ship_id) {
-            for m in fit.modules.values_mut() { m.damage_hp = 0.0; }
-            fit.rack_heat = [0.0, 0.0, 0.0];
-            ctx.store_ship_fitting(target_ship_id, fit);
-        }
-        let _ = ctx.notify_damage_state_change(crate::router::NotificationTarget::Character(target_char_id), target_ship_id, 1.0, 1.0, 1.0);
-        let _ = ctx.notify_remote_message(crate::router::NotificationTarget::Character(target_char_id), "CustomNotify", vec![("notify", PyRep::String("Ship healed".into()))]);
-
-        return Some(Ok(PyRep::keyval([
-            ("command", PyRep::String(cmd.to_string())),
-            ("characterID", PyRep::Integer(target_char_id)),
-            ("shipID", PyRep::Integer(target_ship_id)),
-            ("targetID", PyRep::Integer(target_ship_id)),
-            ("shieldHP", PyRep::Real(combat_healed.shield_hp)),
-            ("armorHP", PyRep::Real(combat_healed.armor_hp)),
-            ("hullHP", PyRep::Real(combat_healed.structure_hp)),
-            ("capacitor", PyRep::Real(combat_healed.capacitor)),
-            ("moduleHeatCleared", PyRep::Bool(true)),
-            ("healed", PyRep::Bool(true)),
-        ])));
+        return Some(execute_gm_heal(ctx, session, cid, cmd).await);
     }
 
     if let Some(rest) = cmd.strip_prefix("/spawn ") {

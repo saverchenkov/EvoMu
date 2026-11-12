@@ -380,8 +380,8 @@ fn persist_ship_combat_hp_batch_inner<'a, I>(
     });
 }
 
-/// Clears ship hull/armor dynamic damage attributes and persisted `sp6_lifecycle.ship_combat_hp`
-/// together when a ship is repaired or healed (`#585`).
+/// Clears ship hull/armor/shield/capacitor dynamic damage attributes and persisted `sp6_lifecycle.ship_combat_hp`
+/// together when a ship is repaired or healed (`#585`, `#949`).
 pub fn clear_ship_combat_damage_in_snap(snap: &mut eve_db::WorldStateSnapshot, ship_id: i64) {
     if let Some(it) = snap.items.get_mut(&ship_id) {
         let removed_h = it
@@ -392,7 +392,12 @@ pub fn clear_ship_combat_damage_in_snap(snap: &mut eve_db::WorldStateSnapshot, s
             .dynamic_attributes
             .remove(&eve_sde::attr_ids::ARMOR_DAMAGE)
             .is_some();
-        if removed_h || removed_a {
+        let removed_s = it
+            .dynamic_attributes
+            .remove(&eve_sde::attr_ids::SHIELD_CHARGE)
+            .is_some();
+        let removed_c = it.dynamic_attributes.remove(&18u16).is_some();
+        if removed_h || removed_a || removed_s || removed_c {
             it.version += 1;
         }
     }

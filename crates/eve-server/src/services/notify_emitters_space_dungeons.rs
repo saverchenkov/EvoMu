@@ -641,29 +641,16 @@ pub fn emit_module_activation_godma_notifications(
     }
 }
 
-/// Emits `OnGodmaFlushLocationProfile(shipID, ("effect", moduleID))` and, for projected EWAR modules,
-/// `OnEwarEnd(sourceBallID, moduleID, targetBallID, jammingType)` before removing projected EWAR.
-pub fn flush_module_profile_and_ewar_end(
+/// Removes active/projected EWAR state for `(ship_id, module_id)` and emits
+/// `OnEwarEnd(sourceBallID, moduleID, targetBallID, jammingType)` without purging
+/// a still-fitted module from `godma.StateManager.invitems`.
+pub fn flush_module_ewar_end(
     ctx: &ServerContext,
     char_id: i64,
     solar_system_id: Option<u32>,
     ship_id: i64,
     module_id: i64,
 ) -> Vec<i64> {
-    if ship_id > 0 && module_id > 0 && module_id != ship_id {
-        ctx.notify(
-            NotificationTarget::Character(char_id),
-            "OnGodmaFlushLocationProfile",
-            "charid",
-            vec![
-                PyRep::Integer(ship_id),
-                PyRep::Tuple(vec![
-                    PyRep::String("effect".into()),
-                    PyRep::Integer(module_id),
-                ]),
-            ],
-        );
-    }
     let started_targets = ctx
         .active_ewar_starts
         .write()
@@ -782,6 +769,34 @@ pub fn flush_module_profile_and_ewar_end(
     affected_projected
 }
 
+/// Emits `OnGodmaFlushLocationProfile(shipID, ("effect", moduleID))` (only safe when
+/// `module_id` is actually leaving `ship_id`, because client `StateManager.PurgeEntry`
+/// deletes `module_id` from `godma.invitems`) and cleans up any projected EWAR.
+// parity: notify:OnGodmaFlushLocationProfile
+pub fn flush_module_profile_and_ewar_end(
+    ctx: &ServerContext,
+    char_id: i64,
+    solar_system_id: Option<u32>,
+    ship_id: i64,
+    module_id: i64,
+) -> Vec<i64> {
+    if ship_id > 0 && module_id > 0 && module_id != ship_id {
+        ctx.notify(
+            NotificationTarget::Character(char_id),
+            "OnGodmaFlushLocationProfile",
+            "charid",
+            vec![
+                PyRep::Integer(ship_id),
+                PyRep::Tuple(vec![
+                    PyRep::String("effect".into()),
+                    PyRep::Integer(module_id),
+                ]),
+            ],
+        );
+    }
+    flush_module_ewar_end(ctx, char_id, solar_system_id, ship_id, module_id)
+}
+
 /// Flushes all active EWAR projections and remote assistance originating from OR targeting `ship_id`,
 /// emitting `OnEwarEnd` to both attacker and victim.
 pub fn flush_ship_all_ewar_sync(
@@ -840,7 +855,7 @@ pub fn flush_ship_all_ewar_sync(
                 .with_snapshot(|s| s.items.get(&src_sid).map(|i| i.owner_id))
                 .unwrap_or(0)
         };
-        let _ = flush_module_profile_and_ewar_end(ctx, src_char, solar_system_id, src_sid, mod_id);
+        let _ = flush_module_ewar_end(ctx, src_char, solar_system_id, src_sid, mod_id);
         crate::services::tactical_modules::remove_projected_remote_assistance(ctx, src_sid, mod_id);
     }
     pairs

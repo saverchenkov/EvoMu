@@ -974,7 +974,7 @@ impl ServerContext {
                     Arc::clone(&active_ewar_starts),
                     Arc::clone(&tactical_state),
                 );
-                let _ = crate::services::notify_emitters_space_dungeons::flush_module_profile_and_ewar_end(
+                let _ = crate::services::notify_emitters_space_dungeons::flush_module_ewar_end(
                     &step_ctx,
                     char_id,
                     solar_system_id,

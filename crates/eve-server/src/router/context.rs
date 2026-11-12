@@ -1529,7 +1529,7 @@ impl ServerContext {
                 .with_snapshot(|s| s.items.get(&ship_id).map(|it| it.dynamic_attributes.clone()))
             {
                 for (attr_id, val) in ship_dyn {
-                    if !matches!(attr_id, 3 | 18 | 265 | 266)
+                    if !matches!(attr_id, 3 | 18 | 264 | 265 | 266)
                         && existing.ship.base_attributes.get(&attr_id).copied() != Some(val)
                     {
                         existing.ship.base_attributes.insert(attr_id, val);

@@ -1366,21 +1366,12 @@ pub async fn handle(
             {
                 Some(handle_slash_teleport(ctx, session, cid, cmd, rest).await)
             } else if cmd == "/heal" || cmd.starts_with("/heal ") {
-                let (sys_id, ship_id) = ctx.db.with_snapshot(|snap| {
-                    snap.characters.get(&cid).map(|c| (c.solar_system_id, c.active_ship_id))
-                }).or_else(|| session.solar_system_id.map(|s| (s, 0))).unwrap_or((0, 0));
-
-                if ship_id > 0 {
-                    let handle = ctx.systems.get_or_spawn(sys_id);
-                    let _ = handle.heal_combat_state(ship_id).await;
-                }
-
-                Some(Ok(PyRep::keyval([
-                    ("command", PyRep::String(cmd.to_string())),
-                    ("characterID", PyRep::Integer(cid)),
-                    ("shipID", PyRep::Integer(ship_id)),
-                    ("healed", PyRep::Bool(true)),
-                ])))
+                Some(
+                    crate::services::character_skills::character_gm_tools::execute_gm_heal(
+                        ctx, session, cid, cmd,
+                    )
+                    .await,
+                )
             } else if let Some(rest) = cmd.strip_prefix("/createccpevent ") {
                 if (session.role & eve_machonet::service_roles::ROLE_GMH) == 0 {
                     return Some(Err(BridgeRpcError {

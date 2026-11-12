@@ -2067,3 +2067,340 @@ async fn test_batch_h_inventory_item_change_cpu_pg_and_online_in_space() {
         .expect_err("onlining below 75% cap must fail");
     assert_eq!(low_cap_err.code, "NotEnoughCapacitorToOnline");
 }
+
+#[tokio::test]
+async fn test_gh963_shield_booster_cycle_end_and_offline_never_flush_location_profile() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(4263);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    let char_id = 90_000_001i64;
+    let rifter_id = sess.ship_id.unwrap_or(100_000_001);
+    let station_id = sess.station_id.unwrap_or(60_003_760);
+    sess.role = eve_db::service_roles::ROLE_ADMIN | eve_db::service_roles::ROLE_GMS;
+
+    for tid in [629u32, 10_836, 31_213] {
+        grant_all_required_skills_for_type(&ctx, char_id, tid);
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        let sk = snap.skills.entry(char_id).or_default();
+        for sid in [3426u32, 3413, 3416, 3334] {
+            sk.insert(
+                sid,
+                eve_db::TrainedSkillRecord {
+                    type_id: sid,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+    });
+
+    // Negative/genuine-destroy baseline: `dogmaIM.DestroyFitting` on a rig STILL emits `OnGodmaFlushLocationProfile`.
+    let rig_id = 100_963_001i64;
+    seed_item(&ctx, rig_id, 31_213, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "invbroker",
+        None,
+        "Add",
+        &[
+            PyRep::Integer(rig_id),
+            PyRep::Integer(rifter_id),
+            PyRep::Integer(InventoryFlag::RigSlot0 as i64),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("fit rig for DestroyFitting baseline");
+    let _ = sess.drain_notifications();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "DestroyFitting",
+        &[PyRep::Integer(rig_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("DestroyFitting");
+    let mut destroy_notes = sess.drain_notifications();
+    destroy_notes.extend(
+        ctx.drain_notifications_for_char(char_id)
+            .into_iter()
+            .map(|n| (n.event, n.args)),
+    );
+    let destroy_flush = destroy_notes
+        .iter()
+        .find(|(ev, _)| ev == "OnGodmaFlushLocationProfile")
+        .expect("genuine DestroyFitting must still emit OnGodmaFlushLocationProfile");
+    assert_eq!(destroy_flush.1.first().and_then(|v| v.as_i64()), Some(rifter_id));
+    assert_eq!(
+        destroy_flush.1.get(1),
+        Some(&PyRep::Tuple(vec![
+            PyRep::String("effect".into()),
+            PyRep::Integer(rig_id),
+        ]))
+    );
+
+    // Board a Rupture (629), fit Medium Shield Booster I (10836) via `/fit me 10836`, and undock.
+    let rupture_id = 100_963_010i64;
+    seed_item(&ctx, rupture_id, 629, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    ctx.advance_secs(31);
+    ctx.dispatch_rpc(&mut sess, "ship", None, "Board", &[PyRep::Integer(rupture_id)], &kw, None)
+        .await
+        .expect("Board Rupture");
+
+    let fit_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/fit me 10836".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/fit me 10836");
+    assert_eq!(fit_res.dict_get("online"), Some(&PyRep::Bool(true)));
+    let msb_id = fit_res
+        .dict_get("itemID")
+        .and_then(|v| v.as_i64())
+        .expect("fitted Medium Shield Booster itemID");
+
+    ctx.advance_secs(31);
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock");
+    let sys_id = sess.solar_system_id.unwrap_or(30_000_142);
+    let sys = ctx.systems.get_or_spawn(sys_id);
+
+    let pre_info = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "GetAllInfo",
+            &[PyRep::Bool(true), PyRep::Bool(true)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetAllInfo after Undock");
+    let PyRep::Dict(ref pre_ship_info) = pre_info.dict_get("shipInfo").expect("shipInfo") else {
+        panic!("shipInfo must be Dict");
+    };
+    assert!(
+        pre_ship_info.iter().any(|(k, _)| k.as_i64() == Some(msb_id)),
+        "Medium Shield Booster I must be present in GetAllInfo.shipInfo before activation"
+    );
+
+    let _ = sess.drain_notifications();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. Normal cycle end (`Activate` -> `Deactivate` -> cycle expires via `step_manual`) must NOT purge `msb_id`.
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[
+            PyRep::Integer(msb_id),
+            PyRep::String("shieldBoosting".into()),
+            PyRep::None,
+            PyRep::Integer(1),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate Medium Shield Booster I");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Deactivate",
+        &[PyRep::Integer(msb_id), PyRep::String("shieldBoosting".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Deactivate Medium Shield Booster I");
+    for _ in 0..10 {
+        let _ = sys.step_manual(1.0).await;
+    }
+
+    let mut cycle_notes = sess.drain_notifications();
+    cycle_notes.extend(
+        ctx.drain_notifications_for_char(char_id)
+            .into_iter()
+            .map(|n| (n.event, n.args)),
+    );
+    assert!(
+        !cycle_notes.iter().any(|(ev, _)| ev == "OnGodmaFlushLocationProfile"),
+        "GH #963: shield booster cycle completion must NEVER emit OnGodmaFlushLocationProfile: {cycle_notes:?}"
+    );
+    assert!(
+        cycle_notes.iter().any(|(ev, args)| {
+            ev == "OnGodmaShipEffect"
+                && args.first().and_then(|v| v.as_i64()) == Some(msb_id)
+                && args.get(3).and_then(|v| v.as_i64()) == Some(0)
+        }),
+        "cycle expiry must still emit OnGodmaShipEffect(active=0): {cycle_notes:?}"
+    );
+
+    let post_cycle_info = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "GetAllInfo",
+            &[PyRep::Bool(true), PyRep::Bool(true)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetAllInfo after cycle end");
+    let PyRep::Dict(ref post_cycle_ship_info) =
+        post_cycle_info.dict_get("shipInfo").expect("shipInfo")
+    else {
+        panic!("shipInfo must be Dict");
+    };
+    assert!(
+        post_cycle_ship_info
+            .iter()
+            .any(|(k, _)| k.as_i64() == Some(msb_id)),
+        "Medium Shield Booster I must remain in GetAllInfo.shipInfo after cycle completion"
+    );
+
+    // 2. Cap-depletion auto-stop (`deactivate_repeating_cycle_after_action`) must NOT emit `OnGodmaFlushLocationProfile`.
+    let cap_need = ctx
+        .sde
+        .types
+        .get(&10_836)
+        .and_then(|t| t.default_attributes.get(&attr_ids::CAPACITOR_NEED).copied())
+        .unwrap_or(50.0);
+    let mut cs = sys.get_combat_state(rupture_id).await.unwrap().unwrap();
+    cs.capacitor = cap_need * 1.1;
+    cs.capacitor_recharge_time_ms = 1.0e15;
+    sys.set_combat_state(rupture_id, cs).await.unwrap();
+
+    let _ = sess.drain_notifications();
+    let _ = ctx.drain_notifications_for_char(char_id);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[
+            PyRep::Integer(msb_id),
+            PyRep::String("shieldBoosting".into()),
+            PyRep::None,
+            PyRep::Integer(10),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate repeating MSB for cap-exhaustion check");
+    for _ in 0..10 {
+        let _ = sys.step_manual(1.0).await;
+    }
+    let mut low_cap_notes = sess.drain_notifications();
+    low_cap_notes.extend(
+        ctx.drain_notifications_for_char(char_id)
+            .into_iter()
+            .map(|n| (n.event, n.args)),
+    );
+    assert!(
+        !low_cap_notes
+            .iter()
+            .any(|(ev, _)| ev == "OnGodmaFlushLocationProfile"),
+        "GH #963: cap-depletion cycle deactivation must NEVER emit OnGodmaFlushLocationProfile: {low_cap_notes:?}"
+    );
+    assert!(
+        low_cap_notes.iter().any(|(ev, args)| {
+            ev == "OnGodmaShipEffect"
+                && args.first().and_then(|v| v.as_i64()) == Some(msb_id)
+                && args.get(3).and_then(|v| v.as_i64()) == Some(0)
+        }),
+        "cap-depletion cycle deactivation must emit OnGodmaShipEffect(active=0): {low_cap_notes:?}"
+    );
+
+    // 3. `TakeModuleOffline` in space must NOT emit `OnGodmaFlushLocationProfile`, and `SetModuleOnline` + reactivate must work.
+    ctx.dispatch_rpc(&mut sess, "slash", None, "SlashCmd", &[PyRep::String("/heal".into())], &kw, None)
+        .await
+        .expect("/heal before TakeModuleOffline");
+    let _ = sess.drain_notifications();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "TakeModuleOffline",
+        &[PyRep::Integer(rupture_id), PyRep::Integer(msb_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("TakeModuleOffline");
+    let mut offline_notes = sess.drain_notifications();
+    offline_notes.extend(
+        ctx.drain_notifications_for_char(char_id)
+            .into_iter()
+            .map(|n| (n.event, n.args)),
+    );
+    assert!(
+        !offline_notes
+            .iter()
+            .any(|(ev, _)| ev == "OnGodmaFlushLocationProfile"),
+        "GH #963: TakeModuleOffline must NEVER emit OnGodmaFlushLocationProfile: {offline_notes:?}"
+    );
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "SetModuleOnline",
+        &[PyRep::Integer(rupture_id), PyRep::Integer(msb_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("re-onlining module after cycle end and TakeModuleOffline must succeed");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[
+            PyRep::Integer(msb_id),
+            PyRep::String("shieldBoosting".into()),
+            PyRep::None,
+            PyRep::Integer(1),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("re-activating module after cycle end and offline/online roundtrip must succeed");
+}

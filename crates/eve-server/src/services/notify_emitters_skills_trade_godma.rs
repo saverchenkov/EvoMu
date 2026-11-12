@@ -15,7 +15,7 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::TypeId;
 use crate::services::notify_emitters_space_dungeons::{
-    emit_module_activation_godma_notifications, flush_module_profile_and_ewar_end,
+    emit_module_activation_godma_notifications, flush_module_ewar_end,
 };
 use std::collections::{BTreeMap, HashMap};
 
@@ -765,8 +765,8 @@ pub async fn handle_dogma_set_module_online(
     ]))
 }
 
-/// Extracted `dogmaIM.TakeModuleOffline` handler emitting `OnGodmaFlushLocationProfile`.
-// parity: notify:OnGodmaFlushLocationProfile
+/// Extracted `dogmaIM.TakeModuleOffline` handler emitting online/overload/EWAR end updates
+/// without flushing the fitted module from client `godma.invitems`.
 pub async fn handle_dogma_take_module_offline(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -863,7 +863,7 @@ pub async fn handle_dogma_take_module_offline(
     }
     let mut affected_ewar = Vec::new();
     for &mid in &cleanup_mods {
-        affected_ewar.extend(flush_module_profile_and_ewar_end(
+        affected_ewar.extend(flush_module_ewar_end(
             ctx,
             char_id,
             session.solar_system_id,

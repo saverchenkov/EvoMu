@@ -850,3 +850,320 @@ async fn gm_fit_enforces_hull_slots_and_hardpoints_and_spawn_asteroid_uses_syste
         );
     }
 }
+
+#[tokio::test]
+async fn gm_heal_syncs_godma_damage_cap_heat_and_flushes_self_destiny_update() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let ship_id = ctx.db.with_snapshot(|s| s.characters[&char_id].active_ship_id);
+    let ship_tid = ctx.db.with_snapshot(|s| s.items[&ship_id].type_id);
+    let sys_id = 30_000_142_u32;
+
+    let mod_id = 980_949_001_i64;
+    let mod_tid = 2048_u32; // Damage Control II (or fallback valid module)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            mod_id,
+            eve_db::InventoryItemRecord {
+                item_id: mod_id,
+                type_id: mod_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: eve_db::InventoryFlag::LoSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut sess = gm_session(char_id, ship_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.station_id = None;
+    let uid = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.user_id))
+        .unwrap_or(1);
+    ctx.db
+        .acquire_online_lock(uid, sess.session_id.max(1), Some(char_id), true, ctx.now_unix())
+        .expect("register online session for /heal notif");
+
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    handle
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: ship_tid,
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 2.5,
+            mass: 1_200_000.0,
+            radius: 45.0,
+            speed_fraction: 1.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+    let damaged_cs = eve_destiny::CombatState {
+        shield_hp: 120.0,
+        max_shield_hp: 500.0,
+        armor_hp: 80.0,
+        max_armor_hp: 400.0,
+        structure_hp: 90.0,
+        max_structure_hp: 300.0,
+        capacitor: 45.0,
+        max_capacitor: 250.0,
+        ..Default::default()
+    };
+    handle.set_combat_state(ship_id, damaged_cs.clone()).await.unwrap();
+    crate::sp6_lifecycle::persist_ship_combat_hp_in_db(&ctx.db, ship_id, &damaged_cs);
+    let _ = handle.drain_observer_updates(ship_id).await.unwrap();
+    let mut rx = handle.subscribe();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.dynamic_attributes
+                .insert(eve_sde::attr_ids::SHIELD_CHARGE, 120.0);
+            ship.dynamic_attributes
+                .insert(eve_sde::attr_ids::ARMOR_DAMAGE, 320.0);
+            ship.dynamic_attributes
+                .insert(eve_sde::attr_ids::DAMAGE, 210.0);
+            ship.dynamic_attributes
+                .insert(18, 45.0);
+            ship.dynamic_attributes.insert(1211, 5.0);
+        }
+        if let Some(m) = snap.items.get_mut(&mod_id) {
+            m.dynamic_attributes
+                .insert(eve_sde::attr_ids::DAMAGE, 12.5);
+            m.dynamic_attributes.insert(1211, 7.5);
+        }
+    });
+    if let Ok(mut fit) = ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
+        if let Some(m) = fit.modules.get_mut(&mod_id) {
+            m.damage_hp = 12.5;
+        }
+        fit.rack_heat = [0.4, 0.2, 0.1];
+        ctx.store_ship_fitting(ship_id, fit);
+    }
+
+    // Negative permission check: plain player role must be denied without modifying state.
+    let mut player_sess = sess.clone();
+    player_sess.role = eve_db::service_roles::ROLE_PLAYER_DEFAULT;
+    let _ = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(
+        handle_gm_qa_rpcs(
+            &ctx,
+            &mut player_sess,
+            "slash",
+            "SlashCmd",
+            &[PyRep::String("/heal".into())],
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InsufficientRole"
+    );
+    assert_eq!(
+        crate::services::auth_cache::handle(
+            &ctx,
+            &mut player_sess,
+            "slash",
+            "SlashCmd",
+            &[PyRep::String("/heal".into())],
+            &HashMap::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InsufficientRole"
+    );
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+
+    // Live `/heal` in space must restore HP/cap, flush DoDestinyUpdate to self (`None` exclusion),
+    // and push `OnModuleAttributeChanges` for ship gauges + repaired modules.
+    let heal_res = handle_gm_slash_ext(&ctx, &mut sess, char_id, "/heal")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(heal_res.dict_get("healed"), Some(&PyRep::Bool(true)));
+    assert_eq!(heal_res.dict_get("shieldHP"), Some(&PyRep::Real(500.0)));
+    assert_eq!(heal_res.dict_get("armorHP"), Some(&PyRep::Real(400.0)));
+    assert_eq!(heal_res.dict_get("hullHP"), Some(&PyRep::Real(300.0)));
+    assert_eq!(heal_res.dict_get("capacitor"), Some(&PyRep::Real(250.0)));
+
+    let broadcast = rx
+        .try_recv()
+        .expect("GH #949: /heal must flush DoDestinyUpdate immediately without excluding session.ship_id");
+    let self_destiny_evs = broadcast
+        .observer_events
+        .get(&ship_id)
+        .expect("healed pilot ship observer must receive flushed Destiny events");
+    assert!(
+        self_destiny_evs.iter().any(|ev| matches!(
+            ev,
+            eve_destiny::DestinyEvent::OnDamageStateChange {
+                ball_id,
+                shield_ratio,
+                armor_ratio,
+                structure_ratio,
+            } if *ball_id == ship_id
+                && (*shield_ratio - 1.0).abs() < 1e-6
+                && (*armor_ratio - 1.0).abs() < 1e-6
+                && (*structure_ratio - 1.0).abs() < 1e-6
+        )),
+        "expected full [1.0, 1.0, 1.0] OnDamageStateChange in flushed self Destiny update: {self_destiny_evs:?}"
+    );
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    let mut seen_changes: HashMap<(i64, i64), (f64, f64)> = HashMap::new();
+    for n in notifs.iter().filter(|n| n.event == "OnModuleAttributeChanges") {
+        let Some(PyRep::List(entries)) = n.args.first() else {
+            panic!("expected List in OnModuleAttributeChanges: {n:?}");
+        };
+        for entry in entries {
+            let PyRep::Tuple(t) = entry else {
+                panic!("expected Tuple in OnModuleAttributeChanges: {entry:?}");
+            };
+            assert_eq!(t.first().and_then(|v| v.as_str()), Some("OnModuleAttributeChange"));
+            assert_eq!(t.get(1).and_then(|v| v.as_i64()), Some(char_id));
+            assert!(
+                t.get(4).and_then(|v| v.as_i64()).unwrap_or(0) > 0,
+                "timestamp must be non-zero filetime integer: {t:?}"
+            );
+            assert_eq!(t.get(7), Some(&PyRep::None), "scatterAttr must be None: {t:?}");
+            let iid = t[2].as_i64().unwrap();
+            let aid = t[3].as_i64().unwrap();
+            let new_v = t[5].as_f64().unwrap();
+            let old_v = t[6].as_f64().unwrap();
+            seen_changes.insert((iid, aid), (new_v, old_v));
+        }
+    }
+    assert_eq!(
+        seen_changes.get(&(ship_id, i64::from(eve_sde::attr_ids::SHIELD_CHARGE))),
+        Some(&(500.0, 120.0)),
+        "missing shieldCharge (264) snap in OnModuleAttributeChanges: {seen_changes:?}"
+    );
+    assert_eq!(
+        seen_changes.get(&(ship_id, i64::from(eve_sde::attr_ids::ARMOR_DAMAGE))),
+        Some(&(0.0, 320.0)),
+        "missing armorDamage (266) clear in OnModuleAttributeChanges: {seen_changes:?}"
+    );
+    assert_eq!(
+        seen_changes.get(&(ship_id, i64::from(eve_sde::attr_ids::DAMAGE))),
+        Some(&(0.0, 210.0)),
+        "missing hull damage (3) clear in OnModuleAttributeChanges: {seen_changes:?}"
+    );
+    assert_eq!(
+        seen_changes.get(&(ship_id, 18)),
+        Some(&(250.0, 45.0)),
+        "missing capacitor charge (18) restore in OnModuleAttributeChanges: {seen_changes:?}"
+    );
+    assert_eq!(seen_changes.get(&(ship_id, 1211)), Some(&(0.0, 5.0)));
+    for rack_aid in [1175_i64, 1176, 1177] {
+        assert_eq!(
+            seen_changes.get(&(ship_id, rack_aid)).map(|(n, _)| *n),
+            Some(0.0),
+            "rack heat {rack_aid} must reset to 0.0"
+        );
+    }
+    assert_eq!(
+        seen_changes.get(&(mod_id, i64::from(eve_sde::attr_ids::DAMAGE))),
+        Some(&(0.0, 12.5))
+    );
+    assert_eq!(seen_changes.get(&(mod_id, 1211)), Some(&(0.0, 7.5)));
+
+    ctx.db.with_snapshot(|snap| {
+        let ship = &snap.items[&ship_id];
+        for aid in [
+            eve_sde::attr_ids::DAMAGE,
+            eve_sde::attr_ids::ARMOR_DAMAGE,
+            eve_sde::attr_ids::SHIELD_CHARGE,
+            18,
+            1211,
+        ] {
+            assert!(!ship.dynamic_attributes.contains_key(&aid), "ship dynamic attr {aid} must be cleared");
+        }
+        let m = &snap.items[&mod_id];
+        assert!(!m.dynamic_attributes.contains_key(&eve_sde::attr_ids::DAMAGE));
+        assert!(!m.dynamic_attributes.contains_key(&1211));
+        assert!(!snap.sp6_lifecycle.ship_combat_hp.contains_key(&ship_id));
+    });
+    let fit_after = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
+    assert_eq!(fit_after.rack_heat, [0.0, 0.0, 0.0]);
+    assert_eq!(fit_after.modules.get(&mod_id).map(|m| m.damage_hp), Some(0.0));
+
+    // Docked / auth_cache fallback parity: `auth_cache::handle` shares `execute_gm_heal` and
+    // clears docked DB dynamic attributes while notifying godma with effective fitted maxes.
+    let docked_ship_id = 980_949_002_i64;
+    let docked_char_id = 90_000_002_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters[&char_id].clone();
+        ch.character_id = docked_char_id;
+        ch.active_ship_id = docked_ship_id;
+        ch.station_id = Some(60_003_760);
+        ch.solar_system_id = sys_id;
+        snap.characters.insert(docked_char_id, ch);
+        let mut sh = eve_db::InventoryItemRecord {
+            item_id: docked_ship_id,
+            type_id: ship_tid,
+            owner_id: docked_char_id,
+            location_id: 60_003_760,
+            flag: eve_db::InventoryFlag::Hangar,
+            quantity: 1,
+            singleton: true,
+            version: 1,
+            ..Default::default()
+        };
+        sh.dynamic_attributes
+            .insert(eve_sde::attr_ids::SHIELD_CHARGE, 10.0);
+        sh.dynamic_attributes
+            .insert(eve_sde::attr_ids::ARMOR_DAMAGE, 30.0);
+        sh.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, 40.0);
+        sh.dynamic_attributes.insert(18, 20.0);
+        snap.items.insert(docked_ship_id, sh);
+    });
+    let mut docked_sess = gm_session(docked_char_id, docked_ship_id);
+    docked_sess.session_id = 78;
+    docked_sess.solar_system_id = Some(sys_id);
+    let docked_uid = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&docked_char_id).map(|c| c.user_id))
+        .unwrap_or(1);
+    ctx.db
+        .acquire_online_lock(
+            docked_uid,
+            docked_sess.session_id.max(1),
+            Some(docked_char_id),
+            true,
+            ctx.now_unix(),
+        )
+        .expect("register online session for docked /heal notif");
+    let _ = ctx.drain_notifications_for_char(docked_char_id);
+    let auth_heal = crate::services::auth_cache::handle(
+        &ctx,
+        &mut docked_sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/heal".into())],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(auth_heal.dict_get("healed"), Some(&PyRep::Bool(true)));
+    assert!(
+        auth_heal.dict_get("shieldHP").and_then(|v| v.as_f64()).unwrap_or(0.0) > 10.0,
+        "docked /heal must report fitted shield max rather than 0.0: {auth_heal:?}"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.items[&docked_ship_id].dynamic_attributes.is_empty());
+    });
+    let docked_notifs = ctx.drain_notifications_for_char(docked_char_id);
+    assert!(
+        docked_notifs.iter().any(|n| n.event == "OnModuleAttributeChanges"),
+        "auth_cache /heal must emit OnModuleAttributeChanges: {docked_notifs:?}"
+    );
+}
