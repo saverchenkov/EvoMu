@@ -1,10 +1,6 @@
 {
   "_about": "Supervisor-maintained NA triage: (1) 1,112 Quasar proto modules unreachable from V24 code.ccp (all 1,048 internal eve/* protos + 64 unreachable eve_public/* protos); (2) 94 feat:quasar.<pkg> rows whose packages have 0 reachable Request/Notice RPC protos in V24 code.ccp (66 internal-only packages + 28 shared identifier/value-type-only packages); (3) 55 rpc:* rows that are client-side Python util.Moniker wrapper methods (Bind, Unbind, QuickBind, SetSessionCheck, clear_memoized) or dict/list/DBRowset/KeyVal attribute accesses (.columns, .header, .itervalues, .iteritems, .iterkeys, .keys, .values, .append, .remove, .get, .description, .dictatorial, .url, .deleted, .colonies, .id) mis-scraped from chained client expressions.",
   "rows": {
-    "notify:OnModuleActivated": {
-      "disposition": "client_local",
-      "evidence": "dogma/client/clientDogmaLocation.pyj ClientDogmaLocation._NotifyOfEffectActivation(): sm.ScatterEvent('OnModuleActivated', ...) — client-only local scatter derived from OnGodmaShipEffect(active=1); never sent by server."
-    },
     "feat:quasar.academy": {
       "disposition": "dead_client_code",
       "evidence": "All 2 Quasar proto files in package 'academy' (e.g. eveProto/generated/eve/academy/ships/events_pb2.pyj, eveProto/generated/eve_public/academy/ships/events_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
@@ -385,21 +381,89 @@
       "disposition": "client_local",
       "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/neocom/addressBook/addressbookService.pyj AddressBookSvc.BlockOwner@307-310 (after RemoteSvc('charMgr').BlockOwners: LOAD_ATTR ScatterEvent; LOAD_CONST 'OnBlockContacts'). No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
     },
+    "notify:OnBookmarkCreated": {
+      "disposition": "client_local",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/shared/bookmarks/bookmarkSvc.pyj:BookmarkSvc.NewBookmarkCreated (offsets 163-181: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnBookmarkCreated'; LOAD_FAST bookmark; LOAD_Attr bookmarkID; LOAD_FAST comment; LOAD_FAST itemTypeID; CALL_FUNCTION 4). No server emitter needed: BookmarkSvc.NewBookmarkCreated locally scatters OnBookmarkCreated."
+    },
+    "notify:OnBoosterUpdated": {
+      "disposition": "client_local",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.OnServerBoostersChanged (offsets 22-31: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnBoosterUpdated'; CALL_FUNCTION 1); eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.OnCloneDestruction (offsets 13-22: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnBoosterUpdated'; CALL_FUNCTION 1). No server emitter needed: server sends OnServerBoostersChanged / OnCloneDestruction; SkillsSvc locally scatters OnBoosterUpdated."
+    },
+    "notify:OnClientContactChangeOnBlockContacts": {
+      "disposition": "dead_client_code",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/killRights.pyj:KillRightsEntry (offsets 18-33: LOAD_CONST 'OnContactNoLongerContact'; LOAD_CONST 'OnContactChange'; LOAD_CONST 'OnClientContactChangeOnBlockContacts'; LOAD_CONST 'OnUnblockContacts'; BUILD_LIST 6; STORE_NAME __notifyevents__). No server emitter needed: dead string-concatenation typo in KillRightsEntry.__notifyevents__ with no handler method anywhere in code.ccp (server sends OnContactChange)."
+    },
+    "notify:OnClientEvent_MarketItemReceived": {
+      "disposition": "client_local",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/marketsvc.pyj:MarketQuote.OnMarketItemReceived (offsets 0-21: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnClientEvent_MarketItemReceived'; LOAD_FAST itemID; LOAD_FAST typeID; LOAD_FAST flagID; LOAD_FAST locationID; CALL_FUNCTION 5). No server emitter needed: server sends OnMarketItemReceived; MarketQuote.OnMarketItemReceived locally scatters OnClientEvent_MarketItemReceived."
+    },
+    "notify:OnCloneJumpUpdate": {
+      "disposition": "client_local",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/clonejumpsvc.pyj:CloneJump.OnJumpCloneCacheInvalidated (offsets 27-36: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnCloneJumpUpdate'; CALL_FUNCTION 1); eve/client/script/ui/services/clonejumpsvc.pyj:CloneJump.OnStationJumpCloneCacheInvalidated (offsets 24-33: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnCloneJumpUpdate'; CALL_FUNCTION 1). No server emitter needed: server sends OnJumpCloneCacheInvalidated / OnStationJumpCloneCacheInvalidated; CloneJump locally scatters OnCloneJumpUpdate."
+    },
+    "notify:OnCollapsed": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: carbonui/control/window.pyj:Window.Collapse (offsets 535-547: LOAD_FAST self; LOAD_ATTR sr; LOAD_ATTR stack; LOAD_ATTR OnCollapsed; LOAD_FAST self; CALL_FUNCTION 1). No server emitter needed: CarbonUI Window.Collapse locally calls OnCollapsed on the window/stack."
+    },
+    "notify:OnCombatTimersUpdated": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/services/crimewatchSvc.pyj:CrimewatchService.ProcessSessionChange (offsets 196-209: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnCombatTimersUpdated'; CALL_FUNCTION 1). No server emitter needed: CrimewatchService.ProcessSessionChange locally scatters OnCombatTimersUpdated after fetching GetClientStates."
+    },
     "notify:OnContactChange": {
       "disposition": "client_local",
       "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/neocom/addressBook/addressbookService.pyj AddressBookSvc.OnPersonalContactsAdded@205-208 (LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnContactChange'); eve/client/script/ui/shared/neocom/addressBook/addressbookService.pyj AddressBookSvc.OnPersonalContactsUpdated@315-318 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnContactChange'); eve/client/script/ui/shared/neocom/addressBook/addressbookService.pyj AddressBookSvc.OnPersonalContactsDeleted@110-113 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnContactChange'). No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists. The server sends OnPersonalContactsAdded/Updated/Deleted, whose client handlers re-scatter OnContactChange."
     },
-    "notify:OnContactLoggedOff": {
+    "notify:OnContractCacheCleared": {
       "disposition": "client_local",
-      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/comtool/onlineStatus.pyj OnlineStatus.OnClientContactChange@25 (LOAD_FAST self; LOAD_ATTR OnContactLoggedOff; LOAD_FAST charID; CALL_FUNCTION 1 (branch online == False)); notifications/client/generator/notificationGenerator.pyj FakeCharacterNotification.generate@44-47 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnContactLoggedOff' (test-notification generator)). The server notification is OnClientContactChange(charID, online); OnlineStatus.OnClientContactChange(charID, online) calls self.OnContactLoggedOff(charID) locally when online is false. No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/shared/neocom/contracts/contracts.pyj:ContractsSvc.ClearCache (offsets 114-123: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnContractCacheCleared'; CALL_FUNCTION 1). No server emitter needed: server sends OnContractCreated / OnContractAccepted / OnContractCompleted / etc.; ContractsSvc.ClearCache locally scatters OnContractCacheCleared."
     },
-    "notify:OnContactLoggedOn": {
+    "notify:OnContractEscrowChanged": {
       "disposition": "client_local",
-      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/comtool/onlineStatus.pyj OnlineStatus.OnClientContactChange@9 (LOAD_FAST self; LOAD_ATTR OnContactLoggedOn; LOAD_FAST charID; CALL_FUNCTION 1 (branch online == True)); eve/client/script/ui/shared/userentry.pyj User.OnClientContactChange@9 (LOAD_ATTR OnContactLoggedOn (method call)); notifications/client/generator/notificationGenerator.pyj FakeCharacterNotification.generate@25-28 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnContactLoggedOn' (test-notification generator)). The server notification is OnClientContactChange(charID, online); OnlineStatus.OnClientContactChange(charID, online) calls self.OnContactLoggedOn(charID) locally when online is true. No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/shared/neocom/contracts/contracts.pyj:ContractsSvc._NotifyOfEscrowChange (offsets 0-9: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnContractEscrowChanged'; CALL_FUNCTION 1). No server emitter needed: ContractsSvc._NotifyOfEscrowChange locally scatters OnContractEscrowChanged."
+    },
+    "notify:OnCorpAccountChangedClient": {
+      "disposition": "client_local",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/shared/neocom/wallet/walletSvc.pyj:WalletSvc._OnCorpAccountChange (offsets 135-153: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnCorpAccountChangedClient'; LOAD_FAST balance; LOAD_FAST accountKey; LOAD_FAST difference; CALL_FUNCTION 4). No server emitter needed: server sends OnAccountChange; WalletSvc._OnCorpAccountChange locally scatters OnCorpAccountChangedClient."
+    },
+    "notify:OnCorpWalletBillsChanged": {
+      "disposition": "client_local",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/shared/neocom/wallet/walletSvc.pyj:WalletSvc.TriggerOnCorpBillsChanged (offsets 0-9: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnCorpWalletBillsChanged'; CALL_FUNCTION 1). No server emitter needed: server sends OnBillReceived; WalletSvc.OnBillReceived calls TriggerOnCorpBillsChanged which locally scatters OnCorpWalletBillsChanged."
+    },
+    "notify:OnCrimewatchEngagementUpdated": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/services/crimewatchSvc.pyj:CrimewatchService.OnCrimewatchEngagementCreated (offsets 32-47: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnCrimewatchEngagementUpdated'; LOAD_FAST otherCharId; LOAD_FAST timeout; CALL_FUNCTION 3). No server emitter needed: server sends OnCrimewatchEngagementCreated / OnCrimewatchEngagementEnded / OnCrimewatchEngagementStartTimeout / OnCrimewatchEngagementStopTimeout; CrimewatchService locally scatters OnCrimewatchEngagementUpdated."
+    },
+    "notify:OnDeleteContracts": {
+      "disposition": "client_local",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/shared/neocom/contracts/contracts.pyj:ContractsSvc.DeleteContract (offsets 204-219: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnDeleteContracts'; LOAD_FAST contractID; BUILD_LIST 1; CALL_FUNCTION 2); eve/client/script/ui/shared/neocom/contracts/contracts.pyj:ContractsSvc.DeleteMultipleContracts (offsets 214-226: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnDeleteContracts'; LOAD_FAST contractsDeleted; CALL_FUNCTION 2). No server emitter needed: ContractsSvc.DeleteContract / DeleteMultipleContracts locally scatters OnDeleteContracts."
+    },
+    "notify:OnDockingProgressChanged": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/dockedUI/undockingSvc.pyj:UndockingSvc._Undock_Thread (offsets 9-24: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnDockingProgressChanged'; LOAD_CONST 0.0; CALL_FUNCTION 2). No server emitter needed: UndockingSvc._Undock_Thread locally scatters OnDockingProgressChanged during undock animation."
+    },
+    "notify:OnDockingRequestWasDenied": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/services/structure/structureDocking.pyj:StructureDocking.Dock.RequestDocking (offsets 119-134: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnDockingRequestWasDenied'; LOAD_DEREF 0; CALL_FUNCTION 2). No server emitter needed: StructureDocking.Dock.RequestDocking locally scatters OnDockingRequestWasDenied when the Dock RPC raises an exception."
+    },
+    "notify:OnExpanded": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: carbonui/control/window.pyj:Window.Expand (offsets 481-493: LOAD_FAST self; LOAD_ATTR sr; LOAD_ATTR stack; LOAD_ATTR OnExpanded; LOAD_FAST self; CALL_FUNCTION 1). No server emitter needed: CarbonUI Window.Expand locally calls OnExpanded on the window/stack."
+    },
+    "notify:OnFleetFavoriteAdded": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/parklife/fleetSvc.pyj:FleetSvc.AddFavorite (offsets 368-381: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnFleetFavoriteAdded'; LOAD_FAST charIDs; CALL_FUNCTION 2). No server emitter needed: FleetSvc.AddFavorite locally scatters OnFleetFavoriteAdded when the player adds a watchlist favorite."
+    },
+    "notify:OnFleetFavoriteRemoved": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/parklife/fleetSvc.pyj:FleetSvc.RemoveFavorite (offsets 79-94: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnFleetFavoriteRemoved'; LOAD_FAST charID; CALL_FUNCTION 2). No server emitter needed: FleetSvc.RemoveFavorite locally scatters OnFleetFavoriteRemoved when the player removes a watchlist favorite."
     },
     "notify:OnFleetFinderAdvertChanged": {
       "disposition": "client_local",
       "evidence": "V24.01 code.ccp disassembly: eve/client/script/parklife/fleetSvc.pyj FleetSvc.OnFleetOptionsChanged@46-49 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnFleetFinderAdvertChanged' (when options.isRegistered changes)); eve/client/script/parklife/fleetSvc.pyj FleetSvc._FinializeRegistration@9-12 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnFleetFinderAdvertChanged'). No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists. The server sends OnFleetOptionsChanged(oldOptions, options)."
+    },
+    "notify:OnFleetFormationWndChanged": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/fleet/fleetFormations.pyj:FleetFormationsPanel.DetachPanel (offsets 32-45: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnFleetFormationWndChanged'; CALL_FUNCTION 1). No server emitter needed: FleetFormationsPanel.DetachPanel / FleetFormationWnd.Close locally scatters OnFleetFormationWndChanged."
     },
     "notify:OnFleetMemberChanging": {
       "disposition": "client_local",
@@ -409,13 +473,45 @@
       "disposition": "client_local",
       "evidence": "V24.01 code.ccp disassembly: eve/client/script/parklife/fleetSvc.pyj FleetSvc.SaveSetupOnServer@55-58 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnFleetSetupChanged'). No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
     },
+    "notify:OnImplantsChanged": {
+      "disposition": "client_local",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.OnServerImplantsChanged (offsets 56-65: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnImplantsChanged'; CALL_FUNCTION 1). No server emitter needed: server sends OnServerImplantsChanged; SkillsSvc locally scatters OnImplantsChanged."
+    },
+    "notify:OnIndustryJobClient": {
+      "disposition": "client_local",
+      "evidence": "code.ccp bytecode verification: eve/client/script/industry/industrySvc.pyj:IndustryService.OnIndustryJob (offsets 147-192: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnIndustryJobClient'; CALL_FUNCTION_KW 1). No server emitter needed: server sends OnIndustryJob; IndustryService.OnIndustryJob locally scatters OnIndustryJobClient."
+    },
     "notify:OnMailCountersUpdate": {
       "disposition": "client_local",
       "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/services/mail/mailSvc.pyj mailSvc.MarkMessagesAsRead@114-117 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnMailCountersUpdate'); eve/client/script/ui/services/mail/mailSvc.pyj mailSvc.MarkMessagesAsUnread@115-118 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnMailCountersUpdate'); eve/client/script/ui/services/mail/mailSvc.pyj mailSvc._RefreshTrashedStatusWhenMovingFromTrash@25-28 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnMailCountersUpdate'). No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists. The only handler is MailForm.OnMailCountersUpdate(*args)."
     },
+    "notify:OnMarketEscrowChanged": {
+      "disposition": "client_local",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/marketsvc.pyj:MarketQuote.OnOwnOrdersChanged (offsets 199-208: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnMarketEscrowChanged'; CALL_FUNCTION 1). No server emitter needed: server sends OnOwnOrdersChanged; MarketQuote.OnOwnOrdersChanged locally scatters OnMarketEscrowChanged."
+    },
+    "notify:OnModuleActivated": {
+      "disposition": "client_local",
+      "evidence": "dogma/client/clientDogmaLocation.pyj ClientDogmaLocation._NotifyOfEffectActivation(): sm.ScatterEvent('OnModuleActivated', ...) \u2014 client-only local scatter derived from OnGodmaShipEffect(active=1); never sent by server."
+    },
+    "notify:OnNPCStandingChange": {
+      "disposition": "client_local",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/standingsvc.pyj:Standing.OnStandingSet (offsets 76-104: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnNPCStandingChange'; LOAD_FAST fromID; LOAD_FAST newStanding; LOAD_FAST oldStanding; CALL_FUNCTION 4). No server emitter needed: server sends OnStandingSet; Standing.OnStandingSet locally scatters OnNPCStandingChange."
+    },
     "notify:OnNewMailReceived": {
       "disposition": "client_local",
       "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/services/mail/mailSvc.pyj mailSvc.OnMailSent@497 (LOAD_FAST self; LOAD_ATTR OnNewMailReceived; ... CALL_FUNCTION 1 (unread mail just filed from the server's OnMailSent)); eve/client/script/ui/services/mail/mailSvc.pyj mailSvc.OnNewMailReceived@29-32 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnNewMailReceived' (fan-out to MailWindow/MailForm)); eve/client/script/ui/services/mail/mailSvc.pyj mailSvc.OnMailUndeleted@13-16 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnNewMailReceived'). No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists. The server sends OnMailSent(messageID, senderID, sentDate, toCharacterIDs, toListID, toCorpOrAllianceID, title, statusMask)."
+    },
+    "notify:OnOfficeRentalChanged": {
+      "disposition": "client_local",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/corporation/officeManager.pyj:OfficeManager.OnOfficeRentalChange (offsets 102-117: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnOfficeRentalChanged'; LOAD_FAST corporationID; LOAD_FAST officeID; CALL_FUNCTION 3). No server emitter needed: server sends OnOfficeRentalChange; OfficeManager.OnOfficeRentalChange locally scatters OnOfficeRentalChanged."
+    },
+    "notify:OnPersonalAccountChangedClient": {
+      "disposition": "client_local",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/shared/neocom/wallet/walletSvc.pyj:WalletSvc._OnCharAccountChange (offsets 75-90: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnPersonalAccountChangedClient'; LOAD_FAST b; LOAD_FAST transactionType; CALL_FUNCTION 3). No server emitter needed: server sends OnAccountChange; WalletSvc._OnCharAccountChange locally scatters OnPersonalAccountChangedClient."
+    },
+    "notify:OnRefreshBookmarks": {
+      "disposition": "client_local",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/shared/bookmarks/bookmarkSvc.pyj:BookmarkSvc.RefreshUIOnUpdate (offsets 0-9: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnRefreshBookmarks'; CALL_FUNCTION 1). No server emitter needed: BookmarkSvc.RefreshUIOnUpdate locally scatters OnRefreshBookmarks."
     },
     "notify:OnReloadCalendar": {
       "disposition": "client_local",
@@ -425,13 +521,61 @@
       "disposition": "client_local",
       "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/services/eveCalendarsvc.pyj CalendarSvc._RespondToEvent@199-202 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnReloadToDo'); eve/client/script/ui/services/eveCalendarsvc.pyj CalendarSvc.OnNewCalendarEvent@381-384 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnReloadToDo'); eve/client/script/ui/services/eveCalendarsvc.pyj CalendarSvc.OnRemoveCalendarEvent@270-273 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnReloadToDo'). No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
     },
+    "notify:OnRespecInfoUpdated": {
+      "disposition": "client_local",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.OnRespecInfoChanged (offsets 22-31: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnRespecInfoUpdated'; CALL_FUNCTION 1). No server emitter needed: server sends OnRespecInfoChanged; SkillsSvc locally scatters OnRespecInfoUpdated."
+    },
     "notify:OnRespondToEvent": {
       "disposition": "client_local",
       "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/services/eveCalendarsvc.pyj CalendarSvc._RespondToEvent@212-215 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnRespondToEvent'). No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
     },
+    "notify:OnShipCloneJumpUpdate": {
+      "disposition": "client_local",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/clonejumpsvc.pyj:CloneJump.OnShipJumpCloneCacheInvalidated (offsets 27-36: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnShipCloneJumpUpdate'; CALL_FUNCTION 1); eve/client/script/ui/services/clonejumpsvc.pyj:CloneJump.OnShipJumpCloneInstallationDone (offsets 55-64: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnShipCloneJumpUpdate'; CALL_FUNCTION 1). No server emitter needed: server sends OnShipJumpCloneCacheInvalidated / OnShipJumpCloneInstallationDone; CloneJump locally scatters OnShipCloneJumpUpdate."
+    },
+    "notify:OnSkillPointsInjected_Local": {
+      "disposition": "client_local",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.ActivateSkillInjector (offsets 44-59: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillPointsInjected_Local'; LOAD_FAST quantity; LOAD_FAST points; CALL_FUNCTION 3). No server emitter needed: SkillsSvc.ActivateSkillInjector locally scatters OnSkillPointsInjected_Local."
+    },
+    "notify:OnSkillQueueChanged": {
+      "disposition": "client_local",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/skillQueueSvc.pyj:SkillQueueService.OnNewSkillQueueSaved (offsets 33-42: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillQueueChanged'; CALL_FUNCTION 1). No server emitter needed: server sends OnNewSkillQueueSaved; SkillQueueService locally scatters OnSkillQueueChanged."
+    },
+    "notify:OnSkillQueuePaused": {
+      "disposition": "client_local",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/skillQueueSvc.pyj:SkillQueueService.OnSkillQueuePausedServer (offsets 75-84: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillQueuePaused'; CALL_FUNCTION 1). No server emitter needed: server sends OnSkillQueuePausedServer; SkillQueueService locally scatters OnSkillQueuePaused."
+    },
+    "notify:OnSkillQueueRefreshed": {
+      "disposition": "client_local",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.OnServerBoostersChanged (offsets 35-44: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillQueueRefreshed'; CALL_FUNCTION 1); eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.OnServerImplantsChanged (offsets 40-49: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillQueueRefreshed'; CALL_FUNCTION 1). No server emitter needed: server sends OnServerBoostersChanged / OnServerImplantsChanged; SkillsSvc locally scatters OnSkillQueueRefreshed."
+    },
+    "notify:OnSkillsChanged": {
+      "disposition": "client_local",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.OnServerSkillsChanged (offsets 136-148: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillsChanged'; LOAD_FAST skillInfos; CALL_FUNCTION 2); eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.OnServerSkillsRemoved (offsets 48-60: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillsChanged'; LOAD_FAST skillInfos; CALL_FUNCTION 2). No server emitter needed: server sends OnServerSkillsChanged / OnServerSkillsRemoved; SkillsSvc locally scatters OnSkillsChanged."
+    },
+    "notify:OnSlimItemUpdated": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/remote/michelle.pyj:Park.OnSlimItemChange (offsets 87-114: LOAD_FAST ball; LOAD_ATTR OnSlimItemUpdated; LOAD_FAST newSlim; CALL_FUNCTION 1). No server emitter needed: server sends OnSlimItemChange(itemID, newSlim); Park.OnSlimItemChange invokes ball.OnSlimItemUpdated(newSlim) locally."
+    },
+    "notify:OnSolarsystemAdvantageStateUpdated_Local": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/services/fwAdvantageSvc.pyj:FwAdvantageSvc._OnSolarSystemScoresUpdated (offsets 149-162: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSolarsystemAdvantageStateUpdated_Local'; CALL_FUNCTION 1). No server emitter needed: FwAdvantageSvc._OnSolarSystemScoresUpdated locally scatters OnSolarsystemAdvantageStateUpdated_Local."
+    },
     "notify:OnUnblockContacts": {
       "disposition": "client_local",
       "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/neocom/addressBook/addressbookService.pyj AddressBookSvc.UnblockOwner@107-110 (after RemoteSvc('charMgr').UnblockOwners(blocked): LOAD_ATTR ScatterEvent; LOAD_CONST 'OnUnblockContacts'). No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
+    },
+    "notify:OnUndockingAborted": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/dockedUI/undockingSvc.pyj:UndockingSvc.AbortUndock (offsets 81-96: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnUndockingAborted'; LOAD_FAST stationID; CALL_FUNCTION 2). No server emitter needed: UndockingSvc.AbortUndock locally scatters OnUndockingAborted when the player aborts undocking."
+    },
+    "notify:OnUndockingCompleted": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/dockedUI/undockingSvc.pyj:UndockingSvc.UndockAttempt (offsets 133-148: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnUndockingCompleted'; LOAD_FAST stationID; CALL_FUNCTION 2). No server emitter needed: UndockingSvc.UndockAttempt locally scatters OnUndockingCompleted after the Undock RPC returns."
+    },
+    "notify:OnUndockingStarted": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/dockedUI/undockingSvc.pyj:UndockingSvc._Undock_Thread (offsets 29-44: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnUndockingStarted'; LOAD_FAST session; LOAD_ATTR stationid; LOAD_ATTR structureid; CALL_FUNCTION 2). No server emitter needed: UndockingSvc._Undock_Thread locally scatters OnUndockingStarted when the player clicks Undock."
     },
     "quasar:eveProto/generated/eve/academy/ships/events_pb2.pyj": {
       "class": "unreachable",
@@ -7981,10 +8125,6 @@
       "disposition": "removed_from_live",
       "evidence": "Resource Wars service RWManager removed from live EVE Online in 2020 (matches feat:removed.resource-wars)."
     },
-    "rpc:RWManager.solarsystem_contains_rw_instances": {
-      "disposition": "removed_from_live",
-      "evidence": "Resource Wars service RWManager removed from live EVE Online in 2020 (matches feat:removed.resource-wars)."
-    },
     "rpc:abyssal_content_manager.GenerateAbyssEncounterContent": {
       "disposition": "dead_client_code",
       "evidence": "CCP internal developer tool service called only from eve/devtools/script/abyssal_content_tool.pyj and abyssal_npc_spawn_tool.pyj."
@@ -8042,14 +8182,6 @@
       "evidence": "Client-side @Memoize cache invalidation helper (.clear_memoized) on local service/moniker proxy in V24 client; never sent as a remote machoNet RPC. Scraped from bountyProxy usage in V24 client code.ccp."
     },
     "rpc:browserLockdownSvc.GetDefaultHomePage": {
-      "disposition": "removed_from_live",
-      "evidence": "Legacy In-Game Browser (IGB) site lockdown service browserLockdownSvc (carbonui/control/browser/sites.pyj); IGB removed from EVE Online in 2016."
-    },
-    "rpc:browserLockdownSvc.GetFlaggedSitesHash": {
-      "disposition": "removed_from_live",
-      "evidence": "Legacy In-Game Browser (IGB) site lockdown service browserLockdownSvc (carbonui/control/browser/sites.pyj); IGB removed from EVE Online in 2016."
-    },
-    "rpc:browserLockdownSvc.GetFlaggedSitesList": {
       "disposition": "removed_from_live",
       "evidence": "Legacy In-Game Browser (IGB) site lockdown service browserLockdownSvc (carbonui/control/browser/sites.pyj); IGB removed from EVE Online in 2016."
     },
@@ -8185,10 +8317,6 @@
       "disposition": "dead_client_code",
       "evidence": "Chinese Serenity/Tiancity region-only Kiring billing service (kiring/client/apigateway.pyj); inactive on Tranquility V24.01 client."
     },
-    "rpc:kiringMgr.GetKiringConfiguration": {
-      "disposition": "dead_client_code",
-      "evidence": "Chinese Serenity/Tiancity region-only Kiring billing service (kiring/client/apigateway.pyj); inactive on Tranquility V24.01 client."
-    },
     "rpc:kiringMgr.GetSAuthAid": {
       "disposition": "dead_client_code",
       "evidence": "Chinese Serenity/Tiancity region-only Kiring billing service (kiring/client/apigateway.pyj); inactive on Tranquility V24.01 client."
@@ -8273,55 +8401,11 @@
       "disposition": "removed_from_live",
       "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
     },
-    "rpc:posMgr.AssumeStructureControl": {
-      "disposition": "removed_from_live",
-      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
-    },
-    "rpc:posMgr.ChangeStructureProvisionType": {
-      "disposition": "removed_from_live",
-      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
-    },
-    "rpc:posMgr.GetConsumptionFactor": {
-      "disposition": "removed_from_live",
-      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
-    },
-    "rpc:posMgr.GetControlTowers": {
-      "disposition": "removed_from_live",
-      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
-    },
-    "rpc:posMgr.GetMoonForTower": {
-      "disposition": "removed_from_live",
-      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
-    },
     "rpc:posMgr.GetMoonProcessInfoForTower": {
       "disposition": "removed_from_live",
       "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
     },
-    "rpc:posMgr.GetSiloCapacityByItemID": {
-      "disposition": "removed_from_live",
-      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
-    },
-    "rpc:posMgr.GetStarbasePermissions": {
-      "disposition": "removed_from_live",
-      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
-    },
-    "rpc:posMgr.GetTowerNotificationSettings": {
-      "disposition": "removed_from_live",
-      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
-    },
-    "rpc:posMgr.GetTowerSentrySettings": {
-      "disposition": "removed_from_live",
-      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
-    },
-    "rpc:posMgr.LinkResourceForTower": {
-      "disposition": "removed_from_live",
-      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
-    },
     "rpc:posMgr.OnlineOrbital": {
-      "disposition": "removed_from_live",
-      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
-    },
-    "rpc:posMgr.RelinquishStructureControl": {
       "disposition": "removed_from_live",
       "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
     },
@@ -8330,22 +8414,6 @@
       "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
     },
     "rpc:posMgr.SetSessionCheck": {
-      "disposition": "removed_from_live",
-      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
-    },
-    "rpc:posMgr.SetStarbasePermissions": {
-      "disposition": "removed_from_live",
-      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
-    },
-    "rpc:posMgr.SetTowerNotifications": {
-      "disposition": "removed_from_live",
-      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
-    },
-    "rpc:posMgr.SetTowerPassword": {
-      "disposition": "removed_from_live",
-      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
-    },
-    "rpc:posMgr.SetTowerSentrySettings": {
       "disposition": "removed_from_live",
       "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
     },
@@ -8521,10 +8589,6 @@
       "disposition": "client_local",
       "evidence": "Client UI goal contribution method display metadata (goals/client/contributionMethodTypeLoader.pyj)."
     },
-    "sde:res:/staticdata/controltowerresources.fsdbinary": {
-      "disposition": "removed_from_live",
-      "evidence": "Legacy POS control tower resource table (controltowerresources/data.pyj), only referenced in devtools svc_poser.pyj/svc_slash.pyj."
-    },
     "sde:res:/staticdata/defaultoverviews.fsdbinary": {
       "disposition": "client_local",
       "evidence": "Client default overview preset tabs/filters table (characterdata/defaultOverviews.pyj)."
@@ -8572,10 +8636,6 @@
     "sde:res:/staticdata/goals.fsdbinary": {
       "disposition": "client_local",
       "evidence": "Client NPE storyline UI objective display table (storylines/client/objectives/loader.pyj)."
-    },
-    "sde:res:/staticdata/graphiclocations.fsdbinary": {
-      "disposition": "client_local",
-      "evidence": "Client 3D turret/locator hardpoint attachment table (fsdBuiltData/common/graphicLocations.pyj)."
     },
     "sde:res:/staticdata/graphicmaterialsets.fsdbinary": {
       "disposition": "client_local",
@@ -8652,158 +8712,6 @@
     "sde:res:/staticdata/warzonespositiondata.fsdbinary": {
       "disposition": "client_local",
       "evidence": "Client FW warzone 2D map widget coordinate layout table (fwwarzone/client/data/warzoneMapPositionsDataLoader.pyj)."
-    },
-    "notify:OnBookmarkCreated": {
-      "evidence": "code.ccp bytecode verification: eve/client/script/ui/shared/bookmarks/bookmarkSvc.pyj:BookmarkSvc.NewBookmarkCreated (offsets 163-181: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnBookmarkCreated'; LOAD_FAST bookmark; LOAD_Attr bookmarkID; LOAD_FAST comment; LOAD_FAST itemTypeID; CALL_FUNCTION 4). No server emitter needed: BookmarkSvc.NewBookmarkCreated locally scatters OnBookmarkCreated.",
-      "disposition": "client_local"
-    },
-    "notify:OnBoosterUpdated": {
-      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.OnServerBoostersChanged (offsets 22-31: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnBoosterUpdated'; CALL_FUNCTION 1); eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.OnCloneDestruction (offsets 13-22: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnBoosterUpdated'; CALL_FUNCTION 1). No server emitter needed: server sends OnServerBoostersChanged / OnCloneDestruction; SkillsSvc locally scatters OnBoosterUpdated.",
-      "disposition": "client_local"
-    },
-    "notify:OnClientEvent_MarketItemReceived": {
-      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/marketsvc.pyj:MarketQuote.OnMarketItemReceived (offsets 0-21: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnClientEvent_MarketItemReceived'; LOAD_FAST itemID; LOAD_FAST typeID; LOAD_FAST flagID; LOAD_FAST locationID; CALL_FUNCTION 5). No server emitter needed: server sends OnMarketItemReceived; MarketQuote.OnMarketItemReceived locally scatters OnClientEvent_MarketItemReceived.",
-      "disposition": "client_local"
-    },
-    "notify:OnCloneJumpUpdate": {
-      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/clonejumpsvc.pyj:CloneJump.OnJumpCloneCacheInvalidated (offsets 27-36: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnCloneJumpUpdate'; CALL_FUNCTION 1); eve/client/script/ui/services/clonejumpsvc.pyj:CloneJump.OnStationJumpCloneCacheInvalidated (offsets 24-33: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnCloneJumpUpdate'; CALL_FUNCTION 1). No server emitter needed: server sends OnJumpCloneCacheInvalidated / OnStationJumpCloneCacheInvalidated; CloneJump locally scatters OnCloneJumpUpdate.",
-      "disposition": "client_local"
-    },
-    "notify:OnContractCacheCleared": {
-      "evidence": "code.ccp bytecode verification: eve/client/script/ui/shared/neocom/contracts/contracts.pyj:ContractsSvc.ClearCache (offsets 114-123: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnContractCacheCleared'; CALL_FUNCTION 1). No server emitter needed: server sends OnContractCreated / OnContractAccepted / OnContractCompleted / etc.; ContractsSvc.ClearCache locally scatters OnContractCacheCleared.",
-      "disposition": "client_local"
-    },
-    "notify:OnContractEscrowChanged": {
-      "evidence": "code.ccp bytecode verification: eve/client/script/ui/shared/neocom/contracts/contracts.pyj:ContractsSvc._NotifyOfEscrowChange (offsets 0-9: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnContractEscrowChanged'; CALL_FUNCTION 1). No server emitter needed: ContractsSvc._NotifyOfEscrowChange locally scatters OnContractEscrowChanged.",
-      "disposition": "client_local"
-    },
-    "notify:OnCorpAccountChangedClient": {
-      "evidence": "code.ccp bytecode verification: eve/client/script/ui/shared/neocom/wallet/walletSvc.pyj:WalletSvc._OnCorpAccountChange (offsets 135-153: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnCorpAccountChangedClient'; LOAD_FAST balance; LOAD_FAST accountKey; LOAD_FAST difference; CALL_FUNCTION 4). No server emitter needed: server sends OnAccountChange; WalletSvc._OnCorpAccountChange locally scatters OnCorpAccountChangedClient.",
-      "disposition": "client_local"
-    },
-    "notify:OnCorpWalletBillsChanged": {
-      "evidence": "code.ccp bytecode verification: eve/client/script/ui/shared/neocom/wallet/walletSvc.pyj:WalletSvc.TriggerOnCorpBillsChanged (offsets 0-9: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnCorpWalletBillsChanged'; CALL_FUNCTION 1). No server emitter needed: server sends OnBillReceived; WalletSvc.OnBillReceived calls TriggerOnCorpBillsChanged which locally scatters OnCorpWalletBillsChanged.",
-      "disposition": "client_local"
-    },
-    "notify:OnDeleteContracts": {
-      "evidence": "code.ccp bytecode verification: eve/client/script/ui/shared/neocom/contracts/contracts.pyj:ContractsSvc.DeleteContract (offsets 204-219: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnDeleteContracts'; LOAD_FAST contractID; BUILD_LIST 1; CALL_FUNCTION 2); eve/client/script/ui/shared/neocom/contracts/contracts.pyj:ContractsSvc.DeleteMultipleContracts (offsets 214-226: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnDeleteContracts'; LOAD_FAST contractsDeleted; CALL_FUNCTION 2). No server emitter needed: ContractsSvc.DeleteContract / DeleteMultipleContracts locally scatters OnDeleteContracts.",
-      "disposition": "client_local"
-    },
-    "notify:OnImplantsChanged": {
-      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.OnServerImplantsChanged (offsets 56-65: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnImplantsChanged'; CALL_FUNCTION 1). No server emitter needed: server sends OnServerImplantsChanged; SkillsSvc locally scatters OnImplantsChanged.",
-      "disposition": "client_local"
-    },
-    "notify:OnIndustryJobClient": {
-      "evidence": "code.ccp bytecode verification: eve/client/script/industry/industrySvc.pyj:IndustryService.OnIndustryJob (offsets 147-192: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnIndustryJobClient'; CALL_FUNCTION_KW 1). No server emitter needed: server sends OnIndustryJob; IndustryService.OnIndustryJob locally scatters OnIndustryJobClient.",
-      "disposition": "client_local"
-    },
-    "notify:OnMarketEscrowChanged": {
-      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/marketsvc.pyj:MarketQuote.OnOwnOrdersChanged (offsets 199-208: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnMarketEscrowChanged'; CALL_FUNCTION 1). No server emitter needed: server sends OnOwnOrdersChanged; MarketQuote.OnOwnOrdersChanged locally scatters OnMarketEscrowChanged.",
-      "disposition": "client_local"
-    },
-    "notify:OnNPCStandingChange": {
-      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/standingsvc.pyj:Standing.OnStandingSet (offsets 76-104: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnNPCStandingChange'; LOAD_FAST fromID; LOAD_FAST newStanding; LOAD_FAST oldStanding; CALL_FUNCTION 4). No server emitter needed: server sends OnStandingSet; Standing.OnStandingSet locally scatters OnNPCStandingChange.",
-      "disposition": "client_local"
-    },
-    "notify:OnOfficeRentalChanged": {
-      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/corporation/officeManager.pyj:OfficeManager.OnOfficeRentalChange (offsets 102-117: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnOfficeRentalChanged'; LOAD_FAST corporationID; LOAD_FAST officeID; CALL_FUNCTION 3). No server emitter needed: server sends OnOfficeRentalChange; OfficeManager.OnOfficeRentalChange locally scatters OnOfficeRentalChanged.",
-      "disposition": "client_local"
-    },
-    "notify:OnPersonalAccountChangedClient": {
-      "evidence": "code.ccp bytecode verification: eve/client/script/ui/shared/neocom/wallet/walletSvc.pyj:WalletSvc._OnCharAccountChange (offsets 75-90: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnPersonalAccountChangedClient'; LOAD_FAST b; LOAD_FAST transactionType; CALL_FUNCTION 3). No server emitter needed: server sends OnAccountChange; WalletSvc._OnCharAccountChange locally scatters OnPersonalAccountChangedClient.",
-      "disposition": "client_local"
-    },
-    "notify:OnRefreshBookmarks": {
-      "evidence": "code.ccp bytecode verification: eve/client/script/ui/shared/bookmarks/bookmarkSvc.pyj:BookmarkSvc.RefreshUIOnUpdate (offsets 0-9: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnRefreshBookmarks'; CALL_FUNCTION 1). No server emitter needed: BookmarkSvc.RefreshUIOnUpdate locally scatters OnRefreshBookmarks.",
-      "disposition": "client_local"
-    },
-    "notify:OnRespecInfoUpdated": {
-      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.OnRespecInfoChanged (offsets 22-31: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnRespecInfoUpdated'; CALL_FUNCTION 1). No server emitter needed: server sends OnRespecInfoChanged; SkillsSvc locally scatters OnRespecInfoUpdated.",
-      "disposition": "client_local"
-    },
-    "notify:OnShipCloneJumpUpdate": {
-      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/clonejumpsvc.pyj:CloneJump.OnShipJumpCloneCacheInvalidated (offsets 27-36: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnShipCloneJumpUpdate'; CALL_FUNCTION 1); eve/client/script/ui/services/clonejumpsvc.pyj:CloneJump.OnShipJumpCloneInstallationDone (offsets 55-64: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnShipCloneJumpUpdate'; CALL_FUNCTION 1). No server emitter needed: server sends OnShipJumpCloneCacheInvalidated / OnShipJumpCloneInstallationDone; CloneJump locally scatters OnShipCloneJumpUpdate.",
-      "disposition": "client_local"
-    },
-    "notify:OnSkillPointsInjected_Local": {
-      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.ActivateSkillInjector (offsets 44-59: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillPointsInjected_Local'; LOAD_FAST quantity; LOAD_FAST points; CALL_FUNCTION 3). No server emitter needed: SkillsSvc.ActivateSkillInjector locally scatters OnSkillPointsInjected_Local.",
-      "disposition": "client_local"
-    },
-    "notify:OnSkillQueueChanged": {
-      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/skillQueueSvc.pyj:SkillQueueService.OnNewSkillQueueSaved (offsets 33-42: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillQueueChanged'; CALL_FUNCTION 1). No server emitter needed: server sends OnNewSkillQueueSaved; SkillQueueService locally scatters OnSkillQueueChanged.",
-      "disposition": "client_local"
-    },
-    "notify:OnSkillQueuePaused": {
-      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/skillQueueSvc.pyj:SkillQueueService.OnSkillQueuePausedServer (offsets 75-84: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillQueuePaused'; CALL_FUNCTION 1). No server emitter needed: server sends OnSkillQueuePausedServer; SkillQueueService locally scatters OnSkillQueuePaused.",
-      "disposition": "client_local"
-    },
-    "notify:OnSkillQueueRefreshed": {
-      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.OnServerBoostersChanged (offsets 35-44: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillQueueRefreshed'; CALL_FUNCTION 1); eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.OnServerImplantsChanged (offsets 40-49: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillQueueRefreshed'; CALL_FUNCTION 1). No server emitter needed: server sends OnServerBoostersChanged / OnServerImplantsChanged; SkillsSvc locally scatters OnSkillQueueRefreshed.",
-      "disposition": "client_local"
-    },
-    "notify:OnSkillsChanged": {
-      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.OnServerSkillsChanged (offsets 136-148: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillsChanged'; LOAD_FAST skillInfos; CALL_FUNCTION 2); eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.OnServerSkillsRemoved (offsets 48-60: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillsChanged'; LOAD_FAST skillInfos; CALL_FUNCTION 2). No server emitter needed: server sends OnServerSkillsChanged / OnServerSkillsRemoved; SkillsSvc locally scatters OnSkillsChanged.",
-      "disposition": "client_local"
-    },
-    "notify:OnClientContactChangeOnBlockContacts": {
-      "disposition": "dead_client_code",
-      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/killRights.pyj:KillRightsEntry (offsets 18-33: LOAD_CONST 'OnContactNoLongerContact'; LOAD_CONST 'OnContactChange'; LOAD_CONST 'OnClientContactChangeOnBlockContacts'; LOAD_CONST 'OnUnblockContacts'; BUILD_LIST 6; STORE_NAME __notifyevents__). No server emitter needed: dead string-concatenation typo in KillRightsEntry.__notifyevents__ with no handler method anywhere in code.ccp (server sends OnContactChange)."
-    },
-    "notify:OnCollapsed": {
-      "disposition": "client_local",
-      "evidence": "V24.01 code.ccp disassembly: carbonui/control/window.pyj:Window.Collapse (offsets 535-547: LOAD_FAST self; LOAD_ATTR sr; LOAD_ATTR stack; LOAD_ATTR OnCollapsed; LOAD_FAST self; CALL_FUNCTION 1). No server emitter needed: CarbonUI Window.Collapse locally calls OnCollapsed on the window/stack."
-    },
-    "notify:OnCombatTimersUpdated": {
-      "disposition": "client_local",
-      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/services/crimewatchSvc.pyj:CrimewatchService.ProcessSessionChange (offsets 196-209: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnCombatTimersUpdated'; CALL_FUNCTION 1). No server emitter needed: CrimewatchService.ProcessSessionChange locally scatters OnCombatTimersUpdated after fetching GetClientStates."
-    },
-    "notify:OnCrimewatchEngagementUpdated": {
-      "disposition": "client_local",
-      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/services/crimewatchSvc.pyj:CrimewatchService.OnCrimewatchEngagementCreated (offsets 32-47: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnCrimewatchEngagementUpdated'; LOAD_FAST otherCharId; LOAD_FAST timeout; CALL_FUNCTION 3). No server emitter needed: server sends OnCrimewatchEngagementCreated / OnCrimewatchEngagementEnded / OnCrimewatchEngagementStartTimeout / OnCrimewatchEngagementStopTimeout; CrimewatchService locally scatters OnCrimewatchEngagementUpdated."
-    },
-    "notify:OnDockingProgressChanged": {
-      "disposition": "client_local",
-      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/dockedUI/undockingSvc.pyj:UndockingSvc._Undock_Thread (offsets 9-24: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnDockingProgressChanged'; LOAD_CONST 0.0; CALL_FUNCTION 2). No server emitter needed: UndockingSvc._Undock_Thread locally scatters OnDockingProgressChanged during undock animation."
-    },
-    "notify:OnDockingRequestWasDenied": {
-      "disposition": "client_local",
-      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/services/structure/structureDocking.pyj:StructureDocking.Dock.RequestDocking (offsets 119-134: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnDockingRequestWasDenied'; LOAD_DEREF 0; CALL_FUNCTION 2). No server emitter needed: StructureDocking.Dock.RequestDocking locally scatters OnDockingRequestWasDenied when the Dock RPC raises an exception."
-    },
-    "notify:OnExpanded": {
-      "disposition": "client_local",
-      "evidence": "V24.01 code.ccp disassembly: carbonui/control/window.pyj:Window.Expand (offsets 481-493: LOAD_FAST self; LOAD_ATTR sr; LOAD_ATTR stack; LOAD_ATTR OnExpanded; LOAD_FAST self; CALL_FUNCTION 1). No server emitter needed: CarbonUI Window.Expand locally calls OnExpanded on the window/stack."
-    },
-    "notify:OnFleetFavoriteAdded": {
-      "disposition": "client_local",
-      "evidence": "V24.01 code.ccp disassembly: eve/client/script/parklife/fleetSvc.pyj:FleetSvc.AddFavorite (offsets 368-381: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnFleetFavoriteAdded'; LOAD_FAST charIDs; CALL_FUNCTION 2). No server emitter needed: FleetSvc.AddFavorite locally scatters OnFleetFavoriteAdded when the player adds a watchlist favorite."
-    },
-    "notify:OnFleetFavoriteRemoved": {
-      "disposition": "client_local",
-      "evidence": "V24.01 code.ccp disassembly: eve/client/script/parklife/fleetSvc.pyj:FleetSvc.RemoveFavorite (offsets 79-94: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnFleetFavoriteRemoved'; LOAD_FAST charID; CALL_FUNCTION 2). No server emitter needed: FleetSvc.RemoveFavorite locally scatters OnFleetFavoriteRemoved when the player removes a watchlist favorite."
-    },
-    "notify:OnFleetFormationWndChanged": {
-      "disposition": "client_local",
-      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/fleet/fleetFormations.pyj:FleetFormationsPanel.DetachPanel (offsets 32-45: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnFleetFormationWndChanged'; CALL_FUNCTION 1). No server emitter needed: FleetFormationsPanel.DetachPanel / FleetFormationWnd.Close locally scatters OnFleetFormationWndChanged."
-    },
-    "notify:OnSlimItemUpdated": {
-      "disposition": "client_local",
-      "evidence": "V24.01 code.ccp disassembly: eve/client/script/remote/michelle.pyj:Park.OnSlimItemChange (offsets 87-114: LOAD_FAST ball; LOAD_ATTR OnSlimItemUpdated; LOAD_FAST newSlim; CALL_FUNCTION 1). No server emitter needed: server sends OnSlimItemChange(itemID, newSlim); Park.OnSlimItemChange invokes ball.OnSlimItemUpdated(newSlim) locally."
-    },
-    "notify:OnSolarsystemAdvantageStateUpdated_Local": {
-      "disposition": "client_local",
-      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/services/fwAdvantageSvc.pyj:FwAdvantageSvc._OnSolarSystemScoresUpdated (offsets 149-162: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSolarsystemAdvantageStateUpdated_Local'; CALL_FUNCTION 1). No server emitter needed: FwAdvantageSvc._OnSolarSystemScoresUpdated locally scatters OnSolarsystemAdvantageStateUpdated_Local."
-    },
-    "notify:OnUndockingAborted": {
-      "disposition": "client_local",
-      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/dockedUI/undockingSvc.pyj:UndockingSvc.AbortUndock (offsets 81-96: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnUndockingAborted'; LOAD_FAST stationID; CALL_FUNCTION 2). No server emitter needed: UndockingSvc.AbortUndock locally scatters OnUndockingAborted when the player aborts undocking."
-    },
-    "notify:OnUndockingCompleted": {
-      "disposition": "client_local",
-      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/dockedUI/undockingSvc.pyj:UndockingSvc.UndockAttempt (offsets 133-148: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnUndockingCompleted'; LOAD_FAST stationID; CALL_FUNCTION 2). No server emitter needed: UndockingSvc.UndockAttempt locally scatters OnUndockingCompleted after the Undock RPC returns."
-    },
-    "notify:OnUndockingStarted": {
-      "disposition": "client_local",
-      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/dockedUI/undockingSvc.pyj:UndockingSvc._Undock_Thread (offsets 29-44: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnUndockingStarted'; LOAD_FAST session; LOAD_ATTR stationid; LOAD_ATTR structureid; CALL_FUNCTION 2). No server emitter needed: UndockingSvc._Undock_Thread locally scatters OnUndockingStarted when the player clicks Undock."
     }
   }
 }

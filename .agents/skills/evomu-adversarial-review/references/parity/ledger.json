@@ -68132,10 +68132,10 @@
    "id": "feat:removed.pos-towers",
    "category": "feat",
    "title": "POS control towers",
-   "acceptance": "Not required (legacy starbases superseded by Upwell; posMgr may be stubbed).",
-   "na_allowed": true,
+   "acceptance": "Player-owned starbases (control towers) support anchoring, fuel consumption from controltowerresources.fsdbinary, password/permission/sentry/notification settings, AssumeStructureControl/RelinquishStructureControl (OnTargetOBO), and moon mining/silo provisioning over posMgr.",
+   "na_allowed": false,
    "attest_ok": false,
-   "domain": "removed",
+   "domain": "structures",
    "sources": [
     "wiki:Player-owned_starbases",
     "client:eve/client/script/environment/invCache.pyj"
