@@ -17,7 +17,7 @@ use eve_sde::TypeId;
 use crate::services::notify_emitters_space_dungeons::{
     emit_module_activation_godma_notifications, flush_module_ewar_end,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 fn is_alpha_avail_notified(snap: &WorldStateSnapshot, char_id: i64) -> bool {
     snap.kv(eve_db::Ns::AlphaAvailNotified)

@@ -1,5 +1,5 @@
 use crate::service_domains::{
-    AbyssalPocketSession, CrabBeaconPhase, CrabBeaconRecord, EntityKvKey, EntityKvRow,
+    AbyssalPocketSession, CrabBeaconPhase, CrabBeaconRecord, EntityKvKey,
     EntityKvScope, IncursionTaleRecord, MobileDeployableRecord, MobileDeployableRuntimeState, Ns,
     TourneyMatch, TourneyStore, DEFAULT_ENTITY_KV_MAX_VALUE_BYTES, MAX_SERVICE_STATE_BLOB_KEYS,
     MAX_SERVICE_STATE_BLOB_TOTAL_BYTES, MAX_SERVICE_STATE_BLOB_VALUE_BYTES,
