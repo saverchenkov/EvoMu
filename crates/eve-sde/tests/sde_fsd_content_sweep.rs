@@ -889,11 +889,11 @@ fn test_t2_sde_control_tower_resources_raw_client_verification() {
     assert_eq!(minmatar_null, vec![(4_246, 30)]);
 
     // Gallente Control Tower Small (20064) in high-sec Gallente space (0.7, faction 500004):
-    // 10 Oxygen Fuel Blocks (4312) + 1 Gallente Federation Starbase Charter (24594).
+    // 1 Gallente Federation Starbase Charter (24594) + 10 Oxygen Fuel Blocks (4312).
     let gallente_hisec = sde
         .control_tower_hourly_fuel_requirements(20_064, 0.7, Some(500_004), 1.0)
         .expect("gallente hisec hourly fuel");
-    assert_eq!(gallente_hisec, vec![(4_312, 10), (24_594, 1)]);
+    assert_eq!(gallente_hisec, vec![(24_594, 1), (4_312, 10)]);
 
     eve_testkit::attest(&["sde:res:/staticdata/controltowerresources.fsdbinary"]);
 }
