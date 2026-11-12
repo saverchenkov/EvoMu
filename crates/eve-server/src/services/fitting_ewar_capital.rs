@@ -1096,7 +1096,11 @@ pub(crate) async fn commit_post_cycle_activation_effects(
         || deferred.cap_booster_charge_id.is_some()
         || !deferred.turret_charge_consumptions.is_empty()
     {
-        ctx.db.with_mut_snapshot(|snap| {
+        let item_diffs = ctx.db.with_mut_snapshot(|snap| {
+            let mut diffs: Vec<(
+                eve_db::InventoryItemRecord,
+                Option<eve_db::InventoryItemRecord>,
+            )> = Vec::new();
             if let Some((fuel_type_id, fuel_qty_needed, is_phenomena)) = deferred.fuel_to_deduct {
                 if let Some((fid, avail)) = snap
                     .items
@@ -1110,30 +1114,55 @@ pub(crate) async fn commit_post_cycle_activation_effects(
                     .map(|i| (i.item_id, i.quantity))
                 {
                     if avail >= fuel_qty_needed {
-                        if let Some(f_owner) = snap.items.get(&fid).map(|f| f.owner_id) {
-                            let opts = eve_db::ConsumeExactOptions::for_owner_exact(None, f_owner);
-                            let _ = snap.consume_exact_item_quantity(fid, fuel_qty_needed, opts);
+                        if let Some(pre) = snap.items.get(&fid).cloned() {
+                            let opts =
+                                eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
+                            if let Ok(post) =
+                                snap.consume_exact_item_quantity(fid, fuel_qty_needed, opts)
+                            {
+                                diffs.push((pre, post));
+                            }
                         }
                     }
                 }
             }
             if let Some(cid) = deferred.cap_booster_charge_id {
-                if let Some(c_owner) = snap.items.get(&cid).map(|ci| ci.owner_id) {
-                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, c_owner);
+                if let Some(pre) = snap.items.get(&cid).cloned() {
+                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
                     opts.reject_fitted = false;
-                    let _ = snap.consume_exact_item_quantity(cid, 1, opts);
-                }
-            }
-            for (turret_id, charge_id) in deferred.turret_charge_consumptions {
-                if let Some(c_owner) = snap.items.get(&charge_id).map(|ci| ci.owner_id) {
-                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, c_owner);
-                    opts.reject_fitted = false;
-                    if let Ok(None) = snap.consume_exact_item_quantity(charge_id, 1, opts) {
-                        snap.module_active_charges.remove(&turret_id);
+                    if let Ok(post) = snap.consume_exact_item_quantity(cid, 1, opts) {
+                        diffs.push((pre, post));
                     }
                 }
             }
+            for (turret_id, charge_id) in deferred.turret_charge_consumptions {
+                if let Some(pre) = snap.items.get(&charge_id).cloned() {
+                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
+                    opts.reject_fitted = false;
+                    if let Ok(post) = snap.consume_exact_item_quantity(charge_id, 1, opts) {
+                        if post.is_none() {
+                            snap.module_active_charges.remove(&turret_id);
+                        }
+                        diffs.push((pre, post));
+                    }
+                }
+            }
+            diffs
         });
+        for (pre, post) in &item_diffs {
+            ctx.notify_item_mutation(char_id, Some(pre), post.as_ref());
+            if matches!(pre.flag as u16, 11..=34 | 125..=132) {
+                crate::services::inventory_fitting::fitting_module_cycles::emit_charge_sublocation_quantity_change(
+                    ctx,
+                    char_id,
+                    pre.location_id,
+                    pre.flag,
+                    pre.type_id,
+                    pre.quantity,
+                    post.as_ref().map_or(0, |p| p.quantity),
+                );
+            }
+        }
     }
 
     if deferred.bastion_weapon_timer {

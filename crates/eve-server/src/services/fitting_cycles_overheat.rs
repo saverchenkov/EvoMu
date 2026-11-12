@@ -78,7 +78,10 @@ pub fn prepare_ancillary_module(
 
     let mut cap_need = initial_cap_need;
     if is_asb {
-        let mut consumed_charge = false;
+        let mut consumed_charge: Option<(
+            eve_db::InventoryItemRecord,
+            Option<eve_db::InventoryItemRecord>,
+        )> = None;
         ctx.db.with_mut_snapshot(|snap| {
             if let Some(cid) = snap
                 .items
@@ -91,16 +94,26 @@ pub fn prepare_ancillary_module(
                 })
                 .map(|i| i.item_id)
             {
-                if let Some(c_owner) = snap.items.get(&cid).map(|ci| ci.owner_id) {
-                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, c_owner);
+                if let Some(pre) = snap.items.get(&cid).cloned() {
+                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
                     opts.reject_fitted = false;
-                    if snap.consume_exact_item_quantity(cid, 1, opts).is_ok() {
-                        consumed_charge = true;
+                    if let Ok(post) = snap.consume_exact_item_quantity(cid, 1, opts) {
+                        consumed_charge = Some((pre, post));
                     }
                 }
             }
         });
-        if consumed_charge {
+        if let Some((pre, post)) = consumed_charge {
+            ctx.notify_item_mutation(pre.owner_id, Some(&pre), post.as_ref());
+            crate::services::inventory_fitting::fitting_module_cycles::emit_charge_sublocation_quantity_change(
+                ctx,
+                pre.owner_id,
+                pre.location_id,
+                pre.flag,
+                pre.type_id,
+                pre.quantity,
+                post.as_ref().map_or(0, |p| p.quantity),
+            );
             cap_need = 0.0;
         } else {
             cap_need = asb_fallback_cap_need;
@@ -126,7 +139,10 @@ pub fn prepare_ancillary_module(
     let mut armor_repair_amount = initial_armor_repair;
     let mut remote_armor_amount = initial_remote_armor;
     if is_aar {
-        let mut fueled = false;
+        let mut fueled_diff: Option<(
+            eve_db::InventoryItemRecord,
+            Option<eve_db::InventoryItemRecord>,
+        )> = None;
         ctx.db.with_mut_snapshot(|snap| {
             if let Some(cid) = snap
                 .items
@@ -140,15 +156,30 @@ pub fn prepare_ancillary_module(
                 })
                 .map(|i| i.item_id)
             {
-                if let Some(c_owner) = snap.items.get(&cid).map(|ci| ci.owner_id) {
-                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, c_owner);
+                if let Some(pre) = snap.items.get(&cid).cloned() {
+                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
                     opts.reject_fitted = false;
-                    if snap.consume_exact_item_quantity(cid, aar_paste_rate, opts).is_ok() {
-                        fueled = true;
+                    if let Ok(post) = snap.consume_exact_item_quantity(cid, aar_paste_rate, opts) {
+                        fueled_diff = Some((pre, post));
                     }
                 }
             }
         });
+        let fueled = if let Some((pre, post)) = fueled_diff {
+            ctx.notify_item_mutation(pre.owner_id, Some(&pre), post.as_ref());
+            crate::services::inventory_fitting::fitting_module_cycles::emit_charge_sublocation_quantity_change(
+                ctx,
+                pre.owner_id,
+                pre.location_id,
+                pre.flag,
+                pre.type_id,
+                pre.quantity,
+                post.as_ref().map_or(0, |p| p.quantity),
+            );
+            true
+        } else {
+            false
+        };
         if mod_type.group_id == 1698 {
             remote_armor_amount = if fueled {
                 aar_base_armor_repair * 3.0

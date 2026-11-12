@@ -205,6 +205,41 @@ fn authenticate_grpc_headers_and_build_session_edges() {
     let sso_sess = build_session_for_identity(&raw_ctx, 9_000_110, &mut id_sso, None).unwrap();
     assert_ne!(sso_sess.role & service_roles::ROLE_GM_MASK, 0);
 
+    // 3b. #894: SSO token past its 20-minute `exp` stays valid on Quasar gRPC while the user's
+    // `:26000` OnlineSession is active and non-revoked, and fails immediately on logout or JTI revocation.
+    let past_mint_u = now_u.saturating_sub(2_400);
+    let past_code = raw_ctx
+        .db
+        .authorize_pkce(
+            "demo",
+            "demo-secret",
+            90_000_001,
+            "eveLauncherTQ",
+            "http://127.0.0.1/cb",
+            Vec::new(),
+            &challenge,
+            "S256",
+            past_mint_u,
+        )
+        .unwrap();
+    let expired_sso = raw_ctx
+        .db
+        .exchange_pkce_code(&past_code, "eveLauncherTQ", verifier, past_mint_u)
+        .unwrap()
+        .access_token;
+    assert!(verify_gateway_bearer_token(&raw_ctx, &expired_sso, loopback, now_u).is_err());
+    raw_ctx
+        .db
+        .acquire_online_lock(1, 77_000, Some(90_000_001), true, now_u)
+        .unwrap();
+    let live_sso = verify_gateway_bearer_token(&raw_ctx, &expired_sso, loopback, now_u)
+        .expect("expired SSO token with active :26000 OnlineSession must stay valid on :26005");
+    assert_eq!(live_sso.user_id, 1);
+    assert_eq!(live_sso.character_id, Some(90_000_001));
+    assert!(live_sso.is_full_sso);
+    raw_ctx.db.release_online_lock(1, 77_000);
+    assert!(verify_gateway_bearer_token(&raw_ctx, &expired_sso, loopback, now_u).is_err());
+
     // 4. Local-dev JWT fallback: disabled when flag false, fails when peer_ip None, fails on bad JWT, succeeds when enabled + online IP bound
     let local_jwt = sign_hs256(
         r#"{"alg":"HS256","typ":"JWT"}"#,

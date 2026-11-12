@@ -127,20 +127,34 @@ fn ensure_scan_result_data(rep: PyRep) -> PyRep {
     let PyRep::KeyVal(mut entries) = rep else {
         return rep;
     };
-    if entries.get("scanGroupID").is_none() {
-        let sg = match kv_str(&entries, "targetClass").as_str() {
-            "CosmicAnomaly" | "Anomaly" => 2,
-            "Ship" | "Structure" | "AbyssalTrace" => 8,
-            "Drone" | "Probe" => 16,
-            _ => 4,
-        };
-        entries.insert("scanGroupID".to_string(), PyRep::Integer(sg));
-    }
+    let sg = entries
+        .get("scanGroupID")
+        .and_then(|v| v.as_i64())
+        .unwrap_or_else(|| {
+            // V24.01 `probescanning/const.pyj`:
+            // probeScanGroupSignatures = 3, probeScanGroupShips = 4, probeScanGroupStructures = 5,
+            // probeScanGroupDrones = 6, probeScanGroupAnomalies = 8, probeScanGroupCharges = 9,
+            // probeScanGroupDeployable = 12, probeScanGroupSovereignty = 13, probeScanGroupAbyssalTraces = 14.
+            match kv_str(&entries, "targetClass").as_str() {
+                "CosmicAnomaly" | "Anomaly" => 8,
+                "Ship" => 4,
+                "Structure" => 5,
+                "Drone" => 6,
+                "Probe" => 9,
+                "Deployable" => 12,
+                "Sovereignty" => 13,
+                "AbyssalTrace" => 14,
+                _ => 3,
+            }
+        });
+    entries.insert("scanGroupID".to_string(), PyRep::Integer(sg));
     if entries.get("groupID").is_none() {
         entries.insert("groupID".to_string(), PyRep::Integer(502));
     }
     if entries.get("typeID").is_none() {
-        entries.insert("typeID".to_string(), PyRep::Integer(502));
+        // Never default `typeID` to 502 (`groupCosmicSignature`), which crashes
+        // `evetypes.GetName(502)` in `probeScannerPalette.py` with `TypeNotFoundException` (#984).
+        entries.insert("typeID".to_string(), PyRep::None);
     }
     if !matches!(entries.get("data"), None | Some(PyRep::None)) {
         return PyRep::KeyVal(entries);
@@ -1017,7 +1031,27 @@ pub fn normalize_macho_rpc_reply(
                     let fc = row_field(&it, "finalCharacterID")
                         .or_else(|| row_field(&it, "attackerID"))
                         .unwrap_or(PyRep::None);
-                    vec![kid, vid, sys, kt, vc, fc]
+                    let moon_id = row_field(&it, "moonID").unwrap_or(PyRep::None);
+                    let v_corp = row_field(&it, "victimCorporationID").unwrap_or(PyRep::None);
+                    let v_ally = row_field(&it, "victimAllianceID").unwrap_or(PyRep::None);
+                    let v_fac = row_field(&it, "victimFactionID").unwrap_or(PyRep::None);
+                    let v_ship = row_field(&it, "victimShipTypeID")
+                        .or_else(|| row_field(&it, "shipTypeID"))
+                        .unwrap_or(PyRep::Integer(670));
+                    let v_dmg = row_field(&it, "victimDamageTaken").unwrap_or(PyRep::Real(0.0));
+                    let f_corp = row_field(&it, "finalCorporationID").unwrap_or(PyRep::None);
+                    let f_ally = row_field(&it, "finalAllianceID").unwrap_or(PyRep::None);
+                    let f_fac = row_field(&it, "finalFactionID").unwrap_or(PyRep::None);
+                    let f_ship = row_field(&it, "finalShipTypeID").unwrap_or(PyRep::None);
+                    let f_weap = row_field(&it, "finalWeaponTypeID").unwrap_or(PyRep::None);
+                    let f_sec = row_field(&it, "finalSecurityStatus").unwrap_or(PyRep::Real(0.0));
+                    let f_dmg = row_field(&it, "finalDamageDone")
+                        .unwrap_or_else(|| v_dmg.clone());
+                    let k_blob = row_field(&it, "killBlob").unwrap_or_else(|| PyRep::String(String::new()));
+                    vec![
+                        kid, vid, sys, kt, vc, fc, moon_id, v_corp, v_ally, v_fac, v_ship, v_dmg,
+                        f_corp, f_ally, f_fac, f_ship, f_weap, f_sec, f_dmg, k_blob,
+                    ]
                 })
                 .collect();
             return Ok(PyRep::rowset(
@@ -1028,6 +1062,20 @@ pub fn normalize_macho_rpc_reply(
                     "killTime",
                     "victimCharacterID",
                     "finalCharacterID",
+                    "moonID",
+                    "victimCorporationID",
+                    "victimAllianceID",
+                    "victimFactionID",
+                    "victimShipTypeID",
+                    "victimDamageTaken",
+                    "finalCorporationID",
+                    "finalAllianceID",
+                    "finalFactionID",
+                    "finalShipTypeID",
+                    "finalWeaponTypeID",
+                    "finalSecurityStatus",
+                    "finalDamageDone",
+                    "killBlob",
                 ],
                 rows,
             ));

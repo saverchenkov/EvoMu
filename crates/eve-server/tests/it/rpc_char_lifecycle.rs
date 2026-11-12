@@ -225,10 +225,37 @@ async fn test_char_mgr_character_profile_info_and_lifecycle() {
         .await
         .expect("GetRecentShipKillsAndLosses");
     let PyRep::Rowset { columns, rows } = kills else { panic!("expected Rowset") };
-    assert_eq!(columns, vec!["killID", "victimID", "solarSystemID", "killTime"]);
+    assert_eq!(
+        columns,
+        vec![
+            "killID",
+            "victimID",
+            "solarSystemID",
+            "killTime",
+            "moonID",
+            "victimCharacterID",
+            "victimCorporationID",
+            "victimAllianceID",
+            "victimFactionID",
+            "victimShipTypeID",
+            "victimDamageTaken",
+            "finalCharacterID",
+            "finalCorporationID",
+            "finalAllianceID",
+            "finalFactionID",
+            "finalShipTypeID",
+            "finalWeaponTypeID",
+            "finalSecurityStatus",
+            "finalDamageDone",
+            "killBlob",
+        ]
+    );
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0][0], PyRep::Integer(88001));
     assert_eq!(rows[0][1], PyRep::Integer(90_000_001));
+    assert_eq!(rows[0][4], PyRep::None); // moonID
+    assert_eq!(rows[0][9], PyRep::Integer(587)); // victimShipTypeID
+    assert_eq!(rows[0][11], PyRep::Integer(90_000_002)); // finalCharacterID
 
     // 8. SetActivityStatus (persists to snapshot and across SQLite reload)
     let mut kw_act = HashMap::new();

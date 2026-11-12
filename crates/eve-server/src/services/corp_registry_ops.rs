@@ -270,6 +270,20 @@ pub fn handle(
                 "victimShipTypeID".into(),
                 "solarSystemID".into(),
                 "killTime".into(),
+                "moonID".into(),
+                "victimID".into(),
+                "victimAllianceID".into(),
+                "victimFactionID".into(),
+                "victimDamageTaken".into(),
+                "finalCharacterID".into(),
+                "finalCorporationID".into(),
+                "finalAllianceID".into(),
+                "finalFactionID".into(),
+                "finalShipTypeID".into(),
+                "finalWeaponTypeID".into(),
+                "finalSecurityStatus".into(),
+                "finalDamageDone".into(),
+                "killBlob".into(),
             ];
             let rows = ctx.db.with_snapshot(|snap| {
                 snap.killmails
@@ -282,6 +296,20 @@ pub fn handle(
                         PyRep::Integer(km.ship_type_id as i64),
                         PyRep::Integer(km.solar_system_id as i64),
                         PyRep::Integer(km.killed_unix as i64),
+                        PyRep::None,
+                        PyRep::Integer(km.victim_character_id),
+                        km.victim_alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                        PyRep::None,
+                        PyRep::Integer(0),
+                        PyRep::Integer(km.attacker_character_id),
+                        PyRep::Integer(km.attacker_corp_id),
+                        km.attacker_alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                        PyRep::None,
+                        PyRep::Integer(km.ship_type_id as i64),
+                        PyRep::None,
+                        PyRep::Real(0.0),
+                        PyRep::Integer(0),
+                        PyRep::String(String::new()),
                     ])
                     .collect()
             });
@@ -297,6 +325,20 @@ pub fn handle(
                 "victimShipTypeID".into(),
                 "solarSystemID".into(),
                 "killTime".into(),
+                "moonID".into(),
+                "victimID".into(),
+                "victimAllianceID".into(),
+                "victimFactionID".into(),
+                "victimDamageTaken".into(),
+                "finalCharacterID".into(),
+                "finalCorporationID".into(),
+                "finalAllianceID".into(),
+                "finalFactionID".into(),
+                "finalShipTypeID".into(),
+                "finalWeaponTypeID".into(),
+                "finalSecurityStatus".into(),
+                "finalDamageDone".into(),
+                "killBlob".into(),
             ];
             let rows = ctx.db.with_snapshot(|snap| {
                 snap.killmails
@@ -309,6 +351,20 @@ pub fn handle(
                         PyRep::Integer(km.ship_type_id as i64),
                         PyRep::Integer(km.solar_system_id as i64),
                         PyRep::Integer(km.killed_unix as i64),
+                        PyRep::None,
+                        PyRep::Integer(km.victim_character_id),
+                        km.victim_alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                        PyRep::None,
+                        PyRep::Integer(0),
+                        PyRep::Integer(km.attacker_character_id),
+                        PyRep::Integer(km.attacker_corp_id),
+                        km.attacker_alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                        PyRep::None,
+                        PyRep::Integer(km.ship_type_id as i64),
+                        PyRep::None,
+                        PyRep::Real(0.0),
+                        PyRep::Integer(0),
+                        PyRep::String(String::new()),
                     ])
                     .collect()
             });

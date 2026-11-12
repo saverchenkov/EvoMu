@@ -498,18 +498,22 @@ async fn test_corp_registry_kills_naming_and_owners() {
         .expect("GetRecentKills");
     let (k_cols, k_rows) = rowset_data(&kills);
     assert_eq!(
-        k_cols,
-        vec![
+        &k_cols[..7],
+        &[
             "killID",
             "victimCharacterID",
             "victimCorporationID",
             "victimShipTypeID",
             "solarSystemID",
-            "killTime"
+            "killTime",
+            "moonID"
         ]
     );
+    assert!(k_cols.contains(&"finalCharacterID".to_string()));
+    assert!(k_cols.contains(&"finalShipTypeID".to_string()));
     assert_eq!(k_rows.len(), 1);
     assert_eq!(k_rows[0][0], PyRep::Integer(91_001));
+    assert_eq!(k_rows[0][6], PyRep::None); // moonID
 
     // 6. GetRecentLosses
     let losses = rpc(&ctx, &mut sess, "corpRegistry", "GetRecentLosses", &[])
@@ -517,18 +521,22 @@ async fn test_corp_registry_kills_naming_and_owners() {
         .expect("GetRecentLosses");
     let (l_cols, l_rows) = rowset_data(&losses);
     assert_eq!(
-        l_cols,
-        vec![
+        &l_cols[..7],
+        &[
             "killID",
             "victimCharacterID",
             "victimCorporationID",
             "victimShipTypeID",
             "solarSystemID",
-            "killTime"
+            "killTime",
+            "moonID"
         ]
     );
+    assert!(l_cols.contains(&"finalCharacterID".to_string()));
+    assert!(l_cols.contains(&"finalShipTypeID".to_string()));
     assert_eq!(l_rows.len(), 1);
     assert_eq!(l_rows[0][0], PyRep::Integer(91_002));
+    assert_eq!(l_rows[0][6], PyRep::None); // moonID
 
     // 7. GetEveOwners: returns character member rows with SDE-resolved bloodline typeID and gender
     let owners = rpc(&ctx, &mut sess, "corpRegistry", "GetEveOwners", &[])

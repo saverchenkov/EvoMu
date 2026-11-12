@@ -286,7 +286,7 @@ pub fn emit_signal_tracker_full_state_for_system(
 
     let sig_dict = PyRep::Dict(
         sigs.iter()
-            .filter(|s| !s.collapsed)
+            .filter(|s| !s.collapsed && s.sig_group != "SovOre")
             .map(|s| {
                 (
                     PyRep::String(s.signature_id.clone()),

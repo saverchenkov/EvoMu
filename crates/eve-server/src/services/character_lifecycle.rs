@@ -1160,12 +1160,71 @@ fn handle_char_mgr(
                 snap.killmails
                     .values()
                     .filter(|km| km.victim_character_id == char_id || km.attacker_character_id == char_id)
-                    .map(|km| vec![
-                        PyRep::Integer(km.kill_id),
-                        PyRep::Integer(km.victim_character_id),
-                        PyRep::Integer(km.solar_system_id as i64),
-                        PyRep::Integer(km.killed_unix as i64),
-                    ])
+                    .map(|km| {
+                        let victim_corp_id = if km.victim_corp_id > 0 {
+                            km.victim_corp_id
+                        } else {
+                            snap.characters
+                                .get(&km.victim_character_id)
+                                .map(|c| c.corporation_id)
+                                .unwrap_or(1_000_009)
+                        };
+                        let victim_alliance_rep = km
+                            .victim_alliance_id
+                            .or_else(|| {
+                                snap.characters
+                                    .get(&km.victim_character_id)
+                                    .and_then(|c| c.alliance_id)
+                            })
+                            .map(PyRep::Integer)
+                            .unwrap_or(PyRep::None);
+                        let attacker_corp_id = if km.attacker_corp_id > 0 {
+                            km.attacker_corp_id
+                        } else {
+                            snap.characters
+                                .get(&km.attacker_character_id)
+                                .map(|c| c.corporation_id)
+                                .unwrap_or(1_000_125)
+                        };
+                        let attacker_alliance_rep = km
+                            .attacker_alliance_id
+                            .or_else(|| {
+                                snap.characters
+                                    .get(&km.attacker_character_id)
+                                    .and_then(|c| c.alliance_id)
+                            })
+                            .map(PyRep::Integer)
+                            .unwrap_or(PyRep::None);
+                        let attacker_ship_type_id = snap
+                            .characters
+                            .get(&km.attacker_character_id)
+                            .and_then(|c| c.active_ship_item_id)
+                            .and_then(|sid| snap.inventory.get(&sid))
+                            .map(|it| it.type_id as i64)
+                            .unwrap_or(km.ship_type_id as i64);
+                        vec![
+                            PyRep::Integer(km.kill_id),
+                            PyRep::Integer(km.victim_character_id),
+                            PyRep::Integer(km.solar_system_id as i64),
+                            PyRep::Integer(km.killed_unix as i64),
+                            PyRep::None,
+                            PyRep::Integer(km.victim_character_id),
+                            PyRep::Integer(victim_corp_id),
+                            victim_alliance_rep,
+                            PyRep::None,
+                            PyRep::Integer(km.ship_type_id as i64),
+                            PyRep::Integer(0),
+                            PyRep::Integer(km.attacker_character_id),
+                            PyRep::Integer(attacker_corp_id),
+                            attacker_alliance_rep,
+                            PyRep::None,
+                            PyRep::Integer(attacker_ship_type_id),
+                            PyRep::None,
+                            PyRep::Real(0.0),
+                            PyRep::Integer(0),
+                            PyRep::String(String::new()),
+                        ]
+                    })
                     .collect()
             });
             Some(Ok(PyRep::Rowset {
@@ -1174,6 +1233,22 @@ fn handle_char_mgr(
                     "victimID".into(),
                     "solarSystemID".into(),
                     "killTime".into(),
+                    "moonID".into(),
+                    "victimCharacterID".into(),
+                    "victimCorporationID".into(),
+                    "victimAllianceID".into(),
+                    "victimFactionID".into(),
+                    "victimShipTypeID".into(),
+                    "victimDamageTaken".into(),
+                    "finalCharacterID".into(),
+                    "finalCorporationID".into(),
+                    "finalAllianceID".into(),
+                    "finalFactionID".into(),
+                    "finalShipTypeID".into(),
+                    "finalWeaponTypeID".into(),
+                    "finalSecurityStatus".into(),
+                    "finalDamageDone".into(),
+                    "killBlob".into(),
                 ],
                 rows,
             }))

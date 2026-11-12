@@ -1815,6 +1815,50 @@ pub(crate) async fn execute_pending_cycle_actions(ctx: &ServerContext, sys_id: u
                         false,
                         ctx.now_unix_secs(),
                     );
+                    let active_slot_charges: Vec<eve_db::InventoryItemRecord> =
+                        ctx.db.with_snapshot(|snap| {
+                            let weapon_flags: Vec<InventoryFlag> = snap
+                                .items
+                                .values()
+                                .filter(|i| {
+                                    i.location_id == attacker_ship_id
+                                        && i.type_id == module_type_id
+                                        && snap.module_active_states.contains(&i.item_id)
+                                })
+                                .map(|i| i.flag)
+                                .collect();
+                            snap.items
+                                .values()
+                                .filter(|i| {
+                                    i.location_id == attacker_ship_id
+                                        && weapon_flags.contains(&i.flag)
+                                        && i.type_id != module_type_id
+                                        && i.quantity > 0
+                                        && ctx
+                                            .sde
+                                            .types
+                                            .get(&i.type_id)
+                                            .is_some_and(|t| t.category_id == 8)
+                                })
+                                .cloned()
+                                .collect()
+                        });
+                    for chg in active_slot_charges {
+                        ctx.emit_item_change_routed(
+                            acid,
+                            &chg,
+                            vec![(9, PyRep::Integer(i64::from(chg.quantity.saturating_add(1))))],
+                        );
+                        emit_charge_sublocation_quantity_change(
+                            ctx,
+                            acid,
+                            attacker_ship_id,
+                            chg.flag,
+                            chg.type_id,
+                            chg.quantity.saturating_add(1),
+                            chg.quantity,
+                        );
+                    }
                 }
                 if !notified && applied_dmg > 0.0 {
                     let owner_cid = attacker_char_id.unwrap_or(0);

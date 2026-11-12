@@ -452,4 +452,41 @@ async fn mission_completion_expiry_penalty_and_courier_delivery_branches() {
         remote_accepted_greet.dict_get("missionState"),
         Some(&PyRep::Integer(2))
     );
+
+    // 5. Issues #791 & #979: Calling GetMissionBriefingInfo / GetMissionObjectiveInfo on a different
+    //    agent when an active mission exists for `ag.agent_id` returns MissionNotActive instead of
+    //    leaking `ag.agent_id`'s mission into another agent's dialogue window.
+    let other_agent_id = ctx
+        .sde
+        .agents
+        .keys()
+        .copied()
+        .find(|&aid| aid != ag.agent_id)
+        .unwrap_or(ag.agent_id + 1);
+    assert_eq!(
+        call_agent_mgr(
+            &ctx,
+            &mut remote_sess,
+            "GetMissionBriefingInfo",
+            &[PyRep::Integer(other_agent_id)],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "MissionNotActive"
+    );
+    assert_eq!(
+        call_agent_mgr(
+            &ctx,
+            &mut remote_sess,
+            "GetMissionObjectiveInfo",
+            &[PyRep::Integer(other_agent_id)],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "MissionNotActive"
+    );
 }

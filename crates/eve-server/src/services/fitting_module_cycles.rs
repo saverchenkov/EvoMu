@@ -469,6 +469,8 @@ pub(crate) async fn handle_module_cycles(
                 // Auto-reload from Cargo / SpecializedAmmoHold if launcher slot is empty, then consume 1 probe,
                 // and auto-reload again if the last probe in the launcher slot was just consumed.
                 let launch_res = ctx.db.with_mut_snapshot(|snap| {
+                    let mut touched_pre: HashMap<i64, Option<eve_db::InventoryItemRecord>> =
+                        HashMap::new();
                     let mut in_slot_id = snap
                         .items
                         .values()
@@ -481,59 +483,91 @@ pub(crate) async fn handle_module_cycles(
                         })
                         .map(|i| (i.item_id, i.type_id));
 
-                    let reload_into_slot = |snap: &mut eve_db::WorldStateSnapshot| -> Option<(i64, u32, i32)> {
-                        let cargo_stack = snap
-                            .items
-                            .values()
-                            .find(|i| {
-                                i.location_id == ship_id
-                                    && matches!(i.flag, InventoryFlag::Cargo | InventoryFlag::SpecializedAmmoHold)
-                                    && i.quantity > 0
-                                    && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 492)
-                            })
-                            .map(|i| (i.item_id, i.type_id, i.quantity))?;
-                        let (src_id, p_tid, avail) = cargo_stack;
-                        let p_vol = ctx.sde.types.get(&p_tid).map(|t| t.volume.max(1.0)).unwrap_or(10.0);
-                        let max_fit = ((launcher_cap / p_vol).floor() as i32).max(1);
-                        let move_qty = avail.min(max_fit);
-                        if move_qty >= avail {
-                            if let Some(it) = snap.items.get_mut(&src_id) {
-                                it.flag = slot_flag;
+                    let reload_into_slot =
+                        |snap: &mut eve_db::WorldStateSnapshot,
+                         touched_pre: &mut HashMap<i64, Option<eve_db::InventoryItemRecord>>|
+                         -> Option<(i64, u32, i32)> {
+                            let cargo_stack = snap
+                                .items
+                                .values()
+                                .find(|i| {
+                                    i.location_id == ship_id
+                                        && matches!(
+                                            i.flag,
+                                            InventoryFlag::Cargo | InventoryFlag::SpecializedAmmoHold
+                                        )
+                                        && i.quantity > 0
+                                        && ctx
+                                            .sde
+                                            .types
+                                            .get(&i.type_id)
+                                            .is_some_and(|t| t.group_id == 492)
+                                })
+                                .map(|i| (i.item_id, i.type_id, i.quantity))?;
+                            let (src_id, p_tid, avail) = cargo_stack;
+                            let p_vol = ctx
+                                .sde
+                                .types
+                                .get(&p_tid)
+                                .map(|t| t.volume.max(1.0))
+                                .unwrap_or(10.0);
+                            let max_fit = ((launcher_cap / p_vol).floor() as i32).max(1);
+                            let move_qty = avail.min(max_fit);
+                            if move_qty >= avail {
+                                if let Some(it) = snap.items.get_mut(&src_id) {
+                                    touched_pre
+                                        .entry(src_id)
+                                        .or_insert_with(|| Some(it.clone()));
+                                    it.flag = slot_flag;
+                                    it.version += 1;
+                                }
+                                Some((src_id, p_tid, move_qty))
+                            } else {
+                                if let Some(it) = snap.items.get_mut(&src_id) {
+                                    touched_pre
+                                        .entry(src_id)
+                                        .or_insert_with(|| Some(it.clone()));
+                                    it.quantity -= move_qty;
+                                    it.version += 1;
+                                }
+                                snap.next_entity_id += 1;
+                                let new_id = snap.next_entity_id;
+                                touched_pre.insert(new_id, None);
+                                snap.items.insert(
+                                    new_id,
+                                    eve_db::InventoryItemRecord {
+                                        item_id: new_id,
+                                        type_id: p_tid,
+                                        owner_id: char_id,
+                                        location_id: ship_id,
+                                        flag: slot_flag,
+                                        quantity: move_qty,
+                                        singleton: false,
+                                        version: 1,
+                                        ..Default::default()
+                                    },
+                                );
+                                Some((new_id, p_tid, move_qty))
                             }
-                            Some((src_id, p_tid, move_qty))
-                        } else {
-                            if let Some(it) = snap.items.get_mut(&src_id) {
-                                it.quantity -= move_qty;
-                            }
-                            snap.next_entity_id += 1;
-                            let new_id = snap.next_entity_id;
-                            snap.items.insert(
-                                new_id,
-                                eve_db::InventoryItemRecord {
-                                    item_id: new_id,
-                                    type_id: p_tid,
-                                    owner_id: char_id,
-                                    location_id: ship_id,
-                                    flag: slot_flag,
-                                    quantity: move_qty,
-                                    singleton: false,
-                                    version: 1,
-                                    ..Default::default()
-                                },
-                            );
-                            Some((new_id, p_tid, move_qty))
-                        }
-                    };
+                        };
 
                     if in_slot_id.is_none() {
-                        if let Some((nid, ptid, _)) = reload_into_slot(snap) {
+                        if let Some((nid, ptid, _)) = reload_into_slot(snap, &mut touched_pre) {
                             in_slot_id = Some((nid, ptid));
                         }
                     }
                     let (charge_item_id, probe_type_id) = in_slot_id?;
+                    if let Some(cur_slot_it) = snap.items.get(&charge_item_id).cloned() {
+                        touched_pre
+                            .entry(charge_item_id)
+                            .or_insert(Some(cur_slot_it));
+                    }
 
-                    let mut rem = if let Some(c_owner) = snap.items.get(&charge_item_id).map(|ci| ci.owner_id) {
-                        let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), c_owner);
+                    let mut rem = if let Some(c_owner) =
+                        snap.items.get(&charge_item_id).map(|ci| ci.owner_id)
+                    {
+                        let mut opts =
+                            eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), c_owner);
                         opts.reject_fitted = false;
                         opts.active_ship_id = Some(ship_id);
                         match snap.consume_exact_item_quantity(charge_item_id, 1, opts) {
@@ -546,7 +580,7 @@ pub(crate) async fn handle_module_cycles(
                     };
                     let mut auto_reloaded = 0;
                     if rem == 0 {
-                        if let Some((_, _, r_qty)) = reload_into_slot(snap) {
+                        if let Some((_, _, r_qty)) = reload_into_slot(snap, &mut touched_pre) {
                             rem = r_qty;
                             auto_reloaded = r_qty;
                         }
@@ -554,12 +588,76 @@ pub(crate) async fn handle_module_cycles(
                     // disallowRepeatingActivation (attr 1014 == 1.0): launcher does not auto-repeat
                     snap.module_active_states.remove(&module_id);
                     snap.next_entity_id += 1;
-                    Some((snap.next_entity_id, probe_type_id, rem, auto_reloaded))
+                    let mut diffs: Vec<(
+                        Option<eve_db::InventoryItemRecord>,
+                        Option<eve_db::InventoryItemRecord>,
+                    )> = touched_pre
+                        .into_iter()
+                        .map(|(iid, pre_opt)| (pre_opt, snap.items.get(&iid).cloned()))
+                        .collect();
+                    diffs.sort_by_key(|(pre, post)| {
+                        post.as_ref()
+                            .or(pre.as_ref())
+                            .map_or(0, |r| r.item_id)
+                    });
+                    Some((
+                        snap.next_entity_id,
+                        probe_type_id,
+                        rem,
+                        auto_reloaded,
+                        diffs,
+                    ))
                 });
-                let Some((probe_id, probe_type_id, remaining_in_launcher, auto_reloaded)) = launch_res else {
+                let Some((probe_id, probe_type_id, remaining_in_launcher, auto_reloaded, item_diffs)) =
+                    launch_res
+                else {
                     return Some(Err(BridgeRpcError { code: "NoProbesLoaded".into(), message: "Survey probe launcher has no survey probes loaded".into() }));
                 };
                 ctx.invalidate_ship_fitting(ship_id);
+                for (pre, post) in &item_diffs {
+                    ctx.notify_item_mutation(char_id, pre.as_ref(), post.as_ref());
+                    match (pre, post) {
+                        (Some(old_it), Some(new_it)) if new_it.flag == slot_flag => {
+                            emit_charge_sublocation_quantity_change(
+                                ctx,
+                                char_id,
+                                ship_id,
+                                slot_flag,
+                                new_it.type_id,
+                                if old_it.flag == slot_flag {
+                                    old_it.quantity
+                                } else {
+                                    0
+                                },
+                                new_it.quantity,
+                            );
+                        }
+                        (None, Some(new_it)) if new_it.flag == slot_flag => {
+                            emit_godma_charge_sublocation_prime(ctx, char_id, ship_id, new_it);
+                            emit_charge_sublocation_quantity_change(
+                                ctx,
+                                char_id,
+                                ship_id,
+                                slot_flag,
+                                new_it.type_id,
+                                0,
+                                new_it.quantity,
+                            );
+                        }
+                        (Some(old_it), None) if old_it.flag == slot_flag => {
+                            emit_charge_sublocation_quantity_change(
+                                ctx,
+                                char_id,
+                                ship_id,
+                                slot_flag,
+                                old_it.type_id,
+                                old_it.quantity,
+                                0,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
 
                 let probe_sde = ctx.sde.types.get(&probe_type_id);
                 let base_delay_ms = probe_sde

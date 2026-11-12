@@ -549,4 +549,52 @@ async fn activate_auth_offline_burnout_nanite_reactivation_and_overload_edges() 
             .code,
         "CannotCloakInAbyssalSpace"
     );
+
+    // 11. #896: Weapon charge consumption in `apply_deferred_post_cycle_actions` and repeating
+    // `PendingCycleAction::CycleWeaponDamage` emit both `OnItemChange` and `OnModuleAttributeChanges` (805).
+    let charge_id = 96_800_401_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.insert(gun_id);
+        snap.items.insert(
+            charge_id,
+            InventoryItemRecord {
+                item_id: charge_id,
+                type_id: 193, // Antimatter Charge S (category 8)
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 10,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let _ = ctx.drain_notifications(char_id);
+    ctx.systems.push_pending_cycle_actions(
+        sys_id,
+        vec![crate::system_actor::PendingCycleAction::CycleWeaponDamage {
+            attacker_char_id: Some(char_id),
+            attacker_ship_id: ship_id,
+            attacker_ship_type_id: 587,
+            target_id,
+            target_char_id: None,
+            module_type_id: custom_gun_tid,
+            applied_dmg: 25.0,
+            notified: true,
+        }],
+    );
+    crate::services::inventory_fitting::fitting_module_cycles::execute_pending_cycle_actions(
+        &ctx, sys_id,
+    )
+    .await;
+    let notifs = ctx.drain_notifications(char_id);
+    assert!(
+        notifs.iter().any(|n| n.event == "OnItemChange"),
+        "expected OnItemChange on weapon charge cycle consumption"
+    );
+    assert!(
+        notifs.iter().any(|n| n.event == "OnModuleAttributeChanges"),
+        "expected OnModuleAttributeChanges (805) on weapon charge cycle consumption"
+    );
 }
