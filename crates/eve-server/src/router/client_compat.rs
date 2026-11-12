@@ -3268,6 +3268,7 @@ pub fn normalize_macho_notification_with_sde(
                                 .iter()
                                 .find_map(|(k, v)| (k.as_i64() == Some(80)).then(|| v.clone()))
                                 .unwrap_or(PyRep::Real(1.0));
+                            attrs.retain(|(k, _)| k.as_i64() != Some(80));
                             attrs.push((PyRep::Integer(805), qty_val));
                         }
                     }

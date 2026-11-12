@@ -1488,19 +1488,9 @@ pub(crate) async fn run_pre_notify_instant_module_effects(
     mod_state: &DogmaItemState,
     is_overloaded: bool,
     target_id_opt: Option<i64>,
-    duration_s: f64,
+    _duration_s: f64,
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<Option<PyRep>, BridgeRpcError> {
-    crate::services::notify_emitters_space_dungeons::emit_module_activation_godma_notifications(
-        ctx,
-        char_id,
-        ship_id,
-        module_id,
-        mod_type.type_id,
-        "defaultEffect",
-        duration_s,
-        target_id_opt,
-    );
     if matches!(mod_type.group_id, 201 | 80 | 353) {
         handle_ecm_or_burst_jammer_activation(
             ctx,
@@ -2092,9 +2082,7 @@ pub(crate) async fn try_handle_mercden_remote_shield_repair(
     }
     let rep_hp = mod_type.default_attributes.get(&68).copied().unwrap_or(1_500.0);
     let (pct, enabled) = crate::services::sov_gameplay::apply_mercenary_den_shield_repair(ctx, sys_id, ship_id, target_id, rep_hp).await?;
-    crate::services::notify_emitters_space_dungeons::emit_module_activation_godma_notifications(
-        ctx, char_id, ship_id, module_id, m.type_id, "shieldRepair", 5.0, Some(target_id),
-    );
+    let _ = (char_id, m.type_id);
     Ok(Some(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)),
         ("targetID", PyRep::Integer(target_id)),

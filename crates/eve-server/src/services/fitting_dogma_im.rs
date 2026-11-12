@@ -279,13 +279,59 @@ fn handle_item_get_info(
 
     let active_effects = match fitted_online_ship {
         Some((mod_owner_id, mod_ship_id)) => {
-            crate::services::inventory_fitting::fitting_module_cycles::online_module_active_effects(
+            let mut effs = crate::services::inventory_fitting::fitting_module_cycles::online_module_active_effects(
                 raw_id,
                 mod_owner_id,
                 mod_ship_id,
                 now_ft,
                 true,
-            )
+            );
+            let is_mod_active = ctx.db.with_snapshot(|s| s.module_active_states.contains(&raw_id))
+                || ctx
+                    .ship_fittings
+                    .get(&mod_ship_id)
+                    .and_then(|f| {
+                        f.modules.get(&raw_id).map(|m| {
+                            matches!(
+                                m.state,
+                                eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded
+                            )
+                        })
+                    })
+                    .unwrap_or(false);
+            if is_mod_active {
+                if let Some(eff_id) = crate::router::binding::effect_id_for_module_sde(
+                    &ctx.sde,
+                    show_info.type_id,
+                    Some("defaultEffect"),
+                ) {
+                    if eff_id != 16 {
+                        let dur_ms = merged_attrs
+                            .get(&73)
+                            .copied()
+                            .unwrap_or(1_000.0)
+                            .max(0.0);
+                        if let PyRep::Dict(ref mut entries) = effs {
+                            entries.push((
+                                PyRep::Integer(eff_id),
+                                PyRep::List(vec![
+                                    PyRep::Integer(raw_id),
+                                    PyRep::Integer(mod_owner_id),
+                                    PyRep::Integer(mod_ship_id),
+                                    PyRep::None,
+                                    PyRep::None,
+                                    PyRep::List(Vec::new()),
+                                    PyRep::Integer(eff_id),
+                                    PyRep::Integer(now_ft),
+                                    PyRep::Real(dur_ms),
+                                    PyRep::Integer(0),
+                                ]),
+                            ));
+                        }
+                    }
+                }
+            }
+            effs
         }
         None => PyRep::Dict(Vec::new()),
     };
