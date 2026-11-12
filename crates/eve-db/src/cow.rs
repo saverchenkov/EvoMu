@@ -327,7 +327,7 @@ impl<K: Ord + Clone, V: Clone> CowMap<K, V> {
     fn ensure_ord_mut(&mut self) -> &mut OrdMap<K, Row<V>> {
         if let Some(dirty) = self.dirty.take() {
             if self.ord.get().is_none() {
-                self.ord = OnceLock::from(dirty.into_iter().collect());
+                self.ord = OnceLock::from(dirty.into_iter().collect::<OrdMap<K, Row<V>>>());
             }
         }
         if self.ord.get().is_none() {
@@ -1240,7 +1240,7 @@ impl<K: Ord + Clone, V: Clone> CowMapInline<K, V> {
     fn ensure_ord_mut(&mut self) -> &mut OrdMap<K, V> {
         if let Some(dirty) = self.dirty.take() {
             if self.ord.get().is_none() {
-                self.ord = OnceLock::from(dirty.into_iter().collect());
+                self.ord = OnceLock::from(dirty.into_iter().collect::<OrdMap<K, V>>());
             }
         }
         if self.ord.get().is_none() {
