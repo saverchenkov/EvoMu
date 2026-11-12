@@ -617,6 +617,13 @@ async fn test_pos_mgr_towers_moon_cycle_and_target_obo() {
     let mut sess = setup_pilot(&ctx, 504, "demo", "demo-secret", PILOT1).await;
     sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
     sess.solar_system_id = Some(SYS_LOWSEC);
+    sess.station_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT1) {
+            ch.solar_system_id = SYS_LOWSEC;
+            ch.station_id = None;
+        }
+    });
 
     let tower_id = 140_000_401_i64;
     let silo_id = 140_000_402_i64;
