@@ -726,28 +726,11 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         if let Some(sess_change_payload) = prev_session
                             .to_session_change_pyrep(&session, vec![MACHO_PROXY_NODE_ID as i64])
                         {
-                            let mut named_payload = HashMap::new();
-                            named_payload
-                                .insert("channel".into(), PyRep::ascii_bytes("sessionchange"));
-                            let sess_pkt = MachoPacket {
-                                packet_type: MachoPacketType::SessionChangeNotification,
-                                source: MachoAddress::Node {
-                                    node_id: MACHO_PROXY_NODE_ID,
-                                    service: None,
-                                    call_id: 0,
-                                },
-                                destination: MachoAddress::Client {
-                                    client_id,
-                                    call_id: 0,
-                                    service: None,
-                                },
-                                user_id: session.user_id,
-                                payload: sess_change_payload,
-                                named_payload,
-                            };
-                            if write_framed_pyrep(&mut writer, &sess_pkt.to_pyrep()).await.is_err() {
-                                break;
-                            }
+                            // When an in-space ship switch occurs in the same solar system (e.g. pod
+                            // ejection on ship destruction `#970`), emit `DoDestinyUpdate(SetState)`
+                            // BEFORE `SessionChangeNotification(shipid)` so `michelle` has the new
+                            // capsule ball and `ballpark.ego == new_ship_id` before `OnSessionChanged`
+                            // handlers (`OverviewWindow`, `ActiveShipController`, `ShipUI`) run.
                             if session.station_id.is_none()
                                 && session.structure_id.is_none()
                                 && session.ship_id != prev_session.ship_id
@@ -801,6 +784,28 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                         }
                                     }
                                 }
+                            }
+                            let mut named_payload = HashMap::new();
+                            named_payload
+                                .insert("channel".into(), PyRep::ascii_bytes("sessionchange"));
+                            let sess_pkt = MachoPacket {
+                                packet_type: MachoPacketType::SessionChangeNotification,
+                                source: MachoAddress::Node {
+                                    node_id: MACHO_PROXY_NODE_ID,
+                                    service: None,
+                                    call_id: 0,
+                                },
+                                destination: MachoAddress::Client {
+                                    client_id,
+                                    call_id: 0,
+                                    service: None,
+                                },
+                                user_id: session.user_id,
+                                payload: sess_change_payload,
+                                named_payload,
+                            };
+                            if write_framed_pyrep(&mut writer, &sess_pkt.to_pyrep()).await.is_err() {
+                                break;
                             }
                         }
                     }
@@ -1129,6 +1134,18 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             .map(|cid| ctx.drain_notifications_for_char(cid))
                             .unwrap_or_default();
                         let prev_session = session.clone();
+                        let pre_rpc_db_loc = session.character_id.and_then(|cid| {
+                            ctx.db.with_snapshot(|s| {
+                                s.characters.get(&cid).map(|c| {
+                                    (
+                                        c.active_ship_id,
+                                        c.solar_system_id,
+                                        c.station_id,
+                                        c.structure_id,
+                                    )
+                                })
+                            })
+                        });
                         let rpc_res = ctx
                             .dispatch_rpc(
                                 &mut session,
@@ -1151,7 +1168,20 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 }
                             }
                         }
+                        let post_rpc_db_loc = session.character_id.and_then(|cid| {
+                            ctx.db.with_snapshot(|s| {
+                                s.characters.get(&cid).map(|c| {
+                                    (
+                                        c.active_ship_id,
+                                        c.solar_system_id,
+                                        c.station_id,
+                                        c.structure_id,
+                                    )
+                                })
+                            })
+                        });
                         if service == "timeControl"
+                            || post_rpc_db_loc != pre_rpc_db_loc
                             || pre_rpc_notifs.iter().any(|n| n.event == "OnSessionChanged")
                             || session
                                 .notifications
@@ -1394,8 +1424,11 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                     let mut has_set_state = obs_evs
                                         .iter()
                                         .any(|ev| matches!(ev, eve_destiny::DestinyEvent::SetState { .. }));
-                                    if !effective_was_live && !has_set_state {
-                                        // Either this is a ballpark-init RPC, a `Lagged` resync (`ORD-5`), or a
+                                    let ship_changed_in_space =
+                                        is_in_space && session.ship_id != prev_session.ship_id;
+                                    if (!effective_was_live || ship_changed_in_space) && !has_set_state {
+                                        // Either this is a ballpark-init RPC, an in-space ship switch
+                                        // (e.g. pod ejection `#970`), a `Lagged` resync (`ORD-5`), or a
                                         // concurrent 1Hz tick drained `SetState` between `MachoBindObject` and
                                         // this post-bind drain (`#845`): synthesize `SetState` so the stream
                                         // transitions cleanly into `Live`.

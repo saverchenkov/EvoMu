@@ -496,10 +496,8 @@ pub async fn handle_with_bound(
                     (PyRep::String("stationID".into()), PyRep::Integer(sid)),
                     (PyRep::String("typeID".into()), PyRep::Integer(ltid)),
                     (PyRep::String("agentID".into()), PyRep::Integer(m.agent_id)),
-                    (PyRep::String("referringAgentID".into()), PyRep::None),
                     (PyRep::String("shipTypeID".into()), PyRep::None),
                     (PyRep::String("locationType".into()), PyRep::String(ltype.into())),
-                    (PyRep::String("coords".into()), PyRep::None),
                     (PyRep::String("BookmarkID".into()), m.bookmark_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
                 ])
             };

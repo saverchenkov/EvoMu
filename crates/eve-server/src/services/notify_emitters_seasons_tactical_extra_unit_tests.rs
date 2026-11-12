@@ -978,3 +978,75 @@ fn issue_950_load_ammo_unloaded_and_cargo_volume_uses_attr_161_fallback() {
     assert_eq!(res.dict_get("totalLoaded"), Some(&PyRep::Integer(50)));
 }
 
+#[test]
+fn issue_961_cleartimers_resets_crimewatch_and_emits_timer_cleared_notices() {
+    let ctx = ServerContext::with_sde_and_repository(
+        Arc::new(SdeRegistry::default()),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 90_000_001_i64;
+    let target_id = 90_000_002_i64;
+    let now = ctx.now_unix();
+    ctx.db
+        .acquire_online_lock(1, 601, Some(char_id), true, now)
+        .expect("online lock");
+
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        let st = cw.get_or_create(char_id);
+        st.weapons_timer_expiry = now + 60;
+        st.pvp_timer_expiry = now + 900;
+        st.criminal_timer_expiry = now + 900;
+    }
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.npc_timers.insert(char_id, now + 300);
+        rt.disapproval_flags.insert(char_id, now + 300);
+        rt.limited_engagements
+            .entry(char_id)
+            .or_default()
+            .insert(target_id, now + 300);
+    });
+    crate::services::combat_crimewatch::crimewatch_timers::emit_crimewatch_timer_notifications(
+        &ctx, char_id, now,
+    );
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let mut sess = SessionState::new(601);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+
+    let res = crate::services::notify_emitters_character_services::handle(
+        &ctx,
+        &sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/cleartimers".into())],
+        &std::collections::HashMap::new(),
+    )
+    .expect("slash /cleartimers handled")
+    .expect("/cleartimers ok");
+    assert_eq!(res.dict_get("cleared"), Some(&PyRep::Bool(true)));
+
+    {
+        let cw = ctx.crimewatch.read().unwrap();
+        let st = cw.states.get(&char_id).expect("crimewatch state");
+        assert_eq!(st.weapons_timer_expiry, 0);
+        assert_eq!(st.pvp_timer_expiry, 0);
+        assert_eq!(st.criminal_timer_expiry, 0);
+    }
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    for ev in [
+        "OnWeaponsTimerUpdate",
+        "OnPvpTimerUpdate",
+        "OnCriminalTimerUpdate",
+        "OnNpcTimerUpdate",
+        "OnDisapprovalTimerUpdate",
+        "OnCrimewatchEngagementEnded",
+    ] {
+        assert!(
+            notifs.iter().any(|n| n.event == ev),
+            "expected {ev} notification on /cleartimers, got: {notifs:?}"
+        );
+    }
+}
+

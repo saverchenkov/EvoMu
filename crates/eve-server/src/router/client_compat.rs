@@ -515,7 +515,12 @@ pub fn normalize_macho_rpc_reply(
                 .and_then(|v| v.as_str())
                 .or_else(|| rep.as_str())
             {
-                return Ok(PyRep::String(s.replace(':', "_")));
+                let normalized = if let Some(rest) = s.strip_prefix("channel:") {
+                    format!("player_{rest}")
+                } else {
+                    s.replace(':', "_")
+                };
+                return Ok(PyRep::String(normalized));
             }
         }
     }
@@ -724,14 +729,21 @@ pub fn normalize_macho_rpc_reply(
     if service == "dungeonInstanceCacheMgr"
         && matches!(
             method,
-            "GetPirateInsurgencyInstances" | "GetPirateInsurgencyIceHeistInstances"
+            "GetPirateInsurgencyInstances"
+                | "GetPirateInsurgencyIceHeistInstances"
+                | "GetFactionWarfareBattlefieldInstances"
         )
     {
         if let Ok(PyRep::List(items)) = rpc_res {
-            let default_did = if method == "GetPirateInsurgencyIceHeistInstances" {
-                10_497
+            let default_did = match method {
+                "GetPirateInsurgencyIceHeistInstances" => 10_497,
+                "GetFactionWarfareBattlefieldInstances" => 10_485,
+                _ => 10_477,
+            };
+            let default_fid = if method == "GetFactionWarfareBattlefieldInstances" {
+                500_001
             } else {
-                10_477
+                500_010
             };
             let mut by_sys: std::collections::BTreeMap<i64, Vec<PyRep>> =
                 std::collections::BTreeMap::new();
@@ -743,8 +755,10 @@ pub fn normalize_macho_rpc_reply(
                 if let PyRep::KeyVal(ref mut map) = item {
                     map.entry("dungeonID".to_string())
                         .or_insert(PyRep::Integer(default_did));
+                    map.entry("dungeonNameID".to_string())
+                        .or_insert(PyRep::Integer(0));
                     map.entry("factionID".to_string())
-                        .or_insert(PyRep::Integer(500_010));
+                        .or_insert(PyRep::Integer(default_fid));
                 }
                 by_sys.entry(sys_id).or_default().push(item);
             }
@@ -930,6 +944,58 @@ pub fn normalize_macho_rpc_reply(
                 }
             }
             return Ok(PyRep::Tuple(vec![PyRep::List(bps), PyRep::Dict(locs)]));
+        }
+    } else if service == "blueprintManager" && method == "GetBlueprintData" {
+        if let Ok(PyRep::KeyVal(mut map)) = rpc_res {
+            let bp_id = map
+                .get("itemID")
+                .or_else(|| map.get("blueprintID"))
+                .cloned()
+                .unwrap_or(PyRep::Integer(0));
+            let type_id = map
+                .get("typeID")
+                .or_else(|| map.get("blueprintTypeID"))
+                .cloned()
+                .unwrap_or(PyRep::Integer(0));
+            let loc_id = map
+                .get("locationID")
+                .or_else(|| map.get("facilityID"))
+                .cloned()
+                .unwrap_or(PyRep::Integer(60_003_760));
+            let flag_id = map
+                .get("flagID")
+                .or_else(|| map.get("locationFlagID"))
+                .cloned()
+                .unwrap_or(PyRep::Integer(4));
+            let original = map
+                .get("original")
+                .and_then(PyRep::as_bool)
+                .unwrap_or(true);
+            let runs = map
+                .get("runs")
+                .or_else(|| map.get("runsRemaining"))
+                .cloned()
+                .unwrap_or(PyRep::Integer(if original { -1 } else { 1 }));
+            let qty = map
+                .get("quantity")
+                .cloned()
+                .unwrap_or(PyRep::Integer(if original { -1 } else { -2 }));
+            map.entry("itemID".into()).or_insert_with(|| bp_id.clone());
+            map.entry("blueprintID".into()).or_insert(bp_id);
+            map.entry("typeID".into()).or_insert_with(|| type_id.clone());
+            map.entry("blueprintTypeID".into()).or_insert(type_id);
+            map.entry("ownerID".into()).or_insert(PyRep::Integer(0));
+            map.entry("locationID".into()).or_insert_with(|| loc_id.clone());
+            map.entry("facilityID".into()).or_insert(loc_id);
+            map.entry("locationTypeID".into()).or_insert(PyRep::Integer(1529));
+            map.entry("locationFlagID".into()).or_insert_with(|| flag_id.clone());
+            map.entry("flagID".into()).or_insert(flag_id);
+            map.entry("runs".into()).or_insert_with(|| runs.clone());
+            map.entry("runsRemaining".into()).or_insert(runs);
+            map.entry("quantity".into()).or_insert(qty);
+            map.entry("jobID".into()).or_insert(PyRep::None);
+            map.entry("isImpounded".into()).or_insert(PyRep::Bool(false));
+            return Ok(PyRep::KeyVal(map));
         }
     } else if service == "charMgr" && method == "GetOwnerNoteLabels" {
         if let Ok(PyRep::List(items)) = rpc_res {
@@ -1161,9 +1227,25 @@ pub fn normalize_macho_rpc_reply(
             }
             if matches!(rep, PyRep::KeyVal(_) | PyRep::Dict(_)) {
                 let sys_id = rep.dict_get("solarSystemID").cloned().unwrap_or(PyRep::None);
-                let state = rep.dict_get("state").cloned().unwrap_or(PyRep::Integer(0));
-                return Ok(PyRep::Tuple(vec![sys_id, state]));
+                if let Some(explicit_state) = rep.dict_get("state").cloned() {
+                    return Ok(PyRep::Tuple(vec![sys_id, explicit_state]));
+                }
+                let state_kv =
+                    normalize_fw_victory_point_state_keyval(rep.clone(), Some(sys_id.clone()));
+                return Ok(PyRep::Tuple(vec![sys_id, state_kv]));
             }
+        }
+    } else if service == "fwVictoryPointMgr" && method == "GetAllVictoryPointStates" {
+        if let Ok(PyRep::Dict(entries)) = rpc_res {
+            let out = entries
+                .into_iter()
+                .map(|(sys_key, val)| {
+                    let norm =
+                        normalize_fw_victory_point_state_keyval(val, Some(sys_key.clone()));
+                    (sys_key, norm)
+                })
+                .collect();
+            return Ok(PyRep::Dict(out));
         }
     } else if service == "invbroker" && method == "ALSCLogGet" {
         if let Ok(ref rep) = rpc_res {
@@ -1763,6 +1845,10 @@ pub fn normalize_macho_rpc_reply(
             Ok(rep) => return Ok(normalize_agent_mission_objective_rep(rep)),
             Err(e) => return Err(e),
         }
+    } else if service == "agentMgr" && method == "GetMyJournalDetails" {
+        if let Ok(rep) = rpc_res {
+            return Ok(normalize_agent_journal_details_rep(rep));
+        }
     } else if service == "storeManager"
         && matches!(method, "get_categories" | "get_products" | "get_offers")
     {
@@ -2034,16 +2120,20 @@ fn normalize_agent_mission_objective_rep(rep: PyRep) -> PyRep {
             (PyRep::String("stationID".into()), PyRep::Integer(loc_id)),
             (PyRep::String("typeID".into()), PyRep::Integer(1529)),
             (PyRep::String("agentID".into()), PyRep::Integer(agent_id)),
-            (PyRep::String("referringAgentID".into()), PyRep::None),
             (PyRep::String("shipTypeID".into()), PyRep::None),
             (PyRep::String("locationType".into()), PyRep::String(loc_type.into())),
-            (PyRep::String("coords".into()), PyRep::None),
             (PyRep::String("BookmarkID".into()), PyRep::None),
         ])
     };
     let origin_loc = make_loc_dict(origin_sid, "agenthomebase");
     let objectives = match rep.dict_get("objectives") {
-        Some(PyRep::List(items)) if !items.is_empty() => PyRep::List(items.clone()),
+        Some(PyRep::List(items)) if !items.is_empty() => PyRep::List(
+            items
+                .iter()
+                .cloned()
+                .map(strip_none_location_coords_recursive)
+                .collect(),
+        ),
         _ => {
             let mut objs = vec![PyRep::Tuple(vec![
                 PyRep::String("agent".into()),
@@ -2083,7 +2173,13 @@ fn normalize_agent_mission_objective_rep(rep: PyRep) -> PyRep {
         }
     };
     let locations = match rep.dict_get("locations") {
-        Some(PyRep::List(items)) if !items.is_empty() => PyRep::List(items.clone()),
+        Some(PyRep::List(items)) if !items.is_empty() => PyRep::List(
+            items
+                .iter()
+                .cloned()
+                .map(strip_none_location_coords_recursive)
+                .collect(),
+        ),
         _ => {
             let mut locs = vec![origin_loc];
             if let Some(dest_sid) = dest_sid_opt {
@@ -2130,6 +2226,265 @@ fn normalize_agent_mission_objective_rep(rep: PyRep) -> PyRep {
         (PyRep::String("collateral".into()), PyRep::List(Vec::new())),
         (PyRep::String("contentID".into()), content_id),
     ])
+}
+
+fn strip_none_location_coords_recursive(rep: PyRep) -> PyRep {
+    match rep {
+        PyRep::Dict(entries) => PyRep::Dict(
+            entries
+                .into_iter()
+                .filter(|(k, v)| {
+                    !(matches!(k.as_str(), Some("coords" | "referringAgentID"))
+                        && matches!(v, PyRep::None))
+                })
+                .map(|(k, v)| (k, strip_none_location_coords_recursive(v)))
+                .collect(),
+        ),
+        PyRep::KeyVal(entries) => PyRep::KeyVal(
+            entries
+                .into_iter()
+                .filter(|(k, v)| {
+                    !(matches!(k.as_str(), "coords" | "referringAgentID")
+                        && matches!(v, PyRep::None))
+                })
+                .map(|(k, v)| (k, strip_none_location_coords_recursive(v)))
+                .collect(),
+        ),
+        PyRep::List(items) => PyRep::List(
+            items
+                .into_iter()
+                .map(strip_none_location_coords_recursive)
+                .collect(),
+        ),
+        PyRep::Tuple(items) => PyRep::Tuple(
+            items
+                .into_iter()
+                .map(strip_none_location_coords_recursive)
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+fn normalize_agent_journal_details_rep(rep: PyRep) -> PyRep {
+    let PyRep::Tuple(mut parts) = rep else {
+        return rep;
+    };
+    if let Some(PyRep::List(missions)) = parts.first_mut() {
+        for m in missions.iter_mut() {
+            if matches!(m, PyRep::Tuple(ref t) if t.len() == 10) {
+                continue;
+            }
+            if !matches!(m, PyRep::KeyVal(_) | PyRep::Dict(_)) {
+                continue;
+            }
+            let mission_state = m
+                .dict_get("missionState")
+                .and_then(PyRep::as_i64)
+                .unwrap_or_else(|| {
+                    match m.dict_get("state").and_then(PyRep::as_str).unwrap_or("") {
+                        "Accepted" => 2,
+                        "Failed" => 3,
+                        "Completed" => 4,
+                        "Declined" => 5,
+                        "Quit" => 6,
+                        _ => 1,
+                    }
+                });
+            let important_mission = m
+                .dict_get("importantMission")
+                .or_else(|| m.dict_get("isStoryline"))
+                .and_then(PyRep::as_bool)
+                .unwrap_or(false);
+            let raw_type_label = m
+                .dict_get("missionTypeLabel")
+                .or_else(|| m.dict_get("missionType"))
+                .and_then(PyRep::as_str)
+                .unwrap_or("Encounter");
+            let type_label = match raw_type_label {
+                "Courier" | "courier" => "UI/Agents/MissionTypes/Courier".to_string(),
+                "Trade" | "trade" => "UI/Agents/MissionTypes/Trade".to_string(),
+                "Mining" | "mining" => "UI/Agents/MissionTypes/Mining".to_string(),
+                "Encounter" | "encounter" | "" => "UI/Agents/MissionTypes/Encounter".to_string(),
+                other if other.starts_with("UI/") => other.to_string(),
+                _ => "UI/Agents/MissionTypes/Encounter".to_string(),
+            };
+            let mission_name_id = m
+                .dict_get("missionNameID")
+                .or_else(|| m.dict_get("title"))
+                .cloned()
+                .unwrap_or_else(|| PyRep::String("Agent Mission".into()));
+            let agent_id = m
+                .dict_get("agentID")
+                .cloned()
+                .unwrap_or(PyRep::Integer(3_008_416));
+            let expiration_time = match m.dict_get("expirationTime") {
+                Some(PyRep::Integer(v)) if *v > 0 => {
+                    let ft = if *v < 100_000_000_000_000 {
+                        (*v + 11_644_473_600) * 10_000_000
+                    } else {
+                        *v
+                    };
+                    PyRep::Integer(ft)
+                }
+                _ => PyRep::None,
+            };
+            let bookmarks = match m.dict_get("bookmarks") {
+                Some(PyRep::List(bms)) => PyRep::List(
+                    bms.iter()
+                        .cloned()
+                        .map(strip_none_location_coords_recursive)
+                        .collect(),
+                ),
+                _ => PyRep::List(Vec::new()),
+            };
+            let remote_offerable = m
+                .dict_get("remoteOfferable")
+                .and_then(PyRep::as_bool)
+                .unwrap_or(false);
+            let remote_completable = m
+                .dict_get("remoteCompletable")
+                .and_then(PyRep::as_bool)
+                .unwrap_or(false);
+            let content_id = m
+                .dict_get("contentID")
+                .or_else(|| m.dict_get("missionID"))
+                .cloned()
+                .unwrap_or(PyRep::Integer(0));
+            *m = PyRep::Tuple(vec![
+                PyRep::Integer(mission_state),
+                PyRep::Bool(important_mission),
+                PyRep::String(type_label),
+                mission_name_id,
+                agent_id,
+                expiration_time,
+                bookmarks,
+                PyRep::Bool(remote_offerable),
+                PyRep::Bool(remote_completable),
+                content_id,
+            ]);
+        }
+    }
+    PyRep::Tuple(parts)
+}
+
+fn normalize_fw_victory_point_state_keyval(rep: PyRep, fallback_sys_id: Option<PyRep>) -> PyRep {
+    let vp = rep
+        .dict_get("score")
+        .or_else(|| rep.dict_get("victoryPoints"))
+        .and_then(PyRep::as_i64)
+        .unwrap_or(0);
+    let threshold = rep
+        .dict_get("threshold")
+        .and_then(PyRep::as_i64)
+        .unwrap_or(3_000)
+        .max(1);
+    let contested_pct = rep
+        .dict_get("contestedPercentage")
+        .and_then(PyRep::as_f64)
+        .unwrap_or_else(|| ((vp as f64 / threshold as f64) * 100.0).clamp(0.0, 100.0));
+    let contested_fraction = rep
+        .dict_get("contestedFraction")
+        .and_then(PyRep::as_f64)
+        .unwrap_or_else(|| (contested_pct / 100.0).clamp(0.0, 1.0));
+    let sys_id = rep
+        .dict_get("solarSystemID")
+        .cloned()
+        .or(fallback_sys_id)
+        .unwrap_or(PyRep::Integer(0));
+    let is_contested = rep
+        .dict_get("isContested")
+        .and_then(PyRep::as_bool)
+        .unwrap_or(vp > 0);
+    let is_vulnerable = rep
+        .dict_get("isVulnerable")
+        .and_then(PyRep::as_bool)
+        .unwrap_or(vp >= threshold);
+    let mut map = match rep {
+        PyRep::KeyVal(m) => m,
+        PyRep::Dict(entries) => entries
+            .into_iter()
+            .filter_map(|(k, v)| k.as_str().map(|s| (s.to_string(), v)))
+            .collect(),
+        _ => HashMap::new(),
+    };
+    map.insert("solarSystemID".into(), sys_id);
+    map.insert("victoryPoints".into(), PyRep::Integer(vp));
+    map.insert("score".into(), PyRep::Integer(vp));
+    map.insert("threshold".into(), PyRep::Integer(threshold));
+    map.insert("contestedPercentage".into(), PyRep::Real(contested_pct));
+    map.insert("contestedFraction".into(), PyRep::Real(contested_fraction));
+    map.insert("isContested".into(), PyRep::Bool(is_contested));
+    map.insert("isVulnerable".into(), PyRep::Bool(is_vulnerable));
+    PyRep::KeyVal(map)
+}
+
+fn normalize_damage_message_dict(rep: PyRep) -> PyRep {
+    let mut entries: Vec<(PyRep, PyRep)> = match rep {
+        PyRep::Dict(e) => e,
+        PyRep::KeyVal(m) => m
+            .into_iter()
+            .map(|(k, v)| (PyRep::String(k), v))
+            .collect(),
+        other => return other,
+    };
+    let get_val = |entries: &[(PyRep, PyRep)], key: &str| -> Option<PyRep> {
+        entries
+            .iter()
+            .find_map(|(k, v)| (k.as_str() == Some(key)).then(|| v.clone()))
+    };
+    let set_val = |entries: &mut Vec<(PyRep, PyRep)>, key: &str, val: PyRep| {
+        if let Some((_, existing)) = entries.iter_mut().find(|(k, _)| k.as_str() == Some(key)) {
+            *existing = val;
+        } else {
+            entries.push((PyRep::String(key.into()), val));
+        }
+    };
+    let raw_attack_type = get_val(&entries, "attackType")
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| {
+            if get_val(&entries, "target").is_some() {
+                "me".to_string()
+            } else {
+                "otherPlayerWeapons".to_string()
+            }
+        });
+    let attack_type = match raw_attack_type.as_str() {
+        "other" | "otherPlayerWeapons" => "otherPlayerWeapons",
+        "you" | "me" => "me",
+        "otherPlayer" => "otherPlayer",
+        _ => "me",
+    };
+    set_val(&mut entries, "attackType", PyRep::String(attack_type.into()));
+
+    let hit_quality = match get_val(&entries, "hitQuality") {
+        Some(PyRep::Integer(n)) => n.clamp(1, 6),
+        Some(PyRep::String(s)) => match s.as_str() {
+            "Wrecks" => 6,
+            "Smashes" => 5,
+            "Penetrates" => 4,
+            "Hits" => 3,
+            "GlancesOff" => 2,
+            "Grazes" => 1,
+            _ => 3,
+        },
+        _ => 3,
+    };
+    set_val(&mut entries, "hitQuality", PyRep::Integer(hit_quality));
+
+    if get_val(&entries, "isBanked").is_none() {
+        set_val(&mut entries, "isBanked", PyRep::Bool(false));
+    }
+    let dmg = get_val(&entries, "damage")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    set_val(&mut entries, "damage", PyRep::Real(dmg));
+
+    if matches!(attack_type, "me" | "otherPlayerWeapons") && get_val(&entries, "weapon").is_none() {
+        let w = get_val(&entries, "typeID").unwrap_or(PyRep::Integer(0));
+        set_val(&mut entries, "weapon", w);
+    }
+    PyRep::Dict(entries)
 }
 
 fn market_tx_column_type(col: &str) -> DbColumnType {
@@ -2514,6 +2869,18 @@ pub fn should_suppress_macho_notification(event: &str, args: &[PyRep]) -> bool {
             }
         }
     }
+    // `combat/mod.rs` emits both `OnDamageMessage` and legacy `OnCombatMessage` with synthetic
+    // keys `"AttackHit"`, `"AttackMiss"`, `"AttackedBy"`, `"AttackMissBy"` that do not exist in
+    // V24.01 `eveMessages` (`#960`), causing raw dict text on the HUD. Suppress those duplicate
+    // synthetic `OnCombatMessage` notices on `:26000` while keeping valid V24 `OnCombatMessage` keys.
+    if event == "OnCombatMessage"
+        && matches!(
+            args.first().and_then(PyRep::as_str),
+            Some("AttackHit" | "AttackMiss" | "AttackedBy" | "AttackMissBy")
+        )
+    {
+        return true;
+    }
     false
 }
 
@@ -2822,6 +3189,56 @@ pub fn normalize_macho_notification_with_sde(
             .collect(),
         "OnSpecialFX" => normalize_on_special_fx(args),
         "OnGodmaShipEffect" => normalize_on_godma_ship_effect(args, sde),
+        "OnCombatMessage" => {
+            if let Some(PyRep::String(ref mut key)) = args.first_mut() {
+                let mapped = match key.as_str() {
+                    "AttackHit" => Some("AttackHits"),
+                    "AttackedBy" => Some("AttackHitsR"),
+                    "AttackMissBy" => Some("AttackMissR"),
+                    _ => None,
+                };
+                if let Some(m) = mapped {
+                    *key = m.to_string();
+                }
+            }
+            args
+        }
+        "OnDamageMessage" => {
+            // V24.01 `Logger.OnDamageMessage(self, damageMessagesArgs)` (`loggerSvc.pyj:322`)
+            // takes 1 argument (`damageMessagesArgs: dict`) and passes it to
+            // `AddCombatMessageFromDict(damageMessagesArgs)` (`#952`).
+            let raw_dict = if args.len() >= 2 {
+                args.swap_remove(1)
+            } else if !args.is_empty() {
+                args.swap_remove(0)
+            } else {
+                PyRep::Dict(Vec::new())
+            };
+            vec![normalize_damage_message_dict(raw_dict)]
+        }
+        "OnDamageMessages" => {
+            // V24.01 `Logger.OnDamageMessages(self, dmgmsgs)` (`loggerSvc.pyj:326`) iterates
+            // `for msg in dmgmsgs: self.OnDamageMessage(*msg[1:])`, expecting each element in
+            // `dmgmsgs` to be a 2-tuple `(msg_key, damage_dict)` (`#952`).
+            if let Some(PyRep::List(items)) = args.first_mut() {
+                for item in items.iter_mut() {
+                    let old = std::mem::replace(item, PyRep::None);
+                    *item = match old {
+                        PyRep::Tuple(mut parts) if parts.len() >= 2 => {
+                            let d = std::mem::replace(&mut parts[1], PyRep::None);
+                            parts[1] = normalize_damage_message_dict(d);
+                            PyRep::Tuple(parts)
+                        }
+                        other @ (PyRep::Dict(_) | PyRep::KeyVal(_)) => PyRep::Tuple(vec![
+                            PyRep::String("AttackHit".into()),
+                            normalize_damage_message_dict(other),
+                        ]),
+                        other => other,
+                    };
+                }
+            }
+            args
+        }
         "OnGodmaPrimeItem" => {
             if let Some(PyRep::KeyVal(entries)) = args.get_mut(1) {
                 if !entries.contains_key("wallclockTime") {
@@ -2830,6 +3247,30 @@ pub fn normalize_macho_notification_with_sde(
                         .cloned()
                         .unwrap_or(PyRep::Integer(0));
                     entries.insert("wallclockTime".to_string(), wt);
+                }
+                if matches!(entries.get("invItem"), Some(PyRep::KeyVal(_))) {
+                    if let Some(old_inv) = entries.remove("invItem") {
+                        entries.insert(
+                            "invItem".to_string(),
+                            inv_keyval_to_dbrow_with_sde(old_inv, sde),
+                        );
+                    }
+                }
+                let is_subloc = matches!(
+                    entries.get("itemID"),
+                    Some(PyRep::Tuple(t)) if t.len() == 3
+                );
+                if is_subloc {
+                    if let Some(PyRep::Dict(attrs)) = entries.get_mut("attributes") {
+                        let has_805 = attrs.iter().any(|(k, _)| k.as_i64() == Some(805));
+                        if !has_805 {
+                            let qty_val = attrs
+                                .iter()
+                                .find_map(|(k, v)| (k.as_i64() == Some(80)).then(|| v.clone()))
+                                .unwrap_or(PyRep::Real(1.0));
+                            attrs.push((PyRep::Integer(805), qty_val));
+                        }
+                    }
                 }
             }
             args

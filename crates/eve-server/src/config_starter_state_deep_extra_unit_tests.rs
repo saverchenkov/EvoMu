@@ -52,6 +52,7 @@ impl Drop for ScopedEnv {
 fn shared_sde() -> Arc<SdeRegistry> {
     static SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
     Arc::clone(SDE.get_or_init(|| {
+        let _env_guard = crate::lock_test_env_read();
         Arc::new(SdeRegistry::open(SdeRegistry::default_db_path()).expect("open default SDE"))
     }))
 }

@@ -945,6 +945,15 @@ fn xmpp_stanza_reply_with_ctx_and_auth(
         }
         Some("presence") => {
             if let Some(room_jid) = xmpp_extract_attr(chunk, "to") {
+                let stanza_id = xmpp_extract_attr(chunk, "id");
+                let id_attr = stanza_id
+                    .as_deref()
+                    .map(|id| format!(" id='{id}'"))
+                    .unwrap_or_default();
+                let to_jid = auth
+                    .as_deref()
+                    .and_then(|a| a.bound_jid.as_deref())
+                    .unwrap_or("user@chat.evomu.local/eve");
                 if let Some(c) = ctx {
                     if !eve_server::services::fleet_social::xmpp_can_join_room(
                         c,
@@ -952,20 +961,16 @@ fn xmpp_stanza_reply_with_ctx_and_auth(
                         room_jid,
                     ) {
                         return Some(format!(
-                            "<presence from='{room_jid}' type='error'><error type='auth'><not-authorized xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/></error></presence>"
+                            "<presence from='{room_jid}' to='{to_jid}' type='error'{id_attr}><error code='403' type='auth'><not-authorized xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/></error></presence>"
                         ));
                     }
                 }
-                let to_jid = auth
-                    .as_deref()
-                    .and_then(|a| a.bound_jid.as_deref())
-                    .unwrap_or("user@chat.evomu.local/eve");
                 let is_unavailable = xmpp_extract_attr(chunk, "type")
                     .is_some_and(|t| t.eq_ignore_ascii_case("unavailable"));
                 let p_reply = if is_unavailable {
-                    format!("<presence from='{room_jid}' to='{to_jid}' type='unavailable'><x xmlns='http://jabber.org/protocol/muc#user'><item affiliation='member' role='none'/><status code='110'/></x></presence>")
+                    format!("<presence from='{room_jid}' to='{to_jid}' type='unavailable'{id_attr}><x xmlns='http://jabber.org/protocol/muc#user'><item affiliation='member' role='none'/><status code='110'/></x></presence>")
                 } else {
-                    format!("<presence from='{room_jid}' to='{to_jid}'><x xmlns='http://jabber.org/protocol/muc#user'><item affiliation='member' role='participant'/><status code='110'/></x></presence>")
+                    format!("<presence from='{room_jid}' to='{to_jid}'{id_attr}><x xmlns='http://jabber.org/protocol/muc#user'><item affiliation='member' role='participant'/><status code='110'/></x></presence>")
                 };
                 return Some(p_reply);
             }
