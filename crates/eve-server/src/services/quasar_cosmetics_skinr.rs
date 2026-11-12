@@ -491,13 +491,14 @@ impl SkinrCosmeticsState {
                 .unwrap_or_default()
         });
         let catalog = SkinrStaticCatalog::load(&sde);
+        let db_id = db.instance_id();
         let st = Arc::new(Self {
             db,
             sde,
             catalog,
             data: RwLock::new(data),
             last_redeemed_gen: std::sync::atomic::AtomicU64::new(
-                super::quasar_entitlement_ledger::redeemed_skin_generation(),
+                super::quasar_entitlement_ledger::redeemed_skin_generation(db_id),
             ),
         });
         st
@@ -508,7 +509,9 @@ impl SkinrCosmeticsState {
     }
 
     pub fn sync_redeemed_skins_if_needed(&self) {
-        let cur_gen = super::quasar_entitlement_ledger::redeemed_skin_generation();
+        let cur_gen = super::quasar_entitlement_ledger::redeemed_skin_generation(
+            self.db.instance_id(),
+        );
         let prev = self
             .last_redeemed_gen
             .swap(cur_gen, std::sync::atomic::Ordering::AcqRel);
@@ -534,7 +537,6 @@ impl SkinrCosmeticsState {
         if self.db.is_write_locked_by_current_thread() {
             return;
         }
-        self.sync_redeemed_skins_if_needed();
         let mut snapshot_copy = self.data.read().unwrap_or_else(|e| e.into_inner()).clone();
         let mut recovered_skins = Vec::new();
         let _ = self.db.try_with_mut_snapshot(|s| {
@@ -572,7 +574,7 @@ impl SkinrCosmeticsState {
         });
         *self.data.write().unwrap_or_else(|e| e.into_inner()) = data;
         self.last_redeemed_gen.store(
-            super::quasar_entitlement_ledger::redeemed_skin_generation(),
+            super::quasar_entitlement_ledger::redeemed_skin_generation(self.db.instance_id()),
             std::sync::atomic::Ordering::Release,
         );
     }

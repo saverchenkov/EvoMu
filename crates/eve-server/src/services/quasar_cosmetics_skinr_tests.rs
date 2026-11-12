@@ -397,3 +397,51 @@ fn component_licenses_grant_get_revoke_consume_and_title_definitions() {
     assert_eq!(custom_cat.compute_points_and_tier_for_ship(11_567, &[990_001]), (100, 19));
     assert_eq!(custom_cat.compute_points_and_tier_for_ship(11_567, &[990_004]), (5300, 20));
 }
+
+#[test]
+fn skin_escrow_isolated_across_concurrent_db_entitlement_syncs() {
+    let sde = shared_sde();
+    let db_a = Arc::new(WorldRepository::with_demo_seed());
+    let db_b = Arc::new(WorldRepository::with_demo_seed());
+    let state_a = SkinrCosmeticsState::load(Arc::clone(&db_a), Arc::clone(&sde));
+
+    let cid = 90_000_861u32;
+    let skin_hex = "deadbeef";
+    let key = SkinrCosmeticsState::skin_lic_key(cid, skin_hex);
+    {
+        let mut data = state_a.data.write().unwrap();
+        data.skin_licenses.insert(
+            key.clone(),
+            ThirdPartySkinLicense {
+                character_id: cid,
+                skin_hex: skin_hex.into(),
+                activated: false,
+                unactivated: 2,
+                escrowed: 0,
+                first_acquired_unix: 100,
+            },
+        );
+    }
+    state_a.save();
+
+    // Move 1 license into escrow in memory, then trigger entitlement sync on an unrelated DB B
+    // plus on db_a before calling state_a.save(): neither may wipe in-memory escrowed count.
+    {
+        let mut data = state_a.data.write().unwrap();
+        let lic = data.skin_licenses.get_mut(&key).unwrap();
+        lic.unactivated -= 1;
+        lic.escrowed += 1;
+    }
+    crate::services::quasar_entitlement_ledger::sync_live_skinr_states(&db_b);
+    assert_eq!(
+        crate::services::quasar_entitlement_ledger::redeemed_skin_generation(db_a.instance_id()),
+        0,
+        "entitlement sync on db_b must not advance db_a generation"
+    );
+    state_a.save();
+
+    let saved = state_a.data.read().unwrap();
+    let lic = saved.skin_licenses.get(&key).unwrap();
+    assert_eq!(lic.unactivated, 1);
+    assert_eq!(lic.escrowed, 1);
+}

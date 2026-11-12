@@ -916,14 +916,32 @@ fn redeem_record_in_snap(
     Ok(redeemed_skin)
 }
 
-static REDEEMED_SKIN_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-pub(crate) fn redeemed_skin_generation() -> u64 {
-    REDEEMED_SKIN_GEN.load(std::sync::atomic::Ordering::Acquire)
+fn redeemed_skin_gen_map() -> &'static std::sync::Mutex<HashMap<u64, u64>> {
+    static MAP: std::sync::OnceLock<std::sync::Mutex<HashMap<u64, u64>>> =
+        std::sync::OnceLock::new();
+    MAP.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
-pub(crate) fn sync_live_skinr_states(_db: &WorldRepository) {
-    REDEEMED_SKIN_GEN.fetch_add(1, std::sync::atomic::Ordering::Release);
+pub(crate) fn redeemed_skin_generation(db_id: u64) -> u64 {
+    redeemed_skin_gen_map()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&db_id)
+        .copied()
+        .unwrap_or(0)
+}
+
+pub(crate) fn sync_live_skinr_states(db: &WorldRepository) {
+    let db_id = db.instance_id();
+    let mut map = redeemed_skin_gen_map()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if map.len() > 1024 {
+        let cutoff = db_id.saturating_sub(1024);
+        map.retain(|&id, _| id >= cutoff);
+    }
+    let gen = map.entry(db_id).or_insert(0);
+    *gen = gen.saturating_add(1);
 }
 
 fn delete_or_expire(db: &WorldRepository, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage, rsp_type: &str, require_admin: bool) -> Result<GoogleAny, (u32, String)> {
