@@ -644,6 +644,12 @@ fn object_ex_class_name(header: &PyRep) -> Option<&str> {
     None
 }
 
+fn is_industry_location_class(name: &str) -> bool {
+    name == "industry.job.Location"
+        || name == "industry.Location"
+        || name.ends_with("FacilityLocation")
+}
+
 pub fn get_attr(val: &PyRep, attr: &str) -> Option<PyRep> {
     match val {
         PyRep::KeyVal(map) => {
@@ -739,7 +745,7 @@ pub fn get_attr(val: &PyRep, attr: &str) -> Option<PyRep> {
                     }
                 }
             }
-            if type_name.ends_with("FacilityLocation") && attr == "GetInvController" {
+            if is_industry_location_class(type_name) && attr == "GetInvController" {
                 return Some(PyRep::String("bound_method:GetInvController".into()));
             }
             if type_name.ends_with("SlimItem") {
@@ -753,7 +759,7 @@ pub fn get_attr(val: &PyRep, attr: &str) -> Option<PyRep> {
             if attr == "header" || attr == "__header__" {
                 return Some((**header).clone());
             }
-            if object_ex_class_name(header).is_some_and(|c| c.ends_with("FacilityLocation"))
+            if object_ex_class_name(header).is_some_and(is_industry_location_class)
                 && attr == "GetInvController"
             {
                 return Some(PyRep::String("bound_method:GetInvController".into()));
@@ -1592,7 +1598,34 @@ mod tests {
             "#934 broken raw KeyVal must be rejected for missing `.GetInvController`: {bad_v:#?}"
         );
 
-        // Fixed V24.01 shape: FacilityLocation Object
+        // Fixed V24.01 shape: industry.job.Location ObjectEx (whitelist.pyj + mixins.pyj)
+        let fixed_934_obj_ex = PyRep::List(vec![PyRep::ObjectEx {
+            is_type_2: true,
+            header: Box::new(PyRep::Tuple(vec![
+                PyRep::Tuple(vec![PyRep::Token("industry.job.Location".into())]),
+                PyRep::Dict(vec![
+                    (PyRep::String("facilityID".into()), PyRep::Integer(60_003_760)),
+                    (PyRep::String("itemID".into()), PyRep::Integer(60_003_760)),
+                    (PyRep::String("typeID".into()), PyRep::Integer(27)),
+                    (PyRep::String("ownerID".into()), PyRep::Integer(98_000_001)),
+                    (PyRep::String("flagID".into()), PyRep::Integer(4)),
+                ]),
+            ])),
+            list: Vec::new(),
+            dict: Vec::new(),
+        }]);
+        let good_obj_ex = validate_reply_shape(
+            None,
+            "facilityManager.GetFacilityLocations",
+            &fixed_934_obj_ex,
+            shape,
+        );
+        assert!(
+            good_obj_ex.is_empty(),
+            "#934 fixed industry.job.Location ObjectEx must be accepted: {good_obj_ex:#?}"
+        );
+
+        // Legacy compatibility shape: FacilityLocation Object
         let fixed_934 = PyRep::List(vec![PyRep::Object {
             type_name: "eve.common.script.industry.facilityLocation.FacilityLocation".into(),
             args: Box::new(PyRep::keyval(vec![
