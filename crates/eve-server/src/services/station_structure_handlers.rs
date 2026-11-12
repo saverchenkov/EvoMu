@@ -668,6 +668,18 @@ pub(crate) fn resolve_upwell_dock_target(
     // `ballparkCommon/docking.pyj:CanDock` (`res:/staticdata/graphiclocations.fsdbinary`)
     // governs directional undock locator categories and Pirate FOB freighter exclusions.
     // parity: sde:res:/staticdata/graphiclocations.fsdbinary
+    let ship_type_id = if ctx.sde.types.get(&ship_type_id).map(|t| t.group_id) == Some(ship_group_id) {
+        ship_type_id
+    } else {
+        ctx.db
+            .with_snapshot(|s| {
+                s.characters
+                    .get(&char_id)
+                    .and_then(|c| s.items.get(&c.active_ship_id))
+                    .map(|i| i.type_id)
+            })
+            .unwrap_or(ship_type_id)
+    };
     let is_capital_ship = matches!(ship_group_id, 30 | 485 | 547 | 659 | 883 | 1538 | 4594);
     let is_supercapital_ship = matches!(ship_group_id, 30 | 659);
     let is_rorqual = ship_type_id == 28_352 || ship_group_id == 883;
