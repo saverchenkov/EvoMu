@@ -664,6 +664,7 @@ async fn test_corp_contacts_and_labels() {
     rpc(&ctx, &mut sess, "corpRegistry", "AssignLabels", &[PyRep::List(vec![PyRep::Integer(PILOT_2), PyRep::Integer(PILOT_3)]), PyRep::Integer(label_id)]).await.expect("AssignLabels batch");
 
     let contacts = rpc(&ctx, &mut sess, "corpRegistry", "GetCorporateContacts", &[]).await.expect("GetCorporateContacts after AssignLabels");
+    assert!(matches!(contacts, PyRep::IndexRowset { ref key_column, .. } if key_column == "contactID"));
     let (_, c_rows) = rowset_data(&contacts);
     assert_eq!(c_rows.len(), 2);
     assert!(c_rows.iter().all(|r| r[1] == PyRep::Real(-5.0)));

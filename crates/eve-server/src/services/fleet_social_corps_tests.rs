@@ -387,7 +387,22 @@ fn get_corporation_omits_zero_station_and_ceo_ids() {
     else {
         panic!("expected KeyVal for NPC corp");
     };
-    assert_eq!(npc_info.get("ceoID"), Some(&PyRep::None), "NPC corp ceoID must be None, not 0 (#773)");
+    let expected_cn_ceo = ctx
+        .sde
+        .npc_corporations
+        .get(&1_000_035)
+        .and_then(|c| c.ceo_id)
+        .expect("Caldari Navy 1000035 ceo_id loaded from SDE");
+    assert_eq!(expected_cn_ceo, 3_004_069);
+    assert_eq!(
+        npc_info.get("ceoID"),
+        Some(&PyRep::Integer(expected_cn_ceo)),
+        "NPC corp ceoID must be a valid SDE ceo_id ownerID, never None (#965)"
+    );
+    assert_eq!(
+        npc_info.get("creatorID"),
+        Some(&PyRep::Integer(expected_cn_ceo))
+    );
     assert_eq!(
         handle_corps(
             &ctx,
@@ -399,7 +414,46 @@ fn get_corporation_omits_zero_station_and_ceo_ids() {
         )
         .unwrap()
         .unwrap(),
-        PyRep::None
+        PyRep::Integer(expected_cn_ceo)
+    );
+
+    // NPC corp whose SDE ceo_id is NULL (e.g. 1000173 Polaris Corporation) must fall back to corporationID
+    let polaris_ceo = ctx
+        .sde
+        .npc_corporations
+        .get(&1_000_173)
+        .and_then(|c| c.ceo_id);
+    assert_eq!(polaris_ceo, None);
+    let PyRep::KeyVal(polaris_info) = handle_corps(
+        &ctx,
+        &mut ceo_sess,
+        "corpmgr",
+        "GetPublicInfo",
+        &[PyRep::Integer(1_000_173)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap()
+    else {
+        panic!("expected KeyVal for NPC corp 1000173");
+    };
+    assert_eq!(
+        polaris_info.get("ceoID"),
+        Some(&PyRep::Integer(1_000_173)),
+        "NPC corp without SDE ceo_id must fall back to corporationID, never None (#965)"
+    );
+    assert_eq!(
+        handle_corps(
+            &ctx,
+            &mut ceo_sess,
+            "corpmgr",
+            "ceoID",
+            &[PyRep::Integer(1_000_173)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Integer(1_000_173)
     );
 }
 

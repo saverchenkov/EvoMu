@@ -792,13 +792,17 @@ fn get_all_info_and_prime_ship_include_loaded_charges_941_948() {
     assert_eq!(charge_entry.dict_get("invItem"), Some(&PyRep::None));
     assert_eq!(charge_entry.dict_get("itemID"), Some(&subloc_key));
 
-    // Verify attributes dict includes attributeQuantity (80) = 40.0
+    // Verify attributes dict includes attributeQuantity (805) = 40.0 and does not synthesize speedBonus (80) (#962, #967)
     let PyRep::Dict(c_attrs) = charge_entry.dict_get("attributes").expect("charge attributes") else {
         panic!("expected charge attributes Dict");
     };
     assert!(
-        c_attrs.iter().any(|(k, v)| k.as_i64() == Some(80) && v.as_f64() == Some(40.0)),
-        "charge attributes must include QUANTITY (80) = 40.0: {c_attrs:?}"
+        c_attrs.iter().any(|(k, v)| k.as_i64() == Some(805) && v.as_f64() == Some(40.0)),
+        "charge attributes must include QUANTITY (805) = 40.0: {c_attrs:?}"
+    );
+    assert!(
+        !c_attrs.iter().any(|(k, _)| k.as_i64() == Some(80)),
+        "charge attributes must not use speedBonus (80) as quantity: {c_attrs:?}"
     );
 
     // Verify shipState[1] (instanceFlagQuantityCache) populates {ship_id: {HiSlot0: DBRow(..., quantity=40)}}

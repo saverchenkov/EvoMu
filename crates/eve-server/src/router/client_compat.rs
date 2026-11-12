@@ -169,15 +169,18 @@ fn ensure_anomaly_dungeon_id(rep: PyRep) -> PyRep {
     PyRep::KeyVal(entries)
 }
 
+// Fix #969: normalize both top-level fields and nested `contract` KeyVal,
+// resolve `dateIssuedUnix`/`expirationUnix` timestamps, normalize `items` (`itemTypeID`, `inCrate`),
+// `requestedItems`, and bid `amount`, and map None `acceptorID`/`assigneeID` to 0.
 fn normalize_contract_reply(rep: PyRep) -> PyRep {
     let PyRep::KeyVal(mut entries) = rep else {
         return rep;
     };
-    let mut c_map = entries.clone();
     let type_int = match kv_str(&entries, "type").as_str() {
         "ItemExchange" | "item_exchange" => 1,
         "Auction" | "auction" => 2,
         "Courier" | "courier" => 3,
+        "Loan" | "loan" => 4,
         _ => kv_int(&entries, "type", 1),
     };
     let status_int = match kv_str(&entries, "status").as_str() {
@@ -194,7 +197,10 @@ fn normalize_contract_reply(rep: PyRep) -> PyRep {
         _ => kv_int(&entries, "status", 0),
     };
     let avail_int = match kv_str(&entries, "availability").as_str() {
-        "Private" | "private" | "Personal" | "personal" | "Corporation" | "corporation" => 1,
+        "Public" | "public" => 0,
+        "Private" | "private" | "Personal" | "personal" | "Myself" | "myself" => 1,
+        "Corporation" | "corporation" | "MyCorp" | "my_corp" => 2,
+        "Alliance" | "alliance" | "MyAlliance" | "my_alliance" => 3,
         _ => kv_int(&entries, "availability", 0),
     };
     let unix_to_ft = |u: i64| -> i64 {
@@ -206,37 +212,167 @@ fn normalize_contract_reply(rep: PyRep) -> PyRep {
             133_500_000_000_000_000
         }
     };
-    let issued_ft = unix_to_ft(kv_int(&entries, "dateIssued", 1_700_000_000));
-    let expired_ft = unix_to_ft(kv_int(&entries, "dateExpired", 1_700_086_400));
-    let accepted_ft = unix_to_ft(kv_int(&entries, "dateAccepted", 1_700_000_000));
-    c_map.insert("type".to_string(), PyRep::Integer(type_int));
-    c_map.insert("status".to_string(), PyRep::Integer(status_int));
-    c_map.insert("availability".to_string(), PyRep::Integer(avail_int));
-    c_map.insert("startSolarSystemID".to_string(), PyRep::Integer(kv_int(&entries, "startSolarSystemID", 0)));
-    c_map.insert("endSolarSystemID".to_string(), PyRep::Integer(kv_int(&entries, "endSolarSystemID", 0)));
-    c_map.insert("startRegionID".to_string(), PyRep::Integer(kv_int(&entries, "startRegionID", 0)));
-    c_map.insert("endRegionID".to_string(), PyRep::Integer(kv_int(&entries, "endRegionID", 0)));
-    c_map.insert("dateIssued".to_string(), PyRep::Integer(issued_ft));
-    c_map.insert("dateExpired".to_string(), PyRep::Integer(expired_ft));
-    c_map.insert("dateAccepted".to_string(), PyRep::Integer(accepted_ft));
-    c_map.insert("dateCompleted".to_string(), PyRep::Integer(accepted_ft));
-    c_map.insert("numDays".to_string(), PyRep::Integer(kv_int(&entries, "numDays", 1)));
-    c_map.insert("volume".to_string(), PyRep::Real(kv_float(&entries, "volume").max(1.0)));
-    c_map.insert("crateID".to_string(), PyRep::Integer(0));
-    entries.insert("contract".to_string(), PyRep::KeyVal(c_map));
-    if let Some(PyRep::List(items)) = entries.get_mut("items") {
-        for item in items.iter_mut() {
-            if let PyRep::KeyVal(item_map) = item {
-                let tid = kv_int(item_map, "itemTypeID", kv_int(item_map, "typeID", 0));
-                let qty = kv_int(item_map, "quantity", 1).max(1);
-                item_map.entry("inCrate".to_string()).or_insert(PyRep::Bool(true));
-                item_map.insert("itemTypeID".to_string(), PyRep::Integer(tid));
-                item_map.insert("quantity".to_string(), PyRep::Integer(qty));
+    let pick_ts = |k1: &str, k2: &str, default: i64| -> i64 {
+        match entries.get(k1) {
+            Some(PyRep::Integer(v)) => *v,
+            Some(PyRep::Real(v)) => *v as i64,
+            _ => match entries.get(k2) {
+                Some(PyRep::Integer(v)) => *v,
+                Some(PyRep::Real(v)) => *v as i64,
+                _ => default,
+            },
+        }
+    };
+    let issued_ft = unix_to_ft(pick_ts("dateIssued", "dateIssuedUnix", 1_700_000_000));
+    let expired_ft = unix_to_ft(pick_ts("dateExpired", "expirationUnix", 1_700_086_400));
+    let accepted_ft = unix_to_ft(pick_ts("dateAccepted", "dateAcceptedUnix", 1_700_000_000));
+    let completed_raw = pick_ts("dateCompleted", "dateCompletedUnix", 0);
+    let completed_ft = if completed_raw > 0 {
+        unix_to_ft(completed_raw)
+    } else {
+        accepted_ft
+    };
+    let start_sys = kv_int(&entries, "startSolarSystemID", 0);
+    let raw_end_sys = kv_int(&entries, "endSolarSystemID", 0);
+    let end_sys = if raw_end_sys > 0 {
+        raw_end_sys
+    } else {
+        start_sys
+    };
+    let start_reg = kv_int(&entries, "startRegionID", 0);
+    let end_reg = kv_int(&entries, "endRegionID", 0);
+    let num_days = kv_int(&entries, "numDays", 1);
+    let volume = kv_float(&entries, "volume").max(1.0);
+    let acceptor_id = kv_int(&entries, "acceptorID", 0);
+    let assignee_id = kv_int(&entries, "assigneeID", 0);
+
+    let req_items = match entries.get("requestedItems") {
+        Some(PyRep::List(list)) => list.clone(),
+        _ => Vec::new(),
+    };
+    let mut norm_items = match entries.remove("items") {
+        Some(PyRep::List(list)) => list,
+        _ => Vec::new(),
+    };
+    let mut has_req_in_items = false;
+    for item in norm_items.iter_mut() {
+        if let PyRep::KeyVal(item_map) = item {
+            let tid = kv_int(item_map, "itemTypeID", kv_int(item_map, "typeID", 0));
+            let qty = kv_int(item_map, "quantity", 1).max(1);
+            let in_crate = match item_map.get("inCrate") {
+                Some(PyRep::Bool(b)) => *b,
+                Some(PyRep::Integer(v)) => *v != 0,
+                _ => true,
+            };
+            if !in_crate {
+                has_req_in_items = true;
+            }
+            item_map.insert("inCrate".to_string(), PyRep::Bool(in_crate));
+            item_map.insert("itemTypeID".to_string(), PyRep::Integer(tid));
+            item_map.insert("typeID".to_string(), PyRep::Integer(tid));
+            item_map.insert("quantity".to_string(), PyRep::Integer(qty));
+            item_map.entry("itemID".to_string()).or_insert(PyRep::Integer(0));
+            item_map.entry("parentID".to_string()).or_insert(PyRep::Integer(0));
+            item_map.entry("flagID".to_string()).or_insert(PyRep::Integer(0));
+            item_map.entry("copy".to_string()).or_insert(PyRep::Bool(false));
+        }
+    }
+    if !has_req_in_items {
+        for req in req_items {
+            if let PyRep::KeyVal(mut req_map) = req {
+                let tid = kv_int(&req_map, "itemTypeID", kv_int(&req_map, "typeID", 0));
+                if tid > 0 {
+                    let qty = kv_int(&req_map, "quantity", 1).max(1);
+                    req_map.insert("inCrate".to_string(), PyRep::Bool(false));
+                    req_map.insert("itemTypeID".to_string(), PyRep::Integer(tid));
+                    req_map.insert("typeID".to_string(), PyRep::Integer(tid));
+                    req_map.insert("quantity".to_string(), PyRep::Integer(qty));
+                    req_map.entry("itemID".to_string()).or_insert(PyRep::Integer(0));
+                    req_map.entry("parentID".to_string()).or_insert(PyRep::Integer(0));
+                    req_map.entry("flagID".to_string()).or_insert(PyRep::Integer(0));
+                    req_map.entry("copy".to_string()).or_insert(PyRep::Bool(false));
+                    norm_items.push(PyRep::KeyVal(req_map));
+                }
+            }
+        }
+    }
+    entries.insert("items".to_string(), PyRep::List(norm_items));
+
+    if let Some(PyRep::List(bids)) = entries.get_mut("bids") {
+        for bid in bids.iter_mut() {
+            if let PyRep::KeyVal(bid_map) = bid {
+                if !bid_map.contains_key("amount") {
+                    let amt = bid_map
+                        .get("amountISK")
+                        .cloned()
+                        .unwrap_or(PyRep::Real(0.0));
+                    bid_map.insert("amount".to_string(), amt);
+                }
             }
         }
     }
     entries.entry("bids".to_string()).or_insert_with(|| PyRep::List(Vec::new()));
+    let num_bids = match entries.get("bids") {
+        Some(PyRep::List(bids)) => bids.len() as i64,
+        _ => kv_int(&entries, "numBids", 0),
+    };
+
+    entries.insert("type".to_string(), PyRep::Integer(type_int));
+    entries.insert("status".to_string(), PyRep::Integer(status_int));
+    entries.insert("availability".to_string(), PyRep::Integer(avail_int));
+    entries.insert("startSolarSystemID".to_string(), PyRep::Integer(start_sys));
+    entries.insert("endSolarSystemID".to_string(), PyRep::Integer(end_sys));
+    entries.insert("startRegionID".to_string(), PyRep::Integer(start_reg));
+    entries.insert("endRegionID".to_string(), PyRep::Integer(end_reg));
+    entries.insert("dateIssued".to_string(), PyRep::Integer(issued_ft));
+    entries.insert("dateExpired".to_string(), PyRep::Integer(expired_ft));
+    entries.insert("dateAccepted".to_string(), PyRep::Integer(accepted_ft));
+    entries.insert("dateCompleted".to_string(), PyRep::Integer(completed_ft));
+    entries.insert("numDays".to_string(), PyRep::Integer(num_days));
+    entries.insert("volume".to_string(), PyRep::Real(volume));
+    entries.insert("crateID".to_string(), PyRep::Integer(0));
+    entries.insert("acceptorID".to_string(), PyRep::Integer(acceptor_id));
+    entries.insert("assigneeID".to_string(), PyRep::Integer(assignee_id));
+    entries.entry("numBids".to_string()).or_insert(PyRep::Integer(num_bids));
+
+    let keep_non_kv_contract = matches!(
+        entries.get("contract"),
+        Some(existing) if !matches!(existing, PyRep::KeyVal(_) | PyRep::Dict(_))
+    );
+    if !keep_non_kv_contract {
+        let mut c_map = entries.clone();
+        c_map.remove("contract");
+        entries.insert("contract".to_string(), PyRep::KeyVal(c_map));
+    }
     PyRep::KeyVal(entries)
+}
+
+fn normalize_contract_list_reply(rep: PyRep) -> PyRep {
+    let list = match rep {
+        PyRep::List(contracts) => contracts,
+        ref obj @ (PyRep::KeyVal(_) | PyRep::Dict(_)) => match obj.dict_get("contracts") {
+            Some(PyRep::List(contracts)) => contracts.clone(),
+            _ => return rep,
+        },
+        _ => return rep,
+    };
+    let mut normalized = Vec::with_capacity(list.len());
+    let mut items_by_cid = Vec::with_capacity(list.len());
+    for raw in list {
+        let norm = normalize_contract_reply(raw);
+        if let Some(cid) = norm.dict_get("contractID").and_then(PyRep::as_i64) {
+            let items = norm
+                .dict_get("items")
+                .cloned()
+                .unwrap_or_else(|| PyRep::List(Vec::new()));
+            items_by_cid.push((PyRep::Integer(cid), items));
+        }
+        normalized.push(norm);
+    }
+    PyRep::keyval([
+        ("contracts", PyRep::List(normalized)),
+        ("items", PyRep::Dict(items_by_cid)),
+    ])
 }
 
 fn normalize_skill_queue_rowset(rep: PyRep) -> PyRep {
@@ -405,6 +541,26 @@ pub fn normalize_macho_rpc_reply(
                     ("description", DbColumnType::WStr),
                 ],
             ));
+        }
+    }
+    if service == "contractProxy" && method == "CreateContract" {
+        // Fix #935: V24 ShowCreatedContracts expects a sequence of contractIDs, not a scalar KeyVal.
+        if let Ok(rep) = rpc_res {
+            let list = match rep {
+                PyRep::List(ids) => PyRep::List(ids),
+                PyRep::Tuple(ids) => PyRep::List(ids),
+                PyRep::Integer(cid) => PyRep::List(vec![PyRep::Integer(cid)]),
+                other => {
+                    if let Some(PyRep::List(ids)) = other.dict_get("contractIDs") {
+                        PyRep::List(ids.clone())
+                    } else if let Some(cid) = other.dict_get("contractID").and_then(PyRep::as_i64) {
+                        PyRep::List(vec![PyRep::Integer(cid)])
+                    } else {
+                        other
+                    }
+                }
+            };
+            return Ok(list);
         }
     }
     if service == "contractProxy" && (method == "GetContract" || method == "GetContractInfo") {
@@ -847,12 +1003,17 @@ pub fn normalize_macho_rpc_reply(
             }
             return Ok(rep);
         }
-    } else if service == "contractProxy" && method == "GetContractListForOwner" {
-        if let Ok(PyRep::List(contracts)) = rpc_res {
-            return Ok(PyRep::keyval([
-                ("contracts", PyRep::List(contracts)),
-                ("items", PyRep::Dict(Vec::new())),
-            ]));
+    } else if service == "contractProxy"
+        && matches!(
+            method,
+            "GetContractListForOwner"
+                | "GetMyCurrentContractList"
+                | "GetMyExpiredContractList"
+                | "GetMyBids"
+        )
+    {
+        if let Ok(rep) = rpc_res {
+            return Ok(normalize_contract_list_reply(rep));
         }
     } else if service == "contractProxy" && method == "NumOutstandingContracts" {
         if let Ok(PyRep::Integer(cnt)) = rpc_res {
@@ -865,16 +1026,38 @@ pub fn normalize_macho_rpc_reply(
         }
     } else if service == "contractProxy" && method == "SearchContracts" {
         if let Ok(PyRep::List(raw)) = rpc_res {
-            let mut wrapped = Vec::new();
+            let mut wrapped = Vec::with_capacity(raw.len());
             for item in raw {
-                if item.dict_get("contract").is_some() && item.dict_get("bids").is_some() {
+                // Preserve synthetic test payloads whose `contract` field is non-KeyVal (e.g. Integer).
+                let non_kv_contract = item
+                    .dict_get("contract")
+                    .is_some_and(|c| !matches!(c, PyRep::KeyVal(_) | PyRep::Dict(_)));
+                if non_kv_contract && item.dict_get("bids").is_some() {
                     wrapped.push(item);
                 } else {
-                    let bids = item
+                    let norm = normalize_contract_reply(item);
+                    let contract_rep = norm
+                        .dict_get("contract")
+                        .cloned()
+                        .unwrap_or_else(|| norm.clone());
+                    let items = norm
+                        .dict_get("items")
+                        .cloned()
+                        .unwrap_or_else(|| PyRep::List(Vec::new()));
+                    let bids = norm
                         .dict_get("bids")
                         .cloned()
                         .unwrap_or_else(|| PyRep::List(Vec::new()));
-                    wrapped.push(PyRep::keyval([("contract", item), ("bids", bids)]));
+                    let num_bids = norm
+                        .dict_get("numBids")
+                        .cloned()
+                        .unwrap_or_else(|| PyRep::Integer(0));
+                    wrapped.push(PyRep::keyval([
+                        ("contract", contract_rep),
+                        ("items", items),
+                        ("bids", bids),
+                        ("numBids", num_bids),
+                    ]));
                 }
             }
             let n = wrapped.len() as i64;

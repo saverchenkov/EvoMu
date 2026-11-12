@@ -309,25 +309,52 @@ fn install_job_param_remote_range_and_reaction_facility_guards() {
         .code,
         "InvalidIndustryJobParameters"
     );
-    assert_eq!(
-        handle_industry_jobs(
-            &ctx,
-            &mut sess,
-            "industryManager",
-            "InstallJob",
-            &[PyRep::keyval([
-                ("blueprintID", PyRep::Integer(bpo_id)),
-                ("activityID", PyRep::Integer(1)),
-                ("runs", PyRep::Integer(1)),
-                ("licensedRuns", PyRep::Integer(5)),
-            ])],
-            &kw,
-        )
-        .unwrap()
-        .unwrap_err()
-        .code,
-        "InvalidIndustryJobParameters"
-    );
+    // #964: non-copying activity (activityID=1) ignores V24 licensedRuns and leaves job.licensed_runs = None
+    let temp_bpo_id = 96_900_199_i64;
+    let temp_trit_id = 96_900_198_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            temp_trit_id,
+            make_item(temp_trit_id, 34, char_id, station_id, InventoryFlag::Hangar, 1_000, false),
+        );
+        snap.items.insert(
+            temp_bpo_id,
+            make_item(temp_bpo_id, 688, char_id, station_id, InventoryFlag::Hangar, 1, true),
+        );
+    });
+    let non_copy_rep = handle_industry_jobs(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(temp_bpo_id)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(1)),
+            ("licensedRuns", PyRep::Integer(5)),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .expect("non-copying activity with licensedRuns=5 must succeed");
+    let non_copy_jid = non_copy_rep.dict_get("jobID").unwrap().as_i64().unwrap();
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.industry_jobs[&non_copy_jid].licensed_runs, None);
+    });
+    handle_industry_jobs(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "CancelJob",
+        &[PyRep::Integer(non_copy_jid)],
+        &kw,
+    )
+    .unwrap()
+    .expect("cancel scratch non-copying job");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&temp_bpo_id);
+        snap.items.retain(|_, i| i.type_id != 34);
+    });
     assert_eq!(
         handle_industry_jobs(
             &ctx,

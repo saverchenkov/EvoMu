@@ -63,6 +63,10 @@ fn field(rep: &PyRep, key: &str) -> PyRep {
 fn rowset_data(rep: &PyRep) -> (Vec<String>, Vec<Vec<PyRep>>) {
     match rep {
         PyRep::Rowset { columns, rows } => (columns.clone(), rows.clone()),
+        PyRep::IndexRowset { columns, items, .. } => (
+            columns.clone(),
+            items.iter().map(|(_, row)| row.clone()).collect(),
+        ),
         _ => (Vec::new(), Vec::new()),
     }
 }
@@ -580,6 +584,7 @@ async fn test_corp_registry_kills_naming_and_owners() {
         let ctx_reloaded = ServerContext::with_repository(repo_reloaded);
         let mut s_rel = select_pilot(&ctx_reloaded, 1892, "demo", "demo-secret", PILOT_1).await;
         let contacts = rpc(&ctx_reloaded, &mut s_rel, "corpRegistry", "GetCorporateContacts", &[]).await.expect("GetCorporateContacts after reload");
+        assert!(matches!(contacts, PyRep::IndexRowset { ref key_column, .. } if key_column == "contactID"));
         let (_, c_rows) = rowset_data(&contacts);
         assert_eq!(c_rows.len(), 1);
         let labels = rpc(&ctx_reloaded, &mut s_rel, "corpRegistry", "GetLabels", &[]).await.expect("GetLabels after reload");

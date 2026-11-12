@@ -706,9 +706,12 @@ pub(super) fn handle_corps(
                     (c.corporation_id, c.name.clone(), c.ticker.clone(), (c.ceo_id > 0).then_some(c.ceo_id), c.members.len() as i64, m_limit, c.tax_rate, c.alliance_id.filter(|&id| id > 0), c.hq_station_id.filter(|&id| id > 0), c.description.clone(), c.url.clone(), h_divs, w_divs, allow_war)
                 })
             }).or_else(|| {
-                // DERIVED: SDE NPC corporations fallback for starter/NPC corps
+                // DERIVED: SDE NPC corporations fallback for starter/NPC corps; always supply a
+                // valid ownerID for ceoID (SDE ceo_id or corporation_id) because V24.01 infosvc
+                // passes corpinfo.ceoID directly into cfg.eveowners.Get().
                 ctx.sde.npc_corporations.get(&corp_id).map(|c| {
-                    (c.corporation_id, c.name.clone(), c.ticker_name.clone(), None, 10_000i64, 100_000i64, c.tax_rate, None, c.station_id.filter(|&id| id > 0), format!("NPC Corporation {}", c.name), String::new(), HashMap::new(), Vec::new(), false)
+                    let ceo_id = c.ceo_id.filter(|&id| id > 0).or(Some(c.corporation_id));
+                    (c.corporation_id, c.name.clone(), c.ticker_name.clone(), ceo_id, 10_000i64, 100_000i64, c.tax_rate, None, c.station_id.filter(|&id| id > 0), format!("NPC Corporation {}", c.name), String::new(), HashMap::new(), Vec::new(), false)
                 })
             });
 
@@ -771,7 +774,13 @@ pub(super) fn handle_corps(
             let info = ctx.db.with_snapshot(|snap| {
                 snap.corporations.get(&corp_id).map(|c| (c.corporation_id, c.ceo_id, c.alliance_id))
             }).or_else(|| {
-                ctx.sde.npc_corporations.get(&corp_id).map(|c| (c.corporation_id, 0i64, None))
+                ctx.sde.npc_corporations.get(&corp_id).map(|c| {
+                    (
+                        c.corporation_id,
+                        c.ceo_id.filter(|&id| id > 0).unwrap_or(c.corporation_id),
+                        None,
+                    )
+                })
             });
             let (cid, ceo, aid) = info.unwrap_or((corp_id, 0, None));
             let rep = match method {

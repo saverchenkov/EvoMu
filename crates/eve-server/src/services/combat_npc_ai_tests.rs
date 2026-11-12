@@ -415,6 +415,7 @@ async fn gh829_navy_classification_and_npc_corp_id_resolution_across_spawners() 
                     solar_system_id: None,
                     station_id: None,
                     tax_rate: 0.1,
+                    ceo_id: None,
                 },
             );
         }

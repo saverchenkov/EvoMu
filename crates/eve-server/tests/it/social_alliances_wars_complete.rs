@@ -131,12 +131,15 @@ async fn test_alliances_lifecycle_governance_contacts_bulletins_and_rankings() {
     assert_eq!(call(&ctx, &mut sess1, "allianceRegistry", "AddAllianceContact", vec![PyRep::Integer(p3_char), PyRep::Real(11.0), PyRep::Integer(1)]).await.expect_err("standing range").code, "InvalidStanding");
     call(&ctx, &mut sess1, "allianceRegistry", "AddAllianceContact", vec![PyRep::Integer(p3_char), PyRep::Real(10.0), PyRep::Integer(1)]).await.unwrap();
     call(&ctx, &mut sess1, "allianceRegistry", "EditAllianceContact", vec![PyRep::Integer(p3_char), PyRep::Real(-5.0), PyRep::Integer(3)]).await.unwrap();
-    let (_, crows) = rows(&call(&ctx, &mut sess2, "allianceRegistry", "GetAllianceContacts", vec![]).await.unwrap());
+    let ally_contacts = call(&ctx, &mut sess2, "allianceRegistry", "GetAllianceContacts", vec![]).await.unwrap();
+    assert!(matches!(ally_contacts, PyRep::IndexRowset { ref key_column, .. } if key_column == "contactID"));
+    let (_, crows) = rows(&ally_contacts);
     assert_eq!(crows, vec![vec![PyRep::Integer(p3_char), PyRep::Real(-5.0), PyRep::Integer(3)]], "member corp sees executor contacts");
     assert_eq!(call(&ctx, &mut sess2, "allianceRegistry", "RemoveAllianceContacts", vec![PyRep::List(vec![PyRep::Integer(p3_char)])]).await.expect_err("member corp").code, "NotAllianceExecutor");
     assert_eq!(call(&ctx, &mut sess_nondir, "allianceRegistry", "RemoveAllianceContacts", vec![PyRep::List(vec![PyRep::Integer(p3_char)])]).await.expect_err("non-director").code, "CorpRoleDenied");
     call(&ctx, &mut sess1, "allianceRegistry", "RemoveAllianceContacts", vec![PyRep::List(vec![PyRep::Integer(p3_char)])]).await.unwrap();
-    assert!(rows(&call(&ctx, &mut sess2, "allianceRegistry", "GetAllianceContacts", vec![]).await.unwrap()).1.is_empty());
+    let empty_ally_contacts = call(&ctx, &mut sess2, "allianceRegistry", "GetAllianceContacts", vec![]).await.unwrap();
+    assert!(matches!(empty_ally_contacts, PyRep::IndexRowset { ref key_column, ref items, .. } if key_column == "contactID" && items.is_empty()));
 
     // alliance-bulletins: executor director/CEO-managed, visible to all member corps; non-director in executor corp rejected.
     assert_eq!(call(&ctx, &mut sess2, "allianceRegistry", "AddBulletin", vec![PyRep::String("t".into()), PyRep::String("b".into())]).await.expect_err("member corp").code, "NotAllianceExecutor");
@@ -207,6 +210,10 @@ fn field(rep: &PyRep, key: &str) -> PyRep {
 fn rows(rep: &PyRep) -> (Vec<String>, Vec<Vec<PyRep>>) {
     match rep {
         PyRep::Rowset { columns, rows } => (columns.clone(), rows.clone()),
+        PyRep::IndexRowset { columns, items, .. } => (
+            columns.clone(),
+            items.iter().map(|(_, row)| row.clone()).collect(),
+        ),
         PyRep::ObjectEx { list, .. } => {
             let cols = list
                 .first()
@@ -506,6 +513,10 @@ fn field(rep: &PyRep, key: &str) -> PyRep {
 fn rows(rep: &PyRep) -> (Vec<String>, Vec<Vec<PyRep>>) {
     match rep {
         PyRep::Rowset { columns, rows } => (columns.clone(), rows.clone()),
+        PyRep::IndexRowset { columns, items, .. } => (
+            columns.clone(),
+            items.iter().map(|(_, row)| row.clone()).collect(),
+        ),
         PyRep::ObjectEx { list, .. } => {
             let cols = list
                 .first()
@@ -803,7 +814,9 @@ async fn run_corporation_deliveries_and_governance_suite() -> (bool, bool, i64, 
     let lbl_id = field(&lbl, "labelID").as_i64().unwrap();
     ctx.dispatch_rpc(&mut sess1, "corpRegistry", None, "EditLabel", &[PyRep::Integer(lbl_id), PyRep::String("Coalition".into()), PyRep::Integer(3)], &kw, None).await.unwrap();
     ctx.dispatch_rpc(&mut sess1, "corpRegistry", None, "AssignLabels", &[PyRep::List(vec![PyRep::Integer(90_000_002)]), PyRep::Integer(lbl_id)], &kw, None).await.unwrap();
-    let (_, c_rows) = rows(&ctx.dispatch_rpc(&mut sess2, "corpRegistry", None, "GetCorporateContacts", &[], &kw, None).await.unwrap());
+    let corp_contacts = ctx.dispatch_rpc(&mut sess2, "corpRegistry", None, "GetCorporateContacts", &[], &kw, None).await.unwrap();
+    assert!(matches!(corp_contacts, PyRep::IndexRowset { ref key_column, .. } if key_column == "contactID"));
+    let (_, c_rows) = rows(&corp_contacts);
     assert_eq!(c_rows[0][2], PyRep::Integer(lbl_id));
     ctx.dispatch_rpc(&mut sess1, "corpRegistry", None, "RemoveLabels", &[PyRep::List(vec![PyRep::Integer(90_000_002)]), PyRep::Integer(lbl_id)], &kw, None).await.unwrap();
     ctx.dispatch_rpc(&mut sess1, "corpRegistry", None, "DeleteLabel", &[PyRep::Integer(lbl_id)], &kw, None).await.unwrap();

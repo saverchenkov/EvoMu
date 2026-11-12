@@ -254,7 +254,7 @@ fn concord_lp_exchange_transfers_corp_balances_and_delayed_rewards() {
         sde_mut.npc_corporations.insert(cid, NpcCorporationInfo {
             corporation_id: cid, name: name.into(), ticker_name: ticker.into(),
             faction_id: Some(fid), solar_system_id: Some(30_000_142),
-            station_id: Some(station_id), tax_rate: 0.0,
+            station_id: Some(station_id), tax_rate: 0.0, ceo_id: None,
         });
     }
 

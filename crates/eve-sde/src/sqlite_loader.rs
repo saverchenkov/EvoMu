@@ -501,9 +501,19 @@ impl SdeRegistry {
 
         let mut npc_corporations = HashMap::new();
         {
-            let mut stmt = conn.prepare(
-                "SELECT corporation_id, name, ticker_name, faction_id, solar_system_id, station_id, tax_rate FROM sde_npc_corporations",
-            )?;
+            let has_ceo_col = conn
+                .prepare("PRAGMA table_info(sde_npc_corporations)")
+                .and_then(|mut s| {
+                    let cols = s.query_map([], |r| r.get::<_, String>(1))?;
+                    Ok(cols.flatten().any(|c| c == "ceo_id"))
+                })
+                .unwrap_or(false);
+            let sql = if has_ceo_col {
+                "SELECT corporation_id, name, ticker_name, faction_id, solar_system_id, station_id, tax_rate, ceo_id FROM sde_npc_corporations"
+            } else {
+                "SELECT corporation_id, name, ticker_name, faction_id, solar_system_id, station_id, tax_rate, NULL FROM sde_npc_corporations"
+            };
+            let mut stmt = conn.prepare(sql)?;
             let rows = stmt.query_map([], |r| {
                 Ok(NpcCorporationInfo {
                     corporation_id: r.get(0)?,
@@ -513,6 +523,7 @@ impl SdeRegistry {
                     solar_system_id: r.get::<_, Option<i64>>(4)?.map(|v| v as SolarSystemId),
                     station_id: r.get(5)?,
                     tax_rate: r.get(6)?,
+                    ceo_id: r.get::<_, Option<i64>>(7)?.filter(|&id| id > 0),
                 })
             })?;
             for r in rows {

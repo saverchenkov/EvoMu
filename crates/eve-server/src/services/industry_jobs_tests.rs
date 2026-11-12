@@ -305,13 +305,17 @@ fn test_copy_licensed_runs_validation_scaling_and_multi_bpc_mint() {
     let station_id = 60_003_760;
     let mut session = char_session(char_id, corp_id);
 
-    let (bpo_1, bpo_2, bpo_3) = ctx.db.with_mut_snapshot(|snap| {
+    let (bpo_1, bpo_2, bpo_3, bpo_mfg_lr, bpo_mfg_zero) = ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.balance = IskCents::from_f64_isk(1_000_000_000.0);
         }
         snap.skills.entry(char_id).or_default().insert(
             3380,
             TrainedSkillRecord { type_id: 3380, level: 5, skill_points: 256_000.0 },
+        );
+        snap.skills.entry(char_id).or_default().insert(
+            3387,
+            TrainedSkillRecord { type_id: 3387, level: 5, skill_points: 256_000.0 },
         );
         snap.skills.entry(char_id).or_default().insert(
             3406,
@@ -331,7 +335,7 @@ fn test_copy_licensed_runs_validation_scaling_and_multi_bpc_mint() {
                 ..Default::default()
             },
         );
-        for id in [99_201_i64, 99_202, 99_203] {
+        for id in [99_201_i64, 99_202, 99_203, 99_204, 99_205] {
             snap.items.insert(
                 id,
                 InventoryItemRecord {
@@ -347,17 +351,18 @@ fn test_copy_licensed_runs_validation_scaling_and_multi_bpc_mint() {
                 },
             );
         }
-        (99_201_i64, 99_202_i64, 99_203_i64)
+        (99_201_i64, 99_202_i64, 99_203_i64, 99_204_i64, 99_205_i64)
     });
 
-    // 1. Explicit licensedRuns rejected on non-copying activity (activityID = 1)
-    let err_non_copy = handle_industry_jobs(
+    // 1. #964: V24 IndustryWnd always sends licensedRuns even on non-copying activities (activityID = 1);
+    // it must be ignored (no error, licensed_runs stored as None, cost/duration unaffected).
+    let mfg_lr_rep = handle_industry_jobs(
         &ctx,
         &mut session,
         "industryManager",
         "InstallJob",
         &[PyRep::keyval([
-            ("blueprintID", PyRep::Integer(bpo_1)),
+            ("blueprintID", PyRep::Integer(bpo_mfg_lr)),
             ("activityID", PyRep::Integer(1)),
             ("runs", PyRep::Integer(1)),
             ("licensedRuns", PyRep::Integer(2)),
@@ -365,8 +370,36 @@ fn test_copy_licensed_runs_validation_scaling_and_multi_bpc_mint() {
         &HashMap::new(),
     )
     .unwrap()
-    .unwrap_err();
-    assert_eq!(err_non_copy.code, "InvalidIndustryJobParameters");
+    .expect("non-copying InstallJob with licensedRuns=2 must succeed");
+    let mfg_zero_rep = handle_industry_jobs(
+        &ctx,
+        &mut session,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(bpo_mfg_zero)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(1)),
+            ("licensedRuns", PyRep::Integer(0)),
+        ])],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .expect("non-copying InstallJob with licensedRuns=0 must succeed");
+    let mfg_lr_jid = mfg_lr_rep.dict_get("jobID").unwrap().as_i64().unwrap();
+    let mfg_zero_jid = mfg_zero_rep.dict_get("jobID").unwrap().as_i64().unwrap();
+    assert_eq!(
+        mfg_lr_rep.dict_get("durationSeconds"),
+        mfg_zero_rep.dict_get("durationSeconds")
+    );
+    assert_eq!(
+        mfg_lr_rep.dict_get("totalJobCost"),
+        mfg_zero_rep.dict_get("totalJobCost")
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.industry_jobs[&mfg_lr_jid].licensed_runs, None);
+        assert_eq!(snap.industry_jobs[&mfg_zero_jid].licensed_runs, None);
+    });
 
     // 2. Explicit licensedRuns > max_production_limit (11 > 10) rejected even with runs = 1
     let err_over_limit = handle_industry_jobs(
@@ -499,6 +532,357 @@ fn test_copy_licensed_runs_validation_scaling_and_multi_bpc_mint() {
             assert_eq!(bpc.blueprint_runs_remaining, Some(5));
         }
     });
+}
+
+#[test]
+fn install_job_v24_ignores_corporation_id_and_enforces_account_rbac() {
+    let mut sde = SdeRegistry::with_canonical_seed();
+    sde.types.insert(688, make_inv_type(688, 105, "Rifter Blueprint", 0.01, 100_000.0));
+    sde.types.insert(587, make_inv_type(587, 25, "Rifter", 27_500.0, 500_000.0));
+    sde.blueprints.insert(
+        688,
+        BlueprintInfo {
+            blueprint_type_id: 688,
+            product_type_id: 587,
+            product_quantity: 1,
+            max_production_limit: 30,
+            manufacturing_time_sec: 100,
+            research_me_time_sec: 105,
+            research_te_time_sec: 105,
+            copy_time_sec: 100,
+            invention_time_sec: 100,
+            invention_base_probability: 0.30,
+            materials: vec![BlueprintMaterial { type_id: 34, quantity: 100 }],
+            activities: HashMap::new(),
+        },
+    );
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db);
+    let char_id = 90_000_001_i64;
+    let other_char = 90_000_002_i64;
+    let corp_id = 98_100_001_i64;
+    let station_id = 60_003_760_i64;
+    let mut session = char_session(char_id, corp_id);
+    session.corp_role = 0;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_id;
+            ch.balance = IskCents::from_isk(1_000_000_000);
+        }
+        let mut corp = eve_db::CorporationRecord::new(corp_id, "V24 Test Corp", "V24T", other_char);
+        corp.set_division_balance(1, IskCents(0));
+        corp.set_division_balance(2, IskCents::from_isk(500_000_000));
+        snap.corporations.insert(corp_id, corp);
+
+        for (tid, lvl) in [(3380, 5), (3387, 5), (3406, 5)] {
+            snap.skills.entry(char_id).or_default().insert(
+                tid,
+                TrainedSkillRecord { type_id: tid, level: lvl, skill_points: 256_000.0 },
+            );
+        }
+        snap.items.insert(
+            99_500,
+            InventoryItemRecord {
+                item_id: 99_500,
+                type_id: 34,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 10_000,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        for bp_id in [99_501_i64, 99_502, 99_503] {
+            snap.items.insert(
+                bp_id,
+                InventoryItemRecord {
+                    item_id: bp_id,
+                    type_id: 688,
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.items.insert(
+            99_504,
+            InventoryItemRecord {
+                item_id: 99_504,
+                type_id: 688,
+                owner_id: corp_id,
+                location_id: station_id,
+                flag: InventoryFlag::CorpSAG1,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            99_505,
+            InventoryItemRecord {
+                item_id: 99_505,
+                type_id: 34,
+                owner_id: corp_id,
+                location_id: station_id,
+                flag: InventoryFlag::CorpSAG1,
+                quantity: 1_000,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    // 1. Personal V24.01 payload: unconditionally sends corporationID, licensedRuns, and account=(char_id, 1000).
+    // Even for a zero-role corp member whose corp Division 1 has 0 ISK, manufacturing and copying succeed as personal jobs.
+    let wallet_field = "account";
+    let bal_before = ctx.db.with_snapshot(|s| s.characters[&char_id].balance);
+    let mfg_rep = handle_industry_jobs(
+        &ctx,
+        &mut session,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(99_501)),
+            ("blueprintTypeID", PyRep::Integer(688)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(1)),
+            ("licensedRuns", PyRep::Integer(1)),
+            ("corporationID", PyRep::Integer(corp_id)),
+            (
+                wallet_field,
+                PyRep::Tuple(vec![PyRep::Integer(char_id), PyRep::Integer(1000)]),
+            ),
+        ])],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .expect("V24 personal manufacturing job must succeed");
+    assert_eq!(mfg_rep.dict_get("ownerID"), Some(&PyRep::Integer(char_id)));
+    let mfg_jid = mfg_rep.dict_get("jobID").unwrap().as_i64().unwrap();
+
+    let copy_rep = handle_industry_jobs(
+        &ctx,
+        &mut session,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(99_502)),
+            ("blueprintTypeID", PyRep::Integer(688)),
+            ("activityID", PyRep::Integer(5)),
+            ("runs", PyRep::Integer(1)),
+            ("licensedRuns", PyRep::Integer(30)),
+            ("corporationID", PyRep::Integer(corp_id)),
+            (
+                wallet_field,
+                PyRep::Tuple(vec![PyRep::Integer(char_id), PyRep::Integer(1000)]),
+            ),
+        ])],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .expect("V24 personal copying job must succeed");
+    assert_eq!(copy_rep.dict_get("ownerID"), Some(&PyRep::Integer(char_id)));
+    let copy_jid = copy_rep.dict_get("jobID").unwrap().as_i64().unwrap();
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.industry_jobs[&mfg_jid].licensed_runs, None);
+        assert_eq!(snap.industry_jobs[&copy_jid].licensed_runs, Some(30));
+        assert!(snap.characters[&char_id].balance < bal_before);
+        assert_eq!(snap.corporations[&corp_id].division_balance(1), IskCents(0));
+    });
+
+    // 2. Foreign ownerID and foreign / out-of-range wallet accounts are rejected.
+    let err_foreign_owner = handle_industry_jobs(
+        &ctx,
+        &mut session,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(99_503)),
+            ("blueprintTypeID", PyRep::Integer(688)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(1)),
+            ("ownerID", PyRep::Integer(other_char)),
+        ])],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_foreign_owner.code, "OwnerAccessDenied");
+
+    let err_foreign_wallet = handle_industry_jobs(
+        &ctx,
+        &mut session,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(99_503)),
+            ("blueprintTypeID", PyRep::Integer(688)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(1)),
+            (
+                wallet_field,
+                PyRep::Tuple(vec![PyRep::Integer(other_char), PyRep::Integer(1000)]),
+            ),
+        ])],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_foreign_wallet.code, "OwnerAccessDenied");
+
+    let err_bad_div = handle_industry_jobs(
+        &ctx,
+        &mut session,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(99_503)),
+            ("blueprintTypeID", PyRep::Integer(688)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(1)),
+            (
+                wallet_field,
+                PyRep::Tuple(vec![PyRep::Integer(corp_id), PyRep::Integer(1007)]),
+            ),
+        ])],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_bad_div.code, "InvalidIndustryJobParameters");
+
+    // 3. Corp wallet account=(corp_id, 1001) requires Division 2 Account Take role; once granted, debits Division 2.
+    let err_corp_wallet_no_role = handle_industry_jobs(
+        &ctx,
+        &mut session,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(99_503)),
+            ("blueprintTypeID", PyRep::Integer(688)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(1)),
+            (
+                wallet_field,
+                PyRep::Tuple(vec![PyRep::Integer(corp_id), PyRep::Integer(1001)]),
+            ),
+        ])],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_corp_wallet_no_role.code, "CrpAccessDenied");
+
+    let acc2_role = eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[1];
+    session.corp_role = acc2_role;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations
+            .get_mut(&corp_id)
+            .unwrap()
+            .member_roles
+            .insert(char_id, acc2_role);
+    });
+    // Without Factory Manager, corp blueprint install still fails even with Account Take 2.
+    let err_corp_bp_no_factory = handle_industry_jobs(
+        &ctx,
+        &mut session,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(99_504)),
+            ("blueprintTypeID", PyRep::Integer(688)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(1)),
+            ("corporationID", PyRep::Integer(corp_id)),
+            (
+                wallet_field,
+                PyRep::Tuple(vec![PyRep::Integer(corp_id), PyRep::Integer(1001)]),
+            ),
+        ])],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_corp_bp_no_factory.code, "CrpAccessDenied");
+
+    let div2_before = ctx
+        .db
+        .with_snapshot(|s| s.corporations[&corp_id].division_balance(2));
+    let char_bal_before_corp_pay = ctx.db.with_snapshot(|s| s.characters[&char_id].balance);
+    let pers_corp_pay = handle_industry_jobs(
+        &ctx,
+        &mut session,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(99_503)),
+            ("blueprintTypeID", PyRep::Integer(688)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(1)),
+            (
+                wallet_field,
+                PyRep::Tuple(vec![PyRep::Integer(corp_id), PyRep::Integer(1001)]),
+            ),
+        ])],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .expect("personal job funded by authorized corp division 2 wallet must succeed");
+    assert_eq!(pers_corp_pay.dict_get("ownerID"), Some(&PyRep::Integer(char_id)));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&char_id].balance, char_bal_before_corp_pay);
+        assert!(snap.corporations[&corp_id].division_balance(2) < div2_before);
+        assert_eq!(snap.corporations[&corp_id].division_balance(1), IskCents(0));
+        assert!(!snap
+            .corp_wallet_journals
+            .get(&(corp_id, 2))
+            .map_or(true, |v| v.is_empty()));
+    });
+
+    // 4. Granting Factory Manager + Div 1 Hangar Take allows V24 corp blueprint install using corp Div 2 wallet.
+    let full_roles = acc2_role
+        | eve_db::corp_roles::ROLE_FACTORY_MANAGER
+        | eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[0];
+    session.corp_role = full_roles;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations
+            .get_mut(&corp_id)
+            .unwrap()
+            .member_roles
+            .insert(char_id, full_roles);
+    });
+    let corp_rep = handle_industry_jobs(
+        &ctx,
+        &mut session,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(99_504)),
+            ("blueprintTypeID", PyRep::Integer(688)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(1)),
+            ("licensedRuns", PyRep::Integer(1)),
+            ("useCorp", PyRep::Bool(true)),
+            ("corporationID", PyRep::Integer(corp_id)),
+            (
+                wallet_field,
+                PyRep::Tuple(vec![PyRep::Integer(corp_id), PyRep::Integer(1001)]),
+            ),
+        ])],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .expect("authorized corp job with V24 payload must succeed");
+    assert_eq!(corp_rep.dict_get("ownerID"), Some(&PyRep::Integer(corp_id)));
 }
 
 #[cfg(test)]

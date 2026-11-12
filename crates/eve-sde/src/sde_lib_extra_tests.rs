@@ -623,6 +623,7 @@ fn test_sde_registry_all_accessors_sorting_errors_and_serde_defaults() {
             solar_system_id: Some(30_000_142),
             station_id: Some(60_003_760),
             tax_rate: 0.1,
+            ceo_id: Some(3_004_069),
         },
     );
 

@@ -83,6 +83,7 @@ fn standings_epic_arc_ids_pirate_trig_derived_losses_and_career_suppression() {
                 solar_system_id: Some(30_000_142),
                 station_id: Some(60_003_760),
                 tax_rate: 0.1,
+                ceo_id: None,
             },
         );
         insert_agent(sde, agent_id, corp_id, 24, 1, agent_type, false, vec![]);
@@ -162,6 +163,7 @@ fn rnd_research_and_locator_agent_levels_and_error_guards() {
             solar_system_id: Some(30_000_142),
             station_id: Some(60_003_760),
             tax_rate: 0.1,
+            ceo_id: None,
         },
     );
     insert_agent(sde, rnd_aid, 1_000_009, 18, 1, 4, false, vec![11442]);

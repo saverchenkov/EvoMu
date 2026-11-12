@@ -1503,26 +1503,30 @@ pub(super) fn handle_corp_gov(
         }
 
         ("corpRegistry", "GetCorporateContacts") => {
-            let mut rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
+            let mut items: Vec<(PyRep, Vec<PyRep>)> = ctx.db.with_snapshot(|snap| {
                 snap.corp_contacts
                     .get(&corp_id)
                     .map(|list| {
                         list.iter()
                             .map(|c| {
-                                vec![
+                                (
                                     PyRep::Integer(c.contact_id),
-                                    PyRep::Real(c.standing),
-                                    PyRep::Integer(label_mask_from_ids(&c.label_ids)),
-                                ]
+                                    vec![
+                                        PyRep::Integer(c.contact_id),
+                                        PyRep::Real(c.standing),
+                                        PyRep::Integer(label_mask_from_ids(&c.label_ids)),
+                                    ],
+                                )
                             })
                             .collect()
                     })
                     .unwrap_or_default()
             });
-            rows.sort_by_key(|r| r[0].as_i64());
-            Some(Ok(PyRep::rowset(
+            items.sort_by_key(|(k, _)| k.as_i64());
+            Some(Ok(PyRep::index_rowset(
+                "contactID",
                 vec!["contactID", "relationshipID", "labelMask"],
-                rows,
+                items,
             )))
         }
 

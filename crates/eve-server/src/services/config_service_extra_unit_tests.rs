@@ -189,6 +189,7 @@ fn config_owners_locations_tickers_and_station_solar_systems_coverage() {
             solar_system_id: Some(sys_id),
             station_id: Some(60_003_760),
             tax_rate: 0.0,
+            ceo_id: None,
         },
     );
     sde_mut.agents.insert(

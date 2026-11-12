@@ -671,10 +671,15 @@ fn medals_bulletins_recruitment_ads_and_contacts_edge_cases() {
         vec![PyRep::List(vec![PyRep::Integer(99_111_222)])],
     )
     .unwrap();
-    let PyRep::Rowset { rows: contact_rows, .. } =
-        call_gov(&ctx, &mut member, "corpRegistry", "GetCorporateContacts", vec![]).unwrap()
+    let PyRep::IndexRowset {
+        key_column: contact_key_col,
+        columns: contact_cols,
+        items: contact_items,
+    } = call_gov(&ctx, &mut member, "corpRegistry", "GetCorporateContacts", vec![]).unwrap()
     else {
-        panic!("expected rowset");
+        panic!("expected IndexRowset for GetCorporateContacts");
     };
-    assert!(contact_rows.is_empty());
+    assert_eq!(contact_key_col, "contactID");
+    assert_eq!(contact_cols, vec!["contactID", "relationshipID", "labelMask"]);
+    assert!(contact_items.is_empty());
 }

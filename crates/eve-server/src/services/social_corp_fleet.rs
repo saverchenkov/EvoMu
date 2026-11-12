@@ -816,24 +816,31 @@ pub async fn handle(
         ("allianceRegistry", "GetAllianceContacts") => {
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let aid = session.alliance_id.unwrap_or(0);
-            let mut rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
+            let mut items: Vec<(PyRep, Vec<PyRep>)> = ctx.db.with_snapshot(|snap| {
                 snap.alliance_contacts
                     .get(&aid)
                     .map(|list| {
                         list.iter()
                             .map(|c| {
-                                vec![
+                                (
                                     PyRep::Integer(c.contact_id),
-                                    PyRep::Real(c.standing),
-                                    PyRep::Integer(label_mask_from_ids(&c.label_ids) as i64),
-                                ]
+                                    vec![
+                                        PyRep::Integer(c.contact_id),
+                                        PyRep::Real(c.standing),
+                                        PyRep::Integer(label_mask_from_ids(&c.label_ids) as i64),
+                                    ],
+                                )
                             })
                             .collect()
                     })
                     .unwrap_or_default()
             });
-            rows.sort_by_key(|r| r[0].as_i64());
-            Some(Ok(PyRep::rowset(vec!["contactID", "relationshipID", "labelMask"], rows)))
+            items.sort_by_key(|(k, _)| k.as_i64());
+            Some(Ok(PyRep::index_rowset(
+                "contactID",
+                vec!["contactID", "relationshipID", "labelMask"],
+                items,
+            )))
         }
 
         ("allianceRegistry", "CreateLabel") | ("allianceRegistry", "EditLabel") => {
