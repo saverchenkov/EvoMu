@@ -592,7 +592,10 @@ pub async fn handle_with_bound(
                     {
                         args.get(1).and_then(|a| a.as_i64())
                     } else {
-                        args.first().and_then(|a| a.as_i64())
+                        args.first()
+                            .and_then(|a| a.as_i64())
+                            .or_else(|| args.get(1).and_then(|a| a.as_i64()))
+                            .or_else(|| _kwargs.get("agentID").and_then(|a| a.as_i64()))
                     };
                     if let Some(sid) = supplied_id.filter(|_| bound_agent_id.is_none()) {
                         agent_id = sid;

@@ -477,7 +477,7 @@ async fn test_so7_chat_item_fitting_hyperlinks_resolution() {
     };
 
     // (a) showinfo:<typeID>//<itemID> -> recipient `s2` resolves typeID via SDE and itemID via dogmaIM.ItemGetInfo
-    let showinfo_target = extract_between(delivered_chat_text, "<url=showinfo:", ">Rifter</url>");
+    let showinfo_target = extract_between(&delivered_mail_text, "<url=showinfo:", ">Rifter</url>");
     let (type_str, item_str) = showinfo_target.split_once("//").expect("showinfo typeID//itemID");
     let parsed_type_id: u32 = type_str.parse().expect("parsed showinfo typeID");
     let parsed_item_id: i64 = item_str.parse().expect("parsed showinfo itemID");
@@ -489,13 +489,13 @@ async fn test_so7_chat_item_fitting_hyperlinks_resolution() {
     assert_eq!(item_info.dict_get("ownerID").and_then(|v| v.as_i64()), Some(P1));
 
     // (b) fitting:<shipTypeID>:<modTypeID>;<qty>:: -> recipient `s2` parses fitting DNA from hyperlink and resolves/imports via charFittingMgr
-    let fitting_dna = extract_between(delivered_chat_text, "<url=fitting:", ">Fit #");
+    let fitting_dna = extract_between(&delivered_mail_text, "<url=fitting:", ">Fit #");
     let (dna_ship_str, dna_rest) = fitting_dna.split_once(':').expect("fitting DNA ship:modules");
     let parsed_fit_ship_tid: i64 = dna_ship_str.parse().expect("parsed fitting shipTypeID");
     let (mod_str, qty_rest) = dna_rest.split_once(';').expect("mod;qty");
     let parsed_fit_mod_tid: i64 = mod_str.parse().expect("parsed modTypeID");
     let parsed_fit_mod_qty: i64 = qty_rest.trim_end_matches(':').parse().expect("parsed modQty");
-    let parsed_fit_id: i64 = extract_between(delivered_chat_text, ">Fit #", "</url> <url=killReport:")
+    let parsed_fit_id: i64 = extract_between(&delivered_mail_text, ">Fit #", "</url> <url=killReport:")
         .parse()
         .expect("parsed fit_id");
     assert_eq!(parsed_fit_id, fit_id);

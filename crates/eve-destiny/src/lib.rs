@@ -1802,8 +1802,8 @@ impl Ballpark {
         if !self.balls.contains_key(&member_id) {
             return false;
         }
-        self.push_event_for_ball(
-            member_id,
+        self.emit_event(
+            Some(member_id),
             DestinyEvent::OnFleetStateChange {
                 fleet_id,
                 member_id,
