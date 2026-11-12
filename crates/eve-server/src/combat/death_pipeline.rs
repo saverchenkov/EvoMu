@@ -1570,12 +1570,16 @@ pub fn cleanup_destroyed_non_ship_ball_sync(ctx: &ServerContext, sys_id: u32, ba
         return;
     }
 
-    let is_poco = ctx
-        .db
-        .with_snapshot(|snap| snap.customs_offices.contains_key(&ball_id));
+    let is_poco = ctx.db.with_snapshot(|snap| {
+        snap.corp_customs_offices
+            .values()
+            .any(|v| v.iter().any(|o| o.office_id == ball_id))
+    });
     if is_poco {
         ctx.db.with_mut_snapshot(|snap| {
-            snap.customs_offices.remove(&ball_id);
+            for v in snap.corp_customs_offices.values_mut() {
+                v.retain(|o| o.office_id != ball_id);
+            }
             snap.items.remove(&ball_id);
             snap.item_positions.remove(&ball_id);
             snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
