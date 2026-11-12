@@ -59,6 +59,7 @@ pub enum LockRankMode {
 #[cfg(any(test, debug_assertions, feature = "lock-rank"))]
 mod imp {
     use super::{Location, LockRankMode, LOCK_RANK_RATCHET_RAW};
+    #[cfg(test)]
     use std::cell::RefCell;
     use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
     use std::io::Write as _;
