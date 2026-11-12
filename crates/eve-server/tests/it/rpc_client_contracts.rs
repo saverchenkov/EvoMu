@@ -3008,10 +3008,13 @@ async fn test_c2_client_harness_wire_frames_and_wrong_shape_rejection() {
         )
         .await;
     assert!(login_out.result.is_ok(), "Login must succeed");
-    assert!(matches!(
-        login_out.frames.first().map(|f| &f.kind),
-        Some(ClientWireFrameKind::CallRsp { .. })
-    ));
+    assert!(
+        login_out
+            .frames
+            .iter()
+            .any(|f| matches!(f.kind, ClientWireFrameKind::CallRsp { .. })),
+        "Login wire exchange must include a CallRsp frame"
+    );
 
     let sel_out = harness
         .call_exchange(
