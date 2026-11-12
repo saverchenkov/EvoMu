@@ -585,27 +585,44 @@ impl ServerContext {
         if matches!(reason, "set_account_key" | "login") {
             return;
         }
-        let mut removed = Vec::new();
-        self.bound_objects
-            .write()
+        let candidates: Vec<(u64, BoundObjectEntry)> = self
+            .bound_objects
+            .read()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|&_bid, b| {
-                if b.character_id != char_id {
-                    return true;
+            .iter()
+            .filter(|(_, b)| b.character_id == char_id)
+            .map(|(&bid, b)| (bid, b.clone()))
+            .collect();
+        if candidates.is_empty() {
+            return;
+        }
+        let mut to_remove_ids = Vec::new();
+        for (bid, b) in &candidates {
+            if crate::router::binding_auth::should_invalidate_bound_object(
+                self,
+                b,
+                system_id,
+                active_dock_id,
+                reason,
+            ) {
+                to_remove_ids.push(*bid);
+            }
+        }
+        if to_remove_ids.is_empty() {
+            return;
+        }
+        let mut removed = Vec::with_capacity(to_remove_ids.len());
+        {
+            let mut map = self
+                .bound_objects
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            for bid in to_remove_ids {
+                if let Some(entry) = map.remove(&bid) {
+                    removed.push(entry);
                 }
-                if crate::router::binding_auth::should_invalidate_bound_object(
-                    self,
-                    b,
-                    system_id,
-                    active_dock_id,
-                    reason,
-                ) {
-                    removed.push(b.clone());
-                    false
-                } else {
-                    true
-                }
-            });
+            }
+        }
         for entry in &removed {
             self.emit_macho_object_disconnect(entry);
         }

@@ -405,12 +405,59 @@ impl PersistedServerRuntimeState {
             .collect();
         active_ewar_starts.sort_by_key(|(k, _)| *k);
 
+        let active_moon_probes = ctx
+            .active_moon_probes
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let mining_cycles = ctx
+            .mining_cycles
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let phased_asteroid_fields = ctx
+            .phased_asteroid_fields
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let session_change_timers = ctx
+            .session_change_timers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let active_warps = ctx
+            .active_warps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let location_change_invuln = ctx
+            .location_change_invuln
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let weapon_cycle_state = ctx
+            .weapon_cycle_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let projected_ewar = ctx
+            .projected_ewar
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let projected_ewar_sources = ctx
+            .projected_ewar_sources
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let map_landmarks = ctx
+            .map_landmarks
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+
         Self {
-            active_moon_probes: ctx
-                .active_moon_probes
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
+            active_moon_probes,
             scanned_signatures,
             character_scan_progress,
             active_fighters,
@@ -418,52 +465,16 @@ impl PersistedServerRuntimeState {
             fighter_charge_state,
             fighter_tube_loads,
             module_reactivation_cooldowns,
-            mining_cycles: ctx
-                .mining_cycles
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
-            phased_asteroid_fields: ctx
-                .phased_asteroid_fields
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
-            session_change_timers: ctx
-                .session_change_timers
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
-            active_warps: ctx
-                .active_warps
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
-            location_change_invuln: ctx
-                .location_change_invuln
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
-            weapon_cycle_state: ctx
-                .weapon_cycle_state
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
-            projected_ewar: ctx
-                .projected_ewar
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
-            projected_ewar_sources: ctx
-                .projected_ewar_sources
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
+            mining_cycles,
+            phased_asteroid_fields,
+            session_change_timers,
+            active_warps,
+            location_change_invuln,
+            weapon_cycle_state,
+            projected_ewar,
+            projected_ewar_sources,
             active_ewar_starts,
-            map_landmarks: ctx
-                .map_landmarks
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
+            map_landmarks,
             tactical_state,
             fleet_extras_runtime,
             social_extras_runtime,

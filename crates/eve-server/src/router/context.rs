@@ -4,7 +4,8 @@ use crate::living_world::LivingWorldDirector;
 use crate::system_actor::SystemRegistry;
 use crate::world_seeder;
 use eve_db::lock_rank::{
-    AnyRwLock, RankedMutex, RankedRwLock, RankedRwLockReadGuard, RankedRwLockWriteGuard, RANK_LEAF,
+    AnyRwLock, RankedMutex, RankedRwLock, RankedRwLockReadGuard, RankedRwLockWriteGuard,
+    RANK_CLOCK, RANK_LEAF,
 };
 use eve_db::WorldRepository;
 use eve_dogma::ShipFittingEngine;
@@ -39,7 +40,7 @@ pub struct ServerContext {
     pub instance_id: u64,
     pub sde: Arc<SdeRegistry>,
     pub db: Arc<WorldRepository>,
-    pub clock: RankedRwLock<Arc<dyn eve_db::ServerClock>, RANK_LEAF>,
+    pub clock: RankedRwLock<Arc<dyn eve_db::ServerClock>, RANK_CLOCK>,
     pub systems: Arc<SystemRegistry>,
     pub living_world: Arc<LivingWorldDirector>,
     pub quasar_gateway: Arc<crate::quasar_gateway::PublicGatewayRouter>,

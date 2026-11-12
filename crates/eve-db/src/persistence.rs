@@ -1,8 +1,8 @@
 //! Durable transactional snapshot persistence, WAL journaling, and SQLite relational storage.
 
 use crate::lock_rank::{
-    RankedMutex, RankedRwLock, RANK_LEAF, RANK_SQLITE_CONN, RANK_SQLITE_FP, RANK_WAL_LOCK,
-    RANK_WORLD_INNER,
+    RankedMutex, RankedRwLock, RANK_CLOCK, RANK_LEAF, RANK_SQLITE_CONN, RANK_SQLITE_FP,
+    RANK_WAL_LOCK, RANK_WORLD_INNER,
 };
 use crate::sqlite_store;
 use crate::types::AuthRuntimeState;
@@ -410,7 +410,7 @@ pub struct WorldRepository {
     pub(crate) sqlite_path: Option<std::path::PathBuf>,
     pub(crate) quarantine_unreadable: bool,
     pub(crate) auth_runtime: RankedRwLock<AuthRuntimeState, RANK_LEAF>,
-    pub(crate) clock: RankedRwLock<std::sync::Arc<dyn crate::clock::ServerClock>, RANK_LEAF>,
+    pub(crate) clock: RankedRwLock<std::sync::Arc<dyn crate::clock::ServerClock>, RANK_CLOCK>,
     pub(crate) wal_lock: RankedMutex<(), RANK_WAL_LOCK>,
     pub(crate) snapshot_path: Option<std::path::PathBuf>,
     pub(crate) pending_wal_records: std::sync::atomic::AtomicUsize,

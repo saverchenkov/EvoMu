@@ -25,9 +25,11 @@ pub const RANK_SQLITE_FP: u16 = 42;
 /// Rank `43`: `WorldRepository::wal_lock`.
 pub const RANK_WAL_LOCK: u16 = 43;
 /// Rank `60`: leaf locks (`SystemRegistry::systems`, runtime maps, mirrors, notification queues,
-/// `bound_objects`, `fleet_extras`, `social_extras`, `auth_runtime`, `esi_state.*`, Quasar meta,
-/// and clocks).
+/// `bound_objects`, `fleet_extras`, `social_extras`, `auth_runtime`, `esi_state.*`, and Quasar meta).
 pub const RANK_LEAF: u16 = 60;
+/// Rank `70`: terminal clock pointer lock (`WorldRepository::clock`, `ServerContext::clock`);
+/// never acquires any inner lock while held, so leaf locks may read the clock.
+pub const RANK_CLOCK: u16 = 70;
 
 /// Generated ratchet baseline of known temporary lock-rank violations (`(held, acquired, site)`).
 /// When empty, default enforcement switches to `panic`.
