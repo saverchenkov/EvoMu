@@ -1018,18 +1018,40 @@ async fn test_b41_proving_grounds_party_size_boss_range_cargo_implant_and_atomic
     crate::common::pin_clock(&ctx);
     let jita = 30_000_142_u32;
     let fil_2v2 = 72_984_u32; // 2v2 Battleships Proving Filament
-    let (fil_1v1, ship_1v1) = ctx
+    let mut candidate_1v1: Vec<_> = ctx
         .sde
         .types
         .values()
+        .filter(|t| {
+            t.group_id == 4050
+                && !t.name.contains("Expired")
+                && get_pvp_filament_match_spec(&ctx.sde, t.type_id).fleet_size == 1
+        })
+        .collect();
+    candidate_1v1.sort_by_key(|t| t.type_id);
+    let mut valid_pg_ships: Vec<_> = ctx
+        .sde
+        .types
+        .values()
+        .filter(|st| {
+            st.category_id == 6
+                && st.type_id != 670
+                && !matches!(
+                    st.group_id,
+                    29 | 30 | 485 | 513 | 547 | 659 | 883 | 902 | 941 | 1538
+                )
+        })
+        .collect();
+    valid_pg_ships.sort_by_key(|st| st.type_id);
+    let (fil_1v1, ship_1v1) = candidate_1v1
+        .into_iter()
         .find_map(|t| {
-            let sp = get_pvp_filament_match_spec(&ctx.sde, t.type_id);
-            if t.group_id != 4050 || t.name.contains("Expired") || sp.fleet_size != 1 {
-                return None;
-            }
-            let lid = sp.ship_restrictions_list_id?;
+            let lid = get_pvp_filament_match_spec(&ctx.sde, t.type_id).ship_restrictions_list_id?;
             let tl = ctx.sde.type_lists.get(&lid)?;
-            ctx.sde.types.values().find(|st| tl.contains(st)).map(|st| (t.type_id, st.type_id))
+            valid_pg_ships
+                .iter()
+                .find(|st| tl.contains(st))
+                .map(|st| (t.type_id, st.type_id))
         })
         .expect("1v1 Proving Grounds filament in SDE");
     let spec_2v2 = get_pvp_filament_match_spec(&ctx.sde, fil_2v2);
@@ -1037,14 +1059,16 @@ async fn test_b41_proving_grounds_party_size_boss_range_cargo_implant_and_atomic
         .sde
         .types
         .values()
-        .find(|t| t.category_id == 7 && t.default_attributes.get(&633).copied().unwrap_or(0.0) > f64::from(spec_2v2.max_meta_level))
+        .filter(|t| t.category_id == 7 && t.default_attributes.get(&633).copied().unwrap_or(0.0) > f64::from(spec_2v2.max_meta_level))
+        .min_by_key(|t| t.type_id)
         .unwrap()
         .type_id;
     let high_meta_imp_tid = ctx
         .sde
         .types
         .values()
-        .find(|t| t.category_id == 20 && t.default_attributes.get(&633).copied().unwrap_or(0.0) > f64::from(spec_2v2.max_meta_level))
+        .filter(|t| t.category_id == 20 && t.default_attributes.get(&633).copied().unwrap_or(0.0) > f64::from(spec_2v2.max_meta_level))
+        .min_by_key(|t| t.type_id)
         .unwrap()
         .type_id;
 
