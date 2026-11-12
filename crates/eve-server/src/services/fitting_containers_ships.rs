@@ -57,7 +57,14 @@ pub(crate) fn resolve_missing_dynamic_ship_stub_type_id(
         return None;
     }
     ctx.db.with_snapshot(|snap| {
-        if snap.items.contains_key(&item_id) {
+        if snap.items.contains_key(&item_id)
+            || snap.structures.contains_key(&item_id)
+            || snap.characters.contains_key(&item_id)
+            || snap.corporations.contains_key(&item_id)
+            || snap.alliances.contains_key(&item_id)
+            || snap.wars.contains_key(&item_id)
+            || snap.fleets.contains_key(&item_id)
+        {
             return None;
         }
         snap.killmails

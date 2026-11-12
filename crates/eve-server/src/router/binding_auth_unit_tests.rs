@@ -472,3 +472,133 @@ fn should_invalidate_bound_object_covers_all_reasons_and_services() {
     assert!(should_invalidate_bound_object(&ctx, &make_entry("warRegistry", 123_456, char_id), sys_id, None, "undock"));
     assert!(!should_invalidate_bound_object(&ctx, &make_entry("agentMgr", 3_018_922, char_id), sys_id, None, "undock"));
 }
+
+#[test]
+fn issue_803_invbroker_destroyed_dynamic_ship_stub_auth_verify_and_invalidation() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let other_char = 90_000_002_i64;
+    let sys_id = 30_000_142_u32;
+    let st_id = 60_003_760_i64;
+    let other_st = 60_008_494_i64;
+    let capsule_id = 200_294_811_i64;
+    let destroyed_ship_id = 200_246_015_i64;
+    let foreign_live_ship_id = 200_888_777_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = capsule_id;
+        }
+        snap.items.insert(
+            foreign_live_ship_id,
+            InventoryItemRecord {
+                item_id: foreign_live_ship_id,
+                type_id: 587,
+                owner_id: other_char,
+                location_id: other_st,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.killmails.insert(
+            1,
+            eve_db::KillmailRecord {
+                kill_id: 1,
+                solar_system_id: sys_id,
+                killed_unix: 1_800_000_010,
+                victim_character_id: char_id,
+                ship_type_id: 587,
+                ..Default::default()
+            },
+        );
+    });
+
+    let sess = SessionState {
+        session_id: 42,
+        user_id: Some(1),
+        character_id: Some(char_id),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(capsule_id),
+        ..Default::default()
+    };
+
+    // Destroyed dynamic ship stub is authorized and verified for the owning session's character.
+    assert!(authorize_service_binding(
+        &ctx,
+        &sess,
+        char_id,
+        "invbroker",
+        destroyed_ship_id
+    ));
+    let owned_entry = make_entry("invbroker", destroyed_ship_id, char_id);
+    assert!(verify_service_binding_context(&ctx, &sess, &owned_entry));
+
+    // Teardown and dock transitions do not invalidate the destroyed ship stub invbroker binding.
+    for (dock_opt, reason) in [
+        (None, "ship_loss"),
+        (Some(st_id), "dock"),
+        (Some(st_id), "session_location_change"),
+        (Some(st_id), "podding"),
+    ] {
+        assert!(
+            !should_invalidate_bound_object(&ctx, &owned_entry, sys_id, dock_opt, reason),
+            "reason={reason} should preserve destroyed-ship invbroker stub"
+        );
+    }
+
+    // Mismatched character/session ownership, unauthenticated session, non-stub IDs,
+    // and foreign live dynamic ships at another location remain rejected.
+    let other_sess = SessionState {
+        session_id: 43,
+        user_id: Some(2),
+        character_id: Some(other_char),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(capsule_id),
+        ..Default::default()
+    };
+    assert!(!verify_service_binding_context(&ctx, &other_sess, &owned_entry));
+
+    let unauth_sess = SessionState {
+        user_id: None,
+        ..sess.clone()
+    };
+    assert!(!authorize_service_binding(
+        &ctx,
+        &unauth_sess,
+        char_id,
+        "invbroker",
+        destroyed_ship_id
+    ));
+    assert!(!verify_service_binding_context(
+        &ctx,
+        &unauth_sess,
+        &owned_entry
+    ));
+
+    for bad_id in [199_999_999_i64, 999_999, 1_000_000_000_000, foreign_live_ship_id] {
+        assert!(
+            !authorize_service_binding(&ctx, &sess, char_id, "invbroker", bad_id),
+            "bad_id={bad_id} must not be authorized"
+        );
+        assert!(
+            !verify_service_binding_context(
+                &ctx,
+                &sess,
+                &make_entry("invbroker", bad_id, char_id)
+            ),
+            "bad_id={bad_id} must not verify"
+        );
+        assert!(should_invalidate_bound_object(
+            &ctx,
+            &make_entry("invbroker", bad_id, char_id),
+            sys_id,
+            None,
+            "ship_loss"
+        ));
+    }
+}
