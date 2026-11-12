@@ -669,3 +669,341 @@ async fn cmd_dock_warp_deceleration_1s_tolerance_and_mid_warp_rejection() {
     assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
     assert!(sys_handle.get_ball_snapshot(ship_id).await.unwrap().is_none());
 }
+
+#[tokio::test]
+async fn e2_handoffs_b4_b8_c27_take_restore_absent_ball_and_capacitor_persistence() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let jita_sys = 30_000_142_u32;
+    let perim_sys = 30_000_144_u32;
+    let st_id = 60_003_760_i64;
+
+    let st_pos = ctx
+        .sde
+        .stations
+        .get(&st_id)
+        .map(|s| s.position)
+        .unwrap_or(DVec3::ZERO);
+    spawn_ship_in_space(
+        &ctx,
+        char_id,
+        ship_id,
+        606,
+        jita_sys,
+        st_pos + DVec3::new(500.0, 0.0, 0.0),
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        crate::sp6_lifecycle::enter_space_in_snap(snap, ship_id, jita_sys);
+    });
+
+    let jita_handle = ctx.systems.get_or_spawn(jita_sys);
+    let perim_handle = ctx.systems.get_or_spawn(perim_sys);
+
+    // 1. Modify combat state & set partial capacitor + damage (#846, #889)
+    let updated_cs = jita_handle
+        .modify_combat_state(ship_id, |cs| {
+            cs.shield_hp = 110.0;
+            cs.armor_hp = 120.0;
+            cs.structure_hp = 130.0;
+            cs.capacitor = 92.5;
+        })
+        .await
+        .unwrap()
+        .expect("modify_combat_state on live ball must return Some");
+    assert!((updated_cs.capacitor - 92.5).abs() < 1e-6);
+
+    // 2. Dock via CmdDock -> takes ball atomically and records condition + partial capacitor (#842, #889, #917)
+    let mut sess = SessionState {
+        session_id: 917,
+        user_id: Some(1),
+        character_id: Some(char_id),
+        solar_system_id: Some(jita_sys),
+        station_id: None,
+        ship_id: Some(ship_id),
+        address: "tcp:127.0.0.1:45917".to_string(),
+        ..Default::default()
+    };
+    let kw = HashMap::new();
+    handle(
+        &ctx,
+        &mut sess,
+        None,
+        "beyonce",
+        "CmdDock",
+        &[PyRep::Integer(st_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("CmdDock should succeed");
+    assert_eq!(sess.station_id, Some(st_id));
+    assert!(jita_handle.get_ball_snapshot(ship_id).await.unwrap().is_none());
+
+    // 3. #846 (B8): Damage, heal, set_capacitor, and modify_combat_state on docked/absent ball
+    // must return None / Err and NEVER fabricate CombatState::default() or clobber docked HP/capacitor!
+    assert!(
+        jita_handle
+            .apply_damage(
+                ship_id,
+                eve_destiny::DamageVector {
+                    em: 100.0,
+                    thermal: 100.0,
+                    kinetic: 100.0,
+                    explosive: 100.0,
+                },
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        jita_handle
+            .apply_true_damage(ship_id, 250.0)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(jita_handle.set_capacitor(ship_id, 1.0).await.is_err());
+    assert!(jita_handle.heal_combat_state(ship_id).await.is_err());
+    assert!(
+        jita_handle
+            .modify_combat_state(ship_id, |cs| cs.shield_hp = 1.0)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(jita_handle.get_combat_state(ship_id).await.unwrap().is_none());
+
+    // Step tick on Jita while ship is docked must not overwrite docked condition
+    let _ = jita_handle.step_manual(1.0).await.unwrap();
+    let cond = ctx
+        .db
+        .with_snapshot(|snap| crate::sp6_lifecycle::read_ship_condition_in_snap(snap, ship_id))
+        .expect("persisted condition should exist");
+    assert!((cond.shield_hp - 110.0).abs() < 1e-6);
+    assert!((cond.armor_hp - 120.0).abs() < 1e-6);
+    assert!((cond.hull_hp - 130.0).abs() < 1e-6);
+    assert_eq!(cond.capacitor, Some(92.5));
+    assert_eq!(cond.in_space_system, None);
+    assert!(cond.space_entry_epoch >= 1);
+
+    // 4. #889 (C27): Undock restores partial capacitor (92.5 GJ, not 250.0 GJ max) and bumps space_entry_epoch
+    crate::services::station_structure::handle(
+        &ctx,
+        &mut sess,
+        "stationSvc",
+        "Undock",
+        &[PyRep::Integer(ship_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("Undock should succeed");
+    assert_eq!(sess.station_id, None);
+    let undocked_cs = jita_handle
+        .get_combat_state(ship_id)
+        .await
+        .unwrap()
+        .expect("undocked ship must have live combat state");
+    assert!(
+        (undocked_cs.capacitor - 92.5).abs() < 1e-4,
+        "expected partial capacitor 92.5 GJ after undock, got {}",
+        undocked_cs.capacitor
+    );
+    assert!((undocked_cs.shield_hp - 110.0).abs() < 1e-4);
+    assert!((undocked_cs.armor_hp - 120.0).abs() < 1e-4);
+    assert!((undocked_cs.structure_hp - 130.0).abs() < 1e-4);
+
+    let cond_after_undock = ctx
+        .db
+        .with_snapshot(|snap| crate::sp6_lifecycle::read_ship_condition_in_snap(snap, ship_id))
+        .unwrap();
+    assert_eq!(cond_after_undock.in_space_system, Some(jita_sys));
+    assert!(cond_after_undock.space_entry_epoch > cond.space_entry_epoch);
+
+    // 5. #842 (B4): take_ball + restore_ball rollback when DB transition fails during stargate jump
+    ctx.session_change_timers.lock().unwrap().clear();
+    let jita_to_perim_gate = ctx
+        .sde
+        .jumps
+        .values()
+        .find(|g| g.from_solar_system_id == jita_sys && g.to_solar_system_id == perim_sys)
+        .cloned()
+        .expect("Jita -> Perimeter stargate");
+    jita_handle.try_set_ball_position(ship_id, jita_to_perim_gate.position + DVec3::new(500.0, 0.0, 0.0));
+    let _ = jita_handle
+        .modify_combat_state(ship_id, |cs| {
+            cs.undock_invulnerable_remaining_ticks = 0;
+            cs.gate_cloak_remaining_ticks = 0;
+            cs.is_cloaked = false;
+        })
+        .await;
+
+    // Force DB transition failure by marking character in another solar system concurrently right after take_ball:
+    // First verify direct take_ball + restore_ball round-trip preserves ball and combat_state
+    let taken = jita_handle
+        .take_ball(ship_id)
+        .await
+        .expect("first take_ball must return Some");
+    assert!(
+        jita_handle.take_ball(ship_id).await.is_none(),
+        "second take_ball on already-taken ball must return None (#842)"
+    );
+    jita_handle
+        .restore_ball(taken)
+        .await
+        .expect("restore_ball must succeed");
+    assert!(jita_handle.get_ball_snapshot(ship_id).await.unwrap().is_some());
+
+    // Execute full CmdStargateJump and verify single-authority residency in destination system (#842, #917)
+    handle(
+        &ctx,
+        &mut sess,
+        None,
+        "beyonce",
+        "CmdStargateJump",
+        &[
+            PyRep::Integer(jita_to_perim_gate.stargate_id),
+            PyRep::Integer(jita_to_perim_gate.destination_stargate_id),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("CmdStargateJump Jita -> Perimeter should succeed");
+    assert_eq!(sess.solar_system_id, Some(perim_sys));
+    assert!(
+        jita_handle.get_ball_snapshot(ship_id).await.unwrap().is_none(),
+        "departed system must not retain ship ball"
+    );
+    assert!(
+        perim_handle.get_ball_snapshot(ship_id).await.unwrap().is_some(),
+        "destination system must own ship ball"
+    );
+    let perim_cs = perim_handle
+        .get_combat_state(ship_id)
+        .await
+        .unwrap()
+        .expect("destination combat_state");
+    assert!((perim_cs.capacitor - 92.5).abs() < 1e-4);
+
+    // Stale tick flush from departed system (Jita) must never overwrite destination system residency/condition
+    let _ = jita_handle.step_manual(1.0).await.unwrap();
+    let cond_after_jump = ctx
+        .db
+        .with_snapshot(|snap| crate::sp6_lifecycle::read_ship_condition_in_snap(snap, ship_id))
+        .unwrap();
+    assert_eq!(cond_after_jump.in_space_system, Some(perim_sys));
+    assert_eq!(cond_after_jump.capacitor, Some(92.5));
+}
+
+#[tokio::test]
+async fn cmd_warp_to_stuff_preserves_custom_ball_kinematics_on_normal_warp() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let ship_id = 895_099_i64;
+    let sys_id = 30_000_142_u32;
+    let st_id = 60_003_760_i64;
+    let st_pos = ctx.sde.stations[&st_id].position;
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 606,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle.try_spawn_ball_with_combat(
+        Ball {
+            id: ship_id,
+            type_id: 606,
+            position: st_pos + DVec3::new(10_000_000_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 420.0,
+            inertia: 1.75,
+            mass: 2_345_678.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        CombatState {
+            shield_hp: 500.0,
+            max_shield_hp: 500.0,
+            armor_hp: 500.0,
+            max_armor_hp: 500.0,
+            structure_hp: 500.0,
+            max_structure_hp: 500.0,
+            capacitor: 600.0,
+            max_capacitor: 600.0,
+            base_inertia: Some(9.9),
+            base_mass: Some(9_999_999.0),
+            ..Default::default()
+        },
+    );
+
+    let mut sess = SessionState {
+        user_id: Some(1),
+        character_id: Some(char_id),
+        solar_system_id: Some(sys_id),
+        station_id: None,
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+
+    handle(
+        &ctx,
+        &mut sess,
+        None,
+        "beyonce",
+        "CmdWarpToStuff",
+        &[PyRep::String("item".into()), PyRep::Integer(st_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("CmdWarpToStuff should initiate warp");
+
+    let (_, ball_after) = sys_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .expect("ship ball still in space");
+    assert!(matches!(ball_after.mode, MovementMode::Warp { .. }));
+    assert!(
+        (ball_after.inertia - 1.75).abs() < 1e-6,
+        "CmdWarpToStuff must not clobber live ball inertia ({})",
+        ball_after.inertia
+    );
+    assert!(
+        (ball_after.mass - 2_345_678.0).abs() < 1e-3,
+        "CmdWarpToStuff must not clobber live ball mass ({})",
+        ball_after.mass
+    );
+    let cs_after = sys_handle
+        .get_combat_state(ship_id)
+        .await
+        .unwrap()
+        .expect("ship combat_state");
+    assert!(
+        cs_after.capacitor < 600.0,
+        "CmdWarpToStuff must deduct warp capacitor via set_capacitor"
+    );
+}

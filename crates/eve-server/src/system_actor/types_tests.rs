@@ -440,6 +440,9 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::RecordIncomingArmorDamage { .. } => "RecordIncomingArmorDamage",
             SystemCommand::StopNonWarpModuleCycles { .. } => "StopNonWarpModuleCycles",
             SystemCommand::FlushPeerObserverUpdates { .. } => "FlushPeerObserverUpdates",
+            SystemCommand::TakeBall { .. } => "TakeBall",
+            SystemCommand::RestoreBall { .. } => "RestoreBall",
+            SystemCommand::ModifyCombatState { .. } => "ModifyCombatState",
         }
     }
 

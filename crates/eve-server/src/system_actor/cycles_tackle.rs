@@ -373,12 +373,21 @@ pub(crate) fn set_combat_state_in_actor(
         (p.shield_hp - cs.shield_hp).abs() > 1e-6
             || (p.armor_hp - cs.armor_hp).abs() > 1e-6
             || (p.structure_hp - cs.structure_hp).abs() > 1e-6
+            || (p.capacitor - cs.capacitor).abs() > 1e-6
     }) || (cs.max_shield_hp > 0.0 && cs.shield_hp < cs.max_shield_hp - 1e-6)
         || (cs.max_armor_hp > 0.0 && cs.armor_hp < cs.max_armor_hp - 1e-6)
-        || (cs.max_structure_hp > 0.0 && cs.structure_hp < cs.max_structure_hp - 1e-6);
-    if hp_changed_or_damaged {
+        || (cs.max_structure_hp > 0.0 && cs.structure_hp < cs.max_structure_hp - 1e-6)
+        || (cs.max_capacitor > 0.0 && cs.capacitor < cs.max_capacitor - 1e-6);
+    if hp_changed_or_damaged && ballpark.balls.contains_key(&ball_id) {
         if let Some(db) = db_opt {
-            crate::sp6_lifecycle::persist_ship_combat_hp_in_db(db, ball_id, &cs);
+            let not_stale = db.with_snapshot(|snap| {
+                !crate::sp6_lifecycle::is_ship_stale_for_in_space_write_in_snap(
+                    snap, ball_id, None, None,
+                )
+            });
+            if not_stale {
+                crate::sp6_lifecycle::persist_ship_combat_hp_in_db(db, ball_id, &cs);
+            }
         }
     }
     ballpark.combat_states.insert(ball_id, cs);

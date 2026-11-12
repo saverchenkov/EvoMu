@@ -724,6 +724,247 @@ pub fn compute_wormhole_stages_with_sde(
     (mass_stage, wormhole_size, lifetime_stage, wormhole_age, is_collapsed)
 }
 
+struct ValidatedWormholeJumpPreflight {
+    sig_host_sys: SolarSystemId,
+    wh_idx: usize,
+    is_reverse_exit_jump: bool,
+    wh_id: i64,
+    dest_sys: SolarSystemId,
+    exit_wh_id: i64,
+    sig_id_str: String,
+    ch_const: u32,
+    ch_reg: u32,
+    ch_active_ship: i64,
+    already_collapsed: Option<BridgeRpcError>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_cosmic_wormhole_jump_in_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    old_sys: SolarSystemId,
+    ship_id: i64,
+    ship_mass: f64,
+    current_ball: &Ball,
+    exit_ball_pos_opt: Option<DVec3>,
+    wh_arg_i64: Option<i64>,
+    wh_arg_str: Option<&str>,
+    now_unix: u64,
+) -> Result<ValidatedWormholeJumpPreflight, BridgeRpcError> {
+    let ch = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
+        code: "SystemTransitionFailed".into(),
+        message: format!("Character {char_id} not found"),
+    })?;
+    if ch.station_id.is_some() || ch.structure_id.is_some() {
+        return Err(BridgeRpcError {
+            code: "SystemTransitionFailed".into(),
+            message: format!("Character {char_id} is docked and cannot transition in space"),
+        });
+    }
+    if ch.solar_system_id != old_sys {
+        return Err(BridgeRpcError {
+            code: "SystemTransitionFailed".into(),
+            message: format!(
+                "Character {char_id} moved to solar system {} concurrently",
+                ch.solar_system_id
+            ),
+        });
+    }
+    let ch_const = ch.constellation_id;
+    let ch_reg = ch.region_id;
+    let ch_active_ship = ch.active_ship_id;
+
+    // Resolve canonical parent signature even if jumping via materialized `K162-<orig_id>` string or `exit_wh_id`.
+    let mut reverse_parent_opt: Option<(SolarSystemId, String)> = None;
+    let mut local_k162_pos_opt: Option<DVec3> = None;
+    if let Some(local_sigs) = snap.cosmic_signatures.get(&old_sys) {
+        if let Some(local_k162) = local_sigs.iter().find(|s| {
+            s.sig_group == "Wormhole"
+                && s.signature_id.starts_with("K162-")
+                && (wh_arg_str == Some(s.signature_id.as_str())
+                    || wh_arg_i64 == Some(wormhole_item_id_for_signature(old_sys, &s.signature_id)))
+        }) {
+            local_k162_pos_opt = Some(pochven_wormhole_ball_position(&ctx.sde, local_k162));
+            let orig_id = local_k162.signature_id[5..].to_string();
+            if let Some(parent_sys) = local_k162.destination_system_id {
+                if snap.cosmic_signatures.get(&parent_sys).is_some_and(|ps| {
+                    ps.iter().any(|p| p.sig_group == "Wormhole" && p.signature_id == orig_id)
+                }) {
+                    reverse_parent_opt = Some((parent_sys, orig_id));
+                }
+            }
+        }
+    }
+    if reverse_parent_opt.is_none() {
+        let has_non_k162_local = snap.cosmic_signatures.get(&old_sys).is_some_and(|sigs| {
+            sigs.iter().any(|s| {
+                s.sig_group == "Wormhole"
+                    && !s.signature_id.starts_with("K162-")
+                    && (wh_arg_str == Some(s.signature_id.as_str())
+                        || wh_arg_i64
+                            == Some(wormhole_item_id_for_signature(old_sys, &s.signature_id)))
+            })
+        });
+        if !has_non_k162_local {
+            for (&psys, sigs) in &snap.cosmic_signatures {
+                if let Some(parent) = sigs.iter().find(|s| {
+                    s.sig_group == "Wormhole"
+                        && !s.signature_id.starts_with("K162-")
+                        && s.destination_system_id == Some(old_sys)
+                        && (wh_arg_i64
+                            == Some(wormhole_exit_item_id_for_signature(old_sys, &s.signature_id))
+                            || wh_arg_str == Some(format!("K162-{}", s.signature_id).as_str()))
+                }) {
+                    reverse_parent_opt = Some((psys, parent.signature_id.clone()));
+                    break;
+                }
+            }
+        }
+    }
+
+    let (sig_host_sys, is_reverse_exit_jump, target_parent_sig_id) =
+        if let Some((psys, orig_id)) = reverse_parent_opt {
+            (psys, true, Some(orig_id))
+        } else {
+            (old_sys, false, None)
+        };
+    let ship_type_id = snap
+        .items
+        .get(&ship_id)
+        .map(|i| i.type_id)
+        .unwrap_or(current_ball.type_id);
+
+    let Some(sigs) = snap.cosmic_signatures.get(&sig_host_sys) else {
+        return Err(BridgeRpcError {
+            code: "WormholeNotFound".into(),
+            message: "No signatures in system".into(),
+        });
+    };
+    let matches_wh = |s: &CosmicSignatureRecord| {
+        s.sig_group == "Wormhole"
+            && if let Some(ref pid) = target_parent_sig_id {
+                s.signature_id == *pid
+            } else {
+                wh_arg_str == Some(s.signature_id.as_str())
+                    || wh_arg_i64 == Some(wormhole_item_id_for_signature(old_sys, &s.signature_id))
+            }
+    };
+    let Some(wh_idx) = sigs
+        .iter()
+        .position(|s| !s.collapsed && matches_wh(s))
+        .or_else(|| sigs.iter().position(matches_wh))
+    else {
+        return Err(BridgeRpcError {
+            code: "WormholeNotFound".into(),
+            message: format!("Wormhole not found in system {old_sys}"),
+        });
+    };
+
+    let sig = &sigs[wh_idx];
+    let sig_id_str = sig.signature_id.clone();
+    let (wh_id, dest_sys, exit_wh_id) = if is_reverse_exit_jump {
+        let local_exit_id = wormhole_exit_item_id_for_signature(old_sys, &sig_id_str);
+        let parent_entrance_id = wormhole_item_id_for_signature(sig_host_sys, &sig_id_str);
+        (local_exit_id, sig_host_sys, parent_entrance_id)
+    } else {
+        let entrance_id = wormhole_item_id_for_signature(old_sys, &sig_id_str);
+        let d_sys = sig.destination_system_id.unwrap_or(31_000_005);
+        let exit_id = wormhole_exit_item_id_for_signature(d_sys, &sig_id_str);
+        (entrance_id, d_sys, exit_id)
+    };
+
+    let pol_expiry = snap.wh_polarizations.get(&(char_id, wh_id)).copied().unwrap_or(0);
+    if pol_expiry > now_unix {
+        return Err(BridgeRpcError {
+            code: "WormholePolarized".into(),
+            message: format!(
+                "Character is polarized for wormhole {} for another {} seconds",
+                wh_id,
+                pol_expiry.saturating_sub(now_unix)
+            ),
+        });
+    }
+
+    let wh_pos = exit_ball_pos_opt
+        .or(local_k162_pos_opt)
+        .unwrap_or_else(|| pochven_wormhole_ball_position(&ctx.sde, sig));
+    let dist = current_ball.position.distance(wh_pos);
+    if dist > 2_500.0 {
+        return Err(BridgeRpcError {
+            code: "OutsideWormholeJumpRange".into(),
+            message: format!("Ship is {:.1} m from wormhole (must be <= 2500 m)", dist),
+        });
+    }
+
+    let elapsed = now_unix.saturating_sub(sig.created_unix);
+    if elapsed >= sig.lifetime_seconds || sig.collapsed {
+        let code = if elapsed >= sig.lifetime_seconds {
+            "WormholeCollapsed"
+        } else {
+            "WormholeMassCollapsed"
+        };
+        return Ok(ValidatedWormholeJumpPreflight {
+            sig_host_sys,
+            wh_idx,
+            is_reverse_exit_jump,
+            wh_id,
+            dest_sys,
+            exit_wh_id,
+            sig_id_str,
+            ch_const,
+            ch_reg,
+            ch_active_ship,
+            already_collapsed: Some(BridgeRpcError {
+                code: code.into(),
+                message: "Wormhole has collapsed".into(),
+            }),
+        });
+    }
+
+    let (origin_class, _, _, _) = system_wormhole_profile_sde(&ctx.sde, old_sys);
+    let (dest_class, dest_is_thera, dest_is_shattered, _) =
+        system_wormhole_profile_sde(&ctx.sde, dest_sys);
+    let max_jump = sig.max_jump_mass_kg;
+    if is_small_ship_wormhole(sig.wormhole_type_id, max_jump, origin_class, dest_class) {
+        check_small_ship_wormhole_eligibility(&ctx.sde, ship_type_id, ship_mass)?;
+    } else if (max_jump > 0.0 && ship_mass > max_jump)
+        || ((dest_is_thera || dest_is_shattered || (1..=4).contains(&dest_class))
+            && ship_mass > 375_000_000.0)
+    {
+        return Err(BridgeRpcError {
+            code: "ShipTooHeavyForWormhole".into(),
+            message: format!(
+                "Ship mass {:.1} kg exceeds wormhole jump limit {:.1} kg",
+                ship_mass, max_jump
+            ),
+        });
+    }
+
+    let already_collapsed = if sig.remaining_mass_kg <= 0.0 {
+        Some(BridgeRpcError {
+            code: "WormholeMassCollapsed".into(),
+            message: "Wormhole lacks remaining mass capacity and has collapsed".into(),
+        })
+    } else {
+        None
+    };
+
+    Ok(ValidatedWormholeJumpPreflight {
+        sig_host_sys,
+        wh_idx,
+        is_reverse_exit_jump,
+        wh_id,
+        dest_sys,
+        exit_wh_id,
+        sig_id_str,
+        ch_const,
+        ch_reg,
+        ch_active_ship,
+        already_collapsed,
+    })
+}
+
 // parity: feat:wormholes.mass-reduction-and-destabilization
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_cosmic_wormhole_jump(
@@ -806,6 +1047,52 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
         None
     };
 
+    let preflight = match ctx.db.with_snapshot(|snap| {
+        validate_cosmic_wormhole_jump_in_snap(
+            ctx,
+            snap,
+            char_id,
+            old_sys,
+            ship_id,
+            ship_mass,
+            &current_ball,
+            exit_ball_pos_opt,
+            wh_arg_i64,
+            wh_arg_str,
+            now_unix,
+        )
+    }) {
+        Ok(p) => p,
+        Err(e) => {
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnWormholeJumpCancel",
+                "charid",
+                vec![],
+            );
+            return Some(Err(e));
+        }
+    };
+
+    let mut taken_opt = if preflight.already_collapsed.is_none() {
+        let Some(taken) = old_handle.take_ball(ship_id).await else {
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnWormholeJumpCancel",
+                "charid",
+                vec![],
+            );
+            return Some(Err(BridgeRpcError {
+                code: "SystemTransitionFailed".into(),
+                message: format!("Ship {ship_id} is no longer in solar system {old_sys}"),
+            }));
+        };
+        Some(taken)
+    } else {
+        None
+    };
+    let prev_cs_for_db = taken_opt.as_ref().and_then(|t| t.combat_state.clone());
+
     let mut collapsed_balls_to_remove: Vec<(SolarSystemId, i64)> = Vec::new();
     let mut replacement_to_spawn: Option<(SolarSystemId, CosmicSignatureRecord)> = None;
     let mut collapsed_sig_delta: Option<(SolarSystemId, String)> = None;
@@ -815,71 +1102,23 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
 
     enum WormholeJumpTxOutcome {
         Collapsed(BridgeRpcError),
-        Jumped(SolarSystemId, i64, i64, String, f64, f64, &'static str, f64, &'static str, i64, bool, WormholeBuckets),
+        Jumped(SolarSystemId, i64, i64, String, f64, f64, &'static str, f64, &'static str, i64, bool, WormholeBuckets, SolarSystemId),
     }
 
     let res = ctx.db.try_with_mut_snapshot(|snap| {
-        // Resolve canonical parent signature even if jumping via materialized `K162-<orig_id>` string or `exit_wh_id`.
-        let mut reverse_parent_opt: Option<(SolarSystemId, String)> = None;
-        let mut local_k162_pos_opt: Option<DVec3> = None;
-        if let Some(local_sigs) = snap.cosmic_signatures.get(&old_sys) {
-            if let Some(local_k162) = local_sigs.iter().find(|s| {
-                s.sig_group == "Wormhole"
-                    && s.signature_id.starts_with("K162-")
-                    && (wh_arg_str == Some(s.signature_id.as_str())
-                        || wh_arg_i64
-                            == Some(wormhole_item_id_for_signature(old_sys, &s.signature_id)))
-            }) {
-                local_k162_pos_opt = Some(pochven_wormhole_ball_position(&ctx.sde, local_k162));
-                let orig_id = local_k162.signature_id[5..].to_string();
-                if let Some(parent_sys) = local_k162.destination_system_id {
-                    if snap.cosmic_signatures.get(&parent_sys).is_some_and(|ps| {
-                        ps.iter().any(|p| p.sig_group == "Wormhole" && p.signature_id == orig_id)
-                    }) {
-                        reverse_parent_opt = Some((parent_sys, orig_id));
-                    }
-                }
-            }
-        }
-        if reverse_parent_opt.is_none() {
-            let has_non_k162_local = snap.cosmic_signatures.get(&old_sys).is_some_and(|sigs| {
-                sigs.iter().any(|s| {
-                    s.sig_group == "Wormhole"
-                        && !s.signature_id.starts_with("K162-")
-                        && (wh_arg_str == Some(s.signature_id.as_str())
-                            || wh_arg_i64
-                                == Some(wormhole_item_id_for_signature(old_sys, &s.signature_id)))
-                })
-            });
-            if !has_non_k162_local {
-                for (&psys, sigs) in &snap.cosmic_signatures {
-                    if let Some(parent) = sigs.iter().find(|s| {
-                        s.sig_group == "Wormhole"
-                            && !s.signature_id.starts_with("K162-")
-                            && s.destination_system_id == Some(old_sys)
-                            && (wh_arg_i64
-                                == Some(wormhole_exit_item_id_for_signature(old_sys, &s.signature_id))
-                                || wh_arg_str
-                                    == Some(format!("K162-{}", s.signature_id).as_str()))
-                    }) {
-                        reverse_parent_opt = Some((psys, parent.signature_id.clone()));
-                        break;
-                    }
-                }
-            }
-        }
-
-        let (sig_host_sys, is_reverse_exit_jump, target_parent_sig_id) =
-            if let Some((psys, orig_id)) = reverse_parent_opt {
-                (psys, true, Some(orig_id))
-            } else {
-                (old_sys, false, None)
-            };
-        let ship_type_id = snap
-            .items
-            .get(&ship_id)
-            .map(|i| i.type_id)
-            .unwrap_or(current_ball.type_id);
+        let p = validate_cosmic_wormhole_jump_in_snap(
+            ctx,
+            snap,
+            char_id,
+            old_sys,
+            ship_id,
+            ship_mass,
+            &current_ball,
+            exit_ball_pos_opt,
+            wh_arg_i64,
+            wh_arg_str,
+            now_unix,
+        )?;
 
         let (
             dest_sys,
@@ -896,136 +1135,42 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
             buckets,
             parent_snapshot,
         ) = {
-            let Some(sigs) = snap.cosmic_signatures.get_mut(&sig_host_sys) else {
+            let Some(sigs) = snap.cosmic_signatures.get_mut(&p.sig_host_sys) else {
                 return Err(BridgeRpcError {
                     code: "WormholeNotFound".into(),
                     message: "No signatures in system".into(),
                 });
             };
             let next_seq = sigs.len() as u32 + 1;
-            let matches_wh = |s: &CosmicSignatureRecord| {
-                s.sig_group == "Wormhole"
-                    && if let Some(ref pid) = target_parent_sig_id {
-                        s.signature_id == *pid
-                    } else {
-                        wh_arg_str == Some(s.signature_id.as_str())
-                            || wh_arg_i64
-                                == Some(wormhole_item_id_for_signature(old_sys, &s.signature_id))
-                    }
-            };
-            let Some(wh_idx) = sigs
-                .iter()
-                .position(|s| !s.collapsed && matches_wh(s))
-                .or_else(|| sigs.iter().position(matches_wh))
-            else {
-                return Err(BridgeRpcError {
-                    code: "WormholeNotFound".into(),
-                    message: format!("Wormhole not found in system {old_sys}"),
-                });
-            };
-
-            let sig_id_str = sigs[wh_idx].signature_id.clone();
-            let (wh_id, dest_sys, exit_wh_id) = if is_reverse_exit_jump {
-                let local_exit_id = wormhole_exit_item_id_for_signature(old_sys, &sig_id_str);
-                let parent_entrance_id = wormhole_item_id_for_signature(sig_host_sys, &sig_id_str);
-                (local_exit_id, sig_host_sys, parent_entrance_id)
-            } else {
-                let entrance_id = wormhole_item_id_for_signature(old_sys, &sig_id_str);
-                let d_sys = sigs[wh_idx].destination_system_id.unwrap_or(31_000_005);
-                let exit_id = wormhole_exit_item_id_for_signature(d_sys, &sig_id_str);
-                (entrance_id, d_sys, exit_id)
-            };
-
-            let pol_expiry = snap.wh_polarizations.get(&(char_id, wh_id)).copied().unwrap_or(0);
-            if pol_expiry > now_unix {
-                return Err(BridgeRpcError {
-                    code: "WormholePolarized".into(),
-                    message: format!(
-                        "Character is polarized for wormhole {} for another {} seconds",
-                        wh_id,
-                        pol_expiry.saturating_sub(now_unix)
-                    ),
-                });
-            }
-
-            let wh_pos = exit_ball_pos_opt
-                .or(local_k162_pos_opt)
-                .unwrap_or_else(|| pochven_wormhole_ball_position(&ctx.sde, &sigs[wh_idx]));
-            let dist = current_ball.position.distance(wh_pos);
-            if dist > 2_500.0 {
-                return Err(BridgeRpcError {
-                    code: "OutsideWormholeJumpRange".into(),
-                    message: format!(
-                        "Ship is {:.1} m from wormhole (must be <= 2500 m)",
-                        dist
-                    ),
-                });
-            }
-
             let mut record_collapse = |sigs_vec: &mut Vec<CosmicSignatureRecord>, idx: usize| {
                 let was_collapsed = sigs_vec[idx].collapsed;
                 sigs_vec[idx].collapsed = true;
-                collapsed_balls_to_remove.push((old_sys, wh_id));
-                collapsed_balls_to_remove.push((dest_sys, exit_wh_id));
+                collapsed_balls_to_remove.push((old_sys, p.wh_id));
+                collapsed_balls_to_remove.push((p.dest_sys, p.exit_wh_id));
                 if !was_collapsed {
-                    collapsed_sig_delta = Some((sig_host_sys, sig_id_str.clone()));
-                    let mirror_sys = if is_reverse_exit_jump { old_sys } else { dest_sys };
-                    collapsed_mirror_delta = Some((mirror_sys, format!("K162-{sig_id_str}")));
+                    collapsed_sig_delta = Some((p.sig_host_sys, p.sig_id_str.clone()));
+                    let mirror_sys = if p.is_reverse_exit_jump { old_sys } else { p.dest_sys };
+                    collapsed_mirror_delta = Some((mirror_sys, format!("K162-{}", p.sig_id_str)));
                     if let Some(rep) = build_static_replacement_wormhole(
-                        ctx, sig_host_sys, &sigs_vec[idx], now_unix, next_seq,
+                        ctx,
+                        p.sig_host_sys,
+                        &sigs_vec[idx],
+                        now_unix,
+                        next_seq,
                     ) {
-                        replacement_to_spawn = Some((sig_host_sys, rep.clone()));
+                        replacement_to_spawn = Some((p.sig_host_sys, rep.clone()));
                         sigs_vec.push(rep);
                     }
                 }
             };
 
-            let elapsed = now_unix.saturating_sub(sigs[wh_idx].created_unix);
-            if elapsed >= sigs[wh_idx].lifetime_seconds || sigs[wh_idx].collapsed {
-                record_collapse(sigs, wh_idx);
-                let code = if elapsed >= sigs[wh_idx].lifetime_seconds {
-                    "WormholeCollapsed"
-                } else {
-                    "WormholeMassCollapsed"
-                };
-                return Ok(WormholeJumpTxOutcome::Collapsed(BridgeRpcError {
-                    code: code.into(),
-                    message: "Wormhole has collapsed".into(),
-                }));
+            if let Some(collapse_err) = p.already_collapsed {
+                record_collapse(sigs, p.wh_idx);
+                return Ok(WormholeJumpTxOutcome::Collapsed(collapse_err));
             }
 
-            let (origin_class, _, _, _) = system_wormhole_profile_sde(&ctx.sde, old_sys);
-            let (dest_class, dest_is_thera, dest_is_shattered, _) =
-                system_wormhole_profile_sde(&ctx.sde, dest_sys);
+            let wh_idx = p.wh_idx;
             let max_jump = sigs[wh_idx].max_jump_mass_kg;
-            if is_small_ship_wormhole(
-                sigs[wh_idx].wormhole_type_id,
-                max_jump,
-                origin_class,
-                dest_class,
-            ) {
-                check_small_ship_wormhole_eligibility(&ctx.sde, ship_type_id, ship_mass)?;
-            } else if (max_jump > 0.0 && ship_mass > max_jump)
-                || ((dest_is_thera || dest_is_shattered || (1..=4).contains(&dest_class))
-                    && ship_mass > 375_000_000.0)
-            {
-                return Err(BridgeRpcError {
-                    code: "ShipTooHeavyForWormhole".into(),
-                    message: format!(
-                        "Ship mass {:.1} kg exceeds wormhole jump limit {:.1} kg",
-                        ship_mass, max_jump
-                    ),
-                });
-            }
-
-            if sigs[wh_idx].remaining_mass_kg <= 0.0 {
-                record_collapse(sigs, wh_idx);
-                return Ok(WormholeJumpTxOutcome::Collapsed(BridgeRpcError {
-                    code: "WormholeMassCollapsed".into(),
-                    message: "Wormhole lacks remaining mass capacity and has collapsed".into(),
-                }));
-            }
-
             sigs[wh_idx].remaining_mass_kg -= ship_mass;
             if sigs[wh_idx].remaining_mass_kg <= 0.0 {
                 record_collapse(sigs, wh_idx);
@@ -1038,10 +1183,10 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
             let parent_snapshot = sigs[wh_idx].clone();
 
             (
-                dest_sys,
-                wh_id,
-                exit_wh_id,
-                sig_id_str,
+                p.dest_sys,
+                p.wh_id,
+                p.exit_wh_id,
+                p.sig_id_str,
                 rem_mass,
                 max_jump,
                 mass_stage,
@@ -1055,7 +1200,7 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
         };
 
         // Materialize destination K162 signature on first jump through (`feat:navigation.wormhole-k162-exit-materialization`)
-        if !is_reverse_exit_jump && !is_collapsed && !parent_snapshot.signature_id.starts_with("K162-") {
+        if !p.is_reverse_exit_jump && !is_collapsed && !parent_snapshot.signature_id.starts_with("K162-") {
             if let Some((k_exit_id, k_rec, _k_pos)) =
                 materialize_k162_exit_in_snap(ctx, snap, &parent_snapshot, dest_sys)
             {
@@ -1065,7 +1210,7 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
             }
         }
         if fallback_exit_pos.is_none() {
-            fallback_exit_pos = if is_reverse_exit_jump {
+            fallback_exit_pos = if p.is_reverse_exit_jump {
                 Some(pochven_wormhole_ball_position(&ctx.sde, &parent_snapshot))
             } else {
                 snap.cosmic_signatures
@@ -1089,111 +1234,164 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
         snap.wh_polarizations.insert((char_id, dest_sys as i64), now_unix + 300);
         snap.wh_polarizations.insert((char_id, wh_id), now_unix + 300);
 
-        Ok(WormholeJumpTxOutcome::Jumped(dest_sys, wh_id, exit_wh_id, sig_id_str, rem_mass, max_jump, mass_stage, wh_size, life_stage, wh_age, is_collapsed, buckets))
+        let (const_id, reg_id) = ctx
+            .sde
+            .solar_systems
+            .get(&dest_sys)
+            .map(|s| (s.constellation_id, s.region_id))
+            .unwrap_or_else(|| {
+                (
+                    if p.ch_const != 0 { p.ch_const } else { 20_000_020 },
+                    if p.ch_reg != 0 { p.ch_reg } else { 10_000_002 },
+                )
+            });
+        let updated_sys_id = {
+            let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
+                code: "SystemTransitionFailed".into(),
+                message: format!("Character {char_id} not found"),
+            })?;
+            ch.solar_system_id = dest_sys;
+            ch.constellation_id = const_id;
+            ch.region_id = reg_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.version += 1;
+            ch.system_epoch += 1;
+            ch.solar_system_id
+        };
+        if let Some(ship) = snap.items.get_mut(&p.ch_active_ship) {
+            ship.location_id = dest_sys as i64;
+            ship.flag = eve_db::InventoryFlag::None;
+            ship.version += 1;
+        }
+        if ship_id != p.ch_active_ship {
+            if let Some(ship) = snap.items.get_mut(&ship_id) {
+                ship.location_id = dest_sys as i64;
+                ship.flag = eve_db::InventoryFlag::None;
+                ship.version += 1;
+            }
+        }
+        crate::sp6_lifecycle::leave_space_in_snap(
+            snap,
+            ship_id,
+            prev_cs_for_db.as_ref(),
+            Some(dest_sys),
+            None,
+        );
+        crate::sp6_lifecycle::enter_space_in_snap(snap, ship_id, dest_sys);
+
+        Ok(WormholeJumpTxOutcome::Jumped(dest_sys, wh_id, exit_wh_id, sig_id_str, rem_mass, max_jump, mass_stage, wh_size, life_stage, wh_age, is_collapsed, buckets, updated_sys_id))
     });
 
-    for (b_sys, rem_id) in &collapsed_balls_to_remove {
-        let h = ctx.systems.get_or_spawn(*b_sys);
-        let _ = h.remove_ball(*rem_id).await;
-    }
-    if let Some((host_sys, collapsed_id)) = collapsed_sig_delta {
-        let added_vec: Vec<CosmicSignatureRecord> = replacement_to_spawn
-            .as_ref()
-            .filter(|(s, _)| *s == host_sys)
-            .map(|(_, r)| r.clone())
-            .into_iter()
-            .collect();
-        crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_signature_delta(
-            ctx,
-            host_sys,
-            &added_vec,
-            &[collapsed_id],
-        );
-    }
-    if let Some((m_sys, m_id)) = collapsed_mirror_delta {
-        crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_signature_delta(
-            ctx,
-            m_sys,
-            &[],
-            &[m_id],
-        );
-    }
-    if let Some((d_sys, k_exit_id, k_rec, k_pos)) = k162_to_materialize {
-        let dh = ctx.systems.get_or_spawn(d_sys);
-        if dh.get_ball_snapshot(k_exit_id).await.ok().flatten().is_none() {
-            let _ = dh
+    if res.is_ok() {
+        for (b_sys, rem_id) in &collapsed_balls_to_remove {
+            let h = ctx.systems.get_or_spawn(*b_sys);
+            let _ = h.remove_ball(*rem_id).await;
+        }
+        if let Some((host_sys, collapsed_id)) = collapsed_sig_delta {
+            let added_vec: Vec<CosmicSignatureRecord> = replacement_to_spawn
+                .as_ref()
+                .filter(|(s, _)| *s == host_sys)
+                .map(|(_, r)| r.clone())
+                .into_iter()
+                .collect();
+            crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_signature_delta(
+                ctx,
+                host_sys,
+                &added_vec,
+                &[collapsed_id],
+            );
+        }
+        if let Some((m_sys, m_id)) = collapsed_mirror_delta {
+            crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_signature_delta(
+                ctx,
+                m_sys,
+                &[],
+                &[m_id],
+            );
+        }
+        if let Some((d_sys, k_exit_id, k_rec, k_pos)) = k162_to_materialize {
+            let dh = ctx.systems.get_or_spawn(d_sys);
+            if dh.get_ball_snapshot(k_exit_id).await.ok().flatten().is_none() {
+                let _ = dh
+                    .spawn_ball(Ball {
+                        id: k_exit_id,
+                        type_id: 26272,
+                        position: k_pos,
+                        velocity: DVec3::ZERO,
+                        max_velocity: 0.0,
+                        inertia: 1.0,
+                        mass: k_rec.remaining_mass_kg.max(1.0),
+                        radius: 1500.0,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Rigid,
+                    })
+                    .await;
+            }
+            if is_pochven_wormhole(&ctx.sde, &k_rec) {
+                let d_is_poch = ctx.sde.solar_systems.get(&d_sys).map(|s| s.region_id) == Some(10_000_070);
+                let _ = super::space_pochven_wormholes::ensure_pochven_side_guards(
+                    ctx, d_sys, k_exit_id, k_pos, d_is_poch,
+                )
+                .await;
+            }
+            crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_signature_delta(
+                ctx,
+                d_sys,
+                &[k_rec],
+                &[],
+            );
+        }
+        if let Some((rep_host_sys, rep)) = &replacement_to_spawn {
+            let new_wh_id = wormhole_item_id_for_signature(*rep_host_sys, &rep.signature_id);
+            let rep_handle = ctx.systems.get_or_spawn(*rep_host_sys);
+            let _ = rep_handle
                 .spawn_ball(Ball {
-                    id: k_exit_id,
-                    type_id: 26272,
-                    position: k_pos,
+                    id: new_wh_id,
+                    type_id: rep.wormhole_type_id.unwrap_or(26272),
+                    position: pochven_wormhole_ball_position(&ctx.sde, rep),
                     velocity: DVec3::ZERO,
                     max_velocity: 0.0,
                     inertia: 1.0,
-                    mass: k_rec.remaining_mass_kg.max(1.0),
+                    mass: rep.remaining_mass_kg.max(1.0),
                     radius: 1500.0,
                     speed_fraction: 0.0,
                     mode: MovementMode::Rigid,
                 })
                 .await;
         }
-        if is_pochven_wormhole(&ctx.sde, &k_rec) {
-            let d_is_poch = ctx.sde.solar_systems.get(&d_sys).map(|s| s.region_id) == Some(10_000_070);
-            let _ = super::space_pochven_wormholes::ensure_pochven_side_guards(
-                ctx, d_sys, k_exit_id, k_pos, d_is_poch,
-            )
-            .await;
-        }
-        crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_signature_delta(
-            ctx,
-            d_sys,
-            &[k_rec],
-            &[],
-        );
     }
-    let mut rep_sig_id: Option<String> = None;
-    let mut rep_wh_id: Option<i64> = None;
-    let mut rep_wh_type_id: Option<u32> = None;
-    if let Some((rep_host_sys, rep)) = replacement_to_spawn {
-        let new_wh_id = wormhole_item_id_for_signature(rep_host_sys, &rep.signature_id);
-        rep_sig_id = Some(rep.signature_id.clone());
-        rep_wh_id = Some(new_wh_id);
-        rep_wh_type_id = rep.wormhole_type_id;
-        let rep_handle = ctx.systems.get_or_spawn(rep_host_sys);
-        let _ = rep_handle
-            .spawn_ball(Ball {
-                id: new_wh_id,
-                type_id: rep.wormhole_type_id.unwrap_or(26272),
-                position: pochven_wormhole_ball_position(&ctx.sde, &rep),
-                velocity: DVec3::ZERO,
-                max_velocity: 0.0,
-                inertia: 1.0,
-                mass: rep.remaining_mass_kg.max(1.0),
-                radius: 1500.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Rigid,
-            })
-            .await;
-    }
+    let rep_sig_id: Option<String> = replacement_to_spawn.as_ref().map(|(_, rep)| rep.signature_id.clone());
+    let rep_wh_id: Option<i64> = replacement_to_spawn
+        .as_ref()
+        .map(|(rep_host_sys, rep)| wormhole_item_id_for_signature(*rep_host_sys, &rep.signature_id));
+    let rep_wh_type_id: Option<u32> = replacement_to_spawn.as_ref().and_then(|(_, rep)| rep.wormhole_type_id);
 
     match res {
-        Ok(WormholeJumpTxOutcome::Collapsed(err)) => return Some(Err(err)),
-        Ok(WormholeJumpTxOutcome::Jumped(dest_sys_id, wh_item_id, exit_wh_id, sig_id_str, remaining_mass, max_jump_mass, mass_stage, wh_size, life_stage, wh_age, is_collapsed, buckets)) => {
-            let prev_cs = old_handle.get_combat_state(ship_id).await.ok().flatten();
-            let updated_ch = match ctx.db.transition_character_solar_system_if_at(char_id, old_sys, dest_sys_id, &ctx.sde) {
-                Ok(c) => c,
-                Err(e) => return Some(Err(BridgeRpcError { code: "SystemTransitionFailed".into(), message: e.to_string() })),
+        Ok(WormholeJumpTxOutcome::Collapsed(err)) => {
+            if let Some(taken) = taken_opt.take() {
+                let _ = old_handle.restore_ball(taken).await;
+            }
+            return Some(Err(err));
+        }
+        Ok(WormholeJumpTxOutcome::Jumped(dest_sys_id, wh_item_id, exit_wh_id, sig_id_str, remaining_mass, max_jump_mass, mass_stage, wh_size, life_stage, wh_age, is_collapsed, buckets, updated_sys_id)) => {
+            let Some(taken) = taken_opt.take() else {
+                return Some(Err(BridgeRpcError {
+                    code: "SystemTransitionFailed".into(),
+                    message: format!("Ship {ship_id} is no longer in solar system {old_sys}"),
+                }));
             };
+            let prev_cs = taken.combat_state.clone();
             crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, old_sys);
             crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
             crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
-            let _ = old_handle.remove_ball(ship_id).await;
             ctx.sync_character_local_chat(char_id, Some(old_sys), dest_sys_id);
 
             let _ = ctx.execute_session_transition_sync(
                 Some(session),
                 crate::router::SessionTransitionSpec::for_kind(
                     char_id,
-                    crate::router::TransitionKind::JumpSystem { solar_system_id: updated_ch.solar_system_id },
+                    crate::router::TransitionKind::JumpSystem { solar_system_id: updated_sys_id },
                     "wormhole_jump",
                 )
                 .with_apply_db(false)
@@ -1225,7 +1423,7 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
                         .0,
                     )
                 });
-            let mut new_ball = current_ball;
+            let mut new_ball = taken.ball;
             // Spawn arriving ship on grid within ~5 km (2,200 m from center, outside the 1,500 m
             // wormhole sphere and within the 2,500 m jump-in/return-transit radius) of the exit wormhole.
             new_ball.position = exit_wh_pos + DVec3::new(2_200.0, 0.0, 0.0);
@@ -1335,6 +1533,9 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
             ])))
         }
         Err(e) => {
+            if let Some(taken) = taken_opt.take() {
+                let _ = old_handle.restore_ball(taken).await;
+            }
             ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnWormholeJumpCancel", "charid", vec![]);
             Some(Err(e))
         }

@@ -564,12 +564,14 @@ async fn handle_cmd_warp_to_stuff(
     let req_cap = cap_per_m * requested_dist_m;
 
     if let Ok(Some(mut cs)) = handle.get_combat_state(ship_id).await {
+        let mut repaired_max_cap = false;
         if (cs.max_capacitor - 250.0).abs() < 1e-6
             && (cs.capacitor - 250.0).abs() < 1e-6
             && sde_max_cap > 250.0
         {
             cs.max_capacitor = sde_max_cap;
             cs.capacitor = sde_max_cap;
+            repaired_max_cap = true;
         }
         if cs.capacitor < req_cap {
             let affordable_dist_m = if cap_per_m > 0.0 {
@@ -591,7 +593,18 @@ async fn handle_cmd_warp_to_stuff(
         } else {
             cs.capacitor = (cs.capacitor - req_cap).max(0.0);
         }
-        let _ = handle.set_capacitor(ship_id, cs.capacitor).await;
+        if repaired_max_cap {
+            let new_cap = cs.capacitor;
+            let new_max_cap = cs.max_capacitor;
+            let _ = handle
+                .modify_combat_state(ship_id, move |live_cs| {
+                    live_cs.max_capacitor = new_max_cap;
+                    live_cs.capacitor = new_cap;
+                })
+                .await;
+        } else {
+            let _ = handle.set_capacitor(ship_id, cs.capacitor).await;
+        }
         ctx.notify(
             crate::router::NotificationTarget::Character(char_id),
             "OnCapacitorChange",
@@ -842,12 +855,30 @@ async fn handle_cmd_stargate_jump(
         .unwrap_or(DVec3::ZERO);
     let arrival_pos = dest_gate_pos + DVec3::new(gate_radius + 1_500.0, 0.0, 0.0);
 
-    let prev_combat_state = old_handle.get_combat_state(ship_id).await.ok().flatten();
+    let _ = old_handle
+        .emit_destiny_event(
+            ship_id,
+            eve_destiny::DestinyEvent::OnClientControllerEvent {
+                ball_id: gate_id,
+                target_id: Some(ship_id),
+                event_name: "GateActivate".into(),
+                value: 1,
+                delay: None,
+            },
+        )
+        .await;
+    let Some(taken) = old_handle.take_ball(ship_id).await else {
+        return Err(BridgeRpcError {
+            code: "SystemTransitionFailed".into(),
+            message: format!("Ship {ship_id} is no longer in solar system {old_sys}"),
+        });
+    };
+    let prev_combat_state = taken.combat_state.clone();
 
     // Zarzakh Gate Toll & Gate Lock (`feat:navigation.zarzakh-gate-toll`):
     // Validated and debited BEFORE mutating character solar system state (`P2` rollback safety).
     if dest_sys_id == SOLAR_SYSTEM_ZARZAKH {
-        crate::services::space_navigation_advanced::process_zarzakh_gate_toll(
+        if let Err(e) = crate::services::space_navigation_advanced::process_zarzakh_gate_toll(
             ctx,
             char_id,
             ship_id,
@@ -856,16 +887,19 @@ async fn handle_cmd_stargate_jump(
             &current_ball,
             args,
             kwargs,
-        )?;
+        ) {
+            let _ = old_handle.restore_ball(taken).await;
+            return Err(e);
+        }
     }
 
-    let updated_ch = if entry_db_undocked {
+    let updated_ch_res = if entry_db_undocked {
         ctx.db
             .transition_character_solar_system_if_at(char_id, entry_db_sys, dest_sys_id, &ctx.sde)
             .map_err(|e| BridgeRpcError {
                 code: "SystemTransitionFailed".into(),
                 message: e.to_string(),
-            })?
+            })
     } else {
         ctx.db
             .try_with_mut_snapshot(|snap| {
@@ -905,8 +939,24 @@ async fn handle_cmd_stargate_jump(
                     }
                 }
                 Ok(res)
-            })?
+            })
     };
+    let updated_ch = match updated_ch_res {
+        Ok(ch) => ch,
+        Err(e) => {
+            let _ = old_handle.restore_ball(taken).await;
+            return Err(e);
+        }
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        crate::sp6_lifecycle::leave_space_in_snap(
+            snap,
+            ship_id,
+            prev_combat_state.as_ref(),
+            Some(dest_sys_id),
+            None,
+        );
+    });
     if arrived_at_warp_dest {
         let _ = old_handle.force_stop_warp(ship_id);
         ctx.active_warps
@@ -926,18 +976,6 @@ async fn handle_cmd_stargate_jump(
         });
         zarzakh_lock_expiry = Some(expiry);
     }
-    let _ = old_handle
-        .emit_destiny_event(
-            ship_id,
-            eve_destiny::DestinyEvent::OnClientControllerEvent {
-                ball_id: gate_id,
-                target_id: Some(ship_id),
-                event_name: "GateActivate".into(),
-                value: 1,
-                delay: None,
-            },
-        )
-        .await;
     crate::services::notify_emitters_space_dungeons::emit_exiting_dungeon_on_warp_if_present(
         ctx, char_id, old_sys, current_ball.position.to_array(),
     );
@@ -945,11 +983,10 @@ async fn handle_cmd_stargate_jump(
     crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
         rt.authorized_shipping_storage.retain(|&(_, c)| c != char_id);
     });
-    let existing_ball = old_handle.remove_ball(ship_id).await;
     ctx.sync_character_local_chat(char_id, Some(old_sys), dest_sys_id);
 
     let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
-    let mut new_ball = existing_ball.unwrap_or(current_ball);
+    let mut new_ball = taken.ball;
     new_ball.position = arrival_pos;
     new_ball.velocity = DVec3::ZERO;
     new_ball.speed_fraction = 0.0;
@@ -1366,8 +1403,23 @@ async fn handle_dock(
             message: "Cannot dock at an Upwell structure while ship is warp scrambled".into(),
         });
     }
+    let Some(taken) = handle.take_ball_for_docking(ship_id, dock_id, target_pos).await else {
+        return Err(BridgeRpcError {
+            code: "DockFailed".into(),
+            message: format!("Ship {ship_id} is no longer in space in solar system {sys_id}"),
+        });
+    };
     match ctx.db.dock_character_if_in_space(char_id, sys_id, dock_id, is_structure) {
         Ok(_) => {
+            ctx.db.with_mut_snapshot(|snap| {
+                crate::sp6_lifecycle::leave_space_in_snap(
+                    snap,
+                    ship_id,
+                    taken.combat_state.as_ref(),
+                    None,
+                    None,
+                );
+            });
             if arrived_at_warp_dest {
                 let _ = handle.force_stop_warp(ship_id);
                 ctx.active_warps
@@ -1381,7 +1433,6 @@ async fn handle_dock(
                 sys_id,
                 ball.position.to_array(),
             );
-            let _ = handle.accept_docking(ship_id, dock_id, target_pos).await;
             let dock_spec = crate::router::SessionTransitionSpec::for_kind(
                 char_id,
                 crate::router::TransitionKind::Dock { dock_id, is_structure },
@@ -1441,10 +1492,13 @@ async fn handle_dock(
                 ("sessionChangeTimerSeconds", PyRep::Integer(10)),
             ]))
         }
-        Err(e) => Err(BridgeRpcError {
-            code: "DockFailed".into(),
-            message: e.to_string(),
-        }),
+        Err(e) => {
+            let _ = handle.restore_ball(taken).await;
+            Err(BridgeRpcError {
+                code: "DockFailed".into(),
+                message: e.to_string(),
+            })
+        }
     }
 }
 

@@ -464,6 +464,47 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         });
     }
 
+    let Some(taken) = abyss_handle.take_ball(ship_id).await else {
+        return Err(BridgeRpcError {
+            code: "SystemTransitionFailed".into(),
+            message: format!("Ship {ship_id} is no longer in solar system {pocket_sys}"),
+        });
+    };
+    let taken_cs = taken.combat_state.clone();
+
+    let exit_pos = [
+        origin_pos[0] + 1_000.0,
+        origin_pos[1] + 1_000.0,
+        origin_pos[2] + 1_000.0,
+    ];
+    if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| {
+        let _ = crate::router::apply_character_transition_in_snap(
+            snap,
+            &ctx.sde,
+            char_id,
+            crate::router::TransitionLocation::Space { solar_system_id: origin_sys },
+            Some(ship_id),
+            true,
+            false,
+        )?;
+        crate::sp6_lifecycle::leave_space_in_snap(
+            snap,
+            ship_id,
+            taken_cs.as_ref(),
+            Some(origin_sys),
+            Some(exit_pos),
+        );
+        snap.item_positions.insert(ship_id, exit_pos);
+        crate::sp6_lifecycle::enter_space_in_snap(snap, ship_id, origin_sys);
+        Ok::<(), eve_db::DbError>(())
+    }) {
+        let _ = abyss_handle.restore_ball(taken).await;
+        return Err(BridgeRpcError {
+            code: "SystemTransitionFailed".into(),
+            message: e.to_string(),
+        });
+    }
+
     let now_u = ctx.now_unix();
     let (exited_pid, removed_pid, despawned_trace_ids) =
         crate::services::pve_special_sites_abyssal::with_abyssal_state(ctx, |st| {
@@ -508,7 +549,6 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         });
 
     crate::sp6_lifecycle::clear_abyssal_session(ctx, char_id);
-    abyss_handle.try_remove_ball(ship_id);
     for &npc_id in &r3_npcs {
         abyss_handle.try_remove_ball(npc_id);
     }
@@ -543,25 +583,6 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
     }
 
     ctx.invalidate_ship_fitting(ship_id);
-
-    let exit_pos = [
-        origin_pos[0] + 1_000.0,
-        origin_pos[1] + 1_000.0,
-        origin_pos[2] + 1_000.0,
-    ];
-    let _ = ctx.db.try_with_mut_snapshot(|snap| {
-        let _ = crate::router::apply_character_transition_in_snap(
-            snap,
-            &ctx.sde,
-            char_id,
-            crate::router::TransitionLocation::Space { solar_system_id: origin_sys },
-            Some(ship_id),
-            true,
-            false,
-        )?;
-        snap.item_positions.insert(ship_id, exit_pos);
-        Ok::<(), eve_db::DbError>(())
-    });
 
     let origin_sys_handle = ctx.systems.get_or_spawn(origin_sys);
     for tid in despawned_trace_ids {
@@ -746,10 +767,18 @@ pub(crate) async fn handle_void_space_player_jump(
     )
     .await?;
 
+    let Some(taken) = origin_handle.take_ball(ship_id).await else {
+        return Err(BridgeRpcError {
+            code: "SystemTransitionFailed".into(),
+            message: format!("Ship {ship_id} is no longer in solar system {cur_sys}"),
+        });
+    };
+    let taken_void_cs = taken.combat_state.clone();
+
     // Server-validated target ID (filament or gate) is used as effective_content_id;
     // client-supplied content_id is not trusted directly.
     let effective_content_id = target_id;
-    ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+    if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
         let ch = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
             code: "CharacterNotFound".into(),
             message: format!("Character {char_id} not found"),
@@ -799,8 +828,20 @@ pub(crate) async fn handle_void_space_player_jump(
             Some(ship_id),
             true,
             false,
+        )
+        .map_err(|e| BridgeRpcError {
+            code: "SystemTransitionFailed".into(),
+            message: e.to_string(),
+        })?;
+        crate::sp6_lifecycle::leave_space_in_snap(
+            snap,
+            ship_id,
+            taken_void_cs.as_ref(),
+            Some(VOID_SPACE_SYSTEM_ID),
+            Some([0.0, 0.0, 0.0]),
         );
         snap.item_positions.insert(ship_id, [0.0, 0.0, 0.0]);
+        crate::sp6_lifecycle::enter_space_in_snap(snap, ship_id, VOID_SPACE_SYSTEM_ID);
         let old_chan_id = format!("solarsystemid2:{cur_sys}");
         if let Some(chan) = snap.chat_channels.get_mut(&old_chan_id) {
             chan.members.remove(&char_id);
@@ -811,7 +852,10 @@ pub(crate) async fn handle_void_space_player_jump(
             .void_space_content
             .insert(char_id, effective_content_id);
         Ok(())
-    })?;
+    }) {
+        let _ = origin_handle.restore_ball(taken).await;
+        return Err(e);
+    }
 
     let now_unix = ctx.now_unix();
     let void_expires_at = now_unix.saturating_add(
@@ -841,7 +885,6 @@ pub(crate) async fn handle_void_space_player_jump(
     );
 
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, cur_sys);
-    origin_handle.try_remove_ball(ship_id);
     let _ = crate::services::quasar_social_chat::on_character_leave_local_chat(
         &ctx.quasar_gateway,
         &ctx.db,
@@ -1030,11 +1073,13 @@ pub(crate) async fn handle_void_space_end_gate_activation(
         }
     }
 
-    crate::services::pve_special_sites_abyssal::with_abyssal_state(ctx, |st| {
-        st.void_space_sessions.remove(&char_id);
-    });
-    crate::sp6_lifecycle::clear_abyssal_session(ctx, char_id);
-    void_handle.try_remove_ball(ship_id);
+    let Some(taken) = void_handle.take_ball(ship_id).await else {
+        return Err(BridgeRpcError {
+            code: "SystemTransitionFailed".into(),
+            message: format!("Ship {ship_id} is no longer in solar system {cur_sys}"),
+        });
+    };
+    let taken_exit_cs = taken.combat_state.clone();
 
     let origin_sys = vs.origin_solar_system_id;
     let exit_pos = [
@@ -1042,27 +1087,47 @@ pub(crate) async fn handle_void_space_end_gate_activation(
         vs.origin_position[1] + 1_000.0,
         vs.origin_position[2] + 1_000.0,
     ];
-    let finished_content_id = ctx
-        .db
-        .try_with_mut_snapshot(|snap| {
-            let _ = crate::router::apply_character_transition_in_snap(
-                snap,
-                &ctx.sde,
-                char_id,
-                crate::router::TransitionLocation::Space { solar_system_id: origin_sys },
-                Some(ship_id),
-                true,
-                false,
-            );
-            snap.item_positions.insert(ship_id, exit_pos);
-            let cid = snap
-                .abyssal_state
-                .void_space_content
-                .remove(&char_id)
-                .unwrap_or(vs.target_id);
-            Ok::<i64, BridgeRpcError>(cid)
-        })
-        .unwrap_or(vs.target_id);
+    let finished_content_id = match ctx.db.try_with_mut_snapshot(|snap| {
+        let _ = crate::router::apply_character_transition_in_snap(
+            snap,
+            &ctx.sde,
+            char_id,
+            crate::router::TransitionLocation::Space { solar_system_id: origin_sys },
+            Some(ship_id),
+            true,
+            false,
+        )
+        .map_err(|e| BridgeRpcError {
+            code: "SystemTransitionFailed".into(),
+            message: e.to_string(),
+        })?;
+        crate::sp6_lifecycle::leave_space_in_snap(
+            snap,
+            ship_id,
+            taken_exit_cs.as_ref(),
+            Some(origin_sys),
+            Some(exit_pos),
+        );
+        snap.item_positions.insert(ship_id, exit_pos);
+        crate::sp6_lifecycle::enter_space_in_snap(snap, ship_id, origin_sys);
+        let cid = snap
+            .abyssal_state
+            .void_space_content
+            .remove(&char_id)
+            .unwrap_or(vs.target_id);
+        Ok::<i64, BridgeRpcError>(cid)
+    }) {
+        Ok(cid) => cid,
+        Err(e) => {
+            let _ = void_handle.restore_ball(taken).await;
+            return Err(e);
+        }
+    };
+
+    crate::services::pve_special_sites_abyssal::with_abyssal_state(ctx, |st| {
+        st.void_space_sessions.remove(&char_id);
+    });
+    crate::sp6_lifecycle::clear_abyssal_session(ctx, char_id);
 
     let origin_handle = ctx.systems.get_or_spawn(origin_sys);
     let ship_type = ctx

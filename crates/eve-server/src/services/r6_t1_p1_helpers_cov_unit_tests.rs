@@ -201,11 +201,35 @@ async fn breacher_dots_invulnerability_jump_state_wormhole_and_point_parsing() {
     cs_vuln.armor_hp = 500.0;
     cs_vuln.max_structure_hp = 500.0;
     cs_vuln.structure_hp = 500.0;
-    let _ = sys_handle.set_combat_state(target_id, cs_vuln.clone()).await;
+    for (bid, pos, cs) in [
+        (target_id, DVec3::new(1_000.0, 0.0, 0.0), cs_vuln.clone()),
+        (tethered_id, DVec3::new(2_000.0, 0.0, 0.0), {
+            let mut t = cs_vuln.clone();
+            t.is_tethered = true;
+            t
+        }),
+    ] {
+        let _ = sys_handle
+            .spawn_ball_with_combat(
+                Ball {
+                    id: bid,
+                    type_id: 587,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 40.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                cs,
+            )
+            .await;
+    }
 
     let mut cs_teth = cs_vuln.clone();
     cs_teth.is_tethered = true;
-    let _ = sys_handle.set_combat_state(tethered_id, cs_teth.clone()).await;
 
     assert!(!is_target_invulnerable_or_tethered(&ctx, target_id, &cs_vuln, now_unix));
     assert!(is_target_invulnerable_or_tethered(&ctx, tethered_id, &cs_teth, now_unix));

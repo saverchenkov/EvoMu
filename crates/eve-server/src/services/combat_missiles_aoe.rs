@@ -480,7 +480,8 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                             }));
                         }
                         cs.capacitor -= cap_need;
-                        let _ = sys_handle.set_combat_state(ship_id, cs).await;
+                        let new_cap = cs.capacitor;
+                        let _ = sys_handle.set_capacitor(ship_id, new_cap).await;
                     }
                 }
 
@@ -880,11 +881,11 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                             }
                         }
                         if neut_amount_base > 0.0 {
-                            if let Ok(Some(mut cs)) = sys_handle.get_combat_state(b.id).await {
+                            if let Ok(Some(cs)) = sys_handle.get_combat_state(b.id).await {
                                 let drain = (neut_amount_base * sig_factor).min(cs.capacitor);
-                                cs.capacitor = (cs.capacitor - drain).max(0.0);
+                                let new_cap = (cs.capacitor - drain).max(0.0);
                                 total_cap_neutralized += drain;
-                                let _ = sys_handle.set_combat_state(b.id, cs).await;
+                                let _ = sys_handle.set_capacitor(b.id, new_cap).await;
                             }
                         }
                         if is_lockbreaker {

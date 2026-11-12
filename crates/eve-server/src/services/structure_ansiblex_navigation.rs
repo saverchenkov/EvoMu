@@ -281,7 +281,14 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
     let _dest_sys_info = ctx.sde.solar_systems.get(&dest_sys_id).ok_or_else(|| err("InvalidDestination", format!("Destination system {dest_sys_id} not in SDE")))?;
     let dist_ly = crate::services::space_destiny::space_nav_travel::distance_ly(ctx, sys_id, dest_sys_id).max(0.01);
     let ozone_cost = ((ship_ball.mass * dist_ly * 0.000003 + 50.0).round() as i64).max(50);
-    let committed_ch = ctx.db.try_with_mut_snapshot(|snap| {
+    let Some(taken) = old_handle.take_ball(ship_id).await else {
+        return Err(err(
+            "SystemTransitionFailed",
+            format!("Ship {ship_id} is no longer in solar system {sys_id}"),
+        ));
+    };
+    let prev_combat_state = taken.combat_state.clone();
+    let committed_res = ctx.db.try_with_mut_snapshot(|snap| {
         let mut stack_ids: Vec<i64> = snap
             .items
             .values()
@@ -349,17 +356,28 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
             false,
         )
         .map_err(|e| err("SystemTransitionFailed", e.to_string()))?;
+        crate::sp6_lifecycle::leave_space_in_snap(
+            snap,
+            ship_id,
+            prev_combat_state.as_ref(),
+            Some(dest_sys_id),
+            None,
+        );
         Ok(updated_ch)
-    })?;
-    let updated_ch = committed_ch;
+    });
+    let updated_ch = match committed_res {
+        Ok(ch) => ch,
+        Err(e) => {
+            let _ = old_handle.restore_ball(taken).await;
+            return Err(e);
+        }
+    };
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, sys_id);
     crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
     crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
-    let prev_combat_state = old_handle.get_combat_state(ship_id).await.ok().flatten();
-    let existing_ball = old_handle.remove_ball(ship_id).await;
     ctx.sync_character_local_chat(char_id, Some(sys_id), dest_sys_id);
     let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
-    let mut new_ball = existing_ball.unwrap_or(ship_ball);
+    let mut new_ball = taken.ball;
     new_ball.position = dest_st_pos + glam::DVec3::new(1_500.0, 0.0, 0.0);
     new_ball.velocity = glam::DVec3::ZERO;
     new_ball.speed_fraction = 0.0;

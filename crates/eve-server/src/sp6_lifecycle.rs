@@ -233,6 +233,233 @@ pub fn sde_ship_physics(
         .unwrap_or((25, 6, 1_200_000.0, 40.0, 300.0, 2.5, 3.0))
 }
 
+/// Snapshot of a ship's authoritative condition and space-residency epoch (`#889`, `#917` T-1..T-3).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct PersistedShipCondition {
+    pub shield_hp: f64,
+    pub armor_hp: f64,
+    pub hull_hp: f64,
+    pub capacitor: Option<f64>,
+    pub in_space_system: Option<u32>,
+    pub space_entry_epoch: u64,
+}
+
+/// Reads the persisted condition and space-residency metadata for `ship_id` from `snap`.
+pub fn read_ship_condition_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    ship_id: i64,
+) -> Option<PersistedShipCondition> {
+    if ship_id <= 0 {
+        return None;
+    }
+    let hp = snap.sp6_lifecycle.ship_combat_hp.get(&ship_id);
+    let meta = snap.sp6_lifecycle.ship_combat_hp.get(&(-ship_id));
+    if hp.is_none() && meta.is_none() {
+        return None;
+    }
+    let (shield_hp, armor_hp, hull_hp) = hp
+        .map(|h| (h.shield_hp, h.armor_hp, h.hull_hp))
+        .unwrap_or((0.0, 0.0, 0.0));
+    let capacitor = meta.and_then(|m| (m.shield_hp >= 1.0).then_some((m.shield_hp - 1.0).max(0.0)));
+    let in_space_system = meta.and_then(|m| (m.armor_hp > 0.0).then_some(m.armor_hp.round() as u32));
+    let space_entry_epoch = meta.map(|m| m.hull_hp.max(0.0).round() as u64).unwrap_or(0);
+    Some(PersistedShipCondition {
+        shield_hp,
+        armor_hp,
+        hull_hp,
+        capacitor,
+        in_space_system,
+        space_entry_epoch,
+    })
+}
+
+/// Returns `true` if `ship_id` has left space (docked/stored) or moved to a different solar system
+/// or space-entry epoch, meaning an in-space tick/damage flush from `expected_system` must not
+/// overwrite its persisted condition (`#846`, `#917` T-1/T-2).
+pub fn is_ship_stale_for_in_space_write_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    ship_id: i64,
+    expected_system: Option<u32>,
+    expected_epoch: Option<u64>,
+) -> bool {
+    if ship_id <= 0 {
+        return false;
+    }
+    if let Some(meta) = snap.sp6_lifecycle.ship_combat_hp.get(&(-ship_id)) {
+        if meta.armor_hp < 0.0 {
+            return true;
+        }
+        if let Some(exp_sys) = expected_system {
+            if meta.armor_hp > 0.0 && (meta.armor_hp.round() as u32) != exp_sys {
+                return true;
+            }
+        }
+        if let Some(exp_epoch) = expected_epoch {
+            if (meta.hull_hp.max(0.0).round() as u64) != exp_epoch {
+                return true;
+            }
+        }
+    }
+    if let Some(exp_sys) = expected_system {
+        if let Some(it) = snap.items.get(&ship_id) {
+            if it.location_id >= 60_000_000 {
+                return true;
+            }
+            if (30_000_000..60_000_000).contains(&it.location_id)
+                && it.location_id != i64::from(exp_sys)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn sync_ship_item_damage_attrs_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    ship_id: i64,
+    armor_dmg: f64,
+    hull_dmg: f64,
+) {
+    if let Some(it) = snap.items.get_mut(&ship_id) {
+        let mut touched = false;
+        if armor_dmg > 1e-6 {
+            if it
+                .dynamic_attributes
+                .get(&eve_sde::attr_ids::ARMOR_DAMAGE)
+                .copied()
+                .is_none_or(|v| (v - armor_dmg).abs() > 1e-6)
+            {
+                it.dynamic_attributes
+                    .insert(eve_sde::attr_ids::ARMOR_DAMAGE, armor_dmg);
+                touched = true;
+            }
+        } else if it
+            .dynamic_attributes
+            .remove(&eve_sde::attr_ids::ARMOR_DAMAGE)
+            .is_some()
+        {
+            touched = true;
+        }
+        if hull_dmg > 1e-6 {
+            if it
+                .dynamic_attributes
+                .get(&eve_sde::attr_ids::DAMAGE)
+                .copied()
+                .is_none_or(|v| (v - hull_dmg).abs() > 1e-6)
+            {
+                it.dynamic_attributes
+                    .insert(eve_sde::attr_ids::DAMAGE, hull_dmg);
+                touched = true;
+            }
+        } else if it
+            .dynamic_attributes
+            .remove(&eve_sde::attr_ids::DAMAGE)
+            .is_some()
+        {
+            touched = true;
+        }
+        if touched {
+            it.version += 1;
+        }
+    }
+}
+
+/// Authoritative leave-space transition helper (`#842`, `#889`, `#917` T-1..T-3).
+///
+/// Records the taken ship's `CombatState` (shield, armor, hull, capacitor), updates `in_space_system`
+/// (`None` when docking/storing/logging off, `Some(dest_sys)` when jumping to another solar system),
+/// increments `space_entry_epoch` when entering a destination system, and writes or clears `item_positions`.
+pub fn leave_space_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    ship_id: i64,
+    cs: Option<&CombatState>,
+    dest_in_space_system: Option<u32>,
+    persist_position: Option<[f64; 3]>,
+) -> u64 {
+    if ship_id <= 0 {
+        return 0;
+    }
+    let prev_meta = snap.sp6_lifecycle.ship_combat_hp.get(&(-ship_id)).copied();
+    let prev_epoch = prev_meta
+        .map(|m| m.hull_hp.max(0.0).round() as u64)
+        .unwrap_or(0);
+    let next_epoch = if dest_in_space_system.is_some() {
+        prev_epoch.saturating_add(1)
+    } else {
+        prev_epoch
+    };
+    let sys_encoded = dest_in_space_system.map(|s| s as f64).unwrap_or(-1.0);
+    let cap_encoded = if let Some(cs) = cs {
+        let new_hp = PersistedCombatHp {
+            shield_hp: cs.shield_hp.max(0.0),
+            armor_hp: cs.armor_hp.max(0.0),
+            hull_hp: cs.structure_hp.max(0.0),
+        };
+        snap.sp6_lifecycle.ship_combat_hp.insert(ship_id, new_hp);
+        let armor_dmg = if cs.max_armor_hp > 0.0 {
+            (cs.max_armor_hp - cs.armor_hp).clamp(0.0, cs.max_armor_hp)
+        } else {
+            0.0
+        };
+        let hull_dmg = if cs.max_structure_hp > 0.0 {
+            (cs.max_structure_hp - cs.structure_hp).clamp(0.0, cs.max_structure_hp)
+        } else {
+            0.0
+        };
+        sync_ship_item_damage_attrs_in_snap(snap, ship_id, armor_dmg, hull_dmg);
+        if cs.max_capacitor > 0.0 && (cs.max_capacitor - cs.capacitor.max(0.0)) > 1e-6 {
+            cs.capacitor.clamp(0.0, cs.max_capacitor) + 1.0
+        } else {
+            0.0
+        }
+    } else {
+        prev_meta.map(|m| m.shield_hp).unwrap_or(0.0)
+    };
+    snap.sp6_lifecycle.ship_combat_hp.insert(
+        -ship_id,
+        PersistedCombatHp {
+            shield_hp: cap_encoded,
+            armor_hp: sys_encoded,
+            hull_hp: next_epoch as f64,
+        },
+    );
+    if let Some(pos) = persist_position {
+        snap.item_positions.insert(ship_id, pos);
+    } else if dest_in_space_system.is_none() {
+        snap.item_positions.remove(&ship_id);
+    }
+    next_epoch
+}
+
+/// Authoritative enter-space transition helper (`#917` T-1/T-2).
+///
+/// Marks `ship_id` as in space in `solar_system_id` and increments its `space_entry_epoch`.
+pub fn enter_space_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    ship_id: i64,
+    solar_system_id: u32,
+) -> u64 {
+    if ship_id <= 0 {
+        return 0;
+    }
+    let prev_meta = snap.sp6_lifecycle.ship_combat_hp.get(&(-ship_id)).copied();
+    let cap_encoded = prev_meta.map(|m| m.shield_hp).unwrap_or(0.0);
+    let prev_epoch = prev_meta
+        .map(|m| m.hull_hp.max(0.0).round() as u64)
+        .unwrap_or(0);
+    let next_epoch = prev_epoch.saturating_add(1);
+    snap.sp6_lifecycle.ship_combat_hp.insert(
+        -ship_id,
+        PersistedCombatHp {
+            shield_hp: cap_encoded,
+            armor_hp: solar_system_id as f64,
+            hull_hp: next_epoch as f64,
+        },
+    );
+    next_epoch
+}
+
 /// Persists a ship ball's shield/armor/hull HP into `snap.sp6_lifecycle.ship_combat_hp` so damage
 /// taken while disconnected or before a server restart is preserved upon reconnect (`plan:SP-6`).
 pub fn persist_ship_combat_hp_in_db(
@@ -266,6 +493,18 @@ pub fn persist_existing_ship_combat_hp_batch_in_db<'a, I>(
     persist_ship_combat_hp_batch_inner(db, updates, true);
 }
 
+/// Persists combat HPs and capacitor for balls in `solar_system_id` backed by persisted entities,
+/// refusing to overwrite ships that have already docked or jumped out of `solar_system_id` (`#846`, `#917` T-2).
+pub fn persist_existing_ship_combat_hp_for_system_in_db<'a, I>(
+    db: &Arc<WorldRepository>,
+    solar_system_id: u32,
+    updates: I,
+) where
+    I: IntoIterator<Item = (i64, &'a CombatState)>,
+{
+    persist_ship_combat_hp_batch_inner_for_system(db, Some(solar_system_id), updates, true);
+}
+
 fn persist_ship_combat_hp_batch_inner<'a, I>(
     db: &Arc<WorldRepository>,
     updates: I,
@@ -273,108 +512,122 @@ fn persist_ship_combat_hp_batch_inner<'a, I>(
 ) where
     I: IntoIterator<Item = (i64, &'a CombatState)>,
 {
-    let to_update: Vec<(i64, PersistedCombatHp, f64, f64)> = db.with_snapshot(|snap| {
-        updates
-            .into_iter()
-            .filter_map(|(bid, cs)| {
-                if require_persisted_entity
-                    && !snap.items.contains_key(&bid)
-                    && !snap.structures.contains_key(&bid)
-                {
-                    return None;
-                }
-                let new_hp = PersistedCombatHp {
-                    shield_hp: cs.shield_hp.max(0.0),
-                    armor_hp: cs.armor_hp.max(0.0),
-                    hull_hp: cs.structure_hp.max(0.0),
-                };
-                let armor_dmg = if cs.max_armor_hp > 0.0 {
-                    (cs.max_armor_hp - cs.armor_hp).clamp(0.0, cs.max_armor_hp)
-                } else {
-                    0.0
-                };
-                let hull_dmg = if cs.max_structure_hp > 0.0 {
-                    (cs.max_structure_hp - cs.structure_hp).clamp(0.0, cs.max_structure_hp)
-                } else {
-                    0.0
-                };
-                let hp_changed = snap.sp6_lifecycle.ship_combat_hp.get(&bid) != Some(&new_hp);
-                let item_changed = snap.items.get(&bid).is_some_and(|it| {
-                    let cur_a = it
-                        .dynamic_attributes
-                        .get(&eve_sde::attr_ids::ARMOR_DAMAGE)
-                        .copied();
-                    let cur_h = it
-                        .dynamic_attributes
-                        .get(&eve_sde::attr_ids::DAMAGE)
-                        .copied();
-                    let want_a = (armor_dmg > 1e-6).then_some(armor_dmg);
-                    let want_h = (hull_dmg > 1e-6).then_some(hull_dmg);
-                    let diff = |x: Option<f64>, y: Option<f64>| match (x, y) {
+    persist_ship_combat_hp_batch_inner_for_system(db, None, updates, require_persisted_entity);
+}
+
+fn persist_ship_combat_hp_batch_inner_for_system<'a, I>(
+    db: &Arc<WorldRepository>,
+    expected_system: Option<u32>,
+    updates: I,
+    require_persisted_entity: bool,
+) where
+    I: IntoIterator<Item = (i64, &'a CombatState)>,
+{
+    let to_update: Vec<(i64, PersistedCombatHp, Option<PersistedCombatHp>, bool, f64, f64)> =
+        db.with_snapshot(|snap| {
+            updates
+                .into_iter()
+                .filter_map(|(bid, cs)| {
+                    if require_persisted_entity
+                        && !snap.items.contains_key(&bid)
+                        && !snap.structures.contains_key(&bid)
+                    {
+                        return None;
+                    }
+                    if is_ship_stale_for_in_space_write_in_snap(snap, bid, expected_system, None) {
+                        return None;
+                    }
+                    let new_hp = PersistedCombatHp {
+                        shield_hp: cs.shield_hp.max(0.0),
+                        armor_hp: cs.armor_hp.max(0.0),
+                        hull_hp: cs.structure_hp.max(0.0),
+                    };
+                    let cap_encoded = if bid > 0
+                        && cs.max_capacitor > 0.0
+                        && (cs.max_capacitor - cs.capacitor.max(0.0)) > 1e-6
+                    {
+                        cs.capacitor.clamp(0.0, cs.max_capacitor) + 1.0
+                    } else {
+                        0.0
+                    };
+                    let existing_meta =
+                        (bid > 0).then(|| snap.sp6_lifecycle.ship_combat_hp.get(&(-bid)).copied()).flatten();
+                    let prev_sys = existing_meta.map(|m| m.armor_hp).unwrap_or(0.0);
+                    let prev_epoch = existing_meta.map(|m| m.hull_hp).unwrap_or(0.0);
+                    let want_meta = if bid > 0 && (cap_encoded > 0.0 || prev_sys != 0.0 || prev_epoch != 0.0) {
+                        Some(PersistedCombatHp {
+                            shield_hp: cap_encoded,
+                            armor_hp: prev_sys,
+                            hull_hp: prev_epoch,
+                        })
+                    } else {
+                        None
+                    };
+                    let meta_changed = match (existing_meta, want_meta) {
                         (None, None) => false,
-                        (Some(a), Some(b)) => (a - b).abs() > 1e-6,
+                        (Some(a), Some(b)) => {
+                            (a.shield_hp - b.shield_hp).abs() > 1e-6
+                                || a.armor_hp != b.armor_hp
+                                || a.hull_hp != b.hull_hp
+                        }
                         _ => true,
                     };
-                    diff(cur_a, want_a) || diff(cur_h, want_h)
-                });
-                if hp_changed || item_changed {
-                    Some((bid, new_hp, armor_dmg, hull_dmg))
-                } else {
-                    None
-                }
-            })
-            .collect()
-    });
+                    let armor_dmg = if cs.max_armor_hp > 0.0 {
+                        (cs.max_armor_hp - cs.armor_hp).clamp(0.0, cs.max_armor_hp)
+                    } else {
+                        0.0
+                    };
+                    let hull_dmg = if cs.max_structure_hp > 0.0 {
+                        (cs.max_structure_hp - cs.structure_hp).clamp(0.0, cs.max_structure_hp)
+                    } else {
+                        0.0
+                    };
+                    let hp_changed = snap.sp6_lifecycle.ship_combat_hp.get(&bid) != Some(&new_hp);
+                    let item_changed = snap.items.get(&bid).is_some_and(|it| {
+                        let cur_a = it
+                            .dynamic_attributes
+                            .get(&eve_sde::attr_ids::ARMOR_DAMAGE)
+                            .copied();
+                        let cur_h = it
+                            .dynamic_attributes
+                            .get(&eve_sde::attr_ids::DAMAGE)
+                            .copied();
+                        let want_a = (armor_dmg > 1e-6).then_some(armor_dmg);
+                        let want_h = (hull_dmg > 1e-6).then_some(hull_dmg);
+                        let diff = |x: Option<f64>, y: Option<f64>| match (x, y) {
+                            (None, None) => false,
+                            (Some(a), Some(b)) => (a - b).abs() > 1e-6,
+                            _ => true,
+                        };
+                        diff(cur_a, want_a) || diff(cur_h, want_h)
+                    });
+                    if hp_changed || meta_changed || item_changed {
+                        Some((bid, new_hp, want_meta, meta_changed, armor_dmg, hull_dmg))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        });
 
     if to_update.is_empty() {
         return;
     }
 
     let _ = db.try_with_mut_snapshot(|snap| -> Result<(), String> {
-        for (bid, hp, armor_dmg, hull_dmg) in to_update {
+        for (bid, hp, want_meta, meta_changed, armor_dmg, hull_dmg) in to_update {
+            if is_ship_stale_for_in_space_write_in_snap(snap, bid, expected_system, None) {
+                continue;
+            }
             snap.sp6_lifecycle.ship_combat_hp.insert(bid, hp);
-            if let Some(it) = snap.items.get_mut(&bid) {
-                let mut touched = false;
-                if armor_dmg > 1e-6 {
-                    if it
-                        .dynamic_attributes
-                        .get(&eve_sde::attr_ids::ARMOR_DAMAGE)
-                        .copied()
-                        .is_none_or(|v| (v - armor_dmg).abs() > 1e-6)
-                    {
-                        it.dynamic_attributes
-                            .insert(eve_sde::attr_ids::ARMOR_DAMAGE, armor_dmg);
-                        touched = true;
-                    }
-                } else if it
-                    .dynamic_attributes
-                    .remove(&eve_sde::attr_ids::ARMOR_DAMAGE)
-                    .is_some()
-                {
-                    touched = true;
-                }
-                if hull_dmg > 1e-6 {
-                    if it
-                        .dynamic_attributes
-                        .get(&eve_sde::attr_ids::DAMAGE)
-                        .copied()
-                        .is_none_or(|v| (v - hull_dmg).abs() > 1e-6)
-                    {
-                        it.dynamic_attributes
-                            .insert(eve_sde::attr_ids::DAMAGE, hull_dmg);
-                        touched = true;
-                    }
-                } else if it
-                    .dynamic_attributes
-                    .remove(&eve_sde::attr_ids::DAMAGE)
-                    .is_some()
-                {
-                    touched = true;
-                }
-                if touched {
-                    it.version += 1;
+            if bid > 0 && meta_changed {
+                if let Some(m) = want_meta {
+                    snap.sp6_lifecycle.ship_combat_hp.insert(-bid, m);
+                } else {
+                    snap.sp6_lifecycle.ship_combat_hp.remove(&(-bid));
                 }
             }
+            sync_ship_item_damage_attrs_in_snap(snap, bid, armor_dmg, hull_dmg);
         }
         Ok(())
     });
@@ -402,6 +655,18 @@ pub fn clear_ship_combat_damage_in_snap(snap: &mut eve_db::WorldStateSnapshot, s
         }
     }
     snap.sp6_lifecycle.ship_combat_hp.remove(&ship_id);
+    if ship_id > 0 {
+        let remove_meta = if let Some(meta) = snap.sp6_lifecycle.ship_combat_hp.get_mut(&(-ship_id))
+        {
+            meta.shield_hp = 0.0;
+            meta.armor_hp == 0.0 && meta.hull_hp == 0.0
+        } else {
+            false
+        };
+        if remove_meta {
+            snap.sp6_lifecycle.ship_combat_hp.remove(&(-ship_id));
+        }
+    }
 }
 
 /// Unified ship HP & damage view reconciled across `Ballpark::combat_states`,
@@ -551,6 +816,14 @@ pub fn apply_persisted_hp_to_combat_state(
             if let Some(&hd) = it.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE) {
                 if hd > 0.0 {
                     cs.structure_hp = (cs.max_structure_hp - hd).clamp(0.0, cs.max_structure_hp);
+                }
+            }
+        }
+        if ship_id > 0 {
+            if let Some(meta) = snap.sp6_lifecycle.ship_combat_hp.get(&(-ship_id)) {
+                if meta.shield_hp >= 1.0 {
+                    let cap = (meta.shield_hp - 1.0).max(0.0);
+                    cs.capacitor = cap.clamp(0.0, cs.max_capacitor);
                 }
             }
         }
@@ -1358,6 +1631,7 @@ pub fn reconnect_character_in_space_sync(
     let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), String> {
         snap.item_positions
             .insert(ship_id, [final_pos.x, final_pos.y, final_pos.z]);
+        enter_space_in_snap(snap, ship_id, sys_id);
         Ok(())
     });
 

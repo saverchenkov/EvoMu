@@ -1265,5 +1265,17 @@ fn mutant_killers_remove_static_recompute_eps_and_true_damage_ratios() {
         DestinyEvent::OnDamageStateChange { ball_id: 11, shield_ratio, armor_ratio, structure_ratio }
             if shield_ratio == 0.0 && armor_ratio == 0.0 && structure_ratio == 0.0
     )));
+
+    // 4. Absent ball damage returns None without fabricating CombatState or observer_events (#846)
+    assert!(dpark.apply_damage_to_ball(999_777, DamageVector::new(100.0, 0.0, 0.0, 0.0)).is_none());
+    assert!(dpark.apply_true_damage_to_ball(999_777, 100.0).is_none());
+    assert!(dpark.apply_direct_structure_damage_to_ball(999_777, 100.0).is_none());
+    assert!(!dpark.combat_states.contains_key(&999_777));
+    assert!(!dpark.observer_events.contains_key(&999_777));
+
+    // remove_ball on absent ball cleans up any orphaned combat_states while preserving terminal observer_events (#846)
+    dpark.combat_states.insert(999_778, crate::CombatState::default());
+    assert!(dpark.remove_ball(999_778).is_none());
+    assert!(!dpark.combat_states.contains_key(&999_778));
 }
 

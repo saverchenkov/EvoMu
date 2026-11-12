@@ -149,16 +149,26 @@ pub(super) fn finalize_expired_disconnected_ship(
         .get_ball_position_sync(disc.ship_id)
         .map(|v| [v.x, v.y, v.z])
         .unwrap_or(disc.last_position);
+    let final_cs = handle
+        .ballpark
+        .read()
+        .ok()
+        .and_then(|bp| bp.combat_states.get(&disc.ship_id).cloned());
     cleanup_ship_modules_and_cyno_on_despawn(ctx, disc.char_id, disc.ship_id);
     handle.try_remove_ball(disc.ship_id);
-    with_mut_sp6_state(&ctx.db, |st, snap| {
-        if snap.items.contains_key(&disc.ship_id) {
-            snap.item_positions.insert(disc.ship_id, final_pos);
-        }
-        if let Some(d) = st.disconnected_ships.get_mut(&disc.char_id) {
+    let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), String> {
+        if let Some(d) = snap.sp6_lifecycle.disconnected_ships.get_mut(&disc.char_id) {
             d.last_position = final_pos;
             d.removed_from_space = true;
         }
+        super::leave_space_in_snap(
+            snap,
+            disc.ship_id,
+            final_cs.as_ref(),
+            None,
+            Some(final_pos),
+        );
+        Ok(())
     });
 }
 
@@ -254,10 +264,11 @@ pub(super) async fn build_disconnected_ship_entry(
         } else {
             raw_dest
         };
-        if let Ok(Some(mut cs)) = sys_handle.get_combat_state(ship_id).await {
-            cs.is_emergency_warping = true;
-            let _ = sys_handle.set_combat_state(ship_id, cs).await;
-        }
+        let _ = sys_handle
+            .modify_combat_state(ship_id, |cs| {
+                cs.is_emergency_warping = true;
+            })
+            .await;
         let _ = sys_handle
             .set_movement_mode(
                 ship_id,

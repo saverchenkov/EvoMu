@@ -1036,18 +1036,21 @@ pub async fn evaluate_effective_signature_radius(
 
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
     if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(ship_id).await {
-        if let Ok(Some(mut cs)) = sys_handle.get_combat_state(ship_id).await {
+        if let Ok(Some(cs)) = sys_handle.get_combat_state(ship_id).await {
             let cs_mismatch = (cs.tp_sig_multiplier.unwrap_or(1.0) - tp_mult).abs() > 1e-6
                 || (cs.external_sig_multiplier.unwrap_or(1.0) - bloom_mult).abs() > 1e-6
                 || cs
                     .base_signature_radius
                     .is_some_and(|b| (b - unbloomed_sig).abs() > 1e-3);
             if (ball.radius - effective_sig).abs() > 1e-3 || cs_mismatch {
-                cs.base_signature_radius = Some(unbloomed_sig);
-                cs.tp_sig_multiplier = tp_sig_mult;
-                cs.external_sig_multiplier = ext_sig_mult;
-                cs.signature_radius = effective_sig;
-                let _ = sys_handle.set_combat_state(ship_id, cs).await;
+                let _ = sys_handle
+                    .modify_combat_state(ship_id, move |live_cs| {
+                        live_cs.base_signature_radius = Some(unbloomed_sig);
+                        live_cs.tp_sig_multiplier = tp_sig_mult;
+                        live_cs.external_sig_multiplier = ext_sig_mult;
+                        live_cs.signature_radius = effective_sig;
+                    })
+                    .await;
             }
         }
     }
@@ -1099,7 +1102,11 @@ pub async fn step_passive_shield_recharge(
     let shield_ratio = (cs.shield_hp / cs.max_shield_hp.max(1.0)).clamp(0.0, 1.0);
     let armor_ratio = (cs.armor_hp / cs.max_armor_hp.max(1.0)).clamp(0.0, 1.0);
     let hull_ratio = (cs.structure_hp / cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0);
-    let _ = sys_handle.set_combat_state(ball_id, cs).await;
+    let _ = sys_handle
+        .modify_combat_state(ball_id, move |live_cs| {
+            live_cs.shield_hp = after;
+        })
+        .await;
     if delta > 0.0 {
         if let Some(cid) = char_id_opt {
             let _ = ctx.notify_damage_state_change(

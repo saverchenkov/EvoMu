@@ -699,7 +699,8 @@ pub async fn handle_weapons(
                         }));
                     }
                     cs.capacitor = (cs.capacitor - base_cap_need).max(0.0);
-                    let _ = sys_handle.set_combat_state(ship_id, cs.clone()).await;
+                    let new_cap = cs.capacitor;
+                    let _ = sys_handle.set_capacitor(ship_id, new_cap).await;
                 }
                 cap_after = cs.capacitor;
             }

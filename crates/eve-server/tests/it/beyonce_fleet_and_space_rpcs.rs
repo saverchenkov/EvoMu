@@ -56,16 +56,27 @@ fn seed_skills(snap: &mut eve_db::WorldStateSnapshot, char_id: i64, skill_ids: &
 }
 
 fn seed_in_space_ship(ctx: &ServerContext, char_id: i64, ship_id: i64, type_id: u32, sys_id: u32, pos: DVec3) {
+    let mut prev_sys: Option<u32> = None;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
+            if ch.solar_system_id != sys_id {
+                prev_sys = Some(ch.solar_system_id);
+            }
             ch.solar_system_id = sys_id;
             ch.active_ship_id = ship_id;
             ch.station_id = None;
             ch.structure_id = None;
         }
+        snap.sp6_lifecycle.ship_combat_hp.remove(&ship_id);
+        snap.sp6_lifecycle.ship_combat_hp.remove(&(-ship_id));
         seed_item(snap, ship_id, type_id, char_id, sys_id as i64, InventoryFlag::None, 1);
+        eve_server::sp6_lifecycle::enter_space_in_snap(snap, ship_id, sys_id);
     });
+    if let Some(ps) = prev_sys {
+        ctx.systems.get_or_spawn(ps).try_remove_ball(ship_id);
+    }
     let handle = ctx.systems.get_or_spawn(sys_id);
+    handle.try_remove_ball(ship_id);
     let ball = Ball {
         id: ship_id,
         type_id,

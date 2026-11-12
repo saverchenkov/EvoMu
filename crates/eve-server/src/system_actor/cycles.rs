@@ -1575,10 +1575,12 @@ impl SystemHandle {
         let step_hook_guard = self.system_step_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
         let step_fut = step_hook_guard.map(|hook| hook(self.solar_system_id, dt, destroyed));
         if let Some(db) = db_opt {
-            crate::sp6_lifecycle::persist_existing_ship_combat_hp_batch_in_db(
+            crate::sp6_lifecycle::persist_existing_ship_combat_hp_for_system_in_db(
                 db,
+                self.solar_system_id,
                 bp.combat_states.iter().filter_map(|(&bid, cs)| {
-                    (!bp.is_static_ball(bid)
+                    (bp.balls.contains_key(&bid)
+                        && !bp.is_static_ball(bid)
                         && bp.ball_slim_meta.get(&bid).is_none_or(|m| m.category_id != 11))
                     .then_some((bid, cs))
                 }),

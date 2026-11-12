@@ -845,8 +845,9 @@ pub async fn relocate_ship(
     let cd_secs = ((cd_min * 60.0).round() as u64).max(1);
     let fat_secs = ((fat_min * 60.0).round() as u64).max(cd_secs + 1);
     let from = ctx.systems.get_or_spawn(from_sys);
-    let prev_cs = from.get_combat_state(ship_id).await.ok().flatten();
-    ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+    let taken_opt = from.take_ball(ship_id).await;
+    let prev_cs = taken_opt.as_ref().and_then(|t| t.combat_state.clone());
+    if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
         let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
             code: "CharacterNotFound".into(),
             message: format!("Character {char_id} not found"),
@@ -873,13 +874,25 @@ pub async fn relocate_ship(
             true,
             false,
         );
+        crate::sp6_lifecycle::leave_space_in_snap(
+            snap,
+            ship_id,
+            prev_cs.as_ref(),
+            Some(to_sys),
+            None,
+        );
         snap.character_last_jump_unix.insert(char_id, now);
         Ok(())
-    })?;
+    }) {
+        if let Some(taken) = taken_opt {
+            let _ = from.restore_ball(taken).await;
+        }
+        return Err(e);
+    }
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, from_sys);
     crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
     crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
-    let old = from.remove_ball(ship_id).await;
+    let old = taken_opt.map(|t| t.ball);
     ctx.notify(
         crate::router::NotificationTarget::Character(char_id),
         "OnJumpTimersUpdated",
@@ -985,6 +998,20 @@ pub(super) async fn relocate_caller(
     dist_ly: f64,
     fatigue_mult: f64,
 ) -> Result<(f64, f64, u64), BridgeRpcError> {
+    if ctx
+        .systems
+        .get_or_spawn(from_sys)
+        .get_ball_snapshot(ship_id)
+        .await
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        return Err(BridgeRpcError {
+            code: "SystemTransitionFailed".into(),
+            message: format!("Ship {ship_id} is no longer in solar system {from_sys}"),
+        });
+    }
     let (cd_min, fat_min) = relocate_ship(ctx, char_id, ship_id, from_sys, to_sys, pos, dist_ly, fatigue_mult).await?;
     let _ = ctx.execute_session_transition_sync(
         Some(session),

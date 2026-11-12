@@ -352,6 +352,66 @@ impl SystemHandle {
         rx.await.ok().flatten()
     }
 
+    /// Atomically removes `ball_id` from this solar system (`#842`, `#917` E-2),
+    /// clearing its active module cycles and target locks and returning its final
+    /// `Ball`, `CombatState`, and `SlimItemMeta`. Returns `None` if `ball_id` is
+    /// not present in space.
+    pub async fn take_ball(&self, ball_id: BallId) -> Option<super::TakenBall> {
+        self.cancel_ship_nanite_repairs_sync(ball_id, true);
+        self.ball_positions
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&ball_id);
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .cmd_tx
+            .send(SystemCommand::TakeBall {
+                ball_id,
+                accept_docking_target: None,
+                reply: tx,
+            })
+            .await;
+        rx.await.ok().flatten()
+    }
+
+    /// Atomically removes `ship_id` for docking at `station_id` (`#842`, `#917` E-2),
+    /// emitting `OnDockingAccepted` and returning its final `TakenBall` snapshot,
+    /// or `None` if `ship_id` is not present in space.
+    pub async fn take_ball_for_docking(
+        &self,
+        ship_id: BallId,
+        station_id: BallId,
+        station_pos: DVec3,
+    ) -> Option<super::TakenBall> {
+        self.cancel_ship_nanite_repairs_sync(ship_id, true);
+        self.ball_positions
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&ship_id);
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .cmd_tx
+            .send(SystemCommand::TakeBall {
+                ball_id: ship_id,
+                accept_docking_target: Some((station_id, station_pos)),
+                reply: tx,
+            })
+            .await;
+        rx.await.ok().flatten()
+    }
+
+    /// Re-inserts a previously [`Self::take_ball`] snapshot into this solar system
+    /// when a handoff's subsequent DB transaction fails (`#842`, `#917` E-2).
+    pub async fn restore_ball(&self, taken: super::TakenBall) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::RestoreBall { taken, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Solar system reply dropped".to_string())?
+    }
+
     pub async fn emit_packaged_actions(
         &self,
         ball_id: BallId,
@@ -1294,6 +1354,26 @@ impl SystemHandle {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(SystemCommand::GetCombatState { ball_id, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())
+    }
+
+    /// Atomically mutates `ball_id`'s [`CombatState`] inside the actor loop without a
+    /// stale get-modify-set round-trip (`#846`, `#917` E-2). Returns `Ok(None)` if
+    /// `ball_id` is not present in space.
+    pub async fn modify_combat_state(
+        &self,
+        ball_id: BallId,
+        f: impl FnOnce(&mut CombatState) + Send + 'static,
+    ) -> Result<Option<CombatState>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::ModifyCombatState {
+                ball_id,
+                f: Box::new(f),
+                reply: tx,
+            })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
         rx.await.map_err(|_| "Solar system reply dropped".to_string())

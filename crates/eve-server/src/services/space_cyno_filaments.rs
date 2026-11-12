@@ -286,24 +286,44 @@ async fn handle_wormhole_jump(
         }
     };
 
-    let prev_combat_state = old_handle.get_combat_state(ship_id).await.ok().flatten();
+    let Some(taken) = old_handle.take_ball(ship_id).await else {
+        return Err(BridgeRpcError {
+            code: "SystemTransitionFailed".into(),
+            message: format!("Ship {ship_id} is no longer in solar system {old_sys}"),
+        });
+    };
+    let prev_combat_state = taken.combat_state.clone();
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, old_sys);
     crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
-    let existing_ball = old_handle.remove_ball(ship_id).await;
     crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
-    let updated_ch = ctx
+    let updated_ch = match ctx
         .db
         .set_character_solar_system(char_id, dest_sys_id, &ctx.sde)
-        .map_err(|e| BridgeRpcError {
-            code: "SystemTransitionFailed".into(),
-            message: e.to_string(),
-        })?;
+    {
+        Ok(ch) => ch,
+        Err(e) => {
+            let _ = old_handle.restore_ball(taken).await;
+            return Err(BridgeRpcError {
+                code: "SystemTransitionFailed".into(),
+                message: e.to_string(),
+            });
+        }
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        crate::sp6_lifecycle::leave_space_in_snap(
+            snap,
+            ship_id,
+            prev_combat_state.as_ref(),
+            Some(dest_sys_id),
+            None,
+        );
+    });
     ctx.sync_character_local_chat(char_id, Some(old_sys), dest_sys_id);
 
     let arrival_pos = dest_sig_pos + DVec3::new(2_000.0, 0.0, 0.0);
 
     let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
-    let mut new_ball = existing_ball.unwrap_or(current_ball);
+    let mut new_ball = taken.ball;
     new_ball.position = arrival_pos;
     new_ball.velocity = DVec3::ZERO;
     new_ball.speed_fraction = 0.0;
@@ -599,7 +619,22 @@ async fn handle_random_jump_filament(
         }
     }
 
-    let committed_jumpers = ctx.db.try_with_mut_snapshot(|snap| -> Result<Vec<(i64, i64, Ball)>, BridgeRpcError> {
+    let mut taken_jumpers = Vec::with_capacity(jumpers.len());
+    for (p_char, p_ship, _) in jumpers {
+        if let Some(taken) = old_handle.take_ball(p_ship).await {
+            taken_jumpers.push((p_char, p_ship, taken));
+        } else if p_char == char_id {
+            for (_, _, prev_t) in taken_jumpers {
+                let _ = old_handle.restore_ball(prev_t).await;
+            }
+            return Err(BridgeRpcError {
+                code: "CannotActivateFilament".into(),
+                message: format!("Ship {p_ship} is no longer in space in system {old_sys}"),
+            });
+        }
+    }
+
+    let committed_res = ctx.db.try_with_mut_snapshot(|snap| -> Result<Vec<(i64, i64, crate::system_actor::TakenBall)>, BridgeRpcError> {
         let caller_ch = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
             code: "CharacterNotFound".into(),
             message: format!("Character {char_id} not found"),
@@ -633,8 +668,8 @@ async fn handle_random_jump_filament(
             code: "FilamentLocked".into(),
             message: e.to_string(),
         })?;
-        let mut retained = Vec::with_capacity(jumpers.len());
-        for (p_char, p_ship, b) in &jumpers {
+        let mut retained = Vec::with_capacity(taken_jumpers.len());
+        for (p_char, p_ship, taken) in &taken_jumpers {
             let valid = snap.characters.get(p_char).is_some_and(|ch| {
                 ch.station_id.is_none()
                     && ch.structure_id.is_none()
@@ -653,7 +688,14 @@ async fn handle_random_jump_filament(
                 true,
                 false,
             );
-            retained.push((*p_char, *p_ship, b.clone()));
+            crate::sp6_lifecycle::leave_space_in_snap(
+                snap,
+                *p_ship,
+                taken.combat_state.as_ref(),
+                Some(dest_sys_id),
+                None,
+            );
+            retained.push((*p_char, *p_ship, taken.clone()));
         }
         if !retained.iter().any(|(c, _, _)| *c == char_id) {
             return Err(BridgeRpcError {
@@ -662,7 +704,23 @@ async fn handle_random_jump_filament(
             });
         }
         Ok(retained)
-    })?;
+    });
+    let committed_jumpers = match committed_res {
+        Ok(list) => {
+            for (p_char, _, taken) in taken_jumpers {
+                if !list.iter().any(|(c, _, _)| *c == p_char) {
+                    let _ = old_handle.restore_ball(taken).await;
+                }
+            }
+            list
+        }
+        Err(e) => {
+            for (_, _, taken) in taken_jumpers {
+                let _ = old_handle.restore_ball(taken).await;
+            }
+            return Err(e);
+        }
+    };
     let jumpers = committed_jumpers;
     for &(p_char, p_ship, _) in &jumpers {
         crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, p_char, p_ship, old_sys);
@@ -672,9 +730,9 @@ async fn handle_random_jump_filament(
     let (old_const, old_reg) = ctx.sde.solar_systems.get(&old_sys).map(|s| (s.constellation_id, s.region_id)).unwrap_or((0, 0));
     let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
     let pvp_until = now_unix.saturating_add(crate::sp6_lifecycle::PVP_TIMER_SECS);
-    for (j_idx, (p_char, p_ship, mut b)) in jumpers.into_iter().enumerate() {
-        let prev_cs = old_handle.get_combat_state(p_ship).await.ok().flatten();
-        let _ = old_handle.remove_ball(p_ship).await;
+    for (j_idx, (p_char, p_ship, taken)) in jumpers.into_iter().enumerate() {
+        let prev_cs = taken.combat_state;
+        let mut b = taken.ball;
         ctx.sync_character_local_chat(p_char, Some(old_sys), dest_sys_id);
         crate::services::map_service::record_solar_system_jump(ctx, p_char, dest_sys_id);
 
@@ -941,10 +999,16 @@ async fn handle_cmd_jump_to_structure_beacon(
     nav::check_jump_activation(ctx, char_id)?;
     let cap_ship_type = if nav::type_attr(ctx, db_type_id, "jumpDriveCapacitorNeed").is_some() { db_type_id } else { current_ball.type_id };
     let updated_cap_cs = nav::validate_and_prepare_jump_capacitor(ctx, char_id, ship_id, cur_sys_id, cap_ship_type).await?;
-    let prev_cs = cur_sys_handle.get_combat_state(ship_id).await.ok().flatten();
-    nav::consume_jump_fuel(ctx, ship_id, &plan)?;
-    if let Some(ref cap_cs) = updated_cap_cs {
-        let _ = cur_sys_handle.set_combat_state(ship_id, cap_cs.clone()).await;
+    let Some(taken) = cur_sys_handle.take_ball(ship_id).await else {
+        return Err(BridgeRpcError {
+            code: "SystemTransitionFailed".into(),
+            message: format!("Ship {ship_id} is no longer in solar system {cur_sys_id}"),
+        });
+    };
+    let prev_cs = taken.combat_state.clone();
+    if let Err(e) = nav::consume_jump_fuel(ctx, ship_id, &plan) {
+        let _ = cur_sys_handle.restore_ball(taken).await;
+        return Err(e);
     }
     let dist_ly = plan.distance_ly;
     let (cd_min, fat_min) =
@@ -952,33 +1016,47 @@ async fn handle_cmd_jump_to_structure_beacon(
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, cur_sys_id);
     crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
     crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
-    let _ = cur_sys_handle.remove_ball(ship_id).await;
-    let (dest_const_id, dest_reg_id) = ctx
+    let (dest_const_id, dest_reg_id) = match ctx
         .db
         .transition_character_solar_system_if_at(char_id, cur_sys_id, target_sys_id, &ctx.sde)
-        .map(|ch| (ch.constellation_id, ch.region_id))
-        .map_err(|e| BridgeRpcError {
-            code: "SystemTransitionFailed".into(),
-            message: e.to_string(),
-        })?;
+    {
+        Ok(ch) => (ch.constellation_id, ch.region_id),
+        Err(e) => {
+            let _ = cur_sys_handle.restore_ball(taken).await;
+            return Err(BridgeRpcError {
+                code: "SystemTransitionFailed".into(),
+                message: e.to_string(),
+            });
+        }
+    };
+    let effective_prev_cs = updated_cap_cs.or(prev_cs);
+    ctx.db.with_mut_snapshot(|snap| {
+        crate::sp6_lifecycle::leave_space_in_snap(
+            snap,
+            ship_id,
+            effective_prev_cs.as_ref(),
+            Some(target_sys_id),
+            None,
+        );
+    });
     let target_pos = DVec3::from_array(target_struct.position) + DVec3::new(5_000.0, 0.0, 0.0);
     let dest_handle = ctx.systems.get_or_spawn(target_sys_id);
     let ball = Ball {
         id: ship_id,
-        type_id: current_ball.type_id,
+        type_id: taken.ball.type_id,
         position: target_pos,
         velocity: DVec3::ZERO,
-        max_velocity: current_ball.max_velocity,
-        inertia: current_ball.inertia,
-        mass: current_ball.mass,
-        radius: current_ball.radius,
+        max_velocity: taken.ball.max_velocity,
+        inertia: taken.ball.inertia,
+        mass: taken.ball.mass,
+        radius: taken.ball.radius,
         speed_fraction: 0.0,
         mode: MovementMode::Stop,
     };
-    let mut combat_state = ctx.build_ship_combat_state(char_id, ship_id, current_ball.type_id);
+    let mut combat_state = ctx.build_ship_combat_state(char_id, ship_id, taken.ball.type_id);
     crate::services::r6_t1_p1_helpers::apply_preserved_combat_state(
         &mut combat_state,
-        updated_cap_cs.or(prev_cs),
+        effective_prev_cs,
     );
     combat_state.is_cloaked = true;
     combat_state.gate_cloak_remaining_ticks = 60;
@@ -1424,22 +1502,25 @@ async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut Session
 
     nav::check_jump_activation(ctx, char_id)?;
     let updated_cap_cs = nav::validate_and_prepare_jump_capacitor(ctx, char_id, ship_id, cur_sys_id, db_type_id).await?;
-    nav::consume_jump_fuel(ctx, ship_id, &plan)?;
-    if let Some(ref cap_cs) = updated_cap_cs {
-        let _ = cur_sys_handle.set_combat_state(ship_id, cap_cs.clone()).await;
+    let Some(taken) = cur_sys_handle.take_ball(ship_id).await else {
+        return Err(BridgeRpcError {
+            code: "SystemTransitionFailed".into(),
+            message: format!("Ship {ship_id} is no longer in solar system {cur_sys_id}"),
+        });
+    };
+    let prev_cs = taken.combat_state.clone();
+    if let Err(e) = nav::consume_jump_fuel(ctx, ship_id, &plan) {
+        let _ = cur_sys_handle.restore_ball(taken).await;
+        return Err(e);
     }
     let dist_ly = plan.distance_ly;
     let (cd_min, fat_min) = nav::apply_jump_fatigue(ctx, char_id, plan.distance_ly);
-    let prev_cs = cur_sys_handle.get_combat_state(ship_id).await.ok().flatten();
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, cur_sys_id);
     crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
     crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
-    let _ = cur_sys_handle.remove_ball(ship_id).await;
-    let (dest_const_id, dest_reg_id) = ctx.sde.solar_systems.get(&target_sys_id).map(|s| (s.constellation_id, s.region_id)).unwrap_or((0, 0));
-
-    let _ = (dest_const_id, dest_reg_id);
-    ctx.db.with_mut_snapshot(|snap| {
-        let _ = crate::router::apply_character_transition_in_snap(
+    let effective_prev_cs = updated_cap_cs.or(prev_cs);
+    if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| {
+        crate::router::apply_character_transition_in_snap(
             snap,
             &ctx.sde,
             char_id,
@@ -1447,19 +1528,37 @@ async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut Session
             Some(ship_id),
             true,
             false,
+        )
+        .map_err(|e| BridgeRpcError {
+            code: "SystemTransitionFailed".into(),
+            message: e.to_string(),
+        })?;
+        crate::sp6_lifecycle::leave_space_in_snap(
+            snap,
+            ship_id,
+            effective_prev_cs.as_ref(),
+            Some(target_sys_id),
+            None,
         );
-    });
+        Ok::<(), BridgeRpcError>(())
+    }) {
+        let _ = cur_sys_handle.restore_ball(taken).await;
+        return Err(e);
+    }
+    let (dest_const_id, dest_reg_id) = ctx.sde.solar_systems.get(&target_sys_id).map(|s| (s.constellation_id, s.region_id)).unwrap_or((0, 0));
+
+    let _ = (dest_const_id, dest_reg_id);
     let target_pos = beacon.position + DVec3::new(2_500.0, 0.0, 0.0);
     let dest_handle = ctx.systems.get_or_spawn(target_sys_id);
     let ball = Ball {
-        id: ship_id, type_id: current_ball.type_id, position: target_pos, velocity: DVec3::ZERO,
-        max_velocity: current_ball.max_velocity, inertia: current_ball.inertia, mass: current_ball.mass,
-        radius: current_ball.radius, speed_fraction: 0.0, mode: MovementMode::Stop,
+        id: ship_id, type_id: taken.ball.type_id, position: target_pos, velocity: DVec3::ZERO,
+        max_velocity: taken.ball.max_velocity, inertia: taken.ball.inertia, mass: taken.ball.mass,
+        radius: taken.ball.radius, speed_fraction: 0.0, mode: MovementMode::Stop,
     };
-    let mut combat_state = ctx.build_ship_combat_state(char_id, ship_id, current_ball.type_id);
+    let mut combat_state = ctx.build_ship_combat_state(char_id, ship_id, taken.ball.type_id);
     crate::services::r6_t1_p1_helpers::apply_preserved_combat_state(
         &mut combat_state,
-        updated_cap_cs.or(prev_cs),
+        effective_prev_cs,
     );
     combat_state.is_cloaked = true;
     combat_state.gate_cloak_remaining_ticks = 60;
