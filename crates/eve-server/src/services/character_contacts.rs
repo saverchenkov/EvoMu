@@ -203,7 +203,7 @@ pub fn handle_contacts(
                 };
                 if let Some(hist) = snap.employment_history.get(&cid) {
                     if !hist.is_empty() {
-                        let mut indexed: Vec<(usize, &(i64, u64))> =
+                        let mut indexed: Vec<(usize, &_)> =
                             hist.iter().enumerate().collect();
                         indexed.sort_by(|(idx_a, a), (idx_b, b)| {
                             b.1.cmp(&a.1).then_with(|| idx_b.cmp(idx_a))
