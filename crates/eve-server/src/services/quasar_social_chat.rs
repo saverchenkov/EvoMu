@@ -12,6 +12,7 @@ use crate::quasar_gateway::{
     require_admin_role, GatewaySubscriber, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST,
     STATUS_FORBIDDEN, STATUS_NOT_FOUND,
 };
+use eve_db::lock_rank::AnyRwLock;
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
     encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
@@ -216,7 +217,7 @@ pub fn is_delayed_local_system(sys_id: u32) -> bool {
 
 pub fn get_solar_system_members(
     db: &WorldRepository,
-    subscribers: Option<&Arc<RwLock<HashMap<u64, GatewaySubscriber>>>>,
+    subscribers: Option<&dyn AnyRwLock<HashMap<u64, GatewaySubscriber>>>,
     sys_id: u32,
     caller_cid: Option<u32>,
     _caller_corpid: Option<u32>,
@@ -345,7 +346,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             }
             let (member_bytes_list, _) = get_solar_system_members(
                 &db_mem,
-                Some(&subs_mem),
+                Some(&subs_mem as &dyn AnyRwLock<_>),
                 sys_id,
                 Some(cid),
                 caller_corpid,
@@ -445,7 +446,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             } else {
                 let (_, member_ids) = get_solar_system_members(
                     &db_bcast,
-                    Some(&subs_bcast),
+                    Some(&subs_bcast as &dyn AnyRwLock<_>),
                     sys_id,
                     Some(cid),
                     None,
@@ -725,7 +726,7 @@ pub fn on_character_enter_local_chat(
     // 2. MembershipListNotice published to Character scope ONLY
     let (members, _) = get_solar_system_members(
         db,
-        Some(&gateway.subscribers),
+        Some(&gateway.subscribers as &dyn AnyRwLock<_>),
         solar_system_id,
         Some(char_id),
         Some(corpid),

@@ -11,6 +11,7 @@ use crate::services::pve_special_sites::{
     build_special_site_npc_combat_state, deposit_loot_into_ship_or_container_in_snapshot,
     with_pve_special_reg, with_pve_special_reg_db, DrifterHiveRecord,
 };
+use eve_db::lock_rank::AnyRwLock;
 use eve_db::{IskCents, WorldRepository};
 use eve_proto::PyRep;
 use eve_sde::SolarSystemId;
@@ -32,7 +33,7 @@ pub fn get_all_drifter_hives(ctx: &ServerContext) -> Vec<DrifterHiveRecord> {
 
 pub fn notify_special_site_account_changes(
     db: &WorldRepository,
-    pending_notifications: &std::sync::RwLock<
+    pending_notifications: &dyn AnyRwLock<
         std::collections::HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>,
     >,
     notify_tx: &tokio::sync::broadcast::Sender<(

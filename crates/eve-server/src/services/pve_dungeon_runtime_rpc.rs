@@ -12,6 +12,7 @@ use crate::services::pve_dungeon_runtime::{
     DungeonTrigger, DungeonTriggerAction, DungeonTriggerKind, MaterializedDungeonRoomEntities,
     DEFAULT_CONTAINER_TYPE_ID, GATE_ACTIVATION_RANGE_M,
 };
+use eve_db::lock_rank::AnyRwLock;
 use eve_destiny::MovementMode;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -1183,7 +1184,7 @@ pub fn record_dungeon_progression_events(
 pub fn dispatch_dungeon_notify_actions(
     db: &eve_db::WorldRepository,
     pending_notifications: Option<
-        &std::sync::RwLock<
+        &dyn AnyRwLock<
             HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>,
         >,
     >,

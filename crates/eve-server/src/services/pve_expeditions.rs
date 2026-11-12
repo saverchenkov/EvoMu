@@ -12,6 +12,7 @@ mod ops;
 use serde::{Deserialize, Serialize};
 
 use crate::router::ServerContext;
+use eve_db::lock_rank::AnyRwLock;
 use eve_machonet::SessionState;
 use crate::services::pve_exploration::{
     build_wave_npc_balls, next_pve_seq, now_sec,
@@ -517,7 +518,7 @@ pub async fn advance_expedition_step(
 
 pub(crate) fn emit_expedition_destruction_notifications(
     db: &eve_db::WorldRepository,
-    pending_notifications: &std::sync::RwLock<
+    pending_notifications: &dyn AnyRwLock<
         std::collections::HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>,
     >,
     notify_tx: &tokio::sync::broadcast::Sender<(

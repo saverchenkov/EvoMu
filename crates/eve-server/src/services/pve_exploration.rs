@@ -8,6 +8,7 @@
 
 use crate::router::ServerContext;
 use crate::services::pve_hacking_sites::handle_pve_hacking;
+use eve_db::lock_rank::AnyRwLock;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{SolarSystemId, TypeId};
@@ -307,7 +308,7 @@ pub async fn handle_pve_site_npc_destruction_core(
     db: &std::sync::Arc<eve_db::WorldRepository>,
     sde: &std::sync::Arc<eve_sde::SdeRegistry>,
     rng: &std::sync::Arc<crate::rng::MechanicRng>,
-    combat_ephemeral: &std::sync::Arc<std::sync::RwLock<crate::services::combat_crimewatch::CombatRuntimeState>>,
+    combat_ephemeral: &dyn AnyRwLock<crate::services::combat_crimewatch::CombatRuntimeState>,
     solar_system_id: SolarSystemId,
     npc_ball_id: i64,
     killer_char_id: i64,
@@ -517,7 +518,7 @@ pub async fn handle_pve_site_npc_destruction_core(
 
 pub fn notify_pve_destruction_events(
     db: &eve_db::WorldRepository,
-    pending_notifications: &std::sync::RwLock<std::collections::HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>>,
+    pending_notifications: &dyn AnyRwLock<std::collections::HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>>,
     notify_tx: &tokio::sync::broadcast::Sender<(i64, crate::router::cache_notifications::PendingMachoNotification)>,
     killer_char_id: i64,
     cleared_site_id: Option<String>,

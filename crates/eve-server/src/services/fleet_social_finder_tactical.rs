@@ -1427,18 +1427,29 @@ pub(super) async fn handle_finder_and_tactical(
 /// Clears any fleet target tags associated with `target_id` upon target destruction (`feat:fleet.target-tagging`).
 pub fn clear_destroyed_target_tag(ctx: &ServerContext, target_id: i64) {
     let affected_fleets: Vec<(i64, i64)> = {
-        let mut ex = ctx.fleet_extras.lock().unwrap();
-        let mut affected = Vec::new();
-        for (&fleet_id, tags) in ex.target_tags.iter_mut() {
-            if tags.remove(&target_id).is_some() {
-                let boss_id = ctx
-                    .db
-                    .with_snapshot(|snap| snap.fleets.get(&fleet_id).map(|f| f.boss_id))
-                    .unwrap_or(0);
-                affected.push((fleet_id, boss_id));
+        let modified_fleets: Vec<i64> = {
+            let mut ex = ctx.fleet_extras.lock().unwrap();
+            let mut modified = Vec::new();
+            for (&fleet_id, tags) in ex.target_tags.iter_mut() {
+                if tags.remove(&target_id).is_some() {
+                    modified.push(fleet_id);
+                }
             }
+            modified
+        };
+        if modified_fleets.is_empty() {
+            Vec::new()
+        } else {
+            ctx.db.with_snapshot(|snap| {
+                modified_fleets
+                    .into_iter()
+                    .map(|fleet_id| {
+                        let boss_id = snap.fleets.get(&fleet_id).map(|f| f.boss_id).unwrap_or(0);
+                        (fleet_id, boss_id)
+                    })
+                    .collect()
+            })
         }
-        affected
     };
     for (fleet_id, boss_id) in affected_fleets {
         let fleet_state = notify::build_fleet_state_keyval(ctx, Some(fleet_id), boss_id, 1.0, 1.0, 1.0);

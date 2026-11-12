@@ -93,14 +93,20 @@ pub struct CrimeWatchDirector {
 
 /// Durable read/write lock wrapper around [`CrimeWatchDirector`] backed directly by [`eve_db::WorldRepository`] (`D-6`).
 pub struct CrimeWatchLock {
-    lock: std::sync::RwLock<()>,
+    lock: eve_db::lock_rank::RankedRwLock<(), { eve_db::lock_rank::RANK_CRIMEWATCH }>,
     db: std::sync::Arc<eve_db::WorldRepository>,
-    concord_reports: std::sync::Mutex<Vec<ConcordExecutionReport>>,
-    pending_concord_despawns: std::sync::Mutex<Vec<(u32, i64, u64)>>,
+    concord_reports:
+        eve_db::lock_rank::RankedMutex<Vec<ConcordExecutionReport>, { eve_db::lock_rank::RANK_LEAF }>,
+    pending_concord_despawns:
+        eve_db::lock_rank::RankedMutex<Vec<(u32, i64, u64)>, { eve_db::lock_rank::RANK_LEAF }>,
 }
 
 pub struct CrimeWatchReadGuard<'a> {
-    _guard: std::sync::RwLockReadGuard<'a, ()>,
+    _guard: eve_db::lock_rank::RankedRwLockReadGuard<
+        'a,
+        (),
+        { eve_db::lock_rank::RANK_CRIMEWATCH },
+    >,
     director: CrimeWatchDirector,
 }
 
@@ -190,10 +196,10 @@ impl<'a> Drop for CrimeWatchRestoreGuard<'a> {
 impl CrimeWatchLock {
     pub fn new(db: std::sync::Arc<eve_db::WorldRepository>) -> Self {
         Self {
-            lock: std::sync::RwLock::new(()),
+            lock: eve_db::lock_rank::RankedRwLock::new(()),
             db,
-            concord_reports: std::sync::Mutex::new(Vec::new()),
-            pending_concord_despawns: std::sync::Mutex::new(Vec::new()),
+            concord_reports: eve_db::lock_rank::RankedMutex::new(Vec::new()),
+            pending_concord_despawns: eve_db::lock_rank::RankedMutex::new(Vec::new()),
         }
     }
 
@@ -332,6 +338,7 @@ impl CrimeWatchLock {
             pending_despawns_lock: &self.pending_concord_despawns,
             orig_stages: stages.clone(),
             orig_pending_despawns: pending_despawns.clone(),
+            mutated: false,
             director: CrimeWatchDirector {
                 states,
                 aggression_mgr: AggressionManager { records },
@@ -343,11 +350,17 @@ impl CrimeWatchLock {
 }
 
 pub struct CrimeWatchWriteGuard<'a> {
-    _guard: std::sync::RwLockWriteGuard<'a, ()>,
+    _guard: eve_db::lock_rank::RankedRwLockWriteGuard<
+        'a,
+        (),
+        { eve_db::lock_rank::RANK_CRIMEWATCH },
+    >,
     db: &'a std::sync::Arc<eve_db::WorldRepository>,
-    pending_despawns_lock: &'a std::sync::Mutex<Vec<(u32, i64, u64)>>,
+    pending_despawns_lock:
+        &'a eve_db::lock_rank::RankedMutex<Vec<(u32, i64, u64)>, { eve_db::lock_rank::RANK_LEAF }>,
     orig_stages: HashMap<u32, u8>,
     orig_pending_despawns: Vec<(u32, i64, u64)>,
+    mutated: bool,
     director: CrimeWatchDirector,
 }
 
@@ -360,6 +373,7 @@ impl<'a> std::ops::Deref for CrimeWatchWriteGuard<'a> {
 
 impl<'a> std::ops::DerefMut for CrimeWatchWriteGuard<'a> {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        self.mutated = true;
         &mut self.director
     }
 }
@@ -377,7 +391,7 @@ pub fn concord_delay_for_security(sys_sec: f64) -> f64 {
 
 impl<'a> Drop for CrimeWatchWriteGuard<'a> {
     fn drop(&mut self) {
-        if std::thread::panicking() {
+        if std::thread::panicking() || !self.mutated {
             return;
         }
         let stages_changed = self.director.system_corruption_stages != self.orig_stages;
@@ -856,7 +870,7 @@ impl CrimeWatchDirector {
 pub async fn tick_concord_responses(ctx: &ServerContext, now_unix: u64) {
     let mut due_concord_despawns: Vec<(u32, i64)> = Vec::new();
     let mut temp_cw = CrimeWatchDirector::new();
-    if let Ok(mut cw) = ctx.crimewatch.write() {
+    ctx.crimewatch.with_mut_crimewatch(|cw| {
         let mut remaining = Vec::with_capacity(cw.pending_concord_despawns.len());
         for (sys_id, ball_id, remove_at_unix) in cw.pending_concord_despawns.drain(..) {
             if now_unix >= remove_at_unix {
@@ -875,7 +889,7 @@ pub async fn tick_concord_responses(ctx: &ServerContext, now_unix: u64) {
                 }
             }
         }
-    }
+    });
     for (sys_id, ball_id) in due_concord_despawns {
         let _ = ctx.systems.get_or_spawn(sys_id).remove_ball(ball_id).await;
     }
@@ -886,10 +900,10 @@ pub async fn tick_concord_responses(ctx: &ServerContext, now_unix: u64) {
             .step_concord(ctx, now_unix, u64::from_le_bytes(seed_buf))
             .await;
         if !temp_cw.pending_concord_despawns.is_empty() {
-            if let Ok(mut cw) = ctx.crimewatch.write() {
+            ctx.crimewatch.with_mut_crimewatch(|cw| {
                 cw.pending_concord_despawns
                     .extend(temp_cw.pending_concord_despawns);
-            }
+            });
         }
     }
 }

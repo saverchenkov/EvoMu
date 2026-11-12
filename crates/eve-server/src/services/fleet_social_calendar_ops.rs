@@ -553,6 +553,7 @@ pub(crate) fn handle_calendar_mutate(
 
     let mut resp_val = 1i64;
     let mut edit_info = None;
+    let now_ft = (ctx.now_unix() as i64 + 11_644_473_600) * 10_000_000;
     {
         let mut s = ctx.social_extras.lock().unwrap();
         let Some(ev) = s.calendar_events.get_mut(&eid) else {
@@ -614,7 +615,6 @@ pub(crate) fn handle_calendar_mutate(
                     message: "Only the event creator or authorized director may edit it".into(),
                 });
             }
-            let now_ft = (ctx.now_unix() as i64 + 11_644_473_600) * 10_000_000;
             let mut old_dt = ev.event_date_time;
             if args.len() >= 7 {
                 let new_dt = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);

@@ -792,30 +792,34 @@ fn handle_macho_net(
                     message: "machoNet.GetMetrics requires GM role".into(),
                 }));
             }
-            let state = ctx.cluster_state.read().unwrap();
-            let mut cr_entries: Vec<(PyRep, PyRep)> = state
-                .calls_received
-                .iter()
-                .map(|(k, &v)| (PyRep::String(k.clone()), PyRep::Integer(v)))
-                .collect();
+            let (mut cr_entries, mut cs_entries, mut nr_entries, sent_count) = {
+                let state = ctx.cluster_state.read().unwrap();
+                let cr_entries: Vec<(PyRep, PyRep)> = state
+                    .calls_received
+                    .iter()
+                    .map(|(k, &v)| (PyRep::String(k.clone()), PyRep::Integer(v)))
+                    .collect();
+                let cs_entries: Vec<(PyRep, PyRep)> = state
+                    .calls_sent
+                    .iter()
+                    .map(|(k, &v)| (PyRep::String(k.clone()), PyRep::Integer(v)))
+                    .collect();
+                let nr_entries: Vec<(PyRep, PyRep)> = state
+                    .notifications_received
+                    .iter()
+                    .map(|(k, &v)| (PyRep::String(k.clone()), PyRep::Integer(v)))
+                    .collect();
+                let sent_count = *state.notifications_sent.get("machoNet").unwrap_or(&1);
+                (cr_entries, cs_entries, nr_entries, sent_count)
+            };
             cr_entries.sort_by(|a, b| match (&a.0, &b.0) {
                 (PyRep::String(sa), PyRep::String(sb)) => sa.cmp(sb),
                 _ => std::cmp::Ordering::Equal,
             });
-            let mut cs_entries: Vec<(PyRep, PyRep)> = state
-                .calls_sent
-                .iter()
-                .map(|(k, &v)| (PyRep::String(k.clone()), PyRep::Integer(v)))
-                .collect();
             cs_entries.sort_by(|a, b| match (&a.0, &b.0) {
                 (PyRep::String(sa), PyRep::String(sb)) => sa.cmp(sb),
                 _ => std::cmp::Ordering::Equal,
             });
-            let mut nr_entries: Vec<(PyRep, PyRep)> = state
-                .notifications_received
-                .iter()
-                .map(|(k, &v)| (PyRep::String(k.clone()), PyRep::Integer(v)))
-                .collect();
             nr_entries.sort_by(|a, b| match (&a.0, &b.0) {
                 (PyRep::String(sa), PyRep::String(sb)) => sa.cmp(sb),
                 _ => std::cmp::Ordering::Equal,
@@ -825,7 +829,7 @@ fn handle_macho_net(
                 .read()
                 .map(|n| n.len() as i64)
                 .unwrap_or(0)
-                .max(*state.notifications_sent.get("machoNet").unwrap_or(&1));
+                .max(sent_count);
             let ns_entries = vec![(PyRep::String("machoNet".into()), PyRep::Integer(notifs_count))];
 
             let metrics_keyval = PyRep::keyval(vec![

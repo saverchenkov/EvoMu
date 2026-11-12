@@ -362,29 +362,31 @@ impl PersistedServerRuntimeState {
             .map(|(k, &v)| (k.clone(), v))
             .collect();
         character_scan_progress.sort_by(|(a, _), (b, _)| a.cmp(b));
-        let mut fighter_cooldown_state: Vec<_> = ctx
-            .fighter_cooldown_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .map(|(&k, &v)| (k, v))
-            .collect();
+        let (
+            active_fighters,
+            mut fighter_cooldown_state,
+            mut fighter_charge_state,
+            mut fighter_tube_loads,
+        ) = {
+            let fg = ctx.fighters.read().unwrap_or_else(|e| e.into_inner());
+            (
+                fg.active_fighters.clone(),
+                fg.cooldown_state
+                    .iter()
+                    .map(|(&k, &v)| (k, v))
+                    .collect::<Vec<_>>(),
+                fg.charge_state
+                    .iter()
+                    .map(|(&k, &v)| (k, v))
+                    .collect::<Vec<_>>(),
+                fg.tube_loads
+                    .iter()
+                    .map(|(&k, &v)| (k, v))
+                    .collect::<Vec<_>>(),
+            )
+        };
         fighter_cooldown_state.sort_by_key(|(k, _)| *k);
-        let mut fighter_charge_state: Vec<_> = ctx
-            .fighter_charge_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .map(|(&k, &v)| (k, v))
-            .collect();
         fighter_charge_state.sort_by_key(|(k, _)| *k);
-        let mut fighter_tube_loads: Vec<_> = ctx
-            .fighter_tube_loads
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .map(|(&k, &v)| (k, v))
-            .collect();
         fighter_tube_loads.sort_by_key(|(k, _)| *k);
         let mut module_reactivation_cooldowns: Vec<_> = ctx
             .module_reactivation_cooldowns
@@ -411,11 +413,7 @@ impl PersistedServerRuntimeState {
                 .clone(),
             scanned_signatures,
             character_scan_progress,
-            active_fighters: ctx
-                .active_fighters
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
+            active_fighters,
             fighter_cooldown_state,
             fighter_charge_state,
             fighter_tube_loads,
@@ -522,18 +520,13 @@ impl PersistedServerRuntimeState {
         *ctx.character_scan_progress
             .write()
             .unwrap_or_else(|e| e.into_inner()) = self.character_scan_progress.into_iter().collect();
-        *ctx.active_fighters
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = self.active_fighters;
-        *ctx.fighter_cooldown_state
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = self.fighter_cooldown_state.into_iter().collect();
-        *ctx.fighter_charge_state
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = self.fighter_charge_state.into_iter().collect();
-        *ctx.fighter_tube_loads
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = self.fighter_tube_loads.into_iter().collect();
+        {
+            let mut fg = ctx.fighters.write().unwrap_or_else(|e| e.into_inner());
+            fg.active_fighters = self.active_fighters;
+            fg.cooldown_state = self.fighter_cooldown_state.into_iter().collect();
+            fg.charge_state = self.fighter_charge_state.into_iter().collect();
+            fg.tube_loads = self.fighter_tube_loads.into_iter().collect();
+        }
         *ctx.module_reactivation_cooldowns
             .write()
             .unwrap_or_else(|e| e.into_inner()) =

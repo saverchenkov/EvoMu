@@ -62,8 +62,10 @@ async fn celestials_helpers_pruning_unregistered_and_scrambled_sync() {
     cs.warp_scramble_strength = 2;
     bp.combat_states.insert(ship_id, cs);
 
-    let pos_cache = RwLock::new(HashMap::new());
-    let scram_cache = RwLock::new(HashSet::new());
+    let pos_cache: eve_db::lock_rank::RankedRwLock<_, { eve_db::lock_rank::RANK_LEAF }> =
+        eve_db::lock_rank::RankedRwLock::new(HashMap::new());
+    let scram_cache: eve_db::lock_rank::RankedRwLock<_, { eve_db::lock_rank::RANK_LEAF }> =
+        eve_db::lock_rank::RankedRwLock::new(HashSet::new());
     sync_ball_positions(&bp, &pos_cache, &scram_cache);
     assert_eq!(pos_cache.read().unwrap().get(&ship_id), Some(&DVec3::new(100.0, 0.0, 0.0)));
     assert!(scram_cache.read().unwrap().contains(&ship_id));
@@ -124,8 +126,8 @@ async fn fast_forward_clock_and_force_stop_warp_edge_branches() {
     let db = Arc::new(WorldRepository::with_demo_seed());
     let sys_id = 30_000_142u32;
     let (tx, mut rx) = tokio::sync::broadcast::channel(16);
-    let pos_cache = Arc::new(RwLock::new(HashMap::new()));
-    let scram_cache = Arc::new(RwLock::new(HashSet::new()));
+    let pos_cache = Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new()));
+    let scram_cache = Arc::new(eve_db::lock_rank::RankedRwLock::new(HashSet::new()));
     let mut bp = Ballpark::new(sys_id);
     let mut sim_elapsed = 0.0;
 
@@ -289,7 +291,6 @@ async fn fast_forward_clock_and_force_stop_warp_edge_branches() {
 #[test]
 fn persist_ball_positions_and_landed_warps_kill_all_mutants() {
     use eve_destiny::{SlimItemMeta, WarpPhase};
-    use std::sync::RwLock;
 
     assert_eq!(SUBWARP_FLUSH_DISPLACEMENT_SQ_M2, 10_000.0);
 
@@ -534,8 +535,8 @@ fn persist_ball_positions_and_landed_warps_kill_all_mutants() {
     });
 
     // 3. fast_forward_clock_in_actor advances tick, sim_elapsed_secs, ball position, and shared caches
-    let ball_pos_map = Arc::new(RwLock::new(HashMap::new()));
-    let scrambled_map = Arc::new(RwLock::new(HashSet::new()));
+    let ball_pos_map = Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new()));
+    let scrambled_map = Arc::new(eve_db::lock_rank::RankedRwLock::new(HashSet::new()));
     let tick_before = bp.current_tick;
     let mut sim_elapsed = 10.0;
     let (ev_tx, _) = tokio::sync::broadcast::channel::<crate::system_actor::TickBroadcast>(16);

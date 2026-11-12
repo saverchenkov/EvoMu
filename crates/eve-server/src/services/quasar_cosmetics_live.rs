@@ -25,6 +25,7 @@ use crate::quasar_gateway::{
     STATUS_FORBIDDEN, STATUS_NOT_FOUND,
 };
 use crate::router::NotificationTarget;
+use eve_db::lock_rank::{AnyRwLock, RankedRwLock, RANK_LEAF};
 use eve_db::{WorldRepository, WorldStateSnapshot};
 use eve_proto::quasar::{
     encode_bytes_field, encode_varint_field, AuthoritativeContext, DynamicQuasarMessage,
@@ -91,20 +92,20 @@ fn db_live_cosmetics_map(
 pub struct CosmeticsLiveState {
     db: Arc<WorldRepository>,
     sde: Arc<SdeRegistry>,
-    macho_sink: Arc<RwLock<Option<MachoNotifySink>>>,
+    macho_sink: Arc<RankedRwLock<Option<MachoNotifySink>, RANK_LEAF>>,
     pub data: RwLock<CosmeticsLiveData>,
     last_logo_gen: std::sync::atomic::AtomicU64,
 }
 
 impl CosmeticsLiveState {
     pub fn load(db: Arc<WorldRepository>, sde: Arc<SdeRegistry>) -> Arc<Self> {
-        Self::load_with_sink(db, sde, Arc::new(RwLock::new(None)))
+        Self::load_with_sink(db, sde, Arc::new(RankedRwLock::new(None)))
     }
 
     pub fn load_with_sink(
         db: Arc<WorldRepository>,
         sde: Arc<SdeRegistry>,
-        macho_sink: Arc<RwLock<Option<MachoNotifySink>>>,
+        macho_sink: Arc<RankedRwLock<Option<MachoNotifySink>, RANK_LEAF>>,
     ) -> Arc<Self> {
         let data = db.with_snapshot(|s| {
             s.quasar_state_blobs.get(BLOB_KEY).and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default()
@@ -297,7 +298,7 @@ pub fn install_macho_notify_sink(ctx: &crate::router::ServerContext) {
 }
 
 pub fn emit_ship_logo_macho_notifications(
-    sink_lock: &RwLock<Option<MachoNotifySink>>,
+    sink_lock: &dyn AnyRwLock<Option<MachoNotifySink>>,
     db: &WorldRepository,
     ship_id: u64,
     slot_index: i32,
@@ -339,7 +340,7 @@ pub fn emit_ship_logo_macho_notifications(
 /// and broadcasts `OnShipCosmeticChanged` + `OnShipCosmeticsChanged` for each affected hull.
 pub fn prune_revoked_logo_entitlement(
     db: &WorldRepository,
-    sink_lock: &RwLock<Option<MachoNotifySink>>,
+    sink_lock: &dyn AnyRwLock<Option<MachoNotifySink>>,
     target_cid: u64,
     ship_type_id: u32,
     is_alliance: bool,

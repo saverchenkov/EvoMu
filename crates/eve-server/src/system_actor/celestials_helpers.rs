@@ -3,20 +3,21 @@
 #![forbid(unsafe_code)]
 
 use super::SystemHandle;
+use eve_db::lock_rank::{RankedRwLock, RANK_BALLPARK, RANK_LEAF};
 use eve_destiny::{BallId, Ballpark};
 use eve_sde::SolarSystemId;
 use glam::DVec3;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 #[allow(clippy::type_complexity)]
 fn db_ballpark_map() -> &'static std::sync::Mutex<
     HashMap<
         (u64, SolarSystemId),
         (
-            std::sync::Weak<RwLock<Ballpark>>,
-            std::sync::Weak<RwLock<HashMap<BallId, DVec3>>>,
-            std::sync::Weak<RwLock<std::collections::HashSet<BallId>>>,
+            std::sync::Weak<RankedRwLock<Ballpark, RANK_BALLPARK>>,
+            std::sync::Weak<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+            std::sync::Weak<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
         ),
     >,
 > {
@@ -25,9 +26,9 @@ fn db_ballpark_map() -> &'static std::sync::Mutex<
             HashMap<
                 (u64, SolarSystemId),
                 (
-                    std::sync::Weak<RwLock<Ballpark>>,
-                    std::sync::Weak<RwLock<HashMap<BallId, DVec3>>>,
-                    std::sync::Weak<RwLock<std::collections::HashSet<BallId>>>,
+                    std::sync::Weak<RankedRwLock<Ballpark, RANK_BALLPARK>>,
+                    std::sync::Weak<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+                    std::sync::Weak<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
                 ),
             >,
         >,
@@ -55,16 +56,20 @@ pub(crate) fn register_db_system_ballpark(
 }
 
 fn committed_warp_cache_map(
-) -> &'static std::sync::Mutex<HashMap<usize, std::sync::Weak<RwLock<HashMap<BallId, DVec3>>>>> {
+) -> &'static std::sync::Mutex<
+    HashMap<usize, std::sync::Weak<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>>,
+> {
     static MAP: std::sync::OnceLock<
-        std::sync::Mutex<HashMap<usize, std::sync::Weak<RwLock<HashMap<BallId, DVec3>>>>>,
+        std::sync::Mutex<
+            HashMap<usize, std::sync::Weak<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>>,
+        >,
     > = std::sync::OnceLock::new();
     MAP.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
 pub(crate) fn register_committed_warp_cache(
-    cache: &Arc<RwLock<HashMap<BallId, DVec3>>>,
-    committed_warps: &Arc<RwLock<HashMap<BallId, DVec3>>>,
+    cache: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+    committed_warps: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
 ) {
     let key = Arc::as_ptr(cache) as usize;
     let mut g = committed_warp_cache_map()
@@ -78,39 +83,35 @@ pub(crate) fn register_committed_warp_cache(
 
 pub(crate) fn sync_ball_positions(
     ballpark: &Ballpark,
-    cache: &RwLock<HashMap<BallId, DVec3>>,
-    scrambled: &RwLock<std::collections::HashSet<BallId>>,
+    cache: &RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>,
+    scrambled: &RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>,
 ) {
-    let mut guard = cache.write().unwrap_or_else(|e| e.into_inner());
-    let mut scram_guard = scrambled.write().unwrap_or_else(|e| e.into_inner());
-    guard.clear();
-    scram_guard.clear();
+    let mut positions = HashMap::with_capacity(ballpark.balls.len());
+    let mut scram = std::collections::HashSet::new();
+    let mut warps = HashMap::new();
+    for (&id, ball) in &ballpark.balls {
+        positions.insert(id, ball.position);
+        if ballpark.is_ball_scrambled(id) {
+            scram.insert(id);
+        }
+        if let eve_destiny::MovementMode::Warp {
+            destination, phase, ..
+        } = ball.mode
+        {
+            if phase != eve_destiny::WarpPhase::Aligning {
+                warps.insert(id, destination);
+            }
+        }
+    }
+    *cache.write().unwrap_or_else(|e| e.into_inner()) = positions;
+    *scrambled.write().unwrap_or_else(|e| e.into_inner()) = scram;
     let warp_arc_opt = committed_warp_cache_map()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .get(&(cache as *const RwLock<HashMap<BallId, DVec3>> as usize))
+        .get(&(cache as *const RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF> as usize))
         .and_then(|w| w.upgrade());
-    let mut warp_guard = warp_arc_opt
-        .as_ref()
-        .map(|arc| arc.write().unwrap_or_else(|e| e.into_inner()));
-    if let Some(ref mut wg) = warp_guard {
-        wg.clear();
-    }
-    for (&id, ball) in &ballpark.balls {
-        guard.insert(id, ball.position);
-        if ballpark.is_ball_scrambled(id) {
-            scram_guard.insert(id);
-        }
-        if let Some(ref mut wg) = warp_guard {
-            if let eve_destiny::MovementMode::Warp {
-                destination, phase, ..
-            } = ball.mode
-            {
-                if phase != eve_destiny::WarpPhase::Aligning {
-                    wg.insert(id, destination);
-                }
-            }
-        }
+    if let Some(warp_arc) = warp_arc_opt {
+        *warp_arc.write().unwrap_or_else(|e| e.into_inner()) = warps;
     }
 }
 
@@ -297,8 +298,8 @@ pub(crate) fn fast_forward_clock_in_actor(
     secs: u64,
     sim_elapsed_secs: &mut f64,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
-    ball_positions_actor: &Arc<RwLock<HashMap<BallId, DVec3>>>,
-    scrambled_balls_actor: &Arc<RwLock<std::collections::HashSet<BallId>>>,
+    ball_positions_actor: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+    scrambled_balls_actor: &Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     event_tx_actor: &tokio::sync::broadcast::Sender<crate::system_actor::TickBroadcast>,
 ) {
     let Some(ball0) = ballpark.balls.get(&ship_id) else {

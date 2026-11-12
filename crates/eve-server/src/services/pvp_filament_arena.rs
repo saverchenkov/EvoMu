@@ -5,6 +5,7 @@
 
 use crate::router::cache_notifications::NotificationTarget;
 use crate::router::ServerContext;
+use eve_db::lock_rank::AnyRwLock;
 use crate::services::pve_abyssal_hazards::resolve_character_home_station_and_system;
 use crate::services::pve_abyssal_pylons::destroy_pod_and_respawn_faction_corvette_in_snap;
 use crate::services::pvp_filament_mgr::{
@@ -288,7 +289,7 @@ pub fn record_proving_grounds_combat_result_in_snap(
 
 fn enqueue_pvp_char_notification(
     db: &eve_db::WorldRepository,
-    pending_opt: Option<&std::sync::RwLock<std::collections::HashMap<i64, Vec<crate::router::PendingMachoNotification>>>>,
+    pending_opt: Option<&dyn AnyRwLock<std::collections::HashMap<i64, Vec<crate::router::PendingMachoNotification>>>>,
     notify_tx_opt: Option<&tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
     cid: i64,
     event: &str,
@@ -333,7 +334,7 @@ fn enqueue_pvp_char_notification(
 pub fn notify_pvp_stats_for_pilots_in_db(
     db: &eve_db::WorldRepository,
     sde_opt: Option<&eve_sde::SdeRegistry>,
-    pending_opt: Option<&std::sync::RwLock<std::collections::HashMap<i64, Vec<crate::router::PendingMachoNotification>>>>,
+    pending_opt: Option<&dyn AnyRwLock<std::collections::HashMap<i64, Vec<crate::router::PendingMachoNotification>>>>,
     notify_tx_opt: Option<&tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
     event_id: i64,
     pilots: &[i64],
@@ -400,7 +401,7 @@ pub fn step_proving_grounds_arena_hazards_in_ballpark(
     sde_opt: Option<&eve_sde::SdeRegistry>,
     db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
     solar_system_id: eve_sde::SolarSystemId,
-    pending_notifications_opt: Option<&std::sync::RwLock<std::collections::HashMap<i64, Vec<crate::router::PendingMachoNotification>>>>,
+    pending_notifications_opt: Option<&dyn AnyRwLock<std::collections::HashMap<i64, Vec<crate::router::PendingMachoNotification>>>>,
     notify_tx_opt: Option<&tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
 ) -> Vec<i64> {
     step_proving_grounds_arena_hazards_in_ballpark_with_options(
@@ -419,7 +420,7 @@ pub(crate) fn step_proving_grounds_arena_hazards_in_ballpark_for_tick(
     sde_opt: Option<&eve_sde::SdeRegistry>,
     db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
     solar_system_id: eve_sde::SolarSystemId,
-    pending_notifications_opt: Option<&std::sync::RwLock<std::collections::HashMap<i64, Vec<crate::router::PendingMachoNotification>>>>,
+    pending_notifications_opt: Option<&dyn AnyRwLock<std::collections::HashMap<i64, Vec<crate::router::PendingMachoNotification>>>>,
     notify_tx_opt: Option<&tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
 ) -> Vec<i64> {
     step_proving_grounds_arena_hazards_in_ballpark_with_options(
@@ -438,7 +439,7 @@ fn step_proving_grounds_arena_hazards_in_ballpark_with_options(
     sde_opt: Option<&eve_sde::SdeRegistry>,
     db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
     solar_system_id: eve_sde::SolarSystemId,
-    pending_notifications_opt: Option<&std::sync::RwLock<std::collections::HashMap<i64, Vec<crate::router::PendingMachoNotification>>>>,
+    pending_notifications_opt: Option<&dyn AnyRwLock<std::collections::HashMap<i64, Vec<crate::router::PendingMachoNotification>>>>,
     notify_tx_opt: Option<&tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
     defer_ship_death_to_step_hook: bool,
 ) -> Vec<i64> {

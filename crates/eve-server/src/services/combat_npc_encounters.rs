@@ -15,7 +15,8 @@ use crate::system_actor::SystemRegistry;
 use eve_db::WorldRepository;
 use eve_sde::{SdeRegistry, SolarSystemId};
 use glam::DVec3;
-use std::sync::{Arc, RwLock};
+use eve_db::lock_rank::AnyRwLock;
+use std::sync::Arc;
 
 /// Definition of a single wave in an NPC encounter site.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -176,7 +177,7 @@ pub async fn handle_npc_destroyed_in_space(
     systems: &Arc<SystemRegistry>,
     db: &Arc<WorldRepository>,
     sde: &Arc<SdeRegistry>,
-    combat_ephemeral: &Arc<RwLock<CombatRuntimeState>>,
+    combat_ephemeral: &dyn AnyRwLock<CombatRuntimeState>,
     solar_system_id: SolarSystemId,
     killed_ball_id: i64,
     killer_char_id: Option<i64>,
@@ -697,6 +698,7 @@ pub async fn populate_npc_wreck_on_turret_kill(
             .remove(&npc_ball_id)
             .or_else(|| rt.destroyed_npc_cache.remove(&npc_ball_id))
     });
+    let respawn_at = ctx.now_unix().saturating_add(1_200);
     if let Ok(mut spawns) = ctx.npc_spawns.write() {
         if let Some(mgr) = spawns.get_mut(&solar_system_id) {
             if let Some(removed) = mgr.entities.remove(&npc_ball_id) {
@@ -707,7 +709,7 @@ pub async fn populate_npc_wreck_on_turret_kill(
                 if group_empty {
                     mgr.respawn_timers.insert(
                         (solar_system_id, removed.spawn_group_id),
-                        ctx.now_unix().saturating_add(1_200),
+                        respawn_at,
                     );
                 }
             }

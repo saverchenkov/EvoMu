@@ -1,3 +1,4 @@
+use eve_db::lock_rank::{AnyRwLock, RankedMutex, RANK_LEAF};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 
@@ -89,7 +90,9 @@ pub fn check_starter_shipcaster_eligibility(
 
 pub(crate) fn emit_shipcaster_target_state_changed_core(
     db: &eve_db::WorldRepository,
-    pending_notifications: Option<&std::sync::RwLock<std::collections::HashMap<i64, Vec<PendingMachoNotification>>>>,
+    pending_notifications: Option<
+        &dyn AnyRwLock<std::collections::HashMap<i64, Vec<PendingMachoNotification>>>,
+    >,
     notify_tx: &tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>,
     solar_system_id: u32,
     item_id: i64,
@@ -158,11 +161,18 @@ pub async fn on_landing_pad_ball_destroyed(ctx: &ServerContext, ball_id: i64) {
 }
 
 pub async fn on_landing_pad_ball_destroyed_core(
-    misc: &std::sync::Arc<std::sync::Mutex<crate::services::cluster_macho_misc_services::ClusterMiscRuntimeState>>,
+    misc: &std::sync::Arc<
+        RankedMutex<
+            crate::services::cluster_macho_misc_services::ClusterMiscRuntimeState,
+            RANK_LEAF,
+        >,
+    >,
     systems: &std::sync::Arc<crate::system_actor::SystemRegistry>,
     db: &std::sync::Arc<eve_db::WorldRepository>,
     sde: &eve_sde::SdeRegistry,
-    pending_notifications: Option<&std::sync::RwLock<std::collections::HashMap<i64, Vec<PendingMachoNotification>>>>,
+    pending_notifications: Option<
+        &dyn AnyRwLock<std::collections::HashMap<i64, Vec<PendingMachoNotification>>>,
+    >,
     notify_tx: &tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>,
     ball_id: i64,
 ) {

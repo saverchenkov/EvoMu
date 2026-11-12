@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
 use eve_destiny::{
     Ball, BallId, CombatState, DamageVector, DestinyEvent, MovementMode, SlimItemMeta,
     TargetLock,
@@ -226,8 +227,8 @@ pub(crate) struct SystemActorState {
     pub mechanic_rng_opt: Option<Arc<crate::rng::MechanicRng>>,
     pub sim_elapsed_secs: f64,
     pub pending_cycle_actions: Vec<PendingCycleAction>,
-    pub tactical_state: Arc<std::sync::RwLock<crate::services::tactical_modules::TacticalModulesState>>,
-    pub pending_notifications_opt: Option<Arc<std::sync::RwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>>>>,
+    pub tactical_state: Arc<RankedRwLock<crate::services::tactical_modules::TacticalModulesState, RANK_LEAF>>,
+    pub pending_notifications_opt: Option<Arc<RankedRwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>, RANK_LEAF>>>,
     pub notify_tx_opt: Option<tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
 }
 

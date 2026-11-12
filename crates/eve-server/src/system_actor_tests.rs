@@ -272,8 +272,10 @@ async fn system_registry_builders_sync_queries_hooks_and_nanite_refunds() {
     let db = Arc::new(eve_db::WorldRepository::new_empty());
     let sde = Arc::new(SdeRegistry::with_canonical_seed());
     let (notify_tx, _rx) = tokio::sync::broadcast::channel(16);
-    let pending_notifs = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-    let tactical = Arc::new(std::sync::RwLock::new(
+    let pending_notifs = Arc::new(eve_db::lock_rank::RankedRwLock::new(
+        std::collections::HashMap::new(),
+    ));
+    let tactical = Arc::new(eve_db::lock_rank::RankedRwLock::new(
         crate::services::tactical_modules::TacticalModulesState::default(),
     ));
     let rng = Arc::new(crate::rng::MechanicRng::seeded(
@@ -757,7 +759,7 @@ async fn issue_803_drain_observer_updates_increments_tick_on_set_state() {
 async fn issue_804_active_module_cycle_weapon_damage_emits_on_damage_message() {
     let db = Arc::new(eve_db::WorldRepository::new_empty());
     let sde = Arc::new(SdeRegistry::with_canonical_seed());
-    let pending = Arc::new(std::sync::RwLock::new(
+    let pending = Arc::new(eve_db::lock_rank::RankedRwLock::new(
         std::collections::HashMap::<i64, Vec<crate::router::PendingMachoNotification>>::new(),
     ));
     let (notify_tx, _) = tokio::sync::broadcast::channel(64);

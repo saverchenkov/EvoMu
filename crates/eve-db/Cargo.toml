@@ -18,6 +18,7 @@ getrandom.workspace = true
 [features]
 default = []
 demo-seed = []
+lock-rank = []
 
 [dev-dependencies]
 eve-testkit = { path = "../eve-testkit" }

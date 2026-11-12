@@ -678,25 +678,28 @@ async fn handle_fighters_inner(
                             message: format!("Tube index {tidx} is invalid (ship/structure has {tube_count} tubes)"),
                         }));
                     }
-                    let active = ctx.active_fighters.read().unwrap();
-                    if active
-                        .values()
-                        .any(|f| f.parent_ship_id == ship_id && f.tube_index == tidx && !f.is_abandoned)
                     {
-                        return Some(Err(BridgeRpcError {
-                            code: "FighterAlreadyLaunched".into(),
-                            message: format!("Fighter squadron in tube {tidx} is already launched in space"),
-                        }));
+                        let fighters = ctx.fighters.read().unwrap();
+                        if fighters
+                            .active_fighters
+                            .values()
+                            .any(|f| f.parent_ship_id == ship_id && f.tube_index == tidx && !f.is_abandoned)
+                        {
+                            return Some(Err(BridgeRpcError {
+                                code: "FighterAlreadyLaunched".into(),
+                                message: format!("Fighter squadron in tube {tidx} is already launched in space"),
+                            }));
+                        }
+                        if !fighters.tube_loads.contains_key(&(ship_id, tidx)) {
+                            return Some(Err(BridgeRpcError {
+                                code: "EmptyFighterTube".into(),
+                                message: format!("Fighter tube {tidx} is empty"),
+                            }));
+                        }
                     }
-                    let tube_loads = ctx.fighter_tube_loads.read().unwrap();
-                    if !tube_loads.contains_key(&(ship_id, tidx)) {
-                        return Some(Err(BridgeRpcError {
-                            code: "EmptyFighterTube".into(),
-                            message: format!("Fighter tube {tidx} is empty"),
-                        }));
-                    }
+                    let now_unix = ctx.now_unix();
                     let is_rearming = with_combat_runtime(ctx, |rt| {
-                        rt.fighter_tube_rearm_until.get(&(ship_id, tidx)).copied().unwrap_or(0) > ctx.now_unix()
+                        rt.fighter_tube_rearm_until.get(&(ship_id, tidx)).copied().unwrap_or(0) > now_unix
                     });
                     if is_rearming {
                         return Some(Err(BridgeRpcError {
@@ -707,14 +710,14 @@ async fn handle_fighters_inner(
                 }
                 req
             } else {
-                let tube_loads = ctx.fighter_tube_loads.read().unwrap();
+                let fighters = ctx.fighters.read().unwrap();
                 let available: Vec<usize> = (0..tube_count)
-                    .filter(|&tidx| tube_loads.contains_key(&(ship_id, tidx)))
+                    .filter(|&tidx| fighters.tube_loads.contains_key(&(ship_id, tidx)))
                     .collect();
                 if available.is_empty() {
-                    let active = ctx.active_fighters.read().unwrap();
                     if (0..tube_count).any(|tidx| {
-                        active
+                        fighters
+                            .active_fighters
                             .values()
                             .any(|f| f.parent_ship_id == ship_id && f.tube_index == tidx && !f.is_abandoned)
                     }) {
@@ -1179,8 +1182,9 @@ async fn handle_fighters_inner(
                     .ceil()
                     .clamp(3.0, 20.0) as u64;
                 ctx.fighter_tube_loads.write().unwrap().entry((ship_id, f.tube_index)).or_insert(f.item_id);
+                let now_unix = ctx.now_unix();
                 with_mut_combat_runtime(ctx, |rt| {
-                    rt.fighter_tube_rearm_until.insert((ship_id, f.tube_index), ctx.now_unix() + total_rearm_secs);
+                    rt.fighter_tube_rearm_until.insert((ship_id, f.tube_index), now_unix + total_rearm_secs);
                 });
                 let tube_flag = (159 + f.tube_index) as i64;
                 let recalled_qty = ctx.db.with_snapshot(|s| s.items.get(&f.item_id).map(|i| i.quantity).unwrap_or(f.squadron_size as i32)) as i64;
@@ -1476,8 +1480,8 @@ async fn handle_scoop_abandoned_fighter(
             }));
         }
     };
-    let squad = {
-        let mut fighters = ctx.active_fighters.write().unwrap();
+    let (key, owner_char_id) = {
+        let fighters = ctx.active_fighters.read().unwrap();
         let key = if fighters.contains_key(&target_fighter_id) {
             target_fighter_id
         } else if let Some((&k, _)) = fighters.iter().find(|(_, f)| f.item_id == target_fighter_id) {
@@ -1495,20 +1499,40 @@ async fn handle_scoop_abandoned_fighter(
                 message: format!("Fighter squadron {target_fighter_id} is active and cannot be scooped"),
             }));
         }
-        if squad_ref.owner_char_id != char_id {
-            let authorized = ctx.db.with_snapshot(|snap| {
-                let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                let owner_corp = snap.characters.get(&squad_ref.owner_char_id).map(|c| c.corporation_id).unwrap_or(0);
-                caller_corp != 0 && caller_corp == owner_corp
-            });
-            if !authorized {
-                return Some(Err(BridgeRpcError {
-                    code: "NotFighterOwner".into(),
-                    message: "Cannot scoop an abandoned fighter squadron belonging to another pilot or corporation".into(),
-                }));
-            }
+        (key, squad_ref.owner_char_id)
+    };
+    if owner_char_id != char_id {
+        let authorized = ctx.db.with_snapshot(|snap| {
+            let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+            let owner_corp = snap.characters.get(&owner_char_id).map(|c| c.corporation_id).unwrap_or(0);
+            caller_corp != 0 && caller_corp == owner_corp
+        });
+        if !authorized {
+            return Some(Err(BridgeRpcError {
+                code: "NotFighterOwner".into(),
+                message: "Cannot scoop an abandoned fighter squadron belonging to another pilot or corporation".into(),
+            }));
         }
-        fighters.remove(&key).unwrap()
+    }
+    let squad = {
+        let mut fighters = ctx.active_fighters.write().unwrap();
+        let resolved_key = if fighters.contains_key(&key) {
+            key
+        } else if let Some((&k, _)) = fighters.iter().find(|(_, f)| f.item_id == target_fighter_id) {
+            k
+        } else {
+            return Some(Err(BridgeRpcError {
+                code: "FighterNotFound".into(),
+                message: format!("Fighter squadron {target_fighter_id} not found in space"),
+            }));
+        };
+        if !fighters[&resolved_key].is_abandoned {
+            return Some(Err(BridgeRpcError {
+                code: "FighterNotAbandoned".into(),
+                message: format!("Fighter squadron {target_fighter_id} is active and cannot be scooped"),
+            }));
+        }
+        fighters.remove(&resolved_key).unwrap()
     };
     let restore_squad = |sq: crate::router::context::ActiveFighterSquadron| {
         ctx.active_fighters.write().unwrap().insert(sq.ball_id, sq);

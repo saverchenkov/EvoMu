@@ -11,6 +11,7 @@ pub use eve_db::{
     PersistedInsurgencySiteRecord as InsurgencySiteRecord,
     PersistedInsurgencyState as InsurgencyRuntimeState,
 };
+use eve_db::lock_rank::AnyRwLock;
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
     encode_bytes_field, encode_varint_field, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
@@ -769,7 +770,7 @@ pub fn is_insurgency_stronghold_invulnerable(
 pub fn notify_stronghold_destruction(
     db: &eve_db::WorldRepository,
     gw: Option<&crate::quasar_gateway::PublicGatewayRouter>,
-    pending_notifications: Option<&std::sync::RwLock<HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>>>,
+    pending_notifications: Option<&dyn AnyRwLock<HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>>>,
     notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, crate::router::cache_notifications::PendingMachoNotification)>>,
     info: &StrongholdDestructionInfo,
 ) {

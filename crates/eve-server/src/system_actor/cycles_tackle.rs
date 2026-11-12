@@ -1365,10 +1365,13 @@ impl SystemHandle {
 
 impl SystemRegistry {
     pub fn is_ball_in_committed_warp_sync(&self, solar_system_id: SolarSystemId, ball_id: BallId) -> bool {
-        let guard = self.systems.read().unwrap_or_else(|e| e.into_inner());
-        guard
+        let handle = self
+            .systems
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&solar_system_id)
-            .is_some_and(|h| h.committed_warp_destination_sync(ball_id).is_some())
+            .cloned();
+        handle.is_some_and(|h| h.committed_warp_destination_sync(ball_id).is_some())
     }
 
     pub fn max_active_module_cycle_expiry_unix_sync(
@@ -1378,9 +1381,13 @@ impl SystemRegistry {
         cyno_expiry_unix: u64,
         now_unix: u64,
     ) -> u64 {
-        let guard = self.systems.read().unwrap_or_else(|e| e.into_inner());
-        guard
+        let handle = self
+            .systems
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&solar_system_id)
+            .cloned();
+        handle
             .map(|h| h.max_active_module_cycle_expiry_unix_sync(ship_id, cyno_expiry_unix, now_unix))
             .unwrap_or(cyno_expiry_unix)
     }

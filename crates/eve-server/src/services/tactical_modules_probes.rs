@@ -4,8 +4,9 @@
 
 use super::*;
 use crate::router::ServerContext;
+use eve_db::lock_rank::AnyRwLock;
 use eve_destiny::{Ballpark, DVec3};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 /// Computes Strontium Clathrates consumption for Siege Module based on Tactical Weapon Reconfiguration (`22043`).
 pub fn compute_siege_strontium_cost(skill_level: u8) -> u32 {
@@ -164,7 +165,7 @@ pub fn step_wubble_probes_and_debuffs(
     ballpark: &mut Ballpark,
     sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
-    tactical_state: &RwLock<tactical_modules::TacticalModulesState>,
+    tactical_state: &dyn AnyRwLock<tactical_modules::TacticalModulesState>,
     dt: f64,
 ) {
     let Some(db_ref) = db_opt else {

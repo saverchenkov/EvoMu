@@ -119,8 +119,10 @@ async fn fast_forward_clock_warp_invuln_and_force_stop_warp_cover_all_branches()
         );
     });
 
-    let ball_positions = Arc::new(std::sync::RwLock::new(HashMap::new()));
-    let scrambled_balls = Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
+    let ball_positions = Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new()));
+    let scrambled_balls = Arc::new(eve_db::lock_rank::RankedRwLock::new(
+        std::collections::HashSet::new(),
+    ));
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(16);
     let mut sim_elapsed = 0.0;
     let db_opt = Some(Arc::clone(&db));

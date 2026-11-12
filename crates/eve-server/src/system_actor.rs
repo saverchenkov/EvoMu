@@ -20,6 +20,9 @@ use belts::{
     build_tick_broadcast, ensure_default_slim_meta, handle_mine_asteroid,
     reconcile_spawned_belt_asteroids, respawn_due_asteroids,
 };
+use eve_db::lock_rank::{
+    AnyRwLock, RankedMutex, RankedRwLock, RANK_ACTOR_STATE, RANK_BALLPARK, RANK_LEAF,
+};
 use eve_destiny::wire::{
     encode_destiny_updates, encode_set_state_payload, encode_set_state_update,
 };
@@ -28,7 +31,7 @@ use eve_proto::PyRep;
 use eve_sde::{SdeRegistry, SolarSystemId};
 use glam::DVec3;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 
 // parity: plan:P-7, plan:SP-1, plan:SP-2, plan:SP-4, plan:SP-5
@@ -59,27 +62,27 @@ pub fn next_downtime_unix_secs(now_unix: u64, interval_secs: u64, downtime_utc_s
 }
 
 pub struct SystemRegistry {
-    pub(crate) systems: RwLock<HashMap<SolarSystemId, SystemHandle>>,
+    pub(crate) systems: RankedRwLock<HashMap<SolarSystemId, SystemHandle>, RANK_LEAF>,
     sde: Option<Arc<SdeRegistry>>,
     pub db: Option<Arc<eve_db::WorldRepository>>,
     belt_respawn_interval_secs: Arc<std::sync::atomic::AtomicU64>,
     downtime_utc_secs_of_day: Arc<std::sync::atomic::AtomicU64>,
     /// Game-mechanic RNG (seeded test RNG): OS CSPRNG by default, shared with `ServerContext::mechanic_rng`.
     mechanic_rng: Arc<crate::rng::MechanicRng>,
-    pub(crate) npc_death_hook: Arc<RwLock<Option<NpcDeathHook>>>,
-    pub(crate) module_deactivation_hook: Arc<RwLock<Option<ModuleDeactivationHook>>>,
-    pub(crate) target_lock_completed_hook: Arc<RwLock<Option<TargetLockCompletedHook>>>,
-    pub(crate) system_step_hook: Arc<RwLock<Option<SystemStepHook>>>,
+    pub(crate) npc_death_hook: Arc<RankedRwLock<Option<NpcDeathHook>, RANK_LEAF>>,
+    pub(crate) module_deactivation_hook: Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
+    pub(crate) target_lock_completed_hook: Arc<RankedRwLock<Option<TargetLockCompletedHook>, RANK_LEAF>>,
+    pub(crate) system_step_hook: Arc<RankedRwLock<Option<SystemStepHook>, RANK_LEAF>>,
     /// PvE special-site balls (system, ball id) already spawned once into this registry's ballparks.
     /// Runtime-only (lives and dies with the ballparks), so no sentinel ball is needed in space.
-    special_site_spawned_balls: std::sync::Mutex<std::collections::HashSet<(SolarSystemId, i64)>>,
+    special_site_spawned_balls: RankedMutex<std::collections::HashSet<(SolarSystemId, i64)>, RANK_LEAF>,
     /// Wormhole ore anomalies (system, anomaly_id) whose initial Sleeper guard wave has been hydrated
     /// in this registry's ballparks, preventing player scan RPCs from respawning killed guards.
-    hydrated_wh_ore_anomalies: std::sync::Mutex<std::collections::HashSet<(SolarSystemId, String)>>,
-    pub tactical_state: Arc<RwLock<crate::services::tactical_modules::TacticalModulesState>>,
-    pending_notifications_opt: Option<Arc<RwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>>>>,
+    hydrated_wh_ore_anomalies: RankedMutex<std::collections::HashSet<(SolarSystemId, String)>, RANK_LEAF>,
+    pub tactical_state: Arc<RankedRwLock<crate::services::tactical_modules::TacticalModulesState, RANK_LEAF>>,
+    pending_notifications_opt: Option<Arc<RankedRwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>, RANK_LEAF>>>,
     notify_tx_opt: Option<broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
-    pub cluster_nodes: RwLock<ClusterNodeRegistry>,
+    pub cluster_nodes: RankedRwLock<ClusterNodeRegistry, RANK_LEAF>,
 }
 
 impl Default for SystemRegistry {
@@ -91,22 +94,22 @@ impl Default for SystemRegistry {
 impl SystemRegistry {
     pub fn new() -> Self {
         Self {
-            systems: RwLock::new(HashMap::new()),
+            systems: RankedRwLock::new(HashMap::new()),
             sde: None,
             db: None,
             belt_respawn_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(DEFAULT_BELT_RESPAWN_INTERVAL_SECS)),
             downtime_utc_secs_of_day: Arc::new(std::sync::atomic::AtomicU64::new(DEFAULT_DOWNTIME_UTC_SECS_OF_DAY)),
             mechanic_rng: Arc::new(crate::rng::MechanicRng::os()),
-            npc_death_hook: Arc::new(RwLock::new(None)),
-            module_deactivation_hook: Arc::new(RwLock::new(None)),
-            target_lock_completed_hook: Arc::new(RwLock::new(None)),
-            system_step_hook: Arc::new(RwLock::new(None)),
-            special_site_spawned_balls: std::sync::Mutex::new(std::collections::HashSet::new()),
-            hydrated_wh_ore_anomalies: std::sync::Mutex::new(std::collections::HashSet::new()),
-            tactical_state: Arc::new(RwLock::new(Default::default())),
+            npc_death_hook: Arc::new(RankedRwLock::new(None)),
+            module_deactivation_hook: Arc::new(RankedRwLock::new(None)),
+            target_lock_completed_hook: Arc::new(RankedRwLock::new(None)),
+            system_step_hook: Arc::new(RankedRwLock::new(None)),
+            special_site_spawned_balls: RankedMutex::new(std::collections::HashSet::new()),
+            hydrated_wh_ore_anomalies: RankedMutex::new(std::collections::HashSet::new()),
+            tactical_state: Arc::new(RankedRwLock::new(Default::default())),
             pending_notifications_opt: None,
             notify_tx_opt: None,
-            cluster_nodes: RwLock::new(ClusterNodeRegistry::default()),
+            cluster_nodes: RankedRwLock::new(ClusterNodeRegistry::default()),
         }
     }
 
@@ -120,7 +123,7 @@ impl SystemRegistry {
 
     pub fn with_notifications(
         mut self,
-        pending_notifications: Arc<RwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>>>,
+        pending_notifications: Arc<RankedRwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>, RANK_LEAF>>,
         notify_tx: broadcast::Sender<(i64, crate::router::PendingMachoNotification)>,
     ) -> Self {
         self.pending_notifications_opt = Some(pending_notifications);
@@ -130,7 +133,7 @@ impl SystemRegistry {
 
     pub fn with_tactical_state(
         mut self,
-        tactical_state: Arc<RwLock<crate::services::tactical_modules::TacticalModulesState>>,
+        tactical_state: Arc<RankedRwLock<crate::services::tactical_modules::TacticalModulesState, RANK_LEAF>>,
     ) -> Self {
         self.tactical_state = tactical_state;
         self
@@ -185,10 +188,13 @@ impl SystemRegistry {
         solar_system_id: SolarSystemId,
         ball_id: BallId,
     ) -> Option<DVec3> {
-        let guard = self.systems.read().unwrap_or_else(|e| e.into_inner());
-        guard
+        let handle = self
+            .systems
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&solar_system_id)
-            .and_then(|h| h.get_ball_position_sync(ball_id))
+            .cloned();
+        handle.and_then(|h| h.get_ball_position_sync(ball_id))
     }
 
     pub fn is_ball_scrambled_sync(
@@ -196,10 +202,13 @@ impl SystemRegistry {
         solar_system_id: SolarSystemId,
         ball_id: BallId,
     ) -> bool {
-        let guard = self.systems.read().unwrap_or_else(|e| e.into_inner());
-        guard
+        let handle = self
+            .systems
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&solar_system_id)
-            .is_some_and(|h| h.is_ball_scrambled_sync(ball_id))
+            .cloned();
+        handle.is_some_and(|h| h.is_ball_scrambled_sync(ball_id))
     }
 
     pub fn has_active_modules_or_cloak_sync(
@@ -207,15 +216,24 @@ impl SystemRegistry {
         solar_system_id: SolarSystemId,
         ball_id: BallId,
     ) -> bool {
-        let guard = self.systems.read().unwrap_or_else(|e| e.into_inner());
-        guard
+        let handle = self
+            .systems
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&solar_system_id)
-            .is_some_and(|h| h.has_active_modules_or_cloak_sync(ball_id))
+            .cloned();
+        handle.is_some_and(|h| h.has_active_modules_or_cloak_sync(ball_id))
     }
 
     pub fn find_ball_position_sync(&self, ball_id: BallId) -> Option<DVec3> {
-        let guard = self.systems.read().unwrap_or_else(|e| e.into_inner());
-        for handle in guard.values() {
+        let handles: Vec<SystemHandle> = self
+            .systems
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect();
+        for handle in handles {
             if let Some(pos) = handle.get_ball_position_sync(ball_id) {
                 return Some(pos);
             }
@@ -224,8 +242,7 @@ impl SystemRegistry {
     }
 
     pub fn find_ball_system_sync(&self, ball_id: BallId) -> Option<SolarSystemId> {
-        let guard = self.systems.read().unwrap_or_else(|e| e.into_inner());
-        for (&sys_id, handle) in guard.iter() {
+        for (sys_id, handle) in self.active_system_handles() {
             if handle.get_ball_position_sync(ball_id).is_some() {
                 return Some(sys_id);
             }
@@ -234,17 +251,23 @@ impl SystemRegistry {
     }
 
     pub fn get_system_sim_elapsed(&self, solar_system_id: SolarSystemId) -> f64 {
-        let guard = self.systems.read().unwrap_or_else(|e| e.into_inner());
-        guard
+        let handle = self
+            .systems
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&solar_system_id)
-            .map(|h| h.sim_elapsed_secs())
-            .unwrap_or(0.0)
+            .cloned();
+        handle.map(|h| h.sim_elapsed_secs()).unwrap_or(0.0)
     }
 
     pub fn take_pending_cycle_actions(&self, solar_system_id: SolarSystemId) -> Vec<PendingCycleAction> {
-        let guard = self.systems.read().unwrap_or_else(|e| e.into_inner());
-        guard
+        let handle = self
+            .systems
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&solar_system_id)
+            .cloned();
+        handle
             .map(|h| h.take_pending_cycle_actions())
             .unwrap_or_default()
     }
@@ -274,9 +297,15 @@ impl SystemRegistry {
     }
 
     pub fn cancel_nanite_repairs_for_ship_sync(&self, ship_id: BallId) -> Vec<ActiveNaniteRepair> {
-        let guard = self.systems.read().unwrap_or_else(|e| e.into_inner());
-        guard
+        let handles: Vec<SystemHandle> = self
+            .systems
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
             .values()
+            .cloned()
+            .collect();
+        handles
+            .into_iter()
             .flat_map(|h| h.cancel_nanite_repairs_for_ship_sync(ship_id))
             .collect()
     }
@@ -378,18 +407,24 @@ impl SystemRegistry {
         } else {
             Vec::new()
         };
-        let ball_positions = Arc::new(RwLock::new(HashMap::new()));
-        let scrambled_balls = Arc::new(RwLock::new(std::collections::HashSet::new()));
-        let committed_warp_balls = Arc::new(RwLock::new(HashMap::new()));
-        let active_module_ships = Arc::new(RwLock::new(std::collections::HashSet::new()));
+        let ball_positions: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>> =
+            Arc::new(RankedRwLock::new(HashMap::new()));
+        let scrambled_balls: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>> =
+            Arc::new(RankedRwLock::new(std::collections::HashSet::new()));
+        let committed_warp_balls: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>> =
+            Arc::new(RankedRwLock::new(HashMap::new()));
+        let active_module_ships: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>> =
+            Arc::new(RankedRwLock::new(std::collections::HashSet::new()));
         register_committed_warp_cache(&ball_positions, &committed_warp_balls);
         sync_ball_positions(&initial_ballpark, &ball_positions, &scrambled_balls);
         let ball_positions_actor = ball_positions.clone();
         let scrambled_balls_actor = scrambled_balls.clone();
         let active_module_ships_actor = active_module_ships.clone();
-        let ballpark_shared = Arc::new(RwLock::new(initial_ballpark));
+        let ballpark_shared: Arc<RankedRwLock<Ballpark, RANK_BALLPARK>> =
+            Arc::new(RankedRwLock::new(initial_ballpark));
         let ballpark_actor = ballpark_shared.clone();
-        let actor_state_shared = Arc::new(RwLock::new(SystemActorState {
+        let actor_state_shared: Arc<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>> =
+            Arc::new(RankedRwLock::new(SystemActorState {
             asteroids: initial_asteroids,
             asteroid_templates: initial_asteroid_templates,
             pending_anchoring_disruptors: initial_pending_disruptors,
@@ -703,7 +738,7 @@ impl SystemRegistry {
                                 crate::services::tactical_module_mechanics::on_probe_ball_removed_in_actor(
                                     &mut ballpark,
                                     &db_opt,
-                                    tactical_state,
+                                    tactical_state.as_ref(),
                                     ball_id,
                                 );
                                 let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
@@ -778,7 +813,7 @@ impl SystemRegistry {
                                 crate::services::tactical_module_mechanics::on_probe_ball_removed_in_actor(
                                     &mut ballpark,
                                     &db_opt,
-                                    tactical_state,
+                                    tactical_state.as_ref(),
                                     ball_id,
                                 );
                                 let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
@@ -1100,7 +1135,7 @@ impl SystemRegistry {
                                         crate::services::tactical_module_mechanics::on_probe_ball_removed_in_actor(
                                             &mut ballpark,
                                             &db_opt,
-                                            tactical_state,
+                                            tactical_state.as_ref(),
                                             ball_id,
                                         );
                                     }
@@ -1135,7 +1170,7 @@ impl SystemRegistry {
                                         crate::services::tactical_module_mechanics::on_probe_ball_removed_in_actor(
                                             &mut ballpark,
                                             &db_opt,
-                                            tactical_state,
+                                            tactical_state.as_ref(),
                                             ball_id,
                                         );
                                     }
@@ -1590,10 +1625,10 @@ impl SystemRegistry {
                                 &ballpark,
                                 &events,
                                 db_opt.as_ref(),
-                                pending_notifications_opt.as_deref(),
+                                pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>),
                                 notify_tx_opt.as_ref(),
                             );
-                            if let Some(lock_hook) = target_lock_completed_hook_actor.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                            if let Some(lock_hook) = target_lock_completed_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone() {
                                 for ev in &events {
                                     if let DestinyEvent::OnTarget { mode, source_id, target_id } = ev {
                                         if mode == "locked" {
@@ -1629,11 +1664,11 @@ impl SystemRegistry {
                                 &mut ballpark, active_module_cycles, pending_anchoring_disruptors,
                                 active_nanite_repairs, ship_rack_heat, rah_incoming_damage,
                                 &base_scramble_strengths, &base_core_strengths, &sde_opt, &db_opt,
-                                mechanic_rng_opt, tactical_state, pending_cycle_actions, dt_sim, deact_guard.as_ref(),
+                                mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions, dt_sim, deact_guard.as_ref(),
                             );
                             cycles::flush_pending_cycle_damage_notifications(
                                 db_opt.as_ref(),
-                                pending_notifications_opt.as_deref(),
+                                pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>),
                                 notify_tx_opt.as_ref(),
                                 pending_cycle_actions,
                             );
@@ -1642,7 +1677,7 @@ impl SystemRegistry {
                                     crate::services::tactical_module_mechanics::on_probe_ball_removed_in_actor(
                                         &mut ballpark,
                                         &db_opt,
-                                        tactical_state,
+                                        tactical_state.as_ref(),
                                         target_ball_id,
                                     );
                                     crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark(
@@ -1663,7 +1698,7 @@ impl SystemRegistry {
                                 sde_opt.as_deref(),
                                 db_opt.as_ref(),
                                 solar_system_id,
-                                pending_notifications_opt.as_deref(),
+                                pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>),
                                 notify_tx_opt.as_ref(),
                             ) {
                                 destroyed_balls.push((bid, None));

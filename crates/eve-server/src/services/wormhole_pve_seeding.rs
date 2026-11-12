@@ -22,8 +22,9 @@ use eve_db::{
 use eve_destiny::{Ball, CombatState, DamageVector, MovementMode};
 use eve_sde::{SdeRegistry, SolarSystemId, TypeId};
 use glam::DVec3;
+use eve_db::lock_rank::AnyRwLock;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 pub const SHATTERED_DEBRIS_ORE_TYPES: [TypeId; 15] = [
     1230, 1228, 1224, 18, 1227, 20, 1226, 1231, 21, 1229, 1232, 1225, 1223, 22, 11396,
@@ -135,7 +136,7 @@ pub async fn spawn_sleeper_sentry_tower_for_class(
     systems: &Arc<SystemRegistry>,
     db: &Arc<WorldRepository>,
     sde: &Arc<SdeRegistry>,
-    combat_ephemeral: &Arc<RwLock<CombatRuntimeState>>,
+    combat_ephemeral: &dyn AnyRwLock<CombatRuntimeState>,
     solar_system_id: SolarSystemId,
     wh_class: u8,
     center: DVec3,
