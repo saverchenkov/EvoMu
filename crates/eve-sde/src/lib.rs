@@ -102,6 +102,7 @@ pub mod attr_ids {
     pub const WARP_SPEED_MULTIPLIER: AttributeId = 600;
     pub const REPROCESSING_SKILL_TYPE: AttributeId = 790;
     pub const MASS_ADDITION: AttributeId = 796;
+    pub const QUANTITY: AttributeId = 805;
     pub const UPGRADE_CAPACITY: AttributeId = 1132;
     pub const RIG_SLOTS: AttributeId = 1137;
     pub const UPGRADE_COST: AttributeId = 1153;
@@ -489,6 +490,8 @@ pub struct NpcCorporationInfo {
     pub solar_system_id: Option<SolarSystemId>,
     pub station_id: Option<i64>,
     pub tax_rate: f64,
+    #[serde(default)]
+    pub ceo_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

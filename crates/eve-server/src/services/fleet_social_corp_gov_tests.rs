@@ -456,7 +456,19 @@ async fn corp_gov_recruitment_contacts_labels_and_add_corp() {
     let contacts = call_gov(&ctx, &mut member, "corpRegistry", "GetCorporateContacts", vec![])
         .await
         .unwrap();
-    assert_eq!(rs_rows(&contacts)[0][0].as_i64(), Some(98_000_002));
+    let PyRep::IndexRowset {
+        key_column: contact_key_col,
+        columns: contact_cols,
+        items: contact_items,
+    } = contacts
+    else {
+        panic!("expected IndexRowset for GetCorporateContacts");
+    };
+    assert_eq!(contact_key_col, "contactID");
+    assert_eq!(contact_cols, vec!["contactID", "relationshipID", "labelMask"]);
+    assert_eq!(contact_items.len(), 1);
+    assert_eq!(contact_items[0].0, PyRep::Integer(98_000_002));
+    assert_eq!(contact_items[0].1[0].as_i64(), Some(98_000_002));
     let rem_c = call_gov(
         &ctx,
         &mut ceo,
@@ -467,6 +479,14 @@ async fn corp_gov_recruitment_contacts_labels_and_add_corp() {
     .await
     .unwrap();
     assert_eq!(kv(&rem_c, "removed").as_bool(), Some(true));
+    let empty_contacts = call_gov(&ctx, &mut member, "corpRegistry", "GetCorporateContacts", vec![])
+        .await
+        .unwrap();
+    assert!(matches!(
+        empty_contacts,
+        PyRep::IndexRowset { ref key_column, ref items, .. }
+            if key_column == "contactID" && items.is_empty()
+    ));
 
     clock.advance_secs(5);
     let mut founder = member.clone();

@@ -161,6 +161,7 @@ fn faction_and_station_resolution_fallback_tiers() {
             solar_system_id: Some(30_800_004),
             station_id: Some(60_800_004),
             tax_rate: 0.1,
+            ceo_id: None,
         },
     );
     let mut st_t3b = jita_station;

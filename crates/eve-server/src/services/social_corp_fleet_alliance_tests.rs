@@ -89,7 +89,19 @@ async fn social_alliance_contacts_bulletins_logo_and_deliveries() {
     let contacts = call_social(&ctx, &mut exec, "allianceRegistry", "GetAllianceContacts", vec![])
         .await
         .unwrap();
-    assert_eq!(rs_rows(&contacts).len(), 1);
+    let PyRep::IndexRowset {
+        key_column: ally_key_col,
+        columns: ally_cols,
+        items: ally_items,
+    } = contacts
+    else {
+        panic!("expected IndexRowset for GetAllianceContacts");
+    };
+    assert_eq!(ally_key_col, "contactID");
+    assert_eq!(ally_cols, vec!["contactID", "relationshipID", "labelMask"]);
+    assert_eq!(ally_items.len(), 1);
+    assert_eq!(ally_items[0].0, PyRep::Integer(98_100_002));
+    assert_eq!(ally_items[0].1[0], PyRep::Integer(98_100_002));
     call_social(
         &ctx,
         &mut exec,
@@ -99,6 +111,15 @@ async fn social_alliance_contacts_bulletins_logo_and_deliveries() {
     )
     .await
     .unwrap();
+    let empty_ally_contacts =
+        call_social(&ctx, &mut exec, "allianceRegistry", "GetAllianceContacts", vec![])
+            .await
+            .unwrap();
+    assert!(matches!(
+        empty_ally_contacts,
+        PyRep::IndexRowset { ref key_column, ref items, .. }
+            if key_column == "contactID" && items.is_empty()
+    ));
     call_social(
         &ctx,
         &mut exec,

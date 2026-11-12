@@ -115,6 +115,7 @@ fn build_mission_test_sde() -> Arc<SdeRegistry> {
                 solar_system_id: Some(30_000_142),
                 station_id: Some(station_a),
                 tax_rate: 0.1,
+                ceo_id: None,
             },
         );
     }

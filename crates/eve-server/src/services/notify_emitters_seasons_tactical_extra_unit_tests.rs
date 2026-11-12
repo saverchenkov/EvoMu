@@ -715,7 +715,7 @@ fn issue_950_load_ammo_primes_sublocation_and_emits_fitting_item_change_deltas()
         item_chg.args[1],
         PyRep::Dict(vec![(PyRep::Integer(4), PyRep::Integer(InventoryFlag::Cargo as i64))])
     );
-    // OnGodmaPrimeItem emitted for sublocation (ship_id, 27, 222) with invItem = None and attributeQuantity (80) = 109.0
+    // OnGodmaPrimeItem emitted for sublocation (ship_id, 27, 222) with invItem = None and attributeQuantity (805) = 109.0
     let prime_idx = notifs
         .iter()
         .position(|n| {
@@ -744,8 +744,12 @@ fn issue_950_load_ammo_primes_sublocation_and_emits_fitting_item_change_deltas()
     assert!(
         prime_attrs
             .iter()
-            .any(|(k, v)| k.as_i64() == Some(80) && v.as_f64() == Some(109.0)),
-        "expected attributeQuantity (80) = 109.0 in sublocation attributes: {prime_attrs:?}"
+            .any(|(k, v)| k.as_i64() == Some(805) && v.as_f64() == Some(109.0)),
+        "expected attributeQuantity (805) = 109.0 in sublocation attributes: {prime_attrs:?}"
+    );
+    assert!(
+        !prime_attrs.iter().any(|(k, _)| k.as_i64() == Some(80)),
+        "sublocation attributes must not emit speedBonus (80): {prime_attrs:?}"
     );
 
     // 2. Swap to oversized Iron Charge S x500 -> unloads Antimatter (222) to Cargo, splits 400 Iron (215) into slot 27
@@ -774,7 +778,7 @@ fn issue_950_load_ammo_primes_sublocation_and_emits_fitting_item_change_deltas()
                     (PyRep::Integer(4), PyRep::Integer(InventoryFlag::Cargo as i64)),
                 ]))
     }));
-    // Expelled Antimatter sublocation emits OnModuleAttributeChanges with attributeQuantity (80) -> 0.0 (from 109.0)
+    // Expelled Antimatter sublocation emits OnModuleAttributeChanges with attributeQuantity (805) -> 0.0 (from 109.0)
     let mod_attr = notifs2
         .iter()
         .find(|n| n.event == "OnModuleAttributeChanges")
@@ -791,11 +795,18 @@ fn issue_950_load_ammo_primes_sublocation_and_emits_fitting_item_change_deltas()
                     PyRep::Integer(27),
                     PyRep::Integer(222),
                 ]))
-                && t.get(3) == Some(&PyRep::Integer(80))
+                && t.get(3) == Some(&PyRep::Integer(805))
                 && t.get(5).and_then(|v| v.as_f64()) == Some(0.0)
                 && t.get(6).and_then(|v| v.as_f64()) == Some(109.0)
     )));
-    // Newly loaded Iron Charge S (215) sublocation primed with invItem = None and attributeQuantity (80) = 400.0
+    assert!(
+        !entries.iter().any(|e| matches!(
+            e,
+            PyRep::Tuple(t) if t.get(3) == Some(&PyRep::Integer(80))
+        )),
+        "expelled charge quantity change must not emit speedBonus (80): {entries:?}"
+    );
+    // Newly loaded Iron Charge S (215) sublocation primed with invItem = None and attributeQuantity (805) = 400.0
     let prime2 = notifs2
         .iter()
         .find(|n| {
@@ -816,7 +827,8 @@ fn issue_950_load_ammo_primes_sublocation_and_emits_fitting_item_change_deltas()
     };
     assert!(prime2_attrs
         .iter()
-        .any(|(k, v)| k.as_i64() == Some(80) && v.as_f64() == Some(400.0)));
+        .any(|(k, v)| k.as_i64() == Some(805) && v.as_f64() == Some(400.0)));
+    assert!(!prime2_attrs.iter().any(|(k, _)| k.as_i64() == Some(80)));
 }
 
 #[test]

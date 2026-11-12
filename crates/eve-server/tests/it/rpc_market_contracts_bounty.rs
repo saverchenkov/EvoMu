@@ -1613,3 +1613,293 @@ async fn test_remote_immediate_buy_and_notifications_e2e() {
 }
 
 }
+
+#[tokio::test]
+async fn issue_935_and_969_v24_contract_create_list_and_search_wire_flow() {
+    use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
+
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let station_id = 60_003_760_i64;
+    let system_id = 30_000_142_u32;
+    let mut s1 = setup_pilot(&ctx, 901, "demo", "demo-secret", 90_000_001).await;
+    let mut s2 = setup_pilot(&ctx, 902, "other", "other-secret", 90_000_002).await;
+    s1.station_id = Some(station_id);
+    s1.solar_system_id = Some(system_id);
+    s2.station_id = Some(station_id);
+    s2.solar_system_id = Some(system_id);
+
+    let (ex_item_id, auc_item_id) = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.balance = IskCents::from_isk(10_000_000);
+            ch.station_id = Some(station_id);
+            ch.solar_system_id = system_id;
+        }
+        if let Some(ch) = snap.characters.get_mut(&90_000_002) {
+            ch.balance = IskCents::from_isk(10_000_000);
+            ch.station_id = Some(station_id);
+            ch.solar_system_id = system_id;
+        }
+        snap.next_entity_id += 1;
+        let i1 = snap.next_entity_id;
+        snap.items.insert(
+            i1,
+            InventoryItemRecord {
+                item_id: i1,
+                type_id: 34,
+                owner_id: 90_000_001,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 100,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.next_entity_id += 1;
+        let i2 = snap.next_entity_id;
+        snap.items.insert(
+            i2,
+            InventoryItemRecord {
+                item_id: i2,
+                type_id: 34,
+                owner_id: 90_000_001,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 50,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        (i1, i2)
+    });
+
+    let empty_kw = HashMap::new();
+    let make_contract_struct = |ctype: i64, price: f64, collateral: f64, item_id: i64, title: &str| {
+        PyRep::ObjectEx {
+            is_type_2: false,
+            header: Box::new(PyRep::Tuple(vec![
+                PyRep::String("ContractStruct".into()),
+                PyRep::Tuple(vec![]),
+                PyRep::Dict(vec![
+                    (PyRep::String("type".into()), PyRep::Integer(ctype)),
+                    (PyRep::String("isPrivate".into()), PyRep::Integer(0)),
+                    (PyRep::String("minutesExpire".into()), PyRep::Integer(1440)),
+                    (PyRep::String("startStationID".into()), PyRep::Integer(station_id)),
+                    (PyRep::String("price".into()), PyRep::Real(price)),
+                    (PyRep::String("collateral".into()), PyRep::Real(collateral)),
+                    (PyRep::String("title".into()), PyRep::String(title.into())),
+                    (
+                        PyRep::String("itemList".into()),
+                        PyRep::List(vec![PyRep::keyval([("itemID", PyRep::Integer(item_id))])]),
+                    ),
+                ]),
+            ])),
+            list: vec![],
+            dict: vec![],
+        }
+    };
+
+    // #935: CreateContract over machoNet:26000 must return [cid] sequence for V24 ShowCreatedContracts.
+    let ex_reply = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "contractProxy",
+            None,
+            "CreateContract",
+            &[make_contract_struct(1, 1_000.0, 0.0, ex_item_id, "V24 Exchange")],
+            &empty_kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("CreateContract exchange");
+    let PyRep::List(ex_ids) = ex_reply else {
+        panic!("Expected list of contractIDs from CreateContract over machoNet:26000");
+    };
+    assert_eq!(ex_ids.len(), 1);
+    let PyRep::Integer(ex_cid) = ex_ids[0] else {
+        panic!("Expected integer contractID");
+    };
+
+    let auc_reply = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "contractProxy",
+            None,
+            "CreateContract",
+            &[make_contract_struct(2, 5_000.0, 25_000.0, auc_item_id, "V24 Auction")],
+            &empty_kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("CreateContract auction");
+    let PyRep::List(auc_ids) = auc_reply else {
+        panic!("Expected list of contractIDs for auction");
+    };
+    let PyRep::Integer(auc_cid) = auc_ids[0] else {
+        panic!("Expected integer auction contractID");
+    };
+
+    ctx.dispatch_rpc(
+        &mut s2,
+        "contractProxy",
+        None,
+        "PlaceBid",
+        &[PyRep::Integer(auc_cid), PyRep::Real(6_000.0)],
+        &empty_kw,
+        Some("machoNet:26000"),
+    )
+    .await
+    .expect("PlaceBid");
+
+    // #969: GetContractListForOwner returns { contracts, items } with filetime dateIssued & items.itemTypeID.
+    let owner_rep = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "contractProxy",
+            None,
+            "GetContractListForOwner",
+            &[PyRep::Integer(90_000_001), PyRep::Integer(0), PyRep::None, PyRep::None],
+            &empty_kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("GetContractListForOwner V24");
+    let Some(PyRep::List(owner_contracts)) = owner_rep.dict_get("contracts") else {
+        panic!("Expected contracts list on GetContractListForOwner");
+    };
+    assert!(owner_contracts.len() >= 2);
+    for c in owner_contracts {
+        assert!(matches!(c.dict_get("dateIssued"), Some(PyRep::Integer(v)) if *v > 100_000_000_000_000));
+        assert!(matches!(c.dict_get("dateExpired"), Some(PyRep::Integer(v)) if *v > 100_000_000_000_000));
+        assert_eq!(c.dict_get("status"), Some(&PyRep::Integer(0)));
+        assert_eq!(c.dict_get("acceptorID"), Some(&PyRep::Integer(0)));
+    }
+    let Some(PyRep::Dict(owner_items)) = owner_rep.dict_get("items") else {
+        panic!("Expected items dict on GetContractListForOwner");
+    };
+    let Some((_, PyRep::List(ex_items))) = owner_items.iter().find(|(k, _)| *k == PyRep::Integer(ex_cid)) else {
+        panic!("Missing items entry for exchange contract");
+    };
+    assert_eq!(ex_items[0].dict_get("itemTypeID"), Some(&PyRep::Integer(34)));
+
+    // #969: GetMyCurrentContractList & GetMyBids return normalized { contracts, items }.
+    let current_rep = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "contractProxy",
+            None,
+            "GetMyCurrentContractList",
+            &[PyRep::Bool(false), PyRep::Bool(false)],
+            &empty_kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("GetMyCurrentContractList V24");
+    assert!(matches!(current_rep.dict_get("contracts"), Some(PyRep::List(l)) if l.len() >= 2));
+
+    let bids_rep = ctx
+        .dispatch_rpc(
+            &mut s2,
+            "contractProxy",
+            None,
+            "GetMyBids",
+            &[PyRep::Bool(false)],
+            &empty_kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("GetMyBids V24");
+    let Some(PyRep::List(bid_contracts)) = bids_rep.dict_get("contracts") else {
+        panic!("Expected contracts list on GetMyBids");
+    };
+    let auc_entry = bid_contracts
+        .iter()
+        .find(|c| c.dict_get("contractID") == Some(&PyRep::Integer(auc_cid)))
+        .expect("auc_cid in GetMyBids");
+    let Some(PyRep::List(auc_bids)) = auc_entry.dict_get("bids") else {
+        panic!("Expected bids list on auc_entry");
+    };
+    assert_eq!(auc_bids[0].dict_get("amount"), Some(&PyRep::Real(6_000.0)));
+
+    // #969: SearchContracts returns normalized { contracts: [{ contract, items, bids }], numFound, ... }.
+    let search_rep = ctx
+        .dispatch_rpc(
+            &mut s2,
+            "contractProxy",
+            None,
+            "SearchContracts",
+            &[],
+            &empty_kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("SearchContracts V24");
+    let Some(PyRep::List(search_entries)) = search_rep.dict_get("contracts") else {
+        panic!("Expected contracts list on SearchContracts");
+    };
+    let ex_search = search_entries
+        .iter()
+        .find(|e| {
+            e.dict_get("contract")
+                .and_then(|c| c.dict_get("contractID"))
+                == Some(&PyRep::Integer(ex_cid))
+        })
+        .expect("ex_cid in SearchContracts");
+    let ex_c = ex_search.dict_get("contract").expect("contract inner");
+    assert!(matches!(ex_c.dict_get("dateIssued"), Some(PyRep::Integer(v)) if *v > 100_000_000_000_000));
+    assert_eq!(ex_c.dict_get("type"), Some(&PyRep::Integer(1)));
+    let Some(PyRep::List(ex_search_items)) = ex_search.dict_get("items") else {
+        panic!("Expected items list on SearchContracts entry");
+    };
+    assert_eq!(ex_search_items[0].dict_get("itemTypeID"), Some(&PyRep::Integer(34)));
+
+    // Accept ex_cid so it moves to Finished, then verify GetContractListForOwner(filtStatus=4) & GetMyExpiredContractList.
+    ctx.dispatch_rpc(
+        &mut s2,
+        "contractProxy",
+        None,
+        "AcceptContract",
+        &[PyRep::Integer(ex_cid), PyRep::Bool(false)],
+        &empty_kw,
+        Some("machoNet:26000"),
+    )
+    .await
+    .expect("AcceptContract");
+
+    let finished_rep = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "contractProxy",
+            None,
+            "GetContractListForOwner",
+            &[PyRep::Integer(90_000_001), PyRep::Integer(4), PyRep::Integer(1), PyRep::Bool(false)],
+            &empty_kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("GetContractListForOwner finished");
+    let Some(PyRep::List(finished_list)) = finished_rep.dict_get("contracts") else {
+        panic!("Expected contracts list for finished filter");
+    };
+    assert!(finished_list.iter().any(|c| c.dict_get("contractID") == Some(&PyRep::Integer(ex_cid))));
+
+    let expired_rep = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "contractProxy",
+            None,
+            "GetMyExpiredContractList",
+            &[PyRep::Bool(false)],
+            &empty_kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("GetMyExpiredContractList V24");
+    let Some(PyRep::List(expired_list)) = expired_rep.dict_get("contracts") else {
+        panic!("Expected contracts list on GetMyExpiredContractList");
+    };
+    assert!(expired_list.iter().any(|c| c.dict_get("contractID") == Some(&PyRep::Integer(ex_cid))));
+}

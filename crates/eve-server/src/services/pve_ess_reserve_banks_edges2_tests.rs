@@ -83,6 +83,7 @@ fn ess_eligibility_rnd_access_rp_and_storyline_edges() {
                 solar_system_id: None,
                 station_id: None,
                 tax_rate: 0.0,
+                ceo_id: None,
             },
         );
     }

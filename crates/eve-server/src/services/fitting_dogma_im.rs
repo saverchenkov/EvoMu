@@ -247,7 +247,7 @@ fn handle_item_get_info(
         crate::services::tactical_modules::apply_transient_item_attrs(ctx, raw_id, &mut merged_attrs);
     }
     if subloc_key_opt.is_some() {
-        merged_attrs.insert(80, qty as f64);
+        merged_attrs.insert(attr_ids::QUANTITY, qty as f64);
     }
     let mut attr_entries: Vec<(PyRep, PyRep)> = merged_attrs
         .into_iter()

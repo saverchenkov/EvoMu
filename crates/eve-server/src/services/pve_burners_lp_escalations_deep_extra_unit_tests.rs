@@ -138,6 +138,7 @@ fn build_pve_extra_sde() -> Arc<SdeRegistry> {
                 solar_system_id: Some(30_000_142),
                 station_id: Some(station_id),
                 tax_rate: 0.1,
+                ceo_id: None,
             },
         );
     }

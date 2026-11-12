@@ -52,6 +52,7 @@ fn standing_breakdown_edge_cases_pirate_trig_diplomacy_and_agent_min_rule() {
                 solar_system_id: Some(30_000_142),
                 station_id: Some(60_003_760),
                 tax_rate: 0.10,
+                ceo_id: None,
             },
         );
         sde.npc_corporations.insert(
@@ -64,6 +65,7 @@ fn standing_breakdown_edge_cases_pirate_trig_diplomacy_and_agent_min_rule() {
                 solar_system_id: Some(30_000_142),
                 station_id: Some(60_003_760),
                 tax_rate: 0.0,
+                ceo_id: None,
             },
         );
         sde.agents.insert(
@@ -167,6 +169,7 @@ fn derived_standings_negative_caps_and_epic_career_final_suppression() {
                 solar_system_id: Some(30_000_142),
                 station_id: Some(60_003_760),
                 tax_rate: 0.1,
+                ceo_id: None,
             },
         );
         sde.agents.insert(
@@ -266,6 +269,7 @@ fn special_dialogue_actions_research_and_locator_error_edges() {
                 solar_system_id: Some(30_000_142),
                 station_id: Some(60_003_760),
                 tax_rate: 0.1,
+                ceo_id: None,
             },
         );
         sde.agents.insert(
@@ -538,6 +542,7 @@ async fn extended_rpcs_cover_agent_attr_errors_corp_standings_and_gate_checks() 
                 solar_system_id: Some(30_000_142),
                 station_id: Some(60_003_760),
                 tax_rate: 0.1,
+                ceo_id: None,
             },
         );
         sde.agents.insert(
@@ -826,6 +831,7 @@ fn epic_arc_faction_resolution_pirate_trig_detection_and_rnd_note_roundtrip() {
                     solar_system_id: Some(30_000_142),
                     station_id: Some(60_003_760),
                     tax_rate: 0.1,
+                    ceo_id: None,
                 },
             );
             let aid = 3_900_000 + cid;

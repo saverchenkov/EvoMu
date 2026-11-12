@@ -76,11 +76,21 @@ pub fn handle_industry_jobs(
                 .and_then(|v| v.as_i64())
                 .filter(|&id| id > 0)
                 .map(|id| id as TypeId);
-            let mut use_corp: bool = lookup_first("useCorp")
+            let explicit_use_corp: Option<bool> = lookup_first("useCorp")
                 .or_else(|| lookup_first("isCorpJob"))
-                .and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|n| n != 0)))
-                .unwrap_or(false);
-            let explicit_owner_id = lookup_first("ownerID").or_else(|| lookup_first("corporationID")).and_then(|v| v.as_i64()).filter(|&id| id > 0);
+                .and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|n| n != 0)));
+            let mut use_corp: bool = explicit_use_corp.unwrap_or(false);
+            // V24.01 `IndustryWnd` (`JobData.dump()`) unconditionally includes `'corporationID': session.corpid`
+            // on all jobs (even personal ones), so only explicit top-level `ownerID` selects job owner.
+            let explicit_owner_id = lookup_first("ownerID")
+                .and_then(|v| v.as_i64())
+                .filter(|&id| id > 0);
+            let raw_account: Option<(i64, i64)> = lookup_first("account").and_then(|v| match v {
+                PyRep::Tuple(items) | PyRep::List(items) if items.len() >= 2 => {
+                    Some((items[0].as_i64()?, items[1].as_i64()?))
+                }
+                _ => None,
+            });
             let explicit_input_flag = lookup_first("inputFlag").or_else(|| lookup_first("flagID")).and_then(|v| v.as_i64()).and_then(|f| u16::try_from(f).ok()).map(InventoryFlag::from_u16);
             let raw_input_container = lookup_first("inputLocationID").or_else(|| lookup_first("inputContainerID")).or_else(|| lookup_first("containerID")).and_then(|v| v.as_i64()).filter(|&id| id > 0);
             let raw_output_location = lookup_first("outputLocationID").or_else(|| lookup_first("outputContainerID")).and_then(|v| v.as_i64()).filter(|&id| id > 0);
@@ -180,12 +190,8 @@ pub fn handle_industry_jobs(
                     message: format!("Blueprint type {bp_type_id} not found in SDE"),
                 }));
             };
-            if activity_id != 5 && raw_licensed_runs.is_some() {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidIndustryJobParameters".into(),
-                    message: "licensedRuns is only allowed for copying jobs (activityID 5)".into(),
-                }));
-            }
+            // V24.01 `IndustryWnd` (`JobData.dump()`) serializes `licensedRuns` on all jobs
+            // regardless of activity; ignore it outside copying (activityID 5).
             let copy_licensed_runs: u32 = if activity_id == 5 {
                 let parsed = match raw_licensed_runs {
                     Some(raw) => {
@@ -385,6 +391,17 @@ pub fn handle_industry_jobs(
                     .map(|c| c.corporation_id)
                     .or(session.corporation_id)
                     .unwrap_or(0);
+                if explicit_use_corp.is_none() && explicit_owner_id.is_none() && char_corp_id > 0 {
+                    if let Some(eid) = explicit_bp_item_id {
+                        if snap
+                            .items
+                            .get(&eid)
+                            .is_some_and(|i| i.owner_id == char_corp_id && i.owner_id != char_id)
+                        {
+                            use_corp = true;
+                        }
+                    }
+                }
                 if let Some(oid) = explicit_owner_id {
                     if !use_corp && oid == char_corp_id && char_corp_id > 0 {
                         use_corp = true;
@@ -432,6 +449,62 @@ pub fn handle_industry_jobs(
                 } else {
                     (char_id, false, 0u64)
                 };
+                let (wallet_is_corp, wallet_corp_div, wallet_account_key, wallet_is_ceo, wallet_eff_roles): (bool, u8, i32, bool, u64) =
+                    if let Some((w_owner, acc_key)) = raw_account {
+                        if w_owner == char_id {
+                            if acc_key != 1000 {
+                                return Err(BridgeRpcError {
+                                    code: "InvalidIndustryJobParameters".into(),
+                                    message: format!("Invalid personal wallet account key {acc_key}"),
+                                });
+                            }
+                            (false, 1, 1000, false, 0u64)
+                        } else if char_corp_id > 0 && w_owner == char_corp_id {
+                            let Some(div_id) = acc_key
+                                .checked_sub(999)
+                                .and_then(|d| u8::try_from(d).ok())
+                                .filter(|&d| (1..=7).contains(&d))
+                            else {
+                                return Err(BridgeRpcError {
+                                    code: "InvalidIndustryJobParameters".into(),
+                                    message: format!("Invalid corporation wallet account key {acc_key}"),
+                                });
+                            };
+                            if !snap.corporations.contains_key(&char_corp_id) {
+                                return Err(BridgeRpcError {
+                                    code: "OwnerAccessDenied".into(),
+                                    message: format!("Corporation wallet {w_owner} is not accessible"),
+                                });
+                            }
+                            let (w_ceo, w_roles) = if use_corp {
+                                (is_corp_ceo, eff_corp_roles)
+                            } else {
+                                crate::services::inventory_bound::get_effective_corp_roles_at_location_in_snap_at(
+                                    snap,
+                                    char_corp_id,
+                                    char_id,
+                                    Some(station_id),
+                                    now_unix,
+                                )
+                            };
+                            (true, div_id, acc_key as i32, w_ceo, w_roles)
+                        } else {
+                            return Err(BridgeRpcError {
+                                code: "OwnerAccessDenied".into(),
+                                message: format!(
+                                    "Cannot pay industry job fees from wallet owner {w_owner}"
+                                ),
+                            });
+                        }
+                    } else {
+                        (
+                            use_corp && snap.corporations.contains_key(&job_owner_id),
+                            1,
+                            1000,
+                            is_corp_ceo,
+                            eff_corp_roles,
+                        )
+                    };
 
                 let rig_mat_bonus = resolve_structure_rig_bonuses_for_job(
                     ctx,
@@ -900,22 +973,25 @@ pub fn handle_industry_jobs(
                 let total_debit_isk = cost_meta.total_cost_isk;
 
                 let total_debit_cents = IskCents::from_f64_isk(total_debit_isk);
-                if use_corp && snap.corporations.contains_key(&job_owner_id) {
+                if wallet_is_corp {
+                    let div_idx = usize::from(wallet_corp_div - 1);
                     if total_debit_cents.0 > 0
                         && !session.has_gm_role()
-                        && !is_corp_ceo
-                        && !eve_db::corp_roles::has_role(eff_corp_roles, eve_db::corp_roles::ROLE_DIRECTOR)
-                        && !eve_db::corp_roles::has_role(eff_corp_roles, eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[0])
+                        && !wallet_is_ceo
+                        && !eve_db::corp_roles::has_role(wallet_eff_roles, eve_db::corp_roles::ROLE_DIRECTOR)
+                        && !eve_db::corp_roles::has_role(wallet_eff_roles, eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[div_idx])
                     {
                         return Err(BridgeRpcError {
                             code: "CrpAccessDenied".into(),
-                            message: "Paying corporation industry job fees requires Director or Division 1 Account Take role".into(),
+                            message: format!(
+                                "Paying corporation industry job fees requires Director or Division {wallet_corp_div} Account Take role"
+                            ),
                         });
                     }
                     let corp_bal = snap
                         .corporations
-                        .get(&job_owner_id)
-                        .map(|c| c.division_balance(1))
+                        .get(&char_corp_id)
+                        .map(|c| c.division_balance(wallet_corp_div))
                         .unwrap_or(IskCents(0));
                     if corp_bal < total_debit_cents {
                         return Err(BridgeRpcError {
@@ -1143,17 +1219,17 @@ pub fn handle_industry_jobs(
                 snap.next_entity_id += 1;
                 let jid = snap.next_entity_id;
 
-                if use_corp && snap.corporations.contains_key(&job_owner_id) {
+                if wallet_is_corp {
                     let base_cents = IskCents::from_f64_isk(cost_meta.base_job_cost_isk);
                     let tax_cents = IskCents::from_f64_isk(cost_meta.facility_tax_isk);
                     let scc_cents = IskCents::from_f64_isk(cost_meta.scc_surcharge_isk);
                     let corp_bal = snap
                         .corporations
-                        .get_mut(&job_owner_id)
+                        .get_mut(&char_corp_id)
                         .map(|c| {
-                            let cur = c.division_balance(1);
+                            let cur = c.division_balance(wallet_corp_div);
                             let next = cur.checked_sub(total_debit_cents).unwrap_or(IskCents(0));
-                            c.set_division_balance(1, next);
+                            c.set_division_balance(wallet_corp_div, next);
                             next
                         })
                         .unwrap_or(IskCents(0));
@@ -1167,16 +1243,16 @@ pub fn handle_industry_jobs(
                             continue;
                         }
                         snap.append_journal_entry(eve_db::JournalEntryInput {
-                            owner_id: job_owner_id,
+                            owner_id: char_corp_id,
                             entry_type: etype,
                             amount: fee,
                             balance_after: corp_bal,
                             reason: desc,
                             meta: eve_db::JournalMeta {
                                 ref_type_id: 56,
-                                first_party_id: job_owner_id,
+                                first_party_id: char_corp_id,
                                 second_party_id: station_id,
-                                account_key: 1000,
+                                account_key: wallet_account_key,
                                 date_unix: now_ts,
                                 ..Default::default()
                             },

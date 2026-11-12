@@ -603,12 +603,34 @@ fn add_corp_rpc_validation_tax_clamp_docked_alliance_stasis_and_ad_fallback() {
             eve_db::SocialContactRecord { contact_id: 500_003, contact_type: "character".into(), standing: 0.0, is_watched: false, is_blocked: false, label_ids: vec![] },
         ]);
     });
-    assert_eq!(rs_rows(&call_corp_gov(&ctx, &mut ceo, "corpRegistry", "GetCorporateContacts", &[], &kw).unwrap()).len(), 3);
+    let all_c = call_corp_gov(&ctx, &mut ceo, "corpRegistry", "GetCorporateContacts", &[], &kw).unwrap();
+    let PyRep::IndexRowset {
+        key_column: all_key_col,
+        columns: all_cols,
+        items: all_items,
+    } = all_c
+    else {
+        panic!("expected IndexRowset for GetCorporateContacts");
+    };
+    assert_eq!(all_key_col, "contactID");
+    assert_eq!(all_cols, vec!["contactID", "relationshipID", "labelMask"]);
+    assert_eq!(all_items.len(), 3);
+    assert!(all_items.iter().any(|(k, r)| *k == PyRep::Integer(500_001) && r[0] == PyRep::Integer(500_001)));
     assert!(call_corp_gov(&ctx, &mut ceo, "corpRegistry", "RemoveCorporateContacts", &[PyRep::Integer(500_001)], &kw).is_ok());
     assert!(call_corp_gov(&ctx, &mut ceo, "corpRegistry", "RemoveCorporateContacts", &[PyRep::List(vec![PyRep::Integer(500_002)])], &kw).is_ok());
     let rem_c = call_corp_gov(&ctx, &mut ceo, "corpRegistry", "GetCorporateContacts", &[], &kw).unwrap();
-    assert_eq!(rs_rows(&rem_c).len(), 1);
-    assert_eq!(rs_rows(&rem_c)[0][0], PyRep::Integer(500_003));
+    let PyRep::IndexRowset {
+        key_column: rem_key_col,
+        items: rem_items,
+        ..
+    } = rem_c
+    else {
+        panic!("expected IndexRowset for GetCorporateContacts after removal");
+    };
+    assert_eq!(rem_key_col, "contactID");
+    assert_eq!(rem_items.len(), 1);
+    assert_eq!(rem_items[0].0, PyRep::Integer(500_003));
+    assert_eq!(rem_items[0].1[0], PyRep::Integer(500_003));
 }
 
 #[test]

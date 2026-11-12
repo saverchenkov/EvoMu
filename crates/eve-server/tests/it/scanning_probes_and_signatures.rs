@@ -788,8 +788,12 @@ async fn test_gh962_probe_launcher_sublocations_godma_and_ship_state() {
     assert!(
         prime_attrs
             .iter()
-            .any(|(k, v)| k.as_i64() == Some(80) && v.as_f64() == Some(8.0)),
-        "primed sublocation must include attributeQuantity (80) = 8.0: {prime_attrs:?}"
+            .any(|(k, v)| k.as_i64() == Some(805) && v.as_f64() == Some(8.0)),
+        "primed sublocation must include attributeQuantity (805) = 8.0: {prime_attrs:?}"
+    );
+    assert!(
+        !prime_attrs.iter().any(|(k, _)| k.as_i64() == Some(80)),
+        "primed sublocation must not emit speedBonus (80): {prime_attrs:?}"
     );
 
     // 3. Cold reconnect `GetAllInfo`, `ItemGetInfo` sublocation key lookup, and `ship.Board` prime.
@@ -819,8 +823,12 @@ async fn test_gh962_probe_launcher_sublocations_godma_and_ship_state() {
     assert!(
         sub_attrs
             .iter()
-            .any(|(k, v)| k.as_i64() == Some(80) && v.as_f64() == Some(8.0)),
-        "GetAllInfo sublocation must carry attributeQuantity (80) = 8.0: {sub_attrs:?}"
+            .any(|(k, v)| k.as_i64() == Some(805) && v.as_f64() == Some(8.0)),
+        "GetAllInfo sublocation must carry attributeQuantity (805) = 8.0: {sub_attrs:?}"
+    );
+    assert!(
+        !sub_attrs.iter().any(|(k, _)| k.as_i64() == Some(80)),
+        "GetAllInfo sublocation must not carry speedBonus (80): {sub_attrs:?}"
     );
     let PyRep::Tuple(ref loaded_ship_state) =
         loaded_all.dict_get("shipState").expect("shipState")
@@ -842,6 +850,21 @@ async fn test_gh962_probe_launcher_sublocations_godma_and_ship_state() {
         .await
         .expect("ItemGetInfo with 3-tuple sublocation key");
     assert_eq!(get_info_sub.dict_get("invItem"), Some(&PyRep::None));
+    let PyRep::Dict(ref item_info_attrs) =
+        get_info_sub.dict_get("attributes").expect("ItemGetInfo attributes")
+    else {
+        panic!("ItemGetInfo attributes must be Dict");
+    };
+    assert!(
+        item_info_attrs
+            .iter()
+            .any(|(k, v)| k.as_i64() == Some(805) && v.as_f64() == Some(8.0)),
+        "ItemGetInfo sublocation must carry attributeQuantity (805) = 8.0: {item_info_attrs:?}"
+    );
+    assert!(
+        !item_info_attrs.iter().any(|(k, _)| k.as_i64() == Some(80)),
+        "ItemGetInfo sublocation must not carry speedBonus (80): {item_info_attrs:?}"
+    );
 
     // Re-board ship to verify `ship.Board` returns `shipState[1]` DBRow and emits `ProcessGodmaPrimeLocation`.
     ctx.advance_secs(31);
@@ -867,7 +890,7 @@ async fn test_gh962_probe_launcher_sublocations_godma_and_ship_state() {
         "ProcessGodmaPrimeLocation must prime probe sublocation key"
     );
 
-    // 4. Probe type swap (`LoadAmmo` with 30028 Combat Scanner Probe I): must expel old 30013 (`attr 80 -> 0.0`) & prime 30028.
+    // 4. Probe type swap (`LoadAmmo` with 30028 Combat Scanner Probe I): must expel old 30013 (`attr 805 -> 0.0`) & prime 30028.
     let _ = collect_notes(&mut sess);
     ctx.dispatch_rpc(
         &mut sess,
@@ -885,21 +908,21 @@ async fn test_gh962_probe_launcher_sublocations_godma_and_ship_state() {
     .await
     .expect("LoadAmmo swap to 30028");
     let swap_notes = collect_notes(&mut sess);
-    let has_attr80_delta = |notes: &[(String, Vec<PyRep>)], charge_tid: u32, expected_new: f64| -> bool {
+    let has_attr805_delta = |notes: &[(String, Vec<PyRep>)], charge_tid: u32, expected_new: f64| -> bool {
         let key = subloc_key(charge_tid);
         notes.iter().any(|(ev, args)| {
             ev == "OnModuleAttributeChanges"
                 && matches!(args.first(), Some(PyRep::List(entries)) if entries.iter().any(|entry| {
                     matches!(entry, PyRep::Tuple(t)
                         if t.get(2) == Some(&key)
-                            && t.get(3).and_then(|v| v.as_i64()) == Some(80)
+                            && t.get(3).and_then(|v| v.as_i64()) == Some(805)
                             && t.get(5).and_then(|v| v.as_f64()) == Some(expected_new))
                 }))
         })
     };
     assert!(
-        has_attr80_delta(&swap_notes, 30013, 0.0),
-        "swapping probe types must expel old 30013 sublocation with attr 80 = 0.0: {swap_notes:?}"
+        has_attr805_delta(&swap_notes, 30013, 0.0),
+        "swapping probe types must expel old 30013 sublocation with attr 805 = 0.0: {swap_notes:?}"
     );
     assert!(
         swap_notes.iter().any(|(ev, args)| {
@@ -909,7 +932,7 @@ async fn test_gh962_probe_launcher_sublocations_godma_and_ship_state() {
         "swapping probe types must prime new 30028 sublocation: {swap_notes:?}"
     );
 
-    // 5. Undock -> `launchProbe` (`attr 80 -> 0.0`) -> `RecoverProbes` (`OnGodmaPrimeItem` + `OnChargeLoadedToModule`) -> `UnloadAmmo` (`attr 80 -> 0.0`).
+    // 5. Undock -> `launchProbe` (`attr 805 -> 0.0`) -> `RecoverProbes` (`OnGodmaPrimeItem` + `OnChargeLoadedToModule`) -> `UnloadAmmo` (`attr 805 -> 0.0`).
     ctx.advance_secs(31);
     ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
         .await
@@ -929,8 +952,8 @@ async fn test_gh962_probe_launcher_sublocations_godma_and_ship_state() {
     .expect("launchProbe");
     let launch_notes = collect_notes(&mut sess);
     assert!(
-        has_attr80_delta(&launch_notes, 30028, 0.0),
-        "launching last 8 probes must update sublocation attr 80 -> 0.0: {launch_notes:?}"
+        has_attr805_delta(&launch_notes, 30028, 0.0),
+        "launching last 8 probes must update sublocation attr 805 -> 0.0: {launch_notes:?}"
     );
 
     ctx.dispatch_rpc(&mut sess, "scanMgr", None, "RecoverProbes", &[], &kw, None)
@@ -962,7 +985,7 @@ async fn test_gh962_probe_launcher_sublocations_godma_and_ship_state() {
     .expect("UnloadAmmo");
     let unload_notes = collect_notes(&mut sess);
     assert!(
-        has_attr80_delta(&unload_notes, 30028, 0.0),
-        "UnloadAmmo must expel sublocation with attr 80 -> 0.0: {unload_notes:?}"
+        has_attr805_delta(&unload_notes, 30028, 0.0),
+        "UnloadAmmo must expel sublocation with attr 805 -> 0.0: {unload_notes:?}"
     );
 }

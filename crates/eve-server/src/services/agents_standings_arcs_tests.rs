@@ -44,6 +44,7 @@ fn effective_standings_derived_standings_and_notifications_work() {
             solar_system_id: Some(30_000_142),
             station_id: Some(60_003_760),
             tax_rate: 0.10,
+            ceo_id: None,
         },
     );
     sde.agents.insert(
@@ -159,6 +160,7 @@ fn special_dialogue_actions_cover_locator_agent_and_epic_arc_branching() {
             solar_system_id: Some(30_000_142),
             station_id: Some(60_003_760),
             tax_rate: 0.10,
+            ceo_id: None,
         },
     );
     sde.agents.insert(

@@ -179,6 +179,7 @@ fn custom_sde_for_world_tests() -> SdeRegistry {
                 solar_system_id: Some(sys_id),
                 station_id: Some(sta_id),
                 tax_rate: 0.05,
+                ceo_id: None,
             },
         );
         let sta = StationInfo {

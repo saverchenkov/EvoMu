@@ -31,6 +31,7 @@ fn test_lp_store_reward_log_and_balances_and_transfers() {
             solar_system_id: Some(sys_id),
             station_id: Some(station_id),
             tax_rate: 0.0,
+            ceo_id: None,
         },
     );
 

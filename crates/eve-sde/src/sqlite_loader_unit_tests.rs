@@ -381,6 +381,51 @@ fn load_belt_and_system_asteroid_tables_sqlite_fallback_and_sanitization() {
 }
 
 #[test]
+fn load_uncached_reads_npc_corporation_ceo_id_when_present_and_filters_non_positive() {
+    let legacy_path = std::env::temp_dir().join(format!(
+        "evomu_npc_ceo_legacy_{}.sqlite",
+        std::process::id()
+    ));
+    let with_ceo_path = std::env::temp_dir().join(format!(
+        "evomu_npc_ceo_present_{}.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&legacy_path);
+    let _ = std::fs::remove_file(&with_ceo_path);
+
+    {
+        let conn = Connection::open(&legacy_path).unwrap();
+        create_base_sde_schema(&conn, true);
+        conn.execute(
+            "INSERT INTO sde_npc_corporations VALUES (1000035, 'Caldari Navy', 'CN', 500001, 30000142, 60003760, 0.1)",
+            [],
+        )
+        .unwrap();
+    }
+    let sde_legacy = SdeRegistry::load_uncached(legacy_path.clone()).expect("legacy npc corps");
+    assert_eq!(sde_legacy.npc_corporations[&1_000_035].ceo_id, None);
+
+    {
+        let conn = Connection::open(&with_ceo_path).unwrap();
+        create_base_sde_schema(&conn, true);
+        conn.execute_batch(
+            "ALTER TABLE sde_npc_corporations ADD COLUMN ceo_id INTEGER;
+             INSERT INTO sde_npc_corporations VALUES (1000035, 'Caldari Navy', 'CN', 500001, 30000142, 60003760, 0.1, 3004069);
+             INSERT INTO sde_npc_corporations VALUES (1000173, 'Polaris Corporation', 'PLR', 500021, NULL, NULL, 0.0, NULL);
+             INSERT INTO sde_npc_corporations VALUES (1000999, 'Zero Ceo Test', 'ZCT', NULL, NULL, NULL, 0.0, 0);",
+        )
+        .unwrap();
+    }
+    let sde_ceo = SdeRegistry::load_uncached(with_ceo_path.clone()).expect("npc corps with ceo_id");
+    assert_eq!(sde_ceo.npc_corporations[&1_000_035].ceo_id, Some(3_004_069));
+    assert_eq!(sde_ceo.npc_corporations[&1_000_173].ceo_id, None);
+    assert_eq!(sde_ceo.npc_corporations[&1_000_999].ceo_id, None);
+
+    let _ = std::fs::remove_file(&legacy_path);
+    let _ = std::fs::remove_file(&with_ceo_path);
+}
+
+#[test]
 fn load_uncached_rejects_every_missing_required_table() {
     let tables = [
         "sde_resources",

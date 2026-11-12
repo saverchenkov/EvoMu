@@ -545,7 +545,7 @@ pub(crate) fn build_charge_sublocation_attrs(
     for (&aid, &val) in &c_item.dynamic_attributes {
         c_map.insert(aid, val);
     }
-    c_map.insert(80, c_item.quantity as f64);
+    c_map.insert(attr_ids::QUANTITY, c_item.quantity as f64);
     let mut c_attrs: Vec<(PyRep, PyRep)> = c_map
         .into_iter()
         .map(|(aid, v)| (PyRep::Integer(aid as i64), PyRep::Real(v)))
@@ -594,7 +594,7 @@ pub(crate) fn emit_godma_charge_sublocation_prime(
     );
 }
 
-/// Emits `OnModuleAttributeChanges` for `const.attributeQuantity (80)` on a charge sublocation
+/// Emits `OnModuleAttributeChanges` for `const.attributeQuantity (805)` on a charge sublocation
 /// `(ship_id, flag_id, charge_type_id)`. Passing `new_qty == 0` triggers `SubLoc.quantityExpelled`.
 pub(crate) fn emit_charge_sublocation_quantity_change(
     ctx: &ServerContext,
@@ -618,7 +618,7 @@ pub(crate) fn emit_charge_sublocation_quantity_change(
             PyRep::String("OnModuleAttributeChange".into()),
             PyRep::Integer(char_id),
             subloc_key,
-            PyRep::Integer(80),
+            PyRep::Integer(i64::from(attr_ids::QUANTITY)),
             PyRep::Integer(now_ft),
             PyRep::Real(f64::from(new_qty)),
             PyRep::Real(f64::from(old_qty)),
@@ -897,7 +897,7 @@ fn emit_godma_prime_location_and_ship_state(
                         let qty = match mod_attrs_rep {
                             PyRep::Dict(pairs) => pairs
                                 .iter()
-                                .find(|(k, _)| k.as_i64() == Some(80))
+                                .find(|(k, _)| k.as_i64() == Some(i64::from(attr_ids::QUANTITY)))
                                 .and_then(|(_, v)| v.as_f64())
                                 .map(|q| q.round() as i32)
                                 .unwrap_or(1),
