@@ -970,7 +970,7 @@ fn lifecycle_cancel_paused_ceo_refund_stacking_and_complete_edge_paths() {
     // - industryManager.InstallJob emits OnAccountChange
     // - /completeindustry emits OnIndustryJob with status = 3 (STATUS_READY)
     // - industryManager.CompleteJob delivers 1-run manufactured item with singleton == false and emits OnItemChange
-    let bp_data_svc = crate::services::industry_pi::handle_industry_pi(
+    let bp_data_svc = crate::services::industry_pi::handle_industry_facilities_bps(
         &ctx,
         &mut sess,
         "blueprintManager",
@@ -983,7 +983,7 @@ fn lifecycle_cancel_paused_ceo_refund_stacking_and_complete_edge_paths() {
     assert_eq!(bp_data_svc.dict_get("solarSystemID"), Some(&PyRep::Integer(30_000_142)));
     assert_eq!(bp_data_svc.dict_get("copy"), Some(&PyRep::Bool(false)));
 
-    let bp_owner_svc = crate::services::industry_pi::handle_industry_pi(
+    let bp_owner_svc = crate::services::industry_pi::handle_industry_facilities_bps(
         &ctx,
         &mut sess,
         "blueprintManager",
@@ -1021,7 +1021,7 @@ fn lifecycle_cancel_paused_ceo_refund_stacking_and_complete_edge_paths() {
     let mfg_1run_jid = mfg_1run.dict_get("jobID").unwrap().as_i64().unwrap();
     let install_notifs = ctx.drain_notifications(char_id);
     assert!(
-        install_notifs.iter().any(|n| n.method == "OnAccountChange"),
+        install_notifs.iter().any(|n| n.event == "OnAccountChange"),
         "InstallJob must emit OnAccountChange for installation fee debit (#982)"
     );
 
@@ -1036,7 +1036,7 @@ fn lifecycle_cancel_paused_ceo_refund_stacking_and_complete_edge_paths() {
     let ready_notifs = ctx.drain_notifications(char_id);
     assert!(
         ready_notifs.iter().any(|n| {
-            n.method == "OnIndustryJob"
+            n.event == "OnIndustryJob"
                 && n.args.first() == Some(&PyRep::Integer(mfg_1run_jid))
                 && n.args.get(4) == Some(&PyRep::Integer(3))
         }),
@@ -1062,7 +1062,7 @@ fn lifecycle_cancel_paused_ceo_refund_stacking_and_complete_edge_paths() {
         );
     });
     let comp_notifs = ctx.drain_notifications(char_id);
-    let item_change_count = comp_notifs.iter().filter(|n| n.method == "OnItemChange").count();
+    let item_change_count = comp_notifs.iter().filter(|n| n.event == "OnItemChange").count();
     assert!(
         item_change_count >= 2,
         "CompleteJob must emit OnItemChange for unlocked blueprint and delivered item (#982), got {item_change_count}"
