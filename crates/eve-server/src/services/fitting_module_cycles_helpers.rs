@@ -456,8 +456,31 @@ pub(crate) fn handle_unload_ammo(
         Ok(diffs)
     })?;
 
+    let expelled_sublocs: Vec<(InventoryFlag, u32, i32)> = item_diffs
+        .iter()
+        .filter_map(|(pre_opt, _)| {
+            pre_opt.as_ref().filter(|pre| {
+                pre.location_id == ship_id
+                    && matches!(pre.flag as u16, 11..=34 | 125..=132)
+                    && pre.quantity > 0
+                    && ctx.sde.types.get(&pre.type_id).is_some_and(|t| t.category_id == 8)
+            })
+        })
+        .map(|pre| (pre.flag, pre.type_id, pre.quantity))
+        .collect();
     for (pre, post) in item_diffs {
         ctx.notify_item_mutation(char_id, pre.as_ref(), post.as_ref());
+    }
+    for (old_flag, charge_type_id, old_qty) in expelled_sublocs {
+        emit_charge_sublocation_quantity_change(
+            ctx,
+            char_id,
+            ship_id,
+            old_flag,
+            charge_type_id,
+            old_qty,
+            0,
+        );
     }
     crate::services::notify_emitters_seasons_tactical::emit_bank_ammo_changed_if_grouped(
         ctx,
@@ -467,6 +490,141 @@ pub(crate) fn handle_unload_ammo(
     );
     ctx.invalidate_ship_fitting(ship_id);
     Ok(PyRep::None)
+}
+
+pub(crate) fn charge_sublocation_key(
+    ship_id: i64,
+    flag: InventoryFlag,
+    charge_type_id: u32,
+) -> PyRep {
+    PyRep::Tuple(vec![
+        PyRep::Integer(ship_id),
+        PyRep::Integer(i64::from(flag as u16)),
+        PyRep::Integer(i64::from(charge_type_id)),
+    ])
+}
+
+pub(crate) fn build_charge_sublocation_attrs(
+    ctx: &ServerContext,
+    c_item: &eve_db::InventoryItemRecord,
+    fit_opt: Option<&eve_dogma::ShipFittingEngine>,
+) -> Vec<(PyRep, PyRep)> {
+    let mut c_map: HashMap<u16, f64> = ctx
+        .sde
+        .types
+        .get(&c_item.type_id)
+        .map(|t| t.default_attributes.clone())
+        .unwrap_or_default();
+    if let Some(fit) = fit_opt {
+        let slot_flag = c_item.flag as u16;
+        let launcher_id_opt = fit
+            .modules
+            .values()
+            .find(|m| m.flag_id == slot_flag)
+            .map(|m| m.item_id);
+        let charge_state_opt = launcher_id_opt
+            .and_then(|lid| fit.charge_state(lid, &ctx.sde))
+            .or_else(|| {
+                fit.evaluated_charges
+                    .values()
+                    .find(|c| c.type_id == c_item.type_id)
+                    .cloned()
+            });
+        if let Some(c_state) = charge_state_opt {
+            let all_aids: std::collections::BTreeSet<u16> = c_state
+                .base_attributes
+                .keys()
+                .copied()
+                .chain(c_state.modifiers.iter().map(|m| m.target_attribute_id))
+                .collect();
+            for aid in all_aids {
+                c_map.insert(aid, c_state.get_attribute(aid, &ctx.sde));
+            }
+        }
+    }
+    for (&aid, &val) in &c_item.dynamic_attributes {
+        c_map.insert(aid, val);
+    }
+    c_map.insert(80, c_item.quantity as f64);
+    let mut c_attrs: Vec<(PyRep, PyRep)> = c_map
+        .into_iter()
+        .map(|(aid, v)| (PyRep::Integer(aid as i64), PyRep::Real(v)))
+        .collect();
+    c_attrs.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
+    c_attrs
+}
+
+pub(crate) fn build_charge_sublocation_keyval(
+    subloc_key: PyRep,
+    c_attrs: Vec<(PyRep, PyRep)>,
+    now_ft: i64,
+) -> PyRep {
+    PyRep::keyval([
+        ("itemID", subloc_key),
+        ("invItem", PyRep::None),
+        ("attributes", PyRep::Dict(c_attrs)),
+        ("activeEffects", PyRep::Dict(Vec::new())),
+        ("time", PyRep::Integer(now_ft)),
+        ("wallclockTime", PyRep::Integer(now_ft)),
+        ("description", PyRep::String(String::new())),
+    ])
+}
+
+/// Emits `OnGodmaPrimeItem` for a charge sublocation `(ship_id, flag_id, charge_type_id)` so
+/// client `godma.StateManager.UpdateItem` populates `sublocationsByLocationFlag` immediately.
+pub(crate) fn emit_godma_charge_sublocation_prime(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    c_item: &eve_db::InventoryItemRecord,
+) {
+    if ship_id <= 0 || c_item.quantity <= 0 {
+        return;
+    }
+    let fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
+    let c_attrs = build_charge_sublocation_attrs(ctx, c_item, fit_opt.as_ref());
+    let subloc_key = charge_sublocation_key(ship_id, c_item.flag, c_item.type_id);
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let keyval = build_charge_sublocation_keyval(subloc_key, c_attrs, now_ft);
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnGodmaPrimeItem",
+        "charid",
+        vec![PyRep::Integer(ship_id), keyval],
+    );
+}
+
+/// Emits `OnModuleAttributeChanges` for `const.attributeQuantity (80)` on a charge sublocation
+/// `(ship_id, flag_id, charge_type_id)`. Passing `new_qty == 0` triggers `SubLoc.quantityExpelled`.
+pub(crate) fn emit_charge_sublocation_quantity_change(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    flag: InventoryFlag,
+    charge_type_id: u32,
+    old_qty: i32,
+    new_qty: i32,
+) {
+    if ship_id <= 0 {
+        return;
+    }
+    let subloc_key = charge_sublocation_key(ship_id, flag, charge_type_id);
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnModuleAttributeChanges",
+        "charid",
+        vec![PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::String("OnModuleAttributeChange".into()),
+            PyRep::Integer(char_id),
+            subloc_key,
+            PyRep::Integer(80),
+            PyRep::Integer(now_ft),
+            PyRep::Real(f64::from(new_qty)),
+            PyRep::Real(f64::from(old_qty)),
+            PyRep::None,
+        ])])],
+    );
 }
 
 pub(crate) fn evaluate_ship_dogma_attributes(
@@ -502,7 +660,7 @@ pub(crate) fn evaluate_ship_dogma_attributes(
         .with_snapshot(|s| s.items.get(&ship_id).map(|it| it.dynamic_attributes.clone()))
         .unwrap_or_default();
     for (attr_id, val) in dyn_attrs {
-        if matches!(attr_id, 3 | 18 | 265 | 266)
+        if matches!(attr_id, 3 | 18 | 264 | 265 | 266)
             || !eval_ctx
                 .ship
                 .modifiers
@@ -591,47 +749,11 @@ pub(crate) fn evaluate_ship_dogma_attributes(
         list
     });
     for c_item in loaded_charges {
-        let mut c_map: HashMap<u16, f64> = ctx
-            .sde
-            .types
-            .get(&c_item.type_id)
-            .map(|t| t.default_attributes.clone())
-            .unwrap_or_default();
-        let slot_flag = c_item.flag as u16;
-        let launcher_id_opt = fit
-            .modules
-            .values()
-            .find(|m| m.flag_id == slot_flag)
-            .map(|m| m.item_id);
-        let charge_state_opt = launcher_id_opt
-            .and_then(|lid| fit.charge_state(lid, &ctx.sde))
-            .or_else(|| {
-                fit.evaluated_charges
-                    .values()
-                    .find(|c| c.type_id == c_item.type_id)
-                    .cloned()
-            });
-        if let Some(c_state) = charge_state_opt {
-            let all_aids: std::collections::BTreeSet<u16> = c_state
-                .base_attributes
-                .keys()
-                .copied()
-                .chain(c_state.modifiers.iter().map(|m| m.target_attribute_id))
-                .collect();
-            for aid in all_aids {
-                c_map.insert(aid, c_state.get_attribute(aid, &ctx.sde));
-            }
-        }
-        for (&aid, &val) in &c_item.dynamic_attributes {
-            c_map.insert(aid, val);
-        }
-        c_map.insert(80, c_item.quantity as f64);
-        let mut c_attrs: Vec<(PyRep, PyRep)> = c_map
-            .into_iter()
-            .map(|(aid, v)| (PyRep::Integer(aid as i64), PyRep::Real(v)))
-            .collect();
-        c_attrs.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
-        module_entries.push((PyRep::Integer(c_item.item_id), PyRep::Dict(c_attrs)));
+        let c_attrs = build_charge_sublocation_attrs(ctx, &c_item, Some(&fit));
+        module_entries.push((
+            charge_sublocation_key(ship_id, c_item.flag, c_item.type_id),
+            PyRep::Dict(c_attrs),
+        ));
     }
 
     let ship_type_id = fit.ship.type_id;
@@ -710,6 +832,8 @@ fn emit_godma_prime_location_and_ship_state(
             PyRep::Integer(0),
         ])
     };
+    let mut subloc_cache: std::collections::BTreeMap<u16, (u32, i32)> =
+        std::collections::BTreeMap::new();
     for (mod_id_rep, mod_attrs_rep) in module_entries {
         if let Some(mod_id) = mod_id_rep.as_i64() {
             if let Some(mut mod_item) = ctx.db.get_item(mod_id) {
@@ -763,6 +887,37 @@ fn emit_godma_prime_location_and_ship_state(
                     ]),
                 ));
             }
+        } else if let PyRep::Tuple(parts) = mod_id_rep {
+            if parts.len() == 3 {
+                if let (Some(loc_id), Some(flag_i64), Some(type_i64)) =
+                    (parts[0].as_i64(), parts[1].as_i64(), parts[2].as_i64())
+                {
+                    if loc_id == ship_id && flag_i64 > 0 && type_i64 > 0 {
+                        let flag_u16 = flag_i64 as u16;
+                        let qty = match mod_attrs_rep {
+                            PyRep::Dict(pairs) => pairs
+                                .iter()
+                                .find(|(k, _)| k.as_i64() == Some(80))
+                                .and_then(|(_, v)| v.as_f64())
+                                .map(|q| q.round() as i32)
+                                .unwrap_or(1),
+                            _ => 1,
+                        };
+                        if !subloc_cache.contains_key(&flag_u16) && qty > 0 {
+                            let c_attrs = match mod_attrs_rep {
+                                PyRep::Dict(pairs) => pairs.clone(),
+                                _ => Vec::new(),
+                            };
+                            let subloc_key = PyRep::Tuple(parts.clone());
+                            ship_info_entries.push((
+                                subloc_key.clone(),
+                                build_charge_sublocation_keyval(subloc_key, c_attrs, now_ft),
+                            ));
+                            subloc_cache.insert(flag_u16, (type_i64 as u32, qty));
+                        }
+                    }
+                }
+            }
         }
     }
     let extra_charges: Vec<eve_db::InventoryItemRecord> = ctx.db.with_snapshot(|snap| {
@@ -780,39 +935,18 @@ fn emit_godma_prime_location_and_ship_state(
         list.sort_by_key(|i| i.item_id);
         list
     });
-    for mut c_item in extra_charges {
-        if ship_info_entries.iter().any(|(k, _)| k.as_i64() == Some(c_item.item_id)) {
+    for c_item in extra_charges {
+        let flag_u16 = c_item.flag as u16;
+        if subloc_cache.contains_key(&flag_u16) {
             continue;
         }
-        c_item.singleton = false;
-        let inv_row = header.build_dbrow(super::super::item_to_packed_cells(ctx, &c_item));
-        let mut c_map: HashMap<u16, f64> = ctx
-            .sde
-            .types
-            .get(&c_item.type_id)
-            .map(|t| t.default_attributes.clone())
-            .unwrap_or_default();
-        for (&aid, &val) in &c_item.dynamic_attributes {
-            c_map.insert(aid, val);
-        }
-        c_map.insert(80, c_item.quantity as f64);
-        let mut c_attrs: Vec<(PyRep, PyRep)> = c_map
-            .into_iter()
-            .map(|(aid, v)| (PyRep::Integer(aid as i64), PyRep::Real(v)))
-            .collect();
-        c_attrs.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
+        let c_attrs = build_charge_sublocation_attrs(ctx, &c_item, None);
+        let subloc_key = charge_sublocation_key(ship_id, c_item.flag, c_item.type_id);
         ship_info_entries.push((
-            PyRep::Integer(c_item.item_id),
-            PyRep::keyval([
-                ("itemID", PyRep::Integer(c_item.item_id)),
-                ("invItem", inv_row),
-                ("attributes", PyRep::Dict(c_attrs)),
-                ("activeEffects", PyRep::Dict(Vec::new())),
-                ("time", PyRep::Integer(now_ft)),
-                ("wallclockTime", PyRep::Integer(now_ft)),
-                ("description", PyRep::String(String::new())),
-            ]),
+            subloc_key.clone(),
+            build_charge_sublocation_keyval(subloc_key, c_attrs, now_ft),
         ));
+        subloc_cache.insert(flag_u16, (c_item.type_id, c_item.quantity));
     }
 
     ctx.notify(
@@ -822,6 +956,30 @@ fn emit_godma_prime_location_and_ship_state(
         vec![PyRep::Integer(ship_id), PyRep::Dict(ship_info_entries.clone())],
     );
 
+    let subloc_cache_dict = if subloc_cache.is_empty() {
+        Vec::new()
+    } else {
+        let subloc_header = eve_proto::DBRowDescriptor::new([
+            ("locationID", eve_proto::DbColumnType::I8),
+            ("flagID", eve_proto::DbColumnType::I4),
+            ("typeID", eve_proto::DbColumnType::I4),
+            ("quantity", eve_proto::DbColumnType::I4),
+        ]);
+        let flag_rows: Vec<(PyRep, PyRep)> = subloc_cache
+            .into_iter()
+            .map(|(flag_u16, (charge_tid, qty))| {
+                let row = subloc_header.build_dbrow(vec![
+                    PyRep::Integer(ship_id),
+                    PyRep::Integer(i64::from(flag_u16)),
+                    PyRep::Integer(i64::from(charge_tid)),
+                    PyRep::Integer(i64::from(qty)),
+                ]);
+                (PyRep::Integer(i64::from(flag_u16)), row)
+            })
+            .collect();
+        vec![(PyRep::Integer(ship_id), PyRep::Dict(flag_rows))]
+    };
+
     let wb_data = ctx.db.with_snapshot(|snap| {
         crate::services::combat_crimewatch::combat_weapons_spool::build_weapon_banks_dict(
             snap, ship_id,
@@ -829,7 +987,7 @@ fn emit_godma_prime_location_and_ship_state(
     });
     let ship_state = PyRep::Tuple(vec![
         PyRep::Dict(Vec::new()),
-        PyRep::Dict(Vec::new()),
+        PyRep::Dict(subloc_cache_dict),
         wb_data,
         PyRep::Dict(Vec::new()),
     ]);
@@ -1425,7 +1583,7 @@ async fn deactivate_repeating_cycle_after_action(
     effect_name: &str,
 ) {
     let _ = sys.remove_module_cycle(ship_id, module_id).await;
-    let _ = crate::services::notify_emitters_space_dungeons::flush_module_profile_and_ewar_end(
+    let _ = crate::services::notify_emitters_space_dungeons::flush_module_ewar_end(
         ctx,
         owner_char_id.unwrap_or(0),
         Some(sys.solar_system_id),

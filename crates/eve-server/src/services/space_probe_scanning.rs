@@ -309,6 +309,17 @@ pub async fn activate_scan_probe_launcher(
     };
     ctx.notify_item_mutation(char_id, Some(&pre_charge_item), post_charge_item.as_ref());
     ctx.invalidate_ship_fitting(ship_id);
+    if matches!(pre_charge_item.flag as u16, 11..=34 | 125..=132) {
+        crate::services::inventory_fitting::fitting_module_cycles::emit_charge_sublocation_quantity_change(
+            ctx,
+            char_id,
+            ship_id,
+            pre_charge_item.flag,
+            probe_type_id,
+            pre_charge_item.quantity,
+            remaining_in_launcher,
+        );
+    }
 
     let probe_sde = ctx.sde.types.get(&probe_type_id);
     let launch_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
@@ -1702,13 +1713,48 @@ async fn handle_recover_probes(
     } else {
         (Vec::new(), Vec::new(), 0, 0, Vec::new())
     };
-    for (pre_opt, post) in item_diffs {
-        ctx.notify_item_mutation(char_id, pre_opt.as_ref(), Some(&post));
+    let mut recovered_into_launcher = false;
+    for (pre_opt, post) in &item_diffs {
+        ctx.notify_item_mutation(char_id, pre_opt.as_ref(), Some(post));
     }
     if let Some(sid) = ship_id_opt {
         if !recovered_probes.is_empty() {
             ctx.invalidate_ship_fitting(sid);
         }
+    }
+    for (pre_opt, post) in &item_diffs {
+        if matches!(post.flag as u16, 11..=34 | 125..=132)
+            && post.quantity > 0
+            && ctx.sde.types.get(&post.type_id).is_some_and(|t| t.category_id == 8)
+        {
+            if let Some(pre) = pre_opt {
+                crate::services::inventory_fitting::fitting_module_cycles::emit_charge_sublocation_quantity_change(
+                    ctx,
+                    char_id,
+                    post.location_id,
+                    post.flag,
+                    post.type_id,
+                    pre.quantity,
+                    post.quantity,
+                );
+            } else {
+                crate::services::inventory_fitting::fitting_module_cycles::emit_godma_charge_sublocation_prime(
+                    ctx,
+                    char_id,
+                    post.location_id,
+                    post,
+                );
+                recovered_into_launcher = true;
+            }
+        }
+    }
+    if recovered_into_launcher {
+        ctx.notify(
+            crate::router::NotificationTarget::Character(char_id),
+            "OnChargeLoadedToModule",
+            "charid",
+            vec![],
+        );
     }
 
     if !unrecovered_probes.is_empty() {

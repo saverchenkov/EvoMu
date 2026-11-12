@@ -1635,7 +1635,7 @@ async fn notify_batch9_godma_and_location_cache_invalidation() {
     .await
     .is_err());
 
-    // Positive: TakeModuleOffline emits OnGodmaFlushLocationProfile([ship_a])
+    // TakeModuleOffline keeps module fitted on ship_a, so it MUST NOT emit OnGodmaFlushLocationProfile
     let _ = rpc(
         &ctx,
         &mut sess_a,
@@ -1646,9 +1646,51 @@ async fn notify_batch9_godma_and_location_cache_invalidation() {
     .await
     .expect("TakeModuleOffline");
     let offline_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
-    let flush_args = find_notif(&offline_notifs, "OnGodmaFlushLocationProfile");
+    assert!(
+        !offline_notifs
+            .iter()
+            .any(|(e, _)| e == "OnGodmaFlushLocationProfile"),
+        "TakeModuleOffline must not purge a still-fitted module via OnGodmaFlushLocationProfile"
+    );
+
+    // Positive: DestroyFitting (genuine unfit/destroy while docked) DOES emit OnGodmaFlushLocationProfile([ship_a, ("effect", mod_id)])
+    let rig_destroy_id = 940_000_111_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
+            ch.station_id = Some(JITA_STATION);
+        }
+        snap.items.insert(
+            rig_destroy_id,
+            make_item(rig_destroy_id, 2873, PILOT_A, ship_a, InventoryFlag::HiSlot1, 1, true),
+        );
+    });
+    sess_a.station_id = Some(JITA_STATION);
+    let _ = rpc(
+        &ctx,
+        &mut sess_a,
+        "dogmaIM",
+        "DestroyFitting",
+        &[PyRep::Integer(rig_destroy_id)],
+    )
+    .await
+    .expect("DestroyFitting");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
+            ch.station_id = None;
+        }
+    });
+    sess_a.station_id = None;
+    let destroy_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let flush_args = find_notif(&destroy_notifs, "OnGodmaFlushLocationProfile");
     assert_eq!(flush_args.len(), 2);
     assert_eq!(flush_args[0], PyRep::Integer(ship_a));
+    assert_eq!(
+        flush_args[1],
+        PyRep::Tuple(vec![
+            PyRep::String("effect".into()),
+            PyRep::Integer(rig_destroy_id),
+        ])
+    );
 
     // 8. OnInvalidateCacheForLocations: invbroker.SetPassword on a passworded container
     let pw_container_id = 940_000_060_i64;

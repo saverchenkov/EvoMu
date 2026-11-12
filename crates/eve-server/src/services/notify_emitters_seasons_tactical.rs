@@ -927,7 +927,38 @@ pub(crate) fn handle_load_ammo(
         Ok(diffs)
     })?;
 
+    let mut expelled_sublocs: Vec<(eve_db::InventoryFlag, u32, i32)> = Vec::new();
+    let mut loaded_sublocs: Vec<eve_db::InventoryItemRecord> = Vec::new();
     for (pre, post) in item_diffs {
+        if let Some(ref pre_rec) = pre {
+            if pre_rec.location_id == ship_id
+                && matches!(pre_rec.flag as u16, 11..=34 | 125..=132)
+                && pre_rec.quantity > 0
+                && ctx
+                    .sde
+                    .types
+                    .get(&pre_rec.type_id)
+                    .is_some_and(|t| t.category_id == 8)
+                && post
+                    .as_ref()
+                    .is_none_or(|p| p.location_id != ship_id || p.flag != pre_rec.flag)
+            {
+                expelled_sublocs.push((pre_rec.flag, pre_rec.type_id, pre_rec.quantity));
+            }
+        }
+        if let Some(ref post_rec) = post {
+            if post_rec.location_id == ship_id
+                && matches!(post_rec.flag as u16, 11..=34 | 125..=132)
+                && post_rec.quantity > 0
+                && ctx
+                    .sde
+                    .types
+                    .get(&post_rec.type_id)
+                    .is_some_and(|t| t.category_id == 8)
+            {
+                loaded_sublocs.push(post_rec.clone());
+            }
+        }
         ctx.notify_item_mutation(char_id, pre.as_ref(), post.as_ref());
     }
 
@@ -942,6 +973,32 @@ pub(crate) fn handle_load_ammo(
         );
     }
 
+    ctx.invalidate_ship_fitting(ship_id);
+    for (old_flag, old_type_id, old_qty) in expelled_sublocs {
+        let replaced_same_type = loaded_sublocs
+            .iter()
+            .any(|n| n.flag == old_flag && n.type_id == old_type_id);
+        if !replaced_same_type {
+            crate::services::inventory_fitting::fitting_module_cycles::emit_charge_sublocation_quantity_change(
+                ctx,
+                char_id,
+                ship_id,
+                old_flag,
+                old_type_id,
+                old_qty,
+                0,
+            );
+        }
+    }
+    for loaded_rec in &loaded_sublocs {
+        crate::services::inventory_fitting::fitting_module_cycles::emit_godma_charge_sublocation_prime(
+            ctx,
+            char_id,
+            ship_id,
+            loaded_rec,
+        );
+    }
+
     let _ = ctx.notify(
         NotificationTarget::Character(char_id),
         "OnChargeBeingLoadedToModule",
@@ -953,7 +1010,6 @@ pub(crate) fn handle_load_ammo(
         ],
     );
     emit_charge_and_bank_ammo_loaded(ctx, char_id, ship_id, &all_target_modules);
-    ctx.invalidate_ship_fitting(ship_id);
     let (charge_gid, charge_cid) = ctx
         .sde
         .types

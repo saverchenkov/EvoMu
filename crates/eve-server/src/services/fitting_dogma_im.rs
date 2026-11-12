@@ -8,18 +8,56 @@ fn handle_item_get_info(
     ctx: &ServerContext,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let Some(raw_id) = args.first().and_then(|a| a.as_i64()) else {
-        return Err(BridgeRpcError { code: "InvalidArgument".into(), message: "ItemGetInfo requires itemID or typeID".into() });
+    let subloc_tuple = match args.first() {
+        Some(PyRep::Tuple(parts)) if parts.len() == 3 => {
+            match (parts[0].as_i64(), parts[1].as_i64(), parts[2].as_i64()) {
+                (Some(loc_id), Some(flag_id), Some(tid)) if loc_id > 0 && flag_id > 0 && tid > 0 => {
+                    Some((loc_id, flag_id as u16, tid as u32))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+
+    let (subloc_key_opt, item_opt, raw_id) = if let Some((loc_id, flag_u16, sub_tid)) = subloc_tuple {
+        let charge_opt = ctx.db.with_snapshot(|snap| {
+            snap.items
+                .values()
+                .find(|i| {
+                    i.location_id == loc_id
+                        && (i.flag as u16) == flag_u16
+                        && i.type_id == sub_tid
+                        && i.quantity > 0
+                })
+                .cloned()
+        });
+        let raw_id = charge_opt.as_ref().map_or(0, |it| it.item_id);
+        let key_rep = PyRep::Tuple(vec![
+            PyRep::Integer(loc_id),
+            PyRep::Integer(i64::from(flag_u16)),
+            PyRep::Integer(i64::from(sub_tid)),
+        ]);
+        (Some((key_rep, loc_id, flag_u16, sub_tid)), charge_opt, raw_id)
+    } else {
+        let Some(raw_id) = args.first().and_then(|a| a.as_i64()) else {
+            return Err(BridgeRpcError { code: "InvalidArgument".into(), message: "ItemGetInfo requires itemID or typeID".into() });
+        };
+        let item_opt = ctx.db.with_snapshot(|snap| snap.items.get(&raw_id).cloned());
+        (None, item_opt, raw_id)
     };
 
     // 1. Check if raw_id is an item in the world DB or a launched space drone ball
-    let item_opt = ctx.db.with_snapshot(|snap| snap.items.get(&raw_id).cloned());
-    let space_drone_opt = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-        rt.active_drones_in_space
-            .values()
-            .find(|d| d.ball_id == raw_id || d.drone_item_id == raw_id)
-            .cloned()
-    });
+    let space_drone_opt = if subloc_key_opt.is_none() {
+        crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+            rt.active_drones_in_space
+                .values()
+                .find(|d| d.ball_id == raw_id || d.drone_item_id == raw_id)
+                .cloned()
+        })
+    } else {
+        None
+    };
 
     let (type_id, owner_id, dyn_attrs, location_id, qty, singleton) = if let Some(ref item) = item_opt {
         (
@@ -28,7 +66,19 @@ fn handle_item_get_info(
             item.dynamic_attributes.clone(),
             Some(item.location_id),
             item.quantity,
-            item.singleton,
+            if subloc_key_opt.is_some() { false } else { item.singleton },
+        )
+    } else if let Some((_, loc_id, _, sub_tid)) = subloc_key_opt.as_ref() {
+        let loc_id = *loc_id;
+        let sub_tid = *sub_tid;
+        let ship_owner = ctx.db.with_snapshot(|s| s.items.get(&loc_id).map(|i| i.owner_id));
+        (
+            sub_tid,
+            ship_owner.map(PyRep::Integer).unwrap_or(PyRep::None),
+            HashMap::new(),
+            Some(loc_id),
+            0,
+            false,
         )
     } else if let Some(ref sd) = space_drone_opt {
         (
@@ -106,7 +156,7 @@ fn handle_item_get_info(
                     merged_attrs.insert(aid, fit.ship.get_attribute(aid, &ctx.sde));
                 }
                 for (&attr_id, &val) in &dyn_attrs {
-                    if matches!(attr_id, 3 | 18 | 265 | 266)
+                    if matches!(attr_id, 3 | 18 | 264 | 265 | 266)
                         || !fit
                             .ship
                             .modifiers
@@ -193,7 +243,12 @@ fn handle_item_get_info(
         }
     }
 
-    crate::services::tactical_modules::apply_transient_item_attrs(ctx, raw_id, &mut merged_attrs);
+    if raw_id > 0 {
+        crate::services::tactical_modules::apply_transient_item_attrs(ctx, raw_id, &mut merged_attrs);
+    }
+    if subloc_key_opt.is_some() {
+        merged_attrs.insert(80, qty as f64);
+    }
     let mut attr_entries: Vec<(PyRep, PyRep)> = merged_attrs
         .into_iter()
         .map(|(k, v)| (PyRep::Integer(k as i64), PyRep::Real(v)))
@@ -207,9 +262,20 @@ fn handle_item_get_info(
     dyn_entries.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
 
     let var_reps: Vec<PyRep> = show_info.variations.into_iter().map(|v| PyRep::Integer(v as i64)).collect();
-    let custom_name = ctx.db.with_snapshot(|snap| snap.item_custom_names.get(&raw_id).cloned()).unwrap_or_default();
+    let custom_name = if raw_id > 0 {
+        ctx.db.with_snapshot(|snap| snap.item_custom_names.get(&raw_id).cloned()).unwrap_or_default()
+    } else {
+        String::new()
+    };
     let now_ft = ctx.now_blueos_filetime_ticks();
-    let inv_item = ctx.db.get_item(raw_id).map(|it| eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(item_to_packed_cells(ctx, &it))).unwrap_or(PyRep::None);
+    let inv_item = if subloc_key_opt.is_some() {
+        PyRep::None
+    } else {
+        ctx.db
+            .get_item(raw_id)
+            .map(|it| eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(item_to_packed_cells(ctx, &it)))
+            .unwrap_or(PyRep::None)
+    };
 
     let active_effects = match fitted_online_ship {
         Some((mod_owner_id, mod_ship_id)) => {
@@ -224,8 +290,12 @@ fn handle_item_get_info(
         None => PyRep::Dict(Vec::new()),
     };
 
+    let item_id_rep = subloc_key_opt
+        .map(|(key_rep, _, _, _)| key_rep)
+        .unwrap_or(PyRep::Integer(raw_id));
+
     Ok(PyRep::keyval([
-        ("itemID", PyRep::Integer(raw_id)),
+        ("itemID", item_id_rep),
         ("invItem", inv_item),
         ("typeID", PyRep::Integer(show_info.type_id as i64)),
         ("typeName", PyRep::String(show_info.name)),

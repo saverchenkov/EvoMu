@@ -339,7 +339,7 @@ pub fn deactivate_ship_modules_on_leave_space(ctx: &ServerContext, char_id: i64,
     if !active_mods.is_empty() {
         ctx.invalidate_ship_fitting(ship_id);
         for mid in active_mods {
-            let _ = crate::services::notify_emitters_space_dungeons::flush_module_profile_and_ewar_end(
+            let _ = crate::services::notify_emitters_space_dungeons::flush_module_ewar_end(
                 ctx,
                 char_id,
                 solar_system_id,

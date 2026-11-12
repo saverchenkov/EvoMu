@@ -757,9 +757,14 @@ fn get_all_info_and_prime_ship_include_loaded_charges_941_948() {
 
     let (ship_tid, active_stance, entries, module_entries) =
         evaluate_ship_dogma_attributes(&ctx, char_id, ship_id).expect("eval ship dogma");
+    let subloc_key = PyRep::Tuple(vec![
+        PyRep::Integer(ship_id),
+        PyRep::Integer(i64::from(InventoryFlag::HiSlot0 as u16)),
+        PyRep::Integer(179),
+    ]);
     assert!(
-        module_entries.iter().any(|(k, _)| k.as_i64() == Some(charge_id)),
-        "module_entries must include loaded charge {charge_id}: {module_entries:?}"
+        module_entries.iter().any(|(k, _)| *k == subloc_key),
+        "module_entries must key loaded charge as sublocation {subloc_key:?}: {module_entries:?}"
     );
 
     let _ = ctx.drain_notifications_for_char(char_id);
@@ -779,16 +784,13 @@ fn get_all_info_and_prime_ship_include_loaded_charges_941_948() {
     };
     let charge_entry = ship_entries
         .iter()
-        .find(|(k, _)| k.as_i64() == Some(charge_id))
+        .find(|(k, _)| *k == subloc_key)
         .map(|(_, v)| v)
-        .expect("shipInfo must contain loaded charge entry (#941/#948)");
+        .expect("shipInfo must contain loaded charge sublocation (#941/#948/#962)");
 
-    // Verify invItem preserves stacksize=40 (singleton=false -> quantity cell is 40, not -1)
-    let inv_item_str = format!("{:?}", charge_entry.dict_get("invItem"));
-    assert!(
-        inv_item_str.contains("Integer(40)"),
-        "loaded charge invItem DBRow must encode stacksize 40 (singleton=false), got {inv_item_str}"
-    );
+    // Sublocations use invItem=None (godma.StateManager.UpdateItem inserts sublocationsByLocationFlag)
+    assert_eq!(charge_entry.dict_get("invItem"), Some(&PyRep::None));
+    assert_eq!(charge_entry.dict_get("itemID"), Some(&subloc_key));
 
     // Verify attributes dict includes attributeQuantity (80) = 40.0
     let PyRep::Dict(c_attrs) = charge_entry.dict_get("attributes").expect("charge attributes") else {
@@ -799,13 +801,50 @@ fn get_all_info_and_prime_ship_include_loaded_charges_941_948() {
         "charge attributes must include QUANTITY (80) = 40.0: {c_attrs:?}"
     );
 
-    // Verify ProcessGodmaPrimeLocation notification on prime_ship_on_board (undock #948) also includes charge_id
+    // Verify shipState[1] (instanceFlagQuantityCache) populates {ship_id: {HiSlot0: DBRow(..., quantity=40)}}
+    let PyRep::Tuple(ship_state) = all_info.dict_get("shipState").expect("shipState") else {
+        panic!("expected shipState Tuple");
+    };
+    let PyRep::Dict(ship_flag_cache) = &ship_state[1] else {
+        panic!("expected shipState[1] Dict");
+    };
+    let ship_flags = ship_flag_cache
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(ship_id))
+        .map(|(_, v)| v)
+        .expect("shipState[1] must contain ship_id");
+    let PyRep::Dict(flags_dict) = ship_flags else {
+        panic!("expected per-ship flag dict in shipState[1]");
+    };
+    let subloc_row = flags_dict
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(i64::from(InventoryFlag::HiSlot0 as u16)))
+        .map(|(_, v)| v)
+        .expect("shipState[1][ship_id] must contain HiSlot0");
+    assert_eq!(subloc_row.dbrow_get("locationID"), Some(&PyRep::Integer(ship_id)));
+    assert_eq!(
+        subloc_row.dbrow_get("flagID"),
+        Some(&PyRep::Integer(i64::from(InventoryFlag::HiSlot0 as u16)))
+    );
+    assert_eq!(subloc_row.dbrow_get("typeID"), Some(&PyRep::Integer(179)));
+    assert_eq!(subloc_row.dbrow_get("quantity"), Some(&PyRep::Integer(40)));
+
+    // Verify ProcessGodmaPrimeLocation notification on prime_ship_on_board (undock #948/#962) includes sublocation
     let _ = ctx.drain_notifications_for_char(char_id);
-    let _ = prime_ship_on_board(&ctx, &sess, char_id, ship_id);
+    let board_ship_state = prime_ship_on_board(&ctx, &sess, char_id, ship_id);
+    let PyRep::Tuple(board_state_parts) = board_ship_state else {
+        panic!("expected 4-tuple from prime_ship_on_board");
+    };
+    assert!(
+        matches!(&board_state_parts[1], PyRep::Dict(d) if d.iter().any(|(k, _)| k.as_i64() == Some(ship_id))),
+        "prime_ship_on_board shipState[1] must populate instanceFlagQuantityCache"
+    );
     let prime_notifs = ctx.drain_notifications_for_char(char_id);
     assert!(
-        prime_notifs.iter().any(|n| n.event == "ProcessGodmaPrimeLocation"
-            && format!("{:?}", n.args).contains(&charge_id.to_string())),
-        "prime_ship_on_board must include loaded charge in ProcessGodmaPrimeLocation (#948)"
+        prime_notifs.iter().any(|n| {
+            n.event == "ProcessGodmaPrimeLocation"
+                && matches!(n.args.get(1), Some(PyRep::Dict(entries)) if entries.iter().any(|(k, _)| *k == subloc_key))
+        }),
+        "prime_ship_on_board must include loaded charge sublocation in ProcessGodmaPrimeLocation (#948/#962)"
     );
 }
