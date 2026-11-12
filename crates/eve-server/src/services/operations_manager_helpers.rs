@@ -610,6 +610,12 @@ pub fn emit_operation_reward_notifications_with_sink<F>(
     if outcome.enqueued_redeem_tokens {
         sink(
             NotificationTarget::Character(char_id),
+            "OnRedeemingQueueUpdated",
+            "charid",
+            vec![],
+        );
+        sink(
+            NotificationTarget::Character(char_id),
             "OnRedeemingTokensUpdated",
             "charid",
             vec![],

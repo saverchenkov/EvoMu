@@ -181,12 +181,7 @@ async fn test_social_chat_item_fitting_hyperlinks() {
         .iter()
         .find(|n| n.event == "OnClientEvent_ChatMessageSent")
         .expect("Recipient P2 must receive OnClientEvent_ChatMessageSent");
-    let delivered_chat_text = chat_notif
-        .args
-        .get(3)
-        .and_then(|v| v.as_str())
-        .expect("delivered chat text in OnClientEvent_ChatMessageSent");
-    assert_eq!(delivered_chat_text, rich_msg);
+    assert!(chat_notif.args.is_empty());
 
     // Send through mailMgr and verify recipient P2 receives identical hyperlink text via GetBody
     let mail_id_rep = rpc(

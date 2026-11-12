@@ -1453,19 +1453,25 @@ pub(super) fn handle_corps(
                             vec![PyRep::Bool(false), PyRep::Integer(applicant_id), sess_changes],
                         );
                         if let Some((mid, sender_id, subj)) = welcome_mail_id {
-                            let hdr = PyRep::keyval([
-                                ("messageID", PyRep::Integer(mid)),
-                                ("senderID", PyRep::Integer(sender_id)),
-                                ("toCharacterIDs", PyRep::List(vec![PyRep::Integer(applicant_id)])),
-                                ("toCorpOrAllianceID", PyRep::Integer(corp_id)),
-                                ("subject", PyRep::String(subj)),
-                                ("sentDate", PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(now_unix))),
-                            ]);
-                            ctx.notify(
-                                NotificationTarget::Character(applicant_id),
-                                "OnNewMailReceived",
-                                "charid",
-                                vec![hdr],
+                            crate::services::mail_notify::record_mail_meta(
+                                ctx,
+                                mid,
+                                &[applicant_id],
+                                None,
+                                Some(corp_id),
+                            );
+                            crate::services::mail_notify::emit_mail_sent(
+                                ctx,
+                                &crate::services::mail_notify::SentMail {
+                                    message_id: mid,
+                                    sender_id,
+                                    to_character_ids: &[applicant_id],
+                                    to_list_id: None,
+                                    to_corp_or_alliance_id: Some(corp_id),
+                                    title: &subj,
+                                    status_mask: crate::services::mail_notify::MAIL_STATUS_AUTOMATED,
+                                },
+                                &[applicant_id],
                             );
                         }
                         let _ = crate::services::quasar_social_chat::on_character_local_chat_membership_refreshed(

@@ -935,6 +935,7 @@ fn handle_system_wide_effects(
                     .map(|s| s as u32)
                     .unwrap_or(sys_id);
                 let prev = scanners_superweapons_state().write().unwrap_or_else(|e| e.into_inner()).system_wide_effects.remove(&reset_sys);
+                let _ = prev;
                 if ship_id > 0 {
                     ctx.invalidate_ship_fitting(ship_id);
                 }
@@ -942,10 +943,7 @@ fn handle_system_wide_effects(
                     crate::router::NotificationTarget::Character(char_id),
                     "OnSystemWideEffectRemove",
                     "charid",
-                    vec![
-                        PyRep::Integer(reset_sys as i64),
-                        prev.map(|t| PyRep::Integer(t as i64)).unwrap_or(PyRep::None),
-                    ],
+                    vec![PyRep::Integer(reset_sys as i64)],
                 );
                 return Some(Ok(PyRep::keyval([
                     ("solarSystemID", PyRep::Integer(reset_sys as i64)),

@@ -772,7 +772,7 @@ pub fn handle_clone_jump(
                 NotificationTarget::Character(char_id),
                 "OnCloneJumpUpdate",
                 "charid",
-                vec![PyRep::Integer(jc_id), PyRep::Integer(dest_loc_id)],
+                vec![],
             );
             let implant_reps: Vec<PyRep> = active_implants
                 .into_iter()

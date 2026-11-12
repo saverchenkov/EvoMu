@@ -413,12 +413,10 @@ async fn test_so7_chat_item_fitting_hyperlinks_resolution() {
         .iter()
         .find(|n| n.event == "OnClientEvent_ChatMessageSent")
         .expect("Recipient P2 must receive OnClientEvent_ChatMessageSent");
-    let delivered_chat_text = chat_notif
-        .args
-        .get(3)
-        .and_then(|v| v.as_str())
-        .expect("delivered chat text in OnClientEvent_ChatMessageSent");
-    assert_eq!(delivered_chat_text, rich_msg, "Chat hyperlink text delivered intact to recipient P2");
+    assert!(
+        chat_notif.args.is_empty(),
+        "OnClientEvent_ChatMessageSent has 0 args on V24 client"
+    );
 
     // Local LSC channel delivery between P1 and P2 in Jita (30000142)
     let _ = ctx.drain_notifications_for_char(P2);
@@ -436,7 +434,9 @@ async fn test_so7_chat_item_fitting_hyperlinks_resolution() {
     .expect("LSC.SendMessage on local channel");
     let local_notifs = ctx.drain_notifications_for_char(P2);
     assert!(
-        local_notifs.iter().any(|n| format!("{:?}", n.args).contains("Local Intel Ping")),
+        local_notifs
+            .iter()
+            .any(|n| n.event == "OnClientEvent_ChatMessageSent" && n.args.is_empty()),
         "P2 in same solar system receives local LSC message"
     );
 

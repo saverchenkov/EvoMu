@@ -537,7 +537,7 @@ pub(super) async fn handle_bookmarks(
                         NotificationTarget::Character(char_id),
                         "OnRefreshBookmarks",
                         "charid",
-                        vec![PyRep::Integer(bm_id)],
+                        vec![],
                     );
                     if is_shared {
                         if let Some(cid) = corp_id {

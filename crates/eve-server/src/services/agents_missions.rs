@@ -601,6 +601,58 @@ pub async fn handle_with_bound(
                     let Some(agent_info) = ctx.sde.agents.get(&agent_id) else {
                         return Some(Err(BridgeRpcError { code: "UnknownAgent".into(), message: format!("Agent {agent_id} does not exist in SDE") }));
                     };
+                    if is_implicit_greeting {
+                        let existing_accepted = ctx.db.with_snapshot(|snap| {
+                            snap.active_missions
+                                .values()
+                                .find(|m| {
+                                    m.character_id == char_id
+                                        && m.agent_id == agent_id
+                                        && m.state == "Accepted"
+                                })
+                                .cloned()
+                        });
+                        if let Some(acc) = existing_accepted {
+                            let mid = acc.mission_id;
+                            let title = ctx
+                                .sde
+                                .missions
+                                .get(&mid)
+                                .map(|t| t.title.clone())
+                                .unwrap_or_else(|| format!("Mission {mid}"));
+                            let msg = format!(
+                                "Your assignment '{title}' is currently in progress. Return here once your objectives are complete."
+                            );
+                            let mut dlg = vec![
+                                PyRep::Tuple(vec![
+                                    PyRep::Integer(6),
+                                    PyRep::String("Complete Mission".into()),
+                                ]),
+                                PyRep::Tuple(vec![
+                                    PyRep::Integer(11),
+                                    PyRep::String("Quit Mission".into()),
+                                ]),
+                            ];
+                            if agent_info.is_locator {
+                                dlg.push(PyRep::Tuple(vec![
+                                    PyRep::Integer(15),
+                                    PyRep::String("Locate Character".into()),
+                                ]));
+                            }
+                            return Some(Ok(PyRep::keyval([
+                                ("missionID", PyRep::Integer(mid as i64)),
+                                ("contentID", PyRep::Integer(mid as i64)),
+                                ("agentID", PyRep::Integer(agent_id)),
+                                ("title", PyRep::String(title)),
+                                ("state", PyRep::String("Accepted".into())),
+                                ("missionState", PyRep::Integer(2)),
+                                ("briefing", PyRep::String(msg.clone())),
+                                ("agentSays", PyRep::String(msg)),
+                                ("dialogue", PyRep::List(dlg)),
+                            ])));
+                        }
+                    }
+
                     let station_has_local_agents = session.station_id.is_some_and(|sid| {
                         ctx.sde.agents.values().any(|a| {
                             a.solar_system_id == Some(sys_id)
@@ -615,6 +667,20 @@ pub async fn handle_with_bound(
                             && agent_info.station_id.is_some()
                             && agent_info.station_id != session.station_id)
                     {
+                        if is_implicit_greeting {
+                            let msg = format!(
+                                "Please dock at my station in system {:?} (station {:?}) if you wish to request a new assignment.",
+                                agent_info.solar_system_id, agent_info.station_id
+                            );
+                            return Some(Ok(PyRep::keyval([
+                                ("agentID", PyRep::Integer(agent_id)),
+                                ("state", PyRep::String("NotCoLocated".into())),
+                                ("missionState", PyRep::Integer(0)),
+                                ("briefing", PyRep::String(msg.clone())),
+                                ("agentSays", PyRep::String(msg)),
+                                ("dialogue", PyRep::List(Vec::new())),
+                            ])));
+                        }
                         return Some(Err(BridgeRpcError { code: "AgentNotCoLocated".into(), message: format!("Agent {agent_id} is in system {:?} / station {:?}, not character's current location (system {sys_id}, station {:?})", agent_info.solar_system_id, agent_info.station_id, session.station_id) }));
                     }
                     if is_storyline_agent_type(agent_info.agent_type_id) {
@@ -688,58 +754,6 @@ pub async fn handle_with_bound(
                                 code: "CantDoMission".into(),
                                 message: format!("Level 5 agent {agent_id} cannot operate in high-security space ({sec:.2})"),
                             }));
-                        }
-                    }
-
-                    if is_implicit_greeting {
-                        let existing_accepted = ctx.db.with_snapshot(|snap| {
-                            snap.active_missions
-                                .values()
-                                .find(|m| {
-                                    m.character_id == char_id
-                                        && m.agent_id == agent_id
-                                        && m.state == "Accepted"
-                                })
-                                .cloned()
-                        });
-                        if let Some(acc) = existing_accepted {
-                            let mid = acc.mission_id;
-                            let title = ctx
-                                .sde
-                                .missions
-                                .get(&mid)
-                                .map(|t| t.title.clone())
-                                .unwrap_or_else(|| format!("Mission {mid}"));
-                            let msg = format!(
-                                "Your assignment '{title}' is currently in progress. Return here once your objectives are complete."
-                            );
-                            let mut dlg = vec![
-                                PyRep::Tuple(vec![
-                                    PyRep::Integer(6),
-                                    PyRep::String("Complete Mission".into()),
-                                ]),
-                                PyRep::Tuple(vec![
-                                    PyRep::Integer(11),
-                                    PyRep::String("Quit Mission".into()),
-                                ]),
-                            ];
-                            if agent_info.is_locator {
-                                dlg.push(PyRep::Tuple(vec![
-                                    PyRep::Integer(15),
-                                    PyRep::String("Locate Character".into()),
-                                ]));
-                            }
-                            return Some(Ok(PyRep::keyval([
-                                ("missionID", PyRep::Integer(mid as i64)),
-                                ("contentID", PyRep::Integer(mid as i64)),
-                                ("agentID", PyRep::Integer(agent_id)),
-                                ("title", PyRep::String(title)),
-                                ("state", PyRep::String("Accepted".into())),
-                                ("missionState", PyRep::Integer(2)),
-                                ("briefing", PyRep::String(msg.clone())),
-                                ("agentSays", PyRep::String(msg)),
-                                ("dialogue", PyRep::List(dlg)),
-                            ])));
                         }
                     }
 

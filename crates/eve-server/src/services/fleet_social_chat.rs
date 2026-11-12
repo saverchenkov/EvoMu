@@ -788,7 +788,7 @@ fn handle_chat_rpc(
             });
             remove_delayed_local_speakers(ctx, chan_id, &dropped_speakers);
             if !is_delayed {
-                ctx.notify(NotificationTarget::All, "OnChannelLeft", "channelid", vec![PyRep::String(chan_id.to_string()), PyRep::Integer(char_id)]);
+                ctx.notify(NotificationTarget::All, "OnChannelLeft", "channelid", vec![PyRep::String(chan_id.to_string())]);
             }
             Some(Ok(PyRep::keyval([("channelID", PyRep::String(chan_id.to_string())), ("left", PyRep::Bool(true))])))
         }
@@ -895,15 +895,8 @@ fn handle_chat_rpc(
                 });
             }
 
-            let now_ft = ctx.now_blueos_filetime_ticks();
-
-            let notif_args = vec![
-                PyRep::String(chan_key.clone()),
-                PyRep::Integer(char_id),
-                PyRep::String(sender_name),
-                PyRep::String(text.to_string()),
-                PyRep::Integer(now_ft),
-            ];
+            let _ = (&sender_name, ctx.now_blueos_filetime_ticks());
+            let notif_args = Vec::new();
 
             if let Some(rest) = chan_lower.strip_prefix("solarsystemid2:") {
                 let sys_id: u32 = rest.parse().unwrap_or(0);

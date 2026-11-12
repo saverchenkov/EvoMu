@@ -1892,14 +1892,7 @@ async fn test_z2_systematic_notification_emission_pipelines_and_scope_multicast(
     assert_eq!(notifs7.len(), 2);
     assert_eq!(notifs7[0].event, "OnClientEvent_ChatMessageSent");
     assert_eq!(notifs7[0].id_type, "channelid");
-    assert_eq!(
-        notifs7[0].args,
-        vec![
-            PyRep::String("solarsystemid2:30000142".into()),
-            PyRep::Integer(90_000_001),
-            PyRep::String("Local broadcast test".into()),
-        ]
-    );
+    assert!(notifs7[0].args.is_empty());
 
     // =========================================================================
     // Pipeline 8: OnWarpToAsteroidBelt

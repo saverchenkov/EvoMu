@@ -492,7 +492,7 @@ fn handle_delete_fleet_setup(ctx: &ServerContext, char_id: i64, setup_name: &str
             NotificationTarget::Character(char_id),
             "OnFleetSetupChanged",
             "charid",
-            vec![PyRep::String(setup_name.to_string())],
+            vec![],
         );
     }
     PyRep::keyval([
@@ -767,7 +767,7 @@ pub(super) async fn handle_finder_and_tactical(
             };
             ctx.fleet_extras.lock().unwrap().saved_setups.entry(char_id).or_default().insert(setup_name.clone(), rec);
             sync_fleet_setups_to_db(ctx);
-            ctx.notify(NotificationTarget::Character(char_id), "OnFleetSetupChanged", "charid", vec![PyRep::String(setup_name.clone())]);
+            ctx.notify(NotificationTarget::Character(char_id), "OnFleetSetupChanged", "charid", vec![]);
             Some(Ok(PyRep::keyval([
                 ("setupName", PyRep::String(setup_name)),
                 ("motd", PyRep::String(motd)),

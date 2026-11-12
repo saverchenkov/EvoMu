@@ -3098,13 +3098,26 @@ pub fn normalize_macho_notification_with_sde(
                 args
             }
         }
-        "OnChannelJoined" => {
+        "OnChannelJoined" | "OnChannelLeft" | "OnSystemWideEffectRemove" => {
             if let Some(first) = args.into_iter().next() {
                 vec![first]
             } else {
                 Vec::new()
             }
         }
+        "OnSkyhookSiloDamageUpdated" => {
+            if args.len() >= 2 {
+                vec![args[1].clone()]
+            } else {
+                args
+            }
+        }
+        "OnClientEvent_ChatMessageSent"
+        | "OnCloneJumpUpdate"
+        | "OnFleetSetupChanged"
+        | "OnRefreshBookmarks"
+        | "OnSolarsystemAdvantageStateUpdated_Local"
+        | "OnSystemScanDone" => Vec::new(),
         "OnSharedBookmarksFolderUpdated" => {
             if let Some(PyRep::List(entries)) = args.first_mut() {
                 for entry in entries.iter_mut() {
