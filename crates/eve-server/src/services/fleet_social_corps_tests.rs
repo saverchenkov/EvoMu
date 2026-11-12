@@ -455,6 +455,56 @@ fn get_corporation_omits_zero_station_and_ceo_ids() {
         .unwrap(),
         PyRep::Integer(1_000_173)
     );
+
+    // #965 follow-up: Materialized NPC corporation in snap.corporations with ceo_id = 0 (e.g. 1000004 Ytiri)
+    // must still resolve ceoID, ticker, and stationID from SDE npc_corporations and never return None!
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.insert(
+            1_000_004,
+            CorporationRecord::new(1_000_004, "Ytiri", "NPC", 0),
+        );
+    });
+    let expected_ytiri_ceo = ctx
+        .sde
+        .npc_corporations
+        .get(&1_000_004)
+        .and_then(|c| c.ceo_id.filter(|&id| id > 0))
+        .unwrap_or(1_000_004);
+    assert!(expected_ytiri_ceo > 0);
+    for method in ["GetPublicInfo", "GetCorporations"] {
+        let PyRep::KeyVal(ytiri_info) = handle_corps(
+            &ctx,
+            &mut ceo_sess,
+            "corpmgr",
+            method,
+            &[PyRep::Integer(1_000_004)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap()
+        else {
+            panic!("expected KeyVal for materialized NPC corp 1000004 in {method}");
+        };
+        assert_eq!(
+            ytiri_info.get("ceoID"),
+            Some(&PyRep::Integer(expected_ytiri_ceo)),
+            "materialized NPC corp 1000004 with ceo_id=0 must resolve positive ceoID in {method} (#965)"
+        );
+        assert_ne!(ytiri_info.get("ticker"), Some(&PyRep::String("NPC".into())));
+    }
+    assert_eq!(
+        handle_corps(
+            &ctx,
+            &mut ceo_sess,
+            "corpmgr",
+            "ceoID",
+            &[PyRep::Integer(1_000_004)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Integer(expected_ytiri_ceo)
+    );
 }
 
 #[cfg(test)]

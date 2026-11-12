@@ -856,7 +856,23 @@ pub fn normalize_macho_rpc_reply(
     if (matches!(service, "corpRegistry" | "machoNet") && method == "GetCorporation")
         || (service == "corpmgr" && matches!(method, "GetCorporations" | "GetPublicInfo"))
     {
-        if let Ok(PyRep::KeyVal(entries)) = rpc_res {
+        if let Ok(PyRep::KeyVal(mut entries)) = rpc_res {
+            let cid = entries
+                .get("corporationID")
+                .and_then(PyRep::as_i64)
+                .unwrap_or(0);
+            let ceo_missing = match entries.get("ceoID") {
+                None | Some(PyRep::None) => true,
+                Some(PyRep::Integer(v)) => *v <= 0,
+                _ => false,
+            };
+            if ceo_missing && cid > 0 {
+                let fallback_ceo = sde
+                    .and_then(|s| s.npc_corporations.get(&cid))
+                    .and_then(|nc| nc.ceo_id.filter(|&id| id > 0))
+                    .unwrap_or(cid);
+                entries.insert("ceoID".into(), PyRep::Integer(fallback_ceo));
+            }
             let mut header = Vec::with_capacity(entries.len());
             let mut line = Vec::with_capacity(entries.len());
             for (k, v) in entries {

@@ -1308,13 +1308,25 @@ pub fn handle_industry_jobs(
                     if let Some(fac_corp) = fac_owner_corp {
                         if !use_corp || fac_corp != job_owner_id {
                             let scorp = snap.corporations.entry(fac_corp).or_insert_with(|| {
-                                let name = ctx
-                                    .sde
-                                    .npc_corporations
-                                    .get(&fac_corp)
+                                let npc = ctx.sde.npc_corporations.get(&fac_corp);
+                                let name = npc
                                     .map(|c| c.name.clone())
                                     .unwrap_or_else(|| format!("Corporation {fac_corp}"));
-                                eve_db::CorporationRecord::new(fac_corp, name, "NPC", 0)
+                                let ticker = npc
+                                    .map(|c| c.ticker_name.clone())
+                                    .filter(|t| !t.is_empty())
+                                    .unwrap_or_else(|| "NPC".into());
+                                let ceo_id = npc
+                                    .and_then(|c| c.ceo_id.filter(|&id| id > 0))
+                                    .unwrap_or(fac_corp);
+                                let mut rec =
+                                    eve_db::CorporationRecord::new(fac_corp, name.clone(), ticker, ceo_id);
+                                if let Some(nc) = npc {
+                                    rec.tax_rate = nc.tax_rate;
+                                    rec.hq_station_id = nc.station_id.filter(|&id| id > 0);
+                                    rec.description = format!("NPC Corporation {name}");
+                                }
+                                rec
                             });
                             let sbal = scorp.credit_division(1, fac_tax_cents);
                             snap.append_journal(

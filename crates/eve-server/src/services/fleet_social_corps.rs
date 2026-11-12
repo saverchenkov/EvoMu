@@ -700,10 +700,42 @@ pub(super) fn handle_corps(
                     .copied()
                     .unwrap_or(true);
                 snap.corporations.get(&corp_id).map(|c| {
+                    let npc = ctx.sde.npc_corporations.get(&corp_id);
                     let h_divs = snap.corp_hangar_divisions.get(&corp_id).cloned().unwrap_or_default();
                     let w_divs: Vec<(u8, String)> = c.wallet_divisions.iter().map(|d| (d.division_id, d.name.clone())).collect();
-                    let m_limit = compute_corp_member_limit(ctx, snap, c.corporation_id, c.ceo_id) as i64;
-                    (c.corporation_id, c.name.clone(), c.ticker.clone(), (c.ceo_id > 0).then_some(c.ceo_id), c.members.len() as i64, m_limit, c.tax_rate, c.alliance_id.filter(|&id| id > 0), c.hq_station_id.filter(|&id| id > 0), c.description.clone(), c.url.clone(), h_divs, w_divs, allow_war)
+                    let ceo_id = (c.ceo_id > 0)
+                        .then_some(c.ceo_id)
+                        .or_else(|| npc.and_then(|nc| nc.ceo_id.filter(|&id| id > 0)))
+                        .or_else(|| (c.corporation_id > 0).then_some(c.corporation_id));
+                    let ticker = if c.ticker == "NPC" || c.ticker.is_empty() {
+                        npc.map(|nc| nc.ticker_name.clone())
+                            .filter(|t| !t.is_empty())
+                            .unwrap_or_else(|| c.ticker.clone())
+                    } else {
+                        c.ticker.clone()
+                    };
+                    let hq_station = c
+                        .hq_station_id
+                        .filter(|&id| id > 0)
+                        .or_else(|| npc.and_then(|nc| nc.station_id.filter(|&id| id > 0)));
+                    let desc = if c.description.is_empty() {
+                        npc.map(|nc| format!("NPC Corporation {}", nc.name))
+                            .unwrap_or_default()
+                    } else {
+                        c.description.clone()
+                    };
+                    let m_count = if c.members.is_empty() && npc.is_some() {
+                        10_000i64
+                    } else {
+                        c.members.len() as i64
+                    };
+                    let m_limit = compute_corp_member_limit(
+                        ctx,
+                        snap,
+                        c.corporation_id,
+                        ceo_id.unwrap_or(c.ceo_id),
+                    ) as i64;
+                    (c.corporation_id, c.name.clone(), ticker, ceo_id, m_count, m_limit, c.tax_rate, c.alliance_id.filter(|&id| id > 0), hq_station, desc, c.url.clone(), h_divs, w_divs, allow_war)
                 })
             }).or_else(|| {
                 // DERIVED: SDE NPC corporations fallback for starter/NPC corps; always supply a
@@ -772,7 +804,18 @@ pub(super) fn handle_corps(
             }
             let corp_id = args.first().and_then(|a| a.as_i64()).or(session.corporation_id).unwrap_or(0);
             let info = ctx.db.with_snapshot(|snap| {
-                snap.corporations.get(&corp_id).map(|c| (c.corporation_id, c.ceo_id, c.alliance_id))
+                snap.corporations.get(&corp_id).map(|c| {
+                    let ceo = if c.ceo_id > 0 {
+                        c.ceo_id
+                    } else {
+                        ctx.sde
+                            .npc_corporations
+                            .get(&corp_id)
+                            .and_then(|nc| nc.ceo_id.filter(|&id| id > 0))
+                            .unwrap_or(c.corporation_id)
+                    };
+                    (c.corporation_id, ceo, c.alliance_id)
+                })
             }).or_else(|| {
                 ctx.sde.npc_corporations.get(&corp_id).map(|c| {
                     (
