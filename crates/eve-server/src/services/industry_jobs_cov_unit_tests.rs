@@ -970,10 +970,7 @@ fn lifecycle_cancel_paused_ceo_refund_stacking_and_complete_edge_paths() {
     // - industryManager.InstallJob emits OnAccountChange
     // - /completeindustry emits OnIndustryJob with status = 3 (STATUS_READY)
     // - industryManager.CompleteJob delivers 1-run manufactured item with singleton == false and emits OnItemChange
-    let (mut rx, _guard) = ctx.notifications.subscribe(vec![
-        crate::notifications::NotificationTarget::Character(char_id),
-    ]);
-    let bp_data_svc = crate::services::industry::handle_industry_pi(
+    let bp_data_svc = crate::services::industry_pi::handle_industry_pi(
         &ctx,
         &mut sess,
         "blueprintManager",
@@ -986,7 +983,7 @@ fn lifecycle_cancel_paused_ceo_refund_stacking_and_complete_edge_paths() {
     assert_eq!(bp_data_svc.dict_get("solarSystemID"), Some(&PyRep::Integer(30_000_142)));
     assert_eq!(bp_data_svc.dict_get("copy"), Some(&PyRep::Bool(false)));
 
-    let bp_owner_svc = crate::services::industry::handle_industry_pi(
+    let bp_owner_svc = crate::services::industry_pi::handle_industry_pi(
         &ctx,
         &mut sess,
         "blueprintManager",
@@ -1005,7 +1002,7 @@ fn lifecycle_cancel_paused_ceo_refund_stacking_and_complete_edge_paths() {
         snap.items.insert(74_030, mk_item(74_030, 688, char_id, station_id, InventoryFlag::Hangar, 1, true));
         snap.items.insert(74_031, mk_item(74_031, 34, char_id, station_id, InventoryFlag::Hangar, 50_000, false));
     });
-    while rx.try_recv().is_ok() {}
+    let _ = ctx.drain_notifications(char_id);
     let mfg_1run = handle_industry_jobs(
         &ctx,
         &mut sess,
@@ -1022,10 +1019,7 @@ fn lifecycle_cancel_paused_ceo_refund_stacking_and_complete_edge_paths() {
     .unwrap()
     .unwrap();
     let mfg_1run_jid = mfg_1run.dict_get("jobID").unwrap().as_i64().unwrap();
-    let mut install_notifs = Vec::new();
-    while let Ok(ev) = rx.try_recv() {
-        install_notifs.push(ev);
-    }
+    let install_notifs = ctx.drain_notifications(char_id);
     assert!(
         install_notifs.iter().any(|n| n.method == "OnAccountChange"),
         "InstallJob must emit OnAccountChange for installation fee debit (#982)"
@@ -1034,15 +1028,12 @@ fn lifecycle_cancel_paused_ceo_refund_stacking_and_complete_edge_paths() {
     crate::services::notify_emitters_character_services::handle_batch3_gm_slash_cmd(
         &ctx,
         char_id,
-        30_000_142,
+        Some(30_000_142),
         &format!("/completeindustry {mfg_1run_jid}"),
     )
     .unwrap()
     .unwrap();
-    let mut ready_notifs = Vec::new();
-    while let Ok(ev) = rx.try_recv() {
-        ready_notifs.push(ev);
-    }
+    let ready_notifs = ctx.drain_notifications(char_id);
     assert!(
         ready_notifs.iter().any(|n| {
             n.method == "OnIndustryJob"
@@ -1070,10 +1061,7 @@ fn lifecycle_cancel_paused_ceo_refund_stacking_and_complete_edge_paths() {
             "1-run manufactured item must be delivered repackaged (singleton == false) (#982)"
         );
     });
-    let mut comp_notifs = Vec::new();
-    while let Ok(ev) = rx.try_recv() {
-        comp_notifs.push(ev);
-    }
+    let comp_notifs = ctx.drain_notifications(char_id);
     let item_change_count = comp_notifs.iter().filter(|n| n.method == "OnItemChange").count();
     assert!(
         item_change_count >= 2,

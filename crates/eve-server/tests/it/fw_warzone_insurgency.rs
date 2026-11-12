@@ -11,9 +11,6 @@ use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::fw_gameplay::{BATTLEFIELD_RESPAWN_COOLDOWN_SECS, BATTLEFIELD_ZONE_CENTERS};
-use eve_server::services::fw_services::{
-    STATUS_COMMAND, STATUS_FRONTLINE, STATUS_REARGUARD,
-};
 use glam::DVec3;
 
 /// Finds a connected 4-system low-sec chain `enemy -- front -- cmd -- rear` in SDE and configures
