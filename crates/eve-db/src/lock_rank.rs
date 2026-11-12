@@ -518,19 +518,23 @@ fn map_lock_result<G, W>(
 
 fn map_try_lock_result<G, W>(
     res: TryLockResult<G>,
-    held: imp::HeldToken,
+    rank: u16,
+    site: &'static Location<'static>,
     wrap: impl FnOnce(G, imp::HeldToken) -> W,
 ) -> TryLockResult<W> {
     match res {
-        Ok(guard) => Ok(wrap(guard, held)),
-        Err(TryLockError::Poisoned(poison)) => Err(TryLockError::Poisoned(PoisonError::new(wrap(
-            poison.into_inner(),
-            held,
-        )))),
-        Err(TryLockError::WouldBlock) => {
-            drop(held);
-            Err(TryLockError::WouldBlock)
+        Ok(guard) => {
+            let held = imp::enter(rank, site);
+            Ok(wrap(guard, held))
         }
+        Err(TryLockError::Poisoned(poison)) => {
+            let held = imp::enter(rank, site);
+            Err(TryLockError::Poisoned(PoisonError::new(wrap(
+                poison.into_inner(),
+                held,
+            ))))
+        }
+        Err(TryLockError::WouldBlock) => Err(TryLockError::WouldBlock),
     }
 }
 
@@ -557,11 +561,11 @@ impl<T: ?Sized, const RANK: u16> Ranked<RwLock<T>, RANK> {
         })
     }
 
-    /// Attempts to acquire shared read access without blocking, enforcing `RANK`.
+    /// Attempts to acquire shared read access without blocking, enforcing `RANK` when acquired.
     #[track_caller]
     pub fn try_read(&self) -> TryLockResult<RankedRwLockReadGuard<'_, T, RANK>> {
-        let held = imp::enter(RANK, Location::caller());
-        map_try_lock_result(self.0.try_read(), held, |guard, _held| {
+        let site = Location::caller();
+        map_try_lock_result(self.0.try_read(), RANK, site, |guard, _held| {
             RankedRwLockReadGuard { guard, _held }
         })
     }
@@ -576,11 +580,11 @@ impl<T: ?Sized, const RANK: u16> Ranked<RwLock<T>, RANK> {
         })
     }
 
-    /// Attempts to acquire exclusive write access without blocking, enforcing `RANK`.
+    /// Attempts to acquire exclusive write access without blocking, enforcing `RANK` when acquired.
     #[track_caller]
     pub fn try_write(&self) -> TryLockResult<RankedRwLockWriteGuard<'_, T, RANK>> {
-        let held = imp::enter(RANK, Location::caller());
-        map_try_lock_result(self.0.try_write(), held, |guard, _held| {
+        let site = Location::caller();
+        map_try_lock_result(self.0.try_write(), RANK, site, |guard, _held| {
             RankedRwLockWriteGuard { guard, _held }
         })
     }
@@ -619,11 +623,11 @@ impl<T: ?Sized, const RANK: u16> Ranked<Mutex<T>, RANK> {
         })
     }
 
-    /// Attempts to acquire the mutex without blocking, enforcing `RANK`.
+    /// Attempts to acquire the mutex without blocking, enforcing `RANK` when acquired.
     #[track_caller]
     pub fn try_lock(&self) -> TryLockResult<RankedMutexGuard<'_, T, RANK>> {
-        let held = imp::enter(RANK, Location::caller());
-        map_try_lock_result(self.0.try_lock(), held, |guard, _held| RankedMutexGuard {
+        let site = Location::caller();
+        map_try_lock_result(self.0.try_lock(), RANK, site, |guard, _held| RankedMutexGuard {
             guard,
             _held,
         })
