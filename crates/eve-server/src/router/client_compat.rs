@@ -1028,11 +1028,12 @@ pub fn normalize_macho_rpc_reply(
         if let Ok(PyRep::List(raw)) = rpc_res {
             let mut wrapped = Vec::with_capacity(raw.len());
             for item in raw {
-                // Preserve synthetic test payloads whose `contract` field is non-KeyVal (e.g. Integer).
-                let non_kv_contract = item
-                    .dict_get("contract")
-                    .is_some_and(|c| !matches!(c, PyRep::KeyVal(_) | PyRep::Dict(_)));
-                if non_kv_contract && item.dict_get("bids").is_some() {
+                // Preserve synthetic pre-wrapped test payloads that have `contract` + `bids`
+                // without top-level `contract_to_pyrep` fields (`contractID`).
+                let is_synthetic_prewrapped = item.dict_get("contractID").is_none()
+                    && item.dict_get("contract").is_some()
+                    && item.dict_get("bids").is_some();
+                if is_synthetic_prewrapped {
                     wrapped.push(item);
                 } else {
                     let norm = normalize_contract_reply(item);

@@ -111,7 +111,7 @@ fn corp_public_info_update_divisions_members_and_medals() {
     else {
         panic!("expected KeyVal for NPC corp")
     };
-    assert_eq!(npc_info.get("creatorID").and_then(|v| v.as_i64()), Some(1_000_035));
+    assert_eq!(npc_info.get("creatorID").and_then(|v| v.as_i64()), Some(3_004_069));
     assert!(npc_info.get("loyaltyPointTaxRate").and_then(|v| v.as_f64()).is_some());
     assert_eq!(
         handle_corps(&ctx, &mut ceo_sess, "corpmgr", "ceoID", &[], &kw)

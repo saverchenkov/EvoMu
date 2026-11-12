@@ -371,6 +371,20 @@ fn test_copy_licensed_runs_validation_scaling_and_multi_bpc_mint() {
     )
     .unwrap()
     .expect("non-copying InstallJob with licensedRuns=2 must succeed");
+    let mfg_lr_jid = mfg_lr_rep.dict_get("jobID").unwrap().as_i64().unwrap();
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.industry_jobs[&mfg_lr_jid].licensed_runs, None);
+    });
+    handle_industry_jobs(
+        &ctx,
+        &mut session,
+        "industryManager",
+        "CancelJob",
+        &[PyRep::Integer(mfg_lr_jid)],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap();
     let mfg_zero_rep = handle_industry_jobs(
         &ctx,
         &mut session,
@@ -386,7 +400,6 @@ fn test_copy_licensed_runs_validation_scaling_and_multi_bpc_mint() {
     )
     .unwrap()
     .expect("non-copying InstallJob with licensedRuns=0 must succeed");
-    let mfg_lr_jid = mfg_lr_rep.dict_get("jobID").unwrap().as_i64().unwrap();
     let mfg_zero_jid = mfg_zero_rep.dict_get("jobID").unwrap().as_i64().unwrap();
     assert_eq!(
         mfg_lr_rep.dict_get("durationSeconds"),
@@ -397,9 +410,18 @@ fn test_copy_licensed_runs_validation_scaling_and_multi_bpc_mint() {
         mfg_zero_rep.dict_get("totalJobCost")
     );
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(snap.industry_jobs[&mfg_lr_jid].licensed_runs, None);
         assert_eq!(snap.industry_jobs[&mfg_zero_jid].licensed_runs, None);
     });
+    handle_industry_jobs(
+        &ctx,
+        &mut session,
+        "industryManager",
+        "CancelJob",
+        &[PyRep::Integer(mfg_zero_jid)],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap();
 
     // 2. Explicit licensedRuns > max_production_limit (11 > 10) rejected even with runs = 1
     let err_over_limit = handle_industry_jobs(
