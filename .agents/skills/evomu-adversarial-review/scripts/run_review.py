@@ -791,9 +791,13 @@ def snapshot_review(a, root):
             shutil.rmtree(os.path.join(snap, ".agents"), ignore_errors=True)
             subprocess.run(["git", "checkout", gate_ref, "--", ".agents"], cwd=snap, capture_output=True)
         os.makedirs(os.path.join(snap, "data"), exist_ok=True)
+        main_root = os.path.dirname(rl.main_state_dir(root))
         for f in LOCAL_DATA_FILES:
-            src = os.path.join(root, "data", f)
-            if os.path.exists(src) and not os.path.exists(os.path.join(snap, "data", f)):
+            # A new track worktree may not have its data/ symlinks yet; fall back to the main checkout's copy so the
+            # test gate doesn't fail thousands of tests on a missing SDE (review 20261111-194648: 5,675 failures).
+            src = next((c for c in (os.path.join(root, "data", f), os.path.join(main_root, "data", f))
+                        if os.path.exists(c)), None)
+            if src and not os.path.exists(os.path.join(snap, "data", f)):
                 os.symlink(os.path.realpath(src), os.path.join(snap, "data", f))
         snap_sdir = rl.state_dir(snap)
         if os.path.exists(os.path.join(sdir, "state.json")):
