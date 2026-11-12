@@ -749,7 +749,7 @@ pub fn on_advance_secs_internal(
         crate::services::market_contracts::emit_expired_order_notifications(ctx, &swept);
     }
 
-    let mut cw_pilots: std::collections::HashSet<i64> = with_combat_runtime(ctx, |rt| {
+    let mut cw_pilots: std::collections::BTreeSet<i64> = with_combat_runtime(ctx, |rt| {
         rt.crimewatch_timer_states
             .keys()
             .chain(rt.disapproval_flags.keys())
