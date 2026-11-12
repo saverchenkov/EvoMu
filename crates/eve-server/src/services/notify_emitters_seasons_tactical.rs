@@ -1088,6 +1088,15 @@ pub(crate) fn handle_load_ammo(
             ship_id,
             loaded_rec,
         );
+        crate::services::inventory_fitting::fitting_module_cycles::emit_charge_sublocation_quantity_change(
+            ctx,
+            char_id,
+            ship_id,
+            loaded_rec.flag,
+            loaded_rec.type_id,
+            0,
+            loaded_rec.quantity,
+        );
     }
 
     let _ = ctx.notify(

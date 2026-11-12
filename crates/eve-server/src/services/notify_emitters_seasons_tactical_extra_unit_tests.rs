@@ -751,6 +751,30 @@ fn issue_950_load_ammo_primes_sublocation_and_emits_fitting_item_change_deltas()
         !prime_attrs.iter().any(|(k, _)| k.as_i64() == Some(80)),
         "sublocation attributes must not emit speedBonus (80): {prime_attrs:?}"
     );
+    // #976: handle_load_ammo also emits OnModuleAttributeChanges (attributeQuantity = 805, 0 -> 109) for loaded_sublocs
+    assert!(
+        notifs.iter().any(|n| {
+            n.event == "OnModuleAttributeChanges"
+                && matches!(
+                    n.args.first(),
+                    Some(PyRep::List(entries))
+                        if entries.iter().any(|e| matches!(
+                            e,
+                            PyRep::Tuple(t)
+                                if t.get(2)
+                                    == Some(&PyRep::Tuple(vec![
+                                        PyRep::Integer(ship_id),
+                                        PyRep::Integer(27),
+                                        PyRep::Integer(222),
+                                    ]))
+                                    && t.get(3) == Some(&PyRep::Integer(805))
+                                    && t.get(5).and_then(|v| v.as_f64()) == Some(109.0)
+                                    && t.get(6).and_then(|v| v.as_f64()) == Some(0.0)
+                        ))
+                )
+        }),
+        "expected OnModuleAttributeChanges (0 -> 109) for newly loaded sublocation: {notifs:?}"
+    );
 
     // 2. Swap to oversized Iron Charge S x500 -> unloads Antimatter (222) to Cargo, splits 400 Iron (215) into slot 27
     let _ = ctx.drain_notifications_for_char(char_id);
@@ -977,4 +1001,178 @@ fn issue_950_load_ammo_unloaded_and_cargo_volume_uses_attr_161_fallback() {
     .expect("swap succeeds once cargo space accounts for attr 161");
     assert_eq!(res.dict_get("totalLoaded"), Some(&PyRep::Integer(50)));
 }
+
+#[test]
+fn issue_961_cleartimers_resets_crimewatch_and_emits_timer_cleared_notices() {
+    let ctx = ServerContext::with_sde_and_repository(
+        Arc::new(SdeRegistry::default()),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 90_000_001_i64;
+    let target_id = 90_000_002_i64;
+    let now = ctx.now_unix();
+    ctx.db
+        .acquire_online_lock(1, 601, Some(char_id), true, now)
+        .expect("online lock");
+
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        let st = cw.get_or_create(char_id);
+        st.weapon_timer_until_unix = now + 60;
+        st.pvp_timer_until_unix = now + 900;
+        st.criminal_flag_until_unix = now + 900;
+    }
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.npc_timers.insert(char_id, now + 300);
+        rt.disapproval_flags.insert(char_id, now + 300);
+        rt.limited_engagements
+            .entry(char_id)
+            .or_default()
+            .insert(target_id, now + 300);
+    });
+    crate::services::combat_crimewatch::crimewatch_timers::emit_crimewatch_timer_notifications(
+        &ctx, char_id, now,
+    );
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let res = crate::services::notify_emitters_character_services::handle_batch3_gm_slash_cmd(
+        &ctx,
+        char_id,
+        None,
+        "/cleartimers",
+    )
+    .expect("slash /cleartimers handled")
+    .expect("/cleartimers ok");
+    assert_eq!(res.dict_get("cleared"), Some(&PyRep::Bool(true)));
+
+    {
+        let cw = ctx.crimewatch.read().unwrap();
+        let st = cw.states.get(&char_id).expect("crimewatch state");
+        assert_eq!(st.weapon_timer_until_unix, 0);
+        assert_eq!(st.pvp_timer_until_unix, 0);
+        assert_eq!(st.criminal_flag_until_unix, 0);
+    }
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    for ev in [
+        "OnWeaponsTimerUpdate",
+        "OnPvpTimerUpdate",
+        "OnCriminalTimerUpdate",
+        "OnNpcTimerUpdate",
+        "OnDisapprovalTimerUpdate",
+        "OnCrimewatchEngagementEnded",
+    ] {
+        assert!(
+            notifs.iter().any(|n| n.event == ev),
+            "expected {ev} notification on /cleartimers, got: {notifs:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn issue_975_module_activation_does_not_orphan_def_effect_and_item_get_info_includes_active_effect() {
+    let mut sde = SdeRegistry::default();
+    sde.types.insert(587, make_type(587, 25, 6, 2500.0, 400.0, &[(38, 400.0)]));
+    let mut mwd_type = make_type(434, 46, 7, 5.0, 0.0, &[(6, 15.0), (73, 10_000.0)]);
+    mwd_type.effect_ids = vec![16, 48];
+    mwd_type.default_effect_id = Some(48);
+    sde.types.insert(434, mwd_type);
+
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let char_id = 90_000_001_i64;
+    let ship_id = 200_246_975_i64;
+    let mwd_id = 975_101_i64;
+
+    db.acquire_online_lock(1, 602, Some(char_id), true, 1_800_000_000)
+        .expect("online lock");
+    let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: 30_000_142,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mwd_id,
+            InventoryItemRecord {
+                item_id: mwd_id,
+                type_id: 434,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::MedSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(mwd_id, true);
+        snap.module_active_states.insert(mwd_id);
+    });
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    crate::services::notify_emitters_space_dungeons::emit_module_activation_godma_notifications(
+        &ctx,
+        char_id,
+        ship_id,
+        mwd_id,
+        434,
+        "defaultEffect",
+        10.0,
+        None,
+    );
+    let act_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        !act_notifs
+            .iter()
+            .any(|n| n.event == "OnGodmaEffectInfo" || n.event == "OnGodmaPrimeItem"),
+        "activating a fitted module in ctx.db.items must not emit OnGodmaEffectInfo or OnGodmaPrimeItem: {act_notifs:?}"
+    );
+
+    let mut sess = SessionState::new(602);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.ship_id = Some(ship_id);
+    sess.solar_system_id = Some(30_000_142);
+
+    let info = crate::services::inventory_fitting::fitting_dogma_im::handle_dogma_im(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "ItemGetInfo",
+        &[PyRep::Integer(mwd_id)],
+        &std::collections::HashMap::new(),
+    )
+    .await
+    .expect("dogmaIM.ItemGetInfo handled")
+    .expect("dogmaIM.ItemGetInfo ok");
+    let PyRep::Dict(ref active_effs) = info
+        .dict_get("activeEffects")
+        .expect("activeEffects in ItemGetInfo")
+    else {
+        panic!("expected Dict for activeEffects");
+    };
+    assert!(
+        active_effs.iter().any(|(k, _)| k.as_i64() == Some(16)),
+        "expected effectOnline (16) in activeEffects: {active_effs:?}"
+    );
+    assert!(
+        active_effs.iter().any(|(k, _)| k.as_i64() != Some(16)),
+        "expected active module effect alongside effectOnline (16) in activeEffects: {active_effs:?}"
+    );
+}
+
 

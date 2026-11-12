@@ -1213,6 +1213,7 @@ pub fn handle_batch3_gm_slash_cmd(
             ])))
         }
         "/cleartimers" => {
+            let now_unix = ctx.now_unix();
             crate::services::space_destiny::clear_session_change_timer(ctx, caller_cid);
             ctx.db.with_mut_snapshot(|snap| {
                 if let Some(ch) = snap.characters.get_mut(&caller_cid) {
@@ -1222,11 +1223,47 @@ pub fn handle_batch3_gm_slash_cmd(
                     ch.jump_fatigue_until_unix = 0;
                 }
             });
+            {
+                let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+                if let Some(pst) = cw.states.get_mut(&caller_cid) {
+                    pst.weapon_timer_until_unix = 0;
+                    pst.pvp_timer_until_unix = 0;
+                    pst.suspect_flag_until_unix = 0;
+                    pst.criminal_flag_until_unix = 0;
+                    pst.pending_concord_arrival = None;
+                }
+            }
+            let cleared_engagements: Vec<i64> =
+                crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+                    rt.npc_timers.remove(&caller_cid);
+                    rt.disapproval_flags.remove(&caller_cid);
+                    let mut targets: Vec<i64> = rt
+                        .limited_engagements
+                        .remove(&caller_cid)
+                        .map(|m| m.into_keys().collect())
+                        .unwrap_or_default();
+                    for other_map in rt.limited_engagements.values_mut() {
+                        other_map.remove(&caller_cid);
+                    }
+                    targets.sort_unstable();
+                    targets
+                });
+            crate::services::combat_crimewatch::crimewatch_timers::emit_crimewatch_timer_notifications(
+                ctx,
+                caller_cid,
+                now_unix,
+            );
+            for target_id in cleared_engagements {
+                ctx.notify(
+                    NotificationTarget::Character(caller_cid),
+                    "OnCrimewatchEngagementEnded",
+                    "charid",
+                    vec![PyRep::Integer(target_id), PyRep::None],
+                );
+            }
             crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-                rt.npc_timers.remove(&caller_cid);
                 rt.crimewatch_timer_states.remove(&caller_cid);
                 rt.crimewatch_timer_triggered_at.remove(&caller_cid);
-                rt.limited_engagements.remove(&caller_cid);
             });
             Some(Ok(PyRep::keyval([
                 ("command", PyRep::String(cmd.to_string())),

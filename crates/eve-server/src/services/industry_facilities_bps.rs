@@ -814,11 +814,34 @@ pub fn handle_industry_facilities_bps(
             } else {
                 bp.product_type_id
             };
+            let bp_item_id = bp_item_opt.as_ref().map(|i| i.item_id).unwrap_or(raw_id);
+            let bp_owner_id = bp_item_opt.as_ref().map(|i| i.owner_id).unwrap_or(char_id);
+            let bp_flag_id = bp_item_opt.as_ref().map(|i| i.flag as i64).unwrap_or(4);
+            let is_copy = bp_item_opt.as_ref().map(|i| i.is_blueprint_copy).unwrap_or(false);
+            let runs_rem = bp_item_opt
+                .as_ref()
+                .and_then(|i| i.blueprint_runs_remaining)
+                .map(i64::from)
+                .unwrap_or(if is_copy { 1 } else { -1 });
+            let qty_code = if is_copy { -2_i64 } else { -1_i64 };
+            let loc_type_id = ctx
+                .sde
+                .stations
+                .get(&facility_id)
+                .map(|st| i64::from(st.station_type_id))
+                .unwrap_or(1529);
             let res = PyRep::keyval([
-                ("blueprintID", PyRep::Integer(bp_item_opt.as_ref().map(|i| i.item_id).unwrap_or(raw_id))),
+                ("blueprintID", PyRep::Integer(bp_item_id)),
+                ("itemID", PyRep::Integer(bp_item_id)),
+                ("typeID", PyRep::Integer(bp.blueprint_type_id as i64)),
                 ("blueprintTypeID", PyRep::Integer(bp.blueprint_type_id as i64)),
                 ("productTypeID", PyRep::Integer(prod_type_id as i64)),
-                ("facilityID", PyRep::Integer(facility_id)), ("locationID", PyRep::Integer(facility_id)),
+                ("ownerID", PyRep::Integer(bp_owner_id)),
+                ("facilityID", PyRep::Integer(facility_id)),
+                ("locationID", PyRep::Integer(facility_id)),
+                ("locationTypeID", PyRep::Integer(loc_type_id)),
+                ("locationFlagID", PyRep::Integer(bp_flag_id)),
+                ("flagID", PyRep::Integer(bp_flag_id)),
                 ("maxProductionLimit", PyRep::Integer(bp.max_production_limit as i64)),
                 ("manufacturingTime", PyRep::Integer(bp.manufacturing_time_sec as i64)),
                 ("researchMaterialTime", PyRep::Integer(bp.research_me_time_sec as i64)),
@@ -826,9 +849,14 @@ pub fn handle_industry_facilities_bps(
                 ("copyingTime", PyRep::Integer(bp.copy_time_sec as i64)),
                 ("inventionTime", PyRep::Integer(bp.invention_time_sec as i64)),
                 ("reactionTime", PyRep::Integer(reaction_time)),
-                ("materialEfficiency", PyRep::Integer(me_lvl)), ("timeEfficiency", PyRep::Integer(te_lvl)),
-                ("original", PyRep::Bool(!bp_item_opt.as_ref().map(|i| i.is_blueprint_copy).unwrap_or(false))),
-                ("runsRemaining", PyRep::Integer(bp_item_opt.as_ref().and_then(|i| i.blueprint_runs_remaining).unwrap_or(-1) as i64)),
+                ("materialEfficiency", PyRep::Integer(me_lvl)),
+                ("timeEfficiency", PyRep::Integer(te_lvl)),
+                ("original", PyRep::Bool(!is_copy)),
+                ("runsRemaining", PyRep::Integer(runs_rem)),
+                ("runs", PyRep::Integer(runs_rem)),
+                ("quantity", PyRep::Integer(qty_code)),
+                ("jobID", PyRep::None),
+                ("isImpounded", PyRep::Bool(false)),
                 ("materials", PyRep::List(mats_rep.clone())),
                 ("skills", PyRep::List(skills_rep)),
                 ("estimatedItemValueISK", PyRep::Real(cost_meta.eiv_isk)),

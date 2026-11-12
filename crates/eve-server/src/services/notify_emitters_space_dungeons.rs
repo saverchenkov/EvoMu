@@ -522,7 +522,12 @@ pub fn emit_drone_activity_change(
     );
 }
 
-/// Emits `OnGodmaEffectInfo` and `OnGodmaPrimeItem` when a module activates.
+/// Emits `OnGodmaEffectInfo` and `OnGodmaPrimeItem` when a module is brought online
+/// (or for synthetic non-inventory test modules). Already-primed fitted modules in
+/// `ctx.db.items` must NOT receive `OnGodmaEffectInfo` or `OnGodmaPrimeItem` on
+/// space activation (`effect_name != "online"`), because `StateManager.RefreshItemEffects`
+/// replaces the `blue.DBRow` entries in `effectsByItemEffect[itemID]` and orphans
+/// `ModuleButton.def_effect.dbrow` (`#975`).
 #[allow(clippy::too_many_arguments)]
 pub fn emit_module_activation_godma_notifications(
     ctx: &ServerContext,
@@ -534,6 +539,9 @@ pub fn emit_module_activation_godma_notifications(
     duration_s: f64,
     target_id_opt: Option<i64>,
 ) {
+    if effect_name != "online" && ctx.db.get_item(module_id).is_some() {
+        return;
+    }
     let Some(effect_id) = crate::router::binding::effect_id_for_module_sde(
         &ctx.sde,
         module_type_id,

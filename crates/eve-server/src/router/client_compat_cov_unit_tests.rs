@@ -113,7 +113,7 @@ fn normalize_structure_jump_xmpp_beyonce_blueprint_and_char_branches() {
         ])),
     )
     .expect("xmpp create player channel");
-    assert_eq!(xmpp_create, PyRep::String("channel_playtest".into()));
+    assert_eq!(xmpp_create, PyRep::String("player_playtest".into()));
 
     let siphon =
         normalize_macho_rpc_reply("beyonce", "GetCapacityOfSiphon", Ok(PyRep::Real(0.25)))
@@ -828,4 +828,334 @@ fn issue_771_and_776_get_members_paged_crowset_and_reprocess_list_compat() {
     assert_eq!(hdr[1].dict_get("itemID"), Some(&PyRep::Integer(60_003_760)));
     assert_eq!(hdr[1].dict_get("canView"), Some(&PyRep::Bool(true)));
     assert_eq!(hdr[1].dict_get("canTake"), Some(&PyRep::Bool(true)));
+
+    // #955: dungeonInstanceCacheMgr.GetFactionWarfareBattlefieldInstances converts List -> Dict by solarSystemID
+    let fw_bf = normalize_macho_rpc_reply(
+        "dungeonInstanceCacheMgr",
+        "GetFactionWarfareBattlefieldInstances",
+        Ok(PyRep::List(vec![PyRep::keyval([
+            ("instanceID", PyRep::Integer(7001)),
+            ("solarSystemID", PyRep::Integer(30_002_537)),
+            ("factionID", PyRep::Integer(500_003)),
+        ])])),
+    )
+    .expect("normalize GetFactionWarfareBattlefieldInstances");
+    let PyRep::Dict(bf_entries) = fw_bf else {
+        panic!("expected Dict from GetFactionWarfareBattlefieldInstances");
+    };
+    assert_eq!(bf_entries.len(), 1);
+    assert_eq!(bf_entries[0].0, PyRep::Integer(30_002_537));
+    let PyRep::List(ref sys_bfs) = bf_entries[0].1 else {
+        panic!("expected List of battlefield KeyVals");
+    };
+    assert_eq!(sys_bfs[0].dict_get("dungeonID"), Some(&PyRep::Integer(10_485)));
+    assert_eq!(sys_bfs[0].dict_get("dungeonNameID"), Some(&PyRep::Integer(0)));
+
+    // #956: blueprintManager.GetBlueprintData populates typeID and BlueprintInstance fields
+    let bp_data = normalize_macho_rpc_reply(
+        "blueprintManager",
+        "GetBlueprintData",
+        Ok(PyRep::keyval([
+            ("blueprintID", PyRep::Integer(9_001)),
+            ("blueprintTypeID", PyRep::Integer(683)),
+            ("facilityID", PyRep::Integer(60_003_760)),
+            ("original", PyRep::Bool(true)),
+            ("runsRemaining", PyRep::Integer(-1)),
+        ])),
+    )
+    .expect("normalize GetBlueprintData");
+    assert_eq!(bp_data.dict_get("typeID"), Some(&PyRep::Integer(683)));
+    assert_eq!(bp_data.dict_get("itemID"), Some(&PyRep::Integer(9_001)));
+    assert_eq!(bp_data.dict_get("locationTypeID"), Some(&PyRep::Integer(1529)));
+    assert_eq!(bp_data.dict_get("flagID"), Some(&PyRep::Integer(4)));
+    assert_eq!(bp_data.dict_get("runs"), Some(&PyRep::Integer(-1)));
+    assert_eq!(bp_data.dict_get("quantity"), Some(&PyRep::Integer(-1)));
+    assert_eq!(bp_data.dict_get("jobID"), Some(&PyRep::None));
+
+    // #957: agentMgr.GetMissionObjectiveInfo omits None coords and referringAgentID from location dicts
+    let obj_info = normalize_macho_rpc_reply(
+        "agentMgr",
+        "GetMissionObjectiveInfo",
+        Ok(PyRep::keyval([
+            ("missionID", PyRep::Integer(501)),
+            ("agentID", PyRep::Integer(3_008_416)),
+            ("solarSystemID", PyRep::Integer(30_000_142)),
+            ("originStationID", PyRep::Integer(60_003_760)),
+            ("destinationStationID", PyRep::Integer(60_003_761)),
+            ("missionState", PyRep::Integer(2)),
+        ])),
+    )
+    .expect("normalize GetMissionObjectiveInfo");
+    let Some(PyRep::List(locs)) = obj_info.dict_get("locations") else {
+        panic!("expected locations list");
+    };
+    assert_eq!(locs.len(), 2);
+    assert!(locs[0].dict_get("coords").is_none());
+    assert!(locs[0].dict_get("referringAgentID").is_none());
+
+    // #958: agentMgr.GetMyJournalDetails converts KeyVal mission rows into V24 10-tuples
+    let j_details = normalize_macho_rpc_reply(
+        "agentMgr",
+        "GetMyJournalDetails",
+        Ok(PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::keyval([
+                ("missionID", PyRep::Integer(77)),
+                ("agentID", PyRep::Integer(3_008_416)),
+                ("title", PyRep::String("Courier Run".into())),
+                ("state", PyRep::String("Accepted".into())),
+                ("missionType", PyRep::String("Courier".into())),
+                ("importantMission", PyRep::Bool(true)),
+                ("expirationTime", PyRep::Integer(1_800_000_000)),
+                (
+                    "bookmarks",
+                    PyRep::List(vec![PyRep::Dict(vec![
+                        (PyRep::String("locationID".into()), PyRep::Integer(60_003_760)),
+                        (PyRep::String("coords".into()), PyRep::None),
+                    ])]),
+                ),
+            ])]),
+            PyRep::List(Vec::new()),
+            PyRep::List(Vec::new()),
+        ])),
+    )
+    .expect("normalize GetMyJournalDetails");
+    let PyRep::Tuple(j_parts) = j_details else {
+        panic!("expected 3-tuple from GetMyJournalDetails");
+    };
+    let PyRep::List(ref m_rows) = j_parts[0] else {
+        panic!("expected missions list");
+    };
+    let PyRep::Tuple(ref m_tup) = m_rows[0] else {
+        panic!("expected 10-tuple mission row");
+    };
+    assert_eq!(m_tup.len(), 10);
+    assert_eq!(m_tup[0], PyRep::Integer(2));
+    assert_eq!(m_tup[1], PyRep::Bool(true));
+    assert_eq!(m_tup[2], PyRep::String("UI/Agents/MissionTypes/Courier".into()));
+    assert_eq!(m_tup[3], PyRep::String("Courier Run".into()));
+    assert_eq!(m_tup[4], PyRep::Integer(3_008_416));
+    assert_eq!(m_tup[9], PyRep::Integer(77));
+    let PyRep::List(ref bm_list) = m_tup[6] else {
+        panic!("expected bookmarks list");
+    };
+    assert!(bm_list[0].dict_get("coords").is_none());
+
+    // #972: fwVictoryPointMgr.GetAllVictoryPointStates and GetLocalVictoryPointState populate VictoryPointState fields
+    let vp_local = normalize_macho_rpc_reply(
+        "fwVictoryPointMgr",
+        "GetLocalVictoryPointState",
+        Ok(PyRep::keyval([
+            ("solarSystemID", PyRep::Integer(30_002_537)),
+            ("victoryPoints", PyRep::Integer(1_500)),
+            ("contestedPercentage", PyRep::Real(50.0)),
+            ("threshold", PyRep::Integer(3_000)),
+        ])),
+    )
+    .expect("normalize GetLocalVictoryPointState");
+    let PyRep::Tuple(vp_pair) = vp_local else {
+        panic!("expected 2-tuple from GetLocalVictoryPointState");
+    };
+    assert_eq!(vp_pair[0], PyRep::Integer(30_002_537));
+    assert_eq!(vp_pair[1].dict_get("score"), Some(&PyRep::Integer(1_500)));
+    assert_eq!(vp_pair[1].dict_get("threshold"), Some(&PyRep::Integer(3_000)));
+    assert_eq!(vp_pair[1].dict_get("contestedFraction"), Some(&PyRep::Real(0.5)));
+    assert_eq!(vp_pair[1].dict_get("isContested"), Some(&PyRep::Bool(true)));
+    assert_eq!(vp_pair[1].dict_get("isVulnerable"), Some(&PyRep::Bool(false)));
+
+    let vp_all = normalize_macho_rpc_reply(
+        "fwVictoryPointMgr",
+        "GetAllVictoryPointStates",
+        Ok(PyRep::Dict(vec![(
+            PyRep::Integer(30_002_537),
+            PyRep::keyval([
+                ("victoryPoints", PyRep::Integer(3_000)),
+                ("contestedPercentage", PyRep::Real(100.0)),
+                ("threshold", PyRep::Integer(3_000)),
+            ]),
+        )])),
+    )
+    .expect("normalize GetAllVictoryPointStates");
+    let PyRep::Dict(vp_all_entries) = vp_all else {
+        panic!("expected Dict from GetAllVictoryPointStates");
+    };
+    assert_eq!(
+        vp_all_entries[0].1.dict_get("contestedFraction"),
+        Some(&PyRep::Real(1.0))
+    );
+    assert_eq!(
+        vp_all_entries[0].1.dict_get("isVulnerable"),
+        Some(&PyRep::Bool(true))
+    );
+
+    // #952, #960, #963: OnDamageMessage, OnDamageMessages, OnCombatMessage, and OnGodmaPrimeItem sublocation 805
+    assert!(should_suppress_macho_notification(
+        "OnCombatMessage",
+        &[PyRep::String("AttackHit".into()), PyRep::Dict(Vec::new())]
+    ));
+    assert!(should_suppress_macho_notification(
+        "OnCombatMessage",
+        &[PyRep::String("AttackedBy".into()), PyRep::Dict(Vec::new())]
+    ));
+    let cm_norm = normalize_macho_notification(
+        "OnCombatMessage",
+        vec![PyRep::String("AttackedBy".into()), PyRep::Dict(Vec::new())],
+    );
+    assert_eq!(cm_norm[0], PyRep::String("AttackHitsR".into()));
+
+    let dmg_norm = normalize_macho_notification(
+        "OnDamageMessage",
+        vec![
+            PyRep::String("AttackHit".into()),
+            PyRep::Dict(vec![
+                (PyRep::String("attackType".into()), PyRep::String("other".into())),
+                (PyRep::String("damage".into()), PyRep::Real(42.5)),
+                (PyRep::String("typeID".into()), PyRep::Integer(561)),
+            ]),
+        ],
+    );
+    assert_eq!(dmg_norm.len(), 1);
+    assert_eq!(
+        dmg_norm[0].dict_get("attackType"),
+        Some(&PyRep::String("otherPlayerWeapons".into()))
+    );
+    assert_eq!(dmg_norm[0].dict_get("isBanked"), Some(&PyRep::Bool(false)));
+    assert_eq!(dmg_norm[0].dict_get("hitQuality"), Some(&PyRep::Integer(3)));
+    assert_eq!(dmg_norm[0].dict_get("weapon"), Some(&PyRep::Integer(561)));
+
+    let dmgs_norm = normalize_macho_notification(
+        "OnDamageMessages",
+        vec![PyRep::List(vec![PyRep::Dict(vec![(
+            PyRep::String("attackType".into()),
+            PyRep::String("you".into()),
+        )])])],
+    );
+    let PyRep::List(ref dmgs_list) = dmgs_norm[0] else {
+        panic!("expected List in OnDamageMessages");
+    };
+    let PyRep::Tuple(ref dmg_pair) = dmgs_list[0] else {
+        panic!("expected 2-tuple in OnDamageMessages");
+    };
+    assert_eq!(
+        dmg_pair[1].dict_get("attackType"),
+        Some(&PyRep::String("me".into()))
+    );
+
+    let subloc_prime = normalize_macho_notification(
+        "OnGodmaPrimeItem",
+        vec![
+            PyRep::Integer(200_001),
+            PyRep::keyval([
+                (
+                    "itemID",
+                    PyRep::Tuple(vec![
+                        PyRep::Integer(200_001),
+                        PyRep::Integer(27),
+                        PyRep::Integer(222),
+                    ]),
+                ),
+                ("invItem", PyRep::None),
+                (
+                    "attributes",
+                    PyRep::Dict(vec![(PyRep::Integer(80), PyRep::Real(120.0))]),
+                ),
+                ("time", PyRep::Integer(1_000)),
+            ]),
+        ],
+    );
+    let Some(PyRep::Dict(subloc_attrs)) = subloc_prime[1].dict_get("attributes") else {
+        panic!("expected sublocation attributes dict");
+    };
+    assert!(subloc_attrs
+        .iter()
+        .any(|(k, v)| k.as_i64() == Some(805) && v.as_f64() == Some(120.0)));
+
+    // #897: OnNewProbe includes scanBonuses with strength/deviation -> modules/ship
+    let probe_norm = normalize_macho_notification(
+        "OnNewProbe",
+        vec![PyRep::keyval([
+            ("probeID", PyRep::Integer(900_001)),
+            ("typeID", PyRep::Integer(30_013)),
+        ])],
+    );
+    let Some(PyRep::Dict(scan_bonuses)) = probe_norm[0].dict_get("scanBonuses") else {
+        panic!("expected scanBonuses Dict on OnNewProbe");
+    };
+    assert!(scan_bonuses.iter().any(|(k, _)| k.as_str() == Some("strength")));
+    assert!(scan_bonuses.iter().any(|(k, _)| k.as_str() == Some("deviation")));
+
+    // #977: entity.CmdEngage / CmdReturnHome / CmdReturnBay normalize non-Dict replies to {}
+    // and DoDestinyUpdate strips OnDroneActivityChange
+    for cmd in ["CmdEngage", "CmdReturnHome", "CmdReturnAndOrbit", "CmdReturnBay"] {
+        let cmd_rep = normalize_macho_rpc_reply(
+            "entity",
+            cmd,
+            Ok(PyRep::keyval([("ok", PyRep::Bool(true))])),
+        )
+        .expect("normalize drone cmd");
+        assert_eq!(cmd_rep, PyRep::Dict(Vec::new()));
+    }
+    let destiny_norm = normalize_macho_notification(
+        "DoDestinyUpdate",
+        vec![
+            PyRep::List(vec![
+                PyRep::Tuple(vec![
+                    PyRep::Integer(2069),
+                    PyRep::Tuple(vec![
+                        PyRep::String("OnDroneActivityChange".into()),
+                        PyRep::Tuple(vec![
+                            PyRep::Integer(1_896_919_139),
+                            PyRep::Integer(1),
+                            PyRep::String("attack".into()),
+                        ]),
+                    ]),
+                ]),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(2070),
+                    PyRep::Tuple(vec![
+                        PyRep::String("OnDroneStateChange".into()),
+                        PyRep::Tuple(vec![PyRep::Integer(1_896_919_139)]),
+                    ]),
+                ]),
+            ]),
+            PyRep::Bool(false),
+        ],
+    );
+    let PyRep::List(ref d_items) = destiny_norm[0] else {
+        panic!("expected List in DoDestinyUpdate");
+    };
+    assert_eq!(d_items.len(), 1);
+
+    // #978: industryManager.GetJob / GetJobsByOwner normalize V24.01 JobData fields and integer status
+    let job_norm = normalize_macho_rpc_reply(
+        "industryManager",
+        "GetJob",
+        Ok(PyRep::keyval([
+            ("jobID", PyRep::Integer(501)),
+            ("installerID", PyRep::Integer(90_000_001)),
+            ("facilityID", PyRep::Integer(60_003_760)),
+            ("blueprintItemID", PyRep::Integer(200_123_456)),
+            ("blueprintTypeID", PyRep::Integer(967)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(3)),
+            ("status", PyRep::String("Active".into())),
+            ("durationSeconds", PyRep::Integer(600)),
+            ("startUnix", PyRep::Integer(1_700_000_000)),
+            ("endUnix", PyRep::Integer(1_700_000_600)),
+            ("totalJobCostISK", PyRep::Real(1_250.0)),
+        ])),
+    )
+    .expect("normalize industryManager.GetJob");
+    assert_eq!(job_norm.dict_get("blueprintID"), Some(&PyRep::Integer(200_123_456)));
+    assert_eq!(job_norm.dict_get("blueprintCopy"), Some(&PyRep::Integer(0)));
+    assert_eq!(job_norm.dict_get("blueprintLocationID"), Some(&PyRep::Integer(60_003_760)));
+    assert_eq!(job_norm.dict_get("blueprintLocationFlagID"), Some(&PyRep::Integer(4)));
+    assert_eq!(job_norm.dict_get("status"), Some(&PyRep::Integer(1)));
+    assert_eq!(job_norm.dict_get("licensedRuns"), Some(&PyRep::Integer(3)));
+    assert_eq!(job_norm.dict_get("successfulRuns"), Some(&PyRep::Integer(3)));
+    assert_eq!(job_norm.dict_get("timeInSeconds"), Some(&PyRep::Integer(600)));
+    assert_eq!(job_norm.dict_get("cost"), Some(&PyRep::Real(1_250.0)));
+    assert_eq!(job_norm.dict_get("outputLocationID"), Some(&PyRep::Integer(60_003_760)));
+    assert_eq!(job_norm.dict_get("outputFlagID"), Some(&PyRep::Integer(4)));
+    assert!(job_norm.dict_get("startDate").and_then(|v| v.as_i64()).unwrap_or(0) > 130_000_000_000_000_000);
+    assert!(job_norm.dict_get("endDate").and_then(|v| v.as_i64()).unwrap_or(0) > 130_000_000_000_000_000);
 }

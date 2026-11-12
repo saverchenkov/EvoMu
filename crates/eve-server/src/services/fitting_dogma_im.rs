@@ -249,6 +249,11 @@ fn handle_item_get_info(
     if subloc_key_opt.is_some() {
         merged_attrs.insert(attr_ids::QUANTITY, qty as f64);
     }
+    let dur_ms = merged_attrs
+        .get(&73)
+        .copied()
+        .unwrap_or(1_000.0)
+        .max(0.0);
     let mut attr_entries: Vec<(PyRep, PyRep)> = merged_attrs
         .into_iter()
         .map(|(k, v)| (PyRep::Integer(k as i64), PyRep::Real(v)))
@@ -279,13 +284,65 @@ fn handle_item_get_info(
 
     let active_effects = match fitted_online_ship {
         Some((mod_owner_id, mod_ship_id)) => {
-            crate::services::inventory_fitting::fitting_module_cycles::online_module_active_effects(
+            let mut effs = crate::services::inventory_fitting::fitting_module_cycles::online_module_active_effects(
                 raw_id,
                 mod_owner_id,
                 mod_ship_id,
                 now_ft,
                 true,
-            )
+            );
+            let is_mod_active = ctx.db.with_snapshot(|s| s.module_active_states.contains(&raw_id))
+                || ctx
+                    .ship_fittings
+                    .read()
+                    .ok()
+                    .and_then(|sf| {
+                        sf.get(&mod_ship_id).and_then(|f| {
+                            f.modules.get(&raw_id).map(|m| {
+                                matches!(
+                                    m.state,
+                                    eve_dogma::ModuleState::Active
+                                        | eve_dogma::ModuleState::Overloaded
+                                )
+                            })
+                        })
+                    })
+                    .unwrap_or(false);
+            if is_mod_active {
+                if let Some(eff_id) = crate::router::binding::effect_id_for_module_sde(
+                    &ctx.sde,
+                    show_info.type_id,
+                    Some("defaultEffect"),
+                )
+                .or_else(|| {
+                    ctx.sde
+                        .types
+                        .get(&show_info.type_id)
+                        .and_then(|t| t.effect_ids.iter().copied().find(|&eid| eid != 16))
+                        .map(|eid| eid as i64)
+                }) {
+                    if eff_id != 16 {
+                        if let PyRep::Dict(ref mut entries) = effs {
+                            entries.push((
+                                PyRep::Integer(eff_id),
+                                PyRep::List(vec![
+                                    PyRep::Integer(raw_id),
+                                    PyRep::Integer(mod_owner_id),
+                                    PyRep::Integer(mod_ship_id),
+                                    PyRep::None,
+                                    PyRep::None,
+                                    PyRep::List(Vec::new()),
+                                    PyRep::Integer(eff_id),
+                                    PyRep::Integer(now_ft),
+                                    PyRep::Real(dur_ms),
+                                    PyRep::Integer(0),
+                                ]),
+                            ));
+                        }
+                    }
+                }
+            }
+            effs
         }
         None => PyRep::Dict(Vec::new()),
     };

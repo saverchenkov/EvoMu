@@ -584,6 +584,54 @@ async fn xmpp_stream_times_out_idle_connections_and_discovers_player_channels() 
     assert!(!raw_spoof_reply.contains("<auth"));
     assert!(!raw_spoof_reply.contains("<presence"));
 
+    // #973 & #974: `<presence>` join, leave, and denied error stanzas echo `id='...'` and include `<error code='403' type='auth'>`
+    let pres_join = xmpp_stanza_reply_with_ctx_and_auth(
+        Some(&ctx),
+        Some(&mut spoof_auth),
+        "<presence id='join_42' to='player_playtest_room@conference.chat.evomu.local/90000001'><x xmlns='http://jabber.org/protocol/muc'/></presence>",
+        &mut dummy_sc,
+    )
+    .expect("presence join reply");
+    assert!(
+        pres_join.contains(" id='join_42'"),
+        "expected id='join_42' in presence join reply: {pres_join}"
+    );
+    let pres_channel_prefix = xmpp_stanza_reply_with_ctx_and_auth(
+        Some(&ctx),
+        Some(&mut spoof_auth),
+        "<presence id='join_43' to='channel_playtest_room@conference.chat.evomu.local/90000001'><x xmlns='http://jabber.org/protocol/muc'/></presence>",
+        &mut dummy_sc,
+    )
+    .expect("presence channel_ prefix join reply");
+    assert!(
+        pres_channel_prefix.contains(" id='join_43'") && !pres_channel_prefix.contains("type='error'"),
+        "expected channel_ prefix to resolve player room and succeed: {pres_channel_prefix}"
+    );
+    let pres_leave = xmpp_stanza_reply_with_ctx_and_auth(
+        Some(&ctx),
+        Some(&mut spoof_auth),
+        "<presence id='leave_44' type='unavailable' to='player_playtest_room@conference.chat.evomu.local/90000001'/>",
+        &mut dummy_sc,
+    )
+    .expect("presence leave reply");
+    assert!(
+        pres_leave.contains("type='unavailable' id='leave_44'"),
+        "expected id='leave_44' in unavailable presence reply: {pres_leave}"
+    );
+    let mut unauth_pres = eve_server::services::fleet_social::XmppStreamAuth::default();
+    let pres_err = xmpp_stanza_reply_with_ctx_and_auth(
+        Some(&ctx),
+        Some(&mut unauth_pres),
+        "<presence id='err_45' to='corp_1000009@conference.chat.evomu.local/90000002'/>",
+        &mut dummy_sc,
+    )
+    .expect("presence error reply");
+    assert!(
+        pres_err.contains("type='error' id='err_45'")
+            && pres_err.contains("<error code='403' type='auth'>"),
+        "expected id='err_45' and code='403' on presence error stanza: {pres_err}"
+    );
+
     drop(cli);
     srv_task.await.unwrap();
 }

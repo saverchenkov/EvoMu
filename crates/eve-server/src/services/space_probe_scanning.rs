@@ -441,12 +441,29 @@ pub async fn activate_scan_probe_launcher(
         0,
     );
     let expiry_ft = ctx.now_blueos_filetime_ticks().saturating_add((max_flight_time_s.round() as i64).saturating_mul(10_000_000));
+    let scan_bonuses = PyRep::Dict(vec![
+        (
+            PyRep::String("strength".into()),
+            PyRep::Dict(vec![
+                (PyRep::String("modules".into()), PyRep::Real(0.0)),
+                (PyRep::String("ship".into()), PyRep::Real(0.0)),
+            ]),
+        ),
+        (
+            PyRep::String("deviation".into()),
+            PyRep::Dict(vec![
+                (PyRep::String("modules".into()), PyRep::Real(0.0)),
+                (PyRep::String("ship".into()), PyRep::Real(0.0)),
+            ]),
+        ),
+    ]);
     for &(pid, ppos) in &spawned_probe_positions {
         let pt = PyRep::Tuple(vec![PyRep::Real(ppos.x), PyRep::Real(ppos.y), PyRep::Real(ppos.z)]);
         let probe_kv = PyRep::keyval([
             ("probeID", PyRep::Integer(pid)), ("typeID", PyRep::Integer(probe_type_id as i64)),
             ("scanRange", PyRep::Real(scan_range_m)), ("expiry", PyRep::Integer(expiry_ft)),
             ("pos", pt.clone()), ("destination", pt), ("state", PyRep::Integer(PROBE_STATE_IDLE as i64)),
+            ("scanBonuses", scan_bonuses.clone()),
         ]);
         let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnNewProbe", "charid", vec![probe_kv]);
         let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(PROBE_STATE_IDLE as i64)]);
@@ -1743,6 +1760,15 @@ async fn handle_recover_probes(
                     char_id,
                     post.location_id,
                     post,
+                );
+                crate::services::inventory_fitting::fitting_module_cycles::emit_charge_sublocation_quantity_change(
+                    ctx,
+                    char_id,
+                    post.location_id,
+                    post.flag,
+                    post.type_id,
+                    0,
+                    post.quantity,
                 );
                 recovered_into_launcher = true;
             }

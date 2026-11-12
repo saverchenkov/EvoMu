@@ -351,8 +351,17 @@ pub fn sequence(state: &mut SessionWireState, done: RpcCompletion) -> Vec<OutFra
     }
 
     // 3. SessionChangeNotification (if any session attributes changed).
-    if let Some(sess_frame) = done.session_change_frame {
-        out.push(OutFrame::SessionChange { frame: sess_frame });
+    // When an in-space ship switch occurs in the same solar system while `state.destiny` is
+    // already `Live` (`DestinyDrain::Updates(batch)` with `batch.has_set_state == true`, `#970`),
+    // emit `DoDestinyUpdate(SetState)` BEFORE `SessionChangeNotification` so `michelle` has the
+    // new capsule/ship ball and `ballpark.ego == new_ship_id` before `OnSessionChanged` handlers run.
+    let mut deferred_session_change = done.session_change_frame;
+    let in_space_ship_switch_set_state = state.destiny.is_live()
+        && matches!(&destiny_drain, DestinyDrain::Updates(b) if b.has_set_state);
+    if !in_space_ship_switch_set_state {
+        if let Some(sess_frame) = deferred_session_change.take() {
+            out.push(OutFrame::SessionChange { frame: sess_frame });
+        }
     }
 
     // 4. Buffered tick broadcasts followed by post-RPC direct destiny drain (ORD-3, #844, #845).
@@ -396,6 +405,10 @@ pub fn sequence(state: &mut SessionWireState, done: RpcCompletion) -> Vec<OutFra
             }
         }
         DestinyDrain::None | DestinyDrain::Detach { .. } => {}
+    }
+
+    if let Some(sess_frame) = deferred_session_change.take() {
+        out.push(OutFrame::SessionChange { frame: sess_frame });
     }
 
     // 5. Post-RPC notifications in causal emission order (ORD-5, ORD-6).
@@ -540,6 +553,54 @@ mod tests {
                 set_state_stamp: 61,
                 last_stamp: 61,
             }
+        );
+    }
+
+    #[test]
+    fn in_space_ship_switch_emits_set_state_before_session_change_970() {
+        let mut wire = SessionWireState::new(97, 970);
+        let epoch = wire.enter_space(Some(30_000_142));
+        assert!(sequence_tick(
+            &mut wire,
+            DestinyBatch::new(epoch, 10, true, dummy_updates("SetState", 10))
+        )
+        .is_some());
+        assert!(wire.destiny.is_live());
+
+        // Pod ejection / ship switch in the same solar system while already `Live`:
+        // `DestinyDrain::Updates(batch)` with `batch.has_set_state == true` must be sequenced
+        // BEFORE `SessionChangeNotification` (`#970`).
+        let pod_set_state = DestinyBatch::new(epoch, 11, true, dummy_updates("SetState", 11));
+        let frames = sequence(
+            &mut wire,
+            RpcCompletion {
+                call_id: 7,
+                response_frame: PyRep::Integer(7),
+                session_change_frame: Some(PyRep::String("shipid_to_capsule".into())),
+                pending_tick_batches: vec![],
+                destiny_drain: DestinyDrain::Updates(pod_set_state),
+                notifications: vec![TypedNotification {
+                    event: "OnItemChange".into(),
+                    args: vec![],
+                }],
+            },
+        );
+        assert!(matches!(frames.first(), Some(OutFrame::CallRsp { call_id: 7, .. })));
+        let dest_idx = frames
+            .iter()
+            .position(|f| matches!(f, OutFrame::DoDestinyUpdate { has_set_state: true, stamp: 11, .. }))
+            .expect("SetState DoDestinyUpdate frame");
+        let sess_idx = frames
+            .iter()
+            .position(|f| matches!(f, OutFrame::SessionChange { .. }))
+            .expect("SessionChange frame");
+        let notif_idx = frames
+            .iter()
+            .position(|f| matches!(f, OutFrame::Notification { .. }))
+            .expect("Notification frame");
+        assert!(
+            dest_idx < sess_idx && sess_idx < notif_idx,
+            "expected CallRsp -> DoDestinyUpdate(SetState) -> SessionChange -> Notification, got {dest_idx}, {sess_idx}, {notif_idx}"
         );
     }
 

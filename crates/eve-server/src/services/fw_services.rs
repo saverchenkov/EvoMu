@@ -885,11 +885,16 @@ pub async fn handle(
             let Some((vp, contested, threshold)) = opt_state else {
                 return Some(Ok(PyRep::None));
             };
+            let contested_fraction = (contested / 100.0).clamp(0.0, 1.0);
             Some(Ok(PyRep::keyval([
                 ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
                 ("victoryPoints", PyRep::Integer(vp)),
+                ("score", PyRep::Integer(vp)),
                 ("contestedPercentage", PyRep::Real(contested)),
+                ("contestedFraction", PyRep::Real(contested_fraction)),
                 ("threshold", PyRep::Integer(threshold)),
+                ("isContested", PyRep::Bool(vp > 0)),
+                ("isVulnerable", PyRep::Bool(vp >= threshold)),
             ])))
         }
 
@@ -911,12 +916,18 @@ pub async fn handle(
                         .unwrap_or_else(|| {
                             ((vp as f64 / (threshold as f64).max(1.0)) * 100.0).clamp(0.0, 100.0)
                         });
+                    let contested_fraction = (c / 100.0).clamp(0.0, 1.0);
                     map.push((
                         PyRep::Integer(i64::from(sys_id)),
                         PyRep::keyval([
+                            ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
                             ("victoryPoints", PyRep::Integer(vp)),
+                            ("score", PyRep::Integer(vp)),
                             ("contestedPercentage", PyRep::Real(c)),
+                            ("contestedFraction", PyRep::Real(contested_fraction)),
                             ("threshold", PyRep::Integer(threshold)),
+                            ("isContested", PyRep::Bool(vp > 0)),
+                            ("isVulnerable", PyRep::Bool(vp >= threshold)),
                         ]),
                     ));
                 }

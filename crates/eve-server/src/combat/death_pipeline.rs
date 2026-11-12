@@ -851,6 +851,86 @@ pub fn execute_death_pipeline_sync_inner(
         ))
     })?;
 
+    // Commit ballpark state (remove destroyed ship ball, spawn wreck ball, spawn capsule/escape
+    // ship ball, and push `SetState(ego=cid)`) BEFORE emitting any notifications (`ctx.notify`),
+    // because `ctx.notify` immediately wakes `macho_listener`'s `notify_rx.recv()` loop (`#970`).
+    crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &[victim_ship_id]);
+    crate::services::notify_emitters_seasons_tactical::on_deployable_deactivated(ctx, None, victim_ship_id);
+    sys_handle.try_remove_ball(victim_ship_id);
+    let (wreck_grp, wreck_cat) = if is_pod {
+        ctx.sde
+            .types
+            .get(&25)
+            .map(|t| (t.group_id, t.category_id))
+            .unwrap_or((14, 2))
+    } else {
+        (186, 2)
+    };
+    sys_handle.try_spawn_ball_with_meta(
+        Ball {
+            id: wreck_item_id,
+            type_id: wreck_type_id,
+            position: victim_pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: if is_pod { 80.0 } else { 10_000.0 },
+            radius: if is_pod { 5.0 } else { 50.0 },
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        eve_destiny::CombatState {
+            shield_hp: 0.0,
+            max_shield_hp: 0.0,
+            armor_hp: 0.0,
+            max_armor_hp: 0.0,
+            structure_hp: 500.0,
+            max_structure_hp: 500.0,
+            ..eve_destiny::CombatState::default()
+        },
+        SlimItemMeta {
+            group_id: wreck_grp,
+            category_id: wreck_cat,
+            owner_id: victim_char_id,
+            char_id: None,
+            corp_id: -1,
+            alliance_id: -1,
+            security_status: 0.0,
+            is_cloaked: false,
+            name: ctx.sde.types.get(&wreck_type_id).map(|t| t.name.clone()),
+            ..Default::default()
+        },
+    );
+    if let Some(cid) = ejected_cap_id {
+        let esc_type_id = ctx
+            .db
+            .with_snapshot(|s| s.items.get(&cid).map(|i| i.type_id))
+            .unwrap_or(670);
+        let esc_sde = ctx.sde.types.get(&esc_type_id);
+        let esc_slim = ctx.build_ship_slim_meta(victim_char_id, esc_type_id);
+        sys_handle.try_spawn_ball_with_meta(
+            Ball {
+                id: cid,
+                type_id: esc_type_id,
+                position: victim_pos,
+                velocity: DVec3::ZERO,
+                max_velocity: esc_sde
+                    .and_then(|t| t.default_attributes.get(&37).copied())
+                    .unwrap_or(335.0),
+                inertia: esc_sde
+                    .and_then(|t| t.default_attributes.get(&70).copied())
+                    .unwrap_or(0.25),
+                mass: esc_sde.map(|t| t.mass.max(1_000.0)).unwrap_or(16_000.0),
+                radius: esc_sde.map(|t| t.radius.max(15.0)).unwrap_or(15.0),
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(victim_char_id, cid, esc_type_id),
+            esc_slim,
+        );
+        sys_handle.try_push_set_state(cid);
+    }
+
     if let Some((ins_corp, owner_id, bal_wire, mid, subject)) = ins_notify {
         if ins_corp {
             let _ = ctx.notify(
@@ -1090,81 +1170,25 @@ pub fn execute_death_pipeline_sync_inner(
         }
     });
 
-    crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &[victim_ship_id]);
-    crate::services::notify_emitters_seasons_tactical::on_deployable_deactivated(ctx, None, victim_ship_id);
-    sys_handle.try_remove_ball(victim_ship_id);
-    let (wreck_grp, wreck_cat) = if is_pod {
-        ctx.sde
-            .types
-            .get(&25)
-            .map(|t| (t.group_id, t.category_id))
-            .unwrap_or((14, 2))
-    } else {
-        (186, 2)
-    };
-    sys_handle.try_spawn_ball_with_meta(
-        Ball {
-            id: wreck_item_id,
-            type_id: wreck_type_id,
-            position: victim_pos,
-            velocity: DVec3::ZERO,
-            max_velocity: 0.0,
-            inertia: 1.0,
-            mass: if is_pod { 80.0 } else { 10_000.0 },
-            radius: if is_pod { 5.0 } else { 50.0 },
-            speed_fraction: 0.0,
-            mode: MovementMode::Stop,
-        },
-        eve_destiny::CombatState {
-            shield_hp: 0.0,
-            max_shield_hp: 0.0,
-            armor_hp: 0.0,
-            max_armor_hp: 0.0,
-            structure_hp: 500.0,
-            max_structure_hp: 500.0,
-            ..eve_destiny::CombatState::default()
-        },
-        SlimItemMeta {
-            group_id: wreck_grp,
-            category_id: wreck_cat,
-            owner_id: victim_char_id,
-            char_id: None,
-            corp_id: -1,
-            alliance_id: -1,
-            security_status: 0.0,
-            is_cloaked: false,
-            name: ctx.sde.types.get(&wreck_type_id).map(|t| t.name.clone()),
-            ..Default::default()
-        },
-    );
     if let Some(cid) = ejected_cap_id {
-        let esc_type_id = ctx
-            .db
-            .with_snapshot(|s| s.items.get(&cid).map(|i| i.type_id))
-            .unwrap_or(670);
-        let esc_sde = ctx.sde.types.get(&esc_type_id);
-        let esc_slim = ctx.build_ship_slim_meta(victim_char_id, esc_type_id);
-        sys_handle.try_spawn_ball_with_meta(
-            Ball {
-                id: cid,
-                type_id: esc_type_id,
-                position: victim_pos,
-                velocity: DVec3::ZERO,
-                max_velocity: esc_sde
-                    .and_then(|t| t.default_attributes.get(&37).copied())
-                    .unwrap_or(335.0),
-                inertia: esc_sde
-                    .and_then(|t| t.default_attributes.get(&70).copied())
-                    .unwrap_or(0.25),
-                mass: esc_sde.map(|t| t.mass.max(1_000.0)).unwrap_or(16_000.0),
-                radius: esc_sde.map(|t| t.radius.max(15.0)).unwrap_or(15.0),
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            },
-            ctx.build_ship_combat_state(victim_char_id, cid, esc_type_id),
-            esc_slim,
+        if let Some(cap_item) = ctx.db.get_item(cid) {
+            let _ = ctx.notify_item_record_change(
+                victim_char_id,
+                &cap_item,
+                vec![
+                    (3, eve_proto::PyRep::Integer(0)),
+                    (4, eve_proto::PyRep::Integer(0)),
+                ],
+            );
+        }
+        crate::services::notify_emitters_combat_ess_progression::emit_damage_state_change(
+            ctx,
+            victim_char_id,
+            cid,
+            1.0,
+            1.0,
+            1.0,
         );
-        sys_handle.try_push_set_state(cid);
     }
 
     let (new_sys_id, new_dock_id) = ctx

@@ -1352,6 +1352,8 @@ fn find_existing_channel_key(snap: &eve_db::WorldStateSnapshot, chan_id: &str) -
     if let Some(slug) = localpart
         .strip_prefix("player_")
         .or_else(|| localpart.strip_prefix("PLAYER_"))
+        .or_else(|| localpart.strip_prefix("channel_"))
+        .or_else(|| localpart.strip_prefix("CHANNEL_"))
     {
         let candidate = format!("channel:{slug}");
         if let Some(found) = snap
