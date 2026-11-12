@@ -370,6 +370,10 @@ pub async fn step_missiles_and_breachers(
             for cd in &rt_self_destructs {
                 st.self_destructs
                     .entry(cd.ship_id)
+                    .and_modify(|e| {
+                        e.started_unix = cd.started_unix;
+                        e.detonate_at_unix = cd.detonate_at_unix;
+                    })
                     .or_insert(eve_db::SelfDestructPersistedEntry {
                         ship_id: cd.ship_id,
                         char_id: cd.char_id,

@@ -484,13 +484,32 @@ impl ServerContext {
                     crate::services::shipcaster_ops::on_landing_pad_ball_destroyed(&ctx, tid).await;
                     let _ = crate::services::notify_emitters_space_dungeons::flush_ship_all_ewar_sync(&ctx, 0, Some(sys_id), tid);
                     let _ = crate::services::wormhole_pve_escalations::on_decloaked_relay_attacked_sync(&ctx, sys_id, tid);
-                    let _ = crate::combat::death_pipeline::on_ball_destroyed_sync(
+                    if let Ok(Some(death_res)) = crate::combat::death_pipeline::on_ball_destroyed_sync(
                         &ctx,
                         sys_id,
                         tid,
                         killer_opt,
                         glam::DVec3::ZERO,
-                    );
+                    ) {
+                        if let Some(vcid) = ctx.db.with_snapshot(|s| {
+                            death_res
+                                .ejected_capsule_id
+                                .and_then(|cid_ship| s.items.get(&cid_ship).map(|it| it.owner_id))
+                                .or_else(|| {
+                                    s.killmails
+                                        .get(&death_res.killmail_id)
+                                        .map(|km| km.victim_character_id)
+                                })
+                        }) {
+                            crate::services::pve_abyssal_pylons::on_abyssal_boundary_death_hook(
+                                &ctx,
+                                sys_id,
+                                vcid,
+                                tid,
+                                death_res.ejected_capsule_id,
+                            );
+                        }
+                    }
                 }
                 crate::services::combat_weapons_spool::step_system_entropic_spools(&ctx, sys_id, dt).await;
                 crate::services::inventory_fitting::execute_pending_cycle_actions(&ctx, sys_id).await;

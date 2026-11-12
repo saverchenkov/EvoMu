@@ -61,7 +61,7 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
         return origin_sys;
     }
     let pocket_cleanup = with_abyssal_state(ctx, |st| {
-        let (pid, pocket_sys, origin_sys, bound_tid, npcs) = {
+        let (pid, pocket_sys, origin_sys, bound_tid, npcs, p_ship_id) = {
             let p = st.pockets.get_mut(&char_id)?;
             p.collapsed_destroyed = true;
             p.completed = true;
@@ -76,9 +76,11 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
                 p.origin_solar_system_id,
                 p.trace_ball_id,
                 npcs,
+                p.ship_id,
             )
         };
-        let mut coop_pilots: Vec<(CharacterId, ItemId)> = vec![(char_id, ship_id)];
+        let eff_ship_id = if p_ship_id > 0 { p_ship_id } else { ship_id };
+        let mut coop_pilots: Vec<(CharacterId, ItemId)> = vec![(char_id, eff_ship_id)];
         for other in st.pockets.values_mut() {
             if other.pocket_id == pid
                 && other.character_id != char_id
@@ -186,6 +188,9 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
             eff_pocket_sys,
         );
         handle.try_remove_ball(pilot_sid);
+        if ship_id > 0 && ship_id != pilot_sid {
+            handle.try_remove_ball(ship_id);
+        }
         ctx.invalidate_ship_fitting(pilot_sid);
         crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
             rt.insurance_contracts.remove(&pilot_sid);
@@ -197,7 +202,7 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
             },
         );
 
-        let (home_sys_id, _home_station_id, _corvette_id, cleared_zarzakh_gate) =
+        let (home_sys_id, _home_station_id, _corvette_id, cleared_zarzakh_gate, extra_balls_to_remove) =
             crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, snap| {
                 snap.insurance_contracts.remove(&pilot_sid);
                 st.abyssal_sessions.remove(&pilot_cid);
@@ -209,6 +214,32 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
                         }
                         snap.items.retain(|_, item| !caches.contains(&item.location_id));
                     }
+                }
+
+                let mut extra_balls: Vec<ItemId> = snap
+                    .items
+                    .values()
+                    .filter(|i| {
+                        i.owner_id == pilot_cid
+                            && i.location_id == eff_pocket_sys as i64
+                            && (i.type_id == 670 || i.item_id == ship_id)
+                            && i.item_id != pilot_sid
+                    })
+                    .map(|i| i.item_id)
+                    .collect();
+                if let Some(active_sid) = snap
+                    .characters
+                    .get(&pilot_cid)
+                    .map(|c| c.active_ship_id)
+                    .filter(|&sid| sid > 0 && sid != pilot_sid && !extra_balls.contains(&sid))
+                {
+                    extra_balls.push(active_sid);
+                }
+                for &eb in &extra_balls {
+                    snap.items.remove(&eb);
+                    snap.item_positions.remove(&eb);
+                    snap.module_online_states.remove(&eb);
+                    st.ship_combat_hp.remove(&eb);
                 }
 
                 let ship_type_id = snap
@@ -259,8 +290,11 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
                         death_pos,
                         now_unix,
                     );
-                (home_sys_id, home_station_id, corvette_id, cleared_lock)
+                (home_sys_id, home_station_id, corvette_id, cleared_lock, extra_balls)
             });
+        for eb in extra_balls_to_remove {
+            handle.try_remove_ball(eb);
+        }
 
         if let Some(locked_gate_id) = cleared_zarzakh_gate {
             crate::services::quasar_sov_services::publish_stargate_lock_deactivated_notice(

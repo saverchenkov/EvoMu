@@ -400,6 +400,7 @@ pub fn populate_persisted_space_objects(
         // 3b. Abandoned / unpiloted ships in space (`#918`, `#835`)
         for item in snap.items.values() {
             if item.location_id != solar_system_id as i64
+                || !snap.characters.contains_key(&item.owner_id)
                 || player_ship_ids.contains(&item.item_id)
                 || ballpark.balls.contains_key(&item.item_id)
                 || sp6
@@ -1003,7 +1004,15 @@ pub fn on_advance_secs_internal(
 
         with_mut_sp6_state(&ctx.db, |st, snap| {
             for cd in rt_self_destructs {
-                st.self_destructs.entry(cd.ship_id).or_insert(cd);
+                let started = cd.started_unix;
+                let detonate = cd.detonate_at_unix;
+                st.self_destructs
+                    .entry(cd.ship_id)
+                    .and_modify(|e| {
+                        e.started_unix = started;
+                        e.detonate_at_unix = detonate;
+                    })
+                    .or_insert(cd);
             }
 
             // Prune disconnected_ships entries whose ship was destroyed or pilot docked/changed ship

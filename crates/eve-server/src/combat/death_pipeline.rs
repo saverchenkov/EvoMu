@@ -1492,13 +1492,6 @@ pub fn on_ball_destroyed_sync(
             pos,
             now_unix,
         )?;
-        crate::services::pve_abyssal_pylons::on_abyssal_boundary_death_hook(
-            ctx,
-            sys_id,
-            victim_char_id,
-            ball_id,
-            death_res.ejected_capsule_id,
-        );
         return Ok(Some(death_res));
     }
 
