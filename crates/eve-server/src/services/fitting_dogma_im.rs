@@ -249,6 +249,11 @@ fn handle_item_get_info(
     if subloc_key_opt.is_some() {
         merged_attrs.insert(attr_ids::QUANTITY, qty as f64);
     }
+    let dur_ms = merged_attrs
+        .get(&73)
+        .copied()
+        .unwrap_or(1_000.0)
+        .max(0.0);
     let mut attr_entries: Vec<(PyRep, PyRep)> = merged_attrs
         .into_iter()
         .map(|(k, v)| (PyRep::Integer(k as i64), PyRep::Real(v)))
@@ -310,11 +315,6 @@ fn handle_item_get_info(
                     Some("defaultEffect"),
                 ) {
                     if eff_id != 16 {
-                        let dur_ms = merged_attrs
-                            .get(&73)
-                            .copied()
-                            .unwrap_or(1_000.0)
-                            .max(0.0);
                         if let PyRep::Dict(ref mut entries) = effs {
                             entries.push((
                                 PyRep::Integer(eff_id),

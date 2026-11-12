@@ -1225,12 +1225,6 @@ pub fn handle_batch3_gm_slash_cmd(
             });
             {
                 let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-                let st = cw.get_or_create(caller_cid);
-                st.weapons_timer_expiry = 0;
-                st.pvp_timer_expiry = 0;
-                st.suspect_timer_expiry = 0;
-                st.criminal_timer_expiry = 0;
-                st.booster_timer_expiry = 0;
                 if let Some(pst) = cw.states.get_mut(&caller_cid) {
                     pst.weapon_timer_until_unix = 0;
                     pst.pvp_timer_until_unix = 0;

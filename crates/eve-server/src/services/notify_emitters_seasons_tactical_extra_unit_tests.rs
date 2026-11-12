@@ -1018,9 +1018,9 @@ fn issue_961_cleartimers_resets_crimewatch_and_emits_timer_cleared_notices() {
     {
         let mut cw = ctx.crimewatch.write().unwrap();
         let st = cw.get_or_create(char_id);
-        st.weapons_timer_expiry = now + 60;
-        st.pvp_timer_expiry = now + 900;
-        st.criminal_timer_expiry = now + 900;
+        st.weapon_timer_until_unix = now + 60;
+        st.pvp_timer_until_unix = now + 900;
+        st.criminal_flag_until_unix = now + 900;
     }
     crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
         rt.npc_timers.insert(char_id, now + 300);
@@ -1052,11 +1052,11 @@ fn issue_961_cleartimers_resets_crimewatch_and_emits_timer_cleared_notices() {
     assert_eq!(res.dict_get("cleared"), Some(&PyRep::Bool(true)));
 
     {
-        let mut cw = ctx.crimewatch.write().unwrap();
-        let st = cw.get_or_create(char_id);
-        assert_eq!(st.weapons_timer_expiry, 0);
-        assert_eq!(st.pvp_timer_expiry, 0);
-        assert_eq!(st.criminal_timer_expiry, 0);
+        let cw = ctx.crimewatch.read().unwrap();
+        let st = cw.states.get(&char_id).expect("crimewatch state");
+        assert_eq!(st.weapon_timer_until_unix, 0);
+        assert_eq!(st.pvp_timer_until_unix, 0);
+        assert_eq!(st.criminal_flag_until_unix, 0);
     }
     let notifs = ctx.drain_notifications_for_char(char_id);
     for ev in [
