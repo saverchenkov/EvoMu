@@ -1320,6 +1320,101 @@ pub fn handle(
     match (service, method) {
         ("account", "GetCashBalance") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let parse_corp_flag = |rep: &PyRep| -> bool {
+                match rep {
+                    PyRep::Bool(b) => *b,
+                    PyRep::Integer(n) => *n != 0,
+                    PyRep::Real(r) => *r != 0.0,
+                    PyRep::String(s) | PyRep::Token(s) => s.starts_with("cash"),
+                    PyRep::Tuple(items) | PyRep::List(items) => items.first().is_some_and(|v| {
+                        v.as_bool() == Some(true)
+                            || v.as_i64().unwrap_or(0) != 0
+                            || v.as_str().is_some_and(|s| s.starts_with("cash"))
+                    }),
+                    _ => false,
+                }
+            };
+            let is_corp_wallet = args
+                .first()
+                .map(&parse_corp_flag)
+                .or_else(|| _kwargs.get("isCorpWallet").map(&parse_corp_flag))
+                .or_else(|| {
+                    (args.is_empty()
+                        && _kwargs
+                            .get("accountKey")
+                            .and_then(|v| v.as_i64())
+                            .is_some_and(|k| (1000..=1006).contains(&k)))
+                    .then_some(true)
+                })
+                .unwrap_or(false);
+            if is_corp_wallet {
+                let corp_id = session
+                    .corporation_id
+                    .filter(|&id| id > 0)
+                    .or_else(|| {
+                        ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))
+                    })
+                    .unwrap_or(0);
+                if corp_id > 0 {
+                    crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
+                }
+                let account_key = args
+                    .get(1)
+                    .and_then(|v| v.as_i64())
+                    .or_else(|| _kwargs.get("accountKey").and_then(|v| v.as_i64()))
+                    .or_else(|| {
+                        args.first()
+                            .and_then(|v| v.as_i64())
+                            .filter(|&k| (1000..=1006).contains(&k))
+                    })
+                    .or_else(|| {
+                        args.first()
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| match s {
+                                "cash" => Some(1000),
+                                "cash2" => Some(1001),
+                                "cash3" => Some(1002),
+                                "cash4" => Some(1003),
+                                "cash5" => Some(1004),
+                                "cash6" => Some(1005),
+                                "cash7" => Some(1006),
+                                _ => None,
+                            })
+                    })
+                    .or_else(|| (session.corp_account_key > 0).then_some(i64::from(session.corp_account_key)))
+                    .unwrap_or(1000);
+                let div = if (1000..=1006).contains(&account_key) {
+                    (account_key - 999) as u8
+                } else if (1..=7).contains(&account_key) {
+                    account_key as u8
+                } else {
+                    1
+                };
+                let now_unix = ctx.now_unix();
+                let res = ctx.db.with_snapshot(|snap| {
+                    let Some(corp) = snap.corporations.get(&corp_id) else {
+                        return Err(rpc_err(
+                            "CorporationNotFound",
+                            format!("Corporation {corp_id} not found"),
+                        ));
+                    };
+                    let (is_ceo, eff_roles) =
+                        snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
+                    let div_idx = (div.clamp(1, 7) - 1) as usize;
+                    let allowed = eve_db::corp_roles::ROLE_DIRECTOR
+                        | eve_db::corp_roles::ROLE_ACCOUNTANT
+                        | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT
+                        | eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[div_idx];
+                    if !is_ceo && (eff_roles & allowed) == 0 {
+                        return Err(rpc_err(
+                            "CrpAccessDenied",
+                            "Querying corporation wallet balance requires Accountant, Junior Accountant, Director, or division query/take role",
+                        ));
+                    }
+                    Ok(PyRep::Real(corp.division_balance(div).to_wire_f64()))
+                });
+                return Some(res);
+            }
             Some(Ok(PyRep::Real(ctx.db.get_character(char_id).map(|c| c.balance.to_wire_f64()).unwrap_or(0.0))))
         }
         ("vaultManager", "get_account_balance") => {

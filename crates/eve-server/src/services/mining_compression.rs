@@ -1313,9 +1313,12 @@ pub fn caller_can_take_corp_hangar_item(snap: &eve_db::WorldStateSnapshot, char_
 pub(crate) fn caller_has_structure_extraction_role(snap: &eve_db::WorldStateSnapshot, char_id: i64, corp_id: i64, session_corp_role: u64) -> bool {
     use eve_db::corp_roles::{ROLE_DIRECTOR, ROLE_STARBASE_CONFIG, ROLE_STATION_MANAGER};
     const MOON_ROLES: u64 = ROLE_DIRECTOR | ROLE_STATION_MANAGER | ROLE_STARBASE_CONFIG;
-    if (session_corp_role & MOON_ROLES) != 0 { return true; }
-    let Some(corp) = snap.corporations.get(&corp_id) else { return true };
-    if corp.ceo_id == 0 || corp.ceo_id == char_id || corp.member_roles.is_empty() { return true; }
+    let Some(corp) = snap.corporations.get(&corp_id) else {
+        return true;
+    };
+    if corp.ceo_id == 0 || corp.ceo_id == char_id || corp.member_roles.is_empty() {
+        return true;
+    }
     let (is_ceo, roles) =
         snap.effective_corp_roles_at(corp_id, char_id, None, session_corp_role, 0);
     is_ceo || (roles & MOON_ROLES) != 0

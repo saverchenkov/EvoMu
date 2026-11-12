@@ -2843,6 +2843,10 @@ async fn test_batch3_sim_clock_rebase_and_crimewatch_timers() {
         );
         snap.module_online_states.insert(gun_id, true);
         snap.module_online_states.insert(gun2_id, true);
+        snap.items.insert(
+            gun_id + 90,
+            make_item(gun_id + 90, 178, PILOT_A, ship_a, InventoryFlag::Cargo, 500, false),
+        );
     });
     ctx.invalidate_ship_fitting(ship_a);
     let sys_h = ctx.systems.get_or_spawn(SYS_ZARZAKH);

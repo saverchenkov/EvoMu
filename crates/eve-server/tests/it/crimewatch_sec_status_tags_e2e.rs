@@ -317,6 +317,22 @@ async fn parity_shard_5_crimewatch_sec_status_loss_caps_tags_and_tx() {
     let _ = undock_player_to_space(&ctx, &mut atk_sess, ASABONA_SYSTEM, lowsec_pos_atk).await;
     let (vic_ship_id, _) =
         undock_player_to_space(&ctx, &mut vic_sess, ASABONA_SYSTEM, lowsec_pos_vic).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            100_999_005,
+            eve_db::InventoryItemRecord {
+                item_id: 100_999_005,
+                type_id: 185,
+                owner_id: CHAR_ALPHA_ATTACKER,
+                location_id: 100_000_001,
+                flag: eve_db::InventoryFlag::HiSlot0,
+                quantity: 5_000,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    ctx.invalidate_ship_fitting(100_000_001);
 
     let sec_before_low = ctx
         .db

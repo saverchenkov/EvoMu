@@ -496,6 +496,11 @@ async fn r6_t2_07_issue_376_cmd_unanchor_structures_and_corp_roles() {
     let err_role = crate::services::space_entity_ops::handle(&ctx, &mut line_sess, None, "entity", "CmdUnanchor", &[PyRep::Integer(mtu_id)], &kw).await.unwrap().unwrap_err();
     assert_eq!(err_role.code, "CorpRoleDenied");
 
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.member_roles.insert(char_id, ROLE_DIRECTOR);
+        }
+    });
     let mut dir_sess = sess(char_id, corp_id, sys_id, None, ROLE_DIRECTOR);
     assert!(crate::services::space_entity_ops::handle(&ctx, &mut dir_sess, None, "entity", "CmdUnanchor", &[PyRep::Integer(mtu_id)], &kw).await.unwrap().is_ok());
 }

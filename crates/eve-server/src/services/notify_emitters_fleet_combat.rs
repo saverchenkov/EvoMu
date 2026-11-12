@@ -303,9 +303,8 @@ pub(crate) async fn handle_set_password(
                     message: format!("Secure container {container_id} not found or not owned"),
                 });
             }
-            let (is_ceo, corp_roles) =
+            let (is_ceo, eff_role) =
                 snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, ctx.now_unix());
-            let eff_role = session.corp_role | corp_roles;
             if !is_ceo && (eff_role & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG)) == 0 {
                 return Err(BridgeRpcError {
                     code: "CorpRoleRequired".into(),

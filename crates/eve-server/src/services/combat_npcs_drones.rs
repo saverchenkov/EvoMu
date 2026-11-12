@@ -445,15 +445,53 @@ pub async fn handle_npcs_drones(
             {
                 return Some(Err(e));
             }
-            let mut drone_ids: Vec<i64> = match args.first() {
-                Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
-                    items.iter().filter_map(|it| it.as_i64()).collect()
-                }
-                Some(PyRep::Integer(id)) => vec![*id],
-                _ => Vec::new(),
-            };
+            let mut has_tuple_entries = false;
             let mut seen_drones = std::collections::HashSet::new();
-            drone_ids.retain(|id| seen_drones.insert(*id));
+            let mut requested_launches: Vec<(i64, usize)> = Vec::new();
+            match args.first() {
+                Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
+                    for it in items {
+                        if let Some(id) = it.as_i64() {
+                            if seen_drones.insert(id) {
+                                requested_launches.push((id, 1));
+                            }
+                        } else if let PyRep::Tuple(pair) | PyRep::List(pair) = it {
+                            has_tuple_entries = true;
+                            if let Some(id) = pair.first().and_then(|v| v.as_i64()) {
+                                let qty = pair
+                                    .get(1)
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(1)
+                                    .clamp(1, 50) as usize;
+                                if seen_drones.insert(id) {
+                                    requested_launches.push((id, qty));
+                                }
+                            }
+                        }
+                    }
+                }
+                Some(PyRep::Integer(id)) => {
+                    requested_launches.push((*id, 1));
+                }
+                _ => {}
+            }
+            let drone_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
+                let mut expanded = Vec::new();
+                for &(did, req_qty) in &requested_launches {
+                    let count = if req_qty > 1 {
+                        snap.items
+                            .get(&did)
+                            .map(|it| (it.quantity.max(1) as usize).min(req_qty))
+                            .unwrap_or(1)
+                    } else {
+                        1
+                    };
+                    for _ in 0..count {
+                        expanded.push(did);
+                    }
+                }
+                expanded
+            });
 
             let mut ship_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
             let snap_type_id = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).map(|s| s.type_id)).unwrap_or(0);
@@ -670,25 +708,41 @@ pub async fn handle_npcs_drones(
                     }
                 }
                 let mut results = Vec::with_capacity(prepared_drones.len());
+                let mut bay_stack_decrements: HashMap<i64, (u32, i64, i32, i32, bool)> = HashMap::new();
                 for (rec, _, _, _, _, _, _, d_pos, _, _, _, _, _, _, _, _) in &prepared_drones {
-                    let it = snap.items.get_mut(&rec.item_id).ok_or_else(|| BridgeRpcError {
-                        code: "DroneNotFound".into(),
-                        message: format!("Drone item {} not found", rec.item_id),
-                    })?;
-                    if it.owner_id != char_id || it.location_id != ship_id || it.flag != InventoryFlag::DroneBay || it.quantity <= 0 {
-                        return Err(BridgeRpcError {
-                            code: "DroneNotInBay".into(),
-                            message: format!("Drone {} is no longer in ship {ship_id}'s drone bay", rec.item_id),
-                        });
+                    let cur_qty = {
+                        let it = snap.items.get(&rec.item_id).ok_or_else(|| BridgeRpcError {
+                            code: "DroneNotFound".into(),
+                            message: format!("Drone item {} not found", rec.item_id),
+                        })?;
+                        if it.owner_id != char_id || it.location_id != ship_id || it.flag != InventoryFlag::DroneBay || it.quantity <= 0 {
+                            return Err(BridgeRpcError {
+                                code: "DroneNotInBay".into(),
+                                message: format!("Drone {} is no longer in ship {ship_id}'s drone bay", rec.item_id),
+                            });
+                        }
+                        it.quantity
+                    };
+                    let mut bid = snap.alloc_entity_id();
+                    while snap.items.contains_key(&bid) {
+                        bid = snap.alloc_entity_id();
                     }
-                    snap.next_entity_id += 1;
-                    let bid = snap.next_entity_id;
-                    let actual_item_id = if it.quantity > 1 {
-                        it.quantity -= 1;
-                        it.version += 1;
-                        let mut split_rec = it.clone();
-                        snap.next_entity_id += 1;
-                        let split_id = snap.next_entity_id;
+                    let actual_item_id = if cur_qty > 1 {
+                        let mut split_id = snap.alloc_entity_id();
+                        while snap.items.contains_key(&split_id) || split_id == bid {
+                            split_id = snap.alloc_entity_id();
+                        }
+                        let mut split_rec = {
+                            let it = snap.items.get_mut(&rec.item_id).expect("verified above");
+                            let prev_qty = it.quantity;
+                            it.quantity -= 1;
+                            it.version += 1;
+                            let entry = bay_stack_decrements
+                                .entry(rec.item_id)
+                                .or_insert((it.type_id, it.owner_id, prev_qty, it.quantity, it.singleton));
+                            entry.3 = it.quantity;
+                            it.clone()
+                        };
                         split_rec.item_id = split_id;
                         split_rec.location_id = sys_id as i64;
                         split_rec.flag = InventoryFlag::None;
@@ -698,6 +752,8 @@ pub async fn handle_npcs_drones(
                         snap.items.insert(split_id, split_rec);
                         split_id
                     } else {
+                        bay_stack_decrements.remove(&rec.item_id);
+                        let it = snap.items.get_mut(&rec.item_id).expect("verified above");
                         it.location_id = sys_id as i64;
                         it.flag = InventoryFlag::None;
                         it.singleton = true;
@@ -707,11 +763,11 @@ pub async fn handle_npcs_drones(
                     crate::sp6_lifecycle::record_drone_ball_meta_in_snap(snap, actual_item_id, bid);
                     snap.item_positions.insert(actual_item_id, [d_pos.x, d_pos.y, d_pos.z]);
                     snap.item_positions.insert(bid, [d_pos.x, d_pos.y, d_pos.z]);
-                    results.push((bid, actual_item_id));
+                    results.push((bid, actual_item_id, rec.type_id));
                 }
-                Ok(results)
+                Ok((results, bay_stack_decrements))
             });
-            let committed_launches = match db_launch {
+            let (committed_launches, bay_stack_decrements) = match db_launch {
                 Ok(v) => v,
                 Err(e) => {
                     with_mut_combat_runtime(ctx, |rt| {
@@ -723,8 +779,69 @@ pub async fn handle_npcs_drones(
                 }
             };
 
+            for (stack_id, (type_id, owner_id, old_qty, new_qty, singleton)) in bay_stack_decrements {
+                let (group_id, category_id) = ctx
+                    .sde
+                    .types
+                    .get(&type_id)
+                    .map(|t| (t.group_id, t.category_id))
+                    .unwrap_or((100, 18));
+                ctx.notify(
+                    NotificationTarget::Character(char_id),
+                    "OnItemChange",
+                    "charid",
+                    vec![
+                        PyRep::keyval([
+                            ("itemID", PyRep::Integer(stack_id)),
+                            ("typeID", PyRep::Integer(type_id as i64)),
+                            ("ownerID", PyRep::Integer(owner_id)),
+                            ("locationID", PyRep::Integer(ship_id)),
+                            ("flagID", PyRep::Integer(InventoryFlag::DroneBay as i64)),
+                            ("quantity", PyRep::Integer(new_qty as i64)),
+                            ("groupID", PyRep::Integer(i64::from(group_id))),
+                            ("categoryID", PyRep::Integer(i64::from(category_id))),
+                            ("singleton", PyRep::Bool(singleton)),
+                        ]),
+                        PyRep::Dict(vec![
+                            (PyRep::Integer(5), PyRep::Integer(old_qty as i64)),
+                            (PyRep::Integer(9), PyRep::Integer(old_qty as i64)),
+                        ]),
+                    ],
+                );
+            }
+            for &(_bid, launched_drone_item_id, type_id) in &committed_launches {
+                let (group_id, category_id) = ctx
+                    .sde
+                    .types
+                    .get(&type_id)
+                    .map(|t| (t.group_id, t.category_id))
+                    .unwrap_or((100, 18));
+                ctx.notify(
+                    NotificationTarget::Character(char_id),
+                    "OnItemChange",
+                    "charid",
+                    vec![
+                        PyRep::keyval([
+                            ("itemID", PyRep::Integer(launched_drone_item_id)),
+                            ("typeID", PyRep::Integer(type_id as i64)),
+                            ("ownerID", PyRep::Integer(char_id)),
+                            ("locationID", PyRep::Integer(sys_id as i64)),
+                            ("flagID", PyRep::Integer(InventoryFlag::None as i64)),
+                            ("quantity", PyRep::Integer(-1)),
+                            ("groupID", PyRep::Integer(i64::from(group_id))),
+                            ("categoryID", PyRep::Integer(i64::from(category_id))),
+                            ("singleton", PyRep::Bool(true)),
+                        ]),
+                        PyRep::Dict(vec![
+                            (PyRep::Integer(3), PyRep::Integer(ship_id)),
+                            (PyRep::Integer(4), PyRep::Integer(InventoryFlag::DroneBay as i64)),
+                        ]),
+                    ],
+                );
+            }
+
             with_mut_combat_runtime(ctx, |rt| {
-                for (i, &(bid, launched_drone_item_id)) in committed_launches.iter().enumerate() {
+                for (i, &(bid, launched_drone_item_id, _)) in committed_launches.iter().enumerate() {
                     if let Some(mut st) = rt.active_drones_in_space.remove(&res_ids[i]) {
                         st.ball_id = bid;
                         st.drone_item_id = launched_drone_item_id;
@@ -735,7 +852,7 @@ pub async fn handle_npcs_drones(
             });
 
             let mut launched_ball_ids = Vec::new();
-            for ((rec, sde_t, is_sentry, max_vel, _, _, _, d_pos, _, _, _, _, _, _, _, (eff_hp, eff_sh, eff_ar)), (ball_id, _launched_drone_item_id)) in prepared_drones.into_iter().zip(committed_launches.into_iter()) {
+            for ((rec, sde_t, is_sentry, max_vel, _, _, _, d_pos, _, _, _, _, _, _, _, (eff_hp, eff_sh, eff_ar)), (ball_id, _launched_drone_item_id, _)) in prepared_drones.into_iter().zip(committed_launches.into_iter()) {
                 let mut cs = ctx.build_type_combat_state(rec.type_id);
                 if cs.structure_hp <= 0.0 {
                     cs.structure_hp = 200.0;
@@ -820,7 +937,13 @@ pub async fn handle_npcs_drones(
                 ctx.notify(NotificationTarget::Character(char_id), "OnDroneStateChange", "charid", notif_args);
                 launched_ball_ids.push(ball_id);
             }
-            Some(Ok(PyRep::List(launched_ball_ids.into_iter().map(PyRep::Integer).collect())))
+            if has_tuple_entries || args.len() >= 2 {
+                Some(Ok(PyRep::Dict(Vec::new())))
+            } else {
+                Some(Ok(PyRep::List(
+                    launched_ball_ids.into_iter().map(PyRep::Integer).collect(),
+                )))
+            }
         }
 
         ("entity", "CmdReturnBay") => {

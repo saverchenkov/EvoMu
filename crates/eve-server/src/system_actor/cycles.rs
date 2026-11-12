@@ -746,6 +746,14 @@ pub(crate) fn step_cycles_and_capacitor(
             }
 
             // 4. Weapon ammo & T2/Faction/Mining crystal volatility damage (`feat:modules.t2-crystal-volatility-destruction`)
+            let target_destroyed_in_cycle = cycle.target_id.is_some_and(|tid| {
+                destroyed_balls.iter().any(|&(bid, _)| bid == tid)
+                    || !ballpark.balls.contains_key(&tid)
+                    || ballpark
+                        .combat_states
+                        .get(&tid)
+                        .is_some_and(|cs| cs.structure_hp <= 0.0)
+            });
             let mut crystal_shattered_empty = false;
             if let Some(db_ref) = db_opt {
                 let ammo_is_non_volatile_crystal = cycle
@@ -810,14 +818,32 @@ pub(crate) fn step_cycles_and_capacitor(
                                         }
                                         if destroy_stack {
                                             snap.items.remove(&cid);
+                                            snap.module_active_charges.remove(&turret_id);
                                             crystal_shattered_empty = true;
                                         }
                                     } else if cycle.crystal_volatility_damage >= 0.0 {
-                                        // Projectile / hybrid / missile charges consume 1 unit per shot
-                                        if let Some(c_item) = snap.items.get_mut(&cid) {
+                                        // Projectile / hybrid / missile charges consume 1 unit per shot.
+                                        // When `dogmaIM.Activate` pre-consumed round #1 at cycle #1 start (t=0),
+                                        // each subsequent cycle (k+1) consumes its round at cycle start (i.e. at the
+                                        // end of cycle k when `cycle.repeat > 0 && !burned_out`), and a round that
+                                        // reduces `quantity` from 1 -> 0 chambers the final shot for cycle k+1
+                                        // instead of aborting cycle k+1 early.
+                                        let pre_consumed_mode =
+                                            cycle.crystal_volatility_chance < 0.0;
+                                        if pre_consumed_mode {
+                                            if cycle.repeat > 0 && !burned_out && !target_destroyed_in_cycle {
+                                                if let Some(c_item) = snap.items.get_mut(&cid) {
+                                                    c_item.quantity = c_item.quantity.saturating_sub(1);
+                                                    if c_item.quantity == 0 {
+                                                        snap.items.remove(&cid);
+                                                    }
+                                                }
+                                            }
+                                        } else if let Some(c_item) = snap.items.get_mut(&cid) {
                                             c_item.quantity = c_item.quantity.saturating_sub(1);
                                             if c_item.quantity == 0 {
                                                 snap.items.remove(&cid);
+                                                snap.module_active_charges.remove(&turret_id);
                                                 crystal_shattered_empty = true;
                                             }
                                         }
@@ -831,6 +857,7 @@ pub(crate) fn step_cycles_and_capacitor(
                                             && i.item_id != turret_id
                                             && i.quantity <= 0)
                                     });
+                                    snap.module_active_charges.remove(&turret_id);
                                     crystal_shattered_empty = true;
                                 }
                             }
@@ -889,8 +916,10 @@ pub(crate) fn step_cycles_and_capacitor(
                                         }
                                         for &tid in &cycle.linked_turrets {
                                             if let Some(tf) = snap.items.get(&tid).map(|i| i.flag) {
-                                                snap.next_entity_id += 1;
-                                                let new_cid = snap.next_entity_id;
+                                                let mut new_cid = snap.alloc_entity_id();
+                                                while snap.items.contains_key(&new_cid) {
+                                                    new_cid = snap.alloc_entity_id();
+                                                }
                                                 snap.items.insert(
                                                     new_cid,
                                                     eve_db::InventoryItemRecord {
@@ -1291,6 +1320,9 @@ pub(crate) fn cleanup_removed_module_cycle(ballpark: &mut Ballpark, removed: &Ac
         db_ref.with_mut_snapshot(|snap| {
             snap.module_active_states.remove(&removed.module_id);
             snap.module_active_charges.remove(&removed.module_id);
+            for &tid in &removed.linked_turrets {
+                snap.module_active_charges.remove(&tid);
+            }
         });
     }
 }
@@ -1865,17 +1897,21 @@ pub(crate) fn flush_pending_cycle_damage_notifications(
                         eve_proto::PyRep::String("isWrecking".into()),
                         eve_proto::PyRep::Bool(false),
                     ),
+                    (
+                        eve_proto::PyRep::String("isBanked".into()),
+                        eve_proto::PyRep::Bool(false),
+                    ),
                 ]);
-                let msg_args = vec![
+                let msg_tuple = vec![
                     eve_proto::PyRep::String("AttackHit".into()),
-                    dmg_dict,
+                    dmg_dict.clone(),
                 ];
-                enqueue_notif(acid, "OnDamageMessage", msg_args.clone());
+                enqueue_notif(acid, "OnDamageMessage", vec![dmg_dict]);
                 enqueue_notif(
                     acid,
                     "OnDamageMessages",
                     vec![eve_proto::PyRep::List(vec![eve_proto::PyRep::Tuple(
-                        msg_args,
+                        msg_tuple,
                     )])],
                 );
             }
@@ -1924,17 +1960,21 @@ pub(crate) fn flush_pending_cycle_damage_notifications(
                         eve_proto::PyRep::String("isWrecking".into()),
                         eve_proto::PyRep::Bool(false),
                     ),
+                    (
+                        eve_proto::PyRep::String("isBanked".into()),
+                        eve_proto::PyRep::Bool(false),
+                    ),
                 ]);
-                let vic_args = vec![
+                let vic_tuple = vec![
                     eve_proto::PyRep::String("AttackedBy".into()),
-                    vic_dict,
+                    vic_dict.clone(),
                 ];
-                enqueue_notif(vcid, "OnDamageMessage", vic_args.clone());
+                enqueue_notif(vcid, "OnDamageMessage", vec![vic_dict]);
                 enqueue_notif(
                     vcid,
                     "OnDamageMessages",
                     vec![eve_proto::PyRep::List(vec![eve_proto::PyRep::Tuple(
-                        vic_args,
+                        vic_tuple,
                     )])],
                 );
             }

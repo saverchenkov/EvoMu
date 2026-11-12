@@ -615,8 +615,12 @@ fn handle_audit_member(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
     let corp_id = session.corporation_id.unwrap_or(0);
-    let (is_ceo, roles) = crate::services::fleet_social::get_effective_corp_roles(ctx, corp_id, char_id);
-    if !is_ceo && !eve_db::corp_roles::has_role(session.corp_role | roles, eve_db::corp_roles::ROLE_DIRECTOR) {
+    promote_due_pending_corp_grants(ctx, corp_id);
+    let now_unix = ctx.now_unix();
+    let (is_ceo, roles) = ctx.db.with_snapshot(|snap| {
+        snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, now_unix)
+    });
+    if !is_ceo && !eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR) {
         return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only Directors and CEO can audit member roles and permissions".into() }));
     }
     let target_id = args.first().and_then(|a| a.as_i64()).or_else(|| kwargs.get("characterID").and_then(|a| a.as_i64()));
@@ -698,16 +702,17 @@ pub(super) fn handle_corps(
                 snap.corporations.get(&corp_id).map(|c| {
                     let h_divs = snap.corp_hangar_divisions.get(&corp_id).cloned().unwrap_or_default();
                     let w_divs: Vec<(u8, String)> = c.wallet_divisions.iter().map(|d| (d.division_id, d.name.clone())).collect();
-                    (c.corporation_id, c.name.clone(), c.ticker.clone(), (c.ceo_id > 0).then_some(c.ceo_id), c.members.len() as i64, c.tax_rate, c.alliance_id.filter(|&id| id > 0), c.hq_station_id.filter(|&id| id > 0), c.description.clone(), c.url.clone(), h_divs, w_divs, allow_war)
+                    let m_limit = compute_corp_member_limit(ctx, snap, c.corporation_id, c.ceo_id) as i64;
+                    (c.corporation_id, c.name.clone(), c.ticker.clone(), (c.ceo_id > 0).then_some(c.ceo_id), c.members.len() as i64, m_limit, c.tax_rate, c.alliance_id.filter(|&id| id > 0), c.hq_station_id.filter(|&id| id > 0), c.description.clone(), c.url.clone(), h_divs, w_divs, allow_war)
                 })
             }).or_else(|| {
                 // DERIVED: SDE NPC corporations fallback for starter/NPC corps
                 ctx.sde.npc_corporations.get(&corp_id).map(|c| {
-                    (c.corporation_id, c.name.clone(), c.ticker_name.clone(), None, 10_000i64, c.tax_rate, None, c.station_id.filter(|&id| id > 0), format!("NPC Corporation {}", c.name), String::new(), HashMap::new(), Vec::new(), false)
+                    (c.corporation_id, c.name.clone(), c.ticker_name.clone(), None, 10_000i64, 100_000i64, c.tax_rate, None, c.station_id.filter(|&id| id > 0), format!("NPC Corporation {}", c.name), String::new(), HashMap::new(), Vec::new(), false)
                 })
             });
 
-            let Some((cid, name, ticker, ceo_id, m_count, tax, alliance_id, hq_station, desc, url, h_divs, w_divs, allow_war)) = corp_info else {
+            let Some((cid, name, ticker, ceo_id, m_count, m_limit, tax, alliance_id, hq_station, desc, url, h_divs, w_divs, allow_war)) = corp_info else {
                 return Some(Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") }));
             };
             let ((s1, s2, s3, c1), (c2, c3), apps_enabled, friendly_fire) = read_corp_gov(ctx, |g| {
@@ -726,6 +731,7 @@ pub(super) fn handle_corps(
                 ("ceoID".into(), ceo_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
                 ("creatorID".into(), PyRep::Integer(creator_id)),
                 ("memberCount".into(), PyRep::Integer(m_count)),
+                ("memberLimit".into(), PyRep::Integer(m_limit)),
                 ("taxRate".into(), PyRep::Real(tax)),
                 ("iskTaxRate".into(), PyRep::Real(tax)),
                 ("loyaltyPointTaxRate".into(), PyRep::Real(tax)),

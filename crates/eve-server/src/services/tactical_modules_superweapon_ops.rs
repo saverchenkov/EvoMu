@@ -856,9 +856,15 @@ pub async fn activate_superweapon_with_args(
             (PyRep::String("attackerID".into()), PyRep::Integer(ship_id)),
             (PyRep::String("target".into()), PyRep::Integer(tgt_id)),
             (PyRep::String("target_ID".into()), PyRep::Integer(tgt_id)),
+            (
+                PyRep::String("owner".into()),
+                PyRep::Tuple(vec![PyRep::Integer(2), PyRep::Integer(char_id)]),
+            ),
             (PyRep::String("weapon".into()), PyRep::Integer(mod_type_id as i64)),
             (PyRep::String("hitQuality".into()), PyRep::Integer(5)),
             (PyRep::String("attackType".into()), PyRep::String("me".into())),
+            (PyRep::String("isWrecking".into()), PyRep::Bool(false)),
+            (PyRep::String("isBanked".into()), PyRep::Bool(false)),
         ]);
         ctx.notify(
             NotificationTarget::Character(char_id),
@@ -870,7 +876,10 @@ pub async fn activate_superweapon_with_args(
             NotificationTarget::Character(char_id),
             "OnDamageMessages",
             "charid",
-            vec![PyRep::List(vec![PyRep::Tuple(vec![dmg_dict])])],
+            vec![PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::String("AttackHit".into()),
+                dmg_dict,
+            ])])],
         );
     }
 

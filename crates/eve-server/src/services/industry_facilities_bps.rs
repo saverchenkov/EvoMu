@@ -594,9 +594,7 @@ pub fn handle_industry_facilities_bps(
                         );
                         let has_corp_access = owner_id == caller_corp_id
                             && !(1_000_000..2_000_000).contains(&owner_id)
-                            && ((session.corp_role & CORP_BP_ROLES) != 0
-                                || is_ceo
-                                || (eff_roles & CORP_BP_ROLES) != 0);
+                            && (is_ceo || (eff_roles & CORP_BP_ROLES) != 0);
                         if !has_corp_access {
                             return Err(BridgeRpcError { code: "OwnerAccessDenied".into(), message: format!("Character {char_id} is not authorized to query blueprints for owner {owner_id}") });
                         }
@@ -1218,18 +1216,16 @@ pub fn handle_industry_facilities_bps(
                     if owner_corp_id != char_id {
                         let req_roles = eve_db::corp_roles::ROLE_DIRECTOR
                             | eve_db::corp_roles::ROLE_STATION_MANAGER;
+                        let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
+                            owner_corp_id,
+                            char_id,
+                            Some(facility_id),
+                            session.corp_role,
+                            ctx.now_unix(),
+                        );
                         let has_role = session.has_gm_role()
-                            || (session.corp_role & req_roles) != 0
-                            || snap.corporations.get(&owner_corp_id).is_some_and(|c| {
-                                c.ceo_id == char_id
-                                    || c.member_roles
-                                        .get(&char_id)
-                                        .is_some_and(|&r| (r & req_roles) != 0)
-                            })
-                            || snap
-                                .corp_role_assignments
-                                .get(&(owner_corp_id, char_id))
-                                .is_some_and(|a| (a.roles & req_roles) != 0);
+                            || is_ceo
+                            || (eff_roles & req_roles) != 0;
                         if !has_role {
                             return Err(BridgeRpcError {
                                 code: "InsufficientCorpRoles".into(),

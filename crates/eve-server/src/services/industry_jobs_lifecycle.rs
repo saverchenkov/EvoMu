@@ -68,12 +68,6 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                     let can_cancel_corp = meta.use_corp
                         && meta.owner_id == char_corp
                         && (session.has_gm_role()
-                            || (session.corp_role
-                                & (eve_db::corp_roles::ROLE_DIRECTOR
-                                    | eve_db::corp_roles::ROLE_FACTORY_MANAGER
-                                    | eve_db::corp_roles::ROLE_RENT_FACTORY_FACILITY
-                                    | eve_db::corp_roles::ROLE_RENT_RESEARCH_FACILITY))
-                                != 0
                             || is_ceo
                             || (eff_roles
                                 & (eve_db::corp_roles::ROLE_DIRECTOR

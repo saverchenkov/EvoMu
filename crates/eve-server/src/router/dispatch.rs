@@ -701,7 +701,7 @@ impl ServerContext {
                     .fold(1_000i64, |acc, b| {
                         acc.wrapping_mul(31).wrapping_add(b as i64)
                     })
-                    .abs()
+                    .saturating_abs()
                     .max(1),
                 Some(PyRep::Tuple(items)) => {
                     if let Some(id) = items.first().and_then(|v| v.as_i64()) {
@@ -715,7 +715,7 @@ impl ServerContext {
                             .fold(1_000i64, |acc, b| {
                                 acc.wrapping_mul(31).wrapping_add(b as i64)
                             })
-                            .abs()
+                            .saturating_abs()
                             .max(1)
                     } else {
                         return Err(BridgeRpcError {

@@ -5111,6 +5111,7 @@ async fn test_campaign_enrollment_chat_bans_and_crimewatch_timers() {
     let _s_b = login_in_space(&ctx, 91_006, "other", "other-secret", PILOT_B, ship_b, 587, zarzakh, DVec3::new(1_000.0, 0.0, 0.0)).await;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(gun_id, make_item(gun_id, 484, PILOT_A, ship_a, InventoryFlag::HiSlot0, 1, true));
+        snap.items.insert(gun_id + 1, make_item(gun_id + 1, 178, PILOT_A, ship_a, InventoryFlag::HiSlot0, 100, false));
         snap.module_online_states.insert(gun_id, true);
     });
     ctx.invalidate_ship_fitting(ship_a);

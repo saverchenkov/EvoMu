@@ -65,7 +65,7 @@ pub const MAX_GRPC_FRAME_BUFFER_BYTES: usize = H2_INITIAL_STREAM_WINDOW_BYTES as
 /// Maximum uncompressed or wire gRPC message payload size (`1 MiB - 5` bytes so a complete frame fits in one stream window).
 pub const MAX_GRPC_MESSAGE_BYTES: usize = MAX_GRPC_FRAME_BUFFER_BYTES - 5;
 
-static NEXT_GRPC_SESSION_ID: AtomicU64 = AtomicU64::new(9_000_000);
+pub use crate::router::NEXT_TRANSPORT_SESSION_ID as NEXT_GRPC_SESSION_ID;
 static LAST_REJECTED_BEARER_WARN_UNIX: AtomicU64 = AtomicU64::new(0);
 
 fn warn_rejected_bearer_token(now_unix: u64, peer_ip: Option<std::net::IpAddr>, reason: &str) {

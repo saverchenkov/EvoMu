@@ -66,8 +66,8 @@ pub fn handle_upgrade_gantry(
         let (is_ceo, roles) =
             snap.effective_corp_roles_at(char_corp, char_id, None, session.corp_role, ctx.now_unix());
         let has_role = session.has_gm_role()
-            || (session.corp_role & req_roles) != 0
-            || (snap.corporations.contains_key(&char_corp) && (is_ceo || (roles & req_roles) != 0));
+            || is_ceo
+            || (roles & req_roles) != 0;
         if !has_role {
             return Err(BridgeRpcError {
                 code: "CrpAccessDenied".into(),
@@ -295,7 +295,6 @@ pub fn handle_anchor_orbital(
         let (is_ceo, roles) =
             snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, ctx.now_unix());
         let has_role = session.has_gm_role()
-            || (session.corp_role & req_roles) != 0
             || is_ceo
             || (roles & req_roles) != 0;
         if !has_role {

@@ -492,6 +492,19 @@ async fn test_parity_notify_fw_capture_changed() {
             },
         );
         s.module_online_states.insert(fw_gun, true);
+        s.items.insert(
+            fw_gun + 1,
+            eve_db::InventoryItemRecord {
+                item_id: fw_gun + 1,
+                type_id: 178,
+                owner_id: PILOT_B,
+                location_id: fw_ship,
+                flag: eve_db::InventoryFlag::HiSlot0,
+                quantity: 1_000,
+                singleton: false,
+                ..Default::default()
+            },
+        );
     });
     ctx.invalidate_ship_fitting(fw_ship);
 

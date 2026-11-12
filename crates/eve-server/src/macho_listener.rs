@@ -19,7 +19,7 @@ use eve_machonet::{
 };
 use eve_proto::{marshal, BridgeRpcError, PyRep};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -36,7 +36,7 @@ pub const IDLE_READ_TIMEOUT_SECS: u64 = 300;
 /// Maximum timeout to finish reading a frame body after its 4-byte length prefix arrives.
 pub const FRAME_BODY_TIMEOUT_SECS: u64 = 30;
 
-static NEXT_MACHO_SESSION_ID: AtomicU64 = AtomicU64::new(10_000);
+pub use crate::router::NEXT_TRANSPORT_SESSION_ID as NEXT_MACHO_SESSION_ID;
 
 /// Maps a `CallReq` dispatch failure into a V24 `machoNet` `ErrorResponse` body, preserving
 /// client-handled `UserError` keys (including `InsureShip*` and `DockingApproach` prompts)

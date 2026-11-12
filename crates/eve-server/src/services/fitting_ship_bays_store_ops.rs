@@ -280,15 +280,13 @@ pub(super) async fn handle_store_vessel(
                             format!("Corporation-owned {label} must be in CorpSAG1..7"),
                         ));
                     }
-                    let (is_ceo, snap_roles) =
-                        crate::services::inventory_bound::get_effective_corp_roles_at_location_in_snap_at(
-                            snap,
-                            caller_corp,
-                            char_id,
-                            Some(dock),
-                            ctx.now_unix(),
-                        );
-                    let effective_roles = snap_roles | session.corp_role;
+                    let (is_ceo, effective_roles) = snap.effective_corp_roles_at(
+                        caller_corp,
+                        char_id,
+                        Some(dock),
+                        session.corp_role,
+                        ctx.now_unix(),
+                    );
                     let is_dir_or_ceo = is_ceo
                         || eve_db::corp_roles::has_role(
                             effective_roles,

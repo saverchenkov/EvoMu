@@ -429,7 +429,6 @@ fn handle_move_assets_to_safety(ctx: &ServerContext, session: &mut SessionState,
             let (is_ceo, roles) =
                 snap.effective_corp_roles_at(owner_id, char_id, Some(structure_id), session.corp_role, now_unix);
             let has_dir = session.has_gm_role()
-                || (session.corp_role & eve_db::corp_roles::ROLE_DIRECTOR) != 0
                 || is_ceo
                 || (roles & eve_db::corp_roles::ROLE_DIRECTOR) != 0;
             if !has_dir { return Err(err("InsufficientCorpRoles", "Moving corporate assets to safety requires Director or CEO role")); }
@@ -644,7 +643,6 @@ fn handle_move_safety_wrap_to_structure(ctx: &ServerContext, session: &mut Sessi
             let (is_ceo, roles) =
                 snap.effective_corp_roles_at(caller_corp, char_id, Some(dest_id), session.corp_role, now_unix);
             let has_dir = session.has_gm_role()
-                || (session.corp_role & eve_db::corp_roles::ROLE_DIRECTOR) != 0
                 || is_ceo
                 || (roles & eve_db::corp_roles::ROLE_DIRECTOR) != 0;
             if !has_dir { return Err(err("InsufficientCorpRoles", "Delivering corporate asset safety wrap requires Director or CEO role")); }
@@ -945,17 +943,24 @@ pub(crate) fn require_corp_profile_manager(snap: &WorldStateSnapshot, session: &
     if corp_id != 0 && char_corp != corp_id { return Err(err("StructureOwnershipViolation", "Caller does not belong to the owning corporation")); }
     let req = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
     let (is_ceo, roles) = snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, 0);
-    let has_role = (session.corp_role & req) != 0 || is_ceo || (roles & req) != 0;
+    let has_role = is_ceo || (roles & req) != 0;
     if !has_role { return Err(err("InsufficientCorpRoles", "Structure profile and ACL configuration requires Director or Station Manager role")); }
     Ok(())
 }
 
 pub(crate) fn require_structure_corp_manager(snap: &WorldStateSnapshot, session: &SessionState, char_id: i64, structure_id: i64) -> Result<UpwellStructureRecord, BridgeRpcError> {
     if session.has_gm_role() { return snap.structures.get(&structure_id).cloned().ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found"))); }
-    if (session.corp_role & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER)) != 0 {
+    let st = snap.structures.get(&structure_id).cloned().ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found")))?;
+    let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
+        st.owner_corp_id,
+        char_id,
+        Some(structure_id),
+        session.corp_role,
+        0,
+    );
+    if is_ceo || (eff_roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER)) != 0 {
         return require_structure_corp_member(snap, char_id, structure_id);
     }
-    let st = snap.structures.get(&structure_id).cloned().ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found")))?;
     crate::services::structure_profile_services::require_structure_service_access_in_snap(
         None,
         snap,

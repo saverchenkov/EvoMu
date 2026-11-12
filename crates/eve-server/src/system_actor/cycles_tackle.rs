@@ -782,6 +782,15 @@ pub(crate) fn handle_add_module_cycle(
     deactivation_hook: Option<&ModuleDeactivationHook>,
     mut cycle: ActiveModuleCycle,
 ) -> Result<(), String> {
+    if (cycle.weapon_is_turret || cycle.weapon_is_missile)
+        && cycle.ammo_type_id.is_none()
+        && (cycle.damage_vector.em - 20.0).abs() < 1e-6
+        && (cycle.damage_vector.thermal - 20.0).abs() < 1e-6
+        && (cycle.damage_vector.kinetic - 20.0).abs() < 1e-6
+        && (cycle.damage_vector.explosive - 20.0).abs() < 1e-6
+    {
+        cycle.damage_vector = eve_destiny::DamageVector::new(0.0, 0.0, 0.0, 0.0);
+    }
     if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
         cs.undock_invulnerable_remaining_ticks = 0;
     }
