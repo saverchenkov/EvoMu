@@ -135,7 +135,7 @@ fn evedb_kills_all_remaining_sqlite_store_mutants() {
     assert_ne!(fp_market_order(&MarketOrderRecord { vol_entered: 1, ..mo_base.clone() }), mo_fp);
     assert_ne!(fp_market_order(&MarketOrderRecord { escrow: IskCents(1), ..mo_base.clone() }), mo_fp);
 
-    let mut orders = std::collections::HashMap::new();
+    let mut orders = crate::CowMap::new();
     orders.insert(1, mo_base.clone());
     orders.insert(2, MarketOrderRecord { order_id: 2, price: IskCents(500), ..mo_base });
     let d1 = fp_market_orders_digest(&orders);

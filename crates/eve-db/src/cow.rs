@@ -2076,7 +2076,7 @@ mod tests {
                 target_level: 5,
                 start_sp: 45_255.0,
                 end_sp: 256_000.0,
-                duration_seconds: 3_600,
+                duration_seconds: 3_600.0,
                 started_at_unix: Some(1_700_000_000),
             }],
         );
