@@ -1294,6 +1294,10 @@ async fn b3_destruction_pipeline_idempotency_unpiloted_hull_kills_and_sqlite_rel
         .expect("ship.Eject succeeds");
     let ejected_pod_id = match eject_resp {
         PyRep::Integer(cid) => cid,
+        PyRep::KeyVal(kv) => kv
+            .iter()
+            .find_map(|(k, v)| (k == "capsuleID" || k == "shipID").then_some(v).and_then(|v| v.as_i64()))
+            .expect("capsuleID in ship.Eject KeyVal"),
         other => panic!("expected capsule id from ship.Eject, got {other:?}"),
     };
     assert_ne!(ejected_pod_id, eject_ship);
