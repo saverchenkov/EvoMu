@@ -580,7 +580,13 @@ fn entity_kv_1000_character_scale_and_per_row_64kib_budget() {
     assert_eq!(snap.entity_kv.len(), 6_000);
 
     let mut fp = replace_sqlite_from_snapshot(&mut conn, &snap).expect("replace 6000 rows");
-    let (loaded, _) = load_snapshot_from_sqlite(&conn).expect("load 6000 rows");
+    {
+        let tx = conn.transaction().expect("tx");
+        let delta = sync_dirty_to_sqlite(&tx, &snap, &mut fp, false).expect("noop sync before reload");
+        assert!(!delta.dirty);
+        tx.commit().expect("commit");
+    }
+    let (loaded, mut loaded_fp) = load_snapshot_from_sqlite(&conn).expect("load 6000 rows");
     assert_eq!(loaded.entity_kv.len(), 6_000);
     assert_eq!(
         loaded.kv(Ns::XmppAuthToken).get::<String>(90_000_999, "").as_deref(),
@@ -588,7 +594,7 @@ fn entity_kv_1000_character_scale_and_per_row_64kib_budget() {
     );
 
     let tx = conn.transaction().expect("tx");
-    let delta = sync_dirty_to_sqlite(&tx, &loaded, &mut fp, false).expect("noop sync");
+    let delta = sync_dirty_to_sqlite(&tx, &loaded, &mut loaded_fp, false).expect("noop sync");
     assert!(!delta.dirty);
     tx.commit().expect("commit");
 
