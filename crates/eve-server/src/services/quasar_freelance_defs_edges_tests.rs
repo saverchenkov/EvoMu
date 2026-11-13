@@ -141,7 +141,7 @@ fn deliver_request_error_rejection_and_completion_paths() {
     assert_eq!(call(&router, &player, status_ty, Vec::new(), now).status_code, STATUS_BAD_REQUEST);
 
     // Unknown UUID -> STATUS_NOT_FOUND
-    let unknown_uuid = vec![0xee; 16];
+    let unknown_uuid = vec![0xee_u8; 16];
     let unk_deliv_req = pb::message(deliver_ty)
         .set("project.uuid", unknown_uuid.clone())
         .must_encode();
