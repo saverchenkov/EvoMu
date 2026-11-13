@@ -18,7 +18,7 @@ use eve_machonet::{
     MachoHandshakeStateMachine, MachoPacket, MachoPacketType, SessionState, VersionExchange,
     MACHO_PROXY_NODE_ID,
 };
-use eve_proto::{marshal, BridgeRpcError, PyRep};
+use eve_proto::{marshal, PyRep};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -117,7 +117,7 @@ impl Drop for PreAuthConnectionGuard {
 pub(crate) fn map_call_req_error_body(
     service: &str,
     method: &str,
-    err: &BridgeRpcError,
+    err: &eve_proto::BridgeRpcError,
 ) -> PyRep {
     err.to_client_error(service, method)
         .to_macho_error_body(MachoPacketType::CallReq as i64)
