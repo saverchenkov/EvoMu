@@ -263,16 +263,19 @@ fn beacon_type_for_module(ctx: &ServerContext, mod_type: &eve_sde::InvType) -> O
     })
 }
 
-pub fn active_cyno_jammer(ctx: &ServerContext, sys_id: u32) -> Option<i64> {
+fn is_system_region_or_incursion_jammed(ctx: &ServerContext, sys_id: u32) -> bool {
     if sys_id == 30_100_000
         || ctx.sde.solar_systems.get(&sys_id).map(|s| s.region_id) == Some(10_000_070)
     {
-        return Some(ctx.now_blueos_filetime_ticks());
+        return true;
     }
-    if let Some(effects) = crate::services::pve_special_sites::get_incursion_effects_for_system(ctx, sys_id) {
-        if effects.cyno_jammed {
-            return Some(ctx.now_blueos_filetime_ticks());
-        }
+    crate::services::pve_special_sites::get_incursion_effects_for_system(ctx, sys_id)
+        .is_some_and(|effects| effects.cyno_jammed)
+}
+
+pub fn active_cyno_jammer(ctx: &ServerContext, sys_id: u32) -> Option<i64> {
+    if is_system_region_or_incursion_jammed(ctx, sys_id) {
+        return Some(ctx.now_blueos_filetime_ticks());
     }
     let jammer_structure_types: Vec<TypeId> = ctx
         .sde
@@ -321,7 +324,7 @@ pub(crate) fn unix_to_blueos_filetime_ticks(unix_secs: u64) -> i64 {
 /// Evaluates `beyonce.GetCynoJammerState` in the V24.01 `cynoJammerIcon.GetJamStatus` wire format:
 /// `None` when off, `Some(ts <= now_ticks)` when actively jammed, or `Some(ts > now_ticks)` while spooling.
 pub(crate) fn cyno_jammer_state_ticks(ctx: &ServerContext, sys_id: u32) -> Option<i64> {
-    if sys_id == 30_100_000 || is_pochven_system(sys_id) {
+    if is_system_region_or_incursion_jammed(ctx, sys_id) {
         return Some(ctx.now_blueos_filetime_ticks());
     }
     let now = ctx.now_unix();

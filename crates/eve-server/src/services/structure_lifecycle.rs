@@ -1626,9 +1626,9 @@ fn emit_structure_state_transition_notifs(
             );
         }
         let state_args = vec![
-            PyRep::Integer(i64::from(sys_id)),
-            PyRep::Integer(structure_id),
-            PyRep::String(new_state),
+            eve_proto::PyRep::Integer(i64::from(sys_id)),
+            eve_proto::PyRep::Integer(structure_id),
+            eve_proto::PyRep::String(new_state),
         ];
         ctx.notify(
             crate::router::NotificationTarget::SolarSystem(sys_id),
