@@ -15,9 +15,8 @@ use crate::services::quasar_cosmetics_skinr::{
 };
 use eve_db::{IskCents, WorldRepository};
 use eve_machonet::service_roles;
-use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, QuasarDescriptorRegistry,
-};
+use eve_proto::pb;
+use eve_proto::quasar::{GoogleDuration, GoogleTimestamp, QuasarDescriptorRegistry};
 use eve_proto::PyRep;
 use std::sync::{Arc, Mutex};
 
@@ -94,26 +93,21 @@ fn test_skin_purchase_rollback_branches_account_sink_and_admin_expiration_errors
     }
 
     // Create a character-targeted listing for `buyer` (30% tax rate)
-    let mut shex_msg = Vec::new();
-    encode_string_field(1, skin_hex, &mut shex_msg);
-    let mut lic_ok = Vec::new();
-    put_seq(1, seller as u64, &mut lic_ok);
-    encode_bytes_field(2, &shex_msg, &mut lic_ok);
-    let mut target_char = Vec::new();
-    put_seq(4, buyer as u64, &mut target_char);
-
-    let mut req_create = Vec::new();
-    encode_isk_msg(1, 1_000_000, &mut req_create);
-    encode_bytes_field(3, &lic_ok, &mut req_create);
-    put_seconds(4, 86_400, &mut req_create);
-    encode_varint_field(5, 1, &mut req_create);
-    encode_bytes_field(6, &target_char, &mut req_create);
+    let req_create = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest")
+        .set("price_isk.units", 1_000_000i64)
+        .set("price_isk.nanos", 0i32)
+        .set("skin.character.sequential", seller as u32)
+        .set("skin.skin.hex", skin_hex)
+        .set("duration", GoogleDuration { seconds: 86_400, nanos: 0 })
+        .set("quantity", 1u32)
+        .set("target.character.sequential", buyer as u32)
+        .must_encode();
     assert_eq!(
         call(
             &router,
             &seller_sess,
             "eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest",
-            req_create,
+            req_create.clone(),
             now,
         )
         .status_code,
@@ -143,9 +137,10 @@ fn test_skin_purchase_rollback_branches_account_sink_and_admin_expiration_errors
     );
 
     // 2. Quantity == 0 -> STATUS_BAD_REQUEST
-    let mut req_q0 = Vec::new();
-    put_uuid(1, &listing_uuid, &mut req_q0);
-    encode_varint_field(2, 0, &mut req_q0);
+    let req_q0 = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiatePurchaseListingRequest")
+        .set("listing.uuid", listing_uuid.to_vec())
+        .set("quantity", 0u32)
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -159,9 +154,10 @@ fn test_skin_purchase_rollback_branches_account_sink_and_admin_expiration_errors
     );
 
     // 3. Quantity > listing.quantity (2 > 1) -> STATUS_BAD_REQUEST
-    let mut req_q2 = Vec::new();
-    put_uuid(1, &listing_uuid, &mut req_q2);
-    encode_varint_field(2, 2, &mut req_q2);
+    let req_q2 = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiatePurchaseListingRequest")
+        .set("listing.uuid", listing_uuid.to_vec())
+        .set("quantity", 2u32)
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -175,10 +171,11 @@ fn test_skin_purchase_rollback_branches_account_sink_and_admin_expiration_errors
     );
 
     // 4. Buyer has 0 ISK -> settlement fails, listing is re-inserted into `skin_listings` (rollback when full qty purchased)
-    let mut req_buy = Vec::new();
-    put_uuid(1, &listing_uuid, &mut req_buy);
-    encode_varint_field(2, 1, &mut req_buy);
-    encode_string_field(3, BUYER_FEES_VERSION, &mut req_buy);
+    let req_buy = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiatePurchaseListingRequest")
+        .set("listing.uuid", listing_uuid.to_vec())
+        .set("quantity", 1u32)
+        .set("buyer_fees_version", BUYER_FEES_VERSION)
+        .must_encode();
     let resp_fail = call(
         &router,
         &buyer_sess,
@@ -227,8 +224,9 @@ fn test_skin_purchase_rollback_branches_account_sink_and_admin_expiration_errors
         .status_code,
         STATUS_BAD_REQUEST
     );
-    let mut admin_no_ts = Vec::new();
-    put_uuid(1, &listing_uuid, &mut admin_no_ts);
+    let admin_no_ts = pb::message("eve.cosmetic.market.skin.listing.api.admin.SetExpirationRequest")
+        .set("listing.uuid", listing_uuid.to_vec())
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -240,9 +238,10 @@ fn test_skin_purchase_rollback_branches_account_sink_and_admin_expiration_errors
         .status_code,
         STATUS_BAD_REQUEST
     );
-    let mut admin_not_found = Vec::new();
-    put_uuid(1, &listing_uuid, &mut admin_not_found);
-    put_seconds(2, now + 3600, &mut admin_not_found);
+    let admin_not_found = pb::message("eve.cosmetic.market.skin.listing.api.admin.SetExpirationRequest")
+        .set("listing.uuid", listing_uuid.to_vec())
+        .set("expires", GoogleTimestamp { seconds: (now + 3600) as i64, nanos: 0 })
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -331,16 +330,14 @@ fn admin_revoke_purges_ship_thirdparty_skin_notices_and_hub_listings_and_rejects
     skinr.save();
 
     // Seller creates a Hub listing for 1 unactivated copy
-    let mut shex_msg = Vec::new();
-    encode_string_field(1, skin_hex, &mut shex_msg);
-    let mut lic_id = Vec::new();
-    put_seq(1, seller as u64, &mut lic_id);
-    encode_bytes_field(2, &shex_msg, &mut lic_id);
-    let mut req_create = Vec::new();
-    encode_isk_msg(1, 500_000, &mut req_create);
-    encode_bytes_field(3, &lic_id, &mut req_create);
-    put_seconds(4, 86_400, &mut req_create);
-    encode_varint_field(5, 1, &mut req_create);
+    let req_create = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest")
+        .set("price_isk.units", 500_000i64)
+        .set("price_isk.nanos", 0i32)
+        .set("skin.character.sequential", seller as u32)
+        .set("skin.skin.hex", skin_hex)
+        .set("duration", GoogleDuration { seconds: 86_400, nanos: 0 })
+        .set("quantity", 1u32)
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -354,8 +351,10 @@ fn admin_revoke_purges_ship_thirdparty_skin_notices_and_hub_listings_and_rejects
     );
 
     // 1. Admin revokes the license -> must purge ship applied skin + hub listings
-    let mut rev_req = Vec::new();
-    encode_bytes_field(1, &lic_id, &mut rev_req);
+    let rev_req = pb::message("eve_public.cosmetic.ship.skin.thirdparty.license.api.admin.RevokeRequest")
+        .set("license.character.sequential", seller as u32)
+        .set("license.skin.hex", skin_hex)
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -414,7 +413,7 @@ fn admin_revoke_purges_ship_thirdparty_skin_notices_and_hub_listings_and_rejects
             &router,
             &seller_sess,
             "eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest",
-            req_create,
+            req_create.clone(),
             now,
         )
         .status_code,
@@ -431,10 +430,11 @@ fn admin_revoke_purges_ship_thirdparty_skin_notices_and_hub_listings_and_rejects
     }
     let seller_bal_before = db.with_snapshot(|s| s.characters[&seller].balance.0);
     let buyer_bal_before = db.with_snapshot(|s| s.characters[&buyer].balance.0);
-    let mut buy_req = Vec::new();
-    put_uuid(1, &stale_uuid, &mut buy_req);
-    encode_varint_field(2, 1, &mut buy_req);
-    encode_string_field(3, BUYER_FEES_VERSION, &mut buy_req);
+    let buy_req = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiatePurchaseListingRequest")
+        .set("listing.uuid", stale_uuid.to_vec())
+        .set("quantity", 1u32)
+        .set("buyer_fees_version", BUYER_FEES_VERSION)
+        .must_encode();
     let stale_rsp = call(
         &router,
         &buyer_sess,

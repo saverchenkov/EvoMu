@@ -15,10 +15,10 @@ use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter,
     STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
 };
+use eve_proto::pb::{self, ProtoBuilder};
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
-    DynamicQuasarMessage, DynamicValue, GoogleAny, QuasarDescriptorRegistry, WireMessage,
-    TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, QuasarDescriptorRegistry,
+    WireMessage,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -396,85 +396,57 @@ pub fn extract_target_char_and_title(
 }
 
 pub fn encode_draft_id_msg(uuid: &[u8]) -> Vec<u8> {
-    let mut id_msg = Vec::new();
-    encode_bytes_field(1, uuid, &mut id_msg);
-    id_msg
+    pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.Identifier")
+        .set("uuid", uuid.to_vec())
+        .must_encode()
+}
+
+fn build_draft_attributes(record: &SkinrDraftRecord) -> ProtoBuilder {
+    let valid_editor_cfg =
+        !record.editor_cfg.is_empty() && WireMessage::decode(&record.editor_cfg).is_ok();
+    let mut attrs = pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.Attributes")
+        .set("skin.hex", format!("{:016x}", record.draft_id));
+    if valid_editor_cfg {
+        attrs = attrs.set("editor_configuration", pb::raw_message(&record.editor_cfg));
+    }
+    for mat_id in &record.material_ids {
+        attrs = attrs.add_with("editor_configurations", |b| {
+            b.set("id.sequential", *mat_id as u64)
+                .when(valid_editor_cfg, |b| {
+                    b.set("config", pb::raw_message(&record.editor_cfg))
+                })
+        });
+    }
+    attrs
 }
 
 pub fn encode_draft_attributes(record: &SkinrDraftRecord) -> Vec<u8> {
-    let mut attr_bytes = Vec::new();
-    // 1: skin (.eve_public.cosmetic.ship.skin.thirdparty.Identifier)
-    let mut skin_id = Vec::new();
-    let hex_id = format!("{:016x}", record.draft_id);
-    encode_string_field(1, &hex_id, &mut skin_id);
-    encode_bytes_field(1, &skin_id, &mut attr_bytes);
+    build_draft_attributes(record).must_encode()
+}
 
-    // 2: editor_configuration (.eve_public.cosmetic.ship.skin.thirdparty.draft.EditorConfiguration)
-    encode_bytes_field(2, &record.editor_cfg, &mut attr_bytes);
-
-    // 3: rep editor_configurations
-    for mat_id in &record.material_ids {
-        let mut slot_cfg = Vec::new();
-        let mut slot_id = Vec::new();
-        encode_varint_field(1, *mat_id as u64, &mut slot_id);
-        encode_bytes_field(1, &slot_id, &mut slot_cfg);
-        encode_bytes_field(2, &record.editor_cfg, &mut slot_cfg);
-        encode_bytes_field(3, &slot_cfg, &mut attr_bytes);
+fn build_set_notice(char_id: u32, title_id: Option<u64>) -> ProtoBuilder {
+    let builder = pb::message("eve_public.cosmetic.character.title.api.SetNotice")
+        .set("character.sequential", char_id as u64);
+    match title_id {
+        Some(tid) => builder.set("title.uuid", id_to_uuid_bytes(tid).to_vec()),
+        None => builder.set("no_title", true),
     }
-
-    // 4: name & 5: line_name
-    encode_string_field(4, &record.name, &mut attr_bytes);
-    encode_string_field(5, &record.line_name, &mut attr_bytes);
-
-    // 6: pattern_id, 7: design_slot_id, 8: ship_type_id
-    encode_varint_field(6, record.pattern_id as u64, &mut attr_bytes);
-    encode_varint_field(7, record.design_slot_id as u64, &mut attr_bytes);
-    if record.ship_type_id > 0 {
-        encode_varint_field(8, record.ship_type_id as u64, &mut attr_bytes);
-    }
-
-    attr_bytes
 }
 
 pub fn encode_set_notice(char_id: u32, title_id: Option<u64>) -> Vec<u8> {
-    let mut out = Vec::new();
-    // 1: character
-    let mut char_msg = Vec::new();
-    encode_varint_field(1, char_id as u64, &mut char_msg);
-    encode_bytes_field(1, &char_msg, &mut out);
-
-    match title_id {
-        Some(tid) => {
-            // 2: title
-            let mut title_msg = Vec::new();
-            let uuid = id_to_uuid_bytes(tid);
-            encode_bytes_field(1, &uuid, &mut title_msg);
-            encode_bytes_field(2, &title_msg, &mut out);
-            encode_varint_field(3, 0, &mut out);
-        }
-        None => {
-            encode_varint_field(3, 1, &mut out);
-        }
-    }
-    out
+    build_set_notice(char_id, title_id).must_encode()
 }
 
 pub fn encode_granted_notice(title_id: u64) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut title_msg = Vec::new();
-    let uuid = id_to_uuid_bytes(title_id);
-    encode_bytes_field(1, &uuid, &mut title_msg);
-    encode_bytes_field(1, &title_msg, &mut out);
-    out
+    pb::message("eve_public.cosmetic.character.title.api.GrantedNotice")
+        .set("title.uuid", id_to_uuid_bytes(title_id).to_vec())
+        .must_encode()
 }
 
 pub fn encode_revoked_notice(title_id: u64) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut title_msg = Vec::new();
-    let uuid = id_to_uuid_bytes(title_id);
-    encode_bytes_field(1, &uuid, &mut title_msg);
-    encode_bytes_field(1, &title_msg, &mut out);
-    out
+    pb::message("eve_public.cosmetic.character.title.api.RevokedNotice")
+        .set("title.uuid", id_to_uuid_bytes(title_id).to_vec())
+        .must_encode()
 }
 
 pub fn get_or_init_titles(char_id: u32, data: &mut QuasarCosmeticsStateData) -> HashSet<u64> {
@@ -529,20 +501,15 @@ pub fn register_draft_and_title_handlers(
                     user_drafts.values().cloned().collect()
                 };
 
-                let mut out = Vec::new();
+                let mut resp = pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetAllSavedResponse");
                 for d in &drafts {
-                    let mut draft_msg = Vec::new();
-                    let id_msg = encode_draft_id_msg(&d.uuid);
-                    encode_bytes_field(1, &id_msg, &mut draft_msg);
-                    let attr_bytes = encode_draft_attributes(d);
-                    encode_bytes_field(2, &attr_bytes, &mut draft_msg);
-                    encode_bytes_field(1, &draft_msg, &mut out);
+                    resp = resp.add_with("drafts", |b| {
+                        b.set("id.uuid", d.uuid.clone())
+                            .set("attributes", build_draft_attributes(d))
+                    });
                 }
 
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetAllSavedResponse"),
-                    value: out,
-                })
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -592,14 +559,9 @@ pub fn register_draft_and_title_handlers(
                     None => return Err((STATUS_NOT_FOUND, "Draft not found".into())),
                 };
 
-                let mut out = Vec::new();
-                let attr_bytes = encode_draft_attributes(&record);
-                encode_bytes_field(2, &attr_bytes, &mut out); // GetResponse field 2 is draft (Attributes)
-
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetResponse"),
-                    value: out,
-                })
+                Ok(pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetResponse")
+                    .set("draft", build_draft_attributes(&record))
+                    .must_to_any())
             }),
         );
     }
@@ -690,16 +652,10 @@ pub fn register_draft_and_title_handlers(
                 };
                 st.sync_to_db();
 
-                let mut out = Vec::new();
-                let id_msg = encode_draft_id_msg(&record.uuid);
-                encode_bytes_field(1, &id_msg, &mut out);
-                let attr_bytes = encode_draft_attributes(&record);
-                encode_bytes_field(2, &attr_bytes, &mut out);
-
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveResponse"),
-                    value: out,
-                })
+                Ok(pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveResponse")
+                    .set("id.uuid", record.uuid.clone())
+                    .set("attributes", build_draft_attributes(&record))
+                    .must_to_any())
             }),
         );
     }
@@ -797,16 +753,10 @@ pub fn register_draft_and_title_handlers(
                 };
                 st.sync_to_db();
 
-                let mut out = Vec::new();
-                let id_msg = encode_draft_id_msg(&record.uuid);
-                encode_bytes_field(1, &id_msg, &mut out);
-                let attr_bytes = encode_draft_attributes(&record);
-                encode_bytes_field(2, &attr_bytes, &mut out);
-
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.ship.skin.thirdparty.draft.api.UpdateResponse"),
-                    value: out,
-                })
+                Ok(pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.UpdateResponse")
+                    .set("id.uuid", record.uuid.clone())
+                    .set("attributes", build_draft_attributes(&record))
+                    .must_to_any())
             }),
         );
     }
@@ -862,10 +812,8 @@ pub fn register_draft_and_title_handlers(
                 }
                 st.sync_to_db();
 
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.ship.skin.thirdparty.draft.api.DeleteResponse"),
-                    value: Vec::new(),
-                })
+                Ok(pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.DeleteResponse")
+                    .must_to_any())
             }),
         );
     }
@@ -883,12 +831,9 @@ pub fn register_draft_and_title_handlers(
                     let data = st.data.read().unwrap_or_else(|e| e.into_inner());
                     data.custom_capacity.get(&char_id).copied().unwrap_or(20)
                 };
-                let mut out = Vec::new();
-                encode_varint_field(1, cap, &mut out);
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSaveCapacityResponse"),
-                    value: out,
-                })
+                Ok(pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSaveCapacityResponse")
+                    .set("capacity", cap)
+                    .must_to_any())
             }),
         );
     }
@@ -917,18 +862,12 @@ pub fn register_draft_and_title_handlers(
                 }
                 titles.sort_unstable();
 
-                let mut out = Vec::new();
+                let mut resp = pb::message("eve_public.cosmetic.character.title.api.GetOwnedResponse");
                 for tid in titles {
-                    let mut title_id_msg = Vec::new();
-                    let uuid = id_to_uuid_bytes(tid);
-                    encode_bytes_field(1, &uuid, &mut title_id_msg);
-                    encode_bytes_field(1, &title_id_msg, &mut out);
+                    resp = resp.add_with("titles", |b| b.set("uuid", id_to_uuid_bytes(tid).to_vec()));
                 }
 
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.GetOwnedResponse"),
-                    value: out,
-                })
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -975,24 +914,15 @@ pub fn register_draft_and_title_handlers(
                     data.equipped_titles.get(&req_char_id).copied()
                 };
 
-                let mut out = Vec::new();
-                match equipped {
-                    Some(tid) => {
-                        let mut title_id_msg = Vec::new();
-                        let uuid = id_to_uuid_bytes(tid);
-                        encode_bytes_field(1, &uuid, &mut title_id_msg);
-                        encode_bytes_field(1, &title_id_msg, &mut out);
-                        encode_varint_field(2, 0, &mut out); // no_title = false
-                    }
-                    None => {
-                        encode_varint_field(2, 1, &mut out); // no_title = true
-                    }
-                }
+                let resp = pb::message(
+                    "eve_public.cosmetic.character.title.api.GetEquippedForCharacterResponse",
+                );
+                let resp = match equipped {
+                    Some(tid) => resp.set("title.uuid", id_to_uuid_bytes(tid).to_vec()),
+                    None => resp.set("no_title", true),
+                };
 
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.GetEquippedForCharacterResponse"),
-                    value: out,
-                })
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -1020,13 +950,9 @@ pub fn register_draft_and_title_handlers(
                     }
                     st.sync_to_db();
 
-                    let not_bytes = encode_set_notice(char_id, None);
                     super::quasar_social_chat::ctx_queue_notice(
                         NoticeScope::Character(char_id),
-                        GoogleAny {
-                            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.SetNotice"),
-                            value: not_bytes,
-                        },
+                        build_set_notice(char_id, None).must_to_any(),
                         ctx.now_unix(),
                     );
                 } else {
@@ -1051,21 +977,14 @@ pub fn register_draft_and_title_handlers(
                         }
                     });
 
-                    let not_bytes = encode_set_notice(char_id, Some(title_id));
                     super::quasar_social_chat::ctx_queue_notice(
                         NoticeScope::Character(char_id),
-                        GoogleAny {
-                            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.SetNotice"),
-                            value: not_bytes,
-                        },
+                        build_set_notice(char_id, Some(title_id)).must_to_any(),
                         ctx.now_unix(),
                     );
                 }
 
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.EquipResponse"),
-                    value: Vec::new(),
-                })
+                Ok(pb::message("eve_public.cosmetic.character.title.api.EquipResponse").must_to_any())
             }),
         );
     }
@@ -1092,20 +1011,14 @@ pub fn register_draft_and_title_handlers(
                 });
 
                 // Publish SetNotice with no_title = true
-                let not_bytes = encode_set_notice(char_id, None);
                 super::quasar_social_chat::ctx_queue_notice(
                     NoticeScope::Character(char_id),
-                    GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.SetNotice"),
-                        value: not_bytes,
-                    },
+                    build_set_notice(char_id, None).must_to_any(),
                     ctx.now_unix(),
                 );
 
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.UnequipResponse"),
-                    value: Vec::new(),
-                })
+                Ok(pb::message("eve_public.cosmetic.character.title.api.UnequipResponse")
+                    .must_to_any())
             }),
         );
     }
@@ -1124,13 +1037,11 @@ pub fn register_draft_and_title_handlers(
             }
             st.sync_to_db();
 
-            let not_bytes = encode_granted_notice(tid);
             super::quasar_social_chat::ctx_queue_notice(
                 NoticeScope::Character(cid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.GrantedNotice"),
-                    value: not_bytes,
-                },
+                pb::message("eve_public.cosmetic.character.title.api.GrantedNotice")
+                    .set("title.uuid", id_to_uuid_bytes(tid).to_vec())
+                    .must_to_any(),
                 ctx.now_unix(),
             );
 
@@ -1140,10 +1051,7 @@ pub fn register_draft_and_title_handlers(
                 "eve_public.cosmetic.character.title.api.admin.GrantResponse"
             };
 
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{rsp_pkg}"),
-                value: Vec::new(),
-            })
+            Ok(pb::message(rsp_pkg).must_to_any())
         });
         router.register_handler(
             "eve_public.cosmetic.character.title.api.admin.GrantRequest",
@@ -1176,24 +1084,18 @@ pub fn register_draft_and_title_handlers(
             };
             st.sync_to_db();
 
-            let not_bytes = encode_revoked_notice(tid);
             super::quasar_social_chat::ctx_queue_notice(
                 NoticeScope::Character(cid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.RevokedNotice"),
-                    value: not_bytes,
-                },
+                pb::message("eve_public.cosmetic.character.title.api.RevokedNotice")
+                    .set("title.uuid", id_to_uuid_bytes(tid).to_vec())
+                    .must_to_any(),
                 ctx.now_unix(),
             );
 
             if was_equipped {
-                let set_not_bytes = encode_set_notice(cid, None);
                 super::quasar_social_chat::ctx_queue_notice(
                     NoticeScope::Character(cid),
-                    GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.SetNotice"),
-                        value: set_not_bytes,
-                    },
+                    build_set_notice(cid, None).must_to_any(),
                     ctx.now_unix(),
                 );
             }
@@ -1204,10 +1106,7 @@ pub fn register_draft_and_title_handlers(
                 "eve_public.cosmetic.character.title.api.admin.RevokeResponse"
             };
 
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{rsp_pkg}"),
-                value: Vec::new(),
-            })
+            Ok(pb::message(rsp_pkg).must_to_any())
         });
         router.register_handler(
             "eve_public.cosmetic.character.title.api.admin.RevokeRequest",

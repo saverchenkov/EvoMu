@@ -11,10 +11,10 @@ use crate::services::quasar_cosmetics_skinr::{
 };
 use eve_db::{IskCents, WorldRepository};
 use eve_machonet::SessionState;
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, encode_zigzag64,
-    EvePublicRequest, EvePublicResponse, GoogleAny, GoogleTimestamp, QuasarDescriptorRegistry,
-    TYPE_GOOGLEAPIS_PREFIX,
+    EvePublicRequest, EvePublicResponse, GoogleAny, GoogleDuration, GoogleTimestamp,
+    QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
@@ -22,37 +22,6 @@ use std::sync::{Arc, OnceLock};
 pub(super) fn shared_sde() -> Arc<SdeRegistry> {
     static SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
     Arc::clone(SDE.get_or_init(|| Arc::new(SdeRegistry::with_canonical_seed())))
-}
-
-pub(super) fn put_seq(field: u32, id: u64, out: &mut Vec<u8>) {
-    let mut b = Vec::new();
-    encode_varint_field(1, id, &mut b);
-    encode_bytes_field(field, &b, out);
-}
-
-pub(super) fn put_seconds(field: u32, secs: u64, out: &mut Vec<u8>) {
-    let mut b = Vec::new();
-    encode_varint_field(1, secs, &mut b);
-    encode_bytes_field(field, &b, out);
-}
-
-pub(super) fn put_uuid(field: u32, uuid: &[u8; 16], out: &mut Vec<u8>) {
-    let mut b = Vec::new();
-    encode_bytes_field(1, uuid, &mut b);
-    encode_bytes_field(field, &b, out);
-}
-
-pub(super) fn encode_isk_msg(field: u32, units: i64, out: &mut Vec<u8>) {
-    let mut b = Vec::new();
-    encode_varint_field(1, encode_zigzag64(units), &mut b);
-    encode_varint_field(2, 0, &mut b);
-    encode_bytes_field(field, &b, out);
-}
-
-pub(super) fn encode_plex_msg(field: u32, cents: u64, out: &mut Vec<u8>) {
-    let mut b = Vec::new();
-    encode_varint_field(1, cents, &mut b);
-    encode_bytes_field(field, &b, out);
 }
 
 pub(super) fn hex_of(u: &[u8]) -> String {
@@ -262,18 +231,15 @@ fn test_skin_create_listing_error_and_broker_fee_rollback_branches() {
         );
     }
 
-    let mut shex_msg = Vec::new();
-    encode_string_field(1, skin_hex, &mut shex_msg);
-    let mut lic_ok = Vec::new();
-    put_seq(1, seller as u64, &mut lic_ok);
-    encode_bytes_field(2, &shex_msg, &mut lic_ok);
-
     // 1. Duration == 0 -> STATUS_BAD_REQUEST
-    let mut req_zero_dur = Vec::new();
-    encode_isk_msg(1, 100_000, &mut req_zero_dur);
-    encode_bytes_field(3, &lic_ok, &mut req_zero_dur);
-    put_seconds(4, 0, &mut req_zero_dur);
-    encode_varint_field(5, 1, &mut req_zero_dur);
+    let req_zero_dur = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest")
+        .set("price_isk.units", 100_000i64)
+        .set("price_isk.nanos", 0i32)
+        .set("skin.character.sequential", seller as u32)
+        .set("skin.skin.hex", skin_hex)
+        .set("duration", GoogleDuration { seconds: 0, nanos: 0 })
+        .set("quantity", 1u32)
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -287,11 +253,14 @@ fn test_skin_create_listing_error_and_broker_fee_rollback_branches() {
     );
 
     // 2. Quantity == 0 -> STATUS_BAD_REQUEST
-    let mut req_zero_qty = Vec::new();
-    encode_isk_msg(1, 100_000, &mut req_zero_qty);
-    encode_bytes_field(3, &lic_ok, &mut req_zero_qty);
-    put_seconds(4, 86_400, &mut req_zero_qty);
-    encode_varint_field(5, 0, &mut req_zero_qty);
+    let req_zero_qty = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest")
+        .set("price_isk.units", 100_000i64)
+        .set("price_isk.nanos", 0i32)
+        .set("skin.character.sequential", seller as u32)
+        .set("skin.skin.hex", skin_hex)
+        .set("duration", GoogleDuration { seconds: 86_400, nanos: 0 })
+        .set("quantity", 0u32)
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -305,11 +274,13 @@ fn test_skin_create_listing_error_and_broker_fee_rollback_branches() {
     );
 
     // 3. PLEX price > MAX_LISTING_PRICE_UNITS -> STATUS_BAD_REQUEST
-    let mut req_over_plex = Vec::new();
-    encode_plex_msg(2, MAX_LISTING_PRICE_UNITS + 1, &mut req_over_plex);
-    encode_bytes_field(3, &lic_ok, &mut req_over_plex);
-    put_seconds(4, 86_400, &mut req_over_plex);
-    encode_varint_field(5, 1, &mut req_over_plex);
+    let req_over_plex = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest")
+        .set("price_plex.total_in_cents", (MAX_LISTING_PRICE_UNITS + 1) as i64)
+        .set("skin.character.sequential", seller as u32)
+        .set("skin.skin.hex", skin_hex)
+        .set("duration", GoogleDuration { seconds: 86_400, nanos: 0 })
+        .set("quantity", 1u32)
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -323,11 +294,14 @@ fn test_skin_create_listing_error_and_broker_fee_rollback_branches() {
     );
 
     // 4. Insufficient unactivated licenses (request 10 when only 5 available) -> STATUS_PRECONDITION_FAILED
-    let mut req_insuff_lic = Vec::new();
-    encode_isk_msg(1, 100_000, &mut req_insuff_lic);
-    encode_bytes_field(3, &lic_ok, &mut req_insuff_lic);
-    put_seconds(4, 86_400, &mut req_insuff_lic);
-    encode_varint_field(5, 10, &mut req_insuff_lic);
+    let req_insuff_lic = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest")
+        .set("price_isk.units", 100_000i64)
+        .set("price_isk.nanos", 0i32)
+        .set("skin.character.sequential", seller as u32)
+        .set("skin.skin.hex", skin_hex)
+        .set("duration", GoogleDuration { seconds: 86_400, nanos: 0 })
+        .set("quantity", 10u32)
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -341,11 +315,14 @@ fn test_skin_create_listing_error_and_broker_fee_rollback_branches() {
     );
 
     // 5. Insufficient ISK for broker fee -> returns STATUS_OK with failed transaction notice and rolls back escrow
-    let mut req_no_isk = Vec::new();
-    encode_isk_msg(1, 100_000, &mut req_no_isk);
-    encode_bytes_field(3, &lic_ok, &mut req_no_isk);
-    put_seconds(4, 86_400, &mut req_no_isk);
-    encode_varint_field(5, 2, &mut req_no_isk);
+    let req_no_isk = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest")
+        .set("price_isk.units", 100_000i64)
+        .set("price_isk.nanos", 0i32)
+        .set("skin.character.sequential", seller as u32)
+        .set("skin.skin.hex", skin_hex)
+        .set("duration", GoogleDuration { seconds: 86_400, nanos: 0 })
+        .set("quantity", 2u32)
+        .must_encode();
     let resp = call(
         &router,
         &seller_sess,

@@ -356,10 +356,11 @@ async fn quasar_skinr_drafts_and_titles_full_lifecycle() {
     let set_notice = eq_notices.iter().find(|n| n.payload.as_ref().map(|p| p.type_url.ends_with("SetNotice")).unwrap_or(false));
     assert!(set_notice.is_some(), "SetNotice must be emitted upon EquipRequest");
 
-    // Verify GetEquippedForCharacterRequest reports title 101 (no_title = false)
+    // Verify GetEquippedForCharacterRequest reports title 101 (`oneof equipped`: field 1 title set, field 2 no_title unset)
     let eq_check_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.character.title.api.GetEquippedForCharacterRequest", make_character_id_request(90_000_101)).await;
     let eq_check_wm = WireMessage::decode(&eq_check_rsp.payload.unwrap().value).unwrap();
-    assert_eq!(eq_check_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(0), "no_title must be false");
+    assert!(eq_check_wm.fields.iter().any(|f| f.field_number == 1), "equipped title must be present");
+    assert_eq!(eq_check_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), None, "no_title oneof variant must be unset when a title is equipped");
 
     // 6. Admin RevokeRequest -> revokes title 101, character unequipped and receives RevokedNotice
     let revoke_req = make_admin_grant_char_and_title(90_000_101, 101);

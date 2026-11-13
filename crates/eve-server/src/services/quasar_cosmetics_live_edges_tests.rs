@@ -8,9 +8,10 @@ use eve_db::{
     CorporationRecord, InventoryFlag, InventoryItemRecord, UpwellStructureRecord, WorldRepository,
 };
 use eve_machonet::{service_roles, SessionState};
+use eve_proto::pb::{self, ProtoBuilder};
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, EvePublicRequest, EvePublicResponse, GoogleAny,
-    QuasarDescriptorRegistry, WireMessage,
+    EvePublicRequest, EvePublicResponse, GoogleAny, GoogleDuration, QuasarDescriptorRegistry,
+    WireMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
 use std::sync::{Arc, OnceLock};
 
@@ -63,27 +64,17 @@ fn call(router: &PublicGatewayRouter, s: &SessionState, ty: &str, value: Vec<u8>
     )
 }
 
-fn encode_seq(field: u32, id: u64, out: &mut Vec<u8>) {
-    let mut sub = Vec::new();
-    encode_varint_field(1, id, &mut sub);
-    encode_bytes_field(field, &sub, out);
+fn build_logo_id(ship_id: u64, slot: i64) -> ProtoBuilder {
+    pb::message("eve_public.cosmetic.ship.logo.Identifier")
+        .set("ship.sequential", ship_id)
+        .when(slot != 0, |b| b.set("index", slot as i32))
 }
 
-fn encode_logo_id(ship_id: u64, slot: i64) -> Vec<u8> {
-    let mut id = Vec::new();
-    encode_seq(1, ship_id, &mut id);
-    if slot != 0 {
-        encode_varint_field(2, slot as u64, &mut id);
-    }
-    id
-}
-
-fn encode_rgb(r: u64, g: u64, b: u64) -> Vec<u8> {
-    let mut c = Vec::new();
-    encode_varint_field(1, r, &mut c);
-    encode_varint_field(2, g, &mut c);
-    encode_varint_field(3, b, &mut c);
-    c
+fn build_rgb(r: u32, g: u32, b: u32) -> ProtoBuilder {
+    pb::message("eve_public.color.RGB")
+        .set("red", r)
+        .set("green", g)
+        .set("blue", b)
 }
 
 #[test]
@@ -277,49 +268,53 @@ fn logo_handlers_error_guards_and_macho_notify_sink_delivery() {
     );
 
     // 2. Negative slot index -> 400; missing ship -> 404; foreign ship -> 403
-    let mut neg_req = Vec::new();
-    encode_bytes_field(1, &encode_logo_id(ship_id, -1), &mut neg_req);
+    let neg_req = pb::message("eve_public.cosmetic.ship.logo.DisplayRequest")
+        .set("id", build_logo_id(ship_id, -1))
+        .must_encode();
     assert_eq!(
         call(router, &player, "eve_public.cosmetic.ship.logo.DisplayRequest", neg_req, now).status_code,
         STATUS_BAD_REQUEST
     );
 
-    let mut missing_ship_req = Vec::new();
-    encode_bytes_field(1, &encode_logo_id(888_888_888, 0), &mut missing_ship_req);
+    let missing_ship_req = pb::message("eve_public.cosmetic.ship.logo.ClearRequest")
+        .set("logo", build_logo_id(888_888_888, 0))
+        .must_encode();
     assert_eq!(
         call(router, &player, "eve_public.cosmetic.ship.logo.ClearRequest", missing_ship_req, now).status_code,
         STATUS_NOT_FOUND
     );
 
-    let mut foreign_req = Vec::new();
-    encode_bytes_field(1, &encode_logo_id(ship_id, 0), &mut foreign_req);
+    let foreign_req = pb::message("eve_public.cosmetic.ship.logo.ClearRequest")
+        .set("logo", build_logo_id(ship_id, 0))
+        .must_encode();
     assert_eq!(
         call(router, &other, "eve_public.cosmetic.ship.logo.ClearRequest", foreign_req, now).status_code,
         STATUS_FORBIDDEN
     );
 
     // 3. Missing attr -> 400; empty attr (neither alliance nor corp) -> 400
-    let mut no_attr = Vec::new();
-    encode_bytes_field(1, &encode_logo_id(ship_id, 0), &mut no_attr);
+    let no_attr = pb::message("eve_public.cosmetic.ship.logo.DisplayRequest")
+        .set("id", build_logo_id(ship_id, 0))
+        .must_encode();
     assert_eq!(
         call(router, &player, "eve_public.cosmetic.ship.logo.DisplayRequest", no_attr, now).status_code,
         STATUS_BAD_REQUEST
     );
 
-    let mut empty_attr_req = Vec::new();
-    encode_bytes_field(1, &encode_logo_id(ship_id, 0), &mut empty_attr_req);
-    encode_bytes_field(2, &[], &mut empty_attr_req);
+    let empty_attr_req = pb::message("eve_public.cosmetic.ship.logo.DisplayRequest")
+        .set("id", build_logo_id(ship_id, 0))
+        .set("attr", pb::message("eve_public.cosmetic.ship.logo.Attributes"))
+        .must_encode();
     assert_eq!(
         call(router, &player, "eve_public.cosmetic.ship.logo.DisplayRequest", empty_attr_req, now).status_code,
         STATUS_BAD_REQUEST
     );
 
     // 4. Alliance logo: not in alliance -> 403; in alliance without entitlement -> 403; with entitlement -> 200
-    let mut all_attr = Vec::new();
-    encode_bytes_field(1, &[], &mut all_attr);
-    let mut all_req = Vec::new();
-    encode_bytes_field(1, &encode_logo_id(ship_id, 0), &mut all_req);
-    encode_bytes_field(2, &all_attr, &mut all_req);
+    let all_req = pb::message("eve_public.cosmetic.ship.logo.DisplayRequest")
+        .set("id", build_logo_id(ship_id, 0))
+        .set("attr.alliance", pb::message("eve_public.cosmetic.ship.logo.Alliance"))
+        .must_encode();
     assert_eq!(
         call(router, &player, "eve_public.cosmetic.ship.logo.DisplayRequest", all_req.clone(), now).status_code,
         STATUS_FORBIDDEN
@@ -334,11 +329,10 @@ fn logo_handlers_error_guards_and_macho_notify_sink_delivery() {
     );
 
     // Corp logo without entitlement -> 403
-    let mut corp_attr = Vec::new();
-    encode_bytes_field(2, &[], &mut corp_attr);
-    let mut corp_req = Vec::new();
-    encode_bytes_field(1, &encode_logo_id(ship_id, 0), &mut corp_req);
-    encode_bytes_field(2, &corp_attr, &mut corp_req);
+    let corp_req = pb::message("eve_public.cosmetic.ship.logo.DisplayRequest")
+        .set("id", build_logo_id(ship_id, 0))
+        .set("attr.corporation", pb::message("eve_public.cosmetic.ship.logo.Corporation"))
+        .must_encode();
     assert_eq!(
         call(router, &player, "eve_public.cosmetic.ship.logo.DisplayRequest", corp_req, now).status_code,
         STATUS_FORBIDDEN
@@ -360,8 +354,9 @@ fn logo_handlers_error_guards_and_macho_notify_sink_delivery() {
         call(router, &player, "eve_public.cosmetic.ship.api.GetRequest", Vec::new(), now).status_code,
         STATUS_BAD_REQUEST
     );
-    let mut missing_get = Vec::new();
-    encode_seq(1, 777_777_777, &mut missing_get);
+    let missing_get = pb::message("eve_public.cosmetic.ship.api.GetRequest")
+        .set("ship.sequential", 777_777_777u64)
+        .must_encode();
     assert_eq!(
         call(router, &player, "eve_public.cosmetic.ship.api.GetRequest", missing_get, now).status_code,
         STATUS_NOT_FOUND
@@ -484,30 +479,27 @@ fn palette_paintwork_and_license_authorization_and_boundary_guards() {
         call(&router, &brand_mgr, "eve_public.cosmetic.corporation.palette.api.SetRequest", Vec::new(), now).status_code,
         STATUS_BAD_REQUEST
     );
-    let mut no_main_attrs = Vec::new();
-    encode_bytes_field(2, &encode_rgb(1, 2, 3), &mut no_main_attrs);
-    let mut no_main = Vec::new();
-    encode_bytes_field(1, &no_main_attrs, &mut no_main);
+    let no_main = pb::message("eve_public.cosmetic.corporation.palette.api.SetRequest")
+        .set("attributes.secondary_color", build_rgb(1, 2, 3))
+        .must_encode();
     assert_eq!(
         call(&router, &brand_mgr, "eve_public.cosmetic.corporation.palette.api.SetRequest", no_main, now).status_code,
         STATUS_BAD_REQUEST
     );
-    let mut bad_sec_attrs = Vec::new();
-    encode_bytes_field(1, &encode_rgb(1, 2, 3), &mut bad_sec_attrs);
-    encode_bytes_field(2, &encode_rgb(1, 256, 3), &mut bad_sec_attrs);
-    let mut bad_sec = Vec::new();
-    encode_bytes_field(1, &bad_sec_attrs, &mut bad_sec);
+    let bad_sec = pb::message("eve_public.cosmetic.corporation.palette.api.SetRequest")
+        .set("attributes.main_color", build_rgb(1, 2, 3))
+        .set("attributes.secondary_color", build_rgb(1, 256, 3))
+        .must_encode();
     assert_eq!(
         call(&router, &brand_mgr, "eve_public.cosmetic.corporation.palette.api.SetRequest", bad_sec, now).status_code,
         STATUS_BAD_REQUEST
     );
 
-    let mut full_attrs = Vec::new();
-    encode_bytes_field(1, &encode_rgb(10, 20, 30), &mut full_attrs);
-    encode_bytes_field(2, &encode_rgb(40, 50, 60), &mut full_attrs);
-    encode_bytes_field(4, &encode_rgb(70, 80, 90), &mut full_attrs);
-    let mut full_pal = Vec::new();
-    encode_bytes_field(1, &full_attrs, &mut full_pal);
+    let full_pal = pb::message("eve_public.cosmetic.corporation.palette.api.SetRequest")
+        .set("attributes.main_color", build_rgb(10, 20, 30))
+        .set("attributes.secondary_color", build_rgb(40, 50, 60))
+        .set("attributes.tertiary_color", build_rgb(70, 80, 90))
+        .must_encode();
     assert_eq!(
         call(&router, &ceo, "eve_public.cosmetic.corporation.palette.api.SetRequest", full_pal, now).status_code,
         STATUS_OK
@@ -518,8 +510,9 @@ fn palette_paintwork_and_license_authorization_and_boundary_guards() {
         call(&router, &ceo, "eve_public.cosmetic.structure.paintwork.api.GetRequest", Vec::new(), now).status_code,
         STATUS_BAD_REQUEST
     );
-    let mut get_missing_pw = Vec::new();
-    encode_seq(1, struct_a as u64, &mut get_missing_pw);
+    let get_missing_pw = pb::message("eve_public.cosmetic.structure.paintwork.api.GetRequest")
+        .set("structure.sequential", struct_a as u64)
+        .must_encode();
     assert_eq!(
         call(&router, &ceo, "eve_public.cosmetic.structure.paintwork.api.GetRequest", get_missing_pw, now).status_code,
         STATUS_NOT_FOUND
@@ -538,36 +531,28 @@ fn palette_paintwork_and_license_authorization_and_boundary_guards() {
         call(&router, &ceo, "eve_public.cosmetic.structure.paintwork.license.api.IssueRequest", Vec::new(), now).status_code,
         STATUS_BAD_REQUEST
     );
-    let mut empty_slot1 = Vec::new();
-    encode_varint_field(2, 1, &mut empty_slot1);
-    let mut empty_slots_cfg = Vec::new();
-    encode_bytes_field(1, &empty_slot1, &mut empty_slots_cfg);
-    let mut bad_slots_req = Vec::new();
-    encode_bytes_field(1, &empty_slots_cfg, &mut bad_slots_req);
+    let bad_slots_req = pb::message("eve_public.cosmetic.structure.paintwork.license.api.IssueRequest")
+        .set("paintwork.first.empty", true)
+        .must_encode();
     assert_eq!(
         call(&router, &ceo, "eve_public.cosmetic.structure.paintwork.license.api.IssueRequest", bad_slots_req, now).status_code,
         STATUS_BAD_REQUEST
     );
 
-    let mut slot1 = Vec::new();
-    encode_varint_field(1, 101, &mut slot1);
-    let mut slots_cfg = Vec::new();
-    encode_bytes_field(1, &slot1, &mut slots_cfg);
-    let mut dur_msg = Vec::new();
-    encode_varint_field(1, 2_592_000, &mut dur_msg);
-
     let mk_issue = |st_id: u64, dur: u64| {
-        let mut d = Vec::new();
-        encode_varint_field(1, dur, &mut d);
-        let mut st_seq = Vec::new();
-        encode_varint_field(1, st_id, &mut st_seq);
-        let mut req = Vec::new();
-        encode_bytes_field(1, &slots_cfg, &mut req);
-        encode_bytes_field(2, &d, &mut req);
-        if st_id > 0 {
-            encode_bytes_field(3, &st_seq, &mut req);
-        }
-        req
+        pb::message("eve_public.cosmetic.structure.paintwork.license.api.IssueRequest")
+            .set("paintwork.first.paint", 101u32)
+            .set(
+                "duration",
+                GoogleDuration {
+                    seconds: dur as i64,
+                    nanos: 0,
+                },
+            )
+            .when(st_id > 0, |b| {
+                b.add_with("structures", |s| s.set("sequential", st_id))
+            })
+            .must_encode()
     };
 
     assert_eq!(
@@ -626,32 +611,40 @@ fn palette_paintwork_and_license_authorization_and_boundary_guards() {
     let lic_b_id = adm_entry.fields[0].value.as_bytes().unwrap().to_vec();
 
     // CEO cannot view or revoke corp_b's license
-    let mut lic_b_req = Vec::new();
-    encode_bytes_field(1, &lic_b_id, &mut lic_b_req);
+    let lic_b_get_req = pb::message("eve_public.cosmetic.structure.paintwork.license.api.GetRequest")
+        .set("id", pb::raw_message(&lic_b_id))
+        .must_encode();
+    let lic_b_rev_req = pb::message("eve_public.cosmetic.structure.paintwork.license.api.RevokeRequest")
+        .set("license", pb::raw_message(&lic_b_id))
+        .must_encode();
+    let lic_b_adm_rev_req =
+        pb::message("eve_public.cosmetic.structure.paintwork.license.api.admin.RevokeRequest")
+            .set("license", pb::raw_message(&lic_b_id))
+            .must_encode();
     assert_eq!(
-        call(&router, &ceo, "eve_public.cosmetic.structure.paintwork.license.api.GetRequest", lic_b_req.clone(), now).status_code,
+        call(&router, &ceo, "eve_public.cosmetic.structure.paintwork.license.api.GetRequest", lic_b_get_req, now).status_code,
         STATUS_NOT_FOUND
     );
     assert_eq!(
-        call(&router, &grunt, "eve_public.cosmetic.structure.paintwork.license.api.RevokeRequest", lic_b_req.clone(), now).status_code,
+        call(&router, &grunt, "eve_public.cosmetic.structure.paintwork.license.api.RevokeRequest", lic_b_rev_req.clone(), now).status_code,
         STATUS_FORBIDDEN
     );
     assert_eq!(
-        call(&router, &ceo, "eve_public.cosmetic.structure.paintwork.license.api.RevokeRequest", lic_b_req.clone(), now).status_code,
+        call(&router, &ceo, "eve_public.cosmetic.structure.paintwork.license.api.RevokeRequest", lic_b_rev_req, now).status_code,
         STATUS_FORBIDDEN
     );
     // Non-admin cannot call admin.RevokeRequest; admin can revoke any corp's license!
     assert_eq!(
-        call(&router, &ceo, "eve_public.cosmetic.structure.paintwork.license.api.admin.RevokeRequest", lic_b_req.clone(), now).status_code,
+        call(&router, &ceo, "eve_public.cosmetic.structure.paintwork.license.api.admin.RevokeRequest", lic_b_adm_rev_req.clone(), now).status_code,
         STATUS_FORBIDDEN
     );
     assert_eq!(
-        call(&router, &admin, "eve_public.cosmetic.structure.paintwork.license.api.admin.RevokeRequest", lic_b_req.clone(), now).status_code,
+        call(&router, &admin, "eve_public.cosmetic.structure.paintwork.license.api.admin.RevokeRequest", lic_b_adm_rev_req.clone(), now).status_code,
         STATUS_OK
     );
     // Revoking again -> 404
     assert_eq!(
-        call(&router, &admin, "eve_public.cosmetic.structure.paintwork.license.api.admin.RevokeRequest", lic_b_req, now).status_code,
+        call(&router, &admin, "eve_public.cosmetic.structure.paintwork.license.api.admin.RevokeRequest", lic_b_adm_rev_req, now).status_code,
         STATUS_NOT_FOUND
     );
 }
@@ -788,8 +781,9 @@ fn cosmetics_live_save_rehydrate_register_sink_and_active_ship_cargo_emblem_muta
         Arc::clone(&ctx.sde),
     );
     register(&router, Arc::clone(&state), skinr);
-    let mut get_req = Vec::new();
-    encode_seq(1, ship_id as u64, &mut get_req);
+    let get_req = pb::message("eve_public.cosmetic.ship.api.GetRequest")
+        .set("ship.sequential", ship_id as u64)
+        .must_encode();
     let player = sess(Some(1), Some(cid), Some(98_000_001), service_roles::ROLE_PLAYER_DEFAULT, 0);
     let get_res = call(
         &router,

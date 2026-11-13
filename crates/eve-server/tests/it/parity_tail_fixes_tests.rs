@@ -466,13 +466,13 @@ async fn non_gm_paragon_hub_and_skinr_sde_grounded_e2e_and_sqlite_reload() {
         let mut bf_pub_req = Vec::new();
         encode_bytes_field(2, &skin_id_m, &mut bf_pub_req);
         let bf_pub_wm = WireMessage::decode(&qrpc(&ctx, &mut buyer, "eve_public.cosmetic.market.api.GetBuyerFeeRequest", bf_pub_req).await.payload.unwrap().value).unwrap();
-        let pub_em_fee = WireMessage::decode(WireMessage::decode(bf_pub_wm.fields[0].value.as_bytes().unwrap()).unwrap().fields[0].value.as_bytes().unwrap()).unwrap().fields.iter().find(|f| f.field_number == 2).unwrap().value.as_varint().unwrap() as i64;
+        let pub_em_fee = WireMessage::decode(WireMessage::decode(bf_pub_wm.fields[0].value.as_bytes().unwrap()).unwrap().fields[0].value.as_bytes().unwrap()).unwrap().fields.iter().find(|f| f.field_number == 1).unwrap().value.as_varint().unwrap() as i64;
 
         let mut bf_corp_req = Vec::new();
         encode_bytes_field(1, &corp_target, &mut bf_corp_req);
         encode_bytes_field(2, &skin_id_m, &mut bf_corp_req);
         let bf_corp_wm = WireMessage::decode(&qrpc(&ctx, &mut buyer, "eve_public.cosmetic.market.api.GetBuyerFeeRequest", bf_corp_req).await.payload.unwrap().value).unwrap();
-        let corp_em_fee = WireMessage::decode(WireMessage::decode(bf_corp_wm.fields[0].value.as_bytes().unwrap()).unwrap().fields[0].value.as_bytes().unwrap()).unwrap().fields.iter().find(|f| f.field_number == 2).unwrap().value.as_varint().unwrap() as i64;
+        let corp_em_fee = WireMessage::decode(WireMessage::decode(bf_corp_wm.fields[0].value.as_bytes().unwrap()).unwrap().fields[0].value.as_bytes().unwrap()).unwrap().fields.iter().find(|f| f.field_number == 1).unwrap().value.as_varint().unwrap() as i64;
         assert_eq!(corp_em_fee * 2, pub_em_fee * 5, "Branded buyer fee must be 2.5x public tier fee");
 
         let mut lic_id = Vec::new();

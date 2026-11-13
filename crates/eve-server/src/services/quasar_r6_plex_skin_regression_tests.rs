@@ -8,10 +8,10 @@
 use crate::quasar_gateway::{PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_OK};
 use eve_db::WorldRepository;
 use eve_machonet::{service_roles, SessionState};
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, encode_zigzag64,
-    AuthoritativeContext, EvePublicRequest, EvePublicResponse, GoogleAny, GoogleTimestamp,
-    QuasarDescriptorRegistry, WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, EvePublicRequest, EvePublicResponse, GoogleAny, GoogleDuration,
+    GoogleTimestamp, QuasarDescriptorRegistry, WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::Arc;
@@ -172,10 +172,9 @@ fn regression_403_unified_plex_vault_across_deposit_paragon_hub_and_withdraw() {
 
     // 1. Seeded PLEX Vault has 500 PLEX; deposit +250 PLEX via DepositRequest -> 750 PLEX
     assert_eq!(query_plex_vault_balance(&router, &buyer_player, now), 500);
-    let mut dep_curr = Vec::new();
-    encode_varint_field(1, encode_zigzag64(250 * 100), &mut dep_curr);
-    let mut dep_req = Vec::new();
-    encode_bytes_field(3, &dep_curr, &mut dep_req);
+    let dep_req = pb::message("eve.plex.vault.assetholding.operation.api.DepositRequest")
+        .set("plex.total_in_cents", 250i64 * 100)
+        .must_encode();
     let (r_dep, dep_notices) = dispatch_with_notices(
         &router,
         &buyer_admin,
@@ -229,11 +228,10 @@ fn regression_403_unified_plex_vault_across_deposit_paragon_hub_and_withdraw() {
             );
         }
     });
-    let mut grant_req = Vec::new();
-    let mut grant_skin = Vec::new();
-    encode_string_field(1, &skin_hex, &mut grant_skin);
-    encode_bytes_field(1, &grant_skin, &mut grant_req);
-    encode_varint_field(2, 1, &mut grant_req);
+    let grant_req = pb::message("eve_public.cosmetic.ship.skin.thirdparty.license.api.admin.GrantRequest")
+        .set("skin.hex", skin_hex.as_str())
+        .set("unactivated", 1u64)
+        .must_encode();
     let (r_grant, _) = dispatch_with_notices(
         &router,
         &seller_gm,
@@ -244,22 +242,13 @@ fn regression_403_unified_plex_vault_across_deposit_paragon_hub_and_withdraw() {
     assert!(r_grant.is_ok());
 
     // 3. Seller lists 3rd-party SKIN for 200 PLEX on Paragon Hub
-    let mut plex_price = Vec::new();
-    encode_varint_field(1, encode_zigzag64(200 * 100), &mut plex_price);
-    let mut seller_owner = Vec::new();
-    encode_varint_field(1, seller_cid as u64, &mut seller_owner);
-    let mut list_skin_hex = Vec::new();
-    encode_string_field(1, &skin_hex, &mut list_skin_hex);
-    let mut list_lic_id = Vec::new();
-    encode_bytes_field(1, &seller_owner, &mut list_lic_id);
-    encode_bytes_field(2, &list_skin_hex, &mut list_lic_id);
-    let mut dur = Vec::new();
-    encode_varint_field(1, 86_400, &mut dur);
-    let mut create_listing = Vec::new();
-    encode_bytes_field(2, &plex_price, &mut create_listing);
-    encode_bytes_field(3, &list_lic_id, &mut create_listing);
-    encode_bytes_field(4, &dur, &mut create_listing);
-    encode_varint_field(5, 1, &mut create_listing);
+    let create_listing = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest")
+        .set("price_plex.total_in_cents", 200i64 * 100)
+        .set("skin.character.sequential", seller_cid as u32)
+        .set("skin.skin.hex", skin_hex.as_str())
+        .set("duration", GoogleDuration { seconds: 86_400, nanos: 0 })
+        .set("quantity", 1u32)
+        .must_encode();
     let r_list = call_rpc(
         &router,
         &seller_player,
@@ -285,16 +274,11 @@ fn regression_403_unified_plex_vault_across_deposit_paragon_hub_and_withdraw() {
 
     // 4. Buyer purchases listing using deposited PLEX Vault funds -> buyer -200 PLEX, seller credited net PLEX
     let seller_before = query_plex_vault_balance(&router, &seller_player, now);
-    let mut buy_id = Vec::new();
-    encode_bytes_field(1, &listing_uuid, &mut buy_id);
-    let mut buy_req = Vec::new();
-    encode_bytes_field(1, &buy_id, &mut buy_req);
-    encode_varint_field(2, 1, &mut buy_req);
-    encode_string_field(
-        3,
-        super::quasar_cosmetics_market::BUYER_FEES_VERSION,
-        &mut buy_req,
-    );
+    let buy_req = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiatePurchaseListingRequest")
+        .set("listing.uuid", listing_uuid)
+        .set("quantity", 1u32)
+        .set("buyer_fees_version", super::quasar_cosmetics_market::BUYER_FEES_VERSION)
+        .must_encode();
     let (r_buy, buy_notices) = dispatch_with_notices(
         &router,
         &buyer_player,
@@ -320,10 +304,9 @@ fn regression_403_unified_plex_vault_across_deposit_paragon_hub_and_withdraw() {
 
     // 5. Seller withdraws credited PLEX proceeds via WithdrawRequest -> no split-brain shortfall
     let proceeds = seller_after - seller_before;
-    let mut w_curr = Vec::new();
-    encode_varint_field(1, encode_zigzag64(proceeds * 100), &mut w_curr);
-    let mut w_req = Vec::new();
-    encode_bytes_field(3, &w_curr, &mut w_req);
+    let w_req = pb::message("eve.plex.vault.assetholding.operation.api.WithdrawRequest")
+        .set("plex.total_in_cents", proceeds * 100)
+        .must_encode();
     let (r_withdraw, withdraw_notices) = dispatch_with_notices(
         &router,
         &seller_gm,
@@ -351,15 +334,10 @@ fn regression_404_thirdparty_skin_entitlement_redeem_materializes_without_double
     let player = make_sess(uid, cid, service_roles::ROLE_PLAYER_DEFAULT);
     let skin_hex = "deadbeefcafebabe0102030405060708".to_string();
 
-    // 1. Create a 3rd-party SKIN license asset (unit field 10 -> skin_license_id field 1 -> hex string field 1)
-    let mut sk_inner = Vec::new();
-    encode_string_field(1, &skin_hex, &mut sk_inner);
-    let mut sk_unit = Vec::new();
-    encode_bytes_field(1, &sk_inner, &mut sk_unit);
-    let mut unit_msg = Vec::new();
-    encode_bytes_field(10, &sk_unit, &mut unit_msg);
-    let mut create_asset = Vec::new();
-    encode_bytes_field(4, &unit_msg, &mut create_asset);
+    // 1. Create a 3rd-party SKIN license asset (unit.unit_ship_skin_license.skin.hex)
+    let create_asset = pb::message("eve.assetholding.asset.api.CreateRequest")
+        .set("unit.unit_ship_skin_license.skin.hex", skin_hex.as_str())
+        .must_encode();
 
     let (r_create, _) = dispatch_with_notices(
         &router,
@@ -372,18 +350,13 @@ fn regression_404_thirdparty_skin_entitlement_redeem_materializes_without_double
     let asset_id_msg = wm_create.fields[0].value.as_bytes().unwrap().to_vec();
 
     // 2. Grant entitlement with total = 2 units to character via DirectDeliveryRequest
-    let mut ch_seq = Vec::new();
-    encode_varint_field(1, cid as u64, &mut ch_seq);
-    let mut holder_msg = Vec::new();
-    encode_bytes_field(1, &ch_seq, &mut holder_msg);
-    let mut ent_key = Vec::new();
-    encode_bytes_field(1, &holder_msg, &mut ent_key);
-    encode_bytes_field(2, &asset_id_msg, &mut ent_key);
-    let mut dd_entry = Vec::new();
-    encode_bytes_field(2, &ent_key, &mut dd_entry);
-    encode_varint_field(10, 2, &mut dd_entry);
-    let mut grant_ent = Vec::new();
-    encode_bytes_field(2, &dd_entry, &mut grant_ent);
+    let grant_ent = pb::message("eve.assetholding.entitlement.api.DirectDeliveryRequest")
+        .add_with("entitlements", |ent| {
+            ent.set("entitlement.holder.character.sequential", cid as u32)
+                .set_raw_message("entitlement.asset", &asset_id_msg)
+                .set("quantity", 2u64)
+        })
+        .must_encode();
     let (r_grant_ent, _) = dispatch_with_notices(
         &router,
         &gm,
@@ -394,8 +367,10 @@ fn regression_404_thirdparty_skin_entitlement_redeem_materializes_without_double
     assert!(r_grant_ent.is_ok());
 
     // 3. Player redeems entitlement via eve_public.assetholding.entitlement.api.RedeemRequest
-    let mut redeem_req = Vec::new();
-    encode_bytes_field(1, &ent_key, &mut redeem_req);
+    let redeem_req = pb::message("eve_public.assetholding.entitlement.api.RedeemRequest")
+        .set("entitlement.holder.character.sequential", cid as u32)
+        .set_raw_message("entitlement.asset", &asset_id_msg)
+        .must_encode();
     assert_eq!(
         call_rpc(
             &router,
@@ -409,13 +384,10 @@ fn regression_404_thirdparty_skin_entitlement_redeem_materializes_without_double
     );
 
     // 4. Query GetRequest -> unactivated must be exact 2 (NOT 4 double-counted!)
-    let mut ch_msg = Vec::new();
-    encode_varint_field(1, cid as u64, &mut ch_msg);
-    let mut lic_id = Vec::new();
-    encode_bytes_field(1, &ch_msg, &mut lic_id);
-    encode_bytes_field(2, &sk_inner, &mut lic_id);
-    let mut get_req = Vec::new();
-    encode_bytes_field(1, &lic_id, &mut get_req);
+    let get_req = pb::message("eve_public.cosmetic.ship.skin.thirdparty.license.api.GetRequest")
+        .set("license.character.sequential", cid as u32)
+        .set("license.skin.hex", skin_hex.as_str())
+        .must_encode();
 
     let r_get = call_rpc(
         &router,
@@ -436,8 +408,10 @@ fn regression_404_thirdparty_skin_entitlement_redeem_materializes_without_double
     assert_eq!(unactivated, 2, "redeemed 3rd-party SKIN license must report exact unactivated count without double counting");
 
     // 5. Activate 1 unit via ActivateRequest -> must succeed (not STATUS_NOT_FOUND!) and leave unactivated == 1
-    let mut act_req = Vec::new();
-    encode_bytes_field(1, &lic_id, &mut act_req);
+    let act_req = pb::message("eve_public.cosmetic.ship.skin.thirdparty.license.api.ActivateRequest")
+        .set("license.character.sequential", cid as u32)
+        .set("license.skin.hex", skin_hex.as_str())
+        .must_encode();
     let r_act = call_rpc(
         &router,
         &player,

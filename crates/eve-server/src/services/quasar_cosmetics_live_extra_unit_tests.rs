@@ -11,9 +11,10 @@ use eve_db::{
     corp_roles, InventoryFlag, InventoryItemRecord, UpwellStructureRecord, WorldRepository,
 };
 use eve_machonet::{service_roles, SessionState};
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, EvePublicRequest, EvePublicResponse, GoogleAny,
-    QuasarDescriptorRegistry, WireMessage, TYPE_GOOGLEAPIS_PREFIX,
+    EvePublicRequest, EvePublicResponse, GoogleAny, GoogleDuration, QuasarDescriptorRegistry,
+    WireMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::PyRep;
 use eve_sde::SdeRegistry;
@@ -143,18 +144,12 @@ fn macho_notify_sink_alliance_logos_and_ship_skin_state_branches() {
     let player = sess(Some(1), Some(cid), Some(corp_id), service_roles::ROLE_PLAYER_DEFAULT, 0);
     let other = sess(Some(2), Some(other_cid), Some(corp_id), service_roles::ROLE_PLAYER_DEFAULT, 0);
 
-    let mut ship_seq = Vec::new();
-    encode_varint_field(1, ship_id, &mut ship_seq);
-    let mut logo_id = Vec::new();
-    encode_bytes_field(1, &ship_seq, &mut logo_id);
-    encode_varint_field(2, 0, &mut logo_id);
-
     let disp_ep = "eve_public.cosmetic.ship.logo.DisplayRequest";
-    let mut alliance_attr = Vec::new();
-    encode_bytes_field(1, &[], &mut alliance_attr);
-    let mut alliance_disp = Vec::new();
-    encode_bytes_field(1, &logo_id, &mut alliance_disp);
-    encode_bytes_field(2, &alliance_attr, &mut alliance_disp);
+    let alliance_disp = pb::message(disp_ep)
+        .set("id.ship.sequential", ship_id)
+        .set("id.index", 0i32)
+        .set("attr.alliance", pb::message("eve_public.cosmetic.ship.logo.Alliance"))
+        .must_encode();
 
     assert_code(router, &player, disp_ep, alliance_disp.clone(), now, STATUS_FORBIDDEN);
     db.with_mut_snapshot(|s| s.characters.get_mut(&cid).unwrap().alliance_id = Some(99_000_001));
@@ -166,9 +161,11 @@ fn macho_notify_sink_alliance_logos_and_ship_skin_state_branches() {
     assert_code(router, &player, disp_ep, alliance_disp.clone(), now, STATUS_OK);
     assert_code(router, &other, disp_ep, alliance_disp, now, STATUS_FORBIDDEN);
 
-    let mut empty_attr_req = Vec::new();
-    encode_bytes_field(1, &logo_id, &mut empty_attr_req);
-    encode_bytes_field(2, &[], &mut empty_attr_req);
+    let empty_attr_req = pb::message(disp_ep)
+        .set("id.ship.sequential", ship_id)
+        .set("id.index", 0i32)
+        .set("attr", pb::message("eve_public.cosmetic.ship.logo.Attributes"))
+        .must_encode();
     assert_code(router, &player, disp_ep, empty_attr_req, now, STATUS_BAD_REQUEST);
 
     // ship.api.GetRequest & GetAllInBubbleRequest with first-party skin and third-party SKINR skin
@@ -177,8 +174,9 @@ fn macho_notify_sink_alliance_logos_and_ship_skin_state_branches() {
         s.licensed_skins.entry(cid).or_default().push(1001);
         s.applied_ship_skins.insert(ship_id as i64, 1001);
     });
-    let mut get_ship_req = Vec::new();
-    encode_bytes_field(1, &ship_seq, &mut get_ship_req);
+    let get_ship_req = pb::message(ship_get_ep)
+        .set("ship.sequential", ship_id)
+        .must_encode();
     assert_code(router, &player, ship_get_ep, get_ship_req.clone(), now, STATUS_OK);
     let bubble_rsp = call(
         router,
@@ -212,10 +210,9 @@ fn macho_notify_sink_alliance_logos_and_ship_skin_state_branches() {
     assert_code(router, &player, ship_get_ep, get_ship_req, now, STATUS_OK);
     assert_code(router, &player, ship_get_ep, Vec::new(), now, STATUS_BAD_REQUEST);
 
-    let mut nf_ship = Vec::new();
-    let mut nf_seq = Vec::new();
-    encode_varint_field(1, 999_999_999, &mut nf_seq);
-    encode_bytes_field(1, &nf_seq, &mut nf_ship);
+    let nf_ship = pb::message(ship_get_ep)
+        .set("ship.sequential", 999_999_999u64)
+        .must_encode();
     assert_code(router, &player, ship_get_ep, nf_ship, now, STATUS_NOT_FOUND);
     let _ = sde;
 }
@@ -306,40 +303,36 @@ fn palette_roles_and_structure_paintwork_error_and_admin_paths() {
     let pal_set_ep = "eve_public.cosmetic.corporation.palette.api.SetRequest";
     assert_code(&router, &member, pal_set_ep, Vec::new(), now, STATUS_FORBIDDEN);
 
-    let encode_rgb = |r: u64, g: u64, b: u64| {
-        let mut c = Vec::new();
-        encode_varint_field(1, r, &mut c);
-        encode_varint_field(2, g, &mut c);
-        encode_varint_field(3, b, &mut c);
-        c
+    let build_rgb = |r: u32, g: u32, b: u32| {
+        pb::message("eve_public.color.RGB")
+            .set("red", r)
+            .set("green", g)
+            .set("blue", b)
     };
-    let mut full_pal_attrs = Vec::new();
-    encode_bytes_field(1, &encode_rgb(1, 2, 3), &mut full_pal_attrs);
-    encode_bytes_field(2, &encode_rgb(4, 5, 6), &mut full_pal_attrs);
-    encode_bytes_field(4, &encode_rgb(7, 8, 9), &mut full_pal_attrs);
-    let mut full_pal_req = Vec::new();
-    encode_bytes_field(1, &full_pal_attrs, &mut full_pal_req);
+    let full_pal_req = pb::message(pal_set_ep)
+        .set("attributes.main_color", build_rgb(1, 2, 3))
+        .set("attributes.secondary_color", build_rgb(4, 5, 6))
+        .set("attributes.tertiary_color", build_rgb(7, 8, 9))
+        .must_encode();
     db.with_mut_snapshot(|s| {
         s.corporations.get_mut(&corp_id).unwrap().member_roles.insert(cid, CORP_ROLE_BRAND_MANAGER);
     });
     assert_code(&router, &brand_mgr, pal_set_ep, full_pal_req, now, STATUS_OK);
 
     // Paintwork IssueRequest validation & character LP fallback:
-    let mut slot1 = Vec::new();
-    encode_varint_field(1, 101, &mut slot1);
-    let mut slots_cfg = Vec::new();
-    encode_bytes_field(1, &slot1, &mut slots_cfg);
-    let mut dur_msg = Vec::new();
-    encode_varint_field(1, 2_592_000, &mut dur_msg);
-    let mut st_seq = Vec::new();
-    encode_varint_field(1, struct_id as u64, &mut st_seq);
-
-    let mut issue_req = Vec::new();
-    encode_bytes_field(1, &slots_cfg, &mut issue_req);
-    encode_bytes_field(2, &dur_msg, &mut issue_req);
-    encode_bytes_field(3, &st_seq, &mut issue_req);
-
     let issue_ep = "eve_public.cosmetic.structure.paintwork.license.api.IssueRequest";
+    let issue_req = pb::message(issue_ep)
+        .set("paintwork.first.paint", 101u32)
+        .set(
+            "duration",
+            GoogleDuration {
+                seconds: 2_592_000,
+                nanos: 0,
+            },
+        )
+        .add_with("structures", |b| b.set("sequential", struct_id as u64))
+        .must_encode();
+
     db.with_mut_snapshot(|s| {
         s.corporations.get_mut(&corp_id).unwrap().member_roles.insert(cid, 0);
     });
@@ -359,18 +352,24 @@ fn palette_roles_and_structure_paintwork_error_and_admin_paths() {
     assert_eq!(db.with_snapshot(|s| s.characters[&cid].loyalty_points[&PARAGON_CORP_ID]), 500);
 
     // Admin IssueRequest & Admin RevokeRequest on other_struct_id
-    let mut other_st_seq = Vec::new();
-    encode_varint_field(1, other_struct_id as u64, &mut other_st_seq);
-    let mut admin_issue_req = Vec::new();
-    encode_bytes_field(1, &slots_cfg, &mut admin_issue_req);
-    encode_bytes_field(2, &dur_msg, &mut admin_issue_req);
-    encode_bytes_field(3, &other_st_seq, &mut admin_issue_req);
+    let adm_issue_ep = "eve_public.cosmetic.structure.paintwork.license.api.admin.IssueRequest";
+    let admin_issue_req = pb::message(adm_issue_ep)
+        .set("paintwork.first.paint", 101u32)
+        .set(
+            "duration",
+            GoogleDuration {
+                seconds: 2_592_000,
+                nanos: 0,
+            },
+        )
+        .add_with("structures", |b| b.set("sequential", other_struct_id as u64))
+        .must_encode();
 
     assert_code(&router, &station_mgr, issue_ep, admin_issue_req.clone(), now, STATUS_FORBIDDEN);
     let adm_iss_rsp = call(
         &router,
         &gm,
-        "eve_public.cosmetic.structure.paintwork.license.api.admin.IssueRequest",
+        adm_issue_ep,
         admin_issue_req,
         now,
     );
@@ -379,8 +378,9 @@ fn palette_roles_and_structure_paintwork_error_and_admin_paths() {
     let entry_wm = WireMessage::decode(iss_wm.fields[0].value.as_bytes().unwrap()).unwrap();
     let lic_id_b = entry_wm.fields[0].value.as_bytes().unwrap().to_vec();
 
-    let mut adm_rev_req = Vec::new();
-    encode_bytes_field(1, &lic_id_b, &mut adm_rev_req);
+    let adm_rev_req = pb::message("eve_public.cosmetic.structure.paintwork.license.api.admin.RevokeRequest")
+        .set("license", pb::raw_message(&lic_id_b))
+        .must_encode();
     assert_code(
         &router,
         &gm,

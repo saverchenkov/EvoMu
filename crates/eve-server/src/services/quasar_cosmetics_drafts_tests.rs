@@ -6,6 +6,7 @@ use super::*;
 use crate::quasar_gateway::{PublicGatewayRouter, STATUS_OK};
 use eve_db::WorldRepository;
 use eve_machonet::{service_roles, SessionState};
+use eve_proto::pb;
 use eve_proto::quasar::{
     EvePublicRequest, EvePublicResponse, GoogleAny, QuasarDescriptorRegistry,
     TYPE_GOOGLEAPIS_PREFIX,
@@ -57,41 +58,37 @@ fn uuid_and_wire_extraction_helpers() {
     assert_eq!(id_opt, Some(42));
     assert_eq!(uuid_opt, Some(id_to_uuid_bytes(42).to_vec()));
 
-    let mut raw_id = Vec::new();
-    let id_sub = encode_draft_id_msg(&id_to_uuid_bytes(77));
-    encode_bytes_field(1, &id_sub, &mut raw_id);
+    let raw_id = pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetRequest")
+        .set("draft.uuid", id_to_uuid_bytes(77).to_vec())
+        .must_encode();
     let empty_dyn = DynamicQuasarMessage::new("test.Empty");
     let (w_uuid, w_id) = extract_draft_id_or_uuid(&empty_dyn, &raw_id);
     assert_eq!(w_id, Some(77));
     assert_eq!(w_uuid, Some(id_to_uuid_bytes(77).to_vec()));
 
     // Design parameter extraction via wire fallback
-    let mut slot_id_msg = Vec::new();
-    encode_varint_field(1, 5, &mut slot_id_msg);
-    let mut slot_msg = Vec::new();
-    encode_bytes_field(1, &slot_id_msg, &mut slot_msg);
-    let mut ship_msg = Vec::new();
-    encode_varint_field(1, 587, &mut ship_msg);
-    let mut layout = Vec::new();
-    encode_bytes_field(1, &slot_msg, &mut layout);
-    encode_bytes_field(2, &ship_msg, &mut layout);
-    encode_varint_field(3, 3, &mut layout);
-
-    let mut ed_id = Vec::new();
-    encode_varint_field(1, 9, &mut ed_id);
-    let mut ed_entry = Vec::new();
-    encode_bytes_field(1, &ed_id, &mut ed_entry);
-    encode_bytes_field(2, b"cfg-bytes", &mut ed_entry);
-
-    let mut save_wire = Vec::new();
-    encode_bytes_field(3, &layout, &mut save_wire);
-    encode_bytes_field(4, &ed_entry, &mut save_wire);
+    let expected_ed_cfg = pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.EditorConfiguration")
+        .set("yaw", 1.5f32)
+        .must_encode();
+    let save_wire = pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest")
+        .set(
+            "layout",
+            pb::message("eve_public.cosmetic.ship.skin.thirdparty.Layout")
+                .add_with("slots", |b| b.set("id.sequential", 5u64))
+                .set("ship_type.sequential", 587u64)
+                .set("pattern_blend_mode", pb::enum_name("BLEND_MODE_EXCLUSION")),
+        )
+        .add_with("editor_configurations", |b| {
+            b.set("id.sequential", 9u64)
+                .set("config", pb::raw_message(&expected_ed_cfg))
+        })
+        .must_encode();
 
     let (des_slot, pat, mats, ed_cfg, ship_tid) = extract_design_parameters(&empty_dyn, &save_wire);
     assert_eq!(des_slot, Some(5));
     assert_eq!(pat, Some(3));
     assert_eq!(mats, Some(vec![5, 9]));
-    assert_eq!(ed_cfg, b"cfg-bytes".to_vec());
+    assert_eq!(ed_cfg, expected_ed_cfg);
     assert_eq!(ship_tid, 587);
 
     // Notice & attribute encoders
@@ -104,7 +101,7 @@ fn uuid_and_wire_extraction_helpers() {
         pattern_id: 3,
         material_ids: vec![5, 9],
         updated_at_unix: 1_760_000_000,
-        editor_cfg: b"cfg".to_vec(),
+        editor_cfg: expected_ed_cfg,
         ship_type_id: 587,
     };
     assert!(!encode_draft_attributes(&rec).is_empty());
@@ -141,9 +138,10 @@ fn skinr_draft_crud_capacity_and_cross_character_isolation() {
     assert_eq!(cap_rsp.status_code, STATUS_OK);
 
     // Save draft for p1
-    let mut save_req = Vec::new();
-    encode_string_field(1, "Valkyrie Draft", &mut save_req);
-    encode_string_field(2, "Valkyrie Line", &mut save_req);
+    let save_req = pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest")
+        .set("name", "Valkyrie Draft")
+        .set("line_name", "Valkyrie Line")
+        .must_encode();
     let save_rsp = call(
         &router,
         &p1,
@@ -177,8 +175,9 @@ fn skinr_draft_crud_capacity_and_cross_character_isolation() {
         call(&router, &p1, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetRequest", Vec::new(), now).status_code,
         STATUS_BAD_REQUEST
     );
-    let mut id_req = Vec::new();
-    encode_bytes_field(1, &draft_id_bytes, &mut id_req);
+    let id_req = pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetRequest")
+        .set("draft", pb::raw_message(&draft_id_bytes))
+        .must_encode();
     assert_eq!(
         call(&router, &p2, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetRequest", id_req.clone(), now).status_code,
         STATUS_FORBIDDEN
@@ -193,9 +192,11 @@ fn skinr_draft_crud_capacity_and_cross_character_isolation() {
         call(&router, &p1, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.UpdateRequest", Vec::new(), now).status_code,
         STATUS_BAD_REQUEST
     );
-    let mut upd_req = id_req.clone();
-    encode_string_field(2, "Updated Valkyrie", &mut upd_req);
-    encode_string_field(3, "Updated Line", &mut upd_req);
+    let upd_req = pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.UpdateRequest")
+        .set("id", pb::raw_message(&draft_id_bytes))
+        .set("name", "Updated Valkyrie")
+        .set("line_name", "Updated Line")
+        .must_encode();
     assert_eq!(
         call(&router, &p2, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.UpdateRequest", upd_req.clone(), now).status_code,
         STATUS_FORBIDDEN
@@ -238,31 +239,33 @@ fn character_cosmetic_titles_grant_equip_unequip_and_revoke() {
     let gm = sess(Some(1), Some(cid), service_roles::ROLE_GM_DEFAULT);
 
     // Equip unowned title -> 400
-    let mut title_msg = Vec::new();
-    encode_bytes_field(1, &id_to_uuid_bytes(7), &mut title_msg);
-    let mut equip_req = Vec::new();
-    encode_bytes_field(1, &title_msg, &mut equip_req);
+    let equip_req = pb::message("eve_public.cosmetic.character.title.api.EquipRequest")
+        .set("title.uuid", id_to_uuid_bytes(7).to_vec())
+        .must_encode();
     assert_eq!(
         call(&router, &player, "eve_public.cosmetic.character.title.api.EquipRequest", equip_req.clone(), now).status_code,
         STATUS_BAD_REQUEST
     );
 
     // Admin grant title 7
-    let mut char_msg = Vec::new();
-    encode_varint_field(1, cid as u64, &mut char_msg);
-    let mut grant_req = Vec::new();
-    encode_bytes_field(1, &char_msg, &mut grant_req);
-    encode_bytes_field(2, &title_msg, &mut grant_req);
+    let public_grant_req =
+        pb::message("eve_public.cosmetic.character.title.api.admin.GrantRequest")
+            .set("id.uuid", id_to_uuid_bytes(7).to_vec())
+            .must_encode();
+    let eve_grant_req = pb::message("eve.cosmetic.character.title.api.admin.GrantRequest")
+        .set("character.sequential", cid as u64)
+        .set("id.uuid", id_to_uuid_bytes(7).to_vec())
+        .must_encode();
     assert_eq!(
-        call(&router, &player, "eve_public.cosmetic.character.title.api.admin.GrantRequest", grant_req.clone(), now).status_code,
+        call(&router, &player, "eve_public.cosmetic.character.title.api.admin.GrantRequest", public_grant_req.clone(), now).status_code,
         STATUS_FORBIDDEN
     );
     assert_eq!(
-        call(&router, &gm, "eve_public.cosmetic.character.title.api.admin.GrantRequest", grant_req.clone(), now).status_code,
+        call(&router, &gm, "eve_public.cosmetic.character.title.api.admin.GrantRequest", public_grant_req, now).status_code,
         STATUS_OK
     );
     assert_eq!(
-        call(&router, &gm, "eve.cosmetic.character.title.api.admin.GrantRequest", grant_req.clone(), now).status_code,
+        call(&router, &gm, "eve.cosmetic.character.title.api.admin.GrantRequest", eve_grant_req, now).status_code,
         STATUS_OK
     );
 
@@ -291,8 +294,12 @@ fn character_cosmetic_titles_grant_equip_unequip_and_revoke() {
     assert_eq!(eq_rsp.status_code, STATUS_OK);
 
     // Admin Revoke while equipped clears equipped title
+    let public_revoke_req =
+        pb::message("eve_public.cosmetic.character.title.api.admin.RevokeRequest")
+            .set("id.uuid", id_to_uuid_bytes(7).to_vec())
+            .must_encode();
     assert_eq!(
-        call(&router, &gm, "eve_public.cosmetic.character.title.api.admin.RevokeRequest", grant_req, now).status_code,
+        call(&router, &gm, "eve_public.cosmetic.character.title.api.admin.RevokeRequest", public_revoke_req, now).status_code,
         STATUS_OK
     );
 

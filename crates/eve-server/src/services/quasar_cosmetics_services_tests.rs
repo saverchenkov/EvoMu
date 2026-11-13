@@ -6,9 +6,10 @@ use super::*;
 use crate::quasar_gateway::{PublicGatewayRouter, STATUS_FORBIDDEN, STATUS_OK};
 use eve_db::corp_roles;
 use eve_machonet::{service_roles, SessionState};
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_string_field, encode_varint_field, EvePublicRequest, EvePublicResponse, GoogleAny,
-    QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
+    EvePublicRequest, EvePublicResponse, GoogleAny, QuasarDescriptorRegistry,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
@@ -104,9 +105,10 @@ fn state_persistence_ship_palette_and_quasar_config_handlers() {
         corp_roles::ROLE_DIRECTOR,
     );
 
-    // Ship request & bubble cosmetics
-    let mut ship_req = Vec::new();
-    encode_varint_field(1, 1_000_055, &mut ship_req);
+    // Ship request & bubble cosmetics (route takes legacy field-1 varint ship_id)
+    let ship_req = pb::message("eve.ship.Identifier")
+        .set("sequential", 1_000_055u64)
+        .must_encode();
     let r_ship = call(&router, &member, "eve.cosmetic.ship.api.request.GetRequest", ship_req, now);
     assert_eq!(r_ship.status_code, STATUS_OK);
     assert!(r_ship.payload.is_some());
@@ -128,8 +130,9 @@ fn state_persistence_ship_palette_and_quasar_config_handlers() {
         call(&router, &member, "eve.cosmetic.corporation.palette.api.GetOwnRequest", Vec::new(), now).status_code,
         STATUS_OK
     );
-    let mut corp_req = Vec::new();
-    encode_varint_field(1, 98_000_001, &mut corp_req);
+    let corp_req = pb::message("eve.cosmetic.corporation.palette.api.GetRequest")
+        .set("identifier.corporation.sequential", 98_000_001u32)
+        .must_encode();
     assert_eq!(
         call(&router, &member, "eve.cosmetic.corporation.palette.api.GetRequest", corp_req, now).status_code,
         STATUS_OK
@@ -179,33 +182,28 @@ fn publish_notices_and_handle_app_domain_events() {
     assert!(db.with_snapshot(|s| !s.quasar_state_blobs.contains_key("quasar_app_telemetry")));
 
     // Bookmark added (deduped)
-    let mut bm_bytes = Vec::new();
-    encode_varint_field(1, 501, &mut bm_bytes);
+    let bm_any = pb::message("eve_public.app.eveonline.agency.ui.bookmark.Added")
+        .set("group", 501u32)
+        .must_to_any();
     for _ in 0..2 {
         handle_app_domain_event(
             &db,
             &router.descriptors,
             &player,
-            &GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.app.eveonline.agency.ui.bookmark.Added"),
-                value: bm_bytes.clone(),
-            },
+            &bm_any,
             now,
         );
     }
 
     // Action taken
-    let mut act_bytes = Vec::new();
-    encode_varint_field(1, 501, &mut act_bytes);
-    encode_varint_field(2, 3, &mut act_bytes);
     handle_app_domain_event(
         &db,
         &router.descriptors,
         &player,
-        &GoogleAny {
-            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.app.eveonline.agency.ui.action.Taken"),
-            value: act_bytes,
-        },
+        &pb::message("eve_public.app.eveonline.agency.ui.action.Taken")
+            .set("action", 501u32)
+            .set("content", 3u32)
+            .must_to_any(),
         now,
     );
 
@@ -214,55 +212,45 @@ fn publish_notices_and_handle_app_domain_events() {
         &db,
         &router.descriptors,
         &player,
-        &GoogleAny {
-            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.app.eveonline.activitytracker.ui.node.Selected"),
-            value: bm_bytes,
-        },
+        &pb::message("eve_public.app.eveonline.activitytracker.ui.node.Selected")
+            .set("node", 501u32)
+            .must_to_any(),
         now,
     );
 
     // Map settings changed
-    let mut map_bytes = Vec::new();
-    encode_string_field(1, "color_by", &mut map_bytes);
-    encode_varint_field(2, 12, &mut map_bytes);
-    encode_varint_field(2, 34, &mut map_bytes);
     handle_app_domain_event(
         &db,
         &router.descriptors,
         &player,
-        &GoogleAny {
-            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.app.eveonline.map.settings.api.Changed"),
-            value: map_bytes,
-        },
+        &pb::message("eve_public.app.eveonline.map.settings.api.Changed")
+            .set("setting_key", "color_by")
+            .add("values", 12u32)
+            .add("values", 34u32)
+            .must_to_any(),
         now,
     );
 
     // Feature preview toggled
-    let mut fp_bytes = Vec::new();
-    encode_string_field(1, "new_map", &mut fp_bytes);
-    encode_varint_field(2, 1, &mut fp_bytes);
     handle_app_domain_event(
         &db,
         &router.descriptors,
         &player,
-        &GoogleAny {
-            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.app.eveonline.settings.featurepreview.Toggled"),
-            value: fp_bytes,
-        },
+        &pb::message("eve_public.app.eveonline.settings.featurepreview.Toggled")
+            .set("feature_name", "new_map")
+            .set("state", true)
+            .must_to_any(),
         now,
     );
 
     // Helper pointer clicked
-    let mut hp_bytes = Vec::new();
-    encode_string_field(1, "neocom.inventory", &mut hp_bytes);
     handle_app_domain_event(
         &db,
         &router.descriptors,
         &player,
-        &GoogleAny {
-            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.app.eveonline.helperpointer.ui.link.Clicked"),
-            value: hp_bytes,
-        },
+        &pb::message("eve_public.app.eveonline.helperpointer.ui.link.Clicked")
+            .set("pointer_unique_name", "neocom.inventory")
+            .must_to_any(),
         now,
     );
 
@@ -383,8 +371,9 @@ fn market_admin_and_custom_endpoint_persistence_palette_defaults_and_telemetry_c
         now,
     );
     assert_eq!(r_corp_own.status_code, STATUS_OK);
-    let mut unk_corp = Vec::new();
-    encode_varint_field(1, 98_999_999, &mut unk_corp);
+    let unk_corp = pb::message("eve.cosmetic.corporation.palette.api.GetRequest")
+        .set("identifier.corporation.sequential", 98_999_999u32)
+        .must_encode();
     let r_corp_unk = call(
         &router,
         &player,
@@ -469,18 +458,13 @@ fn market_admin_and_custom_endpoint_persistence_palette_defaults_and_telemetry_c
 
     // No character_id -> char-scoped event ignored, launcher event with user_id=None ignored
     let no_char_no_uid = sess(None, None, None, 0, 0);
-    let mut bm_bytes = Vec::new();
-    encode_varint_field(1, 901, &mut bm_bytes);
     handle_app_domain_event(
         &db,
         &router.descriptors,
         &no_char_no_uid,
-        &GoogleAny {
-            type_url: format!(
-                "{TYPE_GOOGLEAPIS_PREFIX}eve_public.app.eveonline.agency.ui.bookmark.Added"
-            ),
-            value: bm_bytes,
-        },
+        &pb::message("eve_public.app.eveonline.agency.ui.bookmark.Added")
+            .set("group", 901u32)
+            .must_to_any(),
         now,
     );
     handle_app_domain_event(
@@ -497,90 +481,64 @@ fn market_admin_and_custom_endpoint_persistence_palette_defaults_and_telemetry_c
     );
 
     // Map settings & feature preview false toggle
-    let mut map_bytes = Vec::new();
-    encode_string_field(1, "star_mode", &mut map_bytes);
-    encode_varint_field(2, 7, &mut map_bytes);
     handle_app_domain_event(
         &db,
         &router.descriptors,
         &char_sess,
-        &GoogleAny {
-            type_url: format!(
-                "{TYPE_GOOGLEAPIS_PREFIX}eve_public.app.eveonline.map.settings.api.Changed"
-            ),
-            value: map_bytes,
-        },
+        &pb::message("eve_public.app.eveonline.map.settings.api.Changed")
+            .set("setting_key", "star_mode")
+            .add("values", 7u32)
+            .must_to_any(),
         now,
     );
-    let mut fp_off = Vec::new();
-    encode_string_field(1, "new_map", &mut fp_off);
-    encode_varint_field(2, 0, &mut fp_off);
     handle_app_domain_event(
         &db,
         &router.descriptors,
         &char_sess,
-        &GoogleAny {
-            type_url: format!(
-                "{TYPE_GOOGLEAPIS_PREFIX}eve_public.app.eveonline.settings.featurepreview.Toggled"
-            ),
-            value: fp_off,
-        },
+        &pb::message("eve_public.app.eveonline.settings.featurepreview.Toggled")
+            .set("feature_name", "new_map")
+            .set("state", false)
+            .must_to_any(),
         now,
     );
 
     // Cap enforcement at 128 entries for bookmarks, actions, activity nodes, helper pointers, launcher events
-    for i in 1_u64..=135 {
-        let mut id_buf = Vec::new();
-        encode_varint_field(1, i, &mut id_buf);
+    for i in 1_u32..=135 {
         handle_app_domain_event(
             &db,
             &router.descriptors,
             &char_sess,
-            &GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.app.eveonline.agency.ui.bookmark.Added"
-                ),
-                value: id_buf.clone(),
-            },
+            &pb::message("eve_public.app.eveonline.agency.ui.bookmark.Added")
+                .set("group", i)
+                .must_to_any(),
             now,
         );
         handle_app_domain_event(
             &db,
             &router.descriptors,
             &char_sess,
-            &GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.app.eveonline.activitytracker.ui.node.Selected"
-                ),
-                value: id_buf.clone(),
-            },
+            &pb::message("eve_public.app.eveonline.activitytracker.ui.node.Selected")
+                .set("node", i)
+                .must_to_any(),
             now,
         );
-        encode_varint_field(2, i, &mut id_buf);
         handle_app_domain_event(
             &db,
             &router.descriptors,
             &char_sess,
-            &GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.app.eveonline.agency.ui.action.Taken"
-                ),
-                value: id_buf,
-            },
+            &pb::message("eve_public.app.eveonline.agency.ui.action.Taken")
+                .set("action", i)
+                .set("content", i)
+                .must_to_any(),
             now,
         );
-        let mut ptr_buf = Vec::new();
-        encode_string_field(1, &format!("ptr_{i}"), &mut ptr_buf);
         handle_app_domain_event(
             &db,
             &router.descriptors,
             &char_sess,
-            &GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.app.eveonline.helperpointer.ui.link.Clicked"
-                ),
-                value: ptr_buf,
-            },
+            &pb::message("eve_public.app.eveonline.helperpointer.ui.link.Clicked")
+                .set("pointer_unique_name", format!("ptr_{i}"))
+                .must_to_any(),
             now,
         );
         handle_app_domain_event(
@@ -593,7 +551,7 @@ fn market_admin_and_custom_endpoint_persistence_palette_defaults_and_telemetry_c
                 ),
                 value: Vec::new(),
             },
-            now + i,
+            now + u64::from(i),
         );
     }
 
