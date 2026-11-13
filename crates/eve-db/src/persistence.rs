@@ -1066,8 +1066,6 @@ impl WorldRepository {
 
         let before = writer.working.clone();
         let pre_alloc_snap_id = writer.working.next_entity_id;
-        let alloc_start = self.entity_ids.current().max(pre_alloc_snap_id);
-        writer.working.next_entity_id = alloc_start;
 
         let mut effects = Effects::default();
         let closure_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1085,7 +1083,7 @@ impl WorldRepository {
                 let msg = panic_payload_message(&*panic_payload);
                 PERSIST_TX_PANICS_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 tracing::error!("WorldRepository::tx `{label}` panicked (restoring pre-tx snapshot): {msg}");
-                if writer.working.next_entity_id > alloc_start {
+                if writer.working.next_entity_id > pre_alloc_snap_id {
                     let _ = self.entity_ids.advance_to(&writer.conn, writer.working.next_entity_id);
                 }
                 writer.working = before;
@@ -1093,7 +1091,7 @@ impl WorldRepository {
                 return Err(E::from_tx_error(TxError::Panicked { label, msg }));
             }
             Ok(Err(err)) => {
-                if writer.working.next_entity_id > alloc_start {
+                if writer.working.next_entity_id > pre_alloc_snap_id {
                     let _ = self.entity_ids.advance_to(&writer.conn, writer.working.next_entity_id);
                 }
                 writer.working = before;
@@ -1103,15 +1101,13 @@ impl WorldRepository {
             Ok(Ok(val)) => val,
         };
 
-        if writer.working.next_entity_id > alloc_start {
+        if writer.working.next_entity_id > pre_alloc_snap_id {
             if let Err(err) = self.entity_ids.advance_to(&writer.conn, writer.working.next_entity_id) {
                 PERSIST_FAILURES_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 writer.working = before;
                 drop(effects);
                 return Err(E::from_tx_error(TxError::Persist(err)));
             }
-        } else {
-            writer.working.next_entity_id = pre_alloc_snap_id;
         }
 
         for (&sid, st) in &mut writer.working.system_states {
@@ -1120,6 +1116,9 @@ impl WorldRepository {
 
         let mut changes = ChangeSet::diff(writer.seq.saturating_add(1), &before, &writer.working);
         let did_mutate = !changes.is_empty();
+        let ephemeral_changed =
+            before.transient_item_attributes != writer.working.transient_item_attributes
+                || before.sessions != writer.working.sessions;
 
         if did_mutate {
             if let Err(val_err) =
@@ -1226,6 +1225,9 @@ impl WorldRepository {
                     return Err(E::from_tx_error(persist_err));
                 }
             }
+        } else if ephemeral_changed {
+            *self.published.write().unwrap_or_else(|e| e.into_inner()) =
+                std::sync::Arc::new(writer.working.clone());
         }
 
         if !effects.is_empty() {

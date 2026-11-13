@@ -141,7 +141,7 @@ pub fn required_slash_role(cmd: &str) -> u64 {
 pub fn record_gm_audit(ctx: &ServerContext, char_id: i64, cmd: &str, ok: bool) {
     let ts = ctx.now_unix();
     tracing::info!(char_id, cmd, ts, ok, "GM slash command audit");
-    ctx.db.with_mut_snapshot(|snap| {
+    if let Err(err) = ctx.db.try_with_mut_snapshot(|snap| {
         let logs = &mut snap.cluster_and_runtime.gm_audit_log;
         logs.push(serde_json::json!({
             "char_id": char_id,
@@ -153,7 +153,10 @@ pub fn record_gm_audit(ctx: &ServerContext, char_id: i64, cmd: &str, ok: bool) {
             let drain_n = logs.len() - 256;
             logs.drain(0..drain_n);
         }
-    });
+        Ok::<(), String>(())
+    }) {
+        tracing::warn!(char_id, cmd, "record_gm_audit persistence failed: {err}");
+    }
 }
 
 pub async fn handle(

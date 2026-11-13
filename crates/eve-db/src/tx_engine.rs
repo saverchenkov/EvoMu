@@ -291,7 +291,8 @@ fn compute_cold_domain_diff(before: &WorldStateSnapshot, after: &WorldStateSnaps
         || before.next_alliance_id != after.next_alliance_id
         || before.next_corporation_id != after.next_corporation_id
         || before.next_notification_id != after.next_notification_id
-        || before.next_report_id != after.next_report_id;
+        || before.next_report_id != after.next_report_id
+        || before.sp6_lifecycle != after.sp6_lifecycle;
 
     let d6_social = before.read_mails != after.read_mails
         || before.deleted_mails != after.deleted_mails
@@ -300,6 +301,7 @@ fn compute_cold_domain_diff(before: &WorldStateSnapshot, after: &WorldStateSnaps
         || before.mail_assigned_labels != after.mail_assigned_labels
         || before.mailing_lists != after.mailing_lists
         || before.calendar_events != after.calendar_events
+        || before.bookmark_folders != after.bookmark_folders
         || before.bookmark_subfolders != after.bookmark_subfolders
         || before.bookmark_subfolder_parents != after.bookmark_subfolder_parents
         || before.bookmark_expiries != after.bookmark_expiries
@@ -324,14 +326,37 @@ fn compute_cold_domain_diff(before: &WorldStateSnapshot, after: &WorldStateSnaps
     let d6_corp_crimewatch = crimewatch_changed
         || before.corp_governance != after.corp_governance
         || before.employment_history != after.employment_history
+        || before.corp_hangar_divisions != after.corp_hangar_divisions
+        || before.corp_alliance_history != after.corp_alliance_history
+        || before.corp_container_logs != after.corp_container_logs
+        || before.corp_medals != after.corp_medals
+        || before.corp_issued_medals != after.corp_issued_medals
+        || before.corp_member_limits != after.corp_member_limits
+        || before.corp_titles != after.corp_titles
+        || before.corp_member_titles != after.corp_member_titles
+        || before.corp_role_assignments != after.corp_role_assignments
+        || before.corp_role_history != after.corp_role_history
+        || before.corp_shareholders != after.corp_shareholders
+        || before.char_medals != after.char_medals
+        || before.char_scoped_roles != after.char_scoped_roles
+        || before.corp_vote_cases != after.corp_vote_cases
+        || before.corp_vote_ballots != after.corp_vote_ballots
+        || before.wh_polarizations != after.wh_polarizations
+        || before.zarzakh_gate_locks != after.zarzakh_gate_locks
+        || before.structure_docking_acl_denied != after.structure_docking_acl_denied
         || before.alliance_war_state != after.alliance_war_state
         || before.war_state != after.war_state
         || before.fw_runtime != after.fw_runtime
         || before.sov_runtime != after.sov_runtime
         || before.insurgency_runtime != after.insurgency_runtime
-        || before.zarzakh_gate_locks != after.zarzakh_gate_locks
-        || before.structure_docking_acl_denied != after.structure_docking_acl_denied
-        || before.sp6_lifecycle != after.sp6_lifecycle;
+        || before.sov_prospecting_levels != after.sov_prospecting_levels
+        || before.sov_campaign_scores != after.sov_campaign_scores
+        || before.fw_character_stats != after.fw_character_stats
+        || before.fw_corp_enlisted_on != after.fw_corp_enlisted_on
+        || before.fw_system_occupations != after.fw_system_occupations
+        || before.fw_wars != after.fw_wars
+        || before.war_lifecycle_meta != after.war_lifecycle_meta
+        || before.alliance_lifecycle_meta != after.alliance_lifecycle_meta;
 
     let d6_batch4 = before.moon_extractions != after.moon_extractions
         || before.auto_moon_miners != after.auto_moon_miners
@@ -368,23 +393,6 @@ fn compute_cold_domain_diff(before: &WorldStateSnapshot, after: &WorldStateSnaps
         || before.quasar_state_blobs != after.quasar_state_blobs
         || before.service_state_blobs != after.service_state_blobs
         || before.insurance_contracts != after.insurance_contracts
-        || before.corp_vote_cases != after.corp_vote_cases
-        || before.corp_vote_ballots != after.corp_vote_ballots
-        || before.corp_alliance_history != after.corp_alliance_history
-        || before.corp_medals != after.corp_medals
-        || before.corp_issued_medals != after.corp_issued_medals
-        || before.corp_member_limits != after.corp_member_limits
-        || before.corp_titles != after.corp_titles
-        || before.corp_member_titles != after.corp_member_titles
-        || before.corp_hangar_divisions != after.corp_hangar_divisions
-        || before.war_lifecycle_meta != after.war_lifecycle_meta
-        || before.alliance_lifecycle_meta != after.alliance_lifecycle_meta
-        || before.fw_character_stats != after.fw_character_stats
-        || before.fw_corp_enlisted_on != after.fw_corp_enlisted_on
-        || before.fw_system_occupations != after.fw_system_occupations
-        || before.fw_wars != after.fw_wars
-        || before.sov_prospecting_levels != after.sov_prospecting_levels
-        || before.sov_campaign_scores != after.sov_campaign_scores
         || before.mining_ledger != after.mining_ledger;
 
     let service_domains = before.pve_special_sites != after.pve_special_sites
@@ -525,12 +533,14 @@ pub fn validate_changeset(
             }
         }
     }
+    if cd.d6_notes_lp_seq {
+        if before.sp6_lifecycle != after.sp6_lifecycle {
+            validate_row("d6_notes_lp_seq", "sp6_lifecycle".into(), &after.sp6_lifecycle, max_row_bytes)?;
+        }
+    }
     if cd.d6_corp_crimewatch {
         if before.crimewatch_states != after.crimewatch_states {
             validate_row("d6_corp_crimewatch", "crimewatch_states".into(), &after.crimewatch_states, max_row_bytes)?;
-        }
-        if before.sp6_lifecycle != after.sp6_lifecycle {
-            validate_row("d6_corp_crimewatch", "sp6_lifecycle".into(), &after.sp6_lifecycle, max_row_bytes)?;
         }
     }
     Ok(())
