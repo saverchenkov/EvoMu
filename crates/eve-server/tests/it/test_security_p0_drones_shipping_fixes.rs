@@ -860,6 +860,12 @@ async fn issue_1008_1020_fighting_drones_return_bay_and_destroyed_drone_clear_it
     assert!(dead_notifs.iter().any(|n| n.event == "OnDroneControlLost" && n.args.first().and_then(|v| v.as_i64()) == Some(d_dead)));
     assert!(dead_notifs.iter().any(|n| n.event == "OnItemChange"));
     ctx.db.with_snapshot(|snap| assert!(!snap.items.contains_key(&d_dead)));
+    let dead_drone_info = common::borrow_wire_harness(&ctx, &mut sess)
+        .call_exchange("dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(d_dead)], &kw)
+        .await
+        .result
+        .expect("dogmaIM.ItemGetInfo on destroyed drone must return None (#1032)");
+    assert_eq!(dead_drone_info, PyRep::None);
     common::borrow_wire_harness(&ctx, &mut sess)
         .call_exchange("entity", None, "CmdReturnBay", &[PyRep::List(vec![PyRep::Integer(d_dead)])], &kw)
         .await

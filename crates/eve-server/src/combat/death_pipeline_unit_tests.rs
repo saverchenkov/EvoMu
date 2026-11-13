@@ -1559,6 +1559,7 @@ async fn issue_1008_1020_destroyed_player_drone_emits_clear_notifications() {
     });
     crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
         assert!(!rt.active_drones_in_space.contains_key(&drone_id));
+        assert!(rt.is_recently_destroyed_item_id(drone_id));
     });
     assert!(
         sys_handle.get_ball_snapshot(drone_id).await.unwrap().is_none(),

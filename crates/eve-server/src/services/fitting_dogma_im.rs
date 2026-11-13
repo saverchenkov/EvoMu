@@ -90,8 +90,28 @@ fn handle_item_get_info(
             true,
         )
     } else {
-        // If not found in items, raw_id is treated as a TypeId
-        let tid = raw_id as TypeId;
+        // Not found in `snap.items` or `active_drones_in_space`. If `raw_id` was recently
+        // destroyed in combat/space cleanup or exceeds `u32::MAX` (64-bit dynamic entity ID,
+        // never an SDE `typeID`), return `None` as EVE's `godma.py` expects (`UpdateItem` /
+        // `RefreshItemEffects` / `RefreshItemAttributes`: `if infoz is None: return`) instead
+        // of misinterpreting the stale itemID as a `typeID` and raising `TypeNotFound` (#1032).
+        let is_destroyed_entity = raw_id > 0
+            && (TypeId::try_from(raw_id).is_err()
+                || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                    rt.is_recently_destroyed_item_id(raw_id)
+                        || rt.destroyed_npc_cache.contains_key(&raw_id)
+                }));
+        if is_destroyed_entity {
+            return Ok(PyRep::None);
+        }
+        // Otherwise treat `raw_id` as an SDE `TypeId`.
+        let Ok(tid) = TypeId::try_from(raw_id) else {
+            return Err(BridgeRpcError {
+                code: "TypeNotFound".into(),
+                message: format!("Type {raw_id} not found in SDE"),
+                client_error: None,
+            });
+        };
         (tid, PyRep::None, HashMap::new(), None, 1, false)
     };
 
