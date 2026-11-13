@@ -46,7 +46,9 @@ pub(super) fn handle_insure_ship(
         ));
     };
     let Some(arg1) = args.get(1).and_then(|a| a.as_f64()) else {
-        return Err(BridgeRpcError::user_error("InsureShipInvalidCost"));
+        return Err(BridgeRpcError::from_user_key(
+            eve_proto::UserErrorKey::InsureShipInvalidCost,
+        ));
     };
     if let Some(sid) = session.structure_id {
         return Err(BridgeRpcError {
@@ -94,7 +96,9 @@ pub(super) fn handle_insure_ship(
             return Err(rpc_err("ShipNotFound", format!("Ship {ship_id} not found")));
         };
         if ctx.sde.get_type_category(ship.type_id) != Some(6) {
-            return Err(BridgeRpcError::user_error("InsureShipFailed"));
+            return Err(BridgeRpcError::from_user_key(
+                eve_proto::UserErrorKey::InsureShipFailed,
+            ));
         }
         if !ship.singleton {
             return Err(rpc_err(
@@ -166,12 +170,10 @@ pub(super) fn handle_insure_ship(
                 } else {
                     owner_id
                 };
-                return Err(BridgeRpcError {
-                    code: "InsureShipFailedSingleContract".into(),
-                    message: format!(
-                        "InsureShipFailedSingleContract (ownerName={contract_owner_id})"
-                    ),
-                });
+                return Err(BridgeRpcError::user_error_with_args(
+                    eve_proto::UserErrorKey::InsureShipFailedSingleContract,
+                    [("ownerName", PyRep::Integer(contract_owner_id))],
+                ));
             }
         }
         let live_prices =
@@ -197,7 +199,11 @@ pub(super) fn handle_insure_ship(
             }
             match matched {
                 Some(t) => t,
-                None => return Err(BridgeRpcError::user_error("InsureShipInvalidCost")),
+                None => {
+                    return Err(BridgeRpcError::from_user_key(
+                        eve_proto::UserErrorKey::InsureShipInvalidCost,
+                    ))
+                }
             }
         } else if arg1 > 0.0 {
             let idx = standard_fractions
@@ -214,7 +220,9 @@ pub(super) fn handle_insure_ship(
             let (lvl_name, lvl_cost, lvl_payout) = levels[idx];
             (lvl_name, lvl_cost, lvl_payout, standard_fractions[idx])
         } else {
-            return Err(BridgeRpcError::user_error("InsureShipInvalidCost"));
+            return Err(BridgeRpcError::from_user_key(
+                eve_proto::UserErrorKey::InsureShipInvalidCost,
+            ));
         };
         let start_unix = now_unix;
         let end_unix = now_unix.saturating_add(

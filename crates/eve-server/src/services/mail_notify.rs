@@ -475,7 +475,7 @@ pub(crate) fn handle_poke_player_about_chat_msg_gm(
         return Some(Err(BridgeRpcError::user_error("PokeMessageRequired")));
     };
     if channel_name.chars().count() > 4000 {
-        return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+        return Some(Err(BridgeRpcError::custom_info("CustomInfo")));
     }
     // DERIVED: V24 client `mailMgr.PokePlayerAboutChatMsgGm(targetCharID, channelName)` does not pass
     // a separate mail subject; use a fixed subject line for the accompanying GM notification mail.

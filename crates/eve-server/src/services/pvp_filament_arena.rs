@@ -1089,7 +1089,7 @@ pub async fn handle_pvp_end_gate_activation(
         return Err(BridgeRpcError::user_error(err_code));
     }
     if !on_winning_side {
-        return Err(BridgeRpcError::user_error("AccessDenied"));
+        return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::AccessDenied));
     }
 
     let target_gate_id = if end_gate_id > 0 { end_gate_id } else { 70_001 };

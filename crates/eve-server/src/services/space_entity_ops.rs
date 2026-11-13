@@ -316,7 +316,7 @@ pub async fn handle(
                 }));
             }
             if sys_id == 30_100_000 {
-                return Some(Err(BridgeRpcError::user_error("DunBlacklistCannotWarp")));
+                return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::DunBlacklistCannotWarp)));
             }
             let Some(ship_id) = session.ship_id else {
                 return Some(Err(BridgeRpcError {

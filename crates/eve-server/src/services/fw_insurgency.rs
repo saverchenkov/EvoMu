@@ -902,7 +902,7 @@ pub async fn handle_hub_and_scan(
                 }));
             };
             if sys_id == 30_100_000 || (32_000_000..=32_999_999).contains(&sys_id) {
-                return Some(Err(BridgeRpcError::user_error("CannotDscanInThisSystem")));
+                return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CannotDscanInThisSystem)));
             }
             if args.first().and_then(|a| a.as_f64()).is_some_and(|v| !v.is_finite() || v < 0.0) {
                 return Some(Err(BridgeRpcError {

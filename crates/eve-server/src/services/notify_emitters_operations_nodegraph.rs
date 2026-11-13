@@ -363,7 +363,7 @@ pub(crate) fn deactivate_operation_for_char(ctx: &ServerContext, char_id: i64) -
     let prev_op = ctx.db.try_with_mut_snapshot(|snap| {
         with_character_operations_record(snap, char_id, now, |rec| {
             let Some(op_id) = rec.active_operation_id.take() else {
-                return Err(BridgeRpcError::user_error("CustomInfo"));
+                return Err(BridgeRpcError::custom_info("CustomInfo"));
             };
             Ok(op_id)
         })
@@ -384,7 +384,7 @@ fn replay_operation_for_char(
         || !(1..=100_000).contains(&op_id)
         || !op_defs.op_tasks.contains_key(&op_id)
     {
-        return Err(BridgeRpcError::user_error("CustomInfo"));
+        return Err(BridgeRpcError::custom_info("CustomInfo"));
     }
     let now = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
@@ -414,7 +414,7 @@ pub(crate) fn skip_operation_for_char(
         || !(1..=100_000).contains(&op_id)
         || !op_defs.op_tasks.contains_key(&op_id)
     {
-        return Err(BridgeRpcError::user_error("CustomInfo"));
+        return Err(BridgeRpcError::custom_info("CustomInfo"));
     }
     let now = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {

@@ -109,16 +109,17 @@ pub fn check_immobilizing_module_active(
     });
 
     if has_immobilizing_module {
-        let err_code = match action {
-            "dock" => "CantDockWhileModuleActive",
-            "jump" => "CantJumpWhileModuleActive",
-            "warp" => "WarpDisrupted",
-            "tether" => "DeniedTethered",
-            _ => "CantJumpWhileModuleActive",
+        let key = match action {
+            "dock" => eve_proto::UserErrorKey::CantDockWhileModuleActive,
+            "jump" => eve_proto::UserErrorKey::CantJumpWhileModuleActive,
+            "warp" => eve_proto::UserErrorKey::WarpDisrupted,
+            "tether" => eve_proto::UserErrorKey::DeniedTethered,
+            _ => eve_proto::UserErrorKey::CantJumpWhileModuleActive,
         };
-        return Err(err(
-            err_code,
+        return Err(BridgeRpcError::with_client_error(
+            key.as_str(),
             format!("Cannot perform {action} while an immobilizing module (Bastion/Siege/Core) is active"),
+            eve_proto::ClientError::user(key),
         ));
     }
     Ok(())
@@ -301,9 +302,10 @@ pub fn validate_npc_station_docking(
 ) -> Result<(), BridgeRpcError> {
     // Supercarriers (659) and Titans (30) cannot dock at NPC stations
     if is_npc_station && matches!(ship_group_id, 30 | 659) {
-        return Err(err(
-            "DockingRequestDenied",
+        return Err(BridgeRpcError::with_client_error(
+            eve_proto::UserErrorKey::DockingRequestDenied.as_str(),
             "Supercarriers and Titans cannot dock at NPC stations",
+            eve_proto::ClientError::user(eve_proto::UserErrorKey::DockingRequestDenied),
         ));
     }
     Ok(())

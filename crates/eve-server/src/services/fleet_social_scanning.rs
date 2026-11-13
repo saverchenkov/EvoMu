@@ -384,7 +384,7 @@ pub(super) async fn handle_scanning_and_wormholes(
                 }));
             };
             if sys_id == 30_100_000 || (32_000_000..=32_999_999).contains(&sys_id) {
-                return Some(Err(BridgeRpcError::user_error("CannotDscanInThisSystem")));
+                return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CannotDscanInThisSystem)));
             }
             let scan_angle = args
                 .first()

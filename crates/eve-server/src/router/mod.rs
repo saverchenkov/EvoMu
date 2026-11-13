@@ -20,6 +20,7 @@ pub use binding::{alloc_transport_session_id, SessionCleanupGuard, NEXT_TRANSPOR
 pub use cache_notifications::*;
 pub use context::*;
 pub use dispatch::box_fut;
+pub use eve_proto::{ClientError, UserErrorKey, V24_PROGRAMMATIC_USER_ERROR_KEYS};
 pub use rpc_args::RpcArgs;
 pub use session_transition::*;
 

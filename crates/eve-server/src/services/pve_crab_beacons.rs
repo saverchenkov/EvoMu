@@ -230,7 +230,7 @@ pub fn check_crab_loot_access(
             }
         }
         CrabBeaconPhase::LootRestricted | CrabBeaconPhase::SelfDestructed => {
-            Err(BridgeRpcError::user_error("ItemNotFound"))
+            Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::ItemNotFound))
         }
     }
 }

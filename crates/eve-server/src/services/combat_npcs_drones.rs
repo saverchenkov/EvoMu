@@ -571,7 +571,7 @@ pub async fn handle_npcs_drones(
                 })
                 .sum();
             if cur_bw + req_bw > ship_bw + 1e-4 {
-                return Some(Err(BridgeRpcError::user_error("MaxBandwidthExceeded")));
+                return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::MaxBandwidthExceeded)));
             }
 
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -660,7 +660,7 @@ pub async fn handle_npcs_drones(
                     return Err(BridgeRpcError::user_error(code));
                 }
                 if cur_bw + req_bw > ship_bw + 1e-4 {
-                    return Err(BridgeRpcError::user_error("MaxBandwidthExceeded"));
+                    return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::MaxBandwidthExceeded));
                 }
                 for (i, (rec, sde_t, is_sentry, max_vel, bw_used, opt_range, dmg_vec, _, sh_rep, ar_rep, hu_rep, web_f, neut_a, ecm_s, tp_s, _)) in prepared_drones.iter().enumerate() {
                     let rid = res_ids[i];

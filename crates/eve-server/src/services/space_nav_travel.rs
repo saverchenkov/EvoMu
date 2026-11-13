@@ -1146,7 +1146,7 @@ pub(crate) async fn handle_cmd_align_to(
             });
         }
         if sys_id == 30_100_000 {
-            return Err(BridgeRpcError::user_error("DunBlacklistCannotWarp"));
+            return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::DunBlacklistCannotWarp));
         }
         ctx.db.with_snapshot(|snap| {
             snap.bookmarks

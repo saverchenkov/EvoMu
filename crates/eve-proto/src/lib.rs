@@ -9,10 +9,15 @@
 
 #![forbid(unsafe_code)]
 
+pub mod client_error;
 pub mod dbrow;
 pub mod marshal;
 pub mod quasar;
 pub mod quasar_wire;
+
+pub use client_error::{
+    ClientError, UserErrorKey, MACHONETERR_WRAPPEDEXCEPTION, V24_PROGRAMMATIC_USER_ERROR_KEYS,
+};
 
 pub use dbrow::{
     dbtype_bit_width, decode_rle, encode_rle, extract_dbrow_col_defs,

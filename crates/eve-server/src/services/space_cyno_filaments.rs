@@ -650,14 +650,14 @@ async fn handle_random_jump_filament(
             });
         }
         let item = snap.items.get(&fil_item_id).ok_or_else(|| {
-            BridgeRpcError::user_error("ItemNotFound")
+            BridgeRpcError::from_user_key(eve_proto::UserErrorKey::ItemNotFound)
         })?;
         if item.owner_id != char_id
             || item.location_id != ship_id
             || item.flag != eve_db::InventoryFlag::Cargo
             || item.quantity < 1
         {
-            return Err(BridgeRpcError::user_error("ItemNotFound"));
+            return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::ItemNotFound));
         }
         snap.consume_exact_item_quantity(
             fil_item_id,
@@ -1217,7 +1217,7 @@ async fn handle_cone_scan(
         }));
     };
     if sys_id == 30_100_000 || (32_000_000..=32_999_999).contains(&sys_id) {
-        return Some(Err(BridgeRpcError::user_error("CannotDscanInThisSystem")));
+        return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CannotDscanInThisSystem)));
     }
     let raw_angle = args
         .first()

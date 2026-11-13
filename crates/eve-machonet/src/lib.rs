@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 use eve_proto::PyRep;
+pub use eve_proto::{ClientError, UserErrorKey, V24_PROGRAMMATIC_USER_ERROR_KEYS};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -158,6 +159,11 @@ pub fn wrapped_slash_error_body(original_command: i64, reason: &str) -> PyRep {
 /// `RuntimeError` stack trace.
 pub fn wrapped_user_error_body(original_command: i64, message: &str) -> PyRep {
     wrapped_named_user_error_body(original_command, "CustomInfo", message)
+}
+
+/// Total wire mapping from a typed [`ClientError`] to a V24 `machoNetPacket.ErrorResponse` body (`C-5`, `#929`).
+pub fn wrapped_client_error_body(original_command: i64, err: &ClientError) -> PyRep {
+    err.to_macho_error_body(original_command)
 }
 
 /// `macho.MachoAddress` endpoint representation.

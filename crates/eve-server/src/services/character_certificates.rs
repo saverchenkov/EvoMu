@@ -19,7 +19,7 @@ fn check_target_auth(
     if session.has_gm_role() || (session.role & eve_machonet::service_roles::ROLE_GM_MASK) != 0 {
         return Ok(());
     }
-    Err(BridgeRpcError::user_error("AccessDenied"))
+    Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::AccessDenied))
 }
 
 /// Authorizes updating certificate display flags (own character or GM).
@@ -34,7 +34,7 @@ fn check_flags_auth(
     {
         return Ok(());
     }
-    Err(BridgeRpcError::user_error("AccessDenied"))
+    Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::AccessDenied))
 }
 
 /// Persistent certificate state for a character stored in `snap.node_graph_state.certificates`.

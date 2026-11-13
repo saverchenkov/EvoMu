@@ -1559,6 +1559,90 @@ pub fn validate_reply_shape(
     validate_reply_shape_with_metrics(lookup, rpc_name, raw_reply, reply_shape).violations
 }
 
+/// Ratchet ceiling on non-test `BridgeRpcError::user_error(` call sites in `crates/eve-server/src`
+/// (`C-5`, `#929`; reduced from `319` on `main` to `250`).
+pub const UNTYPED_USER_ERROR_RATCHET_CEILING: usize = 250;
+
+/// Validates every [`eve_proto::UserErrorKey`] variant against V24.01 `res:/staticdata/dialogs.static`
+/// (`SdeRegistry::load_dialogs`) or [`eve_proto::V24_PROGRAMMATIC_USER_ERROR_KEYS`] (`C-5`, `#929`).
+pub fn validate_user_error_catalogue(sde: &SdeRegistry) -> Result<usize, String> {
+    let dialogs = sde
+        .load_dialogs()
+        .map_err(|e| format!("failed to load V24.01 dialogs.static: {e}"))?;
+    for &key in eve_proto::UserErrorKey::ALL {
+        let name = key.as_str();
+        if eve_proto::UserErrorKey::from_code(name) != Some(key) {
+            return Err(format!(
+                "UserErrorKey::from_code({name:?}) did not round-trip to {key:?}"
+            ));
+        }
+        match key.v24_dialog_id() {
+            Some(expected_id) => {
+                let Some(entry) = dialogs.get(name) else {
+                    return Err(format!(
+                        "UserErrorKey::{key:?} ({name:?}) missing from V24.01 dialogs.static"
+                    ));
+                };
+                if entry.dialog_id != expected_id {
+                    return Err(format!(
+                        "UserErrorKey::{key:?} ({name:?}) dialog_id mismatch: expected {expected_id}, got {}",
+                        entry.dialog_id
+                    ));
+                }
+            }
+            None => {
+                if !eve_proto::V24_PROGRAMMATIC_USER_ERROR_KEYS.contains(&name) {
+                    return Err(format!(
+                        "UserErrorKey::{key:?} ({name:?}) has no dialogs.static ID and is not in V24_PROGRAMMATIC_USER_ERROR_KEYS"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(eve_proto::UserErrorKey::ALL.len())
+}
+
+/// Counts non-test `BridgeRpcError::user_error(` call sites under `eve_server_src_dir`.
+pub fn count_untyped_user_error_call_sites(eve_server_src_dir: &Path) -> Result<usize, String> {
+    fn walk_dir(dir: &Path, total: &mut usize) -> Result<(), String> {
+        let entries =
+            std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("dir entry in {}: {e}", dir.display()))?;
+            let path = entry.path();
+            if path.is_dir() {
+                walk_dir(&path, total)?;
+            } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
+                let fname = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default();
+                if fname.contains("test") {
+                    continue;
+                }
+                let src = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("read {}: {e}", path.display()))?;
+                *total += src.matches("BridgeRpcError::user_error(").count();
+            }
+        }
+        Ok(())
+    }
+    let mut total = 0;
+    walk_dir(eve_server_src_dir, &mut total)?;
+    Ok(total)
+}
+
+/// Enforces the falling ratchet on raw `BridgeRpcError::user_error(` call sites (`C-5`, `#929`).
+pub fn check_untyped_user_error_ratchet(eve_server_src_dir: &Path) -> Result<usize, String> {
+    let count = count_untyped_user_error_call_sites(eve_server_src_dir)?;
+    if count > UNTYPED_USER_ERROR_RATCHET_CEILING {
+        return Err(format!(
+            "Untyped `BridgeRpcError::user_error(` call-site count {count} exceeds ratchet ceiling {UNTYPED_USER_ERROR_RATCHET_CEILING}; use `ClientError::User` / `BridgeRpcError::from_user_key` / `BridgeRpcError::user_error_with_args` instead (#929)"
+        ));
+    }
+    Ok(count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1944,6 +2028,25 @@ mod tests {
                 .verify_expectations_integrity(&raw, &parsed)
                 .is_err(),
             "Mismatched expectations SHA-256 must be rejected"
+        );
+    }
+
+    #[test]
+    fn user_error_key_catalogue_matches_v24_dialogs_static_and_ratchet_holds() {
+        let sde = SdeRegistry::with_canonical_seed();
+        let checked = validate_user_error_catalogue(&sde)
+            .expect("all UserErrorKey variants must match V24.01 dialogs.static or programmatic catalogue");
+        assert!(checked >= 60, "expected >= 60 catalogued UserErrorKey variants, got {checked}");
+
+        let server_src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("eve-server/src");
+        let count = check_untyped_user_error_ratchet(&server_src)
+            .expect("untyped BridgeRpcError::user_error ratchet must hold");
+        assert_eq!(
+            count, UNTYPED_USER_ERROR_RATCHET_CEILING,
+            "if you migrated more BridgeRpcError::user_error call sites, lower UNTYPED_USER_ERROR_RATCHET_CEILING to {count}"
         );
     }
 }

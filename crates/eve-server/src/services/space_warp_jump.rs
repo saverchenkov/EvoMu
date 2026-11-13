@@ -246,7 +246,7 @@ async fn handle_cmd_warp_to_stuff(
     match stuff_type {
         "bookmark" => {
             if sys_id == SOLAR_SYSTEM_ZARZAKH {
-                return Err(BridgeRpcError::user_error("DunBlacklistCannotWarp"));
+                return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::DunBlacklistCannotWarp));
             }
             let now_unix = ctx.now_unix();
             if crate::services::fleet_social::is_bookmark_expired(ctx, target_id, now_unix) {
@@ -1140,13 +1140,7 @@ pub(crate) fn evaluate_dock_perimeter(
         }
         _ => {
             if dist > max_dock_dist {
-                Err(BridgeRpcError {
-                    code: "OutsideDockingPerimeter".into(),
-                    message: format!(
-                        "Ship is {:.1} m from docking target (must be <= {:.1} m)",
-                        dist, max_dock_dist
-                    ),
-                })
+                Err(BridgeRpcError::outside_docking_perimeter(dist, max_dock_dist))
             } else {
                 Ok(false)
             }

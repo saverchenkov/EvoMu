@@ -239,7 +239,7 @@ pub(crate) async fn handle_bookmark_static_location(
         });
     };
     if sys_id == 30_100_000 {
-        return Err(BridgeRpcError::user_error("CantbookmarkEveSystem"));
+        return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CantbookmarkEveSystem));
     }
 
     let (explicit_entity_id, folder_id, label_str, memo_str, expiry_hours, subfolder_id) =

@@ -111,133 +111,15 @@ impl Drop for PreAuthConnectionGuard {
     }
 }
 
-/// Maps a `CallReq` dispatch failure into a V24 `machoNet` `ErrorResponse` body, preserving
-/// client-handled `UserError` keys (including `InsureShip*` and `DockingApproach` prompts)
-/// instead of collapsing them into `"CustomInfo"`.
+/// Maps a `CallReq` dispatch failure into a V24 `machoNet` `ErrorResponse` body via the
+/// total [`eve_proto::ClientError::to_macho_error_body`] wire mapping (`C-5`, `#929`).
 pub(crate) fn map_call_req_error_body(
     service: &str,
     method: &str,
     err: &BridgeRpcError,
 ) -> PyRep {
-    let err_msg = format!("{}: {}", err.code, err.message);
-    if matches!(
-        err.code.as_str(),
-        "UnimplementedRPC" | "InternalError" | "DatabasePersistenceError"
-    ) {
-        eve_machonet::wrapped_runtime_error_body(MachoPacketType::CallReq as i64, &err_msg)
-    } else if matches!(
-        err.code.as_str(),
-        "FakeItemNotFound" | "CharacterNotAtStation"
-    ) {
-        eve_machonet::wrapped_runtime_error_body(MachoPacketType::CallReq as i64, &err.code)
-    } else if matches!(
-        err.code.as_str(),
-        "InvalidBoundObject" | "BoundObjectNotOwned" | "UnMachoDestination"
-    ) {
-        eve_machonet::wrapped_named_user_error_body(
-            MachoPacketType::CallReq as i64,
-            "UnMachoDestination",
-            &err_msg,
-        )
-    } else if err.code == "SlashError" {
-        eve_machonet::wrapped_slash_error_body(MachoPacketType::CallReq as i64, &err.message)
-    } else if matches!(
-        err.code.as_str(),
-        "UnknownSlashCommand" | "InvalidSlashArgument" | "InvalidSlashArguments"
-    ) || (matches!(service.trim(), "slash" | "publicQaToolsServer") && method == "SlashCmd")
-    {
-        eve_machonet::wrapped_slash_error_body(MachoPacketType::CallReq as i64, &err_msg)
-    } else if matches!(
-        err.code.as_str(),
-        "NotEnoughCargoSpace"
-            | "NotEnoughCargoSpaceOverload"
-            | "NotEnoughDroneBaySpace"
-            | "NotEnoughDroneBaySpaceOverload"
-            | "NotEnoughFighterBaySpace"
-            | "NotEnoughSpecialBaySpace"
-            | "NotEnoughSpecialBaySpaceOverload"
-            | "NotEnoughSpace"
-            | "NotEnoughChargeSpace"
-            | "NoSpaceForThat"
-            | "NoSpaceForThatOverload"
-    ) {
-        let parse_val = |prefix: &str| -> Option<f64> {
-            let start = err.message.find(prefix)? + prefix.len();
-            let rest = &err.message[start..];
-            let end = rest.find(',').unwrap_or(rest.len());
-            rest[..end].trim().parse::<f64>().ok()
-        };
-        let free = parse_val("free=").unwrap_or(0.0);
-        let required = parse_val("required=").unwrap_or(0.0);
-        eve_machonet::wrapped_user_error_with_dict_body(
-            MachoPacketType::CallReq as i64,
-            err.code.trim(),
-            vec![
-                (PyRep::ascii_bytes("free"), PyRep::Real(free)),
-                (PyRep::ascii_bytes("required"), PyRep::Real(required)),
-            ],
-        )
-    } else if err.code == "MaxOpenOrdersReached" {
-        let (cur_cnt, max_cnt) = err
-            .message
-            .rsplit_once('(')
-            .and_then(|(_, rest)| rest.strip_suffix(')'))
-            .and_then(|pair| pair.split_once('/'))
-            .and_then(|(c, m)| {
-                Some((
-                    c.trim().parse::<i64>().ok()?,
-                    m.trim().parse::<i64>().ok()?,
-                ))
-            })
-            .unwrap_or((0, 0));
-        eve_machonet::wrapped_user_error_with_dict_body(
-            MachoPacketType::CallReq as i64,
-            "MarketExceededOrderCount",
-            vec![
-                (PyRep::ascii_bytes("curCnt"), PyRep::Integer(cur_cnt)),
-                (PyRep::ascii_bytes("maxCnt"), PyRep::Integer(max_cnt)),
-            ],
-        )
-    } else if err.code == "InsureShipFailedSingleContract" {
-        let owner_id = err
-            .message
-            .split_once("ownerName=")
-            .and_then(|(_, rest)| {
-                let digits: String = rest
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit() || *c == '-')
-                    .collect();
-                digits.parse::<i64>().ok()
-            })
-            .or_else(|| err.message.trim().parse::<i64>().ok())
-            .filter(|&id| id > 0)
-            .unwrap_or(90_000_001);
-        eve_machonet::wrapped_user_error_with_dict_body(
-            MachoPacketType::CallReq as i64,
-            "InsureShipFailedSingleContract",
-            vec![(PyRep::ascii_bytes("ownerName"), PyRep::Integer(owner_id))],
-        )
-    } else if matches!(
-        err.code.as_str(),
-        "InsureShipInvalidCost" | "InsureShipFailed"
-    ) {
-        eve_machonet::wrapped_user_error_with_dict_body(
-            MachoPacketType::CallReq as i64,
-            err.code.trim(),
-            vec![],
-        )
-    } else if matches!(
-        err.code.as_str(),
-        "OutsideDockingPerimeter" | "DockingApproach"
-    ) {
-        eve_machonet::wrapped_user_error_with_dict_body(
-            MachoPacketType::CallReq as i64,
-            "DockingApproach",
-            vec![],
-        )
-    } else {
-        eve_machonet::wrapped_user_error_body(MachoPacketType::CallReq as i64, &err_msg)
-    }
+    err.to_client_error(service, method)
+        .to_macho_error_body(MachoPacketType::CallReq as i64)
 }
 
 fn reply_source_address(dest: &MachoAddress) -> MachoAddress {
@@ -1248,17 +1130,21 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                     named_payload,
                                 }
                             }
-                            Err(mut err) => {
-                                if err.code == "InsureShipFailedSingleContract"
-                                    && !err.message.contains("ownerName=")
+                            Err(err) => {
+                                let mut client_err = err.to_client_error(&service, &method);
+                                if let eve_proto::ClientError::User {
+                                    key: eve_proto::UserErrorKey::InsureShipFailedSingleContract,
+                                    ref mut args,
+                                } = client_err
                                 {
-                                    if let Some(cid) = session.character_id {
-                                        err.message = format!(
-                                            "InsureShipFailedSingleContract (ownerName={cid})"
-                                        );
+                                    if !args.iter().any(|(k, _)| k == "ownerName") {
+                                        if let Some(cid) = session.character_id {
+                                            args.push(("ownerName".into(), PyRep::Integer(cid)));
+                                        }
                                     }
                                 }
-                                let payload = map_call_req_error_body(&service, &method, &err);
+                                let payload = client_err
+                                    .to_macho_error_body(MachoPacketType::CallReq as i64);
                                 MachoPacket {
                                     packet_type: MachoPacketType::ErrorResponse,
                                     source: reply_source_address(&pkt.destination),

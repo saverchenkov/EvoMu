@@ -1028,7 +1028,7 @@ pub async fn handle_crimewatch(
                 return Some(Err(BridgeRpcError::user_error("InvalidDuelTarget")));
             };
             if !ctx.is_character_online(target_char_id, target_user_id) {
-                return Some(Err(BridgeRpcError::user_error("DuelChallengeFailNoSesssionForTarget")));
+                return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::DuelChallengeFailNoSesssionForTarget)));
             }
             let now_unix = ctx.now_unix();
             let expiry_ft = ctx.now_blueos_filetime_ticks() + 600_000_000;

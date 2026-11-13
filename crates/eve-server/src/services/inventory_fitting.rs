@@ -1970,13 +1970,19 @@ async fn handle_ship_drop(
     fitting_ship_bays::ship_drop(ctx, session, args, kwargs).await
 }
 
-pub(crate) fn ship_hold_capacity_error_code(flag_u16: u16) -> &'static str {
+pub(crate) fn ship_hold_capacity_error_key(flag_u16: u16) -> eve_proto::UserErrorKey {
     match flag_u16 {
-        87 => "NotEnoughDroneBaySpace",
-        158 => "NotEnoughFighterBaySpace",
-        133..=151 | 177 | 179 | 181 | 182 | 185 => "NotEnoughSpecialBaySpace",
-        _ => "NotEnoughCargoSpace",
+        87 => eve_proto::UserErrorKey::NotEnoughDroneBaySpace,
+        158 => eve_proto::UserErrorKey::NotEnoughFighterBaySpace,
+        133..=151 | 177 | 179 | 181 | 182 | 185 => {
+            eve_proto::UserErrorKey::NotEnoughSpecialBaySpace
+        }
+        _ => eve_proto::UserErrorKey::NotEnoughCargoSpace,
     }
+}
+
+pub(crate) fn ship_hold_capacity_error_code(flag_u16: u16) -> &'static str {
+    ship_hold_capacity_error_key(flag_u16).as_str()
 }
 
 pub(crate) fn ship_hold_capacity_error(
@@ -1986,10 +1992,13 @@ pub(crate) fn ship_hold_capacity_error(
     required_vol: f64,
 ) -> BridgeRpcError {
     let free_vol = (hold_capacity - used_vol).max(0.0);
-    BridgeRpcError {
-        code: ship_hold_capacity_error_code(flag_u16).into(),
-        message: format!("free={free_vol}, required={required_vol}"),
-    }
+    BridgeRpcError::user_error_with_args(
+        ship_hold_capacity_error_key(flag_u16),
+        [
+            ("free", PyRep::Real(free_vol)),
+            ("required", PyRep::Real(required_vol)),
+        ],
+    )
 }
 
 pub use super::fitting_saved_apply::{dna_to_fitting, fitting_to_dna, saved_fitting_to_dna};

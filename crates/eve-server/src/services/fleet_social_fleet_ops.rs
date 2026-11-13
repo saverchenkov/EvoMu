@@ -1154,7 +1154,7 @@ pub(crate) async fn handle_fleet_warp(
     } else if let Some(bm_res) = ctx.db.with_snapshot(|snap| {
         let bm = snap.bookmarks.get(&dest_id)?;
         if sys_id == 30_100_000 || bm.solar_system_id == 30_100_000 {
-            return Some(Err(BridgeRpcError::user_error("DunBlacklistCannotWarp")));
+            return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::DunBlacklistCannotWarp)));
         }
         if super::is_bookmark_expired_in_snap(snap, dest_id, now_unix)
             || bm.solar_system_id != sys_id

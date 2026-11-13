@@ -421,7 +421,7 @@ pub fn handle(
                 .and_then(|a| a.as_i64())
                 .filter(|id| op_defs.sde_categories.contains(id))
             else {
-                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+                return Some(Err(BridgeRpcError::custom_info("CustomInfo")));
             };
             let state = ctx.db.with_snapshot(|snap| {
                 if let Some(rec) = load_store(snap).by_character.get(&char_id) {
@@ -449,7 +449,7 @@ pub fn handle(
                 (Some(char_id), args.first().and_then(|a| a.as_i64()))
             };
             let Some(target_cid) = target_cid_opt.filter(|&id| id > 0) else {
-                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+                return Some(Err(BridgeRpcError::custom_info("CustomInfo")));
             };
             if target_cid != char_id && !session.has_gm_role() {
                 return Some(Err(rpc_err(
@@ -458,7 +458,7 @@ pub fn handle(
                 )));
             }
             let Some(cat_id) = raw_cat_id.filter(|id| op_defs.sde_categories.contains(id)) else {
-                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+                return Some(Err(BridgeRpcError::custom_info("CustomInfo")));
             };
             let is_gm = session.has_gm_role();
             let now = ctx.now_unix();
@@ -628,14 +628,14 @@ pub fn handle(
                 .and_then(|a| a.as_i64())
                 .filter(|id| op_defs.sde_operations.contains(id))
             else {
-                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+                return Some(Err(BridgeRpcError::custom_info("CustomInfo")));
             };
             let char_sys = session.solar_system_id.or_else(|| {
                 ctx.db
                     .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.solar_system_id))
             });
             let Some(curr_sys) = char_sys.filter(|id| ctx.sde.solar_systems.contains_key(id)) else {
-                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+                return Some(Err(BridgeRpcError::custom_info("CustomInfo")));
             };
             let op_sys = if let Some(req_arg) = args.get(1) {
                 let Some(req_sys) = req_arg
@@ -643,7 +643,7 @@ pub fn handle(
                     .and_then(|s| u32::try_from(s).ok())
                     .filter(|id| ctx.sde.solar_systems.contains_key(id) && *id == curr_sys)
                 else {
-                    return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+                    return Some(Err(BridgeRpcError::custom_info("CustomInfo")));
                 };
                 req_sys
             } else {
@@ -655,7 +655,7 @@ pub fn handle(
                 .and_then(|a| a.as_i64())
                 .filter(|cid| op_defs.sde_categories.contains(cid));
             if args.get(2).is_some_and(|a| !matches!(a, PyRep::None)) && explicit_cat.is_none() {
-                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+                return Some(Err(BridgeRpcError::custom_info("CustomInfo")));
             }
             let now = ctx.now_unix();
             let sess_docked = session.station_id.or(session.structure_id);
@@ -746,7 +746,7 @@ pub fn handle(
                 .or_else(|| args.first().and_then(|a| a.as_i64()))
                 .filter(|id| op_defs.sde_tasks.contains(id))
             else {
-                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+                return Some(Err(BridgeRpcError::custom_info("CustomInfo")));
             };
             let now = ctx.now_unix();
             ctx.db.with_mut_snapshot(|snap| {
@@ -766,7 +766,7 @@ pub fn handle(
                 .or_else(|| args.first().and_then(|a| a.as_i64()))
                 .filter(|id| op_defs.sde_tasks.contains(id))
             else {
-                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+                return Some(Err(BridgeRpcError::custom_info("CustomInfo")));
             };
             let now = ctx.now_unix();
             ctx.db.with_mut_snapshot(|snap| {
@@ -789,7 +789,7 @@ pub fn handle(
                 .or_else(|| args.first().and_then(|a| a.as_i64()))
                 .filter(|id| op_defs.sde_tasks.contains(id) && op_defs.task_to_op.contains_key(id))
             else {
-                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+                return Some(Err(BridgeRpcError::custom_info("CustomInfo")));
             };
             let call_cat_id = if args.len() >= 3 { args.first().and_then(|a| a.as_i64()) } else { None };
             let call_op_id = if args.len() >= 3 { args.get(1).and_then(|a| a.as_i64()) } else { None };
@@ -808,7 +808,7 @@ pub fn handle(
                         call_op_id
                             .or(rec.active_operation_id)
                             .or_else(|| op_defs.task_to_op.get(&task_id).copied())
-                            .ok_or_else(|| BridgeRpcError::user_error("CustomInfo"))?
+                            .ok_or_else(|| BridgeRpcError::custom_info("CustomInfo"))?
                     } else {
                         let Some(active_op) = rec.active_operation_id else {
                             return Err(rpc_err("NoActiveOperation", "No active operation"));
@@ -816,7 +816,7 @@ pub fn handle(
                         if call_op_id.is_some_and(|co| co != active_op)
                             || rec.active_operation_system_id.is_some_and(|s| s != curr_sys)
                         {
-                            return Err(BridgeRpcError::user_error("CustomInfo"));
+                            return Err(BridgeRpcError::custom_info("CustomInfo"));
                         }
                         let current_tid = op_defs.op_tasks.get(&active_op).and_then(|ts| {
                             ts.iter()
@@ -923,7 +923,7 @@ pub fn handle(
                 )
             };
             let Some(site_id) = site_id_opt else {
-                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+                return Some(Err(BridgeRpcError::custom_info("CustomInfo")));
             };
             let op_defs = get_operation_defs(&ctx.sde);
             let (char_sys, char_race, is_docked, active_op, active_sys) = ctx.db.with_snapshot(|snap| {
@@ -946,25 +946,25 @@ pub fn handle(
                 )
             });
             let Some(sys_id) = char_sys.filter(|&s| s > 0) else {
-                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+                return Some(Err(BridgeRpcError::custom_info("CustomInfo")));
             };
             if is_docked {
-                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+                return Some(Err(BridgeRpcError::custom_info("CustomInfo")));
             }
             let Some(active_op_id) = active_op.filter(|oid| op_defs.sde_operations.contains(oid)) else {
-                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+                return Some(Err(BridgeRpcError::custom_info("CustomInfo")));
             };
             if req_op_id.is_some_and(|rop| rop != active_op_id)
                 || active_sys.is_some_and(|s| s != sys_id)
             {
-                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+                return Some(Err(BridgeRpcError::custom_info("CustomInfo")));
             }
             let Some(d_id) = op_defs.resolve_site_dungeon_id(&ctx.sde, site_id, char_race) else {
-                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+                return Some(Err(BridgeRpcError::custom_info("CustomInfo")));
             };
             if let Some(&expected_site) = op_defs.op_site_ids.get(&active_op_id).filter(|&&s| s > 0) {
                 if site_id != expected_site && i64::from(d_id) != expected_site {
-                    return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+                    return Some(Err(BridgeRpcError::custom_info("CustomInfo")));
                 }
             }
             let _ = crate::services::pve_dungeon_runtime_rpc::register_sde_operation_dungeon_instance(

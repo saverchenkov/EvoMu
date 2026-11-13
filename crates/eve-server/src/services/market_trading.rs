@@ -1367,12 +1367,10 @@ pub fn handle(
                     .filter(|o| o.owner_id == order_owner_id && !o.is_npc && o.vol_remaining > 0)
                     .count();
                 if active_open_orders >= max_open_orders {
-                    return Err(BridgeRpcError {
-                        code: "MaxOpenOrdersReached".into(),
-                        message: format!(
-                            "Character has reached maximum open market orders ({active_open_orders}/{max_open_orders})"
-                        ),
-                    });
+                    return Err(BridgeRpcError::max_open_orders_reached(
+                        active_open_orders as i64,
+                        max_open_orders as i64,
+                    ));
                 }
 
                 let full_esc = order_price

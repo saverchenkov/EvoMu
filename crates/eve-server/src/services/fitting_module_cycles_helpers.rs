@@ -379,7 +379,10 @@ pub(crate) fn handle_unload_ammo(
                 ship_type.map(|st| crate::services::fitting_saved_apply::get_ship_hold_capacity(dest_flag as u16, st, eval_cargo_cap)).unwrap_or(0.0)
             };
             if hold_cap <= 0.0 {
-                return Err(BridgeRpcError { code: "NotEnoughCargoSpace".into(), message: "Not enough cargo space to unload ammo".into() });
+                return Err(BridgeRpcError::user_error_with_args(
+                    eve_proto::UserErrorKey::NotEnoughCargoSpace,
+                    [("free", PyRep::Real(0.0)), ("required", PyRep::Real(1.0))],
+                ));
             }
             Some(hold_cap)
         } else if is_owned_container_target {
@@ -389,7 +392,10 @@ pub(crate) fn handle_unload_ammo(
                 })
             }).unwrap_or(0.0);
             if cont_cap <= 0.0 {
-                return Err(BridgeRpcError { code: "NotEnoughCargoSpace".into(), message: "Not enough cargo space to unload ammo".into() });
+                return Err(BridgeRpcError::user_error_with_args(
+                    eve_proto::UserErrorKey::NotEnoughCargoSpace,
+                    [("free", PyRep::Real(0.0)), ("required", PyRep::Real(1.0))],
+                ));
             }
             Some(cont_cap)
         } else {
@@ -426,7 +432,11 @@ pub(crate) fn handle_unload_ammo(
                 }
                 if let Some(cap) = dest_cap {
                     if cap > 0.0 && used_cargo + vol > cap + 1e-4 {
-                        return Err(BridgeRpcError { code: "NotEnoughCargoSpace".into(), message: "Not enough cargo space to unload ammo".into() });
+                        let free = (cap - used_cargo).max(0.0);
+                        return Err(BridgeRpcError::user_error_with_args(
+                            eve_proto::UserErrorKey::NotEnoughCargoSpace,
+                            [("free", PyRep::Real(free)), ("required", PyRep::Real(vol))],
+                        ));
                     }
                 }
                 if let Some(ci) = snap.items.get_mut(&cid) {

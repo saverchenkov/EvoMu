@@ -19,7 +19,7 @@ pub(crate) fn handle_corp_medals(
     match method {
         "CreateMedal" => {
             if !has_comms {
-                return Some(Err(BridgeRpcError::user_error("CrpAccessDenied")));
+                return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied)));
             }
             let title = args.first().and_then(|a| a.as_str()).unwrap_or("Valorous Service Medal");
             let desc = args.get(1).and_then(|a| a.as_str()).unwrap_or("Awarded for fleet valor");
@@ -92,7 +92,7 @@ pub(crate) fn handle_corp_medals(
 
         "GiveMedalToCharacters" => {
             if !has_comms {
-                return Some(Err(BridgeRpcError::user_error("CrpAccessDenied")));
+                return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied)));
             }
             let medal_id = match args.first().and_then(|a| a.as_i64()) {
                 Some(id) if id > 0 => id,
@@ -520,7 +520,7 @@ pub(crate) fn handle_corp_bulletins(
                 Some(PyRep::Bool(false)) | Some(PyRep::Integer(0)) | None => corp_id,
                 Some(PyRep::Integer(id)) => {
                     if *id != corp_id && Some(*id) != session.alliance_id {
-                        return Some(Err(BridgeRpcError::user_error("CrpAccessDenied")));
+                        return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied)));
                     }
                     *id
                 }

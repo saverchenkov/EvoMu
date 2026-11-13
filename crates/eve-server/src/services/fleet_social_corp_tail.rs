@@ -257,7 +257,7 @@ pub(crate) fn handle_update_members(
         }));
     }
     if specs.iter().any(|sp| sp.has_negative_mask) {
-        return Some(Err(BridgeRpcError::user_error("CrpAccessDenied")));
+        return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied)));
     }
 
     promote_due_pending_corp_grants(ctx, corp_id);
@@ -301,7 +301,7 @@ pub(crate) fn handle_update_members(
                     || chk(sp.roles_at_other_opt, old_ra.roles_at_other)
                     || chk(sp.grantable_roles_at_other_opt, old_ra.grantable_roles_at_other);
                 if dir_changed {
-                    return Err(BridgeRpcError::user_error("CrpAccessDenied"));
+                    return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied));
                 }
             }
         }

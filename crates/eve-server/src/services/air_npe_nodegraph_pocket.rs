@@ -319,7 +319,7 @@ pub(crate) fn check_npe_live_combat_or_scramble(
                         .is_ok_and(|bp| bp.is_ball_scrambled(ship_id))
                 }));
     if scrambled {
-        return Err(BridgeRpcError::user_error("WarpScrambled"));
+        return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::WarpScrambled));
     }
     Ok(())
 }

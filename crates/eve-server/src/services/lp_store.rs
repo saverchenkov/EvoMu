@@ -1087,7 +1087,7 @@ pub fn handle(
                     .unwrap_or(1_000_009);
                 if let Some(req_corp_id) = target_corp_id {
                     if req_corp_id != char_corp_id && session.corporation_id != Some(req_corp_id) {
-                        return Err(BridgeRpcError::user_error("CrpAccessDenied"));
+                        return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied));
                     }
                 }
                 let corp_id = target_corp_id.unwrap_or(char_corp_id);
@@ -1103,7 +1103,7 @@ pub fn handle(
                     ctx.now_unix(),
                 );
                 if !is_ceo && (roles & allowed_view_roles) == 0 {
-                    return Err(BridgeRpcError::user_error("CrpAccessDenied"));
+                    return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied));
                 }
                 let balances = load_corp_lp_balances(snap, corp_id);
                 let mut entries: Vec<(i64, i64)> = balances.into_iter().collect();
