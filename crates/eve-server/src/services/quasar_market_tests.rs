@@ -5,9 +5,9 @@ use crate::quasar_gateway::{
     PublicGatewayRouter, STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_UNAUTHORIZED,
 };
 use eve_db::{CorporationRecord, IskCents, MarketOrderRecord, WorldRepository};
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, AuthoritativeContext, DynamicQuasarMessage,
-    DynamicValue, GoogleAny, QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, QuasarDescriptorRegistry,
 };
 use eve_sde::SdeRegistry;
 use std::collections::{HashMap, HashSet};
@@ -74,14 +74,40 @@ fn make_ctx(char_id: Option<u32>, role: u64) -> AuthoritativeContext {
 }
 
 fn encode_id_req(type_name: &str, id: u64) -> GoogleAny {
-    let mut id_msg = Vec::new();
-    encode_varint_field(1, id, &mut id_msg);
-    let mut req = Vec::new();
-    encode_bytes_field(1, &id_msg, &mut req);
-    GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"),
-        value: req,
-    }
+    let builder = match type_name {
+        "eve.market.orders.GetOrdersRequest" | "eve.market.orders.GetPriceHistoryRequest" => {
+            pb::message(type_name).set("region_id.sequential", id)
+        }
+        "eve.market.orders.GetPublicOpenInRegionRequest"
+        | "eve.market.orders.buyorder.GetAllPublicOpenInRegionRequest"
+        | "eve.market.orders.sellorder.GetAllPublicOpenInRegionRequest"
+        | "eve.market.orders.GetTypesWithActiveOrdersInRegionRequest"
+        | "eve.market.price.history.GetForRegionAndTypeRequest"
+        | "eve.market.region.GetPriceHistoryForTypeRequest" => {
+            pb::message(type_name).set("region.sequential", id)
+        }
+        "eve.market.orders.GetOpenInStationRequest" => {
+            pb::message(type_name).set("station.sequential", id)
+        }
+        "eve.market.orders.GetOpenInStructureRequest" => {
+            pb::message(type_name).set("structure.sequential", id)
+        }
+        "eve.market.orders.GetOpenForCharacterRequest"
+        | "eve.market.orders.GetHistoryForCharacterRequest" => {
+            pb::message(type_name).set("character.sequential", id as u32)
+        }
+        "eve.market.orders.GetOpenForCorporationRequest"
+        | "eve.market.orders.GetHistoryForCorporationRequest" => {
+            pb::message(type_name).set("corporation.sequential", id as u32)
+        }
+        "eve.market.character.sellorder.GetRequest"
+        | "eve.market.corporation.sellorder.GetRequest" => {
+            pb::message(type_name).set("order.sequential", id)
+        }
+        "eve.market.price.GetForAllTypesRequest" => pb::message(type_name).set("head", true),
+        other => panic!("unhandled market request type in test helper: {other}"),
+    };
+    builder.must_to_any()
 }
 
 #[test]

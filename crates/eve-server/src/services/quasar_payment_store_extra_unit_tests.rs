@@ -9,10 +9,10 @@ use crate::quasar_gateway::{
 };
 use eve_db::WorldRepository;
 use eve_machonet::{service_roles, SessionState};
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, EvePublicRequest,
-    EvePublicResponse, GoogleAny, GoogleTimestamp, QuasarDescriptorRegistry,
-    TYPE_GOOGLEAPIS_PREFIX,
+    EvePublicRequest, EvePublicResponse, GoogleAny, GoogleTimestamp, QuasarDescriptorRegistry,
+    WireField, WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
@@ -198,8 +198,13 @@ fn deposit_withdraw_default_nested_amounts_and_direct_scalar_catalog_lookups() {
     let sess = make_sess(Some(1), Some(90_000_001), service_roles::ROLE_GM_DEFAULT);
 
     // DepositRequest with empty inner message in field 2 defaults to +100 PLEX
-    let mut dep_empty_nested = Vec::new();
-    encode_bytes_field(2, &[], &mut dep_empty_nested);
+    let dep_empty_nested = WireMessage {
+        fields: vec![WireField {
+            field_number: 2,
+            value: WireValue::LengthDelimited(Vec::new()),
+        }],
+    }
+    .encode();
     let r = call(
         &router,
         &sess,
@@ -211,8 +216,13 @@ fn deposit_withdraw_default_nested_amounts_and_direct_scalar_catalog_lookups() {
     assert_eq!(plex_balance(&db, 1), 100);
 
     // WithdrawRequest with empty inner message in field 2 defaults to -50 PLEX
-    let mut wd_empty_nested = Vec::new();
-    encode_bytes_field(2, &[], &mut wd_empty_nested);
+    let wd_empty_nested = WireMessage {
+        fields: vec![WireField {
+            field_number: 2,
+            value: WireValue::LengthDelimited(Vec::new()),
+        }],
+    }
+    .encode();
     let r = call(
         &router,
         &sess,
@@ -224,10 +234,9 @@ fn deposit_withdraw_default_nested_amounts_and_direct_scalar_catalog_lookups() {
     assert_eq!(plex_balance(&db, 1), 50);
 
     // Nested message field 1 lookups for Category, Product, Offer, TargetAudience Offer
-    let mut cat_inner = Vec::new();
-    encode_varint_field(1, 1, &mut cat_inner);
-    let mut direct_cat = Vec::new();
-    encode_bytes_field(1, &cat_inner, &mut direct_cat);
+    let direct_cat = pb::message("eve_public.store.category.api.GetRequest")
+        .set("category.sequential", 1u32)
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -240,10 +249,9 @@ fn deposit_withdraw_default_nested_amounts_and_direct_scalar_catalog_lookups() {
         STATUS_OK
     );
 
-    let mut prod_inner = Vec::new();
-    encode_varint_field(1, 102, &mut prod_inner);
-    let mut direct_prod = Vec::new();
-    encode_bytes_field(1, &prod_inner, &mut direct_prod);
+    let direct_prod = pb::message("eve_public.store.product.api.GetRequest")
+        .set("product.sequential", 102u32)
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -256,10 +264,9 @@ fn deposit_withdraw_default_nested_amounts_and_direct_scalar_catalog_lookups() {
         STATUS_OK
     );
 
-    let mut off_inner = Vec::new();
-    encode_string_field(1, "1002", &mut off_inner);
-    let mut direct_offer = Vec::new();
-    encode_bytes_field(1, &off_inner, &mut direct_offer);
+    let direct_offer = pb::message("eve_public.store.offer.api.GetRequest")
+        .set("offer.store_offer", "1002")
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -271,12 +278,9 @@ fn deposit_withdraw_default_nested_amounts_and_direct_scalar_catalog_lookups() {
         .status_code,
         STATUS_OK
     );
-    let mut ta_entry = Vec::new();
-    encode_string_field(1, "1002", &mut ta_entry);
-    let mut ta_id = Vec::new();
-    encode_bytes_field(2, &ta_entry, &mut ta_id);
-    let mut direct_ta_offer = Vec::new();
-    encode_bytes_field(1, &ta_id, &mut direct_ta_offer);
+    let direct_ta_offer = pb::message("eve_public.store.targetaudience.offer.api.GetRequest")
+        .set("offer_id.catalogue_entry.name", "1002")
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -356,8 +360,9 @@ fn cost_and_token_purchase_prefix_stripping_negative_price_and_recipient_validat
     let sess = make_sess(Some(1), Some(90_000_001), service_roles::ROLE_PLAYER_DEFAULT);
 
     // CostRequest for offer 1002 -> STATUS_OK
-    let mut cost_1002 = Vec::new();
-    encode_varint_field(1, 1002, &mut cost_1002);
+    let cost_1002 = pb::message("eve_public.payment.purchase.api.CostRequest")
+        .set("catalog_amount_in_cents", 1002u32)
+        .must_encode();
     let r = call(
         &router,
         &sess,
@@ -368,9 +373,10 @@ fn cost_and_token_purchase_prefix_stripping_negative_price_and_recipient_validat
     assert_eq!(r.status_code, STATUS_OK);
 
     // TokenRequest for offer 1009 with negative price_plex -> STATUS_BAD_REQUEST
-    let mut neg_tok = Vec::new();
-    encode_varint_field(1, 1009, &mut neg_tok);
-    encode_varint_field(2, 78, &mut neg_tok);
+    let neg_tok = pb::message("eve_public.payment.purchase.api.TokenRequest")
+        .set("order.offer.store_offer", "1009")
+        .set("token.sequential", 78u32)
+        .must_encode();
     let r = call(
         &router,
         &sess,
@@ -381,9 +387,10 @@ fn cost_and_token_purchase_prefix_stripping_negative_price_and_recipient_validat
     assert_eq!(r.status_code, STATUS_BAD_REQUEST);
 
     // TokenRequest with disabled payment_token_id (77) -> STATUS_BAD_REQUEST
-    let mut disabled_tok_req = Vec::new();
-    encode_varint_field(1, 1002, &mut disabled_tok_req);
-    encode_varint_field(2, 77, &mut disabled_tok_req);
+    let disabled_tok_req = pb::message("eve_public.payment.purchase.api.TokenRequest")
+        .set("order.offer.store_offer", "1002")
+        .set("token.sequential", 77u32)
+        .must_encode();
     let r = call(
         &router,
         &sess,
@@ -395,9 +402,10 @@ fn cost_and_token_purchase_prefix_stripping_negative_price_and_recipient_validat
 
     // TokenRequest with non-existent active_char_id -> STATUS_NOT_FOUND
     let sess_missing_cid = make_sess(Some(1), Some(999_888_777), service_roles::ROLE_PLAYER_DEFAULT);
-    let mut valid_tok_req = Vec::new();
-    encode_varint_field(1, 1002, &mut valid_tok_req);
-    encode_varint_field(2, 78, &mut valid_tok_req);
+    let valid_tok_req = pb::message("eve_public.payment.purchase.api.TokenRequest")
+        .set("order.offer.store_offer", "1002")
+        .set("token.sequential", 78u32)
+        .must_encode();
     let r = call(
         &router,
         &sess_missing_cid,
@@ -509,11 +517,14 @@ fn schedule_token_quickpay_and_purchase_idor_and_predicate_isolation() {
 
     // 1. schedule.api.GetRequest: u1 gets 101 ("offer-u1-s1"), NOT 103; cross-user 102 is NOT_FOUND
     let mk_nested_id = |id: u64| -> Vec<u8> {
-        let mut inner = Vec::new();
-        encode_varint_field(1, id, &mut inner);
-        let mut outer = Vec::new();
-        encode_bytes_field(1, &inner, &mut outer);
-        outer
+        pb::message("eve_public.payment.schedule.api.GetRequest")
+            .set("schedule.sequential", id)
+            .must_encode()
+    };
+    let mk_token_id = |id: u32| -> Vec<u8> {
+        pb::message("eve_public.payment.token.api.GetRequest")
+            .set("token.sequential", id)
+            .must_encode()
     };
     let r101 = call(
         &router,
@@ -551,8 +562,9 @@ fn schedule_token_quickpay_and_purchase_idor_and_predicate_isolation() {
     );
 
     // 2. schedule.api.GetActiveByTypeRequest: u1 type 1 returns id 101 (NOT 102 or 103); type 9 is NOT_FOUND
-    let mut stype_1 = Vec::new();
-    encode_varint_field(1, 1, &mut stype_1);
+    let stype_1 = pb::message("eve_public.payment.schedule.api.GetActiveByTypeRequest")
+        .set("type", 1i32)
+        .must_encode();
     let r_act = call(
         &router,
         &u1_sess,
@@ -563,8 +575,9 @@ fn schedule_token_quickpay_and_purchase_idor_and_predicate_isolation() {
     assert_eq!(r_act.status_code, STATUS_OK);
     assert_eq!(r_act.payload.expect("active sched").value, mk_nested_id(101));
 
-    let mut stype_9 = Vec::new();
-    encode_varint_field(1, 9, &mut stype_9);
+    let stype_9 = pb::message("eve_public.payment.schedule.api.GetActiveByTypeRequest")
+        .set("type", 9i32)
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -586,14 +599,14 @@ fn schedule_token_quickpay_and_purchase_idor_and_predicate_isolation() {
         1_700_000_305,
     );
     assert_eq!(r_qp.status_code, STATUS_OK);
-    assert_eq!(r_qp.payload.expect("quick pay").value, mk_nested_id(701));
+    assert_eq!(r_qp.payload.expect("quick pay").value, mk_token_id(701));
 
     // 4. payment.token.api.GetRequest: u1 gets 701 ("u1-valid-701"), NOT 703; u1 requesting u2's 702 -> NOT_FOUND
     let r_tok = call(
         &router,
         &u1_sess,
         "eve_public.payment.token.api.GetRequest",
-        mk_nested_id(701),
+        mk_token_id(701),
         1_700_000_306,
     );
     assert_eq!(r_tok.status_code, STATUS_OK);
@@ -605,7 +618,7 @@ fn schedule_token_quickpay_and_purchase_idor_and_predicate_isolation() {
             &router,
             &u1_sess,
             "eve_public.payment.token.api.GetRequest",
-            mk_nested_id(702),
+            mk_token_id(702),
             1_700_000_307,
         )
         .status_code,
@@ -614,10 +627,10 @@ fn schedule_token_quickpay_and_purchase_idor_and_predicate_isolation() {
 
     // 5. TokenRequest: cross-user token 702 -> FORBIDDEN; non-quick-pay 703 -> BAD_REQUEST; valid 701 -> OK
     let mk_tok_purchase = |tok_id: u64| -> Vec<u8> {
-        let mut req = Vec::new();
-        encode_varint_field(1, 1002, &mut req);
-        encode_varint_field(2, tok_id, &mut req);
-        req
+        pb::message("eve_public.payment.purchase.api.TokenRequest")
+            .set("order.offer.store_offer", "1002")
+            .set("token.sequential", tok_id as u32)
+            .must_encode()
     };
     assert_eq!(
         call(

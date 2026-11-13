@@ -9,9 +9,10 @@ use crate::quasar_gateway::{
 };
 use eve_db::WorldRepository;
 use eve_machonet::{service_roles, SessionState};
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, EvePublicRequest,
-    EvePublicResponse, GoogleAny, QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
+    EvePublicRequest, EvePublicResponse, GoogleAny, QuasarDescriptorRegistry,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
@@ -61,19 +62,11 @@ fn call(router: &PublicGatewayRouter, sess: &SessionState, type_name: &str, payl
 }
 
 fn build_ent_id(holder: u64, uuid: &[u8], group_name: &str) -> Vec<u8> {
-    let mut ch = Vec::new();
-    encode_varint_field(1, holder, &mut ch);
-    let mut h = Vec::new();
-    encode_bytes_field(1, &ch, &mut h);
-    let mut a = Vec::new();
-    encode_bytes_field(1, uuid, &mut a);
-    let mut g = Vec::new();
-    encode_string_field(1, group_name, &mut g);
-    let mut eid = Vec::new();
-    encode_bytes_field(1, &h, &mut eid);
-    encode_bytes_field(2, &a, &mut eid);
-    encode_bytes_field(3, &g, &mut eid);
-    eid
+    pb::message("eve.assetholding.entitlement.Identifier")
+        .set("holder.character.sequential", holder as u32)
+        .set("asset.uuid", uuid.to_vec())
+        .set("group_by.name", group_name)
+        .must_encode()
 }
 
 #[test]
@@ -98,14 +91,14 @@ fn asset_spawn_hold_create_lookup_and_entitlement_redemption_lifecycle() {
     assert_eq!(call(&router, &player, "eve.assetholding.asset.api.SpawnRequest", Vec::new(), now), STATUS_FORBIDDEN);
     assert_eq!(call(&router, &gm, "eve.assetholding.asset.api.SpawnRequest", Vec::new(), now), STATUS_BAD_REQUEST);
 
-    let mut spawn_req = Vec::new();
-    encode_string_field(2, "tritanium-pack", &mut spawn_req);
-    let (mut t_sub, mut st_sub, mut stacks_sub) = (Vec::new(), Vec::new(), Vec::new());
-    encode_varint_field(1, 34, &mut t_sub);
-    encode_bytes_field(1, &t_sub, &mut st_sub);
-    encode_varint_field(2, 20, &mut st_sub);
-    encode_bytes_field(1, &st_sub, &mut stacks_sub);
-    encode_bytes_field(6, &stacks_sub, &mut spawn_req);
+    let spawn_req = pb::message("eve.assetholding.asset.api.SpawnRequest")
+        .set("internal_name", "tritanium-pack")
+        .set_with("itemstack", |p| {
+            p.add_with("stacks", |s| {
+                s.set("type.sequential", 34u32).set("quantity", 20u32)
+            })
+        })
+        .must_encode();
     let spawn_rsp = call_rsp(&router, &gm, "eve.assetholding.asset.api.SpawnRequest", spawn_req, now);
     assert_eq!(spawn_rsp.status_code, STATUS_OK);
 
@@ -117,63 +110,62 @@ fn asset_spawn_hold_create_lookup_and_entitlement_redemption_lifecycle() {
         .uuid;
 
     // HoldRequest (stack) + CreateRequest (character_title)
-    let (mut typed, mut stack_hp, mut hold_req) = (Vec::new(), Vec::new(), Vec::new());
-    encode_bytes_field(1, &st_sub, &mut typed);
-    encode_bytes_field(1, &typed, &mut stack_hp);
-    encode_varint_field(7, 4, &mut stack_hp);
-    encode_bytes_field(7, &stack_hp, &mut hold_req);
+    let hold_req = pb::message("eve.assetholding.asset.api.HoldRequest")
+        .set_with("itemstack", |hp| {
+            hp.set_with("by_typed_quantities", |tq| {
+                tq.add_with("items", |s| {
+                    s.set("type.sequential", 34u32).set("quantity", 20u32)
+                })
+            })
+            .set("desired_capacity", 4u64)
+        })
+        .must_encode();
     assert_eq!(call(&router, &gm, "eve.assetholding.asset.api.HoldRequest", hold_req, now), STATUS_OK);
 
-    let mut create_req = Vec::new();
-    let (mut u_sub, mut t_id_sub, mut title_u) = (Vec::new(), Vec::new(), Vec::new());
-    encode_bytes_field(
-        1,
-        &super::super::quasar_cosmetics_drafts::id_to_uuid_bytes(42),
-        &mut t_id_sub,
-    );
-    encode_bytes_field(1, &t_id_sub, &mut title_u);
-    encode_bytes_field(12, &title_u, &mut u_sub);
-    encode_bytes_field(4, &u_sub, &mut create_req);
-    encode_varint_field(6, 2, &mut create_req);
+    let create_req = pb::message("eve.assetholding.asset.api.CreateRequest")
+        .set("unit.unit_character_title.title.uuid", super::super::quasar_cosmetics_drafts::id_to_uuid_bytes(42))
+        .set("finite", 2u64)
+        .must_encode();
     assert_eq!(call(&router, &gm, "eve.assetholding.asset.api.CreateRequest", create_req, now), STATUS_OK);
 
     // 2. Asset GetRequest (internal + public: missing -> 400, unknown -> 404, valid -> 200)
     assert_eq!(call(&router, &player, "eve.assetholding.asset.api.GetRequest", Vec::new(), now), STATUS_BAD_REQUEST);
     assert_eq!(call(&router, &player, "eve_public.assetholding.asset.api.GetRequest", Vec::new(), now), STATUS_BAD_REQUEST);
-    let (mut bad_uuid, mut bad_get) = (Vec::new(), Vec::new());
-    encode_bytes_field(1, &[0xFF; 16], &mut bad_uuid);
-    encode_bytes_field(1, &bad_uuid, &mut bad_get);
+    let bad_get = pb::message("eve.assetholding.asset.api.GetRequest")
+        .set("asset.uuid", vec![0xFFu8; 16])
+        .must_encode();
     assert_eq!(call(&router, &player, "eve.assetholding.asset.api.GetRequest", bad_get.clone(), now), STATUS_NOT_FOUND);
     assert_eq!(call(&router, &player, "eve_public.assetholding.asset.api.GetRequest", bad_get, now), STATUS_NOT_FOUND);
 
-    let (mut good_uuid, mut good_get) = (Vec::new(), Vec::new());
-    encode_bytes_field(1, &asset_uuid, &mut good_uuid);
-    encode_bytes_field(1, &good_uuid, &mut good_get);
+    let good_get = pb::message("eve.assetholding.asset.api.GetRequest")
+        .set("asset.uuid", asset_uuid.to_vec())
+        .must_encode();
     assert_eq!(call(&router, &player, "eve.assetholding.asset.api.GetRequest", good_get.clone(), now), STATUS_OK);
     assert_eq!(call(&router, &player, "eve_public.assetholding.asset.api.GetRequest", good_get, now), STATUS_OK);
 
     // 3. DirectDeliveryRequest + GetUnredeemed + Get + Redeem + Delete
     let eid = build_ent_id(holder_cid, &asset_uuid, "promo");
-    let mut deliv_entry = Vec::new();
-    encode_bytes_field(2, &eid, &mut deliv_entry);
-    encode_varint_field(10, 3, &mut deliv_entry);
-    let mut deliv_req = Vec::new();
-    encode_bytes_field(2, &deliv_entry, &mut deliv_req);
+    let deliv_req = pb::message("eve.assetholding.entitlement.api.DirectDeliveryRequest")
+        .add_with("entitlements", |entry| {
+            entry.set_raw_message("entitlement", eid.clone()).set("quantity", 3u64)
+        })
+        .must_encode();
     assert_eq!(call(&router, &gm, "eve.assetholding.entitlement.api.DirectDeliveryRequest", deliv_req, now), STATUS_OK);
 
     assert_eq!(call(&router, &unauth, "eve.assetholding.entitlement.api.GetUnredeemedByHolderAndGroupNameRequest", Vec::new(), now), STATUS_UNAUTHORIZED);
-    let (mut ch_other, mut h_other, mut unred_other) = (Vec::new(), Vec::new(), Vec::new());
-    encode_varint_field(1, other_cid, &mut ch_other);
-    encode_bytes_field(1, &ch_other, &mut h_other);
-    encode_bytes_field(1, &h_other, &mut unred_other);
+    let unred_other = pb::message("eve.assetholding.entitlement.api.GetUnredeemedByHolderAndGroupNameRequest")
+        .set("holder.character.sequential", other_cid as u32)
+        .must_encode();
     assert_eq!(call(&router, &player, "eve.assetholding.entitlement.api.GetUnredeemedByHolderAndGroupNameRequest", unred_other, now), STATUS_FORBIDDEN);
 
-    let mut unred_self = Vec::new();
-    encode_string_field(2, "promo", &mut unred_self);
+    let unred_self = pb::message("eve.assetholding.entitlement.api.GetUnredeemedByHolderAndGroupNameRequest")
+        .set("group_by_name", "promo")
+        .must_encode();
     assert_eq!(call(&router, &player, "eve.assetholding.entitlement.api.GetUnredeemedByHolderAndGroupNameRequest", unred_self, now), STATUS_OK);
 
-    let mut get_ent = Vec::new();
-    encode_bytes_field(1, &eid, &mut get_ent);
+    let get_ent = pb::message("eve_public.assetholding.entitlement.api.GetRequest")
+        .set_raw_message("entitlement", eid)
+        .must_encode();
     assert_eq!(call(&router, &other, "eve_public.assetholding.entitlement.api.GetRequest", get_ent.clone(), now), STATUS_FORBIDDEN);
     assert_eq!(call(&router, &player, "eve_public.assetholding.entitlement.api.GetRequest", get_ent.clone(), now), STATUS_OK);
     assert_eq!(call(&router, &player, "eve.assetholding.entitlement.api.GetRequest", get_ent.clone(), now), STATUS_OK);
@@ -263,14 +255,14 @@ fn extract_u64_matrix_empty_asset_uuids_and_unredeemed_holder_filters() {
     // Spawn two assets & grant two entitlements: one in "promo" (partially redeemed),
     // one in "full" (fully redeemed -> total == redeemed, must be excluded from GetUnredeemed),
     // plus one belonging to uid_only so user-fallback path returns real results.
-    let mut spawn_req = Vec::new();
-    encode_string_field(2, "tritanium-edge", &mut spawn_req);
-    let (mut t_sub, mut st_sub, mut stacks_sub) = (Vec::new(), Vec::new(), Vec::new());
-    encode_varint_field(1, 34, &mut t_sub);
-    encode_bytes_field(1, &t_sub, &mut st_sub);
-    encode_varint_field(2, 20, &mut st_sub);
-    encode_bytes_field(1, &st_sub, &mut stacks_sub);
-    encode_bytes_field(6, &stacks_sub, &mut spawn_req);
+    let spawn_req = pb::message("eve.assetholding.asset.api.SpawnRequest")
+        .set("internal_name", "tritanium-edge")
+        .set_with("itemstack", |p| {
+            p.add_with("stacks", |s| {
+                s.set("type.sequential", 34u32).set("quantity", 20u32)
+            })
+        })
+        .must_encode();
     assert_eq!(call(&router, &gm, "eve.assetholding.asset.api.SpawnRequest", spawn_req, now), STATUS_OK);
 
     let asset_uuid = super::super::quasar_entitlement_ledger::load(&router.db)
@@ -282,14 +274,15 @@ fn extract_u64_matrix_empty_asset_uuids_and_unredeemed_holder_filters() {
 
     // Fully redeem a 2-count entitlement for group "done" and grant active 3-count for group "promo"
     let eid_done = build_ent_id(holder_cid, &asset_uuid, "done");
-    let mut deliv_done = Vec::new();
-    let mut ent_done = Vec::new();
-    encode_bytes_field(2, &eid_done, &mut ent_done);
-    encode_varint_field(10, 2, &mut ent_done);
-    encode_bytes_field(2, &ent_done, &mut deliv_done);
+    let deliv_done = pb::message("eve.assetholding.entitlement.api.DirectDeliveryRequest")
+        .add_with("entitlements", |entry| {
+            entry.set_raw_message("entitlement", eid_done.clone()).set("quantity", 2u64)
+        })
+        .must_encode();
     assert_eq!(call(&router, &gm, "eve.assetholding.entitlement.api.DirectDeliveryRequest", deliv_done, now), STATUS_OK);
-    let mut red_done = Vec::new();
-    encode_bytes_field(1, &eid_done, &mut red_done);
+    let red_done = pb::message("eve_public.assetholding.entitlement.api.RedeemRequest")
+        .set_raw_message("entitlement", eid_done)
+        .must_encode();
     let player = make_sess(Some(1), Some(holder_cid as i64), service_roles::ROLE_PLAYER_DEFAULT);
     assert_eq!(call(&router, &player, "eve_public.assetholding.entitlement.api.RedeemRequest", red_done, now), STATUS_OK);
     assert!(super::super::quasar_entitlement_ledger::load(&router.db)
@@ -298,20 +291,20 @@ fn extract_u64_matrix_empty_asset_uuids_and_unredeemed_holder_filters() {
         .any(|e| e.group_name == "done" && e.redeemed == e.total));
 
     let eid_promo = build_ent_id(holder_cid, &asset_uuid, "promo");
-    let mut deliv_promo = Vec::new();
-    let mut ent_promo = Vec::new();
-    encode_bytes_field(2, &eid_promo, &mut ent_promo);
-    encode_varint_field(10, 3, &mut ent_promo);
-    encode_bytes_field(2, &ent_promo, &mut deliv_promo);
+    let deliv_promo = pb::message("eve.assetholding.entitlement.api.DirectDeliveryRequest")
+        .add_with("entitlements", |entry| {
+            entry.set_raw_message("entitlement", eid_promo).set("quantity", 3u64)
+        })
+        .must_encode();
     assert_eq!(call(&router, &gm, "eve.assetholding.entitlement.api.DirectDeliveryRequest", deliv_promo, now), STATUS_OK);
 
     // Grant entitlement held directly by uid_only (caller_cid == None && caller_uid == Some(4242))
     let eid_uid = build_ent_id(uid_only, &asset_uuid, "uidgrp");
-    let mut deliv_uid = Vec::new();
-    let mut ent_uid = Vec::new();
-    encode_bytes_field(2, &eid_uid, &mut ent_uid);
-    encode_varint_field(10, 1, &mut ent_uid);
-    encode_bytes_field(2, &ent_uid, &mut deliv_uid);
+    let deliv_uid = pb::message("eve.assetholding.entitlement.api.DirectDeliveryRequest")
+        .add_with("entitlements", |entry| {
+            entry.set_raw_message("entitlement", eid_uid).set("quantity", 1u64)
+        })
+        .must_encode();
     assert_eq!(call(&router, &gm, "eve.assetholding.entitlement.api.DirectDeliveryRequest", deliv_uid, now), STATUS_OK);
 
     let dummy_any = GoogleAny::default();

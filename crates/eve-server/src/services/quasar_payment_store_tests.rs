@@ -10,10 +10,10 @@ use crate::quasar_gateway::{
 };
 use eve_db::WorldRepository;
 use eve_machonet::{service_roles, SessionState};
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, encode_zigzag64,
     EvePublicRequest, EvePublicResponse, GoogleAny, GoogleTimestamp, QuasarDescriptorRegistry,
-    TYPE_GOOGLEAPIS_PREFIX,
+    WireField, WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::collections::HashMap;
@@ -122,9 +122,16 @@ fn seed_catalog(db: &WorldRepository) {
 }
 
 fn encode_currency_field(field: u32, cents: i64, out: &mut Vec<u8>) {
-    let mut c = Vec::new();
-    encode_varint_field(1, encode_zigzag64(cents), &mut c);
-    encode_bytes_field(field, &c, out);
+    let curr_bytes = pb::message("eve.plex.Currency")
+        .set("total_in_cents", cents)
+        .must_encode();
+    let msg = WireMessage {
+        fields: vec![WireField {
+            field_number: field,
+            value: WireValue::LengthDelimited(curr_bytes),
+        }],
+    };
+    out.extend_from_slice(&msg.encode());
 }
 
 #[test]
@@ -217,14 +224,16 @@ fn plex_vault_balance_deposit_withdraw_and_tx_logs() {
         call(&router, &player, "eve_public.plex.vault.transaction.api.GetLogRequest", Vec::new(), now + 6).status_code,
         STATUS_BAD_REQUEST
     );
-    let mut bad_tx = Vec::new();
-    encode_varint_field(1, 999_999, &mut bad_tx);
+    let bad_tx = pb::message("eve_public.plex.vault.transaction.api.GetLogRequest")
+        .set("identifier.sequential", 999_999i64)
+        .must_encode();
     assert_eq!(
         call(&router, &player, "eve_public.plex.vault.transaction.api.GetLogRequest", bad_tx, now + 6).status_code,
         STATUS_NOT_FOUND
     );
-    let mut ok_tx = Vec::new();
-    encode_varint_field(1, tx_id, &mut ok_tx);
+    let ok_tx = pb::message("eve_public.plex.vault.transaction.api.GetLogRequest")
+        .set("identifier.sequential", tx_id as i64)
+        .must_encode();
     assert_eq!(
         call(&router, &player, "eve_public.plex.vault.transaction.api.GetLogRequest", ok_tx, now + 6).status_code,
         STATUS_OK
@@ -243,69 +252,56 @@ fn store_catalog_offers_targeted_pagination_and_redeem_code() {
 
     assert_eq!(call(&router, &player, "eve_public.store.category.api.GetAllRequest", Vec::new(), now).status_code, STATUS_OK);
     assert_eq!(call(&router, &player, "eve_public.store.category.api.GetRequest", Vec::new(), now).status_code, STATUS_BAD_REQUEST);
-    let mut cat_99_inner = Vec::new();
-    encode_varint_field(1, 99, &mut cat_99_inner);
-    let mut cat_99 = Vec::new();
-    encode_bytes_field(1, &cat_99_inner, &mut cat_99);
+    let cat_99 = pb::message("eve_public.store.category.api.GetRequest")
+        .set("category.sequential", 99u32)
+        .must_encode();
     assert_eq!(call(&router, &player, "eve_public.store.category.api.GetRequest", cat_99, now).status_code, STATUS_NOT_FOUND);
-    let mut cat_1_inner = Vec::new();
-    encode_varint_field(1, 1, &mut cat_1_inner);
-    let mut cat_1 = Vec::new();
-    encode_bytes_field(1, &cat_1_inner, &mut cat_1);
+    let cat_1 = pb::message("eve_public.store.category.api.GetRequest")
+        .set("category.sequential", 1u32)
+        .must_encode();
     assert_eq!(call(&router, &player, "eve_public.store.category.api.GetRequest", cat_1, now).status_code, STATUS_OK);
 
     assert_eq!(call(&router, &player, "eve_public.store.product.api.GetRequest", Vec::new(), now).status_code, STATUS_BAD_REQUEST);
-    let mut prod_99_inner = Vec::new();
-    encode_varint_field(1, 99, &mut prod_99_inner);
-    let mut prod_99 = Vec::new();
-    encode_bytes_field(1, &prod_99_inner, &mut prod_99);
+    let prod_99 = pb::message("eve_public.store.product.api.GetRequest")
+        .set("product.sequential", 99u32)
+        .must_encode();
     assert_eq!(call(&router, &player, "eve_public.store.product.api.GetRequest", prod_99, now).status_code, STATUS_NOT_FOUND);
-    let mut prod_102_inner = Vec::new();
-    encode_varint_field(1, 102, &mut prod_102_inner);
-    let mut prod_102 = Vec::new();
-    encode_bytes_field(1, &prod_102_inner, &mut prod_102);
+    let prod_102 = pb::message("eve_public.store.product.api.GetRequest")
+        .set("product.sequential", 102u32)
+        .must_encode();
     assert_eq!(call(&router, &player, "eve_public.store.product.api.GetRequest", prod_102, now).status_code, STATUS_OK);
 
     assert_eq!(call(&router, &player, "eve_public.store.offer.api.GetAllRequest", Vec::new(), now).status_code, STATUS_OK);
     assert_eq!(call(&router, &player, "eve_public.store.offer.api.GetRequest", Vec::new(), now).status_code, STATUS_BAD_REQUEST);
-    let mut off_9999_id = Vec::new();
-    encode_string_field(1, "9999", &mut off_9999_id);
-    let mut off_9999 = Vec::new();
-    encode_bytes_field(1, &off_9999_id, &mut off_9999);
+    let off_9999 = pb::message("eve_public.store.offer.api.GetRequest")
+        .set("offer.store_offer", "9999")
+        .must_encode();
     assert_eq!(call(&router, &player, "eve_public.store.offer.api.GetRequest", off_9999, now).status_code, STATUS_NOT_FOUND);
-    let mut off_1002_id = Vec::new();
-    encode_string_field(1, "1002", &mut off_1002_id);
-    let mut off_1002 = Vec::new();
-    encode_bytes_field(1, &off_1002_id, &mut off_1002);
+    let off_1002 = pb::message("eve_public.store.offer.api.GetRequest")
+        .set("offer.store_offer", "1002")
+        .must_encode();
     assert_eq!(call(&router, &player, "eve_public.store.offer.api.GetRequest", off_1002, now).status_code, STATUS_OK);
 
     assert_eq!(call(&router, &player, "eve_public.store.offer.api.GetAllTargetedRequest", Vec::new(), now).status_code, STATUS_OK);
 
     // Targeted offer pagination (page_size=1, offset="0" -> next_page="1")
-    let mut page_req = Vec::new();
-    let mut page_sub = Vec::new();
-    encode_varint_field(1, 1, &mut page_sub);
-    encode_string_field(2, "0", &mut page_sub);
-    encode_bytes_field(1, &page_sub, &mut page_req);
+    let page_req = pb::message("eve_public.store.targetaudience.offer.api.ListRequest")
+        .set("page.size", 1u32)
+        .set("page.token", "0")
+        .must_encode();
     let rsp_ta_list = call(&router, &player, "eve_public.store.targetaudience.offer.api.ListRequest", page_req, now);
     assert_eq!(rsp_ta_list.status_code, STATUS_OK);
 
     // Targeted GetRequest: missing -> 400, unknown -> 404, valid nested field 2 -> 200
     assert_eq!(call(&router, &player, "eve_public.store.targetaudience.offer.api.GetRequest", Vec::new(), now).status_code, STATUS_BAD_REQUEST);
-    let mut ta_entry_bad = Vec::new();
-    encode_string_field(1, "9999", &mut ta_entry_bad);
-    let mut ta_id_bad = Vec::new();
-    encode_bytes_field(2, &ta_entry_bad, &mut ta_id_bad);
-    let mut ta_req_bad = Vec::new();
-    encode_bytes_field(1, &ta_id_bad, &mut ta_req_bad);
+    let ta_req_bad = pb::message("eve_public.store.targetaudience.offer.api.GetRequest")
+        .set("offer_id.catalogue_entry.name", "9999")
+        .must_encode();
     assert_eq!(call(&router, &player, "eve_public.store.targetaudience.offer.api.GetRequest", ta_req_bad, now).status_code, STATUS_NOT_FOUND);
 
-    let mut ta_entry_ok = Vec::new();
-    encode_string_field(1, "1003", &mut ta_entry_ok);
-    let mut ta_id_ok = Vec::new();
-    encode_bytes_field(2, &ta_entry_ok, &mut ta_id_ok);
-    let mut ta_req_ok = Vec::new();
-    encode_bytes_field(1, &ta_id_ok, &mut ta_req_ok);
+    let ta_req_ok = pb::message("eve_public.store.targetaudience.offer.api.GetRequest")
+        .set("offer_id.catalogue_entry.name", "1003")
+        .must_encode();
     assert_eq!(call(&router, &player, "eve_public.store.targetaudience.offer.api.GetRequest", ta_req_ok, now).status_code, STATUS_OK);
 
     // Code redeem is unimplemented (501)
@@ -341,24 +337,21 @@ fn schedules_tokens_fulfillment_cost_and_token_purchase() {
 
     // 1. Fulfillment: non-GM -> 403, qty <= 0 -> 400, no station -> 400, valid -> delivers & stacks!
     assert_eq!(call(&router, &player, "eve.fulfillment.api.DeliverItemRequest", Vec::new(), now).status_code, STATUS_FORBIDDEN);
-    let mut bad_qty = Vec::new();
-    encode_varint_field(3, 0, &mut bad_qty);
+    let bad_qty = pb::message("eve.fulfillment.api.DeliverItemRequest")
+        .set("quantity", 0i32)
+        .must_encode();
     assert_eq!(call(&router, &gm, "eve.fulfillment.api.DeliverItemRequest", bad_qty, now).status_code, STATUS_BAD_REQUEST);
 
-    let mut no_station_recip = Vec::new();
-    encode_varint_field(1, encode_zigzag64(90_000_099), &mut no_station_recip);
-    let mut no_station_req = Vec::new();
-    encode_bytes_field(1, &no_station_recip, &mut no_station_req);
+    let no_station_req = pb::message("eve.fulfillment.api.DeliverItemRequest")
+        .set("user.sequential", 90_000_099i32)
+        .must_encode();
     assert_eq!(call(&router, &gm, "eve.fulfillment.api.DeliverItemRequest", no_station_req, now).status_code, STATUS_BAD_REQUEST);
 
-    let mut deliver_recip = Vec::new();
-    encode_varint_field(1, encode_zigzag64(cid), &mut deliver_recip);
-    let mut deliver_req = Vec::new();
-    encode_bytes_field(1, &deliver_recip, &mut deliver_req);
-    let mut item_type = Vec::new();
-    encode_varint_field(1, 34599, &mut item_type);
-    encode_bytes_field(2, &item_type, &mut deliver_req);
-    encode_varint_field(3, 3, &mut deliver_req);
+    let deliver_req = pb::message("eve.fulfillment.api.DeliverItemRequest")
+        .set("user.sequential", cid as i32)
+        .set("item_type.sequential", 34599u64)
+        .set("quantity", 3i32)
+        .must_encode();
     assert_eq!(call(&router, &gm, "eve.fulfillment.api.DeliverItemRequest", deliver_req.clone(), now).status_code, STATUS_OK);
     // Second delivery stacks onto the existing hangar stack (3 + 3 = 6).
     assert_eq!(call(&router, &gm, "eve.fulfillment.api.DeliverItemRequest", deliver_req, now).status_code, STATUS_OK);
@@ -369,14 +362,17 @@ fn schedules_tokens_fulfillment_cost_and_token_purchase() {
 
     // 2. CostRequest: missing -> 400, unknown -> 404, no price_cents (1003) -> 501, valid (1001) -> 200
     assert_eq!(call(&router, &player, "eve_public.payment.purchase.api.CostRequest", Vec::new(), now).status_code, STATUS_BAD_REQUEST);
-    let mut cost_9999 = Vec::new();
-    encode_varint_field(1, 9999, &mut cost_9999);
+    let cost_9999 = pb::message("eve_public.payment.purchase.api.CostRequest")
+        .set("catalog_amount_in_cents", 9999u32)
+        .must_encode();
     assert_eq!(call(&router, &player, "eve_public.payment.purchase.api.CostRequest", cost_9999, now).status_code, STATUS_NOT_FOUND);
-    let mut cost_1003 = Vec::new();
-    encode_varint_field(1, 1003, &mut cost_1003);
+    let cost_1003 = pb::message("eve_public.payment.purchase.api.CostRequest")
+        .set("catalog_amount_in_cents", 1003u32)
+        .must_encode();
     assert_eq!(call(&router, &player, "eve_public.payment.purchase.api.CostRequest", cost_1003, now).status_code, STATUS_NOT_IMPLEMENTED);
-    let mut cost_1001 = Vec::new();
-    encode_varint_field(1, 1001, &mut cost_1001);
+    let cost_1001 = pb::message("eve_public.payment.purchase.api.CostRequest")
+        .set("catalog_amount_in_cents", 1001u32)
+        .must_encode();
     assert_eq!(call(&router, &player, "eve_public.payment.purchase.api.CostRequest", cost_1001, now).status_code, STATUS_OK);
 
     // 3. Payment tokens & TokenRequest purchase (Omega + item delivery + negative token checks)
@@ -395,29 +391,21 @@ fn schedules_tokens_fulfillment_cost_and_token_purchase() {
 
     assert_eq!(call(&router, &player, "eve_public.payment.token.api.GetQuickPayRequest", Vec::new(), now).status_code, STATUS_OK);
     assert_eq!(call(&router, &player, "eve_public.payment.token.api.GetRequest", Vec::new(), now).status_code, STATUS_BAD_REQUEST);
-    let mut tok_999 = Vec::new();
-    encode_varint_field(1, 999, &mut tok_999);
-    let mut tok_get_999 = Vec::new();
-    encode_bytes_field(1, &tok_999, &mut tok_get_999);
+    let tok_get_999 = pb::message("eve_public.payment.token.api.GetRequest")
+        .set("token.sequential", 999u32)
+        .must_encode();
     assert_eq!(call(&router, &player, "eve_public.payment.token.api.GetRequest", tok_get_999, now).status_code, STATUS_NOT_FOUND);
-    let mut tok_501 = Vec::new();
-    encode_varint_field(1, 501, &mut tok_501);
-    let mut tok_get_501 = Vec::new();
-    encode_bytes_field(1, &tok_501, &mut tok_get_501);
+    let tok_get_501 = pb::message("eve_public.payment.token.api.GetRequest")
+        .set("token.sequential", 501u32)
+        .must_encode();
     assert_eq!(call(&router, &player, "eve_public.payment.token.api.GetRequest", tok_get_501, now).status_code, STATUS_OK);
 
     let encode_tok_purchase = |off: &str, tid: u64| -> Vec<u8> {
-        let mut req = Vec::new();
-        let mut order = Vec::new();
-        let mut oid = Vec::new();
-        encode_string_field(1, off, &mut oid);
-        encode_bytes_field(1, &oid, &mut order);
-        encode_varint_field(2, 1, &mut order);
-        encode_bytes_field(1, &order, &mut req);
-        let mut tok = Vec::new();
-        encode_varint_field(1, tid, &mut tok);
-        encode_bytes_field(2, &tok, &mut req);
-        req
+        pb::message("eve_public.payment.purchase.api.TokenRequest")
+            .set("order.offer.store_offer", off)
+            .set("order.quantity", 1u32)
+            .set("token.sequential", tid as u32)
+            .must_encode()
     };
 
     // Other user trying to use token 501 gets 403 Forbidden; non-quick-pay token 502 gets 400 Bad Request.
@@ -439,16 +427,11 @@ fn schedules_tokens_fulfillment_cost_and_token_purchase() {
         uid,
         PaymentTokenRecord { id: 503, user_id: uid, token_str: "tok-item".into(), is_quick_pay: true, consumed: false },
     );
-    let mut tok_req_503 = Vec::new();
-    let mut order_msg = Vec::new();
-    let mut off_id_msg = Vec::new();
-    encode_string_field(1, "1002", &mut off_id_msg);
-    encode_bytes_field(1, &off_id_msg, &mut order_msg);
-    encode_varint_field(2, 2, &mut order_msg);
-    encode_bytes_field(1, &order_msg, &mut tok_req_503);
-    let mut tok_503_msg = Vec::new();
-    encode_varint_field(1, 503, &mut tok_503_msg);
-    encode_bytes_field(2, &tok_503_msg, &mut tok_req_503);
+    let tok_req_503 = pb::message("eve_public.payment.purchase.api.TokenRequest")
+        .set("order.offer.store_offer", "1002")
+        .set("order.quantity", 2u32)
+        .set("token.sequential", 503u32)
+        .must_encode();
     assert_eq!(call(&router, &player, "eve_public.payment.purchase.api.TokenRequest", tok_req_503, now).status_code, STATUS_OK);
 
     let after_purchase_qty: i32 = router.db.with_snapshot(|s| {
@@ -458,17 +441,17 @@ fn schedules_tokens_fulfillment_cost_and_token_purchase() {
     assert_eq!(after_purchase_qty, 10);
 
     // 4. Schedule GetActiveByTypeRequest & GetRequest + DisableAllRequest
-    let mut active_sched_req = Vec::new();
-    encode_varint_field(1, 1, &mut active_sched_req);
+    let active_sched_req = pb::message("eve_public.payment.schedule.api.GetActiveByTypeRequest")
+        .set("type", 1i32)
+        .must_encode();
     assert_eq!(call(&router, &player, "eve_public.payment.schedule.api.GetActiveByTypeRequest", active_sched_req.clone(), now).status_code, STATUS_OK);
     assert_eq!(call(&router, &other_player, "eve_public.payment.schedule.api.GetActiveByTypeRequest", active_sched_req, now).status_code, STATUS_NOT_FOUND);
 
     let sched_id = router.db.with_snapshot(|s| s.quasar_commerce.payment_schedules[0].id);
     assert_eq!(call(&router, &player, "eve_public.payment.schedule.api.GetRequest", Vec::new(), now).status_code, STATUS_BAD_REQUEST);
-    let mut sched_id_msg = Vec::new();
-    encode_varint_field(1, sched_id, &mut sched_id_msg);
-    let mut sched_req = Vec::new();
-    encode_bytes_field(1, &sched_id_msg, &mut sched_req);
+    let sched_req = pb::message("eve_public.payment.schedule.api.GetRequest")
+        .set("schedule.sequential", sched_id)
+        .must_encode();
     assert_eq!(call(&router, &player, "eve_public.payment.schedule.api.GetRequest", sched_req.clone(), now).status_code, STATUS_OK);
     assert_eq!(call(&router, &other_player, "eve_public.payment.schedule.api.GetRequest", sched_req, now).status_code, STATUS_NOT_FOUND);
 
@@ -494,11 +477,13 @@ fn schedules_tokens_fulfillment_cost_and_token_purchase() {
     });
     assert_eq!(call(&router, &player, "eve_public.plex.vault.transaction.api.GetAllLoggedForUserRequest", Vec::new(), now).status_code, STATUS_OK);
     assert_eq!(call(&router, &player, "eve_public.plex.vault.transaction.api.GetLogRequest", Vec::new(), now).status_code, STATUS_BAD_REQUEST);
-    let mut tx_missing = Vec::new();
-    encode_varint_field(1, 999_999, &mut tx_missing);
+    let tx_missing = pb::message("eve_public.plex.vault.transaction.api.GetLogRequest")
+        .set("identifier.sequential", 999_999i64)
+        .must_encode();
     assert_eq!(call(&router, &player, "eve_public.plex.vault.transaction.api.GetLogRequest", tx_missing, now).status_code, STATUS_NOT_FOUND);
-    let mut tx_found = Vec::new();
-    encode_varint_field(1, 702, &mut tx_found);
+    let tx_found = pb::message("eve_public.plex.vault.transaction.api.GetLogRequest")
+        .set("identifier.sequential", 702i64)
+        .must_encode();
     assert_eq!(call(&router, &player, "eve_public.plex.vault.transaction.api.GetLogRequest", tx_found, now).status_code, STATUS_OK);
     assert_eq!(call(&router, &player, "eve_public.plex.vault.transaction.api.GetStatisticsRequest", Vec::new(), now).status_code, STATUS_OK);
 }
@@ -587,10 +572,20 @@ fn sde_hydration_boundary_21_empty_names_and_plex_wire_payload_assertions() {
     });
 
     // `parse_raw_varints`: exact `idx + len == raw.len()` fits, whereas `len == remaining + 1` is ignored
-    let mut inner_ok = Vec::new();
-    encode_varint_field(5, 77, &mut inner_ok);
-    let mut exact_fit = Vec::new();
-    encode_bytes_field(3, &inner_ok, &mut exact_fit);
+    let inner_ok = WireMessage {
+        fields: vec![WireField {
+            field_number: 5,
+            value: WireValue::Varint(77),
+        }],
+    }
+    .encode();
+    let exact_fit = WireMessage {
+        fields: vec![WireField {
+            field_number: 3,
+            value: WireValue::LengthDelimited(inner_ok),
+        }],
+    }
+    .encode();
     let parsed_fit = parse_raw_varints(&exact_fit);
     assert_eq!(parsed_fit.get(&3), Some(&77));
     assert_eq!(parsed_fit.get(&5), Some(&77));
@@ -676,8 +671,9 @@ fn sde_hydration_boundary_21_empty_names_and_plex_wire_payload_assertions() {
     assert_eq!(logged_ids, vec![901, 902, 903]); // excludes other_uid's 904!
 
     // Foreign user cannot read uid's transaction 903
-    let mut tx_903 = Vec::new();
-    encode_varint_field(1, 903, &mut tx_903);
+    let tx_903 = pb::message("eve_public.plex.vault.transaction.api.GetLogRequest")
+        .set("identifier.sequential", 903i64)
+        .must_encode();
     assert_eq!(
         call(&router, &other_player, "eve_public.plex.vault.transaction.api.GetLogRequest", tx_903.clone(), now).status_code,
         STATUS_NOT_FOUND
@@ -685,12 +681,10 @@ fn sde_hydration_boundary_21_empty_names_and_plex_wire_payload_assertions() {
     let log_rsp = call(&router, &player, "eve_public.plex.vault.transaction.api.GetLogRequest", tx_903, now);
     assert_eq!(log_rsp.status_code, STATUS_OK);
     let log_attr = WireMessage::decode(WireMessage::decode(&log_rsp.payload.unwrap().value).unwrap().fields[0].value.as_bytes().unwrap()).unwrap();
-    let log_amt_wm = WireMessage::decode(log_attr.fields.iter().find(|f| f.field_number == 4).unwrap().value.as_bytes().unwrap()).unwrap();
-    let log_bal_wm = WireMessage::decode(log_attr.fields.iter().find(|f| f.field_number == 5).unwrap().value.as_bytes().unwrap()).unwrap();
-    let log_desc = log_attr.fields.iter().find(|f| f.field_number == 6).unwrap().value.as_str().unwrap();
+    let log_amt_wm = WireMessage::decode(log_attr.fields.iter().find(|f| f.field_number == 2).unwrap().value.as_bytes().unwrap()).unwrap();
+    let log_bal_wm = WireMessage::decode(log_attr.fields.iter().find(|f| f.field_number == 3).unwrap().value.as_bytes().unwrap()).unwrap();
     assert_eq!(decode_zigzag64(log_amt_wm.fields[0].value.as_varint().unwrap()), -8_000);
     assert_eq!(decode_zigzag64(log_bal_wm.fields[0].value.as_varint().unwrap()), 17_100);
-    assert_eq!(log_desc, Some("SkinBuy"));
 
     let stats_rsp = call(&router, &player, "eve_public.plex.vault.transaction.api.GetStatisticsRequest", Vec::new(), now);
     assert_eq!(stats_rsp.status_code, STATUS_OK);
@@ -789,20 +783,24 @@ fn store_catalog_wire_fields_schedule_token_isolation_and_omega_purchase_edges()
         .collect();
     assert_eq!(tgt_ids, vec!["1003", "1004"]);
 
-    let mut get_1002_inner = Vec::new();
-    encode_string_field(1, "1002", &mut get_1002_inner);
-    let mut get_1002 = Vec::new();
-    encode_bytes_field(1, &get_1002_inner, &mut get_1002);
+    let get_1002 = pb::message("eve_public.store.offer.api.GetRequest")
+        .set("offer.store_offer", "1002")
+        .must_encode();
     let off_1002_wm = WireMessage::decode(&call(&router, &p1, "eve_public.store.offer.api.GetRequest", get_1002, now).payload.unwrap().value).unwrap();
     let off_1002_attr = WireMessage::decode(off_1002_wm.fields[0].value.as_bytes().unwrap()).unwrap();
     let tags: Vec<&str> = off_1002_attr.fields.iter().filter(|f| f.field_number == 2).filter_map(|f| f.value.as_str().ok().flatten()).collect();
     assert_eq!(tags, vec!["featured", "hot"]);
     let price_wm = WireMessage::decode(off_1002_attr.fields.iter().find(|f| f.field_number == 12).unwrap().value.as_bytes().unwrap()).unwrap();
-    assert_eq!(price_wm.fields[0].value.as_varint(), Some(11_000)); // 110 PLEX * 100
+    let plex_price_wm = WireMessage::decode(price_wm.fields.iter().find(|f| f.field_number == 6).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(
+        eve_proto::quasar::decode_zigzag64(plex_price_wm.fields[0].value.as_varint().unwrap()),
+        11_000
+    ); // 110 PLEX * 100
 
     // CostRequest decoded fields for offer 1002 (499 cents EUR)
-    let mut cost_1002 = Vec::new();
-    encode_varint_field(1, 1002, &mut cost_1002);
+    let cost_1002 = pb::message("eve_public.payment.purchase.api.CostRequest")
+        .set("catalog_amount_in_cents", 1002u32)
+        .must_encode();
     let cost_wm = WireMessage::decode(&call(&router, &p1, "eve_public.payment.purchase.api.CostRequest", cost_1002, now).payload.unwrap().value).unwrap();
     let cost_inner = WireMessage::decode(cost_wm.fields[0].value.as_bytes().unwrap()).unwrap();
     assert_eq!(cost_inner.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_varint(), Some(499));
@@ -849,17 +847,11 @@ fn store_catalog_wire_fields_schedule_token_isolation_and_omega_purchase_edges()
     let _ = router.pending_notices.write().unwrap().drain(..).count();
 
     let encode_purchase = |off: &str, tok: u64, qty: u64| -> Vec<u8> {
-        let mut req = Vec::new();
-        let mut order = Vec::new();
-        let mut oid = Vec::new();
-        encode_string_field(1, off, &mut oid);
-        encode_bytes_field(1, &oid, &mut order);
-        encode_varint_field(2, qty, &mut order);
-        encode_bytes_field(1, &order, &mut req);
-        let mut t = Vec::new();
-        encode_varint_field(1, tok, &mut t);
-        encode_bytes_field(2, &t, &mut req);
-        req
+        pb::message("eve_public.payment.purchase.api.TokenRequest")
+            .set("order.offer.store_offer", off)
+            .set("order.quantity", qty as u32)
+            .set("token.sequential", tok as u32)
+            .must_encode()
     };
 
     // Offer 1001 for u2 with qty=0 (clamped to 1 -> 1_999 cents, 30 days) even with no characters

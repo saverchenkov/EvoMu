@@ -5,9 +5,9 @@ use crate::quasar_gateway::{
     STATUS_NOT_FOUND, STATUS_NOT_IMPLEMENTED, STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
+use eve_proto::pb::{self, enum_name};
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, encode_zigzag64,
-    DynamicQuasarMessage, DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
+    DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleTimestamp, TYPE_GOOGLEAPIS_PREFIX,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -98,17 +98,9 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 as u64;
             let bal = db_plex_bal.with_snapshot(|snap| snap.unified_plex_balance_for_user(uid));
 
-            let mut curr = Vec::new();
-            encode_varint_field(1, encode_zigzag64(bal * 100), &mut curr); // field 1: total_in_cents (sint64)
-
-            let mut out = Vec::new();
-            encode_bytes_field(1, &curr, &mut out); // field 1: balance
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.plex.vault.api.BalanceResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve_public.plex.vault.api.BalanceResponse")
+                .set("balance.total_in_cents", bal * 100)
+                .must_to_any())
         }),
     );
 
@@ -256,19 +248,15 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
         "eve_public.store.category.api.GetAllRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
             let cat = db_cat_all.with_snapshot(read_store_catalog);
-            let mut out = Vec::new();
+            let mut msg = pb::message("eve_public.store.category.api.GetAllResponse");
             for c in &cat.categories {
-                let mut cat_bytes = Vec::new();
-                encode_varint_field(1, c.id as u64, &mut cat_bytes); // sequential
-                encode_varint_field(2, 1, &mut cat_bytes); // catalog = 1 (Ingame)
-                encode_bytes_field(1, &cat_bytes, &mut out); // categories
+                msg = msg.add_with("categories", |cat_id| {
+                    cat_id
+                        .set("sequential", c.id)
+                        .set("catalog", enum_name("CATALOG_NES"))
+                });
             }
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.store.category.api.GetAllResponse"
-                ),
-                value: out,
-            })
+            Ok(msg.must_to_any())
         }),
     );
 
@@ -298,19 +286,11 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 .find(|c| c.id == cat_id)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Category not found".to_string()))?;
 
-            let mut attr = Vec::new();
-            encode_string_field(1, &category.name, &mut attr);
-            encode_varint_field(2, 1, &mut attr); // no_parent = true
-            encode_varint_field(4, 1, &mut attr); // no_subcategories = true
-
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attr, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.store.category.api.GetResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve_public.store.category.api.GetResponse")
+                .set("attributes.name", &category.name)
+                .set("attributes.no_parent", true)
+                .set("attributes.no_subcategories", true)
+                .must_to_any())
         }),
     );
 
@@ -341,21 +321,11 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 .find(|p| p.id == prod_id)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Product not found".to_string()))?;
 
-            let mut attr = Vec::new();
-            encode_string_field(1, &product.name, &mut attr);
-            let mut eve_item = Vec::new();
-            encode_varint_field(1, product.type_id as u64, &mut eve_item);
-            encode_varint_field(2, product.quantity as u64, &mut eve_item);
-            encode_bytes_field(2, &eve_item, &mut attr); // #2 item
-
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attr, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.store.product.api.GetResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve_public.store.product.api.GetResponse")
+                .set("attributes.name", &product.name)
+                .set("attributes.item.type.sequential", u64::from(product.type_id))
+                .set("attributes.item.soulbound", false)
+                .must_to_any())
         }),
     );
 
@@ -365,18 +335,11 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
         "eve_public.store.offer.api.GetAllRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
             let cat = db_off_all.with_snapshot(read_store_catalog);
-            let mut out = Vec::new();
+            let mut msg = pb::message("eve_public.store.offer.api.GetAllResponse");
             for off in cat.offers.iter().filter(|o| !o.targeted) {
-                let mut off_bytes = Vec::new();
-                encode_string_field(1, &off.id.to_string(), &mut off_bytes); // store_offer
-                encode_bytes_field(1, &off_bytes, &mut out);
+                msg = msg.add_with("offers", |o| o.set("store_offer", off.id.to_string()));
             }
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.store.offer.api.GetAllResponse"
-                ),
-                value: out,
-            })
+            Ok(msg.must_to_any())
         }),
     );
 
@@ -409,33 +372,22 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 .find(|o| o.id == offer_id)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Offer not found".to_string()))?;
 
-            let mut attr = Vec::new();
-            encode_string_field(1, &offer.name, &mut attr);
+            let mut msg = pb::message("eve_public.store.offer.api.GetResponse")
+                .set("attributes.name", &offer.name)
+                .set("attributes.no_enddate", true)
+                .set("attributes.can_purchase", true)
+                .set("attributes.no_schedule", true)
+                .set(
+                    "attributes.offer_price.plex_price.total_in_cents",
+                    offer.price_plex * 100,
+                )
+                .add_with("attributes.categories", |c| c.set("sequential", offer.category_id));
             if let Some(tags) = offer_tags.get(&offer.id) {
                 for t in tags {
-                    encode_string_field(2, t, &mut attr);
+                    msg = msg.add("attributes.tags", t);
                 }
             }
-            encode_varint_field(5, 1, &mut attr); // no_enddate = true
-            encode_varint_field(7, 1, &mut attr); // can_purchase = true
-            encode_varint_field(9, 1, &mut attr); // no_schedule = true
-
-            let mut price_msg = Vec::new();
-            encode_varint_field(1, (offer.price_plex * 100) as u64, &mut price_msg);
-            encode_bytes_field(12, &price_msg, &mut attr); // offer_price
-
-            let mut cat_ident = Vec::new();
-            encode_varint_field(1, offer.category_id as u64, &mut cat_ident);
-            encode_bytes_field(14, &cat_ident, &mut attr); // categories
-
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attr, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.store.offer.api.GetResponse"
-                ),
-                value: out,
-            })
+            Ok(msg.must_to_any())
         }),
     );
 
@@ -445,18 +397,11 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
         "eve_public.store.offer.api.GetAllTargetedRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
             let cat = db_off_tgt.with_snapshot(read_store_catalog);
-            let mut out = Vec::new();
+            let mut msg = pb::message("eve_public.store.offer.api.GetAllTargetedResponse");
             for off in cat.offers.iter().filter(|o| o.targeted) {
-                let mut off_bytes = Vec::new();
-                encode_string_field(1, &off.id.to_string(), &mut off_bytes);
-                encode_bytes_field(1, &off_bytes, &mut out);
+                msg = msg.add_with("offers", |o| o.set("store_offer", off.id.to_string()));
             }
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.store.offer.api.GetAllTargetedResponse"
-                ),
-                value: out,
-            })
+            Ok(msg.must_to_any())
         }),
     );
 
@@ -517,18 +462,16 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 .find(|o| o.id == offer_id)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Targeted offer not found".to_string()))?;
 
-            let mut attr = Vec::new();
-            encode_string_field(1, &offer.name, &mut attr);
-            encode_string_field(2, &offer.description, &mut attr);
-
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attr, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.store.targetaudience.offer.api.GetResponse"
-                ),
-                value: out,
-            })
+            Ok(
+                pb::message("eve_public.store.targetaudience.offer.api.GetResponse")
+                    .add_with("offer.title.entries", |e| {
+                        e.set("id", enum_name("EN")).set("text", &offer.name)
+                    })
+                    .add_with("offer.description.entries", |e| {
+                        e.set("id", enum_name("EN")).set("text", &offer.description)
+                    })
+                    .must_to_any(),
+            )
         }),
     );
 
@@ -564,26 +507,15 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 (STATUS_NOT_FOUND, "Payment schedule not found".to_string())
             })?;
 
-            let mut attr = Vec::new();
-            encode_varint_field(1, sched.schedule_type as u64, &mut attr); // #1 type
-            let mut ts_bytes = Vec::new();
-            encode_varint_field(1, sched.next_payment_unix, &mut ts_bytes);
-            encode_bytes_field(2, &ts_bytes, &mut attr); // #2 next_payment
-
-            let mut off_ident = Vec::new();
-            encode_string_field(1, &sched.offer_id, &mut off_ident);
-            encode_bytes_field(3, &off_ident, &mut attr); // #3 offer
-
-            encode_varint_field(4, sched.interval_days as u64, &mut attr); // #4 recurring_interval_days
-
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attr, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.schedule.api.GetResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve_public.payment.schedule.api.GetResponse")
+                .set("attributes.type", sched.schedule_type as i32)
+                .set(
+                    "attributes.next_payment",
+                    GoogleTimestamp::from_unix(sched.next_payment_unix as i64, 0),
+                )
+                .set("attributes.offer.store_offer", &sched.offer_id)
+                .set("attributes.recurring_interval_days", sched.interval_days)
+                .must_to_any())
         }),
     );
 
@@ -617,16 +549,11 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 }
             };
 
-            let mut ident = Vec::new();
-            encode_varint_field(1, sched.id, &mut ident);
-            let mut out = Vec::new();
-            encode_bytes_field(1, &ident, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.schedule.api.GetActiveByTypeResponse"
-                ),
-                value: out,
-            })
+            Ok(
+                pb::message("eve_public.payment.schedule.api.GetActiveByTypeResponse")
+                    .set("schedule.sequential", sched.id)
+                    .must_to_any(),
+            )
         }),
     );
 
@@ -652,19 +579,11 @@ fn register_payment_token_and_purchase_handlers(
                     .collect()
             });
 
-            let mut out = Vec::new();
+            let mut msg = pb::message("eve_public.payment.token.api.GetQuickPayResponse");
             for tok in &tokens {
-                let mut tok_ident = Vec::new();
-                encode_varint_field(1, tok.id as u64, &mut tok_ident);
-                encode_bytes_field(1, &tok_ident, &mut out);
+                msg = msg.add_with("tokens", |t| t.set("sequential", tok.id));
             }
-
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.token.api.GetQuickPayResponse"
-                ),
-                value: out,
-            })
+            Ok(msg.must_to_any())
         }),
     );
 
@@ -708,20 +627,10 @@ fn register_payment_token_and_purchase_handlers(
                 }
             };
 
-            let mut attr = Vec::new();
-            let mut cc = Vec::new();
-            encode_string_field(1, &token.token_str, &mut cc);
-            encode_string_field(2, "12/2030", &mut cc);
-            encode_bytes_field(4, &cc, &mut attr); // #4 credit_card
-
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attr, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.token.api.GetResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve_public.payment.token.api.GetResponse")
+                .set("token.credit_card.alias", &token.token_str)
+                .set("token.credit_card.expiry", "12/2030")
+                .must_to_any())
         }),
     );
 
@@ -747,20 +656,13 @@ fn register_payment_token_and_purchase_handlers(
             });
 
             for tid in disabled_ids {
-                let mut notice_bytes = Vec::new();
-                let mut tok_ident = Vec::new();
-                encode_varint_field(1, tid as u64, &mut tok_ident);
-                encode_bytes_field(1, &tok_ident, &mut notice_bytes);
+                let notice = pb::message("eve_public.payment.token.api.QuickPayRemovedNotice")
+                    .set("token.sequential", tid)
+                    .must_to_any();
                 router_pending_dis
                     .write()
                     .unwrap_or_else(|e| e.into_inner())
-                    .push((
-                        NoticeScope::User(uid as i32),
-                        GoogleAny {
-                            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.token.api.QuickPayRemovedNotice"),
-                            value: notice_bytes,
-                        },
-                    ));
+                    .push((NoticeScope::User(uid as i32), notice));
             }
 
             Ok(GoogleAny {
@@ -919,21 +821,14 @@ fn register_payment_token_and_purchase_handlers(
             })?;
             let currency = offer.currency.as_deref().unwrap_or("USD");
 
-            let mut cost_bytes = Vec::new();
-            encode_varint_field(1, amount_in_cents, &mut cost_bytes); // catalog_amount_in_cents
-            encode_varint_field(2, 0, &mut cost_bytes); // tax_amount_in_cents = 0
-            encode_varint_field(3, amount_in_cents, &mut cost_bytes); // total_amount_in_cents
-            encode_varint_field(4, 0, &mut cost_bytes); // tax_rate_points = 0
-            encode_string_field(5, currency, &mut cost_bytes);
-
-            let mut out = Vec::new();
-            encode_bytes_field(1, &cost_bytes, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.purchase.api.CostResponse"
-                ),
-                value: out,
-            })
+            let amount_u32 = amount_in_cents.min(u64::from(u32::MAX)) as u32;
+            Ok(pb::message("eve_public.payment.purchase.api.CostResponse")
+                .set("cost.catalog_amount_in_cents", amount_u32)
+                .set("cost.tax_amount_in_cents", 0u32)
+                .set("cost.total_amount_in_cents", amount_u32)
+                .set("cost.tax_rate_points", 0u32)
+                .set("cost.currency", currency)
+                .must_to_any())
         }),
     );
 
@@ -1190,21 +1085,14 @@ fn register_payment_token_and_purchase_handlers(
                 publish_schedule_set_notice(&router_pending_purchase, uid, sched_id, 1);
             }
 
-            let mut receipt = Vec::new();
-            let mut payment_ident = Vec::new();
-            encode_varint_field(1, receipt_id, &mut payment_ident);
-            encode_bytes_field(2, &payment_ident, &mut receipt); // #2 payment_identifier
-            encode_varint_field(3, 1, &mut receipt); // #3 payment_method = CreditCard
-            encode_string_field(4, "Payment completed successfully", &mut receipt); // #4 description
-
-            let mut out = Vec::new();
-            encode_bytes_field(1, &receipt, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.purchase.api.TokenResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve_public.payment.purchase.api.TokenResponse")
+                .set(
+                    "receipt.payment_identifier.sequential",
+                    receipt_id.min(u64::from(u32::MAX)) as u32,
+                )
+                .set("receipt.payment_method", enum_name("PM_CREDIT_CARD"))
+                .set("receipt.description", "Payment completed successfully")
+                .must_to_any())
         }),
     );
 
@@ -1220,18 +1108,12 @@ fn register_payment_token_and_purchase_handlers(
                     .filter(|t| t.user_id == uid)
                     .collect::<Vec<_>>()
             });
-            let mut out = Vec::new();
+            let mut msg =
+                pb::message("eve_public.plex.vault.transaction.api.GetAllLoggedForUserResponse");
             for t in txs {
-                let mut id_msg = Vec::new();
-                encode_varint_field(1, t.id, &mut id_msg);
-                encode_bytes_field(1, &id_msg, &mut out);
+                msg = msg.add_with("transactions", |id| id.set("sequential", t.id as i64));
             }
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.plex.vault.transaction.api.GetAllLoggedForUserResponse"
-                ),
-                value: out,
-            })
+            Ok(msg.must_to_any())
         }),
     );
 
@@ -1253,33 +1135,23 @@ fn register_payment_token_and_purchase_handlers(
                 (STATUS_NOT_FOUND, "Transaction not found".to_string())
             })?;
 
-            let mut attr = Vec::new();
-            let mut ts_bytes = Vec::new();
-            encode_varint_field(1, tx.timestamp_unix, &mut ts_bytes);
-            encode_bytes_field(1, &ts_bytes, &mut attr); // #1 timestamp
-
-            let mut user_ident = Vec::new();
-            encode_varint_field(1, tx.user_id, &mut user_ident);
-            encode_bytes_field(2, &user_ident, &mut attr); // #2 user_owner
-
-            let mut amt_curr = Vec::new();
-            encode_varint_field(1, encode_zigzag64(tx.amount * 100), &mut amt_curr);
-            encode_bytes_field(4, &amt_curr, &mut attr); // #4 amount_transferred
-
-            let mut bal_curr = Vec::new();
-            encode_varint_field(1, encode_zigzag64(tx.balance_after * 100), &mut bal_curr);
-            encode_bytes_field(5, &bal_curr, &mut attr); // #5 resulting_balance
-
-            encode_string_field(6, &tx.description, &mut attr); // #6 description
-
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attr, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.plex.vault.transaction.api.GetLogResponse"
-                ),
-                value: out,
-            })
+            Ok(
+                pb::message("eve_public.plex.vault.transaction.api.GetLogResponse")
+                    .set(
+                        "transaction.timestamp",
+                        GoogleTimestamp::from_unix(tx.timestamp_unix as i64, 0),
+                    )
+                    .set(
+                        "transaction.amount_transferred.total_in_cents",
+                        tx.amount * 100,
+                    )
+                    .set(
+                        "transaction.resulting_balance.total_in_cents",
+                        tx.balance_after * 100,
+                    )
+                    .set("unavailable", true)
+                    .must_to_any(),
+            )
         }),
     );
 
@@ -1307,29 +1179,20 @@ fn register_payment_token_and_purchase_handlers(
                 (earliest, count, inc, exp)
             });
 
-            let mut out = Vec::new();
-            let mut entry = Vec::new();
-            encode_varint_field(1, 1, &mut entry); // category = 1
-            let mut inc_curr = Vec::new();
-            encode_varint_field(1, encode_zigzag64(incomes * 100), &mut inc_curr);
-            encode_bytes_field(3, &inc_curr, &mut entry); // incomes
-            let mut exp_curr = Vec::new();
-            encode_varint_field(1, encode_zigzag64(expenses * 100), &mut exp_curr);
-            encode_bytes_field(4, &exp_curr, &mut entry); // expenses
-            encode_varint_field(5, count, &mut entry); // transactions_count
-
-            encode_bytes_field(1, &entry, &mut out); // entries
-
-            let mut ts_bytes = Vec::new();
-            encode_varint_field(1, earliest, &mut ts_bytes);
-            encode_bytes_field(2, &ts_bytes, &mut out); // earliest_transaction
-
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.plex.vault.transaction.api.GetStatisticsResponse"
-                ),
-                value: out,
-            })
+            Ok(
+                pb::message("eve_public.plex.vault.transaction.api.GetStatisticsResponse")
+                    .add_with("entries", |e| {
+                        e.set("no_classification", true)
+                            .set("incomes.total_in_cents", incomes * 100)
+                            .set("expenses.total_in_cents", expenses * 100)
+                            .set("transactions_count", count.min(u64::from(u32::MAX)) as u32)
+                    })
+                    .set(
+                        "earliest_transaction",
+                        GoogleTimestamp::from_unix(earliest as i64, 0),
+                    )
+                    .must_to_any(),
+            )
         }),
     );
 

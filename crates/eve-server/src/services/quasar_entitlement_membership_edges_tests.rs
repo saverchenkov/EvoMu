@@ -13,10 +13,10 @@ use eve_db::{
     WorldRepository,
 };
 use eve_machonet::{service_roles, SessionState};
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
-    DynamicQuasarMessage, DynamicValue, EvePublicRequest, EvePublicResponse, GoogleAny,
-    QuasarDescriptorRegistry, WireMessage, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, EvePublicRequest, EvePublicResponse,
+    GoogleAny, QuasarDescriptorRegistry, WireMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
@@ -82,12 +82,6 @@ fn call(
         false,
         now,
     )
-}
-
-fn encode_seq(field: u32, id: u64, out: &mut Vec<u8>) {
-    let mut sub = Vec::new();
-    encode_varint_field(1, id, &mut sub);
-    encode_bytes_field(field, &sub, out);
 }
 
 fn extract_strings(wire: &WireMessage, field: u32) -> Vec<String> {
@@ -254,12 +248,14 @@ fn character_logo_entitlement_admin_grant_double_grant_revoke_and_is_entitled_ch
     let admin = sess(Some(99), Some(2110_099), Some(1_000_009), service_roles::ROLE_ADMIN);
 
     let corp_ident = encode_logo_identifier(2110_010, 587);
-    let mut grant_corp = Vec::new();
-    encode_bytes_field(1, &corp_ident, &mut grant_corp);
+    let grant_corp = pb::message("eve_public.entitlement.character.ship.admin.corplogo.GrantRequest")
+        .set_raw_message("entitlement", corp_ident.clone())
+        .must_encode();
 
     let alliance_ident = encode_logo_identifier(2110_010, 588);
-    let mut grant_alliance = Vec::new();
-    encode_bytes_field(1, &alliance_ident, &mut grant_alliance);
+    let grant_alliance = pb::message("eve_public.entitlement.character.ship.admin.alliancelogo.GrantRequest")
+        .set_raw_message("entitlement", alliance_ident.clone())
+        .must_encode();
 
     // Non-admin rejected across Grant, Revoke, and GetAll
     assert_eq!(
@@ -332,8 +328,9 @@ fn character_logo_entitlement_admin_grant_double_grant_revoke_and_is_entitled_ch
     );
 
     // Admin GetAll encodes both corp and alliance logos for target char
-    let mut get_all = Vec::new();
-    encode_seq(1, 2110_010, &mut get_all);
+    let get_all = pb::message("eve.entitlement.character.admin.GetAllRequest")
+        .set("owner.sequential", 2110_010u32)
+        .must_encode();
     let all_resp = call(
         &router,
         &admin,
@@ -346,8 +343,9 @@ fn character_logo_entitlement_admin_grant_double_grant_revoke_and_is_entitled_ch
     assert_eq!(extract_messages(&w_all, 1).len(), 2);
 
     // Admin can query IsEntitledRequest for another character; non-admin gets 403/404 as appropriate
-    let mut is_ent_alliance = Vec::new();
-    encode_bytes_field(2, &alliance_ident, &mut is_ent_alliance);
+    let is_ent_alliance = pb::message("eve.entitlement.character.api.IsEntitledRequest")
+        .set_raw_message("alliance_logo", alliance_ident)
+        .must_encode();
     assert_eq!(
         call(&router, &admin, "eve.entitlement.character.api.IsEntitledRequest", is_ent_alliance.clone(), now)
             .status_code,
@@ -402,8 +400,9 @@ fn character_logo_entitlement_admin_grant_double_grant_revoke_and_is_entitled_ch
         .is_some_and(|b| b.contains("700001"))));
 
     // Re-checking corp logo IsEntitled returns 404 now that it is revoked
-    let mut is_ent_corp = Vec::new();
-    encode_bytes_field(1, &corp_ident, &mut is_ent_corp);
+    let is_ent_corp = pb::message("eve.entitlement.character.api.IsEntitledRequest")
+        .set_raw_message("corp_logo", corp_ident)
+        .must_encode();
     assert_eq!(
         call(&router, &admin, "eve.entitlement.character.api.IsEntitledRequest", is_ent_corp, now)
             .status_code,
@@ -418,28 +417,26 @@ fn admin_user_entitlement_and_subscription_grant_validation_and_clamping() {
     let player = sess(Some(10), Some(2110_010), None, 0);
     let admin = sess(Some(99), Some(2110_099), None, service_roles::ROLE_ADMIN);
 
-    let encode_user_seq = |field_num: u32, id: u64, out: &mut Vec<u8>| {
-        encode_seq(field_num, ((id as u32) << 1) as u64, out);
-    };
-
     // 1. eve.entitlement.user.api.GrantRequest: whitespace name -> 400
-    let mut ws_ent = Vec::new();
-    encode_user_seq(2, 55, &mut ws_ent);
-    encode_string_field(3, "   ", &mut ws_ent);
-    let mut ws_req = Vec::new();
-    encode_bytes_field(1, &ws_ent, &mut ws_req);
+    let ws_req = pb::message("eve.entitlement.user.api.GrantRequest")
+        .set_with("user_entitlement_fulfillment", |e| {
+            e.set("user.sequential", 55i32)
+                .set("entitlement_name", "   ")
+        })
+        .must_encode();
     assert_eq!(
         call(&router, &admin, "eve.entitlement.user.api.GrantRequest", ws_req, now).status_code,
         STATUS_BAD_REQUEST
     );
 
     // 2. Grant "omega" with explicit expiry (field 5) -> updates omega_subscriptions
-    let mut omega_ent = Vec::new();
-    encode_user_seq(2, 55, &mut omega_ent);
-    encode_string_field(3, "omega", &mut omega_ent);
-    encode_seq(5, now + 10_000, &mut omega_ent);
-    let mut omega_exp_req = Vec::new();
-    encode_bytes_field(1, &omega_ent, &mut omega_exp_req);
+    let omega_exp_req = pb::message("eve.entitlement.user.api.GrantRequest")
+        .set_with("user_entitlement_fulfillment", |e| {
+            e.set("user.sequential", 55i32)
+                .set("entitlement_name", "omega")
+                .set("expiry_date.seconds", (now + 10_000) as i64)
+        })
+        .must_encode();
     assert_eq!(
         call(&router, &admin, "eve.entitlement.user.api.GrantRequest", omega_exp_req, now).status_code,
         STATUS_OK
@@ -450,12 +447,13 @@ fn admin_user_entitlement_and_subscription_grant_validation_and_clamping() {
     );
 
     // 3. Grant expired "omega" (expiry <= now) defaults to 30 days minimum
-    let mut exp_ent = Vec::new();
-    encode_user_seq(2, 56, &mut exp_ent);
-    encode_string_field(3, "omega", &mut exp_ent);
-    encode_seq(5, now - 10, &mut exp_ent);
-    let mut expired_req = Vec::new();
-    encode_bytes_field(1, &exp_ent, &mut expired_req);
+    let expired_req = pb::message("eve.entitlement.user.api.GrantRequest")
+        .set_with("user_entitlement_fulfillment", |e| {
+            e.set("user.sequential", 56i32)
+                .set("entitlement_name", "omega")
+                .set("expiry_date.seconds", (now - 10) as i64)
+        })
+        .must_encode();
     assert_eq!(
         call(&router, &admin, "eve.entitlement.user.api.GrantRequest", expired_req, now).status_code,
         STATUS_OK
@@ -478,21 +476,21 @@ fn admin_user_entitlement_and_subscription_grant_validation_and_clamping() {
     );
     // uid == 0 -> 400
     let zero_admin = sess(Some(0), Some(2110_099), None, service_roles::ROLE_ADMIN);
-    let mut zero_sub = Vec::new();
-    encode_user_seq(1, 0, &mut zero_sub);
-    let mut zero_uid = Vec::new();
-    encode_bytes_field(1, &zero_sub, &mut zero_uid);
+    let zero_uid = pb::message("eve.entitlement.user.subscription.api.GrantRequest")
+        .set("subscription_fulfillment.user.sequential", 0i32)
+        .must_encode();
     assert_eq!(
         call(&router, &zero_admin, "eve.entitlement.user.subscription.api.GrantRequest", zero_uid, now)
             .status_code,
         STATUS_BAD_REQUEST
     );
     // days == 0 clamped to 1 day & empty field 6 defaults to "omega"
-    let mut sub_body = Vec::new();
-    encode_user_seq(1, 57, &mut sub_body);
-    encode_varint_field(3, 0, &mut sub_body);
-    let mut sub_grant = Vec::new();
-    encode_bytes_field(1, &sub_body, &mut sub_grant);
+    let sub_grant = pb::message("eve.entitlement.user.subscription.api.GrantRequest")
+        .set_with("subscription_fulfillment", |s| {
+            s.set("user.sequential", 57i32)
+                .set("recurring_interval_in_days", 0i32)
+        })
+        .must_encode();
     assert_eq!(
         call(&router, &admin, "eve.entitlement.user.subscription.api.GrantRequest", sub_grant, now)
             .status_code,
@@ -531,8 +529,9 @@ fn membership_roles_and_missing_character_fallback() {
         (dir_id, "Director"),
         (mem_id, "Member"),
     ] {
-        let mut req = Vec::new();
-        encode_seq(1, cid as u64, &mut req);
+        let req = pb::message("eve.membership.corporation.GetCharacterRequest")
+            .set("character_id.sequential", cid as u32)
+            .must_encode();
         let s = sess(Some(1), Some(cid), Some(corp_id), 0);
         let resp = call(&router, &s, "eve.membership.corporation.GetCharacterRequest", req.clone(), now);
         assert_eq!(resp.status_code, STATUS_OK);
@@ -549,11 +548,9 @@ fn membership_roles_and_missing_character_fallback() {
     }
 
     // Missing character -> (1000170, "Member")
-    let missing_req = {
-        let mut r = Vec::new();
-        encode_seq(1, 2110_999, &mut r);
-        r
-    };
+    let missing_req = pb::message("eve.membership.corporation.GetCharacterRequest")
+        .set("character_id.sequential", 2110_999u32)
+        .must_encode();
     let miss_resp = call(
         &router,
         &sess(Some(1), Some(2110_999), None, 0),
@@ -586,24 +583,27 @@ fn purchase_skills_validation_dedup_markup_and_history_edges() {
         .unwrap_or(3400);
 
     // 1. Unknown type -> 404
-    let mut unk = Vec::new();
-    encode_seq(1, 999_999_888, &mut unk);
+    let unk = pb::message("eve.character.skill.PurchaseSkillsRequest")
+        .add_with("type", |t| t.set("sequential", 999_999_888u64))
+        .must_encode();
     assert_eq!(
         call(&router, &s, "eve.character.skill.PurchaseSkillsRequest", unk, now).status_code,
         STATUS_NOT_FOUND
     );
 
     // 2. Non-skill type (34 Tritanium) -> 400
-    let mut non_skill = Vec::new();
-    encode_seq(1, 34, &mut non_skill);
+    let non_skill = pb::message("eve.character.skill.PurchaseSkillsRequest")
+        .add_with("type", |t| t.set("sequential", 34u64))
+        .must_encode();
     assert_eq!(
         call(&router, &s, "eve.character.skill.PurchaseSkillsRequest", non_skill, now).status_code,
         STATUS_BAD_REQUEST
     );
 
     // 3. No NPC sell order -> 412
-    let mut no_order = Vec::new();
-    encode_seq(1, skill_id as u64, &mut no_order);
+    let no_order = pb::message("eve.character.skill.PurchaseSkillsRequest")
+        .add_with("type", |t| t.set("sequential", u64::from(skill_id)))
+        .must_encode();
     assert_eq!(
         call(&router, &s, "eve.character.skill.PurchaseSkillsRequest", no_order.clone(), now)
             .status_code,
@@ -639,13 +639,14 @@ fn purchase_skills_validation_dedup_markup_and_history_edges() {
         STATUS_PRECONDITION_FAILED
     );
 
-    // 5. Duplicate skill ID across fields 1 & 2 -> charged only once at 1.30x (13_000), updates skill + journal + skill_history
+    // 5. Duplicate skill ID across repeated `type` -> charged only once at 1.30x (13_000), updates skill + journal + skill_history
     db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&cid).unwrap().balance = IskCents(50_000);
     });
-    let mut dup_req = Vec::new();
-    encode_seq(1, skill_id as u64, &mut dup_req);
-    encode_seq(2, skill_id as u64, &mut dup_req);
+    let dup_req = pb::message("eve.character.skill.PurchaseSkillsRequest")
+        .add_with("type", |t| t.set("sequential", u64::from(skill_id)))
+        .add_with("type", |t| t.set("sequential", u64::from(skill_id)))
+        .must_encode();
     let ok = call(&router, &s, "eve.character.skill.PurchaseSkillsRequest", dup_req, now);
     assert_eq!(ok.status_code, STATUS_OK);
     db.with_snapshot(|snap| {
@@ -657,8 +658,9 @@ fn purchase_skills_validation_dedup_markup_and_history_edges() {
 
     // 6. Missing character in snap.characters -> 404
     let missing_s = sess(Some(61), Some(2110_699), Some(1_000_009), 0);
-    let mut req_miss_char = Vec::new();
-    encode_seq(1, skill_id as u64, &mut req_miss_char);
+    let req_miss_char = pb::message("eve.character.skill.PurchaseSkillsRequest")
+        .add_with("type", |t| t.set("sequential", u64::from(skill_id)))
+        .must_encode();
     assert_eq!(
         call(&router, &missing_s, "eve.character.skill.PurchaseSkillsRequest", req_miss_char, now)
             .status_code,

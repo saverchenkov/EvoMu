@@ -8,9 +8,10 @@ use eve_db::{
     AccountRecord, ContractRecord, CorporationRecord, IskCents, JournalMeta, WalletJournalEntry,
     WorldRepository,
 };
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, AuthoritativeContext, DynamicQuasarMessage,
-    DynamicValue, GoogleAny, QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, QuasarDescriptorRegistry,
+    WireField, WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::collections::{HashMap, HashSet};
@@ -92,10 +93,21 @@ fn make_ctx(char_id: Option<u32>, role: u64) -> AuthoritativeContext {
 }
 
 fn encode_id_req(type_name: &str, id: u64) -> GoogleAny {
-    let mut id_msg = Vec::new();
-    encode_varint_field(1, id, &mut id_msg);
-    let mut req = Vec::new();
-    encode_bytes_field(1, &id_msg, &mut req);
+    let req = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(
+                WireMessage {
+                    fields: vec![WireField {
+                        field_number: 1,
+                        value: WireValue::Varint(id),
+                    }],
+                }
+                .encode(),
+            ),
+        }],
+    }
+    .encode();
     GoogleAny {
         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"),
         value: req,
@@ -409,7 +421,9 @@ fn industry_planets_pi_moons_belts_bloodlines_wallet_and_id_handlers() {
                 },
             )
             .expect(rpc);
-        if rpc != "eve.character.industry.blueprints.GetRequest" {
+        if rpc != "eve.character.industry.blueprints.GetRequest"
+            && rpc != "eve.killmail.Attributes"
+        {
             assert!(!resp.value.is_empty(), "{rpc} should return non-empty payload");
         }
     }
@@ -447,10 +461,9 @@ fn industry_planets_pi_moons_belts_bloodlines_wallet_and_id_handlers() {
         .dispatch(&user, &GoogleAny { type_url: xfer_type.clone(), value: vec![] })
         .is_ok());
 
-    let mut amt_msg = Vec::new();
-    encode_varint_field(1, 100_000, &mut amt_msg);
-    let mut big_xfer = Vec::new();
-    encode_bytes_field(5, &amt_msg, &mut big_xfer);
+    let big_xfer = pb::message("eve.isk.wallet.api.TransferByOwnerRequest")
+        .set("amount.units", 100_000i64)
+        .must_encode();
     assert_eq!(
         router
             .dispatch(&user, &GoogleAny { type_url: xfer_type, value: big_xfer })

@@ -15,18 +15,10 @@
 
 use crate::quasar_gateway::{NoticeScope, PublicGatewayRouter};
 use eve_db::WorldRepository;
-use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, DynamicQuasarMessage,
-    DynamicValue, GoogleAny, QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
-};
+use eve_proto::pb;
+use eve_proto::quasar::{DynamicQuasarMessage, DynamicValue, QuasarDescriptorRegistry};
 use eve_sde::SdeRegistry;
 use std::sync::Arc;
-
-fn encode_identifier(field_num: u32, id: u64, out: &mut Vec<u8>) {
-    let mut id_buf = Vec::new();
-    encode_varint_field(1, id, &mut id_buf);
-    encode_bytes_field(field_num, &id_buf, out);
-}
 
 fn extract_u64_from_field(dyn_msg: &DynamicQuasarMessage, field_num: u32) -> u64 {
     match dyn_msg.get(field_num) {
@@ -81,15 +73,9 @@ pub fn register_assetholding_handlers(
                     )
                 })?;
             let attrs = super::quasar_entitlement_ledger::encode_asset_attributes(asset, false);
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attrs, &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.assetholding.asset.api.GetResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve.assetholding.asset.api.GetResponse")
+                .set_raw_message("asset", attrs)
+                .must_to_any())
         }),
     );
 
@@ -122,15 +108,9 @@ pub fn register_assetholding_handlers(
                     )
                 })?;
             let attrs = super::quasar_entitlement_ledger::encode_asset_attributes(asset, true);
-            let mut out = Vec::new();
-            encode_bytes_field(2, &attrs, &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.assetholding.asset.api.GetResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve_public.assetholding.asset.api.GetResponse")
+                .set_raw_message("asset", attrs)
+                .must_to_any())
         }),
     );
 
@@ -176,29 +156,24 @@ pub fn register_assetholding_handlers(
                 _ => None,
             };
             let ledger = super::quasar_entitlement_ledger::load(&db_unred);
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve.assetholding.entitlement.api.GetUnredeemedByHolderAndGroupNameResponse");
             for e in ledger.entitlements.values() {
                 if e.total > e.redeemed
                     && e.holder == eff_holder
                     && group_filter.as_ref().is_none_or(|g| g.is_empty() || &e.group_name == g)
                 {
                     let id_b = super::quasar_entitlement_ledger::public_identifier(e);
-                    let mut qty = Vec::new();
-                    encode_varint_field(1, e.total, &mut qty);
-                    encode_varint_field(2, e.redeemed, &mut qty);
-                    let mut entry = Vec::new();
-                    encode_bytes_field(1, &id_b, &mut entry);
-                    encode_bytes_field(2, &qty, &mut entry);
-                    encode_bytes_field(1, &entry, &mut out);
+                    resp = resp.add_with("entitlements", |entry| {
+                        entry
+                            .set_raw_message("entitlement", id_b)
+                            .set_with("quantity", |q| {
+                                q.set("total", e.total).set("redeemed", e.redeemed)
+                            })
+                    });
                 }
             }
 
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.assetholding.entitlement.api.GetUnredeemedByHolderAndGroupNameResponse"
-                ),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -215,17 +190,11 @@ pub fn publish_asset_capacity_claimed_notice(
     current_remaining: u64,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let mut payload = Vec::new();
-    encode_identifier(1, asset_id, &mut payload);
-    encode_varint_field(2, previous_remaining, &mut payload);
-    encode_varint_field(3, current_remaining, &mut payload);
-
-    let any = GoogleAny {
-        type_url: format!(
-            "{TYPE_GOOGLEAPIS_PREFIX}eve_public.assetholding.asset.api.FiniteCapacityClaimedNotice"
-        ),
-        value: payload,
-    };
+    let any = pb::message("eve_public.assetholding.asset.api.FiniteCapacityClaimedNotice")
+        .set("asset.uuid", super::quasar_cosmetics_drafts::id_to_uuid_bytes(asset_id))
+        .set("previous_remaining", previous_remaining)
+        .set("current_remaining", current_remaining)
+        .must_to_any();
     let (_, delivered) =
         gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix)?;
     Ok(delivered)
@@ -238,15 +207,9 @@ pub fn publish_asset_deleted_notice(
     asset_id: u64,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let mut payload = Vec::new();
-    encode_identifier(1, asset_id, &mut payload);
-
-    let any = GoogleAny {
-        type_url: format!(
-            "{TYPE_GOOGLEAPIS_PREFIX}eve_public.assetholding.asset.api.DeletedNotice"
-        ),
-        value: payload,
-    };
+    let any = pb::message("eve_public.assetholding.asset.api.DeletedNotice")
+        .set("asset.uuid", super::quasar_cosmetics_drafts::id_to_uuid_bytes(asset_id))
+        .must_to_any();
     let (_, delivered) =
         gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix)?;
     Ok(delivered)

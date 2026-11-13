@@ -147,9 +147,37 @@ fn get_orders_and_public_open_filters_and_wire_encoding_branches() {
     let sell_attrs = WireMessage::decode(&sell_attrs_bytes).unwrap();
     assert!(sell_attrs.fields.iter().all(|f| f.field_number != 1));
     assert_eq!(decode_sub_varint(&sell_attrs_bytes, 3, 1), Some(34));
-    assert_eq!(decode_sub_varint(&sell_attrs_bytes, 5, 1), Some(250));
-    assert_eq!(decode_sub_varint(&sell_attrs_bytes, 12, 1), Some(60_003_760));
-    assert_eq!(decode_sub_varint(&sell_attrs_bytes, 13, 1), Some(10_000_002));
+    assert_eq!(decode_sub_varint(&sell_attrs_bytes, 5, 1), Some(500)); // sint64 zigzag(250)
+    let dyn_sell_attrs = router
+        .descriptors
+        .decode_dynamic("eve.market.orders.sellorder.Attributes", &sell_attrs_bytes)
+        .expect("decode sellorder attributes");
+    let loc_msg = match dyn_sell_attrs.get(12) {
+        Some(DynamicValue::Message(m)) => m,
+        other => panic!("expected location message, got {other:?}"),
+    };
+    let extract_seq = |field_num: u32| -> Option<u64> {
+        match loc_msg.get(field_num) {
+            Some(DynamicValue::Message(sub)) => match sub.get(1) {
+                Some(DynamicValue::Uint64(n)) => Some(*n),
+                _ => None,
+            },
+            _ => None,
+        }
+    };
+    assert_eq!(extract_seq(1), Some(10_000_002));
+    assert_eq!(extract_seq(3), Some(60_003_760));
+    assert_eq!(
+        WireMessage::decode(&sell_attrs_bytes)
+            .unwrap()
+            .fields
+            .iter()
+            .find(|f| f.field_number == 13)
+            .and_then(|f| f.value.as_bytes())
+            .and_then(|b| WireMessage::decode(b).ok())
+            .and_then(|s| s.fields.iter().find(|f| f.field_number == 2)?.value.as_varint()),
+        Some(1)
+    );
     assert!(sell_attrs.fields.iter().all(|f| f.field_number != 15));
 
     // Buy order attributes: no field 1 or field 15 (escrow) leaked in public feed, negative price clamped to 0
@@ -296,11 +324,11 @@ fn price_history_averages_and_character_corp_authorization_matrix() {
     ph_req.set(3, DynamicValue::Uint32(34));
     let ph_resp = invoke_market(&router, "eve.market.orders.GetPriceHistoryRequest", &ceo_ctx, &ph_req).unwrap();
     let entry_bytes = WireMessage::decode(&ph_resp.value).unwrap().fields[0].value.as_bytes().unwrap().to_vec();
-    assert_eq!(decode_sub_varint(&entry_bytes, 2, 1), Some(300));
     assert_eq!(
-        WireMessage::decode(&entry_bytes).unwrap().fields.iter().find(|f| f.field_number == 5).and_then(|f| f.value.as_varint()),
+        WireMessage::decode(&entry_bytes).unwrap().fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()),
         Some(2)
     );
+    assert_eq!(decode_sub_varint(&entry_bytes, 5, 1), Some(600)); // sint64 zigzag(300)
 
     // 2. Unauthenticated context -> STATUS_UNAUTHORIZED
     let anon_ctx = make_ctx_with_corp(None, None, 0);

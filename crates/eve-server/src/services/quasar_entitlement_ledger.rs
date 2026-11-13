@@ -24,9 +24,9 @@ use crate::quasar_gateway::{
     STATUS_NOT_FOUND,
 };
 use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository, WorldStateSnapshot};
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
-    DynamicQuasarMessage, DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::collections::HashMap;
@@ -125,58 +125,46 @@ pub fn redeemed_skin_licenses_for_char(db: &WorldRepository, char_id: u32) -> Ve
 }
 
 pub(super) fn encode_asset_attributes(asset: &AssetRecord, is_public: bool) -> Vec<u8> {
-    let mut cap_msg = Vec::new();
-    if let Some((orig, rem)) = asset.capacity {
-        let mut fin = Vec::new();
-        encode_varint_field(1, orig, &mut fin);
-        encode_varint_field(2, rem, &mut fin);
-        encode_bytes_field(1, &fin, &mut cap_msg);
-    } else {
-        encode_varint_field(2, 1, &mut cap_msg);
-    }
-    let mut ben_msg = Vec::new();
-    if let Some(cid) = asset.benefactor_char_id {
-        let mut ch = Vec::new();
-        encode_varint_field(1, cid as u64, &mut ch);
-        encode_bytes_field(1, &ch, &mut ben_msg);
-    } else if !is_public {
-        encode_varint_field(3, 1, &mut ben_msg);
-    }
-    let mut attrs = Vec::new();
     if is_public {
-        if !ben_msg.is_empty() {
-            encode_bytes_field(1, &ben_msg, &mut attrs);
+        let mut msg = pb::message("eve_public.assetholding.asset.Attributes");
+        if let Some(cid) = asset.benefactor_char_id {
+            msg = msg.set("benefactor.character.sequential", cid);
         }
-        encode_bytes_field(3, &cap_msg, &mut attrs);
-        return attrs;
+        msg = match asset.capacity {
+            Some((orig, rem)) => msg
+                .set("capacity.finite.original", orig)
+                .set("capacity.finite.remaining", rem),
+            None => msg.set("capacity.infinite", true),
+        };
+        return msg.must_encode();
     }
-    encode_string_field(1, &asset.name, &mut attrs);
-    encode_bytes_field(3, &ben_msg, &mut attrs);
-    let mut unit_msg = Vec::new();
+
+    let mut msg = pb::message("eve.assetholding.asset.Attributes")
+        .set("internal_name", &asset.name);
+    msg = match asset.benefactor_char_id {
+        Some(cid) => msg.set("benefactor.character.sequential", cid),
+        None => msg.set("benefactor.spawned", true),
+    };
     if let Some(&(type_id, qty)) = asset.stacks.first() {
-        let (mut t, mut st) = (Vec::new(), Vec::new());
-        encode_varint_field(1, type_id as u64, &mut t);
-        encode_bytes_field(1, &t, &mut st);
-        encode_varint_field(2, qty as u64, &mut st);
-        encode_bytes_field(8, &st, &mut unit_msg);
+        msg = msg.add_with("unit.unit_inventory_stack.stacks", |st| {
+            st.set("type.sequential", u64::from(type_id))
+                .set("quantity", qty)
+        });
     } else if let Some(ref skin_hex) = asset.ship_skin_license_hex {
-        let (mut sk, mut lic) = (Vec::new(), Vec::new());
-        encode_string_field(1, skin_hex, &mut sk);
-        encode_bytes_field(1, &sk, &mut lic);
-        encode_bytes_field(10, &lic, &mut unit_msg);
+        msg = msg.set("unit.unit_ship_skin_license.skin.hex", skin_hex);
     } else if let Some(tid) = asset.character_title_id {
-        let (mut t_id, mut t_unit) = (Vec::new(), Vec::new());
-        let uuid = super::quasar_cosmetics_drafts::id_to_uuid_bytes(tid);
-        encode_bytes_field(1, &uuid, &mut t_id);
-        encode_bytes_field(1, &t_id, &mut t_unit);
-        encode_bytes_field(12, &t_unit, &mut unit_msg);
+        msg = msg.set(
+            "unit.unit_character_title.title.uuid",
+            super::quasar_cosmetics_drafts::id_to_uuid_bytes(tid),
+        );
     }
-    if !unit_msg.is_empty() {
-        encode_bytes_field(4, &unit_msg, &mut attrs);
-    }
-    encode_bytes_field(5, &cap_msg, &mut attrs);
-    encode_varint_field(7, 1, &mut attrs);
-    attrs
+    msg = match asset.capacity {
+        Some((orig, rem)) => msg
+            .set("capacity.finite.original", orig)
+            .set("capacity.finite.remaining", rem),
+        None => msg.set("capacity.infinite", true),
+    };
+    msg.set("no_auto_release", true).must_encode()
 }
 
 fn sub(msg: &DynamicQuasarMessage, field: u32) -> Option<&DynamicQuasarMessage> {
@@ -249,25 +237,19 @@ impl EntitlementKey {
 
 /// Encodes the public `eve_public.assetholding.entitlement.Identifier`.
 pub(super) fn public_identifier(e: &EntitlementRecord) -> Vec<u8> {
-    let (mut ch, mut holder, mut asset, mut group, mut out) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    encode_varint_field(1, e.holder as u64, &mut ch);
-    encode_bytes_field(1, &ch, &mut holder);
-    encode_bytes_field(1, &e.asset, &mut asset);
-    encode_string_field(1, &e.group_name, &mut group);
-    if let Some(u) = e.group_uuid {
-        encode_bytes_field(2, &u, &mut group);
-    }
-    encode_bytes_field(1, &holder, &mut out);
-    encode_bytes_field(2, &asset, &mut out);
-    encode_bytes_field(3, &group, &mut out);
-    out
+    pb::message("eve_public.assetholding.entitlement.Identifier")
+        .set("holder.character.sequential", e.holder)
+        .set("asset.uuid", e.asset)
+        .set("group_by.name", &e.group_name)
+        .set_opt("group_by.uuid", e.group_uuid.as_ref().map(|u| u.as_slice()))
+        .must_encode()
 }
 
 fn entitlement_notice(type_name: &str, e: &EntitlementRecord, quantity: u64) -> GoogleAny {
-    let mut out = Vec::new();
-    encode_bytes_field(1, &public_identifier(e), &mut out);
-    encode_varint_field(2, quantity, &mut out);
-    any(type_name, out)
+    pb::message(type_name)
+        .set_raw_message("entitlement", public_identifier(e))
+        .set("quantity", quantity)
+        .must_to_any()
 }
 
 /// Registers the ledger-backed handlers (after the generic asset holding registrations).
@@ -457,11 +439,10 @@ fn spawn(db: &WorldRepository, sde: &SdeRegistry, ctx: &AuthoritativeContext, ms
         save_to_snap(s, &ledger)?;
         Ok((uuid, attrs))
     })?;
-    let (mut id, mut out) = (Vec::new(), Vec::new());
-    encode_bytes_field(1, &uuid, &mut id);
-    encode_bytes_field(1, &id, &mut out);
-    encode_bytes_field(2, &attrs, &mut out);
-    Ok(any("eve.assetholding.asset.api.SpawnResponse", out))
+    Ok(pb::message("eve.assetholding.asset.api.SpawnResponse")
+        .set("asset.uuid", uuid)
+        .set_raw_message("attributes", attrs)
+        .must_to_any())
 }
 
 /// `HoldRequest { creator = 2, itemstack = 7 | ship_skin_license = 11 { license = 1 { skin = 1 { hex = 1 } }, capacity = 2 } }`.
@@ -526,11 +507,10 @@ fn hold(db: &WorldRepository, sde: &SdeRegistry, ctx: &AuthoritativeContext, msg
         save_to_snap(s, &ledger)?;
         Ok((uuid, attrs))
     })?;
-    let (mut id, mut out) = (Vec::new(), Vec::new());
-    encode_bytes_field(1, &uuid, &mut id);
-    encode_bytes_field(1, &id, &mut out);
-    encode_bytes_field(2, &attrs, &mut out);
-    Ok(any("eve.assetholding.asset.api.HoldResponse", out))
+    Ok(pb::message("eve.assetholding.asset.api.HoldResponse")
+        .set("asset.uuid", uuid)
+        .set_raw_message("attributes", attrs)
+        .must_to_any())
 }
 
 /// `CreateRequest { creator = 2, benefactor = 3, unit = 4, infinite = 5, finite = 6 }`.
@@ -587,10 +567,9 @@ fn create_asset(db: &WorldRepository, sde: &SdeRegistry, ctx: &AuthoritativeCont
         save_to_snap(s, &ledger)?;
         Ok(uuid)
     })?;
-    let (mut id, mut out) = (Vec::new(), Vec::new());
-    encode_bytes_field(1, &uuid, &mut id);
-    encode_bytes_field(1, &id, &mut out);
-    Ok(any("eve.assetholding.asset.api.CreateResponse", out))
+    Ok(pb::message("eve.assetholding.asset.api.CreateResponse")
+        .set("asset.uuid", uuid)
+        .must_to_any())
 }
 
 /// GM: `DirectDeliveryRequest { entitlements = 2 [{ entitlement = 2, quantity = 10 }] }` grants
@@ -682,17 +661,17 @@ fn owned_entitlement(ledger: &EntitlementLedger, ctx: &AuthoritativeContext, msg
 /// `GetResponse { entitlement = 1|2 (Attributes { quantity = 1 { total = 1, redeemed = 2 } }) }`.
 fn get(db: &WorldRepository, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage, is_public: bool) -> Result<GoogleAny, (u32, String)> {
     let (_, rec) = owned_entitlement(&load(db), ctx, msg, !is_public)?;
-    let (mut qty, mut attrs, mut out) = (Vec::new(), Vec::new(), Vec::new());
-    encode_varint_field(1, rec.total, &mut qty);
-    encode_varint_field(2, rec.redeemed, &mut qty);
-    encode_bytes_field(1, &qty, &mut attrs);
     if !is_public {
-        encode_varint_field(5, 1, &mut attrs);
-        encode_bytes_field(1, &attrs, &mut out);
-        Ok(any("eve.assetholding.entitlement.api.GetResponse", out))
+        Ok(pb::message("eve.assetholding.entitlement.api.GetResponse")
+            .set("entitlement.quantity.total", rec.total)
+            .set("entitlement.quantity.redeemed", rec.redeemed)
+            .set("entitlement.no_last_modified_timestamp", true)
+            .must_to_any())
     } else {
-        encode_bytes_field(2, &attrs, &mut out);
-        Ok(any("eve_public.assetholding.entitlement.api.GetResponse", out))
+        Ok(pb::message("eve_public.assetholding.entitlement.api.GetResponse")
+            .set("entitlement.quantity.total", rec.total)
+            .set("entitlement.quantity.redeemed", rec.redeemed)
+            .must_to_any())
     }
 }
 
@@ -851,23 +830,21 @@ fn redeem_record_in_snap(
     ledger.assets.insert(asset_key, asset.clone());
     ledger.entitlements.insert(key.to_string(), updated.clone());
     if let Some((prev_rem, cur_rem)) = cap_claimed {
-        let (mut a_id, mut cap_n) = (Vec::new(), Vec::new());
-        encode_bytes_field(1, &asset.uuid, &mut a_id);
-        encode_bytes_field(1, &a_id, &mut cap_n);
-        encode_varint_field(2, prev_rem, &mut cap_n);
-        encode_varint_field(3, cur_rem, &mut cap_n);
         notices.push((
             updated.holder,
-            any("eve_public.assetholding.asset.api.FiniteCapacityClaimedNotice", cap_n),
+            pb::message("eve_public.assetholding.asset.api.FiniteCapacityClaimedNotice")
+                .set("asset.uuid", asset.uuid)
+                .set("previous_remaining", prev_rem)
+                .set("current_remaining", cur_rem)
+                .must_to_any(),
         ));
     }
     if let Some(tid) = asset.character_title_id {
-        let (mut t_id, mut t_n) = (Vec::new(), Vec::new());
-        encode_bytes_field(1, &super::quasar_cosmetics_drafts::id_to_uuid_bytes(tid), &mut t_id);
-        encode_bytes_field(1, &t_id, &mut t_n);
         notices.push((
             updated.holder,
-            any("eve_public.cosmetic.character.title.api.GrantedNotice", t_n),
+            pb::message("eve_public.cosmetic.character.title.api.GrantedNotice")
+                .set("title.uuid", super::quasar_cosmetics_drafts::id_to_uuid_bytes(tid))
+                .must_to_any(),
         ));
     }
     let mut redeemed_skin = false;
@@ -880,34 +857,24 @@ fn redeem_record_in_snap(
             now_unix,
         )?;
         redeemed_skin = true;
-        let (mut ch_id, mut sk_id, mut lic_id, mut lic_n) =
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        encode_varint_field(1, updated.holder as u64, &mut ch_id);
-        encode_string_field(1, skin_hex, &mut sk_id);
-        encode_bytes_field(1, &ch_id, &mut lic_id);
-        encode_bytes_field(2, &sk_id, &mut lic_id);
-        encode_bytes_field(1, &lic_id, &mut lic_n);
-        let mut lic_at = Vec::new();
-        encode_varint_field(1, u64::from(lic.activated), &mut lic_at);
-        encode_varint_field(2, lic.unactivated, &mut lic_at);
-        encode_varint_field(3, lic.escrowed, &mut lic_at);
-        encode_bytes_field(2, &lic_at, &mut lic_n);
-        if let Some(prev_lic) = prev {
-            let mut prev_at = Vec::new();
-            encode_varint_field(1, u64::from(prev_lic.activated), &mut prev_at);
-            encode_varint_field(2, prev_lic.unactivated, &mut prev_at);
-            encode_varint_field(3, prev_lic.escrowed, &mut prev_at);
-            encode_bytes_field(3, &prev_at, &mut lic_n);
-            notices.push((
-                updated.holder,
-                any("eve_public.cosmetic.ship.skin.thirdparty.license.api.UpdatedNotice", lic_n),
-            ));
+        let notice_type = if prev.is_some() {
+            "eve_public.cosmetic.ship.skin.thirdparty.license.api.UpdatedNotice"
         } else {
-            notices.push((
-                updated.holder,
-                any("eve_public.cosmetic.ship.skin.thirdparty.license.api.AddedNotice", lic_n),
-            ));
+            "eve_public.cosmetic.ship.skin.thirdparty.license.api.AddedNotice"
+        };
+        let mut msg = pb::message(notice_type)
+            .set("id.character.sequential", updated.holder)
+            .set("id.skin.hex", skin_hex)
+            .set("attributes.activated", lic.activated)
+            .set("attributes.unactivated", lic.unactivated)
+            .set("attributes.escrowed", lic.escrowed);
+        if let Some(prev_lic) = prev {
+            msg = msg
+                .set("previous_attributes.activated", prev_lic.activated)
+                .set("previous_attributes.unactivated", prev_lic.unactivated)
+                .set("previous_attributes.escrowed", prev_lic.escrowed);
         }
+        notices.push((updated.holder, msg.must_to_any()));
     }
     notices.push((
         updated.holder,
@@ -961,12 +928,11 @@ fn delete_or_expire(db: &WorldRepository, ctx: &AuthoritativeContext, msg: &Dyna
         save_to_snap(s, &ledger)?;
         Ok(rec)
     })?;
-    let (mut a_id, mut del_n) = (Vec::new(), Vec::new());
-    encode_bytes_field(1, &rec.asset, &mut a_id);
-    encode_bytes_field(1, &a_id, &mut del_n);
     ctx_queue_notice(
         NoticeScope::Character(rec.holder),
-        any("eve_public.assetholding.asset.api.DeletedNotice", del_n),
+        pb::message("eve_public.assetholding.asset.api.DeletedNotice")
+            .set("asset.uuid", rec.asset)
+            .must_to_any(),
         ctx.now_unix(),
     );
     Ok(any(rsp_type, Vec::new()))

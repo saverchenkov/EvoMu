@@ -9,10 +9,10 @@ use crate::quasar_gateway::{
 use crate::services::quasar_payment_store_types::*;
 use eve_db::WorldRepository;
 use eve_machonet::{service_roles, SessionState};
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, AuthoritativeContext, DynamicQuasarMessage,
-    DynamicValue, EvePublicRequest, EvePublicResponse, GoogleAny, GoogleTimestamp,
-    QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, EvePublicRequest, EvePublicResponse,
+    GoogleAny, GoogleTimestamp, QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
@@ -261,15 +261,10 @@ fn purchase_gift_delivery_fallback_recipient_overflow_and_operation_binary_looku
     // 1. Gift purchase of offer 3001 (default qty=1 when field 2 omitted) by buyer_uid to gift_cid:
     // deducts 500 PLEX from buyer_uid, delivers item to gift_cid, and upgrades gift_uid to Omega!
     let buyer_no_active_char = make_sess(Some(buyer_uid), None, service_roles::ROLE_PLAYER_DEFAULT);
-    let mut gift_cm = Vec::new();
-    encode_varint_field(1, gift_cid as u64, &mut gift_cm);
-    let mut gift_gm = Vec::new();
-    encode_bytes_field(3, &gift_cm, &mut gift_gm);
-    let mut offer_m = Vec::new();
-    eve_proto::quasar::encode_string_field(1, "3001", &mut offer_m);
-    let mut gift_req = Vec::new();
-    encode_bytes_field(1, &offer_m, &mut gift_req);
-    encode_bytes_field(3, &gift_gm, &mut gift_req);
+    let gift_req = pb::message("eve_public.plex.vault.api.PurchaseRequest")
+        .set("offer.store_offer", "3001")
+        .set("gift.character.sequential", gift_cid as u64)
+        .must_encode();
 
     assert_eq!(
         call_gw(
@@ -292,8 +287,9 @@ fn purchase_gift_delivery_fallback_recipient_overflow_and_operation_binary_looku
     });
 
     // 2. Fallback recipient resolution when active_cid and gift_char_id are both None: delivers to buyer_cid
-    let mut self_req = Vec::new();
-    encode_varint_field(1, 3001, &mut self_req);
+    let self_req = pb::message("eve_public.plex.vault.api.PurchaseRequest")
+        .set("offer.store_offer", "3001")
+        .must_encode();
     assert_eq!(
         call_gw(
             &router,
@@ -327,8 +323,9 @@ fn purchase_gift_delivery_fallback_recipient_overflow_and_operation_binary_looku
     );
 
     // 4. Delivery quantity overflow (u32::MAX > i32::MAX) -> 400 BAD_REQUEST
-    let mut overflow_req = Vec::new();
-    encode_varint_field(1, 3002, &mut overflow_req);
+    let overflow_req = pb::message("eve_public.plex.vault.api.PurchaseRequest")
+        .set("offer.store_offer", "3002")
+        .must_encode();
     assert_eq!(
         call_gw(
             &router,
@@ -356,10 +353,9 @@ fn purchase_gift_delivery_fallback_recipient_overflow_and_operation_binary_looku
         .status_code,
         STATUS_BAD_REQUEST
     );
-    let mut bin_op_inner = Vec::new();
-    encode_bytes_field(1, &9876_u64.to_be_bytes(), &mut bin_op_inner);
-    let mut bin_op_req = Vec::new();
-    encode_bytes_field(1, &bin_op_inner, &mut bin_op_req);
+    let bin_op_req = pb::message("eve.plex.vault.assetholding.operation.api.GetRequest")
+        .set("operation.uuid", 9876_u64.to_be_bytes().as_slice())
+        .must_encode();
     assert_eq!(
         call_gw(
             &router,
@@ -372,8 +368,9 @@ fn purchase_gift_delivery_fallback_recipient_overflow_and_operation_binary_looku
         STATUS_OK
     );
 
-    let mut missing_op_req = Vec::new();
-    encode_varint_field(1, 777_888_999, &mut missing_op_req);
+    let missing_op_req = pb::message("eve.plex.vault.assetholding.operation.api.GetRequest")
+        .set("operation.uuid", 777_888_999_u64.to_be_bytes().as_slice())
+        .must_encode();
     assert_eq!(
         call_gw(
             &router,

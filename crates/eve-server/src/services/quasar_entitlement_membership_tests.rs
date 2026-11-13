@@ -9,9 +9,10 @@ use crate::quasar_gateway::{
 };
 use eve_db::{corp_roles, IskCents, WorldRepository};
 use eve_machonet::{service_roles, SessionState};
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, EvePublicRequest,
-    EvePublicResponse, GoogleAny, QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
+    EvePublicRequest, EvePublicResponse, GoogleAny, QuasarDescriptorRegistry,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
@@ -89,39 +90,35 @@ fn user_entitlements_logo_grants_membership_and_direct_skill_purchases() {
     assert_eq!(call(&router, &player, "eve.entitlement.user.api.GrantRequest", Vec::new(), now).status_code, STATUS_FORBIDDEN);
     assert_eq!(call(&router, &gm, "eve.entitlement.user.api.GrantRequest", Vec::new(), now).status_code, STATUS_BAD_REQUEST);
 
-    let mut u_sub = Vec::new();
-    encode_varint_field(1, 1, &mut u_sub);
-    let mut dur_sub = Vec::new();
-    encode_varint_field(1, 3600, &mut dur_sub);
-    let mut ent1 = Vec::new();
-    encode_bytes_field(2, &u_sub, &mut ent1);
-    encode_string_field(3, "beta-tester", &mut ent1);
-    encode_bytes_field(4, &dur_sub, &mut ent1);
-    let mut grant1 = Vec::new();
-    encode_bytes_field(1, &ent1, &mut grant1);
+    let grant1 = pb::message("eve.entitlement.user.api.GrantRequest")
+        .set_with("user_entitlement_fulfillment", |e| {
+            e.set("user.sequential", 1i32)
+                .set("entitlement_name", "beta-tester")
+                .set("time_to_add.seconds", 3600i64)
+        })
+        .must_encode();
     assert_eq!(call(&router, &gm, "eve.entitlement.user.api.GrantRequest", grant1, now).status_code, STATUS_OK);
 
-    let mut ent2 = Vec::new();
-    encode_string_field(3, "omega", &mut ent2);
-    let mut grant2 = Vec::new();
-    encode_bytes_field(1, &ent2, &mut grant2);
+    let grant2 = pb::message("eve.entitlement.user.api.GrantRequest")
+        .set("user_entitlement_fulfillment.entitlement_name", "omega")
+        .must_encode();
     assert_eq!(call(&router, &gm, "eve.entitlement.user.api.GrantRequest", grant2, now).status_code, STATUS_OK);
 
-    let mut sub_body = Vec::new();
-    encode_bytes_field(1, &u_sub, &mut sub_body);
-    let mut days_sub = Vec::new();
-    encode_varint_field(1, 15, &mut days_sub);
-    encode_bytes_field(3, &days_sub, &mut sub_body);
-    encode_string_field(6, "omega", &mut sub_body);
-    let mut sub_req = Vec::new();
-    encode_bytes_field(1, &sub_body, &mut sub_req);
+    let sub_req = pb::message("eve.entitlement.user.subscription.api.GrantRequest")
+        .set_with("subscription_fulfillment", |s| {
+            s.set("user.sequential", 1i32)
+                .set("recurring_interval_in_days", 15i32)
+                .set("subscription_type", "omega")
+        })
+        .must_encode();
     assert_eq!(call(&router, &gm, "eve.entitlement.user.subscription.api.GrantRequest", sub_req, now).status_code, STATUS_OK);
     assert_eq!(call(&router, &player, "eve_public.entitlement.user.api.GetRequest", Vec::new(), now).status_code, STATUS_OK);
 
     // 2. Character ship corp/alliance logo entitlements: grant, get, is-entitled, revoke
     let logo_ident = encode_logo_identifier(cid, 587);
-    let mut logo_req = Vec::new();
-    encode_bytes_field(1, &logo_ident, &mut logo_req);
+    let logo_req = pb::message("eve_public.entitlement.character.ship.admin.corplogo.GrantRequest")
+        .set_raw_message("entitlement", logo_ident)
+        .must_encode();
     assert_eq!(call(&router, &gm, "eve_public.entitlement.character.ship.admin.corplogo.GrantRequest", logo_req.clone(), now).status_code, STATUS_OK);
     assert_eq!(call(&router, &gm, "eve.entitlement.character.ship.admin.alliancelogo.GrantRequest", logo_req.clone(), now).status_code, STATUS_OK);
     assert_eq!(call(&router, &player, "eve_public.entitlement.character.GetAllRequest", Vec::new(), now).status_code, STATUS_OK);
@@ -145,8 +142,9 @@ fn user_entitlements_logo_grants_membership_and_direct_skill_purchases() {
     assert_eq!(call(&router, &no_char, "eve.character.skill.PurchaseSkillsRequest", Vec::new(), now).status_code, STATUS_FORBIDDEN);
     assert_eq!(call(&router, &player, "eve.character.skill.PurchaseSkillsRequest", Vec::new(), now).status_code, STATUS_BAD_REQUEST);
 
-    let mut bad_sk = Vec::new();
-    encode_varint_field(1, 3401, &mut bad_sk); // drop-only skill
+    let bad_sk = pb::message("eve.character.skill.PurchaseSkillsRequest")
+        .add_with("type", |t| t.set("sequential", 3401u64)) // drop-only skill
+        .must_encode();
     assert_eq!(call(&router, &player, "eve.character.skill.PurchaseSkillsRequest", bad_sk, now).status_code, STATUS_PRECONDITION_FAILED);
 
     db.with_mut_snapshot(|snap| {
@@ -168,8 +166,9 @@ fn user_entitlements_logo_grants_membership_and_direct_skill_purchases() {
         ord.is_npc = true;
         snap.market_orders.insert(999_001, ord);
     });
-    let mut ok_sk = Vec::new();
-    encode_varint_field(1, 3400, &mut ok_sk);
+    let ok_sk = pb::message("eve.character.skill.PurchaseSkillsRequest")
+        .add_with("type", |t| t.set("sequential", 3400u64))
+        .must_encode();
     assert_eq!(call(&router, &player, "eve.character.skill.PurchaseSkillsRequest", ok_sk.clone(), now).status_code, STATUS_OK);
     assert_eq!(call(&router, &player, "eve.character.skill.PurchaseSkillsRequest", ok_sk, now).status_code, STATUS_CONFLICT);
 }
