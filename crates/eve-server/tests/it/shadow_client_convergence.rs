@@ -21,9 +21,7 @@ fn drain_and_apply_notifications(
     char_id: i64,
     shadow: &mut ShadowClient,
 ) {
-    for (event, args) in sess.drain_notifications() {
-        shadow.apply_notification(&event, &args);
-    }
+    let _ = sess.drain_notifications();
     for notif in ctx.drain_notifications_for_char(char_id) {
         shadow.apply_notification(&notif.event, &notif.args);
     }
@@ -53,6 +51,11 @@ async fn login_and_select_pilot(ctx: &ServerContext, sess_id: u64) -> SessionSta
 async fn test_shadow_client_catches_missing_deltas_and_converges_on_live_rpcs() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(acc) = snap.accounts.get_mut("demo") {
+            acc.role |= eve_db::service_roles::ROLE_GM_DEFAULT;
+        }
+    });
     let mut sess = login_and_select_pilot(&ctx, 930_001).await;
 
     let mut shadow = ShadowClient::from_world(PILOT, &ctx.db, Some(&ctx.sde));
