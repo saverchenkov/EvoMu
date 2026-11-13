@@ -363,6 +363,7 @@ fn normalize_macho_rpc_reply_covers_all_service_adapters() {
     let err = BridgeRpcError {
         code: "Err".into(),
         message: "boom".into(),
+        client_error: None,
     };
     assert!(normalize_macho_rpc_reply("XmppChatMgr", "ResyncSystemChannelAccess", Err(err)).is_err());
 }
@@ -1151,7 +1152,7 @@ fn w4_mutant_killers_untouched_services_helpers_and_defaults() {
         normalize_macho_rpc_reply(
             "agentMgr",
             "GetMissionBriefingInfo",
-            Err(BridgeRpcError { code: "MissionNotActive".into(), message: "x".into() }),
+            Err(BridgeRpcError { code: "MissionNotActive".into(), message: "x".into(), client_error: None }),
         )
         .unwrap(),
         PyRep::None
@@ -1170,7 +1171,7 @@ fn w4_mutant_killers_untouched_services_helpers_and_defaults() {
         normalize_macho_rpc_reply(
             "agentMgr",
             "GetMissionObjectiveInfo",
-            Err(BridgeRpcError { code: "MissionNotActive".into(), message: "x".into() }),
+            Err(BridgeRpcError { code: "MissionNotActive".into(), message: "x".into(), client_error: None }),
         )
         .unwrap(),
         PyRep::None

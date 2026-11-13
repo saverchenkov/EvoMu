@@ -148,6 +148,7 @@ pub fn handle_entropic_activation(
                 return Err(BridgeRpcError {
                     code: "AlreadyActive".into(),
                     message: format!("Module {module_id} is already active"),
+                    client_error: None,
                 });
             } else {
                 // Switched target! Reset spool to 1.0
@@ -1355,6 +1356,7 @@ pub fn handle_link_all_weapons(
             return Err(BridgeRpcError {
                 code: "ShipOwnershipViolation".into(),
                 message: format!("Ship {ship_id} is not owned by {char_id}"),
+                client_error: None,
             });
         }
         let is_linkable_weapon = |ty: &eve_sde::InvType| -> bool {

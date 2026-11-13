@@ -254,6 +254,7 @@ pub(crate) fn handle_update_members(
         return Some(Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "UpdateMember/UpdateMembers requires at least one target characterID".into(),
+            client_error: None,
         }));
     }
     if specs.iter().any(|sp| sp.has_negative_mask) {
@@ -269,12 +270,14 @@ pub(crate) fn handle_update_members(
             return Err(BridgeRpcError {
                 code: "CorporationNotFound".into(),
                 message: format!("Corporation {corp_id} not found"),
+                client_error: None,
             });
         };
         if !is_ceo && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR) {
             return Err(BridgeRpcError {
                 code: "CorpRoleDenied".into(),
                 message: "Only CEO or Director can update corporation roles".into(),
+                client_error: None,
             });
         }
         for sp in &specs {
@@ -282,6 +285,7 @@ pub(crate) fn handle_update_members(
                 return Err(BridgeRpcError {
                     code: "TargetNotInCorp".into(),
                     message: format!("Character {} is not a member of corporation {corp_id}", sp.target_char_id),
+                    client_error: None,
                 });
             }
             if !is_ceo {
@@ -1074,6 +1078,7 @@ pub(crate) fn handle_kick_out_members(
                 "Cannot perform corp member kick while 10s session-change timer ({}) is active",
                 active_timer.reason
             ),
+            client_error: None,
         }));
     }
     for &tid in &target_ids {
@@ -1086,6 +1091,7 @@ pub(crate) fn handle_kick_out_members(
                     "Cannot kick member while 10s session-change timer ({}) is active",
                     active_timer.reason
                 ),
+                client_error: None,
             }));
         }
     }
@@ -1095,6 +1101,7 @@ pub(crate) fn handle_kick_out_members(
             return Err(BridgeRpcError {
                 code: "CorporationNotFound".into(),
                 message: format!("Corporation {corp_id} not found"),
+                client_error: None,
             });
         };
         let (is_ceo, eff_caller_role) =
@@ -1109,6 +1116,7 @@ pub(crate) fn handle_kick_out_members(
             return Err(BridgeRpcError {
                 code: "CorpRoleDenied".into(),
                 message: "Kicking a member requires Personnel Manager or Director role".into(),
+                client_error: None,
             });
         }
         let caller_sess_in_space = session.station_id.is_none()
@@ -1119,12 +1127,14 @@ pub(crate) fn handle_kick_out_members(
                 return Err(BridgeRpcError {
                     code: "NotCorpMember".into(),
                     message: format!("Character {tid} is not a member of corporation {corp_id}"),
+                    client_error: None,
                 });
             }
             if tid == corp.ceo_id && corp.members.len() > 1 {
                 return Err(BridgeRpcError {
                     code: "CeoCannotLeave".into(),
                     message: "CEO cannot leave while other members remain in the corporation".into(),
+                    client_error: None,
                 });
             }
             if tid == char_id {
@@ -1136,6 +1146,7 @@ pub(crate) fn handle_kick_out_members(
                     return Err(BridgeRpcError {
                         code: "MustBeDocked".into(),
                         message: "You must be docked in a station or structure to leave a corporation".into(),
+                        client_error: None,
                     });
                 }
             }
@@ -1147,6 +1158,7 @@ pub(crate) fn handle_kick_out_members(
                         message: format!(
                             "Cannot leave or expel member {tid}: roles/titles must be dropped and 24h must pass ({blocker})"
                         ),
+                        client_error: None,
                     });
                 }
             }
@@ -1165,6 +1177,7 @@ pub(crate) fn handle_kick_out_members(
             return Err(BridgeRpcError {
                 code: "ActiveWarsPreventClosure".into(),
                 message: "Corporation cannot close while active wars remain".into(),
+                client_error: None,
             });
         }
         if solo_ceo_closing {
@@ -1177,6 +1190,7 @@ pub(crate) fn handle_kick_out_members(
                     code: "ActiveStructuresPreventClosure".into(),
                     message: "Corporation cannot close while active owned structures remain"
                         .into(),
+                    client_error: None,
                 });
             }
             let has_open_corp_contract = snap.contracts.values().any(|c| {
@@ -1204,6 +1218,7 @@ pub(crate) fn handle_kick_out_members(
                 return Err(BridgeRpcError {
                     code: "OpenCorpContractsOrJobsPreventClosure".into(),
                     message: "Corporation cannot close while open corporate contracts or industry jobs remain".into(),
+                    client_error: None,
                 });
             }
         }
@@ -1469,10 +1484,10 @@ pub(super) fn handle_insert_vote_case(
         .db
         .try_with_mut_snapshot(|snap| -> Result<(i64, i64), BridgeRpcError> {
             let Some(corp) = snap.corporations.get(&corp_id) else {
-                return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
+                return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found"), client_error: None });
             };
             if !corp.members.contains(&char_id) {
-                return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Caller is not a member of the corporation".into() });
+                return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Caller is not a member of the corporation".into(), client_error: None });
             }
             let (is_ceo, caller_role) =
                 snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
@@ -1480,10 +1495,10 @@ pub(super) fn handle_insert_vote_case(
             if vote_type == 0 {
                 let caller_shares = snap.corp_governance.get(&corp_id).and_then(|g| g.shares.get(&char_id).copied()).unwrap_or(0);
                 if !is_ceo_or_dir && caller_shares <= 0 {
-                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Proposing a CEO election requires holding corporation shares or Director role".into() });
+                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Proposing a CEO election requires holding corporation shares or Director role".into(), client_error: None });
                 }
             } else if !is_ceo_or_dir {
-                return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Inserting a corporation vote case requires CEO or Director role".into() });
+                return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Inserting a corporation vote case requires CEO or Director role".into(), client_error: None });
             }
             let mut options: Vec<(i64, String, i64)> = Vec::new();
             if let Some(opt_rep) = opts_arg {
@@ -1507,6 +1522,7 @@ pub(super) fn handle_insert_vote_case(
                                 return Err(BridgeRpcError {
                                     code: "CandidateNotMember".into(),
                                     message: "CEO election candidate must be a member of the corporation".into(),
+                                    client_error: None,
                                 });
                             }
                             let cname = snap
@@ -1540,6 +1556,7 @@ pub(super) fn handle_insert_vote_case(
                                 return Err(BridgeRpcError {
                                     code: "CandidateNotMember".into(),
                                     message: "CEO election candidate must be a member of the corporation".into(),
+                                    client_error: None,
                                 });
                             }
                             options.push((opt_id, otext, param));
@@ -1559,6 +1576,7 @@ pub(super) fn handle_insert_vote_case(
                 return Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "Share creation amount must be positive and bounded".into(),
+                    client_error: None,
                 });
             }
             if options.is_empty() {
@@ -1571,6 +1589,7 @@ pub(super) fn handle_insert_vote_case(
                         return Err(BridgeRpcError {
                             code: "CandidateNotMember".into(),
                             message: "CEO election candidate must be a member of the corporation".into(),
+                            client_error: None,
                         });
                     }
                     let cname = snap

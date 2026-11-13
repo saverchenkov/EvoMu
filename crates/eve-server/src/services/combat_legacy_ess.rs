@@ -78,6 +78,7 @@ pub async fn handle_legacy_and_ess(
             Some(Err(BridgeRpcError {
                 code: "UnimplementedRPC".into(),
                 message: "dogmaIM.FireWeapon is deleted; use dogmaIM.Activate".into(),
+                client_error: None,
             }))
         }
         // rpc-lint: allow Phase 4 exit gate explicitly rejects deleted beyonce.CmdAttackTarget
@@ -85,6 +86,7 @@ pub async fn handle_legacy_and_ess(
             Some(Err(BridgeRpcError {
                 code: "UnimplementedRPC".into(),
                 message: "beyonce.CmdAttackTarget is deleted; use dogmaIM.Activate".into(),
+                client_error: None,
             }))
         }
 
@@ -106,30 +108,35 @@ pub async fn handle_legacy_and_ess(
                 return Some(Err(BridgeRpcError {
                     code: "ShipDocked".into(),
                     message: "Cannot fire weapons while docked".into(),
+                    client_error: None,
                 }));
             }
             let Some(ship_id) = session.ship_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "Session has no active ship".into(),
+                    client_error: None,
                 }));
             };
             let Some(target_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidTarget".into(),
                     message: "dogmaIM.Activate target requires an explicit integer targetID".into(),
+                    client_error: None,
                 }));
             };
             if target_id <= 0 || target_id == char_id || target_id == ship_id {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidTarget".into(),
                     message: "Invalid or self combat target".into(),
+                    client_error: None,
                 }));
             }
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solar system".into(),
+                    client_error: None,
                 }));
             };
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -142,6 +149,7 @@ pub async fn handle_legacy_and_ess(
                         return Some(Err(BridgeRpcError {
                             code: "DestinyQueryFailed".into(),
                             message: e,
+                            client_error: None,
                         }))
                     }
                 })
@@ -149,6 +157,7 @@ pub async fn handle_legacy_and_ess(
                 return Some(Err(BridgeRpcError {
                     code: "ShipNotInSpace".into(),
                     message: format!("Attacker ship {ship_id} is not spawned in space"),
+                    client_error: None,
                 }));
             };
 
@@ -192,6 +201,7 @@ pub async fn handle_legacy_and_ess(
                     message: format!(
                         "Active ship {ship_id} has no fitted online high-slot weapon module (flags 27..=34)"
                     ),
+                    client_error: None,
                 }));
             }
             let mut armed_weapon: Option<(&eve_dogma::FittedModule, &eve_sde::InvType, i64, u32)> =
@@ -252,6 +262,7 @@ pub async fn handle_legacy_and_ess(
                         "Weapon {} in slot {} on ship {ship_id} has no compatible charge loaded in its weapon slot",
                         wt_name, first_wt.flag_id
                     ),
+                    client_error: None,
                 }));
             }
             let (_weapon_mod, weapon_type, loaded_charge_item_id, charge_tid) =
@@ -404,6 +415,7 @@ pub async fn handle_legacy_and_ess(
                     return Some(Err(BridgeRpcError {
                         code: "DestinyQueryFailed".into(),
                         message: e,
+                        client_error: None,
                     }))
                 }
             }) else {
@@ -412,6 +424,7 @@ pub async fn handle_legacy_and_ess(
                     message: format!(
                         "Target {target_id} (ball {target_ball_id}) is not present in space in system {sys_id}"
                     ),
+                    client_error: None,
                 }));
             };
 
@@ -427,6 +440,7 @@ pub async fn handle_legacy_and_ess(
                             "Target ball {target_ball_id} (type {}) is not a valid combat target",
                             target_ball.type_id
                         ),
+                        client_error: None,
                     }));
                 };
                 let bounty = t
@@ -441,6 +455,7 @@ pub async fn handle_legacy_and_ess(
                             "Target ball {target_ball_id} ({}) is invulnerable to direct weapon fire",
                             t.name
                         ),
+                        client_error: None,
                     }));
                 }
                 let belongs_to_other_mission = ctx.db.with_snapshot(|snap| {
@@ -456,6 +471,7 @@ pub async fn handle_legacy_and_ess(
                         message: format!(
                             "Target NPC {target_ball_id} is inside another pilot's instanced mission pocket"
                         ),
+                        client_error: None,
                     }));
                 }
                 bounty
@@ -472,6 +488,7 @@ pub async fn handle_legacy_and_ess(
                         dist,
                         optimal_range + 3.0 * falloff_range
                     ),
+                    client_error: None,
                 }));
             }
 
@@ -498,6 +515,7 @@ pub async fn handle_legacy_and_ess(
                                 "Weapon on ship {ship_id} is cycling until tick {} (current tick {attacker_tick})",
                                 prev_tick.saturating_add(cycle_ticks)
                             ),
+                            client_error: None,
                         }));
                     }
                 }
@@ -515,6 +533,7 @@ pub async fn handle_legacy_and_ess(
                 return Some(Err(BridgeRpcError {
                     code: "CantActivateWhileTethered".into(),
                     message: "Cannot activate offensive modules while tethered".into(),
+                    client_error: None,
                 }));
             }
             if sys_handle
@@ -529,6 +548,7 @@ pub async fn handle_legacy_and_ess(
                     message: format!(
                         "Target {target_ball_id} is tethered or invulnerable to direct weapon fire"
                     ),
+                    client_error: None,
                 }));
             }
 
@@ -570,6 +590,7 @@ pub async fn handle_legacy_and_ess(
                         message: format!(
                             "Target character {victim_char_id} is invulnerable due to recent location change"
                         ),
+                        client_error: None,
                     }));
                 }
                 match crate::services::r6_t1_p0_helpers::enforce_legacy_pvp_safety_and_concord(
@@ -607,6 +628,7 @@ pub async fn handle_legacy_and_ess(
                         message: format!(
                             "Loaded charge item {loaded_charge_item_id} on ship {ship_id} is depleted"
                         ),
+                        client_error: None,
                     });
                 };
                 if ch_item.quantity <= 0 {
@@ -616,6 +638,7 @@ pub async fn handle_legacy_and_ess(
                         message: format!(
                             "Loaded charge item {loaded_charge_item_id} on ship {ship_id} is depleted"
                         ),
+                        client_error: None,
                     });
                 };
                 if ch_item.quantity > 1 {
@@ -767,6 +790,7 @@ pub async fn handle_legacy_and_ess(
                         return Some(Err(BridgeRpcError {
                             code: "CombatApplicationFailed".into(),
                             message: e,
+                            client_error: None,
                         }))
                     }
                 })
@@ -774,6 +798,7 @@ pub async fn handle_legacy_and_ess(
                 return Some(Err(BridgeRpcError {
                     code: "TargetNotInSpace".into(),
                     message: format!("Target ball {target_ball_id} no longer exists"),
+                    client_error: None,
                 }));
             };
 
@@ -819,6 +844,7 @@ pub async fn handle_legacy_and_ess(
                         return Some(Err(BridgeRpcError {
                             code: "InterdictionFailed".into(),
                             message: e,
+                            client_error: None,
                         }))
                     }
                 };

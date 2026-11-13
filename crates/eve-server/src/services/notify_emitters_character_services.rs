@@ -832,6 +832,7 @@ pub fn handle_batch3_gm_slash_cmd(
                 return Some(Err(BridgeRpcError {
                     code: "CampaignNotFound".into(),
                     message: format!("Login campaign {campaign_id} not found in SDE seasonalcampaignsloginrewards"),
+                    client_error: None,
                 }));
             }
             ctx.db.with_mut_snapshot(|snap| {
@@ -868,12 +869,14 @@ pub fn handle_batch3_gm_slash_cmd(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSlashArguments".into(),
                     message: "Usage: /campaign seasonal <campaign_id|off> [duration_days] [HH:MM:SS]".into(),
+                    client_error: None,
                 }));
             };
             if !get_sde_login_campaigns(&ctx.sde).contains_key(&campaign_id) {
                 return Some(Err(BridgeRpcError {
                     code: "CampaignNotFound".into(),
                     message: format!("Seasonal campaign {campaign_id} not found in SDE seasonalcampaignsloginrewards"),
+                    client_error: None,
                 }));
             }
             let duration_days = match parts.get(3) {
@@ -883,6 +886,7 @@ pub fn handle_batch3_gm_slash_cmd(
                         return Some(Err(BridgeRpcError {
                             code: "InvalidSlashArguments".into(),
                             message: "duration_days must be in 1..=365".into(),
+                            client_error: None,
                         }))
                     }
                 },
@@ -895,6 +899,7 @@ pub fn handle_batch3_gm_slash_cmd(
                         return Some(Err(BridgeRpcError {
                             code: "InvalidSlashArguments".into(),
                             message: "turnover time must match HH:MM:SS".into(),
+                            client_error: None,
                         }))
                     }
                 },

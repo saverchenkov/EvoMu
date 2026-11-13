@@ -378,24 +378,28 @@ pub fn inject_implant(
     let item_id = args.first().and_then(|a| a.as_i64()).ok_or_else(|| BridgeRpcError {
         code: "InvalidArgument".into(),
         message: "InjectImplant requires an itemID".into(),
+        client_error: None,
     })?;
     let (ship_id, item_diffs) = ctx.db.try_with_mut_snapshot(|snap| {
         let Some(item) = snap.items.get(&item_id).cloned() else {
             return Err(BridgeRpcError {
                 code: "ItemNotFound".into(),
                 message: format!("Implant item {item_id} not found"),
+                client_error: None,
             });
         };
         if item.owner_id != char_id {
             return Err(BridgeRpcError {
                 code: "ItemNotOwned".into(),
                 message: format!("Implant item {item_id} is not owned by character {char_id}"),
+                client_error: None,
             });
         }
         if item.flag == InventoryFlag::Implant && item.location_id == char_id {
             return Err(BridgeRpcError {
                 code: "ImplantAlreadyPluggedIn".into(),
                 message: format!("Implant {item_id} is already plugged in"),
+                client_error: None,
             });
         }
         if !item_is_in_pilot_location(snap, session, char_id, &item) || item.quantity < 1 {
@@ -404,12 +408,14 @@ pub fn inject_implant(
                 message: format!(
                     "Implant {item_id} must be unlocked in your active ship cargo or docked hangar and not in a contract"
                 ),
+                client_error: None,
             });
         }
         let Some(slot) = implant_slot(&ctx.sde, item.type_id) else {
             return Err(BridgeRpcError {
                 code: "ItemNotAnImplant".into(),
                 message: format!("Type {} has no valid implantness slot", item.type_id),
+                client_error: None,
             });
         };
         ctx.check_type_skill_prerequisites_in_snapshot(snap, char_id, item.type_id)?;
@@ -428,6 +434,7 @@ pub fn inject_implant(
             return Err(BridgeRpcError {
                 code: "ImplantSlotOccupied".into(),
                 message: format!("Implant slot {slot} is already occupied"),
+                client_error: None,
             });
         }
 
@@ -471,6 +478,7 @@ pub fn inject_implant(
             .map_err(|e| BridgeRpcError {
                 code: "ImplantLocked".into(),
                 message: e.to_string(),
+                client_error: None,
             })?;
             if let Some(src) = snap.items.get_mut(&item_id) {
                 src.singleton = true;
@@ -509,6 +517,7 @@ pub fn destroy_implant(
     let item_id = args.first().and_then(|a| a.as_i64()).ok_or_else(|| BridgeRpcError {
         code: "InvalidArgument".into(),
         message: "DestroyImplant requires an itemID".into(),
+        client_error: None,
     })?;
     let (ship_id, removed_item) = ctx.db.try_with_mut_snapshot(|snap| {
         let found_item = snap.items.get(&item_id).cloned();
@@ -521,6 +530,7 @@ pub fn destroy_implant(
                 return Err(BridgeRpcError {
                     code: "ImplantNotPluggedIn".into(),
                     message: format!("Item {item_id} is not a plugged-in implant of character {char_id}"),
+                    client_error: None,
                 });
             }
             let tid = item.type_id;
@@ -531,6 +541,7 @@ pub fn destroy_implant(
             let tid = u32::try_from(item_id).map_err(|_| BridgeRpcError {
                 code: "ImplantNotFound".into(),
                 message: format!("Plugged-in implant {item_id} not found"),
+                client_error: None,
             })?;
             let matching_rec = snap
                 .items
@@ -550,6 +561,7 @@ pub fn destroy_implant(
                 return Err(BridgeRpcError {
                     code: "ImplantNotFound".into(),
                     message: format!("Plugged-in implant {item_id} not found"),
+                    client_error: None,
                 });
             }
             if let Some(rec) = matching_rec {
@@ -639,6 +651,7 @@ pub fn use_booster(
     let item_id = args.first().and_then(|a| a.as_i64()).ok_or_else(|| BridgeRpcError {
         code: "InvalidArgument".into(),
         message: "UseBooster requires an itemID".into(),
+        client_error: None,
     })?;
     let expected_loc = args.get(1).and_then(|a| a.as_i64()).filter(|&l| l > 0);
     let now_unix = ctx.now_unix();
@@ -651,12 +664,14 @@ pub fn use_booster(
                 return Err(BridgeRpcError {
                     code: "ItemNotFound".into(),
                     message: format!("Booster item {item_id} not found"),
+                    client_error: None,
                 });
             };
             if item.owner_id != char_id {
                 return Err(BridgeRpcError {
                     code: "ItemNotOwned".into(),
                     message: format!("Booster item {item_id} is not owned by character {char_id}"),
+                    client_error: None,
                 });
             }
             if let Some(loc_id) = expected_loc {
@@ -664,6 +679,7 @@ pub fn use_booster(
                     return Err(BridgeRpcError {
                         code: "ItemNotReachable".into(),
                         message: format!("Booster {item_id} is not at location {loc_id}"),
+                        client_error: None,
                     });
                 }
             }
@@ -673,18 +689,21 @@ pub fn use_booster(
                     message: format!(
                         "Booster {item_id} must be unlocked in your active ship cargo or docked hangar and not in a contract"
                     ),
+                    client_error: None,
                 });
             }
             let Some(slot) = booster_slot(&ctx.sde, item.type_id) else {
                 return Err(BridgeRpcError {
                     code: "ItemNotABooster".into(),
                     message: format!("Type {} has no valid boosterness slot", item.type_id),
+                    client_error: None,
                 });
             };
             let Some(b_type) = ctx.sde.types.get(&item.type_id) else {
                 return Err(BridgeRpcError {
                     code: "TypeNotFound".into(),
                     message: format!("Booster type {} not found in SDE", item.type_id),
+                    client_error: None,
                 });
             };
             let base_duration_ms = b_type
@@ -696,6 +715,7 @@ pub fn use_booster(
                 return Err(BridgeRpcError {
                     code: "ItemNotABooster".into(),
                     message: format!("Type {} has no positive boosterDuration", item.type_id),
+                    client_error: None,
                 });
             }
             ctx.check_type_skill_prerequisites_in_snapshot(snap, char_id, item.type_id)?;
@@ -710,6 +730,7 @@ pub fn use_booster(
                 return Err(BridgeRpcError {
                     code: "BoosterSlotOccupied".into(),
                     message: format!("Booster slot {slot} is already occupied by an active booster"),
+                    client_error: None,
                 });
             }
 
@@ -1018,6 +1039,7 @@ pub fn inject_skillpoints(
         let ch = snap.characters.get(&char_id).cloned().ok_or_else(|| BridgeRpcError {
             code: "CharacterNotFound".into(),
             message: format!("Character {char_id} not found"),
+            client_error: None,
         })?;
 
         // Locate an owned, unlocked, reachable Skill Injector
@@ -1041,6 +1063,7 @@ pub fn inject_skillpoints(
             return Err(BridgeRpcError {
                 code: "InjectorNotFound".into(),
                 message: "Character does not own an accessible Skill Injector".into(),
+                client_error: None,
             });
         };
 
@@ -1053,6 +1076,7 @@ pub fn inject_skillpoints(
                 return Err(BridgeRpcError {
                     code: "AlphaCloneRequired".into(),
                     message: "Daily Alpha Injectors can only be used by Alpha clone characters".into(),
+                    client_error: None,
                 });
             }
             let cooldowns = load_alpha_injector_cooldowns(snap);
@@ -1061,6 +1085,7 @@ pub fn inject_skillpoints(
                     return Err(BridgeRpcError {
                         code: "DailyAlphaInjectorCooldownActive".into(),
                         message: "Only one Daily Alpha Injector may be used per 24 hours".into(),
+                        client_error: None,
                     });
                 }
             }
@@ -1091,6 +1116,7 @@ pub fn inject_skillpoints(
         .map_err(|e| BridgeRpcError {
             code: "SkillInjectorLocked".into(),
             message: e.to_string(),
+            client_error: None,
         })?;
         let post_inj = snap.items.get(&item_id).cloned();
 
@@ -1118,6 +1144,7 @@ pub fn inject_skillpoints(
             Err(BridgeRpcError {
                 code: "CharacterNotFound".into(),
                 message: format!("Character {char_id} not found"),
+                client_error: None,
             })
         }
     })?;

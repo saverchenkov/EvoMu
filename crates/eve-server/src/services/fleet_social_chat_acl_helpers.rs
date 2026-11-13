@@ -36,6 +36,7 @@ pub(crate) fn validate_system_channel_resync(
             message: format!(
                 "Cannot resync channel {arg} outside current solar system {actual_sys}"
             ),
+            client_error: None,
         });
     }
     Ok(())
@@ -70,6 +71,7 @@ pub(crate) fn validate_and_apply_channel_invite(
         return Err(BridgeRpcError {
             code: "ChannelAccessDenied".into(),
             message: "Channel invite blocked by channel access list".into(),
+            client_error: None,
         });
     }
 
@@ -83,6 +85,7 @@ pub(crate) fn validate_and_apply_channel_invite(
             return Err(BridgeRpcError {
                 code: "ChannelAccessDenied".into(),
                 message: "Channel invite rejected by channel deny list".into(),
+                client_error: None,
             });
         }
         if let Some(chan) = snap.chat_channels.get_mut(&chan_id) {
@@ -90,6 +93,7 @@ pub(crate) fn validate_and_apply_channel_invite(
                 return Err(BridgeRpcError {
                     code: "ChannelAccessDenied".into(),
                     message: "Must be a member of channel to send invites".into(),
+                    client_error: None,
                 });
             }
             let has_invite_priv = chan.owner_id == Some(char_id)
@@ -101,6 +105,7 @@ pub(crate) fn validate_and_apply_channel_invite(
                 return Err(BridgeRpcError {
                     code: "ChannelAccessDenied".into(),
                     message: "Insufficient permissions to invite into channel".into(),
+                    client_error: None,
                 });
             }
             chan.members.insert(recipient_id);
@@ -198,12 +203,14 @@ pub(crate) fn authorize_and_fetch_channel_members(
         return Err(BridgeRpcError {
             code: "ChannelNotFound".into(),
             message: format!("Channel {chan_id} does not exist"),
+            client_error: None,
         });
     };
     if !authorized {
         return Err(BridgeRpcError {
             code: "ChannelAccessDenied".into(),
             message: format!("Not authorized to inspect channel {chan_id}"),
+            client_error: None,
         });
     }
     Ok((chan, acl))

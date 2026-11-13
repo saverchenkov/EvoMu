@@ -39,6 +39,7 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                     return Err(BridgeRpcError {
                         code: "JobNotFound".into(),
                         message: format!("Industry job {job_id} does not exist"),
+                        client_error: None,
                     });
                 };
                 let meta = load_job_cost_meta(snap, job_id).unwrap_or_default();
@@ -55,6 +56,7 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                             "Industry job {job_id} belongs to corporation {} and cannot be cancelled by ex-member {char_id}",
                             meta.owner_id
                         ),
+                        client_error: None,
                     });
                 }
                 if job.installer_id != char_id {
@@ -81,6 +83,7 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                             message: format!(
                                 "Industry job {job_id} does not belong to character {char_id}"
                             ),
+                            client_error: None,
                         });
                     }
                 }
@@ -88,6 +91,7 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                     return Err(BridgeRpcError {
                         code: "InvalidJobState".into(),
                         message: format!("Industry job {job_id} is not Active"),
+                        client_error: None,
                     });
                 }
                 if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) {
@@ -187,6 +191,7 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                         return Err(BridgeRpcError {
                             code: "JobNotFound".into(),
                             message: format!("Industry job {job_id} does not exist"),
+                            client_error: None,
                         });
                     };
                     let meta = load_job_cost_meta(snap, job_id).unwrap_or_default();
@@ -203,6 +208,7 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                                     "Industry job {job_id} belongs to corporation {} and cannot be delivered by ex-member {char_id}",
                                     meta.owner_id
                                 ),
+                                client_error: None,
                             });
                         }
                     } else if job.installer_id != char_id {
@@ -211,6 +217,7 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                             message: format!(
                                 "Industry job {job_id} does not belong to character {char_id}"
                             ),
+                            client_error: None,
                         });
                     }
                     if job.status == "Paused" {
@@ -219,6 +226,7 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                             message: format!(
                                 "Industry job {job_id} is paused because facility service is offline or out of fuel"
                             ),
+                            client_error: None,
                         });
                     }
                     if job.status != "Active" {
@@ -228,6 +236,7 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                                 "Industry job {job_id} is in state '{}', not Active",
                                 job.status
                             ),
+                            client_error: None,
                         });
                     }
                     let ready_at = job.start_unix.saturating_add(job.duration_seconds);
@@ -237,6 +246,7 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                             message: format!(
                                 "Industry job {job_id} completes at {ready_at} (now {now_unix})"
                             ),
+                            client_error: None,
                         });
                     }
 
@@ -278,6 +288,7 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                                 "Blueprint {} for job {job_id} is missing or unlocked",
                                 job.blueprint_item_id
                             ),
+                            client_error: None,
                         });
                     }
 

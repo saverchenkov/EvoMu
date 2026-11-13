@@ -27,6 +27,7 @@ pub(crate) fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
         code: code.to_string(),
         message: message.into(),
+        client_error: None,
     }
 }
 
@@ -966,6 +967,7 @@ fn handle_inner(
                 .map_err(|_| BridgeRpcError {
                     code: "TokenIssueFailed".into(),
                     message: "Failed to sign user gateway JWT token".into(),
+                    client_error: None,
                 })?;
             Ok(Some(PyRep::String(tok)))
         }
@@ -1029,6 +1031,7 @@ fn handle_inner(
                         .ok_or_else(|| BridgeRpcError {
                             code: "UserError".into(),
                             message: "NoMultiTrainingCertificateFound".into(),
+                            client_error: None,
                         })?;
                     snap.consume_exact_item_quantity(
                         cert_id,
@@ -1041,6 +1044,7 @@ fn handle_inner(
                     .map_err(|_| BridgeRpcError {
                         code: "UserError".into(),
                         message: "NoMultiTrainingCertificateFound".into(),
+                        client_error: None,
                     })?;
                     let slots = snap.cluster_and_runtime.mct_slots.entry(uid).or_default();
                     slots.push(expiry);
@@ -1109,6 +1113,7 @@ fn handle_inner(
                     .ok_or_else(|| BridgeRpcError {
                         code: "UserError".into(),
                         message: "NoResculptCertificateFound".into(),
+                        client_error: None,
                     })?;
                 snap.consume_exact_item_quantity(
                     cert_id,
@@ -1121,6 +1126,7 @@ fn handle_inner(
                 .map_err(|_| BridgeRpcError {
                     code: "UserError".into(),
                     message: "NoResculptCertificateFound".into(),
+                    client_error: None,
                 })?;
                 *snap
                     .cluster_and_runtime
@@ -1151,6 +1157,7 @@ fn handle_inner(
                     return Err(BridgeRpcError {
                         code: "UserError".into(),
                         message: "CharacterDoesNotBelongToUser".into(),
+                        client_error: None,
                     });
                 }
             }
@@ -1162,6 +1169,7 @@ fn handle_inner(
                     return Err(BridgeRpcError {
                         code: "UserError".into(),
                         message: "CharacterDoesNotBelongToUser".into(),
+                        client_error: None,
                     });
                 }
             }

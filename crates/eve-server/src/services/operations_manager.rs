@@ -280,6 +280,7 @@ fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
         code: code.into(),
         message: message.into(),
+        client_error: None,
     }
 }
 
@@ -359,6 +360,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "cannot query another character".into(),
+                    client_error: None,
                 }));
             }
             let finished = ctx.db.with_snapshot(|snap| {

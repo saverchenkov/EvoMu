@@ -257,6 +257,7 @@ impl ServerContext {
                         message: format!(
                             "Service '{service}' cannot be bound to character {object_id} not owned by user {user_id}"
                         ),
+                        client_error: None,
                     });
                 }
                 object_id
@@ -265,6 +266,7 @@ impl ServerContext {
                 return Err(BridgeRpcError {
                     code: "CharacterNotSelected".into(),
                     message: "Cannot bind object before selecting a character".into(),
+                    client_error: None,
                 });
             }
         };
@@ -278,6 +280,7 @@ impl ServerContext {
                 message: format!(
                     "Service '{service}' cannot be bound to object_id {object_id} for current session state"
                 ),
+                client_error: None,
             });
         }
 
@@ -525,6 +528,7 @@ impl ServerContext {
             .ok_or_else(|| BridgeRpcError {
                 code: "InvalidBoundObject".into(),
                 message: format!("Bound object {bound_id} does not exist"),
+                client_error: None,
             })?;
 
         let char_matches = Some(entry.character_id) == session.character_id
@@ -536,6 +540,7 @@ impl ServerContext {
             return Err(BridgeRpcError {
                 code: ERR_BOUND_OWNERSHIP.into(),
                 message: format!("Bound object {bound_id} is not owned by this session"),
+                client_error: None,
             });
         }
 
@@ -548,6 +553,7 @@ impl ServerContext {
                     "Bound object {bound_id} ({}) for object_id {} is no longer valid in current session context",
                     entry.service, entry.object_id
                 ),
+                client_error: None,
             });
         }
         Ok(entry)
@@ -661,6 +667,7 @@ impl ServerContext {
                 return Err(BridgeRpcError {
                     code: "ItemNotFound".into(),
                     message: format!("Container item {container_id} not found"),
+                    client_error: None,
                 });
             };
             let (grp, cat) = self
@@ -706,6 +713,7 @@ impl ServerContext {
         let deny = || BridgeRpcError {
             code: "CantDoThatWithSomeoneElsesStuff".into(),
             message: format!("Container {container_id} is not accessible by character {char_id}"),
+            client_error: None,
         };
 
         if let Some(b) = bound_entry {

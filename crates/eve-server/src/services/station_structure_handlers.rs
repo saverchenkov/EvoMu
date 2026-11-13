@@ -16,6 +16,7 @@ fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
         code: code.into(),
         message: message.into(),
+        client_error: None,
     }
 }
 
@@ -29,15 +30,18 @@ pub fn handle_upgrade_gantry(
         return Err(BridgeRpcError {
             code: "MustBeInSpace".into(),
             message: "Character must be undocked in space to upgrade or online an orbital gantry".into(),
+            client_error: None,
         });
     }
     let sys_id = session.solar_system_id.ok_or_else(|| BridgeRpcError {
         code: "NoSolarSystem".into(),
         message: "Character is not in an active solar system".into(),
+        client_error: None,
     })?;
     let ship_id = session.ship_id.ok_or_else(|| BridgeRpcError {
         code: "NoActiveShip".into(),
         message: "Character has no active ship in space".into(),
+        client_error: None,
     })?;
     let ship_pos = ctx
         .systems
@@ -45,6 +49,7 @@ pub fn handle_upgrade_gantry(
         .ok_or_else(|| BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: "Active ship must be spawned in space to online an orbital".into(),
+            client_error: None,
         })?;
     let orbital_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
     let upgrade_item_arg = args.get(1).and_then(|a| a.as_i64());
@@ -60,6 +65,7 @@ pub fn handle_upgrade_gantry(
             return Err(BridgeRpcError {
                 code: "CrpAccessDenied".into(),
                 message: "Character has no valid corporation".into(),
+                client_error: None,
             });
         }
         let req_roles = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
@@ -72,6 +78,7 @@ pub fn handle_upgrade_gantry(
             return Err(BridgeRpcError {
                 code: "CrpAccessDenied".into(),
                 message: "Upgrading or onlining an orbital gantry requires Director or Station Manager role".into(),
+                client_error: None,
             });
         }
         crate::services::structure_anchoring_rules::validate_pochven_customs_office_standing(
@@ -82,6 +89,7 @@ pub fn handle_upgrade_gantry(
             let it = snap.items.get(&orbital_id).ok_or_else(|| BridgeRpcError {
                 code: "OrbitalNotFound".into(),
                 message: format!("Orbital {orbital_id} not found"),
+                client_error: None,
             })?;
             if it.type_id != 3962 {
                 return Err(BridgeRpcError {
@@ -90,28 +98,33 @@ pub fn handle_upgrade_gantry(
                         "Target item {orbital_id} (type {}) is not an upgradable Customs Office Gantry",
                         it.type_id
                     ),
+                    client_error: None,
                 });
             }
             if it.owner_id != char_corp && it.owner_id != char_id {
                 return Err(BridgeRpcError {
                     code: "OrbitalOwnershipDenied".into(),
                     message: format!("Corporation {char_corp} does not own orbital {orbital_id}"),
+                    client_error: None,
                 });
             }
             let st = snap.structures.get(&orbital_id).ok_or_else(|| BridgeRpcError {
                 code: "OrbitalNotAnchored".into(),
                 message: format!("Orbital {orbital_id} is not an anchored structure in space"),
+                client_error: None,
             })?;
             if st.type_id != 3962 {
                 return Err(BridgeRpcError {
                     code: "OrbitalAlreadyUpgraded".into(),
                     message: format!("Orbital {orbital_id} is not an un-upgraded gantry"),
+                    client_error: None,
                 });
             }
             if st.owner_corp_id != char_corp {
                 return Err(BridgeRpcError {
                     code: "OrbitalOwnershipDenied".into(),
                     message: format!("Corporation {char_corp} does not own orbital structure {orbital_id}"),
+                    client_error: None,
                 });
             }
             if st.solar_system_id != sys_id {
@@ -121,12 +134,14 @@ pub fn handle_upgrade_gantry(
                         "Orbital {orbital_id} is in solar system {}, not {sys_id}",
                         st.solar_system_id
                     ),
+                    client_error: None,
                 });
             }
             if matches!(st.state.as_str(), "Destroyed" | "Unanchored") {
                 return Err(BridgeRpcError {
                     code: "InvalidOrbitalState".into(),
                     message: format!("Orbital {orbital_id} is in invalid state '{}'", st.state),
+                    client_error: None,
                 });
             }
             let dist = ship_pos.distance(glam::DVec3::from_array(st.position));
@@ -136,6 +151,7 @@ pub fn handle_upgrade_gantry(
                     message: format!(
                         "Ship {ship_id} is {dist:.0}m from orbital {orbital_id} (max 10,000m)"
                     ),
+                    client_error: None,
                 });
             }
             (it.type_id, it.location_id)
@@ -160,6 +176,7 @@ pub fn handle_upgrade_gantry(
             let u = snap.items.get(&arg_iid).ok_or_else(|| BridgeRpcError {
                 code: "CustomsOfficeItemRequired".into(),
                 message: format!("Upgrade item {arg_iid} not found"),
+                client_error: None,
             })?;
             if !is_valid_upgrade_item(u) {
                 return Err(BridgeRpcError {
@@ -167,6 +184,7 @@ pub fn handle_upgrade_gantry(
                     message: format!(
                         "Upgrade item {arg_iid} must be an unlocked type {target_tid} owned by caller in active ship cargo"
                     ),
+                    client_error: None,
                 });
             }
             Some(arg_iid)
@@ -180,6 +198,7 @@ pub fn handle_upgrade_gantry(
             return Err(BridgeRpcError {
                 code: "CustomsOfficeItemRequired".into(),
                 message: format!("Upgrading gantry requires item type {target_tid} in active ship cargo"),
+                client_error: None,
             });
         };
         if let Some(u_owner) = snap.items.get(&up_iid).map(|u| u.owner_id) {
@@ -228,6 +247,7 @@ pub fn handle_anchor_orbital(
         return Err(BridgeRpcError {
             code: "NoSolarSystem".into(),
             message: "Session has no active solarSystemID".into(),
+            client_error: None,
         });
     };
     let (_, is_thera, is_shattered, _) =
@@ -238,11 +258,13 @@ pub fn handle_anchor_orbital(
             message: format!(
                 "Anchoring starbases or orbitals is disallowed in Thera or shattered wormhole system {sys_id}"
             ),
+            client_error: None,
         });
     }
     let item_id = args.first().and_then(|a| a.as_i64()).ok_or_else(|| BridgeRpcError {
         code: "MissingArgument".into(),
         message: "AnchorOrbital requires an orbital itemID".into(),
+        client_error: None,
     })?;
 
     let is_gantry = ctx.db.with_snapshot(|snap| {
@@ -255,12 +277,14 @@ pub fn handle_anchor_orbital(
         return Err(BridgeRpcError {
             code: "StarbaseRemoved".into(),
             message: "Legacy POS starbases and control towers are superseded by Upwell structures in V24.01".into(),
+            client_error: None,
         });
     }
     if session.station_id.is_some() || session.structure_id.is_some() {
         return Err(BridgeRpcError {
             code: "NotInSpace".into(),
             message: "Must be undocked in space to anchor an orbital structure".into(),
+            client_error: None,
         });
     }
 
@@ -269,6 +293,7 @@ pub fn handle_anchor_orbital(
         return Err(BridgeRpcError {
             code: "CannotAnchorOrbitalInHighSec".into(),
             message: format!("Customs Office Gantry cannot be anchored in high-sec system {sys_id}"),
+            client_error: None,
         });
     }
 
@@ -289,6 +314,7 @@ pub fn handle_anchor_orbital(
             return Err(BridgeRpcError {
                 code: "CrpAccessDenied".into(),
                 message: format!("Character {char_id} is in NPC corporation {corp_id}; only player corporations may anchor orbitals"),
+                client_error: None,
             });
         }
         let req_roles = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
@@ -301,6 +327,7 @@ pub fn handle_anchor_orbital(
             return Err(BridgeRpcError {
                 code: "CrpAccessDenied".into(),
                 message: "Anchoring an orbital requires Director or Station Manager corporation role".into(),
+                client_error: None,
             });
         }
         Ok(corp_id)
@@ -309,6 +336,7 @@ pub fn handle_anchor_orbital(
     let ship_id = session.ship_id.ok_or_else(|| BridgeRpcError {
         code: "NoActiveShip".into(),
         message: "Anchoring an orbital requires an active ship in space".into(),
+        client_error: None,
     })?;
     let ship_pos = ctx
         .systems
@@ -316,6 +344,7 @@ pub fn handle_anchor_orbital(
         .ok_or_else(|| BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: "Active ship must be spawned in space to anchor an orbital".into(),
+            client_error: None,
         })?;
 
     let planets_in_sys: Vec<_> = ctx
@@ -331,6 +360,7 @@ pub fn handle_anchor_orbital(
             .ok_or_else(|| BridgeRpcError {
                 code: "InvalidOrbitalPlanet".into(),
                 message: format!("Celestial {explicit_pid} is not a planet in solar system {sys_id}"),
+                client_error: None,
             })?
     } else {
         planets_in_sys
@@ -344,6 +374,7 @@ pub fn handle_anchor_orbital(
             .ok_or_else(|| BridgeRpcError {
                 code: "InvalidOrbitalPlanet".into(),
                 message: format!("Solar system {sys_id} has no anchorable planets"),
+                client_error: None,
             })?
     };
     let dist = (ship_pos - target_planet.position).length();
@@ -355,6 +386,7 @@ pub fn handle_anchor_orbital(
                 "Ship is {dist:.0}m from planet {} (must be within {max_dist:.0}m to anchor orbital)",
                 target_planet.celestial_id
             ),
+            client_error: None,
         });
     }
     let planet_id = target_planet.celestial_id;
@@ -364,6 +396,7 @@ pub fn handle_anchor_orbital(
             return Err(BridgeRpcError {
                 code: "AlreadyAnchored".into(),
                 message: format!("Orbital structure {item_id} is already anchored in space"),
+                client_error: None,
             });
         }
         let tag = format!("Orbital:{planet_id}");
@@ -375,22 +408,26 @@ pub fn handle_anchor_orbital(
             return Err(BridgeRpcError {
                 code: "PlanetAlreadyHasOrbital".into(),
                 message: format!("Planet {planet_id} already has an anchored orbital"),
+                client_error: None,
             });
         }
         let it = snap.items.get_mut(&item_id).ok_or_else(|| BridgeRpcError {
             code: "ItemNotFound".into(),
             message: format!("Gantry item {item_id} not found"),
+            client_error: None,
         })?;
         if it.owner_id != char_corp && it.owner_id != char_id {
             return Err(BridgeRpcError {
                 code: "NotItemOwner".into(),
                 message: format!("Character {char_id} does not own item {item_id}"),
+                client_error: None,
             });
         }
         if it.location_id != ship_id || it.flag != eve_db::InventoryFlag::Cargo {
             return Err(BridgeRpcError {
                 code: "ItemNotInCargo".into(),
                 message: format!("Gantry item {item_id} must be in the cargo hold of active ship {ship_id}"),
+                client_error: None,
             });
         }
         let tid = it.type_id;
@@ -554,6 +591,7 @@ pub fn check_station_service_standing(
         .map_err(|e| BridgeRpcError {
             code: "StaticDataUnavailable".into(),
             message: format!("Failed to load station standings restrictions: {e}"),
+            client_error: None,
         })?;
 
     let service_key = service_id.to_string();
@@ -603,6 +641,7 @@ pub fn check_station_service_standing(
             message: format!(
                 "Character {char_id} standing {eff_standing:.2} with {gate_entity_id} is below required {min_standing:.2} for service {raw_service_id} at station {station_id}"
             ),
+            client_error: None,
         });
     }
     Ok(())
@@ -782,6 +821,7 @@ pub fn validate_npc_station_docking_gate(ctx: &ServerContext, char_id: i64, stat
                 return Err(BridgeRpcError {
                     code: "StandingTooLowForStationService".into(),
                     message: format!("Standing {eff:.2} is below required {req_st:.2} to dock at station {station_id}"),
+                    client_error: None,
                 });
             }
         }

@@ -21,6 +21,7 @@ pub(crate) async fn validate_and_activate_fighter_mwd(
         return Err(BridgeRpcError {
             code: "NoFightersSelected".into(),
             message: "MWD movement command requires at least one fighter squadron".into(),
+            client_error: None,
         });
     }
     let now_unix = ctx.now_unix();
@@ -32,12 +33,14 @@ pub(crate) async fn validate_and_activate_fighter_mwd(
                 return Err(BridgeRpcError {
                     code: "FighterNotFound".into(),
                     message: format!("Fighter squadron {fid} not found or not launched"),
+                    client_error: None,
                 });
             };
             if f.owner_char_id != char_id || f.is_abandoned {
                 return Err(BridgeRpcError {
                     code: "FighterNotOwned".into(),
                     message: format!("Fighter squadron {fid} is not controlled by pilot"),
+                    client_error: None,
                 });
             }
             (f.type_id, f.mwd_active)
@@ -47,12 +50,14 @@ pub(crate) async fn validate_and_activate_fighter_mwd(
             return Err(BridgeRpcError {
                 code: "UnsupportedFighterAbility".into(),
                 message: format!("Fighter type {ftype_id} has no defined fighter abilities in SDE"),
+                client_error: None,
             });
         };
         let Some(mwd_slot) = slots.iter().find(|s| matches!(s.ability_id, 4 | 9 | 13)) else {
             return Err(BridgeRpcError {
                 code: "UnsupportedFighterAbility".into(),
                 message: format!("Fighter type {ftype_id} does not support MicroWarpdrive ability"),
+                client_error: None,
             });
         };
         let slot_id = mwd_slot.slot_index as u32;
@@ -62,6 +67,7 @@ pub(crate) async fn validate_and_activate_fighter_mwd(
                 return Err(BridgeRpcError {
                     code: "AbilityOnCooldown".into(),
                     message: format!("Fighter MWD slot {slot_id} on {fid} is on cooldown until {ready_at}"),
+                    client_error: None,
                 });
             }
         }
@@ -73,6 +79,7 @@ pub(crate) async fn validate_and_activate_fighter_mwd(
                 return Err(BridgeRpcError {
                     code: "OutOfCharges".into(),
                     message: format!("Fighter MWD slot {slot_id} on {fid} has exhausted all {} charges", ch.charge_count),
+                    client_error: None,
                 });
             }
             *used = used.saturating_add(1);
@@ -361,15 +368,18 @@ pub(crate) fn parse_fighter_point_target_args(
         return Err(BridgeRpcError {
             code: "FighterNotFound".into(),
             message: "ActivateFighterAbilitySlotsOnPoint requires at least one valid fighterID".into(),
+            client_error: None,
         });
     }
     let slot_id = rpc.req_u32(1, "slotID").map_err(|e| BridgeRpcError {
         code: "InvalidFighterAbilitySlot".into(),
         message: e.message,
+        client_error: None,
     })?;
     let target_point = rpc.req_finite_vec3(2).map_err(|e| BridgeRpcError {
         code: "InvalidTargetPoint".into(),
         message: e.message,
+        client_error: None,
     })?;
     Ok((fighter_ids, slot_id, target_point))
 }

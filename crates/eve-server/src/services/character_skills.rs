@@ -578,6 +578,7 @@ pub fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSkillType".into(),
                         message: "AddToEndOfSkillQueue requires an explicit skill typeID".into(),
+                        client_error: None,
                     }));
                 }
             }
@@ -587,6 +588,7 @@ pub fn handle(
                     return Err(BridgeRpcError {
                         code: "CharacterNotFound".into(),
                         message: format!("Character {char_id} not found"),
+                        client_error: None,
                     });
                 };
                 let now = ctx.now_unix();
@@ -605,6 +607,7 @@ pub fn handle(
                         return Err(BridgeRpcError {
                             code: "UserError".into(),
                             message: "CantTrainMultipleCharactersWithoutMCT".into(),
+                            client_error: None,
                         });
                     }
                 }
@@ -613,6 +616,7 @@ pub fn handle(
                     return Err(BridgeRpcError {
                         code: "AlphaCloneSpCapExceeded".into(),
                         message: "Alpha clones cannot queue skills beyond 5,000,000 SP".into(),
+                        client_error: None,
                     });
                 }
 
@@ -644,12 +648,14 @@ pub fn handle(
                         return Err(BridgeRpcError {
                             code: "InvalidSkillType".into(),
                             message: format!("Skill type {skill_type_id} not found in SDE"),
+                            client_error: None,
                         });
                     };
                     if skill_type.category_id != 16 {
                         return Err(BridgeRpcError {
                             code: "InvalidSkillType".into(),
                             message: format!("Type {skill_type_id} is not a skill (category 16)"),
+                            client_error: None,
                         });
                     }
 
@@ -697,6 +703,7 @@ pub fn handle(
                                             "Skill {} (type {skill_type_id}) requires prerequisite skill {req_skill_id} at level {req_lvl}",
                                             skill_type.name
                                         ),
+                                        client_error: None,
                                     });
                                 }
                             }
@@ -727,6 +734,7 @@ pub fn handle(
                                 "Skill {} (type {skill_type_id}) is already trained or queued to level {effective_base_lvl}",
                                 skill_type.name
                             ),
+                            client_error: None,
                         });
                     }
 
@@ -755,6 +763,7 @@ pub fn handle(
                                     "Alpha clones cannot train {} (type {skill_type_id}) to level {target_level} (Alpha cap is level {alpha_cap})",
                                     skill_type.name
                                 ),
+                                client_error: None,
                             });
                         }
                         if ch.skill_points + ch.free_skill_points + queued_sp + sp_delta > 5_000_000.0
@@ -763,6 +772,7 @@ pub fn handle(
                                 code: "AlphaCloneSpCapExceeded".into(),
                                 message:
                                     "Alpha clones cannot queue skills beyond 5,000,000 SP".into(),
+                                client_error: None,
                             });
                         }
                     }
@@ -843,6 +853,7 @@ pub fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSkillType".into(),
                         message: "ApplyFreeSkillPoints requires a positive skillTypeID".into(),
+                        client_error: None,
                     }));
                 };
                 let Some(points_to_apply) = args
@@ -854,18 +865,21 @@ pub fn handle(
                         code: "InvalidSkillPointAmount".into(),
                         message: "Requested free skill points to apply must be finite and positive"
                             .into(),
+                        client_error: None,
                     }));
                 };
                 let Some(skill_type) = ctx.sde.types.get(&skill_type_id) else {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSkillType".into(),
                         message: format!("Skill type {skill_type_id} not found in SDE"),
+                        client_error: None,
                     }));
                 };
                 if skill_type.category_id != 16 {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSkillType".into(),
                         message: format!("Type {skill_type_id} is not a skill (category 16)"),
+                        client_error: None,
                     }));
                 }
                 let rank = skill_type
@@ -878,12 +892,14 @@ pub fn handle(
                         return Err(BridgeRpcError {
                             code: "CharacterNotFound".into(),
                             message: format!("Character {char_id} not found"),
+                            client_error: None,
                         });
                     };
                     if ch_snap.free_skill_points <= 0.0 {
                         return Err(BridgeRpcError {
                             code: "InsufficientFreeSP".into(),
                             message: "No unallocated free skill points available to apply".into(),
+                            client_error: None,
                         });
                     }
                     let skills_map = snap.skills.entry(char_id).or_default();
@@ -894,6 +910,7 @@ pub fn handle(
                                 "Skill {} ({skill_type_id}) must be injected before applying free skill points",
                                 skill_type.name
                             ),
+                            client_error: None,
                         });
                     };
                     for (skill_attr, level_attr) in eve_dogma::REQUIRED_SKILL_ATTR_IDS
@@ -920,6 +937,7 @@ pub fn handle(
                                             "Skill {} (type {skill_type_id}) requires prerequisite skill {req_skill_id} at level {req_lvl}",
                                             skill_type.name
                                         ),
+                                        client_error: None,
                                     });
                                 }
                             }
@@ -939,6 +957,7 @@ pub fn handle(
                                 "Skill {} ({skill_type_id}) is already at maximum trainable SP ({max_skill_sp})",
                                 skill_type.name
                             ),
+                            client_error: None,
                         });
                     }
                     let alpha_total_room = if ch_snap.clone_grade <= 1 {
@@ -947,6 +966,7 @@ pub fn handle(
                             return Err(BridgeRpcError {
                                 code: "AlphaCloneSpCapExceeded".into(),
                                 message: "Alpha clones cannot apply free skill points beyond 5,000,000 total SP".into(),
+                                client_error: None,
                             });
                         }
                         r
@@ -1047,6 +1067,7 @@ pub fn handle(
                         code: "InvalidSkillPointAmount".into(),
                         message: "Requested free skill points to apply must be finite and positive"
                             .into(),
+                        client_error: None,
                     }));
                 }
             }
@@ -1056,6 +1077,7 @@ pub fn handle(
                     return Err(BridgeRpcError {
                         code: "CharacterNotFound".into(),
                         message: format!("Character {char_id} not found"),
+                        client_error: None,
                     });
                 };
                 let available_free_sp = ch_snap.free_skill_points;
@@ -1063,6 +1085,7 @@ pub fn handle(
                     return Err(BridgeRpcError {
                         code: "InsufficientFreeSP".into(),
                         message: "No unallocated free skill points available to apply".into(),
+                        client_error: None,
                     });
                 }
 
@@ -1075,6 +1098,7 @@ pub fn handle(
                         return Err(BridgeRpcError {
                             code: "AlphaCloneSpCapExceeded".into(),
                             message: "Alpha clones cannot apply free skill points beyond 5,000,000 total SP".into(),
+                            client_error: None,
                         });
                     }
                     remaining_budget = remaining_budget.min(alpha_room);
@@ -1257,6 +1281,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "InjectSkillIntoBrain requires itemID or skill typeID".into(),
+                    client_error: None,
                 }));
             }
             let now_ft = ctx.now_blueos_filetime_ticks();
@@ -1279,6 +1304,7 @@ pub fn handle(
                         return Err(BridgeRpcError {
                             code: "ItemNotFound".into(),
                             message: format!("Skillbook item or skill type {raw_id} not found"),
+                            client_error: None,
                         });
                     };
 
@@ -1286,12 +1312,14 @@ pub fn handle(
                         return Err(BridgeRpcError {
                             code: "SkillNotFound".into(),
                             message: format!("Skill type {skill_type_id} not found in SDE"),
+                            client_error: None,
                         });
                     };
                     if skill_type.category_id != 16 {
                         return Err(BridgeRpcError {
                             code: "InvalidSkillType".into(),
                             message: format!("Type {skill_type_id} is not a skill (category 16)"),
+                            client_error: None,
                         });
                     }
 
@@ -1300,6 +1328,7 @@ pub fn handle(
                             return Err(BridgeRpcError {
                                 code: "SkillAlreadyInjected".into(),
                                 message: format!("Skill {} is already known to character", skill_type.name),
+                                client_error: None,
                             });
                         }
                     }
@@ -1323,6 +1352,7 @@ pub fn handle(
                         return Err(BridgeRpcError {
                             code: "ItemNotFound".into(),
                             message: format!("Skillbook item for skill {} not found in inventory", skill_type.name),
+                            client_error: None,
                         });
                     };
 
@@ -1338,6 +1368,7 @@ pub fn handle(
                     .map_err(|e| BridgeRpcError {
                         code: "ItemLocked".into(),
                         message: e.to_string(),
+                        client_error: None,
                     })?;
                     let post_book = snap.items.get(&item_id).cloned();
                     item_diffs.push((pre_book, post_book));

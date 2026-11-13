@@ -22,6 +22,7 @@ pub async fn handle_fit_ships(
         return Some(Err(BridgeRpcError {
             code: "NotDocked".into(),
             message: "Fitting from saved fitting requires being docked".into(),
+            client_error: None,
         }));
     };
     if station_id < 1_000_000_000_000
@@ -30,6 +31,7 @@ pub async fn handle_fit_ships(
         return Some(Err(BridgeRpcError {
             code: "StationServiceUnavailable".into(),
             message: format!("Station {station_id} does not offer fitting facilities"),
+            client_error: None,
         }));
     }
     let mut target_ship_ids: Vec<i64> = Vec::new();
@@ -64,6 +66,7 @@ pub async fn handle_fit_ships(
             return Some(Err(BridgeRpcError {
                 code: "FittingNotFound".into(),
                 message: format!("Fitting {fid} not found"),
+                client_error: None,
             }));
         };
         let authorized = saved.owner_id == char_id
@@ -78,6 +81,7 @@ pub async fn handle_fit_ships(
             return Some(Err(BridgeRpcError {
                 code: "AccessDenied".into(),
                 message: format!("Not authorized to access fitting {fid}"),
+                client_error: None,
             }));
         }
         desired_items = saved.items;
@@ -101,6 +105,7 @@ pub async fn handle_fit_ships(
                             return Some(Err(BridgeRpcError {
                                 code: "InvalidFittingFlag".into(),
                                 message: format!("Invalid flag {flg}"),
+                                client_error: None,
                             }));
                         };
                         let is_allowed_flag = matches!(
@@ -111,6 +116,7 @@ pub async fn handle_fit_ships(
                             return Some(Err(BridgeRpcError {
                                 code: "InvalidFittingFlag".into(),
                                 message: format!("Flag {flg} is not a valid fitting destination"),
+                                client_error: None,
                             }));
                         }
                         let qty_i64 = seq.get(2).and_then(|v| v.as_i64()).unwrap_or(1);
@@ -118,6 +124,7 @@ pub async fn handle_fit_ships(
                             return Some(Err(BridgeRpcError {
                                 code: "InvalidQuantity".into(),
                                 message: format!("Invalid quantity {qty_i64}"),
+                                client_error: None,
                             }));
                         };
                         desired_items.push((
@@ -175,6 +182,7 @@ pub(crate) fn validate_and_apply_fitting(
                 return Err(BridgeRpcError {
                     code: "ShipNotFound".into(),
                     message: format!("Target ship {ship_id} not found"),
+                    client_error: None,
                 });
             };
             let cat = ctx.sde.types.get(&sh.type_id).map(|t| t.category_id).unwrap_or(0);
@@ -182,12 +190,14 @@ pub(crate) fn validate_and_apply_fitting(
                 return Err(BridgeRpcError {
                     code: "InvalidFittingTarget".into(),
                     message: format!("Target {ship_id} must be an owned ship at station {station_id}"),
+                    client_error: None,
                 });
             }
             if sh.flag == InventoryFlag::Locked || snap.is_item_locked_in_contract_or_job(ship_id) {
                 return Err(BridgeRpcError {
                     code: "ItemLocked".into(),
                     message: format!("Target ship {ship_id} is locked in an active contract or container"),
+                    client_error: None,
                 });
             }
             if let Some(exp_type) = expected_ship_type_id {
@@ -195,6 +205,7 @@ pub(crate) fn validate_and_apply_fitting(
                     return Err(BridgeRpcError {
                         code: "UserError".into(),
                         message: "ShipTypeMismatch".into(),
+                        client_error: None,
                     });
                 }
             }
@@ -270,30 +281,35 @@ pub(crate) fn validate_and_apply_fitting(
                         return Err(BridgeRpcError {
                             code: "UserError".into(),
                             message: "SlotAlreadyOccupied".into(),
+                            client_error: None,
                         });
                     }
                     if (11..=18).contains(&flag_u16) && flag_u16 - 11 >= low_slots {
                         return Err(BridgeRpcError {
                             code: "UserError".into(),
                             message: "SlotIndexExceedsHullSlots".into(),
+                            client_error: None,
                         });
                     }
                     if (19..=26).contains(&flag_u16) && flag_u16 - 19 >= med_slots {
                         return Err(BridgeRpcError {
                             code: "UserError".into(),
                             message: "SlotIndexExceedsHullSlots".into(),
+                            client_error: None,
                         });
                     }
                     if (27..=34).contains(&flag_u16) && flag_u16 - 27 >= hi_slots {
                         return Err(BridgeRpcError {
                             code: "UserError".into(),
                             message: "SlotIndexExceedsHullSlots".into(),
+                            client_error: None,
                         });
                     }
                     if (92..=94).contains(&flag_u16) && flag_u16 - 92 >= rig_slots {
                         return Err(BridgeRpcError {
                             code: "UserError".into(),
                             message: "SlotIndexExceedsHullSlots".into(),
+                            client_error: None,
                         });
                     }
                 }
@@ -304,6 +320,7 @@ pub(crate) fn validate_and_apply_fitting(
                     return Err(BridgeRpcError {
                         code: "InvalidQuantity".into(),
                         message: "Fitting item quantity must be positive".into(),
+                        client_error: None,
                     });
                 }
                 let flag_u16 = flag as u16;
@@ -312,12 +329,14 @@ pub(crate) fn validate_and_apply_fitting(
                         return Err(BridgeRpcError {
                             code: "ItemNotFound".into(),
                             message: format!("Type {tid} not found in SDE"),
+                            client_error: None,
                         });
                     };
                     if !matches!(m_type.category_id, 7 | 8 | 32) || (m_type.category_id != 8 && req_qty != 1) {
                         return Err(BridgeRpcError {
                             code: "ItemNotFittableModule".into(),
                             message: format!("Type {tid} (qty {req_qty}) cannot be fitted to slot {flag_u16}"),
+                            client_error: None,
                         });
                     }
                     let req_eff = if m_type.category_id == 8 {
@@ -327,6 +346,7 @@ pub(crate) fn validate_and_apply_fitting(
                                 message: format!(
                                     "CannotLoadChargeInSlot: Slot {flag_u16} cannot hold charge {tid}"
                                 ),
+                                client_error: None,
                             });
                         }
                         let fitted_mod_type = desired_items
@@ -360,6 +380,7 @@ pub(crate) fn validate_and_apply_fitting(
                                 message: format!(
                                     "NoModuleInSlot: No fitted module in slot {flag_u16} for charge {tid}"
                                 ),
+                                client_error: None,
                             });
                         };
                         let allowed_groups: Vec<u32> = (604..=608)
@@ -376,6 +397,7 @@ pub(crate) fn validate_and_apply_fitting(
                                     "ChargeGroupMismatch: Charge group {} not compatible with module {}",
                                     m_type.group_id, mod_type.type_id
                                 ),
+                                client_error: None,
                             });
                         }
                         if let Some(&req_size) = mod_type.default_attributes.get(&128) {
@@ -388,6 +410,7 @@ pub(crate) fn validate_and_apply_fitting(
                                         message: format!(
                                             "ChargeSizeMismatch: Charge size {charge_size} != module chargeSize {req_size}"
                                         ),
+                                        client_error: None,
                                     });
                                 }
                             }
@@ -403,6 +426,7 @@ pub(crate) fn validate_and_apply_fitting(
                                     "CapacityExceeded: Charge qty {req_qty} exceeds module {} capacity {}",
                                     mod_type.type_id, mod_type.capacity
                                 ),
+                                client_error: None,
                             });
                         }
                         0
@@ -420,6 +444,7 @@ pub(crate) fn validate_and_apply_fitting(
                         return Err(BridgeRpcError {
                             code: "UserError".into(),
                             message: format!("SlotEffectMismatch: Type {tid} lacks required slot effect {req_eff} for slot {flag_u16}"),
+                            client_error: None,
                         });
                     }
                     if (matches!(flag_u16, 92..=94) || m_type.effect_ids.contains(&2663)) && m_type.default_attributes.contains_key(&eve_sde::attr_ids::RIG_SIZE) {
@@ -436,6 +461,7 @@ pub(crate) fn validate_and_apply_fitting(
                             return Err(BridgeRpcError {
                                 code: "UserError".into(),
                                 message: format!("RigSizeMismatch: module rigSize {mod_rig_size} != hull rigSize {hull_rig_size}"),
+                                client_error: None,
                             });
                         }
                     }
@@ -464,6 +490,7 @@ pub(crate) fn validate_and_apply_fitting(
                 return Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: format!("UpgradeCapacityExceeded: total calibration cost {:.1} exceeds capacity {hull_upgrade_cap}", existing_cal + new_cal),
+                    client_error: None,
                 });
             }
 
@@ -484,6 +511,7 @@ pub(crate) fn validate_and_apply_fitting(
                 return Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: format!("InsufficientTurretHardpoints: turret limit {max_turrets} exceeded"),
+                    client_error: None,
                 });
             }
 
@@ -503,6 +531,7 @@ pub(crate) fn validate_and_apply_fitting(
                 return Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: format!("InsufficientLauncherHardpoints: launcher limit {max_launchers} exceeded"),
+                    client_error: None,
                 });
             }
 
@@ -530,6 +559,7 @@ pub(crate) fn validate_and_apply_fitting(
                             return Err(BridgeRpcError {
                                 code: "UserError".into(),
                                 message: format!("MaxGroupFittedExceeded for group {}: limit {limit}", m_type.group_id),
+                                client_error: None,
                             });
                         }
                     }
@@ -556,6 +586,7 @@ pub(crate) fn validate_and_apply_fitting(
                             return Err(BridgeRpcError {
                                 code: "UserError".into(),
                                 message: format!("MaxTypeFittedExceeded for type {tid}: limit {limit}"),
+                                client_error: None,
                             });
                         }
                     }
@@ -579,6 +610,7 @@ pub(crate) fn validate_and_apply_fitting(
                 return Err(BridgeRpcError {
                     code: "CapacityExceeded".into(),
                     message: format!("Cargo hold capacity {ship_cargo_cap} m³ exceeded: total cargo volume is {:.1} m³", existing_cargo_vol + new_cargo_vol),
+                    client_error: None,
                 });
             }
 
@@ -591,12 +623,13 @@ pub(crate) fn validate_and_apply_fitting(
             for &(tid, flag, req_qty) in desired_items {
                 if flag == eve_db::InventoryFlag::DroneBay {
                     let Some(d_type) = ctx.sde.types.get(&tid) else {
-                        return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Type {tid} not found") });
+                        return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Type {tid} not found"), client_error: None });
                     };
                     if d_type.category_id != 18 {
                         return Err(BridgeRpcError {
                             code: "ItemNotADrone".into(),
                             message: format!("Type {tid} is category {}, not a drone (category 18)", d_type.category_id),
+                            client_error: None,
                         });
                     }
                     new_drone_vol += d_type.volume * (req_qty as f64);
@@ -610,6 +643,7 @@ pub(crate) fn validate_and_apply_fitting(
                 return Err(BridgeRpcError {
                     code: "CapacityExceeded".into(),
                     message: format!("Drone bay capacity {ship_drone_cap} m³ exceeded: total drone volume is {:.1} m³", existing_drone_vol + new_drone_vol),
+                    client_error: None,
                 });
             }
 
@@ -625,15 +659,17 @@ pub(crate) fn validate_and_apply_fitting(
                         return Err(BridgeRpcError {
                             code: "ShipHasNoFighterBay".into(),
                             message: "Ship has no fighter bay capacity".into(),
+                            client_error: None,
                         });
                     }
                     let Some(f_type) = ctx.sde.types.get(&tid) else {
-                        return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Type {tid} not found") });
+                        return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Type {tid} not found"), client_error: None });
                     };
                     if f_type.category_id != 87 {
                         return Err(BridgeRpcError {
                             code: "ItemNotAFighter".into(),
                             message: format!("Type {tid} is category {}, not a fighter (category 87)", f_type.category_id),
+                            client_error: None,
                         });
                     }
                     new_fighter_vol += f_type.volume * (req_qty as f64);
@@ -648,6 +684,7 @@ pub(crate) fn validate_and_apply_fitting(
                     return Err(BridgeRpcError {
                         code: "CapacityExceeded".into(),
                         message: format!("Fighter bay capacity {ship_fighter_cap} m³ exceeded: total fighter volume is {:.1} m³", existing_fighter_vol + new_fighter_vol),
+                        client_error: None,
                     });
                 }
             }
@@ -660,6 +697,7 @@ pub(crate) fn validate_and_apply_fitting(
                         return Err(BridgeRpcError {
                             code: "ItemNotFound".into(),
                             message: format!("Type {tid} not found"),
+                            client_error: None,
                         });
                     };
                     let allowed_in_hold = match flag_u16 {
@@ -687,6 +725,7 @@ pub(crate) fn validate_and_apply_fitting(
                         return Err(BridgeRpcError {
                             code: "InvalidItemTypeForHold".into(),
                             message: format!("Type {tid} cannot be placed in specialized hold flag {flag_u16}"),
+                            client_error: None,
                         });
                     }
                 }
@@ -713,6 +752,7 @@ pub(crate) fn validate_and_apply_fitting(
                     return Err(BridgeRpcError {
                         code: "CapacityExceeded".into(),
                         message: format!("Ship does not have specialized hold flag {flg}"),
+                        client_error: None,
                     });
                 }
                 let existing_vol: f64 = snap.items.values()
@@ -727,6 +767,7 @@ pub(crate) fn validate_and_apply_fitting(
                     return Err(BridgeRpcError {
                         code: "CapacityExceeded".into(),
                         message: format!("Specialized hold flag {flg} capacity {hold_capacity} m³ exceeded: total {:.1} m³", existing_vol + new_vol),
+                        client_error: None,
                     });
                 }
             }
@@ -738,6 +779,7 @@ pub(crate) fn validate_and_apply_fitting(
                 return Err(BridgeRpcError {
                     code: "InvalidQuantity".into(),
                     message: "Fitting item quantity must be positive".into(),
+                    client_error: None,
                 });
             }
             let flag_u16 = flag as u16;
@@ -749,6 +791,7 @@ pub(crate) fn validate_and_apply_fitting(
                 return Err(BridgeRpcError {
                     code: "InvalidFittingFlag".into(),
                     message: format!("Flag {flag_u16} is not a valid fitting destination"),
+                    client_error: None,
                 });
             }
             if matches!(flag_u16, 11..=34 | 92..=94 | 125..=132) {
@@ -757,6 +800,7 @@ pub(crate) fn validate_and_apply_fitting(
                     return Err(BridgeRpcError {
                         code: "ItemNotFittableModule".into(),
                         message: format!("Type {tid} (qty {req_qty}) cannot be fitted to slot {flag_u16}"),
+                        client_error: None,
                     });
                 }
                 let seen_ok = if cat == 8 {
@@ -768,6 +812,7 @@ pub(crate) fn validate_and_apply_fitting(
                     return Err(BridgeRpcError {
                         code: "SlotAlreadyOccupied".into(),
                         message: format!("Duplicate assignment to slot flag {flag_u16}"),
+                        client_error: None,
                     });
                 }
             }

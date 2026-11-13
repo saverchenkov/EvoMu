@@ -19,6 +19,7 @@ fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
         code: code.into(),
         message: message.into(),
+        client_error: None,
     }
 }
 
@@ -760,12 +761,14 @@ fn handle_trade_action(
                     return Err(BridgeRpcError {
                         code: "InvalidQuantity".into(),
                         message: "Quantity must be a positive integer between 1 and i32::MAX".into(),
+                        client_error: None,
                     });
                 };
                 if item.singleton && qty != item.quantity {
                     return Err(BridgeRpcError {
                         code: "CannotSplitSingleton".into(),
                         message: "Assembled items cannot be split".into(),
+                        client_error: None,
                     });
                 }
                 let items_list = if is_a {
@@ -778,6 +781,7 @@ fn handle_trade_action(
                         return Err(BridgeRpcError {
                             code: "InsufficientQuantity".into(),
                             message: "Offered quantity exceeds available item stack".into(),
+                            client_error: None,
                         });
                     };
                     existing_entry.1 = new_total;
@@ -786,6 +790,7 @@ fn handle_trade_action(
                         return Err(BridgeRpcError {
                             code: "InsufficientQuantity".into(),
                             message: "Offered quantity exceeds available item stack".into(),
+                            client_error: None,
                         });
                     }
                     items_list.push((item_id, qty));

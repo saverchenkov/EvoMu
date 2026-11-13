@@ -1371,6 +1371,7 @@ pub async fn handle(
             return Some(Err(BridgeRpcError {
                 code: "NoSolarSystem".into(),
                 message: "Session has no active solar system".into(),
+                client_error: None,
             }));
         };
         let sec = ctx
@@ -1645,6 +1646,7 @@ pub fn gm_admin_bounty_action(
         return Err(BridgeRpcError {
             code: "InsufficientRole".into(),
             message: "GM bounty tools require a GM/Admin/QA role".into(),
+            client_error: None,
         });
     }
     match action {
@@ -1653,6 +1655,7 @@ pub fn gm_admin_bounty_action(
                 return Err(BridgeRpcError {
                     code: "InvalidBountyAmount".into(),
                     message: "Bounty amount must be non-negative finite number".into(),
+                    client_error: None,
                 });
             }
             let val = amount_isk;
@@ -1727,6 +1730,7 @@ pub fn gm_admin_bounty_action(
         _ => Err(BridgeRpcError {
             code: "InvalidGmBountyAction".into(),
             message: format!("Unknown GM bounty action '{action}'"),
+            client_error: None,
         }),
     }
 }
@@ -1793,24 +1797,28 @@ pub(crate) fn validate_kill_right_live_preconditions(
         return Err(BridgeRpcError {
             code: "KillRightExpired".into(),
             message: format!("Kill right {kr_id} has expired (30-day lifetime)"),
+            client_error: None,
         });
     }
     let Some(caller) = snap.characters.get(&caller_id) else {
         return Err(BridgeRpcError {
             code: "CharacterNotFound".into(),
             message: format!("Character {caller_id} not found"),
+            client_error: None,
         });
     };
     if caller.station_id.is_some() || caller.structure_id.is_some() {
         return Err(BridgeRpcError {
             code: "KillRightCannotActivateDocked".into(),
             message: "Cannot activate or buy a kill right while docked".into(),
+            client_error: None,
         });
     }
     let Some(target) = snap.characters.get(&target_id) else {
         return Err(BridgeRpcError {
             code: "TargetNotFound".into(),
             message: format!("Kill right target {target_id} not found"),
+            client_error: None,
         });
     };
     if target.station_id.is_some()
@@ -1820,6 +1828,7 @@ pub(crate) fn validate_kill_right_live_preconditions(
         return Err(BridgeRpcError {
             code: "KillRightTargetNotInSystem".into(),
             message: "Target pilot must be undocked in the same solar system".into(),
+            client_error: None,
         });
     }
     let sys_id = caller.solar_system_id;
@@ -1830,6 +1839,7 @@ pub(crate) fn validate_kill_right_live_preconditions(
             return Err(BridgeRpcError {
                 code: "KillRightTargetNotOnGrid".into(),
                 message: "Target pilot is not on grid with caller".into(),
+                client_error: None,
             });
         }
     }

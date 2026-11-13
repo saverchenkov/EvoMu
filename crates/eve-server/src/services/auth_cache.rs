@@ -194,6 +194,7 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidArgument".into(),
                         message: "machoNet.GetCachedObject requires (shared, objectID) or (objectID,)".into(),
+                        client_error: None,
                     }));
                 }
             };
@@ -201,6 +202,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "CachedObjectNotFound".into(),
                     message: format!("Cached object {:?} is not registered", object_id),
+                    client_error: None,
                 }));
             };
             Some(Ok(rec.to_cached_object_pyrep()))
@@ -211,12 +213,14 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: "machoNet.ForwardCharacterNotification requires GM privileges".into(),
+                    client_error: None,
                 }));
             }
             let Some(char_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "ForwardCharacterNotification requires charID as first argument".into(),
+                    client_error: None,
                 }));
             };
             let notif_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("OnNotificationReceived");
@@ -227,6 +231,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: "ForwardCharacterNotification targeting another character with unprivileged notification requires GM role".into(),
+                    client_error: None,
                 }));
             }
             let payload: Vec<PyRep> = match args.get(2) {
@@ -248,6 +253,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: "SetGlobalConfigValue requires GM role".into(),
+                    client_error: None,
                 }));
             }
             let key = args
@@ -260,6 +266,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "SetGlobalConfigValue requires config key".into(),
+                    client_error: None,
                 }));
             }
             let val = args
@@ -360,6 +367,7 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "UserError".into(),
                         message: "NotAuthorized".into(),
+                        client_error: None,
                     }));
                 }
                 let blob_key = format!("cache_setting:{section}:{key}");
@@ -377,6 +385,7 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "UserError".into(),
                         message: "NotAuthorized".into(),
+                        client_error: None,
                     }));
                 }
                 let blob_key = format!("cache_setting:{section}:{key}");
@@ -413,6 +422,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidLoginArguments".into(),
                     message: "authentication.Login expects (username, password)".into(),
+                    client_error: None,
                 }));
             }
             let username = args.first().and_then(|a| a.as_str()).unwrap_or("");
@@ -428,6 +438,7 @@ pub async fn handle(
                             _ => "AuthenticationFailed".into(),
                         },
                         message: e.to_string(),
+                        client_error: None,
                     });
             let acc = match res {
                 Ok(a) => a,
@@ -441,6 +452,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "ClusterShuttingDown".into(),
                     message: "Cluster shutdown in progress. Non-GM logins are rejected.".into(),
+                    client_error: None,
                 }));
             }
 
@@ -513,6 +525,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidLanguageID".into(),
                     message: "SetLanguageID requires a non-empty language code".into(),
+                    client_error: None,
                 }));
             };
             session.language_id = lang.to_string();
@@ -547,6 +560,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidComputerHash".into(),
                     message: "multiLoginBlocker.Login expects a single computerhash argument".into(),
+                    client_error: None,
                 }));
             };
             // V24 client `characterSelection.pyj` (`_CanLogin`) passes `computerhash` as `args[0]` (str/bytes)
@@ -561,6 +575,7 @@ pub async fn handle(
                             message:
                                 "multiLoginBlocker.Login requires a non-empty computerhash string"
                                     .into(),
+                            client_error: None,
                         }));
                     }
                     s.trim().to_string()
@@ -570,6 +585,7 @@ pub async fn handle(
                         code: "InvalidComputerHash".into(),
                         message: "multiLoginBlocker.Login requires a non-empty computerhash string"
                             .into(),
+                        client_error: None,
                     }))
                 }
             };
@@ -607,14 +623,17 @@ pub async fn handle(
                 Err(eve_db::DbError::AccountBanned { .. }) => Some(Err(BridgeRpcError {
                     code: "UserBanned".into(),
                     message: "Account is banned".into(),
+                    client_error: None,
                 })),
                 Err(eve_db::DbError::AccountSuspended { .. }) => Some(Err(BridgeRpcError {
                     code: "AccountSuspended".into(),
                     message: "Account is suspended".into(),
+                    client_error: None,
                 })),
                 Err(eve_db::DbError::ValidationError(msg)) => Some(Err(BridgeRpcError {
                     code: "SessionKicked".into(),
                     message: msg,
+                    client_error: None,
                 })),
                 Err(_) => Some(Ok(PyRep::Bool(false))),
             }
@@ -673,6 +692,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "SlashError".into(),
                     message: format_remote_command_list_reason(session.role),
+                    client_error: None,
                 }));
             }
             let (_, cid) = match ServerContext::require_character(session) {
@@ -685,6 +705,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: format!("slash.SlashCmd '{cmd}' requires role mask 0x{req_role:x}"),
+                    client_error: None,
                 }));
             }
             let res: Option<Result<PyRep, BridgeRpcError>> = async {
@@ -694,23 +715,27 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Usage: /giveisk <positive_integer_amount>".into(),
+                        client_error: None,
                     }));
                 };
                 if amount <= 0 {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Amount for /giveisk must be positive".into(),
+                        client_error: None,
                     }));
                 }
                 let new_bal = ctx.db.try_with_mut_snapshot(|snap| {
                     let ch = snap.characters.get_mut(&cid).ok_or_else(|| BridgeRpcError {
                         code: "CharacterNotFound".into(),
                         message: format!("Character {cid} not found"),
+                        client_error: None,
                     })?;
                     let add = IskCents::from_isk(amount);
                     ch.balance = ch.balance.checked_add(add).ok_or_else(|| BridgeRpcError {
                         code: "BalanceOverflow".into(),
                         message: "Adding ISK would overflow balance".into(),
+                        client_error: None,
                     })?;
                     Ok(ch.balance.to_wire_f64())
                 });
@@ -730,6 +755,7 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Usage: /ban <account_id> [duration_seconds] [reason]".into(),
+                        client_error: None,
                     }));
                 };
                 const PERMANENT_BAN_UNTIL_UNIX: u64 = 32_503_680_000; // Year 3000 UTC
@@ -827,6 +853,7 @@ pub async fn handle(
                     Err(e) => Some(Err(BridgeRpcError {
                         code: "BanFailed".into(),
                         message: e.to_string(),
+                        client_error: None,
                     })),
                 }
             } else if let Some(rest) = cmd.strip_prefix("/unban ") {
@@ -836,6 +863,7 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Usage: /unban <username|user_id> [reason]".into(),
+                        client_error: None,
                     }));
                 }
                 match ctx.db.unban_account_by_id_or_username(target) {
@@ -848,6 +876,7 @@ pub async fn handle(
                     Err(e) => Some(Err(BridgeRpcError {
                         code: "UnbanFailed".into(),
                         message: e.to_string(),
+                        client_error: None,
                     })),
                 }
             } else if let Some(rest) = cmd.strip_prefix("/suspend ") {
@@ -856,24 +885,28 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Usage: /suspend <username|user_id> <duration_seconds> [reason]".into(),
+                        client_error: None,
                     }));
                 };
                 let Some(dur_str) = parts.next().map(str::trim) else {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Usage: /suspend <username|user_id> <duration_seconds> [reason]".into(),
+                        client_error: None,
                     }));
                 };
                 let Ok(duration_secs) = dur_str.parse::<u64>() else {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Duration for /suspend must be a positive integer in seconds".into(),
+                        client_error: None,
                     }));
                 };
                 if duration_secs == 0 {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Duration for /suspend must be greater than zero".into(),
+                        client_error: None,
                     }));
                 }
                 let reason = parts
@@ -934,6 +967,7 @@ pub async fn handle(
                     Err(e) => Some(Err(BridgeRpcError {
                         code: "SuspendFailed".into(),
                         message: e.to_string(),
+                        client_error: None,
                     })),
                 }
             } else if let Some(rest) = cmd.strip_prefix("/unsuspend ") {
@@ -943,6 +977,7 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Usage: /unsuspend <username|user_id> [reason]".into(),
+                        client_error: None,
                     }));
                 }
                 match ctx.db.unsuspend_account_by_id_or_username(target) {
@@ -955,6 +990,7 @@ pub async fn handle(
                     Err(e) => Some(Err(BridgeRpcError {
                         code: "UnsuspendFailed".into(),
                         message: e.to_string(),
+                        client_error: None,
                     })),
                 }
             } else if let Some(rest) = cmd.strip_prefix("/role ") {
@@ -963,12 +999,14 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Usage: /role <username|user_id> <role_bitmask_or_name>".into(),
+                        client_error: None,
                     }));
                 };
                 let Some(role_arg) = parts.next() else {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Usage: /role <username|user_id> <role_bitmask_or_name>".into(),
+                        client_error: None,
                     }));
                 };
                 let parsed_role = if let Some(hex_str) = role_arg.strip_prefix("0x").or_else(|| role_arg.strip_prefix("0X")) {
@@ -1010,6 +1048,7 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: format!("Invalid role specification '{role_arg}'"),
+                        client_error: None,
                     }));
                 };
                 match ctx.db.set_account_role(target, new_role) {
@@ -1050,6 +1089,7 @@ pub async fn handle(
                     Err(e) => Some(Err(BridgeRpcError {
                         code: "RoleUpdateFailed".into(),
                         message: e.to_string(),
+                        client_error: None,
                     })),
                 }
             } else if let Some(rest) = cmd.strip_prefix("/kick ") {
@@ -1058,6 +1098,7 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Usage: /kick <username> [reason]".into(),
+                        client_error: None,
                     }));
                 };
                 let reason = parts
@@ -1076,12 +1117,14 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "UnknownAccount".into(),
                         message: format!("Unknown account '{username}'"),
+                        client_error: None,
                     }));
                 };
                 if is_admin {
                     return Some(Err(BridgeRpcError {
                         code: "KickFailed".into(),
                         message: format!("Cannot kick administrator account '{username}'"),
+                        client_error: None,
                     }));
                 }
                 let kicked_sess = match ctx.db.try_kick_user(uid, reason, ctx.now_unix()) {
@@ -1090,6 +1133,7 @@ pub async fn handle(
                         return Some(Err(BridgeRpcError {
                             code: "KickFailed".into(),
                             message: e.to_string(),
+                            client_error: None,
                         }));
                     }
                 };
@@ -1118,12 +1162,14 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Usage: /giveitem <type_id> [quantity] or /createitem <type_id> <quantity>".into(),
+                        client_error: None,
                     }));
                 };
                 let Ok(type_id) = type_id_str.parse::<u32>() else {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Invalid type_id for /giveitem".into(),
+                        client_error: None,
                     }));
                 };
                 let qty: i32 = tokens.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
@@ -1131,12 +1177,14 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Quantity for /giveitem must be positive".into(),
+                        client_error: None,
                     }));
                 }
                 let Some(inv_type) = ctx.sde.types.get(&type_id) else {
                     return Some(Err(BridgeRpcError {
                         code: "TypeNotFound".into(),
                         message: format!("Type ID {type_id} not found in SDE"),
+                        client_error: None,
                     }));
                 };
                 let is_singleton = inv_type.category_id == 6
@@ -1145,6 +1193,7 @@ pub async fn handle(
                     let ch = snap.characters.get(&cid).ok_or_else(|| BridgeRpcError {
                         code: "CharacterNotFound".into(),
                         message: format!("Character {cid} not found"),
+                        client_error: None,
                     })?;
                     let (location_id, flag) = if let Some(st_id) = ch.station_id.or(ch.structure_id) {
                         (st_id, InventoryFlag::Hangar)
@@ -1202,42 +1251,49 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Usage: /setskill <skill_id> <level> or /giveskill <skill_id> <level>".into(),
+                        client_error: None,
                     }));
                 };
                 let Ok(skill_id) = skill_id_str.parse::<u32>() else {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Invalid skill_id for /setskill".into(),
+                        client_error: None,
                     }));
                 };
                 let Some(lvl_str) = lvl_opt else {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Usage: /setskill <skill_id> <level>".into(),
+                        client_error: None,
                     }));
                 };
                 let Ok(lvl) = lvl_str.parse::<u8>() else {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Invalid level for /setskill".into(),
+                        client_error: None,
                     }));
                 };
                 if lvl > 5 {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Level for /setskill must be between 0 and 5".into(),
+                        client_error: None,
                     }));
                 }
                 let Some(skill_type) = ctx.sde.types.get(&skill_id) else {
                     return Some(Err(BridgeRpcError {
                         code: "SkillNotFound".into(),
                         message: format!("Skill type ID {skill_id} not found in SDE"),
+                        client_error: None,
                     }));
                 };
                 if skill_type.category_id != 16 {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSkillType".into(),
                         message: format!("Type {skill_id} is not a skill (category 16)"),
+                        client_error: None,
                     }));
                 }
                 let rank = skill_type
@@ -1251,6 +1307,7 @@ pub async fn handle(
                     let ch = snap.characters.get_mut(&cid).ok_or_else(|| BridgeRpcError {
                         code: "CharacterNotFound".into(),
                         message: format!("Character {cid} not found"),
+                        client_error: None,
                     })?;
                     let skills_map = snap.skills.entry(cid).or_default();
                     let prev_sp = skills_map.get(&skill_id).map(|s| s.skill_points).unwrap_or(0.0);
@@ -1308,12 +1365,14 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Usage: /spawnnpc <type_id>".into(),
+                        client_error: None,
                     }));
                 };
                 if !ctx.sde.types.contains_key(&type_id) {
                     return Some(Err(BridgeRpcError {
                         code: "TypeNotFound".into(),
                         message: format!("NPC type ID {type_id} not found in SDE"),
+                        client_error: None,
                     }));
                 }
                 let (sys_id, ship_id) = ctx.db.with_snapshot(|snap| {
@@ -1365,6 +1424,7 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InsufficientRole".into(),
                         message: "ROLE_GMH required for /createccpevent".into(),
+                        client_error: None,
                     }));
                 }
                 let mut parts = rest.trim().splitn(4, char::is_whitespace);
@@ -1372,18 +1432,21 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Usage: /createccpevent <dateTime> <duration> <importance> <title> [| <description>]".into(),
+                        client_error: None,
                     }));
                 };
                 let Some(dur) = parts.next().and_then(|s| s.parse::<i64>().ok()) else {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Usage: /createccpevent <dateTime> <duration> <importance> <title> [| <description>]".into(),
+                        client_error: None,
                     }));
                 };
                 let Some(imp) = parts.next().and_then(|s| s.parse::<i64>().ok()) else {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Usage: /createccpevent <dateTime> <duration> <importance> <title> [| <description>]".into(),
+                        client_error: None,
                     }));
                 };
                 let rem = parts.next().unwrap_or("").trim();
@@ -1393,6 +1456,7 @@ pub async fn handle(
                 Some(Err(BridgeRpcError {
                     code: "UnknownSlashCommand".into(),
                     message: format!("Unknown or unsupported slash command '{cmd}'"),
+                    client_error: None,
                 }))
             }
             }
@@ -1441,6 +1505,7 @@ async fn handle_slash_teleport(
                     code: "InvalidSlashArgument".into(),
                     message: "Usage: /teleport|/tr|/translocate|/moveme [me|<char_id>] <location_id>"
                         .into(),
+                    client_error: None,
                 });
             };
             if parsed_cid != cid
@@ -1449,6 +1514,7 @@ async fn handle_slash_teleport(
                 return Err(BridgeRpcError {
                     code: "CharacterNotFound".into(),
                     message: format!("Character {parsed_cid} not found"),
+                    client_error: None,
                 });
             }
             (parsed_cid, *loc)
@@ -1458,6 +1524,7 @@ async fn handle_slash_teleport(
                 code: "InvalidSlashArgument".into(),
                 message: "Usage: /teleport|/tr|/translocate|/moveme [me|<char_id>] <location_id>"
                     .into(),
+                client_error: None,
             });
         }
     };
@@ -1467,6 +1534,7 @@ async fn handle_slash_teleport(
             code: "InvalidSlashArgument".into(),
             message: "Usage: /teleport|/tr|/translocate|/moveme [me|<char_id>] <location_id>"
                 .into(),
+            client_error: None,
         });
     };
     if target_id <= 0 {
@@ -1474,6 +1542,7 @@ async fn handle_slash_teleport(
             code: "InvalidSlashArgument".into(),
             message: "Usage: /teleport|/tr|/translocate|/moveme [me|<char_id>] <location_id>"
                 .into(),
+            client_error: None,
         });
     }
 
@@ -1518,6 +1587,7 @@ async fn handle_slash_teleport(
             return Err(BridgeRpcError {
                 code: "StructureDestroyed".into(),
                 message: format!("Structure {target_id} is destroyed"),
+                client_error: None,
             });
         }
         (
@@ -1548,12 +1618,14 @@ async fn handle_slash_teleport(
             return Err(BridgeRpcError {
                 code: "SolarSystemNotFound".into(),
                 message: format!("Solar system or location {target_id} not found"),
+                client_error: None,
             });
         }
     } else {
         return Err(BridgeRpcError {
             code: "SolarSystemNotFound".into(),
             message: format!("Solar system or location {target_id} not found"),
+            client_error: None,
         });
     };
 
@@ -1563,6 +1635,7 @@ async fn handle_slash_teleport(
         .map_err(|e| BridgeRpcError {
             code: "TeleportFailed".into(),
             message: e.to_string(),
+            client_error: None,
         })?;
 
     if ship_id > 0 {

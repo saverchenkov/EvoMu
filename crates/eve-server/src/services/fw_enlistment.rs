@@ -45,7 +45,7 @@ pub(crate) struct FwEnlistmentStore {
 pub(crate) type FwMemberMutation = (i64, Option<i64>, Option<i64>, Option<i64>, i64, u32);
 
 fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
-    BridgeRpcError { code: code.into(), message: message.into() }
+    BridgeRpcError { code: code.into(), message: message.into(), client_error: None }
 }
 
 /// Unix seconds -> Windows FILETIME ticks (100ns since 1601), the blue time format the client reads.

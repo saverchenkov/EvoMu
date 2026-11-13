@@ -44,11 +44,13 @@ fn parse_split_args(
         .ok_or_else(|| BridgeRpcError {
             code: "SplitFailed".into(),
             message: "Split quantity must be a positive 32-bit integer".into(),
+            client_error: None,
         })?;
     if item_id <= 0 {
         return Err(BridgeRpcError {
             code: "SplitFailed".into(),
             message: "SplitStack requires a valid positive itemID".into(),
+            client_error: None,
         });
     }
     Ok((loc_hint, item_id, split_quantity))
@@ -83,22 +85,26 @@ fn validate_split_stack_access(
         let ch = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
             code: "CharacterNotFound".into(),
             message: format!("Character {char_id} not found"),
+            client_error: None,
         })?;
         let item = snap.items.get(&item_id).ok_or_else(|| BridgeRpcError {
             code: "SplitFailed".into(),
             message: format!("Item {item_id} not found"),
+            client_error: None,
         })?;
 
         if cs_state.alsc_locked_items.contains(&item_id) {
             return Err(BridgeRpcError {
                 code: "ALSCItemLocked".into(),
                 message: "Cannot split an item locked in an Audit Log Secure Container".into(),
+                client_error: None,
             });
         }
         if loaded_tube_items.contains(&item_id) || matches!(item.flag as u16, 159..=163) {
             return Err(BridgeRpcError {
                 code: "SplitFailed".into(),
                 message: "Cannot split fighters loaded in an active fighter tube".into(),
+                client_error: None,
             });
         }
         if matches!(item.flag, InventoryFlag::Locked | InventoryFlag::Impounded)
@@ -109,6 +115,7 @@ fn validate_split_stack_access(
             return Err(BridgeRpcError {
                 code: "SplitFailed".into(),
                 message: format!("Item {item_id} is locked, impounded, or in Asset Safety"),
+                client_error: None,
             });
         }
         let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
@@ -121,6 +128,7 @@ fn validate_split_stack_access(
             return Err(BridgeRpcError {
                 code: "SplitFailed".into(),
                 message: format!("Item {item_id} is sealed inside an Asset Safety wrap"),
+                client_error: None,
             });
         }
 
@@ -129,6 +137,7 @@ fn validate_split_stack_access(
             return Err(BridgeRpcError {
                 code: "SplitFailed".into(),
                 message: format!("Character {char_id} does not own stack {item_id}"),
+                client_error: None,
             });
         }
         if is_corp_item {
@@ -151,12 +160,14 @@ fn validate_split_stack_access(
                 return Err(BridgeRpcError {
                     code: "ALSCItemLocked".into(),
                     message: "Parent Audit Log Secure Container is locked".into(),
+                    client_error: None,
                 });
             }
             if anc.type_id == 3_468 {
                 return Err(BridgeRpcError {
                     code: "SplitFailed".into(),
                     message: "Cannot split items inside a sealed Plastic Wrap".into(),
+                    client_error: None,
                 });
             }
             if matches!(anc.flag, InventoryFlag::Locked | InventoryFlag::Impounded)
@@ -166,6 +177,7 @@ fn validate_split_stack_access(
                 return Err(BridgeRpcError {
                     code: "SplitFailed".into(),
                     message: "Parent container is locked, impounded, or in Asset Safety".into(),
+                    client_error: None,
                 });
             }
             if let Some(req_pw) = cs_state.container_passwords.get(&anc.item_id) {
@@ -181,6 +193,7 @@ fn validate_split_stack_access(
                                 "Password required to access Secure Container {}",
                                 anc.item_id
                             ),
+                            client_error: None,
                         });
                     }
                 }
@@ -207,6 +220,7 @@ fn validate_split_stack_access(
                             "Character {char_id} lacks container take role in division {}",
                             div_idx + 1
                         ),
+                        client_error: None,
                     });
                 }
             }
@@ -222,6 +236,7 @@ fn validate_split_stack_access(
                 return Err(BridgeRpcError {
                     code: "SplitFailed".into(),
                     message: "Session docked location does not match character location".into(),
+                    client_error: None,
                 });
             }
         }
@@ -230,6 +245,7 @@ fn validate_split_stack_access(
                 return Err(BridgeRpcError {
                     code: "SplitFailed".into(),
                     message: format!("Item {item_id} is not located at {hint_loc}"),
+                    client_error: None,
                 });
             }
         }
@@ -250,6 +266,7 @@ fn validate_split_stack_access(
             return Err(BridgeRpcError {
                 code: "SplitFailed".into(),
                 message: format!("Item {item_id} is not physically co-located with pilot"),
+                client_error: None,
             });
         }
 
@@ -321,6 +338,7 @@ pub(in crate::services) fn handle_stack_ops(
                 Err(e) => Some(Err(BridgeRpcError {
                     code: "SplitFailed".into(),
                     message: e.to_string(),
+                    client_error: None,
                 })),
             }
         }
@@ -346,6 +364,7 @@ pub(in crate::services) fn handle_stack_ops(
                                             return Some(Err(BridgeRpcError {
                                                 code: "StackFailed".into(),
                                                 message: "Merge quantity overflows i32".into(),
+                                                client_error: None,
                                             }));
                                         }
                                     },
@@ -368,6 +387,7 @@ pub(in crate::services) fn handle_stack_ops(
                                 return Some(Err(BridgeRpcError {
                                     code: "StackFailed".into(),
                                     message: "Merge quantity overflows i32".into(),
+                                    client_error: None,
                                 }));
                             }
                         },
@@ -381,6 +401,7 @@ pub(in crate::services) fn handle_stack_ops(
                 return Some(Err(BridgeRpcError {
                     code: "StackFailed".into(),
                     message: "MultiMerge requires at least one (sourceItemID, destItemID, qty) merge operation".into(),
+                    client_error: None,
                 }));
             }
             enum MergeChangeEvent {
@@ -420,12 +441,14 @@ pub(in crate::services) fn handle_stack_ops(
                             code: "ALSCItemLocked".into(),
                             message: "Cannot merge items locked in an Audit Log Secure Container"
                                 .into(),
+                            client_error: None,
                         });
                     }
                     if src_id == dst_id {
                         return Err(BridgeRpcError {
                             code: "StackFailed".into(),
                             message: "Cannot stack an item into itself".into(),
+                            client_error: None,
                         });
                     }
                     if guard
@@ -440,6 +463,7 @@ pub(in crate::services) fn handle_stack_ops(
                         return Err(BridgeRpcError {
                             code: "StackFailed".into(),
                             message: "Cannot stack courier mission cargo".into(),
+                            client_error: None,
                         });
                     }
                     if guard.is_item_locked_in_contract_or_job(src_id)
@@ -448,12 +472,14 @@ pub(in crate::services) fn handle_stack_ops(
                         return Err(BridgeRpcError {
                             code: "StackFailed".into(),
                             message: "Cannot merge locked items".into(),
+                            client_error: None,
                         });
                     }
                     if loaded_tube_items.contains(&src_id) || loaded_tube_items.contains(&dst_id) {
                         return Err(BridgeRpcError {
                             code: "StackFailed".into(),
                             message: "Cannot merge fighters loaded in a fighter tube".into(),
+                            client_error: None,
                         });
                     }
                     let src = guard
@@ -462,6 +488,7 @@ pub(in crate::services) fn handle_stack_ops(
                         .ok_or_else(|| BridgeRpcError {
                             code: "StackFailed".into(),
                             message: format!("Source item {src_id} not found"),
+                            client_error: None,
                         })?
                         .clone();
                     let tgt = guard
@@ -470,12 +497,14 @@ pub(in crate::services) fn handle_stack_ops(
                         .ok_or_else(|| BridgeRpcError {
                             code: "StackFailed".into(),
                             message: format!("Destination item {dst_id} not found"),
+                            client_error: None,
                         })?
                         .clone();
                     if src.owner_id != char_id || tgt.owner_id != char_id {
                         return Err(BridgeRpcError {
                             code: "StackFailed".into(),
                             message: "Stack ownership mismatch".into(),
+                            client_error: None,
                         });
                     }
                     if tgt.type_id != src.type_id
@@ -485,6 +514,7 @@ pub(in crate::services) fn handle_stack_ops(
                         return Err(BridgeRpcError {
                             code: "StackFailed".into(),
                             message: "Incompatible stacks for merge".into(),
+                            client_error: None,
                         });
                     }
                     if matches!(src.flag, InventoryFlag::Locked | InventoryFlag::Impounded)
@@ -495,6 +525,7 @@ pub(in crate::services) fn handle_stack_ops(
                         return Err(BridgeRpcError {
                             code: "StackFailed".into(),
                             message: "Cannot merge locked, impounded, or wrapped items".into(),
+                            client_error: None,
                         });
                     }
                     if eve_db::WorldStateSnapshot::is_fitted_slot_flag(src.flag)
@@ -504,6 +535,7 @@ pub(in crate::services) fn handle_stack_ops(
                         return Err(BridgeRpcError {
                             code: "StackFailed".into(),
                             message: "Cannot stack fitted modules or non-empty containers".into(),
+                            client_error: None,
                         });
                     }
                     if src.singleton
@@ -519,6 +551,7 @@ pub(in crate::services) fn handle_stack_ops(
                             code: "StackFailed".into(),
                             message: "Cannot stack singleton, blueprint copy, or mutated item"
                                 .into(),
+                            client_error: None,
                         });
                     }
                     if ext.asset_safety_wraps.values().any(|w| {
@@ -529,6 +562,7 @@ pub(in crate::services) fn handle_stack_ops(
                         return Err(BridgeRpcError {
                             code: "StackFailed".into(),
                             message: "Cannot merge items inside an Asset Safety wrap".into(),
+                            client_error: None,
                         });
                     }
                     let mut cur = src.location_id;
@@ -540,12 +574,14 @@ pub(in crate::services) fn handle_stack_ops(
                             return Err(BridgeRpcError {
                                 code: "StackFailed".into(),
                                 message: "Cannot merge items inside a sealed container".into(),
+                                client_error: None,
                             });
                         }
                         if cs_state_merge.alsc_locked_items.contains(&anc.item_id) {
                             return Err(BridgeRpcError {
                                 code: "ALSCItemLocked".into(),
                                 message: "Cannot merge items inside a locked ALSC container".into(),
+                                client_error: None,
                             });
                         }
                         if let Some(req_pw) = cs_state_merge.container_passwords.get(&anc.item_id) {
@@ -564,6 +600,7 @@ pub(in crate::services) fn handle_stack_ops(
                                         "Password required to merge items inside container {}",
                                         anc.item_id
                                     ),
+                                    client_error: None,
                                 });
                             }
                         }
@@ -575,6 +612,7 @@ pub(in crate::services) fn handle_stack_ops(
                         return Err(BridgeRpcError {
                             code: "StackFailed".into(),
                             message: "Item is locked or impounded".into(),
+                            client_error: None,
                         });
                     }
                     let merge_qty = match qty_opt {
@@ -586,6 +624,7 @@ pub(in crate::services) fn handle_stack_ops(
                                         "Invalid merge quantity {req_qty} for source stack {src_id} (qty {})",
                                         src.quantity
                                     ),
+                                    client_error: None,
                                 });
                             }
                             req_qty
@@ -596,6 +635,7 @@ pub(in crate::services) fn handle_stack_ops(
                         tgt.quantity.checked_add(merge_qty).ok_or_else(|| BridgeRpcError {
                             code: "StackFailed".into(),
                             message: "Stack quantity overflow".into(),
+                            client_error: None,
                         })?;
                     let old_src_qty = src.quantity;
                     let old_dst_qty = tgt.quantity;
@@ -709,6 +749,7 @@ pub(in crate::services) fn handle_stack_ops(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidLocation".into(),
                     message: "StackAll requires a bound inventory or active station/ship".into(),
+                    client_error: None,
                 }));
             };
             let default_flag = if Some(target_loc) == session.station_id

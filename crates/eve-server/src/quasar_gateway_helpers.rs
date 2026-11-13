@@ -76,6 +76,7 @@ fn parse_hijack_args(
                 return Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: format!("Unsupported Quasar hijack error option '{other}'"),
+                    client_error: None,
                 });
             }
         },
@@ -85,6 +86,7 @@ fn parse_hijack_args(
                 return Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: format!("Unsupported Quasar hijack HTTP status code {other} (must be V24 ERROR_OPTIONS)"),
+                    client_error: None,
                 });
             }
         },
@@ -92,6 +94,7 @@ fn parse_hijack_args(
             return Err(BridgeRpcError {
                 code: "InvalidArgument".into(),
                 message: format!("Invalid Quasar hijack error argument: {other:?}"),
+                client_error: None,
             });
         }
     };
@@ -104,6 +107,7 @@ fn parse_hijack_args(
                 return Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: format!("Invalid Quasar hijack latency {f} (must be 0.0..=300.0 sec)"),
+                    client_error: None,
                 });
             }
             Some(*f)
@@ -113,6 +117,7 @@ fn parse_hijack_args(
                 return Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: format!("Invalid Quasar hijack latency {i} (must be 0..=300 sec)"),
+                    client_error: None,
                 });
             }
             Some(*i as f64)
@@ -121,6 +126,7 @@ fn parse_hijack_args(
             return Err(BridgeRpcError {
                 code: "InvalidArgument".into(),
                 message: format!("Invalid Quasar hijack latency argument: {other:?}"),
+                client_error: None,
             });
         }
     };
@@ -207,6 +213,7 @@ impl PublicGatewayRouter {
                     return Some(Err(BridgeRpcError {
                         code: "AuthenticationRequired".into(),
                         message: "publicGatewaySvc subscription requires an authenticated session".into(),
+                        client_error: None,
                     }));
                 }
                 let mut notice_types = Vec::new();
@@ -241,6 +248,7 @@ impl PublicGatewayRouter {
                         return Some(Err(BridgeRpcError {
                             code: "AuthenticationRequired".into(),
                             message: "publicGatewaySvc.PublishEvent requires authentication".into(),
+                            client_error: None,
                         }));
                     }
                     let event = if method == "PublishEventPayload" {
@@ -252,13 +260,13 @@ impl PublicGatewayRouter {
                         } else {
                             match EvePublicEvent::decode_proto(raw_event) {
                                 Ok(ev) => ev,
-                                Err(e) => return Some(Err(BridgeRpcError { code: "InvalidProtobuf".into(), message: e.to_string() })),
+                                Err(e) => return Some(Err(BridgeRpcError { code: "InvalidProtobuf".into(), message: e.to_string(), client_error: None })),
                             }
                         }
                     } else {
                         match EvePublicEvent::decode_proto(raw_event) {
                             Ok(ev) => ev,
-                            Err(e) => return Some(Err(BridgeRpcError { code: "InvalidProtobuf".into(), message: e.to_string() })),
+                            Err(e) => return Some(Err(BridgeRpcError { code: "InvalidProtobuf".into(), message: e.to_string(), client_error: None })),
                         }
                     };
                     self.publish_event(session, event, now_unix);

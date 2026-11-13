@@ -267,16 +267,19 @@ pub async fn handle_anchor_skyhook_rpc(
         return Err(BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: "Cannot anchor an Orbital Skyhook while docked".into(),
+            client_error: None,
         });
     }
     let corp_id = session.corporation_id.unwrap_or(0);
     let sys_id = session.solar_system_id.ok_or_else(|| BridgeRpcError {
         code: "NoSolarSystem".into(),
         message: "No active solar system".into(),
+        client_error: None,
     })?;
     let ship_id = session.ship_id.ok_or_else(|| BridgeRpcError {
         code: "ShipNotInSpace".into(),
         message: "Active ship required".into(),
+        client_error: None,
     })?;
 
     let has_role = ctx.db.with_snapshot(|s| {
@@ -288,6 +291,7 @@ pub async fn handle_anchor_skyhook_rpc(
         return Err(BridgeRpcError {
             code: "InsufficientCorpRoles".into(),
             message: "Anchoring an Orbital Skyhook requires Director or Station Manager role".into(),
+            client_error: None,
         });
     }
 
@@ -328,6 +332,7 @@ pub async fn handle_anchor_skyhook_rpc(
         .ok_or_else(|| BridgeRpcError {
             code: "InvalidPlanet".into(),
             message: format!("Planet {planet_id} does not exist in solar system {sys_id}"),
+            client_error: None,
         })?;
     let planet_type_id = celestial.type_id;
 
@@ -342,6 +347,7 @@ pub async fn handle_anchor_skyhook_rpc(
         .ok_or_else(|| BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: format!("Active ship {ship_id} is not present in space in system {sys_id}"),
+            client_error: None,
         })?;
     let planet_anchor_pos = DVec3::new(
         celestial.position.x + 150_000.0,
@@ -354,6 +360,7 @@ pub async fn handle_anchor_skyhook_rpc(
         return Err(BridgeRpcError {
             code: "TooFarFromPlanet".into(),
             message: format!("Ship must be within 500 km of planet {planet_id} orbital anchor point"),
+            client_error: None,
         });
     }
 
@@ -373,6 +380,7 @@ pub async fn handle_anchor_skyhook_rpc(
                 message: format!(
                     "Orbital Skyhooks can only be anchored in sovereign null-sec solar systems (system {sys_id}, security {sys_sec:.2})"
                 ),
+                client_error: None,
             });
         }
         let corp_alliance = snap
@@ -386,6 +394,7 @@ pub async fn handle_anchor_skyhook_rpc(
                 message: format!(
                     "Corporation {corp_id} (alliance {corp_alliance}) does not hold sovereignty in system {sys_id} (held by {sov_alliance})"
                 ),
+                client_error: None,
             });
         }
         if snap
@@ -403,6 +412,7 @@ pub async fn handle_anchor_skyhook_rpc(
             return Err(BridgeRpcError {
                 code: "SkyhookAlreadyExistsAtPlanet".into(),
                 message: format!("Planet {planet_id} already has an anchored Orbital Skyhook"),
+                client_error: None,
             });
         }
         let item_id = if first_arg > 0
@@ -416,23 +426,27 @@ pub async fn handle_anchor_skyhook_rpc(
                 .ok_or_else(|| BridgeRpcError {
                     code: "MissingSkyhookItem".into(),
                     message: format!("Orbital Skyhook item {first_arg} not found"),
+                    client_error: None,
                 })?;
             if it.owner_id != char_id && it.owner_id != corp_id {
                 return Err(BridgeRpcError {
                     code: "ItemOwnershipViolation".into(),
                     message: format!("Character {char_id} does not own Orbital Skyhook item {first_arg}"),
+                    client_error: None,
                 });
             }
             if it.location_id != ship_id || it.flag != InventoryFlag::Cargo {
                 return Err(BridgeRpcError {
                     code: "ItemNotInCargo".into(),
                     message: format!("Orbital Skyhook item {first_arg} must be in active ship cargo"),
+                    client_error: None,
                 });
             }
             if snap.is_item_or_ancestor_locked_or_impounded(first_arg) {
                 return Err(BridgeRpcError {
                     code: "ItemLockedInContractOrJob".into(),
                     message: format!("Orbital Skyhook item {first_arg} is locked in an open contract or industry job"),
+                    client_error: None,
                 });
             }
             first_arg
@@ -454,6 +468,7 @@ pub async fn handle_anchor_skyhook_rpc(
                     message: format!(
                         "Anchoring requires an unlocked Orbital Skyhook item (type {TYPE_ORBITAL_SKYHOOK}) in ship cargo"
                     ),
+                    client_error: None,
                 })?
         };
         let item_owner = snap.items.get(&item_id).map(|it| it.owner_id).unwrap_or(char_id);
@@ -465,6 +480,7 @@ pub async fn handle_anchor_skyhook_rpc(
         .map_err(|e| BridgeRpcError {
             code: "InventoryError".into(),
             message: e.to_string(),
+            client_error: None,
         })?;
         snap.next_entity_id += 1;
         let id = snap.next_entity_id;
@@ -572,6 +588,7 @@ pub fn apply_skyhook_weapon_damage(
         return Err(BridgeRpcError {
             code: "InvalidDamage".into(),
             message: "Weapon damage must be a finite number".into(),
+            client_error: None,
         });
     }
     let q = damage.max(0.0) * 0.25;
@@ -593,6 +610,7 @@ pub fn apply_skyhook_weapon_damage_typed(
         return Err(BridgeRpcError {
             code: "InvalidDamage".into(),
             message: "Weapon damage components must be finite numbers".into(),
+            client_error: None,
         });
     }
     let [r_em, r_th, r_ki, r_ex] = skyhook_shield_resonances(&ctx.sde);
@@ -608,17 +626,20 @@ pub fn apply_skyhook_weapon_damage_typed(
             let st = snap.structures.get_mut(&skyhook_id).ok_or_else(|| BridgeRpcError {
                 code: "StructureNotFound".into(),
                 message: format!("Orbital Skyhook {skyhook_id} not found"),
+                client_error: None,
             })?;
             if st.state == "Destroyed" {
                 return Err(BridgeRpcError {
                     code: "StructureDestroyed".into(),
                     message: format!("Orbital Skyhook {skyhook_id} is destroyed"),
+                    client_error: None,
                 });
             }
             if st.state == "ArmorReinforced" && now < st.reinforced_until_unix {
                 return Err(BridgeRpcError {
                     code: "StructureInvulnerable".into(),
                     message: format!("Orbital Skyhook {skyhook_id} is reinforced"),
+                    client_error: None,
                 });
             }
             st.last_damage_unix = now;
@@ -694,6 +715,7 @@ pub async fn handle_skyhook_component_call(
         .ok_or_else(|| BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: format!("Ship {ship_id} is not present in space in system {sys_id}"),
+            client_error: None,
         })?;
     let cs = sys_handle
         .get_combat_state(ship_id)
@@ -705,6 +727,7 @@ pub async fn handle_skyhook_component_call(
         return Err(BridgeRpcError {
             code: "CannotLinkWhileCloaked".into(),
             message: "Cannot link with Orbital Skyhook while cloaked".into(),
+            client_error: None,
         });
     }
 
@@ -715,6 +738,7 @@ pub async fn handle_skyhook_component_call(
         .ok_or_else(|| BridgeRpcError {
             code: "SkyhookNotFound".into(),
             message: format!("Orbital Skyhook {skyhook_id} not found"),
+            client_error: None,
         })?;
     if skyhook_st.solar_system_id != sys_id {
         return Err(BridgeRpcError {
@@ -723,6 +747,7 @@ pub async fn handle_skyhook_component_call(
                 "Orbital Skyhook {skyhook_id} is in system {}, caller is in {sys_id}",
                 skyhook_st.solar_system_id
             ),
+            client_error: None,
         });
     }
     let skyhook_pos = if let Some((_, b)) = sys_handle.get_ball_snapshot(skyhook_id).await.ok().flatten() {
@@ -737,6 +762,7 @@ pub async fn handle_skyhook_component_call(
             message: format!(
                 "Ship is {dist:.1} m from Orbital Skyhook {skyhook_id} (must be <= {SKYHOOK_SILO_LINK_RANGE_M:.0} m)"
             ),
+            client_error: None,
         });
     }
 
@@ -750,6 +776,7 @@ pub async fn handle_skyhook_component_call(
                         "Ship hull type {} cannot link to a Skyhook Reagent Silo (requires Cruiser+ or Upwell Hauler)",
                         ship_ball.type_id
                     ),
+                    client_error: None,
                 });
             }
             let max_shield = SKYHOOK_BASE_SHIELD_HP;
@@ -760,6 +787,7 @@ pub async fn handle_skyhook_component_call(
                         "Orbital Skyhook {skyhook_id} shield HP ({:.1}/{max_shield:.1}) must be damaged to <= 10% before Reagent Silo linking",
                         skyhook_st.shield_hp
                     ),
+                    client_error: None,
                 });
             }
             let completes_at = now + SKYHOOK_SILO_LINK_DURATION_SECS;
@@ -786,6 +814,7 @@ pub async fn handle_skyhook_component_call(
                         message: format!(
                             "Skyhook {skyhook_id} is outside its reagent theft vulnerability window"
                         ),
+                        client_error: None,
                     });
                 }
                 if let Some(&(_, existing_ship, until, _)) =
@@ -797,6 +826,7 @@ pub async fn handle_skyhook_component_call(
                             message: format!(
                                 "Skyhook {skyhook_id} is already linked by ship {existing_ship}"
                             ),
+                            client_error: None,
                         });
                     }
                 }
@@ -812,6 +842,7 @@ pub async fn handle_skyhook_component_call(
                         message: format!(
                             "Skyhook {skyhook_id} insecure bay has no maturing reagents to steal"
                         ),
+                        client_error: None,
                     });
                 }
                 snap.sov_runtime.skyhook_silo_links.insert(
@@ -859,6 +890,7 @@ pub async fn handle_skyhook_component_call(
                 return Err(BridgeRpcError {
                     code: "NotAuthorisedForSkyhookExtraction".into(),
                     message: "Only owning corporation Directors or Station Managers may extract secured Skyhook reagents".into(),
+                    client_error: None,
                 });
             }
             let req_qty_opt = args.get(4).and_then(|a| a.as_i64()).filter(|&q| q > 0).map(|q| q as u64);
@@ -872,11 +904,13 @@ pub async fn handle_skyhook_component_call(
                     .ok_or_else(|| BridgeRpcError {
                         code: "SkyhookReagentBayNotFound".into(),
                         message: format!("Skyhook {skyhook_id} has no reagent bay"),
+                        client_error: None,
                     })?;
                 if entry.1 == 0 {
                     return Err(BridgeRpcError {
                         code: "NoSecuredReagentsAvailable".into(),
                         message: format!("Skyhook {skyhook_id} has 0 secured reagents available"),
+                        client_error: None,
                     });
                 }
                 let unit_vol = ctx
@@ -893,6 +927,7 @@ pub async fn handle_skyhook_component_call(
                         message: format!(
                             "Active ship {ship_id} does not have enough free cargo capacity to extract Skyhook reagents"
                         ),
+                        client_error: None,
                     });
                 }
                 let take = req_qty_opt.unwrap_or(entry.1).min(entry.1).min(max_units);
@@ -929,6 +964,7 @@ pub async fn handle_skyhook_component_call(
         _ => Err(BridgeRpcError {
             code: "UnsupportedComponentCall".into(),
             message: format!("Unsupported Skyhook component call {comp_name}.{comp_method}"),
+            client_error: None,
         }),
     }
 }

@@ -323,6 +323,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "GetESSSystemDetails requires solarSystemID".into(),
+                    client_error: None,
                 }));
             };
             let now_u = ctx.now_unix();

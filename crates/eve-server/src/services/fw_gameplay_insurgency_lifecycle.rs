@@ -267,6 +267,7 @@ pub fn resolve_insurgency_campaign_in_snap(
         .ok_or_else(|| BridgeRpcError {
             code: "CampaignNotFound".into(),
             message: format!("Insurgency campaign {campaign_id} not found"),
+            client_error: None,
         })?;
     let pirate_fac = camp.pirate_faction_id;
     let fob_sys = camp.fob_solar_system_id;

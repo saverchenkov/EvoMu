@@ -13,10 +13,12 @@ pub fn parse_mission_id(args: &[PyRep]) -> Result<u32, BridgeRpcError> {
     let raw = args.first().and_then(|a| a.as_i64()).ok_or_else(|| BridgeRpcError {
         code: "InvalidMissionId".into(),
         message: "mission_id argument is required".into(),
+        client_error: None,
     })?;
     u32::try_from(raw).map_err(|_| BridgeRpcError {
         code: "InvalidMissionId".into(),
         message: format!("mission_id {raw} is out of valid u32 range"),
+        client_error: None,
     })
 }
 
@@ -515,6 +517,7 @@ pub fn resolve_target_mission_id(
         message: format!(
             "No matching active mission found for character {char_id} and agent {agent_id}"
         ),
+        client_error: None,
     })
 }
 
@@ -583,6 +586,7 @@ pub async fn abandon_or_decline_mission(
                         message: format!(
                             "Mission {mission_id} is not active or offered for character {char_id}"
                         ),
+                        client_error: None,
                     });
                 };
                 if !matches!(m.state.as_str(), "Offered" | "Accepted") {
@@ -592,6 +596,7 @@ pub async fn abandon_or_decline_mission(
                             "Mission {mission_id} is in terminal state '{}' and cannot be abandoned",
                             m.state
                         ),
+                        client_error: None,
                     });
                 }
                 was_accepted = m.state == "Accepted";
@@ -791,6 +796,7 @@ pub fn resolve_courier_mission_details(
     }).ok_or_else(|| BridgeRpcError {
         code: "InvalidMissionLocation".into(),
         message: format!("Agent {} has no station or solar system in SDE", agent.agent_id),
+        client_error: None,
     })?;
 
     let agent_sys = agent.solar_system_id.or_else(|| {
@@ -798,6 +804,7 @@ pub fn resolve_courier_mission_details(
     }).ok_or_else(|| BridgeRpcError {
         code: "AgentMissingSolarSystem".into(),
         message: format!("Agent {} has no resolvable solar system in SDE", agent.agent_id),
+        client_error: None,
     })?;
     let agent_constellation = ctx.sde.solar_systems.get(&agent_sys).map(|s| s.constellation_id);
 
@@ -850,6 +857,7 @@ pub fn resolve_courier_mission_details(
                 .ok_or_else(|| BridgeRpcError {
                     code: "NoDestinationStationAvailable".into(),
                     message: format!("No destination station available for courier mission {}", tmpl.mission_id),
+                    client_error: None,
                 })?
         }
     };

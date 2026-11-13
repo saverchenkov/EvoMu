@@ -20,6 +20,7 @@ macro_rules! require_cid {
                 return Some(Err(BridgeRpcError {
                     code: "AuthenticationRequired".into(),
                     message: "Character authentication required for tourney operation".into(),
+                    client_error: None,
                 }))
             }
         }
@@ -129,6 +130,7 @@ pub async fn handle(
                     Err(BridgeRpcError {
                         code: "AccessDenied".into(),
                         message: "Caller is not an authorized tournament referee or GM".into(),
+                        client_error: None,
                     })
                 }
             });
@@ -139,6 +141,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidLocation".into(),
                     message: "Caller location unknown and no arena match system available".into(),
+                    client_error: None,
                 }));
             }
 
@@ -151,6 +154,7 @@ pub async fn handle(
                 let ch = snap.characters.get_mut(&caller_cid).ok_or_else(|| BridgeRpcError {
                     code: "CharacterNotFound".into(),
                     message: "Character not found".into(),
+                    client_error: None,
                 })?;
                 old_sys = ch.solar_system_id;
                 old_st = ch.station_id;
@@ -266,6 +270,7 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),
                         message: "Caller is not an authorized tournament referee or GM".into(),
+                        client_error: None,
                     });
                 }
 

@@ -64,6 +64,7 @@ pub fn spend_analysis_kredits_in_snap(
         return Err(BridgeRpcError {
             code: "InvalidAmount".into(),
             message: "Analysis Kredits spend amount must be positive".into(),
+            client_error: None,
         });
     }
     let state = snap
@@ -78,6 +79,7 @@ pub fn spend_analysis_kredits_in_snap(
                 "Insufficient Analysis Kredits (required {amount}, available {})",
                 state.analysis_kredits
             ),
+            client_error: None,
         });
     }
     state.analysis_kredits -= amount;
@@ -678,6 +680,7 @@ pub fn handle_project_discovery(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidTaskId".into(),
                     message: "Invalid task_id format".into(),
+                    client_error: None,
                 }));
             };
 
@@ -745,6 +748,7 @@ pub fn handle_project_discovery(
                         return Some(Err(BridgeRpcError {
                             code: "InvalidTaskId".into(),
                             message: "Task identifier must contain a positive numeric task index".into(),
+                            client_error: None,
                         }));
                     }
                     (format!("task_{i}"), *i)
@@ -763,6 +767,7 @@ pub fn handle_project_discovery(
                             return Some(Err(BridgeRpcError {
                                 code: "InvalidTaskId".into(),
                                 message: "Task identifier must contain a positive numeric task index".into(),
+                                client_error: None,
                             }));
                         }
                     }
@@ -771,6 +776,7 @@ pub fn handle_project_discovery(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidTaskId".into(),
                         message: "Task identifier must contain a positive numeric task index".into(),
+                        client_error: None,
                     }));
                 }
             };
@@ -947,6 +953,7 @@ pub fn handle_project_discovery_slash(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArguments".into(),
                     message: "Usage: /pd config <xp_per_rank> <tutorial_xp> <acc_xp> <inacc_xp> <ak> [max_bonus]".into(),
+                    client_error: None,
                 }));
             };
             ctx.db.with_mut_snapshot(|snap| {
@@ -968,6 +975,7 @@ pub fn handle_project_discovery_slash(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArguments".into(),
                     message: "Usage: /pd consensus <task_index> <true|false>".into(),
+                    client_error: None,
                 }));
             };
             ctx.db.with_mut_snapshot(|snap| {
@@ -983,6 +991,7 @@ pub fn handle_project_discovery_slash(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArguments".into(),
                     message: "Usage: /pd bonus <max_bonus>".into(),
+                    client_error: None,
                 }));
             };
             ctx.db.with_mut_snapshot(|snap| {
@@ -993,6 +1002,7 @@ pub fn handle_project_discovery_slash(
         _ => Some(Err(BridgeRpcError {
             code: "InvalidArguments".into(),
             message: "Usage: /pd <config|consensus|bonus> ...".into(),
+            client_error: None,
         })),
     }
 }

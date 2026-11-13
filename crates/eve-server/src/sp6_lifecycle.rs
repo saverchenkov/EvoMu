@@ -888,6 +888,7 @@ pub fn require_no_pvp_timer_for_filament(
             code: "PvpTimerActive".into(),
             message: "Cannot activate filament while a 15-minute Capsuleer Log-Off (PvP) timer is active"
                 .into(),
+            client_error: None,
         });
     }
     let has_safe_logoff = with_sp6_state(&ctx.db, |st| {
@@ -899,6 +900,7 @@ pub fn require_no_pvp_timer_for_filament(
         return Err(BridgeRpcError {
             code: "LogoffTimerActive".into(),
             message: "Cannot activate filament while a safe-logoff countdown timer is active".into(),
+            client_error: None,
         });
     }
     Ok(())
@@ -918,6 +920,7 @@ pub fn require_ship_ready_for_filament_jump(
         return Err(BridgeRpcError {
             code: "WeaponsTimerActive".into(),
             message: "Cannot activate filament while a Weapons Timer is active".into(),
+            client_error: None,
         });
     }
     crate::services::space_nav_movement_guard::validate_pre_movement_locks(
@@ -939,6 +942,7 @@ pub fn require_ship_ready_for_filament_jump(
                     "Cannot activate filament while 10s session-change timer ({}) is active",
                     active_timer.reason
                 ),
+                client_error: None,
             });
         }
     }
@@ -947,6 +951,7 @@ pub fn require_ship_ready_for_filament_jump(
         return Err(BridgeRpcError {
             code: "WarpScrambled".into(),
             message: "Cannot activate filament while warp scrambled or disrupted".into(),
+            client_error: None,
         });
     }
     if let Ok(bp) = sys_handle.ballpark.read() {
@@ -955,6 +960,7 @@ pub fn require_ship_ready_for_filament_jump(
                 return Err(BridgeRpcError {
                     code: "ShipInWarp".into(),
                     message: "Cannot activate filament while ship is mid-warp".into(),
+                    client_error: None,
                 });
             }
         }
@@ -963,18 +969,21 @@ pub fn require_ship_ready_for_filament_jump(
                 return Err(BridgeRpcError {
                     code: "DisruptiveLanceDebuffActive".into(),
                     message: "Cannot activate filament while disrupted by a Superweapon Lance".into(),
+                    client_error: None,
                 });
             }
             if cs.warp_scramble_strength > 0 {
                 return Err(BridgeRpcError {
                     code: "WarpScrambled".into(),
                     message: "Cannot activate filament while warp scrambled".into(),
+                    client_error: None,
                 });
             }
             if cs.is_warp_exit_invulnerable() || (cs.gate_cloak_remaining_ticks > 0 && cs.is_invulnerable()) {
                 return Err(BridgeRpcError {
                     code: "ShipInvulnerable".into(),
                     message: "Cannot activate filament while session-change or warp-exit invulnerability is active".into(),
+                    client_error: None,
                 });
             }
         }
@@ -1908,10 +1917,10 @@ pub async fn handle_cmd_reconnect_to_drones(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let Some(ship_id) = session.ship_id else {
-        return Err(BridgeRpcError { code: "NoActiveShip".into(), message: "Session has no active ship".into() });
+        return Err(BridgeRpcError { code: "NoActiveShip".into(), message: "Session has no active ship".into(), client_error: None });
     };
     let Some(sys_id) = session.solar_system_id else {
-        return Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() });
+        return Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into(), client_error: None });
     };
     if let Err(e) = crate::services::tourney_service::check_tourney_drone_restricted(ctx, sys_id, char_id) {
         return Err(e);

@@ -46,11 +46,12 @@ pub(crate) fn handle_corp_medals(
             let medal_fee = IskCents::from_isk(5_000_000);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(ch) = snap.characters.get_mut(&char_id) else {
-                    return Err(BridgeRpcError { code: "CharacterNotFound".into(), message: "Character not found".into() });
+                    return Err(BridgeRpcError { code: "CharacterNotFound".into(), message: "Character not found".into(), client_error: None });
                 };
                 ch.balance = ch.balance.checked_sub(medal_fee).ok_or_else(|| BridgeRpcError {
                     code: "InsufficientFunds".into(),
                     message: "Creating a corporation medal costs 5,000,000 ISK".into(),
+                    client_error: None,
                 })?;
                 let max_gov = snap
                     .corp_governance
@@ -347,7 +348,7 @@ pub(crate) fn handle_medal_queries(
                         ]));
                     }
                 }
-                Err(BridgeRpcError { code: "MedalNotFound".into(), message: format!("Medal {medal_id} not found") })
+                Err(BridgeRpcError { code: "MedalNotFound".into(), message: format!("Medal {medal_id} not found"), client_error: None })
             });
             Some(res)
         }
@@ -444,6 +445,7 @@ pub(crate) fn handle_corp_bulletins(
         return Some(Err(BridgeRpcError {
             code: "CorpRoleDenied".into(),
             message: "Managing corporation bulletins requires Communications Officer or Director role".into(),
+            client_error: None,
         }));
     }
     match method {
@@ -455,7 +457,7 @@ pub(crate) fn handle_corp_bulletins(
                 if is_alliance {
                     let aid = session.alliance_id.unwrap_or(0);
                     if !snap.alliances.get(&aid).is_some_and(|a| a.executor_corp_id == corp_id) {
-                        return Err(BridgeRpcError { code: "NotAllianceExecutor".into(), message: "Managing alliance bulletins requires Executor corporation privileges".into() });
+                        return Err(BridgeRpcError { code: "NotAllianceExecutor".into(), message: "Managing alliance bulletins requires Executor corporation privileges".into(), client_error: None });
                     }
                     let meta = snap.alliance_war_state.alliances.entry(aid).or_default();
                     let state = snap.corp_governance.entry(aid).or_default();
@@ -494,7 +496,7 @@ pub(crate) fn handle_corp_bulletins(
                 let owner_key = if is_alliance {
                     let aid = session.alliance_id.unwrap_or(0);
                     if !snap.alliances.get(&aid).is_some_and(|a| a.executor_corp_id == corp_id) {
-                        return Err(BridgeRpcError { code: "NotAllianceExecutor".into(), message: "Managing alliance bulletins requires Executor corporation privileges".into() });
+                        return Err(BridgeRpcError { code: "NotAllianceExecutor".into(), message: "Managing alliance bulletins requires Executor corporation privileges".into(), client_error: None });
                     }
                     aid
                 } else {
@@ -547,7 +549,7 @@ pub(crate) fn handle_corp_bulletins(
                 });
                 if let Some(aid) = aid_opt {
                     if !snap.alliances.get(&aid).is_some_and(|a| a.executor_corp_id == corp_id) {
-                        return Err(BridgeRpcError { code: "NotAllianceExecutor".into(), message: "Deleting alliance bulletins requires Executor corporation privileges".into() });
+                        return Err(BridgeRpcError { code: "NotAllianceExecutor".into(), message: "Deleting alliance bulletins requires Executor corporation privileges".into(), client_error: None });
                     }
                     let mut removed = false;
                     if let Some(s) = snap.corp_governance.get_mut(&aid) {
@@ -561,12 +563,12 @@ pub(crate) fn handle_corp_bulletins(
                         removed |= m.bulletins.len() != before;
                     }
                     if !removed {
-                        return Err(BridgeRpcError { code: "BulletinNotFound".into(), message: format!("Bulletin {bid} not found") });
+                        return Err(BridgeRpcError { code: "BulletinNotFound".into(), message: format!("Bulletin {bid} not found"), client_error: None });
                     }
                     Ok(())
                 } else {
                     if explicit_alliance {
-                        return Err(BridgeRpcError { code: "NotAllianceExecutor".into(), message: "Deleting alliance bulletins requires Executor corporation privileges".into() });
+                        return Err(BridgeRpcError { code: "NotAllianceExecutor".into(), message: "Deleting alliance bulletins requires Executor corporation privileges".into(), client_error: None });
                     }
                     let removed = snap.corp_governance.get_mut(&corp_id).map(|s| {
                         let before = s.bulletins.len();
@@ -574,7 +576,7 @@ pub(crate) fn handle_corp_bulletins(
                         s.bulletins.len() != before
                     }).unwrap_or(false);
                     if !removed {
-                        return Err(BridgeRpcError { code: "BulletinNotFound".into(), message: format!("Bulletin {bid} not found") });
+                        return Err(BridgeRpcError { code: "BulletinNotFound".into(), message: format!("Bulletin {bid} not found"), client_error: None });
                     }
                     Ok(())
                 }

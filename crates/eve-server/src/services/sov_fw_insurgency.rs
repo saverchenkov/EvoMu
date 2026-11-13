@@ -498,6 +498,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidWarFaction".into(),
                     message: "Joining Factional Warfare requires an explicit integer factionID".into(),
+                    client_error: None,
                 }));
             };
             // Militia factions are derived from the SDE (factions with a militia corporation).
@@ -505,6 +506,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidWarFaction".into(),
                     message: format!("Faction {faction_id} is not a valid FW/Insurgency militia faction"),
+                    client_error: None,
                 }));
             }
             let militia_corp_opt = ctx
@@ -521,6 +523,7 @@ pub async fn handle(
                         return Err(BridgeRpcError {
                             code: "FwEnlistmentCooldown".into(),
                             message: "Direct enlistment cooldown is still active".into(),
+                            client_error: None,
                         });
                     }
                 }
@@ -528,6 +531,7 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "CharacterNotFound".into(),
                         message: "Character not found".into(),
+                        client_error: None,
                     });
                 };
                 let old_corp_id = ch.corporation_id;
@@ -536,12 +540,14 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "FwAlreadyEnlisted".into(),
                         message: "Character is already enlisted in Factional Warfare".into(),
+                        client_error: None,
                     });
                 }
                 if ch.standings.get(&faction_id).copied().unwrap_or(0.0) < 0.0 {
                     return Err(BridgeRpcError {
                         code: "FwStandingTooLow".into(),
                         message: "Standing with militia faction is below 0.0".into(),
+                        client_error: None,
                     });
                 }
                 if let Some(allowed) = store.corp_allowed.get(&old_corp_id) {
@@ -549,6 +555,7 @@ pub async fn handle(
                         return Err(BridgeRpcError {
                             code: "FwFactionNotAllowedByCorp".into(),
                             message: "Corporation does not allow direct enlistment into this faction".into(),
+                            client_error: None,
                         });
                     }
                 }
@@ -617,6 +624,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "ShipDocked".into(),
                     message: "Cannot claim sovereignty or acquire skyhooks while docked".into(),
+                    client_error: None,
                 }));
             }
             let sys_id = args
@@ -629,6 +637,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solar system".into(),
+                    client_error: None,
                 }));
             };
             let sys_sec = ctx
@@ -643,6 +652,7 @@ pub async fn handle(
                     message: format!(
                         "Solar system {sys_id} (security {sys_sec:.2}) is not a claimable null-sec system"
                     ),
+                    client_error: None,
                 }));
             }
 
@@ -689,6 +699,7 @@ pub async fn handle(
                                     "Ship is {:.1} m from nearest friendly sovereignty structure (must be <= 50000 m)",
                                     min_dist
                                 ),
+                                client_error: None,
                             }));
                         }
                     }
@@ -816,6 +827,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "GetSystemSovereigntyInfo requires a valid solarSystemID argument or active session solar system".into(),
+                    client_error: None,
                 }));
             };
             let (alliance_id, corp_id, hub_id, claim_id, contested, adm) =
@@ -883,6 +895,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "GetInfrastructureHubInfo requires a valid solarSystemID argument or active session solar system".into(),
+                    client_error: None,
                 }));
             };
             let (hub_id, owner_corp, alliance_id, mil_idx, ind_idx, strat_idx, prosp_lvl, online) =
@@ -949,6 +962,7 @@ pub async fn handle(
                         return Some(Err(BridgeRpcError {
                             code: "InvalidSolarSystemID".into(),
                             message: "GetSovStructuresInfoForSolarSystem received an invalid solarSystemID".into(),
+                            client_error: None,
                         }));
                     }
                 },
@@ -958,6 +972,7 @@ pub async fn handle(
                         return Some(Err(BridgeRpcError {
                             code: "NoSolarSystem".into(),
                             message: "GetSovStructuresInfoForSolarSystem requires a valid solarSystemID argument or active session solar system".into(),
+                            client_error: None,
                         }));
                     }
                 },
@@ -1082,6 +1097,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solar system".into(),
+                    client_error: None,
                 }));
             };
             let (alliance_id, hub_id, prosp_lvl, structs_list) = ctx.db.with_snapshot(|snap| {

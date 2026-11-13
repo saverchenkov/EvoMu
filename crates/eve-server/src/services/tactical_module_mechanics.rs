@@ -54,6 +54,7 @@ pub fn validate_module_fitting_constraints(
                     "UserError: Heavy Stasis Grappler cannot be fitted to {} (group {})",
                     ship_t.name, ship_t.group_id
                 ),
+                client_error: None,
             });
         }
     }
@@ -96,6 +97,7 @@ pub fn validate_module_fitting_constraints(
                     "UserError: MaxGroupFittedExceeded — maximum of {} {} can be fitted per ship",
                     max_count, mod_t.name
                 ),
+                client_error: None,
             });
         }
     }
@@ -137,6 +139,7 @@ pub async fn activate_interdiction_sphere_launcher(
             message: format!(
                 "Interdiction sphere probes can only be launched in null-sec or wormhole space (system {sys_id} security {sys_sec:.2} > 0.0)"
             ),
+            client_error: None,
         });
     }
     let ship_group_id = ctx
@@ -149,6 +152,7 @@ pub async fn activate_interdiction_sphere_launcher(
         return Err(BridgeRpcError {
             code: "InvalidShipGroup".into(),
             message: "Interdiction Sphere Launcher can only be activated on Interdictors (group 541)".into(),
+            client_error: None,
         });
     }
 
@@ -156,6 +160,7 @@ pub async fn activate_interdiction_sphere_launcher(
         return Err(BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: format!("Active ship {ship_id} is not in space in solar system {sys_id}"),
+            client_error: None,
         });
     };
     let ship_pos = ship_ball.position;
@@ -180,6 +185,7 @@ pub async fn activate_interdiction_sphere_launcher(
                     message: format!(
                         "Interdiction Sphere Launcher firing cadence ({cadence_s:.0}s) has not elapsed"
                     ),
+                    client_error: None,
                 });
             }
         }
@@ -205,6 +211,7 @@ pub async fn activate_interdiction_sphere_launcher(
         return Err(BridgeRpcError {
             code: "NoProbesLoaded".into(),
             message: "Interdiction Sphere Launcher has no Warp Disrupt Probe loaded".into(),
+            client_error: None,
         });
     };
 
@@ -257,6 +264,7 @@ pub async fn activate_interdiction_sphere_launcher(
                         code: "NoProbesLoaded".into(),
                         message: "Interdiction Sphere Launcher has no Warp Disrupt Probe loaded"
                             .into(),
+                        client_error: None,
                     });
                 }
             };
@@ -283,6 +291,7 @@ pub async fn activate_interdiction_sphere_launcher(
                         message: format!(
                             "Not enough cargo space to return {excess} excess probe(s) (free: {free_m3:.2} m3)"
                         ),
+                        client_error: None,
                     });
                 }
                 if let Some(ci) = snap.items.get_mut(&charge_item_id) {
@@ -340,6 +349,7 @@ pub async fn activate_interdiction_sphere_launcher(
                         return Err(BridgeRpcError {
                             code: "InventoryError".into(),
                             message: e.to_string(),
+                            client_error: None,
                         });
                     }
                 }
@@ -347,6 +357,7 @@ pub async fn activate_interdiction_sphere_launcher(
                 return Err(BridgeRpcError {
                     code: "NoProbesLoaded".into(),
                     message: "Interdiction Sphere Launcher has no Warp Disrupt Probe loaded.".into(),
+                    client_error: None,
                 });
             };
             let mut reloaded_qty = 0;
@@ -483,6 +494,7 @@ pub async fn activate_interdiction_sphere_launcher(
         return Err(BridgeRpcError {
             code: "SystemActorError".into(),
             message: e,
+            client_error: None,
         });
     }
     if !is_wubble_probe {
@@ -497,6 +509,7 @@ pub async fn activate_interdiction_sphere_launcher(
             return Err(BridgeRpcError {
                 code: "SystemActorError".into(),
                 message: e,
+                client_error: None,
             });
         }
     }

@@ -224,7 +224,7 @@ pub(crate) fn ship_cyno_activity_expiry_unix(ctx: &ServerContext, ship_id: i64) 
 }
 
 fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
-    BridgeRpcError { code: code.into(), message: message.into() }
+    BridgeRpcError { code: code.into(), message: message.into(), client_error: None }
 }
 
 fn type_attr(ctx: &ServerContext, t: &eve_sde::InvType, aid: AttributeId) -> f64 {
@@ -839,6 +839,7 @@ pub async fn relocate_ship(
         return Err(BridgeRpcError {
             code: "SessionChangeTimerActive".into(),
             message: "Session change timer is active".into(),
+            client_error: None,
         });
     }
 
@@ -856,6 +857,7 @@ pub async fn relocate_ship(
         let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
             code: "CharacterNotFound".into(),
             message: format!("Character {char_id} not found"),
+            client_error: None,
         })?;
         if ch.station_id.is_some()
             || ch.structure_id.is_some()
@@ -865,6 +867,7 @@ pub async fn relocate_ship(
             return Err(BridgeRpcError {
                 code: "SystemTransitionFailed".into(),
                 message: format!("Character {char_id} is no longer undocked in solar system {from_sys}"),
+                client_error: None,
             });
         }
         ch.jump_fatigue_minutes = fat_min;
@@ -1015,6 +1018,7 @@ pub(super) async fn relocate_caller(
         return Err(BridgeRpcError {
             code: "SystemTransitionFailed".into(),
             message: format!("Ship {ship_id} is no longer in solar system {from_sys}"),
+            client_error: None,
         });
     }
     let (cd_min, fat_min) = relocate_ship(ctx, char_id, ship_id, from_sys, to_sys, pos, dist_ly, fatigue_mult).await?;

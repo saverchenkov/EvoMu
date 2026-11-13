@@ -216,6 +216,7 @@ fn parse_optional_password(rep: Option<&PyRep>, field: &str) -> Result<Option<St
         Some(_) => Err(BridgeRpcError {
             code: "InvalidPassword".into(),
             message: format!("Container {field} must be a string or None"),
+            client_error: None,
         }),
     }
 }
@@ -260,6 +261,7 @@ pub(crate) async fn handle_set_password(
         return Err(BridgeRpcError {
             code: "InvalidPasswordType".into(),
             message: format!("Invalid container password slot {which}; expected 1 or 2"),
+            client_error: None,
         });
     }
     let password = parse_optional_password(pw_arg, "password")?.unwrap_or_default();
@@ -295,12 +297,14 @@ pub(crate) async fn handle_set_password(
         let item = snap.items.get(&container_id).ok_or_else(|| BridgeRpcError {
             code: "ItemNotFound".into(),
             message: format!("Secure container {container_id} not found or not owned"),
+            client_error: None,
         })?;
         if item.owner_id != char_id {
             if corp_id == 0 || item.owner_id != corp_id {
                 return Err(BridgeRpcError {
                     code: "ItemNotFound".into(),
                     message: format!("Secure container {container_id} not found or not owned"),
+                    client_error: None,
                 });
             }
             let (is_ceo, eff_role) =
@@ -309,6 +313,7 @@ pub(crate) async fn handle_set_password(
                 return Err(BridgeRpcError {
                     code: "CorpRoleRequired".into(),
                     message: "Corporation role required to configure corp container password".into(),
+                    client_error: None,
                 });
             }
         }
@@ -320,6 +325,7 @@ pub(crate) async fn handle_set_password(
             return Err(BridgeRpcError {
                 code: "ContainerDoesNotSupportPassword".into(),
                 message: format!("Container {container_id} (group {grp_id}) does not support passwords"),
+                client_error: None,
             });
         }
         if let Some((sys_id, ref sb_opt, cloaked, ref cb_opt)) = in_space_balls {
@@ -327,28 +333,33 @@ pub(crate) async fn handle_set_password(
                 let (_, sb) = sb_opt.as_ref().ok_or_else(|| BridgeRpcError {
                     code: "ShipNotInSpace".into(),
                     message: "Active ship is not spawned in space".into(),
+                    client_error: None,
                 })?;
                 if cloaked || matches!(sb.mode, eve_destiny::MovementMode::Warp { .. }) {
                     return Err(BridgeRpcError {
                         code: "CannotDoWhileWarpingOrCloaked".into(),
                         message: "Cannot configure container password while warping or cloaked".into(),
+                        client_error: None,
                     });
                 }
                 let (_, cb) = cb_opt.as_ref().ok_or_else(|| BridgeRpcError {
                     code: "ContainerNotInSpace".into(),
                     message: format!("Container {container_id} is not spawned in space"),
+                    client_error: None,
                 })?;
                 let dist = (sb.position.distance(cb.position) - sb.radius - cb.radius).max(0.0);
                 if dist > 2_500.0 {
                     return Err(BridgeRpcError {
                         code: "OutsideOperationalRange".into(),
                         message: format!("Container {container_id} is {dist:.1} m away (must be <= 2500 m)"),
+                        client_error: None,
                     });
                 }
             } else if session.ship_id != Some(item.location_id) {
                 return Err(BridgeRpcError {
                     code: "ColocationRequired".into(),
                     message: "Character must be colocated with container to configure password".into(),
+                    client_error: None,
                 });
             }
         } else if Some(item.location_id) != caller_loc
@@ -358,6 +369,7 @@ pub(crate) async fn handle_set_password(
             return Err(BridgeRpcError {
                 code: "ColocationRequired".into(),
                 message: "Character must be colocated with container to configure password".into(),
+                client_error: None,
             });
         }
 
@@ -371,6 +383,7 @@ pub(crate) async fn handle_set_password(
                 return Err(BridgeRpcError {
                     code: "InvalidPassword".into(),
                     message: "Incorrect old container password".into(),
+                    client_error: None,
                 });
             }
             st.alsc_logs.entry(container_id).or_default().push(fitting_containers_ships::AlscLogEntry {

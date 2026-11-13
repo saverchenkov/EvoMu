@@ -109,6 +109,7 @@ pub(super) fn handle_add_corporation(
         return Some(Err(BridgeRpcError {
             code: "SessionChangeInProgress".into(),
             message: format!("Cannot create corporation while 10s session-change timer ({}) is active", active_timer.reason),
+            client_error: None,
         }));
     }
     let Some(name) = args
@@ -117,7 +118,7 @@ pub(super) fn handle_add_corporation(
         .map(str::trim)
         .filter(|s| !s.is_empty())
     else {
-        return Some(Err(BridgeRpcError { code: "InvalidCorporationName".into(), message: "Corporation name is required".into() }));
+        return Some(Err(BridgeRpcError { code: "InvalidCorporationName".into(), message: "Corporation name is required".into(), client_error: None }));
     };
     let rpc = crate::router::RpcArgs::positional(args);
     let ticker = match rpc.opt_str(1, "ticker") {
@@ -149,26 +150,26 @@ pub(super) fn handle_add_corporation(
     let sess_in_space = session.station_id.is_none() && session.structure_id.is_none() && session.ship_id.is_some();
 
     let res = ctx.db.try_with_mut_snapshot(|snap| {
-        let ch_ro = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found") })?;
+        let ch_ro = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found"), client_error: None })?;
         let invalid_st = session.structure_id.or(ch_ro.structure_id).is_some_and(|sid| {
             snap.structures.get(&sid).is_some_and(|st| matches!(st.state.as_str(), "Destroyed" | "Unanchored"))
         });
         let undocked = ch_ro.station_id.is_none() && ch_ro.structure_id.is_none() && session.station_id.is_none() && session.structure_id.is_none();
         if sess_in_space || undocked || invalid_st {
-            return Err(BridgeRpcError { code: "MustBeDocked".into(), message: "You must be docked in a station or operational structure to create a corporation".into() });
+            return Err(BridgeRpcError { code: "MustBeDocked".into(), message: "You must be docked in a station or operational structure to create a corporation".into(), client_error: None });
         }
         let char_corp_id = ch_ro.corporation_id;
         if snap.corporations.get(&char_corp_id).is_some_and(|c| c.ceo_id == char_id) {
-            return Err(BridgeRpcError { code: "AlreadyCEO".into(), message: "You are already the CEO of a corporation".into() });
+            return Err(BridgeRpcError { code: "AlreadyCEO".into(), message: "You are already the CEO of a corporation".into(), client_error: None });
         }
         if snap.corporations.contains_key(&char_corp_id) {
             if let Some(blocker) = super::fleet_social_corp_tail::member_kick_blocker(snap, char_corp_id, char_id, now_unix) {
-                return Err(BridgeRpcError { code: blocker.into(), message: format!("Cannot leave current corporation to found a new one ({blocker})") });
+                return Err(BridgeRpcError { code: blocker.into(), message: format!("Cannot leave current corporation to found a new one ({blocker})"), client_error: None });
             }
         }
         let corp_mgmt_lvl = snap.skills.get(&char_id).and_then(|m| m.get(&3363)).map(|s| s.level).unwrap_or(0);
         if corp_mgmt_lvl < 1 {
-            return Err(BridgeRpcError { code: "MissingCorporationManagementSkill".into(), message: "Creating a corporation requires Corporation Management (3363) level 1".into() });
+            return Err(BridgeRpcError { code: "MissingCorporationManagementSkill".into(), message: "Creating a corporation requires Corporation Management (3363) level 1".into(), client_error: None });
         }
         if snap
             .corporations
@@ -178,12 +179,14 @@ pub(super) fn handle_add_corporation(
             return Err(BridgeRpcError {
                 code: "CorpNameOrTickerTaken".into(),
                 message: "Corporation name or ticker is already in use".into(),
+                client_error: None,
             });
         }
         let Some(ch) = snap.characters.get_mut(&char_id) else {
             return Err(BridgeRpcError {
                 code: "CharacterNotFound".into(),
                 message: format!("Character {char_id} not found"),
+                client_error: None,
             });
         };
         let old_corp_id = ch.corporation_id;
@@ -191,6 +194,7 @@ pub(super) fn handle_add_corporation(
         let new_bal = ch.balance.checked_sub(reg_fee).ok_or_else(|| BridgeRpcError {
             code: "InsufficientFunds".into(),
             message: "Not enough ISK to pay corporation registration fee (1,599,800 ISK)".into(),
+            client_error: None,
         })?;
         ch.balance = new_bal;
         snap.append_journal(
@@ -351,6 +355,7 @@ pub(super) fn handle_get_wallet_divisions_info(
             return Err(BridgeRpcError {
                 code: "CorporationNotFound".into(),
                 message: format!("Corporation {corp_id} not found"),
+                client_error: None,
             });
         };
         let (is_ceo, caller_role) =
@@ -362,6 +367,7 @@ pub(super) fn handle_get_wallet_divisions_info(
             return Err(BridgeRpcError {
                 code: "CorpRoleDenied".into(),
                 message: "Viewing corporation wallet divisions requires Accountant role".into(),
+                client_error: None,
             });
         }
         let rows: Vec<Vec<PyRep>> = (1..=7u8)
@@ -422,7 +428,7 @@ pub(super) fn handle_corp_gov(
         let dip = dir || (r & corp_roles::ROLE_DIPLOMAT) != 0;
         (dir, comms, dip)
     });
-    let deny_role = |msg: &str| Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: msg.into() }));
+    let deny_role = |msg: &str| Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: msg.into(), client_error: None }));
 
     match (service, method) {
         ("corpRegistry", "MoveCompanyShares") => {
@@ -441,11 +447,12 @@ pub(super) fn handle_corp_gov(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "Share transfer requires positive recipient ID and share count".into(),
+                    client_error: None,
                 }));
             }
             let tx_res = ctx.db.try_with_mut_snapshot(|snap| {
                 if !snap.characters.contains_key(&target_id) && !snap.corporations.contains_key(&target_id) {
-                    return Err(BridgeRpcError { code: "TargetNotFound".into(), message: format!("Share transfer recipient {target_id} does not exist") });
+                    return Err(BridgeRpcError { code: "TargetNotFound".into(), message: format!("Share transfer recipient {target_id} does not exist"), client_error: None });
                 }
                 let state = snap.corp_governance.entry(corp_id).or_default();
                 let from_count = state.shares.entry(corp_id).or_insert(0);
@@ -453,6 +460,7 @@ pub(super) fn handle_corp_gov(
                     return Err(BridgeRpcError {
                         code: "InsufficientShares".into(),
                         message: "Not enough company shares to transfer".into(),
+                        client_error: None,
                     });
                 }
                 let old_f = *from_count;
@@ -522,11 +530,12 @@ pub(super) fn handle_corp_gov(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "Share transfer requires positive recipient ID and share count".into(),
+                    client_error: None,
                 }));
             }
             let tx_res = ctx.db.try_with_mut_snapshot(|snap| {
                 if !snap.characters.contains_key(&target_id) && !snap.corporations.contains_key(&target_id) {
-                    return Err(BridgeRpcError { code: "TargetNotFound".into(), message: format!("Share transfer recipient {target_id} does not exist") });
+                    return Err(BridgeRpcError { code: "TargetNotFound".into(), message: format!("Share transfer recipient {target_id} does not exist"), client_error: None });
                 }
                 let state = snap.corp_governance.entry(target_corp_id).or_default();
                 let from_count = state.shares.entry(char_id).or_insert(0);
@@ -534,6 +543,7 @@ pub(super) fn handle_corp_gov(
                     return Err(BridgeRpcError {
                         code: "InsufficientShares".into(),
                         message: "Not enough shares to transfer".into(),
+                        client_error: None,
                     });
                 }
                 let old_f = *from_count;
@@ -675,16 +685,16 @@ pub(super) fn handle_corp_gov(
             let div_id: u8 = match raw_div {
                 Some(_) => match rpc.req_i64(2, "divisionID") {
                     Ok(val) if (1..=7).contains(&val) => val as u8,
-                    _ => return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Wallet division ID must be between 1 and 7".into() })),
+                    _ => return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Wallet division ID must be between 1 and 7".into(), client_error: None })),
                 },
                 None => 1,
             };
             if total_isk <= 0.0 || !total_isk.is_finite() {
-                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Dividend payout amount must be positive".into() }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Dividend payout amount must be positive".into(), client_error: None }));
             }
             let payout_cents = IskCents::from_f64_isk(total_isk);
             if payout_cents.0 <= 0 {
-                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Dividend payout amount must be positive".into() }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Dividend payout amount must be positive".into(), client_error: None }));
             }
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -692,14 +702,14 @@ pub(super) fn handle_corp_gov(
                     let (is_ceo, caller_role) =
                         snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
                     let Some(corp) = snap.corporations.get_mut(&corp_id) else {
-                        return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
+                        return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found"), client_error: None });
                     };
                     if !is_ceo && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR) {
-                        return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Paying dividends requires CEO or Director role".into() });
+                        return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Paying dividends requires CEO or Director role".into(), client_error: None });
                     }
                     let cur_bal = corp.division_balance(div_id);
                     if cur_bal < payout_cents {
-                        return Err(BridgeRpcError { code: "InsufficientFunds".into(), message: "Insufficient corporation wallet funds for dividend payout".into() });
+                        return Err(BridgeRpcError { code: "InsufficientFunds".into(), message: "Insufficient corporation wallet funds for dividend payout".into(), client_error: None });
                     }
                     let mids: Vec<i64> = corp.members.iter().copied().collect();
                     (cur_bal, mids)
@@ -707,7 +717,7 @@ pub(super) fn handle_corp_gov(
                 let recipients: Vec<(i64, i64)> = if to_shareholders {
                     let state = snap.corp_governance.entry(corp_id).or_default();
                     let shares_snapshot = state.shares.clone();
-                    let total_shares = shares_snapshot.iter().filter(|&(_, &s)| s > 0).try_fold(0i64, |acc, (_, &s)| acc.checked_add(s)).ok_or_else(|| BridgeRpcError { code: "ArithmeticOverflow".into(), message: "Total shares overflowed".into() })?;
+                    let total_shares = shares_snapshot.iter().filter(|&(_, &s)| s > 0).try_fold(0i64, |acc, (_, &s)| acc.checked_add(s)).ok_or_else(|| BridgeRpcError { code: "ArithmeticOverflow".into(), message: "Total shares overflowed".into(), client_error: None })?;
                     if total_shares <= 0 {
                         Vec::new()
                     } else {
@@ -739,7 +749,7 @@ pub(super) fn handle_corp_gov(
                     } else {
                         continue;
                     };
-                    actual_cents = actual_cents.checked_add(cents).ok_or_else(|| BridgeRpcError { code: "ArithmeticOverflow".into(), message: "Dividend cents overflowed".into() })?;
+                    actual_cents = actual_cents.checked_add(cents).ok_or_else(|| BridgeRpcError { code: "ArithmeticOverflow".into(), message: "Dividend cents overflowed".into(), client_error: None })?;
                     credited_count += 1;
                     snap.next_entity_id += 1;
                     snap.wallet_journal.push(WalletJournalEntry {
@@ -751,6 +761,7 @@ pub(super) fn handle_corp_gov(
                 let new_bal_cents = cur_bal.0.checked_sub(actual_cents).ok_or_else(|| BridgeRpcError {
                     code: "InsufficientFunds".into(),
                     message: "Insufficient corporation wallet funds for dividend payout".into(),
+                    client_error: None,
                 })?;
                 let new_bal = IskCents(new_bal_cents);
                 if let Some(corp) = snap.corporations.get_mut(&corp_id) {
@@ -927,16 +938,17 @@ pub(super) fn handle_corp_gov(
             let new_ceo_opt = args.first().and_then(|a| a.as_i64());
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(corp) = snap.corporations.get_mut(&corp_id) else {
-                    return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
+                    return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found"), client_error: None });
                 };
                 if corp.ceo_id != char_id {
-                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only the current CEO can resign".into() });
+                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only the current CEO can resign".into(), client_error: None });
                 }
                 let next_ceo = new_ceo_opt.filter(|&id| id > 0 && id != char_id && corp.members.contains(&id)).unwrap_or(0);
                 if next_ceo == 0 && corp.members.len() > 1 {
                     return Err(BridgeRpcError {
                         code: "InvalidNewCEO".into(),
                         message: "Cannot resign as CEO without designating a valid member successor while corporation has other members".into(),
+                        client_error: None,
                     });
                 }
                 let corp_ally = corp.alliance_id;
@@ -1005,16 +1017,17 @@ pub(super) fn handle_corp_gov(
                 )
             };
             let weight = match ctx.db.try_with_mut_snapshot(|snap| -> Result<i64, BridgeRpcError> {
-                let vc = snap.corp_vote_cases.get(&case_id).ok_or_else(|| BridgeRpcError { code: "VoteCaseNotFound".into(), message: format!("Vote case {case_id} not found") })?;
+                let vc = snap.corp_vote_cases.get(&case_id).ok_or_else(|| BridgeRpcError { code: "VoteCaseNotFound".into(), message: format!("Vote case {case_id} not found"), client_error: None })?;
                 if vc.corporation_id != corp_id
                     || (args.len() >= 3 && args.first().and_then(|a| a.as_i64()).is_some_and(|cid| cid != vc.corporation_id))
                 {
                     return Err(BridgeRpcError {
                         code: "CorpAccessDenied".into(),
                         message: "Vote case belongs to a different corporation".into(),
+                        client_error: None,
                     });
                 }
-                if now_unix > vc.end_ts { return Err(BridgeRpcError { code: "VoteCaseClosed".into(), message: "Voting period has closed for this case".into() }); }
+                if now_unix > vc.end_ts { return Err(BridgeRpcError { code: "VoteCaseClosed".into(), message: "Voting period has closed for this case".into(), client_error: None }); }
                 let vc_corp = vc.corporation_id;
                 let has_any_corp_shares = snap
                     .corp_shareholders
@@ -1044,6 +1057,7 @@ pub(super) fn handle_corp_gov(
                         return Err(BridgeRpcError {
                             code: "CorpAccessDenied".into(),
                             message: "Only corporation shareholders with > 0 shares may vote".into(),
+                            client_error: None,
                         });
                     }
                 };
@@ -1086,18 +1100,19 @@ pub(super) fn handle_corp_gov(
             let mut share_delta: Option<(i64, i64, i64)> = None;
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
                 let (passed, win_param, _) = {
-                    let vc = snap.corp_vote_cases.get(&case_id).ok_or_else(|| BridgeRpcError { code: "VoteCaseNotFound".into(), message: format!("Vote case {case_id} not found") })?;
+                    let vc = snap.corp_vote_cases.get(&case_id).ok_or_else(|| BridgeRpcError { code: "VoteCaseNotFound".into(), message: format!("Vote case {case_id} not found"), client_error: None })?;
                     if vc.corporation_id != corp_id {
                         return Err(BridgeRpcError {
                             code: "CorpAccessDenied".into(),
                             message: "Vote case belongs to a different corporation".into(),
+                            client_error: None,
                         });
                     }
-                    if vc.executed { return Err(BridgeRpcError { code: "VoteAlreadyActivated".into(), message: "Sanctioned action has already been activated".into() }); }
-                    if now_unix < vc.end_ts { return Err(BridgeRpcError { code: "VoteStillOpen".into(), message: "Cannot activate sanctioned action before voting closes".into() }); }
+                    if vc.executed { return Err(BridgeRpcError { code: "VoteAlreadyActivated".into(), message: "Sanctioned action has already been activated".into(), client_error: None }); }
+                    if now_unix < vc.end_ts { return Err(BridgeRpcError { code: "VoteStillOpen".into(), message: "Cannot activate sanctioned action before voting closes".into(), client_error: None }); }
                     eval_vote_case_winner(vc, &snap.corp_vote_ballots)
                 };
-                if !passed { return Err(BridgeRpcError { code: "VoteDidNotPass".into(), message: "Sanctioned action did not pass shareholder vote".into() }); }
+                if !passed { return Err(BridgeRpcError { code: "VoteDidNotPass".into(), message: "Sanctioned action did not pass shareholder vote".into(), client_error: None }); }
                 let (vote_type, vote_text) = {
                     let vc = snap.corp_vote_cases.get(&case_id).unwrap();
                     (vc.vote_type, vc.text.clone())
@@ -1106,6 +1121,7 @@ pub(super) fn handle_corp_gov(
                     return Err(BridgeRpcError {
                         code: "InvalidShareCount".into(),
                         message: "Sanctioned share creation requires a positive share count".into(),
+                        client_error: None,
                     });
                 }
                 let mut item_lock_flag_update: Option<eve_db::InventoryFlag> = None;
@@ -1118,6 +1134,7 @@ pub(super) fn handle_corp_gov(
                                 return Err(BridgeRpcError {
                                     code: "ItemLocked".into(),
                                     message: format!("Item {win_param} is not owned by corporation {corp_id}"),
+                                    client_error: None,
                                 });
                             }
                         } else {
@@ -1125,6 +1142,7 @@ pub(super) fn handle_corp_gov(
                                 return Err(BridgeRpcError {
                                     code: "ItemLocked".into(),
                                     message: format!("Item {win_param} is locked in an active contract or job"),
+                                    client_error: None,
                                 });
                             }
                             if matches!(it.flag, eve_db::InventoryFlag::Impounded)
@@ -1134,12 +1152,14 @@ pub(super) fn handle_corp_gov(
                                 return Err(BridgeRpcError {
                                     code: if it.flag as u16 == 72 { "ImpoundedItem" } else { "AssetSafetyLocked" }.into(),
                                     message: format!("Item {win_param} cannot be modified by vote while impounded or in asset safety"),
+                                    client_error: None,
                                 });
                             }
                             if matches!(it.flag as u16, 11..=34 | 92..=94 | 125..=133 | 164..=172 | 180) {
                                 return Err(BridgeRpcError {
                                     code: "ItemLocked".into(),
                                     message: format!("Fitted/structural item {win_param} cannot be altered by item lock vote"),
+                                    client_error: None,
                                 });
                             }
                             if let Some(parent) = snap.items.get(&it.location_id) {
@@ -1154,6 +1174,7 @@ pub(super) fn handle_corp_gov(
                                     return Err(BridgeRpcError {
                                         code: "ItemLocked".into(),
                                         message: format!("Item {win_param} is not blueprint-locked"),
+                                        client_error: None,
                                     });
                                 }
                                 if let Err(err) = in_active_wrap {
@@ -1171,6 +1192,7 @@ pub(super) fn handle_corp_gov(
                                     return Err(BridgeRpcError {
                                         code: "ItemLocked".into(),
                                         message: format!("Item {win_param} location {} is not a safe corp hangar/office/container", it.location_id),
+                                        client_error: None,
                                     });
                                 }
                                 item_lock_flag_update = Some(eve_db::InventoryFlag::Hangar);
@@ -1180,6 +1202,7 @@ pub(super) fn handle_corp_gov(
                                     return Err(BridgeRpcError {
                                         code: "ItemLocked".into(),
                                         message: format!("Item {win_param} must be in a corporation hangar to be locked"),
+                                        client_error: None,
                                     });
                                 }
                                 item_lock_flag_update = Some(eve_db::InventoryFlag::Locked);
@@ -1189,6 +1212,7 @@ pub(super) fn handle_corp_gov(
                         return Err(BridgeRpcError {
                             code: "ItemNotFound".into(),
                             message: format!("Item {win_param} not found"),
+                            client_error: None,
                         });
                     }
                 }
@@ -1197,13 +1221,13 @@ pub(super) fn handle_corp_gov(
                 vc.parameter = win_param;
                 if vc.vote_type == 5 {
                     if vc.parameter <= 0 {
-                        return Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Share creation amount must be positive".into() });
+                        return Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Share creation amount must be positive".into(), client_error: None });
                     }
                     let state = snap.corp_governance.entry(corp_id).or_default();
                     let entry = state.shares.entry(corp_id).or_insert(0);
                     let old_s = *entry;
                     let new_s = entry.checked_add(vc.parameter).filter(|&s| s <= 10_000_000_000).ok_or_else(|| {
-                        BridgeRpcError { code: "InvalidArgument".into(), message: "Share creation amount exceeds maximum limit".into() }
+                        BridgeRpcError { code: "InvalidArgument".into(), message: "Share creation amount exceeds maximum limit".into(), client_error: None }
                     })?;
                     *entry = new_s;
                     state.company_shares = *entry;
@@ -1222,9 +1246,9 @@ pub(super) fn handle_corp_gov(
                 if vc.vote_type == 0 {
                     is_ceo_vote = true;
                     new_ceo_id = win_param;
-                    let corp = snap.corporations.get_mut(&corp_id).ok_or_else(|| BridgeRpcError { code: "CorpNotFound".into(), message: "Corporation not found".into() })?;
+                    let corp = snap.corporations.get_mut(&corp_id).ok_or_else(|| BridgeRpcError { code: "CorpNotFound".into(), message: "Corporation not found".into(), client_error: None })?;
                     if !corp.members.contains(&new_ceo_id) {
-                        return Err(BridgeRpcError { code: "CandidateNotMember".into(), message: "CEO election candidate is not a member of the corporation".into() });
+                        return Err(BridgeRpcError { code: "CandidateNotMember".into(), message: "CEO election candidate is not a member of the corporation".into(), client_error: None });
                     }
                     old_ceo_id = corp.ceo_id;
                     if old_ceo_id > 0 && old_ceo_id != new_ceo_id {
@@ -1371,7 +1395,7 @@ pub(super) fn handle_corp_gov(
             let ad_id = if method == "UpdateRecruitmentAd" {
                 let id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
                 let Some(ad) = ads.iter_mut().find(|a| a.ad_id == id && a.corp_id == corp_id) else {
-                    return Some(Err(BridgeRpcError { code: "RecruitmentAdNotFound".into(), message: format!("Recruitment ad {id} not found") }));
+                    return Some(Err(BridgeRpcError { code: "RecruitmentAdNotFound".into(), message: format!("Recruitment ad {id} not found"), client_error: None }));
                 };
                 ad.title = title.clone();
                 ad.description = desc.clone();
@@ -1449,7 +1473,7 @@ pub(super) fn handle_corp_gov(
             let before = ads.len();
             ads.retain(|a| a.ad_id != ad_id || a.corp_id != corp_id);
             if ads.len() == before {
-                return Some(Err(BridgeRpcError { code: "RecruitmentAdNotFound".into(), message: format!("Recruitment ad {ad_id} not found") }));
+                return Some(Err(BridgeRpcError { code: "RecruitmentAdNotFound".into(), message: format!("Recruitment ad {ad_id} not found"), client_error: None }));
             }
             save_corp_rec_ads(ctx, &ads);
             with_corp_gov(ctx, |g| {
@@ -1600,6 +1624,7 @@ fn handle_get_shares_by_shareholder(
                 return Some(Err(BridgeRpcError {
                     code: "CrpAccessDenied".into(),
                     message: format!("Cannot view shares for entity {target_sh_id}"),
+                    client_error: None,
                 }));
             }
             let now_unix = ctx.now_unix();
@@ -1617,12 +1642,14 @@ fn handle_get_shares_by_shareholder(
                 return Some(Err(BridgeRpcError {
                     code: "CrpAccessDenied".into(),
                     message: "Only CEO or Directors can view corporation-held shares".into(),
+                    client_error: None,
                 }));
             }
         } else if target_sh_id != char_id {
             return Some(Err(BridgeRpcError {
                 code: "CrpAccessDenied".into(),
                 message: format!("Cannot view shares held by third-party entity {target_sh_id}"),
+                client_error: None,
             }));
         }
     }

@@ -42,6 +42,7 @@ pub(super) fn err(code: &str, message: impl Into<String>) -> Option<Result<PyRep
     Some(Err(BridgeRpcError {
         code: code.into(),
         message: message.into(),
+        client_error: None,
     }))
 }
 
@@ -156,6 +157,7 @@ pub(super) fn debit_corp(
     let corp = snap.corporations.get_mut(&corp_id).ok_or_else(|| BridgeRpcError {
         code: "CorporationNotFound".into(),
         message: format!("Corporation {corp_id} not found"),
+        client_error: None,
     })?;
     corp.ensure_wallet_divisions();
     let cur = corp.division_balance(1);
@@ -165,6 +167,7 @@ pub(super) fn debit_corp(
             "Corporation {corp_id} master wallet cannot cover {} ISK",
             amount.to_wire_f64()
         ),
+        client_error: None,
     })?;
     corp.set_division_balance(1, next);
     Ok(())
@@ -348,6 +351,7 @@ pub(super) fn neg_rows_for_caller(
             return Err(BridgeRpcError {
                 code: "NotWarParticipant".into(),
                 message: "Only war participants may view surrender negotiations".into(),
+                client_error: None,
             });
         }
         Ok(snap

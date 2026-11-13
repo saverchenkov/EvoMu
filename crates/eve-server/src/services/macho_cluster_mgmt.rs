@@ -108,7 +108,7 @@ fn apply_load_setting(
     target_sys: Option<&mut Option<u32>>,
     strict: bool,
 ) -> Result<(), BridgeRpcError> {
-    let err = || BridgeRpcError { code: "UserError".into(), message: "InvalidConfig".into() };
+    let err = || BridgeRpcError { code: "UserError".into(), message: "InvalidConfig".into(), client_error: None };
     match key {
         "ticks" | "steps" | "iterations" | "duration" => {
             if let Some(n) = val.as_i64().filter(|&n| n > 0) {
@@ -178,6 +178,7 @@ pub fn handle(
             return Some(Err(BridgeRpcError {
                 code: "InsufficientRole".into(),
                 message: "UserError: GM_InsufficientRole".into(),
+                client_error: None,
             }));
         }
     }
@@ -235,6 +236,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "NotAuthorized".into(),
+                    client_error: None,
                 }));
             }
             let load_spec = args.first().cloned().unwrap_or(PyRep::None);
@@ -249,7 +251,7 @@ pub fn handle(
             match &load_spec {
                 PyRep::Real(d) => {
                     if !d.is_finite() || *d <= 0.0 {
-                        return Some(Err(BridgeRpcError { code: "UserError".into(), message: "InvalidLoadSpec".into() }));
+                        return Some(Err(BridgeRpcError { code: "UserError".into(), message: "InvalidLoadSpec".into(), client_error: None }));
                     }
                     ticks = (d.ceil() as u64).clamp(1, 100);
                 }
@@ -278,6 +280,7 @@ pub fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "UserError".into(),
                         message: "MissingSolarSystemID".into(),
+                        client_error: None,
                     }));
                 }
             };
@@ -286,6 +289,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "InvalidSolarSystemID".into(),
+                    client_error: None,
                 }));
             }
 
@@ -337,6 +341,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "NotAuthorized".into(),
+                    client_error: None,
                 }));
             }
             let now = ctx.now_unix();
@@ -357,9 +362,10 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "NotAuthorized".into(),
+                    client_error: None,
                 }));
             }
-            let invalid_cfg = || BridgeRpcError { code: "UserError".into(), message: "InvalidConfig".into() };
+            let invalid_cfg = || BridgeRpcError { code: "UserError".into(), message: "InvalidConfig".into(), client_error: None };
             let mut updates: Vec<(String, PyRep)> = Vec::new();
             match args.first() {
                 Some(PyRep::Dict(entries)) => {
@@ -414,6 +420,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "NotAuthorized".into(),
+                    client_error: None,
                 }));
             }
             let sde_types_len = ctx.sde.types.len() as i64;
@@ -459,6 +466,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: "UserError: GM_InsufficientRole".into(),
+                    client_error: None,
                 }));
             }
             let target_sessions: Vec<(u64, u64, Option<i64>)> = ctx.db.with_snapshot(|snap| {
@@ -511,6 +519,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: "UserError: GM_InsufficientRole".into(),
+                    client_error: None,
                 }));
             }
             let node_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
@@ -596,6 +605,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "NotAuthorized".into(),
+                    client_error: None,
                 }));
             }
             let result = match proc_name {
@@ -622,6 +632,7 @@ pub fn handle(
                         return Some(Err(BridgeRpcError {
                             code: "UserError".into(),
                             message: "InvalidArguments".into(),
+                            client_error: None,
                         }));
                     }
                     let bounded_args: Vec<String> = args
@@ -665,6 +676,7 @@ pub fn handle(
                         return Some(Err(BridgeRpcError {
                             code: "UserError".into(),
                             message: "RateLimited".into(),
+                            client_error: None,
                         }));
                     }
                     PyRep::None
@@ -673,6 +685,7 @@ pub fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "UnimplementedRPC".into(),
                         message: "InvalidProcedure".into(),
+                        client_error: None,
                     }));
                 }
             };
@@ -689,6 +702,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "NotAuthorized".into(),
+                    client_error: None,
                 }));
             }
             let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("");
@@ -696,6 +710,7 @@ pub fn handle(
                 Some(Err(BridgeRpcError {
                     code: "UnimplementedRPC".into(),
                     message: "debug.Exec is not implemented".into(),
+                    client_error: None,
                 }))
             } else {
                 Some(Ok(PyRep::List(vec![PyRep::Tuple(vec![
@@ -790,6 +805,7 @@ fn handle_macho_net(
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: "machoNet.GetMetrics requires GM role".into(),
+                    client_error: None,
                 }));
             }
             let (mut cr_entries, mut cs_entries, mut nr_entries, sent_count) = {
@@ -924,6 +940,7 @@ fn handle_macho_net(
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: "machoNet.SetConnectionProperty requires GM role".into(),
+                    client_error: None,
                 }));
             }
             let key = if let Some(k) = args.first().and_then(|a| a.as_str()) {
@@ -934,6 +951,7 @@ fn handle_macho_net(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "machoNet.SetConnectionProperty requires property key".into(),
+                    client_error: None,
                 }));
             };
             const ALLOWED_KEYS: &[&str] = &[
@@ -950,6 +968,7 @@ fn handle_macho_net(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: format!("machoNet.SetConnectionProperty: key '{key}' is not allowed"),
+                    client_error: None,
                 }));
             }
             let val = args
@@ -987,6 +1006,7 @@ fn handle_macho_net(
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: "machoNet.GracefulShutdown requires GM role".into(),
+                    client_error: None,
                 }));
             }
             let origin_node_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
@@ -1025,6 +1045,7 @@ fn handle_macho_net(
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: "GM role required for cluster lifecycle operations".into(),
+                    client_error: None,
                 }));
             }
             ctx.cluster_state.write().unwrap().shutdown_in_progress = true;
@@ -1039,6 +1060,7 @@ fn handle_macho_net(
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: "GM role required for cluster lifecycle operations".into(),
+                    client_error: None,
                 }));
             }
             let node_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
@@ -1057,6 +1079,7 @@ fn handle_macho_net(
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: "machoNet.TerminateAllClients requires GM role".into(),
+                    client_error: None,
                 }));
             }
             let reason = args
@@ -1112,6 +1135,7 @@ fn handle_macho_net(
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "NotAuthorized".into(),
+                    client_error: None,
                 }));
             }
             let active_hash = ctx.db.with_mut_snapshot(|snap| {
@@ -1146,6 +1170,7 @@ fn session_attr_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
         code: code.to_string(),
         message: message.into(),
+        client_error: None,
     }
 }
 

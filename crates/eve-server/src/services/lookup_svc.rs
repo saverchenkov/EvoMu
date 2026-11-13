@@ -134,6 +134,7 @@ fn handle_bannedwords_check_words_allowed(
                 Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "LocationNameInvalidBannedWord".into(),
+                    client_error: None,
                 })
             }
         }
@@ -165,6 +166,7 @@ fn handle_bannedwords_check_chat_words_allowed(
         Err(BridgeRpcError {
             code: "UserError".into(),
             message: "ChatContentInvalidBannedWords".into(),
+            client_error: None,
         })
     }
 }
@@ -693,12 +695,14 @@ fn parse_search_query_params(
         return Err(BridgeRpcError {
             code: "SearchStringTooShort".into(),
             message: "Search string must contain at least 1 non-whitespace character".into(),
+            client_error: None,
         });
     }
     if !is_word_allowed(&query) {
         return Err(BridgeRpcError {
             code: "UserError".into(),
             message: "LocationNameInvalidBannedWord".into(),
+            client_error: None,
         });
     }
     let groups: Vec<i64> = match args.get(1).or_else(|| kwargs.get("groupIDList")) {

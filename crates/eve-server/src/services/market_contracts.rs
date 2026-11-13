@@ -11,7 +11,7 @@ fn notify_char(ctx: &ServerContext, char_id: i64, event: &str, args: Vec<PyRep>)
 }
 
 fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
-    BridgeRpcError { code: code.into(), message: message.into() }
+    BridgeRpcError { code: code.into(), message: message.into(), client_error: None }
 }
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, MarketOrderRecord};
 use eve_machonet::SessionState;
@@ -1092,6 +1092,7 @@ pub fn handle(
                                 message: format!(
                                     "Insufficient PLEX in vault ({vault_plex}) or hangar to sell {quantity} PLEX"
                                 ),
+                                client_error: None,
                             });
                         };
                         let mut opts = eve_db::ConsumeExactOptions::for_character_stack(char_id);
@@ -1103,6 +1104,7 @@ pub fn handle(
                                 message: format!(
                                     "Insufficient unlocked PLEX in vault ({vault_plex}) or hangar to sell {quantity} PLEX"
                                 ),
+                                client_error: None,
                             })?;
                     }
 

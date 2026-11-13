@@ -129,6 +129,7 @@ fn check_item_repair_ownership_and_role(
         return Err(BridgeRpcError {
             code: "NotItemOwner".into(),
             message: format!("Character {char_id} does not own item {}", it.item_id),
+            client_error: None,
         });
     }
     if Some(it.item_id) == active_ship || Some(it.location_id) == active_ship {
@@ -158,6 +159,7 @@ fn check_item_repair_ownership_and_role(
                 div_idx + 1,
                 it.item_id
             ),
+            client_error: None,
         });
     }
     Err(BridgeRpcError {
@@ -166,6 +168,7 @@ fn check_item_repair_ownership_and_role(
             "Character {char_id} lacks Director role to repair corporate item {}",
             it.item_id
         ),
+        client_error: None,
     })
 }
 
@@ -262,6 +265,7 @@ pub fn handle_repair_get_quotes(
             return Err(BridgeRpcError {
                 code: "StationServiceUnavailable".into(),
                 message: format!("Station {station_id} does not offer repair facilities"),
+                client_error: None,
             });
         }
     }
@@ -283,6 +287,7 @@ pub fn handle_repair_get_quotes(
         return Err(BridgeRpcError {
             code: "NotInStation".into(),
             message: "Must be docked at a station or structure, or tethered to an Upwell structure".into(),
+            client_error: None,
         });
     }
     let active_ship = session.ship_id;
@@ -324,6 +329,7 @@ pub fn handle_repair_get_quotes(
                     return Err(BridgeRpcError {
                         code: "NotDockedInStructure".into(),
                         message: "Must be docked inside the structure to quote or repair hangar items".into(),
+                        client_error: None,
                     });
                 }
             } else if Some(root.item_id) != active_ship && Some(root.location_id) != dock_loc {
@@ -331,6 +337,7 @@ pub fn handle_repair_get_quotes(
                     return Err(BridgeRpcError {
                         code: "ItemNotAtLocation".into(),
                         message: format!("Item {req_id} is not located at dockable location"),
+                        client_error: None,
                     });
                 };
                 let parent_is_ship = ctx.sde.types.get(&parent.type_id).is_some_and(|t| t.category_id == 6);
@@ -338,12 +345,14 @@ pub fn handle_repair_get_quotes(
                     return Err(BridgeRpcError {
                         code: "ItemInsideContainer".into(),
                         message: format!("Item {req_id} is inside a container or cargo hold and must be unpacked to hangar"),
+                        client_error: None,
                     });
                 }
                 if Some(parent.item_id) != active_ship && Some(parent.location_id) != dock_loc {
                     return Err(BridgeRpcError {
                         code: "ItemNotAtLocation".into(),
                         message: format!("Item {req_id} is not located at dockable location"),
+                        client_error: None,
                     });
                 }
             }
@@ -414,11 +423,13 @@ pub fn handle_repair_items_in_location(
         repair_sid.ok_or_else(|| BridgeRpcError {
             code: "NotInStructure".into(),
             message: "RepairItemsInStructure requires being docked in or tethered at an accessible operational Upwell structure".into(),
+            client_error: None,
         })?
     } else {
         let sid = session.station_id.or(session.structure_id).ok_or_else(|| BridgeRpcError {
             code: "NotInStation".into(),
             message: "RepairItemsInStation requires being docked in a station or structure".into(),
+            client_error: None,
         })?;
         if sid < 1_000_000_000_000
             && !ctx.db.with_snapshot(|s| s.structures.contains_key(&sid))
@@ -427,6 +438,7 @@ pub fn handle_repair_items_in_location(
             return Err(BridgeRpcError {
                 code: "StationServiceUnavailable".into(),
                 message: format!("Station {sid} does not offer repair facilities"),
+                client_error: None,
             });
         }
         sid
@@ -442,6 +454,7 @@ pub fn handle_repair_items_in_location(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "RepairItems requires a non-empty list of itemIDs".into(),
+            client_error: None,
         });
     }
     let isk_budget = args.get(1).and_then(|a| a.as_f64());
@@ -450,6 +463,7 @@ pub fn handle_repair_items_in_location(
             return Err(BridgeRpcError {
                 code: "InvalidArgument".into(),
                 message: "iskRepairValue must be a finite non-negative number".into(),
+                client_error: None,
             });
         }
     }
@@ -479,6 +493,7 @@ pub fn handle_repair_items_in_location(
                 return Err(BridgeRpcError {
                     code: "ItemNotFound".into(),
                     message: format!("Item {req_id} not found"),
+                    client_error: None,
                 });
             };
             check_item_repair_ownership_and_role(
@@ -499,6 +514,7 @@ pub fn handle_repair_items_in_location(
                         message: format!(
                             "Must be docked inside structure {loc_id} to repair hangar items"
                         ),
+                        client_error: None,
                     });
                 }
             } else if root.item_id != active_ship.unwrap_or(0) && root.location_id != loc_id {
@@ -506,6 +522,7 @@ pub fn handle_repair_items_in_location(
                     return Err(BridgeRpcError {
                         code: "ItemNotAtLocation".into(),
                         message: format!("Item {req_id} is not located at dockable location {loc_id}"),
+                        client_error: None,
                     });
                 };
                 let parent_is_ship = ctx.sde.types.get(&parent.type_id).is_some_and(|t| t.category_id == 6);
@@ -515,12 +532,14 @@ pub fn handle_repair_items_in_location(
                         message: format!(
                             "Item {req_id} is inside a container or cargo hold and must be unpacked to hangar before repair"
                         ),
+                        client_error: None,
                     });
                 }
                 if Some(parent.item_id) != active_ship && parent.location_id != loc_id {
                     return Err(BridgeRpcError {
                         code: "ItemNotAtLocation".into(),
                         message: format!("Item {req_id} is not located at dockable location {loc_id}"),
+                        client_error: None,
                     });
                 }
             }
@@ -544,18 +563,21 @@ pub fn handle_repair_items_in_location(
                                 .ok_or_else(|| BridgeRpcError {
                                     code: "ArithmeticOverflow".into(),
                                     message: "Repair service tax calculation overflowed".into(),
+                                    client_error: None,
                                 })?
                         } else {
                             let item_base = eve_db::IskCents(
                                 base_cents.checked_mul(dmg_units).ok_or_else(|| BridgeRpcError {
                                     code: "ArithmeticOverflow".into(),
                                     message: "Item base repair cost overflowed".into(),
+                                    client_error: None,
                                 })?,
                             );
                             base_total_cents = base_total_cents.checked_add(item_base).ok_or_else(|| {
                                 BridgeRpcError {
                                     code: "ArithmeticOverflow".into(),
                                     message: "Total base repair cost overflowed IskCents".into(),
+                                    client_error: None,
                                 }
                             })?;
                             base_cents
@@ -564,12 +586,14 @@ pub fn handle_repair_items_in_location(
                             unit_cents.checked_mul(dmg_units).ok_or_else(|| BridgeRpcError {
                                 code: "ArithmeticOverflow".into(),
                                 message: "Item total repair cost overflowed".into(),
+                                client_error: None,
                             })?,
                         );
                         total_cents = total_cents.checked_add(item_cents).ok_or_else(|| {
                             BridgeRpcError {
                                 code: "ArithmeticOverflow".into(),
                                 message: "Total repair bill overflowed IskCents".into(),
+                                client_error: None,
                             }
                         })?;
                     }
@@ -589,6 +613,7 @@ pub fn handle_repair_items_in_location(
                             "Provided iskRepairValue {budget:.2} is less than repair cost {:.2}",
                             total_cents.to_f64_isk()
                         ),
+                        client_error: None,
                     });
                 }
             }
@@ -596,12 +621,14 @@ pub fn handle_repair_items_in_location(
         let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
             code: "CharacterNotFound".into(),
             message: format!("Character {char_id} not found"),
+            client_error: None,
         })?;
         let fee = total_cents;
         if fee.0 > 0 {
             ch.balance = ch.balance.checked_sub(fee).ok_or_else(|| BridgeRpcError {
                 code: "InsufficientFunds".into(),
                 message: "Insufficient ISK to pay repair bill".into(),
+                client_error: None,
             })?;
             let bal = ch.balance;
             snap.append_journal(
@@ -620,6 +647,7 @@ pub fn handle_repair_items_in_location(
                                 BridgeRpcError {
                                     code: "ArithmeticOverflow".into(),
                                     message: "Corporate master wallet overflow on repair tax credit".into(),
+                                    client_error: None,
                                 }
                             })?;
                             corp.set_division_balance(1, new_corp_bal);

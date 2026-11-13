@@ -38,7 +38,7 @@ pub fn handle_contacts(
                 .and_then(|a| a.as_i64())
                 .or(session.character_id);
             let Some(cid) = target_char_id else {
-                return Some(Err(BridgeRpcError { code: "CharacterNotSelected".into(), message: "GetPublicInfo3 requires an explicit charID or selected character".into() }));
+                return Some(Err(BridgeRpcError { code: "CharacterNotSelected".into(), message: "GetPublicInfo3 requires an explicit charID or selected character".into(), client_error: None }));
             };
             let res = ctx.db.with_snapshot(|snap| {
                 snap.characters.get(&cid).cloned().map(|mut c| {
@@ -50,7 +50,7 @@ pub fn handle_contacts(
                 })
             });
             let Some((c, portrait_info)) = res else {
-                return Some(Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {cid} not found") }));
+                return Some(Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {cid} not found"), client_error: None }));
             };
             let (war_fac, rank) = c.war_faction_id.map(|wfid| {
                 let st = c.standings.get(&wfid).copied().unwrap_or(0.0);
@@ -76,10 +76,10 @@ pub fn handle_contacts(
             };
             let target_cid = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
             if target_cid != char_id {
-                return Some(Err(BridgeRpcError { code: "CharacterOwnershipMismatch".into(), message: format!("GetPrivateInfo can only be queried for the active character {char_id}") }));
+                return Some(Err(BridgeRpcError { code: "CharacterOwnershipMismatch".into(), message: format!("GetPrivateInfo can only be queried for the active character {char_id}"), client_error: None }));
             }
             let Some(c) = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).cloned()) else {
-                return Some(Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found") }));
+                return Some(Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found"), client_error: None }));
             };
             let (skills_list, attrs_kv, implants_list, jump_clones_list, standings_list, kill_rights_list) =
                 ctx.db.with_snapshot(|snap| {
@@ -149,6 +149,7 @@ pub fn handle_contacts(
                 return Some(Err(BridgeRpcError {
                     code: "CharacterNotSelected".into(),
                     message: "GetCharacterDescription requires charID or selected character".into(),
+                    client_error: None,
                 }));
             };
             let desc = ctx.db.with_snapshot(|snap| {
@@ -167,6 +168,7 @@ pub fn handle_contacts(
                 return Some(Err(BridgeRpcError {
                     code: "DescriptionTooLong".into(),
                     message: "Character description exceeds 5000 characters limit".into(),
+                    client_error: None,
                 }));
             }
             ctx.db.with_mut_snapshot(|snap| {
@@ -184,6 +186,7 @@ pub fn handle_contacts(
                 return Some(Err(BridgeRpcError {
                     code: "CharacterNotSelected".into(),
                     message: "GetEmployementRecordAndCharacterTransfers requires charID or selected character".into(),
+                    client_error: None,
                 }));
             };
             // V24.01 `Info.GetEmploymentHistorySubContent` (`infosvc.pyj:3565-3605`) reads
@@ -387,6 +390,7 @@ pub fn handle_contacts(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidRemapArguments".into(),
                     message: "Remap requires charisma, intelligence, memory, perception, and willpower values".into(),
+                    client_error: None,
                 }));
             };
 
@@ -420,6 +424,7 @@ pub fn handle_contacts(
                 Err(e) => Some(Err(BridgeRpcError {
                     code: "RemapFailed".into(),
                     message: e.to_string(),
+                    client_error: None,
                 })),
             }
         }
@@ -436,6 +441,7 @@ pub fn handle_contacts(
                 return Some(Err(BridgeRpcError {
                     code: "CharacterNotFound".into(),
                     message: format!("Character {char_id} not found"),
+                    client_error: None,
                 }));
             }
             let mut address_rows = Vec::new();
@@ -501,12 +507,14 @@ pub fn handle_contacts(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "AddContact requires contactID".into(),
+                    client_error: None,
                 }));
             };
             if contact_id <= 0 || contact_id == char_id {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidContactID".into(),
                     message: "contactID must be a positive entity ID distinct from self".into(),
+                    client_error: None,
                 }));
             }
             let valid_entity = ctx.db.with_snapshot(|snap| {
@@ -519,6 +527,7 @@ pub fn handle_contacts(
                 return Some(Err(BridgeRpcError {
                     code: "ContactNotFound".into(),
                     message: format!("Contact entity {contact_id} not found"),
+                    client_error: None,
                 }));
             }
             let rpc = crate::router::RpcArgs::new(args, kwargs);
@@ -535,6 +544,7 @@ pub fn handle_contacts(
                         return Some(Err(BridgeRpcError {
                             code: "InvalidArgument".into(),
                             message: "Expected boolean for 'inWatchlist' (arg[2])".into(),
+                            client_error: None,
                         }));
                     }
                 },
@@ -554,12 +564,12 @@ pub fn handle_contacts(
             };
 
             let Ok(mut guard) = ctx.esi_state.char_contacts.write() else {
-                return Some(Err(BridgeRpcError { code: "LockPoisoned".into(), message: "Contact state lock poisoned".into() }));
+                return Some(Err(BridgeRpcError { code: "LockPoisoned".into(), message: "Contact state lock poisoned".into(), client_error: None }));
             };
             let list = guard.entry(char_id).or_default();
             let existing_pos = list.iter().position(|e| e.contact_id == contact_id);
             if existing_pos.is_none() && list.len() >= 1_024 {
-                return Some(Err(BridgeRpcError { code: "MaxContactsExceeded".into(), message: "Character has reached the maximum of 1,024 contacts".into() }));
+                return Some(Err(BridgeRpcError { code: "MaxContactsExceeded".into(), message: "Character has reached the maximum of 1,024 contacts".into(), client_error: None }));
             }
             let (is_blocked, label_mask) = if let Some(idx) = existing_pos {
                 list[idx].standing = standing;
@@ -584,7 +594,7 @@ pub fn handle_contacts(
                 return Some(Err(e));
             }
             if let Some(err_msg) = crate::router::dispatch::take_dispatch_wal_error() {
-                return Some(Err(BridgeRpcError { code: "DatabasePersistenceError".into(), message: err_msg }));
+                return Some(Err(BridgeRpcError { code: "DatabasePersistenceError".into(), message: err_msg, client_error: None }));
             }
 
             // AddressBookSvc.OnPersonalContactsAdded(contacts, relationshipID, watchlist, labelMask):
@@ -627,6 +637,7 @@ pub fn handle_contacts(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: format!("{method} requires at least one contactID"),
+                    client_error: None,
                 }));
             }
             let rpc = crate::router::RpcArgs::new(args, kwargs);
@@ -643,6 +654,7 @@ pub fn handle_contacts(
                             return Some(Err(BridgeRpcError {
                                 code: "InvalidArgument".into(),
                                 message: "Expected boolean for 'inWatchlist' (arg[2])".into(),
+                                client_error: None,
                             }));
                         }
                     },
@@ -694,7 +706,7 @@ pub fn handle_contacts(
                 }
             }
             if let Some(err_msg) = crate::router::dispatch::take_dispatch_wal_error() {
-                return Some(Err(BridgeRpcError { code: "DatabasePersistenceError".into(), message: err_msg }));
+                return Some(Err(BridgeRpcError { code: "DatabasePersistenceError".into(), message: err_msg, client_error: None }));
             }
             let id_reps: Vec<PyRep> = contact_ids.iter().map(|&id| PyRep::Integer(id)).collect();
             // AddressBookSvc.OnPersonalContactsUpdated(contactIDs, standing, inWatchlist): `None` keeps
@@ -724,7 +736,7 @@ pub fn handle_contacts(
             let _ = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&char_id));
             let contact_ids = parse_id_list(args.first());
             if contact_ids.is_empty() {
-                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "DeleteContacts requires contactIDs".into() }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "DeleteContacts requires contactIDs".into(), client_error: None }));
             }
             let mut removed_ids = Vec::new();
             if let Ok(mut guard) = ctx.esi_state.char_contacts.write() {
@@ -777,6 +789,7 @@ pub fn handle_contacts(
                     code: "InvalidArgument".into(),
                     message: "BlockOwners requires valid positive ownerIDs distinct from self"
                         .into(),
+                    client_error: None,
                 }));
             }
             let mut blocked_count = 0usize;
@@ -791,6 +804,7 @@ pub fn handle_contacts(
                             return Some(Err(BridgeRpcError {
                                 code: "MaxContactsExceeded".into(),
                                 message: "Character has reached the maximum of 1,024 contacts/blocked owners".into(),
+                                client_error: None,
                             }));
                         }
                         list.push(EsiContactEntry {
@@ -829,6 +843,7 @@ pub fn handle_contacts(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "UnblockOwners requires ownerIDs".into(),
+                    client_error: None,
                 }));
             }
             let mut unblocked_ids = Vec::new();
@@ -868,6 +883,7 @@ pub fn handle_contacts(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidLabelName".into(),
                     message: "CreateLabel requires a non-empty label name".into(),
+                    client_error: None,
                 }));
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -927,6 +943,7 @@ pub fn handle_contacts(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "EditLabel requires labelID".into(),
+                    client_error: None,
                 }));
             };
             let Some(new_name) = args
@@ -938,6 +955,7 @@ pub fn handle_contacts(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidLabelName".into(),
                     message: "EditLabel requires a non-empty label name".into(),
+                    client_error: None,
                 }));
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -951,6 +969,7 @@ pub fn handle_contacts(
                     return Err(BridgeRpcError {
                         code: "LabelNotFound".into(),
                         message: format!("Contact label {label_id} not found"),
+                        client_error: None,
                     });
                 }
                 Ok(())
@@ -974,6 +993,7 @@ pub fn handle_contacts(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "DeleteLabel requires labelID".into(),
+                    client_error: None,
                 }));
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -1031,6 +1051,7 @@ pub fn handle_contacts(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "AssignLabels requires contactIDs and positive labelMask".into(),
+                    client_error: None,
                 }));
             }
             let mut updated = 0usize;
@@ -1074,6 +1095,7 @@ pub fn handle_contacts(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "RemoveLabels requires contactIDs and positive labelMask".into(),
+                    client_error: None,
                 }));
             }
             let mut updated = 0usize;
@@ -1125,6 +1147,7 @@ pub fn handle_contacts(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "GetOnlineStatus requires target characterID or characterIDs".into(),
+                    client_error: None,
                 }));
             }
             let entries: Vec<(PyRep, PyRep)> = id_list
@@ -1188,7 +1211,7 @@ pub fn handle_contacts(
             };
             match ctx.db.get_character(char_id) {
                 Ok(ch) => Some(Ok(PyRep::Integer(ch.home_station_id))),
-                Err(e) => Some(Err(BridgeRpcError { code: "CharacterNotFound".into(), message: e.to_string() })),
+                Err(e) => Some(Err(BridgeRpcError { code: "CharacterNotFound".into(), message: e.to_string(), client_error: None })),
             }
         }
 
@@ -1228,14 +1251,14 @@ pub fn handle_contacts(
                         ("is_fallback", PyRep::Bool(is_fallback)),
                     ])))
                 }
-                Err(e) => Some(Err(BridgeRpcError { code: "CharacterNotFound".into(), message: e.to_string() })),
+                Err(e) => Some(Err(BridgeRpcError { code: "CharacterNotFound".into(), message: e.to_string(), client_error: None })),
             }
         }
 
         ("charMgr", "SetHomeStation") | ("home_station", "set_home_station") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(new_home_id) = args.first().and_then(|a| a.as_i64()).or(session.station_id).or(session.structure_id) else {
-                return Some(Err(BridgeRpcError { code: "MustBeDockedAtTargetStation".into(), message: "set_home_station requires a target station ID".into() }));
+                return Some(Err(BridgeRpcError { code: "MustBeDockedAtTargetStation".into(), message: "set_home_station requires a target station ID".into(), client_error: None }));
             };
             let is_sde_station = ctx.sde.solar_systems.values().any(|s| s.stations.iter().any(|st| st.station_id == new_home_id));
             if !is_sde_station {
@@ -1243,20 +1266,20 @@ pub fn handle_contacts(
                     return Some(Err(e));
                 }
             } else if ctx.sde.solar_systems.values().any(|s| s.region_id == 10_000_070 && s.stations.iter().any(|st| st.station_id == new_home_id)) {
-                return Some(Err(BridgeRpcError { code: "CannotSetMedicalCloneInPochven".into(), message: "A medical clone cannot be set in Pochven".into() }));
+                return Some(Err(BridgeRpcError { code: "CannotSetMedicalCloneInPochven".into(), message: "A medical clone cannot be set in Pochven".into(), client_error: None }));
             }
             let now_unix = ctx.now_unix_secs();
             let is_local_docked = session.station_id == Some(new_home_id) || session.structure_id == Some(new_home_id);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(ch) = snap.characters.get(&char_id) else {
-                    return Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found") });
+                    return Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found"), client_error: None });
                 };
                 let (school_id, corp_id) = (ch.school_id, ch.corporation_id);
                 if !is_local_docked {
                     let school_st = ctx.sde.schools.get(&school_id).map(|s| s.station_id).filter(|&id| id > 0);
                     let corp_hq_st = snap.corporations.get(&corp_id).and_then(|c| c.hq_station_id).filter(|&id| id > 0);
                     if Some(new_home_id) != school_st && Some(new_home_id) != corp_hq_st {
-                        return Err(BridgeRpcError { code: "MustBeDockedAtTargetStation".into(), message: format!("Station {new_home_id} is not a remote candidate") });
+                        return Err(BridgeRpcError { code: "MustBeDockedAtTargetStation".into(), message: format!("Station {new_home_id} is not a remote candidate"), client_error: None });
                     }
                     let cd_key = -10_000_099 - char_id;
                     let next_allowed = snap
@@ -1269,7 +1292,7 @@ pub fn handle_contacts(
                         })
                         .unwrap_or(0);
                     if now_unix < next_allowed {
-                        return Err(BridgeRpcError { code: "HomeStationRemoteCooldownActive".into(), message: format!("Remote home station change on cooldown until {next_allowed}") });
+                        return Err(BridgeRpcError { code: "HomeStationRemoteCooldownActive".into(), message: format!("Remote home station change on cooldown until {next_allowed}"), client_error: None });
                     }
                     let next_time = now_unix + 365 * 86_400;
                     snap.owner_notes.remove(&cd_key);
@@ -1363,6 +1386,7 @@ pub fn handle_contacts(
                     // rpc-lint: allow "AccessDenied" is an error code, not a home_station method
                     code: "AccessDenied".into(),
                     message: "reset_remote_change_time requires GM/QA privileges".into(),
+                    client_error: None,
                 }));
             }
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };

@@ -428,15 +428,18 @@ fn db_err_to_rpc(err: DbError) -> BridgeRpcError {
         DbError::InvalidDestinationLocation { .. } => BridgeRpcError {
             code: "InvalidDestinationLocation".into(),
             message: err.to_string(),
+            client_error: None,
         },
         DbError::CharacterNotFound(_) => BridgeRpcError {
             code: "CharacterNotFound".into(),
             message: err.to_string(),
+            client_error: None,
         },
         DbError::NotDocked(_) => BridgeRpcError::user_error("NotDocked"),
         other => BridgeRpcError {
             code: "SessionTransitionFailed".into(),
             message: other.to_string(),
+            client_error: None,
         },
     }
 }

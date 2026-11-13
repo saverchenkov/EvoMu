@@ -50,7 +50,7 @@ fn require_corp_director(ctx: &ServerContext, session: &SessionState) -> Result<
         is_ceo || corp_roles::has_role(roles, corp_roles::ROLE_DIRECTOR)
     });
     if !ok {
-        return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Director or CEO role is required".into() });
+        return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Director or CEO role is required".into(), client_error: None });
     }
     Ok(corp_id)
 }
@@ -65,8 +65,8 @@ fn require_executor(ctx: &ServerContext, session: &SessionState) -> Result<i64, 
             let _ = require_corp_director(ctx, session)?;
             Ok(aid)
         }
-        Some(_) => Err(BridgeRpcError { code: "NotAllianceExecutor".into(), message: "Only the executor corporation can manage the alliance".into() }),
-        None => Err(BridgeRpcError { code: "NotInAlliance".into(), message: "Your corporation is not in an alliance".into() }),
+        Some(_) => Err(BridgeRpcError { code: "NotAllianceExecutor".into(), message: "Only the executor corporation can manage the alliance".into(), client_error: None }),
+        None => Err(BridgeRpcError { code: "NotInAlliance".into(), message: "Your corporation is not in an alliance".into(), client_error: None }),
     }
 }
 
@@ -226,6 +226,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "AlreadyInFleet".into(),
                     message: "Character is already in a fleet".into(),
+                    client_error: None,
                 }));
             }
             let fid = ctx.db.try_with_mut_snapshot(|snap| {
@@ -299,6 +300,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidAllianceName".into(),
                     message: "Alliance name and ticker (1..=5 chars) are required".into(),
+                    client_error: None,
                 }));
             }
             let alliance_fee = IskCents::from_isk(1_000_000_000);
@@ -308,25 +310,27 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "AllianceNameTaken".into(),
                         message: "Alliance name or short ticker is already in use".into(),
+                        client_error: None,
                     });
                 }
                 if corp_id < 98_000_000 {
-                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "NPC corporations cannot create alliances".into() });
+                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "NPC corporations cannot create alliances".into(), client_error: None });
                 }
                 let Some(corp) = snap.corporations.get_mut(&corp_id) else {
-                    return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
+                    return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found"), client_error: None });
                 };
                 if corp.ceo_id != char_id {
-                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only the Corporation CEO can create an alliance".into() });
+                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only the Corporation CEO can create an alliance".into(), client_error: None });
                 }
                 if corp.alliance_id.is_some() {
-                    return Err(BridgeRpcError { code: "AlreadyInAlliance".into(), message: "Corporation is already in an alliance".into() });
+                    return Err(BridgeRpcError { code: "AlreadyInAlliance".into(), message: "Corporation is already in an alliance".into(), client_error: None });
                 }
                 let new_bal = corp
                     .debit_division(1, alliance_fee)
                     .ok_or_else(|| BridgeRpcError {
                         code: "InsufficientFunds".into(),
                         message: "Creating an alliance requires 1,000,000,000 ISK in the corporation master wallet".into(),
+                        client_error: None,
                     })?
                     .to_f64_isk();
                 let next_jid = snap.corp_wallet_journals.values().flatten().map(|j| j.id).max().unwrap_or(500_000) + 1;
@@ -423,7 +427,7 @@ pub async fn handle(
                 Ok(())
             });
             if let Err((code, message)) = check {
-                return Some(Err(BridgeRpcError { code: code.into(), message }));
+                return Some(Err(BridgeRpcError { code: code.into(), message, client_error: None }));
             }
             with_alliance_war_state(ctx, |st| {
                 let meta = st.alliances.entry(aid).or_default();
@@ -469,7 +473,7 @@ pub async fn handle(
                 Some((a.alliance_id, a.short_name.clone(), a.executor_corp_id, creator_corp, creator_char))
             });
             let Some((aid_val, short_name, exec_id, creator_corp_id, creator_char_id)) = info else {
-                return Some(Err(BridgeRpcError { code: "AllianceNotFound".into(), message: format!("Alliance {aid} not found") }));
+                return Some(Err(BridgeRpcError { code: "AllianceNotFound".into(), message: format!("Alliance {aid} not found"), client_error: None }));
             };
             let rep = match method {
                 "allianceID" => PyRep::Integer(aid_val),
@@ -496,7 +500,7 @@ pub async fn handle(
                 Some((a.alliance_id, a.name.clone(), a.short_name.clone(), a.executor_corp_id, a.member_corp_ids.len() as i64, creator_corp, creator_char, start_date))
             });
             let Some((id, name, short, exec, cnt, creator_corp, creator_char, start_date)) = info else {
-                return Some(Err(BridgeRpcError { code: "AllianceNotFound".into(), message: format!("Alliance {aid} not found") }));
+                return Some(Err(BridgeRpcError { code: "AllianceNotFound".into(), message: format!("Alliance {aid} not found"), client_error: None }));
             };
             let (desc, url, logo, emblem, dictatorial) = read_alliance_war_state(ctx, |st| {
                 st.alliances.get(&aid).map(|m| (m.description.clone(), m.url.clone(), m.logo, m.emblem_entitlements, m.dictatorial)).unwrap_or_default()
@@ -585,7 +589,7 @@ pub async fn handle(
                     if in_db {
                         Some(Ok(PyRep::Integer(0)))
                     } else {
-                        Some(Err(BridgeRpcError { code: "NotInAlliance".into(), message: format!("Corporation {corp_id} is not in alliance {aid}") }))
+                        Some(Err(BridgeRpcError { code: "NotInAlliance".into(), message: format!("Corporation {corp_id} is not in alliance {aid}"), client_error: None }))
                     }
                 }
             }
@@ -600,12 +604,13 @@ pub async fn handle(
                 snap.alliances.get(&aid).map(|a| a.member_corp_ids.clone()).unwrap_or_default()
             });
             if !member_corps.contains(&corp_id) || !member_corps.contains(&target_corp_id) {
-                return Some(Err(BridgeRpcError { code: "NotInAlliance".into(), message: "Both corporations must be members of the alliance".into() }));
+                return Some(Err(BridgeRpcError { code: "NotInAlliance".into(), message: "Both corporations must be members of the alliance".into(), client_error: None }));
             }
             if read_alliance_war_state(ctx, |st| st.alliances.get(&aid).is_some_and(|m| m.dictatorial)) {
                 return Some(Err(BridgeRpcError {
                     code: "AllianceIsDictatorial".into(),
                     message: format!("Alliance {aid} is dictatorial; executor support votes are disabled"),
+                    client_error: None,
                 }));
             }
             let new_exec = with_alliance_war_state(ctx, |st| {
@@ -658,16 +663,16 @@ pub async fn handle(
                 (exec, in_war)
             });
             if method == "KickMember" && caller_corp != exec_corp {
-                return Some(Err(BridgeRpcError { code: "NotAllianceExecutor".into(), message: "Only the executor corporation can kick alliance members".into() }));
+                return Some(Err(BridgeRpcError { code: "NotAllianceExecutor".into(), message: "Only the executor corporation can kick alliance members".into(), client_error: None }));
             }
             if method == "DeleteMember" && target_corp != caller_corp {
-                return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "A corporation can only withdraw itself from the alliance".into() }));
+                return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "A corporation can only withdraw itself from the alliance".into(), client_error: None }));
             }
             if let Err(e) = require_corp_director(ctx, session) {
                 return Some(Err(e));
             }
             if has_active_war {
-                return Some(Err(BridgeRpcError { code: "CannotLeaveAllianceDuringWar".into(), message: "Member corporations cannot leave an alliance during an active war".into() }));
+                return Some(Err(BridgeRpcError { code: "CannotLeaveAllianceDuringWar".into(), message: "Member corporations cannot leave an alliance during an active war".into(), client_error: None }));
             }
             let immediate = method == "KickMember";
             if !immediate {
@@ -711,7 +716,7 @@ pub async fn handle(
             let standing = match rpc.req_finite_f64(1, "standing") {
                 Ok(s) if (-10.0..=10.0).contains(&s) => s,
                 _ => {
-                    return Some(Err(BridgeRpcError { code: "InvalidStanding".into(), message: "Standing must be between -10 and +10".into() }));
+                    return Some(Err(BridgeRpcError { code: "InvalidStanding".into(), message: "Standing must be between -10 and +10".into(), client_error: None }));
                 }
             };
             let label_mask = if matches!(args.get(2), Some(PyRep::Bool(_))) {
@@ -1011,30 +1016,30 @@ pub async fn handle(
                 _ => Vec::new(),
             };
             if item_ids.is_empty() {
-                return Some(Err(BridgeRpcError { code: "ItemNotFound".into(), message: "Deliver requires at least one valid itemID".into() }));
+                return Some(Err(BridgeRpcError { code: "ItemNotFound".into(), message: "Deliver requires at least one valid itemID".into(), client_error: None }));
             }
             let first_item_id = item_ids[0];
             let target_id_or_div = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 for &iid in &item_ids {
                     let Some(item) = snap.items.get(&iid) else {
-                        return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {iid} not found") });
+                        return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {iid} not found"), client_error: None });
                     };
                     if snap.items.get(&item.location_id).is_some_and(|p| crate::services::inventory_fitting::fitting_containers_ships::is_container_group(ctx.sde.types.get(&p.type_id).map(|t| t.group_id).unwrap_or(0), p.type_id)) {
-                        return Err(BridgeRpcError { code: "ItemInsideContainer".into(), message: format!("Item {iid} is inside a container and must be moved to item hangar before delivery") });
+                        return Err(BridgeRpcError { code: "ItemInsideContainer".into(), message: format!("Item {iid} is inside a container and must be moved to item hangar before delivery"), client_error: None });
                     }
                     if snap.item_custom_names.get(&iid).is_some_and(|name| name.starts_with("courier_cargo:")) {
-                        return Err(BridgeRpcError { code: "ItemCannotBeTransferred".into(), message: "Courier mission items cannot be transferred to corporation hangars or members".into() });
+                        return Err(BridgeRpcError { code: "ItemCannotBeTransferred".into(), message: "Courier mission items cannot be transferred to corporation hangars or members".into(), client_error: None });
                     }
                 }
                 let Some(corp) = snap.corporations.get(&corp_id) else {
-                    return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
+                    return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found"), client_error: None });
                 };
                 if !corp.members.contains(&char_id) {
-                    return Err(BridgeRpcError { code: "NotInCorporation".into(), message: "Character is not a member of the corporation".into() });
+                    return Err(BridgeRpcError { code: "NotInCorporation".into(), message: "Character is not a member of the corporation".into(), client_error: None });
                 }
                 if method == "DeliverToCorpMember" && target_id_or_div != char_id && !corp.members.contains(&target_id_or_div) {
-                    return Err(BridgeRpcError { code: "TargetNotInCorporation".into(), message: format!("Recipient {target_id_or_div} is not in corporation {corp_id}") });
+                    return Err(BridgeRpcError { code: "TargetNotInCorporation".into(), message: format!("Recipient {target_id_or_div} is not in corporation {corp_id}"), client_error: None });
                 }
                 let (is_ceo, caller_roles) = snap.effective_corp_roles_at(
                     corp_id,
@@ -1057,30 +1062,30 @@ pub async fn handle(
 
                 for &iid in &item_ids {
                     let Some(item) = snap.items.get(&iid) else {
-                        return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {iid} not found") });
+                        return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {iid} not found"), client_error: None });
                     };
                     if snap.item_custom_names.get(&iid).is_some_and(|name| name.starts_with("courier_cargo:")) {
-                        return Err(BridgeRpcError { code: "ItemCannotBeTransferred".into(), message: "Courier mission items cannot be transferred to corporation hangars or members".into() });
+                        return Err(BridgeRpcError { code: "ItemCannotBeTransferred".into(), message: "Courier mission items cannot be transferred to corporation hangars or members".into(), client_error: None });
                     }
                     if Some(iid) == session.ship_id || Some(iid) == active_ship_id || snap.is_character_boarded_or_saved_ship(char_id, session.ship_id, iid) {
-                        return Err(BridgeRpcError { code: "CannotDeliverActiveShip".into(), message: "Cannot deliver the currently active ship".into() });
+                        return Err(BridgeRpcError { code: "CannotDeliverActiveShip".into(), message: "Cannot deliver the currently active ship".into(), client_error: None });
                     }
                     let flag_u16 = item.flag as u16;
                     if matches!(flag_u16, 11..=34 | 92..=94 | 125..=132 | 164..=171)
                         || item.flag == InventoryFlag::Locked
                         || snap.is_item_locked_in_contract_or_job(iid)
                     {
-                        return Err(BridgeRpcError { code: "ItemCannotBeTransferred".into(), message: "Fitted or locked items cannot be delivered".into() });
+                        return Err(BridgeRpcError { code: "ItemCannotBeTransferred".into(), message: "Fitted or locked items cannot be delivered".into(), client_error: None });
                     }
                     if item.owner_id != char_id && item.owner_id != corp_id {
-                        return Err(BridgeRpcError { code: "ItemNotOwned".into(), message: "Cannot deliver an item not owned by caller or corporation".into() });
+                        return Err(BridgeRpcError { code: "ItemNotOwned".into(), message: "Cannot deliver an item not owned by caller or corporation".into(), client_error: None });
                     }
                     if item.location_id != docked_id && Some(item.location_id) != office_folder_id {
-                        return Err(BridgeRpcError { code: "ItemNotAtLocation".into(), message: format!("Item {iid} is not located at docked facility {docked_id}") });
+                        return Err(BridgeRpcError { code: "ItemNotAtLocation".into(), message: format!("Item {iid} is not located at docked facility {docked_id}"), client_error: None });
                     }
                     if item.owner_id == corp_id {
                         if !has_trader {
-                            return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Delivering corporation-owned items requires Trader, Accountant, or Director role".into() });
+                            return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Delivering corporation-owned items requires Trader, Accountant, or Director role".into(), client_error: None });
                         }
                         if (116..=122).contains(&flag_u16) {
                             let req_take_role = 1u64 << (13 + (flag_u16 - 116));
@@ -1089,7 +1094,7 @@ pub async fn handle(
                                 && !corp_roles::has_role(caller_roles, corp_roles::ROLE_ACCOUNTANT)
                                 && !corp_roles::has_role(caller_roles, req_take_role)
                             {
-                                return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Delivering items from a corporation hangar division requires division take access, Accountant, or Director role".into() });
+                                return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Delivering items from a corporation hangar division requires division take access, Accountant, or Director role".into(), client_error: None });
                             }
                         }
                     }
@@ -1276,6 +1281,7 @@ fn handle_update_alliance_application(
         return Err(BridgeRpcError {
             code: "ApplicationNotFound".into(),
             message: format!("No pending application from corporation {applicant_corp_id}"),
+            client_error: None,
         });
     }
     let _ = sync_alliance_timers(ctx, aid);
@@ -1461,6 +1467,7 @@ fn handle_upsert_alliance_bulletin(
         return Err(BridgeRpcError {
             code: "BulletinTitleRequired".into(),
             message: "A bulletin needs a title".into(),
+            client_error: None,
         });
     }
     let now_unix = ctx.now_unix();
@@ -1475,6 +1482,7 @@ fn handle_upsert_alliance_bulletin(
                 None => Err(BridgeRpcError {
                     code: "BulletinNotFound".into(),
                     message: format!("Bulletin {id} not found"),
+                    client_error: None,
                 }),
             },
             None => {
@@ -1641,6 +1649,7 @@ fn resolve_alliance_id(session: &SessionState, bound_obj_id: Option<i64>) -> Res
         .ok_or_else(|| BridgeRpcError {
             code: "NotInAlliance".into(),
             message: "Character is not in an alliance".into(),
+            client_error: None,
         })
 }
 
@@ -1701,12 +1710,14 @@ fn handle_set_capital_system(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "SetCapitalSystem requires solarSystemID".into(),
+            client_error: None,
         });
     };
     if !ctx.sde.solar_systems.contains_key(&(sys_id as u32)) {
         return Err(BridgeRpcError {
             code: "InvalidSolarSystem".into(),
             message: format!("Unknown solar system {sys_id}"),
+            client_error: None,
         });
     }
     let now_unix = ctx.now_unix();
@@ -1750,6 +1761,7 @@ fn handle_cancel_capital_system_transition(
             return Err(BridgeRpcError {
                 code: "NoCapitalSystemTransition".into(),
                 message: "No pending capital system transition to cancel".into(),
+                client_error: None,
             });
         }
         cfg.pending_capital_system_id = None;
@@ -1798,12 +1810,14 @@ fn handle_set_prime_hour(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "SetPrimeHour requires hour".into(),
+            client_error: None,
         });
     };
     if !(0..=23).contains(&hour) {
         return Err(BridgeRpcError {
             code: "InvalidPrimeHour".into(),
             message: format!("Prime hour must be 0..=23, got {hour}"),
+            client_error: None,
         });
     }
     let now_unix = ctx.now_unix();
@@ -1965,17 +1979,20 @@ fn handle_get_alliance_bill_balance(
                 return Err(BridgeRpcError {
                     code: "BillNotFound".into(),
                     message: format!("Bill {bill_id} not found"),
+                    client_error: None,
                 });
             };
             let bill: super::wallet_services_ext::CorpBillRecord =
                 serde_json::from_str(&note.note).map_err(|_| BridgeRpcError {
                     code: "BillNotFound".into(),
                     message: "Corrupt bill record".into(),
+                    client_error: None,
                 })?;
             if bill.debtor_id != aid && bill.creditor_id != aid {
                 return Err(BridgeRpcError {
                     code: "AccessDenied".into(),
                     message: "Bill does not belong to caller alliance".into(),
+                    client_error: None,
                 });
             }
             let bal = if bill.paid {
@@ -2046,6 +2063,7 @@ fn handle_pay_alliance_bill(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "PayBill requires billID".into(),
+            client_error: None,
         });
     };
     let from_account_key = args
@@ -2067,23 +2085,27 @@ fn handle_pay_alliance_bill(
             return Err(BridgeRpcError {
                 code: "BillNotFound".into(),
                 message: format!("Bill {bill_id} not found"),
+                client_error: None,
             });
         };
         let mut bill: super::wallet_services_ext::CorpBillRecord =
             serde_json::from_str(&note.note).map_err(|_| BridgeRpcError {
                 code: "BillNotFound".into(),
                 message: "Corrupt bill record".into(),
+                client_error: None,
             })?;
         if bill.paid {
             return Err(BridgeRpcError {
                 code: "BillAlreadyPaid".into(),
                 message: "Bill is already paid".into(),
+                client_error: None,
             });
         }
         if bill.debtor_id != aid {
             return Err(BridgeRpcError {
                 code: "AccessDenied".into(),
                 message: "Bill does not belong to caller alliance".into(),
+                client_error: None,
             });
         }
         super::market_trading::market_orders_corp_auth::require_corp_accountant_spend_role(
@@ -2101,10 +2123,12 @@ fn handle_pay_alliance_bill(
             .ok_or_else(|| BridgeRpcError {
                 code: "CorporationNotFound".into(),
                 message: "Executor corporation not found".into(),
+                client_error: None,
             })?;
         let bal_after = corp.debit_division(div_id, amt).ok_or_else(|| BridgeRpcError {
             code: "NotEnoughMoney".into(),
             message: "Insufficient corporation division ISK to pay alliance bill".into(),
+            client_error: None,
         })?;
         snap.append_journal(
             corp_id,
@@ -2154,6 +2178,7 @@ fn handle_gm_force_accept_application(
         return Err(BridgeRpcError {
             code: "GMRoleRequired".into(),
             message: "GMForceAcceptApplication requires GM privileges".into(),
+            client_error: None,
         });
     }
     let aid = resolve_alliance_id(session, bound_obj_id)?;
@@ -2161,6 +2186,7 @@ fn handle_gm_force_accept_application(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "GMForceAcceptApplication requires corporationID".into(),
+            client_error: None,
         });
     };
     let now_unix = ctx.now_unix();
@@ -2169,12 +2195,14 @@ fn handle_gm_force_accept_application(
             return Err(BridgeRpcError {
                 code: "AllianceNotFound".into(),
                 message: format!("Alliance {aid} not found"),
+                client_error: None,
             });
         }
         if !snap.corporations.contains_key(&applicant_corp_id) {
             return Err(BridgeRpcError {
                 code: "CorpNotFound".into(),
                 message: format!("Corporation {applicant_corp_id} not found"),
+                client_error: None,
             });
         }
         let meta = snap.alliance_war_state.alliances.entry(aid).or_default();
@@ -2186,6 +2214,7 @@ fn handle_gm_force_accept_application(
             return Err(BridgeRpcError {
                 code: "ApplicationNotFound".into(),
                 message: format!("No pending application from corporation {applicant_corp_id}"),
+                client_error: None,
             });
         };
         app.3 = "Accepted".into();
@@ -2283,6 +2312,7 @@ fn handle_update_alliance_bulletin_order(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "UpdateBulletinOrder requires a non-empty order list".into(),
+            client_error: None,
         });
     }
     with_alliance_war_state(ctx, |st| {

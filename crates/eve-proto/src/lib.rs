@@ -781,6 +781,8 @@ impl BridgeEnvelope {
 pub struct BridgeRpcError {
     pub code: String,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_error: Option<Box<ClientError>>,
 }
 
 impl BridgeRpcError {
@@ -789,6 +791,7 @@ impl BridgeRpcError {
         Self {
             message: code.clone(),
             code,
+            client_error: None,
         }
     }
 }

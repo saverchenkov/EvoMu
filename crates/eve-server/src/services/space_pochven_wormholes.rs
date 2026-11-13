@@ -232,6 +232,7 @@ pub fn resolve_pochven_filament_candidates(
             return Err(BridgeRpcError {
                 code: "SystemCheck_JumpFailed_StandingsTooLow".into(),
                 message: "Triglavian standings below 6.0".into(),
+                client_error: None,
             });
         }
         candidates.retain(|s| !home.contains(s));

@@ -854,10 +854,10 @@ pub fn handle_special_dialogue_action(
         // 12 = agentDialogueButtonStartResearch (feat:pve.research-agent-rp-formula; see GAP(sde) below for access-requirements)
         12 => {
             let Some(agent_info) = ctx.sde.agents.get(&agent_id) else {
-                return Some(Err(BridgeRpcError { code: "UnknownAgent".into(), message: format!("Agent {agent_id} does not exist in SDE") }));
+                return Some(Err(BridgeRpcError { code: "UnknownAgent".into(), message: format!("Agent {agent_id} does not exist in SDE"), client_error: None }));
             };
             if agent_info.agent_type_id != 4 {
-                return Some(Err(BridgeRpcError { code: "NotResearchAgent".into(), message: format!("Agent {agent_id} is not an R&D research agent") }));
+                return Some(Err(BridgeRpcError { code: "NotResearchAgent".into(), message: format!("Agent {agent_id} is not an R&D research agent"), client_error: None }));
             }
             let requested_field_skill: Option<TypeId> = match args.get(2) {
                 None | Some(PyRep::None) => None,
@@ -867,6 +867,7 @@ pub fn handle_special_dialogue_action(
                         return Some(Err(BridgeRpcError {
                             code: "InvalidResearchSkill".into(),
                             message: "Research skill argument must be a valid skill typeID".into(),
+                            client_error: None,
                         }));
                     }
                 },
@@ -928,7 +929,7 @@ pub fn handle_special_dialogue_action(
                 let before = entries.len();
                 entries.retain(|e| e.agent_id != agent_id);
                 if entries.len() == before {
-                    return Err(BridgeRpcError { code: "ResearchNotActive".into(), message: format!("No active R&D research with agent {agent_id}") });
+                    return Err(BridgeRpcError { code: "ResearchNotActive".into(), message: format!("No active R&D research with agent {agent_id}"), client_error: None });
                 }
                 save_rnd_research_entries(snap, char_id, &entries);
                 Ok(())
@@ -956,10 +957,10 @@ pub fn handle_special_dialogue_action(
                 ])));
             }
             let Some(agent_info) = ctx.sde.agents.get(&agent_id) else {
-                return Some(Err(BridgeRpcError { code: "UnknownAgent".into(), message: format!("Agent {agent_id} does not exist in SDE") }));
+                return Some(Err(BridgeRpcError { code: "UnknownAgent".into(), message: format!("Agent {agent_id} does not exist in SDE"), client_error: None }));
             };
             if !agent_info.is_locator {
-                return Some(Err(BridgeRpcError { code: "AgentHasNoLocatorService".into(), message: format!("Agent {agent_id} does not offer Locator services") }));
+                return Some(Err(BridgeRpcError { code: "AgentHasNoLocatorService".into(), message: format!("Agent {agent_id} does not offer Locator services"), client_error: None }));
             }
             let caller_sys = if sys_id > 0 {
                 sys_id
@@ -980,6 +981,7 @@ pub fn handle_special_dialogue_action(
                         "Must be co-located with Locator Agent {agent_id} in system {:?} / station {:?}",
                         agent_info.solar_system_id, agent_info.station_id
                     ),
+                    client_error: None,
                 }));
             }
             let target_char_id = args
@@ -1002,23 +1004,24 @@ pub fn handle_special_dialogue_action(
                 if agent_info.level > 1 {
                     let req_st = ((agent_info.level as f64) - 1.0) * 2.0 - 1.0;
                     if eff_st < req_st {
-                        return Err(BridgeRpcError { code: "InsufficientAgentStanding".into(), message: format!("Locator agent {agent_id} (level {}) requires effective standing >= {req_st:.1} (have {eff_st:.2})", agent_info.level) });
+                        return Err(BridgeRpcError { code: "InsufficientAgentStanding".into(), message: format!("Locator agent {agent_id} (level {}) requires effective standing >= {req_st:.1} (have {eff_st:.2})", agent_info.level), client_error: None });
                     }
                 } else if eff_st <= -2.0 {
-                    return Err(BridgeRpcError { code: "InsufficientAgentStanding".into(), message: format!("Locator agent {agent_id} (level 1) requires effective standing > -2.0 (have {eff_st:.2})") });
+                    return Err(BridgeRpcError { code: "InsufficientAgentStanding".into(), message: format!("Locator agent {agent_id} (level 1) requires effective standing > -2.0 (have {eff_st:.2})"), client_error: None });
                 }
                 if let Some(cd_note) = snap.owner_notes.get(&cd_nid) {
                     if now_unix < cd_note.timestamp_unix {
-                        return Err(BridgeRpcError { code: "LocatorAgentOnCooldown".into(), message: format!("Locator agent {agent_id} is on cooldown until {}", cd_note.timestamp_unix) });
+                        return Err(BridgeRpcError { code: "LocatorAgentOnCooldown".into(), message: format!("Locator agent {agent_id} is on cooldown until {}", cd_note.timestamp_unix), client_error: None });
                     }
                 }
                 let Some(target_ch) = snap.characters.get(&target_char_id).cloned() else {
-                    return Err(BridgeRpcError { code: "TargetCharacterNotFound".into(), message: format!("Target character {target_char_id} not found") });
+                    return Err(BridgeRpcError { code: "TargetCharacterNotFound".into(), message: format!("Target character {target_char_id} not found"), client_error: None });
                 };
                 if target_ch.solar_system_id >= 31_000_000 {
                     return Err(BridgeRpcError {
                         code: "LocatorTargetInUnknownSpace".into(),
                         message: format!("Locator agents cannot locate targets in wormhole or abyssal space (system {})", target_ch.solar_system_id),
+                        client_error: None,
                     });
                 }
                 let sys_info = ctx.sde.solar_systems.get(&target_ch.solar_system_id);
@@ -1028,6 +1031,7 @@ pub fn handle_special_dialogue_action(
                     return Err(BridgeRpcError {
                         code: "LocatorTargetInUnknownSpace".into(),
                         message: format!("Locator agents cannot locate targets in unknown space region {reg_id}"),
+                        client_error: None,
                     });
                 }
                 let agent_sys_info = agent_info.solar_system_id.and_then(|sid| ctx.sde.solar_systems.get(&sid));
@@ -1037,18 +1041,20 @@ pub fn handle_special_dialogue_action(
                     return Err(BridgeRpcError {
                         code: "LocatorTargetOutOfRange".into(),
                         message: format!("Level 1 locator agent {agent_id} can only locate targets in constellation {agent_const_id}"),
+                        client_error: None,
                     });
                 }
                 if agent_info.level == 2 && reg_id != agent_reg_id {
                     return Err(BridgeRpcError {
                         code: "LocatorTargetOutOfRange".into(),
                         message: format!("Level 2 locator agent {agent_id} can only locate targets in region {agent_reg_id}"),
+                        client_error: None,
                     });
                 }
                 let fee_cents = IskCents::from_isk(isk_fee);
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     if ch.balance < fee_cents {
-                        return Err(BridgeRpcError { code: "InsufficientFunds".into(), message: format!("Locator service requires {isk_fee} ISK") });
+                        return Err(BridgeRpcError { code: "InsufficientFunds".into(), message: format!("Locator service requires {isk_fee} ISK"), client_error: None });
                     }
                     ch.balance = ch.balance.checked_sub(fee_cents).unwrap_or(IskCents(0));
                     let bal_after = ch.balance;
@@ -1187,6 +1193,7 @@ pub(super) async fn handle_extended_with_bound(
                                 return Some(Err(BridgeRpcError {
                                     code: "InvalidParameter".into(),
                                     message: "agentIDs must contain positive integer agent IDs".into(),
+                                    client_error: None,
                                 }));
                             };
                             if seen_ids.insert(aid) {
@@ -1201,6 +1208,7 @@ pub(super) async fn handle_extended_with_bound(
                         return Some(Err(BridgeRpcError {
                             code: "InvalidParameter".into(),
                             message: "agentIDs must be a list, tuple, set, or positive integer".into(),
+                            client_error: None,
                         }));
                     }
                 }
@@ -1264,6 +1272,7 @@ pub(super) async fn handle_extended_with_bound(
                     return Some(Err(BridgeRpcError {
                         code: "AgentNotFound".into(),
                         message: format!("Agent {aid} not found in SDE"),
+                        client_error: None,
                     }));
                 }
                 agent_ids.push(aid);
@@ -1414,6 +1423,7 @@ pub(super) async fn handle_extended_with_bound(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArguments".into(),
                     message: "epicArcStatus.AgentHasEpicMissionsForCharacter requires a positive agentID".into(),
+                    client_error: None,
                 }));
             };
             let char_id = session_char_id;
@@ -1586,7 +1596,7 @@ pub(super) async fn handle_extended_with_bound(
                 return None;
             };
             if session.station_id.is_some() || session.structure_id.is_some() {
-                return Some(Err(BridgeRpcError { code: "ShipDocked".into(), message: "Cannot activate dungeon acceleration gate while docked".into() }));
+                return Some(Err(BridgeRpcError { code: "ShipDocked".into(), message: "Cannot activate dungeon acceleration gate while docked".into(), client_error: None }));
             }
             if let Some(ship_id) = session.ship_id {
                 let is_burner_gate = ctx.db.with_snapshot(|snap| {
@@ -1627,20 +1637,20 @@ pub(super) async fn handle_extended_with_bound(
                                 if matches!(ship_type.group_id, 27 | 30 | 419 | 485 | 547 | 659 | 898 | 900)
                                     || ship_type.mass >= 50_000_000.0
                                 {
-                                    return Err(BridgeRpcError { code: "ShipRestrictedByGate".into(), message: format!("Ship {} (group {}) is too large for this Anomic Burner acceleration gate", ship_type.name, ship_type.group_id) });
+                                    return Err(BridgeRpcError { code: "ShipRestrictedByGate".into(), message: format!("Ship {} (group {}) is too large for this Anomic Burner acceleration gate", ship_type.name, ship_type.group_id), client_error: None });
                                 }
                             }
                         }
                     }
                 }
                 let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) else {
-                    return Err(BridgeRpcError { code: "MissionNotActive".into(), message: format!("Mission {mission_id} is not active for character {char_id}") });
+                    return Err(BridgeRpcError { code: "MissionNotActive".into(), message: format!("Mission {mission_id} is not active for character {char_id}"), client_error: None });
                 };
                 if m.state != "Accepted" {
-                    return Err(BridgeRpcError { code: "InvalidMissionState".into(), message: format!("Mission {mission_id} is in state '{}', not Accepted", m.state) });
+                    return Err(BridgeRpcError { code: "InvalidMissionState".into(), message: format!("Mission {mission_id} is in state '{}', not Accepted", m.state), client_error: None });
                 }
                 if m.npcs_remaining > 0 {
-                    return Err(BridgeRpcError { code: "RoomNpcsRemaining".into(), message: format!("Cannot activate acceleration gate while {} room NPC(s) remain", m.npcs_remaining) });
+                    return Err(BridgeRpcError { code: "RoomNpcsRemaining".into(), message: format!("Cannot activate acceleration gate while {} room NPC(s) remain", m.npcs_remaining), client_error: None });
                 }
                 m.current_room_id += 1;
                 Ok(m.current_room_id)
@@ -1713,6 +1723,7 @@ fn handle_agent_mgr_attr(
             return Some(Err(BridgeRpcError {
                 code: "AgentNotFound".into(),
                 message: "agentMgr attribute lookup requires agentID or bound agent moniker".into(),
+                client_error: None,
             }));
         }
     };
@@ -1720,6 +1731,7 @@ fn handle_agent_mgr_attr(
         return Some(Err(BridgeRpcError {
             code: "UnknownAgent".into(),
             message: format!("Agent {agent_id} does not exist in SDE"),
+            client_error: None,
         }));
     };
     let corp_id = agent.corporation_id;

@@ -437,7 +437,7 @@ fn arb_bridge_envelope() -> impl Strategy<Value = BridgeEnvelope> {
         (1u64..1_000_000u64, "[A-Za-z]{3,12}", "[a-zA-Z0-9 ]{3,20}").prop_map(
             |(req_id, code, message)| BridgeEnvelope::RpcResponse {
                 req_id,
-                result: Err(BridgeRpcError { code, message }),
+                result: Err(BridgeRpcError { code, message, client_error: None }),
             }
         ),
         (

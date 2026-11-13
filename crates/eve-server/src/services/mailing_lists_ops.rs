@@ -238,6 +238,7 @@ fn handle_mail_ops(
                     return Some(Err(BridgeRpcError {
                         code: "AccessDenied".into(),
                         message: "Cannot modify mail belonging to another character".into(),
+                        client_error: None,
                     }));
                 }
             }
@@ -375,6 +376,7 @@ fn handle_mailing_list_ops(
                 Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: format!("Mailing list {req_list_id} not found"),
+                    client_error: None,
                 }))
             }
         }
@@ -449,6 +451,7 @@ fn handle_mailing_list_ops(
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "Mailing list not found".into(),
+                    client_error: None,
                 }));
             };
             let entity_acc = ml
@@ -462,6 +465,7 @@ fn handle_mailing_list_ops(
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "Access to this mailing list is blocked".into(),
+                    client_error: None,
                 }));
             }
             let already_member = ml.members.contains_key(&char_id);
@@ -480,10 +484,12 @@ fn handle_mailing_list_ops(
                     let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
                         code: "CharacterNotFound".into(),
                         message: format!("Character {char_id} not found"),
+                        client_error: None,
                     })?;
                     ch.balance = ch.balance.checked_sub(fee).ok_or_else(|| BridgeRpcError {
                         code: "NotEnoughISK".into(),
                         message: "Insufficient ISK to cover mailing list join cost".into(),
+                        client_error: None,
                     })?;
                     if let Some(owner_ch) = snap.characters.get_mut(&owner_id) {
                         owner_ch.balance = owner_ch.balance.checked_add(fee).unwrap_or(owner_ch.balance);
@@ -588,6 +594,7 @@ fn handle_mailing_list_ops(
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: format!("Mailing list {list_id} not found"),
+                    client_error: None,
                 }));
             };
             let is_member = ml.members.contains_key(&char_id);
@@ -604,6 +611,7 @@ fn handle_mailing_list_ops(
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "Access to this mailing list is blocked".into(),
+                    client_error: None,
                 }));
             }
 
@@ -641,12 +649,14 @@ fn handle_mailing_list_ops(
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: format!("Mailing list {list_id} not found"),
+                    client_error: None,
                 }));
             };
             if !caller_has_operator_or_owner_role(ml, char_id) {
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "Mailing list operator or owner role required".into(),
+                    client_error: None,
                 }));
             }
             ml.entity_access.remove(&entity_id);
@@ -675,6 +685,7 @@ fn handle_mailing_list_ops(
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: format!("Mailing list {list_id} not found"),
+                    client_error: None,
                 }));
             };
             let effective_acc = ml
@@ -691,6 +702,7 @@ fn handle_mailing_list_ops(
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "MailingListAccessDenied".into(),
+                    client_error: None,
                 }));
             }
 
@@ -721,12 +733,14 @@ fn handle_mailing_list_ops(
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: format!("Mailing list {list_id} not found"),
+                    client_error: None,
                 }));
             };
             if !caller_has_operator_or_owner_role(ml, char_id) {
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "Mailing list operator or owner role required".into(),
+                    client_error: None,
                 }));
             }
             ml.welcome_mail = None;
@@ -750,12 +764,14 @@ fn handle_mailing_list_ops(
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "Mailing list not found".into(),
+                    client_error: None,
                 }));
             };
             if ml.owner_id != char_id {
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "MailingListAccessDenied".into(),
+                    client_error: None,
                 }));
             }
             let removed = s.mailing_lists.remove(&list_id).unwrap();
@@ -797,6 +813,7 @@ fn handle_mailing_list_ops(
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: format!("Mailing list {list_id} not found"),
+                    client_error: None,
                 }));
             };
             let effective_acc = ml
@@ -813,6 +830,7 @@ fn handle_mailing_list_ops(
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "MailingListAccessDenied".into(),
+                    client_error: None,
                 }));
             }
 
@@ -862,12 +880,14 @@ fn handle_mailing_list_ops(
                     return Some(Err(BridgeRpcError {
                         code: "UserError".into(),
                         message: format!("Mailing list {list_id} not found"),
+                        client_error: None,
                     }));
                 };
                 if !caller_has_operator_or_owner_role(ml, char_id) {
                     return Some(Err(BridgeRpcError {
                         code: "UserError".into(),
                         message: "Mailing list operator or owner role required".into(),
+                        client_error: None,
                     }));
                 }
                 let is_owner = char_id == ml.owner_id;
@@ -908,12 +928,14 @@ fn handle_mailing_list_ops(
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: format!("Mailing list {list_id} not found"),
+                    client_error: None,
                 }));
             };
             if !caller_has_operator_or_owner_role(ml, char_id) {
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "Mailing list operator or owner role required".into(),
+                    client_error: None,
                 }));
             }
             ml.welcome_mail = Some((title.to_string(), body.to_string()));
@@ -939,12 +961,14 @@ fn handle_mailing_list_ops(
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: format!("Mailing list {list_id} not found"),
+                    client_error: None,
                 }));
             };
             if !caller_has_operator_or_owner_role(ml, char_id) {
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "Mailing list operator or owner role required".into(),
+                    client_error: None,
                 }));
             }
             
@@ -954,6 +978,7 @@ fn handle_mailing_list_ops(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "SendWelcomeMail requires listID, title, and body".into(),
+                    client_error: None,
                 }));
             };
             let title = title.clone();
@@ -1031,12 +1056,14 @@ fn handle_mailing_list_ops(
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: format!("Mailing list {list_id} not found"),
+                    client_error: None,
                 }));
             };
             if !caller_has_operator_or_owner_role(ml, char_id) {
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "Mailing list operator or owner role required".into(),
+                    client_error: None,
                 }));
             }
             ml.default_access = default_access.clamp(0, 2);
@@ -1073,12 +1100,14 @@ fn handle_mailing_list_ops(
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: format!("Mailing list {list_id} not found"),
+                    client_error: None,
                 }));
             };
             if !caller_has_operator_or_owner_role(ml, char_id) {
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "Mailing list operator or owner role required".into(),
+                    client_error: None,
                 }));
             }
             if let Some(PyRep::Dict(map)) = args.get(1) {
@@ -1095,6 +1124,7 @@ fn handle_mailing_list_ops(
                     return Some(Err(BridgeRpcError {
                         code: "UserError".into(),
                         message: "Invalid entity ID".into(),
+                        client_error: None,
                     }));
                 }
                 let access = args.get(2).and_then(|a| a.as_i64()).unwrap_or(1);
@@ -1133,12 +1163,14 @@ fn handle_mailing_list_ops(
                     return Some(Err(BridgeRpcError {
                         code: "UserError".into(),
                         message: format!("Mailing list {list_id} not found"),
+                        client_error: None,
                     }));
                 };
                 if !caller_has_operator_or_owner_role(ml, char_id) {
                     return Some(Err(BridgeRpcError {
                         code: "UserError".into(),
                         message: "Mailing list operator or owner role required".into(),
+                        client_error: None,
                     }));
                 }
                 let is_owner = char_id == ml.owner_id;

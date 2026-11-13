@@ -199,6 +199,7 @@ pub fn check_ded_gate_ship_allowed(
         return Err(BridgeRpcError {
             code: "ShipSizeRestricted".into(),
             message: format!("Acceleration gate cannot classify hull type {ship_type_id}: {label}"),
+            client_error: None,
         });
     };
     let grp = ship_type.group_id;
@@ -206,6 +207,7 @@ pub fn check_ded_gate_ship_allowed(
         return Err(BridgeRpcError {
             code: "ShipSizeRestricted".into(),
             message: format!("Acceleration gate rejects ship hull {} (group {grp}, mass {ship_mass:.0} kg): {label}", ship_type.name),
+            client_error: None,
         });
     }
     Ok(())

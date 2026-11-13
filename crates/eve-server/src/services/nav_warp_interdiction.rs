@@ -56,6 +56,7 @@ pub fn sync_waypoints_from_char_settings(
                         message: format!(
                             "Destination {dest_id} is not a known solar system, station, or structure"
                         ),
+                        client_error: None,
                     });
                 }
                 out.push(dest_id);
@@ -265,6 +266,7 @@ pub fn calculate_route_with_waypoints(
         return Err(BridgeRpcError {
             code: "InvalidOrigin".into(),
             message: format!("Origin solar system {origin_sys} not found in SDE"),
+            client_error: None,
         });
     }
 
@@ -273,6 +275,7 @@ pub fn calculate_route_with_waypoints(
         let sid = resolve_waypoint_solar_system(ctx, dest_id).ok_or_else(|| BridgeRpcError {
             code: "InvalidWaypoint".into(),
             message: format!("Destination {dest_id} is not a valid solar system, station, or structure"),
+            client_error: None,
         })?;
         resolved_targets.push(sid);
     }
@@ -282,6 +285,7 @@ pub fn calculate_route_with_waypoints(
         return Err(BridgeRpcError {
             code: "OriginSystemInAvoidList".into(),
             message: format!("Origin system {origin_sys} is in the avoid list"),
+            client_error: None,
         });
     }
 
@@ -301,6 +305,7 @@ pub fn calculate_route_with_waypoints(
             return Err(BridgeRpcError {
                 code: "WaypointInAvoidList".into(),
                 message: format!("Waypoint solar system {next_sys} is in the avoid list"),
+                client_error: None,
             });
         }
         let leg = dijkstra_single_leg(ctx, &base_adj, current_sys, next_sys, &avoid_set, flag)
@@ -315,6 +320,7 @@ pub fn calculate_route_with_waypoints(
                     message: format!(
                         "No stargate route found between {current_sys} and {next_sys} respecting avoid list"
                     ),
+                    client_error: None,
                 }
             })?;
         full_route.extend(leg.into_iter().skip(1));
@@ -447,6 +453,7 @@ pub(crate) fn ensure_not_in_active_warp(mode: &MovementMode) -> Result<(), Bridg
         return Err(BridgeRpcError {
             code: "ShipAlreadyInWarp".into(),
             message: "Cannot initiate or redirect warp while already in warp".into(),
+            client_error: None,
         });
     }
     Ok(())
@@ -484,6 +491,7 @@ pub(crate) fn check_warp_interdiction_and_adjust_dest(
         return Err(BridgeRpcError {
             code: "WarpScrambled".into(),
             message: "WarpScrambled: Warp drive disabled by warp disruption bubble".into(),
+            client_error: None,
         });
     }
     if let Some((_bid, intercept_pos)) = bp.warp_bubble_mgr.check_interception(origin, dest_pos) {
@@ -591,6 +599,7 @@ pub(crate) async fn execute_agency_content_warp(
                         "Insufficient capacitor ({:.3} GJ) to initiate minimum 150 km warp",
                         cs.capacitor
                     ),
+                    client_error: None,
                 });
             }
             dest_pos = current_ball.position + warp_dir * affordable_dist_m;
@@ -635,6 +644,7 @@ pub(crate) async fn execute_agency_content_warp(
         return Err(BridgeRpcError {
             code: code.into(),
             message: e,
+            client_error: None,
         });
     }
     on_warp_initiated_hooks(ctx, sys_handle, char_id, ship_id, sys_id).await;
@@ -681,11 +691,13 @@ pub async fn handle_use_warp_vector(
         return Err(BridgeRpcError {
             code: "ShipDocked".into(),
             message: "Cannot activate a warp vector while docked".into(),
+            client_error: None,
         });
     }
     let ship_id = session.ship_id.ok_or_else(|| BridgeRpcError {
         code: "NoActiveShip".into(),
         message: "Session has no active ship in space".into(),
+        client_error: None,
     })?;
     let sys_id = session
         .solar_system_id
@@ -693,6 +705,7 @@ pub async fn handle_use_warp_vector(
         .ok_or_else(|| BridgeRpcError {
             code: "NoSolarSystem".into(),
             message: "Session has no active solar system".into(),
+            client_error: None,
         })?;
     let target_id = args
         .first()
@@ -701,11 +714,13 @@ pub async fn handle_use_warp_vector(
         .ok_or_else(|| BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "warpVectorMgr.UseVector requires a positive vector itemID".into(),
+            client_error: None,
         })?;
     if target_id == ship_id {
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "Cannot activate a warp vector targeting your own active ship".into(),
+            client_error: None,
         });
     }
 
@@ -721,6 +736,7 @@ pub async fn handle_use_warp_vector(
     let ship_ball = validated.ball.ok_or_else(|| BridgeRpcError {
         code: "ShipNotInSpace".into(),
         message: format!("Active ship {ship_id} is not in space in solar system {sys_id}"),
+        client_error: None,
     })?;
     ensure_not_in_active_warp(&ship_ball.mode)?;
 
@@ -747,6 +763,7 @@ pub async fn handle_use_warp_vector(
             return Err(BridgeRpcError {
                 code: "InvalidVectorItem".into(),
                 message: format!("Warp vector item {target_id} not found in active ship {ship_id} cargo"),
+                client_error: None,
             });
         };
         if vec_item.owner_id != char_id
@@ -757,11 +774,13 @@ pub async fn handle_use_warp_vector(
             return Err(BridgeRpcError {
                 code: "InvalidVectorItem".into(),
                 message: format!("Warp vector item {target_id} must be in active ship {ship_id} cargo"),
+                client_error: None,
             });
         }
         let mod_t = ctx.sde.types.get(&vec_item.type_id).ok_or_else(|| BridgeRpcError {
             code: "InvalidVectorItem".into(),
             message: format!("Unknown vector item type {}", vec_item.type_id),
+            client_error: None,
         })?;
         if mod_t.group_id != 4599 {
             return Err(BridgeRpcError {
@@ -770,6 +789,7 @@ pub async fn handle_use_warp_vector(
                     "Item {} (group {}) is not a valid Warp Vector Data item (group 4599)",
                     mod_t.name, mod_t.group_id
                 ),
+                client_error: None,
             });
         }
 
@@ -785,6 +805,7 @@ pub async fn handle_use_warp_vector(
                     "Warp vector reactivation cooldown active for {} s",
                     prev_cd.unwrap_or(0) - now_unix
                 ),
+                client_error: None,
             });
         }
 
@@ -803,6 +824,7 @@ pub async fn handle_use_warp_vector(
                         "Ship is {:.1} m from system star (maximum {:.1} m for warp vector activation)",
                         star_dist, max_star_dist
                     ),
+                    client_error: None,
                 });
             }
         }
@@ -830,6 +852,7 @@ pub async fn handle_use_warp_vector(
             return Err(BridgeRpcError {
                 code: "InvalidArgument".into(),
                 message: "Warp vector coordinates must be finite".into(),
+                client_error: None,
             });
         }
         let mut dest_pos = star_pos + delta;
@@ -847,6 +870,7 @@ pub async fn handle_use_warp_vector(
                     "Warp vector distance {:.1} m is below minimum 150,000 m",
                     dist_m
                 ),
+                client_error: None,
             });
         }
 
@@ -908,6 +932,7 @@ pub async fn handle_use_warp_vector(
         return Err(BridgeRpcError {
             code: "WarpFailed".into(),
             message: e,
+            client_error: None,
         });
     }
     on_warp_initiated_hooks(ctx, &sys_handle, char_id, ship_id, sys_id).await;
@@ -1034,6 +1059,7 @@ pub(crate) async fn handle_set_session_check(
                     return Err(BridgeRpcError {
                         code: "SessionCheckMismatch".into(),
                         message: format!("Session solarsystemid2 is {sys_id}, not {req_sys}"),
+                        client_error: None,
                     });
                 }
             }
@@ -1069,6 +1095,7 @@ pub(crate) async fn handle_set_session_check(
         return Err(BridgeRpcError {
             code: "InvalidSessionChangeTrigger".into(),
             message: format!("Unknown session-change trigger '{reason}'"),
+            client_error: None,
         });
     }
     if let Some(active) = crate::services::space_destiny::check_session_change_timer_active(
@@ -1083,6 +1110,7 @@ pub(crate) async fn handle_set_session_check(
                 "Cannot perform session change '{reason}' while 10s timer from '{}' is active",
                 active.reason
             ),
+            client_error: None,
         });
     }
     let tick = cur_tick_opt.map(|(_, t)| t).unwrap_or(0);

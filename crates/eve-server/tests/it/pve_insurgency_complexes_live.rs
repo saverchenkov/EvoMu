@@ -139,7 +139,7 @@ async fn warp_to_target(ctx: &ServerContext, p: &mut LivePilot, stuff: &str, ite
             Err(e) if e.code == "WarpDistanceTooShort" && hop > 0 => {
                 let sdist = sys.get_ball_snapshot(p.ship_id).await.ok().flatten().zip(sys.get_ball_snapshot(item_id).await.ok().flatten()).map_or(0.0, |((_, a), (_, b))| a.position.distance(b.position));
                 if stuff == "item" && (item_id >= 1_893_100_000 || ctx.db.with_snapshot(|s| s.items.get(&item_id).is_some_and(|i| ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 366)))) && sdist > min_range + 2_400.0 {
-                    return Err(BridgeRpcError { code: "WarpDistanceTooShort".into(), message: format!("short hop {sdist:.1} m") });
+                    return Err(BridgeRpcError { code: "WarpDistanceTooShort".into(), message: format!("short hop {sdist:.1} m"), client_error: None });
                 }
                 break;
             }

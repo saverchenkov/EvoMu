@@ -200,6 +200,7 @@ pub fn check_small_ship_wormhole_eligibility(
                 "Ship mass {:.1} kg exceeds small-ship wormhole limit 5000000.0 kg",
                 effective_mass_kg
             ),
+            client_error: None,
         });
     }
     let ship_group_id = sde
@@ -223,6 +224,7 @@ pub fn check_small_ship_wormhole_eligibility(
             message: format!(
                 "Ship type {ship_type_id} (group {ship_group_id}) is not permitted through small-ship wormholes"
             ),
+            client_error: None,
         })
     }
 }

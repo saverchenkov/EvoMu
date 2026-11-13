@@ -184,7 +184,7 @@ pub fn can_harvest(module: &InvType, kind: MiningKind, target: &InvType) -> bool
 }
 
 fn err(reason: MiningStopReason, message: String) -> BridgeRpcError {
-    BridgeRpcError { code: reason.code().into(), message }
+    BridgeRpcError { code: reason.code().into(), message, client_error: None }
 }
 
 /// Live geometry/state used by the requirement checks.
@@ -952,17 +952,19 @@ pub async fn activate(
     let module_type_id = ctx
         .db
         .with_snapshot(|s| s.items.get(&module_id).filter(|i| i.location_id == ship_id).map(|i| i.type_id))
-        .ok_or_else(|| BridgeRpcError { code: "ModuleNotFound".into(), message: format!("Module {module_id} is not fitted") })?;
+        .ok_or_else(|| BridgeRpcError { code: "ModuleNotFound".into(), message: format!("Module {module_id} is not fitted"), client_error: None })?;
     let module = ctx.sde.types.get(&module_type_id).ok_or_else(|| BridgeRpcError {
         code: "ModuleNotFound".into(),
         message: format!("Unknown module type {module_type_id}"),
+        client_error: None,
     })?;
     let kind = mining_kind_of(&ctx.sde, module).ok_or_else(|| BridgeRpcError {
         code: "NotAMiningModule".into(),
         message: format!("Module type {module_type_id} has no mining effect"),
+        client_error: None,
     })?;
     if ctx.mining_cycles.read().unwrap_or_else(|e| e.into_inner()).contains_key(&module_id) {
-        return Err(BridgeRpcError { code: "EffectAlreadyActive".into(), message: format!("Module {module_id} is already active") });
+        return Err(BridgeRpcError { code: "EffectAlreadyActive".into(), message: format!("Module {module_id} is already active"), client_error: None });
     }
     if let Some(asteroid) = ctx.db.get_asteroid(target_id) {
         let target_ok = ctx.sde.types.get(&asteroid.type_id).is_some_and(|t| can_harvest(module, kind, t));
@@ -970,6 +972,7 @@ pub async fn activate(
             return Err(BridgeRpcError {
                 code: "TargetNotMinable".into(),
                 message: format!("Module {module_type_id} cannot harvest type {}", asteroid.type_id),
+                client_error: None,
             });
         }
     }
@@ -989,7 +992,7 @@ pub async fn activate(
     {
         let mut cycles = ctx.mining_cycles.write().unwrap_or_else(|e| e.into_inner());
         if cycles.contains_key(&module_id) {
-            return Err(BridgeRpcError { code: "EffectAlreadyActive".into(), message: format!("Module {module_id} is already active") });
+            return Err(BridgeRpcError { code: "EffectAlreadyActive".into(), message: format!("Module {module_id} is already active"), client_error: None });
         }
         cycles.insert(module_id, cycle.clone());
     }
@@ -1065,6 +1068,7 @@ pub async fn deactivate(
         return Some(Err(BridgeRpcError {
             code: "ModuleNotFound".into(),
             message: format!("Module {module_id} is not fitted to the caller's active ship"),
+            client_error: None,
         }));
     }
     let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, cycle.solar_system_id).clamp(0.1, 1.0);

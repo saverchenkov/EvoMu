@@ -23,6 +23,7 @@ pub(crate) async fn check_superweapon_tether_guard(
         return Err(BridgeRpcError {
             code: "CantActivateWhileTethered".into(),
             message: "Cannot activate a Superweapon or Disruptive Lance while tethered".into(),
+            client_error: None,
         });
     }
     Ok(())
@@ -86,6 +87,7 @@ fn parse_vec3_arg(args: &[PyRep], idx: usize) -> Result<Option<DVec3>, BridgeRpc
         .map_err(|e| BridgeRpcError {
             code: "InvalidDirectionVector".into(),
             message: e.message,
+            client_error: None,
         })
 }
 
@@ -126,6 +128,7 @@ fn check_superweapon_fuel_available(
         .map_err(|message| BridgeRpcError {
             code: "InsufficientFuel".into(),
             message,
+            client_error: None,
         })
 }
 
@@ -188,6 +191,7 @@ fn deduct_superweapon_fuel(
         .map_err(|message| BridgeRpcError {
             code: "InsufficientFuel".into(),
             message,
+            client_error: None,
         })
 }
 
@@ -272,6 +276,7 @@ fn precheck_doomsday_structure_target(
             return Err(BridgeRpcError {
                 code: "StructureInvulnerable".into(),
                 message: format!("Structure {target_id} is invulnerable to direct weapon and superweapon damage"),
+                client_error: None,
             });
         }
     }
@@ -304,6 +309,7 @@ pub async fn activate_superweapon_with_args(
         return Err(BridgeRpcError {
             code: "ModuleInReactivationDelay".into(),
             message: format!("Module {module_id} is in reactivation delay"),
+            client_error: None,
         });
     }
     let (ship_type_id, ship_group_id, mod_type_id, has_active_siege) = ctx.db.with_snapshot(|snap| {
@@ -328,6 +334,7 @@ pub async fn activate_superweapon_with_args(
         return Err(BridgeRpcError {
             code: "InvalidShipGroup".into(),
             message: "Superweapons can only be activated on Titans (group 30) or Lancer Dreadnoughts (group 4594)".into(),
+            client_error: None,
         });
     }
     let sys_sec = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
@@ -344,24 +351,28 @@ pub async fn activate_superweapon_with_args(
         return Err(BridgeRpcError {
             code: "CannotActivateDoomsdayInHighSec".into(),
             message: format!("Superweapons and Disruptive Lances cannot be activated in high-sec (system {sys_id} security {sys_sec:.2})"),
+            client_error: None,
         });
     }
     if !is_lancer && sys_sec > 0.0 {
         return Err(BridgeRpcError {
             code: "CannotActivateLanceInLowSec".into(),
             message: format!("Titan superweapons and AoE Lances can only be activated in null-sec or wormhole space (system {sys_id} security {sys_sec:.2})"),
+            client_error: None,
         });
     }
     let Some(mod_type) = ctx.sde.types.get(&mod_type_id) else {
         return Err(BridgeRpcError {
             code: "ModuleNotFound".into(),
             message: format!("Superweapon module {module_id} not found on ship"),
+            client_error: None,
         });
     };
     if mod_type.group_id != 588 {
         return Err(BridgeRpcError {
             code: "InvalidModuleGroup".into(),
             message: format!("Module {module_id} is not a Super Weapon (group 588)"),
+            client_error: None,
         });
     }
 
@@ -373,6 +384,7 @@ pub async fn activate_superweapon_with_args(
             return Err(BridgeRpcError {
                 code: "SiegeRequiredForLance".into(),
                 message: "Disruptive Lance can only be activated while a Siege Module is active".into(),
+                client_error: None,
             });
         }
         let skills = ctx.character_skill_levels(char_id);
@@ -386,12 +398,14 @@ pub async fn activate_superweapon_with_args(
             return Err(BridgeRpcError {
                 code: "SkillMissing".into(),
                 message: "Activating a Disruptive Lance requires Disruptive Lance Operation (77739) and Lancer Dreadnoughts (77738)".into(),
+                client_error: None,
             });
         }
         if sys.get_ball_snapshot(ship_id).await.ok().flatten().is_none() {
             return Err(BridgeRpcError {
                 code: "ShipNotInSpace".into(),
                 message: "Disruptive Lance can only be activated while ship is in space".into(),
+                client_error: None,
             });
         }
         crate::services::inventory_fitting::fitting_module_cycles::enforce_space_action_cloak_and_warp_guard(
@@ -420,6 +434,7 @@ pub async fn activate_superweapon_with_args(
                 return Err(BridgeRpcError {
                     code: "NotEnoughCapacitor".into(),
                     message: format!("Insufficient capacitor for Disruptive Lance: need {cap_cost:.1} GJ"),
+                    client_error: None,
                 });
             }
             Some(cs.capacitor)
@@ -560,6 +575,7 @@ pub async fn activate_superweapon_with_args(
         return Err(BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: "Superweapon can only be activated while ship is in space".into(),
+            client_error: None,
         });
     };
     crate::services::inventory_fitting::fitting_module_cycles::enforce_space_action_cloak_and_warp_guard(
@@ -582,18 +598,21 @@ pub async fn activate_superweapon_with_args(
             return Err(BridgeRpcError {
                 code: "TargetRequired".into(),
                 message: "Single-point Doomsday requires a targetID".into(),
+                client_error: None,
             });
         };
         if tid == ship_id {
             return Err(BridgeRpcError {
                 code: "InvalidTarget".into(),
                 message: "Cannot fire Doomsday at own ship".into(),
+                client_error: None,
             });
         }
         let Some(tb) = all_balls.iter().find(|b| b.id == tid).cloned() else {
             return Err(BridgeRpcError {
                 code: "TargetNotInSpace".into(),
                 message: format!("Target {tid} is not in space"),
+                client_error: None,
             });
         };
         if let Some(tcs) = sys.get_combat_state(tid).await.ok().flatten() {
@@ -616,12 +635,14 @@ pub async fn activate_superweapon_with_args(
             return Err(BridgeRpcError {
                 code: "TargetNotLocked".into(),
                 message: format!("Target {tid} is not locked"),
+                client_error: None,
             });
         }
         if !is_eligible_single_target_doomsday_target(ctx, tid, tb.type_id) {
             return Err(BridgeRpcError {
                 code: "InvalidTarget".into(),
                 message: "Single-target Doomsdays can only target Capital ships or Structures".into(),
+                client_error: None,
             });
         }
         let max_dd_range = mod_type
@@ -634,6 +655,7 @@ pub async fn activate_superweapon_with_args(
             return Err(BridgeRpcError {
                 code: "TargetOutOfRange".into(),
                 message: format!("Target {tid} exceeds Doomsday range ({max_dd_range:.0}m)"),
+                client_error: None,
             });
         }
         let (vic_char_opt, is_p_struct) = ctx.db.with_snapshot(|snap| {
@@ -656,6 +678,7 @@ pub async fn activate_superweapon_with_args(
                 return Err(BridgeRpcError {
                     code: "TargetInvulnerable".into(),
                     message: format!("Target character {vcid} is invulnerable"),
+                    client_error: None,
                 });
             }
         }
@@ -689,6 +712,7 @@ pub async fn activate_superweapon_with_args(
                 return Err(BridgeRpcError {
                     code: "NotEnoughCapacitor".into(),
                     message: format!("Insufficient capacitor for Doomsday: need {dd_cap_cost:.1} GJ"),
+                    client_error: None,
                 });
             }
             Some(cs.capacitor)

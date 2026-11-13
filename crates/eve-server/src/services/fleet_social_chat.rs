@@ -130,7 +130,7 @@ fn handle_chat_rpc(
         ("XmppChatMgr", "AddCharacterToChannel") => {
             let (_, caller_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(chan_id) = args.first().and_then(|a| a.as_str()) else {
-                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "AddCharacterToChannel requires channelID".into() }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "AddCharacterToChannel requires channelID".into(), client_error: None }));
             };
             let (target_char, password_arg) = match (args.get(1), args.get(2)) {
                 (Some(PyRep::Integer(cid)), Some(PyRep::String(pw))) => (*cid, Some(pw.as_str())),
@@ -142,7 +142,7 @@ fn handle_chat_rpc(
                 let blocked_in_contacts = crate::services::character_skills::character_contacts::is_blocked_by(ctx, target_char, caller_id);
                 let blocked_in_social = ctx.social_extras.lock().unwrap_or_else(|e| e.into_inner()).blocked.get(&target_char).is_some_and(|b| b.contains(&caller_id));
                 if blocked_in_contacts || blocked_in_social {
-                    return Some(Err(BridgeRpcError { code: "ChannelAccessDenied".into(), message: "Target character has blocked caller".into() }));
+                    return Some(Err(BridgeRpcError { code: "ChannelAccessDenied".into(), message: "Target character has blocked caller".into(), client_error: None }));
                 }
             }
             let is_delayed = is_delayed_local_channel(chan_id);
@@ -155,16 +155,16 @@ fn handle_chat_rpc(
                 if existing_owner != Some(target_char)
                     && (blocked_in_social_chan || is_character_blocked_in_acl(snap, &chan_key, target_char))
                 {
-                    return Err(BridgeRpcError { code: "ChannelAccessDenied".into(), message: "Blocked from channel".into() });
+                    return Err(BridgeRpcError { code: "ChannelAccessDenied".into(), message: "Blocked from channel".into(), client_error: None });
                 }
                 let chan_exists = snap.chat_channels.contains_key(&chan_key);
                 if !chan_exists && target_char != caller_id && !session.has_gm_role() {
-                    return Err(BridgeRpcError { code: "ChannelAccessDenied".into(), message: "Cannot add another character to non-existent channel".into() });
+                    return Err(BridgeRpcError { code: "ChannelAccessDenied".into(), message: "Cannot add another character to non-existent channel".into(), client_error: None });
                 }
                 if target_char != caller_id {
                     let existing = snap.chat_channels.get(&chan_key);
                     if !has_channel_operator_auth(snap, session, caller_id, &chan_key, existing) {
-                        return Err(BridgeRpcError { code: "ChannelAccessDenied".into(), message: "Only channel owner or operator may add other characters".into() });
+                        return Err(BridgeRpcError { code: "ChannelAccessDenied".into(), message: "Only channel owner or operator may add other characters".into(), client_error: None });
                     }
                 }
                 let caller_is_op = {
@@ -188,7 +188,7 @@ fn handle_chat_rpc(
                 }
                 if let Some(ref pw) = chan.password {
                     if !pw.is_empty() && !caller_is_op && chan.owner_id != Some(caller_id) && !chan.operators.contains(&caller_id) && password_arg != Some(pw.as_str()) {
-                        return Err(BridgeRpcError { code: "InvalidChannelPassword".into(), message: "Incorrect password for channel".into() });
+                        return Err(BridgeRpcError { code: "InvalidChannelPassword".into(), message: "Incorrect password for channel".into(), client_error: None });
                     }
                 }
                 chan.members.insert(target_char);
@@ -349,6 +349,7 @@ fn handle_chat_rpc(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "CreatePlayerOwnedChannel requires non-empty channel name".into(),
+                    client_error: None,
                 }));
             }
             let password = args.get(1).and_then(|a| a.as_str()).map(|s| s.to_string());
@@ -364,6 +365,7 @@ fn handle_chat_rpc(
                     return Err(BridgeRpcError {
                         code: "ChannelAlreadyExists".into(),
                         message: format!("Channel {chan_id} already exists"),
+                        client_error: None,
                     });
                 }
                 snap.chat_channels.insert(
@@ -404,12 +406,14 @@ fn handle_chat_rpc(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "GrantChannelOwnership requires channelID".into(),
+                    client_error: None,
                 }));
             };
             let Some(new_owner_id) = args.get(1).and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "GrantChannelOwnership requires newOwnerID".into(),
+                    client_error: None,
                 }));
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -417,24 +421,28 @@ fn handle_chat_rpc(
                     return Err(BridgeRpcError {
                         code: "ChannelNotFound".into(),
                         message: format!("Channel {chan_id} not found"),
+                        client_error: None,
                     });
                 };
                 if is_system_or_org_channel(&chan_key) {
                     return Err(BridgeRpcError {
                         code: "NotChannelOwner".into(),
                         message: "System and organization channels do not allow ownership transfer".into(),
+                        client_error: None,
                     });
                 }
                 let Some(chan) = snap.chat_channels.get_mut(&chan_key) else {
                     return Err(BridgeRpcError {
                         code: "ChannelNotFound".into(),
                         message: format!("Channel {chan_id} not found"),
+                        client_error: None,
                     });
                 };
                 if !has_channel_owner_auth(session, char_id, &chan_key, chan) {
                     return Err(BridgeRpcError {
                         code: "NotChannelOwner".into(),
                         message: "Only the channel owner can transfer ownership".into(),
+                        client_error: None,
                     });
                 }
                 chan.owner_id = Some(new_owner_id);
@@ -469,12 +477,14 @@ fn handle_chat_rpc(
                     return Err(BridgeRpcError {
                         code: "ChannelNotFound".into(),
                         message: format!("Channel {chan_id} not found"),
+                        client_error: None,
                     });
                 };
                 if !can_op {
                     return Err(BridgeRpcError {
                         code: "NotChannelOperator".into(),
                         message: "Requires channel operator privileges".into(),
+                        client_error: None,
                     });
                 }
                 chan.motd = motd.to_string();
@@ -505,12 +515,14 @@ fn handle_chat_rpc(
                 return Some(Err(BridgeRpcError {
                     code: "ChatAccessDenied".into(),
                     message: "GMMute requires channel operator or GM role".into(),
+                    client_error: None,
                 }));
             }
             if targets_owner && !session.has_gm_role() {
                 return Some(Err(BridgeRpcError {
                     code: "NotChannelOwner".into(),
                     message: "Channel owner cannot be muted by a non-GM operator".into(),
+                    client_error: None,
                 }));
             }
             let duration_sec = args.get(2).and_then(|a| a.as_i64()).unwrap_or(300).max(1) as u64;
@@ -544,7 +556,7 @@ fn handle_chat_rpc(
                 (chan_key, ok)
             });
             if !is_authorized {
-                return Some(Err(BridgeRpcError { code: "ChatAccessDenied".into(), message: "GMUnmute requires channel operator or GM role".into() }));
+                return Some(Err(BridgeRpcError { code: "ChatAccessDenied".into(), message: "GMUnmute requires channel operator or GM role".into(), client_error: None }));
             }
             ctx.social_extras.lock().unwrap_or_else(|e| e.into_inner()).muted_in_channel.remove(&(chan_key.clone(), target_id));
             ctx.db.with_mut_snapshot(|snap| {
@@ -646,12 +658,13 @@ fn handle_chat_rpc(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidArgument".into(),
                         message: "JoinChannel requires channelID".into(),
+                        client_error: None,
                     }))
                 }
             };
             let chan_id = chan_id_owned.as_str();
             if crate::services::pve_special_sites_abyssal::is_abyssal_local_channel_disabled(chan_id, session.solar_system_id) {
-                return Some(Err(BridgeRpcError { code: "LocalChannelDisabledInAbyssalSpace".into(), message: "Local chat channel is disabled inside Abyssal Deadspace".into() }));
+                return Some(Err(BridgeRpcError { code: "LocalChannelDisabledInAbyssalSpace".into(), message: "Local chat channel is disabled inside Abyssal Deadspace".into(), client_error: None }));
             }
             let password_arg = args.get(1).and_then(|a| a.as_str());
             let motd_arg = args.get(2).and_then(|a| a.as_str()).unwrap_or("");
@@ -669,6 +682,7 @@ fn handle_chat_rpc(
                     return Err(BridgeRpcError {
                         code: "ChannelAccessDenied".into(),
                         message: "You are blocked from joining this channel".into(),
+                        client_error: None,
                     });
                 }
                 let is_allowed_explicitly = snap
@@ -708,6 +722,7 @@ fn handle_chat_rpc(
                         return Err(BridgeRpcError {
                             code: "InvalidChannelPassword".into(),
                             message: "Incorrect password for channel".into(),
+                            client_error: None,
                         });
                     }
                 }
@@ -759,7 +774,7 @@ fn handle_chat_rpc(
         (_, "LeaveChannel") | (_, "LeaveChannels") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(chan_id) = args.first().and_then(|a| a.as_str()) else {
-                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "LeaveChannel requires channelID string".into() }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "LeaveChannel requires channelID string".into(), client_error: None }));
             };
             let is_delayed = is_delayed_local_channel(chan_id);
             let candidate_speakers = if is_delayed {
@@ -796,17 +811,17 @@ fn handle_chat_rpc(
         (_, "SendMessage") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(chan_id) = args.first().and_then(|a| a.as_str()) else {
-                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "SendMessage requires channelID string".into() }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "SendMessage requires channelID string".into(), client_error: None }));
             };
             if crate::services::pve_special_sites_abyssal::is_abyssal_local_channel_disabled(chan_id, session.solar_system_id) {
-                return Some(Err(BridgeRpcError { code: "LocalChannelDisabledInAbyssalSpace".into(), message: "Local chat channel is disabled inside Abyssal Deadspace".into() }));
+                return Some(Err(BridgeRpcError { code: "LocalChannelDisabledInAbyssalSpace".into(), message: "Local chat channel is disabled inside Abyssal Deadspace".into(), client_error: None }));
             }
             let text = args.get(1).and_then(|a| a.as_str()).unwrap_or("o7");
             if text.is_empty() || text.chars().count() > 2_000 {
-                return Some(Err(BridgeRpcError { code: "InvalidChatMessageLength".into(), message: "Chat message must be 1..=2000 characters".into() }));
+                return Some(Err(BridgeRpcError { code: "InvalidChatMessageLength".into(), message: "Chat message must be 1..=2000 characters".into(), client_error: None }));
             }
             if !crate::services::lookup_svc::is_word_allowed(text) {
-                return Some(Err(BridgeRpcError { code: "UserError".into(), message: "ChatContentInvalidBannedWords".into() }));
+                return Some(Err(BridgeRpcError { code: "UserError".into(), message: "ChatContentInvalidBannedWords".into(), client_error: None }));
             }
             let chan_key = ctx.db.with_snapshot(|snap| resolve_channel_key(snap, chan_id));
             let chan_lower = chan_key.to_ascii_lowercase();
@@ -818,13 +833,14 @@ fn handle_chat_rpc(
                     cid_u32,
                     now_unix,
                 ) {
-                    return Some(Err(BridgeRpcError { code: "CharacterChatBanned".into(), message: format!("Character is banned from chat: {reason}") }));
+                    return Some(Err(BridgeRpcError { code: "CharacterChatBanned".into(), message: format!("Character is banned from chat: {reason}"), client_error: None }));
                 }
             }
             if let Some(reason) = check_channel_or_global_mute(ctx, &chan_key, char_id, now_unix) {
                 return Some(Err(BridgeRpcError {
                     code: "MutedInChannel".into(),
                     message: format!("You are muted in {chan_key}: {reason}"),
+                    client_error: None,
                 }));
             }
             let blocked_in_social_chan = is_character_blocked_in_social_extras(ctx, &chan_key, char_id);
@@ -839,6 +855,7 @@ fn handle_chat_rpc(
                     let chan = snap.chat_channels.get(&chan_key).ok_or_else(|| BridgeRpcError {
                         code: "ChannelAccessDenied".into(),
                         message: format!("Must join channel {chan_key} before sending messages"),
+                        client_error: None,
                     })?;
                     if chan.owner_id != Some(char_id)
                         && (blocked_in_social_chan || is_character_blocked_in_acl(snap, &chan_key, char_id))
@@ -846,12 +863,14 @@ fn handle_chat_rpc(
                         return Err(BridgeRpcError {
                             code: "ChannelAccessDenied".into(),
                             message: "Blocked from channel".into(),
+                            client_error: None,
                         });
                     }
                     if !chan.members.contains(&char_id) {
                         return Err(BridgeRpcError {
                             code: "ChannelAccessDenied".into(),
                             message: format!("Must be a member of {chan_key} to send messages"),
+                            client_error: None,
                         });
                     }
                 }
@@ -873,7 +892,7 @@ fn handle_chat_rpc(
                 if entry.0 == now_unix {
                     entry.1 += 1;
                     if entry.1 > 20 {
-                        return Some(Err(BridgeRpcError { code: "ChatRateLimitExceeded".into(), message: "Chat message rate limit exceeded".into() }));
+                        return Some(Err(BridgeRpcError { code: "ChatRateLimitExceeded".into(), message: "Chat message rate limit exceeded".into(), client_error: None }));
                     }
                 } else {
                     *entry = (now_unix, 1);
@@ -934,6 +953,7 @@ fn handle_chat_rpc(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "Invite requires recipient characterID".into(),
+                    client_error: None,
                 }));
             };
             let snap_cspa_charge = ctx
@@ -971,6 +991,7 @@ fn handle_chat_rpc(
                 return Some(Err(BridgeRpcError {
                     code: "SenderBlockedByRecipient".into(),
                     message: "Recipient has blocked invitations from you".into(),
+                    client_error: None,
                 }));
             }
             if cspa_charge.0 > 0 {
@@ -979,11 +1000,13 @@ fn handle_chat_rpc(
                         return Err(BridgeRpcError {
                             code: "CharacterNotFound".into(),
                             message: "Caller character not found".into(),
+                            client_error: None,
                         });
                     };
                     ch.balance = ch.balance.checked_sub(cspa_charge).ok_or_else(|| BridgeRpcError {
                         code: "InsufficientFundsForCSPA".into(),
                         message: "Insufficient ISK to pay recipient CSPA charge for chat invite".into(),
+                        client_error: None,
                     })?;
                     Ok(())
                 });
@@ -1025,6 +1048,7 @@ fn handle_chat_rpc(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "GetMembers requires channelID".into(),
+                    client_error: None,
                 }));
             };
             let (chan, acl) = match crate::services::fleet_social_chat_acl_helpers::authorize_and_fetch_channel_members(
@@ -1104,6 +1128,7 @@ fn handle_chat_rpc(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "Channel operation requires channelID".into(),
+                    client_error: None,
                 }));
             };
             if method == "DestroyChannel" {
@@ -1111,6 +1136,7 @@ fn handle_chat_rpc(
                     return Some(Err(BridgeRpcError {
                         code: "NotChannelOwner".into(),
                         message: "System and organization channels cannot be destroyed".into(),
+                        client_error: None,
                     }));
                 }
                 let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -1118,18 +1144,21 @@ fn handle_chat_rpc(
                         return Err(BridgeRpcError {
                             code: "ChannelNotFound".into(),
                             message: format!("Channel {chan_id} not found"),
+                            client_error: None,
                         });
                     };
                     let Some(chan) = snap.chat_channels.get(&chan_key) else {
                         return Err(BridgeRpcError {
                             code: "ChannelNotFound".into(),
                             message: format!("Channel {chan_id} not found"),
+                            client_error: None,
                         });
                     };
                     if !has_channel_owner_auth(session, char_id, &chan_key, chan) {
                         return Err(BridgeRpcError {
                             code: "NotChannelOwner".into(),
                             message: "Only channel owner can destroy the channel".into(),
+                            client_error: None,
                         });
                     }
                     snap.chat_channels.remove(&chan_key);
@@ -1159,6 +1188,7 @@ fn handle_chat_rpc(
                     return Err(BridgeRpcError {
                         code: "NotChannelOwner".into(),
                         message: "System and organization channels cannot be renamed or password-locked".into(),
+                        client_error: None,
                     });
                 }
                 let can_op = {
@@ -1169,12 +1199,14 @@ fn handle_chat_rpc(
                     return Err(BridgeRpcError {
                         code: "ChannelNotFound".into(),
                         message: format!("Channel {chan_id} not found"),
+                        client_error: None,
                     });
                 };
                 if !can_op {
                     return Err(BridgeRpcError {
                         code: "NotChannelOperator".into(),
                         message: "Requires channel owner or operator privileges".into(),
+                        client_error: None,
                     });
                 }
                 let mut social_op = PostAccessControlSocialOp::None;
@@ -1209,6 +1241,7 @@ fn handle_chat_rpc(
                                         code: "NotChannelOwner".into(),
                                         message: "Only the channel owner can transfer ownership"
                                             .into(),
+                                        client_error: None,
                                     });
                                 }
                                 chan.owner_id = Some(target_id);
@@ -1222,6 +1255,7 @@ fn handle_chat_rpc(
                                     return Err(BridgeRpcError {
                                         code: "NotChannelOwner".into(),
                                         message: "Only the channel owner or a GM can grant operator rights".into(),
+                                        client_error: None,
                                     });
                                 }
                                 chan.operators.insert(target_id);
@@ -1241,6 +1275,7 @@ fn handle_chat_rpc(
                                     return Err(BridgeRpcError {
                                         code: "NotChannelOwner".into(),
                                         message: "Channel owner cannot be muted by a non-GM operator".into(),
+                                        client_error: None,
                                     });
                                 }
                                 let until = ctx.now_unix() + 3600;
@@ -1256,12 +1291,14 @@ fn handle_chat_rpc(
                                     return Err(BridgeRpcError {
                                         code: "NotChannelOwner".into(),
                                         message: "Channel owner cannot be kicked or banned".into(),
+                                        client_error: None,
                                     });
                                 }
                                 if chan.operators.contains(&target_id) && !caller_is_owner_or_gm {
                                     return Err(BridgeRpcError {
                                         code: "NotChannelOwner".into(),
                                         message: "Only the channel owner can demote or ban an operator".into(),
+                                        client_error: None,
                                     });
                                 }
                                 chan.members.remove(&target_id);
@@ -1276,12 +1313,14 @@ fn handle_chat_rpc(
                                     return Err(BridgeRpcError {
                                         code: "NotChannelOwner".into(),
                                         message: "Channel owner ACL cannot be modified by a non-GM operator".into(),
+                                        client_error: None,
                                     });
                                 }
                                 if chan.operators.contains(&target_id) && !caller_is_owner_or_gm {
                                     return Err(BridgeRpcError {
                                         code: "NotChannelOwner".into(),
                                         message: "Only the channel owner can modify operator ACL".into(),
+                                        client_error: None,
                                     });
                                 }
                                 if let Some(acl) = snap.chat_channel_acl.get_mut(&chan_key) {
@@ -1469,6 +1508,7 @@ fn validate_scoped_channel_sender(
             return Err(BridgeRpcError {
                 code: "ChannelAccessDenied".into(),
                 message: "Sender is not in the target solar system".into(),
+                client_error: None,
             });
         }
     } else if let Some(rest) = chan_lower.strip_prefix("resourcewars:") {
@@ -1477,6 +1517,7 @@ fn validate_scoped_channel_sender(
             return Err(BridgeRpcError {
                 code: "ChannelAccessDenied".into(),
                 message: "Sender is not in the target solar system".into(),
+                client_error: None,
             });
         }
     } else if let Some(rest) = chan_lower.strip_prefix("constellationid:") {
@@ -1490,6 +1531,7 @@ fn validate_scoped_channel_sender(
             return Err(BridgeRpcError {
                 code: "ChannelAccessDenied".into(),
                 message: "Sender is not in the target constellation".into(),
+                client_error: None,
             });
         }
     } else if let Some(rest) = chan_lower.strip_prefix("regionid:") {
@@ -1503,6 +1545,7 @@ fn validate_scoped_channel_sender(
             return Err(BridgeRpcError {
                 code: "ChannelAccessDenied".into(),
                 message: "Sender is not in the target region".into(),
+                client_error: None,
             });
         }
     } else if let Some(rest) = chan_lower.strip_prefix("factionid:") {
@@ -1511,6 +1554,7 @@ fn validate_scoped_channel_sender(
             return Err(BridgeRpcError {
                 code: "ChannelAccessDenied".into(),
                 message: "Sender is not enlisted in the target faction".into(),
+                client_error: None,
             });
         }
     } else if let Some(rest) = chan_lower.strip_prefix("corpid:") {
@@ -1519,6 +1563,7 @@ fn validate_scoped_channel_sender(
             return Err(BridgeRpcError {
                 code: "ChannelAccessDenied".into(),
                 message: "Sender is not in the target corporation".into(),
+                client_error: None,
             });
         }
     } else if let Some(rest) = chan_lower.strip_prefix("allianceid:") {
@@ -1527,6 +1572,7 @@ fn validate_scoped_channel_sender(
             return Err(BridgeRpcError {
                 code: "ChannelAccessDenied".into(),
                 message: "Sender is not in the target alliance".into(),
+                client_error: None,
             });
         }
     } else if let Some(rest) = chan_lower.strip_prefix("fleetid:") {
@@ -1535,6 +1581,7 @@ fn validate_scoped_channel_sender(
             return Err(BridgeRpcError {
                 code: "ChannelAccessDenied".into(),
                 message: "Sender is not in the target fleet".into(),
+                client_error: None,
             });
         }
     }

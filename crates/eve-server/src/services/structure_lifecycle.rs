@@ -1692,14 +1692,14 @@ pub struct DamageOutcome {
 /// Applies one weapon cycle (`raw_damage` over `cycle_secs`) to a structure: layer damage cap,
 /// repair-timer pause threshold, reinforcement transitions and destruction.
 pub fn apply_structure_damage(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &mut StructureExtendedState, structure_id: i64, raw_damage: f64, cycle_secs: f64, attacker_char_id: i64, now: u64) -> Result<DamageOutcome, BridgeRpcError> {
-    let st = snap.structures.get(&structure_id).cloned().ok_or_else(|| BridgeRpcError { code: "StructureNotFound".into(), message: format!("Structure {structure_id} does not exist") })?;
-    let profile = structure_profile(ctx, st.type_id).ok_or_else(|| BridgeRpcError { code: "InvalidStructureType".into(), message: format!("Type {} is not an Upwell structure", st.type_id) })?;
+    let st = snap.structures.get(&structure_id).cloned().ok_or_else(|| BridgeRpcError { code: "StructureNotFound".into(), message: format!("Structure {structure_id} does not exist"), client_error: None })?;
+    let profile = structure_profile(ctx, st.type_id).ok_or_else(|| BridgeRpcError { code: "InvalidStructureType".into(), message: format!("Type {} is not an Upwell structure", st.type_id), client_error: None })?;
     let (layer, cap, pause) = match st.state.as_str() {
         STATE_SHIELD_VULNERABLE => ("shield", profile.shield_damage_cap, profile.pause_shield_dps),
         STATE_ARMOR_VULNERABLE => ("armor", profile.armor_damage_cap, profile.pause_armor_dps),
         STATE_HULL_VULNERABLE | STATE_ANCHOR_VULNERABLE | STATE_NO_CORE | STATE_ONLINING => ("hull", profile.hull_damage_cap, profile.pause_hull_dps),
-        STATE_DESTROYED => return Err(BridgeRpcError { code: "StructureAlreadyDestroyed".into(), message: format!("Structure {structure_id} is already destroyed") }),
-        other => return Err(BridgeRpcError { code: "StructureReinforcedInvulnerable".into(), message: format!("Structure {structure_id} is invulnerable ({other}) until {}", st.reinforced_until_unix) }),
+        STATE_DESTROYED => return Err(BridgeRpcError { code: "StructureAlreadyDestroyed".into(), message: format!("Structure {structure_id} is already destroyed"), client_error: None }),
+        other => return Err(BridgeRpcError { code: "StructureReinforcedInvulnerable".into(), message: format!("Structure {structure_id} is invulnerable ({other}) until {}", st.reinforced_until_unix), client_error: None }),
     };
     let cycle = cycle_secs.max(0.1);
     let applied = crate::formulas::clamp_upwell_structure_damage(raw_damage, cap, cycle);
@@ -1729,7 +1729,7 @@ pub fn apply_structure_damage(ctx: &ServerContext, snap: &mut WorldStateSnapshot
     }
     let mut destruction = None;
     {
-        let s = snap.structures.get_mut(&structure_id).ok_or_else(|| BridgeRpcError { code: "StructureNotFound".into(), message: "structure vanished".into() })?;
+        let s = snap.structures.get_mut(&structure_id).ok_or_else(|| BridgeRpcError { code: "StructureNotFound".into(), message: "structure vanished".into(), client_error: None })?;
         s.last_damage_unix = now;
         // Anchoring/onlining timers are paused the same way while under qualifying fire.
         if qualifying && matches!(s.state.as_str(), STATE_ANCHOR_VULNERABLE | STATE_ONLINING) {
@@ -1830,7 +1830,7 @@ pub fn apply_structure_damage_typed(
     attacker_char_id: i64,
     now: u64,
 ) -> Result<DamageOutcome, BridgeRpcError> {
-    let st = snap.structures.get(&structure_id).ok_or_else(|| BridgeRpcError { code: "StructureNotFound".into(), message: format!("Structure {structure_id} does not exist") })?;
+    let st = snap.structures.get(&structure_id).ok_or_else(|| BridgeRpcError { code: "StructureNotFound".into(), message: format!("Structure {structure_id} does not exist"), client_error: None })?;
     let attrs = ctx.sde.types.get(&st.type_id).map(|t| &t.default_attributes);
     let (em_a, th_a, ki_a, ex_a) = match st.state.as_str() {
         STATE_SHIELD_VULNERABLE => (271u16, 274u16, 273u16, 272u16),
@@ -1883,12 +1883,13 @@ pub fn validate_home_station_structure(ctx: &ServerContext, snap: &WorldStateSna
     let st = snap.structures.get(&structure_id).filter(|s| s.state != STATE_DESTROYED).ok_or_else(|| BridgeRpcError {
         code: "StationNotFound".into(),
         message: format!("Station or structure {structure_id} does not exist"),
+        client_error: None,
     })?;
     if ctx.sde.solar_systems.get(&st.solar_system_id).map(|s| s.region_id) == Some(POCHVEN_REGION_ID) {
-        return Err(BridgeRpcError { code: "CannotSetMedicalCloneInPochven".into(), message: "A medical clone cannot be set in Pochven".into() });
+        return Err(BridgeRpcError { code: "CannotSetMedicalCloneInPochven".into(), message: "A medical clone cannot be set in Pochven".into(), client_error: None });
     }
     if !super::structure_upwell_ops::evaluate_character_structure_access(ctx, snap, structure_id, char_id) {
-        return Err(BridgeRpcError { code: "CloneBayAccessDenied".into(), message: format!("Character {char_id} lacks access to structure {structure_id}") });
+        return Err(BridgeRpcError { code: "CloneBayAccessDenied".into(), message: format!("Character {char_id} lacks access to structure {structure_id}"), client_error: None });
     }
     if !crate::services::structure_profile_services::is_v24_or_legacy_service_online(
         ctx,
@@ -1896,7 +1897,7 @@ pub fn validate_home_station_structure(ctx: &ServerContext, snap: &WorldStateSna
         structure_id,
         crate::services::structure_profile_services::SERVICE_JUMP_CLONE,
     ) {
-        return Err(BridgeRpcError { code: "CloneBayServiceOffline".into(), message: format!("Structure {structure_id} does not have an online Clone Bay service") });
+        return Err(BridgeRpcError { code: "CloneBayServiceOffline".into(), message: format!("Structure {structure_id} does not have an online Clone Bay service"), client_error: None });
     }
     Ok(())
 }
@@ -1905,18 +1906,18 @@ pub fn validate_home_station_structure(ctx: &ServerContext, snap: &WorldStateSna
 /// `feat:structures.fitting-state-locks`): must be in `ShieldVulnerable`, no active repair timer,
 /// and at 100% shield/armor/hull HP.
 pub fn validate_structure_refit(ctx: &ServerContext, snap: &WorldStateSnapshot, ext: &StructureExtendedState, structure_id: i64, now: u64) -> Result<(UpwellStructureRecord, StructureProfile), BridgeRpcError> {
-    let st = snap.structures.get(&structure_id).cloned().ok_or_else(|| BridgeRpcError { code: "StructureNotFound".into(), message: format!("Structure {structure_id} does not exist") })?;
-    let profile = structure_profile(ctx, st.type_id).ok_or_else(|| BridgeRpcError { code: "InvalidStructureType".into(), message: format!("Type {} is not an Upwell structure", st.type_id) })?;
+    let st = snap.structures.get(&structure_id).cloned().ok_or_else(|| BridgeRpcError { code: "StructureNotFound".into(), message: format!("Structure {structure_id} does not exist"), client_error: None })?;
+    let profile = structure_profile(ctx, st.type_id).ok_or_else(|| BridgeRpcError { code: "InvalidStructureType".into(), message: format!("Type {} is not an Upwell structure", st.type_id), client_error: None })?;
     if st.state != STATE_SHIELD_VULNERABLE {
-        return Err(BridgeRpcError { code: "StructureFittingLockedInState".into(), message: format!("Structure {structure_id} cannot be refitted in state {}", st.state) });
+        return Err(BridgeRpcError { code: "StructureFittingLockedInState".into(), message: format!("Structure {structure_id} cannot be refitted in state {}", st.state), client_error: None });
     }
     if ext.lifecycle.get(&structure_id).and_then(|l| l.repair_until_unix).is_some_and(|until| now < until) {
-        return Err(BridgeRpcError { code: "StructureRepairingCannotRefit".into(), message: format!("Structure {structure_id} cannot be refitted while its repair timer is active") });
+        return Err(BridgeRpcError { code: "StructureRepairingCannotRefit".into(), message: format!("Structure {structure_id} cannot be refitted while its repair timer is active"), client_error: None });
     }
     let power = power_state(ctx, snap, ext, &st, now);
     let max_shield = effective_max_shield(ctx, snap, &profile, structure_id, power);
     if st.shield_hp + 1e-3 < max_shield || st.armor_hp + 1e-3 < profile.armor_hp || st.hull_hp + 1e-3 < profile.hull_hp {
-        return Err(BridgeRpcError { code: "StructureDamagedCannotRefit".into(), message: format!("Structure {structure_id} must be at 100% shield, armor, and hull HP to refit") });
+        return Err(BridgeRpcError { code: "StructureDamagedCannotRefit".into(), message: format!("Structure {structure_id} must be at 100% shield, armor, and hull HP to refit"), client_error: None });
     }
     Ok((st, profile))
 }

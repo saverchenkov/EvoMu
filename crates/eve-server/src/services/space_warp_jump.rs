@@ -94,6 +94,7 @@ async fn handle_cmd_warp_to_stuff(
         return Err(BridgeRpcError {
             code: "NotInSpace".into(),
             message: "Cannot warp while docked in station or structure".into(),
+            client_error: None,
         });
     }
     let sys_id = resolve_bound_or_session_sys(bound_entry, session)?;
@@ -101,6 +102,7 @@ async fn handle_cmd_warp_to_stuff(
         return Err(BridgeRpcError {
             code: "NoActiveShip".into(),
             message: "Session has no active ship".into(),
+            client_error: None,
         });
     };
     let is_fleet_warp_kw = kwargs
@@ -164,18 +166,21 @@ async fn handle_cmd_warp_to_stuff(
         return Err(BridgeRpcError {
             code: "InvalidWarpDestination".into(),
             message: "Invalid warp destination".into(),
+            client_error: None,
         });
     }
     if target_id <= 0 && target_str_opt.is_none() {
         return Err(BridgeRpcError {
             code: "InvalidTarget".into(),
             message: "Warp target ID must be a positive integer".into(),
+            client_error: None,
         });
     }
     if target_id == ship_id {
         return Err(BridgeRpcError {
             code: "InvalidTarget".into(),
             message: "Cannot warp to own ship".into(),
+            client_error: None,
         });
     }
     let default_min_range = if is_autopilot { 15_000.0 } else { 0.0 };
@@ -191,6 +196,7 @@ async fn handle_cmd_warp_to_stuff(
             return Err(BridgeRpcError {
                 code: "InvalidArgument".into(),
                 message: "Warp range must be finite".into(),
+                client_error: None,
             });
         }
     }
@@ -215,12 +221,14 @@ async fn handle_cmd_warp_to_stuff(
             return Err(BridgeRpcError {
                 code: "DestinyCommandFailed".into(),
                 message: e,
+                client_error: None,
             })
         }
     }) else {
         return Err(BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: "Active ship is not spawned in Ballpark".into(),
+            client_error: None,
         });
     };
 
@@ -275,6 +283,7 @@ async fn handle_cmd_warp_to_stuff(
                 return Err(BridgeRpcError {
                     code: "BookmarkNotFound".into(),
                     message: format!("Bookmark {target_id} not found"),
+                    client_error: None,
                 });
             };
             resolved_pos = Some(pos);
@@ -484,6 +493,7 @@ async fn handle_cmd_warp_to_stuff(
             message: format!(
                 "Warp target ({stuff_type}, {target_id}) is not a valid warpable object in system {sys_id}"
             ),
+            client_error: None,
         });
     };
     crate::services::nav_warp_interdiction::ensure_not_in_active_warp(&current_ball.mode)?;
@@ -534,6 +544,7 @@ async fn handle_cmd_warp_to_stuff(
                 "Cannot warp {:.1} m (minimum warp distance is 150,000 m)",
                 effective_warp_dist_m.max(0.0)
             ),
+            client_error: None,
         });
     }
 
@@ -586,6 +597,7 @@ async fn handle_cmd_warp_to_stuff(
                         "Insufficient capacitor ({:.3} GJ) to initiate minimum 150 km warp (affordable distance {:.1} m)",
                         cs.capacitor, affordable_dist_m
                     ),
+                    client_error: None,
                 });
             }
             dest_pos = current_ball.position + warp_dir * affordable_dist_m;
@@ -676,6 +688,7 @@ async fn handle_cmd_warp_to_stuff(
             Err(BridgeRpcError {
                 code: code.into(),
                 message: e,
+                client_error: None,
             })
         }
     }
@@ -696,6 +709,7 @@ async fn handle_cmd_stargate_jump(
         return Err(BridgeRpcError {
             code: "ShipDocked".into(),
             message: "Cannot jump stargate while docked".into(),
+            client_error: None,
         });
     }
     let old_sys = resolve_bound_or_session_sys(bound_entry, session)?;
@@ -703,6 +717,7 @@ async fn handle_cmd_stargate_jump(
         return Err(BridgeRpcError {
             code: "NoActiveShip".into(),
             message: "Session has no active ship".into(),
+            client_error: None,
         });
     };
     let entry_db_state = ctx.db.with_snapshot(|s| {
@@ -725,12 +740,14 @@ async fn handle_cmd_stargate_jump(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "CmdStargateJump requires integer stargateID".into(),
+            client_error: None,
         });
     };
     let Some(jump) = ctx.sde.jumps.get(&gate_id) else {
         return Err(BridgeRpcError {
             code: "UnknownStargate".into(),
             message: format!("Stargate {gate_id} does not exist in SDE"),
+            client_error: None,
         });
     };
     if jump.from_solar_system_id != old_sys {
@@ -740,6 +757,7 @@ async fn handle_cmd_stargate_jump(
                 "Stargate {gate_id} is in system {}, not current system {old_sys}",
                 jump.from_solar_system_id
             ),
+            client_error: None,
         });
     }
 
@@ -760,12 +778,14 @@ async fn handle_cmd_stargate_jump(
             return Err(BridgeRpcError {
                 code: "DestinyQueryFailed".into(),
                 message: e,
+                client_error: None,
             })
         }
     }) else {
         return Err(BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: "Active ship ball is not in space".into(),
+            client_error: None,
         });
     };
 
@@ -778,6 +798,7 @@ async fn handle_cmd_stargate_jump(
                 "Cannot jump stargate while 10s session-change timer ({}) is active",
                 active_timer.reason
             ),
+            client_error: None,
         });
     }
 
@@ -839,6 +860,7 @@ async fn handle_cmd_stargate_jump(
                     message: format!(
                         "Zarzakh 6-hour gate lock active: character {char_id} entered via gate {allowed_gate_id} and cannot exit via gate {gate_id}"
                     ),
+                    client_error: None,
                 });
             }
         }
@@ -871,6 +893,7 @@ async fn handle_cmd_stargate_jump(
         return Err(BridgeRpcError {
             code: "SystemTransitionFailed".into(),
             message: format!("Ship {ship_id} is no longer in solar system {old_sys}"),
+            client_error: None,
         });
     };
     let prev_combat_state = taken.combat_state.clone();
@@ -899,6 +922,7 @@ async fn handle_cmd_stargate_jump(
             .map_err(|e| BridgeRpcError {
                 code: "SystemTransitionFailed".into(),
                 message: e.to_string(),
+                client_error: None,
             })
     } else {
         ctx.db
@@ -912,11 +936,13 @@ async fn handle_cmd_stargate_jump(
                 let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
                     code: "CharacterNotFound".into(),
                     message: format!("Character {char_id} not found"),
+                    client_error: None,
                 })?;
                 if entry_db_state.is_some_and(|e| (ch.station_id, ch.structure_id, ch.solar_system_id) != e) {
                     return Err(BridgeRpcError {
                         code: "SystemTransitionFailed".into(),
                         message: format!("Character {char_id} transitioned concurrently"),
+                        client_error: None,
                     });
                 }
                 ch.solar_system_id = dest_sys_id;
@@ -1087,6 +1113,7 @@ pub(crate) fn evaluate_stargate_jump_perimeter(
                 Err(BridgeRpcError {
                     code: "ShipInWarp".into(),
                     message: "Cannot jump stargate while ship is still in warp".into(),
+                    client_error: None,
                 })
             }
         }
@@ -1099,6 +1126,7 @@ pub(crate) fn evaluate_stargate_jump_perimeter(
                         "Ship is {:.1} m from stargate (must be <= 2500 m)",
                         surface_dist
                     ),
+                    client_error: None,
                 })
             } else {
                 Ok(false)
@@ -1135,6 +1163,7 @@ pub(crate) fn evaluate_dock_perimeter(
                 Err(BridgeRpcError {
                     code: "ShipInWarp".into(),
                     message: "Cannot dock while ship is still in warp".into(),
+                    client_error: None,
                 })
             }
         }
@@ -1162,18 +1191,21 @@ async fn handle_dock(
         return Err(BridgeRpcError {
             code: "AlreadyDocked".into(),
             message: "Character is already docked in a station or structure".into(),
+            client_error: None,
         });
     }
     let Some(mut ship_id) = session.ship_id else {
         return Err(BridgeRpcError {
             code: "NoActiveShip".into(),
             message: "Cannot dock without an active ship in space".into(),
+            client_error: None,
         });
     };
     let Some(dock_id) = args.first().and_then(|a| a.as_i64()) else {
         return Err(BridgeRpcError {
             code: "MissingLocationId".into(),
             message: "Dock requires an explicit station or structure ID argument".into(),
+            client_error: None,
         });
     };
     let Some(sys_id) = bound_entry
@@ -1183,6 +1215,7 @@ async fn handle_dock(
         return Err(BridgeRpcError {
             code: "NoSolarSystem".into(),
             message: "Session has no active solarSystemID".into(),
+            client_error: None,
         });
     };
 
@@ -1194,6 +1227,7 @@ async fn handle_dock(
             return Err(BridgeRpcError {
                 code: "DestinyQueryFailed".into(),
                 message: e,
+                client_error: None,
             })
         }
     };
@@ -1216,6 +1250,7 @@ async fn handle_dock(
         return Err(BridgeRpcError {
             code: "InvalidShipId".into(),
             message: "Requested shipID does not match pilot's active ship".into(),
+            client_error: None,
         });
     }
     let cur_tick_opt = ball_snap.as_ref().map(|(cur_tick, _)| (sys_id, *cur_tick));
@@ -1228,12 +1263,14 @@ async fn handle_dock(
                 "Cannot dock while 10s session-change timer ({}) is active",
                 active_timer.reason
             ),
+            client_error: None,
         });
     }
     let Some((cur_tick, ball)) = ball_snap else {
         return Err(BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: format!("Ship {ship_id} is not spawned in solar system {sys_id} Ballpark"),
+            client_error: None,
         });
     };
 
@@ -1268,12 +1305,14 @@ async fn handle_dock(
                 return Err(BridgeRpcError {
                     code: "WeaponsTimerActive".into(),
                     message: "Cannot dock while a 60s Weapons Timer is active".into(),
+                    client_error: None,
                 });
             }
             if sys_sec >= 0.45 && cw_state.is_criminal(now_unix) && !is_capsule {
                 return Err(BridgeRpcError {
                     code: "CantDockGlobalCriminalFlag".into(),
                     message: "Cannot dock a non-capsule ship in high-sec while a Criminal Timer is active".into(),
+                    client_error: None,
                 });
             }
         }
@@ -1283,6 +1322,7 @@ async fn handle_dock(
         return Err(BridgeRpcError {
             code: "FactionPoliceRefusedDocking".into(),
             message: "Faction police refuse docking permissions to outlaw ships in high-security space".into(),
+            client_error: None,
         });
     }
 
@@ -1294,6 +1334,7 @@ async fn handle_dock(
             return Err(BridgeRpcError {
                 code: "StructureNotFound".into(),
                 message: format!("Structure {dock_id} does not exist"),
+                client_error: None,
             });
         };
         if st.solar_system_id != sys_id {
@@ -1303,18 +1344,21 @@ async fn handle_dock(
                     "Structure {dock_id} is in system {}, but pilot is in {sys_id}",
                     st.solar_system_id
                 ),
+                client_error: None,
             });
         }
         if st.state == "Destroyed" {
             return Err(BridgeRpcError {
                 code: "StructureDestroyed".into(),
                 message: format!("Structure {dock_id} is destroyed"),
+                client_error: None,
             });
         }
         if matches!(st.state.as_str(), "Unanchored" | "AnchorVulnerable" | "Anchoring") {
             return Err(BridgeRpcError {
                 code: "StructureNotDockable".into(),
                 message: format!("Structure {dock_id} is in state '{}' and cannot be docked at", st.state),
+                client_error: None,
             });
         }
         crate::services::structure_acl_defense_rules::apply_pending_profile_applications(ctx);
@@ -1329,6 +1373,7 @@ async fn handle_dock(
                 message: format!(
                     "Character {char_id} is denied docking access by structure {dock_id} ACL"
                 ),
+                client_error: None,
             });
         }
         let is_medium_structure = matches!(st.type_id, 35832 | 35825 | 35835);
@@ -1345,6 +1390,7 @@ async fn handle_dock(
                     "Ship type {} (group {}) is too large to dock at structure {} (type {})",
                     ball.type_id, ship_group_id, dock_id, st.type_id
                 ),
+                client_error: None,
             });
         }
         let r = ctx
@@ -1369,6 +1415,7 @@ async fn handle_dock(
                 message: format!(
                     "Station {dock_id} does not exist in current solar system {sys_id}"
                 ),
+                client_error: None,
             });
         };
         crate::services::station_structure_handlers::validate_npc_station_docking_gate(ctx, char_id, dock_id)?;
@@ -1395,12 +1442,14 @@ async fn handle_dock(
         return Err(BridgeRpcError {
             code: "ShipWarpScrambled".into(),
             message: "Cannot dock at an Upwell structure while ship is warp scrambled".into(),
+            client_error: None,
         });
     }
     let Some(taken) = handle.take_ball_for_docking(ship_id, dock_id, target_pos).await else {
         return Err(BridgeRpcError {
             code: "DockFailed".into(),
             message: format!("Ship {ship_id} is no longer in space in solar system {sys_id}"),
+            client_error: None,
         });
     };
     match ctx.db.dock_character_if_in_space(char_id, sys_id, dock_id, is_structure) {
@@ -1491,6 +1540,7 @@ async fn handle_dock(
             Err(BridgeRpcError {
                 code: "DockFailed".into(),
                 message: e.to_string(),
+                client_error: None,
             })
         }
     }

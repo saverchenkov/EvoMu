@@ -147,6 +147,7 @@ pub fn record_proving_grounds_combat_result_in_snap(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "Winner and loser must be distinct characters".into(),
+            client_error: None,
         });
     }
     let mut store = load_pvp_store(snap);
@@ -162,6 +163,7 @@ pub fn record_proving_grounds_combat_result_in_snap(
         return Err(BridgeRpcError {
             code: "NotInPvpQueue".into(),
             message: "Both combatants must be queued in Proving Grounds or in an active match".into(),
+            client_error: None,
         });
     }
 

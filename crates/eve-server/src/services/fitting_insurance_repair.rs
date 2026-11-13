@@ -10,6 +10,7 @@ fn rpc_err(code: &str, msg: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
         code: code.into(),
         message: msg.into(),
+        client_error: None,
     }
 }
 
@@ -54,6 +55,7 @@ pub(super) fn handle_insure_ship(
         return Err(BridgeRpcError {
             code: "StationServiceUnavailable".into(),
             message: format!("Upwell structure {sid} does not offer insurance"),
+            client_error: None,
         });
     }
     let Some(station_id) = session.station_id else {
@@ -68,6 +70,7 @@ pub(super) fn handle_insure_ship(
         return Err(BridgeRpcError {
             code: "StationServiceUnavailable".into(),
             message: format!("Station {station_id} does not offer insurance"),
+            client_error: None,
         });
     }
 
@@ -373,6 +376,7 @@ pub(super) fn handle_repair_all(
         return Err(BridgeRpcError {
             code: "NotDocked".into(),
             message: "Repairing ship and modules requires being docked".into(),
+            client_error: None,
         });
     };
     life::sync_all_structures(ctx);
@@ -385,12 +389,14 @@ pub(super) fn handle_repair_all(
         return Err(BridgeRpcError {
             code: "StationServiceUnavailable".into(),
             message: format!("Station {dock_id} does not offer repair facilities"),
+            client_error: None,
         });
     }
     let Some(ship_id) = session.ship_id else {
         return Err(BridgeRpcError {
             code: "NoActiveShip".into(),
             message: "Session has no active ship".into(),
+            client_error: None,
         });
     };
     let explicit_ids: Vec<i64> = match args.first() {
@@ -415,12 +421,14 @@ pub(super) fn handle_repair_all(
                 return Err(BridgeRpcError {
                     code: "ItemNotFound".into(),
                     message: format!("Item {eid} not found"),
+                    client_error: None,
                 });
             };
             if it.owner_id != char_id {
                 return Err(BridgeRpcError {
                     code: "ItemOwnershipViolation".into(),
                     message: format!("Item {eid} is not owned by character {char_id}"),
+                    client_error: None,
                 });
             }
             let at_dock = it.location_id == dock_id
@@ -432,6 +440,7 @@ pub(super) fn handle_repair_all(
                 return Err(BridgeRpcError {
                     code: "ItemNotAtStation".into(),
                     message: format!("Item {eid} is not located at docked facility {dock_id}"),
+                    client_error: None,
                 });
             }
         }
@@ -531,11 +540,13 @@ pub(super) fn handle_repair_all(
             let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
                 code: "CharacterNotFound".into(),
                 message: format!("Character {char_id} not found"),
+                client_error: None,
             })?;
             let fee = IskCents::from_f64_isk(cost_isk);
             ch.balance = ch.balance.checked_sub(fee).ok_or_else(|| BridgeRpcError {
                 code: "InsufficientFunds".into(),
                 message: "Insufficient ISK to pay repair bill".into(),
+                client_error: None,
             })?;
             let bal = ch.balance;
             new_char_bal = Some(bal);

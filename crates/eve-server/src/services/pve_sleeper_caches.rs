@@ -62,6 +62,7 @@ pub fn validate_sleeper_cache_passage(
         return Err(BridgeRpcError {
             code: "RiftPassageUnstable".into(),
             message: "Must hack the Spatial Rift Generator Control before traversing the Sleeper Cache passage".into(),
+            client_error: None,
         });
     }
     let (max_mass, label, allowed_groups) = sleeper_cache_ship_restrictions(tier);
@@ -69,6 +70,7 @@ pub fn validate_sleeper_cache_passage(
         return Err(BridgeRpcError {
             code: "ShipSizeRestricted".into(),
             message: format!("Acceleration gate rejects hull group {ship_group_id} (mass {ship_mass:.0} kg): {label}"),
+            client_error: None,
         });
     }
     Ok(())

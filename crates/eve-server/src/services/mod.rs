@@ -689,5 +689,6 @@ pub(crate) fn domain_err_to_rpc(err: crate::domain::DomainError) -> eve_proto::B
     eve_proto::BridgeRpcError {
         code: err.code,
         message: err.message,
+        client_error: None,
     }
 }

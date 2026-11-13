@@ -138,7 +138,7 @@ impl ContractNotifyDelta {
 }
 
 fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
-    BridgeRpcError { code: code.into(), message: message.into(), }
+    BridgeRpcError { code: code.into(), message: message.into(), client_error: None }
 }
 
 fn parse_requested_items(raw: Option<&PyRep>, kwargs: &HashMap<String, PyRep>) -> Result<Vec<(TypeId, i32)>, BridgeRpcError> {

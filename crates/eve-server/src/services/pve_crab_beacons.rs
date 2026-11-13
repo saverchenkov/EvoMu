@@ -1160,6 +1160,7 @@ pub async fn handle_crab_component_call(
         _ => Err(BridgeRpcError {
             code: "UnsupportedComponentCall".into(),
             message: format!("Unsupported CRAB component call {comp_name}.{comp_method}"),
+            client_error: None,
         }),
     }
 }

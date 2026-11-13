@@ -207,6 +207,7 @@ pub async fn precheck_entosis_activation(
         let ch = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
             code: "CharNotFound".into(),
             message: format!("Character {char_id} not found"),
+            client_error: None,
         })?;
         let attacker_alliance = ch
             .alliance_id
@@ -215,6 +216,7 @@ pub async fn precheck_entosis_activation(
             .ok_or_else(|| BridgeRpcError {
                 code: "MustBeInAlliance".into(),
                 message: "Pilot must belong to an alliance to Entosis sovereignty structures".into(),
+                client_error: None,
             })?;
         if is_hub {
             let st = snap.structures.get(&target_id).expect("checked");
@@ -233,6 +235,7 @@ pub async fn precheck_entosis_activation(
                     return Err(BridgeRpcError {
                         code: "CannotEntosisFriendlyStructure".into(),
                         message: "Cannot activate Entosis Link on your own uncontested Sovereignty Hub".into(),
+                        client_error: None,
                     });
                 }
             }
@@ -240,12 +243,14 @@ pub async fn precheck_entosis_activation(
                 return Err(BridgeRpcError {
                     code: "SovHubAlreadyReinforced".into(),
                     message: format!("Sovereignty Hub {target_id} is currently in state {}", st.state),
+                    client_error: None,
                 });
             }
             if !is_hub_within_vulnerability_window_in_snap(snap, target_id, now) {
                 return Err(BridgeRpcError {
                     code: "SovHubInvulnerableOutsideWindow".into(),
                     message: format!("Sovereignty Hub {target_id} is outside its daily vulnerability window"),
+                    client_error: None,
                 });
             }
             Ok(Some((sys_id, DVec3::from_array(st.position), attacker_alliance)))
@@ -272,6 +277,7 @@ pub async fn precheck_entosis_activation(
         .ok_or_else(|| BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: format!("Ship {ship_id} is not in space in system {target_sys}"),
+            client_error: None,
         })?;
     let target_pos = sys_handle
         .get_ball_snapshot(target_id)
@@ -285,6 +291,7 @@ pub async fn precheck_entosis_activation(
         return Err(BridgeRpcError {
             code: "TargetOutOfEntosisRange".into(),
             message: format!("Target {target_id} is {dist:.0} m away (max 250,000 m)"),
+            client_error: None,
         });
     }
     Ok(true)
@@ -533,6 +540,7 @@ pub fn require_flex_sov_upgrade_online(
             message: format!(
                 "FLEX structure type {structure_type_id} can only be anchored in sovereign K-space null-security space (system {solar_system_id})"
             ),
+            client_error: None,
         });
     }
     let Some(req_upgrade) = required_upgrade_for_flex_structure(structure_type_id) else {
@@ -550,12 +558,14 @@ pub fn require_flex_sov_upgrade_online(
             .ok_or_else(|| BridgeRpcError {
                 code: "MissingSovereigntyHub".into(),
                 message: "A Sovereignty Hub with the required upgrade online is required".into(),
+                client_error: None,
             })
     })?;
     if is_hub_hacked(ctx, hub_id) {
         return Err(BridgeRpcError {
             code: "SovHubHacked".into(),
             message: "Sovereignty Hub upgrades are temporarily disabled by a hostile hack".into(),
+            client_error: None,
         });
     }
     ctx.db.with_snapshot(|snap| {
@@ -572,6 +582,7 @@ pub fn require_flex_sov_upgrade_online(
             return Err(BridgeRpcError {
                 code: "RequiredSovUpgradeOffline".into(),
                 message: format!("Required Sovereignty Hub upgrade {req_upgrade} is not online"),
+                client_error: None,
             });
         }
         Ok(())

@@ -7,19 +7,9 @@
 
 use crate::{marshal, BridgeRpcError, PyRep};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::{LazyLock, RwLock};
 
 /// `cluster.MACHONETERR_WRAPPEDEXCEPTION`: `ErrorResponse.payload` is `(DumpsSanitized(exc),)`.
 pub const MACHONETERR_WRAPPEDEXCEPTION: i64 = 2;
-
-/// Maximum cached typed `ClientError` entries in [`TYPED_CLIENT_ERRORS`].
-const MAX_TYPED_ERROR_CACHE_ENTRIES: usize = 16_384;
-
-/// Thread-safe side-table mapping `(code, message)` pairs produced by typed [`BridgeRpcError`]
-/// constructors to their lossless [`ClientError`] representation.
-static TYPED_CLIENT_ERRORS: LazyLock<RwLock<HashMap<(String, String), ClientError>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
 
 /// Programmatic V24.01 `eveexceptions.UserError` keys handled directly by client `.pyj` call sites
 /// (`base_insurance.pyj`, skill checks, station checks) outside `res:/staticdata/dialogs.static`.
@@ -145,7 +135,7 @@ pub enum UserErrorKey {
 }
 
 impl UserErrorKey {
-    /// Exhaustive slice of all typed [`UserErrorKey`] variants.
+    /// Exhaustive slice of all 88 typed [`UserErrorKey`] variants.
     pub const ALL: &[Self] = &[
         Self::InsureShipFailedSingleContract,
         Self::InsureShipFailedMultipleContracts,
@@ -464,9 +454,6 @@ impl UserErrorKey {
             ];
         }
         match self {
-            Self::InsureShipFailedSingleContract => {
-                vec![("ownerName".into(), PyRep::Integer(90_000_001))]
-            }
             Self::MarketExceededOrderCount => vec![
                 ("curCnt".into(), PyRep::Integer(0)),
                 ("maxCnt".into(), PyRep::Integer(0)),
@@ -628,18 +615,9 @@ fn encode_wrapped_user_error(
     ])
 }
 
-fn register_typed_client_error(code: &str, message: &str, client_error: ClientError) {
-    if let Ok(mut guard) = TYPED_CLIENT_ERRORS.write() {
-        if guard.len() >= MAX_TYPED_ERROR_CACHE_ENTRIES {
-            guard.clear();
-        }
-        guard.insert((code.to_string(), message.to_string()), client_error);
-    }
-}
-
 impl BridgeRpcError {
-    /// Constructs a [`BridgeRpcError`] from a typed [`ClientError`] and records the lossless
-    /// mapping so [`Self::to_client_error`] never parses the human-readable `message`.
+    /// Constructs a [`BridgeRpcError`] carrying `client_error` directly by value so
+    /// [`Self::to_client_error`] is lossless without parsing `message` or using global state.
     pub fn from_client_error(client_error: ClientError) -> Self {
         let (code, message) = match &client_error {
             ClientError::User { key, args } => {
@@ -699,8 +677,11 @@ impl BridgeRpcError {
             ClientError::Internal(msg) => ("InternalError".into(), msg.clone()),
             ClientError::SessionMismatch(msg) => ("UnMachoDestination".into(), msg.clone()),
         };
-        register_typed_client_error(&code, &message, client_error);
-        Self { code, message }
+        Self {
+            code,
+            message,
+            client_error: Some(Box::new(client_error)),
+        }
     }
 
     /// Constructs a [`BridgeRpcError`] backed by [`ClientError::User`] with no extra kwargs.
@@ -723,10 +704,11 @@ impl BridgeRpcError {
         message: impl Into<String>,
         client_error: ClientError,
     ) -> Self {
-        let code = code.into();
-        let message = message.into();
-        register_typed_client_error(&code, &message, client_error);
-        Self { code, message }
+        Self {
+            code: code.into(),
+            message: message.into(),
+            client_error: Some(Box::new(client_error)),
+        }
     }
 
     /// Constructs a typed [`ClientError::CustomInfo`] RPC error.
@@ -767,11 +749,17 @@ impl BridgeRpcError {
         let is_slash_rpc =
             matches!(service.trim(), "slash" | "publicQaToolsServer") && method == "SlashCmd";
 
-        if !is_slash_rpc {
-            if let Ok(guard) = TYPED_CLIENT_ERRORS.read() {
-                if let Some(typed) = guard.get(&(self.code.clone(), self.message.clone())) {
-                    return typed.clone();
-                }
+        if let Some(ref typed) = self.client_error {
+            if !is_slash_rpc
+                || matches!(
+                    typed.as_ref(),
+                    ClientError::User {
+                        key: UserErrorKey::SlashError,
+                        ..
+                    }
+                )
+            {
+                return (**typed).clone();
             }
         }
 
@@ -920,5 +908,65 @@ mod tests {
         };
         let PyRep::Tuple(h) = *header else { panic!() };
         assert_eq!(h[0], PyRep::Token("exceptions.RuntimeError".into()));
+    }
+
+    #[test]
+    fn bridge_rpc_error_carries_client_error_by_value_across_serde_without_collisions() {
+        let skill_a = BridgeRpcError::user_error_with_args(
+            UserErrorKey::SkillMissing,
+            [("typeID", PyRep::Integer(3300))],
+        );
+        let skill_b = BridgeRpcError::user_error_with_args(
+            UserErrorKey::SkillMissing,
+            [("typeID", PyRep::Integer(3436))],
+        );
+        let skill_empty = BridgeRpcError::from_user_key(UserErrorKey::SkillMissing);
+        assert_eq!(
+            skill_a.to_client_error("skillMgr2", "InjectSkillpoints"),
+            ClientError::User {
+                key: UserErrorKey::SkillMissing,
+                args: vec![("typeID".into(), PyRep::Integer(3300))],
+            }
+        );
+        assert_eq!(
+            skill_b.to_client_error("skillMgr2", "InjectSkillpoints"),
+            ClientError::User {
+                key: UserErrorKey::SkillMissing,
+                args: vec![("typeID".into(), PyRep::Integer(3436))],
+            }
+        );
+        assert_eq!(
+            skill_empty.to_client_error("skillMgr2", "InjectSkillpoints"),
+            ClientError::User {
+                key: UserErrorKey::SkillMissing,
+                args: Vec::new(),
+            }
+        );
+
+        let env = crate::BridgeEnvelope::RpcResponse {
+            req_id: 42,
+            result: Err(skill_a.clone()),
+        };
+        let wire = env.to_wire_bytes().expect("wire encode");
+        let decoded = crate::BridgeEnvelope::from_wire_bytes(&wire).expect("wire decode");
+        assert_eq!(decoded, env);
+
+        let untyped = BridgeRpcError::user_error("CustomLegacyCode");
+        let json = serde_json::to_string(&untyped).expect("json encode");
+        assert!(
+            !json.contains("client_error"),
+            "None client_error must be omitted from JSON: {json}"
+        );
+        let parsed: BridgeRpcError =
+            serde_json::from_str(r#"{"code":"CustomLegacyCode","message":"CustomLegacyCode"}"#)
+                .expect("legacy json decode");
+        assert_eq!(parsed, untyped);
+
+        assert!(
+            UserErrorKey::InsureShipFailedSingleContract
+                .default_args()
+                .is_empty(),
+            "InsureShipFailedSingleContract default_args must not emit a hardcoded character ID"
+        );
     }
 }

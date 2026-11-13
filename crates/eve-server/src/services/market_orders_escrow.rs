@@ -43,24 +43,28 @@ pub fn handle_orders_escrow(
                 return Some(Err(BridgeRpcError {
                     code: "NotDockedAtStation".into(),
                     message: "Character must be docked at a station or structure to PlaceMultiSellOrder".into(),
+                    client_error: None,
                 }));
             };
             let Some(region_id) = session.region_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoRegion".into(),
                     message: "Session has no active region".into(),
+                    client_error: None,
                 }));
             };
             let Some(PyRep::List(entries) | PyRep::Tuple(entries)) = args.first() else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidMultiSellOrder".into(),
                     message: "PlaceMultiSellOrder requires itemList as first argument".into(),
+                    client_error: None,
                 }));
             };
             if entries.is_empty() {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidMultiSellOrder".into(),
                     message: "PlaceMultiSellOrder requires at least one item entry".into(),
+                    client_error: None,
                 }));
             }
             let rpc = RpcArgs::new(args, _kwargs);
@@ -78,6 +82,7 @@ pub fn handle_orders_escrow(
                     message: format!(
                         "Invalid market order duration {duration_days}; expected one of [0, 1, 3, 7, 14, 30, 90]"
                     ),
+                    client_error: None,
                 }));
             }
             let account_key = args
@@ -95,6 +100,7 @@ pub fn handle_orders_escrow(
                         return Some(Err(BridgeRpcError {
                             code: "InvalidMultiSellOrder".into(),
                             message: "PlaceMultiSellOrder expectedBrokersFee must be non-negative and finite".into(),
+                            client_error: None,
                         }));
                     }
                 },
@@ -134,20 +140,21 @@ pub fn handle_orders_escrow(
                     _ => return Some(Err(BridgeRpcError {
                         code: "InvalidMultiSellOrder".into(),
                         message: "Each PlaceMultiSellOrder entry must be a KeyVal/dict with stationID, typeID, itemID, price, quantity".into(),
+                        client_error: None,
                     })),
                 };
                 if st_id != docked_station_id {
-                    return Some(Err(BridgeRpcError { code: "StationMismatch".into(), message: format!("Cannot place sell order at station {st_id} while docked at {docked_station_id}") }));
+                    return Some(Err(BridgeRpcError { code: "StationMismatch".into(), message: format!("Cannot place sell order at station {st_id} while docked at {docked_station_id}"), client_error: None }));
                 }
                 if raw_tid <= 0 || !price_isk.is_finite() || price_isk <= 0.0 || qty <= 0 || qty > (i32::MAX as i64) || ![0, 1, 3, 7, 14, 30, 90].contains(&item_dur) {
-                    return Some(Err(BridgeRpcError { code: "InvalidMultiSellOrder".into(), message: "PlaceMultiSellOrder entry requires valid positive typeID, price, quantity, and duration".into() }));
+                    return Some(Err(BridgeRpcError { code: "InvalidMultiSellOrder".into(), message: "PlaceMultiSellOrder entry requires valid positive typeID, price, quantity, and duration".into(), client_error: None }));
                 }
                 if !super::super::market_contracts::is_valid_4_sig_fig_price(price_isk) {
-                    return Some(Err(BridgeRpcError { code: "InvalidPriceTickSize".into(), message: format!("Sell order price {price_isk} violates EVE 4-significant-figure tick size rule") }));
+                    return Some(Err(BridgeRpcError { code: "InvalidPriceTickSize".into(), message: format!("Sell order price {price_isk} violates EVE 4-significant-figure tick size rule"), client_error: None }));
                 }
                 let tid = raw_tid as TypeId;
                 if ctx.sde.types.get(&tid).and_then(|t| t.market_group_id).is_none() {
-                    return Some(Err(BridgeRpcError { code: "ItemNotMarketEligible".into(), message: format!("Type {tid} has no marketGroupID and cannot be sold on the market") }));
+                    return Some(Err(BridgeRpcError { code: "ItemNotMarketEligible".into(), message: format!("Type {tid} has no marketGroupID and cannot be sold on the market"), client_error: None }));
                 }
                 parsed_items.push((st_id, tid, item_id, IskCents::from_f64_isk(price_isk), qty as i32, item_dur));
             }
@@ -174,11 +181,11 @@ pub fn handle_orders_escrow(
                     (station_owner_corp, None)
                 } else if let Some((st_corp_id, _, pilot_bps)) = upwell_opt {
                     if !snap.structures.get(&docked_station_id).and_then(|st| ctx.sde.solar_systems.get(&st.solar_system_id)).is_some_and(|sys| sys.region_id == region_id) {
-                        return Err(BridgeRpcError { code: "InvalidMarketStation".into(), message: format!("Structure {docked_station_id} is not in region {region_id}") });
+                        return Err(BridgeRpcError { code: "InvalidMarketStation".into(), message: format!("Structure {docked_station_id} is not in region {region_id}"), client_error: None });
                     }
                     (st_corp_id, pilot_bps)
                 } else {
-                    return Err(BridgeRpcError { code: "InvalidMarketStation".into(), message: format!("Station {docked_station_id} is not in region {region_id}") });
+                    return Err(BridgeRpcError { code: "InvalidMarketStation".into(), message: format!("Station {docked_station_id} is not in region {region_id}"), client_error: None });
                 };
                 let caller_corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                 let div_id = (account_key.saturating_sub(999)).clamp(1, 7) as u8;
@@ -228,7 +235,7 @@ pub fn handle_orders_escrow(
 
                 let damaged_count = crate::services::notify_emitters_skills_trade_godma::count_damaged_sell_items(snap, &damaged_fitted_ships, char_id, caller_corp_id, use_corp, &parsed_items);
                 if damaged_count > 0 {
-                    return Err(BridgeRpcError { code: "CantRepackageDamagedItem".into(), message: damaged_count.to_string() });
+                    return Err(BridgeRpcError { code: "CantRepackageDamagedItem".into(), message: damaged_count.to_string(), client_error: None });
                 }
 
                 let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
@@ -248,6 +255,7 @@ pub fn handle_orders_escrow(
                         .ok_or_else(|| BridgeRpcError {
                             code: "MarketOrderOverflow".into(),
                             message: "Order total cost overflows 64-bit ISK cents".into(),
+                            client_error: None,
                         })?;
                     let is_sellable_item = |snap_ref: &eve_db::WorldStateSnapshot, i: &InventoryItemRecord| {
                         market_orders_corp_auth::is_item_sellable_on_market(
@@ -294,6 +302,7 @@ pub fn handle_orders_escrow(
                                 return Err(BridgeRpcError {
                                     code: "ItemCannotBeSold".into(),
                                     message: "Courier mission items cannot be sold on the market".into(),
+                                    client_error: None,
                                 });
                             }
                             let has_non_empty_candidate = snap.items.values().any(|i| {
@@ -305,6 +314,7 @@ pub fn handle_orders_escrow(
                                 return Err(BridgeRpcError {
                                     code: "CannotSellItemWithContents".into(),
                                     message: format!("Cannot sell ship or container of type {type_id} while it contains fitted modules, rigs, or cargo"),
+                                    client_error: None,
                                 });
                             }
                             let has_assembled_candidate = snap.items.values().any(|i| i.type_id == type_id && i.singleton && is_sellable_item(snap, i));
@@ -312,17 +322,20 @@ pub fn handle_orders_escrow(
                                 return Err(BridgeRpcError {
                                     code: "CannotSellAssembledItem".into(),
                                     message: format!("Item of type {type_id} in station {station_id} hangar must be repackaged before selling on the market"),
+                                    client_error: None,
                                 });
                             }
                             if let Some(cand) = snap.items.values().find(|i| i.type_id == type_id && i.owner_id == char_id && snap.items.get(&i.location_id).is_some_and(|p| crate::services::inventory_fitting::fitting_containers_ships::is_container_group(ctx.sde.types.get(&p.type_id).map(|t| t.group_id).unwrap_or(0), p.type_id))) {
                                 return Err(BridgeRpcError {
                                     code: "ItemInsideContainer".into(),
                                     message: format!("Item {} is inside a container and must be moved to item hangar before selling", cand.item_id),
+                                    client_error: None,
                                 });
                             }
                             return Err(BridgeRpcError {
                                 code: "InsufficientInventoryForSellOrder".into(),
                                 message: format!("Seller does not have {quantity_i32}x repackaged consumable type {type_id} in station {station_id} hangar"),
+                                client_error: None,
                             });
                         };
                         fid
@@ -333,18 +346,21 @@ pub fn handle_orders_escrow(
                         return Err(BridgeRpcError {
                             code: "InsufficientInventoryForSellOrder".into(),
                             message: format!("Item {item_id} not found in seller inventory"),
+                            client_error: None,
                         });
                     };
                     if snap.items.get(&item.location_id).is_some_and(|p| crate::services::inventory_fitting::fitting_containers_ships::is_container_group(ctx.sde.types.get(&p.type_id).map(|t| t.group_id).unwrap_or(0), p.type_id)) {
                         return Err(BridgeRpcError {
                             code: "ItemInsideContainer".into(),
                             message: format!("Item {item_id} is inside a container and must be moved to item hangar before selling"),
+                            client_error: None,
                         });
                     }
                     if is_courier_item(item_id) {
                         return Err(BridgeRpcError {
                             code: "ItemCannotBeSold".into(),
                             message: "Courier mission items cannot be sold on the market".into(),
+                            client_error: None,
                         });
                     }
                     if item.type_id != type_id || !is_sellable_ignoring_contents(snap, &item) {
@@ -353,6 +369,7 @@ pub fn handle_orders_escrow(
                             message: format!(
                                 "Item {item_id} (type {type_id}) is not reachable in station {station_id} hangar"
                             ),
+                            client_error: None,
                         });
                     }
                     if snap.items.values().any(|other| {
@@ -365,6 +382,7 @@ pub fn handle_orders_escrow(
                             message: format!(
                                 "Cannot sell container/ship {item_id} while it contains items"
                             ),
+                            client_error: None,
                         });
                     }
                     if item.singleton {
@@ -373,6 +391,7 @@ pub fn handle_orders_escrow(
                             message: format!(
                                 "Item {item_id} of type {type_id} must be repackaged before selling"
                             ),
+                            client_error: None,
                         });
                     }
                     if item.quantity < quantity_i32 {
@@ -382,6 +401,7 @@ pub fn handle_orders_escrow(
                                 "Item {item_id} has quantity {}, less than requested {quantity_i32}",
                                 item.quantity
                             ),
+                            client_error: None,
                         });
                     }
                     let old_qty = item.quantity;
@@ -416,6 +436,7 @@ pub fn handle_orders_escrow(
                             return Err(BridgeRpcError {
                                 code: "ItemLocked".into(),
                                 message: e.to_string(),
+                                client_error: None,
                             });
                         }
                     }
@@ -632,6 +653,7 @@ pub fn handle_orders_escrow(
                         return Err(BridgeRpcError {
                             code: "ImmediateOrderUnfilled".into(),
                             message: "Immediate sell order (duration=0) could not be completely filled".into(),
+                            client_error: None,
                         });
                     }
 
@@ -641,6 +663,7 @@ pub fn handle_orders_escrow(
                         .ok_or_else(|| BridgeRpcError {
                             code: "MarketOrderOverflow".into(),
                             message: "Order resting cost overflows 64-bit ISK cents".into(),
+                            client_error: None,
                         })?;
                     let raw_broker_fee = IskCents(
                         (((resting_cost.0 as i128) * broker_ppm + 500_000) / 1_000_000) as i64,
@@ -657,6 +680,7 @@ pub fn handle_orders_escrow(
                             return Err(BridgeRpcError {
                                 code: "InsufficientFunds".into(),
                                 message: "Not enough corporation ISK for market broker fee".into(),
+                                client_error: None,
                             });
                         };
                         if let Some(corp_mut) = snap.corporations.get_mut(&caller_corp_id) {
@@ -680,6 +704,7 @@ pub fn handle_orders_escrow(
                             return Err(BridgeRpcError {
                                 code: "InsufficientFunds".into(),
                                 message: "Not enough ISK for market broker fee".into(),
+                                client_error: None,
                             });
                         }
                         if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
@@ -784,6 +809,7 @@ pub fn handle_orders_escrow(
                             return Err(BridgeRpcError {
                                 code: "BrokerFeeExceeded".into(),
                                 message: format!("Actual broker fee rate {broker_rate:.4} exceeds expectedBrokersFee {expected_fee_raw:.4}"),
+                                client_error: None,
                             });
                         }
                     } else {
@@ -792,6 +818,7 @@ pub fn handle_orders_escrow(
                             return Err(BridgeRpcError {
                                 code: "BrokerFeeExceeded".into(),
                                 message: format!("Actual broker fee {:.2} ISK exceeds expectedBrokersFee {:.2} ISK", total_broker_fee.to_wire_f64(), expected_fee.to_wire_f64()),
+                                client_error: None,
                             });
                         }
                     }
@@ -855,6 +882,7 @@ pub fn handle_orders_escrow(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidMarketOrder".into(),
                     message: "CancelCharOrder requires an explicit orderID".into(),
+                    client_error: None,
                 }));
             };
             let now_unix = ctx.now_unix();
@@ -863,6 +891,7 @@ pub fn handle_orders_escrow(
                     return Err(BridgeRpcError {
                         code: "OrderNotFound".into(),
                         message: format!("Market order {order_id} not found"),
+                        client_error: None,
                     });
                 };
                 let caller_corp_id = snap
@@ -875,6 +904,7 @@ pub fn handle_orders_escrow(
                     return Err(BridgeRpcError {
                         code: "OrderOwnershipViolation".into(),
                         message: format!("Order {order_id} does not belong to character {char_id}"),
+                        client_error: None,
                     });
                 }
                 let mut meta = load_market_order_meta(snap, &order, now_unix);
@@ -883,6 +913,7 @@ pub fn handle_orders_escrow(
                         return Err(BridgeRpcError {
                             code: "CorporationNotFound".into(),
                             message: "Corporation not found".into(),
+                            client_error: None,
                         });
                     }
                     let issued_by = snap.market_order_meta.get(&order_id).and_then(|m| m.issued_by);
@@ -907,6 +938,7 @@ pub fn handle_orders_escrow(
                     return Err(BridgeRpcError {
                         code: "OrderAlreadyFilled".into(),
                         message: format!("Order {order_id} is already filled or cancelled"),
+                        client_error: None,
                     });
                 }
                 let remaining_qty = order.vol_remaining;
@@ -1038,7 +1070,7 @@ pub fn handle_orders_escrow(
             let (station_id, raw_entries) = match (args.first(), args.get(1)) {
                 (Some(PyRep::List(entries) | PyRep::Tuple(entries)), _) => {
                     let Some(sid) = docked_station_id else {
-                        return Some(Err(BridgeRpcError { code: "NotDockedAtStation".into(), message: "Character must be docked at a station or structure to BuyMultipleItems".into() }));
+                        return Some(Err(BridgeRpcError { code: "NotDockedAtStation".into(), message: "Character must be docked at a station or structure to BuyMultipleItems".into(), client_error: None }));
                     };
                     (sid, entries.as_slice())
                 }
@@ -1050,6 +1082,7 @@ pub fn handle_orders_escrow(
                                 message: format!(
                                     "BuyMultipleItems station {sid} does not match docked station {docked}"
                                 ),
+                                client_error: None,
                             }));
                         }
                     }
@@ -1057,11 +1090,12 @@ pub fn handle_orders_escrow(
                 }
                 _ => {
                     if docked_station_id.is_none() && args.is_empty() {
-                        return Some(Err(BridgeRpcError { code: "NotDockedAtStation".into(), message: "Character must be docked at a station or structure to BuyMultipleItems".into() }));
+                        return Some(Err(BridgeRpcError { code: "NotDockedAtStation".into(), message: "Character must be docked at a station or structure to BuyMultipleItems".into(), client_error: None }));
                     }
                     return Some(Err(BridgeRpcError {
                         code: "InvalidBuyMultipleItems".into(),
                         message: "BuyMultipleItems requires a non-empty list of (type_id, quantity[, max_price_isk]) entries".into(),
+                        client_error: None,
                     }));
                 }
             };
@@ -1070,6 +1104,7 @@ pub fn handle_orders_escrow(
                     code: "InvalidBuyMultipleItems".into(),
                     message: "BuyMultipleItems requires a non-empty list of items to purchase"
                         .into(),
+                    client_error: None,
                 }));
             }
 
@@ -1107,12 +1142,14 @@ pub fn handle_orders_escrow(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidBuyMultipleItems".into(),
                         message: format!("Invalid type_id {tid_i64} in BuyMultipleItems"),
+                        client_error: None,
                     }));
                 };
                 let Ok(qty_i32) = i32::try_from(qty_i64) else {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidBuyMultipleItems".into(),
                         message: format!("Invalid quantity {qty_i64} in BuyMultipleItems"),
+                        client_error: None,
                     }));
                 };
                 if tid_u32 == 0
@@ -1129,6 +1166,7 @@ pub fn handle_orders_escrow(
                         message: format!(
                             "BuyMultipleItems entry ({tid_u32}, {qty_i32}) must reference a published type and positive quantity"
                         ),
+                        client_error: None,
                     }));
                 }
                 let max_price_cents = match max_price_f64 {
@@ -1136,6 +1174,7 @@ pub fn handle_orders_escrow(
                         return Some(Err(BridgeRpcError {
                             code: "InvalidBuyMultipleItems".into(),
                             message: "BuyMultipleItems max_price must be finite and positive".into(),
+                            client_error: None,
                         }));
                     }
                     Some(p) => Some(IskCents::from_f64_isk(p)),
@@ -1157,6 +1196,7 @@ pub fn handle_orders_escrow(
                             return Err(BridgeRpcError {
                                 code: "InvalidMarketStation".into(),
                                 message: format!("Station {station_id} is not in region {reg}"),
+                                client_error: None,
                             });
                         }
                         reg
@@ -1164,6 +1204,7 @@ pub fn handle_orders_escrow(
                     None => st_reg.ok_or_else(|| BridgeRpcError {
                         code: "InvalidMarketStation".into(),
                         message: format!("Could not resolve region for station {station_id}"),
+                        client_error: None,
                     })?,
                 };
                 let sk = snap.skills.get(&char_id);
@@ -1178,7 +1219,7 @@ pub fn handle_orders_escrow(
                 };
                 for (req_tid, _, _, ent_st, ord_rng) in &parsed_requests {
                     if !matches!(*ord_rng, -1 | 0 | 1..=40 | 32767) {
-                        return Err(BridgeRpcError { code: "InvalidBuyMultipleItems".into(), message: format!("Invalid orderRange {ord_rng} in BuyMultipleItems") });
+                        return Err(BridgeRpcError { code: "InvalidBuyMultipleItems".into(), message: format!("Invalid orderRange {ord_rng} in BuyMultipleItems"), client_error: None });
                     }
                     if *ent_st != station_id {
                         let _ = crate::services::structure_profile_services::apply_due_profiles_and_check_upwell_market(
@@ -1187,7 +1228,7 @@ pub fn handle_orders_escrow(
                         let ent_sys = super::resolve_station_solar_system(ctx, snap, *ent_st);
                         let ent_reg = ent_sys.and_then(|s| ctx.sde.solar_systems.get(&s).map(|sys| sys.region_id));
                         if ent_reg != Some(region_id) {
-                            return Err(BridgeRpcError { code: "InvalidMarketStation".into(), message: format!("Station {ent_st} is not in region {region_id}") });
+                            return Err(BridgeRpcError { code: "InvalidMarketStation".into(), message: format!("Station {ent_st} is not in region {region_id}"), client_error: None });
                         }
                         let proc_ok = proc_lvl > 0 && (max_proc_jumps >= 32_767 || match (caller_sys, ent_sys) {
                             (Some(a), Some(b)) if a == b => true,
@@ -1195,14 +1236,14 @@ pub fn handle_orders_escrow(
                             _ => false,
                         });
                         if !proc_ok {
-                            return Err(BridgeRpcError { code: "InsufficientProcurementSkill".into(), message: format!("Procurement skill level {proc_lvl} is insufficient for remote station {ent_st}") });
+                            return Err(BridgeRpcError { code: "InsufficientProcurementSkill".into(), message: format!("Procurement skill level {proc_lvl} is insufficient for remote station {ent_st}"), client_error: None });
                         }
                     }
                     if *req_tid != super::PLEX_TYPE_ID && *ord_rng > max_vis_jumps {
-                        return Err(BridgeRpcError { code: "InsufficientVisibilitySkill".into(), message: format!("Order range {ord_rng} exceeds Visibility skill limit {max_vis_jumps}") });
+                        return Err(BridgeRpcError { code: "InsufficientVisibilitySkill".into(), message: format!("Order range {ord_rng} exceeds Visibility skill limit {max_vis_jumps}"), client_error: None });
                     }
                 }
-                let mut avail_isk = snap.characters.get(&char_id).map(|c| c.balance).ok_or_else(|| BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found") })?;
+                let mut avail_isk = snap.characters.get(&char_id).map(|c| c.balance).ok_or_else(|| BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found"), client_error: None })?;
                 let mut virtual_rem: HashMap<i64, i32> = snap.market_orders.values().filter(|o| !o.is_bid && o.region_id == region_id && o.vol_remaining > 0).map(|o| (o.order_id, o.vol_remaining)).collect();
 
                 let mut planned_fills: Vec<(i64, TypeId, i32, IskCents, i64, bool, IskCents, i64, u32)> = Vec::new();
@@ -1261,11 +1302,13 @@ pub fn handle_orders_escrow(
                         let fill_gross = ask_price.checked_mul_qty(fill_qty as i64).ok_or_else(|| BridgeRpcError {
                             code: "MarketOrderOverflow".into(),
                             message: "Order fill cost overflowed ISK bounds".into(),
+                            client_error: None,
                         })?;
                         avail_isk = avail_isk.checked_sub(fill_gross).unwrap_or(IskCents(0));
                         total_cost = total_cost.checked_add(fill_gross).ok_or_else(|| BridgeRpcError {
                             code: "MarketOrderOverflow".into(),
                             message: "Total BuyMultipleItems cost overflowed ISK bounds".into(),
+                            client_error: None,
                         })?;
                         if let Some(vr) = virtual_rem.get_mut(&oid) { *vr -= fill_qty; }
                         rem -= fill_qty;
@@ -1458,6 +1501,7 @@ pub fn handle_orders_escrow(
                 return Some(Err(BridgeRpcError {
                     code: "NoRegion".into(),
                     message: "Session has no active region".into(),
+                    client_error: None,
                 }));
             };
             let raw_type_id = args.first().and_then(|a| {
@@ -1467,6 +1511,7 @@ pub fn handle_orders_escrow(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidMarketOrder".into(),
                     message: "GetPriceHistory requires typeID".into(),
+                    client_error: None,
                 }));
             };
             let type_id = raw_type_id as TypeId;

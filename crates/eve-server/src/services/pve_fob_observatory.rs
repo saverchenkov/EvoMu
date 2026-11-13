@@ -99,6 +99,7 @@ pub async fn spawn_pirate_fob(
         return Err(BridgeRpcError {
             code: "InvalidPirateFaction".into(),
             message: "Pirate FOBs must belong to Blood Raider (500012) or Guristas (500010)".into(),
+            client_error: None,
         });
     }
     let sys_sec = ctx
@@ -111,6 +112,7 @@ pub async fn spawn_pirate_fob(
         return Err(BridgeRpcError {
             code: "InvalidSystemSecurity".into(),
             message: format!("Pirate FOBs only spawn in high/low-sec systems (sec={sys_sec:.2})"),
+            client_error: None,
         });
     }
 
@@ -226,6 +228,7 @@ pub async fn trigger_fob_defense_response(
         .ok_or_else(|| BridgeRpcError {
             code: "FobNotFound".into(),
             message: format!("Pirate FOB {fob_id} not found"),
+            client_error: None,
         })?;
 
     let fleet_weight: usize = ctx.db.with_snapshot(|snap| {
@@ -297,11 +300,13 @@ pub async fn destroy_pirate_fob_and_payout(
             .ok_or_else(|| BridgeRpcError {
                 code: "FobNotFound".into(),
                 message: format!("Pirate FOB {fob_id} not found"),
+                client_error: None,
             })?;
         if st.state == "Destroyed" {
             return Err(BridgeRpcError {
                 code: "FobAlreadyDestroyed".into(),
                 message: format!("Pirate FOB {fob_id} is already destroyed"),
+                client_error: None,
             });
         }
         st.state = "Destroyed".into();
@@ -479,6 +484,7 @@ pub async fn spawn_observatory_flashpoint(
             message: format!(
                 "Observatory Flashpoint sites only spawn in Pochven (region {POCHVEN_REGION_ID})"
             ),
+            client_error: None,
         });
     }
 
@@ -494,6 +500,7 @@ pub async fn spawn_observatory_flashpoint(
             message: format!(
                 "Pochven already has {active_in_pochven} active Observatory Flashpoints (max {MAX_ACTIVE_POCHVEN_OBSERVATORIES})"
             ),
+            client_error: None,
         });
     }
 
@@ -662,6 +669,7 @@ pub fn validate_observatory_access(
         return Err(BridgeRpcError {
             code: "InsufficientFleetComposition".into(),
             message: "Observatory Flashpoint requires at least 3 on-grid subcapital fleet members".into(),
+            client_error: None,
         });
     }
     let min_standing = ctx.db.with_snapshot(|snap| {
@@ -680,6 +688,7 @@ pub fn validate_observatory_access(
         return Err(BridgeRpcError {
             code: "StandingAccessDenied".into(),
             message: format!("Triglavian standing {min_standing:.2} is below required 0.0"),
+            client_error: None,
         });
     }
     Ok(())
@@ -696,6 +705,7 @@ pub fn complete_observatory_flashpoint(
         return Err(BridgeRpcError {
             code: "InsufficientFleetComposition".into(),
             message: "Observatory Flashpoint payout requires at least 3 participating pocket fleet members".into(),
+            client_error: None,
         });
     }
     let eligible: Vec<i64> = fleet_member_ids
@@ -717,6 +727,7 @@ pub fn complete_observatory_flashpoint(
             return Err(BridgeRpcError {
                 code: "ObservatorySiteNotFound".into(),
                 message: format!("Observatory Flashpoint site {site_id} does not exist"),
+                client_error: None,
             });
         };
         snap.fob_observatory_state
@@ -777,18 +788,21 @@ pub async fn try_activate_observatory_gate(
         return Some(Err(BridgeRpcError {
             code: "CantDoThatWhileDocked".into(),
             message: "Cannot activate an acceleration gate while docked".into(),
+            client_error: None,
         }));
     }
     if session.solar_system_id != Some(sys_id) {
         return Some(Err(BridgeRpcError {
             code: "NotInSolarSystem".into(),
             message: "Ship is not in the Observatory solar system".into(),
+            client_error: None,
         }));
     }
     let Some(ship_id) = session.ship_id else {
         return Some(Err(BridgeRpcError {
             code: "NoActiveShip".into(),
             message: "Activating an acceleration gate requires an active ship".into(),
+            client_error: None,
         }));
     };
 
@@ -798,12 +812,14 @@ pub async fn try_activate_observatory_gate(
         return Some(Err(BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: "Active ship ball is not in space".into(),
+            client_error: None,
         }));
     };
     let Some(gate_ball) = all_balls.iter().find(|b| b.id == gate_id) else {
         return Some(Err(BridgeRpcError {
             code: "GateNotInSpace".into(),
             message: "Observatory acceleration gate is not in space".into(),
+            client_error: None,
         }));
     };
     let dist_to_gate = ship_ball.position.distance(gate_ball.position);
@@ -813,6 +829,7 @@ pub async fn try_activate_observatory_gate(
             message: format!(
                 "Ship is {dist_to_gate:.1}m from Observatory gate (must be <= {GATE_ACTIVATION_RANGE_M:.0}m)"
             ),
+            client_error: None,
         }));
     }
 
@@ -832,12 +849,14 @@ pub async fn try_activate_observatory_gate(
         return Some(Err(BridgeRpcError {
             code: "CantDoThatWhileDocked".into(),
             message: "Cannot activate an acceleration gate while docked".into(),
+            client_error: None,
         }));
     }
     if is_capital_or_disallowed_observatory_hull(ctx, ship_type_id) {
         return Some(Err(BridgeRpcError {
             code: "ShipClassRestricted".into(),
             message: "Observatory Flashpoint acceleration gate restricts entry to subcapital hulls (up to Battleship)".into(),
+            client_error: None,
         }));
     }
 

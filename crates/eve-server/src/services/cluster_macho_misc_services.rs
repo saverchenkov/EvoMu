@@ -839,6 +839,7 @@ fn rpc_err(code: impl Into<String>, msg: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
         code: code.into(),
         message: msg.into(),
+        client_error: None,
     }
 }
 
@@ -965,6 +966,7 @@ pub fn check_and_apply_shipcaster_target_cooldown(
                         "Shipcaster destination pad {pad_id} is on cooldown for {} more seconds",
                         expires - now
                     ),
+                    client_error: None,
                 });
             }
             st.target_charges.insert(pad_id, 1);
@@ -974,6 +976,7 @@ pub fn check_and_apply_shipcaster_target_cooldown(
             return Err(BridgeRpcError {
                 code: "ShipcasterTargetNoCharges".into(),
                 message: format!("Shipcaster destination pad {pad_id} has 0 remaining charges"),
+                client_error: None,
             });
         }
         *charges -= 1;

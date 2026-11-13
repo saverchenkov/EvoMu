@@ -84,6 +84,7 @@ pub fn handle(
         return Some(Err(BridgeRpcError {
             code: "MapDisabledInAbyssalSpace".into(),
             message: "Star map queries are disabled inside Abyssal Deadspace".into(),
+            client_error: None,
         }));
     }
 

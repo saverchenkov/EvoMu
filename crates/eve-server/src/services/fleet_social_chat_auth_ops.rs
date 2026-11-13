@@ -212,6 +212,7 @@ pub(super) fn validate_channel_join_auth(
     let deny = || BridgeRpcError {
         code: "ChannelAccessDenied".into(),
         message: format!("Not authorized to join channel {chan_id}"),
+        client_error: None,
     };
 
     let lower = chan_id.to_ascii_lowercase();

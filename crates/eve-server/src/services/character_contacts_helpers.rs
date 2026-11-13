@@ -98,6 +98,7 @@ pub(crate) fn handle_home_station_candidates(
     let ch = ctx.db.get_character(char_id).map_err(|e| BridgeRpcError {
         code: "CharacterNotFound".into(),
         message: e.to_string(),
+        client_error: None,
     })?;
     let mut cands = vec![ch.home_station_id];
     let school_st = ctx
@@ -221,6 +222,7 @@ pub(crate) fn handle_self_destruct_clone(
         Err(e) => Err(BridgeRpcError {
             code: "RespawnFailed".into(),
             message: e.to_string(),
+            client_error: None,
         }),
     }
 }
@@ -236,6 +238,7 @@ pub(crate) fn check_mail_recipient_blocks(
                 return Err(BridgeRpcError {
                     code: "ContactBlocked".into(),
                     message: format!("Recipient {rec_id} has blocked sender {sender_id}"),
+                    client_error: None,
                 });
             }
         }

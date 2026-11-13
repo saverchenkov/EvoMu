@@ -201,7 +201,7 @@ async fn handle_invbroker_add(
                 Err(e) => return Some(Err(e)),
             };
             let Some(mut item_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Add requires itemID".into() }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Add requires itemID".into(), client_error: None }));
             };
             let source_item_opt = ctx.db.with_snapshot(|snap| snap.items.get(&item_id).cloned());
             let raw_flag_opt = args.get(2).and_then(|a| a.as_i64()).or_else(|| kwargs.get("flag").and_then(|v| v.as_i64()));
@@ -219,15 +219,15 @@ async fn handle_invbroker_add(
                 raw_flag_opt.and_then(|v| u16::try_from(v).ok()),
                 src_is_fittable_module,
             ) else {
-                return Some(Err(BridgeRpcError { code: "InvalidLocation".into(), message: "Add requires a target locationID, bound inventory, or active ship/station".into() }));
+                return Some(Err(BridgeRpcError { code: "InvalidLocation".into(), message: "Add requires a target locationID, bound inventory, or active ship/station".into(), client_error: None }));
             };
             if let Some(rf) = raw_flag_opt {
                 if !matches!(rf, 0 | 4 | 5 | 11..=34 | 87 | 90 | 92..=94 | 116..=122 | 125..=151 | 155 | 158 | 164..=172 | 177 | 179..=182 | 185) {
-                    return Some(Err(BridgeRpcError { code: "InvalidInventoryFlag".into(), message: format!("Invalid or restricted inventory flag {rf}") }));
+                    return Some(Err(BridgeRpcError { code: "InvalidInventoryFlag".into(), message: format!("Invalid or restricted inventory flag {rf}"), client_error: None }));
                 }
                 // Fighter Bay (158) only accepts fighters (SDE category 87).
                 if rf == 158 && source_item_opt.as_ref().and_then(|i| ctx.sde.types.get(&i.type_id)).is_some_and(|t| t.category_id != 87) {
-                    return Some(Err(BridgeRpcError { code: "InvalidInventoryFlag".into(), message: "Fighter Bay only accepts fighters".into() }));
+                    return Some(Err(BridgeRpcError { code: "InvalidInventoryFlag".into(), message: "Fighter Bay only accepts fighters".into(), client_error: None }));
                 }
             }
             let mut flag_u16 = raw_flag_opt.map(|v| v as u16).unwrap_or(InventoryFlag::Cargo as u16);
@@ -315,6 +315,7 @@ async fn handle_invbroker_add(
                                 return Some(Err(BridgeRpcError {
                                     code: "NoFreeSlot".into(),
                                     message: format!("No free fitting slot available on ship {new_loc}"),
+                                    client_error: None,
                                 }));
                             }
                         } else {
@@ -424,6 +425,7 @@ async fn handle_invbroker_add(
                         return Some(Err(BridgeRpcError {
                             code: "CannotRefitDamagedModule".into(),
                             message: "UserError: Damaged or burned-out Capital Emergency Hull Energizer cannot be refitted".into(),
+                            client_error: None,
                         }));
                     }
                     if let Err(e) = validate_ship_module_unfit_auth(ctx, session, char_id, src_item, new_loc).await {
@@ -434,14 +436,14 @@ async fn handle_invbroker_add(
                     let now_unix = ctx.now_unix_secs();
                     let has_weapons_timer = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner()).states.get(&char_id).is_some_and(|cw| cw.is_weapon_timer_active(now_unix));
                     if has_weapons_timer {
-                        return Some(Err(BridgeRpcError { code: "CannotRefitWithWeaponsTimer".into(), message: "Cannot refit or unfit modules in space while weapons timer is active".into() }));
+                        return Some(Err(BridgeRpcError { code: "CannotRefitWithWeaponsTimer".into(), message: "Cannot refit or unfit modules in space while weapons timer is active".into(), client_error: None }));
                     }
                     let mut near_fitting_service = false;
                     if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
                         near_fitting_service = is_near_in_space_fitting_service(ctx, sys_id, ship_id).await;
                     }
                     if !near_fitting_service {
-                        return Some(Err(BridgeRpcError { code: "CannotUnfitInSpace".into(), message: "Unfitting modules requires being docked at a station/structure or within range of a Mobile Depot or capital SMA".into() }));
+                        return Some(Err(BridgeRpcError { code: "CannotUnfitInSpace".into(), message: "Unfitting modules requires being docked at a station/structure or within range of a Mobile Depot or capital SMA".into(), client_error: None }));
                     }
                 }
                 if let Some(src_item) = &source_item_opt {
@@ -458,6 +460,7 @@ async fn handle_invbroker_add(
                             return Some(Err(BridgeRpcError {
                                 code: "SubsystemHasFittedModules".into(),
                                 message: "Cannot unfit a T3 Strategic Cruiser subsystem while modules are fitted".into(),
+                                client_error: None,
                             }));
                         }
                         if let Ok(mut check_fit) = ctx.get_or_rebuild_ship_fitting(char_id, src_item.location_id) {
@@ -465,6 +468,7 @@ async fn handle_invbroker_add(
                                 return Some(Err(BridgeRpcError {
                                     code: "SubsystemHasFittedModules".into(),
                                     message: msg,
+                                    client_error: None,
                                 }));
                             }
                         }
@@ -472,7 +476,7 @@ async fn handle_invbroker_add(
                     if let Some(sys_id) = session.solar_system_id {
                         let sys = ctx.systems.get_or_spawn(sys_id);
                         if sys.has_active_nanite_repair_sync(src_item.location_id, item_id) {
-                            return Some(Err(BridgeRpcError { code: "ModuleBeingRepaired".into(), message: format!("Module {item_id} cannot be unfitted while undergoing nanite repair") }));
+                            return Some(Err(BridgeRpcError { code: "ModuleBeingRepaired".into(), message: format!("Module {item_id} cannot be unfitted while undergoing nanite repair"), client_error: None }));
                         }
                         let _ = sys.remove_module_cycle(src_item.location_id, item_id).await;
                     }
@@ -494,6 +498,7 @@ async fn handle_invbroker_add(
                             return Err(BridgeRpcError {
                                 code: "ItemNotFound".into(),
                                 message: format!("Rig {item_id} no longer exists"),
+                                client_error: None,
                             });
                         };
                         if it.owner_id != char_id
@@ -503,12 +508,14 @@ async fn handle_invbroker_add(
                             return Err(BridgeRpcError {
                                 code: "ItemOwnershipViolation".into(),
                                 message: format!("Rig {item_id} is no longer fitted on ship {old_loc}"),
+                                client_error: None,
                             });
                         }
                         if snap.is_item_locked_in_contract_or_job(item_id) {
                             return Err(BridgeRpcError {
                                 code: "ItemLocked".into(),
                                 message: format!("Rig {item_id} is locked"),
+                                client_error: None,
                             });
                         }
                         snap.remove_system_cleanup_item(item_id);
@@ -577,30 +584,32 @@ async fn handle_invbroker_add(
                     return Some(Err(BridgeRpcError {
                         code: "CannotRefitDamagedModule".into(),
                         message: "UserError: Damaged or burned-out Capital Emergency Hull Energizer cannot be fitted".into(),
+                        client_error: None,
                     }));
                 }
                 if session.station_id.is_none() && session.structure_id.is_none() {
                     let now_unix = ctx.now_unix_secs();
                     let has_weapons_timer = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner()).states.get(&char_id).is_some_and(|cw| cw.is_weapon_timer_active(now_unix));
                     if has_weapons_timer {
-                        return Some(Err(BridgeRpcError { code: "CannotRefitWithWeaponsTimer".into(), message: "Cannot fit modules in space while weapons timer is active".into() }));
+                        return Some(Err(BridgeRpcError { code: "CannotRefitWithWeaponsTimer".into(), message: "Cannot fit modules in space while weapons timer is active".into(), client_error: None }));
                     }
                     let mut near_fitting_service = false;
                     if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
                         near_fitting_service = is_near_in_space_fitting_service(ctx, sys_id, ship_id).await;
                     }
                     if !near_fitting_service {
-                        return Some(Err(BridgeRpcError { code: "CannotFitInSpace".into(), message: "Fitting modules into ship slots requires being docked at a station or structure or within range of a Mobile Depot or capital SMA".into() }));
+                        return Some(Err(BridgeRpcError { code: "CannotFitInSpace".into(), message: "Fitting modules into ship slots requires being docked at a station or structure or within range of a Mobile Depot or capital SMA".into(), client_error: None }));
                     }
                 }
                 let pre_check = ctx.db.with_snapshot(|snap| {
                     let Some(item) = snap.items.get(&item_id) else {
-                        return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {item_id} not found") });
+                        return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {item_id} not found"), client_error: None });
                     };
                     if item.owner_id != char_id {
                         return Err(BridgeRpcError {
                             code: "ItemOwnershipViolation".into(),
                             message: format!("Item {item_id} is not owned by {char_id}"),
+                            client_error: None,
                         });
                     }
                     if item.flag == InventoryFlag::Locked
@@ -611,6 +620,7 @@ async fn handle_invbroker_add(
                             message: format!(
                                 "Item {item_id} is locked by an active contract, industry job, or container"
                             ),
+                            client_error: None,
                         });
                     }
                     let eff_qty = split_qty_opt.unwrap_or(item.quantity);
@@ -620,6 +630,7 @@ async fn handle_invbroker_add(
                             message: format!(
                                 "Item {item_id} has quantity {eff_qty} and must be split to 1 before fitting"
                             ),
+                            client_error: None,
                         });
                     }
                     let item_cat = ctx
@@ -635,12 +646,14 @@ async fn handle_invbroker_add(
                                 "Item {item_id} (type {}, category {item_cat}) cannot be fitted to a module slot",
                                 item.type_id
                             ),
+                            client_error: None,
                         });
                     }
                     let Some(ship_item) = snap.items.get(&new_loc) else {
                         return Err(BridgeRpcError {
                             code: "ShipNotFound".into(),
                             message: format!("Target ship {new_loc} not found"),
+                            client_error: None,
                         });
                     };
                     let ship_cat = ctx
@@ -653,6 +666,7 @@ async fn handle_invbroker_add(
                         return Err(BridgeRpcError {
                             code: "InvalidFittingTarget".into(),
                             message: format!("Target {new_loc} is not an owned ship"),
+                            client_error: None,
                         });
                     }
                     // parity: feat:modules.stasis-grappler-mechanics
@@ -673,6 +687,7 @@ async fn handle_invbroker_add(
                         return Err(BridgeRpcError {
                             code: "CannotRefitDamagedModule".into(),
                             message: "UserError: Damaged or burned-out Capital Emergency Hull Energizer cannot be fitted".into(),
+                            client_error: None,
                         });
                     }
                     if let (Some(mod_t), Some(ship_t)) = (
@@ -727,6 +742,7 @@ async fn handle_invbroker_add(
                                 message: format!(
                                     "Target ship {new_loc} is not located at current dock {ch_dock}"
                                 ),
+                                client_error: None,
                             });
                         }
                         if !resolves_to_loc(item.location_id, ch_dock) {
@@ -735,6 +751,7 @@ async fn handle_invbroker_add(
                                 message: format!(
                                     "Item {item_id} is not located at current dock {ch_dock}"
                                 ),
+                                client_error: None,
                             });
                         }
                     } else if ch_sys > 0 {
@@ -747,6 +764,7 @@ async fn handle_invbroker_add(
                                 message: format!(
                                     "Target ship {new_loc} is not in current system {ch_sys}"
                                 ),
+                                client_error: None,
                             });
                         }
                         if !resolves_to_loc(item.location_id, ch_sys) {
@@ -755,6 +773,7 @@ async fn handle_invbroker_add(
                                 message: format!(
                                     "Item {item_id} is not in current system {ch_sys}"
                                 ),
+                                client_error: None,
                             });
                         }
                     }
@@ -774,6 +793,7 @@ async fn handle_invbroker_add(
                             message: format!(
                                 "Slot {flag_u16} on ship {new_loc} is already occupied"
                             ),
+                            client_error: None,
                         });
                     }
                     Ok(item.type_id)
@@ -792,6 +812,7 @@ async fn handle_invbroker_add(
                     return Some(Err(BridgeRpcError {
                         code: "FittingValidationFailed".into(),
                         message: msg,
+                        client_error: None,
                     }));
                 }
             }
@@ -807,7 +828,7 @@ async fn handle_invbroker_add(
             let mut pending_alsc_take: Option<(i64, fitting_containers_ships::AlscLogEntry)> = None;
             let auth_move_ok: Result<(), BridgeRpcError> = ctx.db.with_snapshot(|snap| {
                 let Some(moving) = snap.items.get(&item_id) else {
-                    return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {item_id} not found") });
+                    return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {item_id} not found"), client_error: None });
                 };
                 let (corp_id, char_sys, char_dock, active_ship_id) = snap
                     .characters
@@ -815,18 +836,19 @@ async fn handle_invbroker_add(
                     .map(|c| (c.corporation_id, c.solar_system_id as i64, c.station_id.or(c.structure_id).unwrap_or(0), c.active_ship_id))
                     .unwrap_or((0, 0, 0, 0));
                 if item_id == new_loc || snap.is_structure_controller_saved_ship(item_id) || (active_ship_id > 0 && item_id == active_ship_id && (snap.items.contains_key(&new_loc) || (116..=122).contains(&flag_u16))) {
-                    return Err(BridgeRpcError { code: "CannotMoveActiveShip".into(), message: format!("Cannot move item {item_id} into {new_loc}") });
+                    return Err(BridgeRpcError { code: "CannotMoveActiveShip".into(), message: format!("Cannot move item {item_id} into {new_loc}"), client_error: None });
                 }
                 if matches!(flag_u16, 36 | 63 | 72) {
                     return Err(BridgeRpcError {
                         code: if flag_u16 == 72 { "ImpoundedItem" } else if flag_u16 == 36 { "AssetSafetyLocked" } else { "ItemLocked" }.into(),
                         message: format!("Cannot move item {item_id} into restricted flag {flag_u16}"),
+                        client_error: None,
                     });
                 }
                 fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, moving)?;
                 if let Some(exp_v) = expected_version {
                     if moving.version != exp_v {
-                        return Err(BridgeRpcError { code: "ItemVersionMismatch".into(), message: format!("Item {item_id} version mismatch: expected {exp_v}, actual {}", moving.version) });
+                        return Err(BridgeRpcError { code: "ItemVersionMismatch".into(), message: format!("Item {item_id} version mismatch: expected {exp_v}, actual {}", moving.version), client_error: None });
                     }
                 }
                 let is_courier_cargo = snap.item_custom_names.get(&item_id).is_some_and(|s| s.starts_with("courier_cargo:"));
@@ -834,6 +856,7 @@ async fn handle_invbroker_add(
                     return Err(BridgeRpcError {
                         code: "CannotDeliverCourierCargo".into(),
                         message: "Courier cargo cannot be moved into corporation hangar divisions or foreign containers/ships".into(),
+                        client_error: None,
                     });
                 }
                 let ch_sys = session.solar_system_id.filter(|&id| id > 0).map(|s| s as i64).unwrap_or(char_sys);
@@ -906,7 +929,7 @@ async fn handle_invbroker_add(
                     && !is_core_item
                     && crate::services::structure_acl_defense_rules::is_structure_fuel_flag(moving.flag);
                 let src_ok = if is_deed_bay {
-                    return Err(BridgeRpcError { code: "ItemLocked".into(), message: "Quantum core cannot be removed from structure deed bay".into() });
+                    return Err(BridgeRpcError { code: "ItemLocked".into(), message: "Quantum core cannot be removed from structure deed bay".into(), client_error: None });
                 } else if src_is_struct_fuel {
                     crate::services::structure_acl_defense_rules::validate_structure_fuel_bay_transfer(
                         ctx, snap, session, char_id, moving.location_id, moving.type_id, false, ch_dock, ch_sys, caller_ship_id, &pre_balls,
@@ -944,7 +967,7 @@ async fn handle_invbroker_add(
                                 if !req_pw.is_empty() && !st.unlocked_containers.contains(&(parent.item_id, char_id)) {
                                     let supplied_pw = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.iter().find_map(|a| a.as_str()));
                                     if supplied_pw != Some(req_pw.as_str()) {
-                                        return Err(BridgeRpcError { code: "ALSCPasswordRequired".into(), message: format!("Password required to take items from container {}", parent.item_id) });
+                                        return Err(BridgeRpcError { code: "ALSCPasswordRequired".into(), message: format!("Password required to take items from container {}", parent.item_id), client_error: None });
                                     }
                                 }
                             }
@@ -996,7 +1019,7 @@ async fn handle_invbroker_add(
                     false
                 };
                 if !src_ok {
-                    return Err(BridgeRpcError { code: "ItemOwnershipViolation".into(), message: format!("Character {char_id} is not authorized to move item {item_id}") });
+                    return Err(BridgeRpcError { code: "ItemOwnershipViolation".into(), message: format!("Character {char_id} is not authorized to move item {item_id}"), client_error: None });
                 };
 
                 let dst_ok = if let Some(dest) = snap.items.get(&new_loc) {
@@ -1011,7 +1034,7 @@ async fn handle_invbroker_add(
                                 if !req_pw.is_empty() && !st.unlocked_containers.contains(&(dest.item_id, char_id)) {
                                     let supplied_pw = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.iter().find_map(|a| a.as_str()));
                                     if supplied_pw != Some(req_pw.as_str()) {
-                                        return Err(BridgeRpcError { code: "ALSCPasswordRequired".into(), message: format!("Password required to move items into container {}", dest.item_id) });
+                                        return Err(BridgeRpcError { code: "ALSCPasswordRequired".into(), message: format!("Password required to move items into container {}", dest.item_id), client_error: None });
                                     }
                                 }
                             }
@@ -1059,23 +1082,24 @@ async fn handle_invbroker_add(
                         true
                     } else if is_deed_flag {
                         let st = snap.structures.get(&new_loc).ok_or_else(|| {
-                            BridgeRpcError { code: "StructureNotFound".into(), message: format!("Structure {new_loc} not found") }
+                            BridgeRpcError { code: "StructureNotFound".into(), message: format!("Structure {new_loc} not found"), client_error: None }
                         })?;
                         if st.state == "Destroyed" {
-                            return Err(BridgeRpcError { code: "StructureDestroyed".into(), message: format!("Structure {new_loc} is destroyed") });
+                            return Err(BridgeRpcError { code: "StructureDestroyed".into(), message: format!("Structure {new_loc} is destroyed"), client_error: None });
                         }
                         if ctx.sde.solar_systems.get(&st.solar_system_id).is_some_and(|s| s.region_id == crate::services::station_structure::structure_lifecycle::POCHVEN_REGION_ID) {
                             return Err(BridgeRpcError {
                                 code: "QuantumCoreDisallowedInPochven".into(),
                                 message: format!("Quantum Cores cannot be installed into Upwell structure {new_loc} in Pochven"),
+                                client_error: None,
                             });
                         }
                         if ch_dock != new_loc {
-                            return Err(BridgeRpcError { code: "DestinationAccessDenied".into(), message: format!("Installing a quantum core requires docking in structure {new_loc}") });
+                            return Err(BridgeRpcError { code: "DestinationAccessDenied".into(), message: format!("Installing a quantum core requires docking in structure {new_loc}"), client_error: None });
                         }
                         let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
                         if caller_corp != st.owner_corp_id {
-                            return Err(BridgeRpcError { code: "StructureOwnershipViolation".into(), message: format!("Character {char_id} does not belong to structure owning corp {}", st.owner_corp_id) });
+                            return Err(BridgeRpcError { code: "StructureOwnershipViolation".into(), message: format!("Character {char_id} does not belong to structure owning corp {}", st.owner_corp_id), client_error: None });
                         }
                         use eve_db::corp_roles::{ROLE_DIRECTOR, ROLE_STATION_MANAGER};
                         let req = ROLE_DIRECTOR | ROLE_STATION_MANAGER;
@@ -1088,24 +1112,24 @@ async fn handle_invbroker_add(
                         );
                         let has_role = (session.corp_role & req) != 0 || is_ceo || (eff_roles & req) != 0;
                         if !has_role {
-                            return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Installing a quantum core requires Director or Station Manager role".into() });
+                            return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Installing a quantum core requires Director or Station Manager role".into(), client_error: None });
                         }
                         let profile = crate::services::station_structure::structure_lifecycle::structure_profile(ctx, st.type_id);
                         let expected_core = profile.as_ref().and_then(|p| p.core_type_id);
                         if expected_core != Some(moving.type_id) {
-                            return Err(BridgeRpcError { code: "InvalidItemType".into(), message: format!("Item {} is not the required quantum core for structure {}", moving.type_id, new_loc) });
+                            return Err(BridgeRpcError { code: "InvalidItemType".into(), message: format!("Item {} is not the required quantum core for structure {}", moving.type_id, new_loc), client_error: None });
                         }
                         true
                     } else {
                         if let Some(st) = snap.structures.get(&new_loc) {
                             if st.state == "Destroyed" {
-                                return Err(BridgeRpcError { code: "StructureDestroyed".into(), message: format!("Structure {new_loc} is destroyed") });
+                                return Err(BridgeRpcError { code: "StructureDestroyed".into(), message: format!("Structure {new_loc} is destroyed"), client_error: None });
                             }
                             let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
                             if st.owner_corp_id != caller_corp
                                 && !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(snap, new_loc, char_id)
                             {
-                                return Err(BridgeRpcError { code: "DestinationAccessDenied".into(), message: format!("Character {char_id} lacks structure access at {new_loc}") });
+                                return Err(BridgeRpcError { code: "DestinationAccessDenied".into(), message: format!("Character {char_id} lacks structure access at {new_loc}"), client_error: None });
                             }
                         }
                         ch_dock == new_loc
@@ -1114,7 +1138,7 @@ async fn handle_invbroker_add(
                     false
                 };
                 if !dst_ok {
-                    return Err(BridgeRpcError { code: "DestinationAccessDenied".into(), message: format!("Character {char_id} is not authorized to move items into {new_loc}") });
+                    return Err(BridgeRpcError { code: "DestinationAccessDenied".into(), message: format!("Character {char_id} is not authorized to move items into {new_loc}"), client_error: None });
                 }
                 Ok(())
             });
@@ -1206,6 +1230,7 @@ async fn handle_invbroker_add(
                     return Err(BridgeRpcError {
                         code: "InventoryMoveFailed".into(),
                         message: format!("Item {orig_item_id} not found"),
+                        client_error: None,
                     });
                 };
 
@@ -1216,6 +1241,7 @@ async fn handle_invbroker_add(
                             "Item {orig_item_id} moved concurrently from location {orig_source_loc_id} to {}",
                             orig_item.location_id
                         ),
+                        client_error: None,
                     });
                 }
 
@@ -1228,6 +1254,7 @@ async fn handle_invbroker_add(
                         return Err(BridgeRpcError {
                             code: "InventoryMoveFailed".into(),
                             message: format!("Destination location {new_loc} is not authorized for character {char_id}"),
+                            client_error: None,
                         });
                     }
                     if let Some(dock_id) = session.station_id.or(session.structure_id) {
@@ -1235,6 +1262,7 @@ async fn handle_invbroker_add(
                             return Err(BridgeRpcError {
                                 code: "InventoryMoveFailed".into(),
                                 message: format!("Character {char_id} is no longer docked at {dock_id}"),
+                                client_error: None,
                             });
                         }
                     } else if let Some(sess_sys) = session.solar_system_id {
@@ -1242,6 +1270,7 @@ async fn handle_invbroker_add(
                             return Err(BridgeRpcError {
                                 code: "InventoryMoveFailed".into(),
                                 message: format!("Character {char_id} changed location concurrently"),
+                                client_error: None,
                             });
                         }
                     }
@@ -1249,6 +1278,7 @@ async fn handle_invbroker_add(
                     return Err(BridgeRpcError {
                         code: "InventoryMoveFailed".into(),
                         message: format!("Item {orig_item_id} move is locked or invalid"),
+                        client_error: None,
                     });
                 }
 
@@ -1256,6 +1286,7 @@ async fn handle_invbroker_add(
                     return Err(BridgeRpcError {
                         code: if flag_u16 == 72 { "ImpoundedItem" } else if flag_u16 == 36 { "AssetSafetyLocked" } else { "ItemLocked" }.into(),
                         message: format!("Cannot move item {orig_item_id} into restricted flag {flag_u16}"),
+                        client_error: None,
                     });
                 }
                 fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, &orig_item)?;
@@ -1286,6 +1317,7 @@ async fn handle_invbroker_add(
                         return Err(BridgeRpcError {
                             code: "ItemOwnershipViolation".into(),
                             message: format!("Item {orig_item_id} is not owned by {char_id}"),
+                            client_error: None,
                         });
                     }
                     let eff_qty = split_qty_opt.unwrap_or(orig_item.quantity);
@@ -1293,12 +1325,14 @@ async fn handle_invbroker_add(
                         return Err(BridgeRpcError {
                             code: "CannotFitStackedModule".into(),
                             message: format!("Item {orig_item_id} has quantity {eff_qty} and must be split to 1 before fitting"),
+                            client_error: None,
                         });
                     }
                     let Some(ship_item) = snap.items.get(&new_loc) else {
                         return Err(BridgeRpcError {
                             code: "ShipNotFound".into(),
                             message: format!("Target ship {new_loc} not found"),
+                            client_error: None,
                         });
                     };
                     let ship_cat = ctx.sde.types.get(&ship_item.type_id).map(|t| t.category_id).unwrap_or(0);
@@ -1306,6 +1340,7 @@ async fn handle_invbroker_add(
                         return Err(BridgeRpcError {
                             code: "InvalidFittingTarget".into(),
                             message: format!("Target {new_loc} is not an owned ship"),
+                            client_error: None,
                         });
                     }
                     if snap.items.values().any(|other| {
@@ -1317,6 +1352,7 @@ async fn handle_invbroker_add(
                         return Err(BridgeRpcError {
                             code: "SlotAlreadyOccupied".into(),
                             message: format!("Slot {flag_u16} on ship {new_loc} is already occupied"),
+                            client_error: None,
                         });
                     }
                     if let (Some(mod_t), Some(ship_t)) = (ctx.sde.types.get(&orig_item.type_id), ctx.sde.types.get(&ship_item.type_id)) {
@@ -1338,19 +1374,19 @@ async fn handle_invbroker_add(
                                     && item_type.category_id == 6
                                 {
                                     if !orig_item.singleton || orig_item.quantity != 1 {
-                                        return Err(BridgeRpcError { code: "ShipMustBeAssembled".into(), message: "UserError: Only an assembled frigate can be placed in the Frigate Escape Bay".into() });
+                                        return Err(BridgeRpcError { code: "ShipMustBeAssembled".into(), message: "UserError: Only an assembled frigate can be placed in the Frigate Escape Bay".into(), client_error: None });
                                     }
                                     let has_non_charge_cargo = snap.items.values().any(|c| {
                                         c.location_id == orig_item_id && !matches!(c.flag as u16, 11..=34 | 92..=94 | 125..=132) && ctx.sde.types.get(&c.type_id).is_none_or(|t| t.category_id != 8)
                                     });
                                     if has_non_charge_cargo {
-                                        return Err(BridgeRpcError { code: "ShipHasItemsInCargo".into(), message: "UserError: Frigate in Frigate Escape Bay cannot contain non-charge cargo items".into() });
+                                        return Err(BridgeRpcError { code: "ShipHasItemsInCargo".into(), message: "UserError: Frigate in Frigate Escape Bay cannot contain non-charge cargo items".into(), client_error: None });
                                     }
                                     let existing_frigate = snap.items.values().any(|i| {
                                         i.location_id == new_loc && matches!(i.flag as u16, 177 | 179) && i.item_id != orig_item_id && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 6)
                                     });
                                     if existing_frigate {
-                                        return Err(BridgeRpcError { code: "CapacityExceeded".into(), message: "UserError: Frigate Escape Bay can hold at most 1 assembled frigate".into() });
+                                        return Err(BridgeRpcError { code: "CapacityExceeded".into(), message: "UserError: Frigate Escape Bay can hold at most 1 assembled frigate".into(), client_error: None });
                                     }
                                 }
                                 let hold_capacity = crate::services::fitting_saved_apply::get_ship_hold_capacity(flag_u16, ship_type, eval_cargo_cap);
@@ -1400,13 +1436,13 @@ async fn handle_invbroker_add(
                                     .unwrap_or_else(|| if dest_type.capacity > 0.0 { dest_type.capacity } else { dest_type.default_attributes.get(&eve_sde::attr_ids::CAPACITY).copied().unwrap_or(0.0) });
                                 let used: f64 = snap.items.values().filter(|i| i.location_id == new_loc && i.item_id != orig_item_id).map(|i| effective_item_unit_volume(&ctx.sde, i) * (i.quantity as f64)).sum();
                                 if cap <= 0.0 || used + moving_vol > cap + 1e-4 {
-                                    return Err(BridgeRpcError { code: "CapacityExceeded".into(), message: format!("Container capacity of {cap} m³ exceeded") });
+                                    return Err(BridgeRpcError { code: "CapacityExceeded".into(), message: format!("Container capacity of {cap} m³ exceeded"), client_error: None });
                                 }
                             } else if flag_u16 == 155 && dest_type.category_id == 6 {
                                 let fh_cap = dest_type.default_attributes.get(&912).copied().unwrap_or(0.0);
                                 let used_fh: f64 = snap.items.values().filter(|i| i.location_id == new_loc && (i.flag as u16) == 155 && i.item_id != orig_item_id).map(|i| effective_item_unit_volume(&ctx.sde, i) * (i.quantity as f64)).sum();
                                 if fh_cap <= 0.0 || used_fh + moving_vol > fh_cap + 1e-4 {
-                                    return Err(BridgeRpcError { code: "CapacityExceeded".into(), message: format!("Fleet Hangar capacity {fh_cap} m³ exceeded") });
+                                    return Err(BridgeRpcError { code: "CapacityExceeded".into(), message: format!("Fleet Hangar capacity {fh_cap} m³ exceeded"), client_error: None });
                                 }
                             }
                         }
@@ -1434,6 +1470,7 @@ async fn handle_invbroker_add(
                             return Err(BridgeRpcError {
                                 code: "InventoryMoveFailed".into(),
                                 message: format!("Stale entity version (expected {exp_v}, found {})", orig_item.version),
+                                client_error: None,
                             });
                         }
                     }
@@ -1457,9 +1494,10 @@ async fn handle_invbroker_add(
                         let orig = snap.items.get_mut(&orig_item_id).ok_or_else(|| BridgeRpcError {
                             code: "SplitFailed".into(),
                             message: format!("Item {orig_item_id} not found"),
+                            client_error: None,
                         })?;
                         if orig.singleton || split_qty <= 0 || split_qty >= orig.quantity {
-                            return Err(BridgeRpcError { code: "SplitFailed".into(), message: "Cannot split".into() });
+                            return Err(BridgeRpcError { code: "SplitFailed".into(), message: "Cannot split".into(), client_error: None });
                         }
                         orig.quantity -= split_qty;
                         orig.version += 1;
@@ -1482,6 +1520,7 @@ async fn handle_invbroker_add(
                         let it = snap.items.get_mut(&orig_item_id).ok_or_else(|| BridgeRpcError {
                             code: "InventoryMoveFailed".into(),
                             message: format!("Item {orig_item_id} not found"),
+                            client_error: None,
                         })?;
                         it.owner_id = char_id;
                         it.location_id = active_ship;
@@ -1501,15 +1540,17 @@ async fn handle_invbroker_add(
                     let orig = snap.items.get_mut(&orig_item_id).ok_or_else(|| BridgeRpcError {
                         code: "SplitFailed".into(),
                         message: format!("Item {orig_item_id} not found"),
+                        client_error: None,
                     })?;
                     if orig.owner_id != split_owner {
                         return Err(BridgeRpcError {
                             code: "SplitFailed".into(),
                             message: format!("Item {orig_item_id} is not owned by character {split_owner}"),
+                            client_error: None,
                         });
                     }
                     if orig.singleton || split_qty <= 0 || split_qty >= orig.quantity {
-                        return Err(BridgeRpcError { code: "SplitFailed".into(), message: "Cannot split".into() });
+                        return Err(BridgeRpcError { code: "SplitFailed".into(), message: "Cannot split".into(), client_error: None });
                     }
                     orig.quantity -= split_qty;
                     orig.version += 1;
@@ -1579,6 +1620,7 @@ async fn handle_invbroker_add(
                             return Err(BridgeRpcError {
                                 code: "InventoryMoveFailed".into(),
                                 message: format!("Stale entity version (expected {exp_v}, found {})", active_src_record.version),
+                                client_error: None,
                             });
                         }
                     }
@@ -1594,6 +1636,7 @@ async fn handle_invbroker_add(
                     let it = snap.items.get_mut(&effective_item_id).ok_or_else(|| BridgeRpcError {
                         code: "InventoryMoveFailed".into(),
                         message: format!("Item {effective_item_id} not found"),
+                        client_error: None,
                     })?;
                     it.location_id = new_loc;
                     it.flag = flag;

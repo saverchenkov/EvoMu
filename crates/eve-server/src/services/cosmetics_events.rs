@@ -19,12 +19,14 @@ pub async fn materialize_system_lod2(
         return Err(BridgeRpcError {
             code: "InsufficientRole".into(),
             message: "materialize_system_lod2 requires GM role; normal players trigger LOD 2 automatically on system entry or undock".into(),
+            client_error: None,
         });
     }
     let Some(session_sys_id) = session.solar_system_id else {
         return Err(BridgeRpcError {
             code: "UnknownSolarSystem".into(),
             message: "Session has no active solar system".into(),
+            client_error: None,
         });
     };
     if let Some(arg_sys) = args.first().and_then(|a| a.as_i64()) {
@@ -32,12 +34,14 @@ pub async fn materialize_system_lod2(
             return Err(BridgeRpcError {
                 code: "UnknownSolarSystem".into(),
                 message: format!("Invalid solar system ID {arg_sys}"),
+                client_error: None,
             });
         };
         if !ctx.sde.solar_systems.contains_key(&req_sys_id) {
             return Err(BridgeRpcError {
                 code: "UnknownSolarSystem".into(),
                 message: format!("Solar system {req_sys_id} does not exist in SDE"),
+                client_error: None,
             });
         }
         if req_sys_id != session_sys_id {
@@ -46,6 +50,7 @@ pub async fn materialize_system_lod2(
                 message: format!(
                     "Cannot materialize LOD 2 in remote solar system {req_sys_id} while in system {session_sys_id}"
                 ),
+                client_error: None,
             });
         }
     }
@@ -53,6 +58,7 @@ pub async fn materialize_system_lod2(
         return Err(BridgeRpcError {
             code: "UnknownSolarSystem".into(),
             message: format!("Solar system {session_sys_id} does not exist in SDE"),
+            client_error: None,
         });
     }
     let count = ctx
@@ -72,30 +78,35 @@ pub async fn interdict_convoy(
         return Err(BridgeRpcError {
             code: "InsufficientRole".into(),
             message: "interdict_convoy requires GM role; normal players must destroy convoys in space via combat".into(),
+            client_error: None,
         });
     }
     if session.station_id.is_some() || session.structure_id.is_some() {
         return Err(BridgeRpcError {
             code: "ShipDocked".into(),
             message: "Cannot interdict a space convoy while docked".into(),
+            client_error: None,
         });
     }
     let Some(ship_id) = session.ship_id else {
         return Err(BridgeRpcError {
             code: "NoActiveShip".into(),
             message: "Session has no active ship".into(),
+            client_error: None,
         });
     };
     let Some(convoy_id) = args.first().and_then(|a| a.as_i64()) else {
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "interdict_convoy requires convoyID".into(),
+            client_error: None,
         });
     };
     let Some(convoy) = ctx.living_world.get_convoy(convoy_id) else {
         return Err(BridgeRpcError {
             code: "ConvoyNotFound".into(),
             message: format!("Convoy {convoy_id} does not exist"),
+            client_error: None,
         });
     };
     if session.solar_system_id != Some(convoy.current_system_id) {
@@ -105,6 +116,7 @@ pub async fn interdict_convoy(
                 "Convoy {convoy_id} is in system {}, but attacker is in {:?}",
                 convoy.current_system_id, session.solar_system_id
             ),
+            client_error: None,
         });
     }
 
@@ -115,12 +127,14 @@ pub async fn interdict_convoy(
             return Err(BridgeRpcError {
                 code: "DestinyQueryFailed".into(),
                 message: e,
+                client_error: None,
             })
         }
     }) else {
         return Err(BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: "Attacker ship is not in space".into(),
+            client_error: None,
         });
     };
 
@@ -130,6 +144,7 @@ pub async fn interdict_convoy(
             return Err(BridgeRpcError {
                 code: "DestinyQueryFailed".into(),
                 message: e,
+                client_error: None,
             })
         }
     }) else {
@@ -138,6 +153,7 @@ pub async fn interdict_convoy(
             message: format!(
                 "Convoy {convoy_id} is not materialized on grid in Ballpark"
             ),
+            client_error: None,
         });
     };
 
@@ -149,6 +165,7 @@ pub async fn interdict_convoy(
                 "Ship is {:.1} m from convoy {convoy_id} (must be <= 30000 m)",
                 dist
             ),
+            client_error: None,
         });
     }
 
@@ -203,6 +220,7 @@ pub async fn interdict_convoy(
         Err(e) => Err(BridgeRpcError {
             code: "InterdictionFailed".into(),
             message: e,
+            client_error: None,
         }),
     }
 }
@@ -225,18 +243,21 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: "shipCosmeticsMgr.GiveSkin requires GM role".into(),
+                    client_error: None,
                 }));
             }
             let Some(raw_skin) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSkinLicenseType".into(),
                     message: "GiveSkin requires skinID".into(),
+                    client_error: None,
                 }));
             };
             let Ok(skin_id) = u32::try_from(raw_skin) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSkinLicenseType".into(),
                     message: format!("Invalid SKIN ID {raw_skin}"),
+                    client_error: None,
                 }));
             };
             let resolved_skin = ctx.sde.skins.get(&skin_id).or_else(|| {
@@ -249,6 +270,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSkinLicenseType".into(),
                     message: format!("SKIN or skin license {skin_id} does not exist in SDE"),
+                    client_error: None,
                 }));
             };
             if let Some(ship_tid) = args.get(1).and_then(|a| a.as_i64()).filter(|&id| id > 0) {
@@ -259,6 +281,7 @@ pub async fn handle(
                             "SKIN '{}' (id {}) cannot be granted for incompatible ship type {ship_tid}",
                             skin_info.internal_name, skin_info.skin_id
                         ),
+                        client_error: None,
                     }));
                 }
             }
@@ -290,18 +313,21 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSkinLicenseType".into(),
                     message: "ActivateSkinLicense requires skin license typeID".into(),
+                    client_error: None,
                 }));
             };
             let Ok(requested_skin_id) = u32::try_from(raw_skin_id) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSkinLicenseType".into(),
                     message: format!("Invalid SKIN license typeID {raw_skin_id}"),
+                    client_error: None,
                 }));
             };
             let Some(skin_type) = ctx.sde.types.get(&requested_skin_id) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSkinLicenseType".into(),
                     message: format!("Type {requested_skin_id} not found in SDE"),
+                    client_error: None,
                 }));
             };
             if skin_type.category_id != 91 {
@@ -311,18 +337,21 @@ pub async fn handle(
                         "Type {requested_skin_id} (category {}) is not a Permanent SKIN license (category 91)",
                         skin_type.category_id
                     ),
+                    client_error: None,
                 }));
             }
             let Some(lic_info) = ctx.sde.skin_licenses.get(&requested_skin_id) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSkinLicenseType".into(),
                     message: format!("Type {requested_skin_id} is not mapped to any SKIN in SDE skin_licenses"),
+                    client_error: None,
                 }));
             };
             let Some(skin_info) = ctx.sde.skins.get(&lic_info.skin_id) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSkinLicenseType".into(),
                     message: format!("SKIN ID {} mapped by license {requested_skin_id} does not exist in SDE skins", lic_info.skin_id),
+                    client_error: None,
                 }));
             };
             if let Some(ship_tid) = args.get(1).and_then(|a| a.as_i64()).filter(|&id| id > 0) {
@@ -333,6 +362,7 @@ pub async fn handle(
                             "SKIN license {requested_skin_id} ('{}') is not compatible with ship type {ship_tid}",
                             skin_info.internal_name
                         ),
+                        client_error: None,
                     }));
                 }
             }
@@ -355,6 +385,7 @@ pub async fn handle(
                         message: format!(
                             "Character {char_id} does not own SKIN license item (typeID {requested_skin_id}) at current station/structure or active ship"
                         ),
+                        client_error: None,
                     });
                 };
 
@@ -369,6 +400,7 @@ pub async fn handle(
                 .map_err(|e| BridgeRpcError {
                     code: "ItemLocked".into(),
                     message: e.to_string(),
+                    client_error: None,
                 })?;
 
                 let list = snap.licensed_skins.entry(char_id).or_default();

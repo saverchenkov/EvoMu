@@ -234,16 +234,16 @@ pub(super) fn handle_wars(
             }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(agg) = snap.corporations.get(&my_corp) else {
-                    return Err(BridgeRpcError { code: "NpcCorporationCannotDeclareWar".into(), message: "Only player corporations can declare war".into() });
+                    return Err(BridgeRpcError { code: "NpcCorporationCannotDeclareWar".into(), message: "Only player corporations can declare war".into(), client_error: None });
                 };
                 if agg.ceo_id != char_id {
-                    return Err(BridgeRpcError { code: "CeoRoleRequired".into(), message: "Only the corporation CEO can declare war".into() });
+                    return Err(BridgeRpcError { code: "CeoRoleRequired".into(), message: "Only the corporation CEO can declare war".into(), client_error: None });
                 }
                 if defender == my_corp || !snap.corporations.contains_key(&defender) || same_alliance(snap, my_corp, defender) {
-                    return Err(BridgeRpcError { code: "InvalidWarTarget".into(), message: format!("Corporation {defender} is not a valid war target") });
+                    return Err(BridgeRpcError { code: "InvalidWarTarget".into(), message: format!("Corporation {defender} is not a valid war target"), client_error: None });
                 }
                 if already_at_war(snap, my_corp, defender) {
-                    return Err(BridgeRpcError { code: "AlreadyAtWar".into(), message: "These corporations are already at war".into() });
+                    return Err(BridgeRpcError { code: "AlreadyAtWar".into(), message: "These corporations are already at war".into(), client_error: None });
                 }
                 let owned_ok = |s: &&eve_db::UpwellStructureRecord| {
                     is_valid_war_hq(ctx, &snap.corporations, my_corp, s)
@@ -254,10 +254,10 @@ pub(super) fn handle_wars(
                     None => snap.structures.values().filter(owned_ok).map(|s| s.structure_id).min(),
                 };
                 let Some(hq) = hq else {
-                    return Err(BridgeRpcError { code: "WarHqRequired".into(), message: "Declaring war requires a War HQ structure owned by the attacking corporation".into() });
+                    return Err(BridgeRpcError { code: "WarHqRequired".into(), message: "Declaring war requires a War HQ structure owned by the attacking corporation".into(), client_error: None });
                 };
                 if !war_eligible(snap, defender) {
-                    return Err(BridgeRpcError { code: "DefenderNotWarEligible".into(), message: format!("Corporation {defender} owns no structures and is not war-eligible") });
+                    return Err(BridgeRpcError { code: "DefenderNotWarEligible".into(), message: format!("Corporation {defender} owns no structures and is not war-eligible"), client_error: None });
                 }
                 debit_corp(snap, my_corp, IskCents::from_isk(WAR_DECLARATION_FEE_ISK))?;
                 snap.next_entity_id += 1;
@@ -545,6 +545,7 @@ pub(super) fn handle_wars(
                     return Err(BridgeRpcError {
                         code: "AllyOfferAlreadyExists".into(),
                         message: "Your corporation already has an active or pending ally offer for this war".into(),
+                        client_error: None,
                     });
                 }
                 if kind == NegKind::Surrender {
@@ -607,6 +608,7 @@ pub(super) fn handle_wars(
                     return Err(BridgeRpcError {
                         code: "NotWarParticipant".into(),
                         message: "Only war participants or the negotiation offeror may inspect this negotiation".into(),
+                        client_error: None,
                     });
                 }
                 let (agg, def) = snap
@@ -701,6 +703,7 @@ pub(super) fn handle_wars(
                     return Err(BridgeRpcError {
                         code: "NegotiationAlreadyResolved".into(),
                         message: format!("Negotiation {neg_id} is already {current_status}"),
+                        client_error: None,
                     });
                 }
                 if accepting {
@@ -714,6 +717,7 @@ pub(super) fn handle_wars(
                         return Err(BridgeRpcError {
                             code: "WarAlreadyEnding".into(),
                             message: format!("War {} surrender has already been accepted", n.war_id),
+                            client_error: None,
                         });
                     }
                     debit_corp(snap, n.from_corp, n.isk)?;
@@ -820,6 +824,7 @@ pub(super) fn handle_wars(
                     return Err(BridgeRpcError {
                         code: "NegotiationAlreadyResolved".into(),
                         message: format!("Negotiation {neg_id} is already {cur_status}"),
+                        client_error: None,
                     });
                 }
                 if accepting {
@@ -834,6 +839,7 @@ pub(super) fn handle_wars(
                         return Err(BridgeRpcError {
                             code: "AlreadyWarAlly".into(),
                             message: format!("Corporation {} is already an ally in war {}", n.from_corp, n.war_id),
+                            client_error: None,
                         });
                     }
                     debit_corp(snap, my_corp, n.isk)?;
@@ -1122,6 +1128,7 @@ pub(super) fn handle_wars(
                     return Err(BridgeRpcError {
                         code: "MutualWarInviteNotFound".into(),
                         message: format!("No pending mutual war invite from {from_corp}"),
+                        client_error: None,
                     });
                 }
                 if same_alliance(snap, from_corp, my_corp) {
@@ -1129,6 +1136,7 @@ pub(super) fn handle_wars(
                     return Err(BridgeRpcError {
                         code: "InvalidWarTarget".into(),
                         message: "Corporations in the same alliance cannot enter a mutual war".into(),
+                        client_error: None,
                     });
                 }
                 if already_at_war(snap, from_corp, my_corp) {
@@ -1136,6 +1144,7 @@ pub(super) fn handle_wars(
                     return Err(BridgeRpcError {
                         code: "AlreadyAtWar".into(),
                         message: "These corporations are already at war".into(),
+                        client_error: None,
                     });
                 }
                 snap.war_state.mutual_invites.remove(&(from_corp, my_corp));
@@ -1245,6 +1254,7 @@ pub(super) fn handle_wars(
                     return Err(BridgeRpcError {
                         code: "KillmailNotFound".into(),
                         message: format!("Killmail {kill_id} not found"),
+                        client_error: None,
                     });
                 };
                 let kill_ts = if km.killed_unix > 0 { km.killed_unix } else { now };
@@ -1344,6 +1354,7 @@ fn handle_war_statistic_kills(
         return Some(Err(BridgeRpcError {
             code: "WarNotFound".into(),
             message: format!("War {war_id} not found"),
+            client_error: None,
         }));
     };
     if method == "GetKillsByGroup" {

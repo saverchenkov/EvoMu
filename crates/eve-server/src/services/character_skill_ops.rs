@@ -67,6 +67,7 @@ pub fn migrate_obsolete_skills_for_character(
         let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
             code: "CharacterNotFound".into(),
             message: format!("Character {char_id} not found"),
+            client_error: None,
         })?;
 
         ch.skill_points = (ch.skill_points - total_sp).max(0.0);
@@ -187,6 +188,7 @@ pub fn purchase_skills_direct_for_char(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "PurchaseSkills requires at least one skill typeID".into(),
+            client_error: None,
         });
     }
     let now_unix = ctx.now_unix();
@@ -200,12 +202,14 @@ pub fn purchase_skills_direct_for_char(
                 return Err(BridgeRpcError {
                     code: "InvalidSkillType".into(),
                     message: format!("Type {sk_id} does not exist"),
+                    client_error: None,
                 });
             };
             if st.category_id != 16 || !st.published {
                 return Err(BridgeRpcError {
                     code: "InvalidSkillType".into(),
                     message: format!("Type {sk_id} ({}) is not a published skill", st.name),
+                    client_error: None,
                 });
             }
             if snap
@@ -222,6 +226,7 @@ pub fn purchase_skills_direct_for_char(
                 return Err(BridgeRpcError {
                     code: "SkillUnavailableForPurchase".into(),
                     message: format!("Skill {sk_id} ({}) is drop-only and cannot be directly purchased", st.name),
+                    client_error: None,
                 });
             }
             let npc_price_cents = snap
@@ -233,6 +238,7 @@ pub fn purchase_skills_direct_for_char(
                 .ok_or_else(|| BridgeRpcError {
                     code: "SkillUnavailableForPurchase".into(),
                     message: format!("Skill {sk_id} is not seeded on the NPC market for direct purchase"),
+                    client_error: None,
                 })?;
             let markup_cents = ((npc_price_cents as f64) * 1.30).round() as i64;
             total_cost = total_cost.saturating_add(markup_cents);
@@ -242,6 +248,7 @@ pub fn purchase_skills_direct_for_char(
         let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
             code: "CharacterNotFound".into(),
             message: format!("Character {char_id} not found"),
+            client_error: None,
         })?;
         if ch.balance.0 < total_cost {
             return Err(BridgeRpcError {
@@ -251,6 +258,7 @@ pub fn purchase_skills_direct_for_char(
                     (total_cost as f64) / 100.0,
                     ch.balance.to_f64_isk()
                 ),
+                client_error: None,
             });
         }
         ch.balance = eve_db::IskCents(ch.balance.0 - total_cost);
@@ -404,6 +412,7 @@ pub(crate) fn handle_omega_weekly_free_sp_offer(
             .ok_or_else(|| BridgeRpcError {
                 code: "CharacterNotFound".into(),
                 message: format!("Character {char_id} not found"),
+                client_error: None,
             })?
             .clone_grade;
         let is_omega = clone_grade >= 2 && exp_opt.map(|u| u > now_unix).unwrap_or(true);
@@ -411,6 +420,7 @@ pub(crate) fn handle_omega_weekly_free_sp_offer(
             return Err(BridgeRpcError {
                 code: "OmegaRequired".into(),
                 message: "Omega clone state is required to claim the weekly free SP offer".into(),
+                client_error: None,
             });
         }
         let last_week = snap
@@ -425,6 +435,7 @@ pub(crate) fn handle_omega_weekly_free_sp_offer(
             return Err(BridgeRpcError {
                 code: "WeeklyOfferAlreadyClaimed".into(),
                 message: "Weekly free SP offer has already been claimed this week".into(),
+                client_error: None,
             });
         }
         snap.service_state_blobs.remove(&blob_key);
@@ -433,6 +444,7 @@ pub(crate) fn handle_omega_weekly_free_sp_offer(
             .map_err(|e| BridgeRpcError {
                 code: "ServiceStateLimitExceeded".into(),
                 message: e,
+                client_error: None,
             })?;
         let ch = snap.characters.get_mut(&char_id).unwrap();
         ch.free_skill_points += grant as f64;
@@ -511,6 +523,7 @@ pub fn get_respec_info(
         return Err(BridgeRpcError {
             code: "CharacterNotFound".into(),
             message: format!("Character {char_id} not found"),
+            client_error: None,
         });
     };
     Ok(PyRep::keyval([
@@ -607,6 +620,7 @@ fn strip_ship_fitting(
         return Err(BridgeRpcError {
             code: "CannotStripFittingInSpace".into(),
             message: "StripFitting requires the character to be docked in a station or structure".into(),
+            client_error: None,
         });
     };
     let ship_id = args
@@ -617,6 +631,7 @@ fn strip_ship_fitting(
         .ok_or_else(|| BridgeRpcError {
             code: "NoActiveShip".into(),
             message: "No target ship specified for StripFitting".into(),
+            client_error: None,
         })?;
 
     let stripped = ctx.db.try_with_mut_snapshot(|snap| {
@@ -627,18 +642,21 @@ fn strip_ship_fitting(
             return Err(BridgeRpcError {
                 code: "ShipNotFound".into(),
                 message: format!("Ship {ship_id} not found"),
+                client_error: None,
             });
         };
         if ship.owner_id != char_id {
             return Err(BridgeRpcError {
                 code: "OwnershipViolation".into(),
                 message: format!("Ship {ship_id} is not owned by character {char_id}"),
+                client_error: None,
             });
         }
         if ship.location_id != dock_id {
             return Err(BridgeRpcError {
                 code: "ShipNotAtStation".into(),
                 message: format!("Ship {ship_id} is not docked at station/structure {dock_id}"),
+                client_error: None,
             });
         }
         if snap.contracts.values().any(|c| {
@@ -650,6 +668,7 @@ fn strip_ship_fitting(
             return Err(BridgeRpcError {
                 code: "ItemLockedInContract".into(),
                 message: format!("Ship {ship_id} is locked in an active contract"),
+                client_error: None,
             });
         }
         crate::services::fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(
@@ -788,6 +807,7 @@ pub async fn verify_in_space_container_proximity(
         return Err(BridgeRpcError {
             code: "NotInSameSolarSystem".into(),
             message: format!("Caller must be in space in solar system {sys_id} to open container {container_id}"),
+            client_error: None,
         });
     }
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -800,6 +820,7 @@ pub async fn verify_in_space_container_proximity(
             return Err(BridgeRpcError {
                 code: "OutOfRange".into(),
                 message: format!("Container {container_id} is out of 2,500m range ({edge_dist:.1}m)"),
+                client_error: None,
             });
         }
     }

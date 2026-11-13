@@ -645,6 +645,7 @@ pub fn transition_character_into_npe_pocket(
             .map_err(|e| BridgeRpcError {
                 code: "SessionTransitionFailed".into(),
                 message: e.to_string(),
+                client_error: None,
             })?;
             let ch = snap.characters.get(&char_id).unwrap();
             snap.item_positions

@@ -432,7 +432,7 @@ fn map_call_req_error_body_preserves_exact_insurance_user_error_keys() {
         );
     }
 
-    // Zero-arg fallback uses default ownerName without scraping message strings.
+    // Zero-arg InsureShipFailedSingleContract must not inject a hardcoded character ID.
     let zero_arg_ins = eve_proto::BridgeRpcError::from_user_key(
         eve_proto::UserErrorKey::InsureShipFailedSingleContract,
     );
@@ -442,9 +442,9 @@ fn map_call_req_error_body_preserves_exact_insurance_user_error_keys() {
         &zero_arg_ins,
     ));
     assert_eq!(key, "InsureShipFailedSingleContract");
-    assert_eq!(
-        dict,
-        vec![("ownerName".to_string(), PyRep::Integer(90_000_001))]
+    assert!(
+        dict.is_empty(),
+        "zero-arg InsureShipFailedSingleContract must leave ownerName unset for session fallback, got {dict:?}"
     );
 
     for key_enum in [
@@ -489,6 +489,7 @@ fn map_call_req_error_body_preserves_exact_insurance_user_error_keys() {
     let fallback_err = eve_proto::BridgeRpcError {
         code: "SomeUnmappedError".into(),
         message: "details".into(),
+        client_error: None,
     };
     let (key, dict) = decode_wrapped_user_error(map_call_req_error_body(
         "insuranceSvc",
@@ -549,6 +550,7 @@ fn map_call_req_error_body_preserves_existing_rpc_error_mappings() {
     let fake_item = eve_proto::BridgeRpcError {
         code: "FakeItemNotFound".into(),
         message: "item 1".into(),
+        client_error: None,
     };
     assert_eq!(
         decode_wrapped_runtime_error(map_call_req_error_body("inv", "m", &fake_item)),
@@ -558,6 +560,7 @@ fn map_call_req_error_body_preserves_existing_rpc_error_mappings() {
     let bound_err = eve_proto::BridgeRpcError {
         code: "InvalidBoundObject".into(),
         message: "bad oid".into(),
+        client_error: None,
     };
     let (key, dict) = decode_wrapped_user_error(map_call_req_error_body("svc", "m", &bound_err));
     assert_eq!(key, "UnMachoDestination");
@@ -566,6 +569,7 @@ fn map_call_req_error_body_preserves_existing_rpc_error_mappings() {
     let slash_err = eve_proto::BridgeRpcError {
         code: "SlashError".into(),
         message: "bad syntax".into(),
+        client_error: None,
     };
     let (key, dict) = decode_wrapped_user_error(map_call_req_error_body("slash", "SlashCmd", &slash_err));
     assert_eq!(key, "SlashError");
@@ -575,6 +579,7 @@ fn map_call_req_error_body_preserves_existing_rpc_error_mappings() {
     let slash_cmd_err = eve_proto::BridgeRpcError {
         code: "UnknownSlashCommand".into(),
         message: "unknown /foo".into(),
+        client_error: None,
     };
     let (key, dict) = decode_wrapped_user_error(map_call_req_error_body(
         "publicQaToolsServer",
@@ -609,6 +614,7 @@ fn map_call_req_error_body_preserves_existing_rpc_error_mappings() {
         let dock_err = eve_proto::BridgeRpcError {
             code: code.into(),
             message: "Ship is 12000.0 m from docking target".into(),
+            client_error: None,
         };
         let (key, dict) = decode_wrapped_user_error(map_call_req_error_body(
             "beyonce",

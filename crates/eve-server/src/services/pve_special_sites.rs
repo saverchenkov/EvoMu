@@ -92,7 +92,7 @@ pub fn with_pve_special_reg<R>(
 }
 
 fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
-    BridgeRpcError { code: code.into(), message: message.into() }
+    BridgeRpcError { code: code.into(), message: message.into(), client_error: None }
 }
 
 pub(crate) fn next_spec_seq(reg: &mut PveSpecialSitesRegistry) -> i64 {
@@ -923,12 +923,14 @@ pub async fn handle_pve_special_sites(
                     return Some(Err(BridgeRpcError {
                         code: "UnknownSolarSystem".into(),
                         message: "GetTriglavianSiteInstances requires an integer solarSystemID".into(),
+                        client_error: None,
                     }));
                 };
                 let Some(sid) = u32::try_from(raw).ok().filter(|id| ctx.sde.solar_systems.contains_key(id)) else {
                     return Some(Err(BridgeRpcError {
                         code: "UnknownSolarSystem".into(),
                         message: format!("Unknown solar system ID {raw}"),
+                        client_error: None,
                     }));
                 };
                 sid

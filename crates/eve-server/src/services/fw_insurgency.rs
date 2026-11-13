@@ -32,6 +32,7 @@ pub async fn handle_hub_and_scan(
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solar system".into(),
+                    client_error: None,
                 }));
             };
             let sys_sec = ctx
@@ -46,6 +47,7 @@ pub async fn handle_hub_and_scan(
                     message: format!(
                         "Sovereignty Hub prospecting upgrades can only be installed in null-sec systems (system {sys_id} has sec {sys_sec:.2})"
                     ),
+                    client_error: None,
                 }));
             }
 
@@ -157,6 +159,7 @@ pub async fn handle_hub_and_scan(
                         message: format!(
                             "Caller must belong to the sovereignty-holding alliance in system {sys_id}"
                         ),
+                        client_error: None,
                     });
                 };
                 if held_alliance != Some(caller_aid) {
@@ -165,6 +168,7 @@ pub async fn handle_hub_and_scan(
                         message: format!(
                             "System {sys_id} sovereignty is not held by caller's alliance {caller_aid}"
                         ),
+                        client_error: None,
                     });
                 }
 
@@ -175,6 +179,7 @@ pub async fn handle_hub_and_scan(
                     return Err(BridgeRpcError {
                         code: "InsufficientCorporationRole".into(),
                         message: "Configuring Sovereignty Hub upgrades requires Director or Station Manager role".into(),
+                        client_error: None,
                     });
                 }
 
@@ -197,6 +202,7 @@ pub async fn handle_hub_and_scan(
                         message: format!(
                             "Configuring Sovereignty Hub upgrades in system {sys_id} requires an online structure owned by corporation {caller_corp_id}"
                         ),
+                        client_error: None,
                     });
                 };
                 let hub_pos = snap
@@ -279,17 +285,20 @@ pub async fn handle_hub_and_scan(
                         return Err(BridgeRpcError {
                             code: "OutsideSovStructureProximity".into(),
                             message: "Installing a Sovereignty Hub upgrade from your ship requires being within 50 km of the hub".into(),
+                            client_error: None,
                         });
                     }
                     if found_locked_local {
                         return Err(BridgeRpcError {
                             code: "UpgradeItemLocked".into(),
                             message: "Sovereignty Hub upgrade item is locked in a contract or escrow".into(),
+                            client_error: None,
                         });
                     }
                     return Err(BridgeRpcError {
                         code: "UpgradeItemNotFound".into(),
                         message: "SaveUpgradeConfiguration requires an unlocked Sovereignty Hub upgrade item (group 4768) in the hub structure or your active ship".into(),
+                        client_error: None,
                     });
                 };
                 let up_tid = snap.items.get(&up_iid).map(|i| i.type_id).unwrap_or(0);
@@ -299,6 +308,7 @@ pub async fn handle_hub_and_scan(
                         message: format!(
                             "Sovereignty Hub upgrade type {up_tid} has no modelled prospecting deposit"
                         ),
+                        client_error: None,
                     });
                 };
 
@@ -527,6 +537,7 @@ pub async fn handle_hub_and_scan(
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solar system".into(),
+                    client_error: None,
                 }));
             };
             tick_sov_prospecting_deposit_respawn(ctx, sys_id).await;
@@ -637,6 +648,7 @@ pub async fn handle_hub_and_scan(
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solar system".into(),
+                    client_error: None,
                 }));
             };
             let handle = ctx.systems.get_or_spawn(sys_id);
@@ -899,6 +911,7 @@ pub async fn handle_hub_and_scan(
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solar system".into(),
+                    client_error: None,
                 }));
             };
             if sys_id == 30_100_000 || (32_000_000..=32_999_999).contains(&sys_id) {
@@ -908,12 +921,14 @@ pub async fn handle_hub_and_scan(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgs".into(),
                     message: "ConeScan scan angle must be a finite non-negative number".into(),
+                    client_error: None,
                 }));
             }
             if args.get(1).and_then(|a| a.as_f64()).is_some_and(|v| !v.is_finite()) {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgs".into(),
                     message: "ConeScan scan range must be a finite number".into(),
+                    client_error: None,
                 }));
             }
             let scan_angle_rad = args
@@ -935,12 +950,14 @@ pub async fn handle_hub_and_scan(
                         return Some(Err(BridgeRpcError {
                             code: "InvalidArgs".into(),
                             message: "ConeScan direction vector must contain numeric coordinates".into(),
+                            client_error: None,
                         }));
                     };
                     if !dx.is_finite() || !dy.is_finite() || !dz.is_finite() {
                         return Some(Err(BridgeRpcError {
                             code: "InvalidArgs".into(),
                             message: "ConeScan direction vector coordinates must be finite".into(),
+                            client_error: None,
                         }));
                     }
                     DVec3::new(dx, dy, dz).try_normalize()
@@ -955,6 +972,7 @@ pub async fn handle_hub_and_scan(
                             return Some(Err(BridgeRpcError {
                                 code: "InvalidArgs".into(),
                                 message: "ConeScan direction coordinates must be finite".into(),
+                                client_error: None,
                             }));
                         }
                         DVec3::new(dx, dy, dz).try_normalize()

@@ -174,6 +174,7 @@ pub async fn activate_scan_probe_launcher(
                 return Err(BridgeRpcError {
                     code: "ShipNotInSpace".into(),
                     message: format!("Active ship {ship_id} is not in space in solar system {sys_id}"),
+                    client_error: None,
                 });
             }
         }
@@ -192,6 +193,7 @@ pub async fn activate_scan_probe_launcher(
         return Err(BridgeRpcError {
             code: "NoProbesLoaded".into(),
             message: "Scan probe launcher has no scanner probes loaded".into(),
+            client_error: None,
         });
     };
 
@@ -199,6 +201,7 @@ pub async fn activate_scan_probe_launcher(
         return Err(BridgeRpcError {
             code: "InvalidProbeForLauncher".into(),
             message: "Combat scanner probes require an Expanded Probe Launcher".into(),
+            client_error: None,
         });
     }
 
@@ -216,6 +219,7 @@ pub async fn activate_scan_probe_launcher(
             return Err(BridgeRpcError {
                 code: "MaxProbesLaunched".into(),
                 message: "Maximum of 8 active scanner probes already in space".into(),
+                client_error: None,
             });
         }
         let max_can_launch = (8 - existing_active_count) as i32;
@@ -254,6 +258,7 @@ pub async fn activate_scan_probe_launcher(
                 return Err(BridgeRpcError {
                     code: "ShipNotInSpace".into(),
                     message: format!("Active ship {ship_id} is not in space in solar system {sys_id}"),
+                    client_error: None,
                 });
             }
         }
@@ -265,12 +270,14 @@ pub async fn activate_scan_probe_launcher(
             .ok_or_else(|| BridgeRpcError {
                 code: "NoProbesLoaded".into(),
                 message: "Scan probe launcher has no scanner probes loaded".into(),
+                client_error: None,
             })?;
         let actual_launch = (reservation_ids.len() as i32).min(ci.quantity);
         if actual_launch <= 0 {
             return Err(BridgeRpcError {
                 code: "NoProbesLoaded".into(),
                 message: "Scan probe launcher has no scanner probes loaded".into(),
+                client_error: None,
             });
         }
         let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), ci.owner_id);
@@ -286,6 +293,7 @@ pub async fn activate_scan_probe_launcher(
                 return Err(BridgeRpcError {
                     code: "ItemLocked".into(),
                     message: e.to_string(),
+                    client_error: None,
                 });
             }
         };
@@ -555,6 +563,7 @@ async fn handle_get_full_state(
             return Some(Err(BridgeRpcError {
                 code: "CrossSystemScanDenied".into(),
                 message: format!("Cannot query GetFullState for remote solar system {req_sys}"),
+                client_error: None,
             }));
         }
     }
@@ -608,6 +617,7 @@ fn handle_qa_override_probe_expiry(
         return Some(Err(BridgeRpcError {
             code: "GMRoleRequired".into(),
             message: "scanMgr.QAOverrideProbeExpiry requires GM/QA role".into(),
+            client_error: None,
         }));
     }
     let secs = args.first().and_then(|a| a.as_f64()).unwrap_or(60.0).max(1.0);
@@ -635,6 +645,7 @@ async fn handle_qa_scan_sites(
         return Some(Err(BridgeRpcError {
             code: "GMRoleRequired".into(),
             message: "scanMgr.QAScanSites requires GM/QA role".into(),
+            client_error: None,
         }));
     }
     let Some(sys_id) = bound_entry
@@ -650,6 +661,7 @@ async fn handle_qa_scan_sites(
         return Some(Err(BridgeRpcError {
             code: "InvalidSolarSystem".into(),
             message: "scanMgr.QAScanSites requires an active solar system".into(),
+            client_error: None,
         }));
     };
     let (sigs, anomalies) = ensure_system_signatures_and_anomalies(ctx, sys_id).await;
@@ -738,6 +750,7 @@ fn handle_set_activity_state(
             return Some(Err(BridgeRpcError {
                 code: "InvalidProbeState".into(),
                 message: format!("Invalid scanner probe state {st}"),
+                client_error: None,
             }));
         }
     }
@@ -746,6 +759,7 @@ fn handle_set_activity_state(
             return Some(Err(BridgeRpcError {
                 code: "InvalidProbeState".into(),
                 message: format!("Invalid scanner probe state {st}"),
+                client_error: None,
             }));
         }
     }
@@ -819,6 +833,7 @@ async fn handle_get_system_scan_mgr(
             return Some(Err(BridgeRpcError {
                 code: "AccessDenied".into(),
                 message: "Cannot query scan manager for a remote solar system".into(),
+                client_error: None,
             }));
         }
         arg_sys
@@ -921,6 +936,7 @@ async fn handle_get_anomalies(
             return Some(Err(BridgeRpcError {
                 code: "AccessDenied".into(),
                 message: "Cannot query anomalies for a remote solar system".into(),
+                client_error: None,
             }));
         }
     }
@@ -958,6 +974,7 @@ async fn handle_request_scans(
             return Some(Err(BridgeRpcError {
                 code: "AccessDenied".into(),
                 message: "Cannot request probe scans for a remote solar system".into(),
+                client_error: None,
             }));
         }
     }
@@ -1162,7 +1179,7 @@ async fn handle_request_scans(
         .map(|map| map.values().filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0).cloned().collect())
         .unwrap_or_default();
     if active_probes.is_empty() {
-        return Some(Err(BridgeRpcError { code: "NoActiveProbes".into(), message: "No active scanner probes in space".into() }));
+        return Some(Err(BridgeRpcError { code: "NoActiveProbes".into(), message: "No active scanner probes in space".into(), client_error: None }));
     }
     let balls = sys_handle.list_balls().await.unwrap_or_default();
     let inhibitor_positions = crate::services::space_destiny::space_cyno_filaments::active_scan_inhibitor_positions(ctx, sys_id, &balls);

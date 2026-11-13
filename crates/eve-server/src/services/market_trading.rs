@@ -515,6 +515,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "GetMarketGroupTypes requires marketGroupID integer".into(),
+                    client_error: None,
                 }));
             };
             let type_ids = ctx.sde.types_in_market_group(mg_id);
@@ -554,12 +555,14 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "NoRegion".into(),
                     message: "Session has no active region".into(),
+                    client_error: None,
                 }));
             };
             let Some(raw_type_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidMarketOrder".into(),
                     message: "GetOrders requires typeID".into(),
+                    client_error: None,
                 }));
             };
             let type_id = raw_type_id as TypeId;
@@ -611,12 +614,14 @@ pub fn handle(
                     code: "NotDockedAtStation".into(),
                     message: "GetStationAsks requires being docked at a station or structure"
                         .into(),
+                    client_error: None,
                 }));
             };
             let Some(region_id) = session.region_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoRegion".into(),
                     message: "Session has no active region".into(),
+                    client_error: None,
                 }));
             };
             let now_unix = ctx.now_unix();
@@ -648,6 +653,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "NoRegion".into(),
                     message: "Session has no active region".into(),
+                    client_error: None,
                 }));
             };
             let now_unix = ctx.now_unix();
@@ -814,12 +820,14 @@ pub fn handle(
                     code: "NotDockedAtStation".into(),
                     message: "Character must be docked at a station or specify a stationID to place a market order"
                         .into(),
+                    client_error: None,
                 }));
             };
             let Some(region_id) = session.region_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoRegion".into(),
                     message: "Session has no active region".into(),
+                    client_error: None,
                 }));
             };
             let raw_type_id = match rpc.req_positive_i64(1, "typeID") {
@@ -906,6 +914,7 @@ pub fn handle(
                     code: "InvalidMarketOrder".into(),
                     message: "Market order requires finite price > 0, positive quantity, valid range, and duration in [0, 1, 3, 7, 14, 30, 90]"
                         .into(),
+                    client_error: None,
                 }));
             }
             if !super::market_contracts::is_valid_4_sig_fig_price(price_isk) {
@@ -914,6 +923,7 @@ pub fn handle(
                     message: format!(
                         "Order price {price_isk} violates EVE 4-significant-figure tick size rule"
                     ),
+                    client_error: None,
                 }));
             }
             let quantity_i32 = quantity as i32;
@@ -987,6 +997,7 @@ pub fn handle(
                             message: format!(
                                 "Cannot place immediate market buy at out-of-region station {station_id}"
                             ),
+                            client_error: None,
                         }));
                     }
                 } else if let Some(docked) = docked_station_id {
@@ -996,6 +1007,7 @@ pub fn handle(
                             message: format!(
                                 "Cannot place market order at station {station_id} while docked at {docked}"
                             ),
+                            client_error: None,
                         }));
                     }
                 } else if proc_lvl == 0 {
@@ -1003,6 +1015,7 @@ pub fn handle(
                         code: "NotDockedAtStation".into(),
                         message: "Character must be docked at a station or structure to place a non-immediate market order"
                             .into(),
+                        client_error: None,
                     }));
                 } else if !proc_ok {
                     return Some(Err(BridgeRpcError {
@@ -1010,6 +1023,7 @@ pub fn handle(
                         message: format!(
                             "Procurement skill level {proc_lvl} is insufficient for remote station {station_id}"
                         ),
+                        client_error: None,
                     }));
                 }
             }
@@ -1023,6 +1037,7 @@ pub fn handle(
                         "Buy order range {order_range} exceeds maximum range {} for Visibility skill level {vis_lvl}",
                         super::market_contracts::max_remote_jumps_for_skill_level(vis_lvl)
                     ),
+                    client_error: None,
                 }));
             }
             let order_price = IskCents::from_f64_isk(price_isk);
@@ -1030,6 +1045,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "MarketOrderOverflow".into(),
                     message: "Order total cost overflows 64-bit ISK cents".into(),
+                    client_error: None,
                 }));
             }
             let now_unix = ctx.now_unix();
@@ -1047,6 +1063,7 @@ pub fn handle(
                     return Err(BridgeRpcError {
                         code: "InvalidMarketStation".into(),
                         message: format!("Station {station_id} is not in region {region_id}"),
+                        client_error: None,
                     });
                 };
                 let broker_rate = if let Some((_, st_rate, _)) = structure_broker_opt {
@@ -1195,6 +1212,7 @@ pub fn handle(
                             return Err(BridgeRpcError {
                                 code: "InsufficientFunds".into(),
                                 message: "Not enough ISK to complete immediate buy fill".into(),
+                                client_error: None,
                             });
                         };
                         let buyer_bal = if use_corp {
@@ -1358,6 +1376,7 @@ pub fn handle(
                     return Err(BridgeRpcError {
                         code: "ImmediateOrderUnfilled".into(),
                         message: "Immediate order (duration=0) could not be completely filled against existing orders".into(),
+                        client_error: None,
                     });
                 }
 
@@ -1387,6 +1406,7 @@ pub fn handle(
                 let resting_need = broker_fee.checked_add(escrow).ok_or_else(|| BridgeRpcError {
                     code: "MarketOrderOverflow".into(),
                     message: "Order escrow + broker fee overflow".into(),
+                    client_error: None,
                 })?;
                 let cur_bal = if use_corp {
                     snap.corporations
@@ -1403,6 +1423,7 @@ pub fn handle(
                     return Err(BridgeRpcError {
                         code: "InsufficientFunds".into(),
                         message: "Not enough ISK to cover buy order escrow and broker fee".into(),
+                        client_error: None,
                     });
                 }
                 let broker_bal = if use_corp {

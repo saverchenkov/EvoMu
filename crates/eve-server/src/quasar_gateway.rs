@@ -221,6 +221,7 @@ impl NoticeRoutingCache {
                     "Notice size {byte_size} exceeds NoticeRoutingCache max_bytes {}",
                     self.max_bytes
                 ),
+                client_error: None,
             });
         }
         while self.current_bytes + byte_size > self.max_bytes {

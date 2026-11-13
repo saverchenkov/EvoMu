@@ -782,6 +782,7 @@ pub(super) fn handle_vote_queries(
                 .ok_or_else(|| BridgeRpcError {
                     code: "VoteCaseNotFound".into(),
                     message: format!("Vote case {case_id} not found for corporation {target_corp}"),
+                    client_error: None,
                 })?;
             let opts = if vc.options.is_empty() {
                 vec![
@@ -874,6 +875,7 @@ pub(super) fn handle_vote_queries(
                 .ok_or_else(|| BridgeRpcError {
                     code: "VoteCaseNotFound".into(),
                     message: format!("Vote case {case_id} not found for corporation {target_corp}"),
+                    client_error: None,
                 })?;
             Ok(vote_desc.build_dbrow(format_case(vc, &snap.corp_vote_ballots)))
         });

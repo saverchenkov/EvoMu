@@ -16,7 +16,7 @@ fn is_ship_bay_flag(flag: u16) -> bool {
 const BAY_ACCESS_RANGE_M: f64 = 2_500.0;
 
 fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
-    BridgeRpcError { code: code.into(), message: message.into() }
+    BridgeRpcError { code: code.into(), message: message.into(), client_error: None }
 }
 
 /// `ship.BoardStoredShip(hostID, storedShipID)`: board an owned, assembled ship held in the ship

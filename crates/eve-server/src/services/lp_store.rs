@@ -200,12 +200,14 @@ fn handle_take_offer(
         return Some(Err(BridgeRpcError {
             code: "InvalidQuantity".into(),
             message: format!("LP store offer quantity must be positive (got {qty})"),
+            client_error: None,
         }));
     }
     let Ok(qty_i32) = i32::try_from(qty) else {
         return Some(Err(BridgeRpcError {
             code: "InvalidQuantity".into(),
             message: format!("LP store offer quantity {qty} exceeds i32::MAX"),
+            client_error: None,
         }));
     };
 
@@ -213,6 +215,7 @@ fn handle_take_offer(
         return Some(Err(BridgeRpcError {
             code: "UserError".into(),
             message: "MustBeDocked".into(),
+            client_error: None,
         }));
     };
     let hosted_corps = station_hosted_lp_corps(&ctx.sde, delivery_loc_id);
@@ -220,6 +223,7 @@ fn handle_take_offer(
         return Some(Err(BridgeRpcError {
             code: "StationServiceUnavailable".into(),
             message: format!("Location {delivery_loc_id} does not offer an NPC LP store"),
+            client_error: None,
         }));
     }
     if let Some(req_cid) = explicit_corp_id {
@@ -229,6 +233,7 @@ fn handle_take_offer(
                 message: format!(
                     "Station {delivery_loc_id} does not host LP store for corporation {req_cid}"
                 ),
+                client_error: None,
             }));
         }
     }
@@ -249,6 +254,7 @@ fn handle_take_offer(
             return Some(Err(BridgeRpcError {
                 code: "OfferNotFound".into(),
                 message: format!("LP store offer {target_offer_id} not found"),
+                client_error: None,
             }));
         }
     };
@@ -264,12 +270,14 @@ fn handle_take_offer(
         return Some(Err(BridgeRpcError {
             code: "InvalidQuantity".into(),
             message: "LP store total LP cost overflows i64".into(),
+            client_error: None,
         }));
     };
     let Some(total_isk_cents) = offer.isk_cost.0.checked_mul(qty) else {
         return Some(Err(BridgeRpcError {
             code: "InvalidQuantity".into(),
             message: "LP store total ISK cost overflows i64".into(),
+            client_error: None,
         }));
     };
     let total_isk_cost = IskCents(total_isk_cents);
@@ -277,12 +285,14 @@ fn handle_take_offer(
         return Some(Err(BridgeRpcError {
             code: "InvalidQuantity".into(),
             message: "LP store delivered item quantity overflows i32".into(),
+            client_error: None,
         }));
     };
     let Some(total_ak_cost) = offer.ak_cost.checked_mul(qty) else {
         return Some(Err(BridgeRpcError {
             code: "InvalidQuantity".into(),
             message: "LP store total AK cost overflows i64".into(),
+            client_error: None,
         }));
     };
     let delivery_flag = InventoryFlag::Hangar;
@@ -293,6 +303,7 @@ fn handle_take_offer(
             return Err(BridgeRpcError {
                 code: "CharacterNotFound".into(),
                 message: format!("Character {char_id} not found"),
+                client_error: None,
             });
         };
 
@@ -305,6 +316,7 @@ fn handle_take_offer(
                         "LP store for {} requires non-negative standing (have {st:.2})",
                         offer.corp_id
                     ),
+                    client_error: None,
                 });
             }
         }
@@ -317,6 +329,7 @@ fn handle_take_offer(
                         "LP store offer {} requires at least {:.2} standing with corporation {} (have {:.2})",
                         offer.offer_id, min_st, offer.corp_id, cur_st
                     ),
+                    client_error: None,
                 });
             }
         }
@@ -349,6 +362,7 @@ fn handle_take_offer(
                         "Opposing militia ({char_fac}) cannot redeem offers from militia corporation {} ({expected_fac})",
                         offer.corp_id
                     ),
+                    client_error: None,
                 });
             }
             if char_fac != expected_fac {
@@ -380,6 +394,7 @@ fn handle_take_offer(
                         message: format!(
                             "Character must be enlisted in militia {expected_fac} or have non-negative effective corporation/faction standing (corp={corp_eff:.2}, faction={fac_eff:.2})"
                         ),
+                        client_error: None,
                     });
                 }
             }
@@ -395,6 +410,7 @@ fn handle_take_offer(
                 code: "InvalidQuantity".into(),
                 message: "Blueprint LP store purchases are capped at 1,000 copies per transaction"
                     .into(),
+                client_error: None,
             });
         }
 
@@ -419,18 +435,21 @@ fn handle_take_offer(
                 return Err(BridgeRpcError {
                     code: "InvalidQuantity".into(),
                     message: "LP store required trade-in item quantity must be positive".into(),
+                    client_error: None,
                 });
             }
             let Some(needed) = req_unit_qty.checked_mul(qty_i32) else {
                 return Err(BridgeRpcError {
                     code: "InvalidQuantity".into(),
                     message: "LP store required trade-in item quantity overflows i32".into(),
+                    client_error: None,
                 });
             };
             if let Some(existing) = aggregated_req_items.iter_mut().find(|(t, _)| *t == req_tid) {
                 existing.1 = existing.1.checked_add(needed).ok_or_else(|| BridgeRpcError {
                     code: "InvalidQuantity".into(),
                     message: "LP store required trade-in item quantity overflows i32".into(),
+                    client_error: None,
                 })?;
             } else {
                 aggregated_req_items.push((req_tid, needed));
@@ -495,6 +514,7 @@ fn handle_take_offer(
                         "LP offer {} requires {needed}x item type {req_tid} in hangar (have {available})",
                         offer.offer_id
                     ),
+                    client_error: None,
                 });
             }
             matching_ids.sort_unstable();
@@ -516,6 +536,7 @@ fn handle_take_offer(
                     message: format!(
                         "Character {char_id} lacks Master Wallet take permission in corporation {player_corp_id}"
                     ),
+                    client_error: None,
                 });
             }
             if !is_ceo
@@ -529,6 +550,7 @@ fn handle_take_offer(
                     message: format!(
                         "Character {char_id} lacks Deliveries hangar permission in corporation {player_corp_id}"
                     ),
+                    client_error: None,
                 });
             }
             let mut corp_balances = load_corp_lp_balances(snap, player_corp_id);
@@ -540,6 +562,7 @@ fn handle_take_offer(
                         "Corporation {player_corp_id} does not have enough LP with {} (required {total_lp_cost}, available {current_lp})",
                         offer.corp_id
                     ),
+                    client_error: None,
                 });
             }
             let corp_balance = if let Some(corp) = snap.corporations.get_mut(&player_corp_id) {
@@ -552,6 +575,7 @@ fn handle_take_offer(
                 return Err(BridgeRpcError {
                     code: "InsufficientFunds".into(),
                     message: "Not enough ISK for corporation LP store purchase".into(),
+                    client_error: None,
                 });
             }
             if total_ak_cost > 0 {
@@ -583,6 +607,7 @@ fn handle_take_offer(
                         "Not enough LP with corporation {} (required {total_lp_cost}, available {current_lp})",
                         offer.corp_id
                     ),
+                    client_error: None,
                 });
             }
             if ch.balance < total_isk_cost {
@@ -593,6 +618,7 @@ fn handle_take_offer(
                         total_isk_cost.to_wire_f64(),
                         ch.balance.to_wire_f64()
                     ),
+                    client_error: None,
                 });
             }
             if total_ak_cost > 0 {
@@ -643,6 +669,7 @@ fn handle_take_offer(
                 return Err(BridgeRpcError {
                     code: "MissingRequiredItems".into(),
                     message: format!("LP offer {} required items could not be consumed atomically", offer.offer_id),
+                    client_error: None,
                 });
             }
         }
@@ -882,6 +909,7 @@ fn handle_transfer_lp(
             return Some(Err(BridgeRpcError {
                 code: "InvalidTargetCorp".into(),
                 message: format!("{method_name} requires targetCorpID"),
+                client_error: None,
             }));
         }
     };
@@ -894,6 +922,7 @@ fn handle_transfer_lp(
         return Some(Err(BridgeRpcError {
             code: "InvalidCorpID".into(),
             message: "LP issuer corpID must be positive".into(),
+            client_error: None,
         }));
     }
     let amount = match rpc.req_i64(2, "amount") {
@@ -904,6 +933,7 @@ fn handle_transfer_lp(
         return Some(Err(BridgeRpcError {
             code: "InvalidLPAmount".into(),
             message: "LP transfer amount must be positive".into(),
+            client_error: None,
         }));
     }
     let now_unix = ctx.now_unix();
@@ -912,6 +942,7 @@ fn handle_transfer_lp(
             return Err(BridgeRpcError {
                 code: "CharacterNotFound".into(),
                 message: format!("Character {char_id} not found"),
+                client_error: None,
             });
         };
         let target_exists = snap.corporations.contains_key(&target_corp_id)
@@ -921,12 +952,14 @@ fn handle_transfer_lp(
             return Err(BridgeRpcError {
                 code: "CorporationNotFound".into(),
                 message: format!("Target corporation {target_corp_id} does not exist"),
+                client_error: None,
             });
         }
         if is_from_corp && target_corp_id == ch.corporation_id {
             return Err(BridgeRpcError {
                 code: "InvalidTargetCorp".into(),
                 message: "Cannot transfer corporation LP to the same corporation".into(),
+                client_error: None,
             });
         }
         let (sender_remaining, lp_before) = if is_from_corp {
@@ -940,6 +973,7 @@ fn handle_transfer_lp(
                     message: format!(
                         "Corporation {sender_corp_id} has {cur} LP with {npc_corp_id}, cannot transfer {amount}"
                     ),
+                    client_error: None,
                 });
             }
             let rem = cur - amount;
@@ -954,6 +988,7 @@ fn handle_transfer_lp(
                     message: format!(
                         "Character {char_id} has {cur} LP with {npc_corp_id}, cannot transfer {amount}"
                     ),
+                    client_error: None,
                 });
             }
             let rem = cur - amount;
@@ -1048,6 +1083,7 @@ pub fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "StationServiceUnavailable".into(),
                         message: format!("Station {dock_id} does not offer LP store"),
+                        client_error: None,
                     }));
                 }
             }
@@ -1130,6 +1166,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidTargetCorp".into(),
                     message: "ExchangeConcordLP requires a valid target NPC corpID".into(),
+                    client_error: None,
                 }));
             };
             if target_corp_id == CONCORD_CORP_ID
@@ -1138,18 +1175,21 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidTargetCorp".into(),
                     message: "Cannot exchange CONCORD LP into CONCORD, Factional Warfare militia, Food Relief, or The Sanctuary LP".into(),
+                    client_error: None,
                 }));
             }
             let Some(npc_corp) = ctx.sde.npc_corporations.get(&target_corp_id) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidTargetCorp".into(),
                     message: format!("Target corporation {target_corp_id} is not a valid NPC corporation"),
+                    client_error: None,
                 }));
             };
             let Some(faction_id) = npc_corp.faction_id else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidTargetCorp".into(),
                     message: format!("Target NPC corporation {target_corp_id} has no eligible faction"),
+                    client_error: None,
                 }));
             };
             // DERIVED: Published CONCORD LP conversion rates (`Loyalty_Points.md:78-81`):
@@ -1165,6 +1205,7 @@ pub fn handle(
                         message: format!(
                             "NPC corporation {target_corp_id} (faction {faction_id}) does not accept CONCORD LP conversion"
                         ),
+                        client_error: None,
                     }));
                 }
             };
@@ -1177,6 +1218,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidLPAmount".into(),
                     message: "CONCORD LP exchange amount must be positive".into(),
+                    client_error: None,
                 }));
             }
             let converted_lp = ((concord_amount as f64) * conversion_rate).floor() as i64;
@@ -1184,6 +1226,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidLPAmount".into(),
                     message: "CONCORD LP amount too small to yield positive target LP".into(),
+                    client_error: None,
                 }));
             }
             let session_station_id = session.station_id;
@@ -1194,6 +1237,7 @@ pub fn handle(
                     return Err(BridgeRpcError {
                         code: "CharacterNotFound".into(),
                         message: format!("Character {char_id} not found"),
+                        client_error: None,
                     });
                 };
                 let docked_station_id = session_station_id.or(ch.station_id);
@@ -1201,6 +1245,7 @@ pub fn handle(
                     return Err(BridgeRpcError {
                         code: "MustBeDockedInStation".into(),
                         message: "Must be docked in an NPC station to exchange CONCORD LP".into(),
+                        client_error: None,
                     });
                 }
                 let existing_target_lp = ch.loyalty_points.get(&target_corp_id).copied().unwrap_or(0);
@@ -1210,6 +1255,7 @@ pub fn handle(
                         message: format!(
                             "Character {char_id} must already hold LP with corporation {target_corp_id} to exchange CONCORD LP"
                         ),
+                        client_error: None,
                     });
                 }
                 let cur_concord = ch.loyalty_points.get(&CONCORD_CORP_ID).copied().unwrap_or(0);
@@ -1219,6 +1265,7 @@ pub fn handle(
                         message: format!(
                             "Insufficient CONCORD LP (required {concord_amount}, available {cur_concord})"
                         ),
+                        client_error: None,
                     });
                 }
                 let rem_concord = cur_concord - concord_amount;
@@ -1303,6 +1350,7 @@ pub fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidArguments".into(),
                         message: "rewardMgr.GetDelayedRewardsByGroupIDs requires a list of rewardGroupIDs".into(),
+                        client_error: None,
                     }));
                 }
             };

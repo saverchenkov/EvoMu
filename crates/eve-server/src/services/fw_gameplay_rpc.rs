@@ -153,6 +153,7 @@ pub fn resolve_friendly_supply_site_defense(
         .ok_or_else(|| BridgeRpcError {
             code: "StructureNotFound".into(),
             message: format!("Supply site {structure_id} not found"),
+            client_error: None,
         })?;
     let char_fac = ctx
         .db
@@ -160,11 +161,13 @@ pub fn resolve_friendly_supply_site_defense(
         .ok_or_else(|| BridgeRpcError {
             code: "NotEnlistedInMilitia".into(),
             message: "Only militia-enlisted pilots can defend friendly Supply Caches/Depots".into(),
+            client_error: None,
         })?;
     if char_fac != site_fac {
         return Err(BridgeRpcError {
             code: "CannotDefendEnemyStructure".into(),
             message: "Cannot defend an enemy militia Supply Cache/Depot".into(),
+            client_error: None,
         });
     }
     let is_depot = site_kind == "SupplyDepot";
@@ -319,18 +322,21 @@ pub fn donate_lp_to_fw_ihub(
         return Err(BridgeRpcError {
             code: "InvalidLpDonation".into(),
             message: "LP donation amount must be positive".into(),
+            client_error: None,
         });
     }
     let (old_lp, new_lp, tier) = ctx.db.try_with_mut_snapshot(|snap| {
         let occ = snap.fw_system_occupations.get(&sys_id).ok_or_else(|| BridgeRpcError {
             code: "NotInWarzone".into(),
             message: format!("System {sys_id} is not in an active faction warzone"),
+            client_error: None,
         })?;
         let occ_fac = occ.occupier_faction_id;
         let lp_corp = militia_lp_corp_id(&ctx.sde, occ_fac);
         let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
             code: "CharacterNotFound".into(),
             message: format!("Character {char_id} not found"),
+            client_error: None,
         })?;
         if ch.war_faction_id != Some(occ_fac) {
             return Err(BridgeRpcError {
@@ -338,6 +344,7 @@ pub fn donate_lp_to_fw_ihub(
                 message: format!(
                     "Character {char_id} must be enlisted in occupying militia {occ_fac} to donate LP"
                 ),
+                client_error: None,
             });
         }
         let char_sys = ch.solar_system_id;
@@ -352,6 +359,7 @@ pub fn donate_lp_to_fw_ihub(
                 message: format!(
                     "Character in system {char_sys} is not in or near target system {sys_id}"
                 ),
+                client_error: None,
             });
         }
         const MAX_IHUB_LP: i64 = 200_000;
@@ -368,6 +376,7 @@ pub fn donate_lp_to_fw_ihub(
                 message: format!(
                     "Solar system {sys_id} iHub has reached maximum Tier 5 LP capacity ({MAX_IHUB_LP})"
                 ),
+                client_error: None,
             });
         }
         let effective_lp = lp_amount.min(remaining_cap);
@@ -384,6 +393,7 @@ pub fn donate_lp_to_fw_ihub(
                 message: format!(
                     "Have {have} LP with militia corporation {lp_corp}, tried to donate {effective_lp}"
                 ),
+                client_error: None,
             });
         }
         let from_corp = effective_lp.min(corp_bal);
@@ -661,12 +671,14 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "AccessDenied".into(),
                     message: "Only corporation CEO or Director can enlist in militia".into(),
+                    client_error: None,
                 }));
             }
             if let Some(existing) = cur_fac {
                 return Some(Err(BridgeRpcError {
                     code: "CorporationAlreadyEnlisted".into(),
                     message: format!("Corporation is already enlisted in militia {existing}"),
+                    client_error: None,
                 }));
             }
             let fac = match args
@@ -679,12 +691,14 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidFWMilitiaFaction".into(),
                         message: format!("Faction {other} is not an eligible FW militia faction"),
+                        client_error: None,
                     }))
                 }
                 None => {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidArgs".into(),
                         message: "Militia faction ID required".into(),
+                        client_error: None,
                     }))
                 }
             };
@@ -693,6 +707,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientStanding".into(),
                     message: format!("Corporation standing with faction {fac} too low ({standing:.2})"),
+                    client_error: None,
                 }));
             }
             let now = ctx.now_unix();
@@ -710,6 +725,7 @@ pub async fn handle(
                         return Err(BridgeRpcError {
                             code: "AllianceAlreadyEnlisted".into(),
                             message: "Alliance is already enlisted in Factional Warfare".into(),
+                            client_error: None,
                         });
                     }
                 }
@@ -723,6 +739,7 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "MilitiaCooldownActive".into(),
                         message: "Corporation is on active 24-hour militia cooldown".into(),
+                        client_error: None,
                     });
                 }
                 snap.fw_corp_enlisted_on.insert(cid, now);
@@ -789,18 +806,21 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "AccessDenied".into(),
                     message: "Only corporation CEO or Director can resign from militia".into(),
+                    client_error: None,
                 }));
             }
             if alliance_block {
                 return Some(Err(BridgeRpcError {
                     code: "AllianceEnlisted".into(),
                     message: "Cannot resign corporation individually while alliance is enlisted; use LeaveFactionAsAlliance or leave alliance".into(),
+                    client_error: None,
                 }));
             }
             if cur_fac.is_none() {
                 return Some(Err(BridgeRpcError {
                     code: "CorporationNotEnlisted".into(),
                     message: "Corporation is not enlisted in any militia".into(),
+                    client_error: None,
                 }));
             }
             let now = ctx.now_unix();
@@ -808,6 +828,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "MilitiaCooldownActive".into(),
                     message: "Must wait 24 hours after enlisting to resign from militia".into(),
+                    client_error: None,
                 }));
             }
             let (new_char_fac, changes) = ctx.db.with_mut_snapshot(|snap| {
@@ -843,12 +864,14 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidFWMilitiaFaction".into(),
                         message: format!("Faction {other} is not an eligible FW militia faction"),
+                        client_error: None,
                     }))
                 }
                 None => {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidArgs".into(),
                         message: "Valid militia faction ID required".into(),
+                        client_error: None,
                     }))
                 }
             };
@@ -864,10 +887,12 @@ pub async fn handle(
                     .ok_or_else(|| BridgeRpcError {
                         code: "NotInAlliance".into(),
                         message: "Caller is not in an alliance".into(),
+                        client_error: None,
                     })?;
                 let alliance = snap.alliances.get(&aid).cloned().ok_or_else(|| BridgeRpcError {
                     code: "AllianceNotFound".into(),
                     message: format!("Alliance {aid} not found"),
+                    client_error: None,
                 })?;
                 let is_exec = alliance.executor_corp_id == cid
                     && snap.corporations.get(&cid).is_some_and(|c| c.ceo_id == char_id);
@@ -875,6 +900,7 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),
                         message: "Only the alliance executor corporation CEO can enlist the alliance".into(),
+                        client_error: None,
                     });
                 }
                 let mut member_corps: Vec<i64> = alliance.member_corp_ids.iter().copied().collect();
@@ -891,6 +917,7 @@ pub async fn handle(
                             }
                             .into(),
                             message: format!("Corporation {mc} is already enlisted in militia {existing}"),
+                            client_error: None,
                         });
                     }
                     if snap
@@ -903,6 +930,7 @@ pub async fn handle(
                         return Err(BridgeRpcError {
                             code: "MilitiaCooldownActive".into(),
                             message: format!("Member corporation {mc} is on active 24-hour militia cooldown"),
+                            client_error: None,
                         });
                     }
                     let st = corp_standing_with_faction(snap, mc, fac);
@@ -910,6 +938,7 @@ pub async fn handle(
                         return Err(BridgeRpcError {
                             code: "InsufficientStanding".into(),
                             message: format!("Member corporation {mc} standing with {fac} is {st:.2} (< 0.0)"),
+                            client_error: None,
                         });
                     }
                 }
@@ -953,10 +982,12 @@ pub async fn handle(
                     .ok_or_else(|| BridgeRpcError {
                         code: "NotInAlliance".into(),
                         message: "Caller is not in an alliance".into(),
+                        client_error: None,
                     })?;
                 let alliance = snap.alliances.get(&aid).cloned().ok_or_else(|| BridgeRpcError {
                     code: "AllianceNotFound".into(),
                     message: format!("Alliance {aid} not found"),
+                    client_error: None,
                 })?;
                 let is_exec = alliance.executor_corp_id == cid
                     && snap.corporations.get(&cid).is_some_and(|c| c.ceo_id == char_id);
@@ -964,6 +995,7 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),
                         message: "Only the alliance executor corporation CEO can withdraw the alliance".into(),
+                        client_error: None,
                     });
                 }
                 let mut member_corps: Vec<i64> = alliance.member_corp_ids.iter().copied().collect();
@@ -977,6 +1009,7 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "AllianceNotEnlisted".into(),
                         message: "Alliance is not enlisted in Factional Warfare".into(),
+                        client_error: None,
                     });
                 }
                 let enl = snap.fw_corp_enlisted_on.get(&cid).copied().unwrap_or(0);
@@ -984,6 +1017,7 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "MilitiaCooldownActive".into(),
                         message: "Must wait 24 hours after enlisting to withdraw alliance from militia".into(),
+                        client_error: None,
                     });
                 }
                 let mut changes = Vec::new();
@@ -1104,6 +1138,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSolarSystem".into(),
                     message: "Active solar system required for GetControlBunkerIDInSystem".into(),
+                    client_error: None,
                 }));
             };
             let bunker_opt = ctx.db.with_snapshot(|s| {
@@ -1218,6 +1253,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSolarSystem".into(),
                     message: "Solar system ID required for GetSolarSystemLPs".into(),
+                    client_error: None,
                 }));
             };
             let lp = ctx.db.with_snapshot(|s| {
@@ -1446,12 +1482,14 @@ fn handle_donate_lps_to_solar_system(
         return Err(BridgeRpcError {
             code: "NoSolarSystem".into(),
             message: "No solar system specified".into(),
+            client_error: None,
         });
     };
     let Some(amt) = args.get(1).and_then(|a| a.as_i64()).filter(|&a| a > 0) else {
         return Err(BridgeRpcError {
             code: "InvalidLpDonation".into(),
             message: "LP donation amount must be positive".into(),
+            client_error: None,
         });
     };
     donate_lp_to_fw_ihub(ctx, char_id, sys_id, amt).map(|(tot, tier, tax, fac)| {
@@ -1518,6 +1556,7 @@ fn handle_fw_withdraw_faction(
             return Err(BridgeRpcError {
                 code: "AccessDenied".into(),
                 message: "Only corporation CEO or Director can withdraw militia requests".into(),
+                client_error: None,
             });
         }
         let mut pending = load_fw_pending(snap);
@@ -1528,6 +1567,7 @@ fn handle_fw_withdraw_faction(
                 .ok_or_else(|| BridgeRpcError {
                     code: "NotInAlliance".into(),
                     message: "Corporation is not in an alliance".into(),
+                    client_error: None,
                 })?;
             let is_exec = snap
                 .alliances
@@ -1537,6 +1577,7 @@ fn handle_fw_withdraw_faction(
                 return Err(BridgeRpcError {
                     code: "AccessDenied".into(),
                     message: "Only the alliance executor corporation can withdraw alliance militia requests".into(),
+                    client_error: None,
                 });
             }
             let map = if is_leave {

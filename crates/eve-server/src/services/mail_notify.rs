@@ -457,6 +457,7 @@ pub(crate) fn handle_poke_player_about_chat_msg_gm(
         return Some(Err(BridgeRpcError {
             code: "UserError".into(),
             message: "Requires GM role".into(),
+            client_error: None,
         }));
     }
     let (_, gm_id) = match ServerContext::require_character(session) {
@@ -475,7 +476,9 @@ pub(crate) fn handle_poke_player_about_chat_msg_gm(
         return Some(Err(BridgeRpcError::user_error("PokeMessageRequired")));
     };
     if channel_name.chars().count() > 4000 {
-        return Some(Err(BridgeRpcError::custom_info("CustomInfo")));
+        return Some(Err(BridgeRpcError::custom_info(
+            "Chat message exceeds maximum length of 4000 characters",
+        )));
     }
     // DERIVED: V24 client `mailMgr.PokePlayerAboutChatMsgGm(targetCharID, channelName)` does not pass
     // a separate mail subject; use a fixed subject line for the accompanying GM notification mail.

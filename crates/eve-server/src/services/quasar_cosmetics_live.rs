@@ -1237,7 +1237,7 @@ pub fn activate_ship_emblem_license(
     license_type_id: u32,
     opt_ship_tid: Option<u32>,
 ) -> Result<PyRep, eve_proto::BridgeRpcError> {
-    let mk_err = |code: &str, msg: String| eve_proto::BridgeRpcError { code: code.into(), message: msg };
+    let mk_err = |code: &str, msg: String| eve_proto::BridgeRpcError { code: code.into(), message: msg, client_error: None };
     let Some((ship_type_id, cosmetic_type)) = ship_emblem_license_spec(&ctx.sde, license_type_id) else {
         return Err(mk_err(
             "InvalidSkinLicenseType",

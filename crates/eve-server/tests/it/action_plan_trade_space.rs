@@ -493,6 +493,7 @@ async fn test_action_plan_s_space_structures_clones_mutations() {
         Err(eve_proto::BridgeRpcError {
             code: "SimulatedRollback".into(),
             message: "Simulated failure for S-8".into(),
+            client_error: None,
         })
     });
     assert!(rollback_result.is_err(), "S-8: Mutator closure returned error");

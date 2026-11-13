@@ -39,12 +39,14 @@ pub fn handle_clones_and_sheet(
                 return Some(Err(BridgeRpcError {
                     code: "CharacterNotSelected".into(),
                     message: "GetCharacterInfo requires an explicit charID argument or selected character".into(),
+                    client_error: None,
                 }));
             };
             if !chars.iter().any(|ch| ch.character_id == cid) {
                 return Some(Err(BridgeRpcError {
                     code: "CharacterOwnershipMismatch".into(),
                     message: format!("Character {cid} does not belong to user {user_id}"),
+                    client_error: None,
                 }));
             }
             catch_up_skill_queue(ctx, cid);
@@ -52,6 +54,7 @@ pub fn handle_clones_and_sheet(
                 return Some(Err(BridgeRpcError {
                     code: "CharacterNotFound".into(),
                     message: format!("Character {cid} not found"),
+                    client_error: None,
                 }));
             };
             let sheet = ctx.db.with_snapshot(|snap| {
@@ -237,6 +240,7 @@ pub fn handle_clones_and_sheet(
                 return Some(Err(BridgeRpcError {
                     code: "MustBeDocked".into(),
                     message: "InstallCloneInStation requires being docked at an NPC station".into(),
+                    client_error: None,
                 }));
             }
             let Some(station_id) = ctx
@@ -247,6 +251,7 @@ pub fn handle_clones_and_sheet(
                 return Some(Err(BridgeRpcError {
                     code: "MustBeDocked".into(),
                     message: "InstallCloneInStation requires being docked at an NPC station".into(),
+                    client_error: None,
                 }));
             };
             let is_structure = ctx
@@ -267,6 +272,7 @@ pub fn handle_clones_and_sheet(
                         message: format!(
                             "Structure {station_id} does not have an online Standup Cloning Center service module fitted in a service slot"
                         ),
+                        client_error: None,
                     }));
                 }
             } else {
@@ -281,6 +287,7 @@ pub fn handle_clones_and_sheet(
                     return Some(Err(BridgeRpcError {
                         code: "StationNotFound".into(),
                         message: format!("Station {station_id} not found in SDE"),
+                        client_error: None,
                     }));
                 };
                 if !crate::services::station_structure::npc_station_offers_service(&ctx.sde, station_id, 10)
@@ -292,6 +299,7 @@ pub fn handle_clones_and_sheet(
                             "Station {} ({station_id}) does not have a medical/clone bay service",
                             station.name
                         ),
+                        client_error: None,
                     }));
                 }
                 station_owner_corp_id = Some(station.owner_corporation_id);
@@ -304,6 +312,7 @@ pub fn handle_clones_and_sheet(
                         return Err(BridgeRpcError {
                             code: "FulcrumCloneRequiresPirateEnlistment".into(),
                             message: "Clone installation at The Fulcrum requires pirate militia enlistment".into(),
+                            client_error: None,
                         });
                     }
                 }
@@ -339,6 +348,7 @@ pub fn handle_clones_and_sheet(
                                 "Character standing ({:.2}) with station owner {owner_corp_id} is below the required threshold (0.0) to install a jump clone",
                                 corp_standing.min(faction_standing)
                             ),
+                            client_error: None,
                         });
                     }
                 }
@@ -354,6 +364,7 @@ pub fn handle_clones_and_sheet(
                     return Err(BridgeRpcError {
                         code: "InfomorphPsychologyRequired".into(),
                         message: "Installing a jump clone requires Infomorph Psychology level 1 or higher".into(),
+                        client_error: None,
                     });
                 }
                 let adv_psych_level = skill_map
@@ -379,6 +390,7 @@ pub fn handle_clones_and_sheet(
                         message: format!(
                             "Character already has a jump clone installed at station {station_id}"
                         ),
+                        client_error: None,
                     });
                 }
                 if clones.len() >= max_clones {
@@ -387,6 +399,7 @@ pub fn handle_clones_and_sheet(
                         message: format!(
                             "Character has reached the maximum of {max_clones} installed jump clones"
                         ),
+                        client_error: None,
                     });
                 }
 
@@ -396,12 +409,14 @@ pub fn handle_clones_and_sheet(
                     return Err(BridgeRpcError {
                         code: "CharacterNotFound".into(),
                         message: format!("Character {char_id} not found"),
+                        client_error: None,
                     });
                 };
                 let Some(new_bal) = ch.balance.checked_sub(install_fee) else {
                     return Err(BridgeRpcError {
                         code: "InsufficientFunds".into(),
                         message: format!("Installing a jump clone requires {} ISK", install_fee.to_wire_f64()),
+                        client_error: None,
                     });
                 };
                 ch.balance = new_bal;
@@ -465,6 +480,7 @@ pub fn handle_clones_and_sheet(
                     message:
                         "InstallCloneInStructure requires being docked at an Upwell structure"
                             .into(),
+                    client_error: None,
                 }));
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -473,6 +489,7 @@ pub fn handle_clones_and_sheet(
                     return Err(BridgeRpcError {
                         code: "StructureNotFound".into(),
                         message: format!("Structure {structure_id} not found"),
+                        client_error: None,
                     });
                 }
                 if !crate::services::character_clone_jump_rules::structure_has_online_clone_bay(
@@ -484,6 +501,7 @@ pub fn handle_clones_and_sheet(
                         message: format!(
                             "Structure {structure_id} does not have an online Standup Cloning Center service module fitted in a service slot"
                         ),
+                        client_error: None,
                     });
                 }
                 let custom_acl_fee =
@@ -503,6 +521,7 @@ pub fn handle_clones_and_sheet(
                     return Err(BridgeRpcError {
                         code: "InfomorphPsychologyRequired".into(),
                         message: "Installing a jump clone requires Infomorph Psychology level 1 or higher".into(),
+                        client_error: None,
                     });
                 }
                 let adv_psych_level = skill_map
@@ -528,6 +547,7 @@ pub fn handle_clones_and_sheet(
                         message: format!(
                             "Character already has a jump clone installed at structure {structure_id}"
                         ),
+                        client_error: None,
                     });
                 }
                 if clones.len() >= max_clones {
@@ -536,6 +556,7 @@ pub fn handle_clones_and_sheet(
                         message: format!(
                             "Character has reached the maximum of {max_clones} installed jump clones"
                         ),
+                        client_error: None,
                     });
                 }
 
@@ -544,12 +565,14 @@ pub fn handle_clones_and_sheet(
                     return Err(BridgeRpcError {
                         code: "CharacterNotFound".into(),
                         message: format!("Character {char_id} not found"),
+                        client_error: None,
                     });
                 };
                 let Some(new_bal) = ch.balance.checked_sub(install_fee) else {
                     return Err(BridgeRpcError {
                         code: "InsufficientFunds".into(),
                         message: format!("Installing a jump clone requires {} ISK", install_fee.to_wire_f64()),
+                        client_error: None,
                     });
                 };
                 ch.balance = new_bal;
@@ -666,6 +689,7 @@ pub fn handle_clones_and_sheet(
                     message:
                         "GetStationCloneState requires being docked at a station or structure"
                             .into(),
+                    client_error: None,
                 }));
             };
             let rows = ctx.db.with_snapshot(|snap| {
@@ -699,6 +723,7 @@ pub fn handle_clones_and_sheet(
                     code: "MustBeDocked".into(),
                     message: "GetPriceForClone requires being docked at a station or structure"
                         .into(),
+                    client_error: None,
                 }));
             };
             let valid_facility = ctx
@@ -717,6 +742,7 @@ pub fn handle_clones_and_sheet(
                 return Some(Err(BridgeRpcError {
                     code: "StationHasNoCloneBay".into(),
                     message: format!("Facility {docked_loc_id} does not have an active clone bay"),
+                    client_error: None,
                 }));
             }
             let price = jump_clone_install_fee_cents().to_wire_f64();
@@ -737,6 +763,7 @@ pub fn handle_clones_and_sheet(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidJumpCloneID".into(),
                     message: "DestroyInstalledClone requires a positive jump clone ID".into(),
+                    client_error: None,
                 }));
             }
             let removed_loc = ctx.db.with_mut_snapshot(|snap| {
@@ -749,6 +776,7 @@ pub fn handle_clones_and_sheet(
                 return Some(Err(BridgeRpcError {
                     code: "CloneNotFound".into(),
                     message: format!("Jump clone {jc_id} not found for character {char_id}"),
+                    client_error: None,
                 }));
             };
             crate::services::jump_clone_names::emit_station_jump_clone_invalidated(ctx, char_id, loc_id, false);
@@ -842,6 +870,7 @@ pub fn handle_clones_and_sheet(
                 return Some(Err(BridgeRpcError {
                     code: "CharacterNotFound".into(),
                     message: format!("Character {char_id} not found"),
+                    client_error: None,
                 }));
             };
             Some(Ok(PyRep::keyval([
@@ -869,6 +898,7 @@ pub fn handle_clones_and_sheet(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "GetPaperDollData requires characterID".into(),
+                    client_error: None,
                 }));
             };
             let Some(gender) = ctx
@@ -878,6 +908,7 @@ pub fn handle_clones_and_sheet(
                 return Some(Err(BridgeRpcError {
                     code: "CharacterNotFound".into(),
                     message: format!("Character {target_cid} not found"),
+                    client_error: None,
                 }));
             };
             // V24.01 `AvatarCharacterSceneContext` (`avatardisplay.pyj:1390`, `dna[0] == "male"`) and
@@ -928,6 +959,7 @@ pub fn handle_clones_and_sheet(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "GetPaperDollPortraitDataFor requires characterID".into(),
+                    client_error: None,
                 }));
             };
             let res = ctx.db.with_snapshot(|snap| {
@@ -949,6 +981,7 @@ pub fn handle_clones_and_sheet(
                 return Some(Err(BridgeRpcError {
                     code: "CharacterNotFound".into(),
                     message: format!("Character {target_cid} not found"),
+                    client_error: None,
                 }));
             };
             Some(Ok(PyRep::keyval([
@@ -970,19 +1003,20 @@ pub fn handle_clones_and_sheet(
                 Some(tid) if tid != char_id => return Some(Err(BridgeRpcError {
                     code: "CharacterOwnershipMismatch".into(),
                     message: format!("Cannot update paperdoll for character {tid} from session {char_id}"),
+                    client_error: None,
                 })),
                 Some(_) => (args.get(1), args.get(2)),
                 None => (args.first(), args.get(1)),
             };
             let Some(doll_rep) = doll_arg else {
-                return Some(Err(BridgeRpcError { code: "InvalidDollInfo".into(), message: "UpdateExistingCharacter requires structured dollInfo argument".into() }));
+                return Some(Err(BridgeRpcError { code: "InvalidDollInfo".into(), message: "UpdateExistingCharacter requires structured dollInfo argument".into(), client_error: None }));
             };
             if !super::is_valid_doll_or_portrait_payload(doll_rep) {
-                return Some(Err(BridgeRpcError { code: "InvalidDollInfo".into(), message: "dollInfo must be a non-empty structured KeyVal or Dict".into() }));
+                return Some(Err(BridgeRpcError { code: "InvalidDollInfo".into(), message: "dollInfo must be a non-empty structured KeyVal or Dict".into(), client_error: None }));
             }
             if let Some(p_rep) = portrait_arg {
                 if !matches!(p_rep, PyRep::None) && !super::is_valid_doll_or_portrait_payload(p_rep) {
-                    return Some(Err(BridgeRpcError { code: "InvalidDollInfo".into(), message: "portraitInfo must be a non-empty structured KeyVal or Dict".into() }));
+                    return Some(Err(BridgeRpcError { code: "InvalidDollInfo".into(), message: "portraitInfo must be a non-empty structured KeyVal or Dict".into(), client_error: None }));
                 }
             }
             let new_doll_str = super::serialize_doll_pyrep(doll_rep);
@@ -1004,6 +1038,7 @@ pub fn handle_clones_and_sheet(
                     return Err(BridgeRpcError {
                         code: "CharacterNotFound".into(),
                         message: format!("Character {char_id} not found"),
+                        client_error: None,
                     });
                 }
                 if method == "UpdateExistingCharacterFull" {
@@ -1024,6 +1059,7 @@ pub fn handle_clones_and_sheet(
                         return Err(BridgeRpcError {
                             code: "UserError".into(),
                             message: "NoResculptAvailable".into(),
+                            client_error: None,
                         });
                     }
                     store.resculpt_pending.remove(&char_id);
@@ -1046,6 +1082,7 @@ pub fn handle_clones_and_sheet(
                         .ok_or_else(|| BridgeRpcError {
                             code: "NotDocked".into(),
                             message: "Must be docked at a station or structure to equip or unequip apparel".into(),
+                            client_error: None,
                         })?;
                     let mut equipped_item_ids: Vec<i64> = Vec::with_capacity(req_apparel.len());
                     let mut seen_requests: std::collections::HashSet<i64> =
@@ -1059,6 +1096,7 @@ pub fn handle_clones_and_sheet(
                             return Err(BridgeRpcError {
                                 code: "InvalidApparelItem".into(),
                                 message: format!("Duplicate apparel entry {id_or_tid} in request"),
+                                client_error: None,
                             });
                         }
                         let mut candidates: Vec<(i64, bool, bool)> = snap
@@ -1086,18 +1124,21 @@ pub fn handle_clones_and_sheet(
                             return Err(BridgeRpcError {
                                 code: "InvalidApparelItem".into(),
                                 message: format!("Character {char_id} does not own apparel item/type {id_or_tid} (category 30)"),
+                                client_error: None,
                             });
                         };
                         if !valid_loc {
                             return Err(BridgeRpcError {
                                 code: "InvalidApparelItem".into(),
                                 message: format!("Apparel item/type {id_or_tid} is not in current docked hangar ({docked_loc}) or wardrobe"),
+                                client_error: None,
                             });
                         }
                         if locked {
                             return Err(BridgeRpcError {
                                 code: "ItemLockedInContractOrJob".into(),
                                 message: format!("Apparel item/type {id_or_tid} is locked in an open contract or industry job"),
+                                client_error: None,
                             });
                         }
                         let src = snap.items.get(&iid).unwrap().clone();
@@ -1106,6 +1147,7 @@ pub fn handle_clones_and_sheet(
                             return Err(BridgeRpcError {
                                 code: "InvalidApparelItem".into(),
                                 message: format!("Cannot equip multiple garments in wearable group {apparel_group}"),
+                                client_error: None,
                             });
                         }
                         consumed_source_ids.insert(iid);

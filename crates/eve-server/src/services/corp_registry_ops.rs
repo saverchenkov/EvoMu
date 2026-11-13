@@ -69,6 +69,7 @@ pub async fn handle_corp_hangar_invbroker(
             return Some(Err(BridgeRpcError {
                 code: "InvalidLocation".into(),
                 message: "invbroker.List requires a bound inventory location or active station/ship".into(),
+                client_error: None,
             }));
         };
         if ((60_000_000..=69_999_999).contains(&bound_loc_id)
@@ -81,6 +82,7 @@ pub async fn handle_corp_hangar_invbroker(
                 message: format!(
                     "Character {char_id} is not docked at bound inventory location {bound_loc_id}"
                 ),
+                client_error: None,
             }));
         }
         let corp_id = session
@@ -102,6 +104,7 @@ pub async fn handle_corp_hangar_invbroker(
             return Some(Err(BridgeRpcError {
                 code: "CorpRoleDenied".into(),
                 message: format!("Corporation role denied for division {} query", div_idx + 1),
+                client_error: None,
             }));
         }
         let rows = ctx.db.with_snapshot(|snap| {
@@ -153,6 +156,7 @@ pub async fn handle_corp_hangar_invbroker(
                 return Some(Err(BridgeRpcError {
                     code: "CorpRoleDenied".into(),
                     message: format!("Corporation role denied for division {} take", div_idx + 1),
+                    client_error: None,
                 }));
             }
         }
@@ -411,6 +415,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidAccountKey".into(),
                     message: format!("Account key {key} must be between 1000 and 1006"),
+                    client_error: None,
                 }));
             }
             let corp_id = session.corporation_id.unwrap_or(0);
@@ -427,7 +432,7 @@ pub fn handle(
                 is_ceo || role_mask == u64::MAX || (role_mask & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_ACCOUNTANT | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT | take_bit)) != 0
             });
             if !can_use {
-                return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: format!("Character {char_id} lacks wallet division access for account key {key}") }));
+                return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: format!("Character {char_id} lacks wallet division access for account key {key}"), client_error: None }));
             }
             let old_key = session.corp_account_key as i64;
             if old_key == key {
@@ -437,6 +442,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "SessionChangeInProgress".into(),
                     message: format!("Cannot change account key while 10s session-change timer ({}) is active", active_timer.reason),
+                    client_error: None,
                 }));
             }
             session.corp_account_key = key as i32;
@@ -480,6 +486,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "CorpRoleDenied".into(),
                     message: "CEO or Director role required to execute corporation member actions".into(),
+                    client_error: None,
                 }));
             }
 
@@ -516,6 +523,7 @@ pub fn handle(
                         return Err(BridgeRpcError {
                             code: "CorporationNotFound".into(),
                             message: format!("Corporation {corp_id} not found"),
+                            client_error: None,
                         });
                     };
                     let caller_is_director =
@@ -527,6 +535,7 @@ pub fn handle(
                                 message: format!(
                                     "Character {tid} is not a member of corporation {corp_id}"
                                 ),
+                                client_error: None,
                             });
                         }
                         if !is_ceo && corp.ceo_id == tid {
@@ -1236,7 +1245,7 @@ pub(crate) fn handle_get_info_window_data_for_char(
             (arg_id, None)
         };
         let Some(ch) = snap.characters.get(&target_char_id) else {
-            return Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {target_char_id} not found") });
+            return Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {target_char_id} not found"), client_error: None });
         };
         let corp_id = corp_id_override.unwrap_or(ch.corporation_id);
         let is_npc_corp = corp_id < 98_000_000 || ctx.sde.npc_corporations.contains_key(&corp_id);
@@ -1308,6 +1317,7 @@ pub(crate) fn handle_get_member(
                 return Err(BridgeRpcError {
                     code: "NotCorpMember".into(),
                     message: format!("Character {target_char_id} is not a member of corporation {corp_id}"),
+                    client_error: None,
                 });
             }
             let ch = snap.characters.get(&target_char_id);
@@ -1362,6 +1372,7 @@ pub(crate) fn handle_get_member(
             return Err(BridgeRpcError {
                 code: "CorporationNotFound".into(),
                 message: format!("Corporation {corp_id} not found"),
+                client_error: None,
             });
         };
         let ch = snap.characters.get(&target_char_id);
@@ -1371,6 +1382,7 @@ pub(crate) fn handle_get_member(
             return Err(BridgeRpcError {
                 code: "NotCorpMember".into(),
                 message: format!("Character {target_char_id} is not a member of corporation {corp_id}"),
+                client_error: None,
             });
         }
         let name = ch.map(|c| c.name.clone()).unwrap_or_else(|| format!("Pilot {target_char_id}"));
@@ -1410,7 +1422,7 @@ pub(crate) fn handle_get_member_tracking_info(
         Err(e) => return Some(Err(e)),
     };
     if method == "GetMemberTrackingInfo" && !has_director {
-        return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Director or Personnel Manager role required for full member tracking info".into() }));
+        return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Director or Personnel Manager role required for full member tracking info".into(), client_error: None }));
     }
     let now_unix = ctx.now_unix();
     crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);

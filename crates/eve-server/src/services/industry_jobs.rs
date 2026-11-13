@@ -55,6 +55,7 @@ pub fn handle_industry_jobs(
                 return Some(Err(BridgeRpcError {
                     code: "NotDocked".into(),
                     message: "Installing an industry job requires being docked".into(),
+                    client_error: None,
                 }));
             };
 
@@ -165,6 +166,7 @@ pub fn handle_industry_jobs(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidIndustryJobParameters".into(),
                     message: "InstallJob requires an explicit blueprint typeID or blueprintItemID".into(),
+                    client_error: None,
                 }));
             };
             let (Ok(bp_type_id), Ok(activity_id)) =
@@ -173,6 +175,7 @@ pub fn handle_industry_jobs(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidIndustryJobParameters".into(),
                     message: "Invalid blueprint typeID or activityID".into(),
+                    client_error: None,
                 }));
             };
 
@@ -180,6 +183,7 @@ pub fn handle_industry_jobs(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidIndustryJobParameters".into(),
                     message: "Runs must be in 1..=1000 and activityID in {1, 3, 4, 5, 8, 9}".into(),
+                    client_error: None,
                 }));
             }
             let (runs, runs_i32) = (runs_raw as u32, runs_raw as i32);
@@ -188,6 +192,7 @@ pub fn handle_industry_jobs(
                 return Some(Err(BridgeRpcError {
                     code: "UnknownBlueprint".into(),
                     message: format!("Blueprint type {bp_type_id} not found in SDE"),
+                    client_error: None,
                 }));
             };
             // V24.01 `IndustryWnd` (`JobData.dump()`) serializes `licensedRuns` on all jobs
@@ -199,12 +204,14 @@ pub fn handle_industry_jobs(
                             return Some(Err(BridgeRpcError {
                                 code: "InvalidIndustryJobParameters".into(),
                                 message: "licensedRuns must be a positive integer".into(),
+                                client_error: None,
                             }));
                         };
                         let (Ok(u_val), Ok(_)) = (u32::try_from(val), i32::try_from(val)) else {
                             return Some(Err(BridgeRpcError {
                                 code: "MaxRunsPerCopyExceeded".into(),
                                 message: "Requested licensedRuns exceeds maximum allowed copy runs".into(),
+                                client_error: None,
                             }));
                         };
                         u_val
@@ -218,12 +225,14 @@ pub fn handle_industry_jobs(
                             "Requested {parsed} copy runs exceeds blueprint maxProductionLimit {}",
                             bp.max_production_limit
                         ),
+                        client_error: None,
                     }));
                 }
                 if bp.max_production_limit == 0 && parsed > 1_000 {
                     return Some(Err(BridgeRpcError {
                         code: "MaxRunsPerCopyExceeded".into(),
                         message: "Requested copy runs exceeds maximum limit 1000".into(),
+                        client_error: None,
                     }));
                 }
                 parsed
@@ -235,6 +244,7 @@ pub fn handle_industry_jobs(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidIndustryJobParameters".into(),
                         message: "Total copy runs (runs * licensedRuns) exceeds maximum allowed cap".into(),
+                        client_error: None,
                     }));
                 };
                 total
@@ -257,6 +267,7 @@ pub fn handle_industry_jobs(
                         return Err(BridgeRpcError {
                             code: "FacilityNotFound".into(),
                             message: format!("Industry facility {station_id} not found"),
+                            client_error: None,
                         });
                     };
                     let f_sys = fac.solar_system_id;
@@ -282,6 +293,7 @@ pub fn handle_industry_jobs(
                             message: format!(
                                 "Facility {station_id} in system {f_sys} is {jump_dist} jumps away (max {max_jumps})"
                             ),
+                            client_error: None,
                         });
                     }
                     Ok(())
@@ -337,6 +349,7 @@ pub fn handle_industry_jobs(
                             message: format!(
                                 "Facility {station_id} (type {fac_type_id}) does not support Reactions (requires Athanor 35835 or Tatara 35836)"
                             ),
+                            client_error: None,
                         });
                     }
                     let fac_sec = ctx
@@ -351,6 +364,7 @@ pub fn handle_industry_jobs(
                             message: format!(
                                 "Reactions cannot be run in high-sec (system {fac_sys_id} sec {fac_sec:.2} >= 0.45)"
                             ),
+                            client_error: None,
                         });
                     }
                     let react_prod_tid = bp.activities.get("reaction").or_else(|| bp.activities.get("9"))
@@ -364,6 +378,7 @@ pub fn handle_industry_jobs(
                             return Err(BridgeRpcError {
                                 code: "CompositeReactorRequired".into(),
                                 message: format!("Unrefined Mineral reaction formula {bp_type_id} requires an online Standup Composite Reactor I (45537) at facility {station_id}"),
+                                client_error: None,
                             });
                         }
                     }
@@ -374,6 +389,7 @@ pub fn handle_industry_jobs(
                         message: format!(
                             "Facility {station_id} industry/reaction service is offline or out of fuel"
                         ),
+                        client_error: None,
                     });
                 }
                 if snap.structures.contains_key(&station_id) {
@@ -413,6 +429,7 @@ pub fn handle_industry_jobs(
                             message: format!(
                                 "Cannot install industry job for owner {oid} (caller {char_id}, corp {char_corp_id})"
                             ),
+                            client_error: None,
                         });
                     }
                 }
@@ -421,6 +438,7 @@ pub fn handle_industry_jobs(
                         return Err(BridgeRpcError {
                             code: "OwnerAccessDenied".into(),
                             message: "Character does not belong to a corporation".into(),
+                            client_error: None,
                         });
                     }
                     let (is_ceo, eff_roles) =
@@ -443,6 +461,7 @@ pub fn handle_industry_jobs(
                             message:
                                 "Installing a corporation industry job requires Factory Manager or Director role"
                                     .into(),
+                            client_error: None,
                         });
                     }
                     (char_corp_id, is_ceo, eff_roles)
@@ -456,6 +475,7 @@ pub fn handle_industry_jobs(
                                 return Err(BridgeRpcError {
                                     code: "InvalidIndustryJobParameters".into(),
                                     message: format!("Invalid personal wallet account key {acc_key}"),
+                                    client_error: None,
                                 });
                             }
                             (false, 1, 1000, false, 0u64)
@@ -468,12 +488,14 @@ pub fn handle_industry_jobs(
                                 return Err(BridgeRpcError {
                                     code: "InvalidIndustryJobParameters".into(),
                                     message: format!("Invalid corporation wallet account key {acc_key}"),
+                                    client_error: None,
                                 });
                             };
                             if !snap.corporations.contains_key(&char_corp_id) {
                                 return Err(BridgeRpcError {
                                     code: "OwnerAccessDenied".into(),
                                     message: format!("Corporation wallet {w_owner} is not accessible"),
+                                    client_error: None,
                                 });
                             }
                             let (w_ceo, w_roles) = if use_corp {
@@ -494,6 +516,7 @@ pub fn handle_industry_jobs(
                                 message: format!(
                                     "Cannot pay industry job fees from wallet owner {w_owner}"
                                 ),
+                                client_error: None,
                             });
                         }
                     } else {
@@ -579,6 +602,7 @@ pub fn handle_industry_jobs(
                         message: format!(
                             "Character {char_id} has used all {active_slots_used}/{max_slots} slots for activity {activity_id}"
                         ),
+                        client_error: None,
                     });
                 }
 
@@ -743,6 +767,7 @@ pub fn handle_industry_jobs(
                                 "Input flag {} cannot be used as an industry material source",
                                 ef as u16
                             ),
+                            client_error: None,
                         });
                     }
                     if use_corp
@@ -756,6 +781,7 @@ pub fn handle_industry_jobs(
                             message: format!(
                                 "Missing corporation hangar division {div_num} Take role"
                             ),
+                            client_error: None,
                         });
                     }
                 }
@@ -773,6 +799,7 @@ pub fn handle_industry_jobs(
                                     message: format!(
                                         "Missing corporation container division {div_num} Take role"
                                     ),
+                                    client_error: None,
                                 });
                             }
                         }
@@ -797,6 +824,7 @@ pub fn handle_industry_jobs(
                     return Err(BridgeRpcError {
                         code: "BlueprintNotAvailable".into(),
                         message: format!("No unlocked blueprint {bp_type_id} at facility {station_id}"),
+                        client_error: None,
                     });
                 }
 
@@ -807,6 +835,7 @@ pub fn handle_industry_jobs(
                         .ok_or_else(|| BridgeRpcError {
                             code: "CannotResearchOrCopyBPC".into(),
                             message: "ME/TE research and copying require a BPO".into(),
+                            client_error: None,
                         })?,
                     8 if is_ancient_relic => matching_bps
                         .into_iter()
@@ -814,6 +843,7 @@ pub fn handle_industry_jobs(
                         .ok_or_else(|| BridgeRpcError {
                             code: "InsufficientBlueprintRuns".into(),
                             message: format!("No ancient relic stack with {runs} units available"),
+                            client_error: None,
                         })?,
                     8 => matching_bps
                         .into_iter()
@@ -821,6 +851,7 @@ pub fn handle_industry_jobs(
                         .ok_or_else(|| BridgeRpcError {
                             code: "InventionRequiresBPC".into(),
                             message: "T2 Invention requires a BPC with at least 1 remaining run".into(),
+                            client_error: None,
                         })?,
                     _ => matching_bps
                         .into_iter()
@@ -828,6 +859,7 @@ pub fn handle_industry_jobs(
                         .ok_or_else(|| BridgeRpcError {
                             code: "InsufficientBlueprintRuns".into(),
                             message: format!("No BPO or BPC with {runs} remaining runs available"),
+                            client_error: None,
                         })?,
                 };
                 let mut bp_iid = bp_rec.item_id;
@@ -877,12 +909,14 @@ pub fn handle_industry_jobs(
                     return Err(BridgeRpcError {
                         code: "MaxTimeEfficiencyReached".into(),
                         message: "Blueprint Time Efficiency cannot exceed 20%".into(),
+                        client_error: None,
                     });
                 }
                 if activity_id == 4 && (me_level >= 10 || u32::from(me_level) + runs > 10) {
                     return Err(BridgeRpcError {
                         code: "MaxMaterialEfficiencyReached".into(),
                         message: "Blueprint Material Efficiency cannot exceed 10%".into(),
+                        client_error: None,
                     });
                 }
 
@@ -986,6 +1020,7 @@ pub fn handle_industry_jobs(
                             message: format!(
                                 "Paying corporation industry job fees requires Director or Division {wallet_corp_div} Account Take role"
                             ),
+                            client_error: None,
                         });
                     }
                     let corp_bal = snap
@@ -997,6 +1032,7 @@ pub fn handle_industry_jobs(
                         return Err(BridgeRpcError {
                             code: "InsufficientFunds".into(),
                             message: format!("Insufficient corporation funds ({total_debit_isk:.2} ISK)"),
+                            client_error: None,
                         });
                     }
                 } else if let Some(ch) = snap.characters.get(&char_id) {
@@ -1004,6 +1040,7 @@ pub fn handle_industry_jobs(
                         return Err(BridgeRpcError {
                             code: "InsufficientFunds".into(),
                             message: format!("Insufficient funds ({total_debit_isk:.2} ISK required)"),
+                            client_error: None,
                         });
                     }
                 }
@@ -1012,7 +1049,7 @@ pub fn handle_industry_jobs(
                 let mut input_is_non_office_container = false;
                 if let Some(cid) = input_container_id {
                     let Some(cont) = snap.items.get(&cid) else {
-                        return Err(BridgeRpcError { code: "InvalidInputContainer".into(), message: format!("Input container {cid} does not exist") });
+                        return Err(BridgeRpcError { code: "InvalidInputContainer".into(), message: format!("Input container {cid} does not exist"), client_error: None });
                     };
                     let pw_locked = cs_state
                         .container_passwords
@@ -1024,7 +1061,7 @@ pub fn handle_industry_jobs(
                         || (cont.owner_id != char_id && !(use_corp && cont.owner_id == job_owner_id))
                         || !crate::services::industry_pi::is_industry_loc_at_facility(snap, cont.location_id, station_id, docked_id, char_id, use_corp, job_owner_id)
                     {
-                        return Err(BridgeRpcError { code: "InvalidInputContainer".into(), message: format!("Input container {cid} is inaccessible or not at facility {station_id}") });
+                        return Err(BridgeRpcError { code: "InvalidInputContainer".into(), message: format!("Input container {cid} is inaccessible or not at facility {station_id}"), client_error: None });
                     }
                     input_is_non_office_container = cont.type_id != 27;
                     if input_is_non_office_container && use_corp && cont.owner_id == job_owner_id && !has_div_take_role(true, cont.flag) {
@@ -1032,13 +1069,14 @@ pub fn handle_industry_jobs(
                         return Err(BridgeRpcError {
                             code: "CrpAccessDenied".into(),
                             message: format!("Missing corporation container division {div_num} Take role"),
+                            client_error: None,
                         });
                     }
                 }
                 let mut is_out_item_container = false;
                 if let Some(oid) = raw_output_location.filter(|&id| id != station_id) {
                     let Some(out_cont) = snap.items.get(&oid) else {
-                        return Err(BridgeRpcError { code: "InvalidOutputLocation".into(), message: format!("Output location {oid} does not exist") });
+                        return Err(BridgeRpcError { code: "InvalidOutputLocation".into(), message: format!("Output location {oid} does not exist"), client_error: None });
                     };
                     let is_allowed_cont = out_cont.type_id == 27
                         || (out_cont.singleton
@@ -1051,7 +1089,7 @@ pub fn handle_industry_jobs(
                         || (out_cont.owner_id != char_id && !(use_corp && out_cont.owner_id == job_owner_id))
                         || !crate::services::industry_pi::is_industry_loc_at_facility(snap, out_cont.location_id, station_id, docked_id, char_id, use_corp, job_owner_id)
                     {
-                        return Err(BridgeRpcError { code: "InvalidOutputLocation".into(), message: format!("Output location {oid} is not an accessible container or office at facility {station_id}") });
+                        return Err(BridgeRpcError { code: "InvalidOutputLocation".into(), message: format!("Output location {oid} is not an accessible container or office at facility {station_id}"), client_error: None });
                     }
                     is_out_item_container = out_cont.type_id != 27;
                 }
@@ -1063,6 +1101,7 @@ pub fn handle_industry_jobs(
                                 "Output flag {} is not valid for industry delivery",
                                 of as u16
                             ),
+                            client_error: None,
                         });
                     }
                 }
@@ -1093,6 +1132,7 @@ pub fn handle_industry_jobs(
                         message: format!(
                             "Missing corporation hangar division {div_num} Take role"
                         ),
+                        client_error: None,
                     });
                 }
                 let mut consumed_materials: Vec<(TypeId, i32)> = Vec::new();
@@ -1106,7 +1146,7 @@ pub fn handle_industry_jobs(
                     matching_stacks.sort_by_key(|(is_fallback, id, _)| (*is_fallback, *id));
                     let total_avail: i64 = matching_stacks.iter().map(|(_, _, q)| i64::from(*q)).sum();
                     if total_avail < i64::from(req_qty) {
-                        return Err(BridgeRpcError { code: err_code.into(), message: format!("Missing {req_qty}x material type {mat_tid} at {station_id}") });
+                        return Err(BridgeRpcError { code: err_code.into(), message: format!("Missing {req_qty}x material type {mat_tid} at {station_id}"), client_error: None });
                     }
                     let mut rem = req_qty;
                     for (_, mid, _) in matching_stacks {
@@ -1124,6 +1164,7 @@ pub fn handle_industry_jobs(
                         snap.consume_exact_item_quantity(mid, take, mat_opts).map_err(|e| BridgeRpcError {
                             code: err_code.into(),
                             message: e.to_string(),
+                            client_error: None,
                         })?;
                         rem -= take;
                     }
@@ -1140,6 +1181,7 @@ pub fn handle_industry_jobs(
                         return Err(BridgeRpcError {
                             code: "MissingIndustrySkills".into(),
                             message: "Manufacturing requires Industry (3380) >= level 1".into(),
+                            client_error: None,
                         });
                     }
                     for mat in &bp.materials {
@@ -1157,12 +1199,14 @@ pub fn handle_industry_jobs(
                         return Err(BridgeRpcError {
                             code: "BlueprintNotInventable".into(),
                             message: format!("Blueprint/Relic {bp_type_id} does not support invention"),
+                            client_error: None,
                         });
                     }
                     if sci1_lvl < 1 || sci2_lvl < 1 || enc_lvl < 1 {
                         return Err(BridgeRpcError {
                             code: "MissingInventionSkills".into(),
                             message: "Invention requires science and encryption skills >= level 1".into(),
+                            client_error: None,
                         });
                     }
                     let req_dc = runs as i32;
@@ -1194,6 +1238,7 @@ pub fn handle_industry_jobs(
                         return Err(BridgeRpcError {
                             code: "MissingReactionSkills".into(),
                             message: "Reactions require Reactions skill (45746) >= level 1".into(),
+                            client_error: None,
                         });
                     }
                     let react_mats: Vec<(TypeId, u64)> = bp
@@ -1206,6 +1251,7 @@ pub fn handle_industry_jobs(
                         return Err(BridgeRpcError {
                             code: "BlueprintNotReactionFormula".into(),
                             message: format!("Type {bp_type_id} has no SDE reaction activity materials"),
+                            client_error: None,
                         });
                     }
                     for (mtid, mqty) in react_mats {

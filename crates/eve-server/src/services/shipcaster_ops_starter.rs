@@ -14,6 +14,7 @@ fn rpc_err(code: &str, msg: &str) -> BridgeRpcError {
     BridgeRpcError {
         code: code.to_string(),
         message: msg.to_string(),
+        client_error: None,
     }
 }
 

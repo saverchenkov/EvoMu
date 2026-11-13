@@ -64,6 +64,7 @@ pub(crate) async fn enforce_space_module_cloak_and_warp_guard(
                 return Err(BridgeRpcError {
                     code: "CantActivateInWarp".into(),
                     message: "Cannot activate modules while in warp".into(),
+                    client_error: None,
                 });
             }
         }
@@ -108,6 +109,7 @@ pub(crate) async fn enforce_space_action_cloak_and_warp_guard(
             return Err(BridgeRpcError {
                 code: "CantActivateInWarp".into(),
                 message: format!("Cannot {action_label} while in warp"),
+                client_error: None,
             });
         }
     }

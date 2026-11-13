@@ -924,6 +924,7 @@ pub fn validate_capital_construction_restrictions(
                 message: format!(
                     "Supercapitals require sovereign Null-Sec (system {fac_sys_id} sec {fac_sec:.2})"
                 ),
+                client_error: None,
             });
         }
         let has_sov = snap
@@ -949,6 +950,7 @@ pub fn validate_capital_construction_restrictions(
                 message: format!(
                     "System {fac_sys_id} requires active sovereignty and an online Supercapital Construction Facilities upgrade"
                 ),
+                client_error: None,
             });
         }
         let has_supercap_shipyard = fac_type_id == 35827
@@ -964,6 +966,7 @@ pub fn validate_capital_construction_restrictions(
                 message: format!(
                     "Supercapitals require a Sotiyo (35827) with an online Standup Supercapital Shipyard I (35877) at {station_id}"
                 ),
+                client_error: None,
             });
         }
     } else if matches!(prod_grp, 485 | 4594 | 547 | 5120 | 1538 | 883)
@@ -978,6 +981,7 @@ pub fn validate_capital_construction_restrictions(
                 message: format!(
                     "Capital ship construction is forbidden in High-Sec (system {fac_sys_id} sec {fac_sec:.2})"
                 ),
+                client_error: None,
             });
         }
         let has_cap_shipyard = matches!(fac_type_id, 35826 | 35827 | 35833 | 35834)
@@ -994,6 +998,7 @@ pub fn validate_capital_construction_restrictions(
                 message: format!(
                     "Facility {station_id} (type {fac_type_id}) requires an online Standup Capital Shipyard I (35881)"
                 ),
+                client_error: None,
             });
         }
     }

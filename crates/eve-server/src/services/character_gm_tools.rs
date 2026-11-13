@@ -161,12 +161,14 @@ pub fn handle_char_unbound(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidBloodline".into(),
                         message: "GetValidRandomName requires a valid positive bloodlineID".into(),
+                        client_error: None,
                     }));
                 };
                 if !ctx.sde.bloodlines.contains_key(&bid) {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidBloodline".into(),
                         message: format!("Bloodline {bid} does not exist in SDE"),
+                        client_error: None,
                     }));
                 }
                 bid
@@ -205,12 +207,14 @@ pub fn handle_char_unbound(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidCharacterName".into(),
                     message: "CreateCharacterWithDoll requires charactername string".into(),
+                    client_error: None,
                 }));
             };
             if !is_valid_character_name_syntax(name) || !crate::services::lookup_svc::is_word_allowed(name) {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidCharacterName".into(),
                     message: format!("Character name '{name}' violates EVE naming rules"),
+                    client_error: None,
                 }));
             }
 
@@ -221,6 +225,7 @@ pub fn handle_char_unbound(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "CreateCharacterWithDoll requires (charactername, [raceID,] bloodlineID, genderID, ancestryID, charInfo, portraitInfo, schoolID)".into(),
+                    client_error: None,
                 }));
             }
             let has_race_arg = !is_valid_doll_or_portrait_payload(args.get(4).unwrap_or(&PyRep::None))
@@ -230,18 +235,21 @@ pub fn handle_char_unbound(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "CreateCharacterWithDoll requires integer bloodlineID".into(),
+                    client_error: None,
                 }));
             };
             let Some(gid) = args.get(2 + offset).and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "CreateCharacterWithDoll requires integer genderID (0 or 1)".into(),
+                    client_error: None,
                 }));
             };
             if !(0..=1).contains(&gid) {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidGender".into(),
                     message: format!("Invalid genderID {gid}; expected 0 (female) or 1 (male)"),
+                    client_error: None,
                 }));
             }
             let gender_id = gid as u32;
@@ -249,18 +257,21 @@ pub fn handle_char_unbound(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "CreateCharacterWithDoll requires integer ancestryID".into(),
+                    client_error: None,
                 }));
             };
             let Some(char_info_rep) = args.get(4 + offset) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidDollInfo".into(),
                     message: "Missing charInfo doll appearance argument".into(),
+                    client_error: None,
                 }));
             };
             let Some(portrait_info_rep) = args.get(5 + offset) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidDollInfo".into(),
                     message: "Missing portraitInfo argument".into(),
+                    client_error: None,
                 }));
             };
             if !is_valid_doll_or_portrait_payload(char_info_rep)
@@ -269,18 +280,21 @@ pub fn handle_char_unbound(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidDollInfo".into(),
                     message: "charInfo and portraitInfo must be non-empty structured appearance descriptors (KeyVal or Dict)".into(),
+                    client_error: None,
                 }));
             }
             let Some(school_id) = args.get(6 + offset).and_then(|a| a.as_i64()).map(|v| v as u32) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "CreateCharacterWithDoll requires integer schoolID".into(),
+                    client_error: None,
                 }));
             };
             let Some(race_id) = ctx.sde.bloodlines.get(&bloodline_id).map(|b| b.race_id) else {
                 return Some(Err(BridgeRpcError {
                     code: "CharacterCreationFailed".into(),
                     message: format!("Unknown bloodline_id {bloodline_id}"),
+                    client_error: None,
                 }));
             };
             let doll_str = serialize_doll_pyrep(char_info_rep);
@@ -352,7 +366,7 @@ pub fn handle_char_unbound(
                     });
                     Some(Ok(PyRep::Integer(ch.character_id)))
                 }
-                Err(e) => Some(Err(BridgeRpcError { code: "CharacterCreationFailed".into(), message: e.to_string() })),
+                Err(e) => Some(Err(BridgeRpcError { code: "CharacterCreationFailed".into(), message: e.to_string(), client_error: None })),
             }
         }
 
@@ -365,6 +379,7 @@ pub fn handle_char_unbound(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "SelectCharacterID requires integer characterID".into(),
+                    client_error: None,
                 }));
             };
 
@@ -374,6 +389,7 @@ pub fn handle_char_unbound(
                     return Some(Err(BridgeRpcError {
                         code: "CharacterSelectionDenied".into(),
                         message: e.to_string(),
+                        client_error: None,
                     }))
                 }
             };
@@ -393,6 +409,7 @@ pub fn handle_char_unbound(
                     return Some(Err(BridgeRpcError {
                         code: "CharacterAlreadyOnline".into(),
                         message: format!("Character {} is already online on another active session", c.character_id),
+                        client_error: None,
                     }));
                 }
             }
@@ -903,14 +920,14 @@ pub async fn handle_gm_slash_ext(
     if let Some(rest) = cmd.strip_prefix("/spawn ") {
         let tokens = parse_slash_tokens(rest);
         let Some(type_id) = tokens.first().and_then(|s| s.parse::<u32>().ok()) else {
-            return Some(Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /spawn <type_id> [quantity]".into() }));
+            return Some(Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /spawn <type_id> [quantity]".into(), client_error: None }));
         };
         let qty = tokens.get(1).and_then(|s| s.parse::<i32>().ok()).unwrap_or(1);
         if !(1..=100).contains(&qty) {
-            return Some(Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Quantity for /spawn must be between 1 and 100".into() }));
+            return Some(Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Quantity for /spawn must be between 1 and 100".into(), client_error: None }));
         }
         let Some(inv_type) = ctx.sde.types.get(&type_id).cloned() else {
-            return Some(Err(BridgeRpcError { code: "TypeNotFound".into(), message: format!("Type ID {type_id} not found in SDE") }));
+            return Some(Err(BridgeRpcError { code: "TypeNotFound".into(), message: format!("Type ID {type_id} not found in SDE"), client_error: None }));
         };
         let (sys_id, ship_id) = ctx
             .db
@@ -1130,7 +1147,7 @@ pub async fn handle_gm_slash_ext(
     if let Some(rest) = cmd.strip_prefix("/unspawn ").or_else(|| cmd.strip_prefix("/despawn ")) {
         let tokens = parse_slash_tokens(rest);
         let Some(target_id) = tokens.first().and_then(|s| s.parse::<i64>().ok()).filter(|&id| id > 0) else {
-            return Some(Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /unspawn <entity_id>".into() }));
+            return Some(Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /unspawn <entity_id>".into(), client_error: None }));
         };
         let (sys_id, removed_db) = ctx.db.with_mut_snapshot(|snap| {
             let caller_sys = session.solar_system_id.or_else(|| snap.characters.get(&cid).map(|c| c.solar_system_id)).unwrap_or(0);
@@ -1156,7 +1173,7 @@ pub async fn handle_gm_slash_ext(
             crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_core(&ctx.systems, &ctx.db, sys_id, target_id).await;
         }
         if !removed_db && !removed_ball {
-            return Some(Err(BridgeRpcError { code: "EntityNotFound".into(), message: format!("Entity {target_id} not found in space or inventory") }));
+            return Some(Err(BridgeRpcError { code: "EntityNotFound".into(), message: format!("Entity {target_id} not found in space or inventory"), client_error: None }));
         }
         return Some(Ok(PyRep::keyval([
             ("command", PyRep::String(cmd.to_string())),
@@ -1172,12 +1189,14 @@ pub async fn handle_gm_slash_ext(
             return Some(Err(BridgeRpcError {
                 code: "InvalidSlashArgument".into(),
                 message: "Usage: /setattr <item_id|me> <attribute_id> <value>".into(),
+                client_error: None,
             }));
         };
         let Some(attr_id) = tokens.get(1).and_then(|s| s.parse::<u16>().ok()) else {
             return Some(Err(BridgeRpcError {
                 code: "InvalidSlashArgument".into(),
                 message: "Usage: /setattr <item_id|me> <attribute_id> <value>".into(),
+                client_error: None,
             }));
         };
         let Some(val) = tokens
@@ -1188,6 +1207,7 @@ pub async fn handle_gm_slash_ext(
             return Some(Err(BridgeRpcError {
                 code: "InvalidSlashArgument".into(),
                 message: "Attribute value for /setattr must be a finite number".into(),
+                client_error: None,
             }));
         };
 
@@ -1202,12 +1222,14 @@ pub async fn handle_gm_slash_ext(
                 item_tok.parse::<i64>().map_err(|_| BridgeRpcError {
                     code: "InvalidSlashArgument".into(),
                     message: format!("Invalid item_id '{item_tok}' for /setattr"),
+                    client_error: None,
                 })?
             };
             let Some(item) = snap.items.get_mut(&item_id) else {
                 return Err(BridgeRpcError {
                     code: "ItemNotFound".into(),
                     message: format!("Item {item_id} not found"),
+                    client_error: None,
                 });
             };
             let default_val = ctx
@@ -1250,12 +1272,14 @@ pub async fn handle_gm_slash_ext(
             return Some(Err(BridgeRpcError {
                 code: "InvalidSlashArgument".into(),
                 message: "Usage: /getattr <item_id|me> <attribute_id>".into(),
+                client_error: None,
             }));
         };
         let Some(attr_id) = tokens.get(1).and_then(|s| s.parse::<u16>().ok()) else {
             return Some(Err(BridgeRpcError {
                 code: "InvalidSlashArgument".into(),
                 message: "Usage: /getattr <item_id|me> <attribute_id>".into(),
+                client_error: None,
             }));
         };
         let res = ctx.db.with_snapshot(|snap| {
@@ -1285,6 +1309,7 @@ pub async fn handle_gm_slash_ext(
             return Some(Err(BridgeRpcError {
                 code: "ItemNotFound".into(),
                 message: format!("Item '{item_tok}' not found for /getattr"),
+                client_error: None,
             }));
         };
         return Some(Ok(PyRep::keyval([
@@ -1302,6 +1327,7 @@ pub async fn handle_gm_slash_ext(
             return Some(Err(BridgeRpcError {
                 code: "InvalidSlashArgument".into(),
                 message: "Usage: /fit [ship_id|me] <type_id> [flag_id]".into(),
+                client_error: None,
             }));
         }
         let caller_ship_id = ctx
@@ -1315,6 +1341,7 @@ pub async fn handle_gm_slash_ext(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSlashArgument".into(),
                     message: "Usage: /fit me <type_id> [flag_id]".into(),
+                    client_error: None,
                 }));
             };
             let flg = tokens
@@ -1335,6 +1362,7 @@ pub async fn handle_gm_slash_ext(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Usage: /fit <ship_id> <type_id> [flag_id]".into(),
+                        client_error: None,
                     }));
                 };
                 let flg = tokens
@@ -1347,6 +1375,7 @@ pub async fn handle_gm_slash_ext(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Usage: /fit <type_id> [flag_id]".into(),
+                        client_error: None,
                     }));
                 };
                 let flg = tokens
@@ -1360,6 +1389,7 @@ pub async fn handle_gm_slash_ext(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSlashArgument".into(),
                     message: "Usage: /fit <type_id> [flag_id]".into(),
+                    client_error: None,
                 }));
             };
             (caller_ship_id, tid, None)
@@ -1369,6 +1399,7 @@ pub async fn handle_gm_slash_ext(
             return Some(Err(BridgeRpcError {
                 code: "TypeNotFound".into(),
                 message: format!("Module type {type_id} not found in SDE"),
+                client_error: None,
             }));
         };
         let effects = &mod_type.effect_ids;
@@ -1387,6 +1418,7 @@ pub async fn handle_gm_slash_ext(
             return Some(Err(BridgeRpcError {
                 code: "ShipNotFound".into(),
                 message: format!("Target ship {ship_id} not found"),
+                client_error: None,
             }));
         };
 
@@ -1409,6 +1441,7 @@ pub async fn handle_gm_slash_ext(
                 return Err(BridgeRpcError {
                     code: "ShipNotFound".into(),
                     message: format!("Target ship {ship_id} not found"),
+                    client_error: None,
                 });
             };
             let occupied_flags: std::collections::HashSet<InventoryFlag> = snap
@@ -1527,6 +1560,7 @@ pub async fn handle_gm_slash_ext(
                                 "No free compatible fitting slot for module type {type_id} on ship {ship_id}"
                             )
                         }),
+                        client_error: None,
                     });
                 };
                 valid_flag
@@ -1660,6 +1694,7 @@ pub async fn handle_gm_slash_ext(
             return Some(Err(BridgeRpcError {
                 code: "InvalidSlashArgument".into(),
                 message: "Usage: /load [target|me] <type_id> [quantity]".into(),
+                client_error: None,
             }));
         }
 
@@ -1673,6 +1708,7 @@ pub async fn handle_gm_slash_ext(
                     .ok_or_else(|| BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Quantity for /load must be a positive integer".into(),
+                        client_error: None,
                     }),
             }
         };
@@ -1682,6 +1718,7 @@ pub async fn handle_gm_slash_ext(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSlashArgument".into(),
                     message: "Usage: /load me <type_id> [quantity]".into(),
+                    client_error: None,
                 }));
             };
             (Some(tokens[0].as_str()), tid_s.as_str(), tokens.get(2))
@@ -1707,6 +1744,7 @@ pub async fn handle_gm_slash_ext(
             return Some(Err(BridgeRpcError {
                 code: "InvalidSlashArgument".into(),
                 message: "Usage: /load [target|me] <type_id> [quantity]".into(),
+                client_error: None,
             }));
         };
         let qty = match parse_qty(qty_tok) {
@@ -1717,6 +1755,7 @@ pub async fn handle_gm_slash_ext(
             return Some(Err(BridgeRpcError {
                 code: "TypeNotFound".into(),
                 message: format!("Type ID {type_id} not found in SDE"),
+                client_error: None,
             }));
         };
         let is_ship = inv_type.category_id == 6;
@@ -1726,6 +1765,7 @@ pub async fn handle_gm_slash_ext(
                 let ch = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
                     code: "CharacterNotFound".into(),
                     message: format!("Character {char_id} not found"),
+                    client_error: None,
                 })?;
                 if ch.active_ship_id > 0 && snap.items.contains_key(&ch.active_ship_id) {
                     Ok((char_id, ch.active_ship_id, InventoryFlag::Cargo))
@@ -1735,6 +1775,7 @@ pub async fn handle_gm_slash_ext(
                     Err(BridgeRpcError {
                         code: "TargetNotFound".into(),
                         message: format!("Character {char_id} has no active ship or docked station"),
+                        client_error: None,
                     })
                 }
             };
@@ -1746,6 +1787,7 @@ pub async fn handle_gm_slash_ext(
                     let target_id = tok.parse::<i64>().map_err(|_| BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: format!("Invalid target '{tok}' for /load"),
+                        client_error: None,
                     })?;
                     if snap.characters.contains_key(&target_id) {
                         resolve_char_dest(target_id)?
@@ -1759,6 +1801,7 @@ pub async fn handle_gm_slash_ext(
                         return Err(BridgeRpcError {
                             code: "TargetNotFound".into(),
                             message: format!("Target {target_id} not found for /load"),
+                            client_error: None,
                         });
                     }
                 }
@@ -1813,6 +1856,7 @@ pub async fn handle_gm_slash_ext(
             return Some(Err(BridgeRpcError {
                 code: "InvalidSlashArgument".into(),
                 message: "Usage: /kill <target_id>".into(),
+                client_error: None,
             }));
         };
         let target_id = if is_me_or_myship(tok) {
@@ -1822,6 +1866,7 @@ pub async fn handle_gm_slash_ext(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSlashArgument".into(),
                     message: "Usage: /kill <target_id>".into(),
+                    client_error: None,
                 }));
             };
             tid
@@ -1897,6 +1942,7 @@ pub async fn handle_gm_slash_ext(
                     return Some(Err(BridgeRpcError {
                         code: "KillFailed".into(),
                         message: e,
+                        client_error: None,
                     }))
                 }
             }
@@ -1905,6 +1951,7 @@ pub async fn handle_gm_slash_ext(
                 return Some(Err(BridgeRpcError {
                     code: "TargetNotFound".into(),
                     message: format!("Target entity {target_id} not found"),
+                    client_error: None,
                 }));
             };
             let _ = handle.remove_ball(victim_ship_id).await;
@@ -1987,6 +2034,7 @@ pub async fn handle_gm_slash_ext(
             return Some(Err(BridgeRpcError {
                 code: "CharacterNotFound".into(),
                 message: format!("Character {target_cid} not found"),
+                client_error: None,
             }));
         };
         let handle = ctx.systems.get_or_spawn(ch.solar_system_id);
@@ -2014,6 +2062,7 @@ pub async fn handle_gm_slash_ext(
                 return Some(Err(BridgeRpcError {
                     code: "CharacterNotFound".into(),
                     message: e.to_string(),
+                    client_error: None,
                 }))
             }
         };
@@ -2056,18 +2105,18 @@ pub async fn handle_gm_slash_ext(
         let parts: Vec<&str> = cmd.split_whitespace().collect();
         let target_id = match parts.get(1).and_then(|s| s.parse::<i64>().ok()) {
             Some(tid) if tid > 0 => tid,
-            _ => return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /contact <targetID> <standing>".into() })),
+            _ => return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /contact <targetID> <standing>".into(), client_error: None })),
         };
         let standing = match parts.get(2).and_then(|s| s.parse::<f64>().ok()) {
             Some(s) if s.is_finite() => s.clamp(-10.0, 10.0),
-            Some(_) => return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Standing must be finite".into() })),
+            Some(_) => return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Standing must be finite".into(), client_error: None })),
             None => 5.0,
         };
         let valid_entity = ctx.db.with_snapshot(|snap| {
             snap.characters.contains_key(&target_id) || snap.corporations.contains_key(&target_id) || snap.alliances.contains_key(&target_id)
         }) || ctx.sde.npc_corporations.contains_key(&target_id) || ctx.sde.factions.contains_key(&(target_id as u32));
         if !valid_entity {
-            return Some(Err(BridgeRpcError { code: "ContactNotFound".into(), message: format!("Target {target_id} not found") }));
+            return Some(Err(BridgeRpcError { code: "ContactNotFound".into(), message: format!("Target {target_id} not found"), client_error: None }));
         }
         let contact_type = if (99_000_000..100_000_000).contains(&target_id) { "alliance" } else if (1_000_000..2_000_000).contains(&target_id) || (98_000_000..99_000_000).contains(&target_id) { "corporation" } else { "character" };
         if let Ok(mut guard) = ctx.esi_state.char_contacts.write() {
@@ -2099,16 +2148,16 @@ pub async fn handle_gm_slash_ext(
     if let Some(r) = cmd.strip_prefix("/tidi") {
         let f = match r.trim().parse::<f64>() {
             Ok(v) if v.is_finite() && v > 0.0 && v <= 1.0 => v,
-            _ => return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /tidi <factor 0.0..1.0>".into() })),
+            _ => return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /tidi <factor 0.0..1.0>".into(), client_error: None })),
         };
         let Some(sys_id) = session.solar_system_id else {
-            return Some(Err(BridgeRpcError { code: "InvalidLocation".into(), message: "Pilot not in solar system".into() }));
+            return Some(Err(BridgeRpcError { code: "InvalidLocation".into(), message: "Pilot not in solar system".into(), client_error: None }));
         };
         return Some(Ok(PyRep::Real(crate::services::wallet_serverops::set_system_tidi_factor(ctx, sys_id, f))));
     }
     if cmd == "/reinforce" || cmd.starts_with("/reinforce ") {
         let Some(sys_id) = session.solar_system_id else {
-            return Some(Err(BridgeRpcError { code: "InvalidLocation".into(), message: "Pilot not in solar system".into() }));
+            return Some(Err(BridgeRpcError { code: "InvalidLocation".into(), message: "Pilot not in solar system".into(), client_error: None }));
         };
         let custom_node = cmd.strip_prefix("/reinforce").unwrap_or("").trim().parse::<u32>().ok().filter(|&n| n > 0);
         let nid = match custom_node {
@@ -2125,7 +2174,7 @@ pub async fn handle_gm_slash_ext(
         }
         let thr = match arg.parse::<usize>() {
             Ok(v) if v > 0 => v,
-            _ => return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /autotidi <threshold|off>".into() })),
+            _ => return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /autotidi <threshold|off>".into(), client_error: None })),
         };
         crate::services::serverops_cluster::set_cluster_node_load_threshold(ctx, thr);
         crate::services::serverops_cluster::set_auto_cluster_tidi_enabled(ctx, true);
@@ -2151,10 +2200,10 @@ pub async fn handle_gm_slash_ext(
             _ => (None, None),
         };
         let (Some(target_cid), Some(energy_val)) = (target_cid.filter(|&id| id > 0), new_energy) else {
-            return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /energy [char_id] <amount>".into() }));
+            return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /energy [char_id] <amount>".into(), client_error: None }));
         };
         if !ctx.db.with_snapshot(|snap| snap.characters.contains_key(&target_cid)) {
-            return Some(Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {target_cid} not found") }));
+            return Some(Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {target_cid} not found"), client_error: None }));
         }
         // Update character CONCORD Encounter Surveillance System / CEQ energy state and emit OnCharacterEnergyChanged.
         let st = crate::services::character_energy::set_character_energy(ctx, target_cid, energy_val);
@@ -2168,7 +2217,7 @@ pub async fn handle_gm_slash_ext(
             _ => (None, None),
         };
         let (Some(target_cid), Some(sec_val)) = (target_cid.filter(|&id| id > 0), new_sec.filter(|v| v.is_finite())) else {
-            return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /secstatus [char_id] <value>".into() }));
+            return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /secstatus [char_id] <value>".into(), client_error: None }));
         };
         let clamped = sec_val.clamp(-10.0, 10.0);
         let updated = ctx.db.with_mut_snapshot(|snap| {
@@ -2179,7 +2228,7 @@ pub async fn handle_gm_slash_ext(
             true
         });
         if !updated {
-            return Some(Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {target_cid} not found") }));
+            return Some(Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {target_cid} not found"), client_error: None }));
         }
         ctx.notify(crate::router::NotificationTarget::Character(target_cid), "OnSecurityStatusUpdate", "charid", vec![PyRep::Real(clamped)]);
         return Some(Ok(PyRep::Real(clamped)));
@@ -2215,6 +2264,7 @@ pub async fn handle_gm_qa_rpcs(
             return Some(Err(BridgeRpcError {
                 code: "InsufficientRole".into(),
                 message: format!("slash.SlashCmd '{cmd}' requires role mask 0x{req_role:x}"),
+                client_error: None,
             }));
         }
         if let Some(ext_res) = handle_gm_slash_ext(ctx, session, cid, cmd).await {
@@ -2236,6 +2286,7 @@ pub async fn handle_gm_qa_rpcs(
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: format!("publicQaToolsServer.SlashCmd '{cmd}' requires role mask 0x{req_role:x}"),
+                    client_error: None,
                 }));
             }
             if cmd == "/" {
@@ -2245,6 +2296,7 @@ pub async fn handle_gm_qa_rpcs(
                     message: crate::services::auth_cache::format_remote_command_list_reason(
                         session.role,
                     ),
+                    client_error: None,
                 }));
             }
             if let Some(ext_res) = handle_gm_slash_ext(ctx, session, cid, cmd).await {
@@ -2255,6 +2307,7 @@ pub async fn handle_gm_qa_rpcs(
             Some(Err(BridgeRpcError {
                 code: "UnknownSlashCommand".into(),
                 message: format!("Unknown or unsupported QA slash command '{cmd}'"),
+                client_error: None,
             }))
         }
         ("publicQaToolsServer", method) => {

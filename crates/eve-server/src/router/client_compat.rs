@@ -4800,6 +4800,7 @@ mod client_compat_tests {
             Err(eve_proto::BridgeRpcError {
                 code: "MissionNotActive".into(),
                 message: "none".into(),
+                client_error: None,
             }),
         )
         .unwrap();
@@ -4811,6 +4812,7 @@ mod client_compat_tests {
             Err(eve_proto::BridgeRpcError {
                 code: "MissionNotActive".into(),
                 message: "none".into(),
+                client_error: None,
             }),
         )
         .unwrap();

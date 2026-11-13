@@ -185,6 +185,7 @@ pub async fn activate_salvager_or_tractor_module(
         return Some(Err(BridgeRpcError {
             code: "TargetRequired".into(),
             message: "Salvager / Tractor Beam requires a target wreck or container".into(),
+            client_error: None,
         }));
     };
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -192,6 +193,7 @@ pub async fn activate_salvager_or_tractor_module(
         return Some(Err(BridgeRpcError {
             code: "TargetNotInSpace".into(),
             message: format!("Target wreck/container {wreck_id} is not in space"),
+            client_error: None,
         }));
     };
     let dist = attacker_ball.position.distance(wreck_ball.position);
@@ -215,6 +217,7 @@ pub async fn activate_salvager_or_tractor_module(
                 message: format!(
                     "Wreck/can {wreck_id} is {dist:.1} m away (exceeds tractor beam range {max_range:.1} m)"
                 ),
+                client_error: None,
             }));
         }
         let now_unix = ctx.now_unix();
@@ -247,6 +250,7 @@ pub async fn activate_salvager_or_tractor_module(
             return Some(Err(BridgeRpcError {
                 code: "TractorBeamOwnershipRestricted".into(),
                 message: "Cannot tractor a wreck or container owned by another pilot".into(),
+                client_error: None,
             }));
         }
         let tractor_vel = mod_state_opt
@@ -320,6 +324,7 @@ pub async fn activate_salvager_or_tractor_module(
             message: format!(
                 "Wreck {wreck_id} is {dist:.1} m away (exceeds salvager range {max_range:.1} m)"
             ),
+            client_error: None,
         }));
     }
     let res = crate::combat::drones_salvage_tractor::execute_wreck_salvage_cycle_scheduled(
@@ -416,6 +421,7 @@ pub async fn handle_npcs_drones(
                 return Some(Err(BridgeRpcError {
                     code: "CantLaunchDronesWhileDocked".into(),
                     message: "Cannot launch drones while docked".into(),
+                    client_error: None,
                 }));
             }
             let Some(ship_id) = session.ship_id.or_else(|| {
@@ -425,10 +431,11 @@ pub async fn handle_npcs_drones(
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "Session has no active ship".into(),
+                    client_error: None,
                 }));
             };
             let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
+                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into(), client_error: None }));
             };
             if let Err(e) = crate::services::tourney_service::check_tourney_drone_restricted(ctx, sys_id, char_id) {
                 return Some(Err(e));
@@ -525,13 +532,14 @@ pub async fn handle_npcs_drones(
                         return Err(BridgeRpcError {
                             code: "DroneNotFound".into(),
                             message: format!("Drone item {did} not found"),
+                            client_error: None,
                         });
                     };
                     if it.owner_id != char_id || it.location_id != ship_id || it.flag != InventoryFlag::DroneBay {
-                        return Err(BridgeRpcError { code: "DroneNotInBay".into(), message: format!("Drone {did} is not in ship {ship_id}'s drone bay") });
+                        return Err(BridgeRpcError { code: "DroneNotInBay".into(), message: format!("Drone {did} is not in ship {ship_id}'s drone bay"), client_error: None });
                     }
                     if !ctx.sde.types.get(&it.type_id).is_some_and(|t| t.category_id == 18) {
-                        return Err(BridgeRpcError { code: "NotADrone".into(), message: format!("Item {did} (type {}) is not a drone", it.type_id) });
+                        return Err(BridgeRpcError { code: "NotADrone".into(), message: format!("Item {did} (type {}) is not a drone", it.type_id), client_error: None });
                     }
                     let is_excavator = ctx
                         .sde
@@ -547,6 +555,7 @@ pub async fn handle_npcs_drones(
                             return Err(BridgeRpcError {
                                 code: "InvalidShipForExcavator".into(),
                                 message: "Excavator mining drones can only be operated by a Capital Industrial Ship".into(),
+                                client_error: None,
                             });
                         }
                     }
@@ -704,6 +713,7 @@ pub async fn handle_npcs_drones(
                         return Err(BridgeRpcError {
                             code: "ShipNotInSpace".into(),
                             message: format!("Ship {ship_id} is no longer undocked in system {sys_id}"),
+                            client_error: None,
                         });
                     }
                 }
@@ -714,11 +724,13 @@ pub async fn handle_npcs_drones(
                         let it = snap.items.get(&rec.item_id).ok_or_else(|| BridgeRpcError {
                             code: "DroneNotFound".into(),
                             message: format!("Drone item {} not found", rec.item_id),
+                            client_error: None,
                         })?;
                         if it.owner_id != char_id || it.location_id != ship_id || it.flag != InventoryFlag::DroneBay || it.quantity <= 0 {
                             return Err(BridgeRpcError {
                                 code: "DroneNotInBay".into(),
                                 message: format!("Drone {} is no longer in ship {ship_id}'s drone bay", rec.item_id),
+                                client_error: None,
                             });
                         }
                         it.quantity
@@ -962,10 +974,11 @@ pub async fn handle_npcs_drones(
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "Session has no active ship".into(),
+                    client_error: None,
                 }));
             };
             let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
+                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into(), client_error: None }));
             };
             if let Err(e) = crate::services::tourney_service::check_tourney_drone_restricted(ctx, sys_id, char_id) {
                 return Some(Err(e));
@@ -1053,10 +1066,11 @@ pub async fn handle_npcs_drones(
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "Session has no active ship".into(),
+                    client_error: None,
                 }));
             };
             let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
+                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into(), client_error: None }));
             };
             if let Err(e) = crate::services::tourney_service::check_tourney_drone_restricted(ctx, sys_id, char_id) {
                 return Some(Err(e));
@@ -1076,6 +1090,7 @@ pub async fn handle_npcs_drones(
                 return Some(Err(BridgeRpcError {
                     code: "ShipDocked".into(),
                     message: "Cannot engage drones while docked".into(),
+                    client_error: None,
                 }));
             }
             if let Err(e) = crate::services::inventory_fitting::fitting_module_cycles::enforce_space_action_cloak_and_warp_guard(
@@ -1099,6 +1114,7 @@ pub async fn handle_npcs_drones(
                 return Some(Err(BridgeRpcError {
                     code: "CantActivateWhileTethered".into(),
                     message: "Cannot engage drones while tethered".into(),
+                    client_error: None,
                 }));
             }
             let ship_pos = sys_handle
@@ -1112,6 +1128,7 @@ pub async fn handle_npcs_drones(
                 return Some(Err(BridgeRpcError {
                     code: "TargetNotInSpace".into(),
                     message: format!("Target ball {target_id} is not in space"),
+                    client_error: None,
                 }));
             };
 
@@ -1123,6 +1140,7 @@ pub async fn handle_npcs_drones(
                     message: format!(
                         "Target is {target_dist:.1} m away (exceeds drone control range {max_ctrl_range:.1} m)"
                     ),
+                    client_error: None,
                 }));
             }
             if let Some(target_cs) = sys_handle.get_combat_state(target_id).await.ok().flatten() {
@@ -1138,6 +1156,7 @@ pub async fn handle_npcs_drones(
                 return Some(Err(BridgeRpcError {
                     code: "TargetNotLocked".into(),
                     message: format!("Target {target_id} is not locked"),
+                    client_error: None,
                 }));
             }
 
@@ -1448,6 +1467,7 @@ pub async fn handle_npcs_drones(
                         message: format!(
                             "{kw_name} must be boolean or 0..=1 (got float {v})"
                         ),
+                        client_error: None,
                     }),
                     _ => rpc.opt_bool(idx, kw_name),
                 }
@@ -1496,10 +1516,11 @@ pub async fn handle_npcs_drones(
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "Session has no active ship".into(),
+                    client_error: None,
                 }));
             };
             let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
+                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into(), client_error: None }));
             };
             if let Err(e) = crate::services::tourney_service::check_tourney_drone_restricted(ctx, sys_id, char_id) {
                 return Some(Err(e));
@@ -1520,12 +1541,14 @@ pub async fn handle_npcs_drones(
                 return Some(Err(BridgeRpcError {
                     code: "DroneNotInSpace".into(),
                     message: format!("Drone ball {drone_ball_id} is not in space"),
+                    client_error: None,
                 }));
             };
             if ship_pos.distance(d_ball.position) > 2_500.0 {
                 return Some(Err(BridgeRpcError {
                     code: "OutOfScoopRange".into(),
                     message: "Drone must be within 2,500 m to scoop to drone bay".into(),
+                    client_error: None,
                 }));
             }
             let claimed_drone = match with_mut_combat_runtime(ctx, |rt| {
@@ -1534,6 +1557,7 @@ pub async fn handle_npcs_drones(
                         return Err(BridgeRpcError {
                             code: "DroneOwnedByOther".into(),
                             message: "Cannot scoop an active drone controlled by another pilot".into(),
+                            client_error: None,
                         });
                     }
                     Ok(rt.active_drones_in_space.remove(&drone_ball_id))
@@ -1550,6 +1574,7 @@ pub async fn handle_npcs_drones(
                         return Err(BridgeRpcError {
                             code: "DroneNotInSpace".into(),
                             message: format!("Caller ship {ship_id} is not undocked in solar system {sys_id}"),
+                            client_error: None,
                         });
                     }
                 }
@@ -1576,30 +1601,35 @@ pub async fn handle_npcs_drones(
                     return Err(BridgeRpcError {
                         code: "DroneNotFound".into(),
                         message: format!("Drone ball {drone_ball_id} is not a scoopable drone"),
+                        client_error: None,
                     });
                 };
                 let Some(it) = snap.items.get(&drone_item_id).cloned() else {
                     return Err(BridgeRpcError {
                         code: "DroneNotFound".into(),
                         message: format!("Drone item {drone_item_id} not found"),
+                        client_error: None,
                     });
                 };
                 if it.location_id != sys_id as i64 || it.flag != InventoryFlag::None {
                     return Err(BridgeRpcError {
                         code: "DroneNotInSpace".into(),
                         message: format!("Drone item {drone_item_id} is no longer in space"),
+                        client_error: None,
                     });
                 }
                 let Some(t) = ctx.sde.types.get(&it.type_id) else {
                     return Err(BridgeRpcError {
                         code: "NotADrone".into(),
                         message: format!("Item {drone_item_id} has unknown type {}", it.type_id),
+                        client_error: None,
                     });
                 };
                 if t.category_id != 18 {
                     return Err(BridgeRpcError {
                         code: "NotADrone".into(),
                         message: format!("Item {drone_item_id} (type {}) is not a drone", it.type_id),
+                        client_error: None,
                     });
                 }
                 let is_abandoned_meta = claimed_drone.as_ref().is_some_and(|d| d.is_abandoned)
@@ -1612,6 +1642,7 @@ pub async fn handle_npcs_drones(
                     return Err(BridgeRpcError {
                         code: "DroneOwnedByOther".into(),
                         message: "Cannot scoop a drone owned by another pilot".into(),
+                        client_error: None,
                     });
                 }
                 let ship_drone_cap = snap
@@ -1647,6 +1678,7 @@ pub async fn handle_npcs_drones(
                             "Drone bay capacity exceeded ({:.1} + {:.1} > {:.1} m3)",
                             used_vol, incoming_vol, ship_drone_cap
                         ),
+                        client_error: None,
                     });
                 }
                 if let Some(mut_it) = snap.items.get_mut(&drone_item_id) {
@@ -1693,7 +1725,7 @@ pub async fn handle_npcs_drones(
                 Err(e) => return Some(Err(e)),
             };
             let Some(ship_id) = session.ship_id else {
-                return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "Session has no active ship".into() }));
+                return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "Session has no active ship".into(), client_error: None }));
             };
             let has_salvage_drone = with_combat_runtime(ctx, |rt| {
                 rt.active_drones_in_space.values().any(|d| {
@@ -1701,13 +1733,13 @@ pub async fn handle_npcs_drones(
                 })
             });
             let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
+                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into(), client_error: None }));
             };
             if !has_salvage_drone {
-                return Some(Err(BridgeRpcError { code: "NoActiveSalvageDrones".into(), message: "No active Salvage Drones in space".into() }));
+                return Some(Err(BridgeRpcError { code: "NoActiveSalvageDrones".into(), message: "No active Salvage Drones in space".into(), client_error: None }));
             }
             let Some(wreck_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError { code: "TargetRequired".into(), message: "CmdSalvage requires a target wreckID".into() }));
+                return Some(Err(BridgeRpcError { code: "TargetRequired".into(), message: "CmdSalvage requires a target wreckID".into(), client_error: None }));
             };
             Some(crate::combat::drones_salvage_tractor::execute_wreck_salvage_auto_repeat(ctx, sys_id, char_id, ship_id, wreck_id, None).await)
         }

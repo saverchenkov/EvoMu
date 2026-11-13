@@ -151,6 +151,7 @@ pub fn check_docking_allowed(
                 message: format!(
                     "Docking at Pirate FOB {dock_id} requires enlistment in pirate militia {req_fac} (have {war_fac:?})"
                 ),
+                client_error: None,
             });
         }
     }
@@ -201,6 +202,7 @@ pub async fn apply_pirate_fob_structure_damage(
             .ok_or_else(|| BridgeRpcError {
                 code: "StructureNotFound".into(),
                 message: format!("Pirate FOB {structure_id} not found"),
+                client_error: None,
             })?;
         let attacker_fac = snap
             .characters
@@ -223,6 +225,7 @@ pub async fn apply_pirate_fob_structure_damage(
                 .ok_or_else(|| BridgeRpcError {
                     code: "CampaignNotFound".into(),
                     message: format!("No active Insurgency campaign found for FOB {structure_id}"),
+                    client_error: None,
                 })?
         };
         let camp = snap.insurgency_runtime.campaigns.get(&camp_id).expect("checked above");
@@ -230,6 +233,7 @@ pub async fn apply_pirate_fob_structure_damage(
             return Err(BridgeRpcError {
                 code: "CannotAttackFriendlyStructure".into(),
                 message: "Pirate militia pilots cannot attack their own Pirate FOB".into(),
+                client_error: None,
             });
         }
         let (phase, _) = get_campaign_phase_and_timer(camp, now);
@@ -237,6 +241,7 @@ pub async fn apply_pirate_fob_structure_damage(
             return Err(BridgeRpcError {
                 code: "FobInvulnerableInPhase".into(),
                 message: format!("Pirate FOB is invulnerable during {phase} phase"),
+                client_error: None,
             });
         }
         let emp_mod = snap
@@ -263,6 +268,7 @@ pub async fn apply_pirate_fob_structure_damage(
                 message: format!(
                     "Pirate FOB requires {supp_goal} Stage-5 suppressed systems before attack (currently {suppressed_systems})"
                 ),
+                client_error: None,
             });
         }
         if let Some(until) = existing_reinf {
@@ -270,6 +276,7 @@ pub async fn apply_pirate_fob_structure_damage(
                 return Err(BridgeRpcError {
                     code: "FobArmorReinforced".into(),
                     message: format!("Pirate FOB is in armor reinforcement until {until} (now {now})"),
+                    client_error: None,
                 });
             }
         }
@@ -279,6 +286,7 @@ pub async fn apply_pirate_fob_structure_damage(
             return Err(BridgeRpcError {
                 code: "StructureDestroyed".into(),
                 message: format!("Pirate FOB {structure_id} is already destroyed"),
+                client_error: None,
             });
         }
         st.last_damage_unix = now;

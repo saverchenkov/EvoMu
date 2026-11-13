@@ -23,6 +23,7 @@ fn err(code: &str, message: String) -> BridgeRpcError {
     BridgeRpcError {
         code: code.into(),
         message,
+        client_error: None,
     }
 }
 
@@ -234,6 +235,7 @@ async fn ensure_ship_not_immobilized(
         return Err(BridgeRpcError {
             code: "CantMoveWhileModuleActive".into(),
             message: "Ship is immobilized while superweapon warmup or 5-minute Lance caster lock is active".into(),
+            client_error: None,
         });
     }
     if let Ok(Some((_, b))) = handle.get_ball_snapshot(ship_id).await {
@@ -250,6 +252,7 @@ async fn ensure_ship_not_immobilized(
             return Err(BridgeRpcError {
                 code: "CantMoveWhileModuleActive".into(),
                 message: "Ship is immobilized while superweapon warmup, siege/bastion, or cynosural field is active".into(),
+                client_error: None,
             });
         }
     }
@@ -270,6 +273,7 @@ pub(crate) async fn ensure_not_mjd_spooling(
         return Err(BridgeRpcError {
             code: "CantMoveWhileModuleActive".into(),
             message: "Cannot steer ship while Micro Jump Drive or Micro Jump Field Generator is spooling".into(),
+            client_error: None,
         });
     }
     Ok(())
@@ -321,11 +325,13 @@ fn map_destiny_nav_err(e: String) -> BridgeRpcError {
         BridgeRpcError {
             code: "ShipAlreadyInWarp".into(),
             message: e,
+            client_error: None,
         }
     } else {
         BridgeRpcError {
             code: "DestinyCommandFailed".into(),
             message: e,
+            client_error: None,
         }
     }
 }
@@ -805,6 +811,7 @@ pub(crate) async fn handle_cmd_goto_direction(
         return Err(BridgeRpcError {
             code: "NotInSpace".into(),
             message: "Cannot steer ship while docked".into(),
+            client_error: None,
         });
     }
     let sys_id = ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?;
@@ -812,6 +819,7 @@ pub(crate) async fn handle_cmd_goto_direction(
         return Err(BridgeRpcError {
             code: "NoActiveShip".into(),
             message: "Session has no active ship".into(),
+            client_error: None,
         });
     };
     let raw_dir = crate::router::RpcArgs::positional(args)
@@ -819,6 +827,7 @@ pub(crate) async fn handle_cmd_goto_direction(
         .map_err(|e| BridgeRpcError {
             code: "InvalidArguments".into(),
             message: e.message,
+            client_error: None,
         })?;
     let dir = raw_dir.normalize_or_zero();
     let direction = if dir.length_squared() > 1e-6 { dir } else { DVec3::X };
@@ -826,10 +835,12 @@ pub(crate) async fn handle_cmd_goto_direction(
     let Some((_, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
         code: "DestinyCommandFailed".into(),
         message: e,
+        client_error: None,
     })? else {
         return Err(BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: "Active ship is not spawned in Ballpark".into(),
+            client_error: None,
         });
     };
     crate::services::nav_warp_interdiction::ensure_not_in_active_warp(&current_ball.mode)?;
@@ -861,6 +872,7 @@ pub(crate) async fn handle_cmd_stop(
         return Err(BridgeRpcError {
             code: "NotInSpace".into(),
             message: "Cannot issue stop command while docked".into(),
+            client_error: None,
         });
     }
     let sys_id = ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?;
@@ -868,6 +880,7 @@ pub(crate) async fn handle_cmd_stop(
         return Err(BridgeRpcError {
             code: "NoActiveShip".into(),
             message: "Session has no active ship".into(),
+            client_error: None,
         });
     };
     let handle = ctx.systems.get_or_spawn(sys_id);
@@ -875,10 +888,12 @@ pub(crate) async fn handle_cmd_stop(
     let Some((_, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
         code: "DestinyCommandFailed".into(),
         message: e,
+        client_error: None,
     })? else {
         return Err(BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: "Active ship is not spawned in Ballpark".into(),
+            client_error: None,
         });
     };
     crate::services::nav_warp_interdiction::ensure_not_in_active_warp(&current_ball.mode)?;
@@ -925,6 +940,7 @@ pub(crate) async fn handle_cmd_set_speed_fraction(
         return Err(BridgeRpcError {
             code: "NotInSpace".into(),
             message: "Cannot change speed fraction while docked".into(),
+            client_error: None,
         });
     }
     let sys_id = ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?;
@@ -932,6 +948,7 @@ pub(crate) async fn handle_cmd_set_speed_fraction(
         return Err(BridgeRpcError {
             code: "NoActiveShip".into(),
             message: "Session has no active ship".into(),
+            client_error: None,
         });
     };
     let fraction = crate::router::RpcArgs::positional(args)
@@ -939,16 +956,19 @@ pub(crate) async fn handle_cmd_set_speed_fraction(
         .map_err(|e| BridgeRpcError {
             code: "InvalidSpeedFraction".into(),
             message: e.message,
+            client_error: None,
         })?;
     let handle = ctx.systems.get_or_spawn(sys_id);
     ensure_not_mjd_spooling(&handle, ship_id).await?;
     let Some((_, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
         code: "DestinyCommandFailed".into(),
         message: e,
+        client_error: None,
     })? else {
         return Err(BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: "Active ship is not spawned in Ballpark".into(),
+            client_error: None,
         });
     };
     crate::services::nav_warp_interdiction::ensure_not_in_active_warp(&current_ball.mode)?;
@@ -1005,6 +1025,7 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
         return Err(BridgeRpcError {
             code: "NotInSpace".into(),
             message: "Cannot orbit, approach, or keep at range while docked".into(),
+            client_error: None,
         });
     }
     let sys_id = ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?;
@@ -1012,6 +1033,7 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
         return Err(BridgeRpcError {
             code: "NoActiveShip".into(),
             message: "Session has no active ship".into(),
+            client_error: None,
         });
     };
     let rpc = crate::router::RpcArgs::positional(args);
@@ -1020,21 +1042,25 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
         .map_err(|e| BridgeRpcError {
             code: "InvalidTarget".into(),
             message: e.message,
+            client_error: None,
         })?;
     if target_id == ship_id {
         return Err(BridgeRpcError {
             code: "InvalidTarget".into(),
             message: "Cannot orbit, approach, or follow own ship".into(),
+            client_error: None,
         });
     }
     let handle = ctx.systems.get_or_spawn(sys_id);
     let Some((_, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
         code: "DestinyCommandFailed".into(),
         message: e,
+        client_error: None,
     })? else {
         return Err(BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: "Active ship is not spawned in Ballpark".into(),
+            client_error: None,
         });
     };
     crate::services::nav_warp_interdiction::ensure_not_in_active_warp(&current_ball.mode)?;
@@ -1042,6 +1068,7 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
         return Err(BridgeRpcError {
             code: "TargetNotFound".into(),
             message: format!("Target {target_id} not found in system {sys_id}"),
+            client_error: None,
         });
     };
     let default_range = if method == "CmdFollowBall" {
@@ -1054,6 +1081,7 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
         .map_err(|e| BridgeRpcError {
             code: "InvalidRange".into(),
             message: e.message,
+            client_error: None,
         })?
         .unwrap_or(default_range);
     let mode = if method == "CmdOrbit" {
@@ -1100,6 +1128,7 @@ pub(crate) async fn handle_cmd_align_to(
         return Err(BridgeRpcError {
             code: "NotInSpace".into(),
             message: "Cannot align while docked".into(),
+            client_error: None,
         });
     }
     let sys_id = ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?;
@@ -1107,6 +1136,7 @@ pub(crate) async fn handle_cmd_align_to(
         return Err(BridgeRpcError {
             code: "NoActiveShip".into(),
             message: "Session has no active ship".into(),
+            client_error: None,
         });
     };
     let bookmark_id = kwargs.get("bookmarkID").and_then(|v| v.as_i64());
@@ -1119,22 +1149,26 @@ pub(crate) async fn handle_cmd_align_to(
         return Err(BridgeRpcError {
             code: "InvalidTarget".into(),
             message: "Align target ID must be a positive integer".into(),
+            client_error: None,
         });
     }
     if bookmark_id.is_none() && target_id == ship_id {
         return Err(BridgeRpcError {
             code: "InvalidTarget".into(),
             message: "Cannot align to own ship".into(),
+            client_error: None,
         });
     }
     let handle = ctx.systems.get_or_spawn(sys_id);
     let Some((_, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
         code: "DestinyCommandFailed".into(),
         message: e,
+        client_error: None,
     })? else {
         return Err(BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: "Active ship is not spawned in Ballpark".into(),
+            client_error: None,
         });
     };
     crate::services::nav_warp_interdiction::ensure_not_in_active_warp(&current_ball.mode)?;
@@ -1143,6 +1177,7 @@ pub(crate) async fn handle_cmd_align_to(
             return Err(BridgeRpcError {
                 code: "CannotWarpInAbyssalSpace".into(),
                 message: "Bookmarks and warp navigation are disabled inside Abyssal Deadspace".into(),
+                client_error: None,
             });
         }
         if sys_id == 30_100_000 {
@@ -1162,6 +1197,7 @@ pub(crate) async fn handle_cmd_align_to(
         return Err(BridgeRpcError {
             code: "TargetNotFound".into(),
             message: format!("Target {reported_target} not found in system {sys_id}"),
+            client_error: None,
         });
     };
     let dir = (target_pos - current_ball.position).normalize_or_zero();

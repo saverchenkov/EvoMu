@@ -189,6 +189,7 @@ pub(super) async fn handle_teleport_ref_home(
             return Err(BridgeRpcError {
                 code: "AccessDenied".into(),
                 message: "Caller is not an authorized tournament referee or GM".into(),
+                client_error: None,
             });
         }
 

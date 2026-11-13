@@ -462,6 +462,7 @@ pub fn process_zarzakh_gate_toll(
             message: format!(
                 "Confirm Zarzakh stargate transit toll of {toll} ISK for ship {ship_id} (effective mass {mass:.0} kg)"
             ),
+            client_error: None,
         });
     };
 

@@ -138,7 +138,7 @@ pub fn save_cosmetics_ui_state(snap: &mut WorldStateSnapshot, state: &CosmeticsU
 }
 
 fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
-    BridgeRpcError { code: code.into(), message: message.into() }
+    BridgeRpcError { code: code.into(), message: message.into(), client_error: None }
 }
 
 /// Records a licence activation; `duration_days <= 0` (SDE `-1`) means permanent.

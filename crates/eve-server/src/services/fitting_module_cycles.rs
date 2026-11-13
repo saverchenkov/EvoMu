@@ -50,7 +50,7 @@ pub(crate) async fn handle_module_cycles(
                 Err(e) => return Some(Err(e)),
             };
             let Some(ship_id) = session.ship_id else {
-                return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "No active ship in session".into() }));
+                return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "No active ship in session".into(), client_error: None }));
             };
             if let Some(st_id) = ctx.db.with_snapshot(|s| {
                 s.structures.contains_key(&ship_id).then_some(ship_id).or_else(|| {
@@ -85,6 +85,7 @@ pub(crate) async fn handle_module_cycles(
                             return Some(Err(BridgeRpcError {
                                 code: "ModuleBeingRepaired".into(),
                                 message: format!("Module {module_id} cannot be onlined while undergoing nanite repair"),
+                                client_error: None,
                             }));
                         }
                     }
@@ -99,7 +100,7 @@ pub(crate) async fn handle_module_cycles(
                 }
             }
             let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Cannot activate modules outside of space".into() }));
+                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Cannot activate modules outside of space".into(), client_error: None }));
             };
             let sys = ctx.systems.get_or_spawn(sys_id);
 
@@ -149,13 +150,13 @@ pub(crate) async fn handle_module_cycles(
                 if method == "Activate" && args.len() == 1 && raw_module_id > 0 && has_online_weapon {
                     return None;
                 }
-                return Some(Err(BridgeRpcError { code: "ModuleNotFound".into(), message: format!("Module {module_id} not found on ship") }));
+                return Some(Err(BridgeRpcError { code: "ModuleNotFound".into(), message: format!("Module {module_id} not found on ship"), client_error: None }));
             };
             if let Err(e) = check_module_reloading(ctx, ship_id, module_id) {
                 return Some(Err(e));
             }
             if sys.has_active_nanite_repair_sync(ship_id, module_id) {
-                return Some(Err(BridgeRpcError { code: "ModuleBeingRepaired".into(), message: format!("Module {module_id} cannot be activated or overloaded while undergoing nanite repair") }));
+                return Some(Err(BridgeRpcError { code: "ModuleBeingRepaired".into(), message: format!("Module {module_id} cannot be activated or overloaded while undergoing nanite repair"), client_error: None }));
             }
             let is_burned = m.damage_hp >= m.max_hp - 1e-6
                 || ctx.db.with_snapshot(|s| {
@@ -167,7 +168,7 @@ pub(crate) async fn handle_module_cycles(
                     dmg >= hp - 1e-6
                 });
             if is_burned {
-                return Some(Err(BridgeRpcError { code: "ModuleBurnedOut".into(), message: format!("Module {module_id} is burned out and cannot be activated") }));
+                return Some(Err(BridgeRpcError { code: "ModuleBurnedOut".into(), message: format!("Module {module_id} is burned out and cannot be activated"), client_error: None }));
             }
             // Disables any module group / weapon bank it belongs to until repaired or ungrouped (`feat:modules.overheat-burnout-state`)
             let group_burned = ctx.db.with_snapshot(|snap| {
@@ -189,16 +190,17 @@ pub(crate) async fn handle_module_cycles(
                 return Some(Err(BridgeRpcError {
                     code: "ModuleBurnedOut".into(),
                     message: format!("Module group contains burned-out module {b_mod_id} and is disabled until repaired or ungrouped"),
+                    client_error: None,
                 }));
             }
             if m.state == eve_dogma::ModuleState::Offline
                 || !ctx.db.with_snapshot(|s| s.module_online_states.get(&module_id).copied().unwrap_or(true))
             {
-                return Some(Err(BridgeRpcError { code: "ModuleOffline".into(), message: format!("Module {module_id} is offline") }));
+                return Some(Err(BridgeRpcError { code: "ModuleOffline".into(), message: format!("Module {module_id} is offline"), client_error: None }));
             }
 
             let Some(mod_type) = ctx.sde.types.get(&m.type_id) else {
-                return Some(Err(BridgeRpcError { code: "ModuleNotFound".into(), message: format!("Module type {} not found in SDE", m.type_id) }));
+                return Some(Err(BridgeRpcError { code: "ModuleNotFound".into(), message: format!("Module type {} not found in SDE", m.type_id), client_error: None }));
             };
             if effect_name != "online" && session.station_id.is_none() && session.structure_id.is_none() {
                 if let Err(e) = enforce_space_module_cloak_and_warp_guard(
@@ -214,6 +216,7 @@ pub(crate) async fn handle_module_cycles(
                 return Some(Err(BridgeRpcError {
                     code: "ModuleAlreadyActive".into(),
                     message: format!("Module {module_id} is already active in a cycle"),
+                    client_error: None,
                 }));
             }
             let is_upwell_weapon_or_aoe = (target_id_opt.is_some_and(|tid| {
@@ -263,13 +266,14 @@ pub(crate) async fn handle_module_cycles(
                 return Some(Err(BridgeRpcError {
                     code: "CantActivateWhileTethered".into(),
                     message: "Cannot activate offensive modules, smartbombs, or bomb launchers while tethered".into(),
+                    client_error: None,
                 }));
             }
 
             // Mining lasers, strip miners, ice and gas harvesters run on the repeating MN-04 cycle engine.
             if crate::services::mining_cycle::mining_kind_of(&ctx.sde, mod_type).is_some() {
                 let Some(target_id) = target_id_opt.filter(|&t| t > 0) else {
-                    return Some(Err(BridgeRpcError { code: "TargetNotLocked".into(), message: "Mining modules require a locked target asteroid".into() }));
+                    return Some(Err(BridgeRpcError { code: "TargetNotLocked".into(), message: "Mining modules require a locked target asteroid".into(), client_error: None }));
                 };
                 return Some(
                     crate::router::box_fut(|| crate::services::mining_cycle::activate(ctx, char_id, ship_id, sys_id, module_id, target_id)).await,
@@ -281,10 +285,10 @@ pub(crate) async fn handle_module_cycles(
             }
             if mod_type.group_id == 330 {
                 if (32_000_000..=32_999_999).contains(&sys_id) {
-                    return Some(Err(BridgeRpcError { code: "CannotCloakInAbyssalSpace".into(), message: "Cloaking devices cannot be activated inside Abyssal Deadspace".into() }));
+                    return Some(Err(BridgeRpcError { code: "CannotCloakInAbyssalSpace".into(), message: "Cloaking devices cannot be activated inside Abyssal Deadspace".into(), client_error: None }));
                 }
                 if fit.modules.values().any(|fm| ctx.sde.types.get(&fm.type_id).is_some_and(|t| t.group_id == 588)) {
-                    return Some(Err(BridgeRpcError { code: "CannotCloakWithLanceFitted".into(), message: "Cannot activate a cloaking device while a Disruptive Lance or Superweapon is fitted".into() }));
+                    return Some(Err(BridgeRpcError { code: "CannotCloakWithLanceFitted".into(), message: "Cannot activate a cloaking device while a Disruptive Lance or Superweapon is fitted".into(), client_error: None }));
                 }
                 if let Err(e) = crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "cloak") {
                     return Some(Err(e));
@@ -414,6 +418,7 @@ pub(crate) async fn handle_module_cycles(
                     return Some(Err(BridgeRpcError {
                         code: "ShipDocked".into(),
                         message: "Cannot activate Interdiction Sphere Launcher while docked".into(),
+                        client_error: None,
                     }));
                 }
                 if sys
@@ -426,6 +431,7 @@ pub(crate) async fn handle_module_cycles(
                     return Some(Err(BridgeRpcError {
                         code: "CantActivateWhileTethered".into(),
                         message: "Cannot activate Interdiction Sphere Launcher while tethered".into(),
+                        client_error: None,
                     }));
                 }
                 let res = crate::router::box_fut(|| crate::services::tactical_module_mechanics::activate_interdiction_sphere_launcher(
@@ -557,7 +563,7 @@ pub(crate) async fn handle_module_cycles(
                     Some((snap.next_entity_id, probe_type_id, rem, auto_reloaded))
                 });
                 let Some((probe_id, probe_type_id, remaining_in_launcher, auto_reloaded)) = launch_res else {
-                    return Some(Err(BridgeRpcError { code: "NoProbesLoaded".into(), message: "Survey probe launcher has no survey probes loaded".into() }));
+                    return Some(Err(BridgeRpcError { code: "NoProbesLoaded".into(), message: "Survey probe launcher has no survey probes loaded".into(), client_error: None }));
                 };
                 ctx.invalidate_ship_fitting(ship_id);
 
@@ -715,7 +721,7 @@ pub(crate) async fn handle_module_cycles(
                 }
                 if ctx.is_module_in_reactivation_delay(ship_id, module_id) {
                     let code = if matches!(mod_type.group_id, 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807) { "ModuleAlreadyActive" } else { "ModuleReactivationDelay" };
-                    return Some(Err(BridgeRpcError { code: code.into(), message: format!("Module {module_id} cannot reactivate before delay expires") }));
+                    return Some(Err(BridgeRpcError { code: code.into(), message: format!("Module {module_id} cannot reactivate before delay expires"), client_error: None }));
                 }
                 if method == "Activate"
                     && already_active
@@ -728,12 +734,14 @@ pub(crate) async fn handle_module_cycles(
                     return Some(Err(BridgeRpcError {
                         code: "ModuleAlreadyActive".into(),
                         message: format!("Module {module_id} is already active in a cycle"),
+                        client_error: None,
                     }));
                 }
                 if matches!(mod_type.group_id, 1122 | 650 | 82) && target_id_opt.is_none() {
                     return Some(Err(BridgeRpcError {
                         code: "TargetRequired".into(),
                         message: "Target required for module activation".into(),
+                        client_error: None,
                     }));
                 }
                 let mut passive_targeter_lock_opt: Option<eve_destiny::TargetLock> = None;
@@ -746,12 +754,14 @@ pub(crate) async fn handle_module_cycles(
                         return Some(Err(BridgeRpcError {
                             code: "InvalidTarget".into(),
                             message: "Interdiction probes cannot be targeted directly; use area-of-effect weapons".into(),
+                            client_error: None,
                         }));
                     }
                     if target_id == ship_id && matches!(mod_type.group_id, 41 | 325 | 2018 | 585 | 67 | 1697 | 1698 | 52 | 65 | 68 | 71 | 201 | 208 | 291 | 379 | 1672) {
                         return Some(Err(BridgeRpcError {
                             code: "CannotActivateOnSelf".into(),
                             message: "Cannot activate remote assistance or offensive module on self".into(),
+                            client_error: None,
                         }));
                     }
                     if mod_type.group_id == 82 {
@@ -766,7 +776,7 @@ pub(crate) async fn handle_module_cycles(
                     } else if mod_type.group_id != 842 {
                         let locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
                         if !locks.iter().any(|l| l.target_id == target_id && l.locked) {
-                            return Some(Err(BridgeRpcError { code: "TargetNotLocked".into(), message: format!("Target {target_id} is not locked") }));
+                            return Some(Err(BridgeRpcError { code: "TargetNotLocked".into(), message: format!("Target {target_id} is not locked"), client_error: None }));
                         }
                     }
                     if (matches!(mod_type.group_id, 52 | 65 | 68 | 71 | 201 | 208 | 291 | 379 | 1672)
@@ -810,7 +820,7 @@ pub(crate) async fn handle_module_cycles(
                 if is_mwd_or_mjd {
                     if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
                         if cs.is_mwd_mjd_disabled {
-                            return Some(Err(BridgeRpcError { code: "WarpScrambled".into(), message: "Cannot activate Microwarpdrive or Micro Jump Drive while warp scrambled".into() }));
+                            return Some(Err(BridgeRpcError { code: "WarpScrambled".into(), message: "Cannot activate Microwarpdrive or Micro Jump Drive while warp scrambled".into(), client_error: None }));
                         }
                     }
                 }
@@ -877,7 +887,7 @@ pub(crate) async fn handle_module_cycles(
                     ctx.sde.effects.get(&eid).is_some_and(|e| e.name == "cloakingWarpSafe" || e.is_warp_safe)
                 });
                 if is_covert_cloak && fit.ship.get_attribute(906, &ctx.sde) <= 0.0 && !matches!(ship_group_id, 830 | 833 | 898 | 963 | 1202 | 1283 | 1527 | 1972) {
-                    return Some(Err(BridgeRpcError { code: "ShipCannotUseCovertCloak".into(), message: "Ship cannot activate Covert Ops Cloaking Device".into() }));
+                    return Some(Err(BridgeRpcError { code: "ShipCannotUseCovertCloak".into(), message: "Ship cannot activate Covert Ops Cloaking Device".into(), client_error: None }));
                 }
                 if !effect_name.starts_with("cloaking") {
                     effect_name = if is_covert_cloak { "cloakingWarpSafe" } else { "cloaking" }.to_string();
@@ -965,7 +975,7 @@ pub(crate) async fn handle_module_cycles(
                         .map(|i| (i.item_id, i.type_id))
                 });
                 let Some((cid, charge_tid)) = charge_opt else {
-                    return Some(Err(BridgeRpcError { code: "NoChargesLoaded".into(), message: "Capacitor Booster has no Cap Booster charges loaded".into() }));
+                    return Some(Err(BridgeRpcError { code: "NoChargesLoaded".into(), message: "Capacitor Booster has no Cap Booster charges loaded".into(), client_error: None }));
                 };
                 deferred_post_cycle.cap_booster_charge_id = Some(cid);
                 let eval_inject = fit.get_charge_effective_attribute(module_id, 67, &ctx.sde);
@@ -1548,7 +1558,7 @@ pub(crate) async fn handle_module_cycles(
             if let Err(e) = sys.add_module_cycle(cycle).await {
                 ctx.remove_projected_ewar_by_module(ship_id, module_id);
                 let code = if e.contains("WarpScrambled") { "WarpScrambled" } else { "NotEnoughCapacitor" };
-                return Some(Err(BridgeRpcError { code: code.into(), message: e }));
+                return Some(Err(BridgeRpcError { code: code.into(), message: e, client_error: None }));
             }
 
             if let Err(e) = crate::router::box_fut(|| evaluate_module_cycle_aggression_or_assistance(

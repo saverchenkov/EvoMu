@@ -17,12 +17,14 @@ pub(super) async fn handle_loot_all(
         return Err(BridgeRpcError {
             code: "CantDoThatWhileDocked".into(),
             message: "Cannot loot space wrecks or containers while docked".into(),
+            client_error: None,
         });
     }
     let Some(ship_id) = session.ship_id else {
         return Err(BridgeRpcError {
             code: "NoActiveShip".into(),
             message: "Session has no active ship".into(),
+            client_error: None,
         });
     };
     let (ship_docked_in_db, entry_db_state) = ctx.db.with_snapshot(|s| {
@@ -40,12 +42,14 @@ pub(super) async fn handle_loot_all(
         return Err(BridgeRpcError {
             code: "CantDoThatWhileDocked".into(),
             message: "Cannot loot space wrecks or containers while docked".into(),
+            client_error: None,
         });
     }
     let Some(wreck_id) = args.first().and_then(|a| a.as_i64()) else {
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "LootAll requires a container/wreck itemID".into(),
+            client_error: None,
         });
     };
     let now_unix = ctx.now_unix();
@@ -56,6 +60,7 @@ pub(super) async fn handle_loot_all(
         return Err(BridgeRpcError {
             code: "NoSolarSystem".into(),
             message: "Character has no active solar system".into(),
+            client_error: None,
         });
     };
     let _ = super::step_wreck_and_jetcan_decay(ctx, sys_id, now_unix).await;
@@ -67,12 +72,14 @@ pub(super) async fn handle_loot_all(
         return Err(BridgeRpcError {
             code: "ContainerNotFound".into(),
             message: format!("Wreck or container {wreck_id} no longer exists in space"),
+            client_error: None,
         });
     };
     if wreck_item.location_id != sys_id as i64 {
         return Err(BridgeRpcError {
             code: "InvalidContainerLocation".into(),
             message: format!("Container {wreck_id} is not in solar system {sys_id}"),
+            client_error: None,
         });
     }
     let (is_ship_or_station, is_foreign_deployable, is_locked_container) =
@@ -102,12 +109,14 @@ pub(super) async fn handle_loot_all(
                 "Item {wreck_id} (type {}) is not a lootable wreck or cargo container",
                 wreck_item.type_id
             ),
+            client_error: None,
         });
     }
     if is_foreign_deployable {
         return Err(BridgeRpcError {
             code: "AccessDenied".into(),
             message: format!("Cannot loot foreign deployable {wreck_id}"),
+            client_error: None,
         });
     }
     if is_locked_container {
@@ -116,6 +125,7 @@ pub(super) async fn handle_loot_all(
             message: format!(
                 "Secure container {wreck_id} requires a password before looting"
             ),
+            client_error: None,
         });
     }
 
@@ -132,12 +142,14 @@ pub(super) async fn handle_loot_all(
         return Err(BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: "Active ship ball is not present in space".into(),
+            client_error: None,
         });
     };
     let Ok(Some((_, wb))) = sys_handle.get_ball_snapshot(wreck_id).await else {
         return Err(BridgeRpcError {
             code: "ContainerNotInSpace".into(),
             message: format!("Wreck or container {wreck_id} ball is not present in space"),
+            client_error: None,
         });
     };
     let dist = sb.position.distance(wb.position);
@@ -147,6 +159,7 @@ pub(super) async fn handle_loot_all(
             message: format!(
                 "Wreck or container {wreck_id} is {dist:.1} m away (must be within 2,500 m)"
             ),
+            client_error: None,
         });
     }
 
@@ -176,6 +189,7 @@ pub(super) async fn handle_loot_all(
                 return Err(BridgeRpcError {
                     code: "ShipNotInSpace".into(),
                     message: format!("Ship {ship_id} is no longer undocked in solar system {sys_id}"),
+                    client_error: None,
                 });
             }
         }
@@ -183,18 +197,21 @@ pub(super) async fn handle_loot_all(
             return Err(BridgeRpcError {
                 code: "ContainerNotFound".into(),
                 message: format!("Wreck or container {wreck_id} no longer exists"),
+                client_error: None,
             });
         };
         if live_wreck.location_id != sys_id as i64 {
             return Err(BridgeRpcError {
                 code: "ContainerNotInSpace".into(),
                 message: format!("Wreck or container {wreck_id} is no longer in space"),
+                client_error: None,
             });
         }
         if live_wreck.owner_id != wreck_item.owner_id {
             return Err(BridgeRpcError {
                 code: "ContainerOwnerChanged".into(),
                 message: format!("Wreck or container {wreck_id} owner changed concurrently"),
+                client_error: None,
             });
         }
 
@@ -377,6 +394,7 @@ pub(crate) fn authorize_killmail_read(
             return Err(BridgeRpcError {
                 code: "InvalidKillmailHash".into(),
                 message: format!("Killmail hash mismatch for kill {kill_id}"),
+                client_error: None,
             });
         }
         return Ok(());
@@ -471,6 +489,7 @@ pub(crate) fn authorize_killmail_read(
     Err(BridgeRpcError {
         code: "KillmailAccessDenied".into(),
         message: format!("Not authorized to view killmail {kill_id} without a valid killmail hash"),
+        client_error: None,
     })
 }
 
@@ -484,6 +503,7 @@ pub(super) fn handle_get_killmail(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "GetKillMail requires killID".into(),
+            client_error: None,
         });
     };
     let requested_hash = args.get(1).and_then(|a| a.as_str());
@@ -608,6 +628,7 @@ pub(super) fn handle_get_killmail(
         return Err(BridgeRpcError {
             code: "KillmailNotFound".into(),
             message: format!("Killmail {kill_id} not found"),
+            client_error: None,
         });
     };
     let kill_ts = if km.killed_unix > 0 {

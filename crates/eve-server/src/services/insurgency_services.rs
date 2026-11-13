@@ -1248,7 +1248,7 @@ pub async fn handle(
         match args.first() {
             None | Some(PyRep::None) => Ok(fallback),
             Some(arg) => arg.as_i64().and_then(|v| u32::try_from(v).ok()).filter(|id| ctx.sde.solar_systems.contains_key(id)).map(Some)
-                .ok_or_else(|| BridgeRpcError { code: "InvalidSolarSystem".into(), message: "Invalid solarSystemID".into() }),
+                .ok_or_else(|| BridgeRpcError { code: "InvalidSolarSystem".into(), message: "Invalid solarSystemID".into(), client_error: None }),
         }
     };
     let now = ctx.now_unix();
@@ -1343,6 +1343,7 @@ fn handle_get_local_campaign_snapshot(
         return Err(BridgeRpcError {
             code: "NoSolarSystem".into(),
             message: "Session has no active solar system".into(),
+            client_error: None,
         });
     };
     let snapshot = read_insurgency_runtime(ctx, |rt| {

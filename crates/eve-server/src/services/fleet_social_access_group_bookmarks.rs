@@ -359,6 +359,7 @@ async fn handle_add_folder(
                 return Err(BridgeRpcError {
                     code: "BookmarkAccessDenied".into(),
                     message: "Shared folder requires adminGroupID".into(),
+                    client_error: None,
                 });
             };
             let has_admin_grp = ctx
@@ -368,6 +369,7 @@ async fn handle_add_folder(
                 return Err(BridgeRpcError {
                     code: "BookmarkAccessDenied".into(),
                     message: "Caller lacks admin membership on adminGroupID".into(),
+                    client_error: None,
                 });
             }
         } else {
@@ -382,6 +384,7 @@ async fn handle_add_folder(
                 return Err(BridgeRpcError {
                     code: "BookmarkAccessDenied".into(),
                     message: "Only CEO or directors can create shared corp folders".into(),
+                    client_error: None,
                 });
             }
         }
@@ -403,6 +406,7 @@ async fn handle_add_folder(
                 return Err(BridgeRpcError {
                     code: "MaxSharedFoldersReached".into(),
                     message: "Corporation has reached the maximum of 30 shared bookmark folders".into(),
+                    client_error: None,
                 });
             }
             snap.next_entity_id += 1;
@@ -482,6 +486,7 @@ async fn handle_add_folder(
             return Err(BridgeRpcError {
                 code: "MaxPersonalFoldersReached".into(),
                 message: format!("Character has reached the maximum of {max_personal} personal bookmark folders"),
+                client_error: None,
             });
         }
         snap.next_entity_id += 1;
@@ -544,12 +549,14 @@ async fn handle_update_folder(
             return Err(BridgeRpcError {
                 code: "UserError".into(),
                 message: "Cannot update subfolder via UpdateFolder; use UpdateSubfolder".into(),
+                client_error: None,
             });
         }
         let Some(f_clone) = snap.bookmark_folders.get(&folder_id).cloned() else {
             return Err(BridgeRpcError {
                 code: "UserError".into(),
                 message: format!("Folder {folder_id} not found"),
+                client_error: None,
             });
         };
         let lvl = folder_access_level(snap, session, char_id, &f_clone);
@@ -557,6 +564,7 @@ async fn handle_update_folder(
             return Err(BridgeRpcError {
                 code: "UserError".into(),
                 message: "Admin access-group rights required to update folder".into(),
+                client_error: None,
             });
         }
         let f = snap.bookmark_folders.get_mut(&folder_id).unwrap();
@@ -638,6 +646,7 @@ async fn handle_delete_folder(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "DeleteFolder requires folderID".into(),
+            client_error: None,
         });
     };
     let corp_id_opt = ctx.db.try_with_mut_snapshot(|snap| {
@@ -645,12 +654,14 @@ async fn handle_delete_folder(
             return Err(BridgeRpcError {
                 code: "UserError".into(),
                 message: "Cannot delete subfolder via DeleteFolder; use DeleteSubfolder".into(),
+                client_error: None,
             });
         }
         let Some(f) = snap.bookmark_folders.get(&folder_id).cloned() else {
             return Err(BridgeRpcError {
                 code: "UserError".into(),
                 message: format!("Folder {folder_id} not found"),
+                client_error: None,
             });
         };
         let lvl = folder_access_level(snap, session, char_id, &f);
@@ -658,6 +669,7 @@ async fn handle_delete_folder(
             return Err(BridgeRpcError {
                 code: "UserError".into(),
                 message: "Admin rights required to delete folder".into(),
+                client_error: None,
             });
         }
         let child_sfs: Vec<i64> = snap
@@ -716,6 +728,7 @@ async fn handle_create_subfolder(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "CreateSubfolder requires parent folderID".into(),
+            client_error: None,
         });
     };
     let sub_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("Subfolder");
@@ -725,12 +738,14 @@ async fn handle_create_subfolder(
             return Err(BridgeRpcError {
                 code: "UserError".into(),
                 message: "Cannot create a subfolder within a subfolder".into(),
+                client_error: None,
             });
         }
         let Some(parent) = snap.bookmark_folders.get(&parent_folder_id).cloned() else {
             return Err(BridgeRpcError {
                 code: "UserError".into(),
                 message: format!("Parent folder {parent_folder_id} not found"),
+                client_error: None,
             });
         };
         let lvl = folder_access_level(snap, session, char_id, &parent);
@@ -738,6 +753,7 @@ async fn handle_create_subfolder(
             return Err(BridgeRpcError {
                 code: "UserError".into(),
                 message: "Manage rights required on parent folder to create subfolder".into(),
+                client_error: None,
             });
         }
         let prefix = format!("{}/", parent.folder_name);
@@ -754,6 +770,7 @@ async fn handle_create_subfolder(
             return Err(BridgeRpcError {
                 code: "MaxSubfoldersReached".into(),
                 message: format!("Maximum of {max_subs} subfolders reached"),
+                client_error: None,
             });
         }
         let full = format!("{}/{sub_name}", parent.folder_name);
@@ -832,18 +849,21 @@ async fn handle_update_subfolder(
                 return Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "Subfolder does not belong to specified folder".into(),
+                    client_error: None,
                 });
             }
         } else if !snap.bookmark_subfolder_parents.contains_key(&actual_sfid) {
             return Err(BridgeRpcError {
                 code: "UserError".into(),
                 message: format!("Subfolder {actual_sfid} not found"),
+                client_error: None,
             });
         }
         let Some(parent) = snap.bookmark_folders.get(&pfid).cloned() else {
             return Err(BridgeRpcError {
                 code: "UserError".into(),
                 message: format!("Parent folder {pfid} not found"),
+                client_error: None,
             });
         };
         let lvl = folder_access_level(snap, session, char_id, &parent);
@@ -851,6 +871,7 @@ async fn handle_update_subfolder(
             return Err(BridgeRpcError {
                 code: "UserError".into(),
                 message: "Manage rights required on parent folder to update subfolder".into(),
+                client_error: None,
             });
         }
         let full = format!("{}/{sub_name}", parent.folder_name);
@@ -860,6 +881,7 @@ async fn handle_update_subfolder(
             return Err(BridgeRpcError {
                 code: "UserError".into(),
                 message: format!("Subfolder {actual_sfid} record not found"),
+                client_error: None,
             });
         }
         Ok((actual_sfid, pfid, full, parent.is_shared, parent.corporation_id))
@@ -906,18 +928,21 @@ async fn handle_delete_subfolder(
                 return Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "Subfolder does not belong to specified folder".into(),
+                    client_error: None,
                 });
             }
         } else if !snap.bookmark_subfolder_parents.contains_key(&subfolder_id) {
             return Err(BridgeRpcError {
                 code: "UserError".into(),
                 message: format!("Subfolder {subfolder_id} not found"),
+                client_error: None,
             });
         }
         let Some(parent) = snap.bookmark_folders.get(&pfid).cloned() else {
             return Err(BridgeRpcError {
                 code: "UserError".into(),
                 message: format!("Parent folder {pfid} not found"),
+                client_error: None,
             });
         };
         let lvl = folder_access_level(snap, session, char_id, &parent);
@@ -925,6 +950,7 @@ async fn handle_delete_subfolder(
             return Err(BridgeRpcError {
                 code: "UserError".into(),
                 message: "Manage rights required on parent folder to delete subfolder".into(),
+                client_error: None,
             });
         }
         snap.bookmark_folders.remove(&subfolder_id);
@@ -973,6 +999,7 @@ async fn handle_known_folders_state(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "Known folders operation requires folderID".into(),
+            client_error: None,
         });
     };
     let active = if is_add {
@@ -986,18 +1013,21 @@ async fn handle_known_folders_state(
             return Err(BridgeRpcError {
                 code: "UserError".into(),
                 message: "Cannot add subfolder to known folders".into(),
+                client_error: None,
             });
         }
         let Some(f) = snap.bookmark_folders.get(&folder_id) else {
             return Err(BridgeRpcError {
                 code: "UserError".into(),
                 message: format!("Folder {folder_id} not found"),
+                client_error: None,
             });
         };
         if !is_add && !snap.bookmark_folder_known_by.contains_key(&(folder_id, char_id)) {
             return Err(BridgeRpcError {
                 code: "UserError".into(),
                 message: "Folder is not in known folders".into(),
+                client_error: None,
             });
         }
         let lvl = folder_access_level(snap, session, char_id, f);
@@ -1005,6 +1035,7 @@ async fn handle_known_folders_state(
             return Err(BridgeRpcError {
                 code: "UserError".into(),
                 message: "Character lacks view access-group rights to subscribe to this folder".into(),
+                client_error: None,
             });
         }
         Ok((f.clone(), lvl as i64))
@@ -1022,6 +1053,7 @@ async fn handle_known_folders_state(
             return Err(BridgeRpcError {
                 code: "MaxActiveSharedFoldersReached".into(),
                 message: "Maximum of 3 online shared bookmark folders reached".into(),
+                client_error: None,
             });
         }
         snap.bookmark_folder_known_by.insert((folder_id, char_id), active);
@@ -1180,6 +1212,7 @@ async fn handle_remove_from_known_folders(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "RemoveFromKnownFolders requires folderID".into(),
+            client_error: None,
         });
     };
     let (exists, is_sub) = ctx.db.with_snapshot(|snap| {
@@ -1192,6 +1225,7 @@ async fn handle_remove_from_known_folders(
         return Err(BridgeRpcError {
             code: "UserError".into(),
             message: format!("Folder {folder_id} not found"),
+            client_error: None,
         });
     }
     ctx.db.with_mut_snapshot(|snap| {
@@ -1226,6 +1260,7 @@ async fn handle_get_folder_info(
         return Err(BridgeRpcError {
             code: "UserError".into(),
             message: "GetFolderInfo requires folderID".into(),
+            client_error: None,
         });
     };
 
@@ -1234,6 +1269,7 @@ async fn handle_get_folder_info(
             return Err(BridgeRpcError {
                 code: "UserError".into(),
                 message: format!("Folder {target_fid} not found"),
+                client_error: None,
             });
         };
         let lvl = folder_access_level(snap, session, char_id, f);
@@ -1241,6 +1277,7 @@ async fn handle_get_folder_info(
             return Err(BridgeRpcError {
                 code: "UserError".into(),
                 message: "Folder not visible".into(),
+                client_error: None,
             });
         }
         Ok((f.clone(), lvl as i64))
