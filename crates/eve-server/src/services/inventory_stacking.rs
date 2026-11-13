@@ -15,6 +15,38 @@ use std::collections::{HashMap, HashSet};
 mod inventory_stacking_ops;
 pub(super) use inventory_stacking_ops::handle_stack_ops;
 
+fn validate_multi_add_dest_flag(flag_u16: u16) -> Result<(), BridgeRpcError> {
+    if matches!(flag_u16, 11..=34 | 89 | 92..=94 | 125..=132 | 164..=171) {
+        return Err(BridgeRpcError {
+            code: "InvalidLocation".into(),
+            message: "MultiAdd cannot be used to fit modules or rigs".into(),
+            client_error: None,
+        });
+    }
+    if matches!(flag_u16, 36 | 63 | 72) {
+        return Err(BridgeRpcError {
+            code: if flag_u16 == 72 {
+                "ImpoundedItem"
+            } else if flag_u16 == 36 {
+                "AssetSafetyLocked"
+            } else {
+                "ItemLocked"
+            }
+            .into(),
+            message: format!("Cannot MultiAdd items into restricted inventory flag {flag_u16}"),
+            client_error: None,
+        });
+    }
+    if matches!(flag_u16, 62 | 173 | 187) {
+        return Err(BridgeRpcError {
+            code: "InvalidInventoryFlag".into(),
+            message: format!("Invalid or restricted inventory flag {flag_u16}"),
+            client_error: None,
+        });
+    }
+    Ok(())
+}
+
 pub(crate) async fn handle_multi_add(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -73,27 +105,8 @@ pub(crate) async fn handle_multi_add(
             client_error: None,
         });
     };
-    if matches!(raw_flag_opt, Some(11..=34 | 89 | 92..=94 | 125..=132 | 164..=171)) {
-        return Err(BridgeRpcError {
-            code: "InvalidLocation".into(),
-            message: "MultiAdd cannot be used to fit modules or rigs".into(),
-            client_error: None,
-        });
-    }
-    if matches!(raw_flag_opt, Some(36 | 63 | 72)) {
-        let bf = raw_flag_opt.unwrap_or(0);
-        return Err(BridgeRpcError {
-            code: if bf == 72 {
-                "ImpoundedItem"
-            } else if bf == 36 {
-                "AssetSafetyLocked"
-            } else {
-                "ItemLocked"
-            }
-            .into(),
-            message: format!("Cannot MultiAdd items into restricted inventory flag {bf}"),
-            client_error: None,
-        });
+    if let Some(rf) = raw_flag_opt {
+        validate_multi_add_dest_flag(rf)?;
     }
     let should_auto_fit = (raw_flag_opt == Some(0) || raw_flag_opt.is_none())
         && ctx.db.with_snapshot(|snap| {
@@ -121,29 +134,10 @@ pub(crate) async fn handle_multi_add(
     let raw_flag_u16 = raw_flag_opt
         .filter(|&f| f != 0)
         .unwrap_or(InventoryFlag::Cargo as u16);
-    if matches!(raw_flag_u16, 36 | 63 | 72) {
-        return Err(BridgeRpcError {
-            code: if raw_flag_u16 == 72 {
-                "ImpoundedItem"
-            } else if raw_flag_u16 == 36 {
-                "AssetSafetyLocked"
-            } else {
-                "ItemLocked"
-            }
-            .into(),
-            message: format!("Cannot MultiAdd items into restricted inventory flag {raw_flag_u16}"),
-            client_error: None,
-        });
-    }
+    validate_multi_add_dest_flag(raw_flag_u16)?;
     let flag = InventoryFlag::from_u16(raw_flag_u16);
     let flag_u16 = flag as u16;
-    if matches!(flag_u16, 11..=34 | 89 | 92..=94 | 125..=132 | 164..=171) {
-        return Err(BridgeRpcError {
-            code: "InvalidLocation".into(),
-            message: "MultiAdd cannot be used to fit modules or rigs".into(),
-            client_error: None,
-        });
-    }
+    validate_multi_add_dest_flag(flag_u16)?;
     let active_ship_id = session
         .ship_id
         .or_else(|| {
@@ -383,7 +377,7 @@ pub(crate) async fn handle_multi_add(
             } else if (116..=122).contains(&flag_u16) && caller_corp_id > 0 {
                 caller_corp_id
             } else if (116..=122).contains(&old_flag_u16)
-                || old_flag_u16 == 133
+                || matches!(old_flag_u16, 62 | 133 | 173 | 187)
                 || matches!(flag, InventoryFlag::Hangar | InventoryFlag::Cargo)
                 || is_ship_hold
                 || looted_from_space_ids.contains(&item_id)

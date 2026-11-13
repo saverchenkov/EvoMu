@@ -1565,3 +1565,250 @@ async fn issue_1021_1022_capsuleer_deliveries_get_inventory_list_and_rbacs() {
     .unwrap();
     assert!(ok_take.is_ok(), "member with ROLE_DELIVERIES_HANGAR_TAKE should take from CapsuleerDeliveries");
 }
+
+#[tokio::test]
+async fn hf1020_01_capsuleer_deliveries_multi_add_ownership_and_deposit_rejection() {
+    let ctx = test_ctx();
+    let station_id = 60_003_760_i64;
+    let corp_id = 98_100_011_i64;
+    let ceo_id = 90_000_001_i64;
+    let member_id = 90_000_002_i64;
+    let personal_cont_id = 92_100_100_i64;
+    let cap_item_1 = 92_100_101_i64;
+    let cap_item_2 = 92_100_102_i64;
+    let corp_deliv_item = 92_100_103_i64;
+    let personal_item_id = 92_100_104_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "Delivery Test Corp".into();
+        corp.ticker = "DTST".into();
+        corp.ceo_id = ceo_id;
+        corp.hq_station_id = Some(station_id);
+        corp.members.insert(ceo_id);
+        corp.members.insert(member_id);
+        corp.member_roles.insert(member_id, 0);
+        snap.corporations.insert(corp_id, corp);
+        if let Some(ch) = snap.characters.get_mut(&member_id) {
+            ch.corporation_id = corp_id;
+            ch.station_id = Some(station_id);
+            ch.structure_id = None;
+        }
+        snap.corp_role_assignments.insert(
+            (corp_id, member_id),
+            CorpMemberRoleAssignment {
+                character_id: member_id,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            personal_cont_id,
+            eve_db::InventoryItemRecord {
+                item_id: personal_cont_id,
+                type_id: 17366,
+                owner_id: member_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        for (iid, flag, qty) in [
+            (cap_item_1, InventoryFlag::CapsuleerDeliveries, 100),
+            (cap_item_2, InventoryFlag::CapsuleerDeliveries, 200),
+            (corp_deliv_item, InventoryFlag::CorpDeliveries, 50),
+        ] {
+            snap.items.insert(
+                iid,
+                eve_db::InventoryItemRecord {
+                    item_id: iid,
+                    type_id: 34,
+                    owner_id: corp_id,
+                    location_id: station_id,
+                    flag,
+                    quantity: qty,
+                    singleton: false,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.items.insert(
+            personal_item_id,
+            eve_db::InventoryItemRecord {
+                item_id: personal_item_id,
+                type_id: 34,
+                owner_id: member_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 75,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut mem_sess = SessionState {
+        session_id: 12,
+        user_id: Some(member_id as u64),
+        character_id: Some(member_id),
+        corporation_id: Some(corp_id),
+        station_id: Some(station_id),
+        ship_id: Some(100_000_002),
+        ..Default::default()
+    };
+    let b_mem = bound_invbroker(member_id, station_id);
+    let empty_kw = HashMap::new();
+
+    // 1. Non-Director without deliveries take role is denied on MultiAdd from CapsuleerDeliveries.
+    let denied = crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut mem_sess,
+        Some(&b_mem),
+        "invbroker",
+        "MultiAdd",
+        &[
+            PyRep::List(vec![PyRep::Integer(cap_item_1), PyRep::Integer(cap_item_2)]),
+            PyRep::Integer(personal_cont_id),
+            PyRep::Integer(InventoryFlag::Unlocked as i64),
+        ],
+        &empty_kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(denied.code, "CorpRoleDenied");
+
+    // 2. Grant ROLE_DELIVERIES_HANGAR_TAKE (not Director/CEO) -> MultiAdd into personal container transfers owner_id to member_id.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations
+            .get_mut(&corp_id)
+            .unwrap()
+            .member_roles
+            .insert(member_id, eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_TAKE);
+        snap.corp_role_assignments
+            .get_mut(&(corp_id, member_id))
+            .unwrap()
+            .roles_at_hq = eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_TAKE;
+    });
+    let multi_ok = crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut mem_sess,
+        Some(&b_mem),
+        "invbroker",
+        "MultiAdd",
+        &[
+            PyRep::List(vec![PyRep::Integer(cap_item_1), PyRep::Integer(cap_item_2)]),
+            PyRep::Integer(personal_cont_id),
+            PyRep::Integer(InventoryFlag::Unlocked as i64),
+        ],
+        &empty_kw,
+    )
+    .await
+    .unwrap()
+    .expect(
+        "non-Director with ROLE_DELIVERIES_HANGAR_TAKE should MultiAdd from CapsuleerDeliveries",
+    );
+    assert_eq!(
+        multi_ok.dict_get("movedCount").and_then(|v| v.as_i64()),
+        Some(2)
+    );
+    ctx.db.with_snapshot(|snap| {
+        for iid in [cap_item_1, cap_item_2] {
+            let it = snap.items.get(&iid).expect("moved item exists");
+            assert_eq!(it.location_id, personal_cont_id);
+            assert_eq!(it.flag, InventoryFlag::Unlocked);
+            assert_eq!(
+                it.owner_id, member_id,
+                "corp delivery item {iid} must transfer ownership to char_id"
+            );
+        }
+    });
+
+    // 3. Single Add from CorpDeliveries (62) into personal container with flag=0 also transfers owner_id to member_id.
+    let add_ok = crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut mem_sess,
+        Some(&b_mem),
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(corp_deliv_item),
+            PyRep::Integer(personal_cont_id),
+            PyRep::Integer(0),
+        ],
+        &empty_kw,
+    )
+    .await
+    .unwrap();
+    assert!(
+        add_ok.is_ok(),
+        "Add from CorpDeliveries into personal container should succeed"
+    );
+    ctx.db.with_snapshot(|snap| {
+        let it = snap
+            .items
+            .get(&corp_deliv_item)
+            .expect("moved CorpDeliveries item exists");
+        assert_eq!(it.location_id, personal_cont_id);
+        assert_eq!(
+            it.owner_id, member_id,
+            "Add from CorpDeliveries to personal container must transfer ownership to char_id"
+        );
+    });
+
+    // 4. MultiAdd & Add reject deposits into read-only delivery flags (62, 173, 187).
+    for deliv_flag in [62_i64, 173_i64, 187_i64] {
+        let multi_err = crate::services::inventory_fitting::handle(
+            &ctx,
+            &mut mem_sess,
+            Some(&b_mem),
+            "invbroker",
+            "MultiAdd",
+            &[
+                PyRep::List(vec![PyRep::Integer(personal_item_id)]),
+                PyRep::Integer(station_id),
+                PyRep::Integer(deliv_flag),
+            ],
+            &empty_kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(
+            multi_err.code, "InvalidInventoryFlag",
+            "MultiAdd to delivery flag {deliv_flag} must be rejected"
+        );
+
+        let add_err = crate::services::inventory_fitting::handle(
+            &ctx,
+            &mut mem_sess,
+            Some(&b_mem),
+            "invbroker",
+            "Add",
+            &[
+                PyRep::Integer(personal_item_id),
+                PyRep::Integer(station_id),
+                PyRep::Integer(deliv_flag),
+            ],
+            &empty_kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(
+            add_err.code, "InvalidInventoryFlag",
+            "Add to delivery flag {deliv_flag} must be rejected"
+        );
+    }
+    ctx.db.with_snapshot(|snap| {
+        let it = snap
+            .items
+            .get(&personal_item_id)
+            .expect("personal item remains");
+        assert_eq!(it.location_id, station_id);
+        assert_eq!(it.flag, InventoryFlag::Hangar);
+        assert_eq!(it.owner_id, member_id);
+    });
+}

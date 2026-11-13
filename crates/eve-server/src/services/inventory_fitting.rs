@@ -1651,7 +1651,7 @@ async fn handle_invbroker_add(
                     } else if matches!(flag, InventoryFlag::Hangar | InventoryFlag::Cargo)
                         || dest_is_ship_hold
                         || (116..=122).contains(&old_flag_id)
-                        || old_flag_id == 133
+                        || matches!(old_flag_id, 62 | 133 | 173 | 187)
                     {
                         it.owner_id = char_id;
                     }

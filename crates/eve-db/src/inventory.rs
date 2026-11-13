@@ -1080,7 +1080,9 @@ impl WorldStateSnapshot {
         }
         if matches!(
             root_flag,
-            InventoryFlag::Deliveries | InventoryFlag::CorpDeliveries
+            InventoryFlag::Deliveries
+                | InventoryFlag::CorpDeliveries
+                | InventoryFlag::CapsuleerDeliveries
         ) {
             let deliveries_roles = corp_roles::ROLE_DELIVERIES_HANGAR_TAKE
                 | corp_roles::ROLE_FACTORY_MANAGER
