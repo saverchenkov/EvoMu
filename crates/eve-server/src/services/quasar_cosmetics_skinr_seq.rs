@@ -7,10 +7,9 @@
 #![forbid(unsafe_code)]
 
 use super::quasar_cosmetics_skinr::{
-    any_msg, as_u64, encode_skin_attributes, encode_skin_id,
-    encode_skin_license_attrs, encode_skin_license_id, parse_component_id, parse_skin_hex,
-    parse_skin_license_id, put_duration, put_seq, put_timestamp, queue_ship_skin_set_notice,
-    queue_skin_license_added_notice, queue_skin_license_deleted_notice,
+    any_msg, as_u64, build_skin_attributes, build_skin_id, build_skin_license_attrs,
+    build_skin_license_id, parse_component_id, parse_skin_hex, parse_skin_license_id,
+    queue_ship_skin_set_notice, queue_skin_license_added_notice, queue_skin_license_deleted_notice,
     queue_skin_license_updated_notice, register_live_skinr_state, require_char, seq_of, str_of,
     sub, tier_base_duration_secs, tier_base_plex_cents, HandlerResult, SequencingJobRecord,
     SkinDesignRecord, SkinLayoutSlot, SkinrCosmeticsState, ThirdPartySkinLicense, CATEGORY_SHIP,
@@ -20,14 +19,11 @@ use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
     STATUS_NOT_FOUND,
 };
+use eve_proto::pb::{self, ProtoBuilder};
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, AuthoritativeContext, DynamicQuasarMessage,
-    DynamicValue, GoogleAny, WireMessage,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleDuration,
+    GoogleTimestamp, WireMessage,
 };
-#[cfg(test)]
-use eve_proto::quasar::encode_string_field;
-#[cfg(test)]
-use super::quasar_cosmetics_skinr::encode_layout_slot;
 use std::sync::Arc;
 
 const DEFAULT_SHIP_TYPE_ID: u32 = 587; // Rifter
@@ -61,14 +57,10 @@ fn handle_skin_get(
     let Some(design) = data.skins.get(&skin_hex) else {
         return Err((STATUS_NOT_FOUND, format!("3rd-party SKIN design '{skin_hex}' not found")));
     };
-    let mut out = Vec::new();
-    encode_bytes_field(1, &encode_skin_attributes(design), &mut out);
-    let rsp_type = if req_type.starts_with("eve.") {
-        "eve.cosmetic.ship.skin.thirdparty.api.requests.GetResponse"
-    } else {
-        "eve_public.cosmetic.ship.skin.thirdparty.api.GetResponse"
-    };
-    Ok(any_msg(rsp_type, out))
+    let prefix = if req_type.starts_with("eve.") { "eve" } else { "eve_public" };
+    Ok(pb::message(format!("{prefix}.cosmetic.ship.skin.thirdparty.api.GetResponse"))
+        .set("skin", build_skin_attributes(prefix, design))
+        .must_to_any())
 }
 
 fn handle_skin_license_get_owned(
@@ -86,23 +78,17 @@ fn handle_skin_license_get_owned(
         .filter(|lic| lic.character_id == cid)
         .map(|lic| lic.skin_hex.clone())
         .collect();
-    let mut out = Vec::new();
+    let prefix = if req_type.starts_with("eve.") { "eve" } else { "eve_public" };
+    let mut rsp = pb::message(format!(
+        "{prefix}.cosmetic.ship.skin.thirdparty.license.api.GetOwnedResponse"
+    ));
     for sh in &owned_hexes {
-        encode_bytes_field(1, &encode_skin_license_id(cid, sh), &mut out);
+        rsp = rsp.add("licenses", build_skin_license_id(prefix, cid, sh));
     }
-    if req_type.starts_with("eve.") {
-        if out.is_empty() {
-            encode_varint_field(1, cid as u64, &mut out);
-        }
-        return Ok(any_msg(
-            "eve.cosmetic.ship.skin.thirdparty.license.api.GetOwnedResponse",
-            out,
-        ));
+    if prefix == "eve" && owned_hexes.is_empty() {
+        rsp = rsp.add_with("licenses", |l| l.set("character.sequential", cid));
     }
-    Ok(any_msg(
-        "eve_public.cosmetic.ship.skin.thirdparty.license.api.GetOwnedResponse",
-        out,
-    ))
+    Ok(rsp.must_to_any())
 }
 
 fn handle_skin_license_get(
@@ -127,14 +113,12 @@ fn handle_skin_license_get(
     let Some(lic_cow) = data.skin_licenses.get(&key).cloned() else {
         return Err((STATUS_NOT_FOUND, "3rd-party SKIN license not found".into()));
     };
-    let mut out = Vec::new();
-    encode_bytes_field(1, &encode_skin_license_attrs(&lic_cow), &mut out);
-    let rsp_type = if req_type.starts_with("eve.") {
-        "eve.cosmetic.ship.skin.thirdparty.license.api.GetResponse"
-    } else {
-        "eve_public.cosmetic.ship.skin.thirdparty.license.api.GetResponse"
-    };
-    Ok(any_msg(rsp_type, out))
+    let prefix = if req_type.starts_with("eve.") { "eve" } else { "eve_public" };
+    Ok(pb::message(format!(
+        "{prefix}.cosmetic.ship.skin.thirdparty.license.api.GetResponse"
+    ))
+    .set("license", build_skin_license_attrs(prefix, &lic_cow))
+    .must_to_any())
 }
 
 fn handle_skin_license_activate(
@@ -350,12 +334,11 @@ fn handle_skin_license_admin_grant(
     }
     grant_or_increment_skin_license(state, cid, &skin_hex, unactivated, ctx.now_unix());
 
-    let mut out = Vec::new();
-    encode_bytes_field(1, &encode_skin_license_id(cid, &skin_hex), &mut out);
-    Ok(any_msg(
+    Ok(pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.license.api.admin.GrantResponse",
-        out,
-    ))
+    )
+    .set("license", build_skin_license_id("eve_public", cid, &skin_hex))
+    .must_to_any())
 }
 
 fn handle_skin_license_admin_revoke(
@@ -481,28 +464,19 @@ fn handle_get_tier_pricing(
     req_type: &str,
 ) -> HandlerResult {
     let (discount_pct, _, _) = skill_discounts_and_cap(state, ctx.effective_character_id());
-    let mut out = Vec::new();
+    let prefix = if req_type.starts_with("eve.") { "eve" } else { "eve_public" };
+    let mut rsp = pb::message(format!(
+        "{prefix}.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierPricingResponse"
+    ));
     for tier in 1..=20u32 {
         let base_plex_cents = tier_base_plex_cents(tier);
         let discounted = base_plex_cents.saturating_mul(100 - discount_pct as u64) / 100;
-
-        let mut tier_msg = Vec::new();
-        encode_varint_field(1, tier as u64, &mut tier_msg);
-        let mut plex_msg = Vec::new();
-        encode_varint_field(1, discounted.max(100), &mut plex_msg);
-
-        let mut price_entry = Vec::new();
-        encode_bytes_field(1, &tier_msg, &mut price_entry);
-        encode_bytes_field(2, &plex_msg, &mut price_entry);
-        encode_bytes_field(1, &price_entry, &mut out);
+        rsp = rsp.add_with("prices", |p| {
+            p.set("tier.level", tier)
+                .set("plex.total_in_cents", discounted.max(100) as i64)
+        });
     }
-    encode_varint_field(2, discount_pct as u64, &mut out);
-    let rsp_type = if req_type.starts_with("eve.") {
-        "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierPricingResponse"
-    } else {
-        "eve_public.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierPricingResponse"
-    };
-    Ok(any_msg(rsp_type, out))
+    Ok(rsp.set("discount_percentage_applied", discount_pct).must_to_any())
 }
 
 fn handle_get_tier_durations(
@@ -511,25 +485,21 @@ fn handle_get_tier_durations(
     req_type: &str,
 ) -> HandlerResult {
     let (_, discount_pct, _) = skill_discounts_and_cap(state, ctx.effective_character_id());
-    let mut out = Vec::new();
-    for tier in 1..=20u32 {
-        let base_secs = tier_base_duration_secs(tier);
-        let discounted_secs = (base_secs.saturating_mul(100 - discount_pct as u64) / 100).max(600);
-
-        let mut tier_msg = Vec::new();
-        encode_varint_field(1, tier as u64, &mut tier_msg);
-        let mut entry = Vec::new();
-        encode_bytes_field(1, &tier_msg, &mut entry);
-        put_duration(2, discounted_secs, &mut entry);
-        encode_bytes_field(1, &entry, &mut out);
-    }
-    encode_varint_field(2, discount_pct as u64, &mut out);
     let rsp_type = if req_type.starts_with("eve.") {
         "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierDurationsForCharacterResponse"
     } else {
         "eve_public.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierDurationsResponse"
     };
-    Ok(any_msg(rsp_type, out))
+    let mut rsp = pb::message(rsp_type);
+    for tier in 1..=20u32 {
+        let base_secs = tier_base_duration_secs(tier);
+        let discounted_secs = (base_secs.saturating_mul(100 - discount_pct as u64) / 100).max(600);
+        rsp = rsp.add_with("durations", |d| {
+            d.set("tier.level", tier)
+                .set("duration", GoogleDuration { seconds: discounted_secs as i64, nanos: 0 })
+        });
+    }
+    Ok(rsp.set("discount_percentage_applied", discount_pct).must_to_any())
 }
 
 pub fn early_completion_plex_cents(remaining_secs: u64) -> u64 {
@@ -545,88 +515,72 @@ fn handle_get_early_completion_pricing(req_type: &str) -> HandlerResult {
         (0u64, 900u64), (900, 1_800), (1_800, 3_600), (3_600, 10_800), (10_800, 25_200),
         (25_200, 43_200), (43_200, 86_400), (86_400, 259_200), (259_200, 604_800), (604_800, 1_915_200),
     ];
-    let mut out = Vec::new();
+    let prefix = if req_type.starts_with("eve.") { "eve" } else { "eve_public" };
+    let mut rsp = pb::message(format!(
+        "{prefix}.cosmetic.ship.skin.thirdparty.sequencing.api.GetEarlyCompletionPricingResponse"
+    ));
     for (gt_secs, lte_secs) in bounds {
-        let mut entry = Vec::new();
-        put_duration(1, gt_secs, &mut entry);
-        put_duration(2, lte_secs, &mut entry);
-        let mut plex_msg = Vec::new();
-        encode_varint_field(1, early_completion_plex_cents(lte_secs), &mut plex_msg);
-        encode_bytes_field(3, &plex_msg, &mut entry);
-        encode_bytes_field(1, &entry, &mut out);
+        rsp = rsp.add_with("prices", |p| {
+            p.set("remaining_greater", GoogleDuration { seconds: gt_secs as i64, nanos: 0 })
+                .set(
+                    "remaining_lesser_or_equal",
+                    GoogleDuration { seconds: lte_secs as i64, nanos: 0 },
+                )
+                .set("plex.total_in_cents", early_completion_plex_cents(lte_secs) as i64)
+        });
     }
-    let rsp_type = if req_type.starts_with("eve.") {
-        "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetEarlyCompletionPricingResponse"
-    } else {
-        "eve_public.cosmetic.ship.skin.thirdparty.sequencing.api.GetEarlyCompletionPricingResponse"
-    };
-    Ok(any_msg(rsp_type, out))
+    Ok(rsp.must_to_any())
 }
 
-fn encode_job_id(uuid: &[u8; 16]) -> Vec<u8> {
-    let mut b = Vec::new();
-    encode_bytes_field(1, uuid, &mut b);
-    b
+fn build_job_id(uuid: &[u8; 16]) -> ProtoBuilder {
+    pb::message("eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.Identifier")
+        .set("uuid", uuid)
 }
 
-fn encode_job_attributes(job: &SequencingJobRecord) -> Vec<u8> {
-    let mut out = Vec::new();
-    encode_bytes_field(1, &encode_skin_id(&job.skin_hex), &mut out);
-    put_seq(2, job.sequencer_id as u64, &mut out);
-    encode_varint_field(3, job.quantity as u64, &mut out);
-    if let Some(done_ts) = job.completed_unix {
-        put_timestamp(7, done_ts, &mut out);
+fn build_job_attributes(job: &SequencingJobRecord) -> ProtoBuilder {
+    let b = pb::message("eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.Attributes")
+        .set("skin", build_skin_id("eve_public", &job.skin_hex))
+        .set("sequencer.sequential", job.sequencer_id)
+        .set("quantity", job.quantity as u64);
+    let b = if let Some(done_ts) = job.completed_unix {
+        b.set("completed", GoogleTimestamp::from_unix(done_ts as i64, 0))
     } else if let Some(fail_code) = job.failed_reason {
-        encode_varint_field(6, fail_code as u64, &mut out);
+        b.set("failed", fail_code as i32)
     } else {
-        put_timestamp(5, job.initiated_unix, &mut out);
-    }
-    put_timestamp(
-        8,
-        job.initiated_unix.saturating_add(job.planned_duration_secs),
-        &mut out,
-    );
-    out
+        b.set("started", GoogleTimestamp::from_unix(job.initiated_unix as i64, 0))
+    };
+    b.set(
+        "planned_completion",
+        GoogleTimestamp::from_unix(job.initiated_unix.saturating_add(job.planned_duration_secs) as i64, 0),
+    )
 }
 
 fn queue_job_started_notice(character_id: u32, uuid: &[u8; 16], now_unix: u64) {
-    let mut payload = Vec::new();
-    encode_bytes_field(1, &encode_job_id(uuid), &mut payload);
-    ctx_queue_notice(
-        NoticeScope::Character(character_id),
-        any_msg(
-            "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.StartedNotice",
-            payload,
-        ),
-        now_unix,
-    );
+    let notice = pb::message(
+        "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.StartedNotice",
+    )
+    .set("id", build_job_id(uuid))
+    .must_to_any();
+    ctx_queue_notice(NoticeScope::Character(character_id), notice, now_unix);
 }
 
 fn queue_job_completed_notice(character_id: u32, uuid: &[u8; 16], now_unix: u64) {
-    let mut payload = Vec::new();
-    encode_bytes_field(1, &encode_job_id(uuid), &mut payload);
-    ctx_queue_notice(
-        NoticeScope::Character(character_id),
-        any_msg(
-            "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.CompletedNotice",
-            payload,
-        ),
-        now_unix,
-    );
+    let notice = pb::message(
+        "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.CompletedNotice",
+    )
+    .set("id", build_job_id(uuid))
+    .must_to_any();
+    ctx_queue_notice(NoticeScope::Character(character_id), notice, now_unix);
 }
 
 fn queue_job_failed_notice(character_id: u32, uuid: &[u8; 16], reason_enum: u32, now_unix: u64) {
-    let mut payload = Vec::new();
-    encode_bytes_field(1, &encode_job_id(uuid), &mut payload);
-    encode_varint_field(2, reason_enum.max(1) as u64, &mut payload);
-    ctx_queue_notice(
-        NoticeScope::Character(character_id),
-        any_msg(
-            "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.FailedNotice",
-            payload,
-        ),
-        now_unix,
-    );
+    let notice = pb::message(
+        "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.FailedNotice",
+    )
+    .set("id", build_job_id(uuid))
+    .set("reason", reason_enum.max(1) as i32)
+    .must_to_any();
+    ctx_queue_notice(NoticeScope::Character(character_id), notice, now_unix);
 }
 
 fn parse_initiate_slots(
@@ -925,13 +879,12 @@ fn handle_job_initiate(
     state.save();
     queue_job_started_notice(cid, &job_uuid, now);
 
-    let mut out = Vec::new();
-    encode_bytes_field(1, &encode_job_id(&job_uuid), &mut out);
-    encode_bytes_field(2, &encode_job_attributes(&job_rec), &mut out);
-    Ok(any_msg(
+    Ok(pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateResponse",
-        out,
-    ))
+    )
+    .set("id", build_job_id(&job_uuid))
+    .set("attributes", build_job_attributes(&job_rec))
+    .must_to_any())
 }
 
 pub(super) fn settle_completed_jobs(state: &SkinrCosmeticsState, now: u64) {
@@ -969,19 +922,18 @@ fn handle_job_get_all_active(
     state.sync_redeemed_skins_if_needed();
     settle_completed_jobs(state, ctx.now_unix());
     let data = state.data.read().unwrap_or_else(|e| e.into_inner());
-    let mut out = Vec::new();
+    let mut rsp = pb::message(
+        "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.GetAllActiveResponse",
+    );
     for job in data.sequencing_jobs.values() {
         if job.sequencer_id == cid && job.is_active() {
-            let mut job_entry = Vec::new();
-            encode_bytes_field(1, &encode_job_id(&job.job_uuid), &mut job_entry);
-            encode_bytes_field(2, &encode_job_attributes(job), &mut job_entry);
-            encode_bytes_field(1, &job_entry, &mut out);
+            rsp = rsp.add_with("jobs", |j| {
+                j.set("id", build_job_id(&job.job_uuid))
+                    .set("attributes", build_job_attributes(job))
+            });
         }
     }
-    Ok(any_msg(
-        "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.GetAllActiveResponse",
-        out,
-    ))
+    Ok(rsp.must_to_any())
 }
 
 fn parse_job_uuid(dyn_msg: &DynamicQuasarMessage, raw: &[u8]) -> Option<[u8; 16]> {
@@ -1020,12 +972,11 @@ fn handle_job_get(
     if job.sequencer_id != caller && require_admin_role(ctx).is_err() {
         return Err((STATUS_FORBIDDEN, "Cannot inspect another character's sequencing job".into()));
     }
-    let mut out = Vec::new();
-    encode_bytes_field(1, &encode_job_attributes(job), &mut out);
-    Ok(any_msg(
+    Ok(pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.GetResponse",
-        out,
-    ))
+    )
+    .set("job", build_job_attributes(job))
+    .must_to_any())
 }
 
 fn handle_job_complete_early(
@@ -1198,12 +1149,11 @@ pub fn register(router: &PublicGatewayRouter, state: Arc<SkinrCosmeticsState>) {
         "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetSkillBasedJobsCapacityRequest",
         |s: &Arc<SkinrCosmeticsState>, ctx: &AuthoritativeContext, _any: &GoogleAny, _d| {
             let (_, _, max_jobs) = skill_discounts_and_cap(s, ctx.effective_character_id());
-            let mut out = Vec::new();
-            encode_varint_field(1, max_jobs as u64, &mut out);
-            Ok(any_msg(
+            Ok(pb::message(
                 "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetSkillBasedJobsCapacityResponse",
-                out,
-            ))
+            )
+            .set("capacity", max_jobs as u64)
+            .must_to_any())
         }
     );
 

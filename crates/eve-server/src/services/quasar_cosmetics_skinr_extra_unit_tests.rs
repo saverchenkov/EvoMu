@@ -7,10 +7,10 @@ use crate::quasar_gateway::{
 };
 use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
 use eve_machonet::{service_roles, SessionState};
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
-    DynamicQuasarMessage, DynamicValue, EvePublicRequest, EvePublicResponse, GoogleAny,
-    QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, EvePublicRequest, EvePublicResponse,
+    GoogleAny, GoogleDuration, QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
@@ -121,7 +121,7 @@ fn test_empty_sde_catalog_fallbacks_tier_boundaries_and_wire_helpers() {
     job.failed_reason = Some(1);
     assert!(!job.is_active());
 
-    // Wire helpers: as_u64, put_duration, require_char, sub, seq_of, str_of, parse_component_id
+    // Wire helpers: as_u64, pb::message duration, require_char, sub, seq_of, str_of, parse_component_id
     assert_eq!(as_u64(&DynamicValue::Uint64(42)), Some(42));
     assert_eq!(as_u64(&DynamicValue::Uint32(42)), Some(42));
     assert_eq!(as_u64(&DynamicValue::Int64(42)), Some(42));
@@ -132,8 +132,14 @@ fn test_empty_sde_catalog_fallbacks_tier_boundaries_and_wire_helpers() {
     assert_eq!(as_u64(&DynamicValue::Enum(-2)), None);
     assert_eq!(as_u64(&DynamicValue::Bool(true)), None);
 
-    let mut dur_out = Vec::new();
-    put_duration(1, 3600, &mut dur_out);
+    let dur_out = pb::message(
+        "eve_public.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierDurationsResponse",
+    )
+    .add_with("durations", |d| {
+        d.set("tier.level", 1u32)
+            .set("duration", GoogleDuration { seconds: 3600, nanos: 0 })
+    })
+    .must_encode();
     assert!(!dur_out.is_empty());
 
     let mut ctx = AuthoritativeContext::default();
@@ -217,9 +223,12 @@ fn test_component_license_grant_get_revoke_error_and_cross_char_branches() {
         .status_code,
         STATUS_BAD_REQUEST
     );
-    let mut zero_cap_req = Vec::new();
-    encode_bytes_field(1, &encode_component_id(coat_id, false), &mut zero_cap_req);
-    encode_varint_field(2, 0, &mut zero_cap_req);
+    let zero_cap_req = pb::message(
+        "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.api.admin.GrantRequest",
+    )
+    .set("component", build_component_id(coat_id, false))
+    .set("capacity", 0u64)
+    .must_encode();
     assert_eq!(
         call(
             &router,
@@ -231,9 +240,12 @@ fn test_component_license_grant_get_revoke_error_and_cross_char_branches() {
         .status_code,
         STATUS_BAD_REQUEST
     );
-    let mut unknown_comp_req = Vec::new();
-    encode_bytes_field(1, &encode_component_id(999_999_999, false), &mut unknown_comp_req);
-    encode_varint_field(2, 2, &mut unknown_comp_req);
+    let unknown_comp_req = pb::message(
+        "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.api.admin.GrantRequest",
+    )
+    .set("component", build_component_id(999_999_999, false))
+    .set("capacity", 2u64)
+    .must_encode();
     assert_eq!(
         call(
             &router,
@@ -246,9 +258,12 @@ fn test_component_license_grant_get_revoke_error_and_cross_char_branches() {
         STATUS_BAD_REQUEST
     );
     // Pass coating component ID marked as pattern (is_pattern = true) -> category mismatch
-    let mut mismatch_req = Vec::new();
-    encode_bytes_field(1, &encode_component_id(coat_id, true), &mut mismatch_req);
-    encode_varint_field(2, 2, &mut mismatch_req);
+    let mismatch_req = pb::message(
+        "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.api.admin.GrantRequest",
+    )
+    .set("component", build_component_id(coat_id, true))
+    .set("capacity", 2u64)
+    .must_encode();
     assert_eq!(
         call(
             &router,
@@ -272,12 +287,19 @@ fn test_component_license_grant_get_revoke_error_and_cross_char_branches() {
             is_free: true,
         },
     );
-    let mut get_other = Vec::new();
-    encode_bytes_field(
-        1,
-        &encode_comp_license_id(other_cid as u32, coat_id, false),
-        &mut get_other,
-    );
+    let get_other = pb::message(
+        "eve_public.cosmetic.ship.skin.thirdparty.component.license.infinite.api.GetRequest",
+    )
+    .set(
+        "license",
+        build_comp_license_id(
+            "eve_public.cosmetic.ship.skin.thirdparty.component.license.infinite.Identifier",
+            other_cid as u32,
+            coat_id,
+            false,
+        ),
+    )
+    .must_encode();
     assert_eq!(
         call(
             &router,
@@ -354,12 +376,12 @@ fn test_consume_item_branches_and_title_definition_versions() {
     let admin_sess = sess(Some(11), Some(cid), service_roles::ROLE_ADMIN);
 
     let encode_consume = |item_id: u64, qty: u64| -> Vec<u8> {
-        let mut id_msg = Vec::new();
-        put_seq(1, item_id, &mut id_msg);
-        let mut out = Vec::new();
-        encode_bytes_field(1, &id_msg, &mut out);
-        encode_varint_field(2, qty, &mut out);
-        out
+        pb::message(
+            "eve_public.cosmetic.ship.skin.thirdparty.component.license.item.api.ConsumeRequest",
+        )
+        .set("item.item.sequential", item_id)
+        .set("quantity", qty as i32)
+        .must_encode()
     };
 
     // 1. Missing item_id or qty == 0 -> STATUS_BAD_REQUEST
@@ -512,16 +534,14 @@ fn test_consume_item_branches_and_title_definition_versions() {
         name: "Grand Master".into(),
         internal_name: "title_gm".into(),
     });
-    let mut latest_req = Vec::new();
-    let mut cver = Vec::new();
-    encode_varint_field(1, 24, &mut cver);
-    encode_varint_field(2, 2, &mut cver);
-    encode_varint_field(3, 1, &mut cver);
-    encode_string_field(4, "rc1", &mut cver);
-    encode_bytes_field(1, &cver, &mut latest_req);
-    let mut lang_msg = Vec::new();
-    encode_string_field(1, "de", &mut lang_msg);
-    encode_bytes_field(3, &lang_msg, &mut latest_req);
+    let latest_req =
+        pb::message("eve_public.cosmetic.character.title.definition.api.GetLatestRequest")
+            .set("current_version.major", 24u32)
+            .set("current_version.minor", 2u32)
+            .set("current_version.patch", 1u32)
+            .add("current_version.prerelease_tags", "rc1")
+            .set("language.code", "de")
+            .must_encode();
     assert_eq!(
         call(
             &router,
@@ -556,9 +576,15 @@ fn test_consume_item_branches_and_title_definition_versions() {
         .status_code,
         STATUS_BAD_REQUEST
     );
-    let mut empty_tenant = Vec::new();
-    encode_string_field(1, "", &mut empty_tenant);
-    encode_bytes_field(2, &cver, &mut empty_tenant);
+    let empty_tenant = pb::message(
+        "eve.cosmetic.character.title.definition.version.api.admin.OverrideVersionForTenantRequest",
+    )
+    .set("context.comment", "")
+    .set("version.major", 24u32)
+    .set("version.minor", 2u32)
+    .set("version.patch", 1u32)
+    .add("version.prerelease_tags", "rc1")
+    .must_encode();
     assert_eq!(
         call(
             &router,
@@ -709,11 +735,12 @@ fn catalog_load_isis_groups_custom_tiers_persistence_and_active_ship_consume_mut
         );
     });
     let player_sess = sess(Some(77), Some(cid), 0);
-    let mut id_msg = Vec::new();
-    encode_varint_field(1, active_ship_item as u64, &mut id_msg);
-    let mut req = Vec::new();
-    encode_bytes_field(1, &id_msg, &mut req);
-    encode_varint_field(2, 1, &mut req);
+    let req = pb::message(
+        "eve_public.cosmetic.ship.skin.thirdparty.component.license.item.api.ConsumeRequest",
+    )
+    .set("item.item.sequential", active_ship_item as u64)
+    .set("quantity", 1i32)
+    .must_encode();
     let rsp = call(
         &router,
         &player_sess,

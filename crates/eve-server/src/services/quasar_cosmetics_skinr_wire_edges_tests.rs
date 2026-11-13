@@ -5,9 +5,10 @@ use crate::services::quasar_cosmetics_skinr::{
     SkinrStaticCatalog, COMP_CAT_MATERIAL, COMP_CAT_PATTERN,
 };
 use eve_db::WorldRepository;
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
-    DynamicQuasarMessage, DynamicValue, EvePublicCharacterId, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, EvePublicCharacterId,
+    GoogleTimestamp, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
@@ -23,10 +24,11 @@ fn primitive_helpers_and_require_char() {
     assert_eq!(any.type_url, format!("{TYPE_GOOGLEAPIS_PREFIX}foo.Bar"));
     assert_eq!(any.value, vec![1, 2, 3]);
 
-    let mut buf = Vec::new();
-    put_seq(1, 42, &mut buf);
-    put_timestamp(2, 1_700_000_000, &mut buf);
-    put_duration(3, 3600, &mut buf);
+    let buf = pb::message("eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.Attributes")
+        .set("sequencer.sequential", 42u32)
+        .set("started", GoogleTimestamp::from_unix(1_700_000_000, 0))
+        .set("planned_completion", GoogleTimestamp::from_unix(1_700_003_600, 0))
+        .must_encode();
     let wm = WireMessage::decode(&buf).unwrap();
     assert_eq!(wm.fields.len(), 3);
 
@@ -88,9 +90,19 @@ fn component_id_license_id_and_sde_validation_cover_all_paths() {
     assert_eq!(parse_component_id(&zero_msg), None);
 
     // parse_license_identifier via DynamicQuasarMessage and raw wire fallback
-    let lic_id_wire = encode_comp_license_id(90_000_001, 77, true);
-    let mut outer_wire = Vec::new();
-    encode_bytes_field(1, &lic_id_wire, &mut outer_wire);
+    let outer_wire = pb::message(
+        "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.api.GetRequest",
+    )
+    .set(
+        "license",
+        build_comp_license_id(
+            "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.Identifier",
+            90_000_001,
+            77,
+            true,
+        ),
+    )
+    .must_encode();
     let empty_dyn = DynamicQuasarMessage::new("");
     assert_eq!(
         parse_license_identifier(&empty_dyn, &outer_wire),
@@ -242,18 +254,22 @@ fn tier_pricing_duration_skin_encoders_notices_and_parsers() {
 
     // 4. raw wire fallback: nested string, nested varint, direct string bytes, empty
     let empty_dyn = DynamicQuasarMessage::new("");
-    let mut wire_nested_str = Vec::new();
-    encode_bytes_field(1, &encode_skin_id("hex_wire"), &mut wire_nested_str);
+    let wire_nested_str = pb::message("eve_public.cosmetic.ship.skin.thirdparty.api.GetRequest")
+        .set("skin.hex", "hex_wire")
+        .must_encode();
     assert_eq!(parse_skin_hex(&empty_dyn, &wire_nested_str).as_deref(), Some("hex_wire"));
 
-    let mut inner_var = Vec::new();
-    encode_varint_field(1, 0x00ff, &mut inner_var);
-    let mut wire_nested_var = Vec::new();
-    encode_bytes_field(1, &inner_var, &mut wire_nested_var);
+    let inner_var = pb::message("eve_public.ship.Identifier")
+        .set("sequential", 0x00ff_u64)
+        .must_encode();
+    let wire_nested_var = pb::message("eve_public.cosmetic.ship.skin.thirdparty.api.GetRequest")
+        .set_raw_message("skin", inner_var)
+        .must_encode();
     assert_eq!(parse_skin_hex(&empty_dyn, &wire_nested_var).as_deref(), Some("skin_000000ff"));
 
-    let mut wire_direct_str = Vec::new();
-    encode_string_field(1, "direct_hex", &mut wire_direct_str);
+    let wire_direct_str = pb::message("eve_public.cosmetic.ship.skin.thirdparty.Identifier")
+        .set("hex", "direct_hex")
+        .must_encode();
     assert_eq!(parse_skin_hex(&empty_dyn, &wire_direct_str).as_deref(), Some("direct_hex"));
     assert_eq!(parse_skin_hex(&empty_dyn, b""), None);
 
@@ -272,8 +288,9 @@ fn tier_pricing_duration_skin_encoders_notices_and_parsers() {
         Some((Some(90_000_001), "abcd".to_string()))
     );
 
-    let mut wire_slic = Vec::new();
-    encode_bytes_field(1, &encode_skin_license_id(90_000_005, "ef01"), &mut wire_slic);
+    let wire_slic = pb::message("eve_public.cosmetic.ship.skin.thirdparty.license.api.GetRequest")
+        .set("license", build_skin_license_id("eve_public", 90_000_005, "ef01"))
+        .must_encode();
     assert_eq!(
         parse_skin_license_id(&empty_dyn, &wire_slic),
         Some((Some(90_000_005), "ef01".to_string()))

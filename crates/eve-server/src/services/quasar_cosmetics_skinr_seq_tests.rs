@@ -7,6 +7,7 @@ use crate::quasar_gateway::{PublicGatewayRouter, STATUS_OK};
 use crate::services::quasar_cosmetics_skinr::SkinrStaticCatalog;
 use eve_db::{TrainedSkillRecord, WorldRepository};
 use eve_machonet::{service_roles, SessionState};
+use eve_proto::pb;
 use eve_proto::quasar::{
     EvePublicRequest, EvePublicResponse, GoogleAny, QuasarDescriptorRegistry,
     TYPE_GOOGLEAPIS_PREFIX,
@@ -127,9 +128,12 @@ fn thirdparty_skin_licenses_grant_activate_apply_unapply_and_revoke() {
     let other = sess(Some(2), Some(90_000_002), service_roles::ROLE_PLAYER_DEFAULT);
 
     // 1. Admin Grant 3rd-party SKIN license ("skin_custom_01", qty=2)
-    let mut grant_req = Vec::new();
-    encode_bytes_field(1, &encode_skin_id("skin_custom_01"), &mut grant_req);
-    encode_varint_field(2, 2, &mut grant_req);
+    let grant_req = pb::message(
+        "eve_public.cosmetic.ship.skin.thirdparty.license.api.admin.GrantRequest",
+    )
+    .set("skin", build_skin_id("eve_public", "skin_custom_01"))
+    .set("unactivated", 2u64)
+    .must_encode();
     assert_eq!(
         call(
             &router,
@@ -143,8 +147,9 @@ fn thirdparty_skin_licenses_grant_activate_apply_unapply_and_revoke() {
     );
 
     // 2. Design GetRequest & License GetOwned / Get
-    let mut design_req = Vec::new();
-    encode_bytes_field(1, &encode_skin_id("skin_custom_01"), &mut design_req);
+    let design_req = pb::message("eve_public.cosmetic.ship.skin.thirdparty.api.GetRequest")
+        .set("skin", build_skin_id("eve_public", "skin_custom_01"))
+        .must_encode();
     assert_eq!(
         call(&router, &player, "eve_public.cosmetic.ship.skin.thirdparty.api.GetRequest", design_req.clone(), now).status_code,
         STATUS_OK
@@ -158,9 +163,9 @@ fn thirdparty_skin_licenses_grant_activate_apply_unapply_and_revoke() {
         STATUS_OK
     );
 
-    let lic_id_bytes = encode_skin_license_id(cid as u32, "skin_custom_01");
-    let mut lic_req = Vec::new();
-    encode_bytes_field(1, &lic_id_bytes, &mut lic_req);
+    let lic_req = pb::message("eve_public.cosmetic.ship.skin.thirdparty.license.api.GetRequest")
+        .set("license", build_skin_license_id("eve_public", cid as u32, "skin_custom_01"))
+        .must_encode();
     assert_eq!(
         call(&router, &player, "eve_public.cosmetic.ship.skin.thirdparty.license.api.GetRequest", lic_req.clone(), now).status_code,
         STATUS_OK
@@ -171,10 +176,10 @@ fn thirdparty_skin_licenses_grant_activate_apply_unapply_and_revoke() {
     );
 
     // 3. Apply before activation -> 400; Activate -> 200; Apply -> 200; Unapply -> 200; Revoke -> 200
-    let mut ship_seq = Vec::new();
-    encode_varint_field(1, ship_id, &mut ship_seq);
-    let mut apply_req = lic_req.clone();
-    encode_bytes_field(2, &ship_seq, &mut apply_req);
+    let apply_req = pb::message("eve_public.cosmetic.ship.skin.thirdparty.license.api.ApplyRequest")
+        .set("license", build_skin_license_id("eve_public", cid as u32, "skin_custom_01"))
+        .set("ship.sequential", ship_id)
+        .must_encode();
     assert_eq!(
         call(&router, &player, "eve_public.cosmetic.ship.skin.thirdparty.license.api.ApplyRequest", apply_req.clone(), now).status_code,
         STATUS_BAD_REQUEST
@@ -238,12 +243,14 @@ fn sequencing_pricing_durations_and_job_lifecycle() {
         .find(|(_, c)| !c.is_pattern() && !c.disallowed_slots.contains(&1))
         .map(|(id, _)| id)
         .expect("coating component");
-    let mut inf_grant = Vec::new();
-    encode_bytes_field(
-        1,
-        &super::super::quasar_cosmetics_skinr::encode_component_id(coat_id, false),
-        &mut inf_grant,
-    );
+    let inf_grant = pb::message(
+        "eve_public.cosmetic.ship.skin.thirdparty.component.license.infinite.api.admin.GrantRequest",
+    )
+    .set(
+        "component",
+        super::super::quasar_cosmetics_skinr::build_component_id(coat_id, false),
+    )
+    .must_encode();
     assert_eq!(
         call(
             &router,
@@ -257,26 +264,25 @@ fn sequencing_pricing_durations_and_job_lifecycle() {
     );
 
     // Initiate sequencing job for hull 587 (Rifter)
-    let mut slot_entry = encode_layout_slot(&SkinLayoutSlot {
+    let slot = SkinLayoutSlot {
         slot_id: 1,
         component_id: coat_id,
         is_pattern: false,
         primary_coating_id: None,
         secondary_coating_id: None,
-    });
-    let mut ship_seq = Vec::new();
-    encode_varint_field(1, 587, &mut ship_seq);
-    let mut layout = Vec::new();
-    encode_bytes_field(1, &slot_entry, &mut layout);
-    encode_bytes_field(2, &ship_seq, &mut layout);
-    encode_varint_field(3, 1, &mut layout);
-    slot_entry.clear();
-
-    let mut init_req = Vec::new();
-    encode_string_field(1, "Nebula Rifter", &mut init_req);
-    encode_string_field(2, "Nebula Line", &mut init_req);
-    encode_bytes_field(3, &layout, &mut init_req);
-    encode_varint_field(5, 1, &mut init_req);
+    };
+    let init_req = pb::message(
+        "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest",
+    )
+    .set("name", "Nebula Rifter")
+    .set("line_name", "Nebula Line")
+    .set_with("layout", |l| {
+        l.add("slots", build_layout_slot("eve_public", &slot))
+            .set("ship_type.sequential", 587u64)
+            .set("pattern_blend_mode", 1i32)
+    })
+    .set("licenses", 1u32)
+    .must_encode();
 
     let init_rsp = call(
         &router,
@@ -348,12 +354,14 @@ async fn issue_545_cluster_tick_settles_matured_skinr_job_and_publishes_notices(
         .find(|(_, c)| !c.is_pattern() && !c.disallowed_slots.contains(&1))
         .map(|(&id, _)| id)
         .expect("coating component");
-    let mut inf_grant = Vec::new();
-    encode_bytes_field(
-        1,
-        &super::super::quasar_cosmetics_skinr::encode_component_id(coat_id, false),
-        &mut inf_grant,
-    );
+    let inf_grant = pb::message(
+        "eve_public.cosmetic.ship.skin.thirdparty.component.license.infinite.api.admin.GrantRequest",
+    )
+    .set(
+        "component",
+        super::super::quasar_cosmetics_skinr::build_component_id(coat_id, false),
+    )
+    .must_encode();
     assert_eq!(
         call(
             &ctx.quasar_gateway,
@@ -368,26 +376,25 @@ async fn issue_545_cluster_tick_settles_matured_skinr_job_and_publishes_notices(
 
     let mut rx = ctx.quasar_gateway.subscribe_session(&player, Vec::new(), now);
 
-    let mut slot_entry = encode_layout_slot(&SkinLayoutSlot {
+    let slot = SkinLayoutSlot {
         slot_id: 1,
         component_id: coat_id,
         is_pattern: false,
         primary_coating_id: None,
         secondary_coating_id: None,
-    });
-    let mut ship_seq = Vec::new();
-    encode_varint_field(1, 587, &mut ship_seq);
-    let mut layout = Vec::new();
-    encode_bytes_field(1, &slot_entry, &mut layout);
-    encode_bytes_field(2, &ship_seq, &mut layout);
-    encode_varint_field(3, 1, &mut layout);
-    slot_entry.clear();
-
-    let mut init_req = Vec::new();
-    encode_string_field(1, "AutoSettle Rifter", &mut init_req);
-    encode_string_field(2, "Tick Line", &mut init_req);
-    encode_bytes_field(3, &layout, &mut init_req);
-    encode_varint_field(5, 1, &mut init_req);
+    };
+    let init_req = pb::message(
+        "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest",
+    )
+    .set("name", "AutoSettle Rifter")
+    .set("line_name", "Tick Line")
+    .set_with("layout", |l| {
+        l.add("slots", build_layout_slot("eve_public", &slot))
+            .set("ship_type.sequential", 587u64)
+            .set("pattern_blend_mode", 1i32)
+    })
+    .set("licenses", 1u32)
+    .must_encode();
 
     let init_rsp = call(
         &ctx.quasar_gateway,
