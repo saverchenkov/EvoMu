@@ -1,14 +1,19 @@
 //! Runtime lock-rank enforcement and ratchet checking (`RFC-1 §4`).
 //!
 //! Assigns static numeric ranks to synchronization primitives (`Ranked<L, RANK>`)
-//! and maintains a thread-local stack of currently held lock ranks when compiled
-//! with `test`, `debug_assertions`, or feature `lock-rank`. Acquiring a lock whose
-//! rank is less than or equal to any currently held lock on the same thread is
-//! reported with both the outer held call site and the inner acquisition call site.
+//! and maintains a thread-local stack of currently held lock ranks across debug,
+//! test, and release builds. Acquiring a lock whose rank is less than or equal
+//! to any currently held lock on the same thread is reported with both the outer
+//! held call site and the inner acquisition call site, and matched against
+//! `lock_rank_ratchet.txt` via stable `(relative_file, enclosing_fn, field_name)` keys.
 
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::panic::Location;
-use std::sync::{LockResult, Mutex, PoisonError, RwLock, TryLockError, TryLockResult};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LockResult, Mutex, OnceLock, PoisonError, RwLock, TryLockError, TryLockResult};
 
 /// Rank `5`: per-system NPC spawner map (`ServerContext::npc_spawns`), outer to
 /// `SystemRegistry::systems` (`10`), `Ballpark` (`20`), and `WorldRepository::inner` (`40`).
@@ -56,16 +61,788 @@ pub enum LockRankMode {
     Warn,
 }
 
-#[cfg(any(test, debug_assertions, feature = "lock-rank"))]
+/// Total number of unratcheted lock-rank violations observed in this process.
+///
+/// Incremented before panicking (or warning when configured) so callers using
+/// `catch_unwind` or task supervision cannot silently swallow lock-rank violations.
+pub fn unratcheted_violation_count() -> u64 {
+    imp::UNRATCHETED_VIOLATIONS.load(Ordering::Relaxed)
+}
+
+/// Structured, line-number-independent ratchet key:
+/// `<relative_file>::<enclosing_fn_name>::<field_name>`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RatchetSiteKey {
+    /// Repository-relative source file path with `/` separators.
+    pub rel_file: String,
+    /// Enclosing function name (or `<module>`).
+    pub enclosing_fn: String,
+    /// Target lock/snapshot field or helper method name.
+    pub field_name: String,
+}
+
+impl RatchetSiteKey {
+    /// Parses `<relative_file>::<enclosing_fn_name>::<field_name>`.
+    ///
+    /// Returns `None` for legacy `file:line:col` keys or malformed strings.
+    pub fn parse(raw: &str) -> Option<Self> {
+        let mut parts = raw.split("::");
+        let rel_file = parts.next()?.trim();
+        let enclosing_fn = parts.next()?.trim();
+        let field_name = parts.next()?.trim();
+        if parts.next().is_some()
+            || rel_file.is_empty()
+            || enclosing_fn.is_empty()
+            || field_name.is_empty()
+            || rel_file.contains(':')
+            || enclosing_fn.contains(':')
+            || field_name.contains(':')
+        {
+            return None;
+        }
+        Some(Self {
+            rel_file: normalize_rel_file(rel_file),
+            enclosing_fn: enclosing_fn.to_string(),
+            field_name: field_name.to_string(),
+        })
+    }
+}
+
+impl fmt::Display for RatchetSiteKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}::{}::{}",
+            self.rel_file, self.enclosing_fn, self.field_name
+        )
+    }
+}
+
+/// Parsed entry from `lock_rank_ratchet.txt`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RatchetEntry {
+    /// Rank of the already-held outer lock.
+    pub held_rank: u16,
+    /// Rank of the inner lock being acquired (or upper bound for `assert_locks_below`).
+    pub acquired_rank: u16,
+    /// Structured site key (`<relative_file>::<enclosing_fn_name>::<field_name>`).
+    pub key: RatchetSiteKey,
+}
+
+fn normalize_rel_file(raw_file: &str) -> String {
+    let file = raw_file.replace('\\', "/");
+    if let Some(idx) = file.find("/crates/") {
+        file[idx + 1..].to_string()
+    } else if let Some(rest) = file.strip_prefix("./") {
+        rest.to_string()
+    } else {
+        file
+    }
+}
+
+/// Returns the workspace root directory containing `crates/`.
+pub fn workspace_root() -> PathBuf {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if let Some(root) = manifest.parent().and_then(Path::parent) {
+        if root.join("crates").is_dir() {
+            return root.to_path_buf();
+        }
+    }
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Strictly parses all non-comment lines in `raw`, rejecting duplicates and legacy `file:line:col` keys.
+pub fn parse_ratchet_entries(raw: &str) -> Result<Vec<RatchetEntry>, String> {
+    let mut entries = Vec::new();
+    let mut seen = HashSet::new();
+    for (idx, raw_line) in raw.lines().enumerate() {
+        let line_no = idx + 1;
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let mut parts = trimmed.split('\t');
+        let (Some(h), Some(a), Some(s), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return Err(format!(
+                "line {line_no}: expected 3 tab-separated columns `<held>\\t<acq>\\t<file>::<fn>::<field>`, got: {trimmed:?}"
+            ));
+        };
+        let held_rank = h
+            .parse::<u16>()
+            .map_err(|_| format!("line {line_no}: invalid held_rank {h:?}"))?;
+        let acquired_rank = a
+            .parse::<u16>()
+            .map_err(|_| format!("line {line_no}: invalid acquired_rank {a:?}"))?;
+        let key = RatchetSiteKey::parse(s).ok_or_else(|| {
+            format!(
+                "line {line_no}: ratchet key must use structured `<relative_file>::<enclosing_fn_name>::<field_name>` format (legacy `file:line:col` keys are rejected), got: {s:?}"
+            )
+        })?;
+        let entry = RatchetEntry {
+            held_rank,
+            acquired_rank,
+            key,
+        };
+        if !seen.insert(entry.clone()) {
+            return Err(format!(
+                "line {line_no}: duplicate ratchet entry `{held_rank}\\t{acquired_rank}\\t{}`",
+                entry.key
+            ));
+        }
+        entries.push(entry);
+    }
+    Ok(entries)
+}
+
+/// Validates a ratchet file's policy, structured key syntax, and live workspace sites.
+///
+/// Fails loudly if any entry uses legacy `file:line:col` keys, duplicates another entry,
+/// violates forbidden rank transitions, points at a missing file, or matches 0 live lock sites.
+pub fn validate_ratchet_against_workspace(raw: &str, root: &Path) -> Result<usize, Vec<String>> {
+    let entries = match parse_ratchet_entries(raw) {
+        Ok(e) => e,
+        Err(err) => return Err(vec![err]),
+    };
+
+    let mut errors = Vec::new();
+    let mut file_cache: HashMap<String, Vec<imp::ScannedLockSite>> = HashMap::new();
+
+    for entry in &entries {
+        if entry.held_rank == RANK_BALLPARK && entry.acquired_rank == RANK_BALLPARK {
+            errors.push(format!(
+                "forbidden 20 -> 20 same-rank Ballpark ratchet entry: {}",
+                entry.key
+            ));
+        }
+        if entry.held_rank == RANK_SQLITE_CONN
+            || entry.acquired_rank == RANK_SQLITE_CONN
+            || entry.held_rank == RANK_SQLITE_FP
+            || entry.acquired_rank == RANK_SQLITE_FP
+        {
+            errors.push(format!(
+                "stale RANK_SQLITE_CONN/FP ({}/{}) entry: {} -> {} {}",
+                RANK_SQLITE_CONN, RANK_SQLITE_FP, entry.held_rank, entry.acquired_rank, entry.key
+            ));
+        }
+        if entry.held_rank == RANK_LEAF
+            && (entry.acquired_rank == RANK_BALLPARK || entry.acquired_rank == RANK_ACTOR_STATE)
+        {
+            errors.push(format!(
+                "forbidden 60 -> {} ratchet entry: {}",
+                entry.acquired_rank, entry.key
+            ));
+        }
+
+        let rel = &entry.key.rel_file;
+        if !file_cache.contains_key(rel) {
+            let full = root.join(rel);
+            match std::fs::read_to_string(&full) {
+                Ok(src) => {
+                    file_cache.insert(rel.clone(), imp::scan_file_sites(&src).sites);
+                }
+                Err(err) => {
+                    errors.push(format!(
+                        "ratchet entry {} -> {} {} references missing/unreadable file {}: {err}",
+                        entry.held_rank,
+                        entry.acquired_rank,
+                        entry.key,
+                        full.display()
+                    ));
+                    continue;
+                }
+            }
+        }
+
+        if let Some(sites) = file_cache.get(rel) {
+            let matched = sites.iter().any(|site| {
+                site.enclosing_fn == entry.key.enclosing_fn
+                    && site.field_name == entry.key.field_name
+            });
+            if !matched {
+                errors.push(format!(
+                    "stale ratchet entry matches 0 live lock sites: {} -> {} {}",
+                    entry.held_rank, entry.acquired_rank, entry.key
+                ));
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(entries.len())
+    } else {
+        Err(errors)
+    }
+}
+
 mod imp {
-    use super::{Location, LockRankMode, LOCK_RANK_RATCHET_RAW};
+    use super::{
+        normalize_rel_file, parse_ratchet_entries, workspace_root, AtomicU64, BTreeSet, HashMap,
+        HashSet, Location, LockRankMode, Mutex, OnceLock, Ordering, PathBuf, RatchetSiteKey,
+        LOCK_RANK_RATCHET_RAW,
+    };
     #[cfg(test)]
     use std::cell::RefCell;
-    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+    use std::collections::BTreeMap;
     use std::io::Write as _;
-    use std::path::PathBuf;
-    use std::sync::{Mutex, OnceLock};
     use std::thread::ThreadId;
+
+    pub(crate) static UNRATCHETED_VIOLATIONS: AtomicU64 = AtomicU64::new(0);
+
+    const LOCK_METHODS: &[&str] = &[
+        "read",
+        "write",
+        "lock",
+        "try_read",
+        "try_write",
+        "try_lock",
+        "read_unranked",
+        "try_write_unranked",
+        "with_snapshot",
+        "try_with_snapshot",
+        "with_mut_snapshot",
+        "try_with_mut_snapshot",
+        "tx",
+        "read_state",
+        "try_read_state",
+        "assert_no_locks_held",
+        "assert_locks_below",
+    ];
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum TokKind {
+        Ident,
+        RawIdent,
+        Punct,
+        Other,
+    }
+
+    struct Tok {
+        kind: TokKind,
+        text: String,
+        line: u32,
+        col: u32,
+        end_col: u32,
+    }
+
+    struct FnSpan {
+        name: String,
+        start_line: u32,
+        end_line: u32,
+    }
+
+    pub(crate) struct ScannedLockSite {
+        pub(crate) enclosing_fn: String,
+        pub(crate) field_name: String,
+        recv_line: u32,
+        recv_col: u32,
+        method_line: u32,
+        method_col: u32,
+        method_end_col: u32,
+    }
+
+    pub(crate) struct ScannedFile {
+        fn_spans: Vec<FnSpan>,
+        pub(crate) sites: Vec<ScannedLockSite>,
+    }
+
+    fn tokenize_rust(src: &str) -> Vec<Tok> {
+        let chars: Vec<char> = src.chars().collect();
+        let n = chars.len();
+        let mut i = 0usize;
+        let mut line = 1u32;
+        let mut col = 1u32;
+        let mut tokens = Vec::new();
+
+        let step = |i: &mut usize, line: &mut u32, col: &mut u32, k: usize| {
+            for _ in 0..k {
+                if *i >= n {
+                    return;
+                }
+                if chars[*i] == '\n' {
+                    *line += 1;
+                    *col = 1;
+                } else {
+                    *col += 1;
+                }
+                *i += 1;
+            }
+        };
+
+        while i < n {
+            let c = chars[i];
+            if c.is_whitespace() {
+                step(&mut i, &mut line, &mut col, 1);
+                continue;
+            }
+            if c == '/' && i + 1 < n && chars[i + 1] == '/' {
+                while i < n && chars[i] != '\n' {
+                    step(&mut i, &mut line, &mut col, 1);
+                }
+                continue;
+            }
+            if c == '/' && i + 1 < n && chars[i + 1] == '*' {
+                let mut depth = 1usize;
+                step(&mut i, &mut line, &mut col, 2);
+                while i < n && depth > 0 {
+                    if chars[i] == '/' && i + 1 < n && chars[i + 1] == '*' {
+                        depth += 1;
+                        step(&mut i, &mut line, &mut col, 2);
+                    } else if chars[i] == '*' && i + 1 < n && chars[i + 1] == '/' {
+                        depth -= 1;
+                        step(&mut i, &mut line, &mut col, 2);
+                    } else {
+                        step(&mut i, &mut line, &mut col, 1);
+                    }
+                }
+                continue;
+            }
+            if (c == 'r' || (c == 'b' && i + 1 < n && chars[i + 1] == 'r')) && i + 1 < n {
+                if c == 'r' && chars[i + 1] == '#' {
+                    let mut j = i + 1;
+                    let mut hashes = 0usize;
+                    while j < n && chars[j] == '#' {
+                        hashes += 1;
+                        j += 1;
+                    }
+                    if j < n && chars[j] == '"' {
+                        let (tl, tc) = (line, col);
+                        let count = j - i + 1;
+                        step(&mut i, &mut line, &mut col, count);
+                        while i < n {
+                            if chars[i] == '"'
+                                && i + hashes < n
+                                && (1..=hashes).all(|h| chars[i + h] == '#')
+                            {
+                                step(&mut i, &mut line, &mut col, 1 + hashes);
+                                break;
+                            }
+                            step(&mut i, &mut line, &mut col, 1);
+                        }
+                        tokens.push(Tok {
+                            kind: TokKind::Other,
+                            text: String::new(),
+                            line: tl,
+                            col: tc,
+                            end_col: col.saturating_sub(1),
+                        });
+                        continue;
+                    } else if hashes == 1
+                        && j < n
+                        && (chars[j].is_ascii_alphabetic() || chars[j] == '_')
+                    {
+                        let (tl, tc) = (line, col);
+                        let start = i;
+                        step(&mut i, &mut line, &mut col, 2);
+                        while i < n && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                            step(&mut i, &mut line, &mut col, 1);
+                        }
+                        let text: String = chars[start..i].iter().collect();
+                        tokens.push(Tok {
+                            kind: TokKind::RawIdent,
+                            text,
+                            line: tl,
+                            col: tc,
+                            end_col: col.saturating_sub(1),
+                        });
+                        continue;
+                    }
+                } else {
+                    let mut j = i + if c == 'b' { 2 } else { 1 };
+                    let mut hashes = 0usize;
+                    while j < n && chars[j] == '#' {
+                        hashes += 1;
+                        j += 1;
+                    }
+                    if j < n && chars[j] == '"' {
+                        let (tl, tc) = (line, col);
+                        let count = j - i + 1;
+                        step(&mut i, &mut line, &mut col, count);
+                        while i < n {
+                            if chars[i] == '"'
+                                && i + hashes < n
+                                && (1..=hashes).all(|h| chars[i + h] == '#')
+                            {
+                                step(&mut i, &mut line, &mut col, 1 + hashes);
+                                break;
+                            }
+                            step(&mut i, &mut line, &mut col, 1);
+                        }
+                        tokens.push(Tok {
+                            kind: TokKind::Other,
+                            text: String::new(),
+                            line: tl,
+                            col: tc,
+                            end_col: col.saturating_sub(1),
+                        });
+                        continue;
+                    }
+                }
+            }
+            if c == '"' || (c == 'b' && i + 1 < n && chars[i + 1] == '"') {
+                let (tl, tc) = (line, col);
+                step(&mut i, &mut line, &mut col, if c == 'b' { 2 } else { 1 });
+                while i < n {
+                    if chars[i] == '\\' {
+                        step(&mut i, &mut line, &mut col, 2);
+                    } else if chars[i] == '"' {
+                        step(&mut i, &mut line, &mut col, 1);
+                        break;
+                    } else {
+                        step(&mut i, &mut line, &mut col, 1);
+                    }
+                }
+                tokens.push(Tok {
+                    kind: TokKind::Other,
+                    text: String::new(),
+                    line: tl,
+                    col: tc,
+                    end_col: col.saturating_sub(1),
+                });
+                continue;
+            }
+            if c == '\'' || (c == 'b' && i + 1 < n && chars[i + 1] == '\'') {
+                let (tl, tc) = (line, col);
+                if c == 'b' {
+                    step(&mut i, &mut line, &mut col, 2);
+                    while i < n {
+                        if chars[i] == '\\' {
+                            step(&mut i, &mut line, &mut col, 2);
+                        } else if chars[i] == '\'' {
+                            step(&mut i, &mut line, &mut col, 1);
+                            break;
+                        } else {
+                            step(&mut i, &mut line, &mut col, 1);
+                        }
+                    }
+                    tokens.push(Tok {
+                        kind: TokKind::Other,
+                        text: String::new(),
+                        line: tl,
+                        col: tc,
+                        end_col: col.saturating_sub(1),
+                    });
+                    continue;
+                }
+                if i + 1 < n && chars[i + 1] == '\\' {
+                    step(&mut i, &mut line, &mut col, 2);
+                    while i < n && chars[i] != '\'' && chars[i] != '\n' {
+                        step(&mut i, &mut line, &mut col, 1);
+                    }
+                    if i < n && chars[i] == '\'' {
+                        step(&mut i, &mut line, &mut col, 1);
+                    }
+                    tokens.push(Tok {
+                        kind: TokKind::Other,
+                        text: String::new(),
+                        line: tl,
+                        col: tc,
+                        end_col: col.saturating_sub(1),
+                    });
+                    continue;
+                }
+                if i + 2 < n && chars[i + 2] == '\'' {
+                    step(&mut i, &mut line, &mut col, 3);
+                    tokens.push(Tok {
+                        kind: TokKind::Other,
+                        text: String::new(),
+                        line: tl,
+                        col: tc,
+                        end_col: col.saturating_sub(1),
+                    });
+                    continue;
+                }
+                let start = i;
+                step(&mut i, &mut line, &mut col, 1);
+                while i < n && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                    step(&mut i, &mut line, &mut col, 1);
+                }
+                tokens.push(Tok {
+                    kind: TokKind::Other,
+                    text: chars[start..i].iter().collect(),
+                    line: tl,
+                    col: tc,
+                    end_col: col.saturating_sub(1),
+                });
+                continue;
+            }
+            if c.is_ascii_alphabetic() || c == '_' {
+                let (tl, tc) = (line, col);
+                let start = i;
+                while i < n && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                    step(&mut i, &mut line, &mut col, 1);
+                }
+                tokens.push(Tok {
+                    kind: TokKind::Ident,
+                    text: chars[start..i].iter().collect(),
+                    line: tl,
+                    col: tc,
+                    end_col: col.saturating_sub(1),
+                });
+                continue;
+            }
+            let (tl, tc) = (line, col);
+            step(&mut i, &mut line, &mut col, 1);
+            tokens.push(Tok {
+                kind: TokKind::Punct,
+                text: c.to_string(),
+                line: tl,
+                col: tc,
+                end_col: tc,
+            });
+        }
+        tokens
+    }
+
+    fn receiver_start(tokens: &[Tok], dot_idx: usize) -> (u32, u32) {
+        let mut k = dot_idx;
+        let mut start = (tokens[dot_idx].line, tokens[dot_idx].col);
+        while k > 0 {
+            let prev = &tokens[k - 1];
+            match (prev.kind, prev.text.as_str()) {
+                (TokKind::Ident | TokKind::RawIdent, _) => {
+                    if matches!(
+                        prev.text.as_str(),
+                        "let" | "return" | "if" | "else" | "match" | "while" | "for" | "in" | "mut"
+                    ) {
+                        break;
+                    }
+                    start = (prev.line, prev.col);
+                    k -= 1;
+                }
+                (TokKind::Punct, ".") | (TokKind::Punct, ":") => {
+                    k -= 1;
+                }
+                (TokKind::Punct, ")") | (TokKind::Punct, "]") => {
+                    let close = prev.text.as_str();
+                    let open = if close == ")" { "(" } else { "[" };
+                    let mut depth = 1usize;
+                    k -= 1;
+                    while k > 0 && depth > 0 {
+                        k -= 1;
+                        if tokens[k].kind == TokKind::Punct {
+                            if tokens[k].text == close {
+                                depth += 1;
+                            } else if tokens[k].text == open {
+                                depth -= 1;
+                            }
+                        }
+                    }
+                    start = (tokens[k].line, tokens[k].col);
+                }
+                _ => break,
+            }
+        }
+        start
+    }
+
+    pub(crate) fn scan_file_sites(src: &str) -> ScannedFile {
+        let tokens = tokenize_rust(src);
+        let mut brace_depth = 0usize;
+        let mut fn_stack: Vec<(String, u32, usize)> = Vec::new();
+        let mut fn_spans: Vec<FnSpan> = Vec::new();
+        let mut pending_fn: Option<(String, u32)> = None;
+        let mut pending_paren = 0usize;
+        let mut sites = Vec::new();
+
+        for (idx, tok) in tokens.iter().enumerate() {
+            if let Some((ref fn_name, fn_line)) = pending_fn.clone() {
+                if tok.kind == TokKind::Punct {
+                    match tok.text.as_str() {
+                        "(" => pending_paren += 1,
+                        ")" if pending_paren > 0 => pending_paren -= 1,
+                        ";" if pending_paren == 0 => {
+                            pending_fn = None;
+                        }
+                        "{" if pending_paren == 0 => {
+                            brace_depth += 1;
+                            fn_stack.push((fn_name.clone(), fn_line, brace_depth));
+                            pending_fn = None;
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            if tok.kind == TokKind::Punct {
+                if tok.text == "{" {
+                    brace_depth += 1;
+                } else if tok.text == "}" {
+                    brace_depth = brace_depth.saturating_sub(1);
+                    while let Some(top) = fn_stack.last() {
+                        if top.2 > brace_depth {
+                            let (name, start_line, _) = fn_stack.pop().expect("non-empty");
+                            fn_spans.push(FnSpan {
+                                name,
+                                start_line,
+                                end_line: tok.line,
+                            });
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            } else if tok.kind == TokKind::Ident
+                && tok.text == "fn"
+                && pending_fn.is_none()
+                && idx + 1 < tokens.len()
+                && tokens[idx + 1].kind == TokKind::Ident
+            {
+                pending_fn = Some((tokens[idx + 1].text.clone(), tok.line));
+                pending_paren = 0;
+            }
+
+            if tok.kind == TokKind::Ident && LOCK_METHODS.contains(&tok.text.as_str()) {
+                let is_call = if idx + 1 < tokens.len() && tokens[idx + 1].kind == TokKind::Punct {
+                    tokens[idx + 1].text == "("
+                        || (tokens[idx + 1].text == ":"
+                            && idx + 3 < tokens.len()
+                            && tokens[idx + 2].kind == TokKind::Punct
+                            && tokens[idx + 2].text == ":"
+                            && tokens[idx + 3].kind == TokKind::Punct
+                            && tokens[idx + 3].text == "<")
+                } else {
+                    false
+                };
+                if !is_call {
+                    continue;
+                }
+
+                let enclosing_fn = fn_stack
+                    .last()
+                    .map(|(n, _, _)| n.clone())
+                    .unwrap_or_else(|| "<module>".to_string());
+                let mut field_name = tok.text.clone();
+                let mut recv = (tok.line, tok.col);
+                if idx >= 1 && tokens[idx - 1].kind == TokKind::Punct && tokens[idx - 1].text == "."
+                {
+                    recv = receiver_start(&tokens, idx - 1);
+                    if idx >= 2 {
+                        let prev = &tokens[idx - 2];
+                        if matches!(prev.kind, TokKind::Ident | TokKind::RawIdent) {
+                            field_name = if prev.text == "self" {
+                                tok.text.clone()
+                            } else {
+                                prev.text.clone()
+                            };
+                        } else if prev.kind == TokKind::Punct && prev.text == ")" {
+                            let mut pdepth = 1usize;
+                            let mut k = idx.saturating_sub(3);
+                            loop {
+                                if tokens[k].kind == TokKind::Punct {
+                                    if tokens[k].text == ")" {
+                                        pdepth += 1;
+                                    } else if tokens[k].text == "(" {
+                                        pdepth -= 1;
+                                        if pdepth == 0 {
+                                            break;
+                                        }
+                                    }
+                                }
+                                if k == 0 {
+                                    break;
+                                }
+                                k -= 1;
+                            }
+                            if k > 0
+                                && pdepth == 0
+                                && matches!(tokens[k - 1].kind, TokKind::Ident | TokKind::RawIdent)
+                            {
+                                field_name = tokens[k - 1].text.clone();
+                            }
+                        }
+                    }
+                }
+                sites.push(ScannedLockSite {
+                    enclosing_fn,
+                    field_name,
+                    recv_line: recv.0,
+                    recv_col: recv.1,
+                    method_line: tok.line,
+                    method_col: tok.col,
+                    method_end_col: tok.end_col,
+                });
+            }
+        }
+
+        ScannedFile { fn_spans, sites }
+    }
+
+    fn scanned_file_for_rel(rel_file: &str, raw_file: &str) -> Option<&'static ScannedFile> {
+        static CACHE: OnceLock<Mutex<HashMap<String, Option<&'static ScannedFile>>>> =
+            OnceLock::new();
+        let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        {
+            let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(&cached) = guard.get(rel_file) {
+                return cached;
+            }
+        }
+        let candidates = [
+            workspace_root().join(rel_file),
+            PathBuf::from(rel_file),
+            PathBuf::from(raw_file),
+        ];
+        let parsed = candidates
+            .into_iter()
+            .find_map(|p| std::fs::read_to_string(p).ok())
+            .map(|src| Box::leak(Box::new(scan_file_sites(&src))) as &'static ScannedFile);
+        let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        *guard.entry(rel_file.to_string()).or_insert(parsed)
+    }
+
+    fn resolve_ratchet_key(site: &'static Location<'static>) -> Option<RatchetSiteKey> {
+        let rel_file = normalize_rel_file(site.file());
+        let scanned = scanned_file_for_rel(&rel_file, site.file())?;
+        let target = (site.line(), site.column());
+
+        // 1. Prefer a site whose receiver-through-method token span contains `target`.
+        let best_span = scanned
+            .sites
+            .iter()
+            .filter(|s| {
+                (s.recv_line, s.recv_col) <= target
+                    && target <= (s.method_line, s.method_end_col.saturating_add(1))
+            })
+            .max_by_key(|s| (s.recv_line, s.recv_col));
+        if let Some(s) = best_span {
+            return Some(RatchetSiteKey {
+                rel_file,
+                enclosing_fn: s.enclosing_fn.clone(),
+                field_name: s.field_name.clone(),
+            });
+        }
+
+        // 2. Fallback: closest site on the same line (e.g. macro/chained call).
+        let same_line = scanned
+            .sites
+            .iter()
+            .filter(|s| s.method_line == site.line() || s.recv_line == site.line())
+            .min_by_key(|s| s.method_col.abs_diff(site.column()));
+        if let Some(s) = same_line {
+            return Some(RatchetSiteKey {
+                rel_file,
+                enclosing_fn: s.enclosing_fn.clone(),
+                field_name: s.field_name.clone(),
+            });
+        }
+
+        // 3. Fallback: enclosing function span from brace scan.
+        let enclosing_fn = scanned
+            .fn_spans
+            .iter()
+            .filter(|f| f.start_line <= site.line() && site.line() <= f.end_line)
+            .min_by_key(|f| f.end_line.saturating_sub(f.start_line))
+            .map(|f| f.name.clone())
+            .unwrap_or_else(|| "<module>".to_string());
+        Some(RatchetSiteKey {
+            rel_file,
+            enclosing_fn,
+            field_name: "unknown".to_string(),
+        })
+    }
 
     #[derive(Clone, Copy)]
     struct HeldEntry {
@@ -116,37 +893,46 @@ mod imp {
         }
     }
 
+    #[cfg(test)]
     thread_local! {
-        #[cfg(test)]
         static TEST_CONFIG: RefCell<Option<(LockRankMode, Option<PathBuf>)>> = const { RefCell::new(None) };
     }
 
-    pub(crate) fn normalize_site(site: &'static Location<'static>) -> String {
-        let file = site.file().replace('\\', "/");
+    pub(crate) fn format_location(site: &'static Location<'static>) -> String {
+        let file = normalize_rel_file(site.file());
         format!("{file}:{}:{}", site.line(), site.column())
     }
 
     pub(crate) fn parse_ratchet(raw: &str) -> HashSet<(u16, u16, String)> {
-        let mut out = HashSet::new();
-        for line in raw.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
-            }
-            let mut parts = trimmed.splitn(3, '\t');
-            let (Some(h), Some(a), Some(s)) = (parts.next(), parts.next(), parts.next()) else {
-                continue;
-            };
-            if let (Ok(held), Ok(acq)) = (h.parse::<u16>(), a.parse::<u16>()) {
-                out.insert((held, acq, s.to_string()));
-            }
-        }
-        out
+        parse_ratchet_entries(raw)
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .map(|e| (e.held_rank, e.acquired_rank, e.key.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn baseline_ratchet() -> &'static HashSet<(u16, u16, String)> {
         static BASELINE: OnceLock<HashSet<(u16, u16, String)>> = OnceLock::new();
         BASELINE.get_or_init(|| parse_ratchet(LOCK_RANK_RATCHET_RAW))
+    }
+
+    fn is_entry_ratcheted(
+        held_rank: u16,
+        acquired_rank: u16,
+        rel_file: &str,
+        resolved_key: Option<&RatchetSiteKey>,
+    ) -> bool {
+        let baseline = baseline_ratchet();
+        if let Some(key) = resolved_key {
+            return baseline.contains(&(held_rank, acquired_rank, key.to_string()));
+        }
+        let prefix = format!("{rel_file}::");
+        baseline
+            .iter()
+            .any(|(h, a, k)| *h == held_rank && *a == acquired_rank && k.starts_with(&prefix))
     }
 
     fn current_mode_and_path() -> (LockRankMode, Option<PathBuf>) {
@@ -221,7 +1007,7 @@ mod imp {
     fn stack_summary(entries: &[HeldEntry]) -> String {
         entries
             .iter()
-            .map(|e| format!("{}@{}", e.rank, normalize_site(e.site)))
+            .map(|e| format!("{}@{}", e.rank, format_location(e.site)))
             .collect::<Vec<_>>()
             .join(" -> ")
     }
@@ -234,50 +1020,64 @@ mod imp {
         stack: &str,
         context: &str,
     ) {
-        let held_str = normalize_site(held_site);
-        let acq_str = normalize_site(acquired_site);
-        let triple = format!("{held_rank}\t{acquired_rank}\t{acq_str}");
+        let held_loc = format_location(held_site);
+        let acq_loc = format_location(acquired_site);
+        let rel_file = normalize_rel_file(acquired_site.file());
+        let resolved_key = resolve_ratchet_key(acquired_site);
+        let acq_key_str = resolved_key
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| acq_loc.clone());
         let (mode, record_path) = current_mode_and_path();
         match mode {
             LockRankMode::Record => {
+                let triple = format!("{held_rank}\t{acquired_rank}\t{acq_key_str}");
                 record_triple(&triple, record_path);
                 tracing::warn!(
                     held_rank,
-                    held_site = %held_str,
+                    held_site = %held_loc,
                     acquired_rank,
-                    acquired_site = %acq_str,
+                    acquired_site = %acq_loc,
+                    ratchet_key = %acq_key_str,
                     held_stack = %stack,
                     "{context} (recorded in lock_rank_ratchet.txt)"
                 );
             }
             LockRankMode::Warn => {
+                if !is_entry_ratcheted(held_rank, acquired_rank, &rel_file, resolved_key.as_ref()) {
+                    UNRATCHETED_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
+                }
                 tracing::warn!(
                     held_rank,
-                    held_site = %held_str,
+                    held_site = %held_loc,
                     acquired_rank,
-                    acquired_site = %acq_str,
+                    acquired_site = %acq_loc,
+                    ratchet_key = %acq_key_str,
                     held_stack = %stack,
                     "{context}"
                 );
             }
             LockRankMode::EnforceRatchet => {
-                if baseline_ratchet().contains(&(held_rank, acquired_rank, acq_str.clone())) {
+                if is_entry_ratcheted(held_rank, acquired_rank, &rel_file, resolved_key.as_ref()) {
                     tracing::warn!(
                         held_rank,
-                        held_site = %held_str,
+                        held_site = %held_loc,
                         acquired_rank,
-                        acquired_site = %acq_str,
+                        acquired_site = %acq_loc,
+                        ratchet_key = %acq_key_str,
                         "{context} (allowed by lock_rank_ratchet.txt)"
                     );
                 } else {
+                    UNRATCHETED_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
                     panic!(
-                        "lock-rank violation ({context}): cannot acquire rank {acquired_rank} at {acq_str} while holding rank {held_rank} at {held_str} [held: {stack}]"
+                        "lock-rank violation ({context}): cannot acquire rank {acquired_rank} at {acq_loc} (key: {acq_key_str}) while holding rank {held_rank} at {held_loc} [held: {stack}]"
                     );
                 }
             }
             LockRankMode::Panic => {
+                UNRATCHETED_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
                 panic!(
-                    "lock-rank violation ({context}): cannot acquire rank {acquired_rank} at {acq_str} while holding rank {held_rank} at {held_str} [held: {stack}]"
+                    "lock-rank violation ({context}): cannot acquire rank {acquired_rank} at {acq_loc} (key: {acq_key_str}) while holding rank {held_rank} at {held_loc} [held: {stack}]"
                 );
             }
         }
@@ -381,35 +1181,6 @@ mod imp {
         });
         let _reset = Reset;
         f()
-    }
-}
-
-#[cfg(not(any(test, debug_assertions, feature = "lock-rank")))]
-mod imp {
-    use super::Location;
-
-    pub(crate) struct HeldToken;
-
-    impl HeldToken {
-        pub(crate) const fn none() -> Self {
-            Self
-        }
-    }
-
-    #[inline(always)]
-    pub(crate) fn enter(_rank: u16, _site: &'static Location<'static>) -> HeldToken {
-        HeldToken
-    }
-
-    #[inline(always)]
-    pub(crate) fn assert_no_locks_held(_site: &'static Location<'static>) {}
-
-    #[inline(always)]
-    pub(crate) fn assert_locks_below(_max_rank: u16, _site: &'static Location<'static>) {}
-
-    #[inline(always)]
-    pub(crate) fn held_ranks() -> Vec<u16> {
-        Vec::new()
     }
 }
 
@@ -1003,8 +1774,11 @@ mod tests {
         assert_eq!(
             parsed.len(),
             non_comment_lines,
-            "every non-comment line in crates/eve-db/lock_rank_ratchet.txt must parse as a unique triple"
+            "every non-comment line in crates/eve-db/lock_rank_ratchet.txt must parse as a unique structured triple"
         );
+        let validated_count = validate_ratchet_against_workspace(LOCK_RANK_RATCHET_RAW, &workspace_root())
+            .expect("committed lock_rank_ratchet.txt must validate against live workspace sites with 0 stale entries");
+        assert_eq!(validated_count, non_comment_lines);
         assert!(
             parsed
                 .iter()
@@ -1012,8 +1786,8 @@ mod tests {
             "committed ratchet must never allow same-rank Ballpark (20 -> 20) re-entry"
         );
         assert!(
-            parsed.iter().all(|(h, _, _)| *h != RANK_SQLITE_FP),
-            "committed ratchet must never allow RANK_SQLITE_FP (42) outer inversions"
+            parsed.iter().all(|(h, _, _)| *h != RANK_SQLITE_FP && *h != RANK_SQLITE_CONN),
+            "committed ratchet must never allow stale RANK_SQLITE_CONN/FP (41/42) entries"
         );
         assert!(
             parsed.iter().all(|(h, a, _)| {
@@ -1035,10 +1809,17 @@ mod tests {
         assert_eq!(entries.len(), 1, "expected 1 recorded triple, got: {recorded}");
         let (h, a, site) = entries.clone().into_iter().next().unwrap();
         assert_eq!((h, a), (RANK_LEAF, RANK_WORLD_INNER));
-        assert!(site.contains("lock_rank.rs"));
+        assert!(site.contains("lock_rank.rs"), "site: {site}");
+        let key = RatchetSiteKey::parse(&site)
+            .expect("recorded ratchet entry must use structured file::fn::field key");
+        assert_eq!(
+            key.enclosing_fn,
+            "committed_ratchet_policy_and_record_enforce_roundtrip"
+        );
+        assert_eq!(key.field_name, "world");
         assert!(!entries.contains(&(RANK_LEAF, RANK_BALLPARK, site)));
 
-        // Re-recording the same site is deduplicated; assert_locks_below enforces upper rank.
+        // Re-recording the same site is deduplicated; assert_locks_below emits distinct field key.
         imp::with_test_mode(LockRankMode::Record, Some(path.clone()), || {
             let _g = leaf.read().unwrap();
             assert_locks_below(RANK_WORLD_INNER);
@@ -1057,6 +1838,68 @@ mod tests {
             assert!(err.is_err());
         });
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ratchet_validation_rejects_stale_and_line_keyed_entries() {
+        let root = workspace_root();
+
+        let stale = "60\t40\tcrates/eve-db/src/lock_rank.rs::nonexistent_ratchet_fn::world\n";
+        let err = validate_ratchet_against_workspace(stale, &root)
+            .expect_err("stale entry matching 0 live sites must fail loudly");
+        assert!(
+            err.iter().any(|m| m.contains("matches 0 live lock sites")),
+            "unexpected stale error: {err:?}"
+        );
+
+        let legacy_line_col = "60\t40\tcrates/eve-db/src/lock_rank.rs:1020:15\n";
+        let legacy_err = parse_ratchet_entries(legacy_line_col)
+            .expect_err("legacy file:line:col key must be rejected");
+        assert!(
+            legacy_err.contains("file:line:col"),
+            "unexpected legacy error: {legacy_err}"
+        );
+        assert!(validate_ratchet_against_workspace(legacy_line_col, &root).is_err());
+
+        let dup = "60\t40\tcrates/eve-db/src/inventory.rs::get_item::read_state\n\
+                   60\t40\tcrates/eve-db/src/inventory.rs::get_item::read_state\n";
+        assert!(
+            validate_ratchet_against_workspace(dup, &root).is_err(),
+            "duplicate structured ratchet entries must fail loudly"
+        );
+    }
+
+    #[test]
+    fn enforce_ratchet_tracks_unconditional_held_locks_and_counts_violations() {
+        // Default mode (no test override) still tracks held_lock_ranks identically
+        // across debug/test and release builds.
+        let bp: RankedRwLock<u32, RANK_BALLPARK> = RankedRwLock::new(1);
+        let world: RankedRwLock<u32, RANK_WORLD_INNER> = RankedRwLock::new(2);
+        let leaf: RankedRwLock<u32, RANK_LEAF> = RankedRwLock::new(3);
+        assert!(held_lock_ranks().is_empty());
+        {
+            let _g20 = bp.read().unwrap();
+            assert_eq!(held_lock_ranks(), vec![RANK_BALLPARK]);
+            let _g40 = world.read().unwrap();
+            assert_eq!(held_lock_ranks(), vec![RANK_BALLPARK, RANK_WORLD_INNER]);
+        }
+        assert!(held_lock_ranks().is_empty());
+
+        // Unlisted inversion under EnforceRatchet must panic AND increment
+        // unratcheted_violation_count so catch_unwind cannot hide it.
+        let before = unratcheted_violation_count();
+        imp::with_test_mode(LockRankMode::EnforceRatchet, None, || {
+            let _g60 = leaf.read().unwrap();
+            let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _unlisted = world.read();
+            }));
+            assert!(err.is_err(), "unlisted 60->40 must panic in EnforceRatchet");
+        });
+        assert!(
+            unratcheted_violation_count() > before,
+            "unratcheted_violation_count must increment before panicking"
+        );
+        assert!(held_lock_ranks().is_empty());
     }
 
     #[test]

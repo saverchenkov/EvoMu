@@ -1270,3 +1270,33 @@ async fn test_p1_track_b_regressions_issues_26_28_30_32_33() {
         "Issue #30: Disallowed redirect_uri scheme must be rejected with 400"
     );
 }
+
+#[test]
+fn test_e05_lock_rank_ratchet_has_no_stale_or_line_keyed_entries() {
+    let root = eve_db::lock_rank::workspace_root();
+    let count = eve_db::lock_rank::validate_ratchet_against_workspace(
+        eve_db::lock_rank::LOCK_RANK_RATCHET_RAW,
+        &root,
+    )
+    .expect(
+        "E-05: crates/eve-db/lock_rank_ratchet.txt must contain only live structured \
+         `<relative_file>::<enclosing_fn_name>::<field_name>` entries with zero stale entries",
+    );
+    assert!(
+        count > 0,
+        "expected non-empty structured ratchet baseline or deliberate zeroing"
+    );
+
+    // Ensure stale entries matching 0 live sites and legacy `file:line:col` keys fail loudly.
+    let stale = "60\t40\tcrates/eve-server/src/quasar_gateway.rs::nonexistent_stale_fn::db\n";
+    assert!(
+        eve_db::lock_rank::validate_ratchet_against_workspace(stale, &root).is_err(),
+        "E-05: stale ratchet entries matching 0 sites must fail loudly"
+    );
+
+    let line_col = "60\t40\tcrates/eve-server/src/quasar_gateway.rs:512:17\n";
+    assert!(
+        eve_db::lock_rank::validate_ratchet_against_workspace(line_col, &root).is_err(),
+        "E-05: legacy file:line:col ratchet keys must fail loudly"
+    );
+}
