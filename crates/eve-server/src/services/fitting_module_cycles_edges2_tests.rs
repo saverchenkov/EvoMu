@@ -565,13 +565,17 @@ async fn activate_auth_offline_burnout_nanite_reactivation_and_overload_edges() 
     // 11. #896: Weapon charge consumption in `apply_deferred_post_cycle_actions` and repeating
     // `PendingCycleAction::CycleWeaponDamage` emit both `OnItemChange` and `OnModuleAttributeChanges` (805).
     let charge_id = 96_800_401_i64;
-    let _ = ctx.db.register_online_session(eve_db::OnlineSession {
-        session_id: 9850,
-        user_id: char_id as u64,
-        character_id: Some(char_id),
-        solar_system_id: Some(sys_id),
-        station_id: None,
+    let seed_uid = ctx.db.with_snapshot(|snap| {
+        snap.accounts.values().next().expect("seed account").user_id
     });
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.user_id = seed_uid;
+        }
+    });
+    let _ = ctx
+        .db
+        .acquire_online_lock(seed_uid, 9850, Some(char_id), true, 1_000);
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.insert(gun_id);
         snap.items.insert(
