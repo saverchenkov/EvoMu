@@ -64,6 +64,11 @@ pub(crate) fn id_field(field: u32, id: u64, out: &mut Vec<u8>) {
     );
 }
 
+/// Encodes a `{ seconds = 1 }` timestamp sub-message at `field` (for excluded `quasar_sov_skyhook`).
+pub(crate) fn ts_field(field: u32, seconds: u64, out: &mut Vec<u8>) {
+    id_field(field, seconds, out);
+}
+
 pub(crate) fn push_notice(pending: &PendingNotices, sys: u32, name: &str, value: Vec<u8>) {
     pending
         .write()
