@@ -692,6 +692,59 @@ async fn gh998_gh999_gh1000_bookmarks_dungeon_owner_and_courier_item_notificatio
     assert_eq!(bms[0].dict_get("locationNumber"), Some(&PyRep::Integer(0)));
     assert_eq!(bms[0].dict_get("agentID"), Some(&PyRep::Integer(ag.agent_id)));
     assert_eq!(bms[0].dict_get("locationType"), Some(&PyRep::String("dungeon".into())));
+    assert_eq!(bms[0].dict_get("itemID"), Some(&PyRep::None));
+    assert_eq!(bms[0].dict_get("typeID"), Some(&PyRep::Integer(5)));
+
+    // #1017: Bookmark referencing an SDE station item carries itemID and station_type_id.
+    let station_id = ctx
+        .sde
+        .stations
+        .values()
+        .find(|s| s.solar_system_id == sys_id)
+        .map(|s| (s.station_id, s.station_type_id as i64));
+    if let Some((st_id, st_type_id)) = station_id {
+        let st_bm_id = 91_000_002_i64;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.bookmarks.insert(
+                st_bm_id,
+                eve_db::BookmarkRecord {
+                    bookmark_id: st_bm_id,
+                    owner_id: char_id,
+                    item_id: Some(st_id),
+                    solar_system_id: sys_id,
+                    x: 100.0,
+                    y: 200.0,
+                    z: 300.0,
+                    label: "Mission Pocket Station".into(),
+                    memo: "Mission Pocket Station".into(),
+                    folder_id: None,
+                    is_shared: false,
+                },
+            );
+        });
+        let journal2 = call_agent_mgr(&ctx, &mut sess, "GetMyJournalDetails", &[], &kw)
+            .await
+            .expect("GetMyJournalDetails with station bookmark");
+        let PyRep::Tuple(j2_parts) = journal2 else {
+            panic!("expected tuple");
+        };
+        let PyRep::List(ref j2_missions) = j2_parts[0] else {
+            panic!("expected missions");
+        };
+        let enc_row2 = j2_missions
+            .iter()
+            .find(|r| r.dict_get("missionID") == Some(&PyRep::Integer(encounter_mid as i64)))
+            .expect("encounter row2");
+        let Some(PyRep::List(bms2)) = enc_row2.dict_get("bookmarks") else {
+            panic!("expected bookmarks list2");
+        };
+        let st_bm = bms2
+            .iter()
+            .find(|b| b.dict_get("bookmarkID") == Some(&PyRep::Integer(st_bm_id)))
+            .expect("station bookmark");
+        assert_eq!(st_bm.dict_get("itemID"), Some(&PyRep::Integer(st_id)));
+        assert_eq!(st_bm.dict_get("typeID"), Some(&PyRep::Integer(st_type_id)));
+    }
 
     // #999: GetMissionObjectiveInfo dungeons[].ownerID is an NPC faction or corp ID, never ag.agent_id
     let obj_info = call_agent_mgr(

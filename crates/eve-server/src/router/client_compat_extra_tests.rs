@@ -1613,6 +1613,8 @@ fn gh998_and_gh999_agent_journal_bookmarks_and_dungeon_owner_compat() {
                 PyRep::List(vec![PyRep::keyval([
                     ("bookmarkID", PyRep::Integer(900_002)),
                     ("solarSystemID", PyRep::Integer(30_000_144)),
+                    ("itemID", PyRep::Integer(60_003_760)),
+                    ("typeID", PyRep::Integer(1529)),
                 ])]),
                 PyRep::Bool(false),
                 PyRep::Bool(false),
@@ -1631,9 +1633,23 @@ fn gh998_and_gh999_agent_journal_bookmarks_and_dungeon_owner_compat() {
         panic!("expected missions list");
     };
     assert_eq!(m_rows.len(), 2);
-    for (row_idx, expected_loc, expected_hint, expected_loc_type) in [
-        (0usize, 30_000_142_i64, "UI/Agents/MissionTypes/Courier", "objective.destination"),
-        (1usize, 30_000_144_i64, "UI/Agents/MissionTypes/Encounter", "dungeon"),
+    for (row_idx, expected_loc, expected_hint, expected_loc_type, expected_item, expected_type) in [
+        (
+            0usize,
+            30_000_142_i64,
+            "UI/Agents/MissionTypes/Courier",
+            "objective.destination",
+            PyRep::None,
+            5_i64,
+        ),
+        (
+            1usize,
+            30_000_144_i64,
+            "UI/Agents/MissionTypes/Encounter",
+            "dungeon",
+            PyRep::Integer(60_003_760),
+            1529_i64,
+        ),
     ] {
         let PyRep::Tuple(ref cols) = m_rows[row_idx] else {
             panic!("expected 10-tuple row");
@@ -1648,6 +1664,8 @@ fn gh998_and_gh999_agent_journal_bookmarks_and_dungeon_owner_compat() {
         assert_eq!(bms[0].dict_get("locationNumber"), Some(&PyRep::Integer(0)));
         assert_eq!(bms[0].dict_get("agentID"), Some(&PyRep::Integer(3_008_416)));
         assert_eq!(bms[0].dict_get("locationType"), Some(&PyRep::String(expected_loc_type.into())));
+        assert_eq!(bms[0].dict_get("itemID"), Some(&expected_item));
+        assert_eq!(bms[0].dict_get("typeID"), Some(&PyRep::Integer(expected_type)));
         assert!(bms[0].dict_get("coords").is_none());
     }
 

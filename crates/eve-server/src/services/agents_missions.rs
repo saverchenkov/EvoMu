@@ -385,6 +385,19 @@ pub async fn handle_with_bound(
                             .into_iter()
                             .enumerate()
                             .map(|(idx, b)| {
+                                let bm_type_id = b
+                                    .item_id
+                                    .and_then(|eid| {
+                                        ctx.sde
+                                            .stations
+                                            .get(&eid)
+                                            .map(|s| s.station_type_id as i64)
+                                            .or_else(|| snap.items.get(&eid).map(|i| i.type_id as i64))
+                                            .or_else(|| {
+                                                snap.structures.get(&eid).map(|st| st.type_id as i64)
+                                            })
+                                    })
+                                    .unwrap_or(5_i64);
                                 PyRep::keyval([
                                     ("bookmarkID", PyRep::Integer(b.bookmark_id)),
                                     ("agentID", PyRep::Integer(m.agent_id)),
@@ -392,6 +405,11 @@ pub async fn handle_with_bound(
                                     ("locationID", PyRep::Integer(b.solar_system_id as i64)),
                                     ("locationNumber", PyRep::Integer(idx as i64)),
                                     ("locationType", PyRep::String(bm_loc_type.into())),
+                                    (
+                                        "itemID",
+                                        b.item_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                                    ),
+                                    ("typeID", PyRep::Integer(bm_type_id)),
                                     ("hint", PyRep::String(bm_hint.into())),
                                     ("label", PyRep::String(b.label.clone())),
                                     ("x", PyRep::Real(b.x)),
