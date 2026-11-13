@@ -22,6 +22,10 @@ pub use agents_missions_helpers::*;
 #[path = "agents_finder_query.rs"]
 mod agents_finder_query;
 
+use crate::router::notify_registry::{
+    OnAgentMissionChange, OnAgentMissionObjectivesCompleted, OnAgentMissionObjectivesFailed,
+    OnIncomingTransmission,
+};
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::notify_emitters_character_services::emit_agent_mission_dialogue;
 use eve_db::{
@@ -1093,11 +1097,23 @@ pub async fn handle_with_bound(
                                 lp_reward,
                                 bonus_reward,
                             } = compute_character_mission_rewards(ctx, char_id, agent_id, mission_id, sys_id);
-                            ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionChange", "charid", vec![PyRep::String("offered".into()), PyRep::Integer(agent_id)]);
+                            ctx.emit_typed(
+                                NotificationTarget::Character(char_id),
+                                OnAgentMissionChange {
+                                    action: "offered".into(),
+                                    agent_id,
+                                },
+                            );
                             let clean_header = title.trim_start_matches("[d]").trim();
                             let header_str = if clean_header.is_empty() { "Agent Transmission" } else { clean_header };
                             let trans_kv = PyRep::keyval([("header", PyRep::String(header_str.to_string())), ("text", PyRep::String(briefing.clone())), ("icon", PyRep::String("res:/UI/Texture/WindowIcons/agent.png".into())), ("agentID", PyRep::Integer(agent_id))]);
-                            ctx.notify(NotificationTarget::Character(char_id), "OnIncomingTransmission", "charid", vec![trans_kv, PyRep::Bool(true)]);
+                            ctx.emit_typed(
+                                NotificationTarget::Character(char_id),
+                                OnIncomingTransmission {
+                                    transmission: trans_kv,
+                                    is_agent_mission: true,
+                                },
+                            );
                             let mut offer_kvs = vec![
                                 ("missionID", PyRep::Integer(mission_id as i64)),
                                 ("contentID", PyRep::Integer(mission_id as i64)),
@@ -1372,7 +1388,13 @@ pub async fn handle_with_bound(
                     });
                     let agent_type_id = ctx.sde.agents.get(&active_agent_id).map(|a| a.agent_type_id).unwrap_or(2);
                     let mission_body = ctx.sde.missions.get(&mission_id).and_then(|m| m.content_template.as_deref()).unwrap_or("");
-                    ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionChange", "charid", vec![PyRep::String("offer_accepted".into()), PyRep::Integer(active_agent_id)]);
+                    ctx.emit_typed(
+                        NotificationTarget::Character(char_id),
+                        OnAgentMissionChange {
+                            action: "offer_accepted".into(),
+                            agent_id: active_agent_id,
+                        },
+                    );
                     emit_agent_mission_dialogue(ctx, char_id, active_agent_id, agent_type_id, &mission_title, mission_body, false);
                     let accept_msg = format!(
                         "Excellent. Your mission '{mission_title}' is now active in your journal. Return here once your objectives are complete."
@@ -1486,8 +1508,19 @@ pub async fn handle_with_bound(
                                 },
                             );
                         });
-                        ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionObjectivesFailed", "charid", vec![PyRep::Integer(active_agent_id)]);
-                        ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionChange", "charid", vec![PyRep::String("failed".into()), PyRep::Integer(active_agent_id)]);
+                        ctx.emit_typed(
+                            NotificationTarget::Character(char_id),
+                            OnAgentMissionObjectivesFailed {
+                                agent_id: active_agent_id,
+                            },
+                        );
+                        ctx.emit_typed(
+                            NotificationTarget::Character(char_id),
+                            OnAgentMissionChange {
+                                action: "failed".into(),
+                                agent_id: active_agent_id,
+                            },
+                        );
                         return Some(Err(BridgeRpcError {
                             code: "MissionExpired".into(),
                             message: format!("Mission {mission_id} has expired and failed"),
@@ -1811,8 +1844,19 @@ pub async fn handle_with_bound(
                                 crate::services::agents_mission_rewards::emit_mission_item_reward_notification(ctx, char_id, irw);
                             }
                             notify_standing_changes(ctx, char_id, &st_changes);
-                            ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionObjectivesCompleted", "charid", vec![PyRep::Integer(active_agent_id)]);
-                            ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionChange", "charid", vec![PyRep::String("completed".into()), PyRep::Integer(active_agent_id)]);
+                            ctx.emit_typed(
+                                NotificationTarget::Character(char_id),
+                                OnAgentMissionObjectivesCompleted {
+                                    agent_id: active_agent_id,
+                                },
+                            );
+                            ctx.emit_typed(
+                                NotificationTarget::Character(char_id),
+                                OnAgentMissionChange {
+                                    action: "completed".into(),
+                                    agent_id: active_agent_id,
+                                },
+                            );
                             let agent_type_id = ctx.sde.agents.get(&active_agent_id).map(|a| a.agent_type_id).unwrap_or(2);
                             let mission_title = ctx.sde.missions.get(&mission_id).map(|m| m.title.clone()).unwrap_or_else(|| format!("Mission {mission_id}"));
                             let mission_body = ctx.sde.missions.get(&mission_id).and_then(|m| m.content_template.as_deref()).unwrap_or("");
@@ -1863,10 +1907,21 @@ pub async fn handle_with_bound(
                         Ok((new_state, penalty_applied, was_accepted)) => {
                             let mission_state = if was_accepted { 6_i64 } else { 5_i64 };
                             if was_accepted {
-                                ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionObjectivesFailed", "charid", vec![PyRep::Integer(active_agent_id)]);
+                                ctx.emit_typed(
+                                    NotificationTarget::Character(char_id),
+                                    OnAgentMissionObjectivesFailed {
+                                        agent_id: active_agent_id,
+                                    },
+                                );
                             }
                             let action_str = if was_accepted { "quit" } else { "offer_declined" };
-                            ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionChange", "charid", vec![PyRep::String(action_str.into()), PyRep::Integer(active_agent_id)]);
+                            ctx.emit_typed(
+                                NotificationTarget::Character(char_id),
+                                OnAgentMissionChange {
+                                    action: action_str.into(),
+                                    agent_id: active_agent_id,
+                                },
+                            );
                             let quit_msg = if was_accepted {
                                 "Very well. I have cancelled your active assignment.".to_string()
                             } else {

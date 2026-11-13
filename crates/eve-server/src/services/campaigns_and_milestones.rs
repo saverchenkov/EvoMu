@@ -20,6 +20,10 @@ use std::sync::OnceLock;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 
+use crate::router::notify_registry::{
+    push_typed_session_notification, OnItemChange, OnRedeemingQueueUpdated,
+    OnRedeemingTokensUpdated,
+};
 use crate::router::ServerContext;
 use crate::services::cosmetics_ui_ops::{load_cosmetics_ui_state, save_cosmetics_ui_state};
 
@@ -672,49 +676,51 @@ fn handle_login_campaign_claim_reward(
                 .get(&item.type_id)
                 .map(|t| (t.group_id, t.category_id))
                 .unwrap_or((0, 0));
-            let item_change_args = vec![
-                PyRep::keyval([
-                    ("itemID", PyRep::Integer(item.item_id)),
-                    ("typeID", PyRep::Integer(i64::from(item.type_id))),
-                    ("ownerID", PyRep::Integer(char_id)),
-                    ("locationID", PyRep::Integer(item.location_id)),
-                    ("flagID", PyRep::Integer(eve_db::InventoryFlag::Hangar as i64)),
-                    (
-                        "quantity",
-                        PyRep::Integer(if item.singleton {
-                            -1
-                        } else {
-                            i64::from(item.quantity)
-                        }),
-                    ),
-                    ("groupID", PyRep::Integer(i64::from(group_id))),
-                    ("categoryID", PyRep::Integer(i64::from(category_id))),
-                    ("singleton", PyRep::Bool(item.singleton)),
-                    ("stacksize", PyRep::Integer(i64::from(item.quantity))),
-                ]),
-                PyRep::Dict(Vec::new()),
-            ];
+            let item_rep = PyRep::keyval([
+                ("itemID", PyRep::Integer(item.item_id)),
+                ("typeID", PyRep::Integer(i64::from(item.type_id))),
+                ("ownerID", PyRep::Integer(char_id)),
+                ("locationID", PyRep::Integer(item.location_id)),
+                ("flagID", PyRep::Integer(eve_db::InventoryFlag::Hangar as i64)),
+                (
+                    "quantity",
+                    PyRep::Integer(if item.singleton {
+                        -1
+                    } else {
+                        i64::from(item.quantity)
+                    }),
+                ),
+                ("groupID", PyRep::Integer(i64::from(group_id))),
+                ("categoryID", PyRep::Integer(i64::from(category_id))),
+                ("singleton", PyRep::Bool(item.singleton)),
+                ("stacksize", PyRep::Integer(i64::from(item.quantity))),
+            ]);
             if !session.live_notify_listener {
-                session.push_notification("OnItemChange", item_change_args.clone());
+                push_typed_session_notification(
+                    session,
+                    OnItemChange {
+                        item: item_rep.clone(),
+                        change: PyRep::Dict(Vec::new()),
+                        location: PyRep::None,
+                    },
+                );
             }
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnItemChange",
-                "charid",
-                item_change_args,
+                OnItemChange {
+                    item: item_rep,
+                    change: PyRep::Dict(Vec::new()),
+                    location: PyRep::None,
+                },
             );
         }
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::Character(char_id),
-            "OnRedeemingQueueUpdated",
-            "charid",
-            vec![],
+            OnRedeemingQueueUpdated,
         );
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::Character(char_id),
-            "OnRedeemingTokensUpdated",
-            "charid",
-            vec![],
+            OnRedeemingTokensUpdated,
         );
     }
     Ok(res)

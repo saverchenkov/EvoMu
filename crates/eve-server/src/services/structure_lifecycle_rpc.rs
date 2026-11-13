@@ -4,6 +4,10 @@
 #![forbid(unsafe_code)]
 use super::structure_lifecycle::{self as life, STATE_ANCHOR_VULNERABLE};
 use super::structure_upwell_ops::{load_ext_state, save_ext_state};
+use crate::router::notify_registry::{
+    OnCorporationStructuresUpdated, OnCurrentStructureStateChanged, OnCynoJammerChanged,
+    OnStructureAdded, OnStructureServiceChanged, OnStructureStateChanged,
+};
 use crate::router::ServerContext;
 use eve_db::{InventoryFlag, UpwellStructureRecord};
 use eve_machonet::SessionState;
@@ -369,34 +373,32 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
     if let Some(st_rec) = ctx.db.with_snapshot(|snap| snap.structures.get(&structure_id).cloned()) {
         crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_structure_delta(ctx, sys_id, &[st_rec], &[]);
     }
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::SolarSystem(sys_id),
-        "OnStructureAdded",
-        "solarsystemid",
-        vec![PyRep::Integer(i64::from(sys_id)), PyRep::Integer(structure_id)],
+        OnStructureAdded {
+            solar_system_id: i64::from(sys_id),
+            structure_id,
+        },
     );
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::Corporation(owner_corp_id),
-        "OnCorporationStructuresUpdated",
-        "corpid",
-        vec![],
+        OnCorporationStructuresUpdated,
     );
-    let state_args = vec![
-        PyRep::Integer(i64::from(sys_id)),
-        PyRep::Integer(structure_id),
-        PyRep::String(STATE_ANCHOR_VULNERABLE.into()),
-    ];
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::SolarSystem(sys_id),
-        "OnStructureStateChanged",
-        "solarsystemid",
-        state_args.clone(),
+        OnStructureStateChanged {
+            solar_system_id: i64::from(sys_id),
+            structure_id,
+            state: STATE_ANCHOR_VULNERABLE.into(),
+        },
     );
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::SolarSystem(sys_id),
-        "OnCurrentStructureStateChanged",
-        "solarsystemid",
-        state_args,
+        OnCurrentStructureStateChanged {
+            solar_system_id: i64::from(sys_id),
+            structure_id,
+            state: STATE_ANCHOR_VULNERABLE.into(),
+        },
     );
     let prefit_core_type = ctx
         .sde
@@ -758,11 +760,12 @@ pub async fn apply_live_combat_damage_to_upwell_structure(
             life::STATE_ARMOR_VULNERABLE | life::STATE_ARMOR_REINFORCED | life::STATE_HULL_REINFORCED | life::STATE_DESTROYED
         )
     {
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::SolarSystem(sys_id),
-            "OnCynoJammerChanged",
-            "solarsystemid",
-            vec![PyRep::Integer(sys_id as i64), PyRep::Integer(0)],
+            OnCynoJammerChanged {
+                solar_system_id: sys_id as i64,
+                status: 0,
+            },
         );
     }
     if !destroyed {
@@ -1191,11 +1194,9 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
     let (structure_id, fitted_id, type_id, old_flag, destroyed, is_online, service_changed, released) = res;
     crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
     if service_changed {
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::Station(structure_id),
-            "OnStructureServiceChanged",
-            "stationid",
-            vec![PyRep::Integer(structure_id)],
+            OnStructureServiceChanged { structure_id },
         );
     }
     if destroyed {
@@ -1286,11 +1287,9 @@ pub fn handle_structure_module_online(ctx: &ServerContext, session: &mut Session
     })?;
     crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
     if is_service {
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::Station(structure_id),
-            "OnStructureServiceChanged",
-            "stationid",
-            vec![PyRep::Integer(structure_id)],
+            OnStructureServiceChanged { structure_id },
         );
     }
     Ok(PyRep::keyval([

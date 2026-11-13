@@ -3,6 +3,7 @@
 
 #![forbid(unsafe_code)]
 
+use crate::router::notify_registry::*;
 use crate::router::{NotificationTarget, ServerContext};
 use eve_proto::{DBRowDescriptor, PyRep};
 
@@ -72,18 +73,16 @@ pub fn emit_fw_capture_changed(
     capture_time_ms: f64,
 ) {
     let now_ft = ctx.now_blueos_filetime_ticks();
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(solar_system_id),
-        "OnCaptureChanged",
-        "solarsystemid",
-        vec![
-            PyRep::Integer(ball_id),
-            PyRep::Integer(faction_id),
-            PyRep::Integer(now_ft),
-            PyRep::Real(points),
-            PyRep::Real(capture_time_ms),
-            PyRep::Integer(faction_id),
-        ],
+        OnCaptureChanged {
+            ball_id,
+            capture_id: faction_id,
+            last_incident: now_ft,
+            points,
+            capture_time: capture_time_ms,
+            last_capturing: faction_id,
+        },
     );
 }
 
@@ -98,13 +97,11 @@ pub fn emit_structure_cfg_and_jammer_notifications(
     pos: [f64; 3],
     online: bool,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnCfgDataChanged",
-        "solarsystemid",
-        vec![
-            PyRep::String("evelocations".into()),
-            PyRep::List(vec![
+        OnCfgDataChanged {
+            what: "evelocations".into(),
+            data: PyRep::List(vec![
                 PyRep::Integer(structure_id),
                 PyRep::String(name.to_string()),
                 PyRep::Integer(i64::from(sys_id)),
@@ -113,19 +110,20 @@ pub fn emit_structure_cfg_and_jammer_notifications(
                 PyRep::Real(pos[2]),
                 PyRep::None,
             ]),
-        ],
+        },
     );
     if type_id == 37_534 {
         let sim_time = if online {
-            PyRep::Integer(ctx.now_blueos_filetime_ticks())
+            Some(ctx.now_blueos_filetime_ticks())
         } else {
-            PyRep::None
+            None
         };
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::SolarSystem(sys_id),
-            "OnCynoJammerChanged",
-            "solarsystemid",
-            vec![PyRep::Integer(i64::from(sys_id)), sim_time],
+            OnCynoJammerChangedOpt {
+                solar_system_id: i64::from(sys_id),
+                status: sim_time,
+            },
         );
     }
 }
@@ -142,34 +140,35 @@ pub fn emit_ess_bank_link_notifications(
 ) {
     if method == "AttemptLinkToMainBank" {
         if link_started_only {
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::SolarSystem(sys_id),
-                "OnESSMainBankLinkNotification",
-                "solarsystemid",
-                vec![PyRep::Integer(i64::from(sys_id))],
+                OnESSMainBankLinkNotification {
+                    solar_system_id: i64::from(sys_id),
+                },
             );
         } else if payout > 0.0 {
-            ctx.notify(
+            ctx.emit_typed_with_id_type(
                 NotificationTarget::SolarSystem(sys_id),
-                "OnMainBankPlayerHackSuccess",
                 "solarsystemid",
-                vec![PyRep::Dict(vec![
-                    (
-                        PyRep::String("solarSystemID".into()),
-                        PyRep::Integer(i64::from(sys_id)),
-                    ),
-                    (PyRep::String("linkID".into()), PyRep::Integer(1)),
-                    (PyRep::String("characterID".into()), PyRep::Integer(char_id)),
-                    (PyRep::String("amount".into()), PyRep::Real(payout)),
-                ])],
+                OnMainBankPlayerHackSuccess {
+                    data: PyRep::Dict(vec![
+                        (
+                            PyRep::String("solarSystemID".into()),
+                            PyRep::Integer(i64::from(sys_id)),
+                        ),
+                        (PyRep::String("linkID".into()), PyRep::Integer(1)),
+                        (PyRep::String("characterID".into()), PyRep::Integer(char_id)),
+                        (PyRep::String("amount".into()), PyRep::Real(payout)),
+                    ]),
+                },
             );
         }
     } else if method == "AttemptLinkToReserveBank" && link_started_only {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::SolarSystem(sys_id),
-            "OnESSReserveBankLinkNotification",
-            "solarsystemid",
-            vec![PyRep::Integer(i64::from(sys_id))],
+            OnESSReserveBankLinkNotification {
+                solar_system_id: i64::from(sys_id),
+            },
         );
     }
 }
@@ -181,22 +180,23 @@ pub fn emit_ess_main_bank_link_disconnected(
     char_id: i64,
     reason: &str,
 ) {
-    ctx.notify(
+    ctx.emit_typed_with_id_type(
         NotificationTarget::SolarSystem(sys_id),
-        "OnMainBankPlayerLinkDisconnected",
         "solarsystemid",
-        vec![PyRep::Dict(vec![
-            (
-                PyRep::String("solarSystemID".into()),
-                PyRep::Integer(i64::from(sys_id)),
-            ),
-            (PyRep::String("linkID".into()), PyRep::Integer(1)),
-            (PyRep::String("characterID".into()), PyRep::Integer(char_id)),
-            (
-                PyRep::String("reason".into()),
-                PyRep::String(reason.to_string()),
-            ),
-        ])],
+        OnMainBankPlayerLinkDisconnected {
+            data: PyRep::Dict(vec![
+                (
+                    PyRep::String("solarSystemID".into()),
+                    PyRep::Integer(i64::from(sys_id)),
+                ),
+                (PyRep::String("linkID".into()), PyRep::Integer(1)),
+                (PyRep::String("characterID".into()), PyRep::Integer(char_id)),
+                (
+                    PyRep::String("reason".into()),
+                    PyRep::String(reason.to_string()),
+                ),
+            ]),
+        },
     );
 }
 
@@ -251,17 +251,17 @@ pub fn spawn_and_emit_cosmic_anomaly(
             });
         }
     });
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnCosmicAnomalyAdded",
-        "solarsystemid",
-        vec![PyRep::keyval([
-            ("targetID", PyRep::String(out_anom_id.clone())),
-            ("instanceID", PyRep::Integer(out_inst_id)),
-            ("dungeonID", PyRep::Integer(i64::from(dungeon_id))),
-            ("dungeonName", PyRep::String(out_name)),
-            ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
-        ])],
+        OnCosmicAnomalyAdded {
+            anomaly: PyRep::keyval([
+                ("targetID", PyRep::String(out_anom_id.clone())),
+                ("instanceID", PyRep::Integer(out_inst_id)),
+                ("dungeonID", PyRep::Integer(i64::from(dungeon_id))),
+                ("dungeonName", PyRep::String(out_name)),
+                ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+            ]),
+        },
     );
     (out_anom_id, out_inst_id)
 }
@@ -296,11 +296,11 @@ pub fn emit_cosmic_signature_added(
             });
         }
     });
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnCosmicSignatureAdded",
-        "solarsystemid",
-        vec![PyRep::String(sig_id.to_string())],
+        OnCosmicSignatureAdded {
+            target_id: sig_id.to_string(),
+        },
     );
 }
 
@@ -313,31 +313,22 @@ pub fn emit_escalation_created_or_advanced(
     dungeon_template_id: u32,
     notify_fleet: bool,
 ) {
-    ctx.notify(
+    ctx.emit_typed(NotificationTarget::Character(char_id), OnEscalatingPathChange);
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnEscalatingPathChange",
-        "charid",
-        vec![],
-    );
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnEscalatingPathMessage",
-        "charid",
-        vec![PyRep::Integer(instance_id)],
+        OnEscalatingPathMessage { instance_id },
     );
     if notify_fleet {
         let fleet_id_opt = ctx
             .db
             .with_snapshot(|s| s.characters.get(&char_id).and_then(|c| c.fleet_id));
         if let Some(fid) = fleet_id_opt.filter(|&f| f > 0) {
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Fleet(fid),
-                "OnFleetEscalatingPathMessage",
-                "fleetid",
-                vec![
-                    PyRep::Integer(char_id),
-                    PyRep::Integer(i64::from(dungeon_template_id)),
-                ],
+                OnFleetEscalatingPathMessage {
+                    char_id,
+                    journal_entry_template_id: i64::from(dungeon_template_id),
+                },
             );
         }
     }
@@ -375,40 +366,37 @@ pub fn emit_dungeon_progression_notifications(
             PyRep::Bool(completed_now),
         ),
     ]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnEnteringDungeonRoom",
-        "charid",
-        vec![
-            PyRep::Integer(dungeon_id),
-            PyRep::Integer(room_id),
-            PyRep::Tuple(vec![
+        OnEnteringDungeonRoom {
+            dungeon_id,
+            room_id,
+            room_position: PyRep::Tuple(vec![
                 PyRep::Real(room_pos[0]),
                 PyRep::Real(room_pos[1]),
                 PyRep::Real(room_pos[2]),
             ]),
-            PyRep::Integer(instance_id),
-            values_dict.clone(),
-        ],
+            instance_id,
+            dungeon_values: values_dict.clone(),
+        },
     );
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnDungeonValues",
-        "charid",
-        vec![PyRep::Integer(dungeon_id), values_dict],
+        OnDungeonValues {
+            dungeon_id,
+            values: values_dict,
+        },
     );
     let room_objective_id = room_id * 10 + i64::from(current_wave.max(1));
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnProgressionRoomJoined",
-        "charid",
-        vec![
-            PyRep::Integer(dungeon_id),
-            PyRep::Integer(room_objective_id),
-            PyRep::List(Vec::new()),
-            PyRep::List(Vec::new()),
-            PyRep::Integer(room_id),
-        ],
+        OnProgressionRoomJoined {
+            progression_name_id: dungeon_id,
+            objective_id: room_objective_id,
+            task_widget_states: PyRep::List(Vec::new()),
+            objective_history: Vec::new(),
+            room_id,
+        },
     );
 
     let row = build_util_row(
@@ -430,27 +418,23 @@ pub fn emit_dungeon_progression_notifications(
         ],
     );
     if matches!(category, "Expedition" | "DED" | "CombatSignature") {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnEscalatingPathDungeonEntered",
-            "charid",
-            vec![row],
+            OnEscalatingPathDungeonEntered { row },
         );
     } else {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnDistributionDungeonEntered",
-            "charid",
-            vec![row],
+            OnDistributionDungeonEntered { row },
         );
     }
 
     if completed_now {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnDungeonCompleted",
-            "charid",
-            vec![PyRep::Integer(i64::from(dungeon_id))],
+            OnDungeonCompleted {
+                dungeon_id: i64::from(dungeon_id),
+            },
         );
     }
 }
@@ -480,11 +464,11 @@ pub fn emit_exiting_dungeon_on_warp_if_present(
                 })
             });
     if let Some(dungeon_id) = found_did {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnExitingDungeon",
-            "charid",
-            vec![PyRep::Integer(i64::from(dungeon_id))],
+            OnExitingDungeon {
+                dungeon_id: i64::from(dungeon_id),
+            },
         );
     }
 }
@@ -497,19 +481,17 @@ pub fn emit_dungeon_edit(
     room_id: i64,
     room_pos: [f64; 3],
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnDungeonEdit",
-        "charid",
-        vec![
-            PyRep::Integer(dungeon_id),
-            PyRep::Integer(room_id),
-            PyRep::Tuple(vec![
+        OnDungeonEdit {
+            dungeon_id,
+            room_id,
+            room_pos: PyRep::Tuple(vec![
                 PyRep::Real(room_pos[0]),
                 PyRep::Real(room_pos[1]),
                 PyRep::Real(room_pos[2]),
             ]),
-        ],
+        },
     );
 }
 
@@ -521,17 +503,13 @@ pub fn emit_drone_activity_change(
     activity_id: i64,
     activity: Option<&str>,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnDroneActivityChange",
-        "charid",
-        vec![
-            PyRep::Integer(drone_id),
-            PyRep::Integer(activity_id),
-            activity
-                .map(|s| PyRep::String(s.to_string()))
-                .unwrap_or(PyRep::None),
-        ],
+        OnDroneActivityChange {
+            drone_id,
+            activity_id,
+            activity: activity.map(str::to_string),
+        },
     );
 }
 
@@ -578,16 +556,14 @@ pub fn emit_module_activation_godma_notifications(
         PyRep::Integer(0),
     ]);
     let active_effects = PyRep::Dict(vec![(PyRep::Integer(effect_id), active_effect_line)]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnGodmaEffectInfo",
-        "charid",
-        vec![
-            PyRep::Integer(module_id),
-            PyRep::Integer(i64::from(module_type_id)),
-            active_effects.clone(),
-            PyRep::Integer(now_ft),
-        ],
+        OnGodmaEffectInfo {
+            item_id: module_id,
+            type_id: i64::from(module_type_id),
+            active_effects: active_effects.clone(),
+            time: now_ft,
+        },
     );
 
     if let Some(mut inv_item) = ctx.db.get_item(module_id) {
@@ -653,11 +629,12 @@ pub fn emit_module_activation_godma_notifications(
             ("time", PyRep::Integer(now_ft)),
             ("wallclockTime", PyRep::Integer(now_ft)),
         ]);
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnGodmaPrimeItem",
-            "charid",
-            vec![PyRep::Integer(ship_id), prime_row],
+            OnGodmaPrimeItem {
+                location_id: ship_id,
+                row: prime_row,
+            },
         );
     }
 }
@@ -748,19 +725,16 @@ pub fn flush_module_ewar_end(
     };
     let affected_projected = ctx.remove_projected_ewar_by_module(ship_id, module_id);
     for (target_sid, jamming_type) in ewar_targets {
-        let ewar_args = vec![
-            PyRep::Integer(ship_id),
-            PyRep::Integer(module_id),
-            PyRep::Integer(target_sid),
-            PyRep::String(jamming_type.into()),
-        ];
         let mut notified = false;
         if char_id > 0 {
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(char_id),
-                "OnEwarEnd",
-                "charid",
-                ewar_args.clone(),
+                OnEwarEnd {
+                    source_ball_id: ship_id,
+                    module_id,
+                    target_ball_id: target_sid,
+                    jamming_type: jamming_type.into(),
+                },
             );
             notified = true;
         }
@@ -769,21 +743,28 @@ pub fn flush_module_ewar_end(
             .with_snapshot(|snap| snap.items.get(&target_sid).map(|i| i.owner_id))
             .unwrap_or(0);
         if target_owner > 0 && target_owner != char_id {
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(target_owner),
-                "OnEwarEnd",
-                "charid",
-                ewar_args.clone(),
+                OnEwarEnd {
+                    source_ball_id: ship_id,
+                    module_id,
+                    target_ball_id: target_sid,
+                    jamming_type: jamming_type.into(),
+                },
             );
             notified = true;
         }
         if !notified {
             if let Some(sys_id) = solar_system_id {
-                ctx.notify(
+                ctx.emit_typed_with_id_type(
                     NotificationTarget::SolarSystem(sys_id),
-                    "OnEwarEnd",
                     "solarsystemid",
-                    ewar_args,
+                    OnEwarEnd {
+                        source_ball_id: ship_id,
+                        module_id,
+                        target_ball_id: target_sid,
+                        jamming_type: jamming_type.into(),
+                    },
                 );
             }
         }
@@ -803,17 +784,15 @@ pub fn flush_module_profile_and_ewar_end(
     module_id: i64,
 ) -> Vec<i64> {
     if ship_id > 0 && module_id > 0 && module_id != ship_id {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnGodmaFlushLocationProfile",
-            "charid",
-            vec![
-                PyRep::Integer(ship_id),
-                PyRep::Tuple(vec![
+            OnGodmaFlushLocationProfile {
+                location_id: ship_id,
+                profile_id: PyRep::Tuple(vec![
                     PyRep::String("effect".into()),
                     PyRep::Integer(module_id),
                 ]),
-            ],
+            },
         );
     }
     flush_module_ewar_end(ctx, char_id, solar_system_id, ship_id, module_id)
@@ -918,18 +897,16 @@ pub fn emit_ecm_jam_landed(
 ) {
     let now_ft = ctx.now_blueos_filetime_ticks();
     let duration_ms = (duration_s.max(1.0)) * 1_000.0;
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnJamStart",
-        "solarsystemid",
-        vec![
-            PyRep::Integer(attacker_ship_id),
-            PyRep::Integer(module_id),
-            PyRep::Integer(target_id),
-            PyRep::String("electronic".into()),
-            PyRep::Integer(now_ft),
-            PyRep::Real(duration_ms),
-        ],
+        OnJamStart {
+            source_ball_id: attacker_ship_id,
+            module_id,
+            target_ball_id: target_id,
+            jamming_type: "electronic".into(),
+            start_time: now_ft,
+            duration: duration_ms,
+        },
     );
 }
 
@@ -940,14 +917,12 @@ pub fn emit_fleet_boosted(
     module_type_id: u32,
     num_boosted: usize,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnFleetBoosted",
-        "charid",
-        vec![
-            PyRep::Integer(i64::from(module_type_id)),
-            PyRep::Integer(num_boosted as i64),
-        ],
+        OnFleetBoosted {
+            module_type_id: i64::from(module_type_id),
+            num_boosted: num_boosted as i64,
+        },
     );
 }
 
@@ -964,17 +939,15 @@ pub fn emit_fleet_jump_beacon_deployable_change(
     let Some(fleet_id) = fleet_id_opt.filter(|&f| f > 0) else {
         return;
     };
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Fleet(fleet_id),
-        "OnFleetJumpBeaconDeployableChange",
-        "fleetid",
-        vec![
-            PyRep::Integer(item_id),
-            PyRep::Integer(i64::from(sys_id)),
-            PyRep::Integer(item_id),
-            PyRep::Integer(owner_char_id),
-            PyRep::Bool(active),
-        ],
+        OnFleetJumpBeaconDeployableChange {
+            deployable_id: item_id,
+            solar_system_id: i64::from(sys_id),
+            beacon_id: item_id,
+            owner_id: owner_char_id,
+            active,
+        },
     );
 }
 
@@ -992,11 +965,12 @@ pub fn emit_incursion_influence_update(
     let tale_id = i64::from(constellation_id);
     for (&sys_id, sys_rec) in &ctx.sde.solar_systems {
         if sys_rec.constellation_id == constellation_id {
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::SolarSystem(sys_id),
-                "OnInfluenceUpdate",
-                "solarsystemid",
-                vec![PyRep::Integer(tale_id), data.clone()],
+                OnInfluenceUpdate {
+                    tale_id,
+                    new_influence_data: data.clone(),
+                },
             );
         }
     }
@@ -1007,15 +981,13 @@ pub fn emit_incursion_influence_update(
 pub fn emit_jump_cloak_started(ctx: &ServerContext, char_id: i64, ship_id: i64) {
     let duration_ft: i64 = 600_000_000;
     let end_ft = ctx.now_blueos_filetime_ticks().saturating_add(duration_ft);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnJumpCloakUpdated",
-        "charid",
-        vec![
-            PyRep::Integer(ship_id),
-            PyRep::Integer(end_ft),
-            PyRep::Integer(duration_ft),
-        ],
+        OnJumpCloakUpdated {
+            ship_id,
+            end_time: end_ft,
+            duration: duration_ft,
+        },
     );
 }
 
@@ -1029,19 +1001,15 @@ pub fn emit_warp_cloak_or_invuln_cancelled(
     had_invuln: bool,
 ) {
     if had_gate_cloak {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnJumpCloakCancelled",
-            "charid",
-            vec![PyRep::Integer(ship_id)],
+            OnJumpCloakCancelled { ship_id },
         );
     }
     if had_invuln {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnInvulnCancelled",
-            "charid",
-            vec![PyRep::Integer(ship_id)],
+            OnInvulnCancelled { ship_id },
         );
     }
 }
@@ -1049,19 +1017,15 @@ pub fn emit_warp_cloak_or_invuln_cancelled(
 /// Emits `OnKillNotification()` (`0` args, `id_type = "charid"`) to the victim and final-blow pilot.
 pub fn emit_kill_notifications(ctx: &ServerContext, victim_char_id: i64, attacker_char_id: i64) {
     if victim_char_id > 0 {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(victim_char_id),
-            "OnKillNotification",
-            "charid",
-            vec![],
+            OnKillNotification,
         );
     }
     if attacker_char_id > 0 && attacker_char_id != victim_char_id {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(attacker_char_id),
-            "OnKillNotification",
-            "charid",
-            vec![],
+            OnKillNotification,
         );
     }
 }
@@ -1073,14 +1037,12 @@ pub fn emit_local_hack_progress_updated(
     container_id: i64,
     progress: f64,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnLocalHackProgressUpdated",
-        "solarsystemid",
-        vec![
-            PyRep::Integer(container_id),
-            PyRep::Real(progress.clamp(0.0, 1.0)),
-        ],
+        OnLocalHackProgressUpdated {
+            hacked_object_id: container_id,
+            hack_progress: progress.clamp(0.0, 1.0),
+        },
     );
 }
 
@@ -1090,38 +1052,29 @@ pub fn emit_pvp_match_found_and_expiry(ctx: &ServerContext, char_id: i64, expire
     let end_ft = (expires_at_unix as i64)
         .saturating_mul(10_000_000)
         .saturating_add(116_444_736_000_000_000);
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnMatchFound",
-        "charid",
-        vec![],
-    );
+    ctx.emit_typed(NotificationTarget::Character(char_id), OnMatchFound);
     crate::services::notify_emitters_tournaments_anomalies::emit_proving_grounds_match_found(ctx, char_id);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnAddExpiryDurationForAbyssalPvpContent",
-        "charid",
-        vec![PyRep::Integer(end_ft)],
+        OnAddExpiryDurationForAbyssalPvpContent { end_time: end_ft },
     );
 }
 
 /// Emits `OnMatchMakingFailure(errors)` when `pvpFilamentMgr.JoinPVPQueue` validation fails.
 pub fn emit_pvp_matchmaking_failure(ctx: &ServerContext, char_id: i64, error_code: i64) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnMatchMakingFailure",
-        "charid",
-        vec![PyRep::List(vec![PyRep::Integer(error_code)])],
+        OnMatchMakingFailureCodes {
+            errors: vec![error_code],
+        },
     );
 }
 
 /// Emits `DoDestinyUpdates(updates)` batch destiny update notification.
 pub fn emit_destiny_updates(ctx: &ServerContext, char_id: i64, updates: Vec<PyRep>) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "DoDestinyUpdates",
-        "charid",
-        vec![PyRep::List(updates)],
+        DoDestinyUpdates { updates },
     );
 }
 
@@ -1132,26 +1085,24 @@ pub fn emit_cloak_module_force_deactivated(
     reason: &str,
     dist_m: f64,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnCloakModuleForceDeactivated",
-        "charid",
-        vec![
-            PyRep::String(reason.to_string()),
-            PyRep::Dict(vec![
+        OnCloakModuleForceDeactivated {
+            notify_msg: reason.to_string(),
+            notify_args: PyRep::Dict(vec![
                 (PyRep::String("distance".into()), PyRep::Real(dist_m)),
             ]),
-        ],
+        },
     );
 }
 
 /// Emits `OnComponentRemovedSystemEnvironment(solarSystemID)` when a solar system environment is cleared.
 pub fn emit_component_removed_system_environment(ctx: &ServerContext, sys_id: u32) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnComponentRemovedSystemEnvironment",
-        "solarsystemid",
-        vec![PyRep::Integer(i64::from(sys_id))],
+        OnComponentRemovedSystemEnvironment {
+            solar_system_id: i64::from(sys_id),
+        },
     );
 }
 
@@ -1175,15 +1126,13 @@ pub fn emit_deathzone_state_update(
     } else {
         PyRep::None
     };
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnDeathzoneStateUpdate",
-        "charid",
-        vec![
-            PyRep::Integer(i64::from(sys_id)),
-            PyRep::Integer(ship_id),
+        OnDeathzoneStateUpdate {
+            solar_system_id: i64::from(sys_id),
+            ship_id,
             tracking_data,
-        ],
+        },
     );
 }
 
@@ -1195,15 +1144,13 @@ pub fn emit_dungeon_camera_interest(
     speed: f64,
     duration: f64,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnDungeonCameraInterest",
-        "charid",
-        vec![
-            PyRep::Integer(item_id),
-            PyRep::Real(speed),
-            PyRep::Real(duration),
-        ],
+        OnDungeonCameraInterest {
+            item_id,
+            speed,
+            duration,
+        },
     );
 }
 
@@ -1216,16 +1163,14 @@ pub fn emit_dungeon_trigger_ambient_sound(
     entity_item_id: i64,
     emitter_id: i64,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnDungeonTriggerAmbientSound",
-        "charid",
-        vec![
-            PyRep::Integer(dungeon_id),
-            PyRep::String(sound_id.to_string()),
-            PyRep::Integer(entity_item_id),
-            PyRep::Integer(emitter_id),
-        ],
+        OnDungeonTriggerAmbientSoundStr {
+            dungeon_id,
+            sound_id: sound_id.to_string(),
+            entity_item_id,
+            emitter_id,
+        },
     );
 }
 
@@ -1236,14 +1181,12 @@ pub fn emit_dungeon_trigger_audio(
     dungeon_id: i64,
     audio_url: &str,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnDungeonTriggerAudio",
-        "charid",
-        vec![
-            PyRep::Integer(dungeon_id),
-            PyRep::String(audio_url.to_string()),
-        ],
+        OnDungeonTriggerAudio {
+            dungeon_id,
+            audio_url: audio_url.to_string(),
+        },
     );
 }
 
@@ -1254,14 +1197,12 @@ pub fn emit_dungeon_trigger_message(
     message_type: &str,
     message_id: i64,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnDungeonTriggerMessage",
-        "charid",
-        vec![
-            PyRep::String(message_type.to_string()),
-            PyRep::Integer(message_id),
-        ],
+        OnDungeonTriggerMessageStr {
+            message_type: message_type.to_string(),
+            message_id,
+        },
     );
 }
 
@@ -1272,44 +1213,36 @@ pub fn emit_dungeon_trigger_music(
     dungeon_id: i64,
     music_trigger_id: i64,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnDungeonTriggerMusic",
-        "charid",
-        vec![
-            PyRep::Integer(dungeon_id),
-            PyRep::Integer(music_trigger_id),
-        ],
+        OnDungeonTriggerMusic {
+            dungeon_id,
+            music_trigger_id,
+        },
     );
 }
 
 /// Emits `OnEnterTournamentSystem()` to open the tournament match status window.
 pub fn emit_enter_tournament_system(ctx: &ServerContext, char_id: i64) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnEnterTournamentSystem",
-        "charid",
-        vec![],
+        OnEnterTournamentSystem,
     );
 }
 
 /// Emits `OnLeaveTournamentSystem()` to close the tournament match status window.
 pub fn emit_leave_tournament_system(ctx: &ServerContext, char_id: i64) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnLeaveTournamentSystem",
-        "charid",
-        vec![],
+        OnLeaveTournamentSystem,
     );
 }
 
 /// Emits `OnEssReserveBankInventoryFull()` to the solar system when reserve bank capacity is reached.
 pub fn emit_ess_reserve_bank_inventory_full(ctx: &ServerContext, sys_id: u32) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnEssReserveBankInventoryFull",
-        "solarsystemid",
-        vec![],
+        OnEssReserveBankInventoryFull,
     );
 }
 
@@ -1323,18 +1256,15 @@ pub fn emit_jump_queue_update(
     jump_keys: Vec<i64>,
     key_life: i64,
 ) {
-    let keys = jump_keys.into_iter().map(PyRep::Integer).collect();
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnJumpQueueUpdate",
-        "charid",
-        vec![
-            PyRep::Integer(i64::from(sys_id)),
-            PyRep::Integer(space),
-            PyRep::Integer(queue),
-            PyRep::List(keys),
-            PyRep::Integer(key_life),
-        ],
+        OnJumpQueueUpdate {
+            solar_system_id: i64::from(sys_id),
+            space,
+            queue,
+            jump_keys,
+            key_life,
+        },
     );
 }
 

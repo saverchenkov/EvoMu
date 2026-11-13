@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+use crate::router::notify_registry::{OnReserveBankUnlock, OnSessionChanged, OnWarpFinished};
 use crate::router::{BoundObjectEntry, ServerContext};
 use eve_destiny::MovementMode;
 use eve_machonet::SessionState;
@@ -269,15 +270,13 @@ fn record_session_change_timer_with_invuln(
     if reason == "board_or_eject" || !has_entries {
         return;
     }
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
-        "OnSessionChanged",
-        "charid",
-        vec![
-            PyRep::Bool(false),
-            sess_rep,
-            change_dict,
-        ],
+        OnSessionChanged {
+            is_remote: false,
+            session: sess_rep,
+            change: change_dict,
+        },
     );
 }
 
@@ -696,11 +695,11 @@ pub async fn handle(
                     ]);
                     for (&s_id, s_info) in &ctx.sde.solar_systems {
                         if s_info.region_id as i64 == reg_id {
-                            ctx.notify(
+                            ctx.emit_typed(
                                 crate::router::NotificationTarget::SolarSystem(s_id),
-                                "OnReserveBankUnlock",
-                                "solarsystemid",
-                                vec![unlock_payload.clone()],
+                                OnReserveBankUnlock {
+                                    data: unlock_payload.clone(),
+                                },
                             );
                         }
                     }
@@ -893,16 +892,14 @@ pub(crate) async fn handle_update_state_request(
             .remove(&ship_id)
             .is_some();
         if finished_warp {
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnWarpFinished",
-                "charid",
-                vec![
-                    PyRep::Integer(ship_id),
-                    PyRep::Real(ship_ball.position.x),
-                    PyRep::Real(ship_ball.position.y),
-                    PyRep::Real(ship_ball.position.z),
-                ],
+                OnWarpFinished {
+                    item_id: ship_id,
+                    x_or_type_id: PyRep::Real(ship_ball.position.x),
+                    y: Some(ship_ball.position.y),
+                    z: Some(ship_ball.position.z),
+                },
             );
             crate::services::pve_dungeon_runtime::on_warp_landed_at_dungeon_pocket_if_present(
                 ctx,

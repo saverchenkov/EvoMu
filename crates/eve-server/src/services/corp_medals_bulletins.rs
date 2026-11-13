@@ -2,6 +2,9 @@
 
 #![forbid(unsafe_code)]
 
+use crate::router::notify_registry::{
+    OnCorporationMedalAdded, OnMedalIssued, OnMedalStatusChanged,
+};
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::IskCents;
 use eve_machonet::SessionState;
@@ -83,7 +86,13 @@ pub(crate) fn handle_corp_medals(
                 Ok(mid) => mid,
                 Err(e) => return Some(Err(e)),
             };
-            ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationMedalAdded", "corpid", vec![PyRep::Integer(medal_id), PyRep::Integer(corp_id)]);
+            ctx.emit_typed(
+                NotificationTarget::Corporation(corp_id),
+                OnCorporationMedalAdded {
+                    medal_id,
+                    entity_id: corp_id,
+                },
+            );
             Some(Ok(PyRep::keyval([
                 ("medalID", PyRep::Integer(medal_id)),
                 ("title", PyRep::String(title.to_string())),
@@ -153,8 +162,21 @@ pub(crate) fn handle_corp_medals(
                 return Some(Err(e));
             }
             for &recipient_id in &recipient_ids {
-                ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationMedalAdded", "corpid", vec![PyRep::Integer(medal_id), PyRep::Integer(recipient_id)]);
-                ctx.notify(NotificationTarget::Character(recipient_id), "OnMedalIssued", "charid", vec![PyRep::Integer(medal_id), PyRep::Integer(corp_id), PyRep::Integer(char_id)]);
+                ctx.emit_typed(
+                    NotificationTarget::Corporation(corp_id),
+                    OnCorporationMedalAdded {
+                        medal_id,
+                        entity_id: recipient_id,
+                    },
+                );
+                ctx.emit_typed(
+                    NotificationTarget::Character(recipient_id),
+                    OnMedalIssued {
+                        medal_id,
+                        corp_id,
+                        issuer_id: char_id,
+                    },
+                );
             }
             let first_recipient = recipient_ids[0];
             Some(Ok(PyRep::keyval([("medalID", PyRep::Integer(medal_id)), ("recipientID", PyRep::Integer(first_recipient)), ("status", PyRep::Integer(2))])))
@@ -269,7 +291,13 @@ pub(crate) fn handle_corp_medals(
                 }
             });
             for &(medal_id, new_status) in &updates {
-                ctx.notify(NotificationTarget::Character(char_id), "OnMedalStatusChanged", "charid", vec![PyRep::Integer(medal_id), PyRep::Integer(new_status)]);
+                ctx.emit_typed(
+                    NotificationTarget::Character(char_id),
+                    OnMedalStatusChanged {
+                        medal_id,
+                        new_status,
+                    },
+                );
             }
             let last_update = updates.last().cloned().unwrap_or((1, 3));
             Some(Ok(PyRep::keyval([("medalID", PyRep::Integer(last_update.0)), ("status", PyRep::Integer(last_update.1))])))

@@ -3,6 +3,10 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+use crate::router::notify_registry::{
+    push_typed_session_notification, OnFighterAbilitySlotActivated,
+    OnFighterAbilitySlotDeactivated,
+};
 
 async fn check_fighter_and_parent_operational_state(
     ctx: &ServerContext,
@@ -1054,16 +1058,16 @@ async fn activate_single_fighter_ability(
     };
 
     let now_ft = ctx.now_blueos_filetime_ticks();
-    session.push_notification(
-        "OnFighterAbilitySlotActivated",
-        vec![
-            PyRep::Integer(fighter_ball_id),
-            PyRep::Integer(slot_id as i64),
-            if charge_count > 0 { PyRep::Integer(remaining_charges) } else { PyRep::None },
-            PyRep::Integer(now_ft),
-            PyRep::Real(cycle_duration_ms),
-            if cooldown_sec > 0.0 { PyRep::Real(cooldown_sec) } else { PyRep::None },
-        ],
+    push_typed_session_notification(
+        session,
+        OnFighterAbilitySlotActivated {
+            fighter_id: fighter_ball_id,
+            ability_slot_id: slot_id as i64,
+            remaining_charge_count: (charge_count > 0).then_some(remaining_charges),
+            start_time: now_ft,
+            duration_ms: cycle_duration_ms,
+            cooldown: (cooldown_sec > 0.0).then_some(cooldown_sec),
+        },
     );
 
     Some(Ok(PyRep::keyval([
@@ -1426,16 +1430,16 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
         .filter(|&v| v > 0.0)
         .unwrap_or(10_000.0);
     let now_ft = ctx.now_blueos_filetime_ticks();
-    session.push_notification(
-        "OnFighterAbilitySlotActivated",
-        vec![
-            PyRep::Integer(fighter_ball_id),
-            PyRep::Integer(slot_id as i64),
-            if charge_count > 0 { PyRep::Integer(remaining_charges) } else { PyRep::None },
-            PyRep::Integer(now_ft),
-            PyRep::Real(cycle_duration_ms),
-            PyRep::Real(cd_secs as f64),
-        ],
+    push_typed_session_notification(
+        session,
+        OnFighterAbilitySlotActivated {
+            fighter_id: fighter_ball_id,
+            ability_slot_id: slot_id as i64,
+            remaining_charge_count: (charge_count > 0).then_some(remaining_charges),
+            start_time: now_ft,
+            duration_ms: cycle_duration_ms,
+            cooldown: Some(cd_secs as f64),
+        },
     );
 
     point_results.push(PyRep::keyval([
@@ -1612,9 +1616,13 @@ pub(crate) async fn handle_deactivate_fighter_ability_slots(
         }
     }
 
-    session.push_notification(
-        "OnFighterAbilitySlotDeactivated",
-        vec![PyRep::Integer(fighter_ball_id), PyRep::Integer(slot_id as i64), PyRep::None],
+    push_typed_session_notification(
+        session,
+        OnFighterAbilitySlotDeactivated {
+            fighter_id: fighter_ball_id,
+            ability_slot_id: slot_id as i64,
+            failure_reason: None,
+        },
     );
 
     Some(Ok(PyRep::keyval([

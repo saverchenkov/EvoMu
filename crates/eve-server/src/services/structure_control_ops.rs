@@ -10,6 +10,7 @@ use super::station_structure::structure_upwell_ops::{
     load_ext_state, save_ext_state,
 };
 use super::structure_acl_defense_rules::evaluate_auto_defense_target;
+use crate::router::notify_registry::{OnSessionChanged, OnStructureTargetRemoved};
 use crate::router::{NotificationTarget, ServerContext};
 use eve_db::WorldStateSnapshot;
 use eve_destiny::{DamageVector, TargetLock};
@@ -735,17 +736,23 @@ pub fn notify_released_structure_controllers(ctx: &ServerContext, released: &[(i
         });
         let new_py = new_ship_opt.map(PyRep::Integer).unwrap_or(PyRep::None);
         let sess_rep = PyRep::keyval([("charid", PyRep::Integer(pilot_id)), ("shipid", new_py.clone())]);
-        let change_args = vec![
-            PyRep::Bool(false),
-            sess_rep,
-            PyRep::Dict(vec![(PyRep::String("shipid".into()), PyRep::Tuple(vec![PyRep::Integer(structure_id), new_py]))]),
-        ];
-        ctx.notify(NotificationTarget::Character(pilot_id), "OnSessionChanged", "charid", change_args);
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(pilot_id),
-            "OnStructureTargetRemoved",
-            "charid",
-            vec![PyRep::Integer(structure_id), PyRep::Integer(0)],
+            OnSessionChanged {
+                is_remote: false,
+                session: sess_rep,
+                change: PyRep::Dict(vec![(
+                    PyRep::String("shipid".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(structure_id), new_py]),
+                )]),
+            },
+        );
+        ctx.emit_typed(
+            NotificationTarget::Character(pilot_id),
+            OnStructureTargetRemoved {
+                structure_id,
+                target_id: 0,
+            },
         );
     }
 }
@@ -817,11 +824,12 @@ pub fn handle_release_control(ctx: &ServerContext, session: &mut SessionState, a
     })?;
     ensure_in_space_capsule_ball_spawned(ctx, sys_id, char_id, orig_ship_id);
     sync_released_ship_on_session(ctx, session, char_id, structure_id, orig_ship_id);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnStructureTargetRemoved",
-        "charid",
-        vec![PyRep::Integer(structure_id), PyRep::Integer(target_id)],
+        OnStructureTargetRemoved {
+            structure_id,
+            target_id,
+        },
     );
     Ok(PyRep::None)
 }

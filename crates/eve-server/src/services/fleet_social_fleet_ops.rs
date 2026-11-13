@@ -1,5 +1,6 @@
 //! Fleet Operations, Options, Broadcasts, Fleet Warp & Fleet Finder (`SO-2`).
 
+use crate::router::notify_registry::{OnFleetBroadcast, OnFleetMoveFailedCharOnly};
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::{FleetMemberRecord, FleetRole};
 use eve_destiny::MovementMode;
@@ -154,19 +155,21 @@ async fn handle_send_broadcast(
         .collect();
     // FleetSvc.OnFleetBroadcast(name, scope, charID, solarSystemID, itemID, typeID)
     let opt = |v: Option<i64>| v.map(PyRep::Integer).unwrap_or(PyRep::None);
-    let payload = vec![
-        PyRep::String(broadcast_name.to_string()),
-        PyRep::Integer(scope),
-        PyRep::Integer(char_id),
-        PyRep::Integer(sender_sys as i64),
-        opt(item_id),
-        opt(type_id),
-    ];
     let mut recipient_ids = Vec::new();
     if location == 0 {
         for (m_id, _, _) in &members_info {
             recipient_ids.push(*m_id);
-            ctx.notify(NotificationTarget::Character(*m_id), "OnFleetBroadcast", "charid", payload.clone());
+            ctx.emit_typed(
+                NotificationTarget::Character(*m_id),
+                OnFleetBroadcast {
+                    name: broadcast_name.to_string(),
+                    scope,
+                    char_id,
+                    solar_system_id: sender_sys as i64,
+                    item_id,
+                    type_id,
+                },
+            );
         }
     } else {
         let sys = ctx.systems.get_or_spawn(sender_sys);
@@ -195,11 +198,16 @@ async fn handle_send_broadcast(
                 }
             }
             recipient_ids.push(m_id);
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(m_id),
-                "OnFleetBroadcast",
-                "charid",
-                payload.clone(),
+                OnFleetBroadcast {
+                    name: broadcast_name.to_string(),
+                    scope,
+                    char_id,
+                    solar_system_id: sender_sys as i64,
+                    item_id,
+                    type_id,
+                },
             );
         }
     }
@@ -1328,11 +1336,11 @@ pub(crate) async fn handle_fleet_warp(
     }
 
     for &opt_out_cid in &skipped_opt_out_members {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnFleetMoveFailed",
-            "charid",
-            vec![PyRep::Integer(opt_out_cid)],
+            OnFleetMoveFailedCharOnly {
+                char_id: opt_out_cid,
+            },
         );
     }
 

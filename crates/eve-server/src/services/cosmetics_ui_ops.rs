@@ -4,6 +4,10 @@
 //! NES intro state). Only V24 client RPC names are dispatched; everything else returns `None`
 //! so the router answers `UnimplementedRPC`.
 #![forbid(unsafe_code)]
+use crate::router::notify_registry::{
+    push_typed_session_notification, OnCurrentShipSkinChange, OnSkinLicenseActivated,
+    OnSkinLicenseRemoved,
+};
 use crate::router::ServerContext;
 use eve_db::WorldStateSnapshot;
 use eve_machonet::SessionState;
@@ -216,12 +220,14 @@ pub fn purge_expired_skins_for_char(snap: &mut WorldStateSnapshot, char_id: i64,
 /// Pushes `OnSkinLicenseRemoved(skinID, itemID, typeID)` for every expired SKIN (call outside any snapshot lock).
 pub fn notify_skins_removed(ctx: &ServerContext, char_id: i64, _session: &mut SessionState, expired: &[(u32, i64, u32)]) {
     for &(skin_id, item_id, type_id) in expired {
-        let args = vec![
-            PyRep::Integer(i64::from(skin_id)),
-            if item_id > 0 { PyRep::Integer(item_id) } else { PyRep::None },
-            if type_id > 0 { PyRep::Integer(i64::from(type_id)) } else { PyRep::None },
-        ];
-        ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnSkinLicenseRemoved", "charid", args);
+        ctx.emit_typed(
+            crate::router::NotificationTarget::Character(char_id),
+            OnSkinLicenseRemoved {
+                skin_id: i64::from(skin_id),
+                item_id: (item_id > 0).then_some(item_id),
+                type_id: (type_id > 0).then_some(i64::from(type_id)),
+            },
+        );
     }
 }
 
@@ -304,8 +310,13 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         });
         return match res {
             Ok((skin_id, exp_opt)) => {
-                let act_args = vec![PyRep::Integer(i64::from(skin_id)), PyRep::Integer(char_id)];
-                ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnSkinLicenseActivated", "charid", act_args);
+                ctx.emit_typed(
+                    crate::router::NotificationTarget::Character(char_id),
+                    OnSkinLicenseActivated {
+                        skin_id: i64::from(skin_id),
+                        licensee_id: char_id,
+                    },
+                );
                 Some(Ok(PyRep::keyval([
                     ("characterID", PyRep::Integer(char_id)),
                     ("skinID", PyRep::Integer(i64::from(skin_id))),
@@ -357,7 +368,13 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
             return match res {
                 Ok((target_ship, prev_skin, expired)) => {
                     notify_skins_removed(ctx, char_id, session, &expired);
-                    session.push_notification("OnCurrentShipSkinChange", vec![PyRep::Integer(target_ship), PyRep::None]);
+                    push_typed_session_notification(
+                        session,
+                        OnCurrentShipSkinChange {
+                            ship_id: target_ship,
+                            skin_id: None,
+                        },
+                    );
                     crate::services::quasar_cosmetics_live::broadcast_ship_skin_cosmetic_change(ctx, char_id, target_ship, ship_type_id, prev_skin, None).await;
                     crate::services::quasar_cosmetics_live::publish_ship_skin_set(&ctx.quasar_gateway, &ctx.db, &ctx.sde, target_ship, now_unix);
                     Some(Ok(PyRep::keyval([
@@ -426,7 +443,13 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         return match res {
             Ok((active_ship, skin_id, prev_skin, expired)) => {
                 notify_skins_removed(ctx, char_id, session, &expired);
-                session.push_notification("OnCurrentShipSkinChange", vec![PyRep::Integer(active_ship), PyRep::Integer(skin_id as i64)]);
+                push_typed_session_notification(
+                    session,
+                    OnCurrentShipSkinChange {
+                        ship_id: active_ship,
+                        skin_id: Some(skin_id as i64),
+                    },
+                );
                 crate::services::quasar_cosmetics_live::broadcast_ship_skin_cosmetic_change(ctx, char_id, active_ship, ship_type_id, prev_skin, Some(skin_id)).await;
                 // Quasar ship SKIN state (`eve_public.cosmetic.ship.api.SetNotice`) for observers.
                 crate::services::quasar_cosmetics_live::publish_ship_skin_set(&ctx.quasar_gateway, &ctx.db, &ctx.sde, active_ship, now_unix);

@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 
+use crate::router::notify_registry::{OnSessionChanged, OnTournamentPerformBan};
 use crate::router::ServerContext;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -168,14 +169,7 @@ pub async fn handle(
                 Ok(PyRep::Bool(true))
             });
             if let Some((mid, qty, cur_bans, round, tid, r_boss, b_boss)) = notify_info {
-                let ban_args = vec![
-                    PyRep::Integer(mid),
-                    PyRep::Integer(qty),
-                    PyRep::List(cur_bans.into_iter().map(PyRep::Integer).collect()),
-                    PyRep::Integer((now_unix + 60) as i64),
-                    PyRep::Integer(round),
-                    PyRep::Integer(tid),
-                ];
+                let deadline = (now_unix + 60) as i64;
                 let mut recipients = vec![caller_cid];
                 for cid in [r_boss, b_boss].into_iter().flatten() {
                     if !recipients.contains(&cid) {
@@ -183,11 +177,16 @@ pub async fn handle(
                     }
                 }
                 for cid in recipients {
-                    ctx.notify(
+                    ctx.emit_typed(
                         crate::router::NotificationTarget::Character(cid),
-                        "OnTournamentPerformBan",
-                        "charid",
-                        ban_args.clone(),
+                        OnTournamentPerformBan {
+                            ban_id: mid,
+                            num_bans: qty,
+                            cur_bans: cur_bans.clone(),
+                            deadline,
+                            respond_to_node_id: round,
+                            tourney_id: tid,
+                        },
                     );
                 }
             }
@@ -907,10 +906,6 @@ pub async fn handle(
                 Ok(PyRep::Bool(true))
             });
             if let Some((mid, tid, r_boss, b_boss, cur_bans, round, deadline)) = notify_info {
-                let ban_args = vec![
-                    PyRep::Integer(mid), PyRep::Integer(qty), PyRep::List(cur_bans.into_iter().map(PyRep::Integer).collect()),
-                    PyRep::Integer(deadline), PyRep::Integer(round), PyRep::Integer(tid),
-                ];
                 let mut recipients = vec![caller_cid];
                 for cid in [r_boss, b_boss].into_iter().flatten() {
                     if !recipients.contains(&cid) {
@@ -918,7 +913,17 @@ pub async fn handle(
                     }
                 }
                 for cid in recipients {
-                    ctx.notify(crate::router::NotificationTarget::Character(cid), "OnTournamentPerformBan", "charid", ban_args.clone());
+                    ctx.emit_typed(
+                        crate::router::NotificationTarget::Character(cid),
+                        OnTournamentPerformBan {
+                            ban_id: mid,
+                            num_bans: qty,
+                            cur_bans: cur_bans.clone(),
+                            deadline,
+                            respond_to_node_id: round,
+                            tourney_id: tid,
+                        },
+                    );
                 }
             }
             res
@@ -1083,18 +1088,16 @@ pub async fn handle(
                         ("solarsystemid2", PyRep::Integer(match_sys)),
                         ("solarsystemid", PyRep::Integer(match_sys)),
                     ]);
-                    ctx.notify(
+                    ctx.emit_typed(
                         crate::router::NotificationTarget::Character(cid),
-                        "OnSessionChanged",
-                        "charid",
-                        vec![
-                            PyRep::Bool(false),
-                            sess_rep,
-                            PyRep::Dict(vec![
+                        OnSessionChanged {
+                            is_remote: false,
+                            session: sess_rep,
+                            change: PyRep::Dict(vec![
                                 (PyRep::String("stationid".into()), PyRep::Tuple(vec![old_st.map(PyRep::Integer).unwrap_or(PyRep::None), PyRep::None])),
                                 (PyRep::String("solarsystemid".into()), PyRep::Tuple(vec![PyRep::Integer(i64::from(old_sys)), PyRep::Integer(match_sys)])),
                             ]),
-                        ],
+                        },
                     );
                     if old_sys != match_sys as u32 || old_st.is_some() {
                         crate::services::notify_emitters_tournaments_anomalies::emit_enter_tournament_system(ctx, cid);

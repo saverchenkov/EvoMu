@@ -6,6 +6,9 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+use crate::router::notify_registry::{
+    OnAccountChange, OnBountyPlaced, OnKillRightSellCancel, OnSecurityStatusUpdate,
+};
 use crate::router::{NotificationTarget, ServerContext};
 use eve_db::IskCents;
 use eve_machonet::SessionState;
@@ -392,11 +395,11 @@ pub fn handle_bounty_proxy(
             });
             match res {
                 Ok(()) => {
-                    ctx.notify(
+                    ctx.emit_typed(
                         crate::router::NotificationTarget::Character(char_id),
-                        "OnKillRightSellCancel",
-                        "charid",
-                        vec![PyRep::Integer(kr_id)],
+                        OnKillRightSellCancel {
+                            kill_right_id: kr_id,
+                        },
                     );
                     Some(Ok(PyRep::keyval([
                         ("killRightID", PyRep::Integer(kr_id)),
@@ -544,15 +547,13 @@ pub fn handle_bounty_proxy(
                 Err(e) => return Some(Err(e)),
             };
             let _ = ctx.notify_account_change(char_id, "cash", char_id, new_bal);
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(target_id),
-                "OnBountyPlaced",
-                "charid",
-                vec![
-                    PyRep::Integer(char_id),
-                    PyRep::Integer(target_id),
-                    PyRep::Real(amount_isk),
-                ],
+                OnBountyPlaced {
+                    owner_id: char_id,
+                    target_id: Some(target_id),
+                    amount_isk: Some(amount_isk),
+                },
             );
             Some(Ok(PyRep::keyval([
                 ("targetID", PyRep::Integer(target_id)),
@@ -1055,24 +1056,22 @@ pub fn handle_apply_tags_for_sec_status(
                     }
                 }
             });
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnAccountChange",
-                "charid",
-                vec![
-                    PyRep::String("cash".into()),
-                    PyRep::Integer(char_id),
-                    PyRep::Real(new_bal_f64),
-                ],
+                OnAccountChange {
+                    account_key: "cash".into(),
+                    owner_id: char_id,
+                    balance: new_bal_f64,
+                },
             );
             for (old_item, new_item_opt) in changed_items {
                 ctx.notify_item_mutation(char_id, Some(&old_item), new_item_opt.as_ref());
             }
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnSecurityStatusUpdate",
-                "charid",
-                vec![PyRep::Real(new_sec)],
+                OnSecurityStatusUpdate {
+                    new_security_status: new_sec,
+                },
             );
             Some(Ok(PyRep::keyval([
                 ("oldSecurityStatus", PyRep::Real(old_sec)),

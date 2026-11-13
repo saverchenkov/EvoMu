@@ -6,6 +6,10 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{HashMap, HashSet};
+use crate::router::notify_registry::{
+    OnAccountChange, OnItemChange, OnOperationTaskCompleted, OnRedeemingQueueUpdated,
+    OnRedeemingTokensUpdated, TypedNotification,
+};
 use crate::router::{NotificationTarget, ServerContext};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -553,24 +557,73 @@ pub fn grant_category_completion_rewards(
     out
 }
 
-pub fn emit_operation_reward_notifications_with_sink<F>(
+enum OperationRewardNotif {
+    AccountChange(OnAccountChange),
+    ItemChange(OnItemChange),
+    RedeemingQueueUpdated(OnRedeemingQueueUpdated),
+    RedeemingTokensUpdated(OnRedeemingTokensUpdated),
+}
+
+impl OperationRewardNotif {
+    fn emit_typed(self, ctx: &ServerContext, target: NotificationTarget) {
+        match self {
+            Self::AccountChange(n) => {
+                let _ = ctx.emit_typed(target, n);
+            }
+            Self::ItemChange(n) => {
+                let _ = ctx.emit_typed(target, n);
+            }
+            Self::RedeemingQueueUpdated(n) => {
+                let _ = ctx.emit_typed(target, n);
+            }
+            Self::RedeemingTokensUpdated(n) => {
+                let _ = ctx.emit_typed(target, n);
+            }
+        }
+    }
+
+    fn into_raw(self) -> (&'static str, &'static str, Vec<PyRep>) {
+        match self {
+            Self::AccountChange(n) => (
+                OnAccountChange::EVENT,
+                OnAccountChange::DEFAULT_ID_TYPE,
+                n.into_args(),
+            ),
+            Self::ItemChange(n) => (
+                OnItemChange::EVENT,
+                OnItemChange::DEFAULT_ID_TYPE,
+                n.into_args(),
+            ),
+            Self::RedeemingQueueUpdated(n) => (
+                OnRedeemingQueueUpdated::EVENT,
+                OnRedeemingQueueUpdated::DEFAULT_ID_TYPE,
+                n.into_args(),
+            ),
+            Self::RedeemingTokensUpdated(n) => (
+                OnRedeemingTokensUpdated::EVENT,
+                OnRedeemingTokensUpdated::DEFAULT_ID_TYPE,
+                n.into_args(),
+            ),
+        }
+    }
+}
+
+fn emit_operation_reward_notifications_impl<F>(
     sde: &eve_sde::SdeRegistry,
-    sink: F,
+    mut emit: F,
     char_id: i64,
     outcome: &OperationRewardOutcome,
 ) where
-    F: Fn(NotificationTarget, &str, &str, Vec<PyRep>),
+    F: FnMut(NotificationTarget, OperationRewardNotif),
 {
     if let Some(bal_cents) = outcome.new_balance_cents {
-        sink(
+        emit(
             NotificationTarget::Character(char_id),
-            "OnAccountChange",
-            "charid",
-            vec![
-                PyRep::String("cash".into()),
-                PyRep::Integer(char_id),
-                PyRep::Real(eve_db::IskCents(bal_cents).to_f64_isk()),
-            ],
+            OperationRewardNotif::AccountChange(OnAccountChange {
+                account_key: "cash".into(),
+                owner_id: char_id,
+                balance: eve_db::IskCents(bal_cents).to_f64_isk(),
+            }),
         );
     }
     for &(item_id, type_id, loc_id, qty) in &outcome.created_hangar_items {
@@ -586,12 +639,10 @@ pub fn emit_operation_reward_notifications_with_sink<F>(
                 (t.group_id, cid)
             })
             .unwrap_or((0, 0));
-        sink(
+        emit(
             NotificationTarget::Character(char_id),
-            "OnItemChange",
-            "charid",
-            vec![
-                PyRep::keyval([
+            OperationRewardNotif::ItemChange(OnItemChange {
+                item: PyRep::keyval([
                     ("itemID", PyRep::Integer(item_id)),
                     ("typeID", PyRep::Integer(i64::from(type_id))),
                     ("ownerID", PyRep::Integer(char_id)),
@@ -603,24 +654,40 @@ pub fn emit_operation_reward_notifications_with_sink<F>(
                     ("categoryID", PyRep::Integer(i64::from(category_id))),
                     ("singleton", PyRep::Integer(i64::from(qty == 1))),
                 ]),
-                PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))]),
-            ],
+                change: PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))]),
+                location: PyRep::None,
+            }),
         );
     }
     if outcome.enqueued_redeem_tokens {
-        sink(
+        emit(
             NotificationTarget::Character(char_id),
-            "OnRedeemingQueueUpdated",
-            "charid",
-            vec![],
+            OperationRewardNotif::RedeemingQueueUpdated(OnRedeemingQueueUpdated),
         );
-        sink(
+        emit(
             NotificationTarget::Character(char_id),
-            "OnRedeemingTokensUpdated",
-            "charid",
-            vec![],
+            OperationRewardNotif::RedeemingTokensUpdated(OnRedeemingTokensUpdated),
         );
     }
+}
+
+pub fn emit_operation_reward_notifications_with_sink<F>(
+    sde: &eve_sde::SdeRegistry,
+    sink: F,
+    char_id: i64,
+    outcome: &OperationRewardOutcome,
+) where
+    F: Fn(NotificationTarget, &str, &str, Vec<PyRep>),
+{
+    emit_operation_reward_notifications_impl(
+        sde,
+        |target, notif| {
+            let (event, id_type, args) = notif.into_raw();
+            sink(target, event, id_type, args);
+        },
+        char_id,
+        outcome,
+    );
 }
 
 pub fn emit_operation_reward_notifications(
@@ -628,11 +695,9 @@ pub fn emit_operation_reward_notifications(
     char_id: i64,
     outcome: &OperationRewardOutcome,
 ) {
-    emit_operation_reward_notifications_with_sink(
+    emit_operation_reward_notifications_impl(
         &ctx.sde,
-        |target, event, id_type, args| {
-            ctx.notify(target, event, id_type, args);
-        },
+        |target, notif| notif.emit_typed(ctx, target),
         char_id,
         outcome,
     );
@@ -828,15 +893,13 @@ pub fn handle_operation_task_client_event(
     });
     emit_operation_reward_notifications(ctx, char_id, &outcome);
     if let Some((cat_id, op_id, tid)) = completed_task {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnOperationTaskCompleted",
-            "charid",
-            vec![
-                PyRep::Integer(cat_id),
-                PyRep::Integer(op_id),
-                PyRep::Integer(tid),
-            ],
+            OnOperationTaskCompleted {
+                category_id: cat_id,
+                operation_id: op_id,
+                task_id: tid,
+            },
         );
         Ok(PyRep::Bool(true))
     } else if progressed {
@@ -995,15 +1058,13 @@ pub fn record_server_operation_event(
         ctx, char_id, event_name, params,
     );
     if let Some((cat_id, op_id, tid)) = completed_task {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnOperationTaskCompleted",
-            "charid",
-            vec![
-                PyRep::Integer(cat_id),
-                PyRep::Integer(op_id),
-                PyRep::Integer(tid),
-            ],
+            OnOperationTaskCompleted {
+                category_id: cat_id,
+                operation_id: op_id,
+                task_id: tid,
+            },
         );
     }
 }
@@ -1118,13 +1179,14 @@ pub fn advance_and_notify_server_operation_tasks(
         if let Some((cat_id, op_id, tid)) = completed_task {
             sink(
                 NotificationTarget::Character(char_id),
-                "OnOperationTaskCompleted",
-                "charid",
-                vec![
-                    PyRep::Integer(cat_id),
-                    PyRep::Integer(op_id),
-                    PyRep::Integer(tid),
-                ],
+                OnOperationTaskCompleted::EVENT,
+                OnOperationTaskCompleted::DEFAULT_ID_TYPE,
+                OnOperationTaskCompleted {
+                    category_id: cat_id,
+                    operation_id: op_id,
+                    task_id: tid,
+                }
+                .into_args(),
             );
         }
     }

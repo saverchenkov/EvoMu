@@ -1,5 +1,8 @@
 //! Calendar event creation, mutation, and response handlers.
 
+use crate::router::notify_registry::{
+    OnEditCalendarEvent, OnNewCalendarEventOptAuto, OnRemoveCalendarEvent,
+};
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use crate::services::fleet_social::fleet_social_chat::{extract_id_list, CalendarEventState};
 use crate::services::fleet_social::fleet_social_persistence::persist_social_state;
@@ -30,20 +33,18 @@ fn emit_new_calendar_event(
     importance: i64,
     do_blink: bool,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         target,
-        "OnNewCalendarEvent",
-        "charid",
-        vec![
-            PyRep::Integer(event_id),
-            PyRep::Integer(owner_id),
-            PyRep::Integer(event_date_time),
-            PyRep::Integer(duration),
-            PyRep::String(title.to_string()),
-            PyRep::Integer(importance),
-            PyRep::None,
-            PyRep::Bool(do_blink),
-        ],
+        OnNewCalendarEventOptAuto {
+            event_id,
+            owner_id,
+            event_date_time,
+            event_duration: duration,
+            event_title: title.to_string(),
+            importance,
+            auto_event_type: None,
+            do_blink,
+        },
     );
 }
 
@@ -60,20 +61,18 @@ fn emit_edit_calendar_event(
     title: &str,
     importance: i64,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         target,
-        "OnEditCalendarEvent",
-        "charid",
-        vec![
-            PyRep::Integer(event_id),
-            PyRep::Integer(owner_id),
-            PyRep::Integer(old_event_date_time),
-            PyRep::Integer(event_date_time),
-            PyRep::Integer(duration),
-            PyRep::String(title.to_string()),
-            PyRep::Integer(importance),
-            PyRep::None,
-        ],
+        OnEditCalendarEvent {
+            event_id,
+            owner_id,
+            old_event_date_time,
+            event_date_time,
+            event_duration: duration,
+            event_title: title.to_string(),
+            importance,
+            auto_event_type: None,
+        },
     );
 }
 
@@ -85,15 +84,14 @@ fn emit_remove_calendar_event(
     event_date_time: i64,
     is_deleted: bool,
 ) {
-    ctx.notify(
+    ctx.emit_typed_with_id_type(
         target,
-        "OnRemoveCalendarEvent",
         "charid",
-        vec![
-            PyRep::Integer(event_id),
-            PyRep::Integer(event_date_time),
-            PyRep::Bool(is_deleted),
-        ],
+        OnRemoveCalendarEvent {
+            event_id,
+            event_date_time,
+            is_deleted,
+        },
     );
 }
 

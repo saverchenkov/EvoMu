@@ -233,6 +233,7 @@ pub(crate) fn acl_folder_updates_rep(
     ])])
 }
 
+#[cfg(test)]
 pub(crate) fn acl_folder_updates_arg(
     folder_id: i64,
     update_type: i64,

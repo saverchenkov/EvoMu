@@ -7,6 +7,9 @@
 // parity: rpc:beyonce.CmdGroupJumpToFleetModuleBeacon, feat:modules.jump-portal-bridge-rules, feat:navigation.conduit-jump
 
 use super::*;
+use crate::router::notify_registry::{
+    OnBridgeModeChange, OnGroupJumpAnchorActivated, OnGroupJumpedPassenger, OnSessionChanged,
+};
 use eve_destiny::MovementMode;
 
 pub(super) fn hull_allowed(ctx: &ServerContext, mod_type: &eve_sde::InvType, ship_type: &eve_sde::InvType) -> bool {
@@ -407,16 +410,14 @@ pub(crate) async fn bridge_to_resolved_beacon(
         );
     if let Some(fleet_id) = ctx.db.with_snapshot(|s| fleet_of(s, char_id)) {
         // DERIVED argument order from the client `fleetSvc.OnBridgeModeChange` handler locals.
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::Fleet(fleet_id),
-            "OnBridgeModeChange",
-            "fleetid",
-            vec![
-                PyRep::Integer(ship_id),
-                PyRep::Integer(beacon.solar_system_id as i64),
-                PyRep::Integer(beacon.beacon_id),
-                PyRep::Bool(true),
-            ],
+            OnBridgeModeChange {
+                ship_id,
+                solar_system_id: beacon.solar_system_id as i64,
+                item_id: beacon.beacon_id,
+                active: true,
+            },
         );
     }
     let mut entries = vec![
@@ -783,14 +784,13 @@ pub(crate) async fn group_jump_to_resolved_beacon(
         {
             jumped_passengers.push(*m_char);
             crate::services::map_service::record_solar_system_jump(ctx, *m_char, beacon.solar_system_id);
-            ctx.notify(
+            ctx.emit_typed_with_id_type(
                 crate::router::NotificationTarget::Character(*m_char),
-                "OnSessionChanged",
                 "clientID",
-                vec![
-                    PyRep::Bool(false),
-                    PyRep::Integer(0),
-                    PyRep::Dict(vec![
+                OnSessionChanged {
+                    is_remote: false,
+                    session: PyRep::Integer(0),
+                    change: PyRep::Dict(vec![
                         (
                             PyRep::String("solarsystemid".into()),
                             PyRep::Tuple(vec![PyRep::Integer(sys_id as i64), PyRep::Integer(beacon.solar_system_id as i64)]),
@@ -800,24 +800,23 @@ pub(crate) async fn group_jump_to_resolved_beacon(
                             PyRep::Tuple(vec![PyRep::Integer(sys_id as i64), PyRep::Integer(beacon.solar_system_id as i64)]),
                         ),
                     ]),
-                ],
+                },
             );
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(*m_char),
-                "OnGroupJumpedPassenger",
-                "charid",
-                vec![PyRep::Integer(char_id), PyRep::Integer(beacon.solar_system_id as i64)],
+                OnGroupJumpedPassenger {
+                    anchor_char_id: char_id,
+                    to_solar_system_id: beacon.solar_system_id as i64,
+                },
             );
         }
     }
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
-        "OnGroupJumpAnchorActivated",
-        "charid",
-        vec![
-            PyRep::Integer(beacon.solar_system_id as i64),
-            PyRep::Integer(jumped_passengers.len() as i64),
-        ],
+        OnGroupJumpAnchorActivated {
+            to_solar_system_id: beacon.solar_system_id as i64,
+            num_passengers: jumped_passengers.len() as i64,
+        },
     );
 
     let caller_dest = if landed_at_star {

@@ -7,6 +7,9 @@
 
 use std::collections::HashMap;
 
+use crate::router::notify_registry::{
+    OnAbyssalLocationEntered, OnAddExpiryDurationForAbyssalContent, OnVoidSpaceRelog,
+};
 use crate::router::ServerContext;
 use crate::services::abyssal_void_gates::{
     handle_abyssal_end_gate_activation, handle_abyssal_gate_activation,
@@ -263,11 +266,9 @@ pub async fn handle(
                         (PyRep::String("nebula_graphic_id".into()), PyRep::Integer(nebula_graphic_id)),
                         (PyRep::String("end_time".into()), PyRep::Integer(end_ft)),
                     ]);
-                    ctx.notify(
+                    ctx.emit_typed(
                         crate::router::NotificationTarget::Character(char_id),
-                        "OnVoidSpaceRelog",
-                        "charid",
-                        vec![client_data],
+                        OnVoidSpaceRelog { client_data },
                     );
                 }
             }
@@ -772,18 +773,14 @@ fn emit_abyssal_entry_notifications(
         (PyRep::String("location_id".into()), PyRep::Integer(1)),
         (PyRep::String("rooms_completed".into()), PyRep::Integer(0)),
     ]);
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
-        "OnAbyssalLocationEntered",
-        "charid",
-        vec![client_data],
+        OnAbyssalLocationEntered { client_data },
     );
     let end_ft = ctx.now_blueos_filetime_ticks() + remaining_sec.max(1) * 10_000_000;
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
-        "OnAddExpiryDurationForAbyssalContent",
-        "charid",
-        vec![PyRep::Integer(end_ft)],
+        OnAddExpiryDurationForAbyssalContent { end_time: end_ft },
     );
 }
 

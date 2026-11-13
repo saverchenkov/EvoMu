@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+use crate::router::notify_registry::{OnFleetJumpBeaconModuleChange, OnJumpTimersUpdated};
 use eve_destiny::{Ball, MovementMode};
 use std::sync::{OnceLock, RwLock};
 
@@ -820,17 +821,15 @@ async fn light_cyno(
     cyno_sess.solar_system_id = Some(sys_id);
     crate::services::pve_special_sites::record_system_interference_activity(ctx, &mut cyno_sess, sys_id, 0.35);
     if let Some(fleet_id) = ctx.db.with_snapshot(|s| fleet_of(s, char_id)) {
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::Fleet(fleet_id),
-            "OnFleetJumpBeaconModuleChange",
-            "fleetid",
-            vec![
-                PyRep::Integer(char_id),
-                PyRep::Integer(sys_id as i64),
-                PyRep::Integer(beacon_id),
-                PyRep::Integer(beacon_type_id as i64),
-                PyRep::Bool(true),
-            ],
+            OnFleetJumpBeaconModuleChange {
+                char_id,
+                solar_system_id: sys_id as i64,
+                beacon_id,
+                type_id: beacon_type_id as i64,
+                active: true,
+            },
         );
     }
     Ok(PyRep::keyval([
@@ -852,17 +851,15 @@ fn cleanup_expired_beacons(ctx: &ServerContext, expired: Vec<(i64, u32, i64, Typ
     for (exp_char, exp_sys, exp_beacon, exp_type) in expired {
         ctx.systems.get_or_spawn(exp_sys).try_remove_ball(exp_beacon);
         if let Some(fleet_id) = ctx.db.with_snapshot(|s| fleet_of(s, exp_char)) {
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Fleet(fleet_id),
-                "OnFleetJumpBeaconModuleChange",
-                "fleetid",
-                vec![
-                    PyRep::Integer(exp_char),
-                    PyRep::Integer(exp_sys as i64),
-                    PyRep::Integer(exp_beacon),
-                    PyRep::Integer(exp_type as i64),
-                    PyRep::Bool(false),
-                ],
+                OnFleetJumpBeaconModuleChange {
+                    char_id: exp_char,
+                    solar_system_id: exp_sys as i64,
+                    beacon_id: exp_beacon,
+                    type_id: exp_type as i64,
+                    active: false,
+                },
             );
         }
     }
@@ -1000,16 +997,14 @@ pub async fn relocate_ship(
     crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
     crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     let old = taken_opt.map(|t| t.ball);
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
-        "OnJumpTimersUpdated",
-        "charid",
-        vec![
-            PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(now + cd_secs)),
-            PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(now + fat_secs)),
-            PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(now)),
-            PyRep::Bool(true),
-        ],
+        OnJumpTimersUpdated {
+            jump_activation: crate::sp6_lifecycle::unix_to_filetime(now + cd_secs),
+            jump_fatigue: crate::sp6_lifecycle::unix_to_filetime(now + fat_secs),
+            last_updated: crate::sp6_lifecycle::unix_to_filetime(now),
+            do_alert: true,
+        },
     );
     ctx.invalidate_bound_objects_for_session_transition(
         char_id,

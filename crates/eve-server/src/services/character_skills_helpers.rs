@@ -7,6 +7,7 @@ use super::{
     lookup_effective_attr_from_tuple,
 };
 use crate::formulas::{skill_injector_sp_yield, skill_training_time_seconds, sp_for_skill_level};
+use crate::router::notify_registry::{OnFreeSkillPointsChanged, OnSkillQueuePausedServer};
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::implant_plugging::{
     is_daily_alpha_injector, is_non_diminishing_injector, load_alpha_injector_cooldowns,
@@ -419,11 +420,11 @@ fn handle_apply_free_skill_points_to_queue(
             None,
         );
     }
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnFreeSkillPointsChanged",
-        "charid",
-        vec![PyRep::Real(rem_free)],
+        OnFreeSkillPointsChanged {
+            new_free_skill_points: rem_free,
+        },
     );
     Ok(PyRep::None)
 }
@@ -639,11 +640,11 @@ fn handle_apply_free_skill_points_to_skills(
             None,
         );
     }
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnFreeSkillPointsChanged",
-        "charid",
-        vec![PyRep::Real(rem_free)],
+        OnFreeSkillPointsChanged {
+            new_free_skill_points: rem_free,
+        },
     );
     Ok(PyRep::None)
 }
@@ -777,11 +778,11 @@ fn handle_char_start_training_skill(
     for ocid in paused_other_chars {
         let _ = ctx.notify_skill_queue_paused_server(ocid);
     }
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnSkillQueuePausedServer",
-        "charid",
-        vec![PyRep::Bool(false)],
+        OnSkillQueuePausedServer {
+            paused: Some(false),
+        },
     );
     Ok(PyRep::None)
 }
