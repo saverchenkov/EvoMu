@@ -23,10 +23,10 @@ use crate::quasar_gateway::{
     STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
-    DynamicQuasarMessage, DynamicValue, FieldDescriptorProto, FieldLabel, FieldType, GoogleAny,
-    QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, FieldDescriptorProto, FieldLabel,
+    FieldType, GoogleAny, GoogleTimestamp, QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::Arc;
@@ -58,17 +58,6 @@ fn caller_solar_system(ctx: &AuthoritativeContext, db: &WorldRepository) -> Resu
     let cid = require_character(ctx)?;
     db.with_snapshot(|s| s.characters.get(&cid).map(|c| c.solar_system_id))
         .ok_or((STATUS_NOT_FOUND, format!("Character {cid} not found")))
-}
-
-fn encode_id_field(field_num: u32, id: u64, out: &mut Vec<u8>) {
-    let mut buf = Vec::new();
-    encode_varint_field(1, id, &mut buf);
-    encode_bytes_field(field_num, &buf, out);
-}
-
-fn encode_fraction(num: u64, den: u64, out: &mut Vec<u8>) {
-    encode_varint_field(1, num, out);
-    encode_varint_field(2, den, out);
 }
 
 fn build_field_value(
@@ -614,28 +603,32 @@ pub fn register_handlers(
                 } else {
                     2 // ACTIVE
                 };
-                let mut out = Vec::new();
-                encode_id_field(1, warzone_id, &mut out);
-                let mut staging_buf = Vec::new();
-                encode_id_field(1, camp.target_faction_id as u64, &mut staging_buf);
-                encode_id_field(2, camp.pirate_faction_id as u64, &mut staging_buf);
-                encode_bytes_field(2, &staging_buf, &mut out);
-                encode_id_field(3, camp.fob_solar_system_id as u64, &mut out);
+                let mut msg = pb::message("eve.pirate.insurgency.api.GetResponse")
+                    .set("warzone.sequential", warzone_id)
+                    .add_with("participants.factions", |f| {
+                        f.set("sequential", camp.target_faction_id as u64)
+                    })
+                    .set(
+                        "participants.pirate_faction.sequential",
+                        camp.pirate_faction_id as u64,
+                    )
+                    .set("origin.sequential", camp.fob_solar_system_id as u64)
+                    .set("state", state_enum as i32);
                 for &sys_id in &camp.systems {
-                    encode_id_field(4, sys_id as u64, &mut out);
+                    msg = msg.add_with("systems", |s| s.set("sequential", sys_id as u64));
                 }
-                encode_varint_field(5, state_enum, &mut out);
                 if camp.active_end_unix > 0 {
-                    let mut ts_buf = Vec::new();
-                    encode_varint_field(1, camp.active_end_unix, &mut ts_buf);
-                    encode_bytes_field(7, &ts_buf, &mut out);
+                    msg = msg.set(
+                        "expiry",
+                        GoogleTimestamp {
+                            seconds: camp.active_end_unix as i64,
+                            nanos: 0,
+                        },
+                    );
                 } else {
-                    encode_varint_field(6, 1, &mut out);
+                    msg = msg.set("no_expiry", true);
                 }
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.pirate.insurgency.api.GetResponse"),
-                    value: out,
-                })
+                Ok(msg.must_to_any())
             }),
         );
     }
@@ -658,14 +651,11 @@ pub fn register_handlers(
                     list.sort_unstable();
                     list.into_iter().map(|(_, id)| id.max(0) as u64).collect::<Vec<_>>()
                 });
-                let mut out = Vec::new();
+                let mut msg = pb::message("eve.pirate.insurgency.api.GetCurrentResponse");
                 for cid in camp_ids {
-                    encode_id_field(1, cid, &mut out);
+                    msg = msg.add_with("campaigns", |c| c.set("sequential", cid));
                 }
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.pirate.insurgency.api.GetCurrentResponse"),
-                    value: out,
-                })
+                Ok(msg.must_to_any())
             }),
         );
     }
@@ -680,14 +670,11 @@ pub fn register_handlers(
                 let systems = db_i
                     .with_snapshot(|snap| snap.insurgency_runtime.campaigns.get(&req_cid).map(|c| c.systems.clone()))
                     .ok_or_else(|| (STATUS_NOT_FOUND, format!("Insurgency campaign {req_cid} not found")))?;
-                let mut out = Vec::new();
+                let mut msg = pb::message("eve.pirate.insurgency.api.GetSystemsResponse");
                 for sys_id in systems {
-                    encode_id_field(1, sys_id as u64, &mut out);
+                    msg = msg.add_with("systems", |s| s.set("sequential", sys_id as u64));
                 }
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.pirate.insurgency.api.GetSystemsResponse"),
-                    value: out,
-                })
+                Ok(msg.must_to_any())
             }),
         );
     }
@@ -711,16 +698,14 @@ pub fn register_handlers(
                         })
                         .map(|c| c.campaign_id.max(0) as u64)
                 });
-                let mut out = Vec::new();
-                if let Some(cid) = matched_cid {
-                    encode_id_field(2, cid, &mut out);
+                let msg = if let Some(cid) = matched_cid {
+                    pb::message("eve.pirate.insurgency.api.GetForWarzoneResponse")
+                        .set("campaign.sequential", cid)
                 } else {
-                    encode_varint_field(1, 1, &mut out);
-                }
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.pirate.insurgency.api.GetForWarzoneResponse"),
-                    value: out,
-                })
+                    pb::message("eve.pirate.insurgency.api.GetForWarzoneResponse")
+                        .set("no_campaign", true)
+                };
+                Ok(msg.must_to_any())
             }),
         );
     }
@@ -751,24 +736,18 @@ pub fn register_handlers(
                         .max(u32::from(crate::services::insurgency_services::insurgency_stage(pts)));
                     (pts, stage)
                 });
-                let mut out = Vec::new();
-                let mut f1 = Vec::new();
-                encode_fraction(c_pts.max(0) as u64, 1000, &mut f1);
-                encode_bytes_field(1, &f1, &mut out);
-
-                let mut f2 = Vec::new();
-                encode_fraction(c_pts.max(0) as u64, 1000, &mut f2);
-                encode_bytes_field(2, &f2, &mut out);
-
-                let mut f3 = Vec::new();
-                encode_fraction(0, 1000, &mut f3);
-                encode_bytes_field(3, &f3, &mut out);
-
-                encode_varint_field(4, c_stage as u64, &mut out);
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.pirate.corruption.api.GetSystemInfoResponse"),
-                    value: out,
-                })
+                let pts_num = c_pts.max(0) as u64;
+                Ok(
+                    pb::message("eve_public.pirate.corruption.api.GetSystemInfoResponse")
+                        .set("total_progress.numerator", pts_num)
+                        .set("total_progress.denominator", 1000u64)
+                        .set("eve_contribution.numerator", pts_num)
+                        .set("eve_contribution.denominator", 1000u64)
+                        .set("vanguard_contribution.numerator", 0u64)
+                        .set("vanguard_contribution.denominator", 1000u64)
+                        .set("stage", c_stage)
+                        .must_to_any(),
+                )
             }),
         );
     }
@@ -776,16 +755,14 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.pirate.corruption.api.GetStageThresholdsRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                let mut out = Vec::new();
+                let mut msg =
+                    pb::message("eve_public.pirate.corruption.api.GetStageThresholdsResponse");
                 for threshold in INSURGENCY_STAGE_THRESHOLDS {
-                    let mut th = Vec::new();
-                    encode_fraction(threshold, 1000, &mut th);
-                    encode_bytes_field(1, &th, &mut out);
+                    msg = msg.add_with("thresholds", |f| {
+                        f.set("numerator", threshold).set("denominator", 1000u64)
+                    });
                 }
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.pirate.corruption.api.GetStageThresholdsResponse"),
-                    value: out,
-                })
+                Ok(msg.must_to_any())
             }),
         );
     }
@@ -816,25 +793,18 @@ pub fn register_handlers(
                         .max(u32::from(crate::services::insurgency_services::insurgency_stage(pts)));
                     (pts, stage)
                 });
-                let mut out = Vec::new();
-                let mut f1 = Vec::new();
-                encode_fraction(s_pts.max(0) as u64, 1000, &mut f1);
-                encode_bytes_field(1, &f1, &mut out);
-
-                encode_varint_field(2, s_stage as u64, &mut out);
-
-                let mut f3 = Vec::new();
-                encode_fraction(s_pts.max(0) as u64, 1000, &mut f3);
-                encode_bytes_field(3, &f3, &mut out);
-
-                let mut f4 = Vec::new();
-                encode_fraction(0, 1000, &mut f4);
-                encode_bytes_field(4, &f4, &mut out);
-
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.pirate.suppression.api.GetSystemInfoResponse"),
-                    value: out,
-                })
+                let pts_num = s_pts.max(0) as u64;
+                Ok(
+                    pb::message("eve_public.pirate.suppression.api.GetSystemInfoResponse")
+                        .set("total_progress.numerator", pts_num)
+                        .set("total_progress.denominator", 1000u64)
+                        .set("stage", s_stage)
+                        .set("eve_contribution.numerator", pts_num)
+                        .set("eve_contribution.denominator", 1000u64)
+                        .set("vanguard_contribution.numerator", 0u64)
+                        .set("vanguard_contribution.denominator", 1000u64)
+                        .must_to_any(),
+                )
             }),
         );
     }
@@ -842,16 +812,14 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.pirate.suppression.api.GetStageThresholdsRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                let mut out = Vec::new();
+                let mut msg =
+                    pb::message("eve_public.pirate.suppression.api.GetStageThresholdsResponse");
                 for threshold in INSURGENCY_STAGE_THRESHOLDS {
-                    let mut th = Vec::new();
-                    encode_fraction(threshold, 1000, &mut th);
-                    encode_bytes_field(1, &th, &mut out);
+                    msg = msg.add_with("thresholds", |f| {
+                        f.set("numerator", threshold).set("denominator", 1000u64)
+                    });
                 }
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.pirate.suppression.api.GetStageThresholdsResponse"),
-                    value: out,
-                })
+                Ok(msg.must_to_any())
             }),
         );
     }
@@ -1012,17 +980,20 @@ pub fn register_handlers(
                     }
                     snap.zarzakh_gate_locks.get(&cid).copied().filter(|(_, expires_at)| *expires_at > now)
                 });
-                let mut out = Vec::new();
-                if let Some((gate_id, expiry_unix)) = lock_info {
-                    encode_id_field(1, gate_id as u64, &mut out);
-                    let mut exp_bytes = Vec::new();
-                    encode_varint_field(1, expiry_unix, &mut exp_bytes);
-                    encode_bytes_field(2, &exp_bytes, &mut out);
-                }
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.stargate.lock.api.GetResponse"),
-                    value: out,
-                })
+                let msg = if let Some((gate_id, expiry_unix)) = lock_info {
+                    pb::message("eve_public.stargate.lock.api.GetResponse")
+                        .set("gate.sequential", gate_id as u64)
+                        .set(
+                            "expiry",
+                            GoogleTimestamp {
+                                seconds: expiry_unix as i64,
+                                nanos: 0,
+                            },
+                        )
+                } else {
+                    pb::message("eve_public.stargate.lock.api.GetResponse")
+                };
+                Ok(msg.must_to_any())
             }),
         );
     }
@@ -1038,14 +1009,18 @@ pub fn register_handlers(
                 let locked = db_lock.with_snapshot(|snap| {
                     snap.zarzakh_gate_locks.get(&cid).is_some_and(|(_, expires_at)| *expires_at > now)
                 });
-                let mut out = Vec::new();
-                if locked {
-                    encode_id_field(1, u64::from(crate::services::space_destiny::space_warp_jump::SOLAR_SYSTEM_ZARZAKH), &mut out);
-                }
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.stargate.lock.api.GetRestrictedSystemsResponse"),
-                    value: out,
-                })
+                let msg = pb::message("eve_public.stargate.lock.api.GetRestrictedSystemsResponse")
+                    .when(locked, |b| {
+                        b.add_with("solarsystems", |s| {
+                            s.set(
+                                "sequential",
+                                u64::from(
+                                    crate::services::space_destiny::space_warp_jump::SOLAR_SYSTEM_ZARZAKH,
+                                ),
+                            )
+                        })
+                    });
+                Ok(msg.must_to_any())
             }),
         );
     }
@@ -1121,41 +1096,31 @@ pub fn register_handlers(
                     (msg, true, Some(("solar_system", sys_name)))
                 };
 
-                let mut out = Vec::new();
-                encode_string_field(1, &response_text, &mut out);
-                encode_varint_field(2, u64::from(is_fallback), &mut out);
-
-                let mut fmt_msg = Vec::new();
-                encode_string_field(1, &response_text, &mut fmt_msg);
+                let mut resp = pb::message("eve_public.ai.assistant.chat.api.QueryResponse")
+                    .set("response", &response_text)
+                    .set("fallback", is_fallback)
+                    .set("formatted_response.text", &response_text);
                 if let Some((pkey, pval)) = param_pair {
-                    let mut param = Vec::new();
-                    encode_string_field(1, pkey, &mut param);
-                    encode_string_field(2, &pval, &mut param);
-                    encode_bytes_field(2, &param, &mut fmt_msg);
+                    resp = resp.add_with("formatted_response.parameters", |p| {
+                        p.set("key", pkey).set("string", &pval)
+                    });
                 }
-                encode_bytes_field(3, &fmt_msg, &mut out);
 
                 let scope = match ctx.effective_character_id() {
                     Some(cid) => NoticeScope::Character(cid),
                     None => NoticeScope::Broadcast,
                 };
-                let mut notice_val = Vec::new();
-                encode_string_field(1, &query, &mut notice_val);
-                encode_string_field(2, &response_text, &mut notice_val);
-                pending_ai.write().unwrap_or_else(|e| e.into_inner()).push((
-                    scope,
-                    GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.ai.assistant.chat.api.Queried"),
-                        value: notice_val,
-                    },
-                ));
+                let notice = pb::message("eve.ai.assistant.chat.api.Queried")
+                    .set("message", &query)
+                    .set("response", &response_text)
+                    .set("fallback", is_fallback)
+                    .must_to_any();
+                pending_ai
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((scope, notice));
 
-                Ok(GoogleAny {
-                    type_url: format!(
-                        "{TYPE_GOOGLEAPIS_PREFIX}eve_public.ai.assistant.chat.api.QueryResponse"
-                    ),
-                    value: out,
-                })
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -1204,8 +1169,7 @@ pub fn register_handlers(
                         value: Vec::new(),
                     });
                 }
-                let mut out = Vec::new();
-                if no_local || cur_ver != Some(latest) {
+                let msg = if no_local || cur_ver != Some(latest) {
                     let crc_val = ((sde_cdn.solar_systems.len() as u32).wrapping_mul(2654435761))
                         ^ ((sde_cdn.constellations.len() as u32).wrapping_mul(2246822519))
                         ^ ((sde_cdn.regions.len() as u32).wrapping_mul(3266489917));
@@ -1218,24 +1182,16 @@ pub fn register_handlers(
                         "{cdn_base}/maptags/v{}.{}.{}/universe.fb",
                         latest.0, latest.1, latest.2
                     );
-                    let mut ver_buf = Vec::new();
-                    encode_varint_field(1, u64::from(latest.0), &mut ver_buf);
-                    encode_varint_field(2, u64::from(latest.1), &mut ver_buf);
-                    encode_varint_field(3, u64::from(latest.2), &mut ver_buf);
-                    let mut crc_buf = Vec::new();
-                    encode_varint_field(1, u64::from(crc_val), &mut crc_buf);
-                    let mut cp_buf = Vec::new();
-                    encode_string_field(1, &url, &mut cp_buf);
-                    encode_bytes_field(2, &ver_buf, &mut cp_buf);
-                    encode_bytes_field(3, &crc_buf, &mut cp_buf);
-                    encode_bytes_field(1, &cp_buf, &mut out);
-                }
-                Ok(GoogleAny {
-                    type_url: format!(
-                        "{TYPE_GOOGLEAPIS_PREFIX}eve_public.space.api.cdn.GetUpdateResponse"
-                    ),
-                    value: out,
-                })
+                    pb::message("eve_public.space.api.cdn.GetUpdateResponse")
+                        .set("checkpoint.url", &url)
+                        .set("checkpoint.version.major", latest.0)
+                        .set("checkpoint.version.minor", latest.1)
+                        .set("checkpoint.version.patch", latest.2)
+                        .set("checkpoint.crc.crc", crc_val)
+                } else {
+                    pb::message("eve_public.space.api.cdn.GetUpdateResponse")
+                };
+                Ok(msg.must_to_any())
             }),
         );
     }
@@ -1253,7 +1209,7 @@ mod tests {
     use super::*;
     use crate::router::ServerContext;
     use eve_machonet::SessionState;
-    use eve_proto::quasar::{EvePublicRequest, GoogleTimestamp, TYPE_EVETECH_PREFIX};
+    use eve_proto::quasar::{EvePublicRequest, TYPE_EVETECH_PREFIX};
 
     #[test]
     fn space_cdn_get_update_evetech_refresh_with_current_version_returns_no_checkpoint() {
@@ -1262,12 +1218,11 @@ mod tests {
         sess.user_id = Some(1);
         sess.character_id = Some(90_000_001);
 
-        let mut ver_bytes = Vec::new();
-        encode_varint_field(1, 24, &mut ver_bytes);
-        encode_varint_field(2, 1, &mut ver_bytes);
-        encode_varint_field(3, 5432, &mut ver_bytes);
-        let mut req_bytes = Vec::new();
-        encode_bytes_field(1, &ver_bytes, &mut req_bytes);
+        let req_bytes = pb::message("eve_public.space.api.cdn.GetUpdateRequest")
+            .set("current_version.major", 24u32)
+            .set("current_version.minor", 1u32)
+            .set("current_version.patch", 5432u32)
+            .must_encode();
 
         let pub_req = EvePublicRequest {
             issued: Some(GoogleTimestamp {

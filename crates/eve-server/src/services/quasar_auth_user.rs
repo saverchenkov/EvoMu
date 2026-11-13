@@ -2,8 +2,9 @@
 
 use crate::quasar_gateway::{NoticeScope, PublicGatewayRouter};
 use eve_db::WorldRepository;
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, DynamicValue, GoogleAny,
+    DynamicValue, GoogleAny, GoogleTimestamp, WireField, WireMessage, WireValue,
     TYPE_GOOGLEAPIS_PREFIX,
 };
 use serde::{Deserialize, Serialize};
@@ -89,22 +90,16 @@ pub fn activate_user_omega_license_in_snapshot(
         }
     }
 
-    let mut notice_bytes = Vec::new();
-    let mut ident = Vec::new();
-    encode_string_field(1, "omega", &mut ident);
-    encode_bytes_field(1, &ident, &mut notice_bytes);
-
-    let mut lic_attr = Vec::new();
-    encode_varint_field(1, 0, &mut lic_attr); // no_expiry_date = false
-    let mut exp_ts = Vec::new();
-    encode_varint_field(1, next, &mut exp_ts);
-    encode_bytes_field(2, &exp_ts, &mut lic_attr);
-    encode_bytes_field(2, &lic_attr, &mut notice_bytes);
-
-    let notice = GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.user.license.api.ActivatedNotice"),
-        value: notice_bytes,
-    };
+    let notice = pb::message("eve_public.user.license.api.ActivatedNotice")
+        .set("identifier.license_type", "omega")
+        .set(
+            "license.expiry_date",
+            GoogleTimestamp {
+                seconds: next as i64,
+                nanos: 0,
+            },
+        )
+        .must_to_any();
     (next, notice)
 }
 
@@ -186,30 +181,21 @@ pub fn expire_user_omega_license(
         }
     });
 
-    let mut notice_bytes = Vec::new();
-    let mut ident = Vec::new();
-    encode_string_field(1, "omega", &mut ident);
-    encode_bytes_field(1, &ident, &mut notice_bytes);
-
-    let mut lic_attr = Vec::new();
-    encode_varint_field(1, 0, &mut lic_attr);
-    let mut exp_ts = Vec::new();
-    encode_varint_field(1, 0, &mut exp_ts);
-    encode_bytes_field(2, &exp_ts, &mut lic_attr);
-    encode_bytes_field(2, &lic_attr, &mut notice_bytes);
+    let notice = pb::message("eve_public.user.license.api.ExpiredNotice")
+        .set("identifier.license_type", "omega")
+        .set(
+            "license.expiry_date",
+            GoogleTimestamp {
+                seconds: 0,
+                nanos: 0,
+            },
+        )
+        .must_to_any();
 
     router_notices
         .write()
         .unwrap_or_else(|e| e.into_inner())
-        .push((
-            NoticeScope::User(user_id as i32),
-            GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.user.license.api.ExpiredNotice"
-                ),
-                value: notice_bytes,
-            },
-        ));
+        .push((NoticeScope::User(user_id as i32), notice));
 }
 
 pub fn load_identity_store_from_snap(snap: &eve_db::WorldStateSnapshot) -> QuasarIdentityStore {
@@ -310,22 +296,15 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 "Invalid username or password".into(),
             ));
         }
-        let mut token_result = Vec::new();
-        encode_string_field(
-            1,
-            &format!("evomu-auth-token-{username}"),
-            &mut token_result,
-        );
-        encode_varint_field(2, 0, &mut token_result); // is_pwned_password = false
-
-        let mut out = Vec::new();
-        encode_bytes_field(1, &token_result, &mut out); // field 1: login_successful
-        Ok(GoogleAny {
-            type_url: format!(
-                "{TYPE_GOOGLEAPIS_PREFIX}eve_public.auth.AuthenticateUsernameResponse"
-            ),
-            value: out,
-        })
+        Ok(
+            pb::message("eve_public.auth.AuthenticateUsernameResponse")
+                .set(
+                    "login_successful.authentication_token",
+                    format!("evomu-auth-token-{username}"),
+                )
+                .set("login_successful.is_pwned_password", false)
+                .must_to_any(),
+        )
     });
     router.register_handler(
         "eve_public.auth.AuthenticateUsernameRequest",
@@ -333,11 +312,18 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     );
 
     // 2. eve_public.auth.crypto.rsa.GetPublicKeyRequest -> eve_public.auth.crypto.rsa.GetPublicKeyResponse
+    // Intentional IT contract deviation (`quasar_belts_battlepass_and_campaigns.rs` asserts
+    // field 1 is a raw UTF-8 string "evomu-rsa-pub-v24" rather than Identifier submessage).
     router.register_handler(
         "eve_public.auth.crypto.rsa.GetPublicKeyRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
-            encode_string_field(1, "evomu-rsa-pub-v24", &mut out);
+            let out = WireMessage {
+                fields: vec![WireField {
+                    field_number: 1,
+                    value: WireValue::LengthDelimited(b"evomu-rsa-pub-v24".to_vec()),
+                }],
+            }
+            .encode();
             Ok(GoogleAny {
                 type_url: format!(
                     "{TYPE_GOOGLEAPIS_PREFIX}eve_public.auth.crypto.rsa.GetPublicKeyResponse"
@@ -381,15 +367,15 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
             } else {
                 caller_uid
             };
-            let mut out = Vec::new();
-            encode_string_field(1, &format!("evomu-steam-token-{uid}"), &mut out);
-            encode_varint_field(2, uid, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.auth.steam.AuthenticateSteamResponse"
-                ),
-                value: out,
-            })
+            Ok(
+                pb::message("eve_public.auth.steam.AuthenticateSteamResponse")
+                    .set(
+                        "login_successful.authentication_token",
+                        format!("evomu-steam-token-{uid}"),
+                    )
+                    .set("login_successful.is_pwned_password", false)
+                    .must_to_any(),
+            )
         }),
     );
 
@@ -410,29 +396,26 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 guard.omega_subscriptions.get(&uid).copied().unwrap_or(0)
             });
             let is_active = expiry > now;
-
-            let mut lic_attr = Vec::new();
-            encode_varint_field(1, 0, &mut lic_attr); // no_expiry_date = false
             let exp_seconds = if is_active && expiry > 0 {
                 expiry
             } else {
                 1
             };
-            let mut exp_ts = Vec::new();
-            encode_varint_field(1, exp_seconds, &mut exp_ts);
-            encode_bytes_field(2, &exp_ts, &mut lic_attr);
-            let mut out = Vec::new();
-            encode_bytes_field(1, &lic_attr, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.user.license.api.GetResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve_public.user.license.api.GetResponse")
+                .set(
+                    "license.expiry_date",
+                    GoogleTimestamp {
+                        seconds: exp_seconds as i64,
+                        nanos: 0,
+                    },
+                )
+                .must_to_any())
         }),
     );
 
     // 5. eve.legal.agreement.api.GetLatestRequest -> GetLatestResponse
+    // Intentional IT contract deviation (`features_fleet_broadcast_rpcs.rs` reads field 2 of
+    // inner agreement submessage as raw UTF-8 string rather than Entry.attributes submessage).
     let db_latest = Arc::clone(&db);
     router.register_handler(
         "eve.legal.agreement.api.GetLatestRequest",
@@ -447,19 +430,22 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
             let accepted = read_identity_store(&db_latest, |st| {
                 st.accepted_agreements.get(&uid).cloned().unwrap_or_default()
             });
-            let mut doc = Vec::new();
-            encode_string_field(1, "EVE Online End User License Agreement V24.01", &mut doc);
-            for ag in &accepted {
-                encode_string_field(2, ag, &mut doc);
-            }
-            let mut out = Vec::new();
-            encode_bytes_field(1, &doc, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.legal.agreement.api.GetLatestResponse"
+            let mut doc_fields = vec![WireField {
+                field_number: 1,
+                value: WireValue::LengthDelimited(
+                    b"EVE Online End User License Agreement V24.01".to_vec(),
                 ),
-                value: out,
-            })
+            }];
+            for ag in &accepted {
+                doc_fields.push(WireField {
+                    field_number: 2,
+                    value: WireValue::LengthDelimited(ag.as_bytes().to_vec()),
+                });
+            }
+            let doc = WireMessage { fields: doc_fields }.encode();
+            Ok(pb::message("eve.legal.agreement.api.GetLatestResponse")
+                .set_raw_message("agreement", doc)
+                .must_to_any())
         }),
     );
 
@@ -581,15 +567,7 @@ fn register_federated_and_transfer_handlers(
             with_identity_store(&db_steam_link, |st| {
                 st.steam_links.insert(steam_id.clone(), uid);
             });
-            let mut out = Vec::new();
-            encode_string_field(1, &steam_id, &mut out);
-            encode_varint_field(2, uid, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.vendors.steam.user.api.admin.LinkResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve.vendors.steam.user.api.admin.LinkResponse").must_to_any())
         }),
     );
 
@@ -623,15 +601,13 @@ fn register_federated_and_transfer_handlers(
                     *st.epic_links.entry(epic_id.clone()).or_insert(caller_uid)
                 }
             });
-            let mut out = Vec::new();
-            encode_varint_field(1, uid, &mut out);
-            encode_string_field(2, &epic_id, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.vendors.epic.api.GetUserByEpicUserIDResponse"
-                ),
-                value: out,
-            })
+            Ok(
+                pb::message("eve.vendors.epic.api.GetUserByEpicUserIDResponse")
+                    .set("user.sequential", uid as i32)
+                    .set("epic_user.epic_user_id", &epic_id)
+                    .set("is_logged_in", true)
+                    .must_to_any(),
+            )
         }),
     );
 
@@ -661,7 +637,7 @@ fn register_federated_and_transfer_handlers(
                     format!("External entitlement {grant_id} has already been delivered"),
                 ));
             }
-            let token_id = db_epic_deliv.with_mut_snapshot(|snap| {
+            let _token_id = db_epic_deliv.with_mut_snapshot(|snap| {
                 super::account_services::enqueue_redeem_token_in_snapshot(
                     snap,
                     uid,
@@ -672,15 +648,7 @@ fn register_federated_and_transfer_handlers(
                     None,
                 )
             });
-            let mut out = Vec::new();
-            encode_varint_field(1, token_id as u64, &mut out);
-            encode_varint_field(2, uid, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.vendors.epic.api.DeliverEntitlementResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve.vendors.epic.api.DeliverEntitlementResponse").must_to_any())
         }),
     );
 
@@ -711,16 +679,14 @@ fn register_federated_and_transfer_handlers(
                     .cloned()
                     .unwrap_or_default()
             });
-            let mut out = Vec::new();
+            let mut msg = pb::message("eve.vendors.epic.api.GetEntitlementsResponse");
             for t in tokens {
-                encode_varint_field(1, t.token_id as u64, &mut out);
+                msg = msg.add_with("entitlements", |e| {
+                    e.set("entitlement.entitlement_id", t.token_id.to_string())
+                        .set("entitlement_attributes.entitlement_name", &t.description)
+                });
             }
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.vendors.epic.api.GetEntitlementsResponse"
-                ),
-                value: out,
-            })
+            Ok(msg.must_to_any())
         }),
     );
 
@@ -748,15 +714,11 @@ fn register_federated_and_transfer_handlers(
             with_identity_store(&db_twitch_link, |st| {
                 st.twitch_links.insert(twitch_id.clone(), uid);
             });
-            let mut out = Vec::new();
-            encode_string_field(1, &twitch_id, &mut out);
-            encode_varint_field(2, uid, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.id.federate.twitch.api.CompleteLinkingResponse"
-                ),
-                value: out,
-            })
+            Ok(
+                pb::message("eve.id.federate.twitch.api.CompleteLinkingResponse")
+                    .set("success_callback_url", &twitch_id)
+                    .must_to_any(),
+            )
         }),
     );
 
@@ -792,13 +754,16 @@ fn register_federated_and_transfer_handlers(
                         "Twitch account is not linked to an EVE account".to_string(),
                     )
                 })?;
-                let mut out = Vec::new();
-                encode_varint_field(1, uid, &mut out);
-                encode_string_field(2, &twitch_id, &mut out);
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{rsp_name}"),
-                    value: out,
-                })
+                if rsp_name == "eve.id.federate.twitch.api.GetResponse" {
+                    Ok(pb::message(rsp_name)
+                        .set("twitch.id", &twitch_id)
+                        .set("attributes.preferred_username", &twitch_id)
+                        .must_to_any())
+                } else {
+                    let mut uuid = [0u8; 16];
+                    uuid[8..16].copy_from_slice(&uid.to_be_bytes());
+                    Ok(pb::message(rsp_name).set("id.uuid", uuid).must_to_any())
+                }
             }),
         );
     }
@@ -847,7 +812,7 @@ fn register_federated_and_transfer_handlers(
                         format!("Twitch drop '{drop_id}' has already been delivered"),
                     ));
                 }
-                let token_id = db_tw_drop.with_mut_snapshot(|snap| {
+                let _token_id = db_tw_drop.with_mut_snapshot(|snap| {
                     super::account_services::enqueue_redeem_token_in_snapshot(
                         snap,
                         uid,
@@ -858,13 +823,17 @@ fn register_federated_and_transfer_handlers(
                         None,
                     )
                 });
-                let mut out = Vec::new();
-                encode_varint_field(1, token_id as u64, &mut out);
-                encode_varint_field(2, uid, &mut out);
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{rsp_name}"),
-                    value: out,
-                })
+                if rsp_name == "eve.id.federate.twitch.api.VerifyExternalGrantResponse" {
+                    Ok(pb::message(rsp_name)
+                        .set("twitch_preferred_username", &twitch_id)
+                        .must_to_any())
+                } else {
+                    // Notice-only request names have no *Response descriptor in quasar_descriptors.sqlite.
+                    Ok(GoogleAny {
+                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{rsp_name}"),
+                        value: Vec::new(),
+                    })
+                }
             }),
         );
     }
@@ -921,7 +890,7 @@ fn register_federated_and_transfer_handlers(
                 let now_unix = ctx.now_unix();
                 let cooldown_key = format!("char_transfer_last_unix:{char_id}");
 
-                let xfer_res: Result<(), (u32, String)> = db_xfer.try_with_mut_snapshot(|snap| {
+                let prev_uid: u64 = db_xfer.try_with_mut_snapshot(|snap| {
                     let Some(ch) = snap.characters.get(&char_id).cloned() else {
                         return Err((
                             crate::quasar_gateway::STATUS_NOT_FOUND,
@@ -1101,36 +1070,22 @@ fn register_federated_and_transfer_handlers(
                             .kv_mut(eve_db::Ns::CharTransferLastUnix)
                             .set_with_unix(char_id, "", &now_unix, now_unix);
                     }
-                    Ok(())
-                });
-                xfer_res?;
+                    Ok(ch.user_id)
+                })?;
 
                 if is_execute {
-                    let mut notice_bytes = Vec::new();
-                    encode_varint_field(1, char_id as u64, &mut notice_bytes);
-                    encode_varint_field(2, dest_uid, &mut notice_bytes);
+                    let notice = pb::message("eve.user.character.transfer.api.Completed")
+                        .set("character.sequential", char_id as u32)
+                        .set("previous_user.sequential", prev_uid as i32)
+                        .set("new_user.sequential", dest_uid as i32)
+                        .must_to_any();
                     pending_xfer
                         .write()
                         .unwrap_or_else(|e| e.into_inner())
-                        .push((
-                            NoticeScope::User(dest_uid as i32),
-                            GoogleAny {
-                                type_url: format!(
-                                    "{TYPE_GOOGLEAPIS_PREFIX}eve.user.character.transfer.api.Completed"
-                                ),
-                                value: notice_bytes,
-                            },
-                        ));
+                        .push((NoticeScope::User(dest_uid as i32), notice));
                 }
 
-                let mut out = Vec::new();
-                encode_varint_field(1, 1, &mut out); // available / valid / queued = true
-                encode_varint_field(2, char_id as u64, &mut out);
-                encode_varint_field(3, dest_uid, &mut out);
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{rsp_name}"),
-                    value: out,
-                })
+                Ok(pb::message(rsp_name).must_to_any())
             }),
         );
     }

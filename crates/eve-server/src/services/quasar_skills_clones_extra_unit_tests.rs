@@ -9,8 +9,8 @@ use eve_db::{
 };
 use eve_machonet::service_roles;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, AuthoritativeContext, DynamicQuasarMessage,
-    DynamicValue, GoogleAny, QuasarDescriptorRegistry,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, QuasarDescriptorRegistry,
+    WireField, WireMessage, WireValue,
 };
 use eve_sde::SdeRegistry;
 use std::collections::HashMap;
@@ -85,10 +85,20 @@ fn test_skill_plan_manager_legacy_blob_and_active_uuid_wire_extraction() {
         Some(sp_uuid)
     );
 
-    let mut sub_wire = Vec::new();
-    encode_bytes_field(1, &ms_uuid, &mut sub_wire);
-    let mut raw_wire = Vec::new();
-    encode_bytes_field(2, &sub_wire, &mut raw_wire);
+    let sub_wire = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(ms_uuid.to_vec()),
+        }],
+    }
+    .encode();
+    let raw_wire = WireMessage {
+        fields: vec![WireField {
+            field_number: 2,
+            value: WireValue::LengthDelimited(sub_wire),
+        }],
+    }
+    .encode();
     let any_with_wire = GoogleAny {
         type_url: String::new(),
         value: raw_wire,
@@ -405,10 +415,20 @@ fn test_skilltype_skill_level_and_active_implants_encodings_and_permissions() {
     assert!(!imp_resp.value.is_empty());
 
     // Also test WireMessage fallback when `dyn_msg` is empty
-    let mut sub_bytes = Vec::new();
-    encode_varint_field(1, other_cid as u64, &mut sub_bytes);
-    let mut outer_bytes = Vec::new();
-    encode_bytes_field(1, &sub_bytes, &mut outer_bytes);
+    let sub_bytes = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(other_cid as u64),
+        }],
+    }
+    .encode();
+    let outer_bytes = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(sub_bytes),
+        }],
+    }
+    .encode();
     let wire_any = GoogleAny {
         type_url: String::new(),
         value: outer_bytes,
@@ -676,8 +696,13 @@ fn test_quasar_skills_clones_additional_branches_and_validation() {
     );
 
     // 8. eve.skilltype.GetRequest via raw WireMessage in GoogleAny (both direct varint and nested message)
-    let mut wire_direct = Vec::new();
-    encode_varint_field(1, 3300, &mut wire_direct);
+    let wire_direct = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(3300),
+        }],
+    }
+    .encode();
     let st_wire1 = handlers["eve.skilltype.GetRequest"](
         &ctx,
         &GoogleAny {
@@ -689,10 +714,20 @@ fn test_quasar_skills_clones_additional_branches_and_validation() {
     .expect("skilltype direct wire");
     assert!(!st_wire1.value.is_empty());
 
-    let mut sub_st = Vec::new();
-    encode_varint_field(1, 3300, &mut sub_st);
-    let mut wire_nested = Vec::new();
-    encode_bytes_field(1, &sub_st, &mut wire_nested);
+    let sub_st = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(3300),
+        }],
+    }
+    .encode();
+    let wire_nested = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(sub_st),
+        }],
+    }
+    .encode();
     let st_wire2 = handlers["eve.skilltype.GetRequest"](
         &ctx,
         &GoogleAny {

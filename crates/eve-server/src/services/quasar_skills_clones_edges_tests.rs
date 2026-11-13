@@ -6,7 +6,10 @@ use super::*;
 use crate::quasar_gateway::PublicGatewayRouter;
 use crate::services::account_services::account_services_tests::test_ctx;
 use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
-use eve_proto::quasar::{AuthoritativeContext, DynamicQuasarMessage, DynamicValue, QuasarDescriptorRegistry};
+use eve_proto::quasar::{
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, QuasarDescriptorRegistry, WireField,
+    WireMessage, WireValue,
+};
 use eve_sde::InvType;
 use std::sync::Arc;
 
@@ -19,11 +22,20 @@ fn uuid_msg(field: u32, uuid: [u8; 16]) -> DynamicQuasarMessage {
 }
 
 fn wire_bytes_for_sub_uuid(field: u32, uuid: &[u8]) -> Vec<u8> {
-    let mut sub = Vec::new();
-    encode_bytes_field(1, uuid, &mut sub);
-    let mut outer = Vec::new();
-    encode_bytes_field(field, &sub, &mut outer);
-    outer
+    let sub = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(uuid.to_vec()),
+        }],
+    }
+    .encode();
+    WireMessage {
+        fields: vec![WireField {
+            field_number: field,
+            value: WireValue::LengthDelimited(sub),
+        }],
+    }
+    .encode()
 }
 
 #[test]
@@ -349,15 +361,30 @@ fn skilltype_getlevel_and_implants_encoding_variant_edges() {
     nested_req.fields.insert(1, DynamicValue::Message(Box::new(nested_t)));
     assert!(handlers["eve.skilltype.GetRequest"](&ctx, &dummy_any, &nested_req).is_ok());
 
-    let mut wire_direct = Vec::new();
-    encode_varint_field(1, 3300, &mut wire_direct);
+    let wire_direct = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(3300),
+        }],
+    }
+    .encode();
     let any_direct = GoogleAny { type_url: "t".into(), value: wire_direct };
     assert!(handlers["eve.skilltype.GetRequest"](&ctx, &any_direct, &DynamicQuasarMessage::new("E")).is_ok());
 
-    let mut wire_sub = Vec::new();
-    encode_varint_field(1, 3300, &mut wire_sub);
-    let mut wire_outer = Vec::new();
-    encode_bytes_field(1, &wire_sub, &mut wire_outer);
+    let wire_sub = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(3300),
+        }],
+    }
+    .encode();
+    let wire_outer = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(wire_sub),
+        }],
+    }
+    .encode();
     let any_nested = GoogleAny { type_url: "t".into(), value: wire_outer };
     assert!(handlers["eve.skilltype.GetRequest"](&ctx, &any_nested, &DynamicQuasarMessage::new("E")).is_ok());
 
@@ -423,8 +450,13 @@ fn skilltype_getlevel_and_implants_encoding_variant_edges() {
     .value
     .is_empty());
 
-    let mut wire_imp_varint = Vec::new();
-    encode_varint_field(1, u64::from(cid), &mut wire_imp_varint);
+    let wire_imp_varint = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(u64::from(cid)),
+        }],
+    }
+    .encode();
     let any_imp_varint = GoogleAny { type_url: "t".into(), value: wire_imp_varint };
     assert!(!handlers["eve.character.implant.GetActiveImplantsByCharacterRequest"](
         &ctx,

@@ -5,7 +5,10 @@
 use super::*;
 use crate::quasar_gateway::PublicGatewayRouter;
 use eve_db::corp_roles;
-use eve_proto::quasar::{AuthoritativeContext, DynamicQuasarMessage, DynamicValue, QuasarDescriptorRegistry};
+use eve_proto::quasar::{
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, QuasarDescriptorRegistry, WireField,
+    WireMessage, WireValue,
+};
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
 
@@ -405,10 +408,20 @@ fn rehydrate_from_db_legacy_corrupt_lock_guard_and_wire_extract_helpers() {
         Some(sp_uuid)
     );
     // Fallback to raw wire protobuf bytes in GoogleAny.value (field 2 -> sub-field 1)
-    let mut sub_b = Vec::new();
-    encode_bytes_field(1, &sp_uuid, &mut sub_b);
-    let mut raw_val = Vec::new();
-    encode_bytes_field(2, &sub_b, &mut raw_val);
+    let sub_b = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(sp_uuid.to_vec()),
+        }],
+    }
+    .encode();
+    let raw_val = WireMessage {
+        fields: vec![WireField {
+            field_number: 2,
+            value: WireValue::LengthDelimited(sub_b),
+        }],
+    }
+    .encode();
     let wire_any = GoogleAny {
         type_url: String::new(),
         value: raw_val,
@@ -418,10 +431,20 @@ fn rehydrate_from_db_legacy_corrupt_lock_guard_and_wire_extract_helpers() {
         Some(sp_uuid)
     );
     // All-zero UUID in wire protobuf returns None
-    let mut zero_sub = Vec::new();
-    encode_bytes_field(1, &[0u8; 16], &mut zero_sub);
-    let mut zero_raw = Vec::new();
-    encode_bytes_field(1, &zero_sub, &mut zero_raw);
+    let zero_sub = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(vec![0u8; 16]),
+        }],
+    }
+    .encode();
+    let zero_raw = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(zero_sub),
+        }],
+    }
+    .encode();
     assert_eq!(
         extract_active_plan_uuid(
             &GoogleAny {
@@ -625,8 +648,13 @@ fn rpc_auth_validation_not_found_wire_decoding_implants_and_milestone_type_varia
         nested.fields.insert(1, DynamicValue::Message(Box::new(inner)));
         assert!(handlers["eve.skilltype.GetRequest"](&ctx, &dummy_any, &nested).is_ok());
     }
-    let mut wire_direct = Vec::new();
-    encode_varint_field(1, 3300, &mut wire_direct);
+    let wire_direct = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(3300),
+        }],
+    }
+    .encode();
     assert!(handlers["eve.skilltype.GetRequest"](
         &ctx,
         &GoogleAny {
@@ -636,10 +664,20 @@ fn rpc_auth_validation_not_found_wire_decoding_implants_and_milestone_type_varia
         &DynamicQuasarMessage::new("Req"),
     )
     .is_ok());
-    let mut sub_tid = Vec::new();
-    encode_varint_field(1, 3300, &mut sub_tid);
-    let mut wire_nested = Vec::new();
-    encode_bytes_field(1, &sub_tid, &mut wire_nested);
+    let sub_tid = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(3300),
+        }],
+    }
+    .encode();
+    let wire_nested = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(sub_tid),
+        }],
+    }
+    .encode();
     assert!(handlers["eve.skilltype.GetRequest"](
         &ctx,
         &GoogleAny {
@@ -741,10 +779,20 @@ fn rpc_auth_validation_not_found_wire_decoding_implants_and_milestone_type_varia
 
     let mut cid_uuid = [0u8; 16];
     cid_uuid[12..16].copy_from_slice(&cid.to_be_bytes());
-    let mut wire_sub_uuid = Vec::new();
-    encode_bytes_field(1, &cid_uuid, &mut wire_sub_uuid);
-    let mut wire_cid_any = Vec::new();
-    encode_bytes_field(1, &wire_sub_uuid, &mut wire_cid_any);
+    let wire_sub_uuid = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(cid_uuid.to_vec()),
+        }],
+    }
+    .encode();
+    let wire_cid_any = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(wire_sub_uuid),
+        }],
+    }
+    .encode();
     assert!(
         handlers["eve.character.implant.GetActiveImplantsByCharacterRequest"](
             &ctx,
