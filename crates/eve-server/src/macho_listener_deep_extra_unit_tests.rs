@@ -1408,8 +1408,30 @@ async fn pod_ejection_handoff_in_space_emits_incremental_destiny_without_set_sta
     let s_pos = saw_sess_pos.expect("must send SessionChangeNotification for capsule switch");
     assert!(d_pos < s_pos, "DoDestinyUpdate ({d_pos}) must precede SessionChangeNotification ({s_pos})");
     assert!(!saw_set_state, "same-system pod ejection must NOT emit SetState (#970)");
-    assert!(saw_remove_ball, "same-system pod ejection must emit RemoveBall (#970)");
+    assert!(!saw_remove_ball, "same-system pod ejection must defer RemoveBall past SessionChangeNotification (#1018)");
     assert!(saw_add_balls2, "same-system pod ejection must emit AddBalls2 (#970)");
+
+    // #1018: Advancing 2 ballpark ticks delivers the deferred RemoveBall for old_ship_id.
+    let b1 = jita.tick().await.unwrap();
+    assert!(!b1
+        .observer_events
+        .get(&capsule_id)
+        .is_some_and(|evs| evs.iter().any(|e| matches!(e, eve_destiny::DestinyEvent::RemoveBall { ball_id } if *ball_id == old_ship_id))));
+    let b2 = jita.tick().await.unwrap();
+    assert!(
+        b2.observer_events.get(&capsule_id).is_some_and(|evs| evs
+            .iter()
+            .any(|e| matches!(e, eve_destiny::DestinyEvent::RemoveBall { ball_id } if *ball_id == old_ship_id))),
+        "deferred RemoveBall(old_ship_id) must be emitted on tick +2 (#970/#1018)"
+    );
+    let rep2 = b2
+        .observer_updates_pyrep
+        .get(&capsule_id)
+        .expect("encoded observer DoDestinyUpdate payload on tick +2");
+    assert!(
+        pyrep_contains_ascii(rep2, "RemoveBall"),
+        "tick +2 DoDestinyUpdate payload must encode RemoveBall (#1018)"
+    );
 }
 
 #[tokio::test]

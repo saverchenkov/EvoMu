@@ -638,11 +638,11 @@ async fn death_pipeline_sets_wreck_and_capsule_names_queues_set_state_and_emits_
         "in-system pod ejection must not queue SetState (DoBallClear wipes overview celestials #970)"
     );
     assert!(
-        events.iter().any(|e| matches!(
+        !events.iter().any(|e| matches!(
             e,
             eve_destiny::DestinyEvent::RemoveBall { ball_id } if *ball_id == ship_id
         )),
-        "death pipeline must queue RemoveBall for destroyed ship on ejected capsule observer (#970)"
+        "death pipeline must defer RemoveBall(old ship) out of immediate AddBalls2 batch (#1018)"
     );
     assert!(
         events.iter().any(|e| match e {
@@ -652,6 +652,26 @@ async fn death_pipeline_sets_wreck_and_capsule_names_queues_set_state_and_emits_
             _ => false,
         }),
         "death pipeline must queue AddBalls2 with wreck and ejected capsule (#729/#970)"
+    );
+
+    // #1018: Stepping 2 ticks delivers deferred RemoveBall for destroyed hull after client ego switch.
+    let mut saw_deferred_remove = false;
+    for step_idx in 0..2 {
+        let broadcast = sys_handle.tick().await.unwrap();
+        let has_remove = broadcast.observer_events.get(&cap_id).is_some_and(|evs| {
+            evs.iter().any(|e| {
+                matches!(e, eve_destiny::DestinyEvent::RemoveBall { ball_id } if *ball_id == ship_id)
+            })
+        });
+        if step_idx == 0 {
+            assert!(!has_remove, "RemoveBall must stay deferred on tick +1 (#1018)");
+        } else {
+            saw_deferred_remove = has_remove;
+        }
+    }
+    assert!(
+        saw_deferred_remove,
+        "death pipeline must deliver deferred RemoveBall for destroyed ship on tick +2 (#970/#1018)"
     );
 
     // #731 / #770: Insurance payout records ref_types::INSURANCE with ship typeID as context_id

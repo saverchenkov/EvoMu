@@ -71,6 +71,8 @@ impl Ballpark {
             ball_grid_ids: BTreeMap::new(),
             next_grid_id: 1,
             observer_events: BTreeMap::new(),
+            scheduled_observer_events: Vec::new(),
+            pending_handoff_observers: BTreeSet::new(),
             target_locks: BTreeMap::new(),
             warp_bubble_mgr: WarpBubbleMgr::default(),
             mushroom_states: BTreeMap::new(),
@@ -511,12 +513,17 @@ impl Ballpark {
         true
     }
 
-    /// Queues an incremental same-system ship-handoff (`RemoveBall` for `old_ball_id` plus
-    /// `AddBalls2` for `added_ball_ids`) on `new_ball_id` without issuing `SetState` (`#970`).
+    /// Queues an incremental same-system ship-handoff (`AddBalls2` for `added_ball_ids`
+    /// immediately on `new_ball_id`, and `RemoveBall` for `old_ball_id` deferred by 2 ticks)
+    /// without issuing `SetState` (`#970`, `#1018`).
     ///
     /// Keeping `SetState` out of in-system ship swaps preserves the client ballpark's celestial
     /// `RealBall` weakrefs (otherwise V24 `Park.SetState` triggers `DoBallClear` and resets overview
-    /// celestial distances to `0 m`).
+    /// celestial distances to `0 m`). Deferring `RemoveBall(old_ball_id)` past the initial
+    /// `AddBalls2` + `SessionChangeNotification` handshake keeps `old_ball_id` alive in client
+    /// `bp.balls` until `gameui._HandleSessionChangeInSpace` (which waits on `godma.Prime`)
+    /// switches `bp.ego` to `new_ball_id`, preventing `egoBall=None` crashes in
+    /// `OverviewWindow._DoBallsAdded` (`#1018`).
     pub fn queue_in_space_ship_handoff(
         &mut self,
         old_ball_id: BallId,
@@ -526,6 +533,7 @@ impl Ballpark {
         if !self.balls.contains_key(&new_ball_id) {
             return false;
         }
+        self.pending_handoff_observers.insert(new_ball_id);
         if let Some(ref mut set) = self.registered_observers {
             set.insert(new_ball_id);
         }
@@ -533,14 +541,44 @@ impl Ballpark {
             .iter()
             .filter_map(|id| self.balls.get(id).cloned())
             .collect();
-        let events = self.observer_events.entry(new_ball_id).or_default();
-        events.push(DestinyEvent::RemoveBall {
-            ball_id: old_ball_id,
-        });
         if !balls.is_empty() {
-            events.push(DestinyEvent::AddBalls2 { balls });
+            self.observer_events
+                .entry(new_ball_id)
+                .or_default()
+                .push(DestinyEvent::AddBalls2 { balls });
+        }
+        if old_ball_id != new_ball_id {
+            self.scheduled_observer_events.push((
+                self.current_tick.saturating_add(2),
+                new_ball_id,
+                DestinyEvent::RemoveBall {
+                    ball_id: old_ball_id,
+                },
+            ));
         }
         true
+    }
+
+    /// Moves any scheduled per-observer events with `deliver_tick <= self.current_tick`
+    /// into `self.observer_events` for live observers still in `self.balls`.
+    pub(crate) fn flush_due_scheduled_observer_events(&mut self) {
+        if self.scheduled_observer_events.is_empty() {
+            return;
+        }
+        let current_tick = self.current_tick;
+        let mut remaining = Vec::new();
+        let scheduled = std::mem::take(&mut self.scheduled_observer_events);
+        for (deliver_tick, obs_id, ev) in scheduled {
+            if !self.balls.contains_key(&obs_id) {
+                continue;
+            }
+            if deliver_tick <= current_tick {
+                self.observer_events.entry(obs_id).or_default().push(ev);
+            } else {
+                remaining.push((deliver_tick, obs_id, ev));
+            }
+        }
+        self.scheduled_observer_events = remaining;
     }
 
     pub fn remove_ball(&mut self, ball_id: BallId) -> Option<Ball> {
@@ -574,6 +612,9 @@ impl Ballpark {
             locks.retain(|l| l.target_id != ball_id);
         }
         self.observer_events.remove(&ball_id);
+        self.pending_handoff_observers.remove(&ball_id);
+        self.scheduled_observer_events
+            .retain(|(_, obs_id, _)| *obs_id != ball_id);
         self.pending_events
             .push(DestinyEvent::RemoveBall { ball_id });
         if let Some(gid) = old_grid_id {

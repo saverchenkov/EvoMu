@@ -1712,7 +1712,12 @@ impl SystemRegistry {
                                         .observer_events
                                         .iter()
                                         .filter_map(|(&obs_id, evs)| {
-                                            if Some(obs_id) == exclude_ball_id || evs.is_empty() {
+                                            if Some(obs_id) == exclude_ball_id
+                                                || evs.is_empty()
+                                                || ballpark
+                                                    .pending_handoff_observers
+                                                    .contains(&obs_id)
+                                            {
                                                 return None;
                                             }
                                             if evs

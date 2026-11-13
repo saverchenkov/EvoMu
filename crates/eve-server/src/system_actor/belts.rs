@@ -669,6 +669,7 @@ pub(super) fn drain_tick_events_without_encode(ballpark: &mut Ballpark) {
         .iter()
         .filter_map(|(&obs_id, evs)| {
             if evs.is_empty()
+                || ballpark.pending_handoff_observers.contains(&obs_id)
                 || evs
                     .iter()
                     .any(|ev| matches!(ev, DestinyEvent::SetState { .. }))
@@ -699,6 +700,7 @@ pub(super) fn build_tick_broadcast(
         .iter()
         .filter_map(|(&obs_id, evs)| {
             if evs.is_empty()
+                || ballpark.pending_handoff_observers.contains(&obs_id)
                 || evs
                     .iter()
                     .any(|ev| matches!(ev, DestinyEvent::SetState { .. }))

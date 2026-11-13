@@ -1604,13 +1604,28 @@ async fn deactivate_repeating_cycle_after_action(
             let _ = fit.deactivate_module(module_id, &ctx.sde);
             ctx.store_ship_fitting(ship_id, fit);
         }
+        let godma_effect = if effect_name.starts_with("superWeapon") {
+            let mod_type_id = ctx
+                .db
+                .with_snapshot(|snap| snap.items.get(&module_id).map(|i| i.type_id))
+                .unwrap_or(0);
+            let eff_id = crate::router::binding::effect_id_for_module_sde(
+                &ctx.sde,
+                mod_type_id,
+                Some(effect_name),
+            )
+            .unwrap_or(4489);
+            PyRep::Integer(eff_id)
+        } else {
+            PyRep::String(effect_name.to_string())
+        };
         ctx.notify(
             crate::router::NotificationTarget::Character(cid),
             "OnGodmaShipEffect",
             "charid",
             vec![
                 PyRep::Integer(module_id),
-                PyRep::String(effect_name.to_string()),
+                godma_effect,
                 PyRep::Bool(false),
             ],
         );

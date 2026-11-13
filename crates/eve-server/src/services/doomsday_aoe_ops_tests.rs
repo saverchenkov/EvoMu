@@ -79,6 +79,12 @@ fn setup_titan_doomsday_ctx() -> (ServerContext, SessionState, i64, i64, u32, i6
             ),
         );
     });
+    let uid = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.user_id).unwrap_or(1));
+    ctx.db
+        .acquire_online_lock(uid, 9_000_001, Some(char_id), true, ctx.now_unix_secs())
+        .expect("acquire online lock for doomsday test char");
 
     (ctx, sess, char_id, ship_id, null_sys_id, mod_id)
 }
@@ -215,6 +221,17 @@ async fn test_dispatch_superweapon_aoe_rpc_cone_spatial_and_multipoint() {
     assert!(!ctx
         .db
         .with_snapshot(|s| s.superweapon_runtime.active_cycles.is_empty()));
+    let notes = ctx.drain_notifications_for_char(_char_id);
+    let effect_ids: Vec<i64> = notes
+        .iter()
+        .filter(|n| n.event == "OnGodmaShipEffect")
+        .filter_map(|n| n.args.get(1).and_then(|v| v.as_i64()))
+        .collect();
+    assert_eq!(
+        effect_ids,
+        vec![6473, 6474, 6201],
+        "AoE doomsday OnGodmaShipEffect notifications must carry real SDE effect IDs instead of 0 (#1019)"
+    );
     cancel_aoe_superweapon_cycles_for_ship(&ctx, ship_id);
     assert!(ctx
         .db

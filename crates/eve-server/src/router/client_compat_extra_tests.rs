@@ -738,6 +738,22 @@ fn wave2_wave4_normalizer_and_effect_id_helper_edges() {
         ("loPower", 11),
         ("hiPower", 12),
         ("medPower", 13),
+        ("superWeapon", 4489),
+        ("superWeaponAmarr", 4489),
+        ("superWeaponCaldari", 4490),
+        ("superWeaponGallente", 4491),
+        ("superWeaponMinmatar", 4492),
+        ("superWeaponImmobilize", 4489),
+        ("superWeaponCone", 6473),
+        ("doomsdayConeDOT", 6473),
+        ("superWeaponSpatial", 6474),
+        ("doomsdayHOG", 6474),
+        ("superWeaponMultiPoint", 6201),
+        ("doomsdaySlash", 6201),
+        ("superWeaponLanceWarmup", 6472),
+        ("superWeaponLanceBeam", 6472),
+        ("doomsdayBeamDOT", 6472),
+        ("doomsdayAOEBalance", 11691),
         ("202", 202),
         ("unknown_custom_effect_xyz", 0),
     ] {
@@ -757,6 +773,35 @@ fn wave2_wave4_normalizer_and_effect_id_helper_edges() {
             PyRep::Integer(eff.effect_id as i64)
         );
     }
+    let norm_short = normalize_on_godma_ship_effect(
+        vec![
+            PyRep::Integer(555),
+            PyRep::String("superWeapon".into()),
+            PyRep::Bool(true),
+        ],
+        Some(&ctx.sde),
+    );
+    assert_eq!(norm_short[1], PyRep::Integer(4489));
+    let norm_full = normalize_on_godma_ship_effect(
+        vec![
+            PyRep::Integer(555),
+            PyRep::String("superWeaponCone".into()),
+            PyRep::Integer(0),
+            PyRep::Integer(1),
+            PyRep::Integer(0),
+            PyRep::Tuple(vec![
+                PyRep::Integer(555),
+                PyRep::Integer(999),
+                PyRep::Integer(777),
+            ]),
+            PyRep::Integer(0),
+            PyRep::Real(30_000.0),
+            PyRep::Integer(0),
+            PyRep::None,
+        ],
+        Some(&ctx.sde),
+    );
+    assert_eq!(norm_full[1], PyRep::Integer(6473));
 
     // 2. normalize_godma_environment: 3-tuple, <7-tuple padding (len 4), string at idx 6, and non-tuple fallback
     let item_arg = PyRep::Integer(10);

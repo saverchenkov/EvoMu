@@ -65,6 +65,7 @@ impl Ballpark {
             self.sim_unix_secs = self.sim_unix_secs.saturating_add(dt.round().max(0.0) as u64);
         }
         let current_tick = self.current_tick;
+        self.flush_due_scheduled_observer_events();
 
         let dynamic_ids: Vec<BallId> = self
             .balls
@@ -1723,12 +1724,24 @@ impl Ballpark {
     ) -> Option<Ball> {
         let was_registered = self.is_registered_observer(ball_id);
         let saved_obs = self.observer_events.remove(&ball_id).unwrap_or_default();
+        let saved_sched: Vec<_> = if was_registered {
+            self.scheduled_observer_events
+                .iter()
+                .filter(|(_, obs_id, _)| *obs_id == ball_id)
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
         let removed = self.remove_ball(ball_id);
         if was_registered && !saved_obs.is_empty() {
             self.observer_events
                 .entry(ball_id)
                 .or_default()
                 .extend(saved_obs);
+        }
+        if was_registered && !saved_sched.is_empty() {
+            self.scheduled_observer_events.extend(saved_sched);
         }
         removed
     }

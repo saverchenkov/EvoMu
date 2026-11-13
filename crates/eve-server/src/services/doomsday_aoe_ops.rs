@@ -656,13 +656,19 @@ pub async fn activate_cone_doomsday(
         });
     });
 
+    let cone_eff_id = crate::router::binding::effect_id_for_module_sde(
+        &ctx.sde,
+        setup.mod_type_id,
+        Some("doomsdayConeDOT"),
+    )
+    .unwrap_or(6473);
     ctx.notify(
         NotificationTarget::Character(char_id),
         "OnGodmaShipEffect",
         "charid",
         vec![
             PyRep::Integer(module_id),
-            PyRep::String("superWeaponCone".into()),
+            PyRep::Integer(cone_eff_id),
             PyRep::Bool(true),
         ],
     );
@@ -767,13 +773,19 @@ pub async fn activate_spatial_gtfo_doomsday(
     });
     let _ = &setup.sys;
 
+    let spatial_eff_id = crate::router::binding::effect_id_for_module_sde(
+        &ctx.sde,
+        setup.mod_type_id,
+        Some("doomsdayHOG"),
+    )
+    .unwrap_or(6474);
     ctx.notify(
         NotificationTarget::Character(char_id),
         "OnGodmaShipEffect",
         "charid",
         vec![
             PyRep::Integer(module_id),
-            PyRep::String("superWeaponSpatial".into()),
+            PyRep::Integer(spatial_eff_id),
             PyRep::Bool(true),
         ],
     );
@@ -936,13 +948,19 @@ pub async fn activate_multipoint_reaper_doomsday(
         });
     });
 
+    let mp_eff_id = crate::router::binding::effect_id_for_module_sde(
+        &ctx.sde,
+        setup.mod_type_id,
+        Some("doomsdaySlash"),
+    )
+    .unwrap_or(6201);
     ctx.notify(
         NotificationTarget::Character(char_id),
         "OnGodmaShipEffect",
         "charid",
         vec![
             PyRep::Integer(module_id),
-            PyRep::String("superWeaponMultiPoint".into()),
+            PyRep::Integer(mp_eff_id),
             PyRep::Bool(true),
         ],
     );
