@@ -994,7 +994,7 @@ async fn handle_request_scans(
                         _ => None,
                     }
                 };
-                if let Some(PyRep::Tuple(c) | PyRep::List(c)) = find_in_v("pos").or_else(|| find_in_v("destination")) {
+                if let Some(PyRep::Tuple(c) | PyRep::List(c)) = find_in_v("destination").or_else(|| find_in_v("pos")) {
                     if c.len() >= 3 {
                         let (x, y, z) = (
                             c[0].as_f64().unwrap_or(probe.position[0]),

@@ -233,6 +233,18 @@ async fn activate_auth_offline_burnout_nanite_reactivation_and_overload_edges() 
                 &[13],
             ),
         );
+        sde.types.insert(
+            999_108,
+            custom_inv_type(
+                sde,
+                999_108,
+                83, // Projectile Ammo
+                8,  // Charge category
+                "Test Projectile Ammo",
+                &[],
+                &[],
+            ),
+        );
     });
 
     let char_id = 96_800_001_i64;
@@ -559,7 +571,7 @@ async fn activate_auth_offline_burnout_nanite_reactivation_and_overload_edges() 
             charge_id,
             InventoryItemRecord {
                 item_id: charge_id,
-                type_id: 193, // Antimatter Charge S (category 8)
+                type_id: 999_108, // Custom Projectile Ammo (category 8)
                 owner_id: char_id,
                 location_id: ship_id,
                 flag: InventoryFlag::HiSlot0,
