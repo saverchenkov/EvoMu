@@ -512,13 +512,20 @@ async fn test_beyonce_cyno_deployable_and_group_jumps() {
     ctx.advance_secs(12);
 
     let (sys_origin, sys_dest) = {
-        let sys: Vec<u32> = ctx
+        let mut sys: Vec<u32> = ctx
             .sde
             .solar_systems
             .values()
-            .filter(|s| s.security_status < 0.45 && s.solar_system_id < 31_000_000 && s.galactic_pos_ly != [0.0; 3])
+            .filter(|s| {
+                s.security_status < 0.45
+                    && s.solar_system_id < 31_000_000
+                    && s.solar_system_id != 30_100_000
+                    && s.region_id != 10_000_070
+                    && s.galactic_pos_ly != [0.0; 3]
+            })
             .map(|s| s.solar_system_id)
             .collect();
+        sys.sort_unstable();
         let mut pair = (SYS_ORIGIN, SYS_DEST);
         'outer: for &a in &sys {
             let pa = ctx.sde.solar_systems[&a].galactic_pos_ly;

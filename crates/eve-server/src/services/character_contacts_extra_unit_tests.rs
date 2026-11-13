@@ -467,12 +467,26 @@ fn home_station_remote_cooldown_pochven_rejection_and_self_destruct_non_capsule(
     assert_eq!(err_no_st.code, "MustBeDockedAtTargetStation");
 
     // 2. Remote change to non-school, non-HQ station -> MustBeDockedAtTargetStation
-    let non_cand_st = *ctx
+    let (school_st, corp_hq_st) = ctx.db.with_snapshot(|snap| {
+        let ch = snap.characters.get(&char_id).unwrap();
+        let school_st = ctx.sde.schools.get(&ch.school_id).map(|s| s.station_id).filter(|&id| id > 0);
+        let corp_hq_st = snap.corporations.get(&ch.corporation_id).and_then(|c| c.hq_station_id).filter(|&id| id > 0);
+        (school_st, corp_hq_st)
+    });
+    let non_cand_st = ctx
         .sde
         .stations
-        .keys()
-        .find(|&&id| id != st_id)
-        .unwrap_or(&60_008_494);
+        .values()
+        .filter(|st| {
+            st.station_id != st_id
+                && st.region_id != 10_000_070
+                && st.solar_system_id < 31_000_000
+                && Some(st.station_id) != school_st
+                && Some(st.station_id) != corp_hq_st
+        })
+        .map(|st| st.station_id)
+        .min()
+        .unwrap_or(60_008_494);
     let err_non_cand = call_home_station(
         &ctx,
         &mut sess,
@@ -529,7 +543,7 @@ fn home_station_remote_cooldown_pochven_rejection_and_self_destruct_non_capsule(
         .filter(|s| s.region_id == 10_000_070)
         .flat_map(|s| s.stations.iter())
         .map(|st| st.station_id)
-        .next()
+        .min()
     {
         let err_poch = call_home_station(
             &ctx,
@@ -580,7 +594,7 @@ fn contact_labels_edit_agent_max_contacts_and_home_station_structure_branches() 
     let kw = HashMap::new();
 
     // 1. AddContact for an SDE agent -> triggers OnAgentAdded notification
-    if let Some(&agent_id) = ctx.sde.agents.keys().next() {
+    if let Some(&agent_id) = ctx.sde.agents.keys().min() {
         let mut add_kw = HashMap::new();
         add_kw.insert("labelMask".into(), PyRep::Integer(2));
         let added = call_contacts(
