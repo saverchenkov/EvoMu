@@ -1336,16 +1336,16 @@ async fn machonet_get_time_stays_anchored_to_wallclock_across_advance_clock() {
         "server ctx.clock() should advance by +120s independently of machoNet.GetTime"
     );
 
-    handle(
-        &ctx,
+    ctx.dispatch_rpc(
         &mut sess,
         "slash",
+        None,
         "SlashCmd",
         &[PyRep::String("/advancetime 3600".to_string())],
         &kw,
+        None,
     )
     .await
-    .unwrap()
     .expect("/advancetime +3600s");
     let wall_after = crate::router::context::host_wall_blueos_filetime_ticks();
     let t_after_slash = handle(&ctx, &mut sess, "machoNet", "GetTime", &[], &kw)
