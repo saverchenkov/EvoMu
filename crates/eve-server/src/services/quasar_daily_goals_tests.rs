@@ -1439,3 +1439,82 @@ fn monthly_alpha_claims_clock_fallback_add_progress_redeem_and_pay_corp_fallback
         STATUS_PRECONDITION_FAILED
     );
 }
+
+#[test]
+fn daily_goal_pb_builders_decode_strictly_with_descriptors() {
+    let reg = QuasarDescriptorRegistry::open_default().expect("open default descriptor DB");
+    for cat in 1..=6 {
+        let mut tpl = default_daily_bonus_template();
+        tpl.uuid = [cat as u8; 16];
+        tpl.category = cat;
+        tpl.career = cat.min(4);
+        tpl.isk_reward = 25_000;
+        tpl.sp_reward = 1_500.0;
+
+        let mut buf = Vec::new();
+        encode_goal_attributes_for_day_bucket(&tpl, 20_548, &mut buf);
+        let dec = reg
+            .decode_dynamic("eve_public.dailygoal.Attributes", &buf)
+            .unwrap_or_else(|e| panic!("decode dailygoal.Attributes cat {cat}: {e}"));
+        assert_eq!(reg.encode_dynamic(&dec).unwrap(), buf);
+    }
+
+    let (router, db) = make_router_and_db();
+    let char_id = 211_200_077u32;
+    seed_char(&db, char_id as i64, 98_000_077, 1_000_000, 3_000);
+    let now = 1_760_000_000;
+    let user = make_ctx(Some(char_id), 0, now);
+
+    let all_any = router
+        .dispatch(
+            &user,
+            &GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.GetAllCurrentRequest"),
+                value: Vec::new(),
+            },
+        )
+        .expect("eve_public.dailygoal.api.GetAllCurrentRequest");
+    reg.decode_dynamic(&all_any.type_url, &all_any.value)
+        .expect("decode GetAllCurrentResponse");
+
+    let int_all_any = router
+        .dispatch(
+            &user,
+            &GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.dailygoal.api.GetAllRequest"),
+                value: Vec::new(),
+            },
+        )
+        .expect("eve.dailygoal.api.GetAllRequest");
+    reg.decode_dynamic(&int_all_any.type_url, &int_all_any.value)
+        .expect("decode eve.dailygoal.api.GetAllResponse");
+
+    let goals = router.progression.daily_goals.get_or_init_goals_at(char_id, now);
+    let first_uuid = goals[0].uuid;
+    let get_req = eve_proto::pb::message("eve.dailygoal.api.GetRequest")
+        .set("goal.uuid", first_uuid)
+        .must_encode();
+    let int_get_any = router
+        .dispatch(
+            &user,
+            &GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.dailygoal.api.GetRequest"),
+                value: get_req.clone(),
+            },
+        )
+        .expect("eve.dailygoal.api.GetRequest");
+    reg.decode_dynamic(&int_get_any.type_url, &int_get_any.value)
+        .expect("decode eve.dailygoal.api.GetResponse");
+
+    let int_prog_any = router
+        .dispatch(
+            &user,
+            &GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.dailygoal.api.GetProgressRequest"),
+                value: get_req,
+            },
+        )
+        .expect("eve.dailygoal.api.GetProgressRequest");
+    reg.decode_dynamic(&int_prog_any.type_url, &int_prog_any.value)
+        .expect("decode eve.dailygoal.api.GetProgressResponse");
+}

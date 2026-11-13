@@ -5,10 +5,8 @@ use crate::quasar_gateway::{
     STATUS_NOT_FOUND,
 };
 use eve_db::WorldRepository;
-use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, encode_zigzag64, DynamicValue,
-    GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
-};
+use eve_proto::pb;
+use eve_proto::quasar::{DynamicValue, GoogleAny, GoogleTimestamp, TYPE_GOOGLEAPIS_PREFIX};
 use std::sync::{Arc, RwLock};
 
 pub(crate) fn encode_plex_balance_changed_notice(
@@ -19,34 +17,22 @@ pub(crate) fn encode_plex_balance_changed_notice(
     _description: &str,
     now_unix: u64,
 ) -> GoogleAny {
-    let mut notice_bytes = Vec::new();
-    let mut ident = Vec::new();
-    encode_varint_field(1, tx_id, &mut ident);
-    encode_bytes_field(1, &ident, &mut notice_bytes);
-
     // V24.01 `eve_public.plex.vault.transaction.Attributes` (`#893`):
     //   field 1 (`timestamp`): `google.protobuf.Timestamp`
     //   field 2 (`amount_transferred`): `eve_public.plex.Currency` (field 1: `total_in_cents`, sint64 zigzag)
     //   field 3 (`resulting_balance`): `eve_public.plex.Currency` (field 1: `total_in_cents`, sint64 zigzag)
-    let mut attr = Vec::new();
-    let mut ts_bytes = Vec::new();
-    encode_varint_field(1, now_unix, &mut ts_bytes);
-    encode_bytes_field(1, &ts_bytes, &mut attr);
-
-    let mut amt_curr = Vec::new();
-    encode_varint_field(1, encode_zigzag64(amount * 100), &mut amt_curr);
-    encode_bytes_field(2, &amt_curr, &mut attr);
-
-    let mut bal_curr = Vec::new();
-    encode_varint_field(1, encode_zigzag64(balance_after * 100), &mut bal_curr);
-    encode_bytes_field(3, &bal_curr, &mut attr);
-
-    encode_bytes_field(2, &attr, &mut notice_bytes);
-
-    GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.plex.vault.api.BalanceChangedNotice"),
-        value: notice_bytes,
-    }
+    pb::message("eve_public.plex.vault.api.BalanceChangedNotice")
+        .set("identifier.sequential", tx_id as i64)
+        .set(
+            "attributes.timestamp",
+            GoogleTimestamp::from_unix(now_unix as i64, 0),
+        )
+        .set("attributes.amount_transferred.total_in_cents", amount * 100)
+        .set(
+            "attributes.resulting_balance.total_in_cents",
+            balance_after * 100,
+        )
+        .must_to_any()
 }
 
 pub(crate) fn queue_plex_balance_changed_notice(
@@ -96,23 +82,14 @@ pub fn cancel_user_payment_schedule(
     });
 
     if let Some(sched_type) = removed_type {
-        let mut notice_bytes = Vec::new();
-        let mut sched_ident = Vec::new();
-        encode_varint_field(1, sched_id, &mut sched_ident);
-        encode_bytes_field(1, &sched_ident, &mut notice_bytes);
-        encode_varint_field(2, u64::from(sched_type), &mut notice_bytes);
+        let notice = pb::message("eve_public.payment.schedule.api.CancelledNotice")
+            .set("schedule.sequential", sched_id)
+            .set("type", sched_type)
+            .must_to_any();
         router_notices
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .push((
-                NoticeScope::User(uid as i32),
-                GoogleAny {
-                    type_url: format!(
-                        "{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.schedule.api.CancelledNotice"
-                    ),
-                    value: notice_bytes,
-                },
-            ));
+            .push((NoticeScope::User(uid as i32), notice));
     }
     removed_type.is_some()
 }
@@ -202,11 +179,10 @@ pub fn process_due_payment_schedules(
 
     if !failed_scheds.is_empty() {
         for (uid, sched_id, sched_type) in failed_scheds {
-            let mut notice_bytes = Vec::new();
-            let mut sched_ident = Vec::new();
-            encode_varint_field(1, sched_id, &mut sched_ident);
-            encode_bytes_field(1, &sched_ident, &mut notice_bytes);
-            encode_varint_field(2, u64::from(sched_type), &mut notice_bytes);
+            let notice_bytes = pb::message("eve_public.payment.schedule.api.CancelledNotice")
+                .set("schedule.sequential", sched_id)
+                .set("type", sched_type)
+                .must_encode();
             router_notices
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
@@ -301,23 +277,14 @@ pub fn publish_schedule_set_notice(
     sched_id: u64,
     schedule_type: u32,
 ) {
-    let mut notice_bytes = Vec::new();
-    let mut sched_ident = Vec::new();
-    encode_varint_field(1, sched_id, &mut sched_ident);
-    encode_bytes_field(1, &sched_ident, &mut notice_bytes);
-    encode_varint_field(2, u64::from(schedule_type), &mut notice_bytes);
+    let notice = pb::message("eve_public.payment.schedule.api.SetNotice")
+        .set("schedule.sequential", sched_id)
+        .set("type", schedule_type)
+        .must_to_any();
     pending_notices
         .write()
         .unwrap_or_else(|e| e.into_inner())
-        .push((
-            NoticeScope::User(user_id as i32),
-            GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.schedule.api.SetNotice"
-                ),
-                value: notice_bytes,
-            },
-        ));
+        .push((NoticeScope::User(user_id as i32), notice));
 }
 
 pub fn encode_targeted_offer_list_response(
@@ -354,21 +321,18 @@ pub fn encode_targeted_offer_list_response(
     } else {
         &[]
     };
-    let mut out = Vec::new();
+    let mut out = pb::message("eve_public.store.targetaudience.offer.api.ListResponse");
     for off in slice {
-        let (mut u_b, mut o_b, mut entry) = (Vec::new(), Vec::new(), Vec::new());
-        encode_varint_field(1, uid, &mut u_b);
-        encode_string_field(1, &off.id.to_string(), &mut o_b);
-        encode_bytes_field(1, &u_b, &mut entry);
-        encode_bytes_field(2, &o_b, &mut entry);
-        encode_bytes_field(1, &entry, &mut out);
+        out = out.add_with("offer_ids", |entry| {
+            entry
+                .set("user_id.sequential", uid as i32)
+                .set("catalogue_entry.name", off.id.to_string())
+        });
     }
     if end < targeted.len() {
-        let mut next_page = Vec::new();
-        encode_string_field(1, &end.to_string(), &mut next_page);
-        encode_bytes_field(2, &next_page, &mut out);
+        out = out.set("next_page.token", end.to_string());
     }
-    out
+    out.must_encode()
 }
 
 pub fn publish_quick_pay_added_notice(
@@ -376,22 +340,13 @@ pub fn publish_quick_pay_added_notice(
     user_id: u64,
     token_id: u32,
 ) {
-    let mut notice_bytes = Vec::new();
-    let mut tok_ident = Vec::new();
-    encode_varint_field(1, token_id as u64, &mut tok_ident);
-    encode_bytes_field(1, &tok_ident, &mut notice_bytes);
+    let notice = pb::message("eve_public.payment.token.api.QuickPayAddedNotice")
+        .set("token.sequential", token_id)
+        .must_to_any();
     pending_notices
         .write()
         .unwrap_or_else(|e| e.into_inner())
-        .push((
-            NoticeScope::User(user_id as i32),
-            GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.token.api.QuickPayAddedNotice"
-                ),
-                value: notice_bytes,
-            },
-        ));
+        .push((NoticeScope::User(user_id as i32), notice));
 }
 
 pub fn add_user_quick_pay_token(
@@ -423,18 +378,12 @@ pub fn register_user_payment_token(
         tokens.push(token);
     });
     if is_qp {
-        let mut notice_bytes = Vec::new();
-        let mut tok_ident = Vec::new();
-        encode_varint_field(1, u64::from(token_id), &mut tok_ident);
-        encode_bytes_field(1, &tok_ident, &mut notice_bytes);
+        let notice = pb::message("eve_public.payment.token.api.QuickPayAddedNotice")
+            .set("token.sequential", token_id)
+            .must_to_any();
         let _ = ctx.quasar_gateway.publish_notice(
             NoticeScope::User(uid as i32),
-            GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.token.api.QuickPayAddedNotice"
-                ),
-                value: notice_bytes,
-            },
+            notice,
             ctx.now_unix(),
         );
     }
@@ -831,16 +780,15 @@ pub fn register_plex_vault_extra_handlers(
                 return Err((STATUS_FORBIDDEN, "Cannot query another user's PLEX operation".to_string()));
             }
 
-            let (mut u_b, mut c_b, mut attr_b, mut out) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-            encode_varint_field(1, tx.user_id, &mut u_b);
-            encode_bytes_field(1, &u_b, &mut attr_b);
-            encode_varint_field(1, (tx.amount.abs() * 100) as u64, &mut c_b);
-            encode_bytes_field(2, &c_b, &mut attr_b);
-            encode_bytes_field(1, &attr_b, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.plex.vault.assetholding.operation.api.GetResponse"),
-                value: out,
-            })
+            Ok(
+                pb::message("eve.plex.vault.assetholding.operation.api.GetResponse")
+                    .set("operation.user.sequential", tx.user_id as i32)
+                    .set(
+                        "operation.balance_change.total_in_cents",
+                        tx.amount.abs() * 100,
+                    )
+                    .must_to_any(),
+            )
         }),
     );
 
@@ -902,18 +850,11 @@ pub fn register_plex_vault_extra_handlers(
                     .map(|o| o.id)
                     .collect::<Vec<_>>()
             });
-            let mut out = Vec::new();
+            let mut out = pb::message("eve_public.store.offer.api.GetAllByTagResponse");
             for oid in matching_ids {
-                let mut off_bytes = Vec::new();
-                encode_string_field(1, &oid.to_string(), &mut off_bytes);
-                encode_bytes_field(1, &off_bytes, &mut out);
+                out = out.add_with("offers", |off| off.set("store_offer", oid.to_string()));
             }
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.store.offer.api.GetAllByTagResponse"
-                ),
-                value: out,
-            })
+            Ok(out.must_to_any())
         }),
     );
 
@@ -947,17 +888,10 @@ pub fn register_plex_vault_extra_handlers(
                 save_store_catalog(snap, &catalog);
                 next_id
             });
-            let mut cid_b = Vec::new();
-            encode_varint_field(1, u64::from(id), &mut cid_b);
-            encode_varint_field(2, cat_enum, &mut cid_b);
-            let mut out = Vec::new();
-            encode_bytes_field(1, &cid_b, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.store.admin.api.CreateCategoryResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve.store.admin.api.CreateCategoryResponse")
+                .set("category.sequential", id)
+                .set("category.catalog", cat_enum as i32)
+                .must_to_any())
         }),
     );
 
@@ -1030,17 +964,10 @@ pub fn register_plex_vault_extra_handlers(
                 save_store_catalog(snap, &catalog);
                 next_id
             });
-            let mut pid_b = Vec::new();
-            encode_varint_field(1, u64::from(id), &mut pid_b);
-            encode_varint_field(2, cat_enum, &mut pid_b);
-            let mut out = Vec::new();
-            encode_bytes_field(1, &pid_b, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.store.admin.api.CreateProductResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve.store.admin.api.CreateProductResponse")
+                .set("product.sequential", id)
+                .set("product.catalog", cat_enum as i32)
+                .must_to_any())
         }),
     );
 
@@ -1201,31 +1128,19 @@ pub fn register_plex_vault_extra_handlers(
                 next_id
             });
             if targeted {
-                let uid = ctx.effective_user_id().unwrap_or(1) as u64;
-                let (mut u_b, mut c_b, mut oid_b, mut nb) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-                encode_varint_field(1, uid, &mut u_b);
-                encode_string_field(1, &id.to_string(), &mut c_b);
-                encode_bytes_field(1, &u_b, &mut oid_b);
-                encode_bytes_field(2, &c_b, &mut oid_b);
-                encode_bytes_field(1, &oid_b, &mut nb);
-                pending_adm_off.write().unwrap_or_else(|e| e.into_inner()).push((
-                    NoticeScope::Broadcast,
-                    GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.store.targetaudience.offer.api.PromotedNotice"),
-                        value: nb,
-                    },
-                ));
+                let uid = ctx.effective_user_id().unwrap_or(1);
+                let notice = pb::message("eve_public.store.targetaudience.offer.api.PromotedNotice")
+                    .set("offer_id.user_id.sequential", uid)
+                    .set("offer_id.catalogue_entry.name", id.to_string())
+                    .must_to_any();
+                pending_adm_off
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((NoticeScope::Broadcast, notice));
             }
-            let mut off_b = Vec::new();
-            encode_string_field(1, &id.to_string(), &mut off_b);
-            let mut out = Vec::new();
-            encode_bytes_field(1, &off_b, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.store.admin.api.CreateOfferResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve.store.admin.api.CreateOfferResponse")
+                .set("offer.store_offer", id.to_string())
+                .must_to_any())
         }),
     );
 

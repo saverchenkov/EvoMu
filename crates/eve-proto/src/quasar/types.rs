@@ -51,6 +51,13 @@ pub struct GoogleTimestamp {
     pub nanos: i32,
 }
 
+impl GoogleTimestamp {
+    /// Constructs a `google.protobuf.Timestamp` from Unix seconds and sub-second nanoseconds.
+    pub const fn from_unix(seconds: i64, nanos: i32) -> Self {
+        Self { seconds, nanos }
+    }
+}
+
 impl QuasarMessage for GoogleTimestamp {
     const FULL_NAME: &'static str = "google.protobuf.Timestamp";
 

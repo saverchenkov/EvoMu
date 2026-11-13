@@ -1,4 +1,5 @@
 use super::*;
+use eve_proto::quasar::{encode_bytes_field, encode_varint_field};
 
 #[test]
 fn career_goal_wire_encoders_and_extractors() {
@@ -356,4 +357,81 @@ fn career_goal_wire_decoded_fields_and_edge_extractors() {
     assert_eq!(extract_target_character(&empty_dyn, &raw_any, 12, false), None);
     assert_eq!(extract_target_character(&empty_dyn, &raw_any, 12, true), Some(90_000_088));
     assert_eq!(extract_target_character(&empty_dyn, &raw_any, 13, true), None);
+}
+
+#[test]
+fn career_goal_wire_encoders_roundtrip_via_strict_descriptor_decode() {
+    let reg = eve_proto::quasar::QuasarDescriptorRegistry::open_default()
+        .expect("open default descriptor DB");
+    let def = CareerGoalDef {
+        uuid: [0x22u8; 16],
+        name: "Scan 5 Signatures".to_string(),
+        description: "Scan 5 cosmic signatures".to_string(),
+        career_id: 1,
+        target: 5,
+        career_points: 20,
+        isk_reward: 50_000,
+        sp_reward: 1_500.0,
+        ..Default::default()
+    };
+    let goal = CharacterCareerGoal {
+        uuid: def.uuid,
+        def: def.clone(),
+        progress: 3,
+        completed: false,
+        claimed: false,
+        completed_time: None,
+    };
+    let ms = CareerMilestoneDef {
+        milestone_id: 1,
+        career_id: Some(1),
+        required_points: 750,
+        sp_reward: 5_000.0,
+        description: "Explorer Graduation".to_string(),
+    };
+
+    let mut buf = Vec::new();
+    encode_career_goal_wire(&goal, &mut buf);
+    let dec = reg
+        .decode_dynamic("eve_public.career.goal.api.GetAllResponse.Goal", &buf)
+        .expect("decode GetAllResponse.Goal");
+    assert_eq!(
+        reg.encode_dynamic(&dec).unwrap(),
+        buf
+    );
+
+    buf.clear();
+    encode_career_goal_definition_wire(&def, &mut buf);
+    let dec = reg
+        .decode_dynamic("eve_public.career.goal.api.GetDefinitionsResponse.Goal", &buf)
+        .expect("decode public goal definition");
+    assert_eq!(
+        reg.encode_dynamic(&dec).unwrap(),
+        buf
+    );
+
+    buf.clear();
+    encode_internal_career_goal_definition_wire(&def, &mut buf);
+    let dec = reg
+        .decode_dynamic("eve.career.goal.api.GetDefinitionsResponse.Goal", &buf)
+        .expect("decode internal goal definition");
+    assert_eq!(
+        reg.encode_dynamic(&dec).unwrap(),
+        buf
+    );
+
+    buf.clear();
+    encode_career_milestone_definition_wire(&ms, &mut buf);
+    reg.decode_dynamic("eve_public.career.goal.api.GetDefinitionsResponse.Goal", &buf)
+        .expect("decode public milestone definition");
+
+    buf.clear();
+    encode_internal_career_milestone_definition_wire(&ms, &mut buf);
+    reg.decode_dynamic("eve.career.goal.api.GetDefinitionsResponse.Goal", &buf)
+        .expect("decode internal milestone definition");
+
+    buf.clear();
+    encode_career_milestone_goal_wire(&ms, 400, false, false, &mut buf);
+    reg.decode_dynamic("eve_public.career.goal.api.GetAllResponse.Goal", &buf)
+        .expect("decode milestone goal");
 }

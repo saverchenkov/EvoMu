@@ -21,9 +21,10 @@ use crate::quasar_gateway::{
     STATUS_PRECONDITION_FAILED,
 };
 use eve_db::{IskCents, WorldRepository};
+use eve_proto::pb::{self, ProtoBuilder};
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, encode_zigzag64, DynamicQuasarMessage, DynamicValue,
-    GoogleAny, GoogleTimestamp, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
+    DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleTimestamp, WireField, WireMessage,
+    WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -1127,32 +1128,17 @@ impl DailyGoalManager {
         self.save_to_db();
 
         for (uuid, current_progress, just_completed) in progressed {
-            let mut id_bytes = Vec::new();
-            encode_bytes_field(1, &uuid, &mut id_bytes);
-            let mut not_bytes = Vec::new();
-            encode_bytes_field(1, &id_bytes, &mut not_bytes);
-            encode_varint_field(2, current_progress, &mut not_bytes);
-
-            let _ = gateway.publish_notice(
-                NoticeScope::Character(char_id),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.ProgressedNotice"),
-                    value: not_bytes,
-                },
-                now_unix,
-            );
+            let notice = pb::message("eve_public.dailygoal.api.ProgressedNotice")
+                .set("goal.uuid", uuid)
+                .set("current_progress", current_progress)
+                .must_to_any();
+            let _ = gateway.publish_notice(NoticeScope::Character(char_id), notice, now_unix);
 
             if just_completed {
-                let mut comp_bytes = Vec::new();
-                encode_bytes_field(1, &id_bytes, &mut comp_bytes);
-                let _ = gateway.publish_notice(
-                    NoticeScope::Character(char_id),
-                    GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.CompletedNotice"),
-                        value: comp_bytes,
-                    },
-                    now_unix,
-                );
+                let comp = pb::message("eve_public.dailygoal.api.CompletedNotice")
+                    .set("goal.uuid", uuid)
+                    .must_to_any();
+                let _ = gateway.publish_notice(NoticeScope::Character(char_id), comp, now_unix);
             }
         }
     }
@@ -1164,101 +1150,120 @@ impl DailyGoalManager {
 
 /// Encodes `eve_public.dailygoal.Identifier` / `eve.dailygoal.Identifier`: `1: bytes uuid`.
 pub fn encode_goal_identifier(uuid: &[u8; 16], out: &mut Vec<u8>) {
-    encode_bytes_field(1, uuid, out);
+    pb::message("eve_public.dailygoal.Identifier")
+        .set("uuid", uuid)
+        .must_encode_into(out);
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn encode_loc_message_id(seq: u32) -> Vec<u8> {
-    let mut b = Vec::new();
-    encode_varint_field(1, seq as u64, &mut b);
-    b
+    pb::message("eve_public.localization.message.Identifier")
+        .set("sequential", seq)
+        .must_encode()
 }
 
-fn encode_contribution_configuration(category: u32, out: &mut Vec<u8>) {
-    let mut cfg = Vec::new();
+fn fill_contribution_configuration(cfg: ProtoBuilder, category: u32) -> ProtoBuilder {
     match category {
-        1 => {
-            // 1: kill_npc (KillNPC { 1: repeated Method { 1: SolarSystemMatcher { 1: any = true } } })
-            let mut matcher = Vec::new();
-            encode_varint_field(1, 1, &mut matcher);
-            let mut method = Vec::new();
-            encode_bytes_field(1, &matcher, &mut method);
-            let mut kill_npc = Vec::new();
-            encode_bytes_field(1, &method, &mut kill_npc);
-            encode_bytes_field(1, &kill_npc, &mut cfg);
-        }
-        2 => {
-            // 3: mine_ore (MineOre { 1: repeated Method { 1: SolarSystemMatcher { 1: true }, 2: OreTypeMatcher { 1: true } } })
-            let mut any_m = Vec::new();
-            encode_varint_field(1, 1, &mut any_m);
-            let mut method = Vec::new();
-            encode_bytes_field(1, &any_m, &mut method);
-            encode_bytes_field(2, &any_m, &mut method);
-            let mut mine_ore = Vec::new();
-            encode_bytes_field(1, &method, &mut mine_ore);
-            encode_bytes_field(3, &mine_ore, &mut cfg);
-        }
-        3 => {
-            // 8: scan_signature (ScanSignature { 1: repeated Method { 1: SignatureTypeMatcher { 1: true }, 2: SolarSystemMatcher { 1: true } } })
-            let mut any_m = Vec::new();
-            encode_varint_field(1, 1, &mut any_m);
-            let mut method = Vec::new();
-            encode_bytes_field(1, &any_m, &mut method);
-            encode_bytes_field(2, &any_m, &mut method);
-            let mut scan_sig = Vec::new();
-            encode_bytes_field(1, &method, &mut scan_sig);
-            encode_bytes_field(8, &scan_sig, &mut cfg);
-        }
-        4 => {
-            // 13: space_jump (SpaceJump {})
-            encode_bytes_field(13, &[], &mut cfg);
-        }
-        5 => {
-            // 9: install_manufacturing_job (InstallManufacturingJob { 1: repeated Method })
-            let mut owner_m = Vec::new();
-            encode_varint_field(3, 1, &mut owner_m); // any = true
-            let mut any_m = Vec::new();
-            encode_varint_field(1, 1, &mut any_m);
-            let mut method = Vec::new();
-            encode_bytes_field(1, &owner_m, &mut method);
-            encode_bytes_field(2, &any_m, &mut method);
-            encode_bytes_field(3, &any_m, &mut method);
-            let mut mfg = Vec::new();
-            encode_bytes_field(1, &method, &mut mfg);
-            encode_bytes_field(9, &mfg, &mut cfg);
-        }
-        6 => {
-            // 10: complete_daily_goal (CompleteDailyGoal { 1: Method { 1: DailyGoalMatcher { any=true }, 2: DailyGoalCategoryMatcher { category=CATEGORY_DAILY(1) } } })
-            let (mut any_m, mut cat_m, mut method, mut cdg) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-            encode_varint_field(1, 1, &mut any_m);
-            encode_varint_field(2, 1, &mut cat_m);
-            encode_bytes_field(1, &any_m, &mut method);
-            encode_bytes_field(2, &cat_m, &mut method);
-            encode_bytes_field(1, &method, &mut cdg);
-            encode_bytes_field(10, &cdg, &mut cfg);
-        }
-        _ => {
-            encode_bytes_field(13, &[], &mut cfg);
-        }
+        1 => cfg.set_with("kill_npc", |k| {
+            k.add_with("contribution_methods", |m| m.set("solar_system.any", true))
+        }),
+        2 => cfg.set_with("mine_ore", |k| {
+            k.add_with("contribution_methods", |m| {
+                m.set("solar_system.any", true).set("ore.any", true)
+            })
+        }),
+        3 => cfg.set_with("scan_signature", |k| {
+            k.add_with("contribution_methods", |m| {
+                m.set("signature_type.any", true)
+                    .set("solar_system.any", true)
+            })
+        }),
+        4 => cfg.set_with("space_jump", |m| m),
+        5 => cfg.set_with("install_manufacturing_job", |k| {
+            k.add_with("contribution_methods", |m| {
+                m.set("job_owner_type.any", true)
+                    .set("job_location.any", true)
+                    .set("item_type.any", true)
+            })
+        }),
+        6 => cfg.set_with("complete_daily_goal", |k| {
+            k.add_with("contribution_methods", |m| {
+                m.set("daily_goal.any", true)
+                    .set("daily_goal_category.category", 1i32)
+            })
+        }),
+        _ => cfg.set_with("space_jump", |m| m),
     }
-    encode_bytes_field(6, &cfg, out);
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn encode_isk_unit(isk: i64) -> Vec<u8> {
-    let mut currency = Vec::new();
-    encode_varint_field(1, encode_zigzag64(isk), &mut currency);
-    let mut isk_msg = Vec::new();
-    encode_bytes_field(1, &currency, &mut isk_msg);
-    let mut unit = Vec::new();
-    encode_bytes_field(1, &isk_msg, &mut unit);
-    unit
+    pb::message("eve_public.dailygoal.Unit")
+        .set("isk.amount.units", isk)
+        .must_encode()
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn encode_sp_unit(sp: u32) -> Vec<u8> {
-    let mut sp_msg = Vec::new();
-    encode_varint_field(1, sp as u64, &mut sp_msg);
-    let mut unit = Vec::new();
-    encode_bytes_field(3, &sp_msg, &mut unit);
-    unit
+    pb::message("eve_public.dailygoal.Unit")
+        .set("sp.amount", sp)
+        .must_encode()
+}
+
+fn build_daily_goal_attributes(
+    attrs_type_name: &str,
+    tpl: &DailyGoalTemplate,
+    active_after_unix: u64,
+    active_until_unix: u64,
+) -> ProtoBuilder {
+    let mut b = pb::message(attrs_type_name)
+        .set("name_message.sequential", tpl.effective_name_message_id())
+        .set(
+            "description_message.sequential",
+            tpl.effective_description_message_id(),
+        )
+        .set(
+            "help_text_message.sequential",
+            tpl.effective_help_text_message_id(),
+        )
+        .set(
+            "assigner.sequential",
+            tpl.effective_assigner_corporation_id(),
+        )
+        .set("category", tpl.effective_goal_category() as i32)
+        .set_with("contribution_configuration", |cfg| {
+            fill_contribution_configuration(cfg, tpl.category)
+        })
+        .set("career", tpl.career.clamp(1, 4) as i32);
+
+    if tpl.isk_reward > 0 {
+        let mut asset_uuid = tpl.uuid;
+        asset_uuid[14] = 1;
+        b = b.add_with("payment", |p| {
+            p.set("asset.uuid", asset_uuid)
+                .set("period", 1i32) // PAYMENT_PERIOD_COMPLETION
+                .set("unit.isk.amount.units", tpl.isk_reward)
+        });
+    }
+    if tpl.sp_reward > 0.0 {
+        let mut asset_uuid = tpl.uuid;
+        asset_uuid[14] = 2;
+        b = b.add_with("payment", |p| {
+            p.set("asset.uuid", asset_uuid)
+                .set("period", 1i32) // PAYMENT_PERIOD_COMPLETION
+                .set("unit.sp.amount", tpl.sp_reward as u32)
+        });
+    }
+
+    b.set("target", tpl.target)
+        .set(
+            "active_after",
+            GoogleTimestamp::from_unix(active_after_unix as i64, 0),
+        )
+        .set(
+            "active_until",
+            GoogleTimestamp::from_unix(active_until_unix as i64, 0),
+        )
 }
 
 /// Encodes `eve_public.dailygoal.Attributes` / `eve.dailygoal.Attributes` matching V24 descriptors.
@@ -1283,62 +1288,52 @@ pub fn encode_goal_attributes_with_window(
     active_until_unix: u64,
     out: &mut Vec<u8>,
 ) {
-    // 1: name_message (.eve_public.localization.message.Identifier { 1: uint32 sequential })
-    encode_bytes_field(1, &encode_loc_message_id(tpl.effective_name_message_id()), out);
-    // 2: description_message (.eve_public.localization.message.Identifier { 1: uint32 sequential })
-    encode_bytes_field(2, &encode_loc_message_id(tpl.effective_description_message_id()), out);
-    // 3: help_text_message (.eve_public.localization.message.Identifier { 1: uint32 sequential })
-    encode_bytes_field(3, &encode_loc_message_id(tpl.effective_help_text_message_id()), out);
-    // 4: assigner (.eve_public.corporation.Identifier { 1: uint32 sequential })
-    encode_bytes_field(4, &encode_loc_message_id(tpl.effective_assigner_corporation_id()), out);
-    // 5: category (.eve_public.dailygoal.Category: CATEGORY_DAILY = 1, CATEGORY_DAILY_BONUS = 2)
-    encode_varint_field(5, tpl.effective_goal_category() as u64, out);
-    // 6: contribution_configuration (.eve_public.dailygoal.ContributionConfiguration)
-    encode_contribution_configuration(tpl.category, out);
-    // 7: career (.eve_public.career.Path: 1..=4)
-    encode_varint_field(7, tpl.career.clamp(1, 4) as u64, out);
-    // 8: repeated payment (.eve_public.dailygoal.Payment { 1: asset, 2: period = 1, 3: unit })
-    for (tag, unit_opt) in [
-        (1u8, (tpl.isk_reward > 0).then(|| encode_isk_unit(tpl.isk_reward))),
-        (2u8, (tpl.sp_reward > 0.0).then(|| encode_sp_unit(tpl.sp_reward as u32))),
-    ] {
-        if let Some(unit) = unit_opt {
-            let (mut asset_uuid, mut asset_id, mut p) = (tpl.uuid, Vec::new(), Vec::new());
-            asset_uuid[14] = tag;
-            encode_bytes_field(1, &asset_uuid, &mut asset_id);
-            encode_bytes_field(1, &asset_id, &mut p);
-            encode_varint_field(2, 1, &mut p); // PAYMENT_PERIOD_COMPLETION
-            encode_bytes_field(3, &unit, &mut p);
-            encode_bytes_field(8, &p, out);
-        }
+    build_daily_goal_attributes(
+        "eve_public.dailygoal.Attributes",
+        tpl,
+        active_after_unix,
+        active_until_unix,
+    )
+    .must_encode_into(out);
+}
+
+fn add_daily_goal_earnings(mut builder: ProtoBuilder, tpl: &DailyGoalTemplate) -> ProtoBuilder {
+    if tpl.isk_reward > 0 {
+        builder = builder.add_with("earnings", |e| {
+            e.set("unit.isk.amount.units", tpl.isk_reward)
+        });
     }
-    // 9: target (uint64)
-    encode_varint_field(9, tpl.target, out);
-    // 10: active_after (.google.protobuf.Timestamp)
-    let after_ts = GoogleTimestamp {
-        seconds: active_after_unix as i64,
-        nanos: 0,
-    };
-    encode_bytes_field(10, &after_ts.encode_proto(), out);
-    // 11: active_until (.google.protobuf.Timestamp)
-    let until_ts = GoogleTimestamp {
-        seconds: active_until_unix as i64,
-        nanos: 0,
-    };
-    encode_bytes_field(11, &until_ts.encode_proto(), out);
+    if tpl.sp_reward > 0.0 {
+        builder = builder.add_with("earnings", |e| {
+            e.set("unit.sp.amount", tpl.sp_reward as u32)
+        });
+    }
+    builder
 }
 
 /// Encodes `repeated eve_public.dailygoal.api.Earning` (one `Earning` per `Unit` oneof variant).
 pub fn encode_goal_earnings(tpl: &DailyGoalTemplate, field_num: u32, out: &mut Vec<u8>) {
+    let mut fields = Vec::new();
     if tpl.isk_reward > 0 {
-        let mut earn = Vec::new();
-        encode_bytes_field(1, &encode_isk_unit(tpl.isk_reward), &mut earn);
-        encode_bytes_field(field_num, &earn, out);
+        let bytes = pb::message("eve_public.dailygoal.api.Earning")
+            .set("unit.isk.amount.units", tpl.isk_reward)
+            .must_encode();
+        fields.push(WireField {
+            field_number: field_num,
+            value: WireValue::LengthDelimited(bytes),
+        });
     }
     if tpl.sp_reward > 0.0 {
-        let mut earn = Vec::new();
-        encode_bytes_field(1, &encode_sp_unit(tpl.sp_reward as u32), &mut earn);
-        encode_bytes_field(field_num, &earn, out);
+        let bytes = pb::message("eve_public.dailygoal.api.Earning")
+            .set("unit.sp.amount", tpl.sp_reward as u32)
+            .must_encode();
+        fields.push(WireField {
+            field_number: field_num,
+            value: WireValue::LengthDelimited(bytes),
+        });
+    }
+    if !fields.is_empty() {
+        out.extend_from_slice(&WireMessage { fields }.encode());
     }
 }
 
@@ -1373,26 +1368,26 @@ pub fn register_daily_goal_handlers(
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
             let goals = mgr.get_or_init_goals_at(cid, ctx.now_unix());
-            let mut out = Vec::new();
+            let mut out = pb::message("eve_public.dailygoal.api.GetAllCurrentResponse");
             for g in &goals {
-                let mut goal_entry = Vec::new();
-                let mut id_bytes = Vec::new();
-                encode_goal_identifier(&g.uuid, &mut id_bytes);
-                encode_bytes_field(1, &id_bytes, &mut goal_entry);
-                let mut attr_bytes = Vec::new();
-                encode_goal_attributes_for_day_bucket(&g.template, g.day_bucket, &mut attr_bytes);
-                encode_bytes_field(2, &attr_bytes, &mut goal_entry);
-                encode_varint_field(3, g.current_progress, &mut goal_entry);
-                encode_goal_earnings(&g.template, 5, &mut goal_entry);
-                if g.paid_completion {
-                    encode_varint_field(6, 1, &mut goal_entry);
-                }
-                encode_bytes_field(1, &goal_entry, &mut out);
+                let (after, until) = daily_goal_window_unix(g.day_bucket);
+                let attrs = build_daily_goal_attributes(
+                    "eve_public.dailygoal.Attributes",
+                    &g.template,
+                    after,
+                    until,
+                );
+                out = out.add_with("goals", |ge| {
+                    add_daily_goal_earnings(
+                        ge.set("id.uuid", g.uuid)
+                            .set("goal", attrs)
+                            .set("current_progress", g.current_progress),
+                        &g.template,
+                    )
+                    .when(g.paid_completion, |ge| ge.set("paid_completion", true))
+                });
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.GetAllCurrentResponse"),
-                value: out,
-            })
+            Ok(out.must_to_any())
         }),
     );
 
@@ -1413,17 +1408,20 @@ pub fn register_daily_goal_handlers(
                 .find(|g| g.uuid == target_uuid)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Daily goal not found".into()))?;
 
-            let mut out = Vec::new();
-            let mut attr_bytes = Vec::new();
-            encode_goal_attributes_for_day_bucket(&g.template, g.day_bucket, &mut attr_bytes);
-            encode_bytes_field(1, &attr_bytes, &mut out);
-            encode_varint_field(2, g.current_progress, &mut out);
-            encode_goal_earnings(&g.template, 4, &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.GetResponse"),
-                value: out,
-            })
+            let (after, until) = daily_goal_window_unix(g.day_bucket);
+            let attrs = build_daily_goal_attributes(
+                "eve_public.dailygoal.Attributes",
+                &g.template,
+                after,
+                until,
+            );
+            Ok(add_daily_goal_earnings(
+                pb::message("eve_public.dailygoal.api.GetResponse")
+                    .set("goal", attrs)
+                    .set("progress", g.current_progress),
+                &g.template,
+            )
+            .must_to_any())
         }),
     );
 
@@ -1436,20 +1434,12 @@ pub fn register_daily_goal_handlers(
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
             let goals = mgr.get_or_init_goals_at(cid, ctx.now_unix());
-            let mut out = Vec::new();
+            let mut out =
+                pb::message("eve_public.dailygoal.api.GetAllCompletedWithEntitlementsResponse");
             for g in goals.iter().filter(|g| g.completed) {
-                let mut goal_entry = Vec::new();
-                let mut id_bytes = Vec::new();
-                encode_goal_identifier(&g.uuid, &mut id_bytes);
-                encode_bytes_field(1, &id_bytes, &mut goal_entry);
-                encode_bytes_field(1, &goal_entry, &mut out);
+                out = out.add_with("goals", |ge| ge.set("id.uuid", g.uuid));
             }
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.GetAllCompletedWithEntitlementsResponse"
-                ),
-                value: out,
-            })
+            Ok(out.must_to_any())
         }),
     );
 
@@ -1462,18 +1452,11 @@ pub fn register_daily_goal_handlers(
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
             let goals = mgr.get_or_init_goals_at(cid, ctx.now_unix());
-            let mut out = Vec::new();
+            let mut out = pb::message("eve_public.dailygoal.api.GetAllWithRewardsResponse");
             for g in goals.iter().filter(|g| g.completed && !g.claimed) {
-                let mut id_bytes = Vec::new();
-                encode_goal_identifier(&g.uuid, &mut id_bytes);
-                encode_bytes_field(1, &id_bytes, &mut out);
+                out = out.add_with("ids", |id| id.set("uuid", g.uuid));
             }
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.GetAllWithRewardsResponse"
-                ),
-                value: out,
-            })
+            Ok(out.must_to_any())
         }),
     );
 
@@ -1493,11 +1476,14 @@ pub fn register_daily_goal_handlers(
             mgr.save_to_db();
 
             // Publish RedeemedNotice
-            let mut not_bytes = Vec::new();
-            let mut id_bytes = Vec::new();
-            encode_goal_identifier(&redeemed.uuid, &mut id_bytes);
-            encode_bytes_field(1, &id_bytes, &mut not_bytes);
-            super::quasar_social_chat::ctx_queue_notice(NoticeScope::Character(cid), GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.RedeemedNotice"), value: not_bytes }, ctx.now_unix());
+            let notice = pb::message("eve_public.dailygoal.api.RedeemedNotice")
+                .set("goal.uuid", redeemed.uuid)
+                .must_to_any();
+            super::quasar_social_chat::ctx_queue_notice(
+                NoticeScope::Character(cid),
+                notice,
+                ctx.now_unix(),
+            );
 
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.RedeemResponse"),
@@ -1518,16 +1504,12 @@ pub fn register_daily_goal_handlers(
             let goals = mgr.get_or_init_goals_at(cid, ctx.now_unix());
             for g in goals.iter().filter(|g| g.completed && !g.claimed) {
                 if let Ok(redeemed) = mgr.redeem_goal(cid, &g.uuid, ctx.now_unix(), &db_redeem_all) {
-                    let mut not_bytes = Vec::new();
-                    let mut id_bytes = Vec::new();
-                    encode_goal_identifier(&redeemed.uuid, &mut id_bytes);
-                    encode_bytes_field(1, &id_bytes, &mut not_bytes);
+                    let notice = pb::message("eve_public.dailygoal.api.RedeemedNotice")
+                        .set("goal.uuid", redeemed.uuid)
+                        .must_to_any();
                     super::quasar_social_chat::ctx_queue_notice(
                         NoticeScope::Character(cid),
-                        GoogleAny {
-                            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.RedeemedNotice"),
-                            value: not_bytes,
-                        },
+                        notice,
                         ctx.now_unix(),
                     );
                 }
@@ -1555,31 +1537,24 @@ pub fn register_daily_goal_handlers(
             let goal = mgr.pay_for_completion(cid, &target_uuid, ctx.now_unix(), &db_pay)?;
             mgr.save_to_db();
 
-            let mut id_bytes = Vec::new();
-            encode_goal_identifier(&goal.uuid, &mut id_bytes);
-
             // 1. ProgressedNotice
-            let mut prog_bytes = Vec::new();
-            encode_bytes_field(1, &id_bytes, &mut prog_bytes);
-            encode_varint_field(2, goal.current_progress, &mut prog_bytes);
+            let prog_notice = pb::message("eve_public.dailygoal.api.ProgressedNotice")
+                .set("goal.uuid", goal.uuid)
+                .set("current_progress", goal.current_progress)
+                .must_to_any();
             super::quasar_social_chat::ctx_queue_notice(
                 NoticeScope::Character(cid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.ProgressedNotice"),
-                    value: prog_bytes,
-                },
+                prog_notice,
                 ctx.now_unix(),
             );
 
             // 2. CompletedNotice
-            let mut comp_bytes = Vec::new();
-            encode_bytes_field(1, &id_bytes, &mut comp_bytes);
+            let comp_notice = pb::message("eve_public.dailygoal.api.CompletedNotice")
+                .set("goal.uuid", goal.uuid)
+                .must_to_any();
             super::quasar_social_chat::ctx_queue_notice(
                 NoticeScope::Character(cid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.CompletedNotice"),
-                    value: comp_bytes,
-                },
+                comp_notice,
                 ctx.now_unix(),
             );
 
@@ -1631,29 +1606,23 @@ pub fn register_daily_goal_handlers(
             mgr.save_to_db();
 
             if let Some((goal, just_completed)) = updated {
-                let mut not_bytes = Vec::new();
-                let mut id_bytes = Vec::new();
-                encode_goal_identifier(&target_uuid, &mut id_bytes);
-                encode_bytes_field(1, &id_bytes, &mut not_bytes);
-                encode_varint_field(2, goal.current_progress, &mut not_bytes);
+                let prog_notice = pb::message("eve_public.dailygoal.api.ProgressedNotice")
+                    .set("goal.uuid", target_uuid)
+                    .set("current_progress", goal.current_progress)
+                    .must_to_any();
                 super::quasar_social_chat::ctx_queue_notice(
                     NoticeScope::Character(target_char),
-                    GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.ProgressedNotice"),
-                        value: not_bytes,
-                    },
+                    prog_notice,
                     ctx.now_unix(),
                 );
 
                 if just_completed {
-                    let mut comp_bytes = Vec::new();
-                    encode_bytes_field(1, &id_bytes, &mut comp_bytes);
+                    let comp_notice = pb::message("eve_public.dailygoal.api.CompletedNotice")
+                        .set("goal.uuid", target_uuid)
+                        .must_to_any();
                     super::quasar_social_chat::ctx_queue_notice(
                         NoticeScope::Character(target_char),
-                        GoogleAny {
-                            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.CompletedNotice"),
-                            value: comp_bytes,
-                        },
+                        comp_notice,
                         ctx.now_unix(),
                     );
                 }
@@ -1683,15 +1652,16 @@ pub fn register_daily_goal_handlers(
                 .find(|g| g.uuid == target_uuid)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Daily goal not found".into()))?;
 
-            let mut out = Vec::new();
-            let mut attr_bytes = Vec::new();
-            encode_goal_attributes_for_day_bucket(&g.template, g.day_bucket, &mut attr_bytes);
-            encode_bytes_field(1, &attr_bytes, &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.dailygoal.api.GetResponse"),
-                value: out,
-            })
+            let (after, until) = daily_goal_window_unix(g.day_bucket);
+            let attrs = build_daily_goal_attributes(
+                "eve.dailygoal.Attributes",
+                &g.template,
+                after,
+                until,
+            );
+            Ok(pb::message("eve.dailygoal.api.GetResponse")
+                .set("goal", attrs)
+                .must_to_any())
         }),
     );
 
@@ -1704,16 +1674,11 @@ pub fn register_daily_goal_handlers(
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
             let goals = mgr.get_or_init_goals_at(cid, ctx.now_unix());
-            let mut out = Vec::new();
+            let mut out = pb::message("eve.dailygoal.api.GetAllResponse");
             for g in &goals {
-                let mut id_bytes = Vec::new();
-                encode_goal_identifier(&g.uuid, &mut id_bytes);
-                encode_bytes_field(1, &id_bytes, &mut out);
+                out = out.add_with("goals", |id| id.set("uuid", g.uuid));
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.dailygoal.api.GetAllResponse"),
-                value: out,
-            })
+            Ok(out.must_to_any())
         }),
     );
 
@@ -1734,22 +1699,20 @@ pub fn register_daily_goal_handlers(
                 .find(|g| g.uuid == target_uuid)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Daily goal not found".into()))?;
 
-            let mut out = Vec::new();
-            encode_varint_field(1, g.current_progress, &mut out);
-            if g.completed {
-                let ts = GoogleTimestamp {
-                    seconds: g.completed_at_unix.unwrap_or(ctx.now_unix()) as i64,
-                    nanos: 0,
-                };
-                encode_bytes_field(4, &ts.encode_proto(), &mut out);
-            } else {
-                encode_varint_field(3, 1, &mut out); // not_completed = true
-            }
-            encode_goal_earnings(&g.template, 5, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.dailygoal.api.GetProgressResponse"),
-                value: out,
-            })
+            Ok(add_daily_goal_earnings(
+                pb::message("eve.dailygoal.api.GetProgressResponse")
+                    .set("current", g.current_progress)
+                    .when(g.completed, |b| {
+                        let ts = GoogleTimestamp::from_unix(
+                            g.completed_at_unix.unwrap_or(ctx.now_unix()) as i64,
+                            0,
+                        );
+                        b.set("completed", ts)
+                    })
+                    .when(!g.completed, |b| b.set("not_completed", true)),
+                &g.template,
+            )
+            .must_to_any())
         }),
     );
 

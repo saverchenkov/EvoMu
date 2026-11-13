@@ -12,6 +12,7 @@
 pub mod client_error;
 pub mod dbrow;
 pub mod marshal;
+pub mod pb;
 pub mod quasar;
 pub mod quasar_wire;
 
