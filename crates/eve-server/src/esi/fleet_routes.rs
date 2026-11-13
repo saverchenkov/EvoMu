@@ -300,17 +300,15 @@ pub fn dispatch_fleet_routes(
                     },
                 ) {
                     Ok(out) => {
-                        ctx.notify(
+                        ctx.emit_typed(
                             NotificationTarget::Character(out.invitee_id),
-                            "OnFleetInvite",
-                            "charid",
-                            vec![
-                                PyRep::Integer(out.fleet_id),
-                                PyRep::Integer(out.inviter_id),
-                                PyRep::Integer(out.wing_id),
-                                PyRep::Integer(out.squad_id),
-                                PyRep::Integer(out.role_num),
-                            ],
+                            crate::router::notify_registry::OnFleetInvite {
+                                fleet_id: out.fleet_id,
+                                invite_id: out.inviter_id,
+                                msg_name: PyRep::Integer(out.wing_id),
+                                msg_dict: PyRep::Integer(out.squad_id),
+                                role_num: Some(out.role_num),
+                            },
                         );
                         RouteExecutionResult::no_content(0)
                     }
@@ -387,11 +385,9 @@ pub fn dispatch_fleet_routes(
                             &out.after,
                             out.is_only_member,
                         );
-                        ctx.notify(
+                        ctx.emit_typed(
                             NotificationTarget::Character(member_id),
-                            "OnFleetMove",
-                            "charid",
-                            vec![],
+                            crate::router::notify_registry::OnFleetMove,
                         );
                         RouteExecutionResult::no_content(0)
                     }
@@ -476,11 +472,11 @@ pub fn dispatch_fleet_routes(
                     false,
                 ) {
                     Ok(created) => {
-                        ctx.notify(
+                        ctx.emit_typed(
                             NotificationTarget::Fleet(fleet_id),
-                            "OnFleetWingAdded",
-                            "fleetid",
-                            vec![PyRep::Integer(created.wing_id)],
+                            crate::router::notify_registry::OnFleetWingAdded {
+                                wing_id: created.wing_id,
+                            },
                         );
                         RouteExecutionResult::created_json(json!({ "wing_id": created.wing_id }))
                     }
@@ -520,11 +516,12 @@ pub fn dispatch_fleet_routes(
                     true,
                 ) {
                     Ok(renamed) => {
-                        ctx.notify(
+                        ctx.emit_typed(
                             NotificationTarget::Fleet(fleet_id),
-                            "OnFleetWingNameChanged",
-                            "fleetid",
-                            vec![PyRep::Integer(wing_id), PyRep::String(renamed)],
+                            crate::router::notify_registry::OnFleetWingNameChanged {
+                                wing_id,
+                                name: renamed,
+                            },
                         );
                         RouteExecutionResult::no_content(0)
                     }
@@ -551,11 +548,9 @@ pub fn dispatch_fleet_routes(
                     false,
                 ) {
                     Ok(()) => {
-                        ctx.notify(
+                        ctx.emit_typed(
                             NotificationTarget::Fleet(fleet_id),
-                            "OnFleetWingDeleted",
-                            "fleetid",
-                            vec![PyRep::Integer(wing_id)],
+                            crate::router::notify_registry::OnFleetWingDeleted { wing_id },
                         );
                         RouteExecutionResult::no_content(0)
                     }
@@ -585,11 +580,12 @@ pub fn dispatch_fleet_routes(
                     false,
                 ) {
                     Ok(created) => {
-                        ctx.notify(
+                        ctx.emit_typed(
                             NotificationTarget::Fleet(fleet_id),
-                            "OnFleetSquadAdded",
-                            "fleetid",
-                            vec![PyRep::Integer(wing_id), PyRep::Integer(created.squad_id)],
+                            crate::router::notify_registry::OnFleetSquadAdded {
+                                wing_id,
+                                squad_id: created.squad_id,
+                            },
                         );
                         RouteExecutionResult::created_json(json!({ "squad_id": created.squad_id }))
                     }
@@ -629,11 +625,12 @@ pub fn dispatch_fleet_routes(
                     true,
                 ) {
                     Ok(renamed) => {
-                        ctx.notify(
+                        ctx.emit_typed(
                             NotificationTarget::Fleet(fleet_id),
-                            "OnFleetSquadNameChanged",
-                            "fleetid",
-                            vec![PyRep::Integer(squad_id), PyRep::String(renamed)],
+                            crate::router::notify_registry::OnFleetSquadNameChanged {
+                                squad_id,
+                                name: renamed,
+                            },
                         );
                         RouteExecutionResult::no_content(0)
                     }
@@ -660,11 +657,9 @@ pub fn dispatch_fleet_routes(
                     false,
                 ) {
                     Ok(()) => {
-                        ctx.notify(
+                        ctx.emit_typed(
                             NotificationTarget::Fleet(fleet_id),
-                            "OnFleetSquadDeleted",
-                            "fleetid",
-                            vec![PyRep::Integer(squad_id)],
+                            crate::router::notify_registry::OnFleetSquadDeleted { squad_id },
                         );
                         RouteExecutionResult::no_content(0)
                     }
@@ -688,7 +683,10 @@ pub fn dispatch_fleet_routes(
             if !ctx.db.with_snapshot(|snap| snap.contracts.contains_key(&contract_id)) {
                 return Some(RouteExecutionResult::error(404, format!("Contract {contract_id} not found")));
             }
-            ctx.notify(NotificationTarget::Character(caller_id), "OnShowContract", "charid", vec![PyRep::Integer(contract_id)]);
+            ctx.emit_typed(
+                NotificationTarget::Character(caller_id),
+                crate::router::notify_registry::OnShowContract { contract_id },
+            );
             Some(RouteExecutionResult::no_content(0))
         }
 
@@ -713,7 +711,10 @@ pub fn dispatch_fleet_routes(
             }) || ctx.sde.npc_corporations.contains_key(&target_id)
                 || ctx.sde.agents.contains_key(&target_id);
             if is_owner {
-                ctx.notify(NotificationTarget::Character(caller_id), "OnShowOwnerDetailsWindow", "charid", vec![PyRep::Integer(target_id)]);
+                ctx.emit_typed(
+                    NotificationTarget::Character(caller_id),
+                    crate::router::notify_registry::OnShowOwnerDetailsWindow { target_id },
+                );
                 return Some(RouteExecutionResult::no_content(0));
             }
             let exists = ctx.db.with_snapshot(|s| {
@@ -751,7 +752,10 @@ pub fn dispatch_fleet_routes(
             if !ctx.sde.types.contains_key(&tid_u32) {
                 return Some(RouteExecutionResult::error(404, format!("Inventory type {type_id} not found")));
             }
-            ctx.notify(NotificationTarget::Character(caller_id), "OnShowMarketDetails", "charid", vec![PyRep::Integer(type_id)]);
+            ctx.emit_typed(
+                NotificationTarget::Character(caller_id),
+                crate::router::notify_registry::OnShowMarketDetails { type_id },
+            );
             Some(RouteExecutionResult::no_content(0))
         }
 
@@ -787,18 +791,22 @@ pub fn dispatch_fleet_routes(
                 let Some(rid) = r.as_i64().filter(|&v| v > 0) else {
                     return Some(RouteExecutionResult::error(400, "Each recipient in 'recipients' must be a positive integer"));
                 };
-                recip_ids.push(PyRep::Integer(rid));
+                recip_ids.push(rid);
             }
             if payload.get("to_corp_or_alliance_id").is_some() && payload.get("to_mailing_list_id").is_some() {
                 return Some(RouteExecutionResult::error(422, "Cannot specify both 'to_corp_or_alliance_id' and 'to_mailing_list_id'"));
             }
             let corp_or_alliance = payload.get("to_corp_or_alliance_id").and_then(Value::as_i64).map(PyRep::Integer).unwrap_or(PyRep::None);
             let to_list_id = payload.get("to_mailing_list_id").and_then(Value::as_i64).map(PyRep::Integer).unwrap_or(PyRep::None);
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(caller_id),
-                "OnCreateNewMailWindow",
-                "charid",
-                vec![PyRep::List(recip_ids), corp_or_alliance, to_list_id, PyRep::String(subject.to_string()), PyRep::String(body.to_string())],
+                crate::router::notify_registry::OnCreateNewMailWindow {
+                    recipients: recip_ids,
+                    corp_or_alliance_recipient: corp_or_alliance,
+                    to_list_id,
+                    subject: subject.to_string(),
+                    body: body.to_string(),
+                },
             );
             Some(RouteExecutionResult::no_content(0))
         }

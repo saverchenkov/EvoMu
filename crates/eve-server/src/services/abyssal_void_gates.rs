@@ -655,20 +655,16 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         crate::services::combat_crimewatch::emit_crimewatch_timer_notifications(ctx, char_id, now_u);
     }
     // V24 `crimewatchTimers.pyj::TimerType::AbyssalContentExpiration = 11` (`abyssalContentService.pyj:107`).
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
-        "OnAbyssalContentFinished",
-        "charid",
-        vec![
-            PyRep::Integer(exited_pid),
-            PyRep::Integer(crate::services::abyssal_void_mgr::TIMER_TYPE_ABYSSAL_CONTENT_EXPIRATION),
-        ],
+        crate::router::notify_registry::OnAbyssalContentFinished {
+            content_id: Some(exited_pid),
+            timer_type: Some(crate::services::abyssal_void_mgr::TIMER_TYPE_ABYSSAL_CONTENT_EXPIRATION),
+        },
     );
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
-        "OnAbyssalLocationExited",
-        "charid",
-        vec![],
+        crate::router::notify_registry::OnAbyssalLocationExited,
     );
 
     Ok(PyRep::keyval([
@@ -985,20 +981,20 @@ pub(crate) async fn handle_void_space_player_jump(
             PyRep::Integer(nebula_graphic_id),
         ),
     ]);
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
-        "OnVoidSpaceEntered",
-        "charid",
-        vec![client_data],
+        crate::router::notify_registry::OnVoidSpaceEntered {
+            client_data,
+        },
     );
     let void_end_ft = ctx.now_blueos_filetime_ticks()
         + (crate::services::abyssal_void_mgr::VOID_SPACE_ENCOUNTER_LIFE_TIME_SECS as i64)
             * 10_000_000;
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
-        "OnAddExpiryDurationForVoidSpaceContent",
-        "charid",
-        vec![PyRep::Integer(void_end_ft)],
+        crate::router::notify_registry::OnAddExpiryDurationForVoidSpaceContent {
+            end_time: void_end_ft,
+        },
     );
 
     Ok(PyRep::keyval([
@@ -1202,14 +1198,12 @@ pub(crate) async fn handle_void_space_end_gate_activation(
     ctx.sync_character_local_chat(char_id, Some(VOID_SPACE_SYSTEM_ID), origin_sys);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, origin_sys);
     // V24 `crimewatchTimers.pyj::TimerType::VoidSpaceContentExpiration = 16` (`voidSpaceContentService.pyj:109`).
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
-        "OnVoidSpaceContentFinished",
-        "charid",
-        vec![
-            PyRep::Integer(finished_content_id),
-            PyRep::Integer(crate::services::abyssal_void_mgr::TIMER_TYPE_VOID_SPACE_CONTENT_EXPIRATION),
-        ],
+        crate::router::notify_registry::OnVoidSpaceContentFinished {
+            content_id: finished_content_id,
+            timer_type: crate::services::abyssal_void_mgr::TIMER_TYPE_VOID_SPACE_CONTENT_EXPIRATION,
+        },
     );
 
     Ok(PyRep::keyval([

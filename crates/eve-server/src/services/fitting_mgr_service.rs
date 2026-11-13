@@ -606,28 +606,30 @@ async fn handle_save_fitting(
             if is_community_fitting_owner(owner_id) {
                 crate::services::notify_emitters_character_services::emit_community_fittings_updated(ctx);
             }
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnFittingsUpdated",
-                "charid",
-                vec![PyRep::Integer(owner_id)],
+                crate::router::notify_registry::OnFittingsUpdated {
+                    fitting: PyRep::Integer(owner_id),
+                },
             );
             if method == "SaveManyFittings" {
                 let list: Vec<PyRep> = saved_ids.iter().copied().map(PyRep::Integer).collect();
-                ctx.notify(
+                ctx.emit_typed(
                     crate::router::NotificationTarget::Character(char_id),
-                    "OnFittingAdded",
-                    "charid",
-                    vec![PyRep::Integer(owner_id), PyRep::List(list.clone())],
+                    crate::router::notify_registry::OnFittingAdded {
+                        owner_id,
+                        fit_id: PyRep::List(list.clone()),
+                    },
                 );
                 Some(Ok(PyRep::List(list)))
             } else {
                 let fid = saved_ids.first().copied().unwrap_or(0);
-                ctx.notify(
+                ctx.emit_typed(
                     crate::router::NotificationTarget::Character(char_id),
-                    "OnFittingAdded",
-                    "charid",
-                    vec![PyRep::Integer(owner_id), PyRep::Integer(fid)],
+                    crate::router::notify_registry::OnFittingAdded {
+                        owner_id,
+                        fit_id: PyRep::Integer(fid),
+                    },
                 );
                 Some(Ok(PyRep::Integer(fid)))
             }
@@ -748,11 +750,11 @@ async fn handle_update_fitting(
             if is_community_fitting_owner(owner_id) {
                 crate::services::notify_emitters_character_services::emit_community_fittings_updated(ctx);
             }
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnFittingsUpdated",
-                "charid",
-                vec![PyRep::Integer(owner_id)],
+                crate::router::notify_registry::OnFittingsUpdated {
+                    fitting: PyRep::Integer(owner_id),
+                },
             );
             Some(Ok(PyRep::keyval([
                 ("fittingID", PyRep::Integer(fid)),
@@ -818,22 +820,23 @@ async fn handle_delete_fitting(
                 Ok::<_, std::convert::Infallible>(removed)
             })
             .unwrap();
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::Character(char_id),
-            "OnFittingsUpdated",
-            "charid",
-            vec![PyRep::Integer(target_owner)],
+            crate::router::notify_registry::OnFittingsUpdated {
+                fitting: PyRep::Integer(target_owner),
+            },
         );
         let deleted_list: Vec<PyRep> = deleted_ids.iter().copied().map(PyRep::Integer).collect();
         if !deleted_list.is_empty() {
             if is_community_fitting_owner(target_owner) {
                 crate::services::notify_emitters_character_services::emit_community_fittings_updated(ctx);
             }
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnManyFittingsDeleted",
-                "charid",
-                vec![PyRep::Integer(target_owner), PyRep::List(deleted_list.clone())],
+                crate::router::notify_registry::OnManyFittingsDeleted {
+                    owner_id: target_owner,
+                    fit_ids: deleted_ids,
+                },
             );
         }
         Some(Ok(PyRep::List(deleted_list)))
@@ -902,17 +905,18 @@ async fn handle_delete_fitting(
             if is_community_fitting_owner(target_owner) {
                 crate::services::notify_emitters_character_services::emit_community_fittings_updated(ctx);
             }
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnFittingsUpdated",
-                "charid",
-                vec![PyRep::Integer(target_owner)],
+                crate::router::notify_registry::OnFittingsUpdated {
+                    fitting: PyRep::Integer(target_owner),
+                },
             );
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnFittingDeleted",
-                "charid",
-                vec![PyRep::Integer(target_owner), PyRep::Integer(fid)],
+                crate::router::notify_registry::OnFittingDeleted {
+                    owner_id: target_owner,
+                    fit_id: fid,
+                },
             );
         }
         Some(Ok(PyRep::Bool(deleted)))

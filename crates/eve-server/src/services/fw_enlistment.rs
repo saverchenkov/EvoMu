@@ -192,19 +192,16 @@ pub(crate) fn notify_member_war_faction_change(
             ("charid", PyRep::Integer(char_id)),
             ("warfactionid", new_py.clone()),
         ]);
-        let change_args = vec![
-            PyRep::Bool(false),
-            sess_rep,
-            PyRep::Dict(vec![(
-                PyRep::String("warfactionid".into()),
-                PyRep::Tuple(vec![old_py, new_py]),
-            )]),
-        ];
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnSessionChanged",
-            "charid",
-            change_args,
+            crate::router::notify_registry::OnSessionChanged {
+                is_remote: false,
+                session: sess_rep,
+                change: PyRep::Dict(vec![(
+                    PyRep::String("warfactionid".into()),
+                    PyRep::Tuple(vec![old_py, new_py]),
+                )]),
+            },
         );
     }
 }
@@ -302,11 +299,13 @@ fn notify_state(
     let e = effective.map(PyRep::Integer).unwrap_or(PyRep::None);
     let d = direct.map(PyRep::Integer).unwrap_or(PyRep::None);
     let c = corp.map(PyRep::Integer).unwrap_or(PyRep::None);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnEnlistmentStateUpdated",
-        "charid",
-        vec![e, d, c],
+        crate::router::notify_registry::OnEnlistmentStateUpdated {
+            faction_id: e,
+            direct_faction_id: d,
+            corp_faction_id: c,
+        },
     );
 }
 
@@ -570,11 +569,9 @@ fn cooldown_timestamp(ctx: &ServerContext, session: &SessionState) -> Result<PyR
         u
     });
     if expired {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnEnlistmentCooldownCleared",
-            "charid",
-            vec![],
+            crate::router::notify_registry::OnEnlistmentCooldownCleared,
         );
     }
     Ok(match until {
@@ -691,11 +688,11 @@ fn set_corp_allowed(ctx: &ServerContext, session: &mut SessionState, args: &[PyR
             }
         }
     }
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Corporation(corp_id),
-        "OnCorpAllowedEnlistmentFactionsSet",
-        "corpid",
-        vec![PyRep::List(factions.iter().copied().map(PyRep::Integer).collect())],
+        crate::router::notify_registry::OnCorpAllowedEnlistmentFactionsSet {
+            factions: Some(factions.clone()),
+        },
     );
     Ok(PyRep::List(factions.into_iter().map(PyRep::Integer).collect()))
 }

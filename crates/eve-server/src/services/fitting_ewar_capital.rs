@@ -1304,11 +1304,13 @@ pub(crate) async fn commit_post_cycle_activation_effects(
     if let Some(lock) = deferred.passive_targeter_lock {
         let tid = lock.target_id;
         let _ = sys.add_target_lock(ship_id, lock).await;
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::Character(char_id),
-            "OnTarget",
-            "charid",
-            vec![PyRep::Integer(tid), PyRep::String("locking".into())],
+            crate::router::notify_registry::OnTarget {
+                arg0: PyRep::Integer(tid),
+                arg1: PyRep::String("locking".into()),
+                reason: None,
+            },
         );
     }
 
@@ -1365,23 +1367,20 @@ pub(crate) fn emit_committed_ewar_and_system_wide_notifications(
 ) {
     if mod_type.group_id == 1815 {
         let effect_id = mod_type.effect_ids.first().copied().unwrap_or(6753) as i64;
-        let sw_args = vec![
-            PyRep::Integer(effect_id),
-            PyRep::Integer(module_id),
-            PyRep::Integer(i64::from(module_type_id)),
-        ];
-        let sent = ctx.notify(
+        let sw_notif = crate::router::notify_registry::OnSystemWideEffectStart {
+            effect_id,
+            source_item_id: module_id,
+            source_type_id: i64::from(module_type_id),
+        };
+        let sent = ctx.emit_typed(
             crate::router::NotificationTarget::SolarSystem(sys_id),
-            "OnSystemWideEffectStart",
-            "solarsystemid2",
-            sw_args.clone(),
+            sw_notif.clone(),
         );
         if !sent.iter().any(|n| n.recipient_char_id == char_id) {
-            ctx.notify(
+            ctx.emit_typed_with_id_type(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnSystemWideEffectStart",
                 "charid",
-                sw_args,
+                sw_notif,
             );
         }
     }
@@ -1398,34 +1397,30 @@ pub(crate) fn emit_committed_ewar_and_system_wide_notifications(
         return;
     };
 
-    let ewar_args = vec![
-        PyRep::Integer(ship_id),
-        PyRep::Integer(module_id),
-        PyRep::Integer(target_id),
-        PyRep::String(jam_type.into()),
-    ];
+    let ewar_notif = crate::router::notify_registry::OnEwarStart {
+        source_ball_id: ship_id,
+        module_id,
+        target_ball_id: target_id,
+        jamming_type: jam_type.into(),
+    };
     ctx.active_ewar_starts
         .write()
         .unwrap_or_else(|e| e.into_inner())
         .entry((ship_id, module_id))
         .or_default()
         .push((target_id, jam_type));
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
-        "OnEwarStart",
-        "charid",
-        ewar_args.clone(),
+        ewar_notif.clone(),
     );
     let target_owner = ctx
         .db
         .with_snapshot(|s| s.items.get(&target_id).map(|i| i.owner_id))
         .unwrap_or(0);
     if target_owner > 0 && target_owner != char_id {
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::Character(target_owner),
-            "OnEwarStart",
-            "charid",
-            ewar_args,
+            ewar_notif,
         );
     }
 }

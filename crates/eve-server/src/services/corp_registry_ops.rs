@@ -409,11 +409,17 @@ pub fn handle(
             crate::services::fleet_social::fleet_social_corps::with_corp_gov(ctx, |g| {
                 g.entry(corp_id).or_default().member_account_keys.insert(char_id, key);
             });
-            ctx.notify(
+            ctx.emit_typed_with_id_type(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnSessionChanged",
                 "clientID",
-                vec![PyRep::Bool(false), PyRep::Dict(vec![(PyRep::String("corpAccountKey".into()), PyRep::Tuple(vec![PyRep::Integer(old_key), PyRep::Integer(key)]))])],
+                crate::router::notify_registry::OnSessionChanged {
+                    is_remote: false,
+                    session: PyRep::Integer(session.session_id as i64),
+                    change: PyRep::Dict(vec![(
+                        PyRep::String("corpAccountKey".into()),
+                        PyRep::Tuple(vec![PyRep::Integer(old_key), PyRep::Integer(key)]),
+                    )]),
+                },
             );
             let sys_id = session.solar_system_id.unwrap_or(0);
             crate::services::space_destiny::record_session_change_timer(
@@ -815,11 +821,13 @@ pub fn handle(
                                 PyRep::String("roles".into()),
                                 PyRep::Tuple(vec![PyRep::Integer(old_role as i64), PyRep::Integer(new_role as i64)]),
                             )]);
-                            ctx.notify(
+                            ctx.emit_typed(
                                 crate::router::NotificationTarget::Corporation(corp_id),
-                                "OnCorporationMemberChanged",
-                                "corpid",
-                                vec![PyRep::Integer(corp_id), PyRep::Integer(tid), change],
+                                crate::router::notify_registry::OnCorporationMemberChanged {
+                                    corporation_id: corp_id,
+                                    member_id: tid,
+                                    change,
+                                },
                             );
                         }
                         Some(Ok(PyRep::Bool(true)))
@@ -1012,11 +1020,13 @@ pub fn handle(
                                     PyRep::String("accountKey".into()),
                                     PyRep::Tuple(vec![PyRep::Integer(old), PyRep::Integer(new)]),
                                 )]);
-                                ctx.notify(
+                                ctx.emit_typed(
                                     crate::router::NotificationTarget::Corporation(corp_id),
-                                    "OnCorporationMemberChanged",
-                                    "corpid",
-                                    vec![PyRep::Integer(corp_id), PyRep::Integer(tid), change],
+                                    crate::router::notify_registry::OnCorporationMemberChanged {
+                                        corporation_id: corp_id,
+                                        member_id: tid,
+                                        change,
+                                    },
                                 );
                             }
                             LegacyNotice::Title { tid, old_mask, new_mask, old_roles, new_roles } => {
@@ -1048,11 +1058,13 @@ pub fn handle(
                                         ]),
                                     ));
                                 }
-                                ctx.notify(
+                                ctx.emit_typed(
                                     crate::router::NotificationTarget::Corporation(corp_id),
-                                    "OnCorporationMemberChanged",
-                                    "corpid",
-                                    vec![PyRep::Integer(corp_id), PyRep::Integer(tid), PyRep::Dict(fields)],
+                                    crate::router::notify_registry::OnCorporationMemberChanged {
+                                        corporation_id: corp_id,
+                                        member_id: tid,
+                                        change: PyRep::Dict(fields),
+                                    },
                                 );
                             }
                             LegacyNotice::Note { tid, old, new } => {
@@ -1060,11 +1072,13 @@ pub fn handle(
                                     PyRep::String("description".into()),
                                     PyRep::Tuple(vec![PyRep::String(old), PyRep::String(new)]),
                                 )]);
-                                ctx.notify(
+                                ctx.emit_typed(
                                     crate::router::NotificationTarget::Corporation(corp_id),
-                                    "OnCorporationMemberChanged",
-                                    "corpid",
-                                    vec![PyRep::Integer(corp_id), PyRep::Integer(tid), change],
+                                    crate::router::notify_registry::OnCorporationMemberChanged {
+                                        corporation_id: corp_id,
+                                        member_id: tid,
+                                        change,
+                                    },
                                 );
                             }
                         }

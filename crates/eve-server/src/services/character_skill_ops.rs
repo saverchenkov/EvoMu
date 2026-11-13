@@ -93,11 +93,11 @@ pub fn migrate_obsolete_skills_for_character(
             let removed_pairs: Vec<(u32, u8)> = to_refund.iter().map(|&(sk, _)| (sk, 0u8)).collect();
             super::jump_clone_names::emit_server_skills_removed(ctx, char_id, &removed_pairs);
             super::notify_emitters_skills_trade_godma::emit_skill_forced_refresh(ctx, char_id);
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(char_id),
-                "OnFreeSkillPointsChanged",
-                "charid",
-                vec![PyRep::Real(new_free_sp)],
+                crate::router::notify_registry::OnFreeSkillPointsChanged {
+                    new_free_skill_points: new_free_sp,
+                },
             );
             (to_refund.len(), total_sp)
         }
@@ -304,15 +304,13 @@ pub fn purchase_skills_direct_for_char(
         Ok((bought, total_cost, new_bal))
     })?;
 
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnAccountChange",
-        "charid",
-        vec![
-            PyRep::String("cash".into()),
-            PyRep::Integer(char_id),
-            PyRep::Real(eve_db::IskCents(new_bal_cents).to_f64_isk()),
-        ],
+        crate::router::notify_registry::OnAccountChange {
+            account_key: "cash".into(),
+            owner_id: char_id,
+            balance: eve_db::IskCents(new_bal_cents).to_f64_isk(),
+        },
     );
     super::jump_clone_names::emit_server_skills_changed(
         ctx,
@@ -452,11 +450,11 @@ pub(crate) fn handle_omega_weekly_free_sp_offer(
         Ok(updated_sp)
     })?;
 
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnFreeSkillPointsChanged",
-        "charid",
-        vec![PyRep::Real(new_free_sp)],
+        crate::router::notify_registry::OnFreeSkillPointsChanged {
+            new_free_skill_points: new_free_sp,
+        },
     );
     Ok(PyRep::keyval([
         ("offerID", PyRep::Integer(offer_id)),
@@ -752,11 +750,12 @@ fn strip_ship_fitting(
                     ("customInfo", PyRep::String(String::new())),
                 ]));
             if matches!(*prev_flag as u16, 11..=34 | 164..=171) {
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Character(char_id),
-                    "OnModuleUnfitted",
-                    "charid",
-                    vec![PyRep::Integer(ship_id), PyRep::Integer(item.item_id)],
+                    crate::router::notify_registry::OnModuleUnfitted {
+                        arg0: PyRep::Integer(ship_id),
+                        arg1: Some(PyRep::Integer(item.item_id)),
+                    },
                 );
             }
         }
@@ -765,11 +764,13 @@ fn strip_ship_fitting(
                 (PyRep::Integer(3), PyRep::Integer(prev_loc)),
                 (PyRep::Integer(4), PyRep::Integer(prev_flag)),
             ]);
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(char_id),
-                "OnItemsChanged",
-                "charid",
-                vec![PyRep::List(item_kvs), change_dict, PyRep::Integer(dock_id)],
+                crate::router::notify_registry::OnItemsChanged {
+                    items: PyRep::List(item_kvs),
+                    change: change_dict,
+                    location: PyRep::Integer(dock_id),
+                },
             );
         }
     }

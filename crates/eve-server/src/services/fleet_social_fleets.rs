@@ -238,7 +238,10 @@ pub(super) async fn handle_fleets(
             let wing_name = args.first().and_then(|a| a.as_str()).unwrap_or("New Wing");
             match crate::domain::fleets::create_fleet_wing(ctx, fleet_id, Some(char_id), Some(wing_name), true, 1, true) {
                 Ok(created) => {
-                    ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetWingAdded", "fleetid", vec![PyRep::Integer(created.wing_id)]);
+                    ctx.emit_typed(
+                        NotificationTarget::Fleet(fleet_id),
+                        crate::router::notify_registry::OnFleetWingAdded { wing_id: created.wing_id },
+                    );
                     Some(Ok(PyRep::keyval([("fleetID", PyRep::Integer(fleet_id)), ("wingID", PyRep::Integer(created.wing_id)), ("name", PyRep::String(created.name))])))
                 }
                 Err(e) => Some(Err(crate::services::domain_err_to_rpc(e))),
@@ -255,7 +258,10 @@ pub(super) async fn handle_fleets(
             };
             match crate::domain::fleets::delete_fleet_wing(ctx, fleet_id, Some(char_id), wing_id, true) {
                 Ok(()) => {
-                    ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetWingDeleted", "fleetid", vec![PyRep::Integer(wing_id)]);
+                    ctx.emit_typed(
+                        NotificationTarget::Fleet(fleet_id),
+                        crate::router::notify_registry::OnFleetWingDeleted { wing_id },
+                    );
                     Some(Ok(PyRep::keyval([("wingID", PyRep::Integer(wing_id)), ("deleted", PyRep::Bool(true))])))
                 }
                 Err(e) => Some(Err(crate::services::domain_err_to_rpc(e))),
@@ -273,7 +279,13 @@ pub(super) async fn handle_fleets(
             let new_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("Renamed Wing");
             match crate::domain::fleets::rename_fleet_wing(ctx, fleet_id, Some(char_id), wing_id, new_name, false) {
                 Ok(name) => {
-                    ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetWingNameChanged", "fleetid", vec![PyRep::Integer(wing_id), PyRep::String(name.clone())]);
+                    ctx.emit_typed(
+                        NotificationTarget::Fleet(fleet_id),
+                        crate::router::notify_registry::OnFleetWingNameChanged {
+                            wing_id,
+                            name: name.clone(),
+                        },
+                    );
                     Some(Ok(PyRep::keyval([("wingID", PyRep::Integer(wing_id)), ("name", PyRep::String(name))])))
                 }
                 Err(e) => Some(Err(crate::services::domain_err_to_rpc(e))),
@@ -289,7 +301,13 @@ pub(super) async fn handle_fleets(
             let squad_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("New Squad");
             match crate::domain::fleets::create_fleet_squad(ctx, fleet_id, Some(char_id), wing_id, Some(squad_name), true, 1, true) {
                 Ok(created) => {
-                    ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetSquadAdded", "fleetid", vec![PyRep::Integer(wing_id), PyRep::Integer(created.squad_id)]);
+                    ctx.emit_typed(
+                        NotificationTarget::Fleet(fleet_id),
+                        crate::router::notify_registry::OnFleetSquadAdded {
+                            wing_id,
+                            squad_id: created.squad_id,
+                        },
+                    );
                     Some(Ok(PyRep::keyval([("fleetID", PyRep::Integer(fleet_id)), ("wingID", PyRep::Integer(wing_id)), ("squadID", PyRep::Integer(created.squad_id)), ("name", PyRep::String(created.name))])))
                 }
                 Err(e) => Some(Err(crate::services::domain_err_to_rpc(e))),
@@ -306,7 +324,10 @@ pub(super) async fn handle_fleets(
             };
             match crate::domain::fleets::delete_fleet_squad(ctx, fleet_id, Some(char_id), squad_id, true) {
                 Ok(()) => {
-                    ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetSquadDeleted", "fleetid", vec![PyRep::Integer(squad_id)]);
+                    ctx.emit_typed(
+                        NotificationTarget::Fleet(fleet_id),
+                        crate::router::notify_registry::OnFleetSquadDeleted { squad_id },
+                    );
                     Some(Ok(PyRep::keyval([("squadID", PyRep::Integer(squad_id)), ("deleted", PyRep::Bool(true))])))
                 }
                 Err(e) => Some(Err(crate::services::domain_err_to_rpc(e))),
@@ -324,7 +345,13 @@ pub(super) async fn handle_fleets(
             let new_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("Renamed Squad");
             match crate::domain::fleets::rename_fleet_squad(ctx, fleet_id, Some(char_id), squad_id, new_name, false) {
                 Ok(name) => {
-                    ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetSquadNameChanged", "fleetid", vec![PyRep::Integer(squad_id), PyRep::String(name.clone())]);
+                    ctx.emit_typed(
+                        NotificationTarget::Fleet(fleet_id),
+                        crate::router::notify_registry::OnFleetSquadNameChanged {
+                            squad_id,
+                            name: name.clone(),
+                        },
+                    );
                     Some(Ok(PyRep::keyval([("squadID", PyRep::Integer(squad_id)), ("name", PyRep::String(name))])))
                 }
                 Err(e) => Some(Err(crate::services::domain_err_to_rpc(e))),
@@ -374,17 +401,15 @@ pub(super) async fn handle_fleets(
             );
             match res {
                 Ok(out) => {
-                    ctx.notify(
+                    ctx.emit_typed(
                         NotificationTarget::Character(out.invitee_id),
-                        "OnFleetInvite",
-                        "charid",
-                        vec![
-                            PyRep::Integer(out.fleet_id),
-                            PyRep::Integer(out.inviter_id),
-                            PyRep::Integer(out.wing_id),
-                            PyRep::Integer(out.squad_id),
-                            PyRep::Integer(out.role_num),
-                        ],
+                        crate::router::notify_registry::OnFleetInvite {
+                            fleet_id: out.fleet_id,
+                            invite_id: out.inviter_id,
+                            msg_name: PyRep::Integer(out.wing_id),
+                            msg_dict: PyRep::Integer(out.squad_id),
+                            role_num: Some(out.role_num),
+                        },
                     );
                     Some(Ok(PyRep::keyval([
                         ("fleetID", PyRep::Integer(out.fleet_id)),
@@ -473,11 +498,12 @@ pub(super) async fn handle_fleets(
                 } else {
                     PyRep::None
                 };
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Character(inviter.unwrap_or(boss_id)),
-                    "OnFleetJoinReject",
-                    "charid",
-                    vec![PyRep::Integer(char_id), reason],
+                    crate::router::notify_registry::OnFleetJoinReject {
+                        member_id: char_id,
+                        reason_code: reason,
+                    },
                 );
             }
             Some(Ok(PyRep::keyval([
@@ -594,15 +620,17 @@ pub(super) async fn handle_fleets(
                     for mid in &out.former_member_ids {
                         notify::emit_leave(ctx, fleet_id, *mid);
                     }
-                    let ids = PyRep::List(out.former_member_ids.iter().map(|&m| PyRep::Integer(m)).collect());
                     for mid in &out.former_member_ids {
-                        ctx.notify(NotificationTarget::Character(*mid), "OnFleetDisbanded", "charid", vec![ids.clone()]);
+                        ctx.emit_typed(
+                            NotificationTarget::Character(*mid),
+                            crate::router::notify_registry::OnFleetDisbanded {
+                                char_ids: out.former_member_ids.clone(),
+                            },
+                        );
                     }
-                    ctx.notify(
+                    ctx.emit_typed(
                         NotificationTarget::Character(char_id),
-                        "OnMemberlessFleetUnregistered",
-                        "charid",
-                        vec![],
+                        crate::router::notify_registry::OnMemberlessFleetUnregistered,
                     );
                     Some(Ok(PyRep::keyval([
                         ("fleetID", PyRep::Integer(fleet_id)),
@@ -682,11 +710,9 @@ pub(super) async fn handle_fleets(
             ) {
                 Ok(out) => {
                     notify::emit_member_changed(ctx, fleet_id, &out.before, &out.after, out.is_only_member);
-                    ctx.notify(
+                    ctx.emit_typed(
                         NotificationTarget::Character(target_id),
-                        "OnFleetMove",
-                        "charid",
-                        vec![],
+                        crate::router::notify_registry::OnFleetMove,
                     );
                     Some(Ok(PyRep::keyval([
                         ("characterID", PyRep::Integer(target_id)),
@@ -696,11 +722,12 @@ pub(super) async fn handle_fleets(
                     ])))
                 }
                 Err(e) => {
-                    ctx.notify(
+                    ctx.emit_typed(
                         NotificationTarget::Character(char_id),
-                        "OnFleetMoveFailed",
-                        "charid",
-                        vec![PyRep::Integer(target_id), PyRep::Bool(false)],
+                        crate::router::notify_registry::OnFleetMoveFailed {
+                            char_id: target_id,
+                            is_kicked: false,
+                        },
                     );
                     Some(Err(crate::services::domain_err_to_rpc(e)))
                 }

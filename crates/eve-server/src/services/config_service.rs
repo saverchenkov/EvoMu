@@ -763,11 +763,9 @@ pub fn handle(
             }
             if updated > 0 {
                 ctx.sync_character_notifications_to_db(char_id);
-                let _ = ctx.notify(
+                let _ = ctx.emit_typed(
                     crate::router::NotificationTarget::Character(char_id),
-                    "OnNotificationChange",
-                    "charid",
-                    vec![PyRep::Integer(char_id)],
+                    crate::router::notify_registry::OnNotificationChange { char_id },
                 );
             }
             Some(Ok(PyRep::Integer(updated)))
@@ -793,11 +791,9 @@ pub fn handle(
             }
             if updated > 0 {
                 ctx.sync_character_notifications_to_db(char_id);
-                let _ = ctx.notify(
+                let _ = ctx.emit_typed(
                     crate::router::NotificationTarget::Character(char_id),
-                    "OnNotificationChange",
-                    "charid",
-                    vec![PyRep::Integer(char_id)],
+                    crate::router::notify_registry::OnNotificationChange { char_id },
                 );
             }
             Some(Ok(PyRep::Integer(updated)))
@@ -834,11 +830,9 @@ pub fn handle(
             }
             if updated > 0 {
                 ctx.sync_character_notifications_to_db(char_id);
-                let _ = ctx.notify(
+                let _ = ctx.emit_typed(
                     crate::router::NotificationTarget::Character(char_id),
-                    "OnNotificationChange",
-                    "charid",
-                    vec![PyRep::Integer(char_id)],
+                    crate::router::notify_registry::OnNotificationChange { char_id },
                 );
             }
             Some(Ok(PyRep::Integer(updated)))
@@ -854,7 +848,7 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let id_set: HashSet<i64> = ids.into_iter().collect();
-            let mut deleted = 0i64;
+            let mut deleted_ids = Vec::new();
             {
                 let mut records = ctx
                     .notification_records
@@ -863,17 +857,18 @@ pub fn handle(
                 for n in records.iter_mut() {
                     if n.receiver_id == char_id && id_set.contains(&n.notification_id) && !n.deleted {
                         n.deleted = true;
-                        deleted += 1;
+                        deleted_ids.push(n.notification_id);
                     }
                 }
             }
+            let deleted = deleted_ids.len() as i64;
             if deleted > 0 {
                 ctx.sync_character_notifications_to_db(char_id);
-                let _ = ctx.notify(
+                let _ = ctx.emit_typed(
                     crate::router::NotificationTarget::Character(char_id),
-                    "OnNotificationDeleted",
-                    "charid",
-                    vec![PyRep::Integer(char_id)],
+                    crate::router::notify_registry::OnNotificationDeleted {
+                        notification_ids: deleted_ids,
+                    },
                 );
             }
             Some(Ok(PyRep::Integer(deleted)))
@@ -891,7 +886,7 @@ pub fn handle(
                     client_error: None,
                 }));
             };
-            let mut deleted = 0i64;
+            let mut deleted_ids = Vec::new();
             {
                 let mut records = ctx
                     .notification_records
@@ -900,17 +895,18 @@ pub fn handle(
                 for n in records.iter_mut() {
                     if n.receiver_id == char_id && !n.deleted && n.group_id as i64 == group_id {
                         n.deleted = true;
-                        deleted += 1;
+                        deleted_ids.push(n.notification_id);
                     }
                 }
             }
+            let deleted = deleted_ids.len() as i64;
             if deleted > 0 {
                 ctx.sync_character_notifications_to_db(char_id);
-                let _ = ctx.notify(
+                let _ = ctx.emit_typed(
                     crate::router::NotificationTarget::Character(char_id),
-                    "OnNotificationDeleted",
-                    "charid",
-                    vec![PyRep::Integer(char_id)],
+                    crate::router::notify_registry::OnNotificationDeleted {
+                        notification_ids: deleted_ids,
+                    },
                 );
             }
             Some(Ok(PyRep::Integer(deleted)))
@@ -921,7 +917,7 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let mut deleted = 0i64;
+            let mut deleted_ids = Vec::new();
             {
                 let mut records = ctx
                     .notification_records
@@ -930,17 +926,18 @@ pub fn handle(
                 for n in records.iter_mut() {
                     if n.receiver_id == char_id && !n.deleted {
                         n.deleted = true;
-                        deleted += 1;
+                        deleted_ids.push(n.notification_id);
                     }
                 }
             }
+            let deleted = deleted_ids.len() as i64;
             if deleted > 0 {
                 ctx.sync_character_notifications_to_db(char_id);
-                let _ = ctx.notify(
+                let _ = ctx.emit_typed(
                     crate::router::NotificationTarget::Character(char_id),
-                    "OnNotificationDeleted",
-                    "charid",
-                    vec![PyRep::Integer(char_id)],
+                    crate::router::notify_registry::OnNotificationDeleted {
+                        notification_ids: deleted_ids,
+                    },
                 );
             }
             Some(Ok(PyRep::Integer(deleted)))

@@ -6,10 +6,6 @@
 use crate::formulas::{compute_broker_fee_rate, compute_sales_tax_rate};
 use crate::router::{NotificationTarget, RpcArgs, ServerContext};
 
-fn notify_char(ctx: &ServerContext, char_id: i64, event: &str, args: Vec<PyRep>) {
-    ctx.notify(NotificationTarget::Character(char_id), event, "charid", args);
-}
-
 fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError { code: code.into(), message: message.into(), client_error: None }
 }
@@ -334,21 +330,20 @@ pub(crate) fn emit_expired_order_notifications(ctx: &ServerContext, expired: &[(
             }
         }
         if !*is_bid {
-            let item_received_args = vec![
-                PyRep::Integer(*oid),
-                PyRep::Integer(*type_id as i64),
-                PyRep::Integer(4),
-                PyRep::Integer(*station_id),
-            ];
+            let item_received = crate::router::notify_registry::OnMarketItemReceived {
+                item_id: *oid,
+                type_id: *type_id as i64,
+                flag: 4,
+                location_id: *station_id,
+            };
             if follow_up.2 {
-                ctx.notify(
+                ctx.emit_typed_with_id_type(
                     NotificationTarget::Corporation(*owner_id),
-                    "OnMarketItemReceived",
                     "corpid",
-                    item_received_args,
+                    item_received,
                 );
             } else {
-                notify_char(ctx, *owner_id, "OnMarketItemReceived", item_received_args);
+                ctx.emit_typed(NotificationTarget::Character(*owner_id), item_received);
             }
         }
     }
@@ -1306,7 +1301,12 @@ pub fn handle(
 
                 return match res {
                     Ok((oid, filled_imm, broker_fee, sales_tax, rem_vault)) => {
-                        notify_char(ctx, char_id, "OnOwnOrdersChanged", crate::services::market_price_history::build_own_order_changed_payload(ctx, oid, "Add", false));
+                        ctx.emit_typed(
+                            NotificationTarget::Character(char_id),
+                            crate::router::notify_registry::OnOwnOrdersChanged::from_payload(
+                                crate::services::market_price_history::build_own_order_changed_payload(ctx, oid, "Add", false),
+                            ),
+                        );
                         Some(Ok(PyRep::keyval([
                             ("orderID", PyRep::Integer(oid)), ("typeID", PyRep::Integer(PLEX_TYPE_ID as i64)), ("filledImmediately", PyRep::Bool(filled_imm)),
                             ("brokerFeeISK", PyRep::Real(broker_fee.to_wire_f64())), ("salesTaxISK", PyRep::Real(sales_tax.to_wire_f64())), ("plexRemainingVault", PyRep::Integer(rem_vault)),

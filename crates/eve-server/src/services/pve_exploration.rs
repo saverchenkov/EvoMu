@@ -533,8 +533,6 @@ pub fn notify_pve_destruction_events(
         new_escalation.as_ref(),
         advanced_step.as_ref(),
     );
-    let now_ft = db.clock().now_blueos_filetime_ticks();
-    let mut to_send = Vec::new();
 
     let cleared_sys_did_opt = cleared_site_id.as_ref().and_then(|site_id| {
         db.with_snapshot(|snap| {
@@ -551,53 +549,8 @@ pub fn notify_pve_destruction_events(
         })
     });
 
-    if let Some(site_id) = cleared_site_id {
-        let cleared_did_opt = cleared_sys_did_opt.map(|(_, d)| d);
-        crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_site_removed_with_db(
-            db, pending_notifications, notify_tx, &site_id,
-        );
-        let (packet, marshaled_packet) = crate::router::ServerContext::build_macho_notification_packet(
-            killer_char_id,
-            None,
-            "OnCosmicAnomalyRemoved",
-            "charid",
-            vec![PyRep::String(site_id.clone())],
-        );
-        to_send.push(crate::router::cache_notifications::PendingMachoNotification {
-            seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-            recipient_char_id: killer_char_id,
-            event: "OnCosmicAnomalyRemoved".to_string(),
-            id_type: "charid".to_string(),
-            args: vec![PyRep::String(site_id)],
-            packet,
-            marshaled_packet,
-            created_filetime: now_ft,
-        });
-        if let Some(did) = cleared_did_opt {
-            let d_args = vec![PyRep::Integer(i64::from(did))];
-            let (d_pkt, d_mpkt) = crate::router::ServerContext::build_macho_notification_packet(
-                killer_char_id,
-                None,
-                "OnDungeonCompleted",
-                "charid",
-                d_args.clone(),
-            );
-            to_send.push(crate::router::cache_notifications::PendingMachoNotification {
-                seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-                recipient_char_id: killer_char_id,
-                event: "OnDungeonCompleted".to_string(),
-                id_type: "charid".to_string(),
-                args: d_args,
-                packet: d_pkt,
-                marshaled_packet: d_mpkt,
-                created_filetime: now_ft,
-            });
-        }
-    }
-
-    let mut fleet_to_send: Vec<(i64, crate::router::cache_notifications::PendingMachoNotification)> = Vec::new();
-    if let Some(ref esc) = new_escalation {
-        let fleet_info = db.with_snapshot(|snap| {
+    let fleet_info = new_escalation.as_ref().and_then(|esc| {
+        db.with_snapshot(|snap| {
             let fid = snap.characters.get(&killer_char_id).and_then(|c| c.fleet_id)?;
             if fid <= 0 {
                 return None;
@@ -607,37 +560,14 @@ pub fn notify_pve_destruction_events(
                 .get(&fid)
                 .map(|fl| fl.members.clone())
                 .unwrap_or_default();
-            Some((fid, members))
-        });
-        if let Some((fid, members)) = fleet_info {
-            let f_args = vec![
-                PyRep::Integer(killer_char_id),
-                PyRep::Integer(i64::from(esc.effective_journal_entry_template_id())),
-            ];
-            let (f_pkt, f_mpkt) = crate::router::ServerContext::build_macho_notification_packet(
+            Some((
                 fid,
-                None,
-                "OnFleetEscalatingPathMessage",
-                "fleetid",
-                f_args.clone(),
-            );
-            for member_id in members {
-                fleet_to_send.push((
-                    member_id,
-                    crate::router::cache_notifications::PendingMachoNotification {
-                        seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-                        recipient_char_id: member_id,
-                        event: "OnFleetEscalatingPathMessage".to_string(),
-                        id_type: "fleetid".to_string(),
-                        args: f_args.clone(),
-                        packet: f_pkt.clone(),
-                        marshaled_packet: f_mpkt.clone(),
-                        created_filetime: now_ft,
-                    },
-                ));
-            }
-        }
-    }
+                members,
+                killer_char_id,
+                i64::from(esc.effective_journal_entry_template_id()),
+            ))
+        })
+    });
 
     crate::services::pve_expeditions::emit_expedition_destruction_notifications(
         db,
@@ -648,62 +578,66 @@ pub fn notify_pve_destruction_events(
         advanced_step.as_ref(),
     );
 
-    for esc in [new_escalation, advanced_step].into_iter().flatten() {
-        let (chg_pkt, chg_mpkt) = crate::router::ServerContext::build_macho_notification_packet(
+    if let Some(site_id) = cleared_site_id {
+        let cleared_did_opt = cleared_sys_did_opt.map(|(_, d)| d);
+        crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_site_removed_with_db(
+            db, pending_notifications, notify_tx, &site_id,
+        );
+        crate::router::notify_registry::emit_typed_char_core(
+            db,
+            Some(pending_notifications),
+            Some(notify_tx),
             killer_char_id,
             None,
-            "OnEscalatingPathChange",
-            "charid",
-            vec![],
+            crate::router::notify_registry::OnCosmicAnomalyRemoved { site_id },
         );
-        to_send.push(crate::router::cache_notifications::PendingMachoNotification {
-            seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-            recipient_char_id: killer_char_id,
-            event: "OnEscalatingPathChange".to_string(),
-            id_type: "charid".to_string(),
-            args: vec![],
-            packet: chg_pkt,
-            marshaled_packet: chg_mpkt,
-            created_filetime: now_ft,
-        });
-        let msg_args = vec![PyRep::Integer(esc.instance_id)];
-        let (msg_pkt, msg_mpkt) = crate::router::ServerContext::build_macho_notification_packet(
-            killer_char_id,
-            None,
-            "OnEscalatingPathMessage",
-            "charid",
-            msg_args.clone(),
-        );
-        to_send.push(crate::router::cache_notifications::PendingMachoNotification {
-            seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-            recipient_char_id: killer_char_id,
-            event: "OnEscalatingPathMessage".to_string(),
-            id_type: "charid".to_string(),
-            args: msg_args,
-            packet: msg_pkt,
-            marshaled_packet: msg_mpkt,
-            created_filetime: now_ft,
-        });
+        if let Some(did) = cleared_did_opt {
+            crate::router::notify_registry::emit_typed_char_core(
+                db,
+                Some(pending_notifications),
+                Some(notify_tx),
+                killer_char_id,
+                None,
+                crate::router::notify_registry::OnDungeonCompleted {
+                    dungeon_id: i64::from(did),
+                },
+            );
+        }
     }
 
-    if !to_send.is_empty() || !fleet_to_send.is_empty() {
-        let mut queues = pending_notifications.write().unwrap_or_else(|e| e.into_inner());
-        let q = queues.entry(killer_char_id).or_default();
-        for notif in to_send {
-            if q.len() >= 256 {
-                q.remove(0);
-            }
-            q.push(notif.clone());
-            let _ = notify_tx.send((killer_char_id, notif));
-        }
-        for (member_id, notif) in fleet_to_send {
-            let mq = queues.entry(member_id).or_default();
-            if mq.len() >= 256 {
-                mq.remove(0);
-            }
-            mq.push(notif.clone());
-            let _ = notify_tx.send((member_id, notif));
-        }
+    for esc in [new_escalation, advanced_step].into_iter().flatten() {
+        crate::router::notify_registry::emit_typed_char_core(
+            db,
+            Some(pending_notifications),
+            Some(notify_tx),
+            killer_char_id,
+            None,
+            crate::router::notify_registry::OnEscalatingPathChange,
+        );
+        crate::router::notify_registry::emit_typed_char_core(
+            db,
+            Some(pending_notifications),
+            Some(notify_tx),
+            killer_char_id,
+            None,
+            crate::router::notify_registry::OnEscalatingPathMessage {
+                instance_id: esc.instance_id,
+            },
+        );
+    }
+
+    if let Some((fid, members, char_id, template_id)) = fleet_info {
+        crate::router::notify_registry::emit_typed_to_fleet_members_core(
+            db,
+            Some(pending_notifications),
+            Some(notify_tx),
+            fid,
+            &members,
+            crate::router::notify_registry::OnFleetEscalatingPathMessage {
+                char_id,
+                journal_entry_template_id: template_id,
+            },
+        );
     }
 }
 
@@ -988,15 +922,20 @@ pub async fn advance_site_wave_or_complete(
             crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_signature_delta(ctx, solar_system_id, &[], &[site_id.to_string()]);
         }
 
-        session.push_notification("OnCosmicAnomalyRemoved", vec![PyRep::String(site_id.to_string())]);
+        crate::router::notify_registry::push_typed_session_notification(
+            session,
+            crate::router::notify_registry::OnCosmicAnomalyRemoved {
+                site_id: site_id.to_string(),
+            },
+        );
         ctx.quasar_gateway.progression.extra.on_system_tale_encounter_completed(
             solar_system_id, &site_category, dungeon_id, 1, ctx.now_unix(), &ctx.quasar_gateway,
         );
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::Character(char_id),
-            "OnDungeonCompleted",
-            "charid",
-            vec![PyRep::Integer(i64::from(dungeon_id))],
+            crate::router::notify_registry::OnDungeonCompleted {
+                dungeon_id: i64::from(dungeon_id),
+            },
         );
     }
 

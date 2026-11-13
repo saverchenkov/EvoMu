@@ -203,6 +203,56 @@ pub fn emit_typed_target_to_char_with_id_type<N: TypedNotification>(
     );
 }
 
+/// Builds one fleet-scoped typed notification and enqueues/broadcasts it to each fleet member
+/// (used by dungeon/escalation hooks outside `ServerContext`, retaining the 256-entry FIFO bound).
+pub fn emit_typed_to_fleet_members_core<N: TypedNotification>(
+    db: &eve_db::WorldRepository,
+    pending_notifications: Option<&dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>>,
+    notify_tx: Option<&broadcast::Sender<(i64, PendingMachoNotification)>>,
+    fleet_id: i64,
+    members: &[i64],
+    notif: N,
+) {
+    if fleet_id <= 0 || members.is_empty() {
+        return;
+    }
+    let now_ft = db.clock().now_blueos_filetime_ticks();
+    let args = notif.into_args();
+    let (packet, marshaled_packet) = ServerContext::build_macho_notification_packet(
+        fleet_id,
+        None,
+        N::EVENT,
+        N::DEFAULT_ID_TYPE,
+        args.clone(),
+    );
+    for &member_id in members {
+        if member_id <= 0 {
+            continue;
+        }
+        let pending = PendingMachoNotification {
+            seq_id: next_notification_seq_id(),
+            recipient_char_id: member_id,
+            event: N::EVENT.to_string(),
+            id_type: N::DEFAULT_ID_TYPE.to_string(),
+            args: args.clone(),
+            packet: packet.clone(),
+            marshaled_packet: marshaled_packet.clone(),
+            created_filetime: now_ft,
+        };
+        if let Some(pend) = pending_notifications {
+            let mut queues = pend.write().unwrap_or_else(|e| e.into_inner());
+            let queue = queues.entry(member_id).or_default();
+            while queue.len() >= 256 {
+                queue.remove(0);
+            }
+            queue.push(pending.clone());
+        }
+        if let Some(tx) = notify_tx {
+            let _ = tx.send((member_id, pending));
+        }
+    }
+}
+
 /// Pushes a typed notification onto an active [`eve_machonet::SessionState`].
 pub fn push_typed_session_notification<N: TypedNotification>(
     session: &mut eve_machonet::SessionState,
@@ -2396,4 +2446,585 @@ define_notifications! {
             ]),
         ]],
     },
+    // Batch 3 (#932) registrations
+    DoDestinyUpdate => "DoDestinyUpdate" ("clientID") {
+        fields: { state: PyRep, wait_for_bubble: PyRep },
+        optional: { dogma_messages: Option<PyRep>, extra: Option<PyRep> },
+        samples: || vec![vec![
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(1),
+                PyRep::Tuple(vec![
+                    PyRep::String("SetMaxSpeed".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::Real(1.0)]),
+                ]),
+            ])]),
+            PyRep::Bool(false),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::String("OnEffectMessage".into()),
+                PyRep::Tuple(Vec::new()),
+            ])]),
+        ]],
+    },
+    OnAbyssalContentFinished => "OnAbyssalContentFinished" ("charid") {
+        optional: { content_id: Option<i64>, timer_type: Option<i64> },
+        samples: || vec![vec![PyRep::Integer(1), PyRep::Integer(1)]],
+    },
+    OnAbyssalLocationExited => "OnAbyssalLocationExited" ("charid") {
+        samples: || vec![vec![]],
+    },
+    OnAddExpiryDurationForVoidSpaceContent => "OnAddExpiryDurationForVoidSpaceContent" ("charid") {
+        fields: { end_time: i64 },
+        samples: || vec![vec![PyRep::Integer(133_500_000_000_000_000)]],
+    },
+    OnCharacterEnteredStructure => "OnCharacterEnteredStructure" ("stationid") {
+        fields: {
+            character_id: i64,
+            corporation_id: i64,
+            alliance_id: Option<i64>,
+            faction_id: Option<i64>,
+        },
+        samples: || vec![vec![
+            PyRep::Integer(90_000_001),
+            PyRep::Integer(98_000_001),
+            PyRep::None,
+            PyRep::None,
+        ]],
+    },
+    OnCharacterLeftStructure => "OnCharacterLeftStructure" ("stationid") {
+        fields: { character_id: i64 },
+        samples: || vec![vec![PyRep::Integer(90_000_001)]],
+    },
+    OnClientNodeGraphMessage => "OnClientNodeGraphMessage" ("charid") {
+        fields: { node_graph_instance_id: i64, arg1: PyRep, arg2: PyRep },
+        optional: { arg3: Option<PyRep> },
+        samples: || vec![vec![
+            PyRep::Integer(1),
+            PyRep::String("msg".into()),
+            PyRep::Integer(1),
+        ]],
+    },
+    OnClientNodeGraphUpdate => "OnClientNodeGraphUpdate" ("charid") {
+        fields: { node_graph_instance_id: i64, arg1: PyRep },
+        optional: { arg2: Option<PyRep> },
+        samples: || vec![vec![
+            PyRep::Integer(1),
+            PyRep::Dict(vec![(PyRep::String("progress".into()), PyRep::Integer(1))]),
+        ]],
+    },
+    OnCorpAllowedEnlistmentFactionsSet => "OnCorpAllowedEnlistmentFactionsSet" ("corpid") {
+        optional: { factions: Option<Vec<i64>> },
+        samples: || vec![vec![]],
+    },
+    OnCreateNewMailWindow => "OnCreateNewMailWindow" ("charid") {
+        fields: {
+            recipients: Vec<i64>,
+            corp_or_alliance_recipient: PyRep,
+            to_list_id: PyRep,
+            subject: String,
+            body: String,
+        },
+        samples: || vec![vec![
+            PyRep::List(vec![PyRep::Integer(90_000_002)]),
+            PyRep::None,
+            PyRep::None,
+            PyRep::String("Hello".into()),
+            PyRep::String("Body".into()),
+        ]],
+    },
+    OnDockingAccepted => "OnDockingAccepted" ("charid") {
+        fields: { item_id: i64 },
+        samples: || vec![vec![PyRep::Integer(60_003_760)]],
+    },
+    OnDockingFinished => "OnDockingFinished" ("charid") {
+        fields: { item_id: i64 },
+        samples: || vec![vec![PyRep::Integer(60_003_760)]],
+    },
+    OnDungeonCompleted => "OnDungeonCompleted" ("charid") {
+        fields: { dungeon_id: i64 },
+        samples: || vec![vec![PyRep::Integer(1)]],
+    },
+    OnEnlistmentCooldownCleared => "OnEnlistmentCooldownCleared" ("charid") {
+        samples: || vec![vec![]],
+    },
+    OnEnlistmentStateUpdated => "OnEnlistmentStateUpdated" ("charid") {
+        fields: { faction_id: PyRep, direct_faction_id: PyRep, corp_faction_id: PyRep },
+        samples: || vec![vec![
+            PyRep::Integer(500_001),
+            PyRep::Integer(500_001),
+            PyRep::None,
+        ]],
+    },
+    OnEscalatingPathChange => "OnEscalatingPathChange" ("charid") {
+        samples: || vec![vec![]],
+    },
+    OnEscalatingPathMessage => "OnEscalatingPathMessage" ("charid") {
+        fields: { instance_id: i64 },
+        samples: || vec![vec![PyRep::Integer(1)]],
+    },
+    OnEwarStart => "OnEwarStart" ("charid") {
+        fields: {
+            source_ball_id: i64,
+            module_id: i64,
+            target_ball_id: i64,
+            jamming_type: String,
+        },
+        samples: || vec![vec![
+            PyRep::Integer(100_000_001),
+            PyRep::Integer(100_000_010),
+            PyRep::Integer(100_000_002),
+            PyRep::String("electronic".into()),
+        ]],
+    },
+    OnFacWarBunkerNonVulnerable => "OnFacWarBunkerNonVulnerable" ("solarsystemid") {
+        fields: { attacker_id: i64 },
+        samples: || vec![vec![PyRep::Integer(500_001)]],
+    },
+    OnFacWarBunkerVulnerable => "OnFacWarBunkerVulnerable" ("solarsystemid") {
+        fields: { attacker_id: i64 },
+        samples: || vec![vec![PyRep::Integer(500_001)]],
+    },
+    OnFacWarDungeonCompleted => "OnFacWarDungeonCompleted" ("solarsystemid") {
+        fields: { was_conquered: bool, faction_id: i64 },
+        samples: || vec![vec![PyRep::Bool(true), PyRep::Integer(500_001)]],
+    },
+    OnFittingAdded => "OnFittingAdded" ("charid") {
+        fields: { owner_id: i64, fit_id: PyRep },
+        samples: || vec![vec![
+            PyRep::Integer(90_000_001),
+            PyRep::List(vec![PyRep::Integer(1)]),
+        ]],
+    },
+    OnFittingDeleted => "OnFittingDeleted" ("charid") {
+        fields: { owner_id: i64, fit_id: i64 },
+        samples: || vec![vec![PyRep::Integer(90_000_001), PyRep::Integer(1)]],
+    },
+    OnFittingsUpdated => "OnFittingsUpdated" ("charid") {
+        fields: { fitting: PyRep },
+        samples: || vec![vec![PyRep::keyval([
+            ("shipTypeID", PyRep::Integer(587)),
+            (
+                "fitData",
+                PyRep::List(vec![PyRep::Tuple(vec![
+                    PyRep::Integer(3170),
+                    PyRep::Integer(12),
+                    PyRep::Integer(1),
+                ])]),
+            ),
+        ])]],
+    },
+    OnFleetDisbanded => "OnFleetDisbanded" ("charid") {
+        fields: { char_ids: Vec<i64> },
+        samples: || vec![vec![PyRep::List(vec![PyRep::Integer(90_000_001)])]],
+    },
+    OnFleetInvite => "OnFleetInvite" ("charid") {
+        fields: { fleet_id: i64, invite_id: i64, msg_name: PyRep, msg_dict: PyRep },
+        optional: { role_num: Option<i64> },
+        samples: || vec![vec![
+            PyRep::Integer(1),
+            PyRep::Integer(90_000_001),
+            PyRep::String("FleetInvite".into()),
+            PyRep::Dict(vec![(PyRep::String("autoAccept".into()), PyRep::Bool(false))]),
+        ]],
+    },
+    OnFleetJoinReject => "OnFleetJoinReject" ("charid") {
+        fields: { member_id: i64, reason_code: PyRep },
+        samples: || vec![vec![PyRep::Integer(90_000_002), PyRep::Integer(1)]],
+    },
+    OnFleetMove => "OnFleetMove" ("charid") {
+        samples: || vec![vec![]],
+    },
+    OnFleetMoveFailed => "OnFleetMoveFailed" ("charid") {
+        fields: { char_id: i64, is_kicked: bool },
+        samples: || vec![vec![PyRep::Integer(90_000_002), PyRep::Bool(false)]],
+    },
+    OnFleetSquadDeleted => "OnFleetSquadDeleted" ("fleetid") {
+        fields: { squad_id: i64 },
+        samples: || vec![vec![PyRep::Integer(1)]],
+    },
+    OnFleetSquadNameChanged => "OnFleetSquadNameChanged" ("fleetid") {
+        fields: { squad_id: i64, name: String },
+        samples: || vec![vec![PyRep::Integer(1), PyRep::String("Squad 1".into())]],
+    },
+    OnFleetWingDeleted => "OnFleetWingDeleted" ("fleetid") {
+        fields: { wing_id: i64 },
+        samples: || vec![vec![PyRep::Integer(1)]],
+    },
+    OnFleetWingNameChanged => "OnFleetWingNameChanged" ("fleetid") {
+        fields: { wing_id: i64, name: String },
+        samples: || vec![vec![PyRep::Integer(1), PyRep::String("Wing 1".into())]],
+    },
+    OnFreeSkillPointsChanged => "OnFreeSkillPointsChanged" ("charid") {
+        fields: { new_free_skill_points: f64 },
+        samples: || vec![vec![PyRep::Real(50_000.0)]],
+    },
+    OnFwObjectiveCompletedInSolarSystem => "OnFwObjectiveCompletedInSolarSystem" ("solarsystemid") {
+        fields: { solar_system_id: i64, target_faction_id: i64, objective_mode: i64 },
+        samples: || vec![vec![
+            PyRep::Integer(30_000_142),
+            PyRep::Integer(500_001),
+            PyRep::Integer(1),
+        ]],
+    },
+    OnFwScoreboardWon => "OnFwScoreboardWon" ("solarsystemid") {
+        fields: { solar_system_id: i64, scoreboard_item_id: i64, winner_faction_id: i64 },
+        samples: || vec![vec![
+            PyRep::Integer(30_000_142),
+            PyRep::Integer(1),
+            PyRep::Integer(500_001),
+        ]],
+    },
+    OnHackingStart => "OnHackingStart" ("charid") {
+        fields: { event_data: PyRep },
+        samples: || vec![vec![PyRep::Dict(vec![(
+            PyRep::String("moduleTypeID".into()),
+            PyRep::Integer(22_175),
+        )])]],
+    },
+    OnHackingVirusChanged => "OnHackingVirusChanged" ("charid") {
+        fields: { object_data: PyRep, event_id: i64 },
+        samples: || vec![vec![
+            PyRep::keyval([("hp", PyRep::Integer(50))]),
+            PyRep::Integer(1),
+        ]],
+    },
+    OnHangarViewStateUpdated => "OnHangarViewStateUpdated" ("charid") {
+        fields: { structure_id: i64, hangar_view_state: PyRep },
+        samples: || vec![vec![
+            PyRep::Integer(1_000_000_000_001),
+            PyRep::Integer(1),
+        ]],
+    },
+    OnInvulunOnUndockingUpdated => "OnInvulunOnUndockingUpdated" ("charid") {
+        fields: { ship_id: i64, end_time: i64, duration: PyRep },
+        samples: || vec![vec![
+            PyRep::Integer(100_000_001),
+            PyRep::Integer(133_500_000_000_000_000),
+            PyRep::Integer(30),
+        ]],
+    },
+    OnItemsChanged => "OnItemsChanged" ("charid") {
+        fields: { items: PyRep, change: PyRep, location: PyRep },
+        samples: || vec![vec![
+            PyRep::List(vec![sample_keyval_item()]),
+            PyRep::Dict(Vec::new()),
+            PyRep::Integer(60_003_760),
+        ]],
+    },
+    OnJumpCloneCacheInvalidated => "OnJumpCloneCacheInvalidated" ("charid") {
+        samples: || vec![vec![]],
+    },
+    OnJumpCloneTransitionCompleted => "OnJumpCloneTransitionCompleted" ("charid") {
+        samples: || vec![vec![]],
+    },
+    OnMailCountersUpdate => "OnMailCountersUpdate" ("charid") {
+        optional: { char_id: Option<i64> },
+        samples: || vec![vec![]],
+    },
+    OnMailRestored => "OnMailRestored" ("charid") {
+        fields: { message_ids: Vec<i64> },
+        samples: || vec![vec![PyRep::List(vec![PyRep::Integer(1)])]],
+    },
+    OnMailUndeleted => "OnMailUndeleted" ("charid") {
+        fields: { message_ids: Vec<i64> },
+        samples: || vec![vec![PyRep::List(vec![PyRep::Integer(1)])]],
+    },
+    OnManyFittingsDeleted => "OnManyFittingsDeleted" ("charid") {
+        fields: { owner_id: i64, fit_ids: Vec<i64> },
+        samples: || vec![vec![
+            PyRep::Integer(90_000_001),
+            PyRep::List(vec![PyRep::Integer(1)]),
+        ]],
+    },
+    OnMarketItemReceived => "OnMarketItemReceived" ("charid") {
+        fields: { item_id: i64, type_id: i64, flag: i64, location_id: i64 },
+        samples: || vec![vec![
+            PyRep::Integer(100_000_001),
+            PyRep::Integer(34),
+            PyRep::Integer(4),
+            PyRep::Integer(60_003_760),
+        ]],
+    },
+    OnMemberlessFleetUnregistered => "OnMemberlessFleetUnregistered" ("charid") {
+        samples: || vec![vec![]],
+    },
+    OnMercenaryDenRegistrationInvalid => "OnMercenaryDenRegistrationInvalid" ("charid") {
+        fields: { notify_msg: String, notify_args: PyRep },
+        samples: || vec![vec![
+            PyRep::String("MercenaryDenInvalid".into()),
+            PyRep::Dict(Vec::new()),
+        ]],
+    },
+    OnMercenaryDenRegistrationSuccess => "OnMercenaryDenRegistrationSuccess" ("charid") {
+        fields: { notify_msg: String, notify_args: PyRep },
+        samples: || vec![vec![
+            PyRep::String("MercenaryDenRegistered".into()),
+            PyRep::Dict(vec![(
+                PyRep::String("itemID".into()),
+                PyRep::Integer(100_000_001),
+            )]),
+        ]],
+    },
+    OnModuleFitted => "OnModuleFitted" ("charid") {
+        fields: { char_id: i64, flag: i64, type_id: i64, group_id: i64 },
+        samples: || vec![vec![
+            PyRep::Integer(90_000_001),
+            PyRep::Integer(27),
+            PyRep::Integer(3170),
+            PyRep::Integer(53),
+        ]],
+    },
+    OnModuleUnfitted => "OnModuleUnfitted" ("charid") {
+        fields: { arg0: PyRep },
+        optional: { arg1: Option<PyRep> },
+        samples: || vec![vec![PyRep::Integer(3170)]],
+    },
+    OnMyMercenaryDenRemoved => "OnMyMercenaryDenRemoved" ("charid") {
+        fields: { notify_msg: String, notify_args: PyRep },
+        samples: || vec![vec![
+            PyRep::String("MercenaryDenRemoved".into()),
+            PyRep::Dict(vec![(
+                PyRep::String("itemID".into()),
+                PyRep::Integer(100_000_001),
+            )]),
+        ]],
+    },
+    OnNotificationDeleted => "OnNotificationDeleted" ("charid") {
+        fields: { notification_ids: Vec<i64> },
+        samples: || vec![vec![PyRep::List(vec![PyRep::Integer(1)])]],
+    },
+    OnOwnOrdersChanged => "OnOwnOrdersChanged" ("charid") {
+        fields: { orders: PyRep, reason: PyRep, is_corp: PyRep },
+        samples: || vec![vec![
+            PyRep::List(vec![PyRep::keyval([
+                ("orderID", PyRep::Integer(1)),
+                ("typeID", PyRep::Integer(34)),
+            ])]),
+            PyRep::String("Add".into()),
+            PyRep::Bool(false),
+        ]],
+    },
+    OnPVPFilamentsCharacterStatistics => "OnPVPFilamentsCharacterStatistics" ("charid") {
+        fields: { info: PyRep },
+        samples: || vec![vec![PyRep::Dict(vec![(
+            PyRep::String("statistics".into()),
+            PyRep::Dict(vec![(PyRep::String("rank".into()), PyRep::Integer(1))]),
+        )])]],
+    },
+    OnPVPFilamentsLeaderboard => "OnPVPFilamentsLeaderboard" ("charid") {
+        fields: { info: PyRep },
+        samples: || vec![vec![PyRep::Dict(vec![(
+            PyRep::String("entries".into()),
+            PyRep::List(vec![PyRep::Dict(vec![
+                (PyRep::String("character_id".into()), PyRep::Integer(90_000_001)),
+                (PyRep::String("rank".into()), PyRep::Integer(1)),
+            ])]),
+        )])]],
+    },
+    OnServerSkillsChanged => "OnServerSkillsChanged" ("charid") {
+        fields: { skill_infos: PyRep, event: PyRep, timestamp: i64 },
+        samples: || vec![vec![
+            PyRep::Dict(vec![(
+                PyRep::Integer(3402),
+                PyRep::keyval([
+                    ("skillPoints", PyRep::Integer(250)),
+                    ("skillLevel", PyRep::Integer(1)),
+                ]),
+            )]),
+            PyRep::String("OnSkillTrained".into()),
+            PyRep::Integer(133_500_000_000_000_000),
+        ]],
+    },
+    OnServerSkillsRemoved => "OnServerSkillsRemoved" ("charid") {
+        fields: { skill_infos: PyRep, timestamp: i64 },
+        samples: || vec![vec![
+            PyRep::Dict(vec![(PyRep::Integer(3402), PyRep::None)]),
+            PyRep::Integer(133_500_000_000_000_000),
+        ]],
+    },
+    OnShipJumpCloneCacheInvalidated => "OnShipJumpCloneCacheInvalidated" ("charid") {
+        fields: { location_id: i64, char_id: i64 },
+        samples: || vec![vec![
+            PyRep::Integer(100_000_001),
+            PyRep::Integer(90_000_001),
+        ]],
+    },
+    OnShipJumpCloneInstallationCanceled => "OnShipJumpCloneInstallationCanceled" ("charid") {
+        optional: { args: Option<PyRep> },
+        samples: || vec![vec![PyRep::Tuple(Vec::new())]],
+    },
+    OnShipJumpCloneInstallationDone => "OnShipJumpCloneInstallationDone" ("charid") {
+        fields: { arg0: PyRep },
+        optional: { arg1: Option<PyRep>, arg2: Option<PyRep>, arg3: Option<PyRep> },
+        samples: || vec![vec![PyRep::Tuple(vec![
+            PyRep::Integer(90_000_001),
+            PyRep::Integer(90_000_002),
+            PyRep::Integer(100_000_001),
+            PyRep::Bool(true),
+        ])]],
+    },
+    OnShipJumpCloneInstallationOffered => "OnShipJumpCloneInstallationOffered" ("charid") {
+        fields: { arg0: PyRep },
+        optional: { arg1: Option<PyRep>, arg2: Option<PyRep>, arg3: Option<PyRep> },
+        samples: || vec![vec![PyRep::Tuple(vec![
+            PyRep::Integer(90_000_001),
+            PyRep::Integer(90_000_002),
+            PyRep::Integer(100_000_001),
+            PyRep::Bool(true),
+        ])]],
+    },
+    OnShowContract => "OnShowContract" ("charid") {
+        fields: { contract_id: i64 },
+        samples: || vec![vec![PyRep::Integer(1)]],
+    },
+    OnShowMarketDetails => "OnShowMarketDetails" ("charid") {
+        fields: { type_id: i64 },
+        samples: || vec![vec![PyRep::Integer(34)]],
+    },
+    OnShowOwnerDetailsWindow => "OnShowOwnerDetailsWindow" ("charid") {
+        fields: { target_id: i64 },
+        samples: || vec![vec![PyRep::Integer(90_000_001)]],
+    },
+    OnSolarsystemAdvantageStateUpdatedLocal => "OnSolarsystemAdvantageStateUpdated_Local" ("solarsystemid") {
+        samples: || vec![vec![]],
+    },
+    OnSolarsystemInterferenceChanged => "OnSolarsystemInterferenceChanged" ("solarsystemid") {
+        fields: { solar_system_id: i64, new_interference_state: PyRep },
+        samples: || vec![vec![
+            PyRep::Integer(30_000_142),
+            PyRep::keyval([("interferenceLevel", PyRep::Real(0.5))]),
+        ]],
+    },
+    OnStationJumpCloneCacheInvalidated => "OnStationJumpCloneCacheInvalidated" ("charid") {
+        fields: { location_id: i64, char_id: i64 },
+        samples: || vec![vec![
+            PyRep::Integer(60_003_760),
+            PyRep::Integer(90_000_001),
+        ]],
+    },
+    OnSystemWideEffectStart => "OnSystemWideEffectStart" ("solarsystemid2") {
+        fields: { effect_id: i64, source_item_id: i64, source_type_id: i64 },
+        samples: || vec![vec![
+            PyRep::Integer(1),
+            PyRep::Integer(100_000_001),
+            PyRep::Integer(32_207),
+        ]],
+    },
+    OnTradeCancel => "OnTradeCancel" ("charid") {
+        fields: { container_id: i64 },
+        samples: || vec![vec![PyRep::Integer(1)]],
+    },
+    OnTradeComplete => "OnTradeComplete" ("charid") {
+        fields: { container_id: i64 },
+        optional: { items: Option<PyRep> },
+        samples: || vec![vec![
+            PyRep::Integer(1),
+            PyRep::List(vec![sample_keyval_item()]),
+        ]],
+    },
+    OnTradeInitiate => "OnTradeInitiate" ("charid") {
+        fields: { char_id: i64, trade_session: PyRep, trade_items: PyRep },
+        samples: || vec![vec![
+            PyRep::Integer(90_000_001),
+            PyRep::keyval([(
+                "List",
+                PyRep::keyval([("tradeContainerID", PyRep::Integer(1))]),
+            )]),
+            PyRep::List(vec![sample_keyval_item()]),
+        ]],
+    },
+    OnTradeMoneyOffer => "OnTradeMoneyOffer" ("charid") {
+        fields: { container_id: i64, arg1: PyRep },
+        optional: { arg2: Option<PyRep> },
+        samples: || vec![vec![PyRep::Integer(1), PyRep::Real(5_000.0)]],
+    },
+    OnTradeOffer => "OnTradeOffer" ("charid") {
+        fields: { container_id: i64, arg1: PyRep },
+        optional: { arg2: Option<PyRep> },
+        samples: || vec![vec![PyRep::Integer(1), PyRep::Bool(true)]],
+    },
+    OnTradeOfferReset => "OnTradeOfferReset" ("charid") {
+        fields: { container_id: i64 },
+        optional: { manifest_error: Option<bool> },
+        samples: || vec![vec![PyRep::Integer(1), PyRep::Bool(false)]],
+    },
+    OnVoidSpaceContentFinished => "OnVoidSpaceContentFinished" ("charid") {
+        fields: { content_id: i64, timer_type: i64 },
+        samples: || vec![vec![PyRep::Integer(1), PyRep::Integer(1)]],
+    },
+    OnVoidSpaceEntered => "OnVoidSpaceEntered" ("charid") {
+        fields: { client_data: PyRep },
+        samples: || vec![vec![PyRep::Dict(vec![
+            (PyRep::String("content_id".into()), PyRep::Integer(1)),
+            (
+                PyRep::String("nebula_graphic_id".into()),
+                PyRep::Integer(20_001),
+            ),
+        ])]],
+    },
+    OnVoteCaseChanged => "OnVoteCaseChanged" ("corpid") {
+        fields: { corporation_id: i64, vote_case_id: i64 },
+        samples: || vec![vec![PyRep::Integer(98_000_001), PyRep::Integer(1)]],
+    },
+    OnWarzoneOccupationStateUpdated => "OnWarzoneOccupationStateUpdated" ("solarsystemid") {
+        fields: { solar_system_id: i64, new_occupation_state: PyRep },
+        samples: || vec![vec![
+            PyRep::Integer(30_000_142),
+            PyRep::keyval([
+                ("adjacencyState", PyRep::Integer(1)),
+                ("occupierID", PyRep::Integer(500_001)),
+            ]),
+        ]],
+    },
+    OnWormholeJumpCancel => "OnWormholeJumpCancel" ("charid") {
+        samples: || vec![vec![]],
+    },
+    ProcessInventoryChange => "ProcessInventoryChange" ("charid") {
+        fields: { arg0: PyRep, arg1: PyRep, arg2: PyRep },
+        optional: { arg3: Option<PyRep> },
+        samples: || vec![vec![
+            PyRep::List(vec![sample_keyval_item()]),
+            PyRep::Dict(vec![(
+                PyRep::Integer(1),
+                PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Integer(1)]),
+            )]),
+            PyRep::Bool(false),
+            PyRep::None,
+        ]],
+    },
 }
+
+impl OnOwnOrdersChanged {
+    /// Builds [`OnOwnOrdersChanged`] from a `[orders, reason, is_corp]` tuple vector.
+    pub fn from_payload(payload: Vec<PyRep>) -> Self {
+        let mut iter = payload.into_iter();
+        Self {
+            orders: iter.next().unwrap_or(PyRep::List(Vec::new())),
+            reason: iter.next().unwrap_or(PyRep::String("Add".into())),
+            is_corp: iter.next().unwrap_or(PyRep::Bool(false)),
+        }
+    }
+}
+
+// Legacy / server-internal events not present in `client_expectations["notify"]`, typed so service
+// call sites carry zero raw `.notify(` / `build_macho_notification_packet(` calls while keeping
+// `all_registered_notifications()` strictly aligned with contracted V24 client expectations.
+define_notification_item!(OnCosmicAnomalyRemoved => "OnCosmicAnomalyRemoved" ("charid") {
+    fields: { site_id: String },
+    samples: || vec![vec![PyRep::String("ABC-123".into())]],
+});
+define_notification_item!(OnCynoJammerChanged => "OnCynoJammerChanged" ("solarsystemid") {
+    fields: { solar_system_id: i64, status: i64 },
+    samples: || vec![vec![PyRep::Integer(30_000_142), PyRep::Integer(0)]],
+});
+define_notification_item!(OnDbuffUpdated => "OnDbuffUpdated" ("charid") {
+    fields: { ship_id: i64 },
+    samples: || vec![vec![PyRep::Integer(100_000_001)]],
+});
+define_notification_item!(OnNotificationChange => "OnNotificationChange" ("charid") {
+    fields: { char_id: i64 },
+    samples: || vec![vec![PyRep::Integer(90_000_001)]],
+});
+define_notification_item!(OnInsurgencyCampaignUpdatedForLocationFallback => "OnInsurgencyCampaignUpdatedForLocation" ("solarsystemid") {
+    fields: { campaign_id: i64, state: i64 },
+    samples: || vec![vec![PyRep::Integer(1), PyRep::Integer(1)]],
+});
