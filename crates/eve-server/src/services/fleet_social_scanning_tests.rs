@@ -722,3 +722,152 @@ async fn wormhole_polarization_acceleration_gate_and_signal_tracker_removal_edge
     assert!(evs.contains(&"OnSignalTrackerStructureUpdate"));
     assert!(evs.contains(&"OnSignalTrackerAnomalyUpdate"));
 }
+
+#[tokio::test]
+async fn signal_tracker_delta_and_get_signatures_exclude_anomaly_colliding_signatures_gh1034() {
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let now = ctx.now_unix();
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_119_u32;
+    let mut sess = make_session(char_id, sys_id);
+    let kw = HashMap::new();
+
+    let make_sig = |id: &str, group: &str| CosmicSignatureRecord {
+        signature_id: id.into(),
+        solar_system_id: sys_id,
+        sig_group: group.into(),
+        type_name: group.into(),
+        signal_strength: if group == "Data Site" { 0.0 } else { 1.0 },
+        position: [1_000.0, 2_000.0, 3_000.0],
+        wormhole_type_id: None,
+        destination_system_id: None,
+        created_unix: now,
+        lifetime_seconds: 86_400,
+        max_mass_kg: 0.0,
+        remaining_mass_kg: 0.0,
+        max_jump_mass_kg: 0.0,
+        collapsed: false,
+    };
+
+    let user_id = ctx.db.with_mut_snapshot(|snap| {
+        let uid = if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.user_id
+        } else {
+            1
+        };
+        snap.cosmic_anomalies.insert(
+            sys_id,
+            vec![CosmicAnomalyRecord {
+                anomaly_id: "DNG-1347-1897095014".into(),
+                solar_system_id: sys_id,
+                anomaly_type: "OreAnomaly".into(),
+                name: "Ordinary Moon Ore Deposit".into(),
+                signal_strength: 1.0,
+                position: [1_000.0, 2_000.0, 3_000.0],
+                ore_types: vec![45_490],
+                remaining_volume: 100_000.0,
+                created_unix: now,
+                lifetime_seconds: 86_400,
+                cleared: false,
+            }],
+        );
+        snap.cosmic_signatures.insert(
+            sys_id,
+            vec![
+                make_sig("DNG-1347-1897095014", "OreAnomaly"),
+                make_sig("ICE-BELT-1", "IceBelt"),
+                make_sig("SOV-ORE-1", "SovOre"),
+                make_sig("SIG-REAL-1", "Data Site"),
+            ],
+        );
+        uid
+    });
+    let _ = ctx.db.acquire_online_lock(user_id, 1, Some(char_id), true, now);
+    sess.user_id = Some(user_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let reg = handle_scanning_and_wormholes(&ctx, &mut sess, "scanMgr", "SignalTrackerRegister", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(signal_tracker_subscribers_in_snap(snap, sys_id), vec![char_id]);
+    });
+    let reg_notifs = ctx.drain_notifications_for_char(char_id);
+    let full = reg_notifs
+        .iter()
+        .find(|n| n.event == "OnSignalTrackerFullState")
+        .expect("OnSignalTrackerFullState");
+    let PyRep::Tuple(ref parts) = full.args[1] else {
+        panic!("expected 4-tuple fullState, got {:?}", full.args[1]);
+    };
+    let PyRep::Dict(ref anoms) = parts[0] else {
+        panic!("expected anoms Dict");
+    };
+    let PyRep::Dict(ref sigs) = parts[1] else {
+        panic!("expected sigs Dict");
+    };
+    let anom_ids: Vec<&str> = anoms.iter().filter_map(|(k, _)| k.as_str()).collect();
+    let sig_ids: Vec<&str> = sigs.iter().filter_map(|(k, _)| k.as_str()).collect();
+    assert!(anom_ids.contains(&"DNG-1347-1897095014"));
+    assert!(!sig_ids.contains(&"DNG-1347-1897095014"));
+    assert!(!sig_ids.contains(&"ICE-BELT-1"));
+    assert!(!sig_ids.contains(&"SOV-ORE-1"));
+    assert!(sig_ids.contains(&"SIG-REAL-1"));
+    assert_eq!(
+        reg.dict_get("signatureCount").and_then(|v| v.as_i64()),
+        Some(sig_ids.len() as i64)
+    );
+
+    // Delta emitter must skip anomaly-colliding signatures and omit empty notifications
+    emit_signal_tracker_signature_delta(
+        &ctx,
+        sys_id,
+        &[make_sig("DNG-1347-1897095014", "OreAnomaly"), make_sig("ICE-BELT-1", "IceBelt")],
+        &[],
+    );
+    assert!(
+        ctx.drain_notifications_for_char(char_id)
+            .iter()
+            .all(|n| n.event != "OnSignalTrackerSignatureUpdate"),
+        "anomaly-only delta must not emit OnSignalTrackerSignatureUpdate (#1034)"
+    );
+
+    emit_signal_tracker_signature_delta(
+        &ctx,
+        sys_id,
+        &[
+            make_sig("DNG-1347-1897095014", "OreAnomaly"),
+            make_sig("SIG-NEW-1", "Relic Site"),
+        ],
+        &[],
+    );
+    let delta_notifs = ctx.drain_notifications_for_char(char_id);
+    let sig_upd = delta_notifs
+        .iter()
+        .find(|n| n.event == "OnSignalTrackerSignatureUpdate")
+        .expect("OnSignalTrackerSignatureUpdate");
+    let PyRep::Dict(ref added_entries) = sig_upd.args[1] else {
+        panic!("expected added Dict, got {:?}", sig_upd.args[1]);
+    };
+    let added_ids: Vec<&str> = added_entries.iter().filter_map(|(k, _)| k.as_str()).collect();
+    assert_eq!(added_ids, vec!["SIG-NEW-1"]);
+
+    // GetSignatures must exclude OreAnomaly/IceBelt/SovOre mirrors while preserving SIG-REAL-1
+    let rowset = handle_scanning_and_wormholes(&ctx, &mut sess, "scanMgr", "GetSignatures", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    let PyRep::Rowset { rows, .. } = rowset else {
+        panic!("expected Rowset from GetSignatures, got {rowset:?}");
+    };
+    let row_ids: Vec<&str> = rows
+        .iter()
+        .filter_map(|r| r.first().and_then(|v| v.as_str()))
+        .collect();
+    assert!(row_ids.contains(&"SIG-REAL-1"));
+    assert!(!row_ids.contains(&"DNG-1347-1897095014"));
+    assert!(!row_ids.contains(&"ICE-BELT-1"));
+    assert!(!row_ids.contains(&"SOV-ORE-1"));
+}
