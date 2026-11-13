@@ -264,11 +264,9 @@ fn apply_crab_link_ship_effects(
         cs.crab_resonance_multiplier = Some(0.90);
         cs.is_tethered = false;
     });
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnDbuffUpdated",
-        "charid",
-        vec![PyRep::Integer(ship_id)],
+        crate::router::notify_registry::OnDbuffUpdated { ship_id },
     );
 }
 
@@ -307,11 +305,9 @@ fn clear_crab_link_ship_effects(
         cs.crab_resonance_multiplier = None;
     });
     if let Some(cid) = char_id_opt {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(cid),
-            "OnDbuffUpdated",
-            "charid",
-            vec![PyRep::Integer(ship_id)],
+            crate::router::notify_registry::OnDbuffUpdated { ship_id },
         );
     }
 }
@@ -557,17 +553,15 @@ fn finalize_crab_scan_success(ctx: &ServerContext, beacon_id: i64, now: u64) {
         }
     });
 
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnSlimItemChange",
-        "solarsystemid",
-        vec![
-            PyRep::Integer(beacon_id),
-            PyRep::keyval([
+        crate::router::notify_registry::OnSlimItemChange {
+            old_slim: PyRep::Integer(beacon_id),
+            new_slim: PyRep::keyval([
                 ("crabPhase", PyRep::String("LootRestricted".into())),
                 ("crabSelfDestructAt", PyRep::Integer(self_destruct_at_sec as i64)),
             ]),
-        ],
+        },
     );
     let level = get_system_interference_level_decayed(ctx, sys_id, now);
     let band = if level >= 0.70 { 3 } else if level >= 0.35 { 2 } else { 1 };
@@ -703,17 +697,15 @@ fn self_destruct_crab_beacon(ctx: &ServerContext, beacon_id: i64) {
         );
     }
 
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnSlimItemChange",
-        "solarsystemid",
-        vec![
-            PyRep::Integer(beacon_id),
-            PyRep::keyval([
+        crate::router::notify_registry::OnSlimItemChange {
+            old_slim: PyRep::Integer(beacon_id),
+            new_slim: PyRep::keyval([
                 ("crabPhase", PyRep::String("SelfDestructed".into())),
                 ("openContainerID", PyRep::Integer(spawned_can_id.unwrap_or(0))),
             ]),
-        ],
+        },
     );
 }
 
@@ -1126,18 +1118,16 @@ pub async fn handle_crab_component_call(
                 }
             });
 
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::SolarSystem(sys_id),
-                "OnSlimItemChange",
-                "solarsystemid",
-                vec![
-                    PyRep::Integer(beacon_id),
-                    PyRep::keyval([
+                crate::router::notify_registry::OnSlimItemChange {
+                    old_slim: PyRep::Integer(beacon_id),
+                    new_slim: PyRep::keyval([
                         ("crabPhase", PyRep::String("Linking".into())),
                         ("crabLinkedShipID", PyRep::Integer(ship_id)),
                         ("crabLinkCompletesAt", PyRep::Integer(link_completes as i64)),
                     ]),
-                ],
+                },
             );
 
             Ok(PyRep::keyval([
@@ -1273,15 +1263,19 @@ pub fn record_system_interference_activity(
             level,
             new_band,
         );
-        session.push_notification(
-            "OnSolarsystemInterferenceChanged",
-            vec![PyRep::Integer(solar_system_id as i64), local_state.clone()],
+        crate::router::notify_registry::push_typed_session_notification(
+            session,
+            crate::router::notify_registry::OnSolarsystemInterferenceChanged {
+                solar_system_id: solar_system_id as i64,
+                new_interference_state: local_state.clone(),
+            },
         );
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::SolarSystem(solar_system_id),
-            "OnSolarsystemInterferenceChanged",
-            "solarsystemid",
-            vec![PyRep::Integer(solar_system_id as i64), local_state],
+            crate::router::notify_registry::OnSolarsystemInterferenceChanged {
+                solar_system_id: solar_system_id as i64,
+                new_interference_state: local_state,
+            },
         );
     }
 }

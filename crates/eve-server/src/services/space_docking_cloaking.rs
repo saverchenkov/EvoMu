@@ -991,7 +991,10 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
     if let Some(active_timer) =
         crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None)
     {
-        ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnWormholeJumpCancel", "charid", vec![]);
+        ctx.emit_typed(
+            crate::router::NotificationTarget::Character(char_id),
+            crate::router::notify_registry::OnWormholeJumpCancel,
+        );
         return Some(Err(BridgeRpcError {
             code: "SessionChangeInProgress".into(),
             message: format!(
@@ -1075,11 +1078,9 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
     }) {
         Ok(p) => p,
         Err(e) => {
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnWormholeJumpCancel",
-                "charid",
-                vec![],
+                crate::router::notify_registry::OnWormholeJumpCancel,
             );
             return Some(Err(e));
         }
@@ -1087,11 +1088,9 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
 
     let mut taken_opt = if preflight.already_collapsed.is_none() {
         let Some(taken) = old_handle.take_ball(ship_id).await else {
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnWormholeJumpCancel",
-                "charid",
-                vec![],
+                crate::router::notify_registry::OnWormholeJumpCancel,
             );
             return Some(Err(BridgeRpcError {
                 code: "SystemTransitionFailed".into(),
@@ -1551,7 +1550,10 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
             if let Some(taken) = taken_opt.take() {
                 let _ = old_handle.restore_ball(taken).await;
             }
-            ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnWormholeJumpCancel", "charid", vec![]);
+            ctx.emit_typed(
+                crate::router::NotificationTarget::Character(char_id),
+                crate::router::notify_registry::OnWormholeJumpCancel,
+            );
             Some(Err(e))
         }
     }

@@ -178,14 +178,15 @@ pub async fn handle_anchor_mercenary_den_rpc(
         }
     });
     let emit_invalid = |reason: &str| {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnMercenaryDenRegistrationInvalid",
-            "charid",
-            vec![
-                PyRep::String(reason.into()),
-                PyRep::Dict(vec![(PyRep::String("itemID".into()), PyRep::Integer(notify_item_id))]),
-            ],
+            crate::router::notify_registry::OnMercenaryDenRegistrationInvalid {
+                notify_msg: reason.to_string(),
+                notify_args: PyRep::Dict(vec![(
+                    PyRep::String("itemID".into()),
+                    PyRep::Integer(notify_item_id),
+                )]),
+            },
         );
     };
     if !is_claimable_nullsec_system(&ctx.sde, sys_id) {
@@ -492,14 +493,15 @@ pub async fn handle_anchor_mercenary_den_rpc(
         })
         .await;
     flush_pending_quasar(ctx, &pending, now);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnMercenaryDenRegistrationSuccess",
-        "charid",
-        vec![
-            PyRep::String("MercenaryDenRegistered".into()),
-            PyRep::Dict(vec![(PyRep::String("itemID".into()), PyRep::Integer(den_id))]),
-        ],
+        crate::router::notify_registry::OnMercenaryDenRegistrationSuccess {
+            notify_msg: "MercenaryDenRegistered".to_string(),
+            notify_args: PyRep::Dict(vec![(
+                PyRep::String("itemID".into()),
+                PyRep::Integer(den_id),
+            )]),
+        },
     );
     emit_sov_structures_updated(ctx, sys_id, &[den_id]);
     Ok(PyRep::keyval([
@@ -988,14 +990,15 @@ pub async fn apply_mercenary_den_weapon_damage(
                 })
                 .await;
             if owner_cid > 0 {
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Character(owner_cid),
-                    "OnMyMercenaryDenRemoved",
-                    "charid",
-                    vec![
-                        PyRep::String("MercenaryDenRemoved".into()),
-                        PyRep::Dict(vec![(PyRep::String("itemID".into()), PyRep::Integer(den_id))]),
-                    ],
+                    crate::router::notify_registry::OnMyMercenaryDenRemoved {
+                        notify_msg: "MercenaryDenRemoved".to_string(),
+                        notify_args: PyRep::Dict(vec![(
+                            PyRep::String("itemID".into()),
+                            PyRep::Integer(den_id),
+                        )]),
+                    },
                 );
             }
             emit_sov_structures_updated(ctx, sys_id, &[den_id]);
@@ -1178,11 +1181,12 @@ pub fn handle_normal_structure_damage_aftermath(
     if st_type_id == TYPE_TENEBREX_CYNO_JAMMER
         && matches!(out_state, "ArmorReinforced" | "HullReinforced" | "Destroyed")
     {
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::SolarSystem(caller_sys),
-            "OnCynoJammerChanged",
-            "solarsystemid",
-            vec![PyRep::Integer(caller_sys as i64), PyRep::Integer(0)],
+            crate::router::notify_registry::OnCynoJammerChanged {
+                solar_system_id: caller_sys as i64,
+                status: 0,
+            },
         );
     }
 }
@@ -1339,22 +1343,23 @@ pub fn try_handle_sov_hub_data_hack(
         (PyRep::String("containerID".into()), PyRep::Integer(target_id)),
         (PyRep::String("targetID".into()), PyRep::Integer(target_id)),
     ]);
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
-        "OnHackingStart",
-        "charid",
-        vec![start_event_data],
+        crate::router::notify_registry::OnHackingStart {
+            event_data: start_event_data,
+        },
     );
     let virus_data = PyRep::keyval([
         ("containerID", PyRep::Integer(target_id)),
         ("coherence", PyRep::Real(coherence)),
         ("strength", PyRep::Real(strength)),
     ]);
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
-        "OnHackingVirusChanged",
-        "charid",
-        vec![virus_data, PyRep::Integer(1)],
+        crate::router::notify_registry::OnHackingVirusChanged {
+            object_data: virus_data,
+            event_id: 1,
+        },
     );
 
     Some(Ok(PyRep::keyval([

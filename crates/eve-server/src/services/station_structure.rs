@@ -583,30 +583,29 @@ pub async fn handle(
                 );
             }
             if station_id >= 1_000_000_000_000 {
-                ctx.notify(
+                ctx.emit_typed(
                     crate::router::NotificationTarget::Station(station_id),
-                    "OnCharacterLeftStructure",
-                    "stationid",
-                    vec![PyRep::Integer(char_id)],
+                    crate::router::notify_registry::OnCharacterLeftStructure {
+                        character_id: char_id,
+                    },
                 );
-                ctx.notify(
+                ctx.emit_typed_with_id_type(
                     crate::router::NotificationTarget::Character(char_id),
-                    "OnCharacterLeftStructure",
                     "charid",
-                    vec![PyRep::Integer(char_id)],
+                    crate::router::notify_registry::OnCharacterLeftStructure {
+                        character_id: char_id,
+                    },
                 );
             }
             let invuln_end_ft = ctx.now_blueos_filetime_ticks() + 300_000_000;
             ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["undockFromStation"], 1, ctx.now_unix(), &ctx.quasar_gateway);
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnInvulunOnUndockingUpdated",
-                "charid",
-                vec![
-                    PyRep::Integer(ship.item_id),
-                    PyRep::Integer(invuln_end_ft),
-                    PyRep::Integer(30_000),
-                ],
+                crate::router::notify_registry::OnInvulunOnUndockingUpdated {
+                    ship_id: ship.item_id,
+                    end_time: invuln_end_ft,
+                    duration: PyRep::Integer(30_000),
+                },
             );
             let beyonce_bound_id =
                 match ctx.bind_object(session, "beyonce", ch.solar_system_id as i64) {
@@ -936,30 +935,24 @@ pub async fn handle(
                         ("constellationid", session.constellation_id.map(|c| PyRep::Integer(c as i64)).unwrap_or(PyRep::None)),
                         ("regionid", session.region_id.map(|r| PyRep::Integer(r as i64)).unwrap_or(PyRep::None)),
                     ]);
-                    ctx.notify(
+                    ctx.emit_typed(
                         crate::router::NotificationTarget::Character(char_id),
-                        "OnSessionChanged",
-                        "charid",
-                        vec![
-                            PyRep::Bool(false),
-                            sess_rep,
-                            PyRep::Dict(vec![(
+                        crate::router::notify_registry::OnSessionChanged {
+                            is_remote: false,
+                            session: sess_rep,
+                            change: PyRep::Dict(vec![(
                                 PyRep::String(if is_structure { "structureid" } else { "stationid" }.into()),
                                 PyRep::Tuple(vec![PyRep::None, PyRep::Integer(dock_id)]),
                             )]),
-                        ],
+                        },
                     );
-                    ctx.notify(
+                    ctx.emit_typed(
                         crate::router::NotificationTarget::Character(char_id),
-                        "OnDockingAccepted",
-                        "charid",
-                        vec![PyRep::Integer(dock_id)],
+                        crate::router::notify_registry::OnDockingAccepted { item_id: dock_id },
                     );
-                    ctx.notify(
+                    ctx.emit_typed(
                         crate::router::NotificationTarget::Character(char_id),
-                        "OnDockingFinished",
-                        "charid",
-                        vec![PyRep::Integer(dock_id)],
+                        crate::router::notify_registry::OnDockingFinished { item_id: dock_id },
                     );
                     if is_structure {
                         let (corp_id, ally_id, fac_id, st_type_id) = ctx.db.with_snapshot(|snap| {
@@ -970,16 +963,14 @@ pub async fn handle(
                             let st_tid = snap.structures.get(&dock_id).map(|s| s.type_id).unwrap_or(35832);
                             (corp, ally, fac, st_tid)
                         });
-                        ctx.notify(
+                        ctx.emit_typed(
                             crate::router::NotificationTarget::Station(dock_id),
-                            "OnCharacterEnteredStructure",
-                            "stationid",
-                            vec![
-                                PyRep::Integer(char_id),
-                                PyRep::Integer(corp_id),
-                                ally_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                                fac_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                            ],
+                            crate::router::notify_registry::OnCharacterEnteredStructure {
+                                character_id: char_id,
+                                corporation_id: corp_id,
+                                alliance_id: ally_id,
+                                faction_id: fac_id,
+                            },
                         );
                         let hv_state = PyRep::keyval([
                             ("characterID", PyRep::Integer(char_id)),
@@ -987,11 +978,12 @@ pub async fn handle(
                             ("structureTypeID", PyRep::Integer(i64::from(st_type_id))),
                             ("shipID", PyRep::Integer(ship_id)),
                         ]);
-                        ctx.notify(
+                        ctx.emit_typed(
                             crate::router::NotificationTarget::Character(char_id),
-                            "OnHangarViewStateUpdated",
-                            "charid",
-                            vec![PyRep::Integer(dock_id), hv_state],
+                            crate::router::notify_registry::OnHangarViewStateUpdated {
+                                structure_id: dock_id,
+                                hangar_view_state: hv_state,
+                            },
                         );
                     }
                     ctx.quasar_gateway.on_session_changed(session, now_unix);

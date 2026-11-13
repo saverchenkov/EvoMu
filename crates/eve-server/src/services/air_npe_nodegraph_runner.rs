@@ -437,22 +437,22 @@ fn emit_graph_update_and_message(
     msg_payload: PyRep,
 ) {
     let nodes_list = PyRep::List(active_nodes.iter().copied().map(PyRep::Integer).collect());
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnClientNodeGraphUpdate",
-        "charid",
-        vec![PyRep::Integer(instance_id), nodes_list, bb_to_py_dict(bb)],
+        crate::router::notify_registry::OnClientNodeGraphUpdate {
+            node_graph_instance_id: instance_id,
+            arg1: nodes_list,
+            arg2: Some(bb_to_py_dict(bb)),
+        },
     );
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnClientNodeGraphMessage",
-        "charid",
-        vec![
-            PyRep::Integer(instance_id),
-            PyRep::Integer(node_id),
-            PyRep::String(msg_key.to_string()),
-            msg_payload,
-        ],
+        crate::router::notify_registry::OnClientNodeGraphMessage {
+            node_graph_instance_id: instance_id,
+            arg1: PyRep::Integer(node_id),
+            arg2: PyRep::String(msg_key.to_string()),
+            arg3: Some(msg_payload),
+        },
     );
 }
 
@@ -712,18 +712,16 @@ pub fn transition_character_into_npe_pocket(
             } else {
                 "stationid"
             };
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(char_id),
-                "OnSessionChanged",
-                "charid",
-                vec![
-                    PyRep::Bool(false),
-                    sess_rep,
-                    PyRep::Dict(vec![(
+                crate::router::notify_registry::OnSessionChanged {
+                    is_remote: false,
+                    session: sess_rep,
+                    change: PyRep::Dict(vec![(
                         PyRep::String(change_key.into()),
                         PyRep::Tuple(vec![PyRep::Integer(st_id), PyRep::None]),
                     )]),
-                ],
+                },
             );
         }
     }
@@ -1030,19 +1028,19 @@ fn advance_runner_checkpoint(
             bb,
         } => {
             if let Some(sid) = old_scene_inst_id {
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Character(char_id),
-                    "OnStopClientNodeGraph",
-                    "charid",
-                    vec![PyRep::Integer(sid)],
+                    crate::router::notify_registry::OnStopClientNodeGraph {
+                        node_graph_instance_id: sid,
+                    },
                 );
             }
             if let Some(aid) = old_act_inst_id {
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Character(char_id),
-                    "OnStopClientNodeGraph",
-                    "charid",
-                    vec![PyRep::Integer(aid)],
+                    crate::router::notify_registry::OnStopClientNodeGraph {
+                        node_graph_instance_id: aid,
+                    },
                 );
             }
             let new_act_inst = start_new_act
@@ -1253,11 +1251,11 @@ pub fn on_skip_air_npe(
         try_cleanup_npe_pocket_and_restore_ui(ctx, session, char_id, false)?;
 
     for inst_id in stopped_instances {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnStopClientNodeGraph",
-            "charid",
-            vec![PyRep::Integer(inst_id)],
+            crate::router::notify_registry::OnStopClientNodeGraph {
+                node_graph_instance_id: inst_id,
+            },
         );
     }
     if let Some(master_gid) = stop_master_by_id {
@@ -1306,11 +1304,11 @@ pub fn complete_air_npe_checked(
         try_cleanup_npe_pocket_and_restore_ui(ctx, session, char_id, true)?;
 
     for inst_id in stopped_instances {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnStopClientNodeGraph",
-            "charid",
-            vec![PyRep::Integer(inst_id)],
+            crate::router::notify_registry::OnStopClientNodeGraph {
+                node_graph_instance_id: inst_id,
+            },
         );
     }
     if let Some(master_gid) = stop_master_by_id {
@@ -1351,14 +1349,12 @@ pub fn complete_air_npe_checked(
         save_store(snap, &store, now_unix);
     });
 
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnAirNpeStateChanged",
-        "charid",
-        vec![
-            PyRep::Integer(char_id),
-            PyRep::Integer(AIR_NPE_STATE_COMPLETED),
-        ],
+        crate::router::notify_registry::OnAirNpeStateChanged {
+            character_id: char_id,
+            new_state_id: AIR_NPE_STATE_COMPLETED,
+        },
     );
     Ok(())
 }

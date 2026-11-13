@@ -251,17 +251,15 @@ pub(crate) fn emit_server_skills_changed(
         return;
     }
     let now_ft = ctx.now_blueos_filetime_ticks();
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnServerSkillsChanged",
-        "charid",
-        vec![
-            PyRep::Dict(entries),
-            event
+        crate::router::notify_registry::OnServerSkillsChanged {
+            skill_infos: PyRep::Dict(entries),
+            event: event
                 .map(|s| PyRep::String(s.into()))
                 .unwrap_or(PyRep::None),
-            PyRep::Integer(now_ft),
-        ],
+            timestamp: now_ft,
+        },
     );
 }
 
@@ -302,11 +300,12 @@ pub(crate) fn emit_server_skills_removed(ctx: &ServerContext, char_id: i64, remo
         })
         .collect();
     let now_ft = ctx.now_blueos_filetime_ticks();
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnServerSkillsRemoved",
-        "charid",
-        vec![PyRep::Dict(entries), PyRep::Integer(now_ft)],
+        crate::router::notify_registry::OnServerSkillsRemoved {
+            skill_infos: PyRep::Dict(entries),
+            timestamp: now_ft,
+        },
     );
 }
 
@@ -726,24 +725,21 @@ pub(crate) fn emit_station_jump_clone_invalidated(
     location_id: i64,
     is_jump: bool,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnStationJumpCloneCacheInvalidated",
-        "charid",
-        vec![PyRep::Integer(location_id), PyRep::Integer(char_id)],
+        crate::router::notify_registry::OnStationJumpCloneCacheInvalidated {
+            location_id,
+            char_id,
+        },
     );
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnJumpCloneCacheInvalidated",
-        "charid",
-        vec![],
+        crate::router::notify_registry::OnJumpCloneCacheInvalidated,
     );
     if is_jump {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnJumpCloneTransitionCompleted",
-            "charid",
-            vec![],
+            crate::router::notify_registry::OnJumpCloneTransitionCompleted,
         );
     }
 }
@@ -755,16 +751,14 @@ pub(crate) fn emit_ship_clone_offered(
     target_char_id: i64,
     ship_id: i64,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(target_char_id),
-        "OnShipJumpCloneInstallationOffered",
-        "charid",
-        vec![
-            PyRep::Integer(offerer_id),
-            PyRep::Integer(target_char_id),
-            PyRep::Integer(ship_id),
-            PyRep::Bool(true),
-        ],
+        crate::router::notify_registry::OnShipJumpCloneInstallationOffered {
+            arg0: PyRep::Integer(offerer_id),
+            arg1: Some(PyRep::Integer(target_char_id)),
+            arg2: Some(PyRep::Integer(ship_id)),
+            arg3: Some(PyRep::Bool(true)),
+        },
     );
 }
 
@@ -774,18 +768,14 @@ pub(crate) fn emit_ship_clone_canceled(
     char_id: i64,
     offerer_opt: Option<i64>,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnShipJumpCloneInstallationCanceled",
-        "charid",
-        vec![],
+        crate::router::notify_registry::OnShipJumpCloneInstallationCanceled { args: None },
     );
     if let Some(offerer_id) = offerer_opt.filter(|&id| id != char_id) {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(offerer_id),
-            "OnShipJumpCloneInstallationCanceled",
-            "charid",
-            vec![],
+            crate::router::notify_registry::OnShipJumpCloneInstallationCanceled { args: None },
         );
     }
 }
@@ -797,35 +787,26 @@ pub(crate) fn emit_ship_clone_accepted(
     target_char_id: i64,
     ship_id: i64,
 ) {
-    let done_args = vec![
-        PyRep::Integer(offerer_id),
-        PyRep::Integer(target_char_id),
-        PyRep::Integer(ship_id),
-        PyRep::Bool(true),
-    ];
-    let inv_args = vec![PyRep::Integer(ship_id), PyRep::Integer(target_char_id)];
+    let done = crate::router::notify_registry::OnShipJumpCloneInstallationDone {
+        arg0: PyRep::Integer(offerer_id),
+        arg1: Some(PyRep::Integer(target_char_id)),
+        arg2: Some(PyRep::Integer(ship_id)),
+        arg3: Some(PyRep::Bool(true)),
+    };
+    let inv = crate::router::notify_registry::OnShipJumpCloneCacheInvalidated {
+        location_id: ship_id,
+        char_id: target_char_id,
+    };
     for rcpt in [target_char_id, offerer_id] {
-        ctx.notify(
-            NotificationTarget::Character(rcpt),
-            "OnShipJumpCloneInstallationDone",
-            "charid",
-            done_args.clone(),
-        );
-        ctx.notify(
-            NotificationTarget::Character(rcpt),
-            "OnShipJumpCloneCacheInvalidated",
-            "charid",
-            inv_args.clone(),
-        );
+        ctx.emit_typed(NotificationTarget::Character(rcpt), done.clone());
+        ctx.emit_typed(NotificationTarget::Character(rcpt), inv.clone());
         if rcpt == offerer_id && offerer_id == target_char_id {
             break;
         }
     }
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(target_char_id),
-        "OnJumpCloneCacheInvalidated",
-        "charid",
-        vec![],
+        crate::router::notify_registry::OnJumpCloneCacheInvalidated,
     );
 }
 

@@ -468,15 +468,14 @@ pub(crate) async fn handle_multi_add(
                 }
                 super::inventory_bound::emit_inv_item_change(ctx, char_id, &fin, changes);
             }
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "ProcessInventoryChange",
-                "charid",
-                vec![
-                    PyRep::Integer(fin.item_id),
-                    PyRep::Integer(fin.location_id),
-                    PyRep::Integer(fin.flag as i64),
-                ],
+                crate::router::notify_registry::ProcessInventoryChange {
+                    arg0: PyRep::Integer(fin.item_id),
+                    arg1: PyRep::Integer(fin.location_id),
+                    arg2: PyRep::Integer(fin.flag as i64),
+                    arg3: None,
+                },
             );
         } else if let Some(updated) = post_it {
             let mut changes = vec![
@@ -487,15 +486,14 @@ pub(crate) async fn handle_multi_add(
                 changes.push((2, PyRep::Integer(pre_item.owner_id)));
             }
             super::inventory_bound::emit_inv_item_change(ctx, char_id, &updated, changes);
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "ProcessInventoryChange",
-                "charid",
-                vec![
-                    PyRep::Integer(updated.item_id),
-                    PyRep::Integer(updated.location_id),
-                    PyRep::Integer(updated.flag as i64),
-                ],
+                crate::router::notify_registry::ProcessInventoryChange {
+                    arg0: PyRep::Integer(updated.item_id),
+                    arg1: PyRep::Integer(updated.location_id),
+                    arg2: PyRep::Integer(updated.flag as i64),
+                    arg3: None,
+                },
             );
         }
         moved_ids.push(fin_id);
@@ -969,15 +967,14 @@ async fn handle_multi_add_auto_fit(
             changes.push((10, PyRep::Integer(1)));
         }
         super::inventory_bound::emit_inv_item_change(ctx, char_id, &updated, changes);
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::Character(char_id),
-            "ProcessInventoryChange",
-            "charid",
-            vec![
-                PyRep::Integer(updated.item_id),
-                PyRep::Integer(updated.location_id),
-                PyRep::Integer(updated.flag as i64),
-            ],
+            crate::router::notify_registry::ProcessInventoryChange {
+                arg0: PyRep::Integer(updated.item_id),
+                arg1: PyRep::Integer(updated.location_id),
+                arg2: PyRep::Integer(updated.flag as i64),
+                arg3: None,
+            },
         );
         let group_id = ctx
             .sde
@@ -985,16 +982,14 @@ async fn handle_multi_add_auto_fit(
             .get(&updated.type_id)
             .map(|t| i64::from(t.group_id))
             .unwrap_or(0);
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::Character(char_id),
-            "OnModuleFitted",
-            "charid",
-            vec![
-                PyRep::Integer(char_id),
-                PyRep::Integer(updated.flag as i64),
-                PyRep::Integer(updated.type_id as i64),
-                PyRep::Integer(group_id),
-            ],
+            crate::router::notify_registry::OnModuleFitted {
+                char_id,
+                flag: updated.flag as i64,
+                type_id: updated.type_id as i64,
+                group_id,
+            },
         );
         let _ = ctx.notify_module_online_state(char_id, updated.item_id, plan.online);
         if plan.online {
@@ -1531,20 +1526,20 @@ pub async fn despawn_empty_jetcan_if_needed(
             .map(|(t, _)| t as i64)
             .unwrap_or(1);
         let _ = sys_handle.remove_ball(cont_id).await;
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::SolarSystem(sid),
-            "DoDestinyUpdate",
-            "clientID",
-            vec![
-                PyRep::List(vec![PyRep::Tuple(vec![
+            crate::router::notify_registry::DoDestinyUpdate {
+                state: PyRep::List(vec![PyRep::Tuple(vec![
                     PyRep::Integer(stamp),
                     PyRep::Tuple(vec![
                         PyRep::String("RemoveBall".into()),
                         PyRep::Tuple(vec![PyRep::Integer(cont_id)]),
                     ]),
                 ])]),
-                PyRep::Bool(false),
-            ],
+                wait_for_bubble: PyRep::Bool(false),
+                dogma_messages: None,
+                extra: None,
+            },
         );
     }
     true

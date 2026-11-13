@@ -18,7 +18,7 @@ use crate::services::insurgency_services::{
 };
 use eve_db::lock_rank::AnyRwLock;
 use eve_destiny::{Ball, MovementMode};
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::BridgeRpcError;
 use glam::DVec3;
 use std::collections::HashMap;
 
@@ -465,39 +465,19 @@ pub fn emit_campaign_resolution_effects_core(
     let now_unix = db.clock().now_unix_secs();
     let now_ft = db.clock().now_blueos_filetime_ticks();
     for &(cid, new_bal) in &res.updated_balances {
-        let (pkt, mpkt) = crate::router::ServerContext::build_macho_notification_packet(
+        crate::router::notify_registry::emit_typed_target_to_char_with_id_type(
+            pending_notifications,
+            notify_tx,
             cid,
             None,
-            "OnAccountChange",
             "cash",
-            vec![
-                PyRep::String("cash".into()),
-                PyRep::Integer(cid),
-                PyRep::Real(new_bal),
-            ],
+            now_ft,
+            crate::router::notify_registry::OnAccountChange {
+                account_key: "cash".into(),
+                owner_id: cid,
+                balance: new_bal,
+            },
         );
-        let notif = crate::router::cache_notifications::PendingMachoNotification {
-            seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-            recipient_char_id: cid,
-            event: "OnAccountChange".into(),
-            id_type: "cash".into(),
-            args: vec![
-                PyRep::String("cash".into()),
-                PyRep::Integer(cid),
-                PyRep::Real(new_bal),
-            ],
-            packet: pkt,
-            marshaled_packet: mpkt,
-            created_filetime: now_ft,
-        };
-        if let Some(pend) = pending_notifications {
-            if let Ok(mut map) = pend.write() {
-                map.entry(cid).or_default().push(notif.clone());
-            }
-        }
-        if let Some(tx) = notify_tx {
-            let _ = tx.send((cid, notif));
-        }
     }
     let outcome_state = match res.outcome.as_str() {
         "PirateWin" => crate::services::insurgency_services::CAMPAIGN_STATE_PIRATE_WIN,
@@ -506,11 +486,11 @@ pub fn emit_campaign_resolution_effects_core(
         }
         _ => crate::services::insurgency_services::CAMPAIGN_STATE_NO_WINNER,
     };
-    let state_args = vec![
-        PyRep::Integer(outcome_state),
-        PyRep::Integer(res.pirate_fac),
-        PyRep::Integer(i64::from(res.fob_sys)),
-    ];
+    let state_notif = crate::router::notify_registry::OnInsurgencyStateChangedForFaction {
+        campaign_state: outcome_state,
+        pirate_faction_id: res.pirate_fac,
+        origin_solar_system_id: i64::from(res.fob_sys),
+    };
     for &sys in &res.sys_list {
         if let Some(router) = gw {
             let mut pb = Vec::new();
@@ -535,73 +515,58 @@ pub fn emit_campaign_resolution_effects_core(
                 .map(|c| c.character_id)
                 .collect()
         });
-        let update_args = db.with_snapshot(|snap| {
+        let snapshot_opt = db.with_snapshot(|snap| {
             let rt = &snap.insurgency_runtime;
-            rt.campaigns
-                .get(&res.campaign_id)
-                .map(|c| {
-                    let emp_mod = rt
-                        .empire_ambition_modifier
-                        .get(&c.pirate_faction_id)
-                        .copied()
-                        .unwrap_or(0);
-                    vec![
-                        crate::services::insurgency_services::build_campaign_snapshot_for_system(
-                            c,
-                            sys,
-                            now_unix,
-                            emp_mod,
-                        ),
-                    ]
-                })
-                .unwrap_or_else(|| vec![PyRep::Integer(res.campaign_id), PyRep::Integer(5)])
+            rt.campaigns.get(&res.campaign_id).map(|c| {
+                let emp_mod = rt
+                    .empire_ambition_modifier
+                    .get(&c.pirate_faction_id)
+                    .copied()
+                    .unwrap_or(0);
+                crate::services::insurgency_services::build_campaign_snapshot_for_system(
+                    c,
+                    sys,
+                    now_unix,
+                    emp_mod,
+                )
+            })
         });
         for cid in system_chars {
-            let (pkt, mpkt) = crate::router::ServerContext::build_macho_notification_packet(
+            if let Some(ref campaign_snapshot) = snapshot_opt {
+                crate::router::notify_registry::emit_typed_target_to_char_with_id_type(
+                    pending_notifications,
+                    notify_tx,
+                    cid,
+                    None,
+                    "solarsystemid",
+                    now_ft,
+                    crate::router::notify_registry::OnInsurgencyCampaignUpdatedForLocation {
+                        campaign_snapshot: campaign_snapshot.clone(),
+                    },
+                );
+            } else {
+                crate::router::notify_registry::emit_typed_target_to_char_with_id_type(
+                    pending_notifications,
+                    notify_tx,
+                    cid,
+                    None,
+                    "solarsystemid",
+                    now_ft,
+                    crate::router::notify_registry::OnInsurgencyCampaignUpdatedForLocationFallback {
+                        campaign_id: res.campaign_id,
+                        state: 5,
+                    },
+                );
+            }
+            crate::router::notify_registry::emit_typed_target_to_char_with_id_type(
+                pending_notifications,
+                notify_tx,
                 cid,
                 None,
-                "OnInsurgencyCampaignUpdatedForLocation",
                 "solarsystemid",
-                update_args.clone(),
+                now_ft,
+                state_notif.clone(),
             );
-            let notif1 = crate::router::cache_notifications::PendingMachoNotification {
-                seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-                recipient_char_id: cid,
-                event: "OnInsurgencyCampaignUpdatedForLocation".into(),
-                id_type: "solarsystemid".into(),
-                args: update_args.clone(),
-                packet: pkt,
-                marshaled_packet: mpkt,
-                created_filetime: now_ft,
-            };
-            let (pkt2, mpkt2) = crate::router::ServerContext::build_macho_notification_packet(
-                cid,
-                None,
-                "OnInsurgencyStateChangedForFaction",
-                "solarsystemid",
-                state_args.clone(),
-            );
-            let notif2 = crate::router::cache_notifications::PendingMachoNotification {
-                seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-                recipient_char_id: cid,
-                event: "OnInsurgencyStateChangedForFaction".into(),
-                id_type: "solarsystemid".into(),
-                args: state_args.clone(),
-                packet: pkt2,
-                marshaled_packet: mpkt2,
-                created_filetime: now_ft,
-            };
-            if let Some(pend) = pending_notifications {
-                if let Ok(mut map) = pend.write() {
-                    let list = map.entry(cid).or_default();
-                    list.push(notif1.clone());
-                    list.push(notif2.clone());
-                }
-            }
-            if let Some(tx) = notify_tx {
-                let _ = tx.send((cid, notif1));
-                let _ = tx.send((cid, notif2));
-            }
         }
     }
 }
@@ -925,15 +890,14 @@ pub async fn tick_insurgency_campaigns(ctx: &ServerContext, now_unix: u64) {
 
         if let Some((systems, p_fac, fob_sys)) = notify_active {
             for sys in systems {
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::SolarSystem(sys),
-                    "OnInsurgencyStateChangedForFaction",
-                    "solarsystemid",
-                    vec![
-                        PyRep::Integer(crate::services::insurgency_services::CAMPAIGN_STATE_ACTIVE),
-                        PyRep::Integer(p_fac),
-                        PyRep::Integer(i64::from(fob_sys)),
-                    ],
+                    crate::router::notify_registry::OnInsurgencyStateChangedForFaction {
+                        campaign_state:
+                            crate::services::insurgency_services::CAMPAIGN_STATE_ACTIVE,
+                        pirate_faction_id: p_fac,
+                        origin_solar_system_id: i64::from(fob_sys),
+                    },
                 );
             }
         }

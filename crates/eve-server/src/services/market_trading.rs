@@ -145,28 +145,18 @@ pub(crate) fn notify_own_order_changed(
         reason,
         is_corp,
     );
+    let notif = crate::router::notify_registry::OnOwnOrdersChanged::from_payload(payload);
     if is_corp {
-        ctx.notify(
+        ctx.emit_typed_with_id_type(
             NotificationTarget::Corporation(owner_id),
-            "OnOwnOrdersChanged",
             "corpid",
-            payload.clone(),
+            notif.clone(),
         );
         if !in_corp && fallback_char_id > 0 {
-            ctx.notify(
-                NotificationTarget::Character(fallback_char_id),
-                "OnOwnOrdersChanged",
-                "charid",
-                payload,
-            );
+            ctx.emit_typed(NotificationTarget::Character(fallback_char_id), notif);
         }
     } else {
-        ctx.notify(
-            NotificationTarget::Character(owner_id),
-            "OnOwnOrdersChanged",
-            "charid",
-            payload,
-        );
+        ctx.emit_typed(NotificationTarget::Character(owner_id), notif);
     }
 }
 
@@ -1538,7 +1528,15 @@ pub fn handle(
                     for (iid, tid, flag_id, loc_id) in delivered_items {
                         // "OnMarketItemReceived" is emitted by the server; the client-local
                         // "OnClientEvent_MarketItemReceived" is scattered internally by MarketQuote.
-                        ctx.notify(NotificationTarget::Character(char_id), "OnMarketItemReceived", "charid", vec![PyRep::Integer(iid), PyRep::Integer(tid as i64), PyRep::Integer(flag_id), PyRep::Integer(loc_id)]);
+                        ctx.emit_typed(
+                            NotificationTarget::Character(char_id),
+                            crate::router::notify_registry::OnMarketItemReceived {
+                                item_id: iid,
+                                type_id: tid as i64,
+                                flag: flag_id,
+                                location_id: loc_id,
+                            },
+                        );
                     }
                     notify_own_order_changed(
                         ctx,

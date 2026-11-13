@@ -332,9 +332,18 @@ pub(super) fn handle_mail_and_calendar(
             restored_ids.sort_unstable();
             restored_ids.dedup();
             if !restored_ids.is_empty() {
-                let mail_id_reps: Vec<PyRep> = restored_ids.iter().copied().map(PyRep::Integer).collect();
-                ctx.notify(NotificationTarget::Character(char_id), "OnMailRestored", "charid", vec![PyRep::List(mail_id_reps.clone())]);
-                ctx.notify(NotificationTarget::Character(char_id), "OnMailUndeleted", "charid", vec![PyRep::List(mail_id_reps)]);
+                ctx.emit_typed(
+                    NotificationTarget::Character(char_id),
+                    crate::router::notify_registry::OnMailRestored {
+                        message_ids: restored_ids.clone(),
+                    },
+                );
+                ctx.emit_typed(
+                    NotificationTarget::Character(char_id),
+                    crate::router::notify_registry::OnMailUndeleted {
+                        message_ids: restored_ids.clone(),
+                    },
+                );
             }
             Some(Ok(PyRep::keyval([
                 ("restored", PyRep::Bool(!restored_ids.is_empty())),
@@ -420,11 +429,11 @@ pub(super) fn handle_mail_and_calendar(
                     Ok::<(), std::convert::Infallible>(())
                 })
                 .unwrap();
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(char_id),
-                "OnMailDeleted",
-                "charid",
-                vec![PyRep::List(ids.iter().copied().map(PyRep::Integer).collect())],
+                crate::router::notify_registry::OnMailDeleted {
+                    message_ids: ids.clone(),
+                },
             );
             Some(Ok(PyRep::keyval([
                 ("messageID", PyRep::Integer(ids[0])),
@@ -714,11 +723,11 @@ fn apply_mail_read_status(
             Ok::<(), std::convert::Infallible>(())
         })
         .unwrap();
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnMailCountersUpdate",
-        "charid",
-        vec![PyRep::Integer(char_id)],
+        crate::router::notify_registry::OnMailCountersUpdate {
+            char_id: Some(char_id),
+        },
     );
     PyRep::keyval([
         ("messageID", PyRep::Integer(mail_ids[0])),

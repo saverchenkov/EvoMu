@@ -218,11 +218,9 @@ pub fn update_system_advantage(ctx: &ServerContext, sys_id: u32, friendly_delta:
         entry.1 = (entry.1 + enemy_delta).clamp(0.0, 100.0);
         *entry
     });
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnSolarsystemAdvantageStateUpdated_Local",
-        "solarsystemid",
-        vec![],
+        crate::router::notify_registry::OnSolarsystemAdvantageStateUpdatedLocal,
     );
     (friendly, enemy)
 }
@@ -280,11 +278,12 @@ pub fn add_victory_points(ctx: &ServerContext, sys_id: u32, vp: i64) -> (i64, f6
         ("frontlineStatus", PyRep::Integer(front)),
         ("contestedPercentage", PyRep::Real(contested)),
     ]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnWarzoneOccupationStateUpdated",
-        "solarsystemid",
-        vec![PyRep::Integer(i64::from(sys_id)), occ_state],
+        crate::router::notify_registry::OnWarzoneOccupationStateUpdated {
+            solar_system_id: i64::from(sys_id),
+            new_occupation_state: occ_state,
+        },
     );
     (new_vp, contested)
 }
@@ -350,11 +349,12 @@ pub fn capture_warzone_system(
         ("frontlineStatus", PyRep::Integer(front)),
         ("contestedPercentage", PyRep::Real(0.0)),
     ]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnWarzoneOccupationStateUpdated",
-        "solarsystemid",
-        vec![PyRep::Integer(i64::from(sys_id)), occ_state],
+        crate::router::notify_registry::OnWarzoneOccupationStateUpdated {
+            solar_system_id: i64::from(sys_id),
+            new_occupation_state: occ_state,
+        },
     );
     let vp_state = PyRep::keyval([
         ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
@@ -362,11 +362,12 @@ pub fn capture_warzone_system(
         ("contestedPercentage", PyRep::Real(0.0)),
         ("threshold", PyRep::Integer(res.3)),
     ]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnVictoryPointStateUpdated",
-        "solarsystemid",
-        vec![PyRep::Integer(i64::from(sys_id)), vp_state],
+        crate::router::notify_registry::OnVictoryPointStateUpdated {
+            solar_system_id: i64::from(sys_id),
+            new_victory_point_state: vp_state,
+        },
     );
 
     Ok((res.0, res.1, res.2))
@@ -427,17 +428,17 @@ pub fn set_facwar_bunker_vulnerable(ctx: &ServerContext, sys_id: u32, attacker_i
             snap.fw_runtime.last_ihub_attacked_unix.remove(&sys_id);
         }
     });
-    let event = if vulnerable {
-        "OnFacWarBunkerVulnerable"
+    if vulnerable {
+        ctx.emit_typed(
+            NotificationTarget::SolarSystem(sys_id),
+            crate::router::notify_registry::OnFacWarBunkerVulnerable { attacker_id },
+        );
     } else {
-        "OnFacWarBunkerNonVulnerable"
-    };
-    ctx.notify(
-        NotificationTarget::SolarSystem(sys_id),
-        event,
-        "solarsystemid",
-        vec![PyRep::Integer(attacker_id)],
-    );
+        ctx.emit_typed(
+            NotificationTarget::SolarSystem(sys_id),
+            crate::router::notify_registry::OnFacWarBunkerNonVulnerable { attacker_id },
+        );
+    }
 }
 
 /// Completes a Faction Warfare dungeon, objective, and scoreboard in `sys_id`.
@@ -449,31 +450,28 @@ pub fn complete_fw_dungeon_and_objective(
     objective_mode: i64,
     scoreboard_item_id: i64,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnFacWarDungeonCompleted",
-        "solarsystemid",
-        vec![PyRep::Bool(was_conquered), PyRep::Integer(faction_id)],
+        crate::router::notify_registry::OnFacWarDungeonCompleted {
+            was_conquered,
+            faction_id,
+        },
     );
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnFwObjectiveCompletedInSolarSystem",
-        "solarsystemid",
-        vec![
-            PyRep::Integer(i64::from(sys_id)),
-            PyRep::Integer(faction_id),
-            PyRep::Integer(objective_mode),
-        ],
+        crate::router::notify_registry::OnFwObjectiveCompletedInSolarSystem {
+            solar_system_id: i64::from(sys_id),
+            target_faction_id: faction_id,
+            objective_mode,
+        },
     );
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnFwScoreboardWon",
-        "solarsystemid",
-        vec![
-            PyRep::Integer(i64::from(sys_id)),
-            PyRep::Integer(scoreboard_item_id),
-            PyRep::Integer(faction_id),
-        ],
+        crate::router::notify_registry::OnFwScoreboardWon {
+            solar_system_id: i64::from(sys_id),
+            scoreboard_item_id,
+            winner_faction_id: faction_id,
+        },
     );
 }
 

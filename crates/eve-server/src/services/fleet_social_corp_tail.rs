@@ -627,11 +627,13 @@ pub(crate) fn handle_update_members(
                         PyRep::Integer(new_roles as i64),
                     ]),
                 )]);
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Corporation(corp_id),
-                    "OnCorporationMemberChanged",
-                    "corpid",
-                    vec![PyRep::Integer(corp_id), PyRep::Integer(tid), change],
+                    crate::router::notify_registry::OnCorporationMemberChanged {
+                        corporation_id: corp_id,
+                        member_id: tid,
+                        change,
+                    },
                 );
             }
             let &(first_tid, _, first_new, _, delayed, _) = &results[0];
@@ -718,11 +720,13 @@ pub(crate) fn emit_corp_role_session_changed(
         ("sessionChangeReason", PyRep::String("corprole".into())),
         ("nextSessionChange", PyRep::None),
     ]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(tid),
-        "OnSessionChanged",
-        "charid",
-        vec![PyRep::Bool(false), sess_kv, PyRep::Dict(changes)],
+        crate::router::notify_registry::OnSessionChanged {
+            is_remote: false,
+            session: sess_kv,
+            change: PyRep::Dict(changes),
+        },
     );
 }
 
@@ -986,18 +990,16 @@ fn emit_member_removed_notifications(
         PyRep::String(("corporationID").into()),
         PyRep::Tuple(vec![PyRep::Integer(corp_id), PyRep::Integer(npc_corp)]),
     )]);
-    let m_args = vec![PyRep::Integer(corp_id), PyRep::Integer(tid), m_change];
-    ctx.notify(
-        NotificationTarget::Corporation(corp_id),
-        "OnCorporationMemberChanged",
-        "corpid",
-        m_args.clone(),
-    );
-    ctx.notify(
+    let member_changed = crate::router::notify_registry::OnCorporationMemberChanged {
+        corporation_id: corp_id,
+        member_id: tid,
+        change: m_change,
+    };
+    ctx.emit_typed(NotificationTarget::Corporation(corp_id), member_changed.clone());
+    ctx.emit_typed_with_id_type(
         NotificationTarget::Character(tid),
-        "OnCorporationMemberChanged",
         "charid",
-        m_args,
+        member_changed,
     );
     let sess_changes = PyRep::Dict(vec![
         (
@@ -1016,11 +1018,14 @@ fn emit_member_removed_notifications(
             ]),
         ),
     ]);
-    ctx.notify(
+    ctx.emit_typed_with_id_type(
         NotificationTarget::Character(tid),
-        "OnSessionChanged",
         "clientID",
-        vec![PyRep::Bool(false), PyRep::Integer(tid), sess_changes],
+        crate::router::notify_registry::OnSessionChanged {
+            is_remote: false,
+            session: PyRep::Integer(tid),
+            change: sess_changes,
+        },
     );
     let _ = crate::services::quasar_social_chat::on_character_local_chat_membership_refreshed(
         &ctx.quasar_gateway,
@@ -1622,17 +1627,19 @@ pub(super) fn handle_insert_vote_case(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Corporation(corp_id),
-        "OnVoteCaseChanged",
-        "corpid",
-        vec![PyRep::Integer(corp_id), PyRep::Integer(case_id)],
+        crate::router::notify_registry::OnVoteCaseChanged {
+            corporation_id: corp_id,
+            vote_case_id: case_id,
+        },
     );
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Corporation(corp_id),
-        "OnSanctionedActionChanged",
-        "corpid",
-        vec![PyRep::Integer(corp_id), PyRep::Integer(case_id)],
+        crate::router::notify_registry::OnSanctionedActionChanged {
+            corporation_id: corp_id,
+            vote_case_id: case_id,
+        },
     );
     Some(Ok(PyRep::keyval([
         ("voteCaseID", PyRep::Integer(case_id)),

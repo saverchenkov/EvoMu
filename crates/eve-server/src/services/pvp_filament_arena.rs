@@ -289,48 +289,32 @@ pub fn record_proving_grounds_combat_result_in_snap(
     Ok((matched_event_id, affected_pilots))
 }
 
-fn enqueue_pvp_char_notification(
+fn enqueue_pvp_char_notification<N: crate::router::notify_registry::TypedNotification>(
     db: &eve_db::WorldRepository,
     pending_opt: Option<&dyn AnyRwLock<std::collections::HashMap<i64, Vec<crate::router::PendingMachoNotification>>>>,
     notify_tx_opt: Option<&tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
     cid: i64,
-    event: &str,
-    id_type: &str,
-    args: Vec<PyRep>,
+    notif: N,
 ) {
-    let Some(pending) = pending_opt else {
+    if pending_opt.is_none() {
         return;
-    };
+    }
     let Some(uid) = db.with_snapshot(|s| s.characters.get(&cid).map(|c| c.user_id)) else {
         return;
     };
     if !db.get_online_session(uid).is_some_and(|os| os.character_id == Some(cid)) {
         return;
     }
-    let (packet, marshaled_packet) =
-        ServerContext::build_macho_notification_packet(cid, Some(uid), event, id_type, args.clone());
-    let created_filetime = (db.clock().now_unix_secs() + 11_644_473_600) * 10_000_000;
-    let notif = crate::router::PendingMachoNotification {
-        seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-        recipient_char_id: cid,
-        event: event.to_string(),
-        id_type: id_type.to_string(),
-        args,
-        packet,
-        marshaled_packet,
-        created_filetime: created_filetime as i64,
-    };
-    {
-        let mut qmap = pending.write().unwrap_or_else(|e| e.into_inner());
-        let q = qmap.entry(cid).or_default();
-        if q.len() >= crate::router::MAX_PENDING_NOTIFICATIONS_PER_CHAR {
-            q.remove(0);
-        }
-        q.push(notif.clone());
-    }
-    if let Some(tx) = notify_tx_opt {
-        let _ = tx.send((cid, notif));
-    }
+    let created_filetime = ((db.clock().now_unix_secs() + 11_644_473_600) * 10_000_000) as i64;
+    crate::router::notify_registry::emit_typed_target_to_char_with_id_type(
+        pending_opt,
+        notify_tx_opt,
+        cid,
+        Some(uid),
+        N::DEFAULT_ID_TYPE,
+        created_filetime,
+        notif,
+    );
 }
 
 pub fn notify_pvp_stats_for_pilots_in_db(
@@ -380,18 +364,18 @@ pub fn notify_pvp_stats_for_pilots_in_db(
             pending_opt,
             notify_tx_opt,
             cid,
-            "OnPVPFilamentsCharacterStatistics",
-            "charid",
-            vec![stat_notif],
+            crate::router::notify_registry::OnPVPFilamentsCharacterStatistics {
+                info: stat_notif,
+            },
         );
         enqueue_pvp_char_notification(
             db,
             pending_opt,
             notify_tx_opt,
             cid,
-            "OnPVPFilamentsLeaderboard",
-            "charid",
-            vec![lb_notif.clone()],
+            crate::router::notify_registry::OnPVPFilamentsLeaderboard {
+                info: lb_notif.clone(),
+            },
         );
     }
 }
@@ -769,9 +753,11 @@ fn step_proving_grounds_arena_hazards_in_ballpark_with_options(
             pending_notifications_opt,
             notify_tx_opt,
             cid,
-            "OnSessionChanged",
-            "charid",
-            vec![PyRep::Bool(false), sess_rep, change_dict],
+            crate::router::notify_registry::OnSessionChanged {
+                is_remote: false,
+                session: sess_rep,
+                change: change_dict,
+            },
         );
     }
     for (cid, old_ship_id, cap_id) in ejected_pods {
@@ -799,9 +785,11 @@ fn step_proving_grounds_arena_hazards_in_ballpark_with_options(
             pending_notifications_opt,
             notify_tx_opt,
             cid,
-            "OnSessionChanged",
-            "charid",
-            vec![PyRep::Bool(false), sess_rep, change_dict],
+            crate::router::notify_registry::OnSessionChanged {
+                is_remote: false,
+                session: sess_rep,
+                change: change_dict,
+            },
         );
     }
     for (ev_id, participants) in concluded_matches {
@@ -852,17 +840,17 @@ pub fn notify_pvp_stats_for_pilots(ctx: &ServerContext, event_id: i64, pilots: &
             (PyRep::String("scheduleID".into()), PyRep::Integer(schedule_id)),
             (PyRep::String("statistics".into()), stats_rep),
         ]);
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(cid),
-            "OnPVPFilamentsCharacterStatistics",
-            "charid",
-            vec![stat_notif],
+            crate::router::notify_registry::OnPVPFilamentsCharacterStatistics {
+                info: stat_notif,
+            },
         );
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(cid),
-            "OnPVPFilamentsLeaderboard",
-            "charid",
-            vec![lb_notif.clone()],
+            crate::router::notify_registry::OnPVPFilamentsLeaderboard {
+                info: lb_notif.clone(),
+            },
         );
     }
 }
@@ -954,21 +942,19 @@ pub async fn spawn_matched_arena_instance(
             ("solarsystemid", PyRep::Integer(32_000_001)),
             ("matchID", PyRep::Integer(mid)),
         ]);
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(pid),
-            "OnSessionChanged",
-            "charid",
-            vec![
-                PyRep::Bool(false),
-                sess_rep,
-                PyRep::Dict(vec![(
+            crate::router::notify_registry::OnSessionChanged {
+                is_remote: false,
+                session: sess_rep,
+                change: PyRep::Dict(vec![(
                     PyRep::String("solarsystemid".into()),
                     PyRep::Tuple(vec![
                         PyRep::Integer(p_origin_sys as i64),
                         PyRep::Integer(32_000_001),
                     ]),
                 )]),
-            ],
+            },
         );
         crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(
             ctx,
@@ -1254,21 +1240,19 @@ pub async fn handle_pvp_end_gate_activation(
         ("solarsystemid2", PyRep::Integer(osys as i64)),
         ("solarsystemid", PyRep::Integer(osys as i64)),
     ]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnSessionChanged",
-        "charid",
-        vec![
-            PyRep::Bool(false),
-            sess_rep,
-            PyRep::Dict(vec![(
+        crate::router::notify_registry::OnSessionChanged {
+            is_remote: false,
+            session: sess_rep,
+            change: PyRep::Dict(vec![(
                 PyRep::String("solarsystemid".into()),
                 PyRep::Tuple(vec![
                     PyRep::Integer(32_000_001),
                     PyRep::Integer(osys as i64),
                 ]),
             )]),
-        ],
+        },
     );
 
     Ok(PyRep::keyval([

@@ -95,11 +95,11 @@ pub fn cancel_open_trades_for_character(ctx: &ServerContext, char_id: i64) {
         .with_mut_snapshot(|snap| cancel_open_trades_for_character_in_snap(snap, char_id));
     for (trade_id, char_a, char_b) in cancelled {
         for party in [char_a, char_b] {
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(party),
-                "OnTradeCancel",
-                "charid",
-                vec![PyRep::Integer(trade_id)],
+                crate::router::notify_registry::OnTradeCancel {
+                    container_id: trade_id,
+                },
             );
         }
     }
@@ -576,15 +576,13 @@ pub fn handle(
             match res {
                 Ok(trade_id) => {
                     for party in [char_id, partner_id] {
-                        ctx.notify(
+                        ctx.emit_typed(
                             NotificationTarget::Character(party),
-                            "OnTradeInitiate",
-                            "charid",
-                            vec![
-                                PyRep::Integer(char_id),
-                                PyRep::Integer(partner_id),
-                                PyRep::Integer(trade_id),
-                            ],
+                            crate::router::notify_registry::OnTradeInitiate {
+                                char_id,
+                                trade_session: PyRep::Integer(partner_id),
+                                trade_items: PyRep::Integer(trade_id),
+                            },
                         );
                     }
                     Some(Ok(PyRep::keyval([
@@ -1028,11 +1026,11 @@ fn handle_trade_action(
         }
         Ok(TradeActionOutcome::UndockedCancelled(tr)) => {
             for party in [tr.char_a, tr.char_b] {
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Character(party),
-                    "OnTradeCancel",
-                    "charid",
-                    vec![PyRep::Integer(tr.trade_id)],
+                    crate::router::notify_registry::OnTradeCancel {
+                        container_id: tr.trade_id,
+                    },
                 );
             }
             Some(Err(rpc_err(
@@ -1060,47 +1058,45 @@ fn handle_trade_action(
             for party in [tr.char_a, tr.char_b] {
                 match method {
                     "Abort" => {
-                        ctx.notify(
+                        ctx.emit_typed(
                             NotificationTarget::Character(party),
-                            "OnTradeCancel",
-                            "charid",
-                            vec![PyRep::Integer(tr.trade_id)],
+                            crate::router::notify_registry::OnTradeCancel {
+                                container_id: tr.trade_id,
+                            },
                         );
                     }
                     "OfferMoney" => {
-                        ctx.notify(
+                        ctx.emit_typed(
                             NotificationTarget::Character(party),
-                            "OnTradeOfferReset",
-                            "charid",
-                            vec![PyRep::Integer(tr.trade_id)],
+                            crate::router::notify_registry::OnTradeOfferReset {
+                                container_id: tr.trade_id,
+                                manifest_error: None,
+                            },
                         );
-                        ctx.notify(
+                        ctx.emit_typed(
                             NotificationTarget::Character(party),
-                            "OnTradeMoneyOffer",
-                            "charid",
-                            vec![
-                                PyRep::Integer(tr.trade_id),
-                                PyRep::Real(IskCents(tr.money_a_cents).to_wire_f64()),
-                                PyRep::Real(IskCents(tr.money_b_cents).to_wire_f64()),
-                            ],
+                            crate::router::notify_registry::OnTradeMoneyOffer {
+                                container_id: tr.trade_id,
+                                arg1: PyRep::Real(IskCents(tr.money_a_cents).to_wire_f64()),
+                                arg2: Some(PyRep::Real(IskCents(tr.money_b_cents).to_wire_f64())),
+                            },
                         );
                     }
                     "AddItem" => {
-                        ctx.notify(
+                        ctx.emit_typed(
                             NotificationTarget::Character(party),
-                            "OnTradeOfferReset",
-                            "charid",
-                            vec![PyRep::Integer(tr.trade_id)],
+                            crate::router::notify_registry::OnTradeOfferReset {
+                                container_id: tr.trade_id,
+                                manifest_error: None,
+                            },
                         );
-                        ctx.notify(
+                        ctx.emit_typed(
                             NotificationTarget::Character(party),
-                            "OnTradeOffer",
-                            "charid",
-                            vec![
-                                PyRep::Integer(tr.trade_id),
-                                PyRep::Bool(tr.accept_a),
-                                PyRep::Bool(tr.accept_b),
-                            ],
+                            crate::router::notify_registry::OnTradeOffer {
+                                container_id: tr.trade_id,
+                                arg1: PyRep::Bool(tr.accept_a),
+                                arg2: Some(PyRep::Bool(tr.accept_b)),
+                            },
                         );
                         if party != char_id {
                             if let Some(iid) = added_item_id {
@@ -1113,22 +1109,21 @@ fn handle_trade_action(
                         }
                     }
                     "MakeOffer" => {
-                        ctx.notify(
+                        ctx.emit_typed(
                             NotificationTarget::Character(party),
-                            "OnTradeOffer",
-                            "charid",
-                            vec![
-                                PyRep::Integer(tr.trade_id),
-                                PyRep::Bool(tr.accept_a),
-                                PyRep::Bool(tr.accept_b),
-                            ],
+                            crate::router::notify_registry::OnTradeOffer {
+                                container_id: tr.trade_id,
+                                arg1: PyRep::Bool(tr.accept_a),
+                                arg2: Some(PyRep::Bool(tr.accept_b)),
+                            },
                         );
                         if tr.completed {
-                            ctx.notify(
+                            ctx.emit_typed(
                                 NotificationTarget::Character(party),
-                                "OnTradeComplete",
-                                "charid",
-                                vec![PyRep::Integer(tr.trade_id)],
+                                crate::router::notify_registry::OnTradeComplete {
+                                    container_id: tr.trade_id,
+                                    items: None,
+                                },
                             );
                         }
                     }
