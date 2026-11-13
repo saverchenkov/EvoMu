@@ -1750,112 +1750,21 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
 
     // Validate all emitted notifications against `notify` expectations (both arity and `reads`)
     let notify_map = root["notify"].as_object().expect("notify map");
+    let sem = eve_testkit::client_contract::SemanticLookupContext {
+        sde: &ctx.sde,
+        db: &ctx.db,
+    };
     let mut notify_violations = Vec::new();
     for (ev, nargs) in &all_emitted_notifs {
-        // `OnSessionChanged` in `session.notifications` is an internal server trigger intercepted by
-        // `macho_listener.rs` to construct a wire `SessionChangeNotification` packet; on the client,
-        // `arg1(sess)` is the client's local `blue.pyos.synchro` session object.
-        if ev == "OnSessionChanged" {
-            continue;
-        }
-        let Some(nspec) = notify_map.get(ev) else {
-            continue;
-        };
-        let mut arity_min = nspec["arity_min"].as_u64().unwrap_or(0) as usize;
-        let mut arity_max = nspec["arity_max"].as_u64().unwrap_or(usize::MAX as u64) as usize;
-        // Recompute exact Python arity bounds from `param_variants` so `*args` handlers allow unlimited max arity
-        if let Some(variants) = nspec["param_variants"].as_array() {
-            if !variants.is_empty() {
-                let mut req_min = 0usize;
-                let mut req_max = usize::MAX;
-                for v in variants {
-                    if let Some(plist) = v.get(0).and_then(|x| x.as_array()) {
-                        let pstrs: Vec<&str> =
-                            plist.iter().filter_map(|x| x.as_str()).collect();
-                        let has_varargs = pstrs
-                            .iter()
-                            .any(|p| p.starts_with('*') && !p.starts_with("**"));
-                        let pos_count = pstrs.iter().filter(|p| !p.starts_with('*')).count();
-                        req_min = req_min.max(pos_count);
-                        if !has_varargs {
-                            req_max = req_max.min(pos_count);
-                        }
-                    }
-                }
-                if req_min <= req_max {
-                    arity_min = req_min;
-                    arity_max = req_max;
-                }
-            }
-        }
         let nargs = eve_server::router::client_compat::normalize_macho_notification(ev, nargs.clone());
-        let nargs = &nargs;
-        if nargs.len() < arity_min || nargs.len() > arity_max {
-            notify_violations.push(format!(
-                "notify:{ev}: emitted {} args, client expects {arity_min}..={arity_max} ({nargs:?})",
-                nargs.len()
-            ));
-            continue;
-        }
-        // Validate notification argument `reads` (e.g. `arg0(data) attr:foo`, `arg0(times) unpack:2`)
-        if let Some(reads) = nspec["reads"].as_array() {
-            let mut arg_shapes: HashMap<usize, serde_json::Map<String, Value>> = HashMap::new();
-            for r in reads.iter().filter_map(|x| x.as_str()) {
-                // `SpaceMgr.OnDamageStateChange(shipID, damageState)` receives a 3-tuple from the server;
-                // `HealthWidget.OnDamageStateChange` is a client-internal scatter event with a 5-tuple.
-                if ev == "OnDamageStateChange" && r.contains("unpack:5") {
-                    continue;
-                }
-                let Some(rest) = r.strip_prefix("arg") else {
-                    continue;
-                };
-                let Some(open_paren) = rest.find('(') else {
-                    continue;
-                };
-                let Ok(arg_idx) = rest[..open_paren].parse::<usize>() else {
-                    continue;
-                };
-                let Some(close_paren) = rest.find(')') else {
-                    continue;
-                };
-                let param_name = &rest[open_paren + 1..close_paren];
-                // Skip if param_name is the `*args` tuple itself
-                if nspec["params"]
-                    .as_array()
-                    .is_some_and(|ps| ps.iter().any(|p| p.as_str() == Some(&format!("*{param_name}"))))
-                {
-                    continue;
-                }
-                let after_paren = &rest[close_paren + 1..];
-                let Some((subpath, op)) = after_paren.split_once(' ') else {
-                    continue;
-                };
-                let path_key = if subpath.is_empty() {
-                    "$".to_string()
-                } else {
-                    subpath.to_string()
-                };
-                arg_shapes
-                    .entry(arg_idx)
-                    .or_default()
-                    .entry(path_key)
-                    .or_insert_with(|| Value::Array(Vec::new()))
-                    .as_array_mut()
-                    .unwrap()
-                    .push(Value::String(op.to_string()));
-            }
-            for (arg_idx, shape_map) in arg_shapes {
-                if let Some(arg_val) = nargs.get(arg_idx) {
-                    let v = validate_reply_shape(
-                        &ctx,
-                        &format!("notify:{ev}[arg{arg_idx}]"),
-                        arg_val,
-                        &shape_map,
-                    );
-                    notify_violations.extend(v);
-                }
-            }
-        }
+        notify_violations.extend(
+            eve_testkit::client_contract::validate_notification_contract(
+                Some(&sem),
+                notify_map,
+                ev,
+                &nargs,
+            ),
+        );
     }
 
     let mut report = eve_testkit::client_contract::ContractSweepReport {
@@ -2782,4 +2691,462 @@ fn test_crowset_descriptor_columns_reads_canonical_empty_rowsets() {
         dict: Vec::new(),
     };
     assert!(has_column_in_collection(&legacy_arg_crowset, "warID"));
+}
+
+/// `[C-2 / #926]` Enforces the falling `raw_dispatch_ratchet.json` baseline on `tests/it/` and
+/// measures how many catalog RPC replies diverge between legacy `caller_trace = None` and
+/// `ClientHarness` on the exact `machoNet` wire path.
+#[tokio::test]
+async fn test_c2_raw_dispatch_ratchet_and_none_vs_wire_harness_diff_count() {
+    use eve_testkit::client_harness::{ContractValidationMode, RawDispatchRatchet};
+
+    let ratchet = RawDispatchRatchet::load_default().expect("load raw_dispatch_ratchet.json");
+    let scan = ratchet
+        .verify_default()
+        .expect("tests/it raw dispatch ratchet must pass");
+    let common_rs_raw = scan.per_file_raw_none.get("common.rs").copied().unwrap_or(0);
+    assert_eq!(
+        common_rs_raw, 0,
+        "tests/it/common.rs must have zero raw caller_trace = None dispatch_rpc calls"
+    );
+
+    let raw = std::fs::read_to_string(expectations_path()).expect("read client_expectations.json");
+    let root: Value = serde_json::from_str(&raw).expect("parse client_expectations.json");
+    let rpc_map = root["rpc"].as_object().expect("rpc map");
+
+    let ctx_raw = shared_comprehensive_ctx().await;
+    let ctx_wire = shared_comprehensive_ctx().await;
+    let raw_caller_trace: Option<&str> = None;
+
+    let mut sess_raw = SessionState::new(77_101);
+    common::login_pilot(&ctx_raw, &mut sess_raw, "demo", "demo-secret").await;
+    ctx_raw
+        .dispatch_rpc(
+            &mut sess_raw,
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(CHAR_ID)],
+            &HashMap::new(),
+            raw_caller_trace,
+        )
+        .await
+        .expect("raw SelectCharacterID");
+    sess_raw.drain_notifications();
+    ctx_raw.drain_notifications_for_char(CHAR_ID);
+
+    let mut harness = common::new_wire_harness(&ctx_wire, 77_102)
+        .with_mode(ContractValidationMode::ReportOnly);
+    harness
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[
+                PyRep::String("demo".into()),
+                PyRep::String("demo-secret".into()),
+            ],
+            &HashMap::new(),
+        )
+        .await;
+    harness
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(CHAR_ID)],
+            &HashMap::new(),
+        )
+        .await;
+    harness.drain_notifications();
+    harness.drain_frames();
+
+    for ctx_pair in [&ctx_raw, &ctx_wire] {
+        let sys_handle = ctx_pair.systems.get_or_spawn(SYSTEM_ID);
+        let _ = sys_handle
+            .spawn_ball(eve_destiny::Ball {
+                id: SHIP_ID,
+                type_id: 587,
+                position: glam::DVec3::new(10_000.0, 20_000.0, 30_000.0),
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 2.5,
+                mass: 1_350_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            })
+            .await;
+    }
+
+    let raw_base_snapshot = ctx_raw.db.with_snapshot(|snap| snap.clone());
+    let wire_base_snapshot = ctx_wire.db.with_snapshot(|snap| snap.clone());
+
+    struct MeasureSig {
+        rpc_key: String,
+        service: String,
+        method: String,
+        kw: HashMap<String, PyRep>,
+        candidates: Vec<Vec<PyRep>>,
+        destructive: bool,
+    }
+
+    let mut non_destructive = Vec::new();
+    let mut destructive = Vec::new();
+    for (rpc_key, rpc_val) in rpc_map {
+        if CLIENT_ONLY_PSEUDO_RPCS.contains(&rpc_key.as_str())
+            || INTENTIONALLY_UNIMPLEMENTED_RPCS.contains(&rpc_key.as_str())
+        {
+            continue;
+        }
+        let Some((svc, meth)) = rpc_key.split_once('.') else {
+            continue;
+        };
+        if is_destructive_rpc(svc, meth) {
+            destructive.push((rpc_key.clone(), svc.to_string(), meth.to_string(), rpc_val));
+        } else {
+            non_destructive.push((rpc_key.clone(), svc.to_string(), meth.to_string(), rpc_val));
+        }
+    }
+
+    let mut pending = Vec::new();
+    for (rpc_key, service, method, rpc_val) in non_destructive.into_iter().chain(destructive) {
+        let sites = rpc_val["call_sites"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let first_site = sites.first();
+        let arity = first_site
+            .and_then(|s| s["args"].as_u64())
+            .unwrap_or(0) as usize;
+        let kwargs_keys: Vec<String> = first_site
+            .and_then(|s| s["kwargs"].as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let arg_consts: Vec<Option<String>> = first_site
+            .and_then(|s| s["arg_consts"].as_array())
+            .map(|a| a.iter().map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let arg_exprs: Vec<String> = first_site
+            .and_then(|s| s["arg_exprs"].as_array())
+            .map(|a| {
+                a.iter()
+                    .map(|x| x.as_str().unwrap_or("?").to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut kw = HashMap::new();
+        for k in &kwargs_keys {
+            if k != "?" {
+                let kw_val =
+                    arg_from_expr(k, &service, &method, 0).unwrap_or(PyRep::Integer(1));
+                kw.insert(k.clone(), kw_val);
+            }
+        }
+        let candidates =
+            build_candidate_arg_sets(&service, &method, arity, &arg_consts, &arg_exprs);
+        let is_destr = is_destructive_rpc(&service, &method);
+        pending.push(MeasureSig {
+            rpc_key,
+            service,
+            method,
+            kw,
+            candidates,
+            destructive: is_destr,
+        });
+    }
+
+    let mut resolved_rpcs = BTreeSet::new();
+    let mut both_ok_rpcs = BTreeSet::new();
+    let mut differing_rpcs = BTreeMap::<String, (String, String)>::new();
+    let mut differing_by_service = BTreeMap::<String, usize>::new();
+    let mut error_diff_rpcs = BTreeSet::new();
+
+    for profile in [
+        SessionProfile::DockedStation,
+        SessionProfile::InSpace,
+        SessionProfile::DockedStructure,
+    ] {
+        for sig in &pending {
+            if resolved_rpcs.contains(&sig.rpc_key) {
+                continue;
+            }
+            for cand_args in &sig.candidates {
+                restore_session_profile(&ctx_raw, &mut sess_raw, profile);
+                restore_session_profile(
+                    &ctx_wire,
+                    &mut harness.transport_mut().inner.session,
+                    profile,
+                );
+                let bound_raw = bind_for_service(&ctx_raw, &sess_raw, &sig.service);
+                let bound_wire = bind_for_service(
+                    &ctx_wire,
+                    &harness.transport().inner.session,
+                    &sig.service,
+                );
+
+                let raw_res = ctx_raw
+                    .dispatch_rpc(
+                        &mut sess_raw,
+                        &sig.service,
+                        bound_raw,
+                        &sig.method,
+                        cand_args,
+                        &sig.kw,
+                        raw_caller_trace,
+                    )
+                    .await;
+                sess_raw.drain_notifications();
+                ctx_raw.drain_notifications_for_char(CHAR_ID);
+
+                let wire_out = harness
+                    .call_exchange(
+                        &sig.service,
+                        bound_wire,
+                        &sig.method,
+                        cand_args,
+                        &sig.kw,
+                    )
+                    .await;
+                harness.drain_notifications();
+                harness.drain_frames();
+
+                match (&raw_res, &wire_out.result) {
+                    (Ok(raw_rep), Ok(wire_rep)) => {
+                        both_ok_rpcs.insert(sig.rpc_key.clone());
+                        resolved_rpcs.insert(sig.rpc_key.clone());
+                        if raw_rep != wire_rep {
+                            *differing_by_service
+                                .entry(sig.service.clone())
+                                .or_insert(0) += 1;
+                            differing_rpcs.insert(
+                                sig.rpc_key.clone(),
+                                (format!("{raw_rep:?}"), format!("{wire_rep:?}")),
+                            );
+                        }
+                    }
+                    (Ok(_), Err(_)) | (Err(_), Ok(_)) => {
+                        error_diff_rpcs.insert(sig.rpc_key.clone());
+                    }
+                    (Err(re), Err(we)) if re.code != we.code || re.message != we.message => {
+                        error_diff_rpcs.insert(sig.rpc_key.clone());
+                    }
+                    (Err(_), Err(_)) => {}
+                }
+
+                if sig.destructive {
+                    ctx_raw
+                        .db
+                        .with_mut_snapshot(|snap| *snap = raw_base_snapshot.clone());
+                    ctx_wire
+                        .db
+                        .with_mut_snapshot(|snap| *snap = wire_base_snapshot.clone());
+                }
+
+                if resolved_rpcs.contains(&sig.rpc_key) {
+                    break;
+                }
+            }
+        }
+    }
+
+    println!(
+        "[C-2 Measurement] raw_dispatch_ratchet: calls={}/{} files={}/{} (common.rs={})",
+        scan.raw_none_calls,
+        ratchet.max_raw_dispatch_calls,
+        scan.files_with_raw_none,
+        ratchet.max_files_with_raw_dispatch,
+        common_rs_raw
+    );
+    println!(
+        "[C-2 Measurement] caller_trace=None vs ClientHarness wire path: both_ok={} differing_replies={} error_diffs={}",
+        both_ok_rpcs.len(),
+        differing_rpcs.len(),
+        error_diff_rpcs.len()
+    );
+    for (svc, cnt) in &differing_by_service {
+        println!("  [C-2 Service Diffs] {svc}: {cnt}");
+    }
+    for (rpc, _) in differing_rpcs.iter().take(25) {
+        println!("  [C-2 Reply Diff] {rpc}");
+    }
+
+    assert!(
+        !differing_rpcs.is_empty(),
+        "ClientHarness wire path must produce distinct client-normalized replies vs caller_trace = None across catalog RPCs"
+    );
+}
+
+/// `[C-2 / #926]` Exercises `ClientHarness` live against `ServerContext` socket-loop framing
+/// (`CallRsp`, `SessionChangeNotification` enrichment, `OnSessionChanged` suppression,
+/// `MachoBindObject` `SubStruct(SubStream)` bound wrapper, `DoDestinyUpdate(SetState)`,
+/// `ErrorResponse` wire mapping, and wrong-shape failure enforcement).
+#[tokio::test]
+async fn test_c2_client_harness_wire_frames_and_wrong_shape_rejection() {
+    use eve_testkit::client_contract::SemanticLookupContext;
+    use eve_testkit::client_harness::{
+        extract_bound_id_from_wire_rep, ClientErrorResponse, ClientHarness, ClientWireExchange,
+        ClientWireFrame, ClientWireFrameKind, ClientWireTransport,
+    };
+    use std::future::Future;
+    use std::pin::Pin;
+
+    let ctx = shared_comprehensive_ctx().await;
+    let kw = HashMap::new();
+    let mut harness = common::new_wire_harness(&ctx, 77_201);
+
+    let login_out = harness
+        .call_exchange(
+            "authentication",
+            None,
+            "Login",
+            &[
+                PyRep::String("demo".into()),
+                PyRep::String("demo-secret".into()),
+            ],
+            &kw,
+        )
+        .await;
+    assert!(login_out.result.is_ok(), "Login must succeed");
+    assert!(
+        login_out
+            .frames
+            .iter()
+            .any(|f| matches!(f.kind, ClientWireFrameKind::CallRsp { .. })),
+        "Login wire exchange must include a CallRsp frame"
+    );
+
+    let sel_out = harness
+        .call_exchange(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(CHAR_ID)],
+            &kw,
+        )
+        .await;
+    assert!(sel_out.result.is_ok(), "SelectCharacterID must succeed");
+    assert!(
+        !sel_out.session_change_packets.is_empty(),
+        "SelectCharacterID must emit SessionChangeNotification frame"
+    );
+    assert!(
+        !sel_out
+            .notifications
+            .iter()
+            .any(|(ev, _)| ev == "OnSessionChanged"),
+        "Internal OnSessionChanged trigger must be suppressed once SessionChangeNotification is emitted"
+    );
+
+    let undock_out = harness
+        .call_exchange("stationSvc", None, "Undock", &[], &kw)
+        .await;
+    assert!(
+        undock_out.result.is_ok(),
+        "Undock must succeed: {:?}",
+        undock_out.result
+    );
+    assert!(
+        !undock_out.session_change_packets.is_empty(),
+        "Undock must emit SessionChangeNotification clearing stationid"
+    );
+
+    let bind_out = harness
+        .call_exchange(
+            "beyonce",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(SYSTEM_ID as i64), PyRep::None],
+            &kw,
+        )
+        .await;
+    let bind_rep = bind_out
+        .result
+        .expect("beyonce.MachoBindObject must succeed");
+    let PyRep::Tuple(ref bind_tup) = bind_rep else {
+        panic!("wire MachoBindObject must return a 2-tuple, got {bind_rep:?}");
+    };
+    assert!(
+        matches!(bind_tup.first(), Some(PyRep::SubStruct(_))),
+        "wire MachoBindObject must wrap bound ref in SubStruct(SubStream), got {bind_rep:?}"
+    );
+    let beyonce_bid = extract_bound_id_from_wire_rep(&bind_rep)
+        .expect("extract_bound_id_from_wire_rep must decode SubStruct(SubStream)");
+    assert!(
+        !bind_out.destiny_batches.is_empty(),
+        "binding beyonce in space via ClientHarness must emit DoDestinyUpdate(SetState)"
+    );
+    assert!(matches!(
+        bind_out.frames.first().map(|f| &f.kind),
+        Some(ClientWireFrameKind::CallRsp { .. })
+    ));
+    assert!(
+        bind_out.frames.iter().any(|f| matches!(
+            f.kind,
+            ClientWireFrameKind::DoDestinyUpdate {
+                has_set_state: true,
+                ..
+            }
+        )),
+        "DoDestinyUpdate with has_set_state=true must be present in beyonce bind frames"
+    );
+
+    let update_state_rep = harness
+        .call_ok("beyonce", Some(beyonce_bid), "UpdateStateRequest", &[], &kw)
+        .await;
+    assert_eq!(update_state_rep, PyRep::None);
+
+    let err_out = harness
+        .call_exchange("charUnboundMgr", None, "SelectCharacterID", &[], &kw)
+        .await;
+    let err: ClientErrorResponse = err_out
+        .result
+        .expect_err("missing characterID must map to ClientErrorResponse");
+    assert_eq!(err.code, "InvalidArgument");
+    assert_ne!(err.wire_body, PyRep::None);
+    assert!(matches!(
+        err_out.frames.first().map(|f| &f.kind),
+        Some(ClientWireFrameKind::ErrorResponse { .. })
+    ));
+
+    // Verify wrong reply shapes immediately fail the calling test inside tests/it/.
+    struct BadShapeTransport;
+    impl ClientWireTransport for BadShapeTransport {
+        fn send_wire_call<'a>(
+            &'a mut self,
+            _service: &'a str,
+            _bound_id: Option<u64>,
+            _method: &'a str,
+            _args: &'a [PyRep],
+            _kwargs: &'a HashMap<String, PyRep>,
+        ) -> Pin<Box<dyn Future<Output = ClientWireExchange> + Send + 'a>> {
+            Box::pin(async move {
+                ClientWireExchange {
+                    rpc_result: Ok(PyRep::None),
+                    frames: vec![ClientWireFrame {
+                        kind: ClientWireFrameKind::CallRsp {
+                            call_id: 1,
+                            reply: PyRep::None,
+                        },
+                        wire_packet: PyRep::None,
+                    }],
+                    marshal_errors: Vec::new(),
+                }
+            })
+        }
+
+        fn semantic_lookup(&self) -> Option<SemanticLookupContext<'_>> {
+            None
+        }
+    }
+
+    let join_err = tokio::spawn(async move {
+        let mut bad_harness = ClientHarness::new(BadShapeTransport);
+        let _ = bad_harness
+            .call("stationSvc", None, "GetAllianceSystems", &[], &HashMap::new())
+            .await;
+    })
+    .await
+    .expect_err("ClientHarness must fail the test when a handler returns a wrong reply shape");
+    assert!(join_err.is_panic());
 }

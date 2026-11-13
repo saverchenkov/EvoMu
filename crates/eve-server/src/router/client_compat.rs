@@ -3612,6 +3612,7 @@ pub fn normalize_macho_notification_with_sde(
             args
         }
         "OnGodmaPrimeItem" => {
+            let first_arg = args.first().cloned().unwrap_or(PyRep::Integer(0));
             if let Some(PyRep::KeyVal(entries)) = args.get_mut(1) {
                 if !entries.contains_key("wallclockTime") {
                     let wt = entries
@@ -3627,6 +3628,39 @@ pub fn normalize_macho_notification_with_sde(
                             inv_keyval_to_dbrow_with_sde(old_inv, sde),
                         );
                     }
+                } else if matches!(entries.get("invItem"), None | Some(PyRep::None)) {
+                    let mut fallback = HashMap::new();
+                    match entries.get("itemID") {
+                        Some(PyRep::Tuple(t)) if t.len() == 3 => {
+                            fallback.insert("itemID".to_string(), t[0].clone());
+                            fallback.insert("locationID".to_string(), t[0].clone());
+                            fallback.insert("flagID".to_string(), t[1].clone());
+                            fallback.insert("typeID".to_string(), t[2].clone());
+                            fallback.insert("singleton".to_string(), PyRep::Bool(false));
+                            fallback.insert("quantity".to_string(), PyRep::Integer(1));
+                        }
+                        Some(id_rep) => {
+                            fallback.insert("itemID".to_string(), id_rep.clone());
+                            fallback.insert(
+                                "locationID".to_string(),
+                                entries
+                                    .get("locationID")
+                                    .cloned()
+                                    .unwrap_or_else(|| first_arg.clone()),
+                            );
+                            fallback.insert(
+                                "typeID".to_string(),
+                                entries.get("typeID").cloned().unwrap_or(PyRep::Integer(0)),
+                            );
+                            fallback.insert("singleton".to_string(), PyRep::Bool(true));
+                            fallback.insert("quantity".to_string(), PyRep::Integer(-1));
+                        }
+                        None => {}
+                    }
+                    entries.insert(
+                        "invItem".to_string(),
+                        inv_keyval_to_dbrow_with_sde(PyRep::KeyVal(fallback), sde),
+                    );
                 }
                 let is_subloc = matches!(
                     entries.get("itemID"),

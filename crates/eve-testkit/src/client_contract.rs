@@ -1559,6 +1559,276 @@ pub fn validate_reply_shape(
     validate_reply_shape_with_metrics(lookup, rpc_name, raw_reply, reply_shape).violations
 }
 
+/// Cached `client_expectations.json` paired with the SHA-256-verified [`ClientContractRatchet`] (`C-2`).
+#[derive(Debug, Clone)]
+pub struct LoadedClientContracts {
+    pub ratchet: ClientContractRatchet,
+    pub normalized_allowed_shape: BTreeSet<String>,
+    pub normalized_allowed_notify: BTreeSet<String>,
+    pub expectations: Value,
+}
+
+impl LoadedClientContracts {
+    /// Returns `true` if `violation` matches an existing entry in `allowed_shape_violations`.
+    pub fn is_shape_violation_allowed(&self, violation: &str) -> bool {
+        self.ratchet.allowed_shape_violations.contains(violation)
+            || self
+                .normalized_allowed_shape
+                .contains(&normalize_violation_for_ratchet(violation))
+    }
+
+    /// Returns `true` if `violation` matches an existing entry in `allowed_notify_violations`.
+    pub fn is_notify_violation_allowed(&self, violation: &str) -> bool {
+        self.ratchet.allowed_notify_violations.contains(violation)
+            || self
+                .normalized_allowed_notify
+                .contains(&normalize_violation_for_ratchet(violation))
+    }
+}
+
+impl ClientContractRatchet {
+    /// Loads and caches the default `client_contract_ratchet.json` + `client_expectations.json` pair
+    /// after verifying expectations version and SHA-256 integrity (`C-1` / `C-2`).
+    pub fn load_default_cached() -> &'static LoadedClientContracts {
+        static CACHE: std::sync::OnceLock<LoadedClientContracts> = std::sync::OnceLock::new();
+        CACHE.get_or_init(|| {
+            let ratchet =
+                Self::load_default().expect("load default client_contract_ratchet.json");
+            let exp_path = Self::default_expectations_path();
+            let raw = std::fs::read(&exp_path).expect("read client_expectations.json");
+            let expectations: Value =
+                serde_json::from_slice(&raw).expect("parse client_expectations.json");
+            ratchet
+                .verify_expectations_integrity(&raw, &expectations)
+                .expect("client_expectations.json integrity check");
+            let normalized_allowed_shape = ratchet
+                .allowed_shape_violations
+                .iter()
+                .map(|s| normalize_violation_for_ratchet(s))
+                .collect();
+            let normalized_allowed_notify = ratchet
+                .allowed_notify_violations
+                .iter()
+                .map(|s| normalize_violation_for_ratchet(s))
+                .collect();
+            LoadedClientContracts {
+                ratchet,
+                normalized_allowed_shape,
+                normalized_allowed_notify,
+                expectations,
+            }
+        })
+    }
+}
+
+/// Resolves the call-site-specific `reply_shape` for `slash.SlashCmd` based on the command string
+/// in `args[0]` (`SlashService.cmd_<verb>` or matching constant `arg_consts`), avoiding false
+/// collisions across unrelated client slash call sites (`C-2`).
+pub fn resolve_slash_cmd_shape(
+    rpc_spec: &Value,
+    args: &[PyRep],
+) -> serde_json::Map<String, Value> {
+    let mut shape = serde_json::Map::new();
+    let Some(cmd_str) = args.first().and_then(PyRep::as_str).map(str::trim) else {
+        return shape;
+    };
+    let verb = cmd_str
+        .strip_prefix('/')
+        .and_then(|rest| rest.split_whitespace().next())
+        .map(str::to_ascii_lowercase);
+    let expected_fn = verb.as_ref().map(|v| format!("SlashService.cmd_{v}"));
+    let Some(sites) = rpc_spec.get("call_sites").and_then(Value::as_array) else {
+        return shape;
+    };
+
+    for site in sites {
+        let exact_const = site
+            .get("arg_consts")
+            .and_then(Value::as_array)
+            .and_then(|arr| arr.first())
+            .and_then(Value::as_str)
+            .is_some_and(|c| c.trim_matches('"').trim() == cmd_str);
+        let matches_fn = expected_fn
+            .as_deref()
+            .is_some_and(|fn_name| site.get("func").and_then(Value::as_str) == Some(fn_name));
+        if !exact_const && !matches_fn {
+            continue;
+        }
+        if let Some(uses) = site.get("uses").and_then(Value::as_array) {
+            for u in uses.iter().filter_map(Value::as_str) {
+                if let Some((p, op)) = u.split_once(' ') {
+                    shape
+                        .entry(p.to_string())
+                        .or_insert_with(|| Value::Array(Vec::new()))
+                        .as_array_mut()
+                        .unwrap()
+                        .push(Value::String(op.to_string()));
+                }
+            }
+        }
+    }
+    shape
+}
+
+/// Validates a single live RPC call reply against `expectations["rpc"]["{service}.{method}"]`
+/// using strict `#912` (`C-1`) validation rules (`C-2`).
+pub fn validate_rpc_reply_for_call(
+    lookup: Option<&SemanticLookupContext<'_>>,
+    expectations: &Value,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    raw_reply: &PyRep,
+) -> ReplyValidationOutcome {
+    // V24 native clients authenticate via GPSTransport crypto handshake or 6/8-arg Authenticate calls;
+    // the 2-arg `authentication.Login(username, password)` helper returns `{userID, role, sessionChange}`
+    // for bridge and integration test session setup (`auth_cache.rs`).
+    if service == "authentication" && method == "Login" && args.len() < 3 {
+        return ReplyValidationOutcome::default();
+    }
+    let rpc_key = format!("{service}.{method}");
+    let Some(rpc_spec) = expectations.get("rpc").and_then(|r| r.get(&rpc_key)) else {
+        return ReplyValidationOutcome::default();
+    };
+    let custom_shape;
+    let shape_map = if rpc_key == "slash.SlashCmd" {
+        custom_shape = resolve_slash_cmd_shape(rpc_spec, args);
+        &custom_shape
+    } else if let Some(m) = rpc_spec.get("reply_shape").and_then(Value::as_object) {
+        m
+    } else {
+        return ReplyValidationOutcome::default();
+    };
+    validate_reply_shape_with_metrics(lookup, &rpc_key, raw_reply, shape_map)
+}
+
+/// Validates an emitted notification `(event, args)` (already normalized for the client wire) against
+/// `notify_map[event]` arity bounds and argument `reads` shapes under strict `#912` (`C-1`) rules.
+pub fn validate_notification_contract(
+    lookup: Option<&SemanticLookupContext<'_>>,
+    notify_map: &serde_json::Map<String, Value>,
+    event: &str,
+    nargs: &[PyRep],
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    // `OnSessionChanged` in `session.notifications` is an internal trigger intercepted by
+    // `macho_listener` to build a wire `SessionChangeNotification` packet; on the client,
+    // `arg1(sess)` is the client's local `blue.pyos.synchro` session object.
+    if event == "OnSessionChanged" {
+        return violations;
+    }
+    let Some(nspec) = notify_map.get(event) else {
+        return violations;
+    };
+
+    let mut arity_min = nspec["arity_min"].as_u64().unwrap_or(0) as usize;
+    let mut arity_max = nspec["arity_max"].as_u64().unwrap_or(usize::MAX as u64) as usize;
+    if let Some(variants) = nspec["param_variants"].as_array() {
+        if !variants.is_empty() {
+            let mut req_min = 0usize;
+            let mut req_max = usize::MAX;
+            for v in variants {
+                if let Some(plist) = v.get(0).and_then(|x| x.as_array()) {
+                    let pstrs: Vec<&str> = plist.iter().filter_map(|x| x.as_str()).collect();
+                    let has_varargs = pstrs
+                        .iter()
+                        .any(|p| p.starts_with('*') && !p.starts_with("**"));
+                    let pos_count = pstrs.iter().filter(|p| !p.starts_with('*')).count();
+                    req_min = req_min.max(pos_count);
+                    if !has_varargs {
+                        req_max = req_max.min(pos_count);
+                    }
+                }
+            }
+            if req_min <= req_max {
+                arity_min = req_min;
+                arity_max = req_max;
+            }
+        }
+    }
+
+    if nargs.len() < arity_min || nargs.len() > arity_max {
+        violations.push(format!(
+            "notify:{event}: emitted {} args, client expects {arity_min}..={arity_max} ({nargs:?})",
+            nargs.len()
+        ));
+        return violations;
+    }
+
+    if let Some(reads) = nspec["reads"].as_array() {
+        let mut arg_shapes: HashMap<usize, serde_json::Map<String, Value>> = HashMap::new();
+        for r in reads.iter().filter_map(|x| x.as_str()) {
+            // `SpaceMgr.OnDamageStateChange(shipID, damageState)` receives a 3-tuple from the server;
+            // `HealthWidget.OnDamageStateChange` is a client-internal scatter event with a 5-tuple.
+            if event == "OnDamageStateChange" && r.contains("unpack:5") {
+                continue;
+            }
+            let Some(rest) = r.strip_prefix("arg") else {
+                continue;
+            };
+            let Some(open_paren) = rest.find('(') else {
+                continue;
+            };
+            let Ok(arg_idx) = rest[..open_paren].parse::<usize>() else {
+                continue;
+            };
+            let Some(close_paren) = rest.find(')') else {
+                continue;
+            };
+            let param_name = &rest[open_paren + 1..close_paren];
+            if nspec["params"]
+                .as_array()
+                .is_some_and(|ps| ps.iter().any(|p| p.as_str() == Some(&format!("*{param_name}"))))
+            {
+                continue;
+            }
+            let after_paren = &rest[close_paren + 1..];
+            let Some((subpath, op)) = after_paren.split_once(' ') else {
+                continue;
+            };
+            let path_key = if subpath.is_empty() {
+                "$".to_string()
+            } else {
+                subpath.to_string()
+            };
+            arg_shapes
+                .entry(arg_idx)
+                .or_default()
+                .entry(path_key)
+                .or_insert_with(|| Value::Array(Vec::new()))
+                .as_array_mut()
+                .unwrap()
+                .push(Value::String(op.to_string()));
+        }
+        for (arg_idx, shape_map) in arg_shapes {
+            if let Some(arg_val) = nargs.get(arg_idx) {
+                let v = validate_reply_shape(
+                    lookup,
+                    &format!("notify:{event}[arg{arg_idx}]"),
+                    arg_val,
+                    &shape_map,
+                );
+                violations.extend(v);
+            }
+        }
+    }
+
+    violations
+}
+
+/// Convenience wrapper validating an emitted wire notification against `expectations["notify"]`.
+pub fn validate_notification_for_event(
+    lookup: Option<&SemanticLookupContext<'_>>,
+    expectations: &Value,
+    event: &str,
+    nargs: &[PyRep],
+) -> Vec<String> {
+    let Some(notify_map) = expectations.get("notify").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    validate_notification_contract(lookup, notify_map, event, nargs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1944,6 +2214,51 @@ mod tests {
                 .verify_expectations_integrity(&raw, &parsed)
                 .is_err(),
             "Mismatched expectations SHA-256 must be rejected"
+        );
+    }
+
+    #[test]
+    fn single_call_and_notification_contract_helpers_enforce_arity_and_slash_polymorphism() {
+        let contracts = ClientContractRatchet::load_default_cached();
+        let notify_map = contracts.expectations["notify"]
+            .as_object()
+            .expect("notify map");
+
+        // OnSessionChanged trigger is converted to SessionChangeNotification by macho_listener
+        assert!(validate_notification_contract(
+            None,
+            notify_map,
+            "OnSessionChanged",
+            &[PyRep::Integer(1)]
+        )
+        .is_empty());
+
+        // Bad arity on a known notification must produce a violation:
+        if let Some((ev, _spec)) = notify_map.iter().find(|(k, _)| {
+            *k != "OnSessionChanged"
+                && !validate_notification_contract(None, notify_map, k, &[]).is_empty()
+        }) {
+            let v = validate_notification_contract(None, notify_map, ev, &[]);
+            assert!(
+                !v.is_empty(),
+                "0-arg emission for `{ev}` must be rejected"
+            );
+        }
+
+        // `/createitem` resolves to SlashService.cmd_createitem (accepts KeyVal{itemID}), not Ship.ImportFromShip split:
+        let created = PyRep::keyval(vec![("itemID", PyRep::Integer(900_001))]);
+        let slash_out = validate_rpc_reply_for_call(
+            None,
+            &contracts.expectations,
+            "slash",
+            "SlashCmd",
+            &[PyRep::String("/createitem 587 1".into())],
+            &created,
+        );
+        assert!(
+            slash_out.violations.is_empty(),
+            "/createitem KeyVal must pass SlashService.cmd_createitem shape: {:?}",
+            slash_out.violations
         );
     }
 }

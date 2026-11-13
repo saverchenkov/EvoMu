@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod client_contract;
+pub mod client_harness;
 pub mod pre_check;
 pub mod quasar_tap;
 
