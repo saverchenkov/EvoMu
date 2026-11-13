@@ -113,6 +113,7 @@ impl Drop for PreAuthConnectionGuard {
 
 /// Maps a `CallReq` dispatch failure into a V24 `machoNet` `ErrorResponse` body via the
 /// total [`eve_proto::ClientError::to_macho_error_body`] wire mapping (`C-5`, `#929`).
+#[cfg(test)]
 pub(crate) fn map_call_req_error_body(
     service: &str,
     method: &str,

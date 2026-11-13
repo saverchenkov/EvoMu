@@ -11,13 +11,6 @@ use crate::router::ServerContext;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
 
-fn err(code: &str, msg: impl Into<String>) -> BridgeRpcError {
-    BridgeRpcError {
-        code: code.into(),
-        message: msg.into(),
-    }
-}
-
 #[derive(Clone, Copy)]
 struct NavDogmaAttrIds {
     disallow_docking: Option<u16>,

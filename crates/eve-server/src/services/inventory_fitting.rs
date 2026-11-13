@@ -1981,6 +1981,7 @@ pub(crate) fn ship_hold_capacity_error_key(flag_u16: u16) -> eve_proto::UserErro
     }
 }
 
+#[cfg(test)]
 pub(crate) fn ship_hold_capacity_error_code(flag_u16: u16) -> &'static str {
     ship_hold_capacity_error_key(flag_u16).as_str()
 }
