@@ -556,8 +556,11 @@ impl ServerContext {
             .map(|b| b.service.as_str())
             .unwrap_or(service);
 
-        let flags = self.feature_flags_snapshot();
-        if effective_service == "taleMgr" && !flags.enable_living_world {
+        let (enable_living_world, enable_quasar_gateway) = {
+            let flags = self.feature_flags.read().unwrap_or_else(|e| e.into_inner());
+            (flags.enable_living_world, flags.enable_quasar_gateway)
+        };
+        if effective_service == "taleMgr" && !enable_living_world {
             return Err(BridgeRpcError {
                 // rpc-lint: allow "FeatureDisabled" is an error code, not a taleMgr method
                 code: "FeatureDisabled".into(),
@@ -567,7 +570,7 @@ impl ServerContext {
             });
         }
 
-        if effective_service == "publicGatewaySvc" && !flags.enable_quasar_gateway {
+        if effective_service == "publicGatewaySvc" && !enable_quasar_gateway {
             return Err(BridgeRpcError {
                 // rpc-lint: allow "FeatureDisabled" is an error code, not a publicGatewaySvc method
                 code: "FeatureDisabled".into(),

@@ -514,4 +514,54 @@ async fn persist_ball_positions_and_landed_warps_reject_stale_epoch_and_wrong_sy
         Some([11_111.0, 22_222.0, 33_333.0]),
         "W5C3-01: SystemActor SetBallPosition with stale actor epoch must not overwrite DB"
     );
+
+    // 5. W5C3R-01 / W5C3R-05: non-ship item in space persists via changed check without character scan,
+    // and docked/stored item (location_id >= 60_000_000) is rejected as stale.
+    let can_id = 888_777_667_i64;
+    db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            can_id,
+            eve_db::InventoryItemRecord {
+                item_id: can_id,
+                type_id: 23, // Cargo Container
+                owner_id: 90_000_001,
+                location_id: i64::from(sys_id),
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let mut can_bp = Ballpark::new(sys_id);
+    can_bp.add_ball(Ball {
+        id: can_id,
+        type_id: 23,
+        position: DVec3::new(500.0, 600.0, 700.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 1_000.0,
+        radius: 50.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    });
+    let empty_epochs: HashMap<BallId, u64> = HashMap::new();
+    persist_ball_positions_in_db(&can_bp, &[can_id], &Some(Arc::clone(&db)), &empty_epochs);
+    assert_eq!(
+        db.with_snapshot(|s| s.item_positions.get(&can_id).copied()),
+        Some([500.0, 600.0, 700.0]),
+        "W5C3R-05: non-ship item in space must persist position"
+    );
+    db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&can_id).unwrap().location_id = 60_003_760;
+    });
+    can_bp.set_ball_position(can_id, DVec3::new(999.0, 999.0, 999.0));
+    persist_ball_positions_in_db(&can_bp, &[can_id], &Some(Arc::clone(&db)), &empty_epochs);
+    assert_eq!(
+        db.with_snapshot(|s| s.item_positions.get(&can_id).copied()),
+        Some([500.0, 600.0, 700.0]),
+        "W5C3R-05: docked/containerized item (location_id >= 60_000_000) must be rejected as stale"
+    );
 }

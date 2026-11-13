@@ -2013,7 +2013,7 @@ pub async fn tick_background_cluster_with_step(ctx: &ServerContext, explicit_ste
         }
     }
     if has_long_idle_candidate {
-        let _ = ctx.systems.evict_idle_systems(300).await;
+        let _ = ctx.systems.evict_idle_systems_with_min_ticks(300, 60).await;
     }
 }
 

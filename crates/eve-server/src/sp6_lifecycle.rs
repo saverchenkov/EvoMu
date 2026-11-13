@@ -339,14 +339,15 @@ pub fn is_ship_stale_for_in_space_write_in_snap(
             {
                 return true;
             }
-        }
-        if snap.characters.values().any(|c| {
-            c.active_ship_id == ship_id
-                && (c.station_id.is_some()
-                    || c.structure_id.is_some()
-                    || c.solar_system_id != exp_sys)
-        }) {
-            return true;
+            if let Some(c) = snap.characters.get(&it.owner_id) {
+                if c.active_ship_id == ship_id
+                    && (c.station_id.is_some()
+                        || c.structure_id.is_some()
+                        || c.solar_system_id != exp_sys)
+                {
+                    return true;
+                }
+            }
         }
     }
     false

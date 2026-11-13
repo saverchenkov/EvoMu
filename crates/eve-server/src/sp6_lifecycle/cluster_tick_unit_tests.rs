@@ -1794,6 +1794,9 @@ async fn system_hibernation_zero_idle_tick_work_and_eviction_919_866_869() {
 async fn tick_background_cluster_evicts_idle_system_after_60_idle_ticks_919_866() {
     let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
     let idle_sys = 30_002_187_u32; // Amarr (no characters in demo seed)
+    let held_sys = 30_002_659_u32; // Dodixie (no demo chars; externally held handle)
+    let held_handle = ctx.systems.get_or_spawn(held_sys);
+    assert!(held_handle.is_hibernated());
     {
         let idle_handle = ctx.systems.get_or_spawn(idle_sys);
         assert!(idle_handle.is_hibernated());
@@ -1816,18 +1819,32 @@ async fn tick_background_cluster_evicts_idle_system_after_60_idle_ticks_919_866(
     assert!(handle_before_age.idle_ticks() >= 60);
     drop(handle_before_age);
 
-    // Once hibernation age passes 300s and idle_ticks >= 60, tick_background_cluster itself evicts it.
+    // Once hibernation age passes 300s and idle_ticks >= 60, tick_background_cluster itself evicts it,
+    // while keeping another hibernated system that has < 60 idle_ticks or an externally held SystemHandle.
+    let young_sys = 30_002_510_u32; // Rens
+    drop(ctx.systems.get_or_spawn(young_sys));
+
     ctx.clock().advance_secs(300);
     tick_background_cluster(&ctx).await;
     assert!(
         ctx.systems.get_handle(idle_sys).is_none(),
-        "W5C3-02: tick_background_cluster must await evict_idle_systems(300) and drop idle system"
+        "W5C3-02: tick_background_cluster must await evict_idle_systems_with_min_ticks(300, 60) and drop idle system"
     );
+    assert!(
+        ctx.systems.get_handle(held_sys).is_some(),
+        "W5C3R-02: system with externally held SystemHandle (strong_count > 3) must not be evicted"
+    );
+    assert!(
+        ctx.systems.get_handle(young_sys).is_some(),
+        "W5C3R-02: system with < 60 idle_ticks must not be evicted when another system triggers eviction"
+    );
+    drop(held_handle);
 }
 
 #[test]
 fn server_context_weak_upgrade_shares_live_config_and_catalog_arcs_without_clones_839() {
     let mut cfg = crate::config::ServerConfig::default();
+    cfg.storage.backend = "memory".to_string();
     cfg.feature_flags.enable_living_world = false;
     cfg.feature_flags.starter_plex_balance = 777;
     cfg.feature_flags.free_fast_checkout_plex = true;

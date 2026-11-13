@@ -332,24 +332,41 @@ impl SystemRegistry {
     /// Evicts hibernated systems that have been idle for at least `min_idle_secs` after flushing
     /// a final condition checkpoint (`RFC-1 E-4`, `#919`, `#866`).
     pub async fn evict_idle_systems(&self, min_idle_secs: u64) -> Vec<SolarSystemId> {
+        self.evict_idle_systems_with_min_ticks(min_idle_secs, 0).await
+    }
+
+    /// Evicts hibernated systems that have reached both `min_idle_secs` and `min_idle_ticks`,
+    /// provided no external [`SystemHandle`] clones are still held outside the registry/actor.
+    pub async fn evict_idle_systems_with_min_ticks(
+        &self,
+        min_idle_secs: u64,
+        min_idle_ticks: u64,
+    ) -> Vec<SolarSystemId> {
         let now_unix = self
             .db
             .as_ref()
             .map(|db| db.clock().now_unix_secs())
             .unwrap_or(1);
+        let can_evict_handle = |h: &SystemHandle, max_strong: usize| -> bool {
+            if !h.is_hibernated() || Arc::strong_count(&h.ballpark) > max_strong {
+                return false;
+            }
+            if min_idle_ticks > 0
+                && h.idle_ticks.load(std::sync::atomic::Ordering::Relaxed) < min_idle_ticks
+            {
+                return false;
+            }
+            if min_idle_secs == 0 {
+                return true;
+            }
+            let since = h.hibernated_since_unix();
+            since > 0 && now_unix.saturating_sub(since) >= min_idle_secs
+        };
         let candidates: Vec<(SolarSystemId, SystemHandle)> = self
             .active_system_handles()
             .into_iter()
-            .filter(|(_, h)| {
-                if !h.is_hibernated() {
-                    return false;
-                }
-                if min_idle_secs == 0 {
-                    return true;
-                }
-                let since = h.hibernated_since_unix();
-                since > 0 && now_unix.saturating_sub(since) >= min_idle_secs
-            })
+            // Refcounts during filter: `self.systems` (1) + actor task (1) + vec element (1) = 3.
+            .filter(|(_, h)| can_evict_handle(h, 3))
             .collect();
         let mut evicted = Vec::new();
         for (sys_id, handle) in candidates {
@@ -359,7 +376,8 @@ impl SystemRegistry {
             }
             let removed = {
                 let mut guard = self.systems.write().unwrap_or_else(|e| e.into_inner());
-                if guard.get(&sys_id).is_some_and(|h| h.is_hibernated()) {
+                // Loop holds `handle` (1), `guard` holds (1), actor holds (1) = 3.
+                if guard.get(&sys_id).is_some_and(|h| can_evict_handle(h, 3)) {
                     guard.remove(&sys_id).is_some()
                 } else {
                     false
@@ -654,6 +672,9 @@ impl SystemRegistry {
                                 reply,
                             } => {
                                 let changed = ballpark.change_slim_item(ball_id, slim_meta);
+                                if changed {
+                                    spawned_checkpoint_ball = Some(ball_id);
+                                }
                                 let _ = reply.send(changed);
                             }
                             SystemCommand::SetBallWormholeStages {

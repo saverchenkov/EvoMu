@@ -195,13 +195,6 @@ pub(crate) fn persist_ball_positions_in_db(
                     .ball_slim_meta
                     .get(&bid)
                     .is_some_and(|m| m.category_id == 11)
-                || !snap.items.contains_key(&bid)
-                || crate::sp6_lifecycle::is_ship_stale_for_in_space_write_in_snap(
-                    snap,
-                    bid,
-                    Some(solar_system_id),
-                    ball_space_entry_epochs.get(&bid).copied(),
-                )
             {
                 continue;
             }
@@ -215,9 +208,18 @@ pub(crate) fn persist_ball_positions_in_db(
                 None => true,
                 Some(&prev) => (DVec3::from_array(prev) - b.position).length_squared() > 1e-6,
             };
-            if changed {
-                out.push((bid, b.position.to_array()));
+            if !changed
+                || !snap.items.contains_key(&bid)
+                || crate::sp6_lifecycle::is_ship_stale_for_in_space_write_in_snap(
+                    snap,
+                    bid,
+                    Some(solar_system_id),
+                    ball_space_entry_epochs.get(&bid).copied(),
+                )
+            {
+                continue;
             }
+            out.push((bid, b.position.to_array()));
         }
         out
     });
@@ -278,14 +280,7 @@ pub(crate) fn persist_landed_warps_in_db(
                     .ball_slim_meta
                     .get(&bid)
                     .is_some_and(|m| m.category_id == 11)
-                || !snap.items.contains_key(&bid)
                 || !b.position.is_finite()
-                || crate::sp6_lifecycle::is_ship_stale_for_in_space_write_in_snap(
-                    snap,
-                    bid,
-                    Some(solar_system_id),
-                    ball_space_entry_epochs.get(&bid).copied(),
-                )
             {
                 continue;
             }
@@ -318,7 +313,15 @@ pub(crate) fn persist_landed_warps_in_db(
                     }
                 }
             };
-            if should_write {
+            if should_write
+                && snap.items.contains_key(&bid)
+                && !crate::sp6_lifecycle::is_ship_stale_for_in_space_write_in_snap(
+                    snap,
+                    bid,
+                    Some(solar_system_id),
+                    ball_space_entry_epochs.get(&bid).copied(),
+                )
+            {
                 out.push((bid, b.position.to_array()));
             }
         }
