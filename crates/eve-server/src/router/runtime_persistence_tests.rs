@@ -335,11 +335,13 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
         let ctx2 = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db2));
 
         // 1) ServerContext persisted state restored
-        let probes = ctx2.active_scanner_probes.read().unwrap();
-        assert_eq!(probes.get(&probe_id).map(|p| p.range_step), Some(4));
-        assert_eq!(probes.get(&probe_id).map(|p| p.probe_type_id), Some(30_013));
-        assert_eq!(probes.get(&probe_id).map(|p| p.state), Some(0));
-        assert_eq!(probes.get(&probe_id).and_then(|p| p.warp_end_ft), None);
+        {
+            let probes = ctx2.active_scanner_probes.read().unwrap();
+            assert_eq!(probes.get(&probe_id).map(|p| p.range_step), Some(4));
+            assert_eq!(probes.get(&probe_id).map(|p| p.probe_type_id), Some(30_013));
+            assert_eq!(probes.get(&probe_id).map(|p| p.state), Some(0));
+            assert_eq!(probes.get(&probe_id).and_then(|p| p.warp_end_ft), None);
+        }
         assert!(ctx2
             .scanned_signatures
             .read()
@@ -352,8 +354,10 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
                 .get(&(cid, sys_id, "ABC-123".into())),
             Some(&0.75)
         );
-        let fighters = ctx2.active_fighters.read().unwrap();
-        assert_eq!(fighters.get(&fighter_id).map(|f| f.squadron_size), Some(9));
+        {
+            let fighters = ctx2.active_fighters.read().unwrap();
+            assert_eq!(fighters.get(&fighter_id).map(|f| f.squadron_size), Some(9));
+        }
         assert_eq!(
             ctx2.fighter_cooldown_state
                 .read()
