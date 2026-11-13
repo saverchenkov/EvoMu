@@ -257,11 +257,13 @@ pub(super) async fn handle_scanning_and_wormholes(
             let radius_au = scan_radius_meters / AU_IN_METERS;
             let now_ft = ctx.now_blueos_filetime_ticks();
             let probe_ids_rep: Vec<PyRep> = (0..probes.len()).map(|i| PyRep::Integer(900_000 + i as i64)).collect();
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(char_id),
-                "OnSystemScanStarted",
-                "charid",
-                vec![PyRep::Integer(now_ft), PyRep::Integer(scan_time_ms), PyRep::List(probe_ids_rep)],
+                crate::router::notify_registry::OnSystemScanStarted {
+                    start_time: now_ft,
+                    duration_ms: scan_time_ms,
+                    probes: PyRep::List(probe_ids_rep),
+                },
             );
 
             let updated_results = ctx.db.try_with_mut_snapshot(|snap| {
@@ -353,11 +355,9 @@ pub(super) async fn handle_scanning_and_wormholes(
                             ]
                         })
                         .collect();
-                    ctx.notify(
+                    ctx.emit_typed(
                         NotificationTarget::Character(char_id),
-                        "OnSystemScanDone",
-                        "charid",
-                        vec![],
+                        crate::router::notify_registry::OnSystemScanDone {},
                     );
                     Some(Ok(PyRep::rowset(
                         vec![
@@ -461,20 +461,18 @@ pub(super) async fn handle_scanning_and_wormholes(
                 vec!["ballID", "typeID", "distance", "x", "y", "z"],
                 rows,
             );
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(char_id),
-                "OnDirectionalScanComplete",
-                "charid",
-                vec![
-                    PyRep::Real(scan_angle.to_radians()),
-                    PyRep::Real(scan_range),
-                    PyRep::Tuple(vec![
+                crate::router::notify_registry::OnDirectionalScanComplete {
+                    angle: scan_angle.to_radians(),
+                    range: scan_range,
+                    direction: PyRep::Tuple(vec![
                         PyRep::Real(caller_dir.x),
                         PyRep::Real(caller_dir.y),
                         PyRep::Real(caller_dir.z),
                     ]),
-                    result_rowset.clone(),
-                ],
+                    results: result_rowset.clone(),
+                },
             );
             Some(Ok(result_rowset))
         }
@@ -597,7 +595,10 @@ pub(super) async fn handle_scanning_and_wormholes(
                     ("state", PyRep::Integer(1)),
                     ("scanBonuses", scan_bonuses.clone()),
                 ]);
-                ctx.notify(NotificationTarget::Character(char_id), "OnNewProbe", "charid", vec![probe_kv]);
+                ctx.emit_typed(
+                    NotificationTarget::Character(char_id),
+                    crate::router::notify_registry::OnNewProbe { probe: probe_kv },
+                );
             }
             Some(Ok(PyRep::keyval([
                 ("success", PyRep::Bool(true)),
@@ -1223,13 +1224,14 @@ pub(crate) fn emit_signal_tracker_signature_delta(
         return;
     }
     let removed_list = PyRep::List(removed_ids.iter().cloned().map(PyRep::String).collect());
-    let args = vec![PyRep::Integer(i64::from(sys_id)), added_dict, removed_list];
     for cid in subs {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(cid),
-            "OnSignalTrackerSignatureUpdate",
-            "charid",
-            args.clone(),
+            crate::router::notify_registry::OnSignalTrackerSignatureUpdate {
+                solar_system_id: i64::from(sys_id),
+                added_signatures: added_dict.clone(),
+                removed_signatures: removed_list.clone(),
+            },
         );
     }
 }
@@ -1259,13 +1261,14 @@ pub(crate) fn emit_signal_tracker_anomaly_delta(
             .collect(),
     );
     let removed_list = PyRep::List(removed_ids.iter().cloned().map(PyRep::String).collect());
-    let args = vec![PyRep::Integer(i64::from(sys_id)), added_dict, removed_list];
     for cid in subs {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(cid),
-            "OnSignalTrackerAnomalyUpdate",
-            "charid",
-            args.clone(),
+            crate::router::notify_registry::OnSignalTrackerAnomalyUpdate {
+                solar_system_id: i64::from(sys_id),
+                added_anomalies: added_dict.clone(),
+                removed_anomalies: removed_list.clone(),
+            },
         );
     }
 }
@@ -1295,13 +1298,14 @@ pub(crate) fn emit_signal_tracker_structure_delta(
             .collect(),
     );
     let removed_list = PyRep::List(removed_ids.iter().copied().map(PyRep::Integer).collect());
-    let args = vec![PyRep::Integer(i64::from(sys_id)), added_dict, removed_list];
     for cid in subs {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(cid),
-            "OnSignalTrackerStructureUpdate",
-            "charid",
-            args.clone(),
+            crate::router::notify_registry::OnSignalTrackerStructureUpdate {
+                solar_system_id: i64::from(sys_id),
+                added_structures: added_dict.clone(),
+                removed_structures: removed_list.clone(),
+            },
         );
     }
 }
@@ -1329,11 +1333,17 @@ pub(crate) fn dispatch_signal_tracker_notifications(
     notifs: impl IntoIterator<Item = (i64, Vec<PyRep>)>,
 ) {
     for (cid, args) in notifs {
-        ctx.notify(
+        let mut it = args.into_iter();
+        let solar_system_id = it.next().and_then(|r| r.as_i64()).unwrap_or(0);
+        let added_structures = it.next().unwrap_or_else(|| PyRep::Dict(Vec::new()));
+        let removed_structures = it.next().unwrap_or_else(|| PyRep::List(Vec::new()));
+        ctx.emit_typed(
             NotificationTarget::Character(cid),
-            "OnSignalTrackerStructureUpdate",
-            "charid",
-            args,
+            crate::router::notify_registry::OnSignalTrackerStructureUpdate {
+                solar_system_id,
+                added_structures,
+                removed_structures,
+            },
         );
     }
 }
@@ -1388,34 +1398,41 @@ pub(crate) fn emit_signal_tracker_site_removed_with_db(
         return;
     }
     let now_ft = db.clock().now_blueos_filetime_ticks();
-    let mut queues = pending_notifications.write().unwrap_or_else(|e| e.into_inner());
-    for (event_name, active) in [
-        ("OnSignalTrackerAnomalyUpdate", was_anom),
-        ("OnSignalTrackerSignatureUpdate", was_sig),
-    ] {
-        if !active {
-            continue;
-        }
-        let args = vec![
-            PyRep::Integer(i64::from(sys_id)),
-            PyRep::Dict(Vec::new()),
-            PyRep::List(vec![PyRep::String(site_id.to_string())]),
-        ];
+    let removed = PyRep::List(vec![PyRep::String(site_id.to_string())]);
+    if was_anom {
+        let notif = crate::router::notify_registry::OnSignalTrackerAnomalyUpdate {
+            solar_system_id: i64::from(sys_id),
+            added_anomalies: PyRep::Dict(Vec::new()),
+            removed_anomalies: removed.clone(),
+        };
         for &(cid, uid) in &recips {
-            let (packet, marshaled_packet) = ServerContext::build_macho_notification_packet(
-                cid, uid, event_name, "charid", args.clone(),
+            crate::router::notify_registry::emit_typed_target_to_char_with_id_type(
+                Some(pending_notifications),
+                Some(notify_tx),
+                cid,
+                uid,
+                "charid",
+                now_ft,
+                notif.clone(),
             );
-            let notif = crate::router::cache_notifications::PendingMachoNotification {
-                seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-                recipient_char_id: cid, event: event_name.into(), id_type: "charid".into(),
-                args: args.clone(), packet, marshaled_packet, created_filetime: now_ft,
-            };
-            let q = queues.entry(cid).or_default();
-            if q.len() >= crate::router::cache_notifications::MAX_PENDING_NOTIFICATIONS_PER_CHAR {
-                q.remove(0);
-            }
-            q.push(notif.clone());
-            let _ = notify_tx.send((cid, notif));
+        }
+    }
+    if was_sig {
+        let notif = crate::router::notify_registry::OnSignalTrackerSignatureUpdate {
+            solar_system_id: i64::from(sys_id),
+            added_signatures: PyRep::Dict(Vec::new()),
+            removed_signatures: removed,
+        };
+        for &(cid, uid) in &recips {
+            crate::router::notify_registry::emit_typed_target_to_char_with_id_type(
+                Some(pending_notifications),
+                Some(notify_tx),
+                cid,
+                uid,
+                "charid",
+                now_ft,
+                notif.clone(),
+            );
         }
     }
 }

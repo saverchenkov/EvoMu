@@ -146,7 +146,13 @@ pub async fn apply_damage_to_fighter_squadron(
             }
         });
         crate::services::fleet_social::fleet_social_finder_tactical::clear_destroyed_target_tag(ctx, fighter_ball_id);
-        ctx.notify(crate::router::NotificationTarget::Character(owner_char_id), "OnFighterRemovedFromController", "charid", vec![PyRep::Integer(fighter_ball_id), PyRep::Integer(tube_flag)]);
+        ctx.emit_typed(
+            crate::router::NotificationTarget::Character(owner_char_id),
+            crate::router::notify_registry::OnFighterRemovedFromController {
+                fighter_id: fighter_ball_id,
+                tube_flag_id: tube_flag,
+            },
+        );
     } else if lost > 0 {
         ctx.active_fighters.write().unwrap().insert(fighter_ball_id, squad.clone());
         ctx.db.with_mut_snapshot(|snap| {
@@ -157,7 +163,13 @@ pub async fn apply_damage_to_fighter_squadron(
                 it.version += 1;
             }
         });
-        ctx.notify(crate::router::NotificationTarget::Character(owner_char_id), "OnInSpaceSquadronSizeChanged", "charid", vec![PyRep::Integer(fighter_ball_id), PyRep::Integer(squad.squadron_size as i64)]);
+        ctx.emit_typed(
+            crate::router::NotificationTarget::Character(owner_char_id),
+            crate::router::notify_registry::OnInSpaceSquadronSizeChanged {
+                fighter_id: fighter_ball_id,
+                squadron_size: squad.squadron_size as i64,
+            },
+        );
     }
 
     (lost, squad.squadron_size, wiped_out)
@@ -489,7 +501,15 @@ async fn handle_fighters_inner(
 
             ctx.fighter_tube_loads.write().unwrap().insert((ship_id, tube_idx), loaded_fighter_id);
             let loaded_sq_size = item.quantity.min(max_squadron_size as i32) as i64;
-            session.push_notification("OnFighterTubeContentUpdate", vec![PyRep::Integer((159 + tube_idx) as i64), PyRep::Integer(loaded_fighter_id), PyRep::Integer(item.type_id as i64), PyRep::Integer(loaded_sq_size)]);
+            crate::router::notify_registry::push_typed_session_notification(
+                session,
+                crate::router::notify_registry::OnFighterTubeContentUpdate {
+                    tube_flag_id: (159 + tube_idx) as i64,
+                    fighter_id: loaded_fighter_id,
+                    fighter_type_id: item.type_id as i64,
+                    squadron_size: loaded_sq_size,
+                },
+            );
             let ability_slots: Vec<PyRep> = ctx
                 .sde
                 .fighter_ability_slots_with_info(item.type_id)
@@ -584,7 +604,12 @@ async fn handle_fighters_inner(
             }
             let removed = ctx.fighter_tube_loads.write().unwrap().remove(&(ship_id, tube_idx));
             if removed.is_some() {
-                session.push_notification("OnFighterTubeContentEmpty", vec![PyRep::Integer((159 + tube_idx) as i64)]);
+                crate::router::notify_registry::push_typed_session_notification(
+                    session,
+                    crate::router::notify_registry::OnFighterTubeContentEmpty {
+                        tube_flag_id: (159 + tube_idx) as i64,
+                    },
+                );
             }
             Some(Ok(PyRep::Bool(removed.is_some())))
         }
@@ -1047,17 +1072,31 @@ async fn handle_fighters_inner(
 
                 let tube_flag = (159 + tube_idx) as i64;
                 let now_ft = ctx.now_blueos_filetime_ticks();
-                session.push_notification("OnFighterTubeTaskStatus", vec![PyRep::Integer(tube_flag), PyRep::String("INSPACE".into()), PyRep::Integer(now_ft), PyRep::Integer(now_ft), PyRep::None]);
-                session.push_notification("OnFighterTubeContentEmpty", vec![PyRep::Integer(tube_flag)]);
-                session.push_notification(
-                    "OnFighterAddedToController",
-                    vec![
-                        PyRep::Integer(ball_id),
-                        PyRep::Integer(item_type_id as i64),
-                        PyRep::Integer(tube_flag),
-                        PyRep::Integer(launched_units as i64),
-                        PyRep::List(vec![]),
-                    ],
+                crate::router::notify_registry::push_typed_session_notification(
+                    session,
+                    crate::router::notify_registry::OnFighterTubeTaskStatus {
+                        tube_flag_id: tube_flag,
+                        status_id: "INSPACE".into(),
+                        status_start_time: now_ft,
+                        status_end_time: now_ft,
+                        user_error: None,
+                    },
+                );
+                crate::router::notify_registry::push_typed_session_notification(
+                    session,
+                    crate::router::notify_registry::OnFighterTubeContentEmpty {
+                        tube_flag_id: tube_flag,
+                    },
+                );
+                crate::router::notify_registry::push_typed_session_notification(
+                    session,
+                    crate::router::notify_registry::OnFighterAddedToController {
+                        fighter_id: ball_id,
+                        fighter_type_id: item_type_id as i64,
+                        tube_flag_id: tube_flag,
+                        squadron_size: launched_units as i64,
+                        ability_slot_states: PyRep::List(vec![]),
+                    },
                 );
                 launched_ball_ids.push(PyRep::Integer(ball_id));
             }
@@ -1229,9 +1268,32 @@ async fn handle_fighters_inner(
                 let recalled_qty = ctx.db.with_snapshot(|s| s.items.get(&f.item_id).map(|i| i.quantity).unwrap_or(f.squadron_size as i32)) as i64;
                 let now_ft = ctx.now_blueos_filetime_ticks();
                 let end_ft = now_ft + (total_rearm_secs as i64) * 10_000_000;
-                session.push_notification("OnFighterRemovedFromController", vec![PyRep::Integer(f.ball_id), PyRep::Integer(tube_flag)]);
-                session.push_notification("OnFighterTubeContentUpdate", vec![PyRep::Integer(tube_flag), PyRep::Integer(f.item_id), PyRep::Integer(f.type_id as i64), PyRep::Integer(recalled_qty)]);
-                session.push_notification("OnFighterTubeTaskStatus", vec![PyRep::Integer(tube_flag), PyRep::String("REFUELING".into()), PyRep::Integer(now_ft), PyRep::Integer(end_ft), PyRep::None]);
+                crate::router::notify_registry::push_typed_session_notification(
+                    session,
+                    crate::router::notify_registry::OnFighterRemovedFromController {
+                        fighter_id: f.ball_id,
+                        tube_flag_id: tube_flag,
+                    },
+                );
+                crate::router::notify_registry::push_typed_session_notification(
+                    session,
+                    crate::router::notify_registry::OnFighterTubeContentUpdate {
+                        tube_flag_id: tube_flag,
+                        fighter_id: f.item_id,
+                        fighter_type_id: f.type_id as i64,
+                        squadron_size: recalled_qty,
+                    },
+                );
+                crate::router::notify_registry::push_typed_session_notification(
+                    session,
+                    crate::router::notify_registry::OnFighterTubeTaskStatus {
+                        tube_flag_id: tube_flag,
+                        status_id: "REFUELING".into(),
+                        status_start_time: now_ft,
+                        status_end_time: end_ft,
+                        user_error: None,
+                    },
+                );
                 let _ = sys_handle.remove_ball(f.ball_id).await;
                 recalled.push(PyRep::Integer(f.ball_id));
             }

@@ -397,11 +397,9 @@ pub fn handle_contacts(
             let now_unix = ctx.now_unix();
             match ctx.db.remap_neural_attributes(char_id, cha, int, mem, per, wil, now_unix) {
                 Ok(ch) => {
-                    ctx.notify(
+                    ctx.emit_typed(
                         NotificationTarget::Character(char_id),
-                        "OnRespecInfoChanged",
-                        "charid",
-                        vec![],
+                        crate::router::notify_registry::OnRespecInfoChanged {},
                     );
                     Some(Ok(PyRep::keyval([
                         ("characterID", PyRep::Integer(char_id)),
@@ -602,15 +600,29 @@ pub fn handle_contacts(
                 ("isOnline", PyRep::Bool(!is_blocked_by(ctx, contact_id, char_id) && is_character_online(ctx, contact_id))),
             ]);
             if ctx.sde.agents.contains_key(&contact_id) {
-                ctx.notify(NotificationTarget::Character(char_id), "OnAgentAdded", "charid", vec![PyRep::Integer(contact_id)]);
+                ctx.emit_typed(
+                    NotificationTarget::Character(char_id),
+                    crate::router::notify_registry::OnAgentAdded {
+                        entity_id: contact_id,
+                    },
+                );
             }
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(char_id),
-                "OnPersonalContactsAdded",
-                "charid",
-                vec![PyRep::List(vec![contact]), PyRep::Real(standing), PyRep::Bool(in_watchlist), PyRep::Integer(label_mask)],
+                crate::router::notify_registry::OnPersonalContactsAdded {
+                    contacts: vec![contact],
+                    relationship_id: standing,
+                    watchlist: in_watchlist,
+                    label_mask,
+                },
             );
-            ctx.notify(NotificationTarget::Character(char_id), "OnSetPlayerStanding", "charid", vec![PyRep::Integer(contact_id), PyRep::Real(standing)]);
+            ctx.emit_typed(
+                NotificationTarget::Character(char_id),
+                crate::router::notify_registry::OnSetPlayerStanding {
+                    contact_id,
+                    standing,
+                },
+            );
 
             Some(Ok(PyRep::keyval([
                 ("contactID", PyRep::Integer(contact_id)),
@@ -705,18 +717,22 @@ pub fn handle_contacts(
             let id_reps: Vec<PyRep> = contact_ids.iter().map(|&id| PyRep::Integer(id)).collect();
             // AddressBookSvc.OnPersonalContactsUpdated(contactIDs, standing, inWatchlist): `None` keeps
             // the client's current value (EditContactsRelationshipID leaves the watchlist untouched).
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(char_id),
-                "OnPersonalContactsUpdated",
-                "charid",
-                vec![
-                    PyRep::List(id_reps.clone()),
-                    PyRep::Real(standing),
-                    watchlist_opt.map(PyRep::Bool).unwrap_or(PyRep::None),
-                ],
+                crate::router::notify_registry::OnPersonalContactsUpdated {
+                    contact_ids: contact_ids.clone(),
+                    standing,
+                    in_watchlist: watchlist_opt,
+                },
             );
             for &cid in &contact_ids {
-                ctx.notify(NotificationTarget::Character(char_id), "OnSetPlayerStanding", "charid", vec![PyRep::Integer(cid), PyRep::Real(standing)]);
+                ctx.emit_typed(
+                    NotificationTarget::Character(char_id),
+                    crate::router::notify_registry::OnSetPlayerStanding {
+                        contact_id: cid,
+                        standing,
+                    },
+                );
             }
             Some(Ok(PyRep::keyval([
                 ("updatedCount", PyRep::Integer(updated_count as i64)),
@@ -753,14 +769,15 @@ pub fn handle_contacts(
                     .iter()
                     .map(|&id| PyRep::keyval([("contactID", PyRep::Integer(id))]))
                     .collect();
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Character(char_id),
-                    "OnPersonalContactsDeleted",
-                    "charid",
-                    vec![PyRep::List(deleted)],
+                    crate::router::notify_registry::OnPersonalContactsDeleted { contacts: deleted },
                 );
                 for &cid in &removed_ids {
-                    ctx.notify(NotificationTarget::Character(char_id), "OnContactNoLongerContact", "charid", vec![PyRep::Integer(cid)]);
+                    ctx.emit_typed(
+                        NotificationTarget::Character(char_id),
+                        crate::router::notify_registry::OnContactNoLongerContact { char_id: cid },
+                    );
                 }
             }
             Some(Ok(PyRep::keyval([
@@ -860,7 +877,10 @@ pub fn handle_contacts(
             // `OnUnblockContacts` is scattered by the client itself (AddressBookSvc.UnblockOwner);
             // ContactsForm.OnUnblockContact(contactID) only reloads the contacts tab.
             for &oid in &unblocked_ids {
-                ctx.notify(NotificationTarget::Character(char_id), "OnUnblockContact", "charid", vec![PyRep::Integer(oid)]);
+                ctx.emit_typed(
+                    NotificationTarget::Character(char_id),
+                    crate::router::notify_registry::OnUnblockContact { contact_id: oid },
+                );
             }
             Some(Ok(PyRep::keyval([
                 ("unblockedCount", PyRep::Integer(unblocked_ids.len() as i64)),
@@ -1292,7 +1312,15 @@ pub fn handle_contacts(
                 Ok(ch.home_station_id)
             });
             match res {
-                Ok(hid) => { ctx.notify(NotificationTarget::Character(char_id), "OnHomeStationChanged", "charid", vec![PyRep::Integer(hid)]); Some(Ok(PyRep::Integer(hid))) }
+                Ok(hid) => {
+                    ctx.emit_typed(
+                        NotificationTarget::Character(char_id),
+                        crate::router::notify_registry::OnHomeStationChanged {
+                            new_home_station_id: hid,
+                        },
+                    );
+                    Some(Ok(PyRep::Integer(hid)))
+                }
                 Err(e) => Some(Err(e)),
             }
         }

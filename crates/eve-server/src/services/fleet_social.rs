@@ -156,15 +156,21 @@ pub(crate) fn sweep_expired_bookmarks_and_notify(ctx: &ServerContext, now_unix: 
         (sweep_expired_bookmarks(snap, now_unix), owners, shared_folder_bms)
     });
     for owner_id in owners {
-        ctx.notify(NotificationTarget::Character(owner_id), "OnRefreshBookmarks", "charid", vec![]);
+        ctx.emit_typed(
+            NotificationTarget::Character(owner_id),
+            crate::router::notify_registry::OnRefreshBookmarks {},
+        );
     }
     for ((corp_id, fid), bms) in shared_folder_bms {
-        let args = fleet_social_access_group_bookmarks::acl_folder_updates_arg(
+        let updates = fleet_social_access_group_bookmarks::acl_folder_updates_rep(
             fid,
             fleet_social_access_group_bookmarks::BOOKMARKS_REMOVED,
             PyRep::List(bms.into_iter().map(PyRep::Integer).collect()),
         );
-        ctx.notify(NotificationTarget::Corporation(corp_id), "OnSharedBookmarksFolderUpdated", "corpid", args);
+        ctx.emit_typed(
+            NotificationTarget::Corporation(corp_id),
+            crate::router::notify_registry::OnSharedBookmarksFolderUpdated { updates },
+        );
     }
     expired_ids
 }
@@ -384,11 +390,12 @@ fn handle_office_manager(
                 Ok((office_id, st_id, quote)) => {
                     let due_unix = ctx.now_unix().saturating_add(30 * 86_400);
                     let _ = super::wallet_serverops::create_bill(ctx, 2, corp_id, 1_000_035, quote, due_unix, 0.0, st_id, 27);
-                    ctx.notify(
+                    ctx.emit_typed(
                         NotificationTarget::Corporation(corp_id),
-                        "OnOfficeRentalChange",
-                        "corpid",
-                        vec![PyRep::Integer(corp_id), PyRep::Integer(office_id)],
+                        crate::router::notify_registry::OnOfficeRentalChange {
+                            corporation_id: corp_id,
+                            office_id: Some(office_id),
+                        },
                     );
                     Some(Ok(PyRep::keyval([
                         ("officeID", PyRep::Integer(office_id)),
@@ -563,11 +570,12 @@ fn handle_office_manager(
 
             match res {
                 Ok(()) => {
-                    ctx.notify(
+                    ctx.emit_typed(
                         NotificationTarget::Corporation(corp_id),
-                        "OnOfficeRentalChange",
-                        "corpid",
-                        vec![PyRep::Integer(corp_id), PyRep::None],
+                        crate::router::notify_registry::OnOfficeRentalChange {
+                            corporation_id: corp_id,
+                            office_id: None,
+                        },
                     );
                     Some(Ok(PyRep::keyval([
                         ("stationID", PyRep::Integer(station_id)),
@@ -800,11 +808,12 @@ pub async fn handle_with_bound(
                 }
                 fleet_social_notify::emit_member_changed(ctx, fleet_id, &old_before, &old_after, false);
                 fleet_social_notify::emit_member_changed(ctx, fleet_id, &new_before, &new_after, false);
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Fleet(fleet_id),
-                    "OnChangeFleetBoss",
-                    "fleetid",
-                    vec![PyRep::Integer(char_id), PyRep::Integer(new_boss_id)],
+                    crate::router::notify_registry::OnChangeFleetBoss {
+                        char_id,
+                        respond_to_node_id: new_boss_id,
+                    },
                 );
                 Some(Ok(PyRep::keyval([
                     ("fleetID", PyRep::Integer(fleet_id)),

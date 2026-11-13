@@ -120,11 +120,12 @@ pub fn handle_corp_gov_tail(
                     .or_default()
                     .welcome_mail = (enabled, subject.clone(), body.clone());
             });
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Corporation(corp_id),
-                "OnCorporationWelcomeMailChanged",
-                "corpid",
-                vec![PyRep::Integer(char_id), PyRep::Integer(now_unix as i64)],
+                crate::router::notify_registry::OnCorporationWelcomeMailChanged {
+                    character_id: char_id,
+                    change_date: now_unix as i64,
+                },
             );
             Some(Ok(PyRep::keyval([
                 ("enabled", PyRep::Bool(enabled)),
@@ -165,11 +166,9 @@ pub fn handle_corp_gov_tail(
                 PyRep::String(("restrictCorpMails").into()),
                 PyRep::Tuple(vec![PyRep::Bool(prev), PyRep::Bool(restricted)]),
             )]);
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Corporation(corp_id),
-                "OnCorporationChanged",
-                "corpid",
-                vec![PyRep::Integer(corp_id), change],
+                crate::router::notify_registry::OnCorporationChanged { corp_id, change },
             );
             Some(Ok(PyRep::Bool(restricted)))
         }
@@ -199,11 +198,9 @@ pub fn handle_corp_gov_tail(
                 PyRep::String(("acceptStructures").into()),
                 PyRep::Tuple(vec![PyRep::Bool(prev), PyRep::Bool(accept)]),
             )]);
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Corporation(corp_id),
-                "OnCorporationChanged",
-                "corpid",
-                vec![PyRep::Integer(corp_id), change],
+                crate::router::notify_registry::OnCorporationChanged { corp_id, change },
             );
             Some(Ok(PyRep::Bool(accept)))
         }
@@ -420,11 +417,9 @@ pub fn handle_corp_gov_tail(
                             PyRep::Integer(station_id),
                         ]),
                     )]);
-                    ctx.notify(
+                    ctx.emit_typed(
                         NotificationTarget::Corporation(corp_id),
-                        "OnCorporationChanged",
-                        "corpid",
-                        vec![PyRep::Integer(corp_id), change],
+                        crate::router::notify_registry::OnCorporationChanged { corp_id, change },
                     );
                     Some(Ok(PyRep::keyval([
                         ("corporationID", PyRep::Integer(corp_id)),
@@ -722,11 +717,11 @@ pub fn handle_corp_gov_tail(
                 Some(ff),
                 Some(eff_ft),
             );
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Corporation(corp_id),
-                "OnCorpAggressionSettingsChange",
-                "corpid",
-                vec![settings_obj.clone()],
+                crate::router::notify_registry::OnCorpAggressionSettingsChange {
+                    aggression_settings: settings_obj.clone(),
+                },
             );
             Some(Ok(settings_obj))
         }

@@ -203,6 +203,22 @@ pub fn emit_typed_target_to_char_with_id_type<N: TypedNotification>(
     );
 }
 
+/// Pushes a typed notification onto an active [`eve_machonet::SessionState`].
+pub fn push_typed_session_notification<N: TypedNotification>(
+    session: &mut eve_machonet::SessionState,
+    notif: N,
+) {
+    session.push_notification(N::EVENT, notif.into_args());
+}
+
+/// Flushes an already-constructed [`PendingMachoNotification`] onto an active [`eve_machonet::SessionState`].
+pub fn push_pending_session_notification(
+    session: &mut eve_machonet::SessionState,
+    notif: PendingMachoNotification,
+) {
+    session.push_notification(notif.event, notif.args);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_and_push_typed_notification<N: TypedNotification>(
     pending_notifications: Option<&dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>>,
@@ -328,6 +344,34 @@ macro_rules! define_notification_item {
             }
         }
     };
+
+    // Zero required + trailing optional arguments (e.g. 0..=2 varargs events)
+    ($name:ident => $event:literal ($id_type:literal) {
+        optional: { $($opt_field:ident : Option<$opt_ty:ty>),+ $(,)? },
+        samples: $samples:expr $(,)?
+    }) => {
+        #[derive(Debug, Clone, PartialEq)]
+        pub struct $name {
+            $(pub $opt_field: Option<$opt_ty>),+
+        }
+
+        impl TypedNotification for $name {
+            const EVENT: &'static str = $event;
+            const DEFAULT_ID_TYPE: &'static str = $id_type;
+            const MIN_ARITY: usize = 0;
+            const MAX_ARITY: usize = count_idents!($($opt_field),+);
+
+            fn into_args(self) -> Vec<PyRep> {
+                let mut args = Vec::new();
+                $(
+                    if let Some(opt_val) = self.$opt_field {
+                        args.push(ToNotifyArg::into_notify_arg(opt_val));
+                    }
+                )+
+                args
+            }
+        }
+    };
 }
 
 macro_rules! define_notifications {
@@ -373,6 +417,18 @@ macro_rules! define_notifications {
     };
     (@entry $name:ident => $event:literal ($id_type:literal) {
         fields: { $($field:ident : $ty:ty),+ $(,)? },
+        optional: { $($opt_field:ident : Option<$opt_ty:ty>),+ $(,)? },
+        samples: $samples:expr $(,)?
+    }) => {
+        NotificationRegistryEntry {
+            event: <$name as TypedNotification>::EVENT,
+            default_id_type: <$name as TypedNotification>::DEFAULT_ID_TYPE,
+            min_arity: <$name as TypedNotification>::MIN_ARITY,
+            max_arity: <$name as TypedNotification>::MAX_ARITY,
+            sample_payloads: $samples,
+        }
+    };
+    (@entry $name:ident => $event:literal ($id_type:literal) {
         optional: { $($opt_field:ident : Option<$opt_ty:ty>),+ $(,)? },
         samples: $samples:expr $(,)?
     }) => {
@@ -1578,5 +1634,766 @@ define_notifications! {
             vec![PyRep::Integer(101), PyRep::Integer(1_335_000_000_000_000_00)],
             vec![PyRep::Integer(101), PyRep::Integer(1_335_000_000_000_000_00), PyRep::Bool(true)],
         ],
+    },
+
+    // --- Wave 5D Batch 2 (Refs #932) ---
+    OnAgentAdded => "OnAgentAdded" ("charid") {
+        fields: { entity_id: i64 },
+        samples: || vec![vec![PyRep::Integer(3_018_916)]],
+    },
+    OnAssetSafetyCreated => "OnAssetSafetyCreated" ("charid") {
+        fields: { owner_id: i64, solar_system_id: i64, location_id: i64 },
+        samples: || vec![vec![
+            PyRep::Integer(90_000_001),
+            PyRep::Integer(30_000_142),
+            PyRep::Integer(1_000_000_000_001),
+        ]],
+    },
+    OnAssetSafetyDelivered => "OnAssetSafetyDelivered" ("charid") {
+        fields: { owner_id: i64 },
+        samples: || vec![vec![PyRep::Integer(90_000_001)]],
+    },
+    OnAssignPetition => "OnAssignPetition" ("charid") {
+        fields: { petition_id: i64, assignee_id: Option<i64> },
+        samples: || vec![
+            vec![PyRep::Integer(1), PyRep::Integer(90_000_002)],
+            vec![PyRep::Integer(1), PyRep::None],
+        ],
+    },
+    OnAssumeStructureControl => "OnAssumeStructureControl" ("charid") {
+        optional: { char_id: Option<i64>, item_id: Option<i64> },
+        samples: || vec![
+            vec![],
+            vec![PyRep::Integer(90_000_001), PyRep::Integer(100_000_001)],
+        ],
+    },
+    OnBillReceived => "OnBillReceived" ("corpid") {
+        optional: { bill: Option<PyRep> },
+        samples: || vec![
+            vec![],
+            vec![PyRep::keyval([("billID", PyRep::Integer(1))])],
+        ],
+    },
+    OnBountyAddedToPayout => "OnBountyAddedToPayout" ("charid") {
+        fields: { data_dict: PyRep },
+        samples: || vec![vec![PyRep::Dict(vec![
+            (PyRep::String("amount".into()), PyRep::Real(10_000.0)),
+            (PyRep::String("payoutTime".into()), PyRep::Integer(1_335_000_000_000_000_00)),
+            (PyRep::String("enemyTypeID".into()), PyRep::Integer(587)),
+            (PyRep::String("isModified".into()), PyRep::Bool(false)),
+        ])]],
+    },
+    OnChannelDeleted => "OnChannelDeleted" ("channelid") {
+        fields: { channel: String },
+        samples: || vec![vec![PyRep::String("player:1".into())]],
+    },
+    OnChannelJoined => "OnChannelJoined" ("channelid") {
+        fields: { channel: String },
+        optional: { character_id: Option<i64> },
+        samples: || vec![
+            vec![PyRep::String("solarsystemid2:30000142".into())],
+            vec![PyRep::String("solarsystemid2:30000142".into()), PyRep::Integer(90_000_001)],
+        ],
+    },
+    OnClientEventChatMessageSent => "OnClientEvent_ChatMessageSent" ("channelid") {
+        samples: || vec![vec![]],
+    },
+    OnCloneJumpUpdate => "OnCloneJumpUpdate" ("charid") {
+        samples: || vec![vec![]],
+    },
+    OnClosePetition => "OnClosePetition" ("charid") {
+        optional: { petition_id: Option<i64> },
+        samples: || vec![vec![], vec![PyRep::Integer(1)]],
+    },
+    OnContactNoLongerContact => "OnContactNoLongerContact" ("charid") {
+        fields: { char_id: i64 },
+        samples: || vec![vec![PyRep::Integer(90_000_002)]],
+    },
+    OnCorpAggressionSettingsChange => "OnCorpAggressionSettingsChange" ("corpid") {
+        fields: { aggression_settings: PyRep },
+        samples: || vec![vec![PyRep::keyval([("friendlyFire", PyRep::Bool(false))])]],
+    },
+    OnCorpLPChange => "OnCorpLPChange" ("corpid") {
+        fields: { reason: String, issuer_corp_id: i64 },
+        samples: || vec![vec![PyRep::String("take_offer".into()), PyRep::Integer(1_000_035)]],
+    },
+    OnCorpLogoReady => "OnCorpLogoReady" ("corpid") {
+        fields: { corp_id: i64, size: i64 },
+        samples: || vec![vec![PyRep::Integer(98_000_001), PyRep::Integer(128)]],
+    },
+    OnCorporationApplicationChanged => "OnCorporationApplicationChanged" ("corpid") {
+        fields: { corp_id: i64, applicant_id: i64, application_id: i64, new_application: PyRep },
+        samples: || vec![vec![
+            PyRep::Integer(98_000_001),
+            PyRep::Integer(90_000_001),
+            PyRep::Integer(1),
+            PyRep::keyval([("applicationID", PyRep::Integer(1))]),
+        ]],
+    },
+    OnCorporationChanged => "OnCorporationChanged" ("corpid") {
+        fields: { corp_id: i64, change: PyRep },
+        samples: || vec![vec![
+            PyRep::Integer(98_000_001),
+            PyRep::Dict(vec![
+                (
+                    PyRep::String("isRecruiting".into()),
+                    PyRep::Tuple(vec![PyRep::Bool(false), PyRep::Bool(true)]),
+                ),
+                (
+                    PyRep::String("stationID".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Integer(60_003_760)]),
+                ),
+            ]),
+        ]],
+    },
+    OnCorporationMemberChanged => "OnCorporationMemberChanged" ("corpid") {
+        fields: { corporation_id: i64, member_id: i64, change: PyRep },
+        samples: || vec![vec![
+            PyRep::Integer(98_000_001),
+            PyRep::Integer(90_000_001),
+            PyRep::Dict(vec![(
+                PyRep::String("corporationID".into()),
+                PyRep::Tuple(vec![PyRep::Integer(98_000_001), PyRep::Integer(98_000_002)]),
+            )]),
+        ]],
+    },
+    OnCorporationRecruitmentAdChanged => "OnCorporationRecruitmentAdChanged" ("corpid") {
+        optional: { corp_id: Option<i64>, ad_id: Option<i64> },
+        samples: || vec![
+            vec![],
+            vec![PyRep::Integer(98_000_001), PyRep::Integer(1)],
+        ],
+    },
+    OnCorporationStructuresUpdated => "OnCorporationStructuresUpdated" ("corpid") {
+        samples: || vec![vec![]],
+    },
+    OnCorporationWelcomeMailChanged => "OnCorporationWelcomeMailChanged" ("corpid") {
+        fields: { character_id: i64, change_date: i64 },
+        samples: || vec![vec![PyRep::Integer(90_000_001), PyRep::Integer(1_700_000_000)]],
+    },
+    OnCrimewatchEngagementStartTimeout => "OnCrimewatchEngagementStartTimeout" ("charid") {
+        fields: { other_char_id: i64, timeout: i64 },
+        samples: || vec![vec![
+            PyRep::Integer(90_000_002),
+            PyRep::Integer(1_335_000_000_000_000_00),
+        ]],
+    },
+    OnCrimewatchEngagementStopTimeout => "OnCrimewatchEngagementStopTimeout" ("charid") {
+        fields: { other_char_id: i64 },
+        samples: || vec![vec![PyRep::Integer(90_000_002)]],
+    },
+    OnCurrentStructureStateChanged => "OnCurrentStructureStateChanged" ("solarsystemid") {
+        fields: { solar_system_id: i64, structure_id: i64, state: String },
+        samples: || vec![vec![
+            PyRep::Integer(30_000_142),
+            PyRep::Integer(1_000_000_000_001),
+            PyRep::String("Unanchoring".into()),
+        ]],
+    },
+    OnDamageMessage => "OnDamageMessage" ("charid") {
+        fields: { damage_messages_args: PyRep },
+        samples: || vec![vec![PyRep::Dict(vec![
+            (PyRep::String("attackType".into()), PyRep::String("other".into())),
+            (PyRep::String("damage".into()), PyRep::Real(42.5)),
+            (PyRep::String("source".into()), PyRep::Integer(100_000_001)),
+            (PyRep::String("target".into()), PyRep::Integer(100_000_002)),
+            (PyRep::String("attackerID".into()), PyRep::Integer(90_000_001)),
+            (PyRep::String("typeID".into()), PyRep::Integer(561)),
+            (
+                PyRep::String("owner".into()),
+                PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(90_000_001)]),
+            ),
+        ])]],
+    },
+    OnDamageMessages => "OnDamageMessages" ("charid") {
+        fields: { dmgmsgs: Vec<PyRep> },
+        samples: || vec![vec![PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::String("AttackHit".into()),
+            PyRep::Dict(vec![
+                (PyRep::String("attackType".into()), PyRep::String("you".into())),
+                (PyRep::String("damage".into()), PyRep::Real(42.5)),
+            ]),
+        ])])]],
+    },
+    OnDirectionalScanComplete => "OnDirectionalScanComplete" ("charid") {
+        fields: { angle: f64, range: f64, direction: PyRep, results: PyRep },
+        samples: || vec![vec![
+            PyRep::Real(1.0),
+            PyRep::Real(1_000_000.0),
+            PyRep::Tuple(vec![PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+            PyRep::List(Vec::new()),
+        ]],
+    },
+    OnDockingAccessChangedForCurrentSolarSystem => "OnDockingAccessChangedForCurrentSolarSystem" ("solarsystemid") {
+        samples: || vec![vec![]],
+    },
+    OnFighterAddedToController => "OnFighterAddedToController" ("charid") {
+        fields: {
+            fighter_id: i64,
+            fighter_type_id: i64,
+            tube_flag_id: i64,
+            squadron_size: i64,
+            ability_slot_states: PyRep,
+        },
+        samples: || vec![vec![
+            PyRep::Integer(100_000_050),
+            PyRep::Integer(23055),
+            PyRep::Integer(159),
+            PyRep::Integer(9),
+            PyRep::Dict(Vec::new()),
+        ]],
+    },
+    OnFighterRemovedFromController => "OnFighterRemovedFromController" ("charid") {
+        fields: { fighter_id: i64, tube_flag_id: i64 },
+        samples: || vec![vec![PyRep::Integer(100_000_050), PyRep::Integer(159)]],
+    },
+    OnFighterTubeContentEmpty => "OnFighterTubeContentEmpty" ("charid") {
+        fields: { tube_flag_id: i64 },
+        samples: || vec![vec![PyRep::Integer(159)]],
+    },
+    OnFighterTubeContentUpdate => "OnFighterTubeContentUpdate" ("charid") {
+        fields: { tube_flag_id: i64, fighter_id: i64, fighter_type_id: i64, squadron_size: i64 },
+        samples: || vec![vec![
+            PyRep::Integer(159),
+            PyRep::Integer(100_000_050),
+            PyRep::Integer(23055),
+            PyRep::Integer(9),
+        ]],
+    },
+    OnFighterTubeTaskStatus => "OnFighterTubeTaskStatus" ("charid") {
+        fields: {
+            tube_flag_id: i64,
+            status_id: String,
+            status_start_time: i64,
+            status_end_time: i64,
+            user_error: Option<PyRep>,
+        },
+        samples: || vec![vec![
+            PyRep::Integer(159),
+            PyRep::String("INSPACE".into()),
+            PyRep::Integer(1_335_000_000_000_000_00),
+            PyRep::Integer(1_335_000_000_000_000_00),
+            PyRep::None,
+        ]],
+    },
+    OnFleetFinderAdvertChanged => "OnFleetFinderAdvertChanged" ("fleetid") {
+        samples: || vec![vec![]],
+    },
+    OnFleetFormationWndChanged => "OnFleetFormationWndChanged" ("charid") {
+        samples: || vec![vec![]],
+    },
+    OnFleetJoinRejected => "OnFleetJoinRejected" ("charid") {
+        fields: { char_id: i64 },
+        samples: || vec![vec![PyRep::Integer(90_000_001)]],
+    },
+    OnFleetJoinRequest => "OnFleetJoinRequest" ("charid") {
+        fields: { info: PyRep },
+        samples: || vec![vec![PyRep::keyval([
+            ("charID", PyRep::Integer(90_000_002)),
+            ("corpID", PyRep::Integer(98_000_001)),
+        ])]],
+    },
+    OnFleetSetupChanged => "OnFleetSetupChanged" ("charid") {
+        samples: || vec![vec![]],
+    },
+    OnFleetSquadAdded => "OnFleetSquadAdded" ("fleetid") {
+        fields: { wing_id: i64, squad_id: i64 },
+        samples: || vec![vec![PyRep::Integer(1), PyRep::Integer(10)]],
+    },
+    OnFleetWingAdded => "OnFleetWingAdded" ("fleetid") {
+        fields: { wing_id: i64 },
+        samples: || vec![vec![PyRep::Integer(1)]],
+    },
+    OnHomeStationChanged => "OnHomeStationChanged" ("charid") {
+        fields: { new_home_station_id: i64 },
+        samples: || vec![vec![PyRep::Integer(60_003_760)]],
+    },
+    OnHomeStationMovedFromStructure => "OnHomeStationMovedFromStructure" ("charid") {
+        samples: || vec![vec![]],
+    },
+    OnInSpaceSquadronSizeChanged => "OnInSpaceSquadronSizeChanged" ("charid") {
+        fields: { fighter_id: i64, squadron_size: i64 },
+        samples: || vec![vec![PyRep::Integer(100_000_050), PyRep::Integer(8)]],
+    },
+    OnInsurgencyCampaignEndingForLocation => "OnInsurgencyCampaignEndingForLocation" ("solarsystemid") {
+        fields: { solar_system_id: i64 },
+        samples: || vec![vec![PyRep::Integer(30_000_142)]],
+    },
+    OnInsurgencyCampaignStartedForLocation => "OnInsurgencyCampaignStartedForLocation" ("solarsystemid") {
+        fields: { campaign_snapshot: PyRep },
+        samples: || vec![vec![PyRep::keyval([(
+            "coveredSolarsystemIDs",
+            PyRep::List(vec![PyRep::Integer(30_000_142)]),
+        )])]],
+    },
+    OnInsurgencyCampaignUpdatedForLocation => "OnInsurgencyCampaignUpdatedForLocation" ("solarsystemid") {
+        fields: { campaign_snapshot: PyRep },
+        samples: || vec![vec![PyRep::keyval([(
+            "coveredSolarsystemIDs",
+            PyRep::List(vec![PyRep::Integer(30_000_142)]),
+        )])]],
+    },
+    OnInsurgencyStateChangedForFaction => "OnInsurgencyStateChangedForFaction" ("solarsystemid") {
+        fields: { campaign_state: i64, pirate_faction_id: i64, origin_solar_system_id: i64 },
+        samples: || vec![vec![
+            PyRep::Integer(1),
+            PyRep::Integer(500_010),
+            PyRep::Integer(30_000_142),
+        ]],
+    },
+    OnJoinRequestUpdate => "OnJoinRequestUpdate" ("charid") {
+        fields: { join_requests: PyRep },
+        samples: || vec![vec![PyRep::Dict(Vec::new())]],
+    },
+    OnKillRightCreated => "OnKillRightCreated" ("charid") {
+        fields: { kill_right_id: i64, from_id: i64, to_id: i64, expiry_time: i64 },
+        samples: || vec![vec![
+            PyRep::Integer(1),
+            PyRep::Integer(90_000_001),
+            PyRep::Integer(90_000_002),
+            PyRep::Integer(1_335_000_000_000_000_00),
+        ]],
+    },
+    OnLPChange => "OnLPChange" ("charid") {
+        fields: { change_type: String, issuer_corp_id: i64, lp_before: i64, lp_after: i64 },
+        samples: || vec![vec![
+            PyRep::String("take_offer".into()),
+            PyRep::Integer(1_000_035),
+            PyRep::Integer(10_000),
+            PyRep::Integer(9_000),
+        ]],
+    },
+    OnMoonExtractionUpdate => "OnMoonExtractionUpdate" ("corpid") {
+        fields: { extraction: Option<PyRep> },
+        samples: || vec![vec![PyRep::None]],
+    },
+    OnMutualWarsUpdatedRemote => "OnMutualWarsUpdated_Remote" ("corpid") {
+        samples: || vec![vec![]],
+    },
+    OnNewCalendarEvent => "OnNewCalendarEvent" ("corpid") {
+        fields: {
+            event_id: i64,
+            owner_id: i64,
+            event_date_time: i64,
+            event_duration: i64,
+            event_title: String,
+            importance: i64,
+            auto_event_type: i64,
+            do_blink: bool,
+        },
+        samples: || vec![vec![
+            PyRep::Integer(1),
+            PyRep::Integer(98_000_001),
+            PyRep::Integer(1_335_000_000_000_000_00),
+            PyRep::Integer(60),
+            PyRep::String("Moon Extraction".into()),
+            PyRep::Integer(1),
+            PyRep::Integer(1),
+            PyRep::Bool(true),
+        ]],
+    },
+    OnNewPetition => "OnNewPetition" ("charid") {
+        fields: { petition_id: i64 },
+        samples: || vec![vec![PyRep::Integer(1)]],
+    },
+    OnNewProbe => "OnNewProbe" ("charid") {
+        fields: { probe: PyRep },
+        samples: || vec![vec![PyRep::keyval([("probeID", PyRep::Integer(100_000_001))])]],
+    },
+    OnOfficeRentalChange => "OnOfficeRentalChange" ("corpid") {
+        fields: { corporation_id: i64, office_id: Option<i64> },
+        samples: || vec![
+            vec![PyRep::Integer(98_000_001), PyRep::Integer(100_000_010)],
+            vec![PyRep::Integer(98_000_001), PyRep::None],
+        ],
+    },
+    OnOperationCategoryChanged => "OnOperationCategoryChanged" ("charid") {
+        fields: { new_category_id: i64, new_operation_id: i64 },
+        samples: || vec![vec![PyRep::Integer(1), PyRep::Integer(10)]],
+    },
+    OnOperationCategoryCompleted => "OnOperationCategoryCompleted" ("charid") {
+        fields: { category_id: i64 },
+        samples: || vec![vec![PyRep::Integer(1)]],
+    },
+    OnOperationTaskCompleted => "OnOperationTaskCompleted" ("charid") {
+        fields: { category_id: i64, operation_id: i64, task_id: i64 },
+        samples: || vec![vec![PyRep::Integer(1), PyRep::Integer(10), PyRep::Integer(100)]],
+    },
+    OnOwnerGroupsUpdated => "OnOwnerGroupsUpdated" ("corpid") {
+        fields: { changed_groups: PyRep },
+        samples: || vec![vec![PyRep::Dict(vec![(
+            PyRep::Integer(98_000_001),
+            PyRep::Integer(1_000_000_000_001),
+        )])]],
+    },
+    OnPersonalContactsAdded => "OnPersonalContactsAdded" ("charid") {
+        fields: { contacts: Vec<PyRep>, relationship_id: f64, watchlist: bool, label_mask: i64 },
+        samples: || vec![vec![
+            PyRep::List(vec![PyRep::keyval([
+                ("contactID", PyRep::Integer(90_000_002)),
+                ("isOnline", PyRep::Bool(true)),
+            ])]),
+            PyRep::Real(5.0),
+            PyRep::Bool(true),
+            PyRep::Integer(0),
+        ]],
+    },
+    OnPersonalContactsDeleted => "OnPersonalContactsDeleted" ("charid") {
+        fields: { contacts: Vec<PyRep> },
+        samples: || vec![vec![PyRep::List(vec![PyRep::keyval([(
+            "contactID",
+            PyRep::Integer(90_000_002),
+        )])])]],
+    },
+    OnPersonalContactsUpdated => "OnPersonalContactsUpdated" ("charid") {
+        fields: { contact_ids: Vec<i64>, standing: f64, in_watchlist: Option<bool> },
+        samples: || vec![vec![
+            PyRep::List(vec![PyRep::Integer(90_000_002)]),
+            PyRep::Real(5.0),
+            PyRep::Bool(true),
+        ]],
+    },
+    OnPetitionCreated => "OnPetitionCreated" ("charid") {
+        optional: { petition_id: Option<i64> },
+        samples: || vec![vec![], vec![PyRep::Integer(1)]],
+    },
+    OnPetitionMessage => "OnPetitionMessage" ("charid") {
+        fields: { petition_id: i64, char_id: i64, message_text: String, message_id: i64 },
+        samples: || vec![vec![
+            PyRep::Integer(1),
+            PyRep::Integer(90_000_001),
+            PyRep::String("Hello".into()),
+            PyRep::Integer(10),
+        ]],
+    },
+    OnProbeStateChanged => "OnProbeStateChanged" ("charid") {
+        fields: { probe_id: i64, probe_state: i64 },
+        samples: || vec![vec![PyRep::Integer(100_000_001), PyRep::Integer(0)]],
+    },
+    OnProbeWarpStart => "OnProbeWarpStart" ("charid") {
+        fields: { probe_id: i64, from_pos: PyRep, to_pos: PyRep, start_time: i64, duration: i64 },
+        samples: || vec![vec![
+            PyRep::Integer(100_000_001),
+            PyRep::Tuple(vec![PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+            PyRep::Tuple(vec![PyRep::Real(1000.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+            PyRep::Integer(1_335_000_000_000_000_00),
+            PyRep::Integer(2500),
+        ]],
+    },
+    OnProbesIdle => "OnProbesIdle" ("charid") {
+        fields: { probes: Vec<PyRep> },
+        samples: || vec![vec![PyRep::List(vec![PyRep::keyval([(
+            "probeID",
+            PyRep::Integer(100_000_001),
+        )])])]],
+    },
+    OnProfileSettingsChange => "OnProfileSettingsChange" ("corpid") {
+        fields: { profile_ids: Vec<i64> },
+        samples: || vec![vec![PyRep::List(vec![PyRep::Integer(1)])]],
+    },
+    OnProjectDiscoveryExperience => "OnProjectDiscoveryExperience" ("charid") {
+        fields: { experience: f64 },
+        samples: || vec![vec![PyRep::Real(120.0)]],
+    },
+    OnProjectDiscoveryLevelUp => "OnProjectDiscoveryLevelUp" ("charid") {
+        fields: { new_rank: i64, xp_for_new_rank: f64, xp_for_next_rank: f64 },
+        samples: || vec![vec![PyRep::Integer(2), PyRep::Real(100.0), PyRep::Real(250.0)]],
+    },
+    OnRaffleCreatedServer => "OnRaffleCreatedServer" ("charid") {
+        fields: { raffle_id: i64, raffle_data: PyRep },
+        samples: || vec![vec![
+            PyRep::Integer(1),
+            PyRep::keyval([("raffleID", PyRep::Integer(1))]),
+        ]],
+    },
+    OnRaffleFinishedServer => "OnRaffleFinishedServer" ("charid") {
+        fields: { raffle_id: i64, winning_ticket: Option<PyRep> },
+        samples: || vec![vec![PyRep::Integer(1), PyRep::None]],
+    },
+    OnRaffleUpdatedServer => "OnRaffleUpdatedServer" ("charid") {
+        fields: { raffle_id: i64, raffle_data: PyRep },
+        samples: || vec![vec![
+            PyRep::Integer(1),
+            PyRep::keyval([("raffleID", PyRep::Integer(1))]),
+        ]],
+    },
+    OnRefreshBookmarks => "OnRefreshBookmarks" ("charid") {
+        samples: || vec![vec![]],
+    },
+    OnRelinquishStructureControl => "OnRelinquishStructureControl" ("charid") {
+        optional: { char_id: Option<i64>, item_id: Option<i64> },
+        samples: || vec![
+            vec![],
+            vec![PyRep::Integer(90_000_001), PyRep::Integer(100_000_001)],
+        ],
+    },
+    OnRemoveCalendarEvent => "OnRemoveCalendarEvent" ("corpid") {
+        fields: { event_id: i64, event_date_time: i64, is_deleted: bool },
+        samples: || vec![vec![
+            PyRep::Integer(1),
+            PyRep::Integer(1_335_000_000_000_000_00),
+            PyRep::Bool(true),
+        ]],
+    },
+    OnRemoveProbe => "OnRemoveProbe" ("charid") {
+        fields: { probe_id: i64 },
+        samples: || vec![vec![PyRep::Integer(100_000_001)]],
+    },
+    OnRespecInfoChanged => "OnRespecInfoChanged" ("charid") {
+        samples: || vec![vec![]],
+    },
+    OnSanctionedActionChanged => "OnSanctionedActionChanged" ("corpid") {
+        fields: { corporation_id: i64, vote_case_id: i64 },
+        samples: || vec![vec![PyRep::Integer(98_000_001), PyRep::Integer(1)]],
+    },
+    OnScannerInfoRemoved => "OnScannerInfoRemoved" ("charid") {
+        samples: || vec![vec![]],
+    },
+    OnSetPlayerStanding => "OnSetPlayerStanding" ("charid") {
+        fields: { contact_id: i64, standing: f64 },
+        samples: || vec![vec![PyRep::Integer(90_000_002), PyRep::Real(5.0)]],
+    },
+    OnShareChange => "OnShareChange" ("corpid") {
+        fields: { shareholder_id: i64, corporation_id: i64, change: PyRep },
+        samples: || vec![vec![
+            PyRep::Integer(90_000_001),
+            PyRep::Integer(98_000_001),
+            PyRep::Dict(Vec::new()),
+        ]],
+    },
+    OnSharedBookmarksFolderDeleted => "OnSharedBookmarksFolderDeleted" ("corpid") {
+        fields: { folder_id: i64 },
+        samples: || vec![vec![PyRep::Integer(1)]],
+    },
+    OnSharedBookmarksFolderUpdated => "OnSharedBookmarksFolderUpdated" ("corpid") {
+        fields: { updates: PyRep },
+        samples: || vec![vec![PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Tuple(vec![PyRep::Integer(1)]),
+            PyRep::String("FolderChanged".into()),
+            PyRep::Tuple(vec![
+                PyRep::List(vec![PyRep::keyval([("bookmarkID", PyRep::Integer(1))])]),
+                PyRep::List(vec![PyRep::Integer(1)]),
+            ]),
+        ])])]],
+    },
+    OnSharedBookmarksFoldersAccessChanged => "OnSharedBookmarksFoldersAccessChanged" ("charid") {
+        fields: { access_changed: PyRep },
+        samples: || vec![vec![PyRep::Dict(vec![(
+            PyRep::Integer(1),
+            PyRep::Integer(1),
+        )])]],
+    },
+    OnSharedBookmarksFoldersAccessLost => "OnSharedBookmarksFoldersAccessLost" ("charid") {
+        fields: { folder_ids: Vec<i64> },
+        samples: || vec![vec![PyRep::List(vec![PyRep::Integer(1)])]],
+    },
+    OnSignalTrackerAnomalyUpdate => "OnSignalTrackerAnomalyUpdate" ("charid") {
+        fields: { solar_system_id: i64, added_anomalies: PyRep, removed_anomalies: PyRep },
+        samples: || vec![vec![
+            PyRep::Integer(30_000_142),
+            PyRep::Dict(Vec::new()),
+            PyRep::List(Vec::new()),
+        ]],
+    },
+    OnSignalTrackerSignatureUpdate => "OnSignalTrackerSignatureUpdate" ("charid") {
+        fields: { solar_system_id: i64, added_signatures: PyRep, removed_signatures: PyRep },
+        samples: || vec![vec![
+            PyRep::Integer(30_000_142),
+            PyRep::Dict(Vec::new()),
+            PyRep::List(Vec::new()),
+        ]],
+    },
+    OnSignalTrackerStructureUpdate => "OnSignalTrackerStructureUpdate" ("charid") {
+        fields: { solar_system_id: i64, added_structures: PyRep, removed_structures: PyRep },
+        samples: || vec![vec![
+            PyRep::Integer(30_000_142),
+            PyRep::Dict(Vec::new()),
+            PyRep::List(Vec::new()),
+        ]],
+    },
+    OnSkyhookCanBeHacked => "OnSkyhookCanBeHacked" ("solarsystemid") {
+        fields: { solar_system_id: i64, skyhook_id: i64 },
+        samples: || vec![vec![PyRep::Integer(30_000_142), PyRep::Integer(1_000_000_000_001)]],
+    },
+    OnSlimItemChange => "OnSlimItemChange" ("solarsystemid") {
+        fields: { old_slim: PyRep, new_slim: PyRep },
+        samples: || vec![vec![
+            PyRep::Integer(1_000_000_000_001),
+            PyRep::keyval([
+                ("itemID", PyRep::Integer(1_000_000_000_001)),
+                ("typeID", PyRep::Integer(35832)),
+                ("ownerID", PyRep::Integer(98_000_001)),
+                ("corpID", PyRep::Integer(98_000_001)),
+                ("allianceID", PyRep::None),
+                ("charID", PyRep::None),
+                ("categoryID", PyRep::Integer(65)),
+                ("groupID", PyRep::Integer(1657)),
+                ("controllerID", PyRep::None),
+                ("incapacitated", PyRep::Bool(false)),
+                ("posState", PyRep::Integer(0)),
+                ("posTimestamp", PyRep::Integer(0)),
+                ("isEmpty", PyRep::Bool(false)),
+                ("lootRights", PyRep::None),
+                ("hackingSecurityState", PyRep::None),
+                ("orbitalHackerID", PyRep::None),
+                ("orbitalHackerProgress", PyRep::Real(0.0)),
+                ("orbitalState", PyRep::None),
+                ("orbitalTimestamp", PyRep::Integer(0)),
+            ]),
+        ]],
+    },
+    OnSolarSystemDevIndexChanged => "OnSolarSystemDevIndexChanged" ("solarsystemid") {
+        fields: { solar_system_id: i64 },
+        samples: || vec![vec![PyRep::Integer(30_000_142)]],
+    },
+    OnSolarSystemSovStructuresUpdated => "OnSolarSystemSovStructuresUpdated" ("solarsystemid") {
+        fields: { solar_system_id: i64, solar_system_structures_info: PyRep, changes: PyRep },
+        samples: || vec![vec![
+            PyRep::Integer(30_000_142),
+            PyRep::List(Vec::new()),
+            PyRep::Dict(vec![(
+                PyRep::Integer(1_000_000_000_001),
+                PyRep::Integer(1),
+            )]),
+        ]],
+    },
+    OnSovHubHacked => "OnSovHubHacked" ("solarsystemid") {
+        fields: { sov_hub_id: i64, upgrades: Vec<PyRep> },
+        samples: || vec![vec![
+            PyRep::Integer(1_000_000_000_001),
+            PyRep::List(vec![PyRep::Integer(81986)]),
+        ]],
+    },
+    OnSovereigntyAudioEvent => "OnSovereigntyAudioEvent" ("solarsystemid") {
+        fields: { event_id: i64, text_params: PyRep },
+        samples: || vec![vec![PyRep::Integer(1), PyRep::Dict(Vec::new())]],
+    },
+    OnSovereigntyChanged => "OnSovereigntyChanged" ("solarsystemid") {
+        fields: { solar_system_id: i64, alliance_id: Option<i64> },
+        samples: || vec![vec![PyRep::Integer(30_000_142), PyRep::Integer(99_000_001)]],
+    },
+    OnStructureHacked => "OnStructureHacked" ("corpid") {
+        fields: { structure_id: i64, reinforce_timing: PyRep },
+        samples: || vec![vec![
+            PyRep::Integer(1_000_000_000_001),
+            PyRep::Tuple(vec![
+                PyRep::Integer(5),
+                PyRep::Integer(18),
+                PyRep::Integer(6),
+                PyRep::Integer(20),
+                PyRep::Integer(1_700_000_000),
+            ]),
+        ]],
+    },
+    OnStructureStateChanged => "OnStructureStateChanged" ("solarsystemid") {
+        fields: { solar_system_id: i64, structure_id: i64, state: String },
+        samples: || vec![vec![
+            PyRep::Integer(30_000_142),
+            PyRep::Integer(1_000_000_000_001),
+            PyRep::String("Unanchoring".into()),
+        ]],
+    },
+    OnStructureTargetAdded => "OnStructureTargetAdded" ("charid") {
+        fields: { sid: i64, tid: i64 },
+        samples: || vec![vec![
+            PyRep::Integer(1_000_000_000_001),
+            PyRep::Integer(100_000_001),
+        ]],
+    },
+    OnSystemFullyCorruptedForFaction => "OnSystemFullyCorruptedForFaction" ("solarsystemid") {
+        fields: {
+            solar_system_id: i64,
+            pirate_faction_id: i64,
+            pirate_points: i64,
+            points_required: i64,
+        },
+        samples: || vec![vec![
+            PyRep::Integer(30_000_142),
+            PyRep::Integer(500_010),
+            PyRep::Integer(1000),
+            PyRep::Integer(1000),
+        ]],
+    },
+    OnSystemFullySuppressedForFaction => "OnSystemFullySuppressedForFaction" ("solarsystemid") {
+        fields: { solar_system_id: i64, antipirate_points: i64, points_required: i64 },
+        samples: || vec![vec![
+            PyRep::Integer(30_000_142),
+            PyRep::Integer(1000),
+            PyRep::Integer(1000),
+        ]],
+    },
+    OnSystemScanDone => "OnSystemScanDone" ("charid") {
+        samples: || vec![vec![]],
+    },
+    OnSystemScanStarted => "OnSystemScanStarted" ("charid") {
+        fields: { start_time: i64, duration_ms: i64, probes: PyRep },
+        samples: || vec![vec![
+            PyRep::Integer(1_335_000_000_000_000_00),
+            PyRep::Integer(5000),
+            PyRep::List(vec![PyRep::Integer(100_000_001)]),
+        ]],
+    },
+    OnSystemScanStopped => "OnSystemScanStopped" ("charid") {
+        fields: { probes: Vec<PyRep>, results: Vec<PyRep>, absent_targets: Vec<PyRep> },
+        samples: || vec![vec![
+            PyRep::List(vec![PyRep::Integer(100_000_001)]),
+            PyRep::List(vec![PyRep::keyval([("id", PyRep::String("ABC-123".into()))])]),
+            PyRep::List(Vec::new()),
+        ]],
+    },
+    OnTarget => "OnTarget" ("charid") {
+        fields: { arg0: PyRep, arg1: PyRep },
+        optional: { reason: Option<PyRep> },
+        samples: || vec![
+            vec![PyRep::String("add".into()), PyRep::Integer(100_000_001)],
+            vec![PyRep::String("add".into()), PyRep::Integer(100_000_001), PyRep::None],
+        ],
+    },
+    OnTargetOBO => "OnTargetOBO" ("charid") {
+        fields: { what: String, sid: i64, tid: Option<i64>, reason: Option<PyRep> },
+        samples: || vec![vec![
+            PyRep::String("clear".into()),
+            PyRep::Integer(100_000_001),
+            PyRep::None,
+            PyRep::None,
+        ]],
+    },
+    OnTicketsUpdatedServer => "OnTicketsUpdatedServer" ("charid") {
+        fields: { ticket_updates: PyRep },
+        samples: || vec![vec![PyRep::Dict(vec![(PyRep::Integer(1), PyRep::Integer(5))])]],
+    },
+    OnTitleChanged => "OnTitleChanged" ("corpid") {
+        fields: { corp_id: i64, title_id: i64, change: PyRep },
+        samples: || vec![vec![
+            PyRep::Integer(98_000_001),
+            PyRep::Integer(1),
+            PyRep::Dict(Vec::new()),
+        ]],
+    },
+    OnUnblockContact => "OnUnblockContact" ("charid") {
+        fields: { contact_id: i64 },
+        samples: || vec![vec![PyRep::Integer(90_000_002)]],
+    },
+    OnVoteCast => "OnVoteCast" ("corpid") {
+        fields: { corporation_id: i64, vote_case_id: i64 },
+        samples: || vec![vec![PyRep::Integer(98_000_001), PyRep::Integer(1)]],
+    },
+    OnWarChanged => "OnWarChanged" ("corpid") {
+        fields: { war: PyRep, owner_ids: PyRep, change: PyRep },
+        samples: || vec![vec![
+            PyRep::keyval([("warID", PyRep::Integer(1)), ("warHQ", PyRep::None)]),
+            PyRep::List(vec![PyRep::Integer(98_000_001), PyRep::Integer(98_000_002)]),
+            PyRep::Dict(Vec::new()),
+        ]],
+    },
+    ProcessSovStatusChanged => "ProcessSovStatusChanged" ("solarsystemid") {
+        fields: { solar_system_id: i64, sov_info: PyRep },
+        samples: || vec![vec![
+            PyRep::Integer(30_000_142),
+            PyRep::keyval([
+                ("solarSystemID", PyRep::Integer(30_000_142)),
+                ("allianceID", PyRep::Integer(99_000_001)),
+            ]),
+        ]],
     },
 }

@@ -1171,17 +1171,17 @@ pub(crate) fn emit_combat_log_and_damage_state(
         (PyRep::String("isBanked".into()), PyRep::Bool(false)),
     ]);
     let msg_tuple = vec![PyRep::String(hit_quality.into()), dmg_dict.clone()];
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(attacker_char_id),
-        "OnDamageMessage",
-        "charid",
-        vec![dmg_dict.clone()],
+        crate::router::notify_registry::OnDamageMessage {
+            damage_messages_args: dmg_dict,
+        },
     );
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(attacker_char_id),
-        "OnDamageMessages",
-        "charid",
-        vec![PyRep::List(vec![PyRep::Tuple(msg_tuple)])],
+        crate::router::notify_registry::OnDamageMessages {
+            dmgmsgs: vec![PyRep::Tuple(msg_tuple)],
+        },
     );
     let _ = ctx.notify_damage_state_change(
         NotificationTarget::Character(attacker_char_id),
@@ -1263,20 +1263,17 @@ pub(crate) fn emit_combat_log_and_damage_state(
             (PyRep::String("isWrecking".into()), PyRep::Bool(is_wrecking)),
             (PyRep::String("isBanked".into()), PyRep::Bool(false)),
         ]);
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(vic_id),
-            "OnDamageMessage",
-            "charid",
-            vec![vic_dict.clone()],
+            crate::router::notify_registry::OnDamageMessage {
+                damage_messages_args: vic_dict.clone(),
+            },
         );
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(vic_id),
-            "OnDamageMessages",
-            "charid",
-            vec![PyRep::List(vec![PyRep::Tuple(vec![
-                PyRep::String(hit_quality.into()),
-                vic_dict,
-            ])])],
+            crate::router::notify_registry::OnDamageMessages {
+                dmgmsgs: vec![PyRep::Tuple(vec![PyRep::String(hit_quality.into()), vic_dict])],
+            },
         );
     }
 }
@@ -1521,7 +1518,10 @@ pub async fn dispatch_combat_rpc(
             if let Some(cid) = session.character_id {
                 if let Some(notifs) = ctx.pending_notifications.read().ok().and_then(|q| q.get(&cid).cloned()) {
                     for notif in notifs.into_iter().filter(|n| n.seq_id > pre_seq) {
-                        session.push_notification(notif.event, notif.args);
+                        crate::router::notify_registry::push_pending_session_notification(
+                            session,
+                            notif,
+                        );
                     }
                 }
             }
@@ -1604,19 +1604,19 @@ pub fn claim_player_bounty_on_kill(
             let _ = ctx.notify_account_change(killer_char_id, "cash", killer_char_id, bal);
         }
         let now_ft = ctx.now_blueos_filetime_ticks();
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(killer_char_id),
-            "OnBountyAddedToPayout",
-            "charid",
-            vec![PyRep::Dict(vec![
-                (PyRep::String("amount".into()), PyRep::Real(claimed_isk)),
-                (PyRep::String("payoutTime".into()), PyRep::Integer(now_ft)),
-                (
-                    PyRep::String("enemyTypeID".into()),
-                    PyRep::Integer(i64::from(victim_ship_type_id)),
-                ),
-                (PyRep::String("isModified".into()), PyRep::Bool(false)),
-            ])],
+            crate::router::notify_registry::OnBountyAddedToPayout {
+                data_dict: PyRep::Dict(vec![
+                    (PyRep::String("amount".into()), PyRep::Real(claimed_isk)),
+                    (PyRep::String("payoutTime".into()), PyRep::Integer(now_ft)),
+                    (
+                        PyRep::String("enemyTypeID".into()),
+                        PyRep::Integer(i64::from(victim_ship_type_id)),
+                    ),
+                    (PyRep::String("isModified".into()), PyRep::Bool(false)),
+                ]),
+            },
         );
     }
     claimed_isk
@@ -1745,24 +1745,14 @@ pub fn create_kill_right(ctx: &ServerContext, kr_id: i64, owner_id: i64, target_
             },
         );
     });
-    let args = vec![
-        PyRep::Integer(kr_id),
-        PyRep::Integer(owner_id),
-        PyRep::Integer(target_id),
-        PyRep::Integer(expiry_ft),
-    ];
-    ctx.notify(
-        NotificationTarget::Character(owner_id),
-        "OnKillRightCreated",
-        "charid",
-        args.clone(),
-    );
-    ctx.notify(
-        NotificationTarget::Character(target_id),
-        "OnKillRightCreated",
-        "charid",
-        args,
-    );
+    let kr_notif = crate::router::notify_registry::OnKillRightCreated {
+        kill_right_id: kr_id,
+        from_id: owner_id,
+        to_id: target_id,
+        expiry_time: expiry_ft,
+    };
+    ctx.emit_typed(NotificationTarget::Character(owner_id), kr_notif.clone());
+    ctx.emit_typed(NotificationTarget::Character(target_id), kr_notif);
 }
 
 pub(crate) fn validate_kill_right_live_preconditions(
@@ -1837,28 +1827,25 @@ pub(crate) fn validate_kill_right_live_preconditions(
 /// Emits limited engagement timeout start/stop and end notifications to `char_id`.
 pub fn update_crimewatch_engagement_timers(ctx: &ServerContext, char_id: i64, other_char_id: i64) {
     let timeout_ft = ctx.now_blueos_filetime_ticks() + 3_000_000_000;
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnCrimewatchEngagementStartTimeout",
-        "charid",
-        vec![PyRep::Integer(other_char_id), PyRep::Integer(timeout_ft)],
+        crate::router::notify_registry::OnCrimewatchEngagementStartTimeout {
+            other_char_id,
+            timeout: timeout_ft,
+        },
     );
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnCrimewatchEngagementStopTimeout",
-        "charid",
-        vec![PyRep::Integer(other_char_id)],
+        crate::router::notify_registry::OnCrimewatchEngagementStopTimeout { other_char_id },
     );
     with_mut_combat_runtime(ctx, |rt| {
         if let Some(m) = rt.limited_engagements.get_mut(&char_id) {
             m.remove(&other_char_id);
         }
     });
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnCrimewatchEngagementEnded",
-        "charid",
-        vec![PyRep::Integer(other_char_id)],
+        crate::router::notify_registry::OnCrimewatchEngagementEnded { other_char_id },
     );
 }
 

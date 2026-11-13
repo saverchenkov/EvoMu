@@ -209,7 +209,13 @@ fn handle_chat_rpc(
                     };
                     let jid = format!("{}@chat.evomu.local", chan_key);
                     if !delayed {
-                        ctx.notify(NotificationTarget::All, "OnChannelJoined", "channelid", vec![PyRep::String(chan_key.clone()), PyRep::Integer(target_char)]);
+                        ctx.emit_typed(
+                            NotificationTarget::All,
+                            crate::router::notify_registry::OnChannelJoined {
+                                channel: chan_key.clone(),
+                                character_id: Some(target_char),
+                            },
+                        );
                     }
                     Some(Ok(PyRep::keyval([
                         ("channelID", PyRep::String(chan_key)),
@@ -751,11 +757,12 @@ fn handle_chat_rpc(
                         members_len
                     };
                     if !delayed {
-                        ctx.notify(
+                        ctx.emit_typed(
                             NotificationTarget::All,
-                            "OnChannelJoined",
-                            "channelid",
-                            vec![PyRep::String(chan_key.clone()), PyRep::Integer(char_id)],
+                            crate::router::notify_registry::OnChannelJoined {
+                                channel: chan_key.clone(),
+                                character_id: Some(char_id),
+                            },
                         );
                     }
                     Some(Ok(PyRep::keyval([
@@ -803,7 +810,12 @@ fn handle_chat_rpc(
             });
             remove_delayed_local_speakers(ctx, chan_id, &dropped_speakers);
             if !is_delayed {
-                ctx.notify(NotificationTarget::All, "OnChannelLeft", "channelid", vec![PyRep::String(chan_id.to_string())]);
+                ctx.emit_typed(
+                    NotificationTarget::All,
+                    crate::router::notify_registry::OnChannelLeft {
+                        channel: PyRep::String(chan_id.to_string()),
+                    },
+                );
             }
             Some(Ok(PyRep::keyval([("channelID", PyRep::String(chan_id.to_string())), ("left", PyRep::Bool(true))])))
         }
@@ -915,27 +927,36 @@ fn handle_chat_rpc(
             }
 
             let _ = (&sender_name, ctx.now_blueos_filetime_ticks());
-            let notif_args = Vec::new();
 
             if let Some(rest) = chan_lower.strip_prefix("solarsystemid2:") {
                 let sys_id: u32 = rest.parse().unwrap_or(0);
-                ctx.notify(NotificationTarget::SolarSystem(sys_id), "OnClientEvent_ChatMessageSent", "channelid", notif_args);
+                ctx.emit_typed(
+                    NotificationTarget::SolarSystem(sys_id),
+                    crate::router::notify_registry::OnClientEventChatMessageSent {},
+                );
             } else if let Some(rest) = chan_lower.strip_prefix("corpid:") {
                 let corp_id: i64 = rest.parse().unwrap_or(0);
-                ctx.notify(NotificationTarget::Corporation(corp_id), "OnClientEvent_ChatMessageSent", "channelid", notif_args);
+                ctx.emit_typed(
+                    NotificationTarget::Corporation(corp_id),
+                    crate::router::notify_registry::OnClientEventChatMessageSent {},
+                );
             } else if let Some(rest) = chan_lower.strip_prefix("allianceid:") {
                 let alliance_id: i64 = rest.parse().unwrap_or(0);
-                ctx.notify(NotificationTarget::Alliance(alliance_id), "OnClientEvent_ChatMessageSent", "channelid", notif_args);
+                ctx.emit_typed(
+                    NotificationTarget::Alliance(alliance_id),
+                    crate::router::notify_registry::OnClientEventChatMessageSent {},
+                );
             } else if let Some(rest) = chan_lower.strip_prefix("fleetid:") {
                 let fleet_id: i64 = rest.parse().unwrap_or(0);
-                ctx.notify(NotificationTarget::Fleet(fleet_id), "OnClientEvent_ChatMessageSent", "channelid", notif_args);
+                ctx.emit_typed(
+                    NotificationTarget::Fleet(fleet_id),
+                    crate::router::notify_registry::OnClientEventChatMessageSent {},
+                );
             } else {
                 for mid in members {
-                    ctx.notify(
+                    ctx.emit_typed(
                         NotificationTarget::Character(mid),
-                        "OnClientEvent_ChatMessageSent",
-                        "channelid",
-                        notif_args.clone(),
+                        crate::router::notify_registry::OnClientEventChatMessageSent {},
                     );
                 }
             }
@@ -1022,17 +1043,19 @@ fn handle_chat_rpc(
                 Err(e) => return Some(Err(e)),
             };
 
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(char_id),
-                "OnChannelJoined",
-                "channelid",
-                vec![PyRep::String(chan_id.clone()), PyRep::Integer(char_id)],
+                crate::router::notify_registry::OnChannelJoined {
+                    channel: chan_id.clone(),
+                    character_id: Some(char_id),
+                },
             );
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(recipient_id),
-                "OnChannelJoined",
-                "channelid",
-                vec![PyRep::String(chan_id.clone()), PyRep::Integer(recipient_id)],
+                crate::router::notify_registry::OnChannelJoined {
+                    channel: chan_id.clone(),
+                    character_id: Some(recipient_id),
+                },
             );
 
             Some(Ok(PyRep::keyval([
@@ -1167,11 +1190,9 @@ fn handle_chat_rpc(
                 });
                 return match res {
                     Ok(chan_key) => {
-                        ctx.notify(
+                        ctx.emit_typed(
                             NotificationTarget::All,
-                            "OnChannelDeleted",
-                            "channelid",
-                            vec![PyRep::String(chan_key)],
+                            crate::router::notify_registry::OnChannelDeleted { channel: chan_key },
                         );
                         Some(Ok(PyRep::Bool(true)))
                     }

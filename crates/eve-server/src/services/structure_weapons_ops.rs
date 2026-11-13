@@ -326,18 +326,21 @@ pub async fn trigger_structure_auto_defense_on_grid(
             )
             .await;
         if let Some(ctrl_char) = pilot_opt {
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(ctrl_char),
-                "OnStructureTargetAdded",
-                "charid",
-                vec![PyRep::Integer(structure_id), PyRep::Integer(ship_id)],
+                crate::router::notify_registry::OnStructureTargetAdded {
+                    sid: structure_id,
+                    tid: ship_id,
+                },
             );
         }
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::Character(target_char_id),
-            "OnTarget",
-            "charid",
-            vec![PyRep::String("otheradd".into()), PyRep::Integer(structure_id)],
+            crate::router::notify_registry::OnTarget {
+                arg0: PyRep::String("otheradd".into()),
+                arg1: PyRep::Integer(structure_id),
+                reason: None,
+            },
         );
         let target_dmg = per_target_dmg.get(&ship_id).copied().unwrap_or_default();
         if target_dmg.total() > 0.0 {
@@ -366,22 +369,22 @@ pub async fn trigger_structure_auto_defense_on_grid(
                 .await
             {
                 if dealt > 0.0 {
-                    ctx.notify(
+                    ctx.emit_typed(
                         crate::router::NotificationTarget::Character(target_char_id),
-                        "OnDamageMessage",
-                        "charid",
-                        vec![PyRep::Dict(vec![
-                            (PyRep::String("damage".into()), PyRep::Real(dealt)),
-                            (PyRep::String("source".into()), PyRep::Integer(structure_id)),
-                            (PyRep::String("attackerID".into()), PyRep::Integer(structure_id)),
-                            (PyRep::String("target".into()), PyRep::Integer(ship_id)),
-                            (PyRep::String("target_ID".into()), PyRep::Integer(ship_id)),
-                            (PyRep::String("weapon".into()), PyRep::Integer(35_894)),
-                            (PyRep::String("hitQuality".into()), PyRep::Integer(3)),
-                            (PyRep::String("attackType".into()), PyRep::String("other".into())),
-                            (PyRep::String("isWrecking".into()), PyRep::Bool(false)),
-                            (PyRep::String("isBanked".into()), PyRep::Bool(false)),
-                        ])],
+                        crate::router::notify_registry::OnDamageMessage {
+                            damage_messages_args: PyRep::Dict(vec![
+                                (PyRep::String("damage".into()), PyRep::Real(dealt)),
+                                (PyRep::String("source".into()), PyRep::Integer(structure_id)),
+                                (PyRep::String("attackerID".into()), PyRep::Integer(structure_id)),
+                                (PyRep::String("target".into()), PyRep::Integer(ship_id)),
+                                (PyRep::String("target_ID".into()), PyRep::Integer(ship_id)),
+                                (PyRep::String("weapon".into()), PyRep::Integer(35_894)),
+                                (PyRep::String("hitQuality".into()), PyRep::Integer(3)),
+                                (PyRep::String("attackType".into()), PyRep::String("other".into())),
+                                (PyRep::String("isWrecking".into()), PyRep::Bool(false)),
+                                (PyRep::String("isBanked".into()), PyRep::Bool(false)),
+                            ]),
+                        },
                     );
                 }
                 if destroyed && !ctx.db.with_snapshot(|s| s.structures.contains_key(&ship_id)) {
@@ -536,17 +539,20 @@ pub async fn handle_structure_add_target(
         )
         .await
         .map_err(|e| err("TargetingFailed", e))?;
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
-        "OnStructureTargetAdded",
-        "charid",
-        vec![PyRep::Integer(structure_id), PyRep::Integer(target_id)],
+        crate::router::notify_registry::OnStructureTargetAdded {
+            sid: structure_id,
+            tid: target_id,
+        },
     );
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
-        "OnTarget",
-        "charid",
-        vec![PyRep::Integer(target_id), PyRep::String("locking".into())],
+        crate::router::notify_registry::OnTarget {
+            arg0: PyRep::Integer(target_id),
+            arg1: PyRep::String("locking".into()),
+            reason: None,
+        },
     );
     if let Some(t_char) = ctx.db.with_snapshot(|s| {
         s.characters
@@ -554,11 +560,13 @@ pub async fn handle_structure_add_target(
             .find(|c| c.active_ship_id == target_id)
             .map(|c| c.character_id)
     }) {
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::Character(t_char),
-            "OnTarget",
-            "charid",
-            vec![PyRep::Integer(structure_id), PyRep::String("targetedBy".into())],
+            crate::router::notify_registry::OnTarget {
+                arg0: PyRep::Integer(structure_id),
+                arg1: PyRep::String("targetedBy".into()),
+                reason: None,
+            },
         );
     }
     Ok(PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())]))
