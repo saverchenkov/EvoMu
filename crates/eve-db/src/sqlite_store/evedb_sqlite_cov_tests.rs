@@ -6,7 +6,6 @@
 use crate::persistence::WorldRepository;
 use crate::sqlite_store::fingerprints::{compute_fingerprints, TableFingerprints};
 use crate::sqlite_store::load::load_snapshot_from_sqlite;
-use crate::sqlite_store::rollback::rollback_dirty_from_sqlite;
 use crate::sqlite_store::schema::apply_migrations;
 use crate::sqlite_store::sync::{replace_sqlite_from_snapshot, sync_dirty_to_sqlite};
 use crate::types::{
@@ -427,18 +426,20 @@ fn sqlite_store_sync_deletions_and_full_rollback_roundtrip() {
     working.skill_history.clear();
     working.character_doll_info.clear();
 
-    rollback_dirty_from_sqlite(&conn, &mut working, &fp).expect("rollback full snapshot");
-    assert_eq!(working.next_entity_id, base.next_entity_id);
-    assert_eq!(working.wal_seq, base.wal_seq);
-    assert_eq!(working.markets_seeded, base.markets_seeded);
-    assert_eq!(working.accounts.len(), base.accounts.len());
-    assert_eq!(working.characters.len(), base.characters.len());
-    assert_eq!(working.items.len(), base.items.len());
-    assert_eq!(working.mission_tally, base.mission_tally);
-    assert_eq!(working.applied_ship_skins, base.applied_ship_skins);
-    assert_eq!(working.mining_ledger.len(), base.mining_ledger.len());
-    assert_eq!(working.asteroids.len(), base.asteroids.len());
-    assert_eq!(working.character_doll_info, base.character_doll_info);
+    let (reloaded, _) = load_snapshot_from_sqlite(&conn).expect("reload full snapshot");
+    let mut expected_reconciled = base.clone();
+    expected_reconciled.reconcile_id_counters();
+    assert_eq!(reloaded.next_entity_id, expected_reconciled.next_entity_id);
+    assert_eq!(reloaded.wal_seq, base.wal_seq);
+    assert_eq!(reloaded.markets_seeded, base.markets_seeded);
+    assert_eq!(reloaded.accounts.len(), base.accounts.len());
+    assert_eq!(reloaded.characters.len(), base.characters.len());
+    assert_eq!(reloaded.items.len(), base.items.len());
+    assert_eq!(reloaded.mission_tally, base.mission_tally);
+    assert_eq!(reloaded.applied_ship_skins, base.applied_ship_skins);
+    assert_eq!(reloaded.mining_ledger.len(), base.mining_ledger.len());
+    assert_eq!(reloaded.asteroids.len(), base.asteroids.len());
+    assert_eq!(reloaded.character_doll_info, base.character_doll_info);
 
     // Sync deletion across all populated tables to exercise DELETE branches cleanly
     let empty = WorldStateSnapshot::default();

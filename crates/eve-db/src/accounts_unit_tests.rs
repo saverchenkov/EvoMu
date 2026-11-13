@@ -277,9 +277,10 @@ fn auth_sqlite_dedicated_connection_fail_closed_persistence_and_lock_ordering_83
     let repo_ref = &repo;
     let fresh_bundle = std::thread::scope(|s| {
         let holder = s.spawn(move || {
-            let _world_conn_guard = repo_ref.sqlite_conn.lock().unwrap();
-            locked_tx.send(()).unwrap();
-            release_rx.recv().unwrap();
+            repo_ref.with_sqlite_conn(|_world_conn_guard| {
+                locked_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
         });
         locked_rx.recv().unwrap();
         let code2 = repo

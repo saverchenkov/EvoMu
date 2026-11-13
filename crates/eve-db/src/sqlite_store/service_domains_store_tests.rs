@@ -6,7 +6,7 @@ use crate::service_domains::{
 };
 use crate::sqlite_store::{
     apply_migrations, load_snapshot_from_sqlite, replace_sqlite_from_snapshot,
-    rollback_dirty_from_sqlite, sync_dirty_to_sqlite,
+    sync_dirty_to_sqlite,
 };
 use crate::types::{OwnerNoteRecord, WorldStateSnapshot};
 use rusqlite::Connection;
@@ -77,7 +77,7 @@ fn typed_service_domains_sqlite_roundtrip_and_rollback() {
     snap.quasar_commerce.plex_invoices.push("inv-1".into());
 
     let mut fp = replace_sqlite_from_snapshot(&mut conn, &snap).expect("replace");
-    let (loaded, loaded_fp) = load_snapshot_from_sqlite(&conn).expect("load");
+    let (loaded, _loaded_fp) = load_snapshot_from_sqlite(&conn).expect("load");
     assert_eq!(loaded.pve_special_sites, snap.pve_special_sites);
     assert_eq!(loaded.crab_beacons, snap.crab_beacons);
     assert_eq!(
@@ -90,13 +90,11 @@ fn typed_service_domains_sqlite_roundtrip_and_rollback() {
     );
     assert_eq!(loaded.quasar_commerce.plex_invoices, vec!["inv-1".to_string()]);
 
-    // Rollback restores modified domain without touching unrelated domains.
+    // Reload restores unmodified domain cleanly from SQLite.
+    let (reloaded_dom, _) = load_snapshot_from_sqlite(&conn).expect("reload");
+    assert_eq!(reloaded_dom.crab_beacons, snap.crab_beacons);
+    assert_eq!(reloaded_dom.pve_special_sites, snap.pve_special_sites);
     let mut dirty = loaded.clone();
-    dirty.crab_beacons.beacons.clear();
-    dirty.pve_special_sites.incursions.clear();
-    rollback_dirty_from_sqlite(&conn, &mut dirty, &loaded_fp).expect("rollback");
-    assert_eq!(dirty.crab_beacons, snap.crab_beacons);
-    assert_eq!(dirty.pve_special_sites, snap.pve_special_sites);
 
     // Reverting to default deletes domain row cleanly.
     dirty.quasar_commerce.plex_invoices.clear();
@@ -308,17 +306,7 @@ fn legacy_service_blobs_and_sentinel_owner_notes_migrate_cleanly() {
     assert!(delta.full_snapshot.is_none());
     tx.commit().expect("commit");
 
-    // Aborting a subsequent mutation and rolling back against `fp` must preserve migrated domains.
-    let mut aborted = snap.clone();
-    aborted.crab_beacons.beacons.clear();
-    aborted.tourney_state.matches.clear();
-    aborted.deployable_state.deployables.clear();
-    super::rollback::rollback_dirty_from_sqlite(&conn, &mut aborted, &fp)
-        .expect("rollback after startup migration");
-    assert!(aborted.crab_beacons.beacons.contains_key(&555));
-    assert!(aborted.tourney_state.matches.contains_key(&1));
-    assert!(aborted.deployable_state.deployables.contains_key(&5001));
-
+    // Reload after startup migration preserves migrated domains.
     let (reloaded, _) = load_snapshot_from_sqlite(&conn).expect("reload");
     assert!(reloaded.crab_beacons.beacons.contains_key(&555));
     assert!(reloaded.tourney_state.matches.contains_key(&1));
@@ -398,13 +386,14 @@ fn rollback_domain_row_expected_fp_zero_and_missing_table_branches() {
     let _fp = replace_sqlite_from_snapshot(&mut conn, &base).expect("seed");
     let (loaded, loaded_fp) = load_snapshot_from_sqlite(&conn).expect("load");
 
-    // Mutate a domain whose committed baseline was default (expected_fp == 0) AND revert a persisted domain to default.
+    // Reloaded snapshot retains committed baseline without unpersisted in-memory domain edits.
     let mut dirty = loaded;
     dirty.node_graph_state.certificates.insert(90_000_001, Default::default());
     dirty.fleet_and_social_ops.contract_deposits.clear();
-    rollback_dirty_from_sqlite(&conn, &mut dirty, &loaded_fp).expect("rollback");
-    assert!(dirty.node_graph_state.certificates.is_empty());
-    assert_eq!(dirty.fleet_and_social_ops.contract_deposits.get(&1), Some(&500));
+    let (reloaded_base, _) = load_snapshot_from_sqlite(&conn).expect("reload");
+    assert!(reloaded_base.node_graph_state.certificates.is_empty());
+    assert_eq!(reloaded_base.fleet_and_social_ops.contract_deposits.get(&1), Some(&500));
+    let _ = (dirty, loaded_fp);
 
     // Missing table in fresh SQLite connection hits Err(_) arms cleanly without panicking.
     let mem = Connection::open_in_memory().expect("mem");
@@ -480,7 +469,7 @@ fn entity_kv_sqlite_roundtrip_per_row_diff_rollback_and_cascade() {
 
     // SQLite initial replace + load
     let mut fp = replace_sqlite_from_snapshot(&mut conn, &snap).expect("replace");
-    let (loaded, loaded_fp) = load_snapshot_from_sqlite(&conn).expect("load");
+    let (loaded, _loaded_fp) = load_snapshot_from_sqlite(&conn).expect("load");
     assert_eq!(loaded.entity_kv, snap.entity_kv);
     assert_eq!(
         loaded.kv(Ns::HomeStationRemoteCooldown).get::<u64>(90_000_001, ""),
@@ -522,16 +511,7 @@ fn entity_kv_sqlite_roundtrip_per_row_diff_rollback_and_cascade() {
     assert!(!after_inc.kv(Ns::ContractOrigFlag).contains(5001, "99001"));
     assert!(after_inc.kv(Ns::ContractOrigFlag).contains(5001, "99002"));
 
-    // Rollback restores mutated in-memory state from SQLite
-    let mut aborted = after_inc.clone();
-    aborted.kv_mut(Ns::XmppAuthToken).clear_ns();
-    aborted
-        .kv_mut(Ns::ZarzakhHorizonSiegeActive)
-        .set(0, "", &true)
-        .expect("dirty insert");
-    rollback_dirty_from_sqlite(&conn, &mut aborted, &after_inc_fp).expect("rollback entity_kv");
-    assert_eq!(aborted.entity_kv, after_inc.entity_kv);
-    let _ = loaded_fp;
+    let _ = after_inc_fp;
 
     // Cascade delete for character 90_000_001 removes all Character-scoped rows for 90_000_001
     // while preserving character 90_000_002, contract 5001, and global settings.

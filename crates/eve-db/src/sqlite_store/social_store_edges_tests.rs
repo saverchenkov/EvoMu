@@ -238,25 +238,14 @@ fn social_fingerprint_sync_load_and_rollback_edges() {
     assert!(loaded.chat_channel_acl.get("501").unwrap().allow_list.contains(&3001));
     assert!(!loaded.chat_channel_acl.contains_key("502"));
 
-    // Rollback restores dirty snapshot to persisted state
+    // Reload restores dirty snapshot to persisted state
     let mut dirty = loaded.clone();
     dirty.bookmark_subfolder_parents.insert(777, 10);
-    rollback_d6_social(&conn, &mut dirty, &fp);
+    load_d6_social_into_snapshot(&conn, &mut dirty).unwrap();
     assert!(!dirty.bookmark_subfolder_parents.contains_key(&777));
 
-    // Clean rollback is a no-op even if a table is dropped
-    let clean_fp = TableFingerprints {
-        d6_social: compute_d6_social_fp(&loaded),
-        ..TableFingerprints::default()
-    };
     let tables = get_social_tables(&conn);
     conn.execute(&format!("DROP TABLE \"{}\"", tables[0]), []).unwrap();
-    let before_noop = loaded.clone();
-    rollback_d6_social(&conn, &mut loaded, &clean_fp);
-    assert_eq!(
-        compute_d6_social_fp(&loaded),
-        compute_d6_social_fp(&before_noop)
-    );
 
     // Sync SQL error when a social table is missing preserves fp
     let mut dirty_for_err = loaded.clone();

@@ -1699,19 +1699,17 @@ async fn test_drones_bandwidth_sentry_and_npc_aggro_switching_end_to_end() {
     assert_eq!(garde_after_snap.max_velocity, 0.0, "Sentry drone remains stationary at 0 m/s");
 
     // Sentry drone optimal, falloff, and tracking turret formula hit-chance evaluation
-    let (hit_opt, hit_falloff, hit_transversal) = with_combat_runtime(&ctx, |rt| {
-        let d = rt.active_drones_in_space.get(&garde_ball).unwrap();
-        let d_ball = Ball { id: garde_ball, type_id: 23561, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 1000.0, radius: 10.0, speed_fraction: 0.0, mode: MovementMode::Stop };
-        let falloff = d.effective_falloff_range(&ctx);
-        let t_opt = Ball { id: 10004, type_id: 10004, position: DVec3::new(d.optimal_range, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 100.0, inertia: 1.0, mass: 1000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop };
-        let t_falloff = Ball { id: 10004, type_id: 10004, position: DVec3::new(d.optimal_range + falloff, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 100.0, inertia: 1.0, mass: 1000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop };
-        let t_trans = Ball { id: 10004, type_id: 10004, position: DVec3::new(d.optimal_range, 0.0, 0.0), velocity: DVec3::new(0.0, 5000.0, 0.0), max_velocity: 5000.0, inertia: 1.0, mass: 1000.0, radius: 25.0, speed_fraction: 1.0, mode: MovementMode::Stop };
-        (
-            d.compute_combat_hit_multiplier(&ctx, &d_ball, &t_opt, 50.0),
-            d.compute_combat_hit_multiplier(&ctx, &d_ball, &t_falloff, 50.0),
-            d.compute_combat_hit_multiplier(&ctx, &d_ball, &t_trans, 25.0),
-        )
-    });
+    let d = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space.get(&garde_ball).unwrap().clone());
+    let d_ball = Ball { id: garde_ball, type_id: 23561, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 1000.0, radius: 10.0, speed_fraction: 0.0, mode: MovementMode::Stop };
+    let falloff = d.effective_falloff_range(&ctx);
+    let t_opt = Ball { id: 10004, type_id: 10004, position: DVec3::new(d.optimal_range, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 100.0, inertia: 1.0, mass: 1000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop };
+    let t_falloff = Ball { id: 10004, type_id: 10004, position: DVec3::new(d.optimal_range + falloff, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 100.0, inertia: 1.0, mass: 1000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop };
+    let t_trans = Ball { id: 10004, type_id: 10004, position: DVec3::new(d.optimal_range, 0.0, 0.0), velocity: DVec3::new(0.0, 5000.0, 0.0), max_velocity: 5000.0, inertia: 1.0, mass: 1000.0, radius: 25.0, speed_fraction: 1.0, mode: MovementMode::Stop };
+    let (hit_opt, hit_falloff, hit_transversal) = (
+        d.compute_combat_hit_multiplier(&ctx, &d_ball, &t_opt, 50.0),
+        d.compute_combat_hit_multiplier(&ctx, &d_ball, &t_falloff, 50.0),
+        d.compute_combat_hit_multiplier(&ctx, &d_ball, &t_trans, 25.0),
+    );
     assert!((hit_opt - 1.0).abs() < 1e-3, "Stationary target at optimal has 1.0 hit chance");
     assert!((hit_falloff - 0.5).abs() < 0.05, "Target at optimal + falloff has ~0.5 hit chance");
     assert!(hit_transversal < 0.25, "High transversal tracking penalty drops hit chance");

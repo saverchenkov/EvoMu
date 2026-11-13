@@ -9,7 +9,6 @@ pub mod fingerprints;
 pub mod ledger_store;
 pub mod load;
 pub mod quarantine;
-pub mod rollback;
 pub mod schema;
 pub mod service_domains_store;
 pub mod sync;
@@ -19,7 +18,6 @@ pub use auth_store::*;
 pub use fingerprints::*;
 pub use load::*;
 pub use quarantine::*;
-pub use rollback::*;
 pub use schema::*;
 pub use sync::*;
 

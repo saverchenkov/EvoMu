@@ -269,9 +269,7 @@ fn test_durable_snapshot_persistence_and_domain_mutations() {
     // back to `prev_len` on disk and aborts in memory, so a subsequent committed transaction reuses
     // the sequence number cleanly and survives restart without reviving the aborted transaction.
     let wal_len_before_abort = std::fs::metadata(&prod_wal_path).unwrap().len();
-    prod1
-        .wal_fault_mode
-        .store(2, std::sync::atomic::Ordering::SeqCst);
+    prod1.set_fault_plan_for_test(crate::TxFaultPlan::FailAtCommit);
     let sync_fail_res: Result<(), DbError> = prod1.try_with_mut_snapshot(|snap| {
         if let Some(gm_ch) = snap.characters.get_mut(&90_000_003) {
             gm_ch.balance = IskCents::from_isk(999_999_999);
@@ -286,13 +284,10 @@ fn test_durable_snapshot_persistence_and_domain_mutations() {
     assert_eq!(
         std::fs::metadata(&prod_wal_path).unwrap().len(),
         wal_len_before_abort,
-        "sync_data failure after write_all must truncate .json.wal back to prev_len (R25-P1-1)"
+        "FailAtCommit must not advance .json.wal beyond wal_len_before_abort"
     );
 
-    // R25-P1-1: (b) Verify partial `write_all` failure truncates partial bytes back to `prev_len`.
-    prod1
-        .wal_fault_mode
-        .store(1, std::sync::atomic::Ordering::SeqCst);
+    prod1.set_fault_plan_for_test(crate::TxFaultPlan::FailNthStatement(1));
     let partial_fail_res: Result<(), DbError> = prod1.try_with_mut_snapshot(|snap| {
         if let Some(gm_ch) = snap.characters.get_mut(&90_000_003) {
             gm_ch.balance = IskCents::from_isk(888_888_888);
@@ -306,7 +301,7 @@ fn test_durable_snapshot_persistence_and_domain_mutations() {
     assert_eq!(
         std::fs::metadata(&prod_wal_path).unwrap().len(),
         wal_len_before_abort,
-        "partial write_all failure must truncate .json.wal back to prev_len (R25-P1-1)"
+        "FailNthStatement must leave .json.wal untouched"
     );
 
     // R25-P1-1: (c) Simulate an uncleaned partial write left on disk in `.json.wal` followed by a

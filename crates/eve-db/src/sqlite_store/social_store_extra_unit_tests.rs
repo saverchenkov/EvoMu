@@ -3,8 +3,7 @@
 use super::fingerprints::TableFingerprints;
 use super::schema::apply_migrations;
 use super::social_store::{
-    apply_d6_social_migration, compute_d6_social_fp, load_d6_social_into_snapshot,
-    rollback_d6_social, sync_d6_social,
+    apply_d6_social_migration, compute_d6_social_fp, load_d6_social_into_snapshot, sync_d6_social,
 };
 use crate::durable_domain_types::SocialContactNotificationRecord;
 use crate::snapshot_ext::{
@@ -345,15 +344,10 @@ fn social_store_load_edge_cases_for_bookmark_meta_folders_and_chat_acls() {
         Some(&(9_999, "spam".into()))
     );
 
-    // Rollback when clean is a no-op; rollback when dirty restores from SQLite.
-    let clean_fp = compute_d6_social_fp(&loaded);
-    fp.d6_social = clean_fp;
-    rollback_d6_social(&conn, &mut loaded, &fp);
-    assert_eq!(loaded.bookmark_folders.len(), 2);
-
-    loaded.bookmark_folders.clear();
-    rollback_d6_social(&conn, &mut loaded, &fp);
-    assert_eq!(loaded.bookmark_folders.len(), 2);
+    // Reloading into a cleared snapshot restores persisted state from SQLite.
+    let mut reloaded = WorldStateSnapshot::default();
+    load_d6_social_into_snapshot(&conn, &mut reloaded).unwrap();
+    assert_eq!(reloaded.bookmark_folders.len(), 2);
 }
 
 #[test]

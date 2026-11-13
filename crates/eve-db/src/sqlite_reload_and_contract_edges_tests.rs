@@ -223,10 +223,6 @@ fn sqlite_full_table_reload_and_snapshot_contract_edges() {
 
 #[test]
 fn contract_expiry_fingerprint_fields_and_undock_validation() {
-    set_wal_error_hook(std::sync::Arc::new(|_| true));
-    set_wal_poison_check_hook(std::sync::Arc::new(|| None));
-    assert!(record_last_wal_error("test_error"));
-
     let raw_c = serde_json::to_string(&ContractRecord::default()).unwrap().replace("\"num_days\":1,", "");
     let c_def: ContractRecord = serde_json::from_str(&raw_c).unwrap();
     assert_eq!(c_def.num_days, 1);

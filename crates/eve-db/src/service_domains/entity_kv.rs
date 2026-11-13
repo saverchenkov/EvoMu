@@ -432,7 +432,6 @@ pub struct EntityKvWriter<'a> {
 impl<'a> EntityKvWriter<'a> {
     #[inline]
     pub fn new(snap: &'a mut WorldStateSnapshot, ns: Ns) -> Self {
-        snap.dirty_hints.other_domains_dirty = true;
         Self { snap, ns }
     }
 
@@ -555,7 +554,6 @@ pub fn cascade_delete_entity_kv(
     scope: EntityKvScope,
     entity_id: i64,
 ) -> usize {
-    snap.dirty_hints.other_domains_dirty = true;
     let mut removed = 0usize;
     for &ns in Ns::ALL {
         if ns.scope() == scope && ns.cascade_on_owner_delete() {

@@ -510,7 +510,7 @@ fn social_store_and_sync_ext_cover_all_collections_and_deletions() {
     }
 
     snap.char_notes.clear();
-    social_store::rollback_d6_social(&conn, &mut snap, &fp);
+    social_store::load_d6_social_into_snapshot(&conn, &mut snap).unwrap();
     assert_eq!(snap.char_notes.get(&(90_000_001, 90_000_002)), Some(&"Trusted".to_string()));
 
     snap.character_last_jump_unix.clear();

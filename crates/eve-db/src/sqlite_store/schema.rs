@@ -444,7 +444,7 @@ pub fn apply_migrations(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     conn.execute_batch(
-        "INSERT OR IGNORE INTO world_meta (meta_key, meta_value) VALUES ('next_entity_id', 200000000), ('wal_seq', 0), ('markets_seeded', 0);",
+        "INSERT OR IGNORE INTO world_meta (meta_key, meta_value) VALUES ('next_entity_id', 200000000), ('next_entity_block', 200000000), ('wal_seq', 0), ('markets_seeded', 0);",
     )
     .map_err(|e| e.to_string())?;
     let _ = conn.execute("ALTER TABLE skill_queues ADD COLUMN started_at_unix INTEGER", []);

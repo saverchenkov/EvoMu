@@ -385,8 +385,6 @@ pub struct CombatRuntimeState {
     #[doc(hidden)]
     pub synced_db_epoch: u64,
     #[doc(hidden)]
-    pub synced_rollback_epoch: u64,
-    #[doc(hidden)]
     pub synced_ext_hash: u64,
     pub entropic_spools: HashMap<(i64, i64), EntropicSpoolState>,
     pub in_flight_missiles: HashMap<i64, InFlightMissileState>,
@@ -506,19 +504,14 @@ impl CombatRuntimeState {
         &mut self,
         p: &eve_db::PersistedCombatCrimewatchState,
         combat_epoch: u64,
-        rb_epoch: u64,
     ) {
         let ext_hash = Self::ext_runtime_hash(p);
-        if self.synced_db_epoch == 0
-            || self.synced_rollback_epoch != rb_epoch
-            || self.synced_ext_hash != ext_hash
-        {
+        if self.synced_db_epoch == 0 || self.synced_ext_hash != ext_hash {
             self.sync_from_persisted(p);
         } else {
             self.sync_core_from_persisted(p);
         }
         self.synced_db_epoch = combat_epoch;
-        self.synced_rollback_epoch = rb_epoch;
         self.synced_ext_hash = ext_hash;
     }
 
@@ -827,18 +820,26 @@ impl CombatRuntimeState {
 }
 
 /// Rehydrates [`CombatRuntimeState`] from `ctx.db` whenever the repository epoch has changed
-/// (e.g. on startup, database reload, snapshot replacement, or transaction rollback) (`#592`).
+/// (e.g. on startup, database reload, or snapshot replacement) (`#592`).
 pub fn sync_combat_runtime_from_db(ctx: &ServerContext) {
     let combat_epoch = ctx.db.combat_state_epoch();
-    let rb_epoch = ctx.db.rollback_epoch();
     let guard_read = ctx
         .combat_ephemeral
         .read()
         .unwrap_or_else(|e| e.into_inner());
-    if guard_read.synced_db_epoch == combat_epoch && guard_read.synced_rollback_epoch == rb_epoch {
+    if guard_read.synced_db_epoch == combat_epoch {
         return;
     }
     drop(guard_read);
+    rehydrate_combat_runtime_with_mode(ctx, false);
+}
+
+/// Unconditionally rehydrates [`CombatRuntimeState`] from the currently published `ctx.db` snapshot.
+pub fn rehydrate_combat_runtime_from_db_forced(ctx: &ServerContext) {
+    rehydrate_combat_runtime_with_mode(ctx, true);
+}
+
+fn rehydrate_combat_runtime_with_mode(ctx: &ServerContext, force_full: bool) {
     if ctx.db.is_write_locked_by_current_thread() {
         return;
     }
@@ -848,8 +849,10 @@ pub fn sync_combat_runtime_from_db(ctx: &ServerContext) {
             .write()
             .unwrap_or_else(|e| e.into_inner());
         let combat_epoch = ctx.db.combat_state_epoch();
-        let rb_epoch = ctx.db.rollback_epoch();
-        guard.rehydrate_from_persisted_epochs(&s.combat_crimewatch_state, combat_epoch, rb_epoch);
+        if force_full {
+            guard.synced_db_epoch = 0;
+        }
+        guard.rehydrate_from_persisted_epochs(&s.combat_crimewatch_state, combat_epoch);
     });
 }
 
@@ -858,7 +861,6 @@ pub fn flush_combat_runtime_to_db(ctx: &ServerContext) {
     if ctx.db.is_write_locked_by_current_thread() {
         return;
     }
-    let rb_before = ctx.db.rollback_epoch();
     let (persisted, ext_hash) = {
         let guard = ctx
             .combat_ephemeral
@@ -881,16 +883,12 @@ pub fn flush_combat_runtime_to_db(ctx: &ServerContext) {
             guard.synced_db_epoch = 0;
         });
     }
-    let rb_after = ctx.db.rollback_epoch();
-    if rb_after == rb_before {
-        let mut guard = ctx
-            .combat_ephemeral
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        guard.synced_db_epoch = ctx.db.combat_state_epoch();
-        guard.synced_rollback_epoch = rb_after;
-        guard.synced_ext_hash = ext_hash;
-    }
+    let mut guard = ctx
+        .combat_ephemeral
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    guard.synced_db_epoch = ctx.db.combat_state_epoch();
+    guard.synced_ext_hash = ext_hash;
 }
 
 pub fn with_combat_runtime<R>(
@@ -918,7 +916,6 @@ pub fn with_mut_combat_runtime<R>(
         guard.synced_db_epoch = 0;
         return out;
     }
-    let rb_before = ctx.db.rollback_epoch();
     let mut ext_hash = 0;
     let out = ctx.db.with_mut_snapshot(|s| {
         let mut guard = ctx
@@ -926,13 +923,8 @@ pub fn with_mut_combat_runtime<R>(
             .write()
             .unwrap_or_else(|e| e.into_inner());
         let combat_epoch = ctx.db.combat_state_epoch();
-        let rb_epoch = ctx.db.rollback_epoch();
-        if guard.synced_db_epoch != combat_epoch || guard.synced_rollback_epoch != rb_epoch {
-            guard.rehydrate_from_persisted_epochs(
-                &s.combat_crimewatch_state,
-                combat_epoch,
-                rb_epoch,
-            );
+        if guard.synced_db_epoch != combat_epoch {
+            guard.rehydrate_from_persisted_epochs(&s.combat_crimewatch_state, combat_epoch);
         }
         let out = f(&mut guard);
         let persisted = guard.to_persisted();
@@ -941,16 +933,12 @@ pub fn with_mut_combat_runtime<R>(
         guard.synced_db_epoch = 0;
         out
     });
-    let rb_after = ctx.db.rollback_epoch();
-    if rb_after == rb_before {
-        let mut guard = ctx
-            .combat_ephemeral
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        guard.synced_db_epoch = ctx.db.combat_state_epoch();
-        guard.synced_rollback_epoch = rb_after;
-        guard.synced_ext_hash = ext_hash;
-    }
+    let mut guard = ctx
+        .combat_ephemeral
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    guard.synced_db_epoch = ctx.db.combat_state_epoch();
+    guard.synced_ext_hash = ext_hash;
     out
 }
 

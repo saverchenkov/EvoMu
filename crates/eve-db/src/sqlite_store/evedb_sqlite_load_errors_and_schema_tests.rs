@@ -6,12 +6,10 @@
 
 use super::evedb_sqlite_cov_tests::build_populated_snapshot;
 use crate::sqlite_store::corp_crimewatch_store::load_d6_corp_crimewatch;
-use crate::sqlite_store::fingerprints::compute_fingerprints;
 use crate::sqlite_store::industry_market_pve_store::load_d6_batch4;
 use crate::sqlite_store::ledger_store::{load_ledger, sync_ledger};
 use crate::sqlite_store::load::load_snapshot_from_sqlite;
 use crate::sqlite_store::notes_lp_sequence_store::{load_d6, sync_d6};
-use crate::sqlite_store::rollback::rollback_dirty_from_sqlite;
 use crate::sqlite_store::schema::{apply_migrations, load_or_init_jwt_secret, save_jwt_secret};
 use crate::sqlite_store::social_store::{load_d6_social_into_snapshot, sync_d6_social};
 use crate::types::WorldStateSnapshot;
@@ -117,9 +115,8 @@ fn sqlite_store_load_error_and_optional_table_missing_branches() {
 
 #[test]
 fn sqlite_store_malformed_json_and_unknown_kv_keys_coverage() {
-    // 1. Rollback malformed skill_history JSON + optional corrupt skill_history on load
-    let snap = build_populated_snapshot();
-    let fp = compute_fingerprints(&snap);
+    // 1. Corrupt skill_history JSON fails closed by default and quarantines under quarantine mode
+    let _ = build_populated_snapshot();
     {
         let conn = open_migrated_conn();
         conn.execute(
@@ -127,10 +124,6 @@ fn sqlite_store_malformed_json_and_unknown_kv_keys_coverage() {
             params![90_000_001i64],
         )
         .expect("insert corrupt skill_history");
-        let mut dirty = snap.clone();
-        dirty.skill_history.get_mut(&90_000_001).unwrap()[0].skill_level = 99;
-        rollback_dirty_from_sqlite(&conn, &mut dirty, &fp)
-            .expect("rollback skips corrupt optional skill_history JSON cleanly");
         let err = load_snapshot_from_sqlite(&conn).expect_err("corrupt skill_history fails closed");
         assert!(err.contains("skill_history") && err.contains("90000001"));
         let (reloaded, _) =

@@ -9,7 +9,6 @@
 use crate::persistence::WorldRepository;
 use crate::sqlite_store::fingerprints::{fp_character, TableFingerprints};
 use crate::sqlite_store::load::load_snapshot_from_sqlite;
-use crate::sqlite_store::rollback::rollback_dirty_from_sqlite;
 use crate::sqlite_store::schema::apply_migrations;
 use crate::sqlite_store::sync::sync_dirty_to_sqlite;
 use crate::types::{BookmarkRecord, MailRecord, WalletJournalEntry, WorldStateSnapshot};
@@ -79,9 +78,9 @@ fn regression_410_character_profile_and_autopilot_fields_dirty_detect_and_roundt
     assert_eq!(ch_loaded.autopilot_waypoints, vec![30_000_142, 30_003_458]);
 
     snap.characters.get_mut(&cid).unwrap().autopilot_waypoints = vec![30_000_999];
-    rollback_dirty_from_sqlite(&conn, &mut snap, &fp).expect("rollback character");
+    let (reloaded_abort, _) = load_snapshot_from_sqlite(&conn).expect("reload character");
     assert_eq!(
-        snap.characters[&cid].autopilot_waypoints,
+        reloaded_abort.characters[&cid].autopilot_waypoints,
         vec![30_000_142, 30_003_458]
     );
 }
@@ -179,14 +178,14 @@ fn regression_411_world_snapshot_auxiliary_collections_persist_and_rollback() {
     working.system_jump_events.clear();
     working.system_kill_events.clear();
 
-    rollback_dirty_from_sqlite(&conn, &mut working, &fp).expect("rollback #411 collections");
-    assert_eq!(working.killmail_details, loaded.killmail_details);
-    assert_eq!(working.station_office_rental_costs, loaded.station_office_rental_costs);
-    assert_eq!(working.structure_esi_timer_meta, loaded.structure_esi_timer_meta);
-    assert_eq!(working.corp_project_contributors, loaded.corp_project_contributors);
-    assert_eq!(working.loyalty_store_offers, loaded.loyalty_store_offers);
-    assert_eq!(working.system_jump_events, loaded.system_jump_events);
-    assert_eq!(working.system_kill_events, loaded.system_kill_events);
+    let (reloaded, _) = load_snapshot_from_sqlite(&conn).expect("reload #411 collections");
+    assert_eq!(reloaded.killmail_details, loaded.killmail_details);
+    assert_eq!(reloaded.station_office_rental_costs, loaded.station_office_rental_costs);
+    assert_eq!(reloaded.structure_esi_timer_meta, loaded.structure_esi_timer_meta);
+    assert_eq!(reloaded.corp_project_contributors, loaded.corp_project_contributors);
+    assert_eq!(reloaded.loyalty_store_offers, loaded.loyalty_store_offers);
+    assert_eq!(reloaded.system_jump_events, loaded.system_jump_events);
+    assert_eq!(reloaded.system_kill_events, loaded.system_kill_events);
 }
 
 #[test]
@@ -242,22 +241,23 @@ fn regression_412_rollback_preserves_bookmarks_metadata_and_same_length_journal_
     snap.mails[m_len - 1].subject = "Tampered same-length subject".into();
     snap.mails[m_len - 1].body = "Tampered same-length body".into();
 
-    rollback_dirty_from_sqlite(&conn, &mut snap, &fp).expect("rollback #412 mutations");
+    let (restored, _) = load_snapshot_from_sqlite(&conn).expect("reload #412 mutations");
+    let _ = snap;
 
-    let restored_bm = &snap.bookmarks[&88_001];
+    let restored_bm = &restored.bookmarks[&88_001];
     assert_eq!(restored_bm.label, "Jita Instadock");
     assert_eq!(restored_bm.item_id, Some(60_003_760));
     assert_eq!(restored_bm.memo, "Align to Jita 4-4 CNAP");
     assert_eq!(restored_bm.folder_id, Some(42));
     assert!(restored_bm.is_shared);
 
-    assert_eq!(snap.wallet_journal[j_len - 1].reason, "Serpentis bounty");
+    assert_eq!(restored.wallet_journal[j_len - 1].reason, "Serpentis bounty");
     assert_eq!(
-        snap.wallet_journal[j_len - 1].amount,
+        restored.wallet_journal[j_len - 1].amount,
         IskCents::from_isk(2_500_000)
     );
-    assert_eq!(snap.mails[m_len - 1].subject, "Fleet Ping");
-    assert_eq!(snap.mails[m_len - 1].body, "Undock in 5 minutes");
+    assert_eq!(restored.mails[m_len - 1].subject, "Fleet Ping");
+    assert_eq!(restored.mails[m_len - 1].body, "Undock in 5 minutes");
 }
 
 #[test]

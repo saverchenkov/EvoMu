@@ -1,7 +1,6 @@
 //! Pre-seeded canonical demonstration world fixtures for offline testing.
 
 use crate::accounts::service_roles;
-use crate::lock_rank::{RankedMutex, RankedRwLock};
 use crate::persistence::WorldRepository;
 use crate::sqlite_store;
 use crate::types::*;
@@ -599,27 +598,16 @@ impl WorldRepository {
         let jwt_secret =
             sqlite_store::load_or_init_jwt_secret(&conn, Self::generate_random_secret_32)
                 .expect("initialize per-deployment JWT signing secret");
+        let entity_block = initial_snap.next_entity_id.max(200_000_000);
 
-        let mut repo = Self {
-            instance_id: Self::next_instance_id(),
-            inner: RankedRwLock::new(std::sync::Arc::new(initial_snap)),
-            sqlite_conn: RankedMutex::new(conn),
-            sqlite_fp: RankedMutex::new(fp),
-            sqlite_path: None,
-            quarantine_unreadable: sqlite_store::default_quarantine_unreadable(),
-            auth_runtime: RankedRwLock::new(AuthRuntimeState::new(jwt_secret)),
-            clock: RankedRwLock::new(std::sync::Arc::new(
-                crate::clock::VirtualServerClock::new(),
-            )),
-            wal_lock: RankedMutex::new(()),
-            snapshot_path: None,
-            pending_wal_records: std::sync::atomic::AtomicUsize::new(0),
-            state_epoch: std::sync::atomic::AtomicU64::new(1),
-            rollback_epoch: std::sync::atomic::AtomicU64::new(1),
-            combat_state_epoch: std::sync::atomic::AtomicU64::new(1),
-            #[cfg(test)]
-            wal_fault_mode: std::sync::atomic::AtomicU8::new(0),
-        };
+        let mut repo = Self::from_parts(
+            initial_snap,
+            conn,
+            fp,
+            entity_block,
+            None,
+            AuthRuntimeState::new(jwt_secret),
+        );
 
         let snapshot_path = {
             let _env_guard = crate::lock_test_env_read();

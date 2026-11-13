@@ -641,21 +641,17 @@ fn test_auth_runtime_state_persists_and_prunes_across_sqlite_restart() {
     repo.kick_user(uid_bob, "restart-kick", now + 10);
 
     // Ensure plaintext refresh token is NEVER stored in SQLite (only its SHA-256 digest).
-    {
-        let conn = repo.sqlite_conn.lock().unwrap();
-        let stored_keys: Vec<String> = conn
-            .prepare("SELECT token_hash FROM auth_refresh_tokens")
+    let stored_keys: Vec<String> = repo.with_sqlite_conn(|conn| {
+        conn.prepare("SELECT token_hash FROM auth_refresh_tokens")
             .unwrap()
             .query_map([], |r| r.get::<_, String>(0))
             .unwrap()
             .map(|r| r.unwrap())
-            .collect();
-        assert!(!stored_keys.is_empty());
-        assert!(!stored_keys.contains(&bundle_active.refresh_token));
-        assert!(stored_keys.contains(&crate::sqlite_store::refresh_token_digest(
-            &bundle_active.refresh_token
-        )));
-    }
+            .collect()
+    });
+    assert!(!stored_keys.is_empty());
+    assert!(!stored_keys.contains(&bundle_active.refresh_token));
+    assert!(stored_keys.contains(&crate::sqlite_store::refresh_token_digest(&bundle_active.refresh_token)));
 
     // Save to another SQLite path and reload from disk.
     repo.save_to_sqlite(&copy_path).expect("save_to_sqlite");

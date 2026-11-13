@@ -1414,26 +1414,20 @@ async fn has_extended_runtime_state_all_32_fields_epoch_sync_and_sig_radius_muta
     let h2 = CombatRuntimeState::ext_runtime_hash(&p_empty);
     assert!(h1 != 0 && h1 != 1 && h2 != 1 && h1 != h2);
 
-    // `rehydrate_from_persisted_epochs`: triggers ext sync when synced_db_epoch==0, rb_epoch changes, or ext_hash changes;
-    // skips ext sync when all 3 match.
+    // `rehydrate_from_persisted_epochs`: triggers ext sync when synced_db_epoch==0 or ext_hash changes;
+    // skips ext sync when both match.
     let mut rt_rehyd = CombatRuntimeState::default();
     rt_rehyd.modified_system_securities.insert(99, 0.1);
     rt_rehyd.synced_db_epoch = 0;
-    rt_rehyd.synced_rollback_epoch = 5;
     rt_rehyd.synced_ext_hash = h2;
-    rt_rehyd.rehydrate_from_persisted_epochs(&p_empty, 3, 5);
+    rt_rehyd.rehydrate_from_persisted_epochs(&p_empty, 3);
     assert!(rt_rehyd.modified_system_securities.is_empty());
 
-    // When db_epoch > 0, rb_epoch matches, and ext_hash matches -> ext NOT overwritten; when rb_epoch differs -> ext synced
+    // When db_epoch > 0 and ext_hash matches -> ext NOT overwritten; when ext_hash differs -> ext synced
     rt_rehyd.modified_system_securities.insert(99, 0.1);
-    rt_rehyd.rehydrate_from_persisted_epochs(&p_empty, 4, 5);
+    rt_rehyd.rehydrate_from_persisted_epochs(&p_empty, 4);
     assert!(rt_rehyd.modified_system_securities.contains_key(&99));
-    rt_rehyd.rehydrate_from_persisted_epochs(&p_empty, 4, 6);
-    assert!(rt_rehyd.modified_system_securities.is_empty());
-
-    // When only ext_hash differs -> ext synced
-    rt_rehyd.modified_system_securities.insert(99, 0.1);
-    rt_rehyd.rehydrate_from_persisted_epochs(&p_ext, 5, 6);
+    rt_rehyd.rehydrate_from_persisted_epochs(&p_ext, 5);
     assert!(rt_rehyd.modified_system_securities.is_empty());
     assert_eq!(rt_rehyd.pending_bounty_ticks.get(&(30_000_142, 11)), Some(&777.0));
 

@@ -942,60 +942,6 @@ pub struct WorldStateSnapshot {
     >,
     #[serde(default)]
     pub insurance_contracts: HashMap<i64, PersistedInsuranceContractRecord>,
-    /// Transaction-scoped dirty tracking hints.
-    #[serde(skip, default)]
-    pub dirty_hints: SnapshotDirtyHints,
-}
-
-/// Per-transaction dirty domain and touched-key tracking hints.
-///
-/// When `tracked` is `true`, `sync_dirty_to_sqlite` skips unchanged domains and hashes only
-/// `touched_*` keys. `PartialEq` always returns `true` so transient hints never affect
-/// `WorldStateSnapshot` equality comparisons.
-#[derive(Debug, Clone, Default)]
-pub struct SnapshotDirtyHints {
-    pub tracked: bool,
-    pub touched_items: HashSet<i64>,
-    pub deleted_items: HashSet<i64>,
-    pub touched_characters: HashSet<i64>,
-    pub touched_skills: HashSet<i64>,
-    pub touched_skill_queues: HashSet<i64>,
-    pub touched_market_orders: HashSet<i64>,
-    pub deleted_market_orders: HashSet<i64>,
-    pub asteroids_dirty: bool,
-    pub system_states_dirty: bool,
-    pub crimewatch_dirty: bool,
-    pub other_domains_dirty: bool,
-}
-
-impl PartialEq for SnapshotDirtyHints {
-    #[inline]
-    fn eq(&self, _other: &Self) -> bool {
-        true
-    }
-}
-impl Eq for SnapshotDirtyHints {}
-
-impl SnapshotDirtyHints {
-    #[inline]
-    pub fn clear(&mut self) {
-        *self = Self::default();
-    }
-
-    #[inline]
-    pub fn is_any_dirty(&self) -> bool {
-        !self.touched_items.is_empty()
-            || !self.deleted_items.is_empty()
-            || !self.touched_characters.is_empty()
-            || !self.touched_skills.is_empty()
-            || !self.touched_skill_queues.is_empty()
-            || !self.touched_market_orders.is_empty()
-            || !self.deleted_market_orders.is_empty()
-            || self.asteroids_dirty
-            || self.system_states_dirty
-            || self.crimewatch_dirty
-            || self.other_domains_dirty
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -1093,60 +1039,13 @@ pub struct ObserverMiningRecord {
 }
 
 impl WorldStateSnapshot {
-    /// Enables per-domain dirty tracking for the current write transaction.
-    #[inline]
-    pub fn enable_dirty_tracking(&mut self) { self.dirty_hints.tracked = true; }
-    #[inline]
-    pub fn mark_item_dirty(&mut self, item_id: i64) {
-        self.dirty_hints.tracked = true;
-        self.dirty_hints.deleted_items.remove(&item_id);
-        self.dirty_hints.touched_items.insert(item_id);
-    }
-    #[inline]
-    pub fn mark_item_deleted(&mut self, item_id: i64) {
-        self.dirty_hints.tracked = true;
-        self.dirty_hints.touched_items.remove(&item_id);
-        self.dirty_hints.deleted_items.insert(item_id);
-    }
-    #[inline]
-    pub fn mark_character_dirty(&mut self, char_id: i64) {
-        self.dirty_hints.tracked = true;
-        self.dirty_hints.touched_characters.insert(char_id);
-    }
-    #[inline]
-    pub fn mark_skills_dirty(&mut self, char_id: i64) {
-        self.dirty_hints.tracked = true;
-        self.dirty_hints.touched_skills.insert(char_id);
-    }
-    #[inline]
-    pub fn mark_skill_queue_dirty(&mut self, char_id: i64) {
-        self.dirty_hints.tracked = true;
-        self.dirty_hints.touched_skill_queues.insert(char_id);
-    }
-    #[inline]
-    pub fn mark_market_order_dirty(&mut self, order_id: i64) {
-        self.dirty_hints.tracked = true;
-        self.dirty_hints.deleted_market_orders.remove(&order_id);
-        self.dirty_hints.touched_market_orders.insert(order_id);
-    }
-    #[inline]
-    pub fn mark_market_order_deleted(&mut self, order_id: i64) {
-        self.dirty_hints.tracked = true;
-        self.dirty_hints.touched_market_orders.remove(&order_id);
-        self.dirty_hints.deleted_market_orders.insert(order_id);
-    }
-    #[inline]
-    pub fn mark_asteroids_dirty(&mut self) { self.dirty_hints.tracked = true; self.dirty_hints.asteroids_dirty = true; }
-    #[inline]
-    pub fn mark_crimewatch_dirty(&mut self, system_states_also: bool) {
-        self.dirty_hints.tracked = true;
-        self.dirty_hints.crimewatch_dirty = true;
-        if system_states_also {
-            self.dirty_hints.system_states_dirty = true;
-        }
-    }
-    #[inline]
-    pub fn mark_other_domains_dirty(&mut self) { self.dirty_hints.tracked = true; self.dirty_hints.other_domains_dirty = true; }
+    // Transitional no-op shims for untouched callers under the 60-file increment cap (`#915` follow-up cleanup).
+    #[doc(hidden)] #[inline] pub fn mark_item_dirty(&mut self, _: i64) {}
+    #[doc(hidden)] #[inline] pub fn mark_item_deleted(&mut self, _: i64) {}
+    #[doc(hidden)] #[inline] pub fn mark_character_dirty(&mut self, _: i64) {}
+    #[doc(hidden)] #[inline] pub fn mark_market_order_deleted(&mut self, _: i64) {}
+    #[doc(hidden)] #[inline] pub fn mark_crimewatch_dirty(&mut self, _: bool) {}
+    #[doc(hidden)] #[inline] pub fn mark_other_domains_dirty(&mut self) {}
 
     /// Persists a killmail stamped with the kill time and the victim's and final-blow attacker's
     /// corporation/alliance as they are at the moment of the kill. Affiliations already set on

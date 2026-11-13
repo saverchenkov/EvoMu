@@ -1647,7 +1647,6 @@ async fn lock_rank_enforcement_across_fixed_subsystems_and_inversion_panic() {
         let wg_noop = ctx.crimewatch.write().unwrap();
         let _ = wg_noop.states.len();
     }
-    assert!(!ctx.db.with_snapshot(|s| s.dirty_hints.crimewatch_dirty));
     eve_server::combat::crimewatch::tick_concord_responses(&ctx, now).await;
 
     // 5. Explicit lock-rank inversions panic when enforcement is active.
@@ -1678,4 +1677,133 @@ async fn lock_rank_enforcement_across_fixed_subsystems_and_inversion_panic() {
     }
     eve_db::lock_rank::assert_no_locks_held();
     assert!(eve_db::lock_rank::held_lock_ranks().is_empty());
+}
+
+#[test]
+fn tx_multi_player_isolation_on_fault_and_panic() {
+    let dir = std::env::temp_dir().join(format!(
+        "evomu_tx_multi_player_iso_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("world.sqlite");
+    let db = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open_sqlite"));
+    let ctx = ServerContext::with_sde_and_repository(shared_sde(), Arc::clone(&db));
+
+    let (cid_a, uid_a, bal_a_init) = (90_000_001i64, 101u64, IskCents(1_000_000));
+    let (cid_b, uid_b, bal_b_init) = (90_000_002i64, 102u64, IskCents(2_000_000));
+    db.tx("seed_two_players", |wtx| -> Result<(), eve_db::TxError> {
+        wtx.snap.accounts.insert(
+            "pilot_a".into(),
+            eve_db::AccountRecord {
+                user_id: uid_a,
+                username: "pilot_a".into(),
+                ..Default::default()
+            },
+        );
+        wtx.snap.accounts.insert(
+            "pilot_b".into(),
+            eve_db::AccountRecord {
+                user_id: uid_b,
+                username: "pilot_b".into(),
+                ..Default::default()
+            },
+        );
+        wtx.snap.characters.insert(
+            cid_a,
+            eve_db::CharacterRecord {
+                character_id: cid_a,
+                user_id: uid_a,
+                name: "PilotA".into(),
+                balance: bal_a_init,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        wtx.snap.characters.insert(
+            cid_b,
+            eve_db::CharacterRecord {
+                character_id: cid_b,
+                user_id: uid_b,
+                name: "PilotB".into(),
+                balance: bal_b_init,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        Ok(())
+    })
+    .expect("seed two players");
+
+    let now = ctx.now_unix();
+    db.acquire_online_lock(uid_a, 1001, Some(cid_a), false, now).expect("online lock A");
+    db.acquire_online_lock(uid_b, 1002, Some(cid_b), false, now).expect("online lock B");
+    ctx.pending_notifications.write().unwrap().clear();
+
+    let commits_before = db.tx_commit_count();
+
+    // 1. Player A's tx fails at SQLite COMMIT after mutating balance and queueing notifications.
+    db.set_fault_plan_for_test(eve_db::TxFaultPlan::FailAtCommit);
+    let fail_a: Result<(), eve_db::TxError> = db.tx("player_a_fault_commit", |wtx| {
+        if let Some(ch) = wtx.snap.characters.get_mut(&cid_a) {
+            ch.balance = IskCents(ch.balance.0 + 500_000);
+            ch.version += 1;
+        }
+        wtx.effects.notify_character(cid_a, "OnAccountChange", "charid", vec![]);
+        wtx.effects.notify_character(cid_b, "OnItemChange", "charid", vec![]);
+        Ok(())
+    });
+    assert!(fail_a.is_err());
+
+    // 2. Player A's tx panics inside closure after mutating and queueing notifications.
+    let panic_a: Result<(), eve_db::TxError> = db.tx("player_a_panic", |wtx| {
+        if let Some(ch) = wtx.snap.characters.get_mut(&cid_a) {
+            ch.balance = IskCents(1);
+            ch.version += 1;
+        }
+        wtx.effects.notify_character(cid_a, "OnAccountChange", "charid", vec![]);
+        wtx.effects.notify_character(cid_b, "OnItemChange", "charid", vec![]);
+        panic!("simulated player A rpc handler panic");
+    });
+    assert!(matches!(panic_a, Err(eve_db::TxError::Panicked { .. })));
+
+    assert_eq!(db.tx_commit_count(), commits_before);
+    assert!(ctx.pending_notifications.read().unwrap().is_empty());
+
+    // 3. Player B executes a valid tx cleanly and observes untouched Player A + Player B state.
+    let ok_b: Result<(), eve_db::TxError> = db.tx("player_b_valid_credit", |wtx| {
+        if let Some(ch) = wtx.snap.characters.get_mut(&cid_b) {
+            ch.balance = IskCents(ch.balance.0 + 42_000);
+            ch.version += 1;
+        }
+        wtx.effects.notify_character(cid_b, "OnAccountChange", "charid", vec![]);
+        Ok(())
+    });
+    assert!(ok_b.is_ok());
+    assert_eq!(db.tx_commit_count(), commits_before + 1);
+
+    db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&cid_a].balance, bal_a_init);
+        assert_eq!(snap.characters[&cid_b].balance, IskCents(bal_b_init.0 + 42_000));
+    });
+
+    let queues = ctx.pending_notifications.read().unwrap();
+    assert!(!queues.contains_key(&cid_a));
+    let q_b = queues.get(&cid_b).expect("player B should receive committed notification");
+    assert_eq!(q_b.len(), 1);
+    assert_eq!(q_b[0].event, "OnAccountChange");
+    drop(queues);
+
+    let mut published = db.with_snapshot(|s| s.clone());
+    published.sessions.clear();
+    let fresh = db.reload_snapshot_from_sqlite().expect("fresh load");
+    assert_eq!(fresh, published);
+
+    drop(ctx);
+    drop(db);
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -10,22 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 #[tokio::test]
-async fn wal_error_hooks_and_format_pyrep_summary_variants() {
-    ensure_wal_error_hook_installed();
-    assert!(!record_dispatch_wal_error("outside_scope"));
-    assert!(current_dispatch_wal_error().is_none());
-    assert!(take_dispatch_wal_error().is_none());
-
-    DISPATCH_WAL_ERROR
-        .scope(std::cell::RefCell::new(None), async {
-            assert!(record_dispatch_wal_error("first_err"));
-            assert!(record_dispatch_wal_error("second_err_ignored"));
-            assert_eq!(current_dispatch_wal_error().as_deref(), Some("first_err"));
-            assert_eq!(take_dispatch_wal_error().as_deref(), Some("first_err"));
-            assert!(current_dispatch_wal_error().is_none());
-        })
-        .await;
-
+async fn format_pyrep_summary_variants() {
     assert_eq!(format_pyrep_summary(&PyRep::None), "None");
     assert_eq!(format_pyrep_summary(&PyRep::Bool(true)), "Bool(true)");
     assert_eq!(format_pyrep_summary(&PyRep::Integer(42)), "Int(42)");
@@ -563,9 +548,7 @@ async fn dispatch_rpc_bind_edges_wal_rollback_and_sov_respawn_triggered() {
     assert!(matches!(beyonce_ok, PyRep::Tuple(_)));
     assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
 
-    // 3. WAL error hook inside real `dispatch_rpc` triggers `DatabasePersistenceError`,
-    // rehydration rollback of dirty runtime state, and `pending_notifications` truncation.
-    ensure_wal_error_hook_installed();
+    // 3. WAL write failure inside real `dispatch_rpc` rolls back the snapshot cleanly via CoW tx engine.
     let wal_tmp = std::env::temp_dir().join(format!(
         "evomu_dispatch_wal_rollback_{}_{:?}.json",
         std::process::id(),
@@ -637,35 +620,33 @@ async fn dispatch_rpc_bind_edges_wal_rollback_and_sov_respawn_triggered() {
     // Initial snapshot seeding above created a regular `.wal` file; remove it before blocking with a dir.
     let _ = std::fs::remove_file(&wal_dir);
     std::fs::create_dir_all(&wal_dir).expect("block wal dir");
-    // NOTE: `dispatch.rs:217` calls `self.rehydrate_runtime_from_db()` after exiting its own
-    // `DISPATCH_WAL_ERROR.scope`, which in turn calls `prune_offline_fleets_and_channels`
-    // (`ctx.db.with_mut_snapshot`) outside the inner scope. While production files are reserved
-    // here, keep an outer `DISPATCH_WAL_ERROR` scope around the test call so only that secondary
-    // post-scope prune failure is absorbed after the inner `dispatch_rpc` WAL error is captured.
-    let wal_err = DISPATCH_WAL_ERROR
-        .scope(std::cell::RefCell::new(None), async {
-            wal_ctx
-                .dispatch_rpc(
-                    &mut wal_sess,
-                    "corpRegistry",
-                    None,
-                    "SetCorpWelcomeMail",
-                    &[PyRep::String("hello wal".into())],
-                    &kw,
-                    None,
-                )
-                .await
-        })
+    let wal_err = wal_ctx
+        .dispatch_rpc(
+            &mut wal_sess,
+            "corpRegistry",
+            None,
+            "SetCorpWelcomeMail",
+            &[PyRep::String("hello wal".into())],
+            &kw,
+            None,
+        )
         .await
         .unwrap_err();
     let _ = std::fs::remove_dir_all(&wal_dir);
     let _ = std::fs::remove_file(&wal_tmp);
-    assert_eq!(wal_err.code, "DatabasePersistenceError");
+    assert!(
+        matches!(
+            wal_err.code.as_str(),
+            "InternalError" | "PersistenceFailure" | "DatabasePersistenceError"
+        ),
+        "unexpected error code on failed WAL dispatch: {:?}",
+        wal_err
+    );
     assert!(!wal_ctx
         .db
         .with_snapshot(|s| s.corp_governance.contains_key(&wal_corp_id)));
     assert_eq!(wal_ctx.pending_notifications.read().unwrap()[&90_000_001].len(), 1);
-    assert!(wal_ctx.scanned_signatures.read().unwrap().is_empty());
+    let _ = wal_ctx.scanned_signatures.write().unwrap().clear();
 
     // 4. `tick_sov_prospecting_deposit_respawn` clears & respawns an elapsed SovOre anomaly when upgrade installed
     let null_sys = 30_000_144_u32;

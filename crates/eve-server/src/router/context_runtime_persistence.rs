@@ -10,7 +10,9 @@ use super::context::{
     ActiveFighterSquadron, ActiveMoonSurveyProbe, ActiveScannerProbe, ModuleCooldownEntry,
     ServerContext,
 };
-use crate::services::combat_crimewatch::{flush_combat_runtime_to_db, sync_combat_runtime_from_db};
+use crate::services::combat_crimewatch::{
+    flush_combat_runtime_to_db, rehydrate_combat_runtime_from_db_forced,
+};
 use crate::services::fleet_social::fleet_social_fleets::{FleetAdvertState, FleetSetupRecord};
 use crate::services::fleet_social::fleet_social_persistence::{
     hydrate_social_state_from_db, persist_social_state,
@@ -799,7 +801,7 @@ impl ServerContext {
     pub fn rehydrate_runtime_from_db(&self) {
         hydrate_social_state_from_db(self);
         self.hydrate_server_runtime_from_db();
-        sync_combat_runtime_from_db(self);
+        rehydrate_combat_runtime_from_db_forced(self);
         self.quasar_gateway.rehydrate_all_from_db();
     }
 }
