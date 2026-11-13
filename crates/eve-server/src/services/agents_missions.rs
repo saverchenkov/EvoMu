@@ -406,6 +406,7 @@ pub async fn handle_with_bound(
                                     ("bookmarkID", PyRep::Integer(b.bookmark_id)),
                                     ("agentID", PyRep::Integer(m.agent_id)),
                                     ("solarSystemID", PyRep::Integer(b.solar_system_id as i64)),
+                                    ("solarsystemID", PyRep::Integer(b.solar_system_id as i64)),
                                     ("locationID", PyRep::Integer(b.solar_system_id as i64)),
                                     ("locationNumber", PyRep::Integer(idx as i64)),
                                     ("locationType", PyRep::String(bm_loc_type.into())),
@@ -616,6 +617,32 @@ pub async fn handle_with_bound(
             } else {
                 0_i64
             };
+            let agent_corp_id = ctx
+                .sde
+                .agents
+                .get(&m.agent_id)
+                .map(|a| a.corporation_id)
+                .filter(|&v| v > 0);
+            let agent_faction_id = agent_corp_id
+                .and_then(|cid| ctx.sde.npc_corporations.get(&cid))
+                .and_then(|c| c.faction_id)
+                .map(i64::from)
+                .filter(|&v| v > 0);
+            let station_owner_id = |sid: i64| -> Option<i64> {
+                ctx.sde.stations.get(&sid).and_then(|st| {
+                    (st.owner_corporation_id > 0)
+                        .then_some(st.owner_corporation_id)
+                        .or_else(|| st.owner_faction_id.filter(|&f| f > 0))
+                })
+            };
+            let fallback_corp_or_faction_id = agent_corp_id
+                .or(agent_faction_id)
+                .unwrap_or(1_000_002);
+            let pickup_owner_id =
+                station_owner_id(origin_sid).unwrap_or(fallback_corp_or_faction_id);
+            let dropoff_owner_id = dest_sid_opt
+                .and_then(station_owner_id)
+                .unwrap_or(pickup_owner_id);
             let dungeons = if !is_courier && !is_trade {
                 let sde_dungeon_id = ctx
                     .sde
@@ -671,10 +698,13 @@ pub async fn handle_with_bound(
             } else {
                 Vec::new()
             };
-            Some(Ok(PyRep::keyval([
+            let mut info_fields = vec![
                 ("missionID", PyRep::Integer(mission_id as i64)),
                 ("contentID", PyRep::Integer(mission_id as i64)),
                 ("agentID", PyRep::Integer(m.agent_id)),
+                ("corporationID", PyRep::Integer(fallback_corp_or_faction_id)),
+                ("pickupOwnerID", PyRep::Integer(pickup_owner_id)),
+                ("dropoffOwnerID", PyRep::Integer(dropoff_owner_id)),
                 ("level", PyRep::Integer(offer_lvl as i64)),
                 ("title", PyRep::String(title)),
                 ("state", PyRep::String(m.state)),
@@ -694,7 +724,11 @@ pub async fn handle_with_bound(
                 ("iskReward", PyRep::Integer(isk_reward)),
                 ("lpReward", PyRep::Integer(lp_reward)),
                 ("bonusReward", PyRep::Integer(bonus_reward)),
-            ])))
+            ];
+            if let Some(fid) = agent_faction_id {
+                info_fields.push(("factionID", PyRep::Integer(fid)));
+            }
+            Some(Ok(PyRep::keyval(info_fields)))
         }
 
         ("agentMgr", "DoAction") | ("agentMgr", "GetOffer") => {

@@ -1716,6 +1716,8 @@ fn gh998_and_gh999_agent_journal_bookmarks_and_dungeon_owner_compat() {
         assert!(matches!(bms[0], PyRep::KeyVal(_)));
         assert_eq!(bms[0].dict_get("hint"), Some(&PyRep::String(expected_hint.into())));
         assert_eq!(bms[0].dict_get("locationID"), Some(&PyRep::Integer(expected_loc)));
+        assert_eq!(bms[0].dict_get("solarSystemID"), Some(&PyRep::Integer(expected_loc)));
+        assert_eq!(bms[0].dict_get("solarsystemID"), Some(&PyRep::Integer(expected_loc)));
         assert_eq!(bms[0].dict_get("locationNumber"), Some(&PyRep::Integer(0)));
         assert_eq!(bms[0].dict_get("agentID"), Some(&PyRep::Integer(3_008_416)));
         assert_eq!(bms[0].dict_get("locationType"), Some(&PyRep::String(expected_loc_type.into())));
@@ -1765,4 +1767,126 @@ fn gh998_and_gh999_agent_journal_bookmarks_and_dungeon_owner_compat() {
         panic!("expected dungeons");
     };
     assert_eq!(fac_duns[0].dict_get("ownerID"), Some(&PyRep::Integer(500_010)));
+}
+
+#[test]
+fn gh1023_mission_objective_owner_ids_reject_agent_and_character_ids() {
+    // 1. Synthesized transport objective rejects character/agent IDs in pickupOwnerID/dropoffOwnerID
+    //    and falls back to corporationID / factionID / 1_000_002, while keeping agent_id on "agent".
+    let courier_with_agent_owners = normalize_macho_rpc_reply(
+        "agentMgr",
+        "GetMissionObjectiveInfo",
+        Ok(PyRep::keyval([
+            ("missionID", PyRep::Integer(504)),
+            ("agentID", PyRep::Integer(3_016_134)),
+            ("corporationID", PyRep::Integer(1_000_004)),
+            ("pickupOwnerID", PyRep::Integer(3_016_134)),
+            ("dropoffOwnerID", PyRep::Integer(90_000_001)),
+            ("solarSystemID", PyRep::Integer(30_000_138)),
+            ("originStationID", PyRep::Integer(60_000_403)),
+            ("destinationStationID", PyRep::Integer(60_001_807)),
+            ("missionState", PyRep::Integer(2)),
+        ])),
+    )
+    .expect("normalize courier with bad owner ids");
+    let Some(PyRep::List(objs)) = courier_with_agent_owners.dict_get("objectives") else {
+        panic!("expected objectives list");
+    };
+    assert_eq!(objs.len(), 2);
+    let PyRep::Tuple(agent_entry) = &objs[0] else { panic!("expected agent entry") };
+    assert_eq!(agent_entry[0], PyRep::String("agent".into()));
+    let PyRep::Tuple(agent_vals) = &agent_entry[1] else { panic!("expected agent tuple") };
+    assert_eq!(agent_vals[0], PyRep::Integer(3_016_134));
+    let PyRep::Tuple(trans_entry) = &objs[1] else { panic!("expected transport entry") };
+    assert_eq!(trans_entry[0], PyRep::String("transport".into()));
+    let PyRep::Tuple(trans_vals) = &trans_entry[1] else { panic!("expected transport tuple") };
+    assert_eq!(trans_vals[0], PyRep::Integer(1_000_004));
+    assert_eq!(trans_vals[2], PyRep::Integer(1_000_004));
+
+    // 2. Valid corp/faction/player-corp IDs in pickupOwnerID & dropoffOwnerID are preserved.
+    for (p_owner, d_owner) in [
+        (1_000_004_i64, 1_000_016_i64),
+        (500_001, 98_100_001),
+    ] {
+        let valid = normalize_macho_rpc_reply(
+            "agentMgr",
+            "GetMissionObjectiveInfo",
+            Ok(PyRep::keyval([
+                ("missionID", PyRep::Integer(505)),
+                ("agentID", PyRep::Integer(3_016_134)),
+                ("pickupOwnerID", PyRep::Integer(p_owner)),
+                ("dropoffOwnerID", PyRep::Integer(d_owner)),
+                ("originStationID", PyRep::Integer(60_000_403)),
+                ("destinationStationID", PyRep::Integer(60_001_807)),
+                ("missionState", PyRep::Integer(2)),
+            ])),
+        )
+        .expect("normalize valid corp/faction owners");
+        let Some(PyRep::List(v_objs)) = valid.dict_get("objectives") else { panic!() };
+        let PyRep::Tuple(t_entry) = &v_objs[1] else { panic!() };
+        let PyRep::Tuple(t_vals) = &t_entry[1] else { panic!() };
+        assert_eq!(t_vals[0], PyRep::Integer(p_owner));
+        assert_eq!(t_vals[2], PyRep::Integer(d_owner));
+    }
+
+    // 3. Pre-built objectives list ("transport" and "fetch") also replaces agent/char/alliance IDs
+    //    with corporationID/factionID/1_000_002, while preserving "agent" tuple's agent_id.
+    let loc_stub = PyRep::Dict(vec![
+        (PyRep::String("locationID".into()), PyRep::Integer(60_000_403)),
+        (PyRep::String("solarsystemID".into()), PyRep::Integer(30_000_138)),
+    ]);
+    let cargo_stub = PyRep::Dict(vec![
+        (PyRep::String("typeID".into()), PyRep::Integer(34)),
+        (PyRep::String("quantity".into()), PyRep::Integer(6)),
+        (PyRep::String("volume".into()), PyRep::Real(6.0)),
+        (PyRep::String("hasCargo".into()), PyRep::Bool(true)),
+    ]);
+    let prebuilt = normalize_macho_rpc_reply(
+        "agentMgr",
+        "GetMissionObjectiveInfo",
+        Ok(PyRep::keyval([
+            ("missionID", PyRep::Integer(506)),
+            ("agentID", PyRep::Integer(3_016_134)),
+            ("factionID", PyRep::Integer(500_001)),
+            (
+                "objectives",
+                PyRep::List(vec![
+                    PyRep::Tuple(vec![
+                        PyRep::String("agent".into()),
+                        PyRep::Tuple(vec![PyRep::Integer(3_016_134), loc_stub.clone()]),
+                    ]),
+                    PyRep::Tuple(vec![
+                        PyRep::String("transport".into()),
+                        PyRep::Tuple(vec![
+                            PyRep::Integer(3_016_134),
+                            loc_stub.clone(),
+                            PyRep::Integer(99_000_001),
+                            loc_stub.clone(),
+                            cargo_stub.clone(),
+                        ]),
+                    ]),
+                    PyRep::Tuple(vec![
+                        PyRep::String("fetch".into()),
+                        PyRep::Tuple(vec![
+                            PyRep::Integer(3_016_134),
+                            loc_stub,
+                            cargo_stub,
+                        ]),
+                    ]),
+                ]),
+            ),
+        ])),
+    )
+    .expect("normalize prebuilt objectives");
+    let Some(PyRep::List(p_objs)) = prebuilt.dict_get("objectives") else { panic!() };
+    let PyRep::Tuple(pa) = &p_objs[0] else { panic!() };
+    let PyRep::Tuple(pa_v) = &pa[1] else { panic!() };
+    assert_eq!(pa_v[0], PyRep::Integer(3_016_134));
+    let PyRep::Tuple(pt) = &p_objs[1] else { panic!() };
+    let PyRep::Tuple(pt_v) = &pt[1] else { panic!() };
+    assert_eq!(pt_v[0], PyRep::Integer(500_001));
+    assert_eq!(pt_v[2], PyRep::Integer(500_001));
+    let PyRep::Tuple(pf) = &p_objs[2] else { panic!() };
+    let PyRep::Tuple(pf_v) = &pf[1] else { panic!() };
+    assert_eq!(pf_v[0], PyRep::Integer(500_001));
 }

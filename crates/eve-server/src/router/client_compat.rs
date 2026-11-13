@@ -2187,22 +2187,34 @@ fn normalize_agent_mission_objective_rep(rep: PyRep) -> PyRep {
         ])
     };
     let origin_loc = make_loc_dict(origin_sid, "agenthomebase");
+    let default_corp_or_faction_owner_id = rep
+        .dict_get("corporationID")
+        .or_else(|| rep.dict_get("factionID"))
+        .and_then(PyRep::as_i64)
+        .filter(|&v| is_corp_or_faction_owner_id(v))
+        .unwrap_or(1_000_002);
     let pickup_owner_id = rep
         .dict_get("pickupOwnerID")
-        .and_then(|v| v.as_i64())
-        .filter(|&v| v >= 1_000_000)
-        .unwrap_or(agent_id);
+        .and_then(PyRep::as_i64)
+        .filter(|&v| is_corp_or_faction_owner_id(v))
+        .unwrap_or(default_corp_or_faction_owner_id);
     let dropoff_owner_id = rep
         .dict_get("dropoffOwnerID")
-        .and_then(|v| v.as_i64())
-        .filter(|&v| v >= 1_000_000)
-        .unwrap_or(agent_id);
+        .and_then(PyRep::as_i64)
+        .filter(|&v| is_corp_or_faction_owner_id(v))
+        .unwrap_or(pickup_owner_id);
     let objectives = match rep.dict_get("objectives") {
         Some(PyRep::List(items)) if !items.is_empty() => PyRep::List(
             items
                 .iter()
                 .cloned()
-                .map(|it| normalize_mission_objective_entry(strip_none_location_coords_recursive(it), agent_id))
+                .map(|it| {
+                    normalize_mission_objective_entry(
+                        strip_none_location_coords_recursive(it),
+                        agent_id,
+                        default_corp_or_faction_owner_id,
+                    )
+                })
                 .collect(),
         ),
         _ => {
@@ -2401,7 +2413,11 @@ fn normalize_single_blueprint_keyval(rep: PyRep) -> PyRep {
     PyRep::KeyVal(map)
 }
 
-fn normalize_mission_objective_entry(entry: PyRep, default_owner_id: i64) -> PyRep {
+fn normalize_mission_objective_entry(
+    entry: PyRep,
+    default_agent_id: i64,
+    default_owner_id: i64,
+) -> PyRep {
     let PyRep::Tuple(mut outer) = entry else {
         return entry;
     };
@@ -2410,18 +2426,26 @@ fn normalize_mission_objective_entry(entry: PyRep, default_owner_id: i64) -> PyR
         if kind == "transport" {
             if let PyRep::Tuple(ref mut inner) = outer[1] {
                 if inner.len() >= 3 {
-                    if inner[0].as_i64().unwrap_or(0) < 1_000_000 {
+                    if !inner[0].as_i64().is_some_and(is_corp_or_faction_owner_id) {
                         inner[0] = PyRep::Integer(default_owner_id);
                     }
-                    if inner[2].as_i64().unwrap_or(0) < 1_000_000 {
+                    if !inner[2].as_i64().is_some_and(is_corp_or_faction_owner_id) {
                         inner[2] = PyRep::Integer(default_owner_id);
                     }
+                }
+            }
+        } else if kind == "fetch" {
+            if let PyRep::Tuple(ref mut inner) = outer[1] {
+                if !inner.is_empty()
+                    && !inner[0].as_i64().is_some_and(is_corp_or_faction_owner_id)
+                {
+                    inner[0] = PyRep::Integer(default_owner_id);
                 }
             }
         } else if kind == "agent" {
             if let PyRep::Tuple(ref mut inner) = outer[1] {
                 if !inner.is_empty() && inner[0].as_i64().unwrap_or(0) < 1_000_000 {
-                    inner[0] = PyRep::Integer(default_owner_id);
+                    inner[0] = PyRep::Integer(default_agent_id);
                 }
             }
         }
@@ -2430,7 +2454,9 @@ fn normalize_mission_objective_entry(entry: PyRep, default_owner_id: i64) -> PyR
 }
 
 fn is_corp_or_faction_owner_id(v: i64) -> bool {
-    (500_000..3_000_000).contains(&v) || (98_000_000..100_000_000).contains(&v)
+    (500_000..599_999).contains(&v)
+        || (1_000_000..=1_999_999).contains(&v)
+        || (98_000_000..=98_999_999).contains(&v)
 }
 
 fn normalize_mission_dungeon_dict(
@@ -2581,6 +2607,20 @@ fn normalize_mission_journal_bookmark(
         .filter(|&v| v > 0)
         .unwrap_or(default_loc_id);
     map.insert("locationID".into(), PyRep::Integer(loc_id));
+    let solarsystem_id = map
+        .get("solarsystemID")
+        .or_else(|| map.get("solarSystemID"))
+        .and_then(PyRep::as_i64)
+        .filter(|&v| v > 0)
+        .unwrap_or_else(|| {
+            if (30_000_000..=39_999_999).contains(&loc_id) {
+                loc_id
+            } else {
+                default_loc_id
+            }
+        });
+    map.insert("solarsystemID".into(), PyRep::Integer(solarsystem_id));
+    map.insert("solarSystemID".into(), PyRep::Integer(solarsystem_id));
     let has_loc_num = map
         .get("locationNumber")
         .and_then(PyRep::as_i64)

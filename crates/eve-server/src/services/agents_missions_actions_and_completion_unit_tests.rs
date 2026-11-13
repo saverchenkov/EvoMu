@@ -689,6 +689,8 @@ async fn gh998_gh999_gh1000_bookmarks_dungeon_owner_and_courier_item_notificatio
             .is_some_and(|s| s.starts_with("UI/Agents/"))
     );
     assert_eq!(bms[0].dict_get("locationID"), Some(&PyRep::Integer(sys_id as i64)));
+    assert_eq!(bms[0].dict_get("solarSystemID"), Some(&PyRep::Integer(sys_id as i64)));
+    assert_eq!(bms[0].dict_get("solarsystemID"), Some(&PyRep::Integer(sys_id as i64)));
     assert_eq!(bms[0].dict_get("locationNumber"), Some(&PyRep::Integer(0)));
     assert_eq!(bms[0].dict_get("agentID"), Some(&PyRep::Integer(ag.agent_id)));
     assert_eq!(bms[0].dict_get("locationType"), Some(&PyRep::String("dungeon".into())));
@@ -744,6 +746,7 @@ async fn gh998_gh999_gh1000_bookmarks_dungeon_owner_and_courier_item_notificatio
             .expect("station bookmark");
         assert_eq!(st_bm.dict_get("itemID"), Some(&PyRep::Integer(st_id)));
         assert_eq!(st_bm.dict_get("typeID"), Some(&PyRep::Integer(st_type_id)));
+        assert_eq!(st_bm.dict_get("solarsystemID"), Some(&PyRep::Integer(sys_id as i64)));
     }
 
     // #999: GetMissionObjectiveInfo dungeons[].ownerID is an NPC faction or corp ID, never ag.agent_id
@@ -937,4 +940,130 @@ async fn bound_get_my_journal_details_filters_by_bound_agent_id_1016() {
     assert_eq!(b2_missions[0].dict_get("missionID"), Some(&PyRep::Integer(mid2 as i64)));
     assert_eq!(b2_research.len(), 1);
     assert_eq!(b2_research[0].dict_get("agentID"), Some(&PyRep::Integer(ag2_id)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gh1023_courier_objective_info_emits_station_corp_owners_and_normalizes_for_v24() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    // Naki Vikkiras (3016134) at Ikuchi VI - Moon 6 - Ytiri Storage (60000403, corp 1000004),
+    // delivering to Hirtamon VII - Moon 5 - Zainou Biotech Production (60001807, corp 1000016),
+    // or fallback to any courier mission if specific IDs are absent in a minimal SDE.
+    let agent_id = if ctx.sde.agents.contains_key(&3_016_134) {
+        3_016_134
+    } else {
+        find_standard_agent(&ctx, 1).agent_id
+    };
+    let agent = ctx.sde.agents.get(&agent_id).expect("agent in sde").clone();
+    let origin_sid = agent.station_id.unwrap_or(60_000_403);
+    let dest_sid = if ctx.sde.stations.contains_key(&60_001_807) {
+        60_001_807
+    } else {
+        ctx.sde
+            .stations
+            .keys()
+            .copied()
+            .find(|&sid| sid != origin_sid)
+            .unwrap_or(origin_sid)
+    };
+    let expected_pickup_owner = ctx
+        .sde
+        .stations
+        .get(&origin_sid)
+        .map(|s| s.owner_corporation_id)
+        .filter(|&v| v > 0)
+        .unwrap_or(agent.corporation_id);
+    let expected_dropoff_owner = ctx
+        .sde
+        .stations
+        .get(&dest_sid)
+        .map(|s| s.owner_corporation_id)
+        .filter(|&v| v > 0)
+        .unwrap_or(expected_pickup_owner);
+    let sys_id = agent.solar_system_id.unwrap_or(30_000_138);
+    let mission_id = ctx
+        .sde
+        .missions
+        .values()
+        .find(|m| m.is_courier)
+        .map(|m| m.mission_id)
+        .unwrap_or(72_001);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&char_id) {
+            c.solar_system_id = sys_id;
+            c.station_id = Some(origin_sid);
+        }
+        snap.active_missions.insert(
+            (char_id, mission_id),
+            make_active_mission(mission_id, char_id, agent_id, sys_id, "Accepted", None),
+        );
+        save_mission_meta(
+            snap,
+            char_id,
+            &crate::services::agents_missions::agents_standings_arcs::MissionTimingAndCargoMeta {
+                mission_id,
+                agent_id,
+                offered_at_unix: 1_700_000_000,
+                offer_expiry_unix: 1_700_086_400,
+                accepted_at_unix: Some(1_700_000_100),
+                accept_expiry_unix: Some(1_700_086_500),
+                bonus_expiry_unix: Some(1_700_001_900),
+                completed_at_unix: None,
+                required_delivery_type_id: Some(3683),
+                required_delivery_qty: 6,
+                granted_courier_item_id: None,
+                granted_courier_qty: 6,
+                is_anomic_burner: false,
+                chosen_branch: None,
+                destination_station_id: Some(dest_sid),
+                origin_station_id: Some(origin_sid),
+                offered_level: Some(agent.level),
+            },
+        );
+    });
+
+    let mut sess = char_session(char_id, Some(sys_id), Some(origin_sid));
+    let raw_obj = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "GetMissionObjectiveInfo",
+        &[PyRep::Integer(agent_id), PyRep::Integer(mission_id as i64)],
+        &HashMap::new(),
+    )
+    .await
+    .expect("raw GetMissionObjectiveInfo");
+    assert_eq!(
+        raw_obj.dict_get("corporationID"),
+        Some(&PyRep::Integer(agent.corporation_id))
+    );
+    assert_eq!(
+        raw_obj.dict_get("pickupOwnerID"),
+        Some(&PyRep::Integer(expected_pickup_owner))
+    );
+    assert_eq!(
+        raw_obj.dict_get("dropoffOwnerID"),
+        Some(&PyRep::Integer(expected_dropoff_owner))
+    );
+
+    let norm = crate::router::client_compat::normalize_macho_rpc_reply(
+        "agentMgr",
+        "GetMissionObjectiveInfo",
+        Ok(raw_obj),
+    )
+    .expect("normalized GetMissionObjectiveInfo");
+    let Some(PyRep::List(objs)) = norm.dict_get("objectives") else {
+        panic!("expected normalized objectives list");
+    };
+    assert_eq!(objs.len(), 2);
+    let PyRep::Tuple(agent_obj) = &objs[0] else { panic!() };
+    let PyRep::Tuple(agent_vals) = &agent_obj[1] else { panic!() };
+    assert_eq!(agent_vals[0], PyRep::Integer(agent_id));
+    let PyRep::Tuple(trans_obj) = &objs[1] else { panic!() };
+    assert_eq!(trans_obj[0], PyRep::String("transport".into()));
+    let PyRep::Tuple(trans_vals) = &trans_obj[1] else { panic!() };
+    assert_eq!(trans_vals[0], PyRep::Integer(expected_pickup_owner));
+    assert_eq!(trans_vals[2], PyRep::Integer(expected_dropoff_owner));
+    assert_ne!(trans_vals[0], PyRep::Integer(agent_id));
+    assert_ne!(trans_vals[2], PyRep::Integer(agent_id));
 }
