@@ -1620,6 +1620,8 @@ pub(crate) async fn execute_pending_cycle_actions_list(
     }
     let sys = ctx.systems.get_or_spawn(sys_id);
     let empty_kw = HashMap::new();
+    let mut emitted_charge_slots: std::collections::HashSet<(i64, u16)> =
+        std::collections::HashSet::new();
     for action in actions {
         match action {
             crate::system_actor::PendingCycleAction::SalvageEnd {
@@ -1852,6 +1854,9 @@ pub(crate) async fn execute_pending_cycle_actions_list(
                                 .collect()
                         });
                     for chg in active_slot_charges {
+                        if !emitted_charge_slots.insert((attacker_ship_id, chg.flag as u16)) {
+                            continue;
+                        }
                         ctx.emit_item_change_routed(
                             acid,
                             &chg,
@@ -1866,6 +1871,7 @@ pub(crate) async fn execute_pending_cycle_actions_list(
                             chg.quantity.saturating_add(1),
                             chg.quantity,
                         );
+                        break;
                     }
                 }
                 if !notified && applied_dmg > 0.0 {

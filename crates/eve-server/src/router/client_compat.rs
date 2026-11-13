@@ -2140,11 +2140,27 @@ fn normalize_agent_mission_objective_rep(rep: PyRep) -> PyRep {
         _ => PyRep::List(Vec::new()),
     };
     let bonus_rewards = match rep.dict_get("bonusRewards") {
-        Some(PyRep::List(items)) => PyRep::List(items.clone()),
+        Some(PyRep::List(items)) => PyRep::List(
+            items
+                .iter()
+                .map(|it| match it {
+                    PyRep::Tuple(els) if els.len() == 3 => PyRep::Tuple(vec![
+                        PyRep::Integer(18_000_000_000),
+                        els[0].clone(),
+                        els[1].clone(),
+                        els[2].clone(),
+                        PyRep::Integer(30),
+                    ]),
+                    other => other.clone(),
+                })
+                .collect(),
+        ),
         _ if bonus_reward > 0 => PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(18_000_000_000),
             PyRep::Integer(29), // const.typeCredits
             PyRep::Integer(bonus_reward),
             PyRep::None,
+            PyRep::Integer(30),
         ])]),
         _ => PyRep::List(Vec::new()),
     };
