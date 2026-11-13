@@ -401,7 +401,7 @@ async fn quasar_corporation_endpoints_reflect_live_corp_registry_industry_and_ma
     assert_eq!(ids, vec![FOUNDER as u64]);
     let roles = ok(&ctx, &mut sess, "eve.corporation.members.roles.GetRequest", corp_req(corp_id, 1)).await;
     let ceo_roles = subs(&roles, 1).into_iter().find(|r| varint(&sub(r, 1), 1) == Some(FOUNDER as u64)).expect("CEO roles");
-    assert_ne!(varint(&ceo_roles, 2).unwrap_or(0) & eve_db::corp_roles::ROLE_DIRECTOR, 0);
+    assert_ne!(varint(&sub(&ceo_roles, 2), 1).unwrap_or(0) & eve_db::corp_roles::ROLE_DIRECTOR, 0);
 
     let jobs = ok(&ctx, &mut sess, "eve.corporation.industry.job.GetActiveRequest", corp_req(corp_id, 1)).await;
     let entry = subs(&jobs, 1).into_iter().find(|e| varint(&sub(e, 1), 1) == Some(job_id as u64)).expect("corp job entry");
@@ -416,7 +416,7 @@ async fn quasar_corporation_endpoints_reflect_live_corp_registry_industry_and_ma
     let attrs = sub(&bought, 2);
     assert_eq!(varint(&attrs, 4), Some(100), "quantity");
     assert_eq!(varint(&sub(&attrs, 14), 1), Some(u64::from(TRITANIUM)), "type");
-    assert_eq!(varint(&bought, 3), Some(1), "buy side");
+    assert_eq!(varint(&bought, 3), Some(0), "buy side (Entry.Type::BUY)");
 
     // A pilot outside the corporation is refused.
     let mut outsider = SessionState::new(7_302);

@@ -11,9 +11,8 @@ use eve_db::{
     InventoryFlag, InventoryItemRecord, SystemDynamicState, UpwellStructureRecord, WorldRepository,
 };
 use eve_proto::quasar::{
-    encode_bytes_field, encode_fixed32_field, encode_fixed64_field, encode_string_field,
-    encode_varint_field, AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny,
-    QuasarDescriptorRegistry, WireMessage, WireValue,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, QuasarDescriptorRegistry,
+    WireField, WireMessage, WireValue,
 };
 use eve_sde::SdeRegistry;
 use std::collections::HashMap;
@@ -273,16 +272,20 @@ fn stargate_locks_structures_sovereignty_and_not_implemented_endpoints() {
     zz_msg.set(2, DynamicValue::Uint32(zarzakh));
     zz_msg.set(3, DynamicValue::Uint64(50_000_111));
     assert!(get_lock(&player_ctx, &dummy_any, &zz_msg).is_ok());
-    // Same gate -> allowed (1); different gate -> blocked (0)
+    // Same gate -> allowed (1); different gate -> blocked (oneof gate_lock present, allowed absent)
     assert_eq!(
         decode_first_varint(&val_jump(&player_ctx, &dummy_any, &zz_msg).unwrap().value),
         Some(1)
     );
     zz_msg.set(3, DynamicValue::Uint64(50_000_222));
-    assert_eq!(
-        decode_first_varint(&val_jump(&player_ctx, &dummy_any, &zz_msg).unwrap().value),
-        Some(0)
-    );
+    let blocked_resp = val_jump(&player_ctx, &dummy_any, &zz_msg).unwrap();
+    assert_eq!(decode_first_varint(&blocked_resp.value), None);
+    let reg = QuasarDescriptorRegistry::open_default().expect("descriptor registry");
+    let decoded_blocked = reg
+        .decode_dynamic("eve.stargate.lock.api.ValidateJumpResponse", &blocked_resp.value)
+        .expect("ValidateJumpResponse blocked branch must decode strictly");
+    assert!(decoded_blocked.get(1).is_none());
+    assert!(matches!(decoded_blocked.get(2), Some(DynamicValue::Message(_))));
 
     // DeleteCommanded: non-admin forbidden; wrong system not found; valid deletes lock; second delete not found
     let mut del_msg = DynamicQuasarMessage::new("Del");
@@ -354,7 +357,8 @@ fn stargate_locks_structures_sovereignty_and_not_implemented_endpoints() {
     let mut claim_msg = DynamicQuasarMessage::new("Claim");
     claim_msg.set(1, DynamicValue::Uint32(sys_id));
     let claim_resp = handlers["eve.sovereignty.api.GetClaimRequest"](&player_ctx, &dummy_any, &claim_msg).unwrap();
-    assert_eq!(decode_first_varint(&claim_resp.value), Some(0));
+    let claim_wire = WireMessage::decode(&claim_resp.value).unwrap();
+    assert!(claim_wire.fields.iter().any(|f| f.field_number == 2));
 
     let all_claims = handlers["eve.sovereignty.api.GetAllClaimsRequest"](
         &player_ctx,
@@ -492,18 +496,53 @@ fn agents_acls_monolith_and_wire_dynamic_decoding_branches() {
     .is_ok());
 
     // 4. decode_wire_dynamic with Fixed64, Fixed32, nested submessage, and raw non-message bytes
-    let mut sub_wire = Vec::new();
-    encode_varint_field(1, 42, &mut sub_wire);
-    encode_fixed64_field(2, 123_456, &mut sub_wire);
-    encode_fixed32_field(3, 789, &mut sub_wire);
-    encode_string_field(4, "inner", &mut sub_wire);
+    let sub_wire = WireMessage {
+        fields: vec![
+            WireField {
+                field_number: 1,
+                value: WireValue::Varint(42),
+            },
+            WireField {
+                field_number: 2,
+                value: WireValue::Fixed64(123_456),
+            },
+            WireField {
+                field_number: 3,
+                value: WireValue::Fixed32(789),
+            },
+            WireField {
+                field_number: 4,
+                value: WireValue::LengthDelimited(b"inner".to_vec()),
+            },
+        ],
+    }
+    .encode();
 
-    let mut outer_wire = Vec::new();
-    encode_varint_field(1, 7, &mut outer_wire);
-    encode_fixed64_field(2, 999, &mut outer_wire);
-    encode_fixed32_field(3, 111, &mut outer_wire);
-    encode_bytes_field(4, &sub_wire, &mut outer_wire);
-    encode_bytes_field(5, &[0xFF, 0xFF, 0xFF], &mut outer_wire);
+    let outer_wire = WireMessage {
+        fields: vec![
+            WireField {
+                field_number: 1,
+                value: WireValue::Varint(7),
+            },
+            WireField {
+                field_number: 2,
+                value: WireValue::Fixed64(999),
+            },
+            WireField {
+                field_number: 3,
+                value: WireValue::Fixed32(111),
+            },
+            WireField {
+                field_number: 4,
+                value: WireValue::LengthDelimited(sub_wire),
+            },
+            WireField {
+                field_number: 5,
+                value: WireValue::LengthDelimited(vec![0xFF, 0xFF, 0xFF]),
+            },
+        ],
+    }
+    .encode();
 
     let dyn_decoded = decode_wire_dynamic("test.FullWire", &outer_wire);
     assert_eq!(dyn_decoded.get(1), Some(&DynamicValue::Uint64(7)));

@@ -10,7 +10,7 @@
 //! - `eve/freelance/project/api/admin/requests.proto`
 
 use super::quasar_freelance_defs::{
-    encode_next_page, extract_currency_isk, paginate_slice, register_item_delivery_and_definitions,
+    extract_currency_isk, paginate_slice, register_item_delivery_and_definitions,
 };
 use super::quasar_social_chat::{ctx_now_unix, ctx_queue_notice};
 use crate::quasar_gateway::{
@@ -18,9 +18,10 @@ use crate::quasar_gateway::{
     STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
-    DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicValue, GoogleAny, WireField, WireMessage, WireValue,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -188,41 +189,22 @@ impl QuasarFreelanceState {
     }
 }
 
-fn encode_uuid_field(field_num: u32, uuid: &[u8], out: &mut Vec<u8>) {
-    let mut id_bytes = Vec::with_capacity(20);
-    encode_bytes_field(1, uuid, &mut id_bytes);
-    encode_bytes_field(field_num, &id_bytes, out);
-}
-
-fn encode_char_id_field(field_num: u32, cid: u32, out: &mut Vec<u8>) {
-    let mut id_bytes = Vec::with_capacity(8);
-    encode_varint_field(1, cid as u64, &mut id_bytes);
-    encode_bytes_field(field_num, &id_bytes, out);
-}
-
-fn encode_corp_id_field(field_num: u32, corpid: u32, out: &mut Vec<u8>) {
-    let mut id_bytes = Vec::with_capacity(8);
-    encode_varint_field(1, corpid as u64, &mut id_bytes);
-    encode_bytes_field(field_num, &id_bytes, out);
-}
-
 fn encode_project_attributes(proj: &FreelanceProjectRecord) -> Vec<u8> {
-    let mut attr = Vec::new();
-    encode_corp_id_field(1, proj.owner_corp_id, &mut attr);
-    encode_char_id_field(2, proj.creator_char_id, &mut attr);
-    encode_varint_field(3, proj.state as u64, &mut attr);
-    encode_string_field(4, &proj.name, &mut attr);
-    encode_string_field(5, &proj.description, &mut attr);
-    encode_varint_field(11, proj.target_progress.max(0) as u64, &mut attr);
-    encode_varint_field(12, proj.current_progress.max(0) as u64, &mut attr);
-    encode_varint_field(13, proj.committed_participants.len() as u64, &mut attr);
-    encode_varint_field(
-        14,
-        proj.committed_participants.len().max(proj.contributors.len()) as u64,
-        &mut attr,
-    );
-    encode_varint_field(15, proj.contributors.len() as u64, &mut attr);
-    attr
+    pb::message("eve_public.freelance.project.Attributes")
+        .set("owner.sequential", proj.owner_corp_id)
+        .set("creator.sequential", proj.creator_char_id)
+        .set("state", proj.state as i32)
+        .set("name", proj.name.as_str())
+        .set("description", proj.description.as_str())
+        .set("target_progress", proj.target_progress.max(0) as u64)
+        .set("current_progress", proj.current_progress.max(0) as u64)
+        .set("committed_participants", proj.committed_participants.len() as u32)
+        .set(
+            "total_participants",
+            proj.committed_participants.len().max(proj.contributors.len()) as u32,
+        )
+        .set("total_contributors", proj.contributors.len() as u32)
+        .must_encode()
 }
 
 fn check_corp_admin_role(
@@ -463,35 +445,23 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             let uuid_vec = uuid_arr.to_vec();
             state_create.refresh_from_db(now_u);
 
-            let mut notice_bytes = Vec::new();
-            encode_uuid_field(1, &uuid_vec, &mut notice_bytes);
-            if let Some(created_proj) = state_create
+            let created_proj = state_create
                 .projects
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
                 .get(&uuid_vec)
-            {
-                let attr = encode_project_attributes(created_proj);
-                encode_bytes_field(2, &attr, &mut notice_bytes);
+                .map(encode_project_attributes);
+            let mut notice = pb::message("eve_public.freelance.project.api.CreatedNotice")
+                .set("project.uuid", uuid_vec.as_slice());
+            if let Some(attr) = created_proj.as_deref() {
+                notice = notice.set_raw_message("attributes", attr);
             }
-            ctx_queue_notice(
-                NoticeScope::Corporation(corpid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.CreatedNotice"),
-                    value: notice_bytes,
-                },
-                now_u,
-            );
+            let notice_any = notice.must_to_any();
+            ctx_queue_notice(NoticeScope::Corporation(corpid), notice_any, now_u);
 
-            let mut created_msg = Vec::new();
-            encode_uuid_field(1, &uuid_vec, &mut created_msg);
-            let mut out = Vec::new();
-            encode_bytes_field(1, &created_msg, &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.CreateResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve_public.freelance.project.api.CreateResponse")
+                .set("created.project.uuid", uuid_vec.as_slice())
+                .must_to_any())
         }),
     );
 
@@ -512,19 +482,15 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             let cid = ctx.effective_character_id().unwrap_or(0);
             let (char_prog, unredeemed) = proj.contributors.get(&cid).copied().unwrap_or((0, 0));
             // V24 `ParticipationState`: 1 = COMMITTED, 0 = UNSPECIFIED (not participating).
-            let participant_state = u64::from(proj.committed_participants.contains(&cid));
+            let participant_state = i32::from(proj.committed_participants.contains(&cid));
             let attr = encode_project_attributes(&proj);
 
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attr, &mut out);
-            encode_varint_field(2, participant_state, &mut out);
-            encode_varint_field(3, char_prog as u64, &mut out);
-            encode_varint_field(4, unredeemed as u64, &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.GetResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve_public.freelance.project.api.GetResponse")
+                .set_raw_message("project", &attr)
+                .set("state", participant_state)
+                .set("progress", char_prog.max(0) as u64)
+                .set("units_unredeemed", unredeemed.max(0) as u64)
+                .must_to_any())
         }),
     );
 
@@ -550,19 +516,13 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             }
             let (char_prog, unredeemed) = proj.contributors.get(&cid).copied().unwrap_or((0, 0));
             let attr = encode_project_attributes(&proj);
-            let mut admin = Vec::new();
-            encode_varint_field(1, 1, &mut admin); // AdminDetails.no_acl
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attr, &mut out);
-            encode_bytes_field(2, &admin, &mut out);
-            encode_varint_field(3, u64::from(proj.committed_participants.contains(&cid)), &mut out);
-            encode_varint_field(4, char_prog.max(0) as u64, &mut out);
-            encode_varint_field(5, unredeemed.max(0) as u64, &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.GetForManagerResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve_public.freelance.project.api.GetForManagerResponse")
+                .set_raw_message("project", &attr)
+                .set("admin_project_details.no_acl", true)
+                .set("state", i32::from(proj.committed_participants.contains(&cid)))
+                .set("progress", char_prog.max(0) as u64)
+                .set("units_unredeemed", unredeemed.max(0) as u64)
+                .must_to_any())
         }),
     );
 
@@ -584,14 +544,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 .map(|p| p.uuid.clone())
                 .collect();
             uuids.sort();
-            let mut out = Vec::new();
+            let mut b = pb::message("eve_public.freelance.project.api.GetAllActiveForCorporationResponse");
             for u in &uuids {
-                encode_uuid_field(1, u, &mut out);
+                b = b.add_with("projects", |m| m.set("uuid", u.as_slice()));
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.GetAllActiveForCorporationResponse"),
-                value: out,
-            })
+            Ok(b.must_to_any())
         }),
     );
 
@@ -608,14 +565,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 .map(|p| p.uuid.clone())
                 .collect();
             uuids.sort();
-            let mut out = Vec::new();
+            let mut b = pb::message("eve_public.freelance.project.api.GetAllActiveResponse");
             for u in &uuids {
-                encode_uuid_field(1, u, &mut out);
+                b = b.add_with("projects", |m| m.set("uuid", u.as_slice()));
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.GetAllActiveResponse"),
-                value: out,
-            })
+            Ok(b.must_to_any())
         }),
     );
 
@@ -633,15 +587,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 .collect();
             uuids.sort();
             let (slice, next_tok) = paginate_slice(dyn_msg.get(3), &uuids);
-            let mut out = Vec::new();
+            let mut b = pb::message("eve_public.freelance.project.api.GetAllInactiveResponse");
             for u in &slice {
-                encode_uuid_field(1, u, &mut out);
+                b = b.add_with("projects", |m| m.set("uuid", u.as_slice()));
             }
-            encode_next_page(2, next_tok.as_deref(), &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.GetAllInactiveResponse"),
-                value: out,
-            })
+            Ok(b.set_opt("next_page.token", next_tok.as_deref()).must_to_any())
         }),
     );
 
@@ -665,25 +615,21 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             }) else {
                 return Err((STATUS_BAD_REQUEST, "Solar system ID or active character required".into()));
             };
-            let mut sys_b = Vec::new();
-            encode_varint_field(1, sys_id, &mut sys_b);
-            let mut bcast = Vec::new();
-            encode_bytes_field(1, &sys_b, &mut bcast);
             let mut uuids: Vec<Vec<u8>> = projects
                 .values()
                 .filter(|p| p.state == 1)
                 .map(|p| p.uuid.clone())
                 .collect();
             uuids.sort();
-            for u in &uuids {
-                encode_uuid_field(2, u, &mut bcast);
-            }
-            let mut out = Vec::new();
-            encode_bytes_field(1, &bcast, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.GetAllBroadcastedResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve_public.freelance.project.api.GetAllBroadcastedResponse")
+                .add_with("broadcasted", |mut b| {
+                    b = b.set("solar_system.sequential", sys_id);
+                    for u in &uuids {
+                        b = b.add_with("projects", |m| m.set("uuid", u.as_slice()));
+                    }
+                    b
+                })
+                .must_to_any())
         }),
     );
 
@@ -704,14 +650,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 .map(|p| p.uuid.clone())
                 .collect();
             uuids.sort();
-            let mut out = Vec::new();
+            let mut b = pb::message("eve_public.freelance.project.api.GetAllCommittedResponse");
             for u in &uuids {
-                encode_uuid_field(1, u, &mut out);
+                b = b.add_with("projects", |m| m.set("uuid", u.as_slice()));
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.GetAllCommittedResponse"),
-                value: out,
-            })
+            Ok(b.must_to_any())
         }),
     );
 
@@ -733,15 +676,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 .collect();
             uuids.sort();
             let (slice, next_tok) = paginate_slice(dyn_msg.get(1), &uuids);
-            let mut out = Vec::new();
+            let mut b = pb::message("eve_public.freelance.project.api.GetAllUnredeemedResponse");
             for u in &slice {
-                encode_uuid_field(1, u, &mut out);
+                b = b.add_with("projects", |m| m.set("uuid", u.as_slice()));
             }
-            encode_next_page(2, next_tok.as_deref(), &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.GetAllUnredeemedResponse"),
-                value: out,
-            })
+            Ok(b.set_opt("next_page.token", next_tok.as_deref()).must_to_any())
         }),
     );
 
@@ -768,21 +707,16 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             }
 
             let (slice, next_tok) = paginate_slice(dyn_msg.get(2), &p.committed_participants);
-            let mut out = Vec::new();
+            let mut b = pb::message("eve_public.freelance.project.api.GetParticipationDetailsResponse");
             for cid in &slice {
-                let mut part = Vec::new();
-                encode_char_id_field(1, *cid, &mut part);
-                encode_varint_field(2, 1, &mut part);
-                if let Some(&(prog, _)) = p.contributors.get(cid) {
-                    encode_varint_field(3, prog.max(0) as u64, &mut part);
-                }
-                encode_bytes_field(1, &part, &mut out);
+                let contrib = p.contributors.get(cid).copied();
+                b = b.add_with("participants", |part| {
+                    part.set("character.sequential", *cid)
+                        .set("state", 1i32)
+                        .set_opt("progress", contrib.map(|(prog, _)| prog.max(0) as u64))
+                });
             }
-            encode_next_page(2, next_tok.as_deref(), &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.GetParticipationDetailsResponse"),
-                value: out,
-            })
+            Ok(b.set_opt("next_page.token", next_tok.as_deref()).must_to_any())
         }),
     );
 
@@ -802,27 +736,27 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 }
             }
 
-            let mut out = Vec::new();
             let entries: Vec<_> = if requested_uuids.is_empty() {
                 projects.values().collect()
             } else {
                 requested_uuids.iter().filter_map(|u| projects.get(u)).collect()
             };
 
+            let mut b = pb::message("eve_public.freelance.project.api.GetStatsResponse");
             for p in entries {
-                let mut pstat = Vec::new();
-                encode_uuid_field(1, &p.uuid, &mut pstat);
-                encode_varint_field(2, p.current_progress.max(0) as u64, &mut pstat);
-                encode_varint_field(3, p.committed_participants.len() as u64, &mut pstat);
-                encode_varint_field(4, p.committed_participants.len().max(p.contributors.len()) as u64, &mut pstat);
-                encode_varint_field(5, p.contributors.len() as u64, &mut pstat);
-                encode_bytes_field(1, &pstat, &mut out);
+                b = b.add_with("project_stats", |ps| {
+                    ps.set("project.uuid", p.uuid.as_slice())
+                        .set("current_progress", p.current_progress.max(0) as u64)
+                        .set("committed_participants", p.committed_participants.len() as u32)
+                        .set(
+                            "total_participants",
+                            p.committed_participants.len().max(p.contributors.len()) as u32,
+                        )
+                        .set("total_contributors", p.contributors.len() as u32)
+                });
             }
 
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.GetStatsResponse"),
-                value: out,
-            })
+            Ok(b.must_to_any())
         }),
     );
 
@@ -830,16 +764,13 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.freelance.project.api.GetCreationLimitsRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
-            encode_varint_field(1, 100, &mut out);
-            encode_varint_field(2, 50, &mut out);
-            encode_varint_field(3, 30, &mut out);
-            encode_varint_field(4, 10, &mut out);
-            encode_varint_field(5, 500, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.GetCreationLimitsResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve_public.freelance.project.api.GetCreationLimitsResponse")
+                .set("max_active_projects_per_corporation", 100u32)
+                .set("max_active_projects_broadcast_per_system", 50u32)
+                .set("max_character_age_days", 30u32)
+                .set("max_broadcasting_locations_per_project", 10u32)
+                .set("max_committed_participants_per_project", 500u32)
+                .must_to_any())
         }),
     );
 
@@ -847,14 +778,9 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.freelance.project.api.GetCreationPricesRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut prices = Vec::new();
-            encode_varint_field(1, 10_000_000, &mut prices);
-            let mut out = Vec::new();
-            encode_bytes_field(1, &prices, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.GetCreationPricesResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve_public.freelance.project.api.GetCreationPricesResponse")
+                .set("prices.base_fee_per_day.units", 10_000_000i64)
+                .must_to_any())
         }),
     );
 
@@ -862,13 +788,10 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.freelance.project.api.GetCommitLimitsRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
-            encode_varint_field(1, 10, &mut out);
-            encode_varint_field(2, 500, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.GetCommitLimitsResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve_public.freelance.project.api.GetCommitLimitsResponse")
+                .set("max_active_projects_per_participant", 10u32)
+                .set("max_committed_participants_per_project", 500u32)
+                .must_to_any())
         }),
     );
 
@@ -904,12 +827,9 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             }
             if !active {
                 // V24 `CommitResponse.invalid_project_state = 3`.
-                let mut out = Vec::new();
-                encode_bytes_field(3, &[], &mut out);
-                return Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.CommitResponse"),
-                    value: out,
-                });
+                return Ok(pb::message("eve_public.freelance.project.api.CommitResponse")
+                    .set_with("invalid_project_state", |m| m)
+                    .must_to_any());
             }
             state_commit.refresh_from_db(now_u);
 
@@ -920,28 +840,22 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 .get(&uuid)
                 .map(|p| {
                     let c = p.committed_participants.len();
-                    (c as u64, c.max(p.contributors.len()) as u64)
+                    (c as u32, c.max(p.contributors.len()) as u32)
                 })
                 .unwrap_or((1, 1));
-            let mut notice_bytes = Vec::new();
-            encode_uuid_field(1, &uuid, &mut notice_bytes);
-            encode_varint_field(2, comm_cnt, &mut notice_bytes);
-            encode_varint_field(3, tot_cnt, &mut notice_bytes);
             ctx_queue_notice(
                 NoticeScope::Corporation(corpid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.ParticipantAddedNotice"),
-                    value: notice_bytes,
-                },
+                pb::message("eve_public.freelance.project.api.ParticipantAddedNotice")
+                    .set("project.uuid", uuid.as_slice())
+                    .set("committed_participants", comm_cnt)
+                    .set("total_participants", tot_cnt)
+                    .must_to_any(),
                 now_u,
             );
 
-            let mut out = Vec::new();
-            encode_bytes_field(1, &[], &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.CommitResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve_public.freelance.project.api.CommitResponse")
+                .set_with("committed", |m| m)
+                .must_to_any())
         }),
     );
 
@@ -970,26 +884,20 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
                 .get(&uuid)
-                .map(|p| p.committed_participants.len() as u64)
+                .map(|p| p.committed_participants.len() as u32)
                 .unwrap_or(0);
-            let mut notice_bytes = Vec::new();
-            encode_uuid_field(1, &uuid, &mut notice_bytes);
-            encode_varint_field(2, comm_cnt, &mut notice_bytes);
             ctx_queue_notice(
                 NoticeScope::Corporation(corpid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.ParticipantRemovedNotice"),
-                    value: notice_bytes,
-                },
+                pb::message("eve_public.freelance.project.api.ParticipantRemovedNotice")
+                    .set("project.uuid", uuid.as_slice())
+                    .set("committed_participants", comm_cnt)
+                    .must_to_any(),
                 now_u,
             );
 
-            let mut out = Vec::new();
-            encode_bytes_field(1, &[], &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.ResignResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve_public.freelance.project.api.ResignResponse")
+                .set_with("resigned", |m| m)
+                .must_to_any())
         }),
     );
 
@@ -1019,24 +927,18 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             }
             state_kick.refresh_from_db(now_u);
 
-            let mut notice_bytes = Vec::new();
-            encode_uuid_field(1, &uuid, &mut notice_bytes);
-            encode_char_id_field(2, target_cid, &mut notice_bytes);
             ctx_queue_notice(
                 NoticeScope::Character(target_cid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.ParticipantKickedNotice"),
-                    value: notice_bytes,
-                },
+                pb::message("eve_public.freelance.project.api.ParticipantKickedNotice")
+                    .set("project.uuid", uuid.as_slice())
+                    .set("participant.sequential", target_cid)
+                    .must_to_any(),
                 now_u,
             );
 
-            let mut out = Vec::new();
-            encode_bytes_field(1, &[], &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.KickResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve_public.freelance.project.api.KickResponse")
+                .set_with("kicked", |m| m)
+                .must_to_any())
         }),
     );
 
@@ -1073,22 +975,16 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             }
             state_close_cmd.refresh_from_db(now_u);
 
-            let mut notice_bytes = Vec::new();
-            encode_uuid_field(1, &uuid, &mut notice_bytes);
             ctx_queue_notice(
                 NoticeScope::Corporation(corpid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.ClosedNotice"),
-                    value: notice_bytes,
-                },
+                pb::message("eve_public.freelance.project.api.ClosedNotice")
+                    .set("project.uuid", uuid.as_slice())
+                    .must_to_any(),
                 now_u,
             );
-            let mut out = Vec::new();
-            encode_bytes_field(1, &[], &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.CloseResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve_public.freelance.project.api.CloseResponse")
+                .set_with("closed", |m| m)
+                .must_to_any())
         }),
     );
 
@@ -1113,8 +1009,18 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             }
             state_del_cmd.refresh_from_db(now_u);
 
-            let mut notice_bytes = Vec::new();
-            encode_uuid_field(1, &uuid, &mut notice_bytes);
+            // Synthetic wire wrapper: `eve_public.freelance.project.api.DeletedNotice` and
+            // `DeleteResponse` are not present in `data/quasar_descriptors.sqlite`.
+            let project_id_bytes = pb::message("eve_public.freelance.project.Identifier")
+                .set("uuid", uuid.as_slice())
+                .must_encode();
+            let notice_bytes = WireMessage {
+                fields: vec![WireField {
+                    field_number: 1,
+                    value: WireValue::LengthDelimited(project_id_bytes),
+                }],
+            }
+            .encode();
             ctx_queue_notice(
                 NoticeScope::Corporation(corpid),
                 GoogleAny {
@@ -1123,8 +1029,13 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 },
                 now_u,
             );
-            let mut out = Vec::new();
-            encode_bytes_field(1, &[], &mut out);
+            let out = WireMessage {
+                fields: vec![WireField {
+                    field_number: 1,
+                    value: WireValue::LengthDelimited(Vec::new()),
+                }],
+            }
+            .encode();
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.DeleteResponse"),
                 value: out,
@@ -1231,22 +1142,16 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             let _ = corp_projects::redeem_freelance_reward_for_char(db, pid, cid as i64, now_u)?;
             state_redeem.refresh_from_db(now_u);
 
-            let mut notice_bytes = Vec::new();
-            encode_uuid_field(1, &uuid, &mut notice_bytes);
-            encode_char_id_field(2, cid, &mut notice_bytes);
             ctx_queue_notice(
                 NoticeScope::Character(cid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.ParticipantRewardRedeemedNotice"),
-                    value: notice_bytes,
-                },
+                pb::message("eve_public.freelance.project.api.ParticipantRewardRedeemedNotice")
+                    .set("project.uuid", uuid.as_slice())
+                    .set("participant.sequential", cid)
+                    .must_to_any(),
                 now_u,
             );
 
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.RedeemRewardResponse"),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve_public.freelance.project.api.RedeemRewardResponse").must_to_any())
         }),
     );
 

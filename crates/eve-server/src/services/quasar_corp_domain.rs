@@ -8,51 +8,33 @@ use crate::quasar_gateway::{
     require_admin_role, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
 };
 use eve_db::{CorporationRecord, WorldRepository};
-use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field,
-    DynamicQuasarMessage, DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
-};
+use eve_proto::pb::{self, ProtoBuilder};
+use eve_proto::quasar::{DynamicQuasarMessage, DynamicValue, GoogleTimestamp};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-fn any(type_name: &str, value: Vec<u8>) -> GoogleAny {
-    GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"),
-        value,
-    }
-}
-
-fn seq_id(field: u32, id: u64, out: &mut Vec<u8>) {
-    let mut b = Vec::new();
-    encode_varint_field(1, id, &mut b);
-    encode_bytes_field(field, &b, out);
-}
-
-fn encode_f32_field(field: u32, v: f32, out: &mut Vec<u8>) {
-    out.push(((field as u8) << 3) | 5);
-    out.extend_from_slice(&v.to_le_bytes());
-}
-
-fn zigzag64(v: i64) -> u64 {
-    ((v << 1) ^ (v >> 63)) as u64
-}
-
-fn encode_isk_currency(cents: i64) -> Vec<u8> {
+fn build_isk_currency(cents: i64) -> ProtoBuilder {
     let units = cents / 100;
-    let nanos = (cents % 100) * 10_000_000;
-    let mut b = Vec::new();
-    encode_varint_field(1, zigzag64(units), &mut b);
-    encode_varint_field(2, zigzag64(nanos), &mut b);
-    b
+    let nanos = ((cents % 100) * 10_000_000) as i32;
+    pb::message("eve.isk.Currency")
+        .set("units", units)
+        .set("nanos", nanos)
 }
 
-fn encode_standing_value(standing: f64) -> Vec<u8> {
+fn build_standing_value(standing: f64) -> ProtoBuilder {
     let units = standing.trunc() as i64;
-    let nanos = ((standing - standing.trunc()) * 1_000_000_000.0).round() as i64;
-    let mut b = Vec::new();
-    encode_varint_field(1, zigzag64(units), &mut b);
-    encode_varint_field(2, zigzag64(nanos), &mut b);
-    b
+    let nanos = ((standing - standing.trunc()) * 1_000_000_000.0).round() as i32;
+    pb::message("eve.standing.Value")
+        .set("units", units)
+        .set("nanos", nanos)
+}
+
+fn build_security_status_value(sec: f64) -> ProtoBuilder {
+    let units = sec.trunc() as i64;
+    let nanos = ((sec - sec.trunc()) * 1_000_000_000.0).round() as i32;
+    pb::message("eve.securitystatus.Value")
+        .set("units", units)
+        .set("nanos", nanos)
 }
 
 fn extract_id(msg: &DynamicQuasarMessage, field: u32) -> Option<u32> {
@@ -124,10 +106,8 @@ fn role_names_to_mask(names: &[String]) -> u64 {
     mask
 }
 
-fn encode_role_collection(field: u32, mask: u64, out: &mut Vec<u8>) {
-    let mut b = Vec::new();
-    encode_varint_field(1, mask, &mut b);
-    encode_bytes_field(field, &b, out);
+fn build_role_collection(mask: u64) -> ProtoBuilder {
+    pb::message("eve.corporation.role.Collection").set("mask", mask)
 }
 
 fn starbase_role_enum(role_str: &str) -> u64 {
@@ -137,6 +117,50 @@ fn starbase_role_enum(role_str: &str) -> u64 {
         "alliance_member" | "alliance" => 3,
         "starbase_fuel_technician" => 4,
         _ => 2,
+    }
+}
+
+fn wallet_key_id_variant(division_id: u8) -> &'static str {
+    match division_id {
+        1 => "Division0",
+        2 => "Division1",
+        3 => "Division2",
+        4 => "Division3",
+        5 => "Division4",
+        6 => "Division5",
+        7 => "Division6",
+        _ => "Division0",
+    }
+}
+
+fn division_identifier_variant(division_id: u8) -> &'static str {
+    match division_id {
+        1 => "DIVISION_1",
+        2 => "DIVISION_2",
+        3 => "DIVISION_3",
+        4 => "DIVISION_4",
+        5 => "DIVISION_5",
+        6 => "DIVISION_6",
+        7 => "DIVISION_7",
+        _ => "DIVISION_1",
+    }
+}
+
+fn structure_state_flag_variant(state: &str) -> &'static str {
+    match state {
+        "Unanchored" => "STATE_UNANCHORED",
+        "Anchoring" => "STATE_ANCHORING",
+        "OnliningVulnerable" => "STATE_ONLINING_VULNERABLE",
+        "ShieldVulnerable" => "STATE_SHIELD_VULNERABLE",
+        "ArmorReinforced" => "STATE_ARMOR_REINFORCE",
+        "ArmorVulnerable" => "STATE_ARMOR_VULNERABLE",
+        "HullReinforced" => "STATE_HULL_REINFORCE",
+        "HullVulnerable" => "STATE_HULL_VULNERABLE",
+        "FittingInvulnerable" => "STATE_FITTING_INVULNERABLE",
+        "AnchorVulnerable" => "STATE_ANCHOR_VULNERABLE",
+        "DeployVulnerable" => "STATE_DEPLOY_VULNERABLE",
+        "Online" | "OnlineDeprecated" => "STATE_ONLINE_DEPRECATED",
+        _ => "STATE_UNKNOWN",
     }
 }
 
@@ -178,16 +202,14 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                         ))
                     })
                     .ok_or_else(|| (STATUS_NOT_FOUND, format!("Alliance {all_id} not found")))?;
-                let (mut attr, mut ts, mut out) = (Vec::new(), Vec::new(), Vec::new());
-                encode_string_field(1, &name, &mut attr);
-                encode_string_field(2, &short_name, &mut attr);
-                encode_varint_field(1, founded, &mut ts);
-                encode_bytes_field(3, &ts, &mut attr);
-                seq_id(4, creator_char, &mut attr);
-                seq_id(5, creator_corp, &mut attr);
-                seq_id(6, exec_corp, &mut attr);
-                encode_bytes_field(1, &attr, &mut out);
-                Ok(any("eve.alliance.GetResponse", out))
+                Ok(pb::message("eve.alliance.GetResponse")
+                    .set("alliance.name", name)
+                    .set("alliance.short_name", short_name)
+                    .set("alliance.date_founded", GoogleTimestamp::from_unix(founded as i64, 0))
+                    .set("alliance.creator_character_id.sequential", creator_char)
+                    .set("alliance.creator_corporation_id.sequential", creator_corp)
+                    .set("alliance.executor_corporation_id.sequential", exec_corp)
+                    .must_to_any())
             }),
         );
     }
@@ -202,11 +224,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     v.sort_unstable();
                     v
                 });
-                let mut out = Vec::new();
+                let mut resp = pb::message("eve.alliance.GetAllResponse");
                 for id in ids {
-                    seq_id(1, id as u64, &mut out);
+                    resp = resp.add_with("alliance_ids", |b| b.set("sequential", id));
                 }
-                Ok(any("eve.alliance.GetAllResponse", out))
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -240,11 +262,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     v.sort_unstable();
                     v
                 });
-                let mut out = Vec::new();
+                let mut resp = pb::message("eve.alliance.SearchResponse");
                 for id in ids {
-                    seq_id(1, id as u64, &mut out);
+                    resp = resp.add_with("alliances", |b| b.set("sequential", id));
                 }
-                Ok(any("eve.alliance.SearchResponse", out))
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -272,11 +294,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                         Some(v)
                     })
                     .ok_or_else(|| (STATUS_NOT_FOUND, format!("Alliance {all_id} not found")))?;
-                let mut out = Vec::new();
+                let mut resp = pb::message("eve.alliance.corporation.GetMembersResponse");
                 for cid in corp_ids {
-                    seq_id(1, cid as u64, &mut out);
+                    resp = resp.add_with("corporation_ids", |b| b.set("sequential", cid as u64));
                 }
-                Ok(any("eve.alliance.corporation.GetMembersResponse", out))
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -316,22 +338,14 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     };
                     Ok::<_, (u32, String)>(w)
                 })?;
-                let mut out = Vec::new();
+                let mut resp = pb::message("eve.corporation.accounting.wallet.GetAllDivisionBalanceResponse");
                 for div in divs {
-                    let key_id = if (1..=7).contains(&div.division_id) {
-                        999 + div.division_id as u64
-                    } else {
-                        1000
-                    };
-                    let mut db_msg = Vec::new();
-                    encode_varint_field(1, key_id, &mut db_msg);
-                    encode_bytes_field(2, &encode_isk_currency(div.balance.0), &mut db_msg);
-                    encode_bytes_field(1, &db_msg, &mut out);
+                    resp = resp.add_with("divisions", |b| {
+                        b.set("division", pb::enum_name(wallet_key_id_variant(div.division_id)))
+                            .set("balance", build_isk_currency(div.balance.0))
+                    });
                 }
-                Ok(any(
-                    "eve.corporation.accounting.wallet.GetAllDivisionBalanceResponse",
-                    out,
-                ))
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -361,28 +375,28 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     };
                     Ok::<_, (u32, String)>((h, w))
                 })?;
-                let mut out = Vec::new();
+                let mut resp = pb::message("eve.corporation.divisions.GetResponse");
                 for idx in 1..=7u8 {
-                    let mut h_msg = Vec::new();
-                    encode_varint_field(1, idx as u64, &mut h_msg);
-                    if let Some(custom) = hangar_map.get(&idx).filter(|s| !s.is_empty()) {
-                        encode_string_field(3, custom, &mut h_msg);
-                    } else {
-                        encode_varint_field(2, 1, &mut h_msg);
-                    }
-                    encode_bytes_field(1, &h_msg, &mut out);
+                    let custom = hangar_map.get(&idx).filter(|s| !s.is_empty()).cloned();
+                    resp = resp.add_with("hangar", |b| {
+                        let b = b.set("id", pb::enum_name(division_identifier_variant(idx)));
+                        match custom {
+                            Some(name) => b.set("custom_name", name),
+                            None => b.set("default_name", true),
+                        }
+                    });
                 }
                 for w in wallet_divs {
-                    let mut w_msg = Vec::new();
-                    encode_varint_field(1, w.division_id as u64, &mut w_msg);
-                    if !w.name.is_empty() {
-                        encode_string_field(3, &w.name, &mut w_msg);
-                    } else {
-                        encode_varint_field(2, 1, &mut w_msg);
-                    }
-                    encode_bytes_field(2, &w_msg, &mut out);
+                    resp = resp.add_with("wallet", |b| {
+                        let b = b.set("id", pb::enum_name(division_identifier_variant(w.division_id)));
+                        if !w.name.is_empty() {
+                            b.set("custom_name", w.name)
+                        } else {
+                            b.set("default_name", true)
+                        }
+                    });
                 }
-                Ok(any("eve.corporation.divisions.GetResponse", out))
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -404,9 +418,9 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                         )
                     })
                 })?;
-                let mut out = Vec::new();
-                seq_id(1, st_id as u64, &mut out);
-                Ok(any("eve.corporation.homestation.GetResponse", out))
+                Ok(pb::message("eve.corporation.homestation.GetResponse")
+                    .set("station.sequential", st_id as u64)
+                    .must_to_any())
             }),
         );
     }
@@ -423,16 +437,13 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                         .ok_or_else(|| (STATUS_NOT_FOUND, format!("Corporation {corpid} not found")))
                         .map(|c| c.alliance_id)
                 })?;
-                let mut out = Vec::new();
-                if let Some(a) = aid.filter(|&x| x > 0) {
-                    seq_id(1, a as u64, &mut out);
+                let resp = pb::message("eve.corporation.alliance.api.GetCurrentMembershipResponse");
+                let resp = if let Some(a) = aid.filter(|&x| x > 0) {
+                    resp.set("alliance.sequential", a)
                 } else {
-                    encode_varint_field(2, 1, &mut out);
-                }
-                Ok(any(
-                    "eve.corporation.alliance.api.GetCurrentMembershipResponse",
-                    out,
-                ))
+                    resp.set("no_alliance", true)
+                };
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -449,27 +460,24 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                         .cloned()
                         .unwrap_or_default()
                 });
-                let mut out = Vec::new();
+                let mut resp = pb::message("eve.corporation.alliancemembershiprecord.GetAllResponse");
                 for rec in history {
-                    let (mut r_msg, mut at_msg, mut ts_msg) = (Vec::new(), Vec::new(), Vec::new());
-                    seq_id(1, rec.record_id as u64, &mut r_msg);
-                    if let Some(aid) = rec.alliance_id.filter(|&a| a > 0) {
-                        let mut al_msg = Vec::new();
-                        seq_id(1, aid as u64, &mut al_msg);
-                        encode_varint_field(2, u64::from(rec.is_deleted.unwrap_or(false)), &mut al_msg);
-                        encode_bytes_field(2, &al_msg, &mut at_msg);
-                    } else {
-                        encode_varint_field(1, 1, &mut at_msg);
-                    }
-                    encode_varint_field(1, rec.start_date_unix, &mut ts_msg);
-                    encode_bytes_field(3, &ts_msg, &mut at_msg);
-                    encode_bytes_field(2, &at_msg, &mut r_msg);
-                    encode_bytes_field(1, &r_msg, &mut out);
+                    resp = resp.add_with("records", |b| {
+                        let b = b
+                            .set("id.sequential", rec.record_id as u32)
+                            .set(
+                                "attributes.timestamp",
+                                GoogleTimestamp::from_unix(rec.start_date_unix as i64, 0),
+                            );
+                        if let Some(aid) = rec.alliance_id.filter(|&a| a > 0) {
+                            b.set("attributes.alliance.id.sequential", aid)
+                                .set("attributes.alliance.is_deleted", rec.is_deleted.unwrap_or(false))
+                        } else {
+                            b.set("attributes.unaffiliated", true)
+                        }
+                    });
                 }
-                Ok(any(
-                    "eve.corporation.alliancemembershiprecord.GetAllResponse",
-                    out,
-                ))
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -492,77 +500,58 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                         .cloned()
                         .unwrap_or_default()
                 });
-                let mut out = Vec::new();
+                let mut resp = pb::message("eve.corporation.alsclogs.GetResponse");
                 for entry in logs {
-                    let (mut e_msg, mut ts_msg, mut act_msg) = (Vec::new(), Vec::new(), Vec::new());
-                    encode_varint_field(1, entry.logged_at_unix, &mut ts_msg);
-                    encode_bytes_field(1, &ts_msg, &mut e_msg);
-                    seq_id(2, entry.container_id as u64, &mut e_msg);
-                    seq_id(3, entry.container_type_id as u64, &mut e_msg);
-                    seq_id(4, entry.location_id as u64, &mut e_msg);
-                    encode_varint_field(5, parse_location_flag(&entry.location_flag), &mut e_msg);
-                    let act_lower = entry.action.to_ascii_lowercase();
-                    let encode_type_qty = |target: &mut Vec<u8>| {
-                        if let Some(tid) = entry.type_id {
-                            seq_id(1, tid as u64, target);
-                        }
-                        if let Some(q) = entry.quantity {
-                            encode_varint_field(2, q.max(0) as u64, target);
-                        }
-                    };
-                    match act_lower.as_str() {
-                        "assemble" => {
-                            let mut sub = Vec::new();
-                            if let Some(tid) = entry.type_id {
-                                seq_id(2, tid as u64, &mut sub);
+                    resp = resp.add_with("entries", |b| {
+                        let b = b
+                            .set("timestamp", GoogleTimestamp::from_unix(entry.logged_at_unix as i64, 0))
+                            .set("container.sequential", entry.container_id as u64)
+                            .set("container_type.sequential", entry.container_type_id as u64)
+                            .set("container_location.sequential", entry.location_id as u64)
+                            .set("container_location_flag", parse_location_flag(&entry.location_flag) as u32)
+                            .set("character.sequential", entry.character_id as u32);
+                        let act_lower = entry.action.to_ascii_lowercase();
+                        let set_type_qty = |sub: ProtoBuilder| -> ProtoBuilder {
+                            sub.set_opt("type.sequential", entry.type_id.map(|tid| tid as u64))
+                                .set_opt("quantity", entry.quantity.map(|q| q.max(0) as u64))
+                        };
+                        match act_lower.as_str() {
+                            "assemble" => b.set_with("action.assemble", |sub| {
+                                sub.set_opt("type.sequential", entry.type_id.map(|tid| tid as u64))
+                            }),
+                            "repackage" => b.set_with("action.repackage", |sub| sub),
+                            "set_name" | "setname" => b.set_with("action.set_name", |sub| sub),
+                            "move" => b.set_with("action.move", |sub| sub),
+                            "set_password" | "setpassword" => {
+                                b.set("action.set_password.password_type", pb::enum_name("PASSWORD_TYPE_GENERAL"))
                             }
-                            encode_bytes_field(1, &sub, &mut act_msg);
+                            "add" => b.set_with("action.add", set_type_qty),
+                            "lock" => b.set_with("action.lock", set_type_qty),
+                            "unlock" => b.set_with("action.unlock", set_type_qty),
+                            "enter_password" | "enterpassword" => {
+                                b.set("action.enter_password.password_type", pb::enum_name("PASSWORD_TYPE_GENERAL"))
+                            }
+                            "configure" => b
+                                .set(
+                                    "action.configure.old_config_bitmask",
+                                    entry.old_config_bitmask.unwrap_or(0) as u64,
+                                )
+                                .set(
+                                    "action.configure.new_config_bitmask",
+                                    entry.new_config_bitmask.unwrap_or(0) as u64,
+                                ),
+                            _ => {
+                                let field = if entry.type_id.is_some() {
+                                    "action.add"
+                                } else {
+                                    "action.lock"
+                                };
+                                b.set_with(field, set_type_qty)
+                            }
                         }
-                        "repackage" => encode_bytes_field(2, &[], &mut act_msg),
-                        "set_name" | "setname" => encode_bytes_field(3, &[], &mut act_msg),
-                        "move" => encode_bytes_field(4, &[], &mut act_msg),
-                        "set_password" | "setpassword" => {
-                            let mut sub = Vec::new();
-                            encode_varint_field(1, 1, &mut sub);
-                            encode_bytes_field(5, &sub, &mut act_msg);
-                        }
-                        "add" => {
-                            let mut sub = Vec::new();
-                            encode_type_qty(&mut sub);
-                            encode_bytes_field(6, &sub, &mut act_msg);
-                        }
-                        "lock" => {
-                            let mut sub = Vec::new();
-                            encode_type_qty(&mut sub);
-                            encode_bytes_field(7, &sub, &mut act_msg);
-                        }
-                        "unlock" => {
-                            let mut sub = Vec::new();
-                            encode_type_qty(&mut sub);
-                            encode_bytes_field(8, &sub, &mut act_msg);
-                        }
-                        "enter_password" | "enterpassword" => {
-                            let mut sub = Vec::new();
-                            encode_varint_field(1, 1, &mut sub);
-                            encode_bytes_field(9, &sub, &mut act_msg);
-                        }
-                        "configure" => {
-                            let mut sub = Vec::new();
-                            encode_varint_field(1, entry.old_config_bitmask.unwrap_or(0) as u64, &mut sub);
-                            encode_varint_field(2, entry.new_config_bitmask.unwrap_or(0) as u64, &mut sub);
-                            encode_bytes_field(10, &sub, &mut act_msg);
-                        }
-                        _ => {
-                            let mut sub = Vec::new();
-                            encode_type_qty(&mut sub);
-                            encode_bytes_field(if entry.type_id.is_some() { 6 } else { 7 }, &mut sub, &mut act_msg);
-                        }
-                    }
-                    encode_bytes_field(6, &act_msg, &mut e_msg);
-                    seq_id(7, entry.character_id as u64, &mut e_msg);
-                    encode_bytes_field(1, &e_msg, &mut out);
+                    });
                 }
-                Ok(any("eve.corporation.alsclogs.GetResponse", out))
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -599,50 +588,47 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     v.sort_by_key(|j| j.job_id);
                     v
                 });
-                let mut out = Vec::new();
+                let mut resp = pb::message("eve.corporation.industry.job.GetActiveResponse");
                 for j in jobs {
-                    let (mut entry, mut sub) = (Vec::new(), Vec::new());
-                    seq_id(1, j.job_id as u64, &mut entry);
-                    seq_id(2, corpid as u64, &mut sub);
-                    seq_id(3, j.installer_id as u64, &mut sub);
-                    seq_id(4, j.facility_id as u64, &mut sub);
-                    encode_varint_field(8, j.runs as u64, &mut sub);
-                    encode_varint_field(14, j.duration_seconds, &mut sub);
-                    seq_id(21, j.blueprint_item_id.max(0) as u64, &mut sub);
-                    let entry_field = match j.activity_id {
-                        3 => {
-                            seq_id(22, j.blueprint_type_id as u64, &mut sub);
-                            6
-                        }
-                        4 => {
-                            seq_id(22, j.blueprint_type_id as u64, &mut sub);
-                            7
-                        }
-                        5 => {
-                            seq_id(22, j.product_type_id as u64, &mut sub);
-                            seq_id(24, j.blueprint_type_id as u64, &mut sub);
-                            2
-                        }
-                        8 => {
-                            seq_id(22, j.product_type_id as u64, &mut sub);
-                            seq_id(25, j.blueprint_type_id as u64, &mut sub);
-                            3
-                        }
-                        9 | 11 => {
-                            seq_id(23, j.product_type_id as u64, &mut sub);
-                            seq_id(25, j.blueprint_type_id as u64, &mut sub);
-                            5
-                        }
-                        _ => {
-                            seq_id(23, j.product_type_id as u64, &mut sub);
-                            seq_id(25, j.blueprint_type_id as u64, &mut sub);
-                            4
-                        }
+                    let details_field = match j.activity_id {
+                        3 => "research_duration",
+                        4 => "research_materials",
+                        5 => "blueprint_copy",
+                        8 => "blueprint_invention",
+                        9 | 11 => "reaction",
+                        _ => "manufacturing",
                     };
-                    encode_bytes_field(entry_field, &sub, &mut entry);
-                    encode_bytes_field(1, &entry, &mut out);
+                    resp = resp.add_with("jobs", |b| {
+                        b.set("id.sequential", j.job_id as u32)
+                            .set_with(details_field, |sub| {
+                                let sub = sub
+                                    .set("corporation.sequential", corpid as u32)
+                                    .set("installer.sequential", j.installer_id as u32)
+                                    .set("facility.sequential", j.facility_id as u64)
+                                    .set("runs", j.runs as u32)
+                                    .set("duration", j.duration_seconds as u32);
+                                let bp_item = j.blueprint_item_id.max(0) as u64;
+                                match j.activity_id {
+                                    3 | 4 => sub
+                                        .set("blueprint_original.sequential", bp_item)
+                                        .set("blueprint_type.sequential", j.blueprint_type_id as u64),
+                                    5 => sub
+                                        .set("blueprint_original.sequential", bp_item)
+                                        .set("product.sequential", j.product_type_id as u64)
+                                        .set("blueprint_type.sequential", j.blueprint_type_id as u64),
+                                    8 => sub
+                                        .set("blueprint_copy.sequential", bp_item)
+                                        .set("product.sequential", j.product_type_id as u64)
+                                        .set("blueprint_type.sequential", j.blueprint_type_id as u64),
+                                    _ => sub
+                                        .set("blueprint_original.sequential", bp_item)
+                                        .set("product.sequential", j.product_type_id as u64)
+                                        .set("blueprint_type.sequential", j.blueprint_type_id as u64),
+                                }
+                            })
+                    });
                 }
-                Ok(any("eve.corporation.industry.job.GetActiveResponse", out))
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -677,42 +663,40 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     v.sort_by_key(|i| i.item_id);
                     v
                 });
-                let mut out = Vec::new();
+                let mut resp = pb::message("eve.corporation.industry.blueprints.GetResponse");
                 for item in items {
-                    let me = item.dynamic_attributes.get(&1112).copied().unwrap_or(0.0).max(0.0) as u64;
-                    let te = item.dynamic_attributes.get(&1113).copied().unwrap_or(0.0).max(0.0) as u64;
-                    let mut loc = Vec::new();
-                    seq_id(1, item.location_id as u64, &mut loc);
-                    encode_varint_field(4, item.flag as u32 as u64, &mut loc);
+                    let me = item.dynamic_attributes.get(&1112).copied().unwrap_or(0.0).max(0.0) as u32;
+                    let te = item.dynamic_attributes.get(&1113).copied().unwrap_or(0.0).max(0.0) as u32;
+                    let loc = pb::message("eve.industry.blueprintlocation.Identifier")
+                        .set("station_id.sequential", item.location_id as u64)
+                        .set("location_flag", item.flag as u32);
                     if !item.singleton && item.quantity > 1 && !item.is_blueprint_copy {
-                        let mut stack = Vec::new();
-                        seq_id(1, item.item_id as u64, &mut stack);
-                        seq_id(2, item.type_id as u64, &mut stack);
-                        encode_bytes_field(3, &loc, &mut stack);
-                        encode_varint_field(4, item.quantity as u64, &mut stack);
-                        encode_bytes_field(3, &stack, &mut out);
+                        resp = resp.add_with("blueprints_stacks", |b| {
+                            b.set("item_id.sequential", item.item_id as u64)
+                                .set("blueprint_type.sequential", item.type_id as u64)
+                                .set("location", loc)
+                                .set("quantity", item.quantity as u32)
+                        });
                     } else if item.is_blueprint_copy {
-                        let (mut bpc, mut attrs) = (Vec::new(), Vec::new());
-                        seq_id(1, item.item_id as u64, &mut bpc);
-                        seq_id(1, item.type_id as u64, &mut attrs);
-                        encode_varint_field(2, me, &mut attrs);
-                        encode_varint_field(3, te, &mut attrs);
-                        encode_varint_field(4, zigzag64(item.blueprint_runs_remaining.unwrap_or(1) as i64), &mut attrs);
-                        encode_bytes_field(2, &attrs, &mut bpc);
-                        encode_bytes_field(3, &loc, &mut bpc);
-                        encode_bytes_field(2, &bpc, &mut out);
+                        resp = resp.add_with("blueprint_copies", |b| {
+                            b.set("blueprint_id.sequential", item.item_id as u64)
+                                .set("attributes.type.sequential", item.type_id as u64)
+                                .set("attributes.material_efficiency", me)
+                                .set("attributes.time_efficiency", te)
+                                .set("attributes.runs_remaining", item.blueprint_runs_remaining.unwrap_or(1))
+                                .set("location", loc)
+                        });
                     } else {
-                        let (mut bp, mut attrs) = (Vec::new(), Vec::new());
-                        seq_id(1, item.item_id as u64, &mut bp);
-                        seq_id(1, item.type_id as u64, &mut attrs);
-                        encode_varint_field(2, me, &mut attrs);
-                        encode_varint_field(3, te, &mut attrs);
-                        encode_bytes_field(2, &attrs, &mut bp);
-                        encode_bytes_field(3, &loc, &mut bp);
-                        encode_bytes_field(1, &bp, &mut out);
+                        resp = resp.add_with("blueprints", |b| {
+                            b.set("blueprint_id.sequential", item.item_id as u64)
+                                .set("attributes.type.sequential", item.type_id as u64)
+                                .set("attributes.material_efficiency", me)
+                                .set("attributes.time_efficiency", te)
+                                .set("location", loc)
+                        });
                     }
                 }
-                Ok(any("eve.corporation.industry.blueprints.GetResponse", out))
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -733,18 +717,17 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     v.sort_by_key(|st| st.structure_id);
                     v
                 });
-                let mut out = Vec::new();
+                let mut resp = pb::message("eve.corporation.industry.facilties.GetResponse");
                 for st in structs {
-                    let (mut f_msg, mut at_msg) = (Vec::new(), Vec::new());
-                    seq_id(1, st.structure_id as u64, &mut f_msg);
-                    seq_id(1, corpid as u64, &mut at_msg);
-                    seq_id(3, st.solar_system_id as u64, &mut at_msg);
-                    seq_id(4, st.type_id as u64, &mut at_msg);
-                    encode_varint_field(5, 1, &mut at_msg);
-                    encode_bytes_field(2, &at_msg, &mut f_msg);
-                    encode_bytes_field(1, &f_msg, &mut out);
+                    resp = resp.add_with("facilities", |b| {
+                        b.set("id.sequential", st.structure_id as u64)
+                            .set("attributes.corporation.sequential", corpid as u32)
+                            .set("attributes.solar_system.sequential", st.solar_system_id as u64)
+                            .set("attributes.type.sequential", st.type_id)
+                            .set("attributes.online", true)
+                    });
                 }
-                Ok(any("eve.corporation.industry.facilties.GetResponse", out))
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -768,19 +751,15 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     ids.sort_unstable();
                     ids
                 });
-                let mut out = Vec::new();
+                let now = ctx.now_unix() as i64;
+                let mut resp = pb::message("eve.corporation.industry.observer.GetAllDetailsResponse");
                 for oid in obs_ids {
-                    let (mut o_msg, mut at_msg, mut ts_msg) = (Vec::new(), Vec::new(), Vec::new());
-                    seq_id(1, oid as u64, &mut o_msg);
-                    encode_varint_field(1, ctx.now_unix(), &mut ts_msg);
-                    encode_bytes_field(1, &ts_msg, &mut at_msg);
-                    encode_bytes_field(2, &at_msg, &mut o_msg);
-                    encode_bytes_field(1, &o_msg, &mut out);
+                    resp = resp.add_with("observers", |b| {
+                        b.set("id.sequential", oid as u64)
+                            .set("attrs.last_updated", GoogleTimestamp::from_unix(now, 0))
+                    });
                 }
-                Ok(any(
-                    "eve.corporation.industry.observer.GetAllDetailsResponse",
-                    out,
-                ))
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -800,9 +779,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 v.sort_unstable();
                 v
             });
-            let mut out = Vec::new();
-            for cid in members { seq_id(1, cid as u64, &mut out); }
-            Ok(any("eve.corporation.members.GetResponse", out))
+            let mut resp = pb::message("eve.corporation.members.GetResponse");
+            for cid in members {
+                resp = resp.add_with("members", |b| b.set("sequential", cid as u32));
+            }
+            Ok(resp.must_to_any())
         }));
     }
 
@@ -813,9 +794,9 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             let limit = d.with_snapshot(|s| {
                 crate::domain::corp_governance::resolve_corp_member_limit(None, s, corpid).unwrap_or(10)
             });
-            let mut out = Vec::new();
-            encode_varint_field(1, limit.max(0) as u64, &mut out);
-            Ok(any("eve.corporation.members.GetLimitResponse", out))
+            Ok(pb::message("eve.corporation.members.GetLimitResponse")
+                .set("member_limit", limit.max(0) as u32)
+                .must_to_any())
         }));
     }
 
@@ -839,14 +820,14 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     (cid, mask)
                 }).collect::<Vec<_>>()
             });
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve.corporation.members.roles.GetResponse");
             for (cid, mask) in member_roles {
-                let mut cr = Vec::new();
-                seq_id(1, cid as u64, &mut cr);
-                encode_varint_field(2, mask, &mut cr);
-                encode_bytes_field(1, &cr, &mut out);
+                resp = resp.add_with("members_roles", |b| {
+                    b.set("character.sequential", cid as u32)
+                        .set("roles_at_all", build_role_collection(mask))
+                });
             }
-            Ok(any("eve.corporation.members.roles.GetResponse", out))
+            Ok(resp.must_to_any())
         }));
     }
 
@@ -874,14 +855,17 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 for v in map.values_mut() { v.sort_unstable(); }
                 map
             });
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve.corporation.members.titles.GetResponse");
             for (cid, tids) in rows {
-                let mut ct = Vec::new();
-                seq_id(1, cid as u64, &mut ct);
-                for tid in tids { seq_id(2, tid as u64, &mut ct); }
-                encode_bytes_field(1, &ct, &mut out);
+                resp = resp.add_with("members", |mut b| {
+                    b = b.set("character.sequential", cid as u32);
+                    for tid in tids {
+                        b = b.add_with("titles", |t| t.set("sequential", tid as u32));
+                    }
+                    b
+                });
             }
-            Ok(any("eve.corporation.members.titles.GetResponse", out))
+            Ok(resp.must_to_any())
         }));
     }
 
@@ -900,20 +884,38 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 }
                 members.sort_unstable();
                 members.into_iter().map(|cid| {
-                    let sys_id = s.characters.get(&cid).map(|ch| ch.solar_system_id as u64).unwrap_or(0);
+                    let ch = s.characters.get(&cid);
+                    let station_id = ch.and_then(|c| c.station_id);
                     let logoff = s.character_login_stats.get(&cid).map(|st| st.last_logout_unix).unwrap_or(0);
-                    (cid, sys_id, logoff)
+                    let logon = s.character_login_stats.get(&cid).map(|st| st.last_login_unix).unwrap_or(0);
+                    (cid, station_id, logon, logoff)
                 }).collect::<Vec<_>>()
             });
-            let mut out = Vec::new();
-            for (cid, sys_id, logoff) in rows {
-                let mut t = Vec::new();
-                seq_id(1, cid as u64, &mut t);
-                encode_varint_field(2, sys_id, &mut t);
-                encode_varint_field(3, logoff, &mut t);
-                encode_bytes_field(1, &t, &mut out);
+            let mut resp = pb::message("eve.corporation.members.tracking.GetResponse");
+            for (cid, station_id, logon, logoff) in rows {
+                resp = resp.add_with("members_tracking_data", |b| {
+                    let b = b
+                        .set("character.sequential", cid as u32)
+                        .set("start_date", GoogleTimestamp::from_unix(1_700_000_000, 0))
+                        .set("no_base", true);
+                    let b = if logon > 0 {
+                        b.set("last_logon_datetime", GoogleTimestamp::from_unix(logon as i64, 0))
+                    } else {
+                        b.set("no_last_logon_datetime", true)
+                    };
+                    let b = if logoff > 0 {
+                        b.set("last_logoff_datetime", GoogleTimestamp::from_unix(logoff as i64, 0))
+                    } else {
+                        b.set("no_last_logoff_datetime", true)
+                    };
+                    if let Some(st) = station_id.filter(|&v| v > 0) {
+                        b.set("station.sequential", st as u64)
+                    } else {
+                        b
+                    }
+                });
             }
-            Ok(any("eve.corporation.members.tracking.GetResponse", out))
+            Ok(resp.must_to_any())
         }));
     }
 
@@ -928,25 +930,29 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 eve_db::corp_roles::ROLE_PERSONNEL_MANAGER | eve_db::corp_roles::ROLE_AUDITOR,
             )?;
             let history = d.with_snapshot(|s| s.corp_role_history.get(&corpid).cloned().unwrap_or_default());
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve.corporation.members.roles.auditlog.GetResponse");
             for entry in history {
-                let (mut rc, mut ts) = (Vec::new(), Vec::new());
-                encode_varint_field(1, entry.changed_at_unix, &mut ts);
-                encode_bytes_field(1, &ts, &mut rc);
-                seq_id(2, entry.character_id as u64, &mut rc);
-                seq_id(3, entry.issuer_id as u64, &mut rc);
                 let rtype = match entry.role_type.as_str() {
-                    "grantable_roles" => 2, "roles_at_hq" => 3, "grantable_roles_at_hq" => 4,
-                    "roles_at_base" => 5, "grantable_roles_at_base" => 6, "roles_at_other" => 7,
-                    "grantable_roles_at_other" => 8, _ => 1,
+                    "grantable_roles" => "TYPE_GRANTABLE_AT_ALL",
+                    "roles_at_hq" => "TYPE_AT_HQ",
+                    "grantable_roles_at_hq" => "TYPE_GRANTABLE_AT_HQ",
+                    "roles_at_base" => "TYPE_AT_BASE",
+                    "grantable_roles_at_base" => "TYPE_GRANTABLE_AT_BASE",
+                    "roles_at_other" => "TYPE_AT_OTHER",
+                    "grantable_roles_at_other" => "TYPE_GRANTABLE_AT_OTHER",
+                    _ => "TYPE_AT_ALL",
                 };
-                encode_varint_field(4, rtype, &mut rc);
-                encode_role_collection(5, role_names_to_mask(&entry.old_roles), &mut rc);
-                encode_role_collection(6, role_names_to_mask(&entry.new_roles), &mut rc);
-                seq_id(7, entry.issuer_id as u64, &mut rc);
-                encode_bytes_field(1, &rc, &mut out);
+                resp = resp.add_with("roles_changes", |b| {
+                    b.set("timestamp", GoogleTimestamp::from_unix(entry.changed_at_unix as i64, 0))
+                        .set("character.sequential", entry.character_id as u32)
+                        .set("issuer.sequential", entry.issuer_id as u32)
+                        .set("role_type", pb::enum_name(rtype))
+                        .set("old_roles", build_role_collection(role_names_to_mask(&entry.old_roles)))
+                        .set("new_roles", build_role_collection(role_names_to_mask(&entry.new_roles)))
+                        .set("known_issuer.sequential", entry.issuer_id as u32)
+                });
             }
-            Ok(any("eve.corporation.members.roles.auditlog.GetResponse", out))
+            Ok(resp.must_to_any())
         }));
     }
 
@@ -956,17 +962,19 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             let mut npc_corps: Vec<u32> = sde_npc.stations.values().map(|st| st.owner_corporation_id).filter(|&cid| cid > 0 && cid < 2_000_000).map(|cid| cid as u32).collect();
             npc_corps.sort_unstable();
             npc_corps.dedup();
-            let mut out = Vec::new();
-            for cid in npc_corps { seq_id(1, cid as u64, &mut out); }
-            Ok(any("eve.corporation.npc.GetAllResponse", out))
+            let mut resp = pb::message("eve.corporation.npc.GetAllResponse");
+            for cid in npc_corps {
+                resp = resp.add_with("corporations", |b| b.set("sequential", cid));
+            }
+            Ok(resp.must_to_any())
         }));
     }
 
     router.register_handler("eve.corporation.npc.IsNPCCorporationRequest", Arc::new(move |_ctx, _any, msg| {
         let corpid = extract_id(msg, 1).unwrap_or(0);
-        let mut out = Vec::new();
-        encode_varint_field(1, u64::from(corpid > 0 && corpid < 2_000_000), &mut out);
-        Ok(any("eve.corporation.npc.IsNPCCorporationResponse", out))
+        Ok(pb::message("eve.corporation.npc.IsNPCCorporationResponse")
+            .set("is_npc", corpid > 0 && corpid < 2_000_000)
+            .must_to_any())
     }));
 
     {
@@ -979,18 +987,20 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 }
                 Ok(s.corp_governance.get(&corpid).map(|g| (g.logo, g.logo_extra_colors)).unwrap_or(((415, 0, 0, 671), (0, 0))))
             })?;
-            let mut logo_msg = Vec::new();
-            for (shape, color) in [(s1, c1), (s2, c2), (s3, c3)] {
-                if shape > 0 || color > 0 {
-                    let mut layer = Vec::new();
-                    encode_varint_field(1, shape.max(0) as u64, &mut layer);
-                    encode_varint_field(2, color.max(0) as u64, &mut layer);
-                    encode_bytes_field(1, &layer, &mut logo_msg);
-                }
-            }
-            let mut out = Vec::new();
-            encode_bytes_field(1, &logo_msg, &mut out);
-            Ok(any("eve.corporation.logo.api.GetResponse", out))
+            Ok(pb::message("eve.corporation.logo.api.GetResponse")
+                .set_with("logo", |mut l| {
+                    for (shape, color) in [(s1, c1), (s2, c2), (s3, c3)] {
+                        if shape > 0 || color > 0 {
+                            l = l.add_with("layers", |layer| {
+                                layer
+                                    .set("shape", shape.max(0) as u32)
+                                    .set("color", color.max(0) as u32)
+                            });
+                        }
+                    }
+                    l
+                })
+                .must_to_any())
         }));
     }
 
@@ -1014,9 +1024,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 v.dedup();
                 v
             });
-            let mut out = Vec::new();
-            for sys_id in systems { seq_id(1, sys_id as u64, &mut out); }
-            Ok(any("eve.corporation.office.api.GetSolarSystemsResponse", out))
+            let mut resp = pb::message("eve.corporation.office.api.GetSolarSystemsResponse");
+            for sys_id in systems {
+                resp = resp.add_with("solar_systems", |b| b.set("sequential", sys_id as u64));
+            }
+            Ok(resp.must_to_any())
         }));
     }
 
@@ -1025,19 +1037,27 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         router.register_handler("eve.corporation.structure.GetAllWithDetailsRequest", Arc::new(move |ctx, _any, msg| {
             let corpid = resolve_authorized_corp(ctx, msg, 1, &d)?;
             let structures = d.with_snapshot(|s| {
-                let mut v: Vec<(i64, String, u32)> = s.structures.values().filter(|st| st.owner_corp_id == corpid).map(|st| (st.structure_id, st.name.clone(), st.solar_system_id)).collect();
-                v.sort_by_key(|(id, _, _)| *id);
+                let mut v: Vec<(i64, String, u32, u32, String)> = s
+                    .structures
+                    .values()
+                    .filter(|st| st.owner_corp_id == corpid)
+                    .map(|st| (st.structure_id, st.name.clone(), st.solar_system_id, st.type_id, st.state.clone()))
+                    .collect();
+                v.sort_by_key(|(id, _, _, _, _)| *id);
                 v
             });
-            let mut out = Vec::new();
-            for (sid, name, sys_id) in structures {
-                let mut st = Vec::new();
-                seq_id(1, sid as u64, &mut st);
-                encode_string_field(2, &name, &mut st);
-                seq_id(3, sys_id as u64, &mut st);
-                encode_bytes_field(1, &st, &mut out);
+            let mut resp = pb::message("eve.corporation.structure.GetAllWithDetailsResponse");
+            for (sid, name, sys_id, type_id, state) in structures {
+                resp = resp.add_with("structures", |b| {
+                    b.set("id.sequential", sid as u64)
+                        .set("attributes.type.sequential", type_id as u64)
+                        .set("attributes.solarsystem_id.sequential", sys_id as u64)
+                        .set("attributes.corporation_id.sequential", corpid as u32)
+                        .set("attributes.name", name)
+                        .set("state.flag", pb::enum_name(structure_state_flag_variant(&state)))
+                });
             }
-            Ok(any("eve.corporation.structure.GetAllWithDetailsResponse", out))
+            Ok(resp.must_to_any())
         }));
     }
 
@@ -1057,18 +1077,28 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 list.sort_by_key(|t| t.title_id);
                 list
             });
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve.corporation.title.GetAllResponse");
             for t in titles {
-                let (mut t_msg, mut at_msg) = (Vec::new(), Vec::new());
-                seq_id(1, t.title_id as u64, &mut t_msg);
-                encode_string_field(1, &t.name, &mut at_msg);
-                encode_bytes_field(2, &at_msg, &mut t_msg);
-                for (f, r) in [(3, &t.roles), (4, &t.grantable_roles), (5, &t.roles_at_base), (6, &t.grantable_roles_at_base), (7, &t.roles_at_hq), (8, &t.grantable_roles_at_hq), (9, &t.roles_at_other), (10, &t.grantable_roles_at_other)] {
-                    encode_role_collection(f, role_names_to_mask(r), &mut t_msg);
-                }
-                encode_bytes_field(1, &t_msg, &mut out);
+                resp = resp.add_with("titles", |mut b| {
+                    b = b
+                        .set("id.sequential", t.title_id as u32)
+                        .set("attributes.name", t.name);
+                    for (field, r) in [
+                        ("roles_at_all", &t.roles),
+                        ("grantable_roles_at_all", &t.grantable_roles),
+                        ("roles_at_base", &t.roles_at_base),
+                        ("grantable_roles_at_base", &t.grantable_roles_at_base),
+                        ("roles_at_hq", &t.roles_at_hq),
+                        ("grantable_roles_at_hq", &t.grantable_roles_at_hq),
+                        ("roles_at_other", &t.roles_at_other),
+                        ("grantable_roles_at_other", &t.grantable_roles_at_other),
+                    ] {
+                        b = b.set(field, build_role_collection(role_names_to_mask(r)));
+                    }
+                    b
+                });
             }
-            Ok(any("eve.corporation.title.GetAllResponse", out))
+            Ok(resp.must_to_any())
         }));
     }
 
@@ -1082,10 +1112,9 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             if !is_admin && caller_corp != Some(vc.corporation_id) {
                 return Err((STATUS_FORBIDDEN, "Cross-corporation vote access denied".into()));
             }
-            let (mut attr, mut out) = (Vec::new(), Vec::new());
-            seq_id(1, vc.corporation_id as u64, &mut attr);
-            encode_bytes_field(1, &attr, &mut out);
-            Ok(any("eve.corporation.vote.GetResponse", out))
+            Ok(pb::message("eve.corporation.vote.GetResponse")
+                .set("vote.corporation_id.sequential", vc.corporation_id as u32)
+                .must_to_any())
         }));
     }
 
@@ -1101,20 +1130,18 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 list.sort_by_key(|(id, _, _, _)| *id);
                 list
             });
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve.corporation.starbase.GetAllResponse");
             for (sb_id, type_id, sys_id, state_flag) in starbases {
-                let (mut sb, mut attr, mut st) = (Vec::new(), Vec::new(), Vec::new());
-                seq_id(1, sb_id as u64, &mut sb);
-                seq_id(1, type_id as u64, &mut attr);
-                seq_id(2, corpid as u64, &mut attr);
-                seq_id(3, sys_id as u64, &mut attr);
-                encode_bytes_field(2, &attr, &mut sb);
-                encode_varint_field(1, state_flag, &mut st);
-                encode_varint_field(2, 1, &mut st);
-                encode_bytes_field(3, &st, &mut sb);
-                encode_bytes_field(1, &sb, &mut out);
+                resp = resp.add_with("starbases", |b| {
+                    b.set("id.sequential", sb_id as u64)
+                        .set("attributes.type.sequential", type_id as u64)
+                        .set("attributes.corporation.sequential", corpid as u32)
+                        .set("attributes.solarsystem.sequential", sys_id as u64)
+                        .set("state.flag", state_flag as i32)
+                        .set("state.no_data", true)
+                });
             }
-            Ok(any("eve.corporation.starbase.GetAllResponse", out))
+            Ok(resp.must_to_any())
         }));
     }
 
@@ -1141,27 +1168,40 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 }
                 Ok::<_, (u32, String)>((s.starbase_settings.get(&sb_id).cloned().unwrap_or_default(), st_opt.map(|st| st.fuel_blocks).unwrap_or(0)))
             })?;
-            let (mut roles, mut set_msg, mut fuels_msg, mut out) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-            for (f, r) in [(1, &cfg.fuel_bay_view), (2, &cfg.fuel_bay_take), (3, &cfg.anchor), (4, &cfg.unanchor), (5, &cfg.online), (6, &cfg.offline)] {
-                encode_varint_field(f, starbase_role_enum(r), &mut roles);
-            }
-            encode_bytes_field(1, &roles, &mut set_msg);
-            encode_varint_field(2, u64::from(cfg.use_alliance_standings), &mut set_msg);
-            encode_varint_field(3, u64::from(cfg.allow_corporation_members), &mut set_msg);
-            encode_varint_field(4, u64::from(cfg.allow_alliance_members), &mut set_msg);
-            if let Some(th) = cfg.attack_standing_threshold { encode_bytes_field(5, &encode_standing_value(th), &mut set_msg); } else { encode_varint_field(6, 1, &mut set_msg); }
-            if let Some(sec) = cfg.attack_security_status_threshold { encode_bytes_field(7, &encode_standing_value(sec), &mut set_msg); } else { encode_varint_field(8, 1, &mut set_msg); }
-            encode_varint_field(9, u64::from(cfg.attack_if_other_security_status_dropping), &mut set_msg);
-            encode_varint_field(10, u64::from(cfg.attack_if_at_war), &mut set_msg);
+            let mut resp = pb::message("eve.corporation.starbase.GetSettingsAndFuelsResponse")
+                .set_with("settings", |mut s| {
+                    s = s
+                        .set("roles.fuel_bay_view", starbase_role_enum(&cfg.fuel_bay_view) as i32)
+                        .set("roles.fuel_bay_take", starbase_role_enum(&cfg.fuel_bay_take) as i32)
+                        .set("roles.anchor", starbase_role_enum(&cfg.anchor) as i32)
+                        .set("roles.unanchor", starbase_role_enum(&cfg.unanchor) as i32)
+                        .set("roles.online", starbase_role_enum(&cfg.online) as i32)
+                        .set("roles.offline", starbase_role_enum(&cfg.offline) as i32)
+                        .set("use_alliance_standings", cfg.use_alliance_standings)
+                        .set("allow_corporation_members", cfg.allow_corporation_members)
+                        .set("allow_alliance_members", cfg.allow_alliance_members)
+                        .set("attack_on_status_dropping", cfg.attack_if_other_security_status_dropping)
+                        .set("attack_if_at_war", cfg.attack_if_at_war);
+                    s = if let Some(th) = cfg.attack_standing_threshold {
+                        s.set("attack_standing_threshold", build_standing_value(th))
+                    } else {
+                        s.set("no_attack_standing_threshold", true)
+                    };
+                    if let Some(sec) = cfg.attack_security_status_threshold {
+                        s.set("attack_security_status_threshold", build_security_status_value(sec))
+                    } else {
+                        s.set("no_attack_security_status_threshold", true)
+                    }
+                });
             if fuel_blocks > 0 {
-                let mut f_item = Vec::new();
-                seq_id(1, 4247, &mut f_item);
-                encode_varint_field(2, fuel_blocks as u64, &mut f_item);
-                encode_bytes_field(1, &f_item, &mut fuels_msg);
+                resp = resp.set_with("fuels", |f| {
+                    f.add_with("blocks", |blk| {
+                        blk.set("type.sequential", 4247u64)
+                            .set("quantity", fuel_blocks as u32)
+                    })
+                });
             }
-            encode_bytes_field(1, &set_msg, &mut out);
-            encode_bytes_field(2, &fuels_msg, &mut out);
-            Ok(any("eve.corporation.starbase.GetSettingsAndFuelsResponse", out))
+            Ok(resp.must_to_any())
         }));
     }
 
@@ -1170,15 +1210,16 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         let medals_fn: crate::quasar_gateway::QuasarHandlerFn = Arc::new(move |ctx, _any, msg| {
             let corpid = resolve_authorized_corp(ctx, msg, 1, &d)?;
             let medals = d.with_snapshot(|s| s.corp_medals.get(&corpid).cloned().unwrap_or_default());
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve.corporation.medals.GetResponse");
             for entry in medals {
-                let mut m = Vec::new();
-                seq_id(1, entry.medal_id as u64, &mut m);
-                encode_string_field(2, &entry.title, &mut m);
-                encode_string_field(3, &entry.description, &mut m);
-                encode_bytes_field(1, &m, &mut out);
+                resp = resp.add_with("medals", |b| {
+                    b.set("id.sequential", entry.medal_id as u32)
+                        .set("attributes.title", entry.title)
+                        .set("attributes.description", entry.description)
+                        .set("attributes.corporation.sequential", corpid as u32)
+                });
             }
-            Ok(any("eve.corporation.medals.GetResponse", out))
+            Ok(resp.must_to_any())
         });
         router.register_handler("eve.corporation.medals.GetRequest", Arc::clone(&medals_fn));
         router.register_handler("eve.corporation.medals.medals.GetRequest", medals_fn);
@@ -1189,15 +1230,16 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         router.register_handler("eve.corporation.medals.issued.GetRequest", Arc::new(move |ctx, _any, msg| {
             let corpid = resolve_authorized_corp(ctx, msg, 1, &d)?;
             let issued = d.with_snapshot(|s| s.corp_issued_medals.get(&corpid).cloned().unwrap_or_default());
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve.corporation.medals.issued.GetResponse");
             for entry in issued {
-                let mut m = Vec::new();
-                seq_id(1, entry.medal_id as u64, &mut m);
-                seq_id(2, entry.character_id as u64, &mut m);
-                encode_string_field(3, &entry.reason, &mut m);
-                encode_bytes_field(1, &m, &mut out);
+                resp = resp.add_with("issued_medals", |b| {
+                    b.set("medal.sequential", entry.medal_id as u32)
+                        .set("character.sequential", entry.character_id as u32)
+                        .set("attributes.reason", entry.reason)
+                        .set("attributes.status", pb::enum_name("STATUS_PUBLIC"))
+                });
             }
-            Ok(any("eve.corporation.medals.issued.GetResponse", out))
+            Ok(resp.must_to_any())
         }));
     }
 
@@ -1231,25 +1273,28 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 }
                 v
             });
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve.corporation.market.entry.GetEntriesResponse");
             for tx in txs {
-                let (mut e_msg, mut id_msg, mut at_msg, mut ts_msg) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-                encode_varint_field(2, tx.transaction_id as u64, &mut id_msg);
-                encode_bytes_field(1, &id_msg, &mut e_msg);
-                encode_varint_field(1, tx.date_unix, &mut ts_msg);
-                encode_bytes_field(1, &ts_msg, &mut at_msg);
-                seq_id(2, 2, &mut at_msg);
-                encode_bytes_field(3, &encode_isk_currency((tx.unit_price * 100.0).round() as i64), &mut at_msg);
-                encode_varint_field(4, tx.quantity.max(0) as u64, &mut at_msg);
-                seq_id(5, tx.location_id as u64, &mut at_msg);
-                seq_id(6, tx.client_id as u64, &mut at_msg);
-                seq_id(10, tx.journal_ref_id.max(1) as u64, &mut at_msg);
-                seq_id(14, tx.type_id as u64, &mut at_msg);
-                encode_bytes_field(2, &at_msg, &mut e_msg);
-                encode_varint_field(3, if tx.is_buy { 1 } else { 2 }, &mut e_msg);
-                encode_bytes_field(1, &e_msg, &mut out);
+                resp = resp.add_with("entries", |b| {
+                    b.set("id.sequential", tx.transaction_id as u64)
+                        .set("attributes.date", GoogleTimestamp::from_unix(tx.date_unix as i64, 0))
+                        .set("attributes.entry_type.sequential", 2u32)
+                        .set(
+                            "attributes.price",
+                            build_isk_currency((tx.unit_price * 100.0).round() as i64),
+                        )
+                        .set("attributes.quantity", tx.quantity.max(0) as u32)
+                        .set("attributes.station.sequential", tx.location_id as u64)
+                        .set("attributes.customer_character.sequential", tx.client_id as u32)
+                        .set(
+                            "attributes.accounting_reference.transaction",
+                            tx.journal_ref_id.max(1) as u64,
+                        )
+                        .set("attributes.item_type.sequential", tx.type_id as u64)
+                        .set("type", pb::enum_name(if tx.is_buy { "BUY" } else { "SELL" }))
+                });
             }
-            Ok(any("eve.corporation.market.entry.GetEntriesResponse", out))
+            Ok(resp.must_to_any())
         }));
     }
 
@@ -1272,17 +1317,22 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 }
                 map
             });
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve.corporation.standing.npc.GetAllResponse");
             for (npc_id, val) in standings {
-                let mut row = Vec::new();
-                if (500_000..600_000).contains(&npc_id) { seq_id(1, npc_id as u64, &mut row); }
-                else if (1_000_000..2_000_000).contains(&npc_id) { seq_id(2, npc_id as u64, &mut row); }
-                else if (3_000_000..4_000_000).contains(&npc_id) { seq_id(3, npc_id as u64, &mut row); }
-                else { encode_varint_field(4, npc_id as u64, &mut row); }
-                encode_bytes_field(5, &encode_standing_value(val.clamp(-10.0, 10.0)), &mut row);
-                encode_bytes_field(1, &row, &mut out);
+                resp = resp.add_with("npc_standings", |b| {
+                    let b = if (500_000..600_000).contains(&npc_id) {
+                        b.set("faction.sequential", npc_id as u64)
+                    } else if (1_000_000..2_000_000).contains(&npc_id) {
+                        b.set("corporation.sequential", npc_id as u32)
+                    } else if (3_000_000..4_000_000).contains(&npc_id) {
+                        b.set("agent.sequential", npc_id as u32)
+                    } else {
+                        b.set("unknown", npc_id as u64)
+                    };
+                    b.set("standing", build_standing_value(val.clamp(-10.0, 10.0)))
+                });
             }
-            Ok(any("eve.corporation.standing.npc.GetAllResponse", out))
+            Ok(resp.must_to_any())
         }));
     }
 
@@ -1307,32 +1357,38 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     })
                     .unwrap_or_default()
             });
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve.corporation.planetinteraction.office.GetResponse");
             for (off, office_type_id) in offices {
-                let (mut o_msg, mut at_msg, mut rates) = (Vec::new(), Vec::new(), Vec::new());
-                seq_id(1, off.office_id as u64, &mut o_msg);
-                seq_id(1, off.system_id as u64, &mut at_msg);
-                if let Some(ct) = off.corporation_tax_rate { encode_f32_field(3, ct as f32, &mut at_msg); } else { encode_varint_field(2, 1, &mut at_msg); }
-                if off.allow_alliance_access { encode_f32_field(5, off.alliance_tax_rate.unwrap_or(0.0) as f32, &mut at_msg); } else { encode_varint_field(4, 1, &mut at_msg); }
-                if off.allow_access_with_standings {
-                    for (f, r) in [(2, off.excellent_standing_tax_rate), (3, off.good_standing_tax_rate), (4, off.neutral_standing_tax_rate), (5, off.bad_standing_tax_rate), (6, off.terrible_standing_tax_rate)] {
-                        encode_f32_field(f, r.unwrap_or(0.0) as f32, &mut rates);
-                    }
-                    encode_bytes_field(7, &rates, &mut at_msg);
-                } else {
-                    encode_varint_field(6, 1, &mut at_msg);
-                }
-                if let Some(tid) = office_type_id {
-                    seq_id(9, tid, &mut at_msg);
-                }
-                encode_bytes_field(2, &at_msg, &mut o_msg);
-                encode_bytes_field(1, &o_msg, &mut out);
+                resp = resp.add_with("offices", |b| {
+                    let b = b
+                        .set("id.sequential", off.office_id as u64)
+                        .set("attributes.solarsystem.sequential", off.system_id as u64);
+                    let b = if let Some(ct) = off.corporation_tax_rate {
+                        b.set("attributes.corporation_tax_rate", ct as f32)
+                    } else {
+                        b.set("attributes.no_allowed_corporation_access", true)
+                    };
+                    let b = if off.allow_alliance_access {
+                        b.set("attributes.alliance_tax_rate", off.alliance_tax_rate.unwrap_or(0.0) as f32)
+                    } else {
+                        b.set("attributes.no_allowed_alliance_access", true)
+                    };
+                    let b = if off.allow_access_with_standings {
+                        b.set("attributes.tax_rates.excellent", off.excellent_standing_tax_rate.unwrap_or(0.0) as f32)
+                            .set("attributes.tax_rates.good", off.good_standing_tax_rate.unwrap_or(0.0) as f32)
+                            .set("attributes.tax_rates.neutral", off.neutral_standing_tax_rate.unwrap_or(0.0) as f32)
+                            .set("attributes.tax_rates.bad", off.bad_standing_tax_rate.unwrap_or(0.0) as f32)
+                            .set("attributes.tax_rates.terrible", off.terrible_standing_tax_rate.unwrap_or(0.0) as f32)
+                    } else {
+                        b.set("attributes.no_allowed_access_with_standings", true)
+                    };
+                    b.set_opt("attributes.office_type.sequential", office_type_id)
+                });
             }
-            Ok(any("eve.corporation.planetinteraction.office.GetResponse", out))
+            Ok(resp.must_to_any())
         }));
     }
 }
 
 #[cfg(test)] #[path = "quasar_corp_domain_tests.rs"]
 mod quasar_corp_domain_tests;
-

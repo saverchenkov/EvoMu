@@ -508,7 +508,7 @@ async fn test_quasar_b2_stargate_locks_and_delete_command() {
     .await;
     assert_eq!(val_rsp.status_code, STATUS_OK);
     let vfields = parse_raw_proto(&val_rsp.payload.unwrap().value);
-    assert_eq!(first_varint(&vfields, 1), Some(0));
+    assert_eq!(first_varint(&vfields, 1), None);
     let lock_sub = parse_raw_proto(first_bytes(&vfields, 2).unwrap());
     assert_eq!(decode_nested_id(&lock_sub, 1), Some(50_001_248));
 
@@ -600,7 +600,7 @@ async fn test_quasar_b2_sovereignty_claims_adm_and_resources() {
     let crsp = quasar_rpc(&ctx, &mut sess, "eve.sovereignty.api.GetClaimRequest", claim_req).await;
     assert_eq!(crsp.status_code, STATUS_OK);
     let cfields = parse_raw_proto(&crsp.payload.unwrap().value);
-    assert_eq!(first_varint(&cfields, 1), Some(0));
+    assert_eq!(first_varint(&cfields, 1), None);
     let cbuf = parse_raw_proto(first_bytes(&cfields, 2).unwrap());
     assert_eq!(decode_nested_id(&cbuf, 1), Some(99_000_001));
     assert_eq!(decode_nested_id(&cbuf, 3), Some(1_040_000_000_001));
