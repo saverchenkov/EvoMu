@@ -648,8 +648,9 @@ fn resolved_contrib_pb_all_matcher_types_filters_and_cached_passthrough() {
     // 4. CreateRequest with raw field 4 in `any.value` forwards those raw bytes verbatim into created goal
     let _ = crate::services::quasar_social_chat::drain_local_notices();
     let custom_raw_cfg = vec![0xaa, 0x01, 0x02, 0x08, 0x09];
-    let mut raw_any_val = Vec::new();
-    eve_proto::quasar::encode_bytes_field(4, &custom_raw_cfg, &mut raw_any_val);
+    let raw_any_val = eve_proto::pb::message("eve_public.goal.api.CreateRequest")
+        .set_raw_message("contribution_configuration", &custom_raw_cfg)
+        .must_encode();
     let mut create_msg = DynamicQuasarMessage::new("Create");
     create_msg.fields.insert(1, DynamicValue::String("RawCfgGoal".into()));
     create_msg.fields.insert(3, DynamicValue::Uint64(50));

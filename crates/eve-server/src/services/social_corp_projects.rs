@@ -17,10 +17,8 @@ use eve_db::{
     WorldRepository,
 };
 use eve_machonet::SessionState;
-use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, DynamicQuasarMessage, DynamicValue, GoogleAny,
-    TYPE_GOOGLEAPIS_PREFIX,
-};
+use eve_proto::pb;
+use eve_proto::quasar::{DynamicQuasarMessage, DynamicValue};
 use eve_proto::{BridgeRpcError, PyRep};
 
 pub const SERVER_TRACKED_MATCHERS: &[&str] = &[
@@ -860,20 +858,16 @@ fn emit_expired_quasar_notices(
                 .unwrap_or_else(|| if fl { freelance_uuid(0, pid) } else { corp_goal_uuid(pid) });
             (fl, u)
         });
-        let (mut id_b, mut out) = (Vec::with_capacity(18), Vec::with_capacity(20));
-        encode_bytes_field(1, &uuid, &mut id_b);
-        encode_bytes_field(1, &id_b, &mut out);
-        let type_name = if is_fl {
-            "eve_public.freelance.project.api.ExpiredNotice"
+        let (type_name, field_path) = if is_fl {
+            ("eve_public.freelance.project.api.ExpiredNotice", "project.uuid")
         } else {
-            "eve_public.corporationgoal.api.ExpiredNotice"
+            ("eve_public.corporationgoal.api.ExpiredNotice", "goal.uuid")
         };
         let _ = gateway.publish_notice(
             NoticeScope::Corporation(corp_id as u32),
-            GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"),
-                value: out,
-            },
+            pb::message(type_name)
+                .set(field_path, uuid.as_slice())
+                .must_to_any(),
             now_unix,
         );
     }
@@ -1152,8 +1146,6 @@ pub fn record_server_project_activity_in_db(
     for u in updates {
         if u.is_freelance {
             if u.corp_id > 0 {
-                let mut id_b = Vec::with_capacity(18);
-                encode_bytes_field(1, &u.uuid, &mut id_b);
                 if contributor_u32 > 0 {
                     let char_tot = db.with_snapshot(|s| {
                         s.alliance_war_state
@@ -1162,42 +1154,34 @@ pub fn record_server_project_activity_in_db(
                             .and_then(|d| d.char_contributions.get(&char_id).copied())
                             .unwrap_or(u.new_cur)
                     });
-                    let mut cid_b = Vec::with_capacity(8);
-                    encode_varint_field(1, u64::from(contributor_u32), &mut cid_b);
-                    let mut contrib_b = Vec::new();
-                    encode_bytes_field(1, &id_b, &mut contrib_b);
-                    encode_bytes_field(2, &cid_b, &mut contrib_b);
-                    encode_varint_field(3, char_tot, &mut contrib_b);
                     let _ = gateway.publish_notice(
                         NoticeScope::Corporation(u.corp_id as u32),
-                        GoogleAny {
-                            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.ParticipantContributedNotice"),
-                            value: contrib_b,
-                        },
+                        pb::message("eve_public.freelance.project.api.ParticipantContributedNotice")
+                            .set("project.uuid", u.uuid.as_slice())
+                            .set("participant.sequential", contributor_u32)
+                            .set("total_participant_progress", char_tot)
+                            .must_to_any(),
                         now_unix,
                     );
                 }
-                let mut prog_b = Vec::new();
-                encode_bytes_field(1, &id_b, &mut prog_b);
-                encode_varint_field(2, u.new_cur, &mut prog_b);
-                encode_varint_field(3, u.total_contributors.max(1) as u64, &mut prog_b);
                 let _ = gateway.publish_notice(
                     NoticeScope::Corporation(u.corp_id as u32),
-                    GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.ProgressedNotice"),
-                        value: prog_b,
-                    },
+                    pb::message("eve_public.freelance.project.api.ProgressedNotice")
+                        .set("project.uuid", u.uuid.as_slice())
+                        .set("total_project_progress", u.new_cur)
+                        .set(
+                            "total_contributors",
+                            u.total_contributors.max(1).min(u32::MAX as usize) as u32,
+                        )
+                        .must_to_any(),
                     now_unix,
                 );
                 if u.completed && u.prev_cur < u.new_cur {
-                    let mut comp_b = Vec::with_capacity(20);
-                    encode_bytes_field(1, &id_b, &mut comp_b);
                     let _ = gateway.publish_notice(
                         NoticeScope::Corporation(u.corp_id as u32),
-                        GoogleAny {
-                            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.CompletedNotice"),
-                            value: comp_b,
-                        },
+                        pb::message("eve_public.freelance.project.api.CompletedNotice")
+                            .set("project.uuid", u.uuid.as_slice())
+                            .must_to_any(),
                         now_unix,
                     );
                 }
@@ -1216,16 +1200,12 @@ pub fn record_server_project_activity_in_db(
                 let _ = gateway.publish_notice(scope, notices::goal_completed(&u.uuid), now_unix);
             }
             if u.auto_paid_isk > 0 && contributor_u32 > 0 {
-                let (mut id_b, mut red_b) = (Vec::with_capacity(18), Vec::with_capacity(28));
-                encode_bytes_field(1, &u.uuid, &mut id_b);
-                encode_bytes_field(1, &id_b, &mut red_b);
-                encode_varint_field(2, u.auto_paid_isk, &mut red_b);
                 let _ = gateway.publish_notice(
                     NoticeScope::Character(contributor_u32),
-                    GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.RedeemedNotice"),
-                        value: red_b,
-                    },
+                    pb::message("eve_public.corporationgoal.api.RedeemedNotice")
+                        .set("goal.uuid", u.uuid.as_slice())
+                        .set("quantity", u.auto_paid_isk)
+                        .must_to_any(),
                     now_unix,
                 );
             }

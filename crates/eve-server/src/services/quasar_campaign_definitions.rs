@@ -7,10 +7,9 @@
 use crate::quasar_gateway::{PublicGatewayRouter, STATUS_INTERNAL_ERROR};
 use super::quasar_progression_extra::ProgressionExtraManager;
 pub use super::quasar_campaign_handlers::extract_campaign_id;
-use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, GoogleAny,
-    TYPE_GOOGLEAPIS_PREFIX,
-};
+use eve_proto::pb::{self, ProtoBuilder};
+#[cfg(test)]
+use eve_proto::quasar::GoogleAny;
 use std::sync::Arc;
 
 /// Fallback definition specs for authentic EVE Online contribution methods.
@@ -219,6 +218,34 @@ pub const AUTHENTIC_CONTRIBUTION_METHODS: &[(&str, u32, u32, &str, &[(&str, &str
     ),
 ];
 
+fn build_contribution_method_definition(
+    name: &str,
+    title_id: u32,
+    progress_desc_id: u32,
+    icon: &str,
+    params: &[(&str, &str, &str)],
+) -> ProtoBuilder {
+    pb::message("eve_public.campaign.contributionmethod.definition.api.GetAllResponse.Definition")
+        .set("definition.name", name)
+        .set_with("attributes", |mut attrs| {
+            for (p_key, p_type, p_icon) in params {
+                attrs = attrs.add_with("parameters", |p| {
+                    p.set_with("matcher", |m| {
+                        m.set("key", *p_key)
+                            .set("type", *p_type)
+                            .when(!p_icon.is_empty(), |m| m.set("icon.name", *p_icon))
+                    })
+                });
+            }
+            attrs
+                .when(title_id > 0, |a| a.set("title.sequential", title_id))
+                .when(progress_desc_id > 0, |a| {
+                    a.set("progress_description.sequential", progress_desc_id)
+                })
+                .when(!icon.is_empty(), |a| a.set("icon.name", icon))
+        })
+}
+
 /// Encodes a contribution method definition into protobuf wire format.
 pub fn encode_contribution_method_definition(
     name: &str,
@@ -228,40 +255,19 @@ pub fn encode_contribution_method_definition(
     params: &[(&str, &str, &str)],
     out: &mut Vec<u8>,
 ) {
-    let mut id_bytes = Vec::new();
-    encode_string_field(1, name, &mut id_bytes);
-    encode_bytes_field(1, &id_bytes, out);
+    build_contribution_method_definition(name, title_id, progress_desc_id, icon, params)
+        .must_encode_into(out);
+}
 
-    let mut attr_bytes = Vec::new();
-    for (p_key, p_type, p_icon) in params {
-        let mut p_bytes = Vec::new();
-        let mut m_bytes = Vec::new();
-        encode_string_field(1, p_key, &mut m_bytes);
-        encode_string_field(2, p_type, &mut m_bytes);
-        if !p_icon.is_empty() {
-            let mut pi_bytes = Vec::new();
-            encode_string_field(1, p_icon, &mut pi_bytes);
-            encode_bytes_field(6, &pi_bytes, &mut m_bytes);
-        }
-        encode_bytes_field(1, &m_bytes, &mut p_bytes);
-        encode_bytes_field(1, &p_bytes, &mut attr_bytes);
-    }
-    if title_id > 0 {
-        let mut t_bytes = Vec::new();
-        encode_varint_field(1, title_id as u64, &mut t_bytes);
-        encode_bytes_field(2, &t_bytes, &mut attr_bytes);
-    }
-    if progress_desc_id > 0 {
-        let mut pd_bytes = Vec::new();
-        encode_varint_field(1, progress_desc_id as u64, &mut pd_bytes);
-        encode_bytes_field(3, &pd_bytes, &mut attr_bytes);
-    }
-    if !icon.is_empty() {
-        let mut ic_bytes = Vec::new();
-        encode_string_field(1, icon, &mut ic_bytes);
-        encode_bytes_field(4, &ic_bytes, &mut attr_bytes);
-    }
-    encode_bytes_field(2, &attr_bytes, out);
+fn build_trigger_eventmatch_definition(name: &str, params: &[(&str, &str)]) -> ProtoBuilder {
+    pb::message("eve_public.campaign.trigger.eventmatch.definition.api.GetAllResponse.Definition")
+        .set("definition.name", name)
+        .set_with("attributes", |mut attrs| {
+            for (p_key, _p_ui) in params {
+                attrs = attrs.add_with("parameters", |p| p.set("key", *p_key));
+            }
+            attrs
+        })
 }
 
 /// Encodes a trigger eventmatch definition into protobuf wire format.
@@ -270,17 +276,7 @@ pub fn encode_trigger_eventmatch_definition(
     params: &[(&str, &str)],
     out: &mut Vec<u8>,
 ) {
-    let mut id_bytes = Vec::new();
-    encode_string_field(1, name, &mut id_bytes);
-    encode_bytes_field(1, &id_bytes, out);
-
-    let mut attr_bytes = Vec::new();
-    for (p_key, _p_ui) in params {
-        let mut p_bytes = Vec::new();
-        encode_string_field(1, p_key, &mut p_bytes);
-        encode_bytes_field(1, &p_bytes, &mut attr_bytes);
-    }
-    encode_bytes_field(2, &attr_bytes, out);
+    build_trigger_eventmatch_definition(name, params).must_encode_into(out);
 }
 
 /// Registers campaign definition handlers on the public router.
@@ -293,7 +289,9 @@ pub fn register_campaign_definition_handlers(
     router.register_handler(
         "eve_public.campaign.contributionmethod.definition.api.GetAllRequest",
         Arc::new(move |_ctx, _any, _dyn| {
-            let mut out = Vec::new();
+            let mut resp = pb::message(
+                "eve_public.campaign.contributionmethod.definition.api.GetAllResponse",
+            );
             if let Some(ref sde) = mgr_cm.sde {
                 let methods = sde.contribution_methods().map_err(|e| {
                     (STATUS_INTERNAL_ERROR, format!("Failed to load SDE contribution methods: {e}"))
@@ -311,16 +309,20 @@ pub fn register_campaign_definition_handlers(
                             param_list.push((key, ptype, picon));
                         }
                     }
-                    let mut def_bytes = Vec::new();
-                    encode_contribution_method_definition(name, title_id, progress_desc_id, icon, &param_list, &mut def_bytes);
-                    encode_bytes_field(1, &def_bytes, &mut out);
+                    resp = resp.add(
+                        "definitions",
+                        build_contribution_method_definition(
+                            name,
+                            title_id,
+                            progress_desc_id,
+                            icon,
+                            &param_list,
+                        ),
+                    );
                 }
             }
 
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.campaign.contributionmethod.definition.api.GetAllResponse"),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -338,7 +340,9 @@ pub fn register_campaign_definition_handlers(
             let mut sorted: Vec<_> = triggers.into_values().collect();
             sorted.sort_by_key(|t| t.trigger_type_id);
 
-            let mut out = Vec::new();
+            let mut resp = pb::message(
+                "eve_public.campaign.trigger.eventmatch.definition.api.GetAllResponse",
+            );
             for info in sorted {
                 let name = if info.trigger_type_name.trim().is_empty() {
                     format!("TriggerType_{}", info.trigger_type_id)
@@ -351,14 +355,12 @@ pub fn register_campaign_definition_handlers(
                     ("allow_on_guard_object", guard_obj),
                     ("allow_on_guards", guards),
                 ];
-                let mut def_bytes = Vec::new();
-                encode_trigger_eventmatch_definition(&name, &params, &mut def_bytes);
-                encode_bytes_field(1, &def_bytes, &mut out);
+                resp = resp.add(
+                    "definitions",
+                    build_trigger_eventmatch_definition(&name, &params),
+                );
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.campaign.trigger.eventmatch.definition.api.GetAllResponse"),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 }

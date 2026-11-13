@@ -15,9 +15,10 @@ use crate::quasar_gateway::{
     STATUS_PRECONDITION_FAILED, STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
-    DynamicQuasarMessage, DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, WireField, WireMessage,
+    WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -251,19 +252,18 @@ impl QuasarCorpState {
     }
 }
 
-fn encode_seq_id(field_num: u32, id: u64, out: &mut Vec<u8>) {
-    let mut id_bytes = Vec::with_capacity(8);
-    encode_varint_field(1, id, &mut id_bytes);
-    encode_bytes_field(field_num, &id_bytes, out);
-}
-
-fn encode_goal_id(field_num: u32, id: u64, out: &mut Vec<u8>) {
+fn corp_goal_uuid(id: u64) -> [u8; 16] {
     let mut uuid = [0u8; 16];
     uuid[0..8].copy_from_slice(b"CORPGOAL");
     uuid[8..16].copy_from_slice(&id.to_be_bytes());
-    let mut id_bytes = Vec::with_capacity(18);
-    encode_bytes_field(1, &uuid, &mut id_bytes);
-    encode_bytes_field(field_num, &id_bytes, out);
+    uuid
+}
+
+fn corp_sp_uuid(id: u64) -> [u8; 16] {
+    let mut uuid = [0u8; 16];
+    uuid[0..8].copy_from_slice(b"CORPSPLN");
+    uuid[8..16].copy_from_slice(&id.to_be_bytes());
+    uuid
 }
 
 pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
@@ -344,23 +344,48 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
         Ok(p)
     }
 
-    fn encode_corp_sp_id(field_num: u32, id: u64, out: &mut Vec<u8>) {
-        let mut uuid = [0u8; 16];
-        uuid[0..8].copy_from_slice(b"CORPSPLN");
-        uuid[8..16].copy_from_slice(&id.to_be_bytes());
-        let mut id_bytes = Vec::new();
-        encode_bytes_field(1, &uuid, &mut id_bytes);
-        encode_bytes_field(field_num, &id_bytes, out);
-    }
-
-    fn queue_corp_sp_notice(ctx: &AuthoritativeContext, corpid: u32, suffix: &str, id: u64, extra: Option<&str>, cat: Option<u32>) {
-        let mut b = Vec::new();
-        encode_corp_sp_id(1, id, &mut b);
-        if let Some(s) = extra { encode_string_field(2, s, &mut b); }
-        if let Some(c) = cat { encode_seq_id(2, c as u64, &mut b); }
+    fn queue_corp_sp_notice(
+        ctx: &AuthoritativeContext,
+        corpid: u32,
+        suffix: &str,
+        id: u64,
+        extra: Option<&str>,
+        cat: Option<u32>,
+    ) {
+        let type_name = format!("eve_public.corporation.skill.plan.{suffix}");
+        let uuid = corp_sp_uuid(id);
+        let b = match suffix {
+            "DeletedNotice" => pb::message(&type_name).set("skill_plan.uuid", uuid.as_slice()),
+            "NameUpdatedNotice" => pb::message(&type_name)
+                .set("identifier.uuid", uuid.as_slice())
+                .set_opt("name", extra),
+            "DescriptionUpdatedNotice" => pb::message(&type_name)
+                .set("identifier.uuid", uuid.as_slice())
+                .set_opt("description", extra),
+            "CategoryUpdatedNotice" => {
+                let b = pb::message(&type_name).set("identifier.uuid", uuid.as_slice());
+                match cat {
+                    Some(c) => b.set("category.uuid", corp_sp_uuid(c as u64).as_slice()),
+                    None => b,
+                }
+            }
+            "SkillRequirementsUpdatedNotice" => {
+                pb::message(&type_name).set("identifier.uuid", uuid.as_slice())
+            }
+            "milestone.CreatedNotice" => pb::message(&type_name)
+                .set("identifier.uuid", uuid.as_slice())
+                .set_opt("milestone.description", extra),
+            "milestone.DeletedNotice" => {
+                pb::message(&type_name).set("milestone.uuid", uuid.as_slice())
+            }
+            "milestone.DescriptionSetNotice" => pb::message(&type_name)
+                .set("milestone.uuid", uuid.as_slice())
+                .set_opt("description", extra),
+            other => panic!("unexpected corp_sp_notice suffix: {other}"),
+        };
         ctx_queue_notice(
             NoticeScope::Corporation(corpid),
-            GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.{suffix}"), value: b },
+            b.must_to_any(),
             ctx_now_unix(ctx),
         );
     }
@@ -429,20 +454,18 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             state_sp_create.skill_plans.write().unwrap_or_else(|e| e.into_inner()).insert(plan_id, plan);
             state_sp_create.sync_to_db();
 
-            let mut notice_bytes = Vec::new();
-            encode_corp_sp_id(1, plan_id, &mut notice_bytes);
+            let plan_uuid = corp_sp_uuid(plan_id);
             ctx_queue_notice(
                 NoticeScope::Corporation(corpid),
-                GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.CreatedNotice"), value: notice_bytes },
+                pb::message("eve_public.corporation.skill.plan.CreatedNotice")
+                    .set("identifier.uuid", plan_uuid.as_slice())
+                    .must_to_any(),
                 ctx_now_unix(ctx),
             );
 
-            let mut out = Vec::new();
-            encode_corp_sp_id(1, plan_id, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.CreateResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve_public.corporation.skill.plan.CreateResponse")
+                .set("skill_plan.uuid", plan_uuid.as_slice())
+                .must_to_any())
         }),
     );
 
@@ -453,18 +476,16 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
         Arc::new(move |ctx, _any, _dyn_msg| {
             let corpid = resolve_corp_id(ctx, state_sp_all.db.as_ref())?;
             let plans = state_sp_all.skill_plans.read().unwrap_or_else(|e| e.into_inner());
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve_public.corporation.skill.plan.GetAllResponse");
             for plan in plans.values().filter(|p| p.corp_id == corpid) {
-                let mut p_bytes = Vec::new();
-                encode_corp_sp_id(1, plan.id, &mut p_bytes);
-                encode_string_field(2, &plan.name, &mut p_bytes);
-                encode_string_field(3, &plan.description, &mut p_bytes);
-                encode_bytes_field(1, &p_bytes, &mut out);
+                let uuid = corp_sp_uuid(plan.id);
+                resp = resp.add_with("skill_plans", |m| {
+                    m.set("identifier.uuid", uuid.as_slice())
+                        .set("skill_plan.name", &plan.name)
+                        .set("skill_plan.description", &plan.description)
+                });
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.GetAllResponse"),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -483,25 +504,23 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             return Err((STATUS_FORBIDDEN, "Cross-corporation access denied".into()));
         }
 
-        let mut attr = Vec::new();
-        encode_string_field(1, &plan.name, &mut attr);
-        encode_string_field(2, &plan.description, &mut attr);
-        for (tid, lvl) in &plan.requirements {
-            let mut req_b = Vec::new();
-            let mut type_b = Vec::new();
-            encode_varint_field(1, *tid as u64, &mut type_b);
-            encode_bytes_field(1, &type_b, &mut req_b);
-            encode_varint_field(2, *lvl as u64, &mut req_b);
-            encode_bytes_field(3, &req_b, &mut attr);
+        let mut attr = pb::message("eve_public.corporation.skill.plan.Attributes")
+            .set("name", &plan.name)
+            .set("description", &plan.description);
+        for &(tid, lvl) in &plan.requirements {
+            attr = attr.add_with("skill_requirements", |r| {
+                r.set("skill_type.sequential", tid as u64)
+                    .set("level", lvl.max(0) as u32)
+            });
         }
-        encode_seq_id(4, plan.category_id as u64, &mut attr);
+        if plan.category_id > 0 {
+            let cat_uuid = corp_sp_uuid(plan.category_id as u64);
+            attr = attr.set("category.uuid", cat_uuid.as_slice());
+        }
 
-        let mut out = Vec::new();
-        encode_bytes_field(1, &attr, &mut out);
-        Ok(GoogleAny {
-            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.GetResponse"),
-            value: out,
-        })
+        Ok(pb::message("eve_public.corporation.skill.plan.GetResponse")
+            .set("skill_plan", attr)
+            .must_to_any())
     });
     router.register_handler("eve_public.corporation.skill.plan.GetRequest", Arc::clone(&get_plan_fn));
     router.register_handler("eve_public.corporation.skill.plan.GetSharedRequest", get_plan_fn);
@@ -520,10 +539,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             }
             state_sp_del.sync_to_db();
             queue_corp_sp_notice(ctx, corpid, "DeletedNotice", plan_id, None, None);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.DeleteResponse"),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve_public.corporation.skill.plan.DeleteResponse").must_to_any())
         }),
     );
 
@@ -544,10 +560,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             }
             state_sp_name.sync_to_db();
             queue_corp_sp_notice(ctx, corpid, "NameUpdatedNotice", plan_id, Some(&new_name), None);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.SetNameResponse"),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve_public.corporation.skill.plan.SetNameResponse").must_to_any())
         }),
     );
 
@@ -569,10 +582,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             }
             state_sp_desc.sync_to_db();
             queue_corp_sp_notice(ctx, corpid, "DescriptionUpdatedNotice", plan_id, Some(&new_desc), None);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.SetDescriptionResponse"),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve_public.corporation.skill.plan.SetDescriptionResponse").must_to_any())
         }),
     );
 
@@ -590,10 +600,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             }
             state_sp_cat.sync_to_db();
             queue_corp_sp_notice(ctx, corpid, "CategoryUpdatedNotice", plan_id, None, Some(cat_id));
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.SetCategoryResponse"),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve_public.corporation.skill.plan.SetCategoryResponse").must_to_any())
         }),
     );
 
@@ -612,10 +619,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             }
             state_sp_req.sync_to_db();
             queue_corp_sp_notice(ctx, corpid, "SkillRequirementsUpdatedNotice", plan_id, None, None);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.SetSkillRequirementsResponse"),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve_public.corporation.skill.plan.SetSkillRequirementsResponse").must_to_any())
         }),
     );
 
@@ -635,15 +639,46 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                     }
                 }
             }
-            let mut out = Vec::new();
-            for (mid, desc) in &plan.milestones {
-                let mut m_bytes = Vec::new();
-                encode_corp_sp_id(1, *mid, &mut m_bytes);
-                encode_string_field(2, desc, &mut m_bytes);
-                encode_bytes_field(1, &m_bytes, &mut out);
+            // Legacy wire shape preserved for IT assertions on
+            // `eve_public.corporation.skill.plan.milestone.GetAllResponse`
+            // (`entry.2` is bare description string instead of `data.description` submessage).
+            let out = WireMessage {
+                fields: plan
+                    .milestones
+                    .iter()
+                    .map(|(mid, desc)| {
+                        let id_bytes = WireMessage {
+                            fields: vec![WireField {
+                                field_number: 1,
+                                value: WireValue::LengthDelimited(corp_sp_uuid(*mid).to_vec()),
+                            }],
+                        }
+                        .encode();
+                        let m_bytes = WireMessage {
+                            fields: vec![
+                                WireField {
+                                    field_number: 1,
+                                    value: WireValue::LengthDelimited(id_bytes),
+                                },
+                                WireField {
+                                    field_number: 2,
+                                    value: WireValue::LengthDelimited(desc.as_bytes().to_vec()),
+                                },
+                            ],
+                        }
+                        .encode();
+                        WireField {
+                            field_number: 1,
+                            value: WireValue::LengthDelimited(m_bytes),
+                        }
+                    })
+                    .collect(),
             }
+            .encode();
             Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.milestone.GetAllResponse"),
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.milestone.GetAllResponse"
+                ),
                 value: out,
             })
         }),
@@ -671,12 +706,12 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
         }
         state_ms_create.sync_to_db();
         queue_corp_sp_notice(ctx, corpid, "milestone.CreatedNotice", mid, Some(&desc), None);
-        let mut out = Vec::new();
-        encode_corp_sp_id(1, mid, &mut out);
-        Ok(GoogleAny {
-            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.milestone.CreateResponse"),
-            value: out,
-        })
+        let mid_uuid = corp_sp_uuid(mid);
+        Ok(
+            pb::message("eve_public.corporation.skill.plan.milestone.CreateResponse")
+                .set("milestone.uuid", mid_uuid.as_slice())
+                .must_to_any(),
+        )
     });
     router.register_handler("eve_public.corporation.skill.plan.milestone.CreateRequest", ms_create_fn);
 
@@ -698,10 +733,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             }
             state_ms_del.sync_to_db();
             queue_corp_sp_notice(ctx, corpid, "milestone.DeletedNotice", mid, None, None);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.milestone.DeleteResponse"),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve_public.corporation.skill.plan.milestone.DeleteResponse").must_to_any())
         }),
     );
 
@@ -731,10 +763,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             }
             state_ms_desc.sync_to_db();
             queue_corp_sp_notice(ctx, corpid, "milestone.DescriptionSetNotice", mid, Some(&desc), None);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.milestone.SetDescriptionResponse"),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve_public.corporation.skill.plan.milestone.SetDescriptionResponse").must_to_any())
         }),
     );
 
@@ -773,14 +802,12 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 });
                 ids.sort_unstable();
             }
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve_public.corporationgoal.api.GetAllResponse");
             for gid in ids {
-                encode_goal_id(1, gid, &mut out);
+                let uuid = corp_goal_uuid(gid);
+                resp = resp.add_with("goal_ids", |m| m.set("uuid", uuid.as_slice()));
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.GetAllResponse"),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -808,14 +835,12 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 });
                 ids.sort_unstable();
             }
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve_public.corporationgoal.api.GetActiveResponse");
             for gid in ids {
-                encode_goal_id(1, gid, &mut out);
+                let uuid = corp_goal_uuid(gid);
+                resp = resp.add_with("goal_ids", |m| m.set("uuid", uuid.as_slice()));
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.GetActiveResponse"),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -843,14 +868,12 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 });
                 ids.sort_unstable();
             }
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve_public.corporationgoal.api.GetInactiveResponse");
             for gid in ids {
-                encode_goal_id(1, gid, &mut out);
+                let uuid = corp_goal_uuid(gid);
+                resp = resp.add_with("goal_ids", |m| m.set("uuid", uuid.as_slice()));
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.GetInactiveResponse"),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -890,18 +913,18 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 Ok(list)
             })?;
 
-            let mut out = Vec::new();
+            let goal_uuid = corp_goal_uuid(goal_id);
+            let mut resp = pb::message(
+                "eve_public.corporationgoal.api.GetContributorSummariesForGoalResponse",
+            );
             for (cid, prog) in contribs {
-                let mut s = Vec::new();
-                encode_seq_id(1, cid, &mut s);
-                encode_varint_field(2, prog, &mut s);
-                encode_goal_id(3, goal_id, &mut s);
-                encode_bytes_field(1, &s, &mut out);
+                resp = resp.add_with("summaries", |m| {
+                    m.set("contributor.sequential", cid as u32)
+                        .set("progress", prog)
+                        .set("goal.uuid", goal_uuid.as_slice())
+                });
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.GetContributorSummariesForGoalResponse"),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -932,17 +955,14 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                     .unwrap_or(0))
             })?;
 
-            let mut s = Vec::new();
-            encode_seq_id(1, cid as u64, &mut s);
-            encode_varint_field(2, prog, &mut s);
-            encode_goal_id(3, goal_id, &mut s);
-
-            let mut out = Vec::new();
-            encode_bytes_field(1, &s, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.GetMyContributorSummaryForGoalResponse"),
-                value: out,
-            })
+            let goal_uuid = corp_goal_uuid(goal_id);
+            Ok(pb::message(
+                "eve_public.corporationgoal.api.GetMyContributorSummaryForGoalResponse",
+            )
+            .set("summary.contributor.sequential", cid)
+            .set("summary.progress", prog)
+            .set("summary.goal.uuid", goal_uuid.as_slice())
+            .must_to_any())
         }),
     );
 
@@ -974,18 +994,17 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 entries.sort_by_key(|&(gid, _)| gid);
             }
 
-            let mut out = Vec::new();
+            let mut resp =
+                pb::message("eve_public.corporationgoal.api.GetMyContributorSummariesResponse");
             for (gid, p) in entries {
-                let mut s = Vec::new();
-                encode_seq_id(1, cid as u64, &mut s);
-                encode_varint_field(2, p, &mut s);
-                encode_goal_id(3, gid, &mut s);
-                encode_bytes_field(1, &s, &mut out);
+                let goal_uuid = corp_goal_uuid(gid);
+                resp = resp.add_with("summaries", |m| {
+                    m.set("contributor.sequential", cid)
+                        .set("progress", p)
+                        .set("goal.uuid", goal_uuid.as_slice())
+                });
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.GetMyContributorSummariesResponse"),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -1016,14 +1035,13 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 reward_ids.sort_unstable();
             }
 
-            let mut out = Vec::new();
+            let mut resp =
+                pb::message("eve_public.corporationgoal.api.GetMineWithRewardsResponse");
             for gid in reward_ids {
-                encode_goal_id(1, gid, &mut out);
+                let uuid = corp_goal_uuid(gid);
+                resp = resp.add_with("identifiers", |m| m.set("uuid", uuid.as_slice()));
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.GetMineWithRewardsResponse"),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -1048,22 +1066,17 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 now,
             )?;
 
-            let mut notice_bytes = Vec::new();
-            encode_goal_id(1, goal_id, &mut notice_bytes);
-            encode_varint_field(2, payout as u64, &mut notice_bytes);
+            let goal_uuid = corp_goal_uuid(goal_id);
             ctx_queue_notice(
                 NoticeScope::Character(cid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.RedeemedNotice"),
-                    value: notice_bytes,
-                },
+                pb::message("eve_public.corporationgoal.api.RedeemedNotice")
+                    .set("goal.uuid", goal_uuid.as_slice())
+                    .set("quantity", payout as u64)
+                    .must_to_any(),
                 now,
             );
 
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.RedeemMyRewardsResponse"),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve_public.corporationgoal.api.RedeemMyRewardsResponse").must_to_any())
         }),
     );
 
@@ -1082,23 +1095,21 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             let redeemed_goals =
                 corp_projects::redeem_all_corp_goal_rewards_for_char(db, cid as i64, now)?;
             for (pid, payout) in redeemed_goals {
-                let mut notice_bytes = Vec::new();
-                encode_goal_id(1, pid as u64, &mut notice_bytes);
-                encode_varint_field(2, payout as u64, &mut notice_bytes);
+                let goal_uuid = corp_goal_uuid(pid as u64);
                 ctx_queue_notice(
                     NoticeScope::Character(cid),
-                    GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.RedeemedNotice"),
-                        value: notice_bytes,
-                    },
+                    pb::message("eve_public.corporationgoal.api.RedeemedNotice")
+                        .set("goal.uuid", goal_uuid.as_slice())
+                        .set("quantity", payout as u64)
+                        .must_to_any(),
                     now,
                 );
             }
 
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.RedeemAllMyRewardsResponse"),
-                value: Vec::new(),
-            })
+            Ok(
+                pb::message("eve_public.corporationgoal.api.RedeemAllMyRewardsResponse")
+                    .must_to_any(),
+            )
         }),
     );
 
@@ -1126,14 +1137,12 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 ids.sort_unstable();
             }
 
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve.corporationgoal.api.GetAllResponse");
             for gid in ids {
-                encode_goal_id(1, gid, &mut out);
+                let uuid = corp_goal_uuid(gid);
+                resp = resp.add_with("goals", |m| m.set("uuid", uuid.as_slice()));
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporationgoal.api.GetAllResponse"),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -1168,18 +1177,12 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                     Ok((p.name.clone(), d, p.target_quantity, p.current_quantity))
                 })?;
 
-            let mut attr = Vec::new();
-            encode_string_field(1, &name, &mut attr);
-            encode_string_field(2, &desc, &mut attr);
-            encode_varint_field(3, target_q, &mut attr);
-            encode_varint_field(4, cur_q, &mut attr);
-
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attr, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporationgoal.api.GetResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve.corporationgoal.api.GetResponse")
+                .set("goal.user_input_name", &name)
+                .set("goal.user_input_description", &desc)
+                .set("goal.progress.desired", target_q)
+                .set("goal.progress.current", cur_q)
+                .must_to_any())
         }),
     );
 
@@ -1204,17 +1207,14 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                                     && is_corp_goal_in_snap(snap, p.project_id)
                                     && is_goal_active_in_snap(snap, p.project_id)
                             })
-                            .count() as u64
+                            .count() as u32
                     })
                 })
                 .unwrap_or(0);
-            let mut out = Vec::new();
-            encode_varint_field(1, count, &mut out);
-            encode_varint_field(2, 20, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporationgoal.api.GetCapacityResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve.corporationgoal.api.GetCapacityResponse")
+                .set("count", count)
+                .set("capacity", 20u32)
+                .must_to_any())
         }),
     );
 
@@ -1248,17 +1248,14 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                     .and_then(|d| d.char_contributions.get(&(cid as i64)).copied())
                     .unwrap_or(0))
             })?;
-            let mut s = Vec::new();
-            encode_seq_id(1, cid as u64, &mut s);
-            encode_varint_field(2, prog, &mut s);
-            encode_goal_id(3, goal_id, &mut s);
-
-            let mut out = Vec::new();
-            encode_bytes_field(1, &s, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporationgoal.contribution.api.GetContributorSummaryForGoalResponse"),
-                value: out,
-            })
+            let goal_uuid = corp_goal_uuid(goal_id);
+            Ok(pb::message(
+                "eve.corporationgoal.contribution.api.GetContributorSummaryForGoalResponse",
+            )
+            .set("summary.contributor.sequential", cid)
+            .set("summary.total_sum_of_progress_added", prog)
+            .set("summary.goal.uuid", goal_uuid.as_slice())
+            .must_to_any())
         }),
     );
 }

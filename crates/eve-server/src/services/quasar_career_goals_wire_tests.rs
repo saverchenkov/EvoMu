@@ -1,5 +1,5 @@
 use super::*;
-use eve_proto::quasar::{encode_bytes_field, encode_varint_field};
+use eve_proto::quasar::{WireField, WireMessage, WireValue};
 
 #[test]
 fn career_goal_wire_encoders_and_extractors() {
@@ -338,15 +338,23 @@ fn career_goal_wire_decoded_fields_and_edge_extractors() {
     assert_eq!(extract_target_character(&dyn_all, &any_empty, 8, true), Some(1_000_006));
 
     // WireMessage fallback when dyn_msg lacks the field
-    let mut raw_sub = Vec::new();
-    encode_varint_field(1, 90_000_077, &mut raw_sub);
-    let mut raw_zero = Vec::new();
-    encode_varint_field(1, 0, &mut raw_zero);
-    let mut raw_bytes = Vec::new();
-    encode_bytes_field(10, &raw_sub, &mut raw_bytes);
-    encode_bytes_field(11, &raw_zero, &mut raw_bytes);
-    encode_varint_field(12, 90_000_088, &mut raw_bytes);
-    encode_varint_field(13, 500, &mut raw_bytes);
+    let raw_sub = WireMessage {
+        fields: vec![WireField { field_number: 1, value: WireValue::Varint(90_000_077) }],
+    }
+    .encode();
+    let raw_zero = WireMessage {
+        fields: vec![WireField { field_number: 1, value: WireValue::Varint(0) }],
+    }
+    .encode();
+    let raw_bytes = WireMessage {
+        fields: vec![
+            WireField { field_number: 10, value: WireValue::LengthDelimited(raw_sub) },
+            WireField { field_number: 11, value: WireValue::LengthDelimited(raw_zero) },
+            WireField { field_number: 12, value: WireValue::Varint(90_000_088) },
+            WireField { field_number: 13, value: WireValue::Varint(500) },
+        ],
+    }
+    .encode();
     let raw_any = GoogleAny {
         type_url: String::new(),
         value: raw_bytes,

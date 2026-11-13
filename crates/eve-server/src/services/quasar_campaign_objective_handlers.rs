@@ -10,14 +10,14 @@
 #![forbid(unsafe_code)]
 
 use super::quasar_campaign_handlers::{
-    any, campaign_tracks, encode_id_field, encode_lifecycle, encode_objective_attributes, encode_objective_stats,
-    encode_status_track, encode_ticking_prediction, encode_track_attributes, encode_track_participant_stats,
-    extract_campaign_id, extract_campaign_ids, queue_notices,
+    campaign_tracks, extract_campaign_id, extract_campaign_ids, lifecycle_builder,
+    objective_attributes_builder, objective_stats_builder, queue_notices, ticking_prediction_builder,
+    track_attributes_builder, track_participant_stats_builder, track_stats_builder,
 };
 use super::quasar_campaign_state::{objective_id_to_uuid_bytes, require_id, track_id_to_uuid_bytes, CampaignObjectiveRecord};
 use super::quasar_progression_extra::ProgressionExtraManager;
 use crate::quasar_gateway::{PublicGatewayRouter, STATUS_FORBIDDEN, STATUS_NOT_FOUND};
-use eve_proto::quasar::{encode_bytes_field, encode_varint_field};
+use eve_proto::pb;
 use std::sync::Arc;
 
 fn get_objective(mgr: &ProgressionExtraManager, oid: u64) -> Result<CampaignObjectiveRecord, (u32, String)> {
@@ -38,15 +38,15 @@ pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manag
             let oid = require_id(extract_campaign_id(dyn_msg.get(1)), "campaign objective")?;
             queue_notices(mgr.evaluate_campaign_lifecycle(ctx.now_unix()), ctx.now_unix());
             let obj = get_objective(&mgr, oid)?;
-            let mut out = Vec::new();
-            encode_bytes_field(1, &encode_objective_attributes(&obj), &mut out);
+            let mut resp = pb::message("eve_public.campaign.objective.api.GetResponse")
+                .set("attributes", objective_attributes_builder(&obj));
             for t in campaign_tracks(&mgr, obj.campaign_id) {
-                let mut e = Vec::new();
-                encode_id_field(1, track_id_to_uuid_bytes(t.id), &mut e);
-                encode_bytes_field(2, &encode_track_attributes(&t), &mut e);
-                encode_bytes_field(2, &e, &mut out);
+                resp = resp.add_with("tracks", |e| {
+                    e.set("id.uuid", track_id_to_uuid_bytes(t.id))
+                        .set("attributes", track_attributes_builder(&t))
+                });
             }
-            Ok(any("eve_public.campaign.objective.api.GetResponse", out))
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -57,13 +57,31 @@ pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manag
             let oid = require_id(extract_campaign_id(dyn_msg.get(1)), "campaign objective")?;
             queue_notices(mgr.evaluate_campaign_lifecycle(ctx.now_unix()), ctx.now_unix());
             let obj = get_objective(&mgr, oid)?;
-            let mut out = Vec::new();
-            encode_lifecycle(1, obj.state, obj.transition_unix, &mut out);
-            encode_bytes_field(2, &encode_objective_stats(&obj), &mut out);
+            let mut resp = pb::message("eve_public.campaign.objective.api.GetStatusResponse")
+                .set(
+                    "state",
+                    lifecycle_builder(
+                        "eve_public.campaign.objective.LifecycleState",
+                        obj.state,
+                        obj.transition_unix,
+                    ),
+                )
+                .set("stats", objective_stats_builder(&obj));
             for t in campaign_tracks(&mgr, obj.campaign_id) {
-                encode_bytes_field(3, &encode_status_track(&t), &mut out);
+                resp = resp.add_with("tracks", |tr| {
+                    tr.set("id.uuid", track_id_to_uuid_bytes(t.id))
+                        .set(
+                            "state",
+                            lifecycle_builder(
+                                "eve_public.campaign.track.LifecycleState",
+                                t.state,
+                                t.transition_unix,
+                            ),
+                        )
+                        .set("stats", track_stats_builder(&t))
+                });
             }
-            Ok(any("eve_public.campaign.objective.api.GetStatusResponse", out))
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -74,18 +92,18 @@ pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manag
             let char_id = ctx.effective_character_id().ok_or((STATUS_FORBIDDEN, "Active character required".to_string()))?;
             let oid = require_id(extract_campaign_id(dyn_msg.get(1)), "campaign objective")?;
             let obj = get_objective(&mgr, oid)?;
-            let mut out = Vec::new();
-            match ProgressionExtraManager::objective_commitment(&obj, char_id) {
-                Some(state) => encode_varint_field(1, u64::from(state), &mut out),
-                None => encode_varint_field(3, 1, &mut out),
-            }
+            let mut resp = pb::message("eve_public.campaign.objective.api.GetParticipantStatusResponse");
+            resp = match ProgressionExtraManager::objective_commitment(&obj, char_id) {
+                Some(state) => resp.set("commitment_state", state as i32),
+                None => resp.set("no_commitment", true),
+            };
             for t in campaign_tracks(&mgr, obj.campaign_id) {
-                let mut e = Vec::new();
-                encode_id_field(1, track_id_to_uuid_bytes(t.id), &mut e);
-                encode_bytes_field(2, &encode_track_participant_stats(&t, char_id), &mut e);
-                encode_bytes_field(2, &e, &mut out);
+                resp = resp.add_with("tracks", |e| {
+                    e.set("id.uuid", track_id_to_uuid_bytes(t.id))
+                        .set("stats", track_participant_stats_builder(&t, char_id))
+                });
             }
-            Ok(any("eve_public.campaign.objective.api.GetParticipantStatusResponse", out))
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -99,7 +117,7 @@ pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manag
             let res = mgr.commit_to_objective(char_id, oid, ctx.now_unix(), &mut notices);
             queue_notices(notices, ctx.now_unix());
             res?;
-            Ok(any("eve_public.campaign.objective.api.CommitResponse", Vec::new()))
+            Ok(pb::message("eve_public.campaign.objective.api.CommitResponse").must_to_any())
         }),
     );
 
@@ -113,7 +131,7 @@ pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manag
             let res = mgr.resign_from_objective(char_id, oid, ctx.now_unix(), &mut notices);
             queue_notices(notices, ctx.now_unix());
             res?;
-            Ok(any("eve_public.campaign.objective.api.ResignResponse", Vec::new()))
+            Ok(pb::message("eve_public.campaign.objective.api.ResignResponse").must_to_any())
         }),
     );
 
@@ -124,7 +142,7 @@ pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manag
             let char_id = ctx.effective_character_id().ok_or((STATUS_FORBIDDEN, "Active character required".to_string()))?;
             let oid = require_id(extract_campaign_id(dyn_msg.get(1)), "campaign objective")?;
             mgr.redeem_objective_rewards(char_id, oid)?;
-            Ok(any("eve_public.campaign.objective.api.RedeemRewardsResponse", Vec::new()))
+            Ok(pb::message("eve_public.campaign.objective.api.RedeemRewardsResponse").must_to_any())
         }),
     );
 
@@ -135,15 +153,15 @@ pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manag
             let ids = extract_campaign_ids(dyn_msg.get(1));
             require_id(ids.first().copied(), "campaign objective")?;
             queue_notices(mgr.evaluate_campaign_lifecycle(ctx.now_unix()), ctx.now_unix());
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve_public.campaign.objective.api.GetStatsResponse");
             for oid in ids {
                 let obj = get_objective(&mgr, oid)?;
-                let mut e = Vec::new();
-                encode_id_field(1, objective_id_to_uuid_bytes(oid), &mut e);
-                encode_bytes_field(2, &encode_objective_stats(&obj), &mut e);
-                encode_bytes_field(1, &e, &mut out);
+                resp = resp.add_with("objective_stats", |e| {
+                    e.set("objective.uuid", objective_id_to_uuid_bytes(oid))
+                        .set("stats", objective_stats_builder(&obj))
+                });
             }
-            Ok(any("eve_public.campaign.objective.api.GetStatsResponse", out))
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -154,24 +172,24 @@ pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manag
             let char_id = ctx.effective_character_id().ok_or((STATUS_FORBIDDEN, "Active character required".to_string()))?;
             let ids = extract_campaign_ids(dyn_msg.get(1));
             require_id(ids.first().copied(), "campaign objective")?;
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve_public.campaign.objective.api.GetParticipantStatsResponse");
             for oid in ids {
                 let obj = get_objective(&mgr, oid)?;
-                let mut e = Vec::new();
-                encode_id_field(1, objective_id_to_uuid_bytes(oid), &mut e);
-                match ProgressionExtraManager::objective_participant_state(&obj, char_id) {
-                    Some(state) => {
-                        let mut ps = Vec::new();
-                        encode_varint_field(1, u64::from(state), &mut ps);
-                        let progress = obj.contributors.get(&char_id).map(|c| c.0.max(0) as u64).unwrap_or(0);
-                        encode_varint_field(2, progress, &mut ps);
-                        encode_bytes_field(2, &ps, &mut e);
+                resp = resp.add_with("participant_stats", |e| {
+                    let e = e.set("objective.uuid", objective_id_to_uuid_bytes(oid));
+                    match ProgressionExtraManager::objective_participant_state(&obj, char_id) {
+                        Some(state) => {
+                            let progress = obj.contributors.get(&char_id).map(|c| c.0.max(0) as u64).unwrap_or(0);
+                            e.set_with("stats", |ps| {
+                                ps.set("state", state as i32)
+                                    .set("current_participant_progress", progress)
+                            })
+                        }
+                        None => e.set("no_participation", true),
                     }
-                    None => encode_varint_field(3, 1, &mut e),
-                }
-                encode_bytes_field(1, &e, &mut out);
+                });
             }
-            Ok(any("eve_public.campaign.objective.api.GetParticipantStatsResponse", out))
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -189,10 +207,7 @@ pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manag
                 .cloned()
                 .ok_or((STATUS_NOT_FOUND, "Campaign track not found".to_string()))?;
             let units = mgr.campaign_committed_units(trk.campaign_id);
-            Ok(any(
-                "eve_public.campaign.track.api.GetTickingContributionsPredictionResponse",
-                encode_ticking_prediction(&trk, units),
-            ))
+            Ok(ticking_prediction_builder(&trk, units).must_to_any())
         }),
     );
 
@@ -203,7 +218,7 @@ pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manag
             let char_id = ctx.effective_character_id().ok_or((STATUS_FORBIDDEN, "Active character required".to_string()))?;
             let tid = require_id(extract_campaign_id(dyn_msg.get(1)), "campaign track")?;
             mgr.redeem_track_rewards(char_id, tid)?;
-            Ok(any("eve_public.campaign.track.api.RedeemParticipantRewardsResponse", Vec::new()))
+            Ok(pb::message("eve_public.campaign.track.api.RedeemParticipantRewardsResponse").must_to_any())
         }),
     );
 }

@@ -14,10 +14,8 @@ use crate::quasar_gateway::{
 };
 use eve_db::lock_rank::AnyRwLock;
 use eve_db::WorldRepository;
-use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
-    DynamicQuasarMessage, DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
-};
+use eve_proto::pb;
+use eve_proto::quasar::{AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -184,27 +182,33 @@ pub fn check_active_chat_mute(
     }
 }
 
+fn chat_member_builder(
+    cid: u32,
+    corpid: u32,
+    alliance_id: Option<u32>,
+    faction_id: Option<u32>,
+) -> pb::ProtoBuilder {
+    let mut b = pb::message("eve_public.chat.local.Character")
+        .set("character.sequential", cid)
+        .set("corporation.sequential", corpid)
+        .set("classification", pb::enum_name("CLASSIFICATION_UNSPECIFIED"));
+    b = match alliance_id {
+        Some(aid) => b.set("alliance.sequential", aid as i32),
+        None => b.set("no_alliance", true),
+    };
+    match faction_id {
+        Some(fid) => b.set("faction.sequential", fid as u64),
+        None => b.set("no_faction", true),
+    }
+}
+
 pub fn encode_chat_member(
     cid: u32,
     corpid: u32,
     alliance_id: Option<u32>,
     faction_id: Option<u32>,
 ) -> Vec<u8> {
-    let mut member_bytes = Vec::new();
-    encode_sequential_id(1, cid, &mut member_bytes); // character
-    encode_sequential_id(2, corpid, &mut member_bytes); // corporation
-    if let Some(aid) = alliance_id {
-        encode_sequential_id(4, aid, &mut member_bytes); // alliance
-    } else {
-        encode_varint_field(3, 1, &mut member_bytes); // no_alliance = true
-    }
-    if let Some(fid) = faction_id {
-        encode_sequential_id(6, fid, &mut member_bytes); // faction
-    } else {
-        encode_varint_field(5, 1, &mut member_bytes); // no_faction = true
-    }
-    encode_varint_field(7, 0, &mut member_bytes); // classification = 0 (CLASSIFICATION_UNSPECIFIED)
-    member_bytes
+    chat_member_builder(cid, corpid, alliance_id, faction_id).must_encode()
 }
 
 pub fn is_wormhole_system(sys_id: u32) -> bool {
@@ -304,12 +308,6 @@ pub fn get_solar_system_members(
     })
 }
 
-fn encode_sequential_id(field_num: u32, id: u32, out: &mut Vec<u8>) {
-    let mut id_bytes = Vec::with_capacity(8);
-    encode_varint_field(1, id as u64, &mut id_bytes);
-    encode_bytes_field(field_num, &id_bytes, out);
-}
-
 pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     let state = Arc::clone(&router.chat_moderation);
 
@@ -353,16 +351,12 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 Some(&state_mem),
             );
 
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve_public.chat.local.api.GetMembershipListResponse")
+                .set("solar_system.sequential", sys_id as u64);
             for m in &member_bytes_list {
-                encode_bytes_field(1, m, &mut out);
+                resp = resp.add("members", pb::raw_message(m));
             }
-            encode_sequential_id(2, sys_id, &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.chat.local.api.GetMembershipListResponse"),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -433,14 +427,10 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     save_wormhole_speakers_to_db(&db_bcast, &sp);
                 }
                 if is_new {
-                    let member_bytes = encode_chat_member(cid, corpid, aid, fid);
-                    let mut join_payload = Vec::new();
-                    encode_bytes_field(1, &member_bytes, &mut join_payload);
-                    encode_sequential_id(2, sys_id, &mut join_payload);
-                    let join_any = GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.chat.local.api.JoinNotice"),
-                        value: join_payload,
-                    };
+                    let join_any = pb::message("eve_public.chat.local.api.JoinNotice")
+                        .set("member", chat_member_builder(cid, corpid, aid, fid))
+                        .set("solar_system.sequential", sys_id as u64)
+                        .must_to_any();
                     ctx_queue_notice(NoticeScope::SolarSystem(sys_id), join_any, now);
                 }
             } else {
@@ -461,23 +451,16 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             }
 
             // Construct eve_public.chat.local.api.MessageBroadcastNotice
-            let mut notice_bytes = Vec::new();
-            encode_sequential_id(1, cid, &mut notice_bytes); // author
-            encode_sequential_id(2, sys_id, &mut notice_bytes); // solar_system
-            encode_string_field(3, &msg_text, &mut notice_bytes); // message
-
-            let notice_any = GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.chat.local.api.MessageBroadcastNotice"),
-                value: notice_bytes,
-            };
+            let notice_any = pb::message("eve_public.chat.local.api.MessageBroadcastNotice")
+                .set("author.sequential", cid)
+                .set("solar_system.sequential", sys_id as u64)
+                .set("message", &msg_text)
+                .must_to_any();
 
             // Queue notice to solar system scope
             ctx_queue_notice(NoticeScope::SolarSystem(sys_id), notice_any, now);
 
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.chat.local.api.BroadcastMessageResponse"),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve_public.chat.local.api.BroadcastMessageResponse").must_to_any())
         }),
     );
 
@@ -536,21 +519,15 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     .unwrap_or_else(|e| e.into_inner())
                     .contains(&(sys_id, char_id));
             if is_revealed {
-                let member_bytes = encode_chat_member(char_id, corpid, aid, fid);
-                let mut ref_notice = Vec::new();
-                encode_bytes_field(1, &member_bytes, &mut ref_notice);
-                encode_sequential_id(2, sys_id, &mut ref_notice);
-                let notice_any = GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.chat.local.api.MembershipRefreshedNotice"),
-                    value: ref_notice,
-                };
+                let notice_any =
+                    pb::message("eve_public.chat.local.api.MembershipRefreshedNotice")
+                        .set("member", chat_member_builder(char_id, corpid, aid, fid))
+                        .set("solar_system.sequential", sys_id as u64)
+                        .must_to_any();
                 ctx_queue_notice(NoticeScope::SolarSystem(sys_id), notice_any, now);
             }
 
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.chat.local.api.admin.MuteResponse"),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve_public.chat.local.api.admin.MuteResponse").must_to_any())
         }),
     );
 
@@ -568,12 +545,9 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 Err(_) => return Err((STATUS_NOT_FOUND, "Character not found".into())),
             };
 
-            let mut out = Vec::new();
-            encode_sequential_id(1, corpid, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.presence.api.GetCorporationResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve_public.presence.api.GetCorporationResponse")
+                .set("corporation.sequential", corpid)
+                .must_to_any())
         }),
     );
 
@@ -591,17 +565,12 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 Err(_) => return Err((STATUS_NOT_FOUND, "Character not found".into())),
             };
 
-            let mut out = Vec::new();
-            if let Some(aid) = alliance_id {
-                encode_sequential_id(2, aid as u32, &mut out);
-            } else {
-                encode_varint_field(1, 1, &mut out); // no_alliance = true
-            }
-
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.presence.api.GetAllianceResponse"),
-                value: out,
-            })
+            let resp = pb::message("eve_public.presence.api.GetAllianceResponse");
+            let resp = match alliance_id {
+                Some(aid) => resp.set("alliance.sequential", aid as i32),
+                None => resp.set("no_alliance", true),
+            };
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -623,17 +592,12 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 None => return Err((STATUS_NOT_FOUND, "Character not found".into())),
             };
 
-            let mut out = Vec::new();
-            if let Some(fid) = faction_id {
-                encode_sequential_id(2, fid as u32, &mut out);
-            } else {
-                encode_varint_field(1, 1, &mut out); // unaligned = true
-            }
-
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.presence.api.GetFactionResponse"),
-                value: out,
-            })
+            let resp = pb::message("eve_public.presence.api.GetFactionResponse");
+            let resp = match faction_id {
+                Some(fid) => resp.set("faction.sequential", fid as u64),
+                None => resp.set("no_faction", true),
+            };
+            Ok(resp.must_to_any())
         }),
     );
 }
@@ -705,14 +669,10 @@ pub fn on_character_enter_local_chat(
 
     let is_wh = is_delayed_local_system(solar_system_id);
     let d1 = if !is_wh {
-        let member_bytes = encode_chat_member(char_id, corpid, aid, fid);
-        let mut join_payload = Vec::new();
-        encode_bytes_field(1, &member_bytes, &mut join_payload);
-        encode_sequential_id(2, solar_system_id, &mut join_payload);
-        let join_any = GoogleAny {
-            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.chat.local.api.JoinNotice"),
-            value: join_payload,
-        };
+        let join_any = pb::message("eve_public.chat.local.api.JoinNotice")
+            .set("member", chat_member_builder(char_id, corpid, aid, fid))
+            .set("solar_system.sequential", solar_system_id as u64)
+            .must_to_any();
         let (_, count) = gateway.publish_notice(
             NoticeScope::SolarSystem(solar_system_id),
             join_any,
@@ -733,15 +693,12 @@ pub fn on_character_enter_local_chat(
         Some(&gateway.chat_moderation),
     );
 
-    let mut list_payload = Vec::new();
+    let mut list_notice = pb::message("eve_public.chat.local.api.MembershipListNotice")
+        .set("solar_system.sequential", solar_system_id as u64);
     for m in &members {
-        encode_bytes_field(1, m, &mut list_payload);
+        list_notice = list_notice.add("members", pb::raw_message(m));
     }
-    encode_sequential_id(2, solar_system_id, &mut list_payload);
-    let list_any = GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.chat.local.api.MembershipListNotice"),
-        value: list_payload,
-    };
+    let list_any = list_notice.must_to_any();
     let (_, d2) = gateway.publish_notice(
         NoticeScope::Character(char_id),
         list_any,
@@ -776,13 +733,10 @@ pub fn on_character_leave_local_chat(
             return Ok(0);
         }
     }
-    let mut leave_payload = Vec::new();
-    encode_sequential_id(1, char_id, &mut leave_payload);
-    encode_sequential_id(2, solar_system_id, &mut leave_payload);
-    let leave_any = GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.chat.local.api.LeaveNotice"),
-        value: leave_payload,
-    };
+    let leave_any = pb::message("eve_public.chat.local.api.LeaveNotice")
+        .set("character.sequential", char_id)
+        .set("solar_system.sequential", solar_system_id as u64)
+        .must_to_any();
     let (_, delivered) = gateway.publish_notice(
         NoticeScope::SolarSystem(solar_system_id),
         leave_any,
@@ -825,14 +779,10 @@ pub fn on_character_local_chat_membership_refreshed(
         }
     }
 
-    let member_bytes = encode_chat_member(char_id, corpid, aid, fid);
-    let mut ref_notice = Vec::new();
-    encode_bytes_field(1, &member_bytes, &mut ref_notice);
-    encode_sequential_id(2, sys_id, &mut ref_notice);
-    let notice_any = GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.chat.local.api.MembershipRefreshedNotice"),
-        value: ref_notice,
-    };
+    let notice_any = pb::message("eve_public.chat.local.api.MembershipRefreshedNotice")
+        .set("member", chat_member_builder(char_id, corpid, aid, fid))
+        .set("solar_system.sequential", sys_id as u64)
+        .must_to_any();
     let (_, delivered) = gateway.publish_notice(
         NoticeScope::SolarSystem(sys_id),
         notice_any,
