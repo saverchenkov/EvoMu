@@ -576,11 +576,17 @@ impl ShadowClient {
     pub fn apply_on_item_change(&mut self, args: &[PyRep]) {
         let Some(new_item) = args.first().and_then(ShadowItem::from_pyrep) else { return };
         let change_dict = args.get(1);
-        let old_location_id = extract_change_dict_i64(change_dict, 3)
-            .or_else(|| self.inventory.items.get(&new_item.item_id).map(|i| i.location_id));
-        let old_flag_id = extract_change_dict_i64(change_dict, 4)
-            .and_then(|v| u16::try_from(v.max(0)).ok())
-            .or_else(|| self.inventory.items.get(&new_item.item_id).map(|i| i.flag_id));
+        let old_location_id = Some(
+            extract_change_dict_i64(change_dict, 3)
+                .or_else(|| self.inventory.items.get(&new_item.item_id).map(|i| i.location_id))
+                .unwrap_or(new_item.location_id),
+        );
+        let old_flag_id = Some(
+            extract_change_dict_i64(change_dict, 4)
+                .and_then(|v| u16::try_from(v.max(0)).ok())
+                .or_else(|| self.inventory.items.get(&new_item.item_id).map(|i| i.flag_id))
+                .unwrap_or(new_item.flag_id),
+        );
 
         if let (Some(old_loc), Some(old_flag)) = (old_location_id, old_flag_id) {
             if self.inventory.primed_ships.contains(&old_loc)
@@ -1792,6 +1798,12 @@ mod tests {
     #[test]
     fn missing_on_item_change_and_on_account_change_deltas_are_caught() {
         let db = WorldRepository::with_demo_seed();
+        db.with_mut_snapshot(|snap| {
+            snap.corporations.entry(CORP_ID).or_insert_with(|| {
+                eve_db::CorporationRecord::new(CORP_ID, "Shadow Corp", "SHDW", PILOT_ID)
+            });
+            snap.characters.get_mut(&PILOT_ID).unwrap().corporation_id = CORP_ID;
+        });
         let mut shadow = ShadowClient::from_world(PILOT_ID, &db, None);
         shadow.assert_converged_with_world(&db, None);
 
