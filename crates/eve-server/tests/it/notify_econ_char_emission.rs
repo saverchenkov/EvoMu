@@ -2150,28 +2150,32 @@ async fn notify_batch8_combat_ewar_cloak_and_invuln() {
     )
     .await
     .expect("Activate ECM Jammer");
-    let mut jam_notifs_a = Vec::new();
-    for _ in 0..25 {
-        let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
-        let _ = drain_all(&ctx, &mut sess_b, PILOT_B);
-        rpc(
-            &ctx,
-            &mut sess_a,
-            "dogmaIM",
-            "Activate",
-            &[
-                PyRep::Integer(ecm_id),
-                PyRep::String("defaultEffect".into()),
-                PyRep::Integer(ship_b),
-            ],
-        )
-        .await
-        .expect("Activate ECM");
-        jam_notifs_a = drain_all(&ctx, &mut sess_a, PILOT_A);
-        if jam_notifs_a.iter().any(|(e, _)| e == "OnJamStart") {
-            break;
-        }
+    let mut jam_notifs_a = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let _ = drain_all(&ctx, &mut sess_b, PILOT_B);
+    if !jam_notifs_a.iter().any(|(e, _)| e == "OnJamStart") {
         let _ = rpc(&ctx, &mut sess_a, "dogmaIM", "Deactivate", &[PyRep::Integer(ecm_id)]).await;
+        for _ in 0..25 {
+            let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
+            let _ = drain_all(&ctx, &mut sess_b, PILOT_B);
+            rpc(
+                &ctx,
+                &mut sess_a,
+                "dogmaIM",
+                "Activate",
+                &[
+                    PyRep::Integer(ecm_id),
+                    PyRep::String("defaultEffect".into()),
+                    PyRep::Integer(ship_b),
+                ],
+            )
+            .await
+            .expect("Activate ECM");
+            jam_notifs_a = drain_all(&ctx, &mut sess_a, PILOT_A);
+            if jam_notifs_a.iter().any(|(e, _)| e == "OnJamStart") {
+                break;
+            }
+            let _ = rpc(&ctx, &mut sess_a, "dogmaIM", "Deactivate", &[PyRep::Integer(ecm_id)]).await;
+        }
     }
     let jam_args = find_notif(&jam_notifs_a, "OnJamStart");
     assert_eq!(jam_args.len(), 6);

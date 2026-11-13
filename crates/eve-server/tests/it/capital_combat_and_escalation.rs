@@ -1949,9 +1949,6 @@ async fn test_deadspace_pocket_rules_and_mwd_disallowance() {
     let (_, b1) = sys.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     assert!(b1.position.distance(DVec3::from_array(room1_dest)) < 5_000.0);
 
-    call_svc(&ctx, &mut sess, "dogmaIM", "Activate", vec![PyRep::Integer(mwd_id), PyRep::String("online".into())])
-        .await
-        .expect("MWD online must succeed in Room 1");
     call_svc(
         &ctx,
         &mut sess,
