@@ -6,6 +6,7 @@ use super::*;
 use crate::quasar_gateway::PublicGatewayRouter;
 use crate::services::sov_services::TYPE_ORBITAL_SKYHOOK;
 use eve_db::{corp_roles, UpwellStructureRecord};
+use eve_proto::pb;
 use eve_proto::quasar::{AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, QuasarDescriptorRegistry};
 use std::sync::{Arc, OnceLock};
 
@@ -85,10 +86,14 @@ fn planet_star_resources_and_skyhook_admin_handlers() {
         .ends_with("eve_public.sovereignty.resource.planet.api.GetAllDefinitionsResponse"));
     assert!(all_defs.value.len() > 20);
     // Planet definitions encode per-type base reagent yields (`12` -> `1200`, `2015` -> `1000`), not the fallback `50`.
-    let mut expected_ice_amount = Vec::new();
-    eve_proto::quasar::encode_varint_field(1, 1_200, &mut expected_ice_amount);
-    let mut expected_lava_amount = Vec::new();
-    eve_proto::quasar::encode_varint_field(1, 1_000, &mut expected_lava_amount);
+    let expected_ice_amount =
+        pb::message("eve_public.sovereignty.resource.planet.reagent.Definition")
+            .set("amount_per_cycle", 1_200u32)
+            .must_encode();
+    let expected_lava_amount =
+        pb::message("eve_public.sovereignty.resource.planet.reagent.Definition")
+            .set("amount_per_cycle", 1_000u32)
+            .must_encode();
     assert!(
         all_defs
             .value
@@ -230,10 +235,11 @@ fn encode_planet_definitions_and_register_handlers_contract() {
     encode_planet_definitions(&mut encoded);
     assert!(!encoded.is_empty());
     for &(type_id, _name, power, workforce) in PLANET_RESOURCE_TABLE.iter() {
-        let mut expected_def = Vec::new();
-        encode_id_field(1, u64::from(type_id), &mut expected_def);
-        encode_varint_field(2, power, &mut expected_def);
-        encode_varint_field(3, workforce, &mut expected_def);
+        let expected_def = pb::message("eve_public.sovereignty.resource.planet.Definition")
+            .set("planet.sequential", type_id)
+            .set("power", power)
+            .set("workforce", workforce)
+            .must_encode();
         assert!(
             encoded
                 .windows(expected_def.len())

@@ -14,13 +14,14 @@
 
 #![forbid(unsafe_code)]
 
-use super::quasar_sov_hub::{any, id_field, push_notice, required_id, transact, ts_field, PendingNotices, RpcError};
+use super::quasar_sov_hub::{push_notice, required_id, transact, PendingNotices, RpcError};
 use crate::quasar_gateway::{
     require_admin_role, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_CONFLICT, STATUS_FORBIDDEN,
     STATUS_NOT_FOUND, STATUS_UNAUTHORIZED,
 };
 use eve_db::{PersistedMercenaryActivity, PersistedMercenaryDen, WorldRepository, WorldStateSnapshot};
-use eve_proto::quasar::{encode_bytes_field, encode_varint_field, AuthoritativeContext, DynamicValue};
+use eve_proto::pb::{self, ProtoBuilder};
+use eve_proto::quasar::{AuthoritativeContext, DynamicValue, GoogleTimestamp};
 use std::sync::Arc;
 
 /// SDE skill `Mercenary Den Management` (each trained level allows one more den, up to 5).
@@ -241,52 +242,67 @@ pub fn simulate_den_in_snap_with_sde(
     simulate_den_for_planet(den, rem, sde, now)
 }
 
-fn encode_level_sim(level: u32, simulated_at: u64) -> Vec<u8> {
-    let mut b = Vec::new();
-    encode_varint_field(1, u64::from(level), &mut b);
-    encode_varint_field(2, u64::from(stage_for_level(level)), &mut b);
-    ts_field(4, simulated_at, &mut b);
-    b
+fn fill_level_sim(b: ProtoBuilder, level: u32, simulated_at: u64) -> ProtoBuilder {
+    b.set("level", level)
+        .set("stage", stage_for_level(level))
+        .set("simulated_at", GoogleTimestamp::from_unix(simulated_at as i64, 0))
+}
+
+fn fill_evolution_simulation(b: ProtoBuilder, den: &PersistedMercenaryDen) -> ProtoBuilder {
+    b.set(if den.enabled { "started" } else { "paused" }, true)
+        .set_with("development", |d| {
+            fill_level_sim(d, den.development_level, den.simulated_at_unix)
+        })
+        .set_with("anarchy", |a| fill_level_sim(a, den.anarchy_level, den.simulated_at_unix))
 }
 
 /// Encodes `eve_public.sovereignty.mercenaryden.EvolutionSimulation`.
 pub fn encode_evolution_simulation(den: &PersistedMercenaryDen) -> Vec<u8> {
-    let mut b = Vec::new();
-    encode_varint_field(if den.enabled { 2 } else { 1 }, 1, &mut b);
-    encode_bytes_field(3, &encode_level_sim(den.development_level, den.simulated_at_unix), &mut b);
-    encode_bytes_field(4, &encode_level_sim(den.anarchy_level, den.simulated_at_unix), &mut b);
-    b
+    fill_evolution_simulation(
+        pb::message("eve_public.sovereignty.mercenaryden.EvolutionSimulation"),
+        den,
+    )
+    .must_encode()
 }
 
-fn encode_evolution_definition() -> Vec<u8> {
-    let (mut dev, mut anarchy) = (Vec::new(), Vec::new());
-    encode_varint_field(1, EVOLUTION_UNIT_SECS, &mut dev);
-    encode_varint_field(1, EVOLUTION_UNIT_SECS, &mut anarchy);
-    for (idx, &(lower, upper)) in STAGE_BOUNDS.iter().enumerate() {
-        let stage = (idx as u32) + 1;
-        let mut s = Vec::new();
-        encode_varint_field(1, u64::from(stage), &mut s);
-        encode_varint_field(2, u64::from(lower), &mut s);
-        encode_varint_field(3, u64::from(upper), &mut s);
-        encode_bytes_field(2, &s, &mut dev);
-        encode_varint_field(4, anarchy_workforce_disruption_pct(stage), &mut s);
-        encode_bytes_field(2, &s, &mut anarchy);
-    }
-    let mut b = Vec::new();
-    encode_bytes_field(1, &dev, &mut b);
-    encode_bytes_field(2, &anarchy, &mut b);
-    b
+fn fill_evolution_definition(b: ProtoBuilder) -> ProtoBuilder {
+    b.set_with("development", |mut dev| {
+        dev = dev.set("unit_increase_time_seconds", EVOLUTION_UNIT_SECS as u32);
+        for (idx, &(lower, upper)) in STAGE_BOUNDS.iter().enumerate() {
+            let stage = (idx as u32) + 1;
+            dev = dev.add_with("stages", |s| {
+                s.set("stage", stage)
+                    .set("level_lower_bound", lower)
+                    .set("level_upper_bound", upper)
+            });
+        }
+        dev
+    })
+    .set_with("anarchy", |mut anarchy| {
+        anarchy = anarchy.set("unit_increase_time_seconds", EVOLUTION_UNIT_SECS as u32);
+        for (idx, &(lower, upper)) in STAGE_BOUNDS.iter().enumerate() {
+            let stage = (idx as u32) + 1;
+            anarchy = anarchy.add_with("stages", |s| {
+                s.set("stage", stage)
+                    .set("level_lower_bound", lower)
+                    .set("level_upper_bound", upper)
+                    .set("workforce_consumption", anarchy_workforce_disruption_pct(stage))
+            });
+        }
+        anarchy
+    })
 }
 
-fn encode_infomorphs_gen_definition_for_planet(
+fn fill_infomorphs_gen_definition(
+    mut b: ProtoBuilder,
     cap: u32,
     sde: Option<&eve_sde::SdeRegistry>,
     solar_system_id: u32,
     planet_id: i64,
-) -> Vec<u8> {
-    let mut info_def = Vec::new();
-    id_field(1, u64::from(TYPE_INFOMORPH_DECRYPTION_KEY), &mut info_def);
-    encode_varint_field(2, INFOMORPH_UNIT_SECS, &mut info_def);
+) -> ProtoBuilder {
+    b = b
+        .set("infomorph_type.sequential", u64::from(TYPE_INFOMORPH_DECRYPTION_KEY))
+        .set("generation_tick_seconds", INFOMORPH_UNIT_SECS);
     for stage in 1..=5u32 {
         let rate = planet_scaled_infomorphs_per_hour(sde, solar_system_id, planet_id, stage);
         let has_planet = sde.is_some_and(|r| {
@@ -295,28 +311,37 @@ fn encode_infomorphs_gen_definition_for_planet(
                 .any(|c| c.celestial_id == planet_id)
         });
         let (band_min, band_max) = if has_planet { stage_infomorph_band(stage) } else { (rate, rate) };
-        let mut band = Vec::new();
-        encode_varint_field(1, u64::from(stage), &mut band);
-        encode_varint_field(2, u64::from(band_min), &mut band);
-        encode_varint_field(3, u64::from(band_max), &mut band);
-        encode_bytes_field(3, &band, &mut info_def);
+        b = b.add_with("generation_bands", |band| {
+            band.set("stage", stage)
+                .set("lower_band", band_min)
+                .set("upper_band", band_max)
+        });
     }
-    encode_varint_field(4, u64::from(cap), &mut info_def);
-    info_def
+    b.set("cargo_capacity", cap)
 }
 
 fn push_evolution_notice(pending: &PendingNotices, den: &PersistedMercenaryDen) {
-    let mut n = Vec::new();
-    id_field(1, den.den_id as u64, &mut n);
-    encode_bytes_field(2, &encode_evolution_simulation(den), &mut n);
+    let n = pb::message(EVOLUTION_NOTICE)
+        .set("mercenary_den.sequential", den.den_id as u64)
+        .set_with("state", |s| fill_evolution_simulation(s, den))
+        .must_encode();
     push_notice(pending, den.solar_system_id, EVOLUTION_NOTICE, n);
 }
 
 pub fn push_definitions_updated_notice(pending: &PendingNotices, den: &PersistedMercenaryDen) {
-    let mut n = Vec::new();
-    id_field(1, den.den_id as u64, &mut n);
-    encode_bytes_field(2, &encode_evolution_definition(), &mut n);
-    encode_bytes_field(3, &encode_infomorphs_gen_definition_for_planet(INFOMORPH_CARGO_CAPACITY, None, den.solar_system_id, den.planet_id), &mut n);
+    let n = pb::message("eve_public.sovereignty.mercenaryden.api.DefinitionsUpdatedNotice")
+        .set("mercenary_den.sequential", den.den_id as u64)
+        .set_with("evolution", fill_evolution_definition)
+        .set_with("infomorphs", |i| {
+            fill_infomorphs_gen_definition(
+                i,
+                INFOMORPH_CARGO_CAPACITY,
+                None,
+                den.solar_system_id,
+                den.planet_id,
+            )
+        })
+        .must_encode();
     push_notice(pending, den.solar_system_id, "eve_public.sovereignty.mercenaryden.api.DefinitionsUpdatedNotice", n);
 }
 
@@ -329,12 +354,13 @@ pub fn push_activity_completed_notice(
     anarchy_impact: i32,
     infomorph_bonus: u32,
 ) {
-    let mut n = Vec::new();
-    id_field(1, den_id as u64, &mut n);
-    encode_bytes_field(2, &encode_activity_id(uuid), &mut n);
-    encode_varint_field(3, dev_impact as i64 as u64, &mut n);
-    encode_varint_field(4, anarchy_impact as i64 as u64, &mut n);
-    encode_varint_field(5, u64::from(infomorph_bonus), &mut n);
+    let n = pb::message("eve_public.sovereignty.mercenaryden.activity.api.CompletedNotice")
+        .set("mercenary_den.sequential", den_id as u64)
+        .set("id.uuid", uuid.to_vec())
+        .set("development_impact", dev_impact)
+        .set("anarchy_impact", anarchy_impact)
+        .set("infomorph_bonus", infomorph_bonus)
+        .must_encode();
     push_notice(pending, solar_system_id, "eve_public.sovereignty.mercenaryden.activity.api.CompletedNotice", n);
 }
 
@@ -344,10 +370,11 @@ pub fn push_activity_expiry_changed_notice(
     activity: &PersistedMercenaryActivity,
     previous_expiry: u64,
 ) {
-    let mut n = Vec::new();
-    encode_bytes_field(1, &encode_activity_id(&activity.uuid), &mut n);
-    encode_bytes_field(2, &encode_activity_attributes(activity), &mut n);
-    ts_field(3, previous_expiry, &mut n);
+    let n = pb::message("eve_public.sovereignty.mercenaryden.activity.api.ExpiryChangedNotice")
+        .set("id.uuid", activity.uuid.clone())
+        .set_with("activity", |attr| fill_activity_attributes(attr, activity))
+        .set("previous_expiry", GoogleTimestamp::from_unix(previous_expiry as i64, 0))
+        .must_encode();
     push_notice(pending, solar_system_id, "eve_public.sovereignty.mercenaryden.activity.api.ExpiryChangedNotice", n);
 }
 
@@ -374,35 +401,26 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+fn fill_activity_attributes(b: ProtoBuilder, a: &PersistedMercenaryActivity) -> ProtoBuilder {
+    b.set_with("activitytemplate", |tmpl| {
+        tmpl.when(a.dungeon_id > 0, |t| t.set("dungeon.sequential", a.dungeon_id))
+            .set("development_impact", a.development_impact)
+            .set("anarchy_impact", a.anarchy_impact)
+            .set("infomorph_bonus", a.infomorph_bonus)
+    })
+    .set("mercenary_den.sequential", a.den_id as u64)
+    .set("started", a.started)
+    .set("expiry", GoogleTimestamp::from_unix(a.expiry_unix as i64, 0))
+    .set("solar_system.sequential", a.solar_system_id)
+}
+
 /// Encodes `eve_public.sovereignty.mercenaryden.activity.Attributes`.
 pub fn encode_activity_attributes(a: &PersistedMercenaryActivity) -> Vec<u8> {
-    let mut tmpl = Vec::new();
-    if a.dungeon_id > 0 {
-        id_field(3, u64::from(a.dungeon_id), &mut tmpl);
-    }
-    encode_varint_field(4, i64::from(a.development_impact) as u64, &mut tmpl);
-    encode_varint_field(5, i64::from(a.anarchy_impact) as u64, &mut tmpl);
-    encode_varint_field(6, u64::from(a.infomorph_bonus), &mut tmpl);
-    let mut b = Vec::new();
-    encode_bytes_field(1, &tmpl, &mut b);
-    id_field(2, a.den_id as u64, &mut b);
-    encode_varint_field(3, u64::from(a.started), &mut b);
-    ts_field(4, a.expiry_unix, &mut b);
-    id_field(5, u64::from(a.solar_system_id), &mut b);
-    b
-}
-
-fn encode_activity_id(uuid: &[u8]) -> Vec<u8> {
-    let mut b = Vec::new();
-    encode_bytes_field(1, uuid, &mut b);
-    b
-}
-
-fn encode_activity_entry(a: &PersistedMercenaryActivity) -> Vec<u8> {
-    let mut b = Vec::new();
-    encode_bytes_field(1, &encode_activity_id(&a.uuid), &mut b);
-    encode_bytes_field(2, &encode_activity_attributes(a), &mut b);
-    b
+    fill_activity_attributes(
+        pb::message("eve_public.sovereignty.mercenaryden.activity.Attributes"),
+        a,
+    )
+    .must_encode()
 }
 
 pub(crate) fn complete_mercenary_activity_in_snap(
@@ -506,9 +524,10 @@ pub(crate) fn refresh_activities(snap: &mut WorldStateSnapshot, pending: &Pendin
                     }
                 });
             }
-            let mut n = Vec::new();
-            id_field(1, den_id as u64, &mut n);
-            encode_bytes_field(2, &encode_activity_id(&a.uuid), &mut n);
+            let n = pb::message("eve_public.sovereignty.mercenaryden.activity.api.RemovedNotice")
+                .set("mercenary_den.sequential", den_id as u64)
+                .set("id.uuid", a.uuid)
+                .must_encode();
             push_notice(pending, den.solar_system_id, "eve_public.sovereignty.mercenaryden.activity.api.RemovedNotice", n);
         }
     }
@@ -535,10 +554,11 @@ pub(crate) fn refresh_activities(snap: &mut WorldStateSnapshot, pending: &Pendin
             anarchy_impact: -10,
             infomorph_bonus: 350,
         };
-        let mut n = Vec::new();
-        encode_bytes_field(1, &encode_activity_id(&uuid), &mut n);
-        encode_bytes_field(2, &encode_activity_attributes(&a), &mut n);
-        id_field(3, u64::from(den.solar_system_id), &mut n);
+        let n = pb::message("eve_public.sovereignty.mercenaryden.activity.api.AddedNotice")
+            .set("id.uuid", uuid.clone())
+            .set_with("activity", |attr| fill_activity_attributes(attr, &a))
+            .set("solar_system.sequential", den.solar_system_id)
+            .must_encode();
         push_notice(pending, den.solar_system_id, "eve_public.sovereignty.mercenaryden.activity.api.AddedNotice", n);
         snap.sov_runtime.mercenary_activities.insert(hex(&uuid), a);
     }
@@ -592,9 +612,7 @@ fn modify_level_handler(
                 push_definitions_updated_notice(&pending, den);
                 Ok::<_, RpcError>(encode_evolution_simulation(den))
             })?;
-            let mut out = Vec::new();
-            encode_bytes_field(1, &sim, &mut out);
-            Ok(any(rsp, out))
+            Ok(pb::message(rsp).set_raw_message("simulation", sim).must_to_any())
         }),
     );
 }
@@ -608,11 +626,12 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
             "eve_public.sovereignty.mercenaryden.api.GetAllOwnedRequest",
             Arc::new(move |ctx, _any, _dyn_msg| {
                 let cid = require_character(ctx)?;
-                let mut out = Vec::new();
+                let mut resp =
+                    pb::message("eve_public.sovereignty.mercenaryden.api.GetAllOwnedResponse");
                 for id in db.with_snapshot(|snap| owned_den_ids(snap, cid)) {
-                    id_field(1, id as u64, &mut out);
+                    resp = resp.add_with("id", |i| i.set("sequential", id as u64));
                 }
-                Ok(any("eve_public.sovereignty.mercenaryden.api.GetAllOwnedResponse", out))
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -628,10 +647,12 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                         .and_then(|s| s.get(&TYPE_MERCENARY_DEN_MANAGEMENT))
                         .map_or(0, |s| u64::from(s.level))
                 });
-                let mut out = Vec::new();
-                encode_varint_field(1, level.min(MERCENARY_DEN_ABSOLUTE_MAX), &mut out);
-                encode_varint_field(2, MERCENARY_DEN_ABSOLUTE_MAX, &mut out);
-                Ok(any("eve_public.sovereignty.mercenaryden.api.GetMaximumForCharacterResponse", out))
+                Ok(pb::message(
+                    "eve_public.sovereignty.mercenaryden.api.GetMaximumForCharacterResponse",
+                )
+                .set("current_maximum", level.min(MERCENARY_DEN_ABSOLUTE_MAX) as u32)
+                .set("absolute_maximum", MERCENARY_DEN_ABSOLUTE_MAX as u32)
+                .must_to_any())
             }),
         );
     }
@@ -649,37 +670,43 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                     let owner = snap.structures.get(&den.skyhook_id).map(|s| s.owner_corp_id);
                     Ok::<_, RpcError>((den, owner))
                 })?;
-                let mut attrs = Vec::new();
-                id_field(1, den.owner_char_id as u64, &mut attrs);
-                id_field(2, den.skyhook_id as u64, &mut attrs);
-                id_field(3, u64::from(den.solar_system_id), &mut attrs);
-                id_field(4, den.planet_id as u64, &mut attrs);
-                id_field(5, u64::from(den.type_id), &mut attrs);
-                let mut evo = Vec::new();
-                encode_bytes_field(1, &encode_evolution_definition(), &mut evo);
-                encode_bytes_field(2, &encode_evolution_simulation(&den), &mut evo);
-                let (mut contents, mut infomorphs) = (Vec::new(), Vec::new());
                 let cap = infomorph_cargo_capacity(stage_for_level(den.development_level));
-                let info_def = encode_infomorphs_gen_definition_for_planet(
-                    cap,
-                    Some(&sde),
-                    den.solar_system_id,
-                    den.planet_id,
-                );
-                encode_varint_field(1, u64::from(den.infomorphs), &mut contents);
-                ts_field(2, den.simulated_at_unix, &mut contents);
-                encode_bytes_field(1, &info_def, &mut infomorphs);
-                encode_bytes_field(2, &contents, &mut infomorphs);
-                let mut out = Vec::new();
-                encode_bytes_field(1, &attrs, &mut out);
-                encode_varint_field(2, u64::from(den.enabled), &mut out);
-                encode_bytes_field(3, &evo, &mut out);
-                encode_bytes_field(4, &infomorphs, &mut out);
-                encode_varint_field(5, u64::from(den.cargo_extraction_enabled), &mut out);
-                if let Some(corp) = skyhook_owner {
-                    id_field(6, corp as u64, &mut out);
-                }
-                Ok(any("eve_public.sovereignty.mercenaryden.api.GetAsOwnerResponse", out))
+                Ok(pb::message("eve_public.sovereignty.mercenaryden.api.GetAsOwnerResponse")
+                    .set_with("attributes", |attrs| {
+                        attrs
+                            .set("owner.sequential", den.owner_char_id as u64)
+                            .set("skyhook.sequential", den.skyhook_id as u64)
+                            .set("solar_system.sequential", den.solar_system_id)
+                            .set("planet.sequential", den.planet_id as u64)
+                            .set("type.sequential", den.type_id)
+                    })
+                    .set("enabled", den.enabled)
+                    .set_with("evolution", |evo| {
+                        evo.set_with("definition", fill_evolution_definition)
+                            .set_with("simulation", |s| fill_evolution_simulation(s, &den))
+                    })
+                    .set_with("infomorphs", |info| {
+                        info.set_with("definition", |d| {
+                            fill_infomorphs_gen_definition(
+                                d,
+                                cap,
+                                Some(&sde),
+                                den.solar_system_id,
+                                den.planet_id,
+                            )
+                        })
+                        .set_with("contents", |c| {
+                            c.set("infomorphs_count", den.infomorphs).set(
+                                "last_generation_tick",
+                                GoogleTimestamp::from_unix(den.simulated_at_unix as i64, 0),
+                            )
+                        })
+                    })
+                    .set("cargo_extraction_enabled", den.cargo_extraction_enabled)
+                    .when_some(skyhook_owner, |b, corp| {
+                        b.set("skyhook_owner.sequential", corp as u64)
+                    })
+                    .must_to_any())
             }),
         );
     }
@@ -711,12 +738,18 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                         snap.sov_runtime.mercenary_activities.values().filter(|a| a.den_id == den_id).cloned().collect();
                     Ok::<_, RpcError>((acts, owned_den(snap, cid, den_id)?.next_activity_generation_unix))
                 })?;
-                let mut out = Vec::new();
+                let mut resp = pb::message(
+                    "eve_public.sovereignty.mercenaryden.activity.api.GetForMercenaryDenResponse",
+                );
                 for a in &acts {
-                    encode_bytes_field(1, &encode_activity_entry(a), &mut out);
+                    resp = resp.add_with("activities", |act| {
+                        act.set("id.uuid", a.uuid.clone())
+                            .set_with("attributes", |attr| fill_activity_attributes(attr, a))
+                    });
                 }
-                ts_field(2, next_gen, &mut out);
-                Ok(any("eve_public.sovereignty.mercenaryden.activity.api.GetForMercenaryDenResponse", out))
+                Ok(resp
+                    .set("next_generation_at", GoogleTimestamp::from_unix(next_gen as i64, 0))
+                    .must_to_any())
             }),
         );
     }
@@ -736,11 +769,15 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                         .cloned()
                         .collect::<Vec<_>>()
                 });
-                let mut out = Vec::new();
+                let mut resp =
+                    pb::message("eve_public.sovereignty.mercenaryden.activity.api.GetAllResponse");
                 for a in &acts {
-                    encode_bytes_field(1, &encode_activity_entry(a), &mut out);
+                    resp = resp.add_with("activities", |act| {
+                        act.set("id.uuid", a.uuid.clone())
+                            .set_with("attributes", |attr| fill_activity_attributes(attr, a))
+                    });
                 }
-                Ok(any("eve_public.sovereignty.mercenaryden.activity.api.GetAllResponse", out))
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -825,15 +862,16 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                     entry.expiry_unix = now + 1_800;
                     push_activity_expiry_changed_notice(&pending, entry.solar_system_id, entry, previous_expiry);
                     let attrs = encode_activity_attributes(entry);
-                    let mut n = Vec::new();
-                    encode_bytes_field(1, &encode_activity_id(&uuid), &mut n);
-                    encode_bytes_field(2, &attrs, &mut n);
+                    let n = pb::message("eve_public.sovereignty.mercenaryden.activity.api.StartedNotice")
+                        .set("id.uuid", uuid.clone())
+                        .set_raw_message("activity", &attrs)
+                        .must_encode();
                     push_notice(&pending, entry.solar_system_id, "eve_public.sovereignty.mercenaryden.activity.api.StartedNotice", n);
                     Ok::<_, RpcError>(attrs)
                 })?;
-                let mut out = Vec::new();
-                encode_bytes_field(1, &attrs, &mut out);
-                Ok(any("eve_public.sovereignty.mercenaryden.activity.api.StartResponse", out))
+                Ok(pb::message("eve_public.sovereignty.mercenaryden.activity.api.StartResponse")
+                    .set_raw_message("attributes", attrs)
+                    .must_to_any())
             }),
         );
     }
@@ -852,9 +890,11 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                         .max()
                         .unwrap_or(0)
                 });
-                let mut out = Vec::new();
-                encode_varint_field(1, u64::from(capacity), &mut out);
-                Ok(any("eve_public.sovereignty.mercenaryden.activity.api.GetCapacityResponse", out))
+                Ok(pb::message(
+                    "eve_public.sovereignty.mercenaryden.activity.api.GetCapacityResponse",
+                )
+                .set("capacity", capacity)
+                .must_to_any())
             }),
         );
     }

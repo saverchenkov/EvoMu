@@ -6,9 +6,10 @@ use super::*;
 use crate::quasar_gateway::{PublicGatewayRouter, STATUS_OK};
 use eve_db::{CorpProjectRecord, InventoryFlag, InventoryItemRecord, PersistedProjectDetails, WorldRepository};
 use eve_machonet::{service_roles, SessionState};
+use eve_proto::pb;
 use eve_proto::quasar::{
     DynamicQuasarMessage, EvePublicRequest, EvePublicResponse, GoogleAny, QuasarDescriptorRegistry,
-    WireMessage,
+    WireMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
@@ -108,8 +109,11 @@ fn contribution_method_definitions_and_freelance_item_delivery() {
     assert_eq!(latest_rsp.status_code, STATUS_OK);
     assert!(!latest_rsp.payload.unwrap().value.is_empty());
 
-    let mut maj1 = Vec::new();
-    encode_varint_field(1, 1, &mut maj1);
+    let maj1 = pb::message(
+        "eve_public.freelance.contributionmethod.definition.api.GetAllLatestWithinMajorRequest",
+    )
+    .set("major", 1u32)
+    .must_encode();
     assert_eq!(
         call(
             &router,
@@ -121,8 +125,11 @@ fn contribution_method_definitions_and_freelance_item_delivery() {
         .status_code,
         STATUS_OK
     );
-    let mut maj2 = Vec::new();
-    encode_varint_field(1, 2, &mut maj2);
+    let maj2 = pb::message(
+        "eve_public.freelance.contributionmethod.definition.api.GetAllLatestWithinMajorRequest",
+    )
+    .set("major", 2u32)
+    .must_encode();
     assert_eq!(
         call(
             &router,
@@ -182,8 +189,11 @@ fn contribution_method_definitions_and_freelance_item_delivery() {
     });
 
     // GetStatusRequest before delivery
-    let mut status_req = Vec::new();
-    encode_uuid_field(1, &uuid, &mut status_req);
+    let status_req = pb::message(
+        "eve_public.freelance.contributionmethod.itemdelivery.api.GetStatusRequest",
+    )
+    .set("delivery.uuid", uuid.clone())
+    .must_encode();
     let st_rsp1 = call(
         &router,
         &player,
@@ -194,9 +204,12 @@ fn contribution_method_definitions_and_freelance_item_delivery() {
     assert_eq!(st_rsp1.status_code, STATUS_OK);
 
     // DeliverRequest (deliver 50 units of Tritanium)
-    let mut deliv_req = Vec::new();
-    encode_uuid_field(1, &uuid, &mut deliv_req);
-    encode_varint_field(4, 50, &mut deliv_req);
+    let deliv_req = pb::message(
+        "eve_public.freelance.contributionmethod.itemdelivery.api.DeliverRequest",
+    )
+    .set("project.uuid", uuid.clone())
+    .set("quantity", 50u32)
+    .must_encode();
     let del_rsp = call(
         &router,
         &player,
@@ -324,14 +337,22 @@ fn freelance_helpers_and_item_delivery_rejections_and_completion() {
     );
 
     let unknown_uuid = [0x99u8; 16];
-    let mut unk_req = Vec::new();
-    encode_uuid_field(1, &unknown_uuid, &mut unk_req);
+    let unk_deliv = pb::message(
+        "eve_public.freelance.contributionmethod.itemdelivery.api.DeliverRequest",
+    )
+    .set("project.uuid", unknown_uuid.to_vec())
+    .must_encode();
+    let unk_status = pb::message(
+        "eve_public.freelance.contributionmethod.itemdelivery.api.GetStatusRequest",
+    )
+    .set("delivery.uuid", unknown_uuid.to_vec())
+    .must_encode();
     assert_eq!(
-        call(&router, &player, "eve_public.freelance.contributionmethod.itemdelivery.api.DeliverRequest", unk_req.clone(), now).status_code,
+        call(&router, &player, "eve_public.freelance.contributionmethod.itemdelivery.api.DeliverRequest", unk_deliv, now).status_code,
         STATUS_NOT_FOUND
     );
     assert_eq!(
-        call(&router, &player, "eve_public.freelance.contributionmethod.itemdelivery.api.GetStatusRequest", unk_req, now).status_code,
+        call(&router, &player, "eve_public.freelance.contributionmethod.itemdelivery.api.GetStatusRequest", unk_status, now).status_code,
         STATUS_NOT_FOUND
     );
 
@@ -365,9 +386,12 @@ fn freelance_helpers_and_item_delivery_rejections_and_completion() {
         det.committed_participants.push(cid);
         s.alliance_war_state.project_details.insert(pid_other, det);
     });
-    let mut non_item_req = Vec::new();
-    encode_uuid_field(1, &uuid_other, &mut non_item_req);
-    encode_varint_field(4, 10, &mut non_item_req);
+    let non_item_req = pb::message(
+        "eve_public.freelance.contributionmethod.itemdelivery.api.DeliverRequest",
+    )
+    .set("project.uuid", uuid_other.clone())
+    .set("quantity", 10u32)
+    .must_encode();
     let non_item_rsp = call(
         &router,
         &player,
@@ -411,32 +435,20 @@ fn freelance_helpers_and_item_delivery_rejections_and_completion() {
 
     // Helper to build DeliverRequest with optional delivery station (2.1), item_id (3), qty (4), item_loc (5)
     let make_deliver_req = |station: Option<i64>, iid: Option<i64>, qty: Option<u64>, cont_flag: Option<(i64, u32)>| {
-        let mut out = Vec::new();
-        encode_uuid_field(1, &uuid, &mut out);
-        if let Some(st) = station {
-            let mut st_id = Vec::new();
-            encode_varint_field(1, st as u64, &mut st_id);
-            let mut dl = Vec::new();
-            encode_bytes_field(1, &st_id, &mut dl);
-            encode_bytes_field(2, &dl, &mut out);
-        }
-        if let Some(id) = iid {
-            let mut item_msg = Vec::new();
-            encode_varint_field(1, id as u64, &mut item_msg);
-            encode_bytes_field(3, &item_msg, &mut out);
-        }
-        if let Some(q) = qty {
-            encode_varint_field(4, q, &mut out);
-        }
-        if let Some((c, fl)) = cont_flag {
-            let mut cont_msg = Vec::new();
-            encode_varint_field(1, c as u64, &mut cont_msg);
-            let mut il = Vec::new();
-            encode_bytes_field(1, &cont_msg, &mut il);
-            encode_varint_field(2, fl as u64, &mut il);
-            encode_bytes_field(5, &il, &mut out);
-        }
-        out
+        pb::message(
+            "eve_public.freelance.contributionmethod.itemdelivery.api.DeliverRequest",
+        )
+        .set("project.uuid", uuid.clone())
+        .when_some(station, |b, st| {
+            b.set("delivery_location.station.sequential", st as u64)
+        })
+        .when_some(iid, |b, id| b.set("item.sequential", id as u64))
+        .when_some(qty, |b, q| b.set("quantity", q as u32))
+        .when_some(cont_flag, |b, (c, fl)| {
+            b.set("item_location.item.sequential", c as u64)
+                .set("item_location.flag.value", u64::from(fl))
+        })
+        .must_encode()
     };
 
     // Missing quantity -> STATUS_BAD_REQUEST
@@ -572,8 +584,11 @@ fn freelance_helpers_and_item_delivery_rejections_and_completion() {
         det.uuid_bytes = uuid_closed.clone();
         s.alliance_war_state.project_details.insert(pid_closed, det);
     });
-    let mut closed_req = Vec::new();
-    encode_uuid_field(1, &uuid_closed, &mut closed_req);
+    let closed_req = pb::message(
+        "eve_public.freelance.contributionmethod.itemdelivery.api.GetStatusRequest",
+    )
+    .set("delivery.uuid", uuid_closed)
+    .must_encode();
     let closed_rsp = call(&router, &player, "eve_public.freelance.contributionmethod.itemdelivery.api.GetStatusRequest", closed_req, now);
     assert_eq!(closed_rsp.status_code, STATUS_OK);
     assert_eq!(WireMessage::decode(&closed_rsp.payload.unwrap().value).unwrap().fields[0].field_number, 3);

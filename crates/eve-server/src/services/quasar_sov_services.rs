@@ -27,10 +27,8 @@ use crate::quasar_gateway::{
     STATUS_UNAUTHORIZED,
 };
 use eve_db::{corp_roles, WorldRepository, WorldStateSnapshot};
-use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, AuthoritativeContext, GoogleAny,
-    TYPE_GOOGLEAPIS_PREFIX,
-};
+use eve_proto::pb;
+use eve_proto::quasar::{AuthoritativeContext, GoogleTimestamp};
 use eve_sde::SdeRegistry;
 use std::sync::Arc;
 
@@ -75,25 +73,19 @@ pub fn register_handlers(
                     Ok::<_, (u32, String)>((sys, pid))
                 })?;
 
-                let mut payload = Vec::new();
-                encode_id_field(1, sys_id as u64, &mut payload);
-                if let Some(pid) = planet_id {
-                    encode_id_field(2, pid as u64, &mut payload);
-                }
-                encode_id_field(3, structure_id as u64, &mut payload);
-                encode_varint_field(4, 1, &mut payload);
+                let notice = pb::message("eve_public.sovereignty.skyhook.api.ActivationNotice")
+                    .set("solar_system.sequential", sys_id)
+                    .when_some(planet_id, |b, pid| b.set("planet.sequential", pid as u64))
+                    .set("skyhook.sequential", structure_id as u64)
+                    .set("active", true)
+                    .must_to_any();
                 pending.write().unwrap_or_else(|e| e.into_inner()).push((
                     NoticeScope::SolarSystem(sys_id),
-                    GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.skyhook.api.ActivationNotice"),
-                        value: payload,
-                    },
+                    notice,
                 ));
 
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.skyhook.api.ActivateResponse"),
-                    value: Vec::new(),
-                })
+                Ok(pb::message("eve_public.sovereignty.skyhook.api.ActivateResponse")
+                    .must_to_any())
             }),
         );
     }
@@ -114,25 +106,19 @@ pub fn register_handlers(
                     Ok::<_, (u32, String)>((sys, pid))
                 })?;
 
-                let mut payload = Vec::new();
-                encode_id_field(1, sys_id as u64, &mut payload);
-                if let Some(pid) = planet_id {
-                    encode_id_field(2, pid as u64, &mut payload);
-                }
-                encode_id_field(3, structure_id as u64, &mut payload);
-                encode_varint_field(4, 0, &mut payload);
+                let notice = pb::message("eve_public.sovereignty.skyhook.api.ActivationNotice")
+                    .set("solar_system.sequential", sys_id)
+                    .when_some(planet_id, |b, pid| b.set("planet.sequential", pid as u64))
+                    .set("skyhook.sequential", structure_id as u64)
+                    .set("active", false)
+                    .must_to_any();
                 pending.write().unwrap_or_else(|e| e.into_inner()).push((
                     NoticeScope::SolarSystem(sys_id),
-                    GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.skyhook.api.ActivationNotice"),
-                        value: payload,
-                    },
+                    notice,
                 ));
 
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.skyhook.api.DeactivateResponse"),
-                    value: Vec::new(),
-                })
+                Ok(pb::message("eve_public.sovereignty.skyhook.api.DeactivateResponse")
+                    .must_to_any())
             }),
         );
     }
@@ -158,19 +144,23 @@ pub fn register_handlers(
                     500_005 => Some(16u64), // Jove
                     _ => None,
                 };
-                let mut attr = Vec::new();
-                eve_proto::quasar::encode_string_field(1, &fac.name, &mut attr);
-                eve_proto::quasar::encode_string_field(2, &format!("res:/ui/texture/corps/{}_128.png", fac.corporation_id.unwrap_or(faction_id as i64)), &mut attr);
-                if let Some(rid) = race_id {
-                    encode_id_field(3, rid, &mut attr);
-                    encode_id_field(4, rid, &mut attr);
-                }
-                let mut out = Vec::new();
-                encode_bytes_field(1, &attr, &mut out);
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.faction.api.GetResponse"),
-                    value: out,
-                })
+                let icon_url = format!(
+                    "res:/ui/texture/corps/{}_128.png",
+                    fac.corporation_id.unwrap_or(faction_id as i64)
+                );
+                Ok(pb::message("eve.faction.api.GetResponse")
+                    .set_with("faction", |attr| {
+                        let attr = attr
+                            .set("name", fac.name.as_str())
+                            .set("icon_url", icon_url);
+                        if let Some(rid) = race_id {
+                            attr.set("race.sequential", rid)
+                                .add_with("races", |r| r.set("sequential", rid))
+                        } else {
+                            attr
+                        }
+                    })
+                    .must_to_any())
             }),
         );
     }
@@ -214,14 +204,11 @@ pub fn register_handlers(
                     .map(|f| f.faction_id)
                     .collect();
                 matched_ids.sort_unstable();
-                let mut out = Vec::new();
+                let mut resp = pb::message("eve.faction.SearchResponse");
                 for fid in matched_ids {
-                    encode_id_field(1, fid as u64, &mut out);
+                    resp = resp.add_with("factions", |f| f.set("sequential", fid));
                 }
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.faction.SearchResponse"),
-                    value: out,
-                })
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -276,19 +263,17 @@ pub fn register_handlers(
                             format!("Solar system {sys_id} is not part of Faction Warfare warzone"),
                         )
                     })?;
-                    let mut out = Vec::new();
+                    let mut resp = pb::message(rsp_name);
                     if include_sys_field {
-                        encode_id_field(1, sys_id as u64, &mut out);
+                        resp = resp.set("solar_system.sequential", sys_id);
                     }
-                    let mut score_entry = Vec::new();
-                    encode_id_field(1, occ_fac, &mut score_entry);
-                    encode_varint_field(2, vp, &mut score_entry);
-                    encode_varint_field(3, adv_floor, &mut score_entry);
-                    encode_bytes_field(2, &score_entry, &mut out);
-                    Ok(GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{rsp_name}"),
-                        value: out,
-                    })
+                    Ok(resp
+                        .add_with("scores", |s| {
+                            s.set("faction.sequential", occ_fac)
+                                .set("contribution", vp.min(u64::from(u32::MAX)))
+                                .set("floor", adv_floor.min(u64::from(u32::MAX)))
+                        })
+                        .must_to_any())
                 }),
             );
         }
@@ -323,24 +308,20 @@ pub fn register_handlers(
                         }
                         (entries, max_ceil)
                     });
-                    let mut out = Vec::new();
+                    let mut resp =
+                        pb::message("eve.faction.activity.api.GetAllSolarSystemScoresResponse");
                     for (sys_id, fac_id, vp, floor) in rows {
-                        let mut score_entry = Vec::new();
-                        encode_id_field(1, fac_id, &mut score_entry);
-                        encode_varint_field(2, vp, &mut score_entry);
-                        encode_varint_field(3, floor, &mut score_entry);
-                        let mut sys_scores = Vec::new();
-                        encode_id_field(1, sys_id as u64, &mut sys_scores);
-                        encode_bytes_field(2, &score_entry, &mut sys_scores);
-                        encode_bytes_field(1, &sys_scores, &mut out);
+                        resp = resp.add_with("solar_system_scores", |ss| {
+                            ss.set("solar_system.sequential", sys_id).add_with("scores", |s| {
+                                s.set("faction.sequential", fac_id)
+                                    .set("contribution", vp.min(u64::from(u32::MAX)))
+                                    .set("floor", floor.min(u64::from(u32::MAX)))
+                            })
+                        });
                     }
-                    encode_varint_field(2, ceiling, &mut out);
-                    Ok(GoogleAny {
-                        type_url: format!(
-                            "{TYPE_GOOGLEAPIS_PREFIX}eve.faction.activity.api.GetAllSolarSystemScoresResponse"
-                        ),
-                        value: out,
-                    })
+                    Ok(resp
+                        .set("ceiling", ceiling.min(u64::from(u32::MAX)))
+                        .must_to_any())
                 }),
             );
         }
@@ -428,37 +409,33 @@ pub fn register_handlers(
                     };
                     let fac_id = resolved_fac_id;
                     if is_increment {
-                        let mut contrib_notice = Vec::new();
-                        encode_id_field(1, sys_id as u64, &mut contrib_notice);
-                        encode_id_field(2, caller_cid, &mut contrib_notice);
-                        encode_id_field(3, fac_id as u64, &mut contrib_notice);
-                        encode_varint_field(4, delta_or_val.max(0) as u64, &mut contrib_notice);
+                        let contrib = delta_or_val.max(0).min(i64::from(i32::MAX)) as i32;
+                        let contrib_notice =
+                            pb::message("eve_public.faction.activity.ScoreContributionNotice")
+                                .set("solar_system.sequential", sys_id)
+                                .set("contributor.sequential", caller_cid)
+                                .set("faction.sequential", fac_id)
+                                .set("contribution", contrib)
+                                .must_to_any();
                         pending_fw.write().unwrap_or_else(|e| e.into_inner()).push((
                             NoticeScope::SolarSystem(sys_id),
-                            GoogleAny {
-                                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.faction.activity.ScoreContributionNotice"),
-                                value: contrib_notice,
-                            },
+                            contrib_notice,
                         ));
                     }
-                    let mut scores_notice = Vec::new();
-                    encode_id_field(1, sys_id as u64, &mut scores_notice);
-                    let mut score_entry = Vec::new();
-                    encode_id_field(1, fac_id as u64, &mut score_entry);
-                    encode_varint_field(2, new_vp, &mut score_entry);
-                    encode_varint_field(3, adv_floor, &mut score_entry);
-                    encode_bytes_field(2, &score_entry, &mut scores_notice);
+                    let scores_notice =
+                        pb::message("eve_public.faction.activity.SolarSystemScoresNotice")
+                            .set("solar_system.sequential", sys_id)
+                            .add_with("scores", |s| {
+                                s.set("faction.sequential", fac_id)
+                                    .set("contribution", new_vp.min(u64::from(u32::MAX)))
+                                    .set("floor", adv_floor.min(u64::from(u32::MAX)))
+                            })
+                            .must_to_any();
                     pending_fw.write().unwrap_or_else(|e| e.into_inner()).push((
                         NoticeScope::SolarSystem(sys_id),
-                        GoogleAny {
-                            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.faction.activity.SolarSystemScoresNotice"),
-                            value: scores_notice,
-                        },
+                        scores_notice,
                     ));
-                    Ok(GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{rsp_name}"),
-                        value: Vec::new(),
-                    })
+                    Ok(pb::message(rsp_name).must_to_any())
                 }),
             );
         }
@@ -599,14 +576,11 @@ pub fn register_handlers(
                     }
                     wz
                 });
-                let mut out = Vec::new();
+                let mut resp = pb::message("eve.factionwarfare.warzone.api.GetAllResponse");
                 for wz_id in warzones {
-                    encode_id_field(1, wz_id, &mut out);
+                    resp = resp.add_with("warzones", |w| w.set("sequential", wz_id));
                 }
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.factionwarfare.warzone.api.GetAllResponse"),
-                    value: out,
-                })
+                Ok(resp.must_to_any())
             }),
         );
 
@@ -636,19 +610,19 @@ pub fn register_handlers(
                         .unwrap_or(u64::from(default_pirate));
                     Ok((factions, pirate))
                 })?;
-                let mut staging_buf = Vec::new();
-                for fid in factions {
-                    encode_id_field(1, fid, &mut staging_buf);
-                }
-                if sde_entry.factions.contains_key(&(pirate_faction as u32)) {
-                    encode_id_field(2, pirate_faction, &mut staging_buf);
-                }
-                let mut out = Vec::new();
-                encode_bytes_field(1, &staging_buf, &mut out);
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.factionwarfare.warzone.api.GetParticipantsResponse"),
-                    value: out,
-                })
+                Ok(
+                    pb::message("eve.factionwarfare.warzone.api.GetParticipantsResponse")
+                        .set_with("participants", |mut p| {
+                            for fid in factions {
+                                p = p.add_with("factions", |f| f.set("sequential", fid));
+                            }
+                            if sde_entry.factions.contains_key(&(pirate_faction as u32)) {
+                                p = p.set("pirate_faction.sequential", pirate_faction);
+                            }
+                            p
+                        })
+                        .must_to_any(),
+                )
             }),
         );
     }
@@ -686,21 +660,19 @@ pub fn register_handlers(
                 ops.sort_unstable();
                 ops.truncate(amount);
 
-                let mut out = Vec::new();
+                let mut resp = pb::message("eve_public.operation.recommendation.GetResponse");
                 for op_id in ops {
-                    encode_id_field(1, op_id, &mut out);
-                    let mut rec = Vec::new();
-                    encode_id_field(2, op_id, &mut rec);
                     let mut journey = [0u8; 16];
                     journey[..8].copy_from_slice(&(cid as u64).to_be_bytes());
                     journey[8..].copy_from_slice(&op_id.to_be_bytes());
-                    encode_bytes_field(3, &journey, &mut rec);
-                    encode_bytes_field(4, &rec, &mut out);
+                    resp = resp
+                        .add_with("operations_deprecated", |o| o.set("sequential", op_id))
+                        .add_with("operation_recommendations", |rec| {
+                            rec.set("operation.sequential", op_id)
+                                .set("journey", journey.to_vec())
+                        });
                 }
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.operation.recommendation.GetResponse"),
-                    value: out,
-                })
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -713,12 +685,6 @@ pub fn register_handlers(
     crate::services::quasar_sov_resources::register_handlers(router, Arc::clone(&db), Arc::clone(&sde));
 }
 
-fn encode_id_field(field_num: u32, id: u64, out: &mut Vec<u8>) {
-    let mut id_buf = Vec::new();
-    encode_varint_field(1, id, &mut id_buf);
-    encode_bytes_field(field_num, &id_buf, out);
-}
-
 /// Publishes character-scoped `eve_public.stargate.lock.api.ActivatedNotice` for a Zarzakh gate
 /// lock created by `CmdStargateJump` (`space_warp_jump`).
 pub(crate) fn publish_stargate_lock_activated_notice(
@@ -729,18 +695,11 @@ pub(crate) fn publish_stargate_lock_activated_notice(
     expiry_unix: u64,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let mut exp_buf = Vec::new();
-    encode_varint_field(1, expiry_unix, &mut exp_buf);
-
-    let mut payload = Vec::new();
-    encode_id_field(1, solar_system_id as u64, &mut payload);
-    encode_id_field(2, gate_id, &mut payload);
-    encode_bytes_field(3, &exp_buf, &mut payload);
-
-    let any = GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.stargate.lock.api.ActivatedNotice"),
-        value: payload,
-    };
+    let any = pb::message("eve_public.stargate.lock.api.ActivatedNotice")
+        .set("solarsystem.sequential", solar_system_id)
+        .set("gate.sequential", gate_id)
+        .set("expiry", GoogleTimestamp::from_unix(expiry_unix as i64, 0))
+        .must_to_any();
     gateway
         .publish_notice(NoticeScope::Character(char_id as u32), any, now_unix)
         .map(|(_, n)| n)
@@ -755,14 +714,10 @@ pub(crate) fn publish_stargate_lock_deactivated_notice(
     gate_id: i64,
     now_unix: u64,
 ) {
-    let mut payload = Vec::new();
-    encode_id_field(1, solar_system_id as u64, &mut payload);
-    encode_id_field(2, gate_id as u64, &mut payload);
-
-    let any = GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.stargate.lock.api.DeactivatedNotice"),
-        value: payload,
-    };
+    let any = pb::message("eve_public.stargate.lock.api.DeactivatedNotice")
+        .set("solarsystem.sequential", solar_system_id)
+        .set("gate.sequential", gate_id as u64)
+        .must_to_any();
     let _ = gateway.publish_notice(NoticeScope::Character(char_id as u32), any, now_unix);
 }
 
