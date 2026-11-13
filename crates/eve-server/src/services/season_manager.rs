@@ -384,6 +384,14 @@ fn season_config_to_keyval(cfg: &SeasonConfig, defs: &[SeasonalChallengeDef]) ->
     let mut tracked: Vec<String> = defs.iter().map(|d| d.event_type.clone()).collect();
     tracked.sort();
     tracked.dedup();
+    // V24.01 localization.GetByMessageID(None) returns ""; passing 0 emits an unresolved marker.
+    let opt_msg_id = |id: i64| {
+        if id > 0 {
+            PyRep::Integer(id)
+        } else {
+            PyRep::None
+        }
+    };
     PyRep::keyval([
         ("season_id", PyRep::Integer(cfg.season_id)),
         ("seasonID", PyRep::Integer(cfg.season_id)),
@@ -398,9 +406,17 @@ fn season_config_to_keyval(cfg: &SeasonConfig, defs: &[SeasonalChallengeDef]) ->
         ("seasonSelectionDescriptionID", PyRep::Integer(cfg.description_message_id)),
         ("seasonSelectionHintID", PyRep::Integer(cfg.hint_message_id)),
         ("seasonSelectionTitleID", PyRep::Integer(cfg.title_message_id)),
+        ("agency_card_title", opt_msg_id(cfg.title_message_id)),
+        ("agency_card_hint", opt_msg_id(cfg.hint_message_id)),
+        // Must stay None: V24.01 CustomContentGroupCard.ConstructBaseLayout branches on
+        // `if self.agencyCardDescriptionID`, then ConstructDescriptionCont reads the
+        // misspelled `self.agencyCardDescription` and crashes with AttributeError if truthy.
+        ("agency_card_description", PyRep::None),
         ("start_time", PyRep::Integer(cfg.start_time_ft)),
         ("end_time", PyRep::Integer(cfg.end_time_ft)),
         ("multiple_season_running", PyRep::Bool(cfg.multiple_season_running)),
+        ("is_auto_claim_enabled", PyRep::Bool(false)),
+        ("feature_tag_id", PyRep::None),
         ("max_active_challenges", PyRep::Integer(cfg.max_active_challenges)),
         ("tracked_event_types", PyRep::List(tracked.into_iter().map(PyRep::String).collect())),
     ])
