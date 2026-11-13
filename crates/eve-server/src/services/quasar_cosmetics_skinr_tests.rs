@@ -6,6 +6,7 @@ use super::*;
 use crate::quasar_gateway::{PublicGatewayRouter, STATUS_OK};
 use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_machonet::{service_roles, SessionState};
+use eve_proto::pb;
 use eve_proto::quasar::{
     EvePublicRequest, EvePublicResponse, GoogleAny, QuasarDescriptorRegistry,
 };
@@ -165,9 +166,12 @@ fn component_licenses_grant_get_revoke_consume_and_title_definitions() {
     let other = sess(Some(2), Some(90_000_002), service_roles::ROLE_PLAYER_DEFAULT);
 
     // 1. Finite component license grant, get, cross-char forbidden, revoke
-    let mut fin_grant = Vec::new();
-    encode_bytes_field(1, &encode_component_id(coat_id, false), &mut fin_grant);
-    encode_varint_field(2, 5, &mut fin_grant);
+    let fin_grant = pb::message(
+        "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.api.admin.GrantRequest",
+    )
+    .set("component", build_component_id(coat_id, false))
+    .set("capacity", 5u64)
+    .must_encode();
     assert_eq!(
         call(
             &router,
@@ -180,8 +184,19 @@ fn component_licenses_grant_get_revoke_consume_and_title_definitions() {
         STATUS_OK
     );
 
-    let mut fin_id_req = Vec::new();
-    encode_bytes_field(1, &encode_comp_license_id(cid as u32, coat_id, false), &mut fin_id_req);
+    let fin_id_req = pb::message(
+        "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.api.GetRequest",
+    )
+    .set(
+        "license",
+        build_comp_license_id(
+            "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.Identifier",
+            cid as u32,
+            coat_id,
+            false,
+        ),
+    )
+    .must_encode();
     assert_eq!(
         call(
             &router,
@@ -206,8 +221,11 @@ fn component_licenses_grant_get_revoke_consume_and_title_definitions() {
     );
 
     // 2. Infinite component license grant, get, revoke
-    let mut inf_grant = Vec::new();
-    encode_bytes_field(1, &encode_component_id(pat_id, true), &mut inf_grant);
+    let inf_grant = pb::message(
+        "eve_public.cosmetic.ship.skin.thirdparty.component.license.infinite.api.admin.GrantRequest",
+    )
+    .set("component", build_component_id(pat_id, true))
+    .must_encode();
     assert_eq!(
         call(
             &router,
@@ -220,8 +238,19 @@ fn component_licenses_grant_get_revoke_consume_and_title_definitions() {
         STATUS_OK
     );
 
-    let mut inf_id_req = Vec::new();
-    encode_bytes_field(1, &encode_comp_license_id(cid as u32, pat_id, true), &mut inf_id_req);
+    let inf_id_req = pb::message(
+        "eve_public.cosmetic.ship.skin.thirdparty.component.license.infinite.api.GetRequest",
+    )
+    .set(
+        "license",
+        build_comp_license_id(
+            "eve_public.cosmetic.ship.skin.thirdparty.component.license.infinite.Identifier",
+            cid as u32,
+            pat_id,
+            true,
+        ),
+    )
+    .must_encode();
     assert_eq!(
         call(
             &router,
@@ -288,11 +317,12 @@ fn component_licenses_grant_get_revoke_consume_and_title_definitions() {
             },
         );
     });
-    let mut item_seq = Vec::new();
-    encode_varint_field(1, item_id as u64, &mut item_seq);
-    let mut consume_req = Vec::new();
-    encode_bytes_field(1, &item_seq, &mut consume_req);
-    encode_varint_field(2, 1, &mut consume_req);
+    let consume_req = pb::message(
+        "eve_public.cosmetic.ship.skin.thirdparty.component.license.item.api.ConsumeRequest",
+    )
+    .set("item.item.sequential", item_id as u64)
+    .set("quantity", 1i32)
+    .must_encode();
     assert_eq!(
         call(
             &router,
@@ -324,8 +354,11 @@ fn component_licenses_grant_get_revoke_consume_and_title_definitions() {
         STATUS_OK
     );
 
-    let mut ver_req = Vec::new();
-    encode_bytes_field(2, &encode_semver([24, 2, 1]), &mut ver_req);
+    let ver_req = pb::message(
+        "eve.cosmetic.character.title.definition.version.api.admin.SetDefaultVersionRequest",
+    )
+    .set("version", build_semver("eve", [24, 2, 1]))
+    .must_encode();
     assert_eq!(
         call(
             &router,
@@ -337,9 +370,12 @@ fn component_licenses_grant_get_revoke_consume_and_title_definitions() {
         .status_code,
         STATUS_OK
     );
-    let mut ovr_req = Vec::new();
-    encode_string_field(1, "singularity", &mut ovr_req);
-    encode_bytes_field(2, &encode_semver([24, 3, 0]), &mut ovr_req);
+    let ovr_req = pb::message(
+        "eve.cosmetic.character.title.definition.version.api.admin.OverrideVersionForTenantRequest",
+    )
+    .set("context.comment", "singularity")
+    .set("version", build_semver("eve", [24, 3, 0]))
+    .must_encode();
     assert_eq!(
         call(
             &router,

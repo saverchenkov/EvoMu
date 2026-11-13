@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use crate::services::quasar_cosmetics_skinr::{
-    encode_component_id, encode_layout_slot, encode_skin_id, encode_skin_license_id,
+    build_layout_slot, build_skin_id, build_skin_license_id, encode_component_id,
     FiniteComponentLicense, SequencingJobRecord, SkinDesignRecord, SkinLayoutSlot,
     SkinrCosmeticsState,
 };
@@ -12,9 +12,10 @@ use crate::quasar_gateway::{
 };
 use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord, WorldRepository};
 use eve_machonet::{service_roles, SessionState};
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, EvePublicRequest, EvePublicResponse, GoogleAny,
-    QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
+    EvePublicRequest, EvePublicResponse, GoogleAny, QuasarDescriptorRegistry,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
@@ -115,8 +116,9 @@ fn skin_get_and_license_endpoints_error_and_edge_branches() {
     // 1. handle_skin_get: empty -> 400, unknown -> 404, unsequenced vs sequenced design attributes
     let get_skin_ep = "eve_public.cosmetic.ship.skin.thirdparty.api.GetRequest";
     assert_code(&router, &player, get_skin_ep, Vec::new(), now, STATUS_BAD_REQUEST);
-    let mut nf_req = Vec::new();
-    encode_bytes_field(1, &encode_skin_id("missing_skin"), &mut nf_req);
+    let nf_req = pb::message("eve_public.cosmetic.ship.skin.thirdparty.api.GetRequest")
+        .set("skin", build_skin_id("eve_public", "missing_skin"))
+        .must_encode();
     assert_code(&router, &player, get_skin_ep, nf_req, now, STATUS_NOT_FOUND);
 
     // Insert a design with slots and first_sequenced_unix = None, plus numeric-named skin_0000002a
@@ -149,10 +151,12 @@ fn skin_get_and_license_endpoints_error_and_edge_branches() {
             first_sequenced_unix: None,
         },
     );
-    let mut num_inner = Vec::new();
-    encode_varint_field(1, 0x2a, &mut num_inner);
-    let mut num_req = Vec::new();
-    encode_bytes_field(1, &num_inner, &mut num_req);
+    let num_inner = pb::message("eve_public.ship.Identifier")
+        .set("sequential", 0x2a_u64)
+        .must_encode();
+    let num_req = pb::message("eve_public.cosmetic.ship.skin.thirdparty.api.GetRequest")
+        .set_raw_message("skin", num_inner)
+        .must_encode();
     assert_code(&router, &player, get_skin_ep, num_req, now, STATUS_OK);
 
     // 2. GetOwnedRequest: unauthenticated -> 403, eve. prefix with 0 licenses encodes cid at field 1
@@ -178,22 +182,27 @@ fn skin_get_and_license_endpoints_error_and_edge_branches() {
     let grant_ep = "eve_public.cosmetic.ship.skin.thirdparty.license.api.admin.GrantRequest";
     assert_code(&router, &player, grant_ep, Vec::new(), now, STATUS_FORBIDDEN);
     assert_code(&router, &gm, grant_ep, Vec::new(), now, STATUS_BAD_REQUEST);
-    let mut zero_grant = Vec::new();
-    encode_bytes_field(1, &encode_skin_id("skin_double"), &mut zero_grant);
-    assert_code(&router, &gm, grant_ep, zero_grant.clone(), now, STATUS_BAD_REQUEST);
-    let mut ok_grant = zero_grant;
-    encode_varint_field(2, 1, &mut ok_grant);
+    let zero_grant = pb::message(grant_ep)
+        .set("skin", build_skin_id("eve_public", "skin_double"))
+        .must_encode();
+    assert_code(&router, &gm, grant_ep, zero_grant, now, STATUS_BAD_REQUEST);
+    let ok_grant = pb::message(grant_ep)
+        .set("skin", build_skin_id("eve_public", "skin_double"))
+        .set("unactivated", 1u64)
+        .must_encode();
     assert_code(&router, &gm_p1, grant_ep, ok_grant.clone(), now, STATUS_OK);
     assert_code(&router, &gm_p1, grant_ep, ok_grant, now, STATUS_OK);
 
     // 4. License GetRequest: missing id -> 400, not found -> 404, admin reading other char's license -> 200
     let lic_get_ep = "eve_public.cosmetic.ship.skin.thirdparty.license.api.GetRequest";
     assert_code(&router, &player, lic_get_ep, Vec::new(), now, STATUS_BAD_REQUEST);
-    let mut nf_lic = Vec::new();
-    encode_bytes_field(1, &encode_skin_license_id(cid as u32, "no_such_skin"), &mut nf_lic);
+    let nf_lic = pb::message(lic_get_ep)
+        .set("license", build_skin_license_id("eve_public", cid as u32, "no_such_skin"))
+        .must_encode();
     assert_code(&router, &player, lic_get_ep, nf_lic, now, STATUS_NOT_FOUND);
-    let mut p1_lic = Vec::new();
-    encode_bytes_field(1, &encode_skin_license_id(cid as u32, "skin_double"), &mut p1_lic);
+    let p1_lic = pb::message(lic_get_ep)
+        .set("license", build_skin_license_id("eve_public", cid as u32, "skin_double"))
+        .must_encode();
     assert_code(
         &router,
         &gm,
@@ -259,9 +268,12 @@ fn apply_and_unapply_validation_branches() {
     });
 
     // Grant & activate "skin_rifter_only" (ship_type_id = 587)
-    let mut grant_req = Vec::new();
-    encode_bytes_field(1, &encode_skin_id("skin_rifter_only"), &mut grant_req);
-    encode_varint_field(2, 1, &mut grant_req);
+    let grant_req = pb::message(
+        "eve_public.cosmetic.ship.skin.thirdparty.license.api.admin.GrantRequest",
+    )
+    .set("skin", build_skin_id("eve_public", "skin_rifter_only"))
+    .set("unactivated", 1u64)
+    .must_encode();
     call(
         &router,
         &gm,
@@ -269,8 +281,9 @@ fn apply_and_unapply_validation_branches() {
         grant_req,
         now,
     );
-    let mut lic_req = Vec::new();
-    encode_bytes_field(1, &encode_skin_license_id(cid as u32, "skin_rifter_only"), &mut lic_req);
+    let lic_req = pb::message("eve_public.cosmetic.ship.skin.thirdparty.license.api.ActivateRequest")
+        .set("license", build_skin_license_id("eve_public", cid as u32, "skin_rifter_only"))
+        .must_encode();
     call(
         &router,
         &player,
@@ -280,13 +293,17 @@ fn apply_and_unapply_validation_branches() {
     );
 
     let mk_apply = |base: &[u8], ship_id: u64| {
-        let mut r = base.to_vec();
         if ship_id > 0 {
-            let mut sh = Vec::new();
-            encode_varint_field(1, ship_id, &mut sh);
-            encode_bytes_field(2, &sh, &mut r);
+            pb::message("eve_public.cosmetic.ship.skin.thirdparty.license.api.ApplyRequest")
+                .set(
+                    "license",
+                    build_skin_license_id("eve_public", cid as u32, "skin_rifter_only"),
+                )
+                .set("ship.sequential", ship_id)
+                .must_encode()
+        } else {
+            base.to_vec()
         }
-        r
     };
 
     let apply_ep = "eve_public.cosmetic.ship.skin.thirdparty.license.api.ApplyRequest";
@@ -362,71 +379,58 @@ fn sequencing_job_initiate_validation_finite_licenses_plex_rollback_and_settle()
     let init_ep = "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest";
     assert_code(&router, &player, init_ep, Vec::new(), now, STATUS_BAD_REQUEST);
 
-    let mut bad_qty = Vec::new();
-    encode_varint_field(5, 101, &mut bad_qty);
+    let bad_qty = pb::message(init_ep).set("licenses", 101u32).must_encode();
     assert_code(&router, &player, init_ep, bad_qty, now, STATUS_BAD_REQUEST);
 
-    let mut bad_ship_lay = Vec::new();
-    let mut sh34 = Vec::new();
-    encode_varint_field(1, 34, &mut sh34);
-    encode_bytes_field(2, &sh34, &mut bad_ship_lay);
-    let mut bad_ship_req = Vec::new();
-    encode_bytes_field(3, &bad_ship_lay, &mut bad_ship_req);
+    let bad_ship_req = pb::message(init_ep)
+        .set("layout.ship_type.sequential", 34u64)
+        .must_encode();
     assert_code(&router, &player, init_ep, bad_ship_req, now, STATUS_BAD_REQUEST);
 
-    let mut sh587 = Vec::new();
-    encode_varint_field(1, 587, &mut sh587);
     for (slot_id, comp_id, is_pat) in [
         (99, coat_id, false),
         (pat_slot, coat_id, false),
         (1, pat_id, false),
         (1, 999_999, false),
     ] {
-        let mut lay = Vec::new();
-        encode_bytes_field(
-            1,
-            &encode_layout_slot(&SkinLayoutSlot {
-                slot_id,
-                component_id: comp_id,
-                is_pattern: is_pat,
-                primary_coating_id: None,
-                secondary_coating_id: None,
-            }),
-            &mut lay,
-        );
-        encode_bytes_field(2, &sh587, &mut lay);
-        let mut req = Vec::new();
-        encode_bytes_field(3, &lay, &mut req);
+        let slot = SkinLayoutSlot {
+            slot_id,
+            component_id: comp_id,
+            is_pattern: is_pat,
+            primary_coating_id: None,
+            secondary_coating_id: None,
+        };
+        let req = pb::message(init_ep)
+            .set_with("layout", |l| {
+                l.add("slots", build_layout_slot("eve_public", &slot))
+                    .set("ship_type.sequential", 587u64)
+            })
+            .must_encode();
         assert_code(&router, &player, init_ep, req, now, STATUS_BAD_REQUEST);
     }
 
-    let mut valid_lay = Vec::new();
-    encode_bytes_field(
-        1,
-        &encode_layout_slot(&SkinLayoutSlot {
-            slot_id: 1,
-            component_id: coat_id,
-            is_pattern: false,
-            primary_coating_id: None,
-            secondary_coating_id: None,
-        }),
-        &mut valid_lay,
-    );
-    encode_bytes_field(
-        1,
-        &encode_layout_slot(&SkinLayoutSlot {
-            slot_id: pat_slot,
-            component_id: pat_id,
-            is_pattern: true,
-            primary_coating_id: None,
-            secondary_coating_id: None,
-        }),
-        &mut valid_lay,
-    );
-    encode_bytes_field(2, &sh587, &mut valid_lay);
-    let mut valid_init_req = Vec::new();
-    encode_bytes_field(3, &valid_lay, &mut valid_init_req);
-    encode_varint_field(5, 2, &mut valid_init_req);
+    let valid_coat_slot = SkinLayoutSlot {
+        slot_id: 1,
+        component_id: coat_id,
+        is_pattern: false,
+        primary_coating_id: None,
+        secondary_coating_id: None,
+    };
+    let valid_pat_slot = SkinLayoutSlot {
+        slot_id: pat_slot,
+        component_id: pat_id,
+        is_pattern: true,
+        primary_coating_id: None,
+        secondary_coating_id: None,
+    };
+    let valid_init_req = pb::message(init_ep)
+        .set_with("layout", |l| {
+            l.add("slots", build_layout_slot("eve_public", &valid_coat_slot))
+                .add("slots", build_layout_slot("eve_public", &valid_pat_slot))
+                .set("ship_type.sequential", 587u64)
+        })
+        .set("licenses", 2u32)
+        .must_encode();
     db.with_mut_snapshot(|s| {
         s.skills.entry(cid).or_default().insert(
             81375,
@@ -476,13 +480,11 @@ fn sequencing_job_initiate_validation_finite_licenses_plex_rollback_and_settle()
         .next()
         .unwrap()
         .job_uuid;
-    let mut job_id_msg = Vec::new();
-    encode_bytes_field(1, &job_uuid, &mut job_id_msg);
-    let mut job_get_req = Vec::new();
-    encode_bytes_field(1, &job_id_msg, &mut job_get_req);
-
     let job_get_ep = "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.GetRequest";
     let early_ep = "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.CompleteEarlyRequest";
+    let job_get_req = pb::message(job_get_ep)
+        .set("job.uuid", job_uuid)
+        .must_encode();
     assert_code(&router, &player, job_get_ep, Vec::new(), now, STATUS_BAD_REQUEST);
     assert_code(&router, &other, job_get_ep, job_get_req.clone(), now, STATUS_FORBIDDEN);
     assert_code(&router, &gm, job_get_ep, job_get_req.clone(), now, STATUS_OK);

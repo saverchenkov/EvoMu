@@ -15,9 +15,10 @@ use crate::quasar_gateway::{
     STATUS_NOT_FOUND, STATUS_PRECONDITION_FAILED,
 };
 use eve_db::WorldRepository;
+use eve_proto::pb::{self, ProtoBuilder};
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
-    DynamicQuasarMessage, DynamicValue, GoogleAny, WireMessage,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleTimestamp,
+    WireMessage,
 };
 use eve_sde::SdeRegistry;
 use serde_json::Value;
@@ -596,29 +597,36 @@ fn handle_comp_license_get_owned(state: &SkinrCosmeticsState, ctx: &Authoritativ
     let cid = require_char(ctx)?;
     state.sync_redeemed_skins_if_needed();
     let data = state.data.read().unwrap_or_else(|e| e.into_inner());
-    let mut out = Vec::new();
+    let mut rsp = pb::message(
+        "eve_public.cosmetic.ship.skin.thirdparty.component.license.api.GetOwnedResponse",
+    );
     for lic in data.finite_licenses.values() {
         if lic.character_id == cid && lic.capacity > 0 {
-            encode_bytes_field(
-                1,
-                &encode_comp_license_id(cid, lic.component_id, lic.is_pattern),
-                &mut out,
+            rsp = rsp.add(
+                "finite",
+                build_comp_license_id(
+                    "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.Identifier",
+                    cid,
+                    lic.component_id,
+                    lic.is_pattern,
+                ),
             );
         }
     }
     for lic in data.infinite_licenses.values() {
         if lic.character_id == cid {
-            encode_bytes_field(
-                2,
-                &encode_comp_license_id(cid, lic.component_id, lic.is_pattern),
-                &mut out,
+            rsp = rsp.add(
+                "infinite",
+                build_comp_license_id(
+                    "eve_public.cosmetic.ship.skin.thirdparty.component.license.infinite.Identifier",
+                    cid,
+                    lic.component_id,
+                    lic.is_pattern,
+                ),
             );
         }
     }
-    Ok(any_msg(
-        "eve_public.cosmetic.ship.skin.thirdparty.component.license.api.GetOwnedResponse",
-        out,
-    ))
+    Ok(rsp.must_to_any())
 }
 
 fn handle_finite_get(
@@ -641,15 +649,15 @@ fn handle_finite_get(
     let Some(lic) = data.finite_licenses.get(&key) else {
         return Err((STATUS_NOT_FOUND, "Finite component license not found".into()));
     };
-    let mut attrs = Vec::new();
-    put_timestamp(1, lic.first_acquired_unix, &mut attrs);
-    encode_varint_field(2, lic.capacity, &mut attrs);
-    let mut out = Vec::new();
-    encode_bytes_field(1, &attrs, &mut out);
-    Ok(any_msg(
+    Ok(pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.api.GetResponse",
-        out,
-    ))
+    )
+    .set(
+        "license.first_acquired",
+        GoogleTimestamp::from_unix(lic.first_acquired_unix as i64, 0),
+    )
+    .set("license.capacity", lic.capacity)
+    .must_to_any())
 }
 
 fn handle_finite_admin_grant(
@@ -703,12 +711,19 @@ fn handle_finite_admin_grant(
     state.save();
     queue_component_license_granted_notice(cid, comp_id, is_pattern, Some(capacity), now);
 
-    let mut out = Vec::new();
-    encode_bytes_field(1, &encode_comp_license_id(cid, comp_id, is_pattern), &mut out);
-    Ok(any_msg(
+    Ok(pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.api.admin.GrantResponse",
-        out,
-    ))
+    )
+    .set(
+        "license",
+        build_comp_license_id(
+            "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.Identifier",
+            cid,
+            comp_id,
+            is_pattern,
+        ),
+    )
+    .must_to_any())
 }
 
 fn handle_finite_admin_revoke(
@@ -761,18 +776,20 @@ fn handle_infinite_get(
     let Some(lic) = data.infinite_licenses.get(&key) else {
         return Err((STATUS_NOT_FOUND, "Infinite component license not found".into()));
     };
-    let mut attrs = Vec::new();
-    if lic.is_free {
-        encode_varint_field(2, 1, &mut attrs);
-    } else {
-        put_timestamp(1, lic.first_acquired_unix, &mut attrs);
-    }
-    let mut out = Vec::new();
-    encode_bytes_field(1, &attrs, &mut out);
-    Ok(any_msg(
+    Ok(pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.component.license.infinite.api.GetResponse",
-        out,
-    ))
+    )
+    .with(|b| {
+        if lic.is_free {
+            b.set("license.free", true)
+        } else {
+            b.set(
+                "license.first_acquired",
+                GoogleTimestamp::from_unix(lic.first_acquired_unix as i64, 0),
+            )
+        }
+    })
+    .must_to_any())
 }
 
 fn handle_infinite_admin_grant(
@@ -809,12 +826,19 @@ fn handle_infinite_admin_grant(
     state.save();
     queue_component_license_granted_notice(cid, comp_id, is_pattern, None, now);
 
-    let mut out = Vec::new();
-    encode_bytes_field(1, &encode_comp_license_id(cid, comp_id, is_pattern), &mut out);
-    Ok(any_msg(
+    Ok(pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.component.license.infinite.api.admin.GrantResponse",
-        out,
-    ))
+    )
+    .set(
+        "license",
+        build_comp_license_id(
+            "eve_public.cosmetic.ship.skin.thirdparty.component.license.infinite.Identifier",
+            cid,
+            comp_id,
+            is_pattern,
+        ),
+    )
+    .must_to_any())
 }
 
 fn handle_infinite_admin_revoke(
@@ -998,12 +1022,11 @@ fn handle_item_consume(
 // Character Title Definition & Version Handlers
 // ============================================================================
 
-fn encode_semver(ver: [u32; 3]) -> Vec<u8> {
-    let mut b = Vec::new();
-    encode_varint_field(1, ver[0] as u64, &mut b);
-    encode_varint_field(2, ver[1] as u64, &mut b);
-    encode_varint_field(3, ver[2] as u64, &mut b);
-    b
+fn build_semver(prefix: &str, ver: [u32; 3]) -> ProtoBuilder {
+    pb::message(format!("{prefix}.semanticversion.Specification"))
+        .set("major", ver[0])
+        .set("minor", ver[1])
+        .set("patch", ver[2])
 }
 
 fn parse_semver(msg: &DynamicQuasarMessage) -> Option<[u32; 3]> {
@@ -1064,82 +1087,67 @@ fn handle_title_def_get_latest(
     let cdn_base = std::env::var("EVOMU_CDN_BASE_URL").ok().map(|s| s.trim_end_matches('/').to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "http://127.0.0.1:26004/cdn".to_string());
     let url = format!("{cdn_base}/cosmetics/character/title/definitions/v{}.{}.{}/{}.json", ver[0], ver[1], ver[2], lang);
 
-    let mut crc_msg = Vec::new();
-    encode_varint_field(1, crc as u64, &mut crc_msg);
-
-    let mut checkpoint = Vec::new();
-    encode_string_field(1, &url, &mut checkpoint);
-    let ver_bytes = if let Some(DynamicValue::Message(client_ver)) = dyn_msg.get(1) {
-        let mut s = Vec::new();
-        for fno in 1..=3 {
-            if let Some(v) = client_ver.get(fno).and_then(as_u64) {
-                encode_varint_field(fno, v, &mut s);
-            }
+    let prefix = if req_type.starts_with("eve.") { "eve" } else { "eve_public" };
+    let semver_type = format!("{prefix}.semanticversion.Specification");
+    let ver_builder = if let Some(DynamicValue::Message(client_ver)) = dyn_msg.get(1) {
+        let mut b = pb::message(&semver_type);
+        if let Some(v) = client_ver.get(1).and_then(as_u64) {
+            b = b.set("major", v as u32);
         }
-        for fno in 4..=5 {
+        if let Some(v) = client_ver.get(2).and_then(as_u64) {
+            b = b.set("minor", v as u32);
+        }
+        if let Some(v) = client_ver.get(3).and_then(as_u64) {
+            b = b.set("patch", v as u32);
+        }
+        for (fno, field_name) in [(4u32, "prerelease_tags"), (5u32, "build_tags")] {
             match client_ver.get(fno) {
-                Some(DynamicValue::String(tag)) => encode_string_field(fno, tag, &mut s),
+                Some(DynamicValue::String(tag)) => b = b.add(field_name, tag),
                 Some(DynamicValue::Repeated(tags)) => {
                     for t in tags {
                         if let DynamicValue::String(tag) = t {
-                            encode_string_field(fno, tag, &mut s);
+                            b = b.add(field_name, tag);
                         }
                     }
                 }
                 _ => {}
             }
         }
-        s
+        b
     } else {
-        encode_semver(ver)
+        build_semver(prefix, ver)
     };
-    encode_bytes_field(2, &ver_bytes, &mut checkpoint);
-    encode_bytes_field(3, &crc_msg, &mut checkpoint);
-
-    let mut out = Vec::new();
-    encode_bytes_field(1, &checkpoint, &mut out);
-    let rsp_type = if req_type.starts_with("eve.") {
-        "eve.cosmetic.character.title.definition.api.GetLatestResponse"
-    } else {
-        "eve_public.cosmetic.character.title.definition.api.GetLatestResponse"
-    };
-    Ok(any_msg(rsp_type, out))
+    Ok(pb::message(format!(
+        "{prefix}.cosmetic.character.title.definition.api.GetLatestResponse"
+    ))
+    .set("checkpoint.url", &url)
+    .set("checkpoint.version", ver_builder)
+    .set("checkpoint.crc.crc", crc)
+    .must_to_any())
 }
 
-fn handle_title_def_list(state: &SkinrCosmeticsState, req_type: &str) -> HandlerResult {
+fn handle_title_def_list(state: &SkinrCosmeticsState, _req_type: &str) -> HandlerResult {
     let data = state.data.read().unwrap_or_else(|e| e.into_inner());
-    let mut out = Vec::new();
+    let mut rsp = pb::message("eve.cosmetic.character.title.definition.api.ListDefinitionsResponse")
+        .set("version", build_semver("eve", data.title_def_version));
     for def in &data.title_definitions {
-        let mut id_bytes = Vec::new();
-        encode_varint_field(1, def.title_id as u64, &mut id_bytes);
-        let mut summary = Vec::new();
-        encode_bytes_field(1, &id_bytes, &mut summary);
-        encode_string_field(2, &def.name, &mut summary);
-        encode_string_field(3, &def.internal_name, &mut summary);
-        encode_bytes_field(1, &summary, &mut out);
-        encode_bytes_field(2, &summary, &mut out);
+        let uuid = crate::services::quasar_cosmetics_drafts::id_to_uuid_bytes(def.title_id as u64);
+        rsp = rsp.add_with("titles", |t| {
+            t.set("id.uuid", uuid)
+                .set("name", &def.name)
+                .set("internal_name", &def.internal_name)
+        });
     }
-    let rsp_type = if req_type.ends_with("ListDefinitionsRequest") {
-        "eve.cosmetic.character.title.definition.api.ListDefinitionsResponse"
-    } else if req_type.starts_with("eve.") {
-        "eve.cosmetic.character.title.definition.api.GetAllResponse"
-    } else {
-        "eve_public.cosmetic.character.title.definition.api.GetAllResponse"
-    };
-    Ok(any_msg(rsp_type, out))
+    Ok(rsp.must_to_any())
 }
 
 fn broadcast_title_version_notice(ver: [u32; 3], now_unix: u64) {
-    let mut payload = Vec::new();
-    encode_bytes_field(1, &encode_semver(ver), &mut payload);
-    ctx_queue_notice(
-        NoticeScope::Broadcast,
-        any_msg(
-            "eve_public.cosmetic.character.title.definition.version.api.CheckVersionNotice",
-            payload,
-        ),
-        now_unix,
-    );
+    let notice = pb::message(
+        "eve_public.cosmetic.character.title.definition.version.api.CheckVersionNotice",
+    )
+    .set("version", build_semver("eve_public", ver))
+    .must_to_any();
+    ctx_queue_notice(NoticeScope::Broadcast, notice, now_unix);
 }
 
 fn handle_title_version_set_default(
@@ -1174,7 +1182,9 @@ fn handle_title_version_override_tenant(
     dyn_msg: &DynamicQuasarMessage,
 ) -> HandlerResult {
     require_admin_role(ctx)?;
-    let tenant = str_of(dyn_msg, 1).unwrap_or_default();
+    let tenant = str_of(dyn_msg, 1)
+        .or_else(|| sub(dyn_msg, 1).and_then(|c| str_of(c, 1)))
+        .unwrap_or_default();
     let Some(ver) = sub(dyn_msg, 2).and_then(parse_semver).filter(|v| v[0] > 0) else {
         return Err((STATUS_BAD_REQUEST, "Valid tenant and semantic version required".into()));
     };
@@ -1197,12 +1207,11 @@ fn handle_title_version_override_tenant(
 
 fn handle_title_version_get_default(state: &SkinrCosmeticsState) -> HandlerResult {
     let ver = state.data.read().unwrap_or_else(|e| e.into_inner()).title_def_version;
-    let mut out = Vec::new();
-    encode_bytes_field(1, &encode_semver(ver), &mut out);
-    Ok(any_msg(
+    Ok(pb::message(
         "eve.cosmetic.character.title.definition.version.api.GetDefaultVersionResponse",
-        out,
-    ))
+    )
+    .set("version", build_semver("eve", ver))
+    .must_to_any())
 }
 
 pub fn register(router: &PublicGatewayRouter, state: Arc<SkinrCosmeticsState>) {
