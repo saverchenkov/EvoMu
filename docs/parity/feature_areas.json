@@ -1,0 +1,18 @@
+{
+  "_about": "Groups the feat:<domain>.* rows of the parity ledger into the areas shown in README.md. Read by status_table.py to generate the 'Feature progress by area' section of docs/ACTION_PLAN_STATUS.md. Every feat domain must appear in exactly one area; unlisted domains are reported under 'Unassigned'.",
+  "areas": [
+    {"name": "Flying and navigation", "domains": ["navigation", "wormholes", "bookmarks", "scanning", "exploration"]},
+    {"name": "Ships, fitting and modules", "domains": ["modules", "fitting", "dogma", "attributes", "ships", "drones", "cosmetics"]},
+    {"name": "Combat", "domains": ["combat", "crimewatch", "npc", "war"]},
+    {"name": "Accounts, characters and skills", "domains": ["account", "character", "skills", "clones", "standings"]},
+    {"name": "Inventory, markets and contracts", "domains": ["inventory", "market", "wallet", "contracts", "lp"]},
+    {"name": "Industry and resources", "domains": ["industry", "mining", "pi"]},
+    {"name": "PvE", "domains": ["pve", "abyssal"]},
+    {"name": "Corporations, alliances and fleets", "domains": ["corporation", "alliance", "fleet", "social"]},
+    {"name": "Structures and territory", "domains": ["structures", "sovereignty", "fw"]},
+    {"name": "ESI web API", "domains": ["esi"]},
+    {"name": "Quasar gateway services", "domains": ["quasar"]},
+    {"name": "Game-master mode and commands", "domains": ["admin"]},
+    {"name": "Sessions and server operations", "domains": ["lifecycle", "serverops", "ui", "invariant", "removed"]}
+  ]
+}

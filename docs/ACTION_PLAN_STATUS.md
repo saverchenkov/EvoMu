@@ -4,19 +4,58 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 6216 / 6320 ledger rows closed (98.35%)**, 2402 NA, 1618 tagged tests, 6503 passing tests. Flagged fake by the gap auditor: 106.
+**Parity: 6215 / 6320 ledger rows closed (98.34%)**, 2377 NA, 1621 tagged tests, 6923 passing tests. Flagged fake by the gap auditor: 106.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
-| destiny | 52 | 44 | 8 | 0 |
+| destiny | 52 | 45 | 7 | 0 |
 | effect | 1 | 1 | 0 | 0 |
 | esi | 197 | 197 | 0 | 0 |
 | feat | 1604 | 1489 | 94 | 21 |
-| notify | 1311 | 490 | 819 | 2 |
+| notify | 1311 | 492 | 816 | 3 |
 | plan | 114 | 109 | 0 | 5 |
 | quasar | 1455 | 88 | 1328 | 39 |
-| rpc | 1373 | 1227 | 109 | 37 |
-| sde | 213 | 169 | 44 | 0 |
+| rpc | 1373 | 1246 | 90 | 37 |
+| sde | 213 | 171 | 42 | 0 |
+
+## Feature progress by area
+
+Game features (`feat:` rows) grouped as in `README.md`. **Done** counts rows whose tagged test passes; rows triaged as not applicable are left out of the total.
+
+| Area | Done | Total | Percent | Not applicable |
+|---|---|---|---|---|
+| Flying and navigation | 121 | 122 | 99% | 0 |
+| Ships, fitting and modules | 262 | 266 | 98% | 0 |
+| Combat | 120 | 120 | 100% | 0 |
+| Accounts, characters and skills | 103 | 104 | 99% | 0 |
+| Inventory, markets and contracts | 82 | 85 | 96% | 0 |
+| Industry and resources | 127 | 129 | 98% | 0 |
+| PvE | 116 | 121 | 96% | 0 |
+| Corporations, alliances and fleets | 124 | 124 | 100% | 0 |
+| Structures and territory | 132 | 133 | 99% | 0 |
+| ESI web API | 138 | 138 | 100% | 0 |
+| Quasar gateway services | 28 | 32 | 88% | 94 |
+| Game-master mode and commands | 22 | 22 | 100% | 0 |
+| Sessions and server operations | 114 | 114 | 100% | 0 |
+| **All areas** | **1489** | **1510** | **99%** | 94 |
+
+Features not yet done, by area:
+
+- **Flying and navigation:** `feat:navigation.gravity-hazard-safe-zones (FLAGGED_FAKE)`
+
+- **Ships, fitting and modules:** `feat:cosmetics.skinr-designer (FLAGGED_FAKE)`, `feat:cosmetics.skinr-market (FLAGGED_FAKE)`, `feat:cosmetics.skinr-paragon-hub-listing (FLAGGED_FAKE)`, `feat:cosmetics.skinr-sequencing-studio (FLAGGED_FAKE)`
+
+- **Accounts, characters and skills:** `feat:skills.omega-weekly-free-sp (FLAGGED_FAKE)`
+
+- **Inventory, markets and contracts:** `feat:wallet.hypernet-hypercore-sizing-expiry (FLAGGED_FAKE)`, `feat:wallet.hypernet-relay (FLAGGED_FAKE)`, `feat:wallet.nes-store (FLAGGED_FAKE)`
+
+- **Industry and resources:** `feat:mining.belt-ore-distribution (FLAGGED_FAKE)`, `feat:mining.belts-as-balls (FLAGGED_FAKE)`
+
+- **PvE:** `feat:pve.air-career-program (FLAGGED_FAKE)`, `feat:pve.daily-goals (FLAGGED_FAKE)`, `feat:pve.login-campaign (FLAGGED_FAKE)`, `feat:pve.mission-complete (FLAGGED_FAKE)`, `feat:pve.mission-lp-isk-reward-formula (FLAGGED_FAKE)`
+
+- **Structures and territory:** `feat:sovereignty.skyhook-reagent-maturity (FLAGGED_FAKE)`
+
+- **Quasar gateway services:** `feat:quasar.achievement (FLAGGED_FAKE)`, `feat:quasar.career (FLAGGED_FAKE)`, `feat:quasar.cosmetic (FLAGGED_FAKE)`, `feat:quasar.dailygoal (FLAGGED_FAKE)`
 
 Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = mapped `feat:` rows closed/total; **Assessment** = the agent's own judgement from `docs/parity/task_notes.json` (DONE is accepted only when the ledger row is DONE).
 
@@ -51,9 +90,9 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| T-1 | Parity tagging and attestation. Write a small test-support crate (e.g. eve-testk… | DONE | 0/0 | test_attest_noop_when_env_unset, test_attest_writes_jsonl_when_env_set, test_phase_t_t1_machonet_get_time_rpc_parity, te | DONE | Implemented eve-testkit JSONL attestation crate, parity tag documentation, and machoNet.GetTime RPC test. | 617cd7004 2026-10-18 |
+| T-1 | Parity tagging and attestation. Write a small test-support crate (e.g. eve-testk… | DONE | 0/0 | test_attest_noop_when_env_unset, test_attest_writes_jsonl_when_env_set, test_phase_t_t1_machonet_get_time_rpc_parity, te | DONE | Implemented eve-testkit JSONL attestation crate, parity tag documentation, and machoNet.GetTime RPC test. | 9275b57f4 2026-11-11 |
 | T-2 | Data-driven sweeps over the real static data. For every client static-data file,… | DONE | 0/0 | test_plan_t2_z4_sde_and_dogma_effect_attestation | DONE | Raw-client FSD and SQLite sweeps verify all SDE static data and Dogma effect rows against V24 client files. | 6adf21085 2026-11-03 |
-| T-3 | Property and fuzz tests. Use proptest round-trips for every marshal opcode, Pack… | DONE | 0/0 | prop_t3_dbrow_pack_unpack_roundtrip, prop_t3_destiny_add_balls_roundtrip, prop_t3_destiny_decoder_fuzz_never_panics, pro | DONE | Comprehensive proptest fuzzing for MachoNet framing, DBRow codec, Destiny wire, Dogma VM, and Quasar envelopes with zero panics. | 6270c6cfe 2026-10-18 |
+| T-3 | Property and fuzz tests. Use proptest round-trips for every marshal opcode, Pack… | DONE | 0/0 | prop_t3_dbrow_pack_unpack_roundtrip, prop_t3_destiny_add_balls_roundtrip, prop_t3_destiny_decoder_fuzz_never_panics, pro | DONE | Comprehensive proptest fuzzing for MachoNet framing, DBRow codec, Destiny wire, Dogma VM, and Quasar envelopes with zero panics. | eec1a36ac 2026-11-12 |
 | T-4 | Golden wire tests against the client's own codecs. Through the in-client bridge,… | DONE | 0/0 | test_t4_golden_wire_marshal_destiny_quasar_and_python_bridge_roundtrip | DONE | Golden wire PyRep marshaling, binary Destiny stream, and Quasar Protobuf wire format roundtrip verified. | 5a5503691 2026-10-18 |
 | T-5 | Coverage tooling. Install cargo-llvm-cov and verify workspace coverage runs clea… | DONE | 0/0 | test_phase_t_t5_coverage_and_mutation_tooling, test_t5_db_persistence_accounts_and_wallet_coverage, test_t5_destiny_move | DONE | Installed cargo-llvm-cov and cargo-mutants and added QA coverage and mutation verification harness enforcing >= 85% thresholds. | 5f79f226e 2026-11-06 |
 | T-6 | Real-client harness. tools/client-harness/run_journeys --out DIR --journeys FILE… | SUPERVISOR_OWNED | 0/0 | — | PARTIAL | Client journey runner and simulated two-client harness in place; real V24 client journey execution pending. | bb5c2427e 2026-11-09 |
@@ -85,7 +124,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | SP-3 | Beyonce command set | DONE | 19/19 | test_sp3_cloaking_prototype_covert_decloak_and_stabilization, test_sp3_propulsion_agility_mjd_mjfg_and_approach, test_sp | DONE | Beyonce approach, keep at range, align, propulsion speed boost, and micro jump drive 100km teleportation tested. | 9923bff61 2026-10-20 |
 | SP-4 | Stargate jump polish | DONE | 7/7 | test_destiny_collision_bounce_physics_and_gate_cloak, test_p7_destiny_binary_stream_undock_movement_and_stargate_jump, t | DONE | Stargate jump arrival at destination gate position, session change notification, gate cloak, and no jump fatigue on stargates partially implemented. | 5a5503691 2026-10-18 |
 | SP-5 | Dock / undock | DONE | 4/4 | test_sp5_docking_and_undocking_station_structure_and_boarding, test_sp5_stargate_jumping_session_handoff_and_gate_cloak_ | DONE | Station and Upwell structure docking perimeter checks, dock delay, undock along orientation vector, and ship boarding tested. | 7af241d43 2026-10-21 |
-| SP-6 | Logoff, disconnect and login in space (user-added 2026-10-22) | DONE | 0/0 | test_sp6_safe_logoff_refusals_aborts_and_30s_completion, test_sp6_ungraceful_disconnect_emergency_warp_timers_pvp_renewa | DONE | — | 40b66b402 2026-10-22 |
+| SP-6 | Logoff, disconnect and login in space (user-added 2026-10-22) | DONE | 0/0 | test_sp6_safe_logoff_refusals_aborts_and_30s_completion, test_sp6_ungraceful_disconnect_emergency_warp_timers_pvp_renewa | DONE | — | 996cd6d2d 2026-11-12 |
 | SP-7 | Background cluster scheduler, unobserved systems & ballpark reload (user-added 2… | DONE | 5/5 | test_sp7_unobserved_system_simulation_and_background_cluster_tick | DONE | — | 9f6870a41 2026-10-30 |
 
 ## Phase 4: Dogma and fitting
@@ -103,14 +142,14 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| C-1 | Turret and missile damage from attributes | DONE | 17/17 | test_c1_c2_turret_tracking_missiles_and_damage_pipeline, test_c1_turret_tracking_missile_damage_and_resistances | DONE | Turret tracking and missile damage formulas with 4-channel resistances across shield, armor, and structure verified. | 773713c0a 2026-10-21 |
+| C-1 | Turret and missile damage from attributes | DONE | 17/17 | test_c1_c2_turret_tracking_missiles_and_damage_pipeline, test_c1_turret_tracking_missile_damage_and_resistances | DONE | Turret tracking and missile damage formulas with 4-channel resistances across shield, armor, and structure verified. | 4a4fa35a2 2026-11-11 |
 | C-2 | HP from dogma; damage notifications | DONE | 4/4 | test_c1_c2_turret_tracking_missiles_and_damage_pipeline, test_c2_dogma_shield_recharge_curve_and_damage_state, test_c2_h | DONE | CombatState initialized from ship dogma attributes, analytical passive shield/capacitor recharge, and OnDamageStateChange verified. | 171ec4ff1 2026-10-18 |
-| C-3 | Death pipeline | DONE | 23/23 | test_c3_courier_package_destroyed_and_missile_death_pipeline, test_c3_death_pipeline_explosion_wreck_loot_pod_insurance_ | DONE | Ship destruction at zero hull HP, physical wreck spawn, Loot Fairy cargo roll, pod ejection, pod loss, medical clone respawn, and self-destruct countdown tested. | ce7713c85 2026-10-27 |
-| C-4 | NPC spawns and AI | DONE | 22/22 | test_c4_npc_spawns_ai_state_machine_and_dynamic_bounties, test_c4_npc_target_switching_and_clone_soldier_lowsec_spawns | DONE | NPC belt rats, spawn groups, faction damage types, AI targeting and orbit, wreck loot tables, dynamic bounty payout, and sec status gain tested. | 9f6870a41 2026-10-30 |
-| C-5 | Asteroid belts and mining | DONE | 0/0 | test_canonical_plan_c5_and_mn01_mining_sde_and_asteroid_belts | DONE | Superseded by Phase 5M (MN-01..MN-18); partial mining cycle and belt spawning in place. | d740ac4fb 2026-10-18 |
+| C-3 | Death pipeline | DONE | 23/23 | test_c3_courier_package_destroyed_and_missile_death_pipeline, test_c3_death_pipeline_explosion_wreck_loot_pod_insurance_ | DONE | Ship destruction at zero hull HP, physical wreck spawn, Loot Fairy cargo roll, pod ejection, pod loss, medical clone respawn, and self-destruct countdown tested. | 1b28e49c7 2026-11-11 |
+| C-4 | NPC spawns and AI | DONE | 22/22 | test_c4_npc_spawns_ai_state_machine_and_dynamic_bounties, test_c4_npc_target_switching_and_clone_soldier_lowsec_spawns | DONE | NPC belt rats, spawn groups, faction damage types, AI targeting and orbit, wreck loot tables, dynamic bounty payout, and sec status gain tested. | e85f6c379 2026-11-12 |
+| C-5 | Asteroid belts and mining | DONE | 0/0 | test_canonical_plan_c5_and_mn01_mining_sde_and_asteroid_belts | DONE | Superseded by Phase 5M (MN-01..MN-18); partial mining cycle and belt spawning in place. | 99a7aa67a 2026-11-12 |
 | C-6 | Reprocessing (real) | DONE | 0/0 | test_action_plan_c6_mn08_to_mn12_harvesting_drones_scan_compression_reprocessing | DONE | Superseded by MN-11 (compression) and MN-12 (reprocessing) using SDE typeMaterials, station/structure base yield, skills, implants, per-structure service tax, and scrapmetal processing. | d9adc53e9 2026-10-27 |
 | C-7 | Salvage, tractor, drones | DONE | 25/25 | test_c7_salvage_mechanics_tractor_beam_and_combat_drones, test_plan_c7_drones_stargate_jump_reconnect_dock_logoff_death, | DONE | Salvager wreck consumption and salvage yield, tractor beam pull physics, drone bandwidth validation, launch, orbit, and recall tested. | 6880b70a2 2026-10-27 |
-| C-8 | CrimeWatch and CONCORD | DONE | 44/44 | test_c8_crimewatch_state_machine_timers_flags_and_concord | DONE | Weapon timer, aggression tracking, suspect and criminal timers, sec status penalty and gain, and highsec CONCORD retaliation response tested. | 9f6870a41 2026-10-30 |
+| C-8 | CrimeWatch and CONCORD | DONE | 44/44 | test_c8_crimewatch_state_machine_timers_flags_and_concord | DONE | Weapon timer, aggression tracking, suspect and criminal timers, sec status penalty and gain, and highsec CONCORD retaliation response tested. | 6fdb9de6d 2026-11-13 |
 
 ## Phase 5M: Full mining system
 
@@ -149,8 +188,8 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| E-1 | Fee inputs | DONE | 4/4 | test_e1_broker_fee_and_sales_tax_skill_discounts | DONE | Broker fee calculation with Broker Relations and standings discount, sales tax with Accounting discount, and market escrow deduction verified. | 0dd62e6b2 2026-10-21 |
-| E-2 | Order lifecycle | DONE | 23/23 | test_e2_market_order_matching_queries_and_cancellation, test_e2_structure_market_service_and_order_expiry | DONE | Limit orders, immediate buy and sell matching against order book, regional order book queries, order cancellation, and escrow refund tested. | 252371f52 2026-10-27 |
+| E-1 | Fee inputs | DONE | 4/4 | test_e1_broker_fee_and_sales_tax_skill_discounts | DONE | Broker fee calculation with Broker Relations and standings discount, sales tax with Accounting discount, and market escrow deduction verified. | d9fc7c574 2026-11-12 |
+| E-2 | Order lifecycle | DONE | 23/23 | test_e2_market_order_matching_queries_and_cancellation, test_e2_structure_market_service_and_order_expiry | DONE | Limit orders, immediate buy and sell matching against order book, regional order book queries, order cancellation, and escrow refund tested. | 9275b57f4 2026-11-11 |
 | E-3 | Contracts | DONE | 15/15 | test_e3_contracts_lifecycle_item_exchange_courier_auction, test_e3_corp_contract_wallet_roles_and_issuer_departure | DONE | Item Exchange, Courier with collateral hold and delivery failure, and Auction contracts with bidding and escrow refund tested. | 02ea9ce13 2026-10-21 |
 | E-4 | Industry | DONE | 33/33 | test_e4_capital_shipyard_restrictions_and_exponential_research, test_e4_industry_jobs_lifecycle_manufacturing_research_a | DONE | Industry blueprint data, facilities lookup, job cost with facility tax, manufacturing, TE/ME research, copying, and delivery tested. | 958987363 2026-11-06 |
 | E-5 | Agents and missions | FLAGGED_FAKE | 25/26 | agent_mission_completion_isk_lp_standing_and_reload, test_agent_missions_complete_reward_formula_and_storyline_e2e | PARTIAL | Agent finder, conversation, mission offer/accept/decline/quit/complete state machine, dungeon NPC spawns, bonus timer, skill-scaled ISK/LP rewards, standing propagation, and cooldowns verified. | e1cbba77e 2026-11-04 |
@@ -178,7 +217,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Q-3 | Identity, accounts and entitlements: auth, login, user, entitlement, omega, memb… | DONE | 0/0 | test_canonical_plan_q3_q4_q7_q8_quasar_packages_dispatch | DONE | Quasar Identity, Account, FastCheckout, Token Purchase, Subscriptions, and Monetization gateway handlers and notices implemented and verified. | 6eb5708a0 2026-11-06 |
 | Q-4 | Character and progression: character, skill, implant, clone-related, career, ach… | DONE | 0/0 | test_canonical_plan_q3_q4_q7_q8_quasar_packages_dispatch | DONE | Quasar Daily Goals, AIR Career Goals, Achievements, Skill Plans, Tracks, and Goal/Tale notices implemented and verified. | 6eb5708a0 2026-11-06 |
 | Q-5 | Social and organization: corporation, corporationgoal, freelance, alliance, cont… | DONE | 0/0 | entitlements_serverops_and_sqlite_restart_persistence, test_plan_q5_social_and_organization_quasar_packages, test_quasar | DONE | Quasar Chat, Corporation Goals, Freelance Projects, Alliance, Mail, Calendar, and Social gateway handlers implemented and verified. | 958987363 2026-11-06 |
-| Q-6 | Economy and industry: market, contract, industry, blueprint, asset, assetholding… | FLAGGED_FAKE | 0/0 | entitlements_serverops_and_sqlite_restart_persistence, quasar_economy_industry_h2c_and_persistence_end_to_end, test_plan | PARTIAL | Quasar Market, Contract, Industry, Blueprint, Asset, AssetHolding, Inventory, Container, Accounting, LoyaltyPoints, Planet, PI, Ore, Moon, and AsteroidBelt handlers and h2c persistence verified. | b9c5cc49e 2026-11-10 |
+| Q-6 | Economy and industry: market, contract, industry, blueprint, asset, assetholding… | FLAGGED_FAKE | 0/0 | entitlements_serverops_and_sqlite_restart_persistence, quasar_economy_industry_h2c_and_persistence_end_to_end, test_plan | PARTIAL | Quasar Market, Contract, Industry, Blueprint, Asset, AssetHolding, Inventory, Container, Accounting, LoyaltyPoints, Planet, PI, Ore, Moon, and AsteroidBelt handlers and h2c persistence verified. | 37f01d0f7 2026-11-06 |
 | Q-7 | Space and combat: ship, module, fighter, dogma, effect, capacitor, space, spacec… | DONE | 0/0 | test_canonical_plan_q3_q4_q7_q8_quasar_packages_dispatch | DONE | Quasar Space, Celestials, Navigation, Bubble Presence, Dynamic Bounty System, and Pirate Insurgency gateway handlers implemented and verified. | 911eb8b47 2026-10-21 |
 | Q-8 | Sovereignty, faction warfare and events: sovereignty, factionwarfare, faction, o… | DONE | 0/0 | test_canonical_plan_q3_q4_q7_q8_quasar_packages_dispatch | DONE | Quasar Sovereignty Hub, Skyhook, Workforce, Upgrades, Mercenary Den, Faction Warfare, and Operations gateway handlers and notices implemented and verified. | 6eb5708a0 2026-11-06 |
 | Q-9 | Cosmetics and app infrastructure: cosmetic (SKINs, SKINR/paragon, emblems, logos… | BLOCKED_BY_FEATURES | 0/0 | test_plan_q9_cosmetics_and_app_infrastructure | PARTIAL | Quasar Ship Cosmetics, SKINR Sequencing, Component/SKIN Market Listings, Achievements, Career Goals, Daily Goals, and App Infrastructure gateway handlers and notices verified. | bb5c2427e 2026-11-09 |
@@ -199,11 +238,11 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| Z-1 | Close every rpc: row (1,230 client-called methods) with V24 argument layouts and… | DONE | 0/0 | test_rpc_notify_and_feature_dispatch | DONE | All catalog RPC methods implemented and verified against V24 client identifier corpus. | e93da2459 2026-11-06 |
-| Z-2 | Close every notify: row. Server-emitted notifications are sent with correct payl… | DONE | 0/0 | test_rpc_notify_and_feature_dispatch | DONE | All client notification methods implemented and verified with live session delivery assertions. | e19dce396 2026-10-18 |
+| Z-1 | Close every rpc: row (1,230 client-called methods) with V24 argument layouts and… | DONE | 0/0 | test_rpc_notify_and_feature_dispatch | PARTIAL | Catalog RPC handlers wired across implemented services; 37 open rpc rows remain in the parity ledger. | 996cd6d2d 2026-11-12 |
+| Z-2 | Close every notify: row. Server-emitted notifications are sent with correct payl… | DONE | 0/0 | test_rpc_notify_and_feature_dispatch | PARTIAL | Client notification emitters and live session delivery verified; 3 open notify rows remain in the parity ledger. | 996cd6d2d 2026-11-12 |
 | Z-3 | Close every destiny: and ballmode: row on the binary destiny stream. | DONE | 0/0 | test_plan_z3_destiny_binary_stream_ball_mode | DONE | All Destiny binary stream actions and ball physics modes implemented and verified. | 6adf21085 2026-11-03 |
 | Z-4 | Close every sde: row and effect:. | DONE | 0/0 | test_plan_t2_z4_sde_and_dogma_effect_attestation | DONE | All 213 SDE static data resources and Dogma effect rows loaded from V24 client files and verified. | 322b1baeb 2026-10-18 |
-| Z-5 | Close every feat: row, including every row the gap auditor has appended. Fix eve… | DONE | 0/0 | test_rpc_notify_and_feature_dispatch | DONE | All non-NA feature parity rows implemented and verified with live server state assertions. | a7e5196df 2026-10-18 |
+| Z-5 | Close every feat: row, including every row the gap auditor has appended. Fix eve… | DONE | 0/0 | test_rpc_notify_and_feature_dispatch | PARTIAL | Implemented server features verified with live state assertions; 21 open feat rows remain in the parity ledger. | 996cd6d2d 2026-11-12 |
 | Z-6 | Pass every journey: row on the real client through tools/client-harness/run_jour… | SUPERVISOR_OWNED | 0/0 | — | NOT STARTED | Real-client journeys require execution via the V24 client journey harness. | bb5c2427e 2026-11-09 |
 | Z-7 | Reach workspace line coverage ≥ 90%. | SUPERVISOR_OWNED | 0/0 | — | PARTIAL | Coverage and mutation QA harness present; full workspace >=90% coverage and >=85% mutation gate pending. | bb5c2427e 2026-11-09 |
 | Z-8 | Final acceptance. The claims review is PASS and the gap audit is CLEAN on the fi… | BLOCKED_BY_FEATURES | 0/0 | test_parity_plan_z6_z7_z8_journeys_coverage_and_acceptance_gate, test_plan_z7_z8_test_thresholds_and_final_acceptance_ga | PARTIAL | Full canonical ledger, preflight static invariants, and final acceptance gate verification wired; awaits gap-audit clearance of remaining flagged rows. | bb5c2427e 2026-11-09 |
