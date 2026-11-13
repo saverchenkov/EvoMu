@@ -5,7 +5,9 @@
 use super::*;
 use crate::quasar_gateway::{PublicGatewayRouter, STATUS_FORBIDDEN};
 use eve_db::UpwellStructureRecord;
-use eve_proto::quasar::{AuthoritativeContext, DynamicQuasarMessage, DynamicValue, QuasarDescriptorRegistry};
+use eve_proto::quasar::{
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, QuasarDescriptorRegistry,
+};
 use std::sync::{Arc, OnceLock};
 
 #[cfg(test)]

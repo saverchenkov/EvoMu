@@ -320,6 +320,23 @@ fn fill_infomorphs_gen_definition(
     b.set("cargo_capacity", cap)
 }
 
+#[cfg(test)]
+fn encode_infomorphs_gen_definition_for_planet(
+    cap: u32,
+    sde: Option<&eve_sde::SdeRegistry>,
+    solar_system_id: u32,
+    planet_id: i64,
+) -> Vec<u8> {
+    fill_infomorphs_gen_definition(
+        pb::message("eve_public.sovereignty.mercenaryden.InfomorphsGenerationDefinition"),
+        cap,
+        sde,
+        solar_system_id,
+        planet_id,
+    )
+    .must_encode()
+}
+
 fn push_evolution_notice(pending: &PendingNotices, den: &PersistedMercenaryDen) {
     let n = pb::message(EVOLUTION_NOTICE)
         .set("mercenary_den.sequential", den.den_id as u64)
