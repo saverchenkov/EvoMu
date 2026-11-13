@@ -523,17 +523,37 @@ pub async fn execute_call_req_wire(
         }
         *wire.subscribed_sys_id = session.solar_system_id;
     }
-    let was_live = matches!(wire.wire_state.destiny, DestinyStream::Live { .. });
+    let mut was_live = matches!(wire.wire_state.destiny, DestinyStream::Live { .. });
     let is_ballpark_init_rpc = (method == "UpdateStateRequest"
         || (service == "beyonce" && method == "MachoBindObject"))
         && session.station_id.is_none()
         && session.structure_id.is_none();
-    if is_ballpark_init_rpc && !was_live {
+    if is_ballpark_init_rpc
+        && (!was_live
+            || matches!(
+                wire.wire_state.destiny,
+                DestinyStream::Live {
+                    set_state_stamp: 0,
+                    ..
+                }
+            ))
+    {
         // Drain any pre-bind 1Hz ticks buffered in `sys_rx` between `SelectCharacterID`
         // and `beyonce.MachoBindObject` / `UpdateStateRequest` so stale ticks (e.g. tick N-1)
         // are never flushed out-of-order after the synchronous post-bind `SetState` drain (tick N).
         let _ = drain_sys_rx_discarding_lag(wire.sys_rx);
-        wire.wire_state.ensure_in_space(session.solar_system_id);
+        if matches!(
+            wire.wire_state.destiny,
+            DestinyStream::Live {
+                set_state_stamp: 0,
+                ..
+            }
+        ) {
+            wire.wire_state.enter_space(session.solar_system_id);
+            was_live = false;
+        } else {
+            wire.wire_state.ensure_in_space(session.solar_system_id);
+        }
     }
 
     let mut error_wire_body = None;

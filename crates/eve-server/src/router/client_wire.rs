@@ -66,9 +66,21 @@ impl<'c> ClientWireSession<'c> {
         let subscribed_sys_id = session.solar_system_id;
         let sys_rx = ctx
             .systems
-            .get_or_spawn(subscribed_sys_id.unwrap_or(30000142))
+            .get_or_spawn(subscribed_sys_id.unwrap_or(0))
             .subscribe();
-        let wire_state = SessionWireState::new(session.session_id, client_id);
+        let mut wire_state = SessionWireState::new(session.session_id, client_id);
+        if session.character_id.is_some()
+            && session.solar_system_id.is_some()
+            && session.station_id.is_none()
+            && session.structure_id.is_none()
+        {
+            let ep = wire_state.enter_space(session.solar_system_id);
+            wire_state.destiny = crate::outbound_sequencer::DestinyStream::Live {
+                epoch: ep,
+                set_state_stamp: 0,
+                last_stamp: 0,
+            };
+        }
         Self {
             ctx,
             session,
@@ -134,9 +146,21 @@ pub async fn dispatch_call_on_wire(
     let mut subscribed_sys_id = session.solar_system_id;
     let mut sys_rx = ctx
         .systems
-        .get_or_spawn(subscribed_sys_id.unwrap_or(30000142))
+        .get_or_spawn(subscribed_sys_id.unwrap_or(0))
         .subscribe();
     let mut wire_state = SessionWireState::new(session.session_id, client_id);
+    if session.character_id.is_some()
+        && session.solar_system_id.is_some()
+        && session.station_id.is_none()
+        && session.structure_id.is_none()
+    {
+        let ep = wire_state.enter_space(session.solar_system_id);
+        wire_state.destiny = crate::outbound_sequencer::DestinyStream::Live {
+            epoch: ep,
+            set_state_stamp: 0,
+            last_stamp: 0,
+        };
+    }
     let mut wire_refs = CallReqWireRefs {
         client_id,
         sys_rx: &mut sys_rx,

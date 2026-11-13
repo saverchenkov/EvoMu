@@ -127,15 +127,12 @@ impl<'s, 'c> ClientWireTransport for SessionBorrowWireTransport<'s, 'c> {
             } else {
                 Vec::new()
             };
-            let saved_char_notifs = if self.preserve_char_notifications {
-                self.session
-                    .character_id
-                    .filter(|&cid| cid != 0)
-                    .map(|cid| self.ctx.drain_notifications_for_char(cid))
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
+            let saved_char_notifs = self
+                .session
+                .character_id
+                .filter(|&cid| cid != 0)
+                .map(|cid| self.ctx.drain_notifications_for_char(cid))
+                .unwrap_or_default();
             let out = dispatch_call_on_wire(
                 self.ctx,
                 self.session,
@@ -150,11 +147,13 @@ impl<'s, 'c> ClientWireTransport for SessionBorrowWireTransport<'s, 'c> {
                 let mut restored_session = saved_session_notifs;
                 restored_session.extend(out.notifications.iter().cloned());
                 self.session.notifications = restored_session;
-                let mut restored_char = saved_char_notifs;
+            }
+            let mut restored_char = saved_char_notifs;
+            if self.preserve_char_notifications {
                 restored_char.extend(out.drained_char_notifications.iter().cloned());
-                if !restored_char.is_empty() {
-                    self.ctx.restore_pending_notifications(restored_char);
-                }
+            }
+            if !restored_char.is_empty() {
+                self.ctx.restore_pending_notifications(restored_char);
             }
             to_wire_exchange(out)
         })
