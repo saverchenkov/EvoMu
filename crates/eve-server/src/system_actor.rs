@@ -595,6 +595,8 @@ impl SystemRegistry {
                     pending_notifications_opt,
                     notify_tx_opt,
                     ball_space_entry_epochs,
+                    fit_projections,
+                    weapon_cycle_start_modules,
                     ..
                 } = &mut *actor_st;
                 {
@@ -891,6 +893,7 @@ impl SystemRegistry {
                                     })
                                     .unwrap_or_default();
                                 let removed = ballpark.remove_ball(ball_id);
+                                fit_projections.remove(&ball_id);
                                 removed_checkpoint_ball = Some(ball_id);
                                 if !docking_evs.is_empty() {
                                     ballpark.observer_events.insert(ball_id, docking_evs);
@@ -917,6 +920,7 @@ impl SystemRegistry {
                                 base_scramble_strengths.remove(&ship_id);
                                 base_core_strengths.remove(&ship_id);
                                 asteroids.remove(&ship_id);
+                                fit_projections.remove(&ship_id);
                                 removed_checkpoint_ball = Some(ship_id);
                                 let removed = if ballpark.balls.contains_key(&station_id) {
                                     ballpark.accept_docking(ship_id, station_id)
@@ -971,6 +975,7 @@ impl SystemRegistry {
                                 base_scramble_strengths.remove(&ball_id);
                                 base_core_strengths.remove(&ball_id);
                                 asteroids.remove(&ball_id);
+                                fit_projections.remove(&ball_id);
                                 removed_checkpoint_ball = Some(ball_id);
                                 let combat_state = ballpark.combat_states.get(&ball_id).cloned();
                                 let slim_meta = ballpark.ball_slim_meta.get(&ball_id).cloned();
@@ -1533,6 +1538,7 @@ impl SystemRegistry {
                             }
                             SystemCommand::RemoveModuleCycle { ship_id, module_id, reply } => {
                                 let mut remaining_cooldown = None;
+                                weapon_cycle_start_modules.remove(&(ship_id, module_id));
                                 cycles_tackle::snapshot_active_tackle_totals(&ballpark, active_module_cycles, &mut last_active_totals);
                                 if let Some(pos) = active_module_cycles.iter().position(|c| c.ship_id == ship_id && c.module_id == module_id) {
                                     let removed = active_module_cycles.remove(pos);
@@ -1558,6 +1564,62 @@ impl SystemRegistry {
                                     }
                                 }
                                 let _ = reply.send(Ok(remaining_cooldown));
+                            }
+                            SystemCommand::RequestCycleDeactivation { ship_id, module_id, reply } => {
+                                let updated = if let Some(cycle) = active_module_cycles
+                                    .iter_mut()
+                                    .find(|c| c.ship_id == ship_id && c.module_id == module_id)
+                                {
+                                    cycle.repeat = 0;
+                                    true
+                                } else {
+                                    false
+                                };
+                                let _ = reply.send(updated);
+                            }
+                            SystemCommand::FireWeaponCycleVolley { ship_id, module_id, reply } => {
+                                let mut volley_destroyed = Vec::new();
+                                let mut volley_actions = Vec::new();
+                                if let Some(cycle) = active_module_cycles
+                                    .iter()
+                                    .find(|c| c.ship_id == ship_id && c.module_id == module_id)
+                                    .cloned()
+                                {
+                                    weapon_cycle_start_modules.insert((ship_id, module_id));
+                                    cycles::apply_weapon_cycle_damage(
+                                        &cycle,
+                                        &mut ballpark,
+                                        rah_incoming_damage,
+                                        sde_opt,
+                                        db_opt,
+                                        &mut volley_actions,
+                                        &mut volley_destroyed,
+                                    );
+                                    cycles::flush_pending_cycle_damage_notifications(
+                                        db_opt.as_ref(),
+                                        pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>),
+                                        notify_tx_opt.as_ref(),
+                                        &mut volley_actions,
+                                    );
+                                    if let Some(db) = db_opt.as_ref() {
+                                        for &(target_ball_id, _) in &volley_destroyed {
+                                            crate::services::tactical_module_mechanics::on_probe_ball_removed_in_actor(
+                                                &mut ballpark,
+                                                db_opt,
+                                                tactical_state.as_ref(),
+                                                target_ball_id,
+                                            );
+                                            crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark(
+                                                &mut ballpark,
+                                                db,
+                                                solar_system_id,
+                                                target_ball_id,
+                                            );
+                                        }
+                                    }
+                                    sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
+                                }
+                                let _ = reply.send((volley_destroyed, volley_actions));
                             }
                             SystemCommand::HasModuleCycle { ship_id, module_id, reply } => {
                                 let exists = active_module_cycles
@@ -1693,11 +1755,39 @@ impl SystemRegistry {
                                 let exists = ballpark.combat_states.contains_key(&target_id) && !target_ewar_immune;
                                 if exists {
                                     ballpark.apply_ecm_jam(target_id, duration_s);
+                                    let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
+                                    on_target_unlocked_in_actor(
+                                        &mut ballpark,
+                                        active_module_cycles,
+                                        &base_scramble_strengths,
+                                        &base_core_strengths,
+                                        &db_opt,
+                                        target_id,
+                                        None,
+                                        deact_guard.as_ref(),
+                                    );
+                                    sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 }
                                 let _ = reply.send(exists);
                             }
                             SystemCommand::ApplyEcmBurst { source_id, burst_radius_m, jam_strengths, duration_s, roll, ship_eval_overrides, reply } => {
                                 let jammed = handle_apply_ecm_burst(&mut ballpark, &active_module_cycles, &sde_opt, &mechanic_rng_opt, source_id, burst_radius_m, jam_strengths, duration_s, roll, ship_eval_overrides);
+                                if !jammed.is_empty() {
+                                    let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
+                                    for &tid in &jammed {
+                                        on_target_unlocked_in_actor(
+                                            &mut ballpark,
+                                            active_module_cycles,
+                                            &base_scramble_strengths,
+                                            &base_core_strengths,
+                                            &db_opt,
+                                            tid,
+                                            None,
+                                            deact_guard.as_ref(),
+                                        );
+                                    }
+                                    sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
+                                }
                                 let _ = reply.send(jammed);
                             }
                             SystemCommand::FlushPeerObserverUpdates {
@@ -1761,6 +1851,21 @@ impl SystemRegistry {
                                 }
                                 let _ = reply.send(flushed);
                             }
+                            SystemCommand::ApplyFitProjection {
+                                ship_id,
+                                projection,
+                                reply,
+                            } => {
+                                let applied = apply_fit_projection_in_actor(
+                                    &mut ballpark,
+                                    fit_projections,
+                                    ship_id,
+                                    projection,
+                                );
+                                if let Some(tx) = reply {
+                                    let _ = tx.send(applied);
+                                }
+                            }
                         }
                         if let Some((dt, step_reply)) = pending_step {
                             let raw_tidi = f64::from_bits(tidi_factor_bits_actor.load(std::sync::atomic::Ordering::Relaxed));
@@ -1805,8 +1910,21 @@ impl SystemRegistry {
                                 .read()
                                 .unwrap_or_else(|e| e.into_inner())
                                 .clone();
+                            let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
                             for ev in &events {
                                 if let DestinyEvent::OnTarget { mode, source_id, target_id } = ev {
+                                    if mode == "lost" {
+                                        on_target_unlocked_in_actor(
+                                            &mut ballpark,
+                                            active_module_cycles,
+                                            &base_scramble_strengths,
+                                            &base_core_strengths,
+                                            &db_opt,
+                                            *source_id,
+                                            Some(*target_id),
+                                            deact_guard.as_ref(),
+                                        );
+                                    }
                                     if mode == "locked" || mode == "lost" {
                                         let char_id_opt = ballpark
                                             .ball_slim_meta
@@ -1841,12 +1959,12 @@ impl SystemRegistry {
                                     }
                                 }
                             }
-                            let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
                             let mut destroyed_balls = step_cycles_and_capacitor_with_epochs(
                                 &mut ballpark, active_module_cycles, pending_anchoring_disruptors,
                                 active_nanite_repairs, ship_rack_heat, rah_incoming_damage,
                                 &base_scramble_strengths, &base_core_strengths, &sde_opt, &db_opt,
-                                ball_space_entry_epochs, mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions, dt_sim, deact_guard.as_ref(),
+                                ball_space_entry_epochs, fit_projections, weapon_cycle_start_modules,
+                                mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions, dt_sim, deact_guard.as_ref(),
                             );
                             cycles::record_player_ship_capacitor_deltas(&ballpark, &pre_tick_caps, pending_cycle_actions);
                             cycles::flush_pending_cycle_damage_notifications(
@@ -2066,6 +2184,131 @@ impl SystemRegistry {
             let mut guard = self.systems.write().unwrap_or_else(|e| e.into_inner());
             insert_handle(&mut guard)
         }
+    }
+}
+
+/// Applies an immutable [`eve_dogma::FitProjection`] onto `ship_id` inside the system actor,
+/// enforcing monotonic [`eve_dogma::FitRev`] ordering and recomputing derived `Ball` / `CombatState`
+/// attributes from the new baselines without overwriting actor-managed multipliers (`#922`, `#834`).
+pub(crate) fn apply_fit_projection_in_actor(
+    ballpark: &mut Ballpark,
+    fit_projections: &mut HashMap<BallId, eve_dogma::FitProjection>,
+    ship_id: BallId,
+    projection: eve_dogma::FitProjection,
+) -> bool {
+    if fit_projections
+        .get(&ship_id)
+        .is_some_and(|cur| projection.rev < cur.rev)
+    {
+        return false;
+    }
+    let prev_proj = fit_projections.get(&ship_id);
+    let hull_changed = prev_proj.is_some_and(|p| p.ship_type_id != projection.ship_type_id);
+    let prev_baseline_cap = prev_proj.map(|p| p.baseline.max_capacitor);
+    let baseline = projection.baseline;
+    fit_projections.insert(ship_id, projection);
+    let prev_max_vel = ballpark.balls.get(&ship_id).map(|b| b.max_velocity);
+    let Some(cs) = ballpark.combat_states.get_mut(&ship_id) else {
+        return false;
+    };
+    let shield_regen_disabled = cs.shield_recharge_time_ms <= 0.0;
+    let cap_regen_disabled = cs.capacitor_recharge_time_ms <= 0.0
+        || cs.base_capacitor_recharge_time_ms.is_some_and(|b| b <= 0.0);
+    cs.base_max_velocity = Some(baseline.max_velocity.max(0.0));
+    cs.base_mass = Some(baseline.mass.max(1.0));
+    cs.base_inertia = Some(baseline.agility.max(0.001));
+    cs.base_signature_radius = Some(baseline.signature_radius.max(0.0));
+    if !shield_regen_disabled {
+        cs.base_max_shield_hp = Some(baseline.max_shield_hp.max(0.0));
+        cs.base_max_armor_hp = Some(baseline.max_armor_hp.max(0.0));
+        cs.base_max_structure_hp = Some(baseline.max_structure_hp.max(0.0));
+        cs.shield_recharge_time_ms = baseline.shield_recharge_time_ms.max(1.0);
+    }
+    if !cap_regen_disabled {
+        let cap_manually_overridden = prev_baseline_cap.is_some_and(|prev_b| {
+            cs.base_max_capacitor
+                .is_some_and(|cur_b| (cur_b - prev_b).abs() > 1e-2)
+                && (baseline.max_capacitor - prev_b).abs() <= 1e-2
+        }) || (prev_baseline_cap.is_none()
+            && (baseline.max_capacitor - 250.0).abs() < 1e-2
+            && cs
+                .base_max_capacitor
+                .is_some_and(|cur_b| (cur_b - 250.0).abs() > 1e-2));
+        if !cap_manually_overridden {
+            let cap_floor = if hull_changed { cs.capacitor } else { 0.0 };
+            cs.base_max_capacitor = Some(baseline.max_capacitor.max(cap_floor).max(0.0));
+        }
+        cs.base_capacitor_recharge_time_ms = Some(baseline.capacitor_recharge_time_ms.max(1.0));
+    }
+    cs.base_shield_resonance = Some(baseline.shield_resonance);
+    cs.base_armor_resonance = Some(baseline.armor_resonance);
+    cs.base_structure_resonance = Some(baseline.structure_resonance);
+    ballpark.recompute_ball_attributes(ship_id);
+    if let (Some(prev), Some(new_v)) =
+        (prev_max_vel, ballpark.balls.get(&ship_id).map(|b| b.max_velocity))
+    {
+        if (prev - new_v).abs() > 1e-6 {
+            ballpark.emit_event(
+                Some(ship_id),
+                DestinyEvent::SetMaxSpeed {
+                    ball_id: ship_id,
+                    max_speed: new_v,
+                },
+            );
+        }
+    }
+    true
+}
+
+impl SystemHandle {
+    /// Pushes an immutable [`eve_dogma::FitProjection`] to the system actor and awaits completion (`#922`).
+    pub async fn apply_fit_projection(
+        &self,
+        ship_id: BallId,
+        projection: eve_dogma::FitProjection,
+    ) -> bool {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if self
+            .cmd_sender()
+            .send(SystemCommand::ApplyFitProjection {
+                ship_id,
+                projection,
+                reply: Some(tx),
+            })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+
+    /// Non-blocking enqueue of [`SystemCommand::ApplyFitProjection`] for synchronous fit-mutation paths (`#922`).
+    ///
+    /// Releases/requires no held locks (`cmd_sender` asserts lock-free caller). Returns `false`
+    /// only if the actor mailbox is closed or currently full.
+    pub fn try_send_fit_projection(
+        &self,
+        ship_id: BallId,
+        projection: eve_dogma::FitProjection,
+    ) -> bool {
+        self.cmd_sender()
+            .try_send(SystemCommand::ApplyFitProjection {
+                ship_id,
+                projection,
+                reply: None,
+            })
+            .is_ok()
+    }
+
+    /// Reads the latest [`eve_dogma::FitProjection`] stored in actor state for `ship_id`, if any.
+    pub fn latest_fit_projection(&self, ship_id: BallId) -> Option<eve_dogma::FitProjection> {
+        self.actor_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .fit_projections
+            .get(&ship_id)
+            .cloned()
     }
 }
 

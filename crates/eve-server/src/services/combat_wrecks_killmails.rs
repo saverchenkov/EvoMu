@@ -1036,10 +1036,7 @@ pub async fn handle_wrecks_killmails(
                     }
                 }
             });
-            if let Ok(mut fit) = ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
-                let _ = fit.deactivate_module(module_id, &ctx.sde);
-                ctx.store_ship_fitting(ship_id, fit);
-            }
+            ctx.invalidate_and_push_fit(ship_id);
             if let Some(sys_id) = session.solar_system_id {
                 crate::services::space_destiny::space_nav_travel::sync_tether(ctx, char_id, sys_id, ship_id).await;
                 crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;

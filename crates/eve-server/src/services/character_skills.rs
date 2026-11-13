@@ -294,7 +294,7 @@ pub fn catch_up_skill_queue(ctx: &ServerContext, char_id: i64) {
         );
     }
     if let Some(ship_id) = ship_to_invalidate {
-        ctx.invalidate_ship_fitting(ship_id);
+        ctx.invalidate_and_push_fit(ship_id);
     }
 }
 
@@ -1040,7 +1040,7 @@ pub fn handle(
                 return match res {
                     Ok((new_skill_sp, remaining_free)) => {
                         if let Some(sid) = session.ship_id {
-                            ctx.invalidate_ship_fitting(sid);
+                            ctx.invalidate_and_push_fit(sid);
                         }
                         super::jump_clone_names::emit_server_skills_changed(
                             ctx,
@@ -1205,7 +1205,7 @@ pub fn handle(
             match res {
                 Ok((sp, rem_free)) => {
                     if let Some(sid) = session.ship_id {
-                        ctx.invalidate_ship_fitting(sid);
+                        ctx.invalidate_and_push_fit(sid);
                     }
                     ctx.notify(
                         crate::router::NotificationTarget::Character(char_id),

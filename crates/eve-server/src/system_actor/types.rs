@@ -292,6 +292,8 @@ pub(crate) struct SystemActorState {
     pub pending_notifications_opt: Option<Arc<RankedRwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>, RANK_LEAF>>>,
     pub notify_tx_opt: Option<tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
     pub ball_space_entry_epochs: HashMap<BallId, u64>,
+    pub fit_projections: HashMap<BallId, eve_dogma::FitProjection>,
+    pub weapon_cycle_start_modules: std::collections::HashSet<(BallId, i64)>,
     pub last_checkpointed_balls: HashMap<BallId, LastCheckpointedBallState>,
     pub hibernated: Arc<std::sync::atomic::AtomicBool>,
     pub hibernated_since_unix: Arc<std::sync::atomic::AtomicU64>,
@@ -555,6 +557,16 @@ pub enum SystemCommand {
         module_id: i64,
         reply: oneshot::Sender<Result<Option<f64>, String>>,
     },
+    RequestCycleDeactivation {
+        ship_id: BallId,
+        module_id: i64,
+        reply: oneshot::Sender<bool>,
+    },
+    FireWeaponCycleVolley {
+        ship_id: BallId,
+        module_id: i64,
+        reply: oneshot::Sender<(Vec<(BallId, Option<CharacterId>)>, Vec<PendingCycleAction>)>,
+    },
     HasModuleCycle {
         ship_id: BallId,
         module_id: i64,
@@ -642,6 +654,11 @@ pub enum SystemCommand {
     FlushPeerObserverUpdates {
         exclude_ball_id: Option<BallId>,
         reply: oneshot::Sender<usize>,
+    },
+    ApplyFitProjection {
+        ship_id: BallId,
+        projection: eve_dogma::FitProjection,
+        reply: Option<oneshot::Sender<bool>>,
     },
 }
 

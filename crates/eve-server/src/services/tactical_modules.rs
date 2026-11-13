@@ -177,7 +177,7 @@ pub fn remove_projected_remote_assistance(ctx: &ServerContext, source_ship_id: i
             }
         }
     }
-    for tid in affected { ctx.invalidate_ship_fitting(tid); }
+    for tid in affected { ctx.invalidate_and_push_fit(tid); }
 }
 
 /// Validates and projects a Remote Sensor Booster (`group 290`) or Remote Tracking Computer (`group 209`) onto `target_id`.
@@ -262,7 +262,7 @@ pub fn apply_projected_remote_assistance(
     list.retain(|e| e.module_id != module_id);
     list.push(entry);
     drop(st);
-    ctx.invalidate_ship_fitting(target_id);
+    ctx.invalidate_and_push_fit(target_id);
     Ok(())
 }
 
@@ -530,7 +530,7 @@ pub async fn activate_target_spectrum_breaker(
         snap.module_active_states.insert(module_id);
     });
     ctx.record_module_reactivation_delay(ship_id, module_id, react_delay_s);
-    ctx.invalidate_ship_fitting(ship_id);
+    ctx.invalidate_and_push_fit(ship_id);
 
     Ok(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)),
@@ -775,7 +775,7 @@ pub async fn handle_entosis_link_activation(
     };
 
     scanners_superweapons_state().write().unwrap_or_else(|e| e.into_inner()).entosis_contested_nodes.insert(target_id, ship_id);
-    ctx.invalidate_ship_fitting(ship_id);
+    ctx.invalidate_and_push_fit(ship_id);
     ctx.persist_server_runtime_to_db();
 
     Ok(PyRep::keyval([
@@ -1037,6 +1037,7 @@ pub async fn activate_command_burst(
     });
     for &(member_cid, member_sid) in &affected_ships {
         ctx.invalidate_ship_fitting(member_sid);
+        ctx.push_fit_projection(member_cid, member_sid);
         ctx.notify(NotificationTarget::Character(member_cid), "OnDbuffUpdated", "charid", vec![PyRep::Integer(member_sid), PyRep::List(dbuff_id_reps.clone())]);
     }
     crate::services::notify_emitters_space_dungeons::emit_fleet_boosted(ctx, char_id, mod_type.type_id, affected_ships.len());

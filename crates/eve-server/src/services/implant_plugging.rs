@@ -496,7 +496,7 @@ pub fn inject_implant(
         ctx.notify_item_mutation(char_id, pre.as_ref(), post.as_ref());
     }
     if ship_id > 0 {
-        ctx.invalidate_ship_fitting(ship_id);
+        ctx.invalidate_and_push_fit(ship_id);
     }
     ctx.notify(
         NotificationTarget::Character(char_id),
@@ -581,7 +581,7 @@ pub fn destroy_implant(
         ctx.notify_item_mutation(char_id, Some(&old_rec), None);
     }
     if ship_id > 0 {
-        ctx.invalidate_ship_fitting(ship_id);
+        ctx.invalidate_and_push_fit(ship_id);
     }
     ctx.notify(
         NotificationTarget::Character(char_id),
@@ -861,7 +861,7 @@ pub fn use_booster(
         ctx.notify_item_mutation(char_id, pre.as_ref(), post.as_ref());
     }
     if ship_id > 0 {
-        ctx.invalidate_ship_fitting(ship_id);
+        ctx.invalidate_and_push_fit(ship_id);
     }
     ctx.notify(
         NotificationTarget::Character(char_id),
@@ -895,7 +895,7 @@ pub fn get_boosters(
         .db
         .with_mut_snapshot(|snap| purge_expired_boosters_in_snapshot_with_items(snap, Some(char_id), now_unix));
     for ship_id in expired_ships {
-        ctx.invalidate_ship_fitting(ship_id);
+        ctx.invalidate_and_push_fit(ship_id);
     }
     for (owner_id, old_rec) in purged {
         ctx.notify_item_mutation(owner_id, Some(&old_rec), None);

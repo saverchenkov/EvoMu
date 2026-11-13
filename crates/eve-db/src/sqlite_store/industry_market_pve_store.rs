@@ -148,6 +148,7 @@ fn compute_blob_hashes(snap: &WorldStateSnapshot) -> HashMap<&'static str, u64> 
     m.insert("module_online_states", fp_map(&snap.module_online_states));
     m.insert("module_active_states", fp_set(&snap.module_active_states));
     m.insert("module_active_charges", fp_map(&snap.module_active_charges));
+    m.insert("ship_fit_inputs", fp_map(&snap.ship_fit_inputs));
     m.insert("weapon_banks", fp_nested_map(&snap.weapon_banks));
     m.insert("paused_skill_queues", fp_set(&snap.paused_skill_queues));
     m.insert("starbase_settings", fp_map(&snap.starbase_settings));
@@ -192,6 +193,7 @@ fn serialize_blob(snap: &WorldStateSnapshot, key: &str) -> Result<String, String
             super::fingerprints::to_checked_json_string(&sorted)
         }
         "module_active_charges" => map_to_json(&snap.module_active_charges),
+        "ship_fit_inputs" => map_to_json(&snap.ship_fit_inputs),
         "weapon_banks" => nested_map_to_json(&snap.weapon_banks),
         "paused_skill_queues" => {
             let mut sorted: Vec<i64> = snap.paused_skill_queues.iter().copied().collect();
@@ -243,6 +245,7 @@ fn apply_blob_json_checked(snap: &mut WorldStateSnapshot, key: &str, js: &str) -
             snap.module_active_states = serde_json::from_str(js).map_err(|e| e.to_string())?;
         }
         "module_active_charges" => snap.module_active_charges = map_from_json(js)?,
+        "ship_fit_inputs" => snap.ship_fit_inputs = map_from_json(js)?,
         "weapon_banks" => snap.weapon_banks = nested_map_from_json(js)?,
         "paused_skill_queues" => {
             snap.paused_skill_queues = serde_json::from_str(js).map_err(|e| e.to_string())?;
@@ -419,6 +422,7 @@ pub fn rollback_d6_batch4(conn: &Connection, snap: &mut WorldStateSnapshot, fp: 
     snap.module_online_states = fresh.module_online_states;
     snap.module_active_states = fresh.module_active_states;
     snap.module_active_charges = fresh.module_active_charges;
+    snap.ship_fit_inputs = fresh.ship_fit_inputs;
     snap.weapon_banks = fresh.weapon_banks;
     snap.paused_skill_queues = fresh.paused_skill_queues;
     snap.starbase_settings = fresh.starbase_settings;

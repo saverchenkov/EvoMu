@@ -1,7 +1,129 @@
 use crate::*;
 use eve_sde::{AttributeId, SdeRegistry, TypeId};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+/// Monotonic per-ship fitting revision assigned whenever fitting inputs or runtime
+/// module/stance/overload state change (`#922`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+pub struct FitRev(pub u64);
+
+impl FitRev {
+    #[inline]
+    pub fn next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+}
+
+/// Evaluation scope separating full client/window stats from the actor-owned combat baseline (`#922`, `#834`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvalScope {
+    /// Full evaluation including active propulsion, cloak, HIC WDFG, and gang bursts.
+    Full,
+    /// Actor-ready baseline excluding active propulsion (`6730`/`6731`), active cloak speed
+    /// penalties (`607`/`980`), active HIC WDFG self-modifiers, and gang burst `dbuff`s so the
+    /// system actor applies them once on `CombatState` without double-counting.
+    ActorBaseline,
+}
+
+/// Authoritative combat baselines projected from `eve-dogma` for `SystemActor` (`#922`, `#834`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CombatBaseline {
+    pub max_velocity: f64,
+    pub mass: f64,
+    pub agility: f64,
+    pub signature_radius: f64,
+    pub max_shield_hp: f64,
+    pub max_armor_hp: f64,
+    pub max_structure_hp: f64,
+    pub max_capacitor: f64,
+    pub shield_recharge_time_ms: f64,
+    pub capacitor_recharge_time_ms: f64,
+    pub shield_resonance: [f64; 4],
+    pub armor_resonance: [f64; 4],
+    pub structure_resonance: [f64; 4],
+    pub warp_speed_au_s: f64,
+    pub max_locked_targets: usize,
+    pub max_target_range: f64,
+    pub scan_resolution: f64,
+}
+
+/// Precomputed active propulsion parameters for an Afterburner or Microwarpdrive (`#860`, `#922`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PropulsionParams {
+    pub module_id: i64,
+    pub module_type_id: TypeId,
+    pub is_mwd: bool,
+    pub is_overloaded: bool,
+    pub speed_factor: f64,
+    pub speed_boost_factor: f64,
+    pub mass_addition: f64,
+    pub signature_radius_bonus_pct: f64,
+    /// `(speed_factor / 100.0) * speed_boost_factor / (baseline_mass + mass_addition)`.
+    /// Total velocity multiplier while cycling is `1.0 + speed_boost`.
+    pub speed_boost: f64,
+}
+
+/// Precomputed per-module cycle parameters projected from [`ShipFittingEngine`] (`#922`, `#859`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CycleParams {
+    pub module_id: i64,
+    pub module_type_id: TypeId,
+    pub flag_id: u16,
+    pub state: ModuleState,
+    pub is_overloaded: bool,
+    pub charge_type_id: Option<TypeId>,
+    pub duration_ms: f64,
+    pub capacitor_need: f64,
+    pub is_turret: bool,
+    pub is_missile: bool,
+    pub damage: [f64; 4],
+    pub damage_multiplier: f64,
+    pub optimal_range_m: f64,
+    pub falloff_m: f64,
+    pub tracking_speed: f64,
+    pub sig_resolution_m: f64,
+    pub missile_explosion_radius_m: f64,
+    pub missile_explosion_velocity_ms: f64,
+    pub missile_drf: f64,
+    pub missile_flight_time_ms: f64,
+    pub missile_max_velocity_ms: f64,
+    pub shield_boost_amount: f64,
+    pub armor_repair_amount: f64,
+    pub hull_repair_amount: f64,
+    pub speed_factor: f64,
+    pub speed_boost_factor: f64,
+    pub mass_addition: f64,
+    pub sig_radius_bonus_pct: f64,
+    pub prop_speed_boost: f64,
+    pub is_mwd: bool,
+    pub is_afterburner: bool,
+    pub is_cloak: bool,
+    pub cloak_velocity_bonus_pct: f64,
+    pub is_hic_wdfg: bool,
+}
+
+/// Persisted world-state inputs needed to rebuild [`ShipFittingEngine`] stance and module
+/// overload state across cache eviction or ship boarding (`#861`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PersistedFitInputs {
+    pub active_stance_type_id: Option<TypeId>,
+    pub last_stance_switch_ms: Option<u64>,
+    pub overloaded_modules: BTreeSet<i64>,
+}
+
+/// Event-driven ship fit projection pushed from `ServerContext` to `SystemActor` (`#922`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FitProjection {
+    pub rev: FitRev,
+    pub ship_id: i64,
+    pub ship_type_id: TypeId,
+    pub active_stance_type_id: Option<TypeId>,
+    pub last_stance_switch_ms: Option<u64>,
+    pub baseline: CombatBaseline,
+    pub propulsion: Option<PropulsionParams>,
+    pub modules: HashMap<i64, CycleParams>,
+}
 
 /// Snapshot of the input fields used during [`ShipFittingEngine::recalculate_stats`] so direct
 /// mutations to public fields on [`ShipFittingEngine`] never serve stale cached states.
@@ -263,6 +385,15 @@ impl ShipFittingEngine {
     /// Builds and evaluates a [`DogmaEffectContext`] for the current ship hull, character skills,
     /// and fitted modules over real V24.01 SDE `modifierInfo` records (`DG-1`, `OF-31`).
     fn compute_evaluated_context(&self, sde: &SdeRegistry) -> DogmaEffectContext {
+        self.compute_evaluated_context_with_scope(sde, EvalScope::Full)
+    }
+
+    /// Evaluates a [`DogmaEffectContext`] under [`EvalScope::Full`] or [`EvalScope::ActorBaseline`].
+    pub fn compute_evaluated_context_with_scope(
+        &self,
+        sde: &SdeRegistry,
+        scope: EvalScope,
+    ) -> DogmaEffectContext {
         let mut base_ship = self.ship.clone();
         base_ship.modifiers.clear();
 
@@ -781,41 +912,30 @@ impl ShipFittingEngine {
         // 1d. Pre-apply `dbuff` `item_modifiers` targeting `ctx.ship` (such as V24 SDE `dbuff_id = 2544`
         //     `FW Dungeon Effect 1` modifying Battlecruiser `shipBonus*BC*` attributes by `+20%`) before
         //     Step 2 (`hull_type.effect_ids`) snapshots `ctx.ship` to propagate hull bonuses onto modules.
-        let mut bursts_by_dbuff: BTreeMap<u32, (i64, Vec<f64>)> = BTreeMap::new();
-        for burst in &self.gang_bursts {
-            if let Some(dbuff_id) = burst.dbuff_id {
-                bursts_by_dbuff
-                    .entry(dbuff_id)
-                    .or_insert_with(|| (burst.source_item_id, Vec::new()))
-                    .1
-                    .push(burst.value);
-            }
-        }
-        for (&dbuff_id, &(source_item_id, ref vals)) in &bursts_by_dbuff {
-            if let Some(dbuff) = sde.dbuff_collections.get(&dbuff_id) {
-                let agg_value = aggregate_dbuff_values(&dbuff.aggregate_mode, vals);
-                let op = match dbuff.operation.as_str() {
-                    "PostPercent" => ModifierOperator::PostPercent,
-                    "PostMul" => ModifierOperator::PostMul,
-                    "ModAdd" => ModifierOperator::ModAdd,
-                    "PostAssignment" => ModifierOperator::PostAssign,
-                    _ => ModifierOperator::PostPercent,
-                };
-                for &aid in &dbuff.item_modifiers {
-                    let stacking_penalized = sde.attributes.get(&aid).is_some_and(|a| !a.stackable);
-                    ctx.ship.modifiers.push(AttributeModifier {
-                        source_item_id,
-                        effect_id: None,
-                        target_attribute_id: aid,
-                        operator: op,
-                        value: agg_value,
-                        stacking_penalized,
-                    });
+        if scope == EvalScope::Full {
+            let mut bursts_by_dbuff: BTreeMap<u32, (i64, Vec<f64>)> = BTreeMap::new();
+            for burst in &self.gang_bursts {
+                if let Some(dbuff_id) = burst.dbuff_id {
+                    bursts_by_dbuff
+                        .entry(dbuff_id)
+                        .or_insert_with(|| (burst.source_item_id, Vec::new()))
+                        .1
+                        .push(burst.value);
                 }
-                for &aid in &dbuff.location_modifiers {
-                    let stacking_penalized = sde.attributes.get(&aid).is_some_and(|a| !a.stackable);
-                    for loc_item in &mut ctx.ship_located_items {
-                        loc_item.modifiers.push(AttributeModifier {
+            }
+            for (&dbuff_id, &(source_item_id, ref vals)) in &bursts_by_dbuff {
+                if let Some(dbuff) = sde.dbuff_collections.get(&dbuff_id) {
+                    let agg_value = aggregate_dbuff_values(&dbuff.aggregate_mode, vals);
+                    let op = match dbuff.operation.as_str() {
+                        "PostPercent" => ModifierOperator::PostPercent,
+                        "PostMul" => ModifierOperator::PostMul,
+                        "ModAdd" => ModifierOperator::ModAdd,
+                        "PostAssignment" => ModifierOperator::PostAssign,
+                        _ => ModifierOperator::PostPercent,
+                    };
+                    for &aid in &dbuff.item_modifiers {
+                        let stacking_penalized = sde.attributes.get(&aid).is_some_and(|a| !a.stackable);
+                        ctx.ship.modifiers.push(AttributeModifier {
                             source_item_id,
                             effect_id: None,
                             target_attribute_id: aid,
@@ -824,53 +944,66 @@ impl ShipFittingEngine {
                             stacking_penalized,
                         });
                     }
-                }
-                for grp_mod in &dbuff.location_group_modifiers {
-                    let stacking_penalized = sde
-                        .attributes
-                        .get(&grp_mod.attribute_id)
-                        .is_some_and(|a| !a.stackable);
-                    for loc_item in &mut ctx.ship_located_items {
-                        let grp_matches = loc_item.group_id == Some(grp_mod.group_id)
-                            || sde.types.get(&loc_item.type_id).map(|t| t.group_id)
-                                == Some(grp_mod.group_id);
-                        if grp_matches {
+                    for &aid in &dbuff.location_modifiers {
+                        let stacking_penalized = sde.attributes.get(&aid).is_some_and(|a| !a.stackable);
+                        for loc_item in &mut ctx.ship_located_items {
                             loc_item.modifiers.push(AttributeModifier {
                                 source_item_id,
                                 effect_id: None,
-                                target_attribute_id: grp_mod.attribute_id,
+                                target_attribute_id: aid,
                                 operator: op,
                                 value: agg_value,
                                 stacking_penalized,
                             });
                         }
                     }
-                }
-                for srq_mod in &dbuff.location_required_skill_modifiers {
-                    let stacking_penalized = sde
-                        .attributes
-                        .get(&srq_mod.attribute_id)
-                        .is_some_and(|a| !a.stackable);
-                    let m = AttributeModifier {
-                        source_item_id,
-                        effect_id: None,
-                        target_attribute_id: srq_mod.attribute_id,
-                        operator: op,
-                        value: agg_value,
-                        stacking_penalized,
-                    };
-                    for loc_item in &mut ctx.ship_located_items {
-                        if item_requires_skill(loc_item, srq_mod.skill_id, sde)
-                            && !loc_item.modifiers.contains(&m)
-                        {
-                            loc_item.modifiers.push(m);
+                    for grp_mod in &dbuff.location_group_modifiers {
+                        let stacking_penalized = sde
+                            .attributes
+                            .get(&grp_mod.attribute_id)
+                            .is_some_and(|a| !a.stackable);
+                        for loc_item in &mut ctx.ship_located_items {
+                            let grp_matches = loc_item.group_id == Some(grp_mod.group_id)
+                                || sde.types.get(&loc_item.type_id).map(|t| t.group_id)
+                                    == Some(grp_mod.group_id);
+                            if grp_matches {
+                                loc_item.modifiers.push(AttributeModifier {
+                                    source_item_id,
+                                    effect_id: None,
+                                    target_attribute_id: grp_mod.attribute_id,
+                                    operator: op,
+                                    value: agg_value,
+                                    stacking_penalized,
+                                });
+                            }
                         }
                     }
-                    for owned_item in &mut ctx.owned_items {
-                        if item_requires_skill(owned_item, srq_mod.skill_id, sde)
-                            && !owned_item.modifiers.contains(&m)
-                        {
-                            owned_item.modifiers.push(m);
+                    for srq_mod in &dbuff.location_required_skill_modifiers {
+                        let stacking_penalized = sde
+                            .attributes
+                            .get(&srq_mod.attribute_id)
+                            .is_some_and(|a| !a.stackable);
+                        let m = AttributeModifier {
+                            source_item_id,
+                            effect_id: None,
+                            target_attribute_id: srq_mod.attribute_id,
+                            operator: op,
+                            value: agg_value,
+                            stacking_penalized,
+                        };
+                        for loc_item in &mut ctx.ship_located_items {
+                            if item_requires_skill(loc_item, srq_mod.skill_id, sde)
+                                && !loc_item.modifiers.contains(&m)
+                            {
+                                loc_item.modifiers.push(m);
+                            }
+                        }
+                        for owned_item in &mut ctx.owned_items {
+                            if item_requires_skill(owned_item, srq_mod.skill_id, sde)
+                                && !owned_item.modifiers.contains(&m)
+                            {
+                                owned_item.modifiers.push(m);
+                            }
                         }
                     }
                 }
@@ -939,6 +1072,7 @@ impl ShipFittingEngine {
         //    Pass 1: apply self-modifiers (`itemID`) and all passive/online/active/overloaded
         //            effects onto `ctx.ship`, `ctx.character`, and `ctx.ship_located_items` without
         //            overwriting self-targeted `Location*` modifiers on `ctx.ship_located_items[idx]`.
+        let mut active_prop_modules: Vec<(i64, u16, usize)> = Vec::new();
         for (idx, m) in sorted_modules.iter().enumerate() {
             let Some(mod_type) = sde.types.get(&m.type_id) else {
                 continue;
@@ -981,7 +1115,15 @@ impl ShipFittingEngine {
                         5 => m.state == ModuleState::Overloaded,
                         _ => false,
                     };
-                    if should_apply {
+                    let skip_actor_managed = scope == EvalScope::ActorBaseline
+                        && is_active
+                        && (matches!(eid, 6730 | 6731 | 607 | 980 | 3380 | 5945 | 7142)
+                            || (effect.effect_category == 1 && effect.name.starts_with("cloaking"))
+                            || effect.name == "warpDisruptSphere"
+                            || effect.name.starts_with("massEntangler")
+                            || (matches!(mod_type.group_id, 899 | 2008)
+                                && effect.effect_category == 1));
+                    if should_apply && !skip_actor_managed {
                         for spec in &effect.modifiers {
                             if spec.domain == "itemID" {
                                 continue;
@@ -1008,8 +1150,8 @@ impl ShipFittingEngine {
                         }
                     }
                     // Engine propulsion effects (`6730` MWD, `6731` Afterburner) have empty `modifiers` in `dogmaeffects.fsdbinary`
-                    // and read the module's effective `SPEED_FACTOR` (already modified by `Acceleration Control` `1176`, T3D/T3C propulsion bonuses, and `overloadSelfSpeedBonus` `3175`)
-                    if is_active && matches!(eid, 6730 | 6731) {
+                    // and read the module's effective `SPEED_FACTOR` and `SPEED_BOOST_FACTOR` against total ship mass (`#860`).
+                    if scope == EvalScope::Full && is_active && matches!(eid, 6730 | 6731) {
                         let mass_attr_id = if mod_type
                             .default_attributes
                             .contains_key(&attr_ids::MASS_ADDITION)
@@ -1018,38 +1160,21 @@ impl ShipFittingEngine {
                         } else {
                             attr_ids::MASS
                         };
-                        let mut nodes = vec![
-                            DogmaExpressionNode {
-                                opcode: DogmaVmOpcode::AddItmMod,
+                        let mut nodes = vec![DogmaExpressionNode {
+                            opcode: DogmaVmOpcode::AddItmMod,
+                            value_f64: None,
+                            attribute_id: Some(attr_ids::MASS),
+                            operator: Some(ModifierOperator::ModAdd),
+                            arg1: None,
+                            arg2: Some(Box::new(DogmaExpressionNode {
+                                opcode: DogmaVmOpcode::GetAttr,
                                 value_f64: None,
-                                attribute_id: Some(attr_ids::MASS),
-                                operator: Some(ModifierOperator::ModAdd),
+                                attribute_id: Some(mass_attr_id),
+                                operator: None,
                                 arg1: None,
-                                arg2: Some(Box::new(DogmaExpressionNode {
-                                    opcode: DogmaVmOpcode::GetAttr,
-                                    value_f64: None,
-                                    attribute_id: Some(mass_attr_id),
-                                    operator: None,
-                                    arg1: None,
-                                    arg2: None,
-                                })),
-                            },
-                            DogmaExpressionNode {
-                                opcode: DogmaVmOpcode::AddItmMod,
-                                value_f64: None,
-                                attribute_id: Some(attr_ids::MAX_VELOCITY),
-                                operator: Some(ModifierOperator::PostPercent),
-                                arg1: None,
-                                arg2: Some(Box::new(DogmaExpressionNode {
-                                    opcode: DogmaVmOpcode::GetAttr,
-                                    value_f64: None,
-                                    attribute_id: Some(attr_ids::SPEED_FACTOR),
-                                    operator: None,
-                                    arg1: None,
-                                    arg2: None,
-                                })),
-                            },
-                        ];
+                                arg2: None,
+                            })),
+                        }];
                         if eid == 6730 {
                             let sig_bonus_attr = if mod_type.default_attributes.contains_key(&554) {
                                 554
@@ -1085,7 +1210,35 @@ impl ShipFittingEngine {
                                 sde,
                             );
                         }
+                        active_prop_modules.push((m.item_id, eid, idx));
                     }
+                }
+            }
+        }
+
+        // Apply active propulsion velocity boosts after all Pass 1 hull/plate/prop mass modifiers
+        // have accumulated on `ctx.ship` (`(speedFactor/100) * speedBoostFactor / (mass + massAddition)`).
+        if !active_prop_modules.is_empty() {
+            let total_mass = ctx.ship.get_attribute(attr_ids::MASS, sde);
+            for (item_id, eid, idx) in active_prop_modules {
+                let mod_state = &ctx.ship_located_items[idx];
+                let speed_factor = mod_state.get_attribute(attr_ids::SPEED_FACTOR, sde);
+                let speed_boost_factor = mod_state.get_attribute(567, sde);
+                let boost = compute_propulsion_speed_boost(
+                    speed_factor,
+                    speed_boost_factor,
+                    total_mass,
+                    0.0,
+                );
+                if boost > 0.0 {
+                    ctx.ship.add_modifier(AttributeModifier {
+                        source_item_id: item_id,
+                        effect_id: Some(eid),
+                        target_attribute_id: attr_ids::MAX_VELOCITY,
+                        operator: ModifierOperator::PostPercent,
+                        value: boost * 100.0,
+                        stacking_penalized: false,
+                    });
                 }
             }
         }
@@ -1296,9 +1449,11 @@ impl ShipFittingEngine {
         }
 
         // 6. Apply any explicit ship-level gang burst modifiers.
-        for burst in &self.gang_bursts {
-            for m in &burst.modifiers {
-                ctx.ship.modifiers.push(*m);
+        if scope == EvalScope::Full {
+            for burst in &self.gang_bursts {
+                for m in &burst.modifiers {
+                    ctx.ship.modifiers.push(*m);
+                }
             }
         }
 
@@ -1624,6 +1779,448 @@ impl ShipFittingEngine {
             }
         }
         state
+    }
+
+    /// Captures persisted stance and overloaded-module state so world-state storage can
+    /// reconstruct this [`ShipFittingEngine`] after cache eviction or restart (`#861`).
+    pub fn persisted_inputs(&self) -> PersistedFitInputs {
+        let overloaded_modules = self
+            .modules
+            .values()
+            .filter(|m| m.state == ModuleState::Overloaded)
+            .map(|m| m.item_id)
+            .collect();
+        PersistedFitInputs {
+            active_stance_type_id: self.active_stance_type_id,
+            last_stance_switch_ms: self.last_stance_switch_ms,
+            overloaded_modules,
+        }
+    }
+
+    /// Rehydrates persisted stance, stance cooldown timestamp, and overloaded module states (`#861`).
+    pub fn apply_persisted_inputs(&mut self, inputs: &PersistedFitInputs, sde: &SdeRegistry) {
+        if let Some(stance_tid) = inputs.active_stance_type_id {
+            if Self::t3d_stance_belongs_to_hull(self.ship.type_id, stance_tid) {
+                self.active_stance_type_id = Some(stance_tid);
+            }
+        }
+        if inputs.last_stance_switch_ms.is_some() {
+            self.last_stance_switch_ms = inputs.last_stance_switch_ms;
+        }
+        let mut changed = false;
+        for &mid in &inputs.overloaded_modules {
+            if let Some(m) = self.modules.get_mut(&mid) {
+                if matches!(m.state, ModuleState::Active | ModuleState::Online) {
+                    m.state = ModuleState::Overloaded;
+                    changed = true;
+                }
+            }
+        }
+        if changed || self.active_stance_type_id.is_some() {
+            self.recalculate_stats(sde);
+        }
+    }
+
+    /// Projects this fitting into an immutable [`FitProjection`] snapshot (`#922`, `#834`, `#859`, `#860`).
+    ///
+    /// - `baseline` is evaluated under [`EvalScope::ActorBaseline`] (excluding active propulsion,
+    ///   cloak speed penalty, HIC WDFG, and gang burst `dbuff`s so the system actor does not
+    ///   double-apply them).
+    /// - `modules` and `propulsion` are evaluated under [`EvalScope::Full`] (including skills,
+    ///   implants, boosters, stance, overload, loaded charges, and projected EWAR) with propulsion
+    ///   velocity boost computed as `(speedFactor / 100.0) * speedBoostFactor / (baseline_mass + massAddition)`.
+    pub fn to_projection(&self, rev: FitRev, sde: &SdeRegistry) -> FitProjection {
+        let baseline_ctx = self.compute_evaluated_context_with_scope(sde, EvalScope::ActorBaseline);
+        let full_ctx = self.evaluated_context(sde);
+
+        let get_ship_or = |ctx: &DogmaEffectContext, attr_id: AttributeId, fallback: f64| -> f64 {
+            if ctx.ship.base_attributes.contains_key(&attr_id)
+                || sde.attributes.contains_key(&attr_id)
+                || ctx.ship.modifiers.iter().any(|m| m.target_attribute_id == attr_id)
+            {
+                ctx.ship.get_attribute(attr_id, sde)
+            } else {
+                fallback
+            }
+        };
+
+        let base_vel = get_ship_or(&baseline_ctx, attr_ids::MAX_VELOCITY, 200.0);
+        let base_mass = get_ship_or(&baseline_ctx, attr_ids::MASS, 1_000_000.0).max(1.0);
+        let base_agility = get_ship_or(&baseline_ctx, attr_ids::AGILITY, 1.0);
+        let base_sig = get_ship_or(&baseline_ctx, attr_ids::SIGNATURE_RADIUS, 35.0);
+        let max_shield_hp = get_ship_or(&baseline_ctx, attr_ids::SHIELD_CAPACITY, 450.0);
+        let max_armor_hp = get_ship_or(&baseline_ctx, attr_ids::ARMOR_HP, 350.0);
+        let max_structure_hp = get_ship_or(&baseline_ctx, attr_ids::HP_STRUCT, 350.0);
+        let raw_cap = get_ship_or(&baseline_ctx, attr_ids::CAPACITOR_CAPACITY, 250.0);
+        let max_capacitor = if raw_cap <= 0.0 {
+            if self.ship.type_id == 670 { 100.0 } else { 250.0 }
+        } else {
+            raw_cap
+        };
+        let shield_recharge_time_ms =
+            get_ship_or(&baseline_ctx, attr_ids::SHIELD_RECHARGE_RATE, 120_000.0);
+        let capacitor_recharge_time_ms =
+            get_ship_or(&baseline_ctx, attr_ids::RECHARGE_RATE, 120_000.0);
+        let shield_resonance = [
+            get_ship_or(&baseline_ctx, attr_ids::SHIELD_EM_DAMAGE_RESONANCE, 1.0),
+            get_ship_or(&baseline_ctx, attr_ids::SHIELD_THERMAL_DAMAGE_RESONANCE, 0.8),
+            get_ship_or(&baseline_ctx, attr_ids::SHIELD_KINETIC_DAMAGE_RESONANCE, 0.6),
+            get_ship_or(&baseline_ctx, attr_ids::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE, 0.5),
+        ];
+        let armor_resonance = [
+            get_ship_or(&baseline_ctx, attr_ids::ARMOR_EM_DAMAGE_RESONANCE, 0.5),
+            get_ship_or(&baseline_ctx, attr_ids::ARMOR_THERMAL_DAMAGE_RESONANCE, 0.65),
+            get_ship_or(&baseline_ctx, attr_ids::ARMOR_KINETIC_DAMAGE_RESONANCE, 0.75),
+            get_ship_or(&baseline_ctx, attr_ids::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE, 0.9),
+        ];
+        let structure_resonance = [
+            get_ship_or(&baseline_ctx, attr_ids::EM_DAMAGE_RESONANCE, 0.67),
+            get_ship_or(&baseline_ctx, attr_ids::THERMAL_DAMAGE_RESONANCE, 0.67),
+            get_ship_or(&baseline_ctx, attr_ids::KINETIC_DAMAGE_RESONANCE, 0.67),
+            get_ship_or(&baseline_ctx, attr_ids::EXPLOSIVE_DAMAGE_RESONANCE, 0.67),
+        ];
+        let base_ws = get_ship_or(&baseline_ctx, 1281, 1.0);
+        let ws_mult = get_ship_or(&baseline_ctx, attr_ids::WARP_SPEED_MULTIPLIER, 3.0);
+        let warp_speed_au_s =
+            (if base_ws > 0.0 { base_ws } else { 1.0 }) * (if ws_mult > 0.0 { ws_mult } else { 3.0 });
+        let ship_max_targets =
+            get_ship_or(&baseline_ctx, attr_ids::MAX_LOCKED_TARGETS, 12.0).max(0.0);
+        let char_max_targets = baseline_ctx
+            .character
+            .get_attribute(attr_ids::MAX_LOCKED_TARGETS, sde)
+            .max(0.0);
+        let max_locked_targets = ship_max_targets.min(char_max_targets).floor() as usize;
+        let max_target_range = get_ship_or(&baseline_ctx, attr_ids::MAX_TARGET_RANGE, 25_000.0);
+        let scan_resolution = get_ship_or(&baseline_ctx, attr_ids::SCAN_RESOLUTION, 400.0);
+
+        let baseline = CombatBaseline {
+            max_velocity: base_vel,
+            mass: base_mass,
+            agility: base_agility,
+            signature_radius: base_sig,
+            max_shield_hp,
+            max_armor_hp,
+            max_structure_hp,
+            max_capacitor,
+            shield_recharge_time_ms,
+            capacitor_recharge_time_ms,
+            shield_resonance,
+            armor_resonance,
+            structure_resonance,
+            warp_speed_au_s,
+            max_locked_targets,
+            max_target_range,
+            scan_resolution,
+        };
+
+        let drones_len = self.drones.len();
+        let mut modules = HashMap::with_capacity(self.modules.len());
+        let mut active_propulsion: Option<PropulsionParams> = None;
+
+        for (&module_id, fitted) in &self.modules {
+            let mod_type = sde.types.get(&fitted.type_id);
+            let mut mod_state = full_ctx
+                .ship_located_items
+                .iter()
+                .find(|i| i.item_id == module_id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    let mut s = DogmaItemState::from_sde(module_id, fitted.type_id, sde);
+                    for (&aid, &val) in &fitted.dynamic_attribute_overrides {
+                        s.base_attributes.insert(aid, val);
+                    }
+                    s
+                });
+            if fitted.state == ModuleState::Offline && !fitted.dynamic_attribute_overrides.is_empty() {
+                for (&aid, &val) in &fitted.dynamic_attribute_overrides {
+                    mod_state.base_attributes.insert(aid, val);
+                }
+            }
+            let charge_state = full_ctx
+                .owned_items
+                .iter()
+                .skip(drones_len)
+                .find(|c| c.item_id == module_id);
+            let charge_sde = fitted.charge_type_id.and_then(|ctid| sde.types.get(&ctid));
+
+            let has_mod_charge_modifier = |attr: AttributeId| -> bool {
+                mod_state.modifiers.iter().any(|mm| {
+                    mm.target_attribute_id == attr
+                        && mm.source_item_id == 0
+                        && mm
+                            .effect_id
+                            .is_some_and(|eid| charge_sde.is_some_and(|ct| ct.effect_ids.contains(&eid)))
+                })
+            };
+
+            let is_turret = mod_type.is_some_and(|t| matches!(t.group_id, 53 | 55 | 74 | 1986));
+            let is_missile = mod_type
+                .is_some_and(|t| matches!(t.group_id, 506..=512 | 524 | 771 | 862 | 1245));
+            let is_vorton = mod_type.is_some_and(|t| t.group_id == 4060);
+            let is_mwd = mod_type.is_some_and(|t| t.effect_ids.contains(&6730));
+            let is_afterburner = !is_mwd && mod_type.is_some_and(|t| t.effect_ids.contains(&6731));
+            let is_cloak = mod_type.is_some_and(|t| {
+                t.group_id == 330 || t.effect_ids.iter().any(|&eid| matches!(eid, 607 | 980))
+            });
+            let is_hic_wdfg = mod_type
+                .is_some_and(|t| t.group_id == 899 || t.effect_ids.contains(&3380));
+
+            let duration_ms = {
+                let d = mod_state.get_attribute(attr_ids::DURATION, sde);
+                if d > 0.0 {
+                    d
+                } else {
+                    let d_high = mod_state.get_attribute(3115, sde);
+                    if d_high > 0.0 {
+                        d_high
+                    } else {
+                        let s = mod_state.get_attribute(attr_ids::SPEED, sde);
+                        if s > 0.0 { s } else { 0.0 }
+                    }
+                }
+            };
+            let capacitor_need = mod_state.get_attribute(attr_ids::CAPACITOR_NEED, sde);
+            let damage_multiplier = mod_state.get_attribute(attr_ids::DAMAGE_MULTIPLIER, sde);
+
+            let charge_or_mod_dmg = |attr: AttributeId| -> f64 {
+                if let Some(ch) = charge_state {
+                    let v = ch.get_attribute(attr, sde);
+                    if v > 0.0 || ch.base_attributes.contains_key(&attr) {
+                        return v;
+                    }
+                }
+                charge_sde
+                    .and_then(|ct| ct.default_attributes.get(&attr).copied())
+                    .unwrap_or(0.0)
+            };
+            let damage = if is_missile {
+                [
+                    charge_or_mod_dmg(attr_ids::EM_DAMAGE),
+                    charge_or_mod_dmg(attr_ids::THERMAL_DAMAGE),
+                    charge_or_mod_dmg(attr_ids::KINETIC_DAMAGE),
+                    charge_or_mod_dmg(attr_ids::EXPLOSIVE_DAMAGE),
+                ]
+            } else if is_turret {
+                let mult = if damage_multiplier > 0.0 {
+                    damage_multiplier
+                } else {
+                    1.0
+                };
+                [
+                    charge_or_mod_dmg(attr_ids::EM_DAMAGE) * mult,
+                    charge_or_mod_dmg(attr_ids::THERMAL_DAMAGE) * mult,
+                    charge_or_mod_dmg(attr_ids::KINETIC_DAMAGE) * mult,
+                    charge_or_mod_dmg(attr_ids::EXPLOSIVE_DAMAGE) * mult,
+                ]
+            } else if is_vorton {
+                let mult = if damage_multiplier > 0.0 {
+                    damage_multiplier
+                } else {
+                    1.0
+                };
+                [
+                    mod_state.get_attribute(attr_ids::EM_DAMAGE, sde) * mult,
+                    mod_state.get_attribute(attr_ids::THERMAL_DAMAGE, sde) * mult,
+                    mod_state.get_attribute(attr_ids::KINETIC_DAMAGE, sde) * mult,
+                    mod_state.get_attribute(attr_ids::EXPLOSIVE_DAMAGE, sde) * mult,
+                ]
+            } else {
+                [0.0; 4]
+            };
+
+            let missile_max_velocity_ms = if is_missile {
+                let v = charge_or_mod_dmg(attr_ids::MAX_VELOCITY);
+                if v > 0.0 { v } else { 3_750.0 }
+            } else {
+                0.0
+            };
+            let missile_flight_time_ms = if is_missile {
+                let d = charge_or_mod_dmg(281);
+                if d > 0.0 { d } else { 5_000.0 }
+            } else {
+                0.0
+            };
+            let optimal_range_m = if is_turret {
+                let range_mult = charge_sde
+                    .and_then(|ct| ct.default_attributes.get(&120).copied())
+                    .unwrap_or(1.0);
+                let base_opt = mod_state.get_attribute(attr_ids::MAX_RANGE, sde);
+                if has_mod_charge_modifier(attr_ids::MAX_RANGE) {
+                    base_opt
+                } else {
+                    base_opt * range_mult
+                }
+            } else if is_missile {
+                missile_max_velocity_ms * (missile_flight_time_ms / 1_000.0)
+            } else {
+                mod_state.get_attribute(attr_ids::MAX_RANGE, sde)
+            };
+            let falloff_m = if is_turret || !is_missile {
+                get_module_falloff(&mod_state, sde)
+            } else {
+                0.0
+            };
+            let tracking_speed = if is_turret {
+                let tracking_mult = charge_sde
+                    .and_then(|ct| ct.default_attributes.get(&244).copied())
+                    .unwrap_or(1.0);
+                let base_tr = mod_state.get_attribute(attr_ids::TRACKING_SPEED, sde);
+                if has_mod_charge_modifier(attr_ids::TRACKING_SPEED) {
+                    base_tr
+                } else {
+                    base_tr * tracking_mult
+                }
+            } else {
+                0.0
+            };
+            let sig_resolution_m = if is_turret {
+                mod_state.get_attribute(620, sde)
+            } else {
+                0.0
+            };
+            let (missile_explosion_radius_m, missile_explosion_velocity_ms, missile_drf) =
+                if is_missile {
+                    let er = charge_or_mod_dmg(654);
+                    let ev = charge_or_mod_dmg(653);
+                    let drf = charge_or_mod_dmg(1353);
+                    (
+                        if er > 0.0 { er } else { 40.0 },
+                        if ev > 0.0 { ev } else { 170.0 },
+                        if drf > 0.0 { drf } else { 0.604 },
+                    )
+                } else if is_vorton {
+                    (
+                        mod_state.get_attribute(654, sde),
+                        mod_state.get_attribute(653, sde),
+                        mod_state.get_attribute(1353, sde),
+                    )
+                } else {
+                    (0.0, 0.0, 0.0)
+                };
+
+            let shield_boost_amount = mod_state.get_attribute(attr_ids::SHIELD_BONUS, sde);
+            let armor_repair_amount = mod_state.get_attribute(84, sde);
+            let hull_repair_amount = mod_state.get_attribute(83, sde);
+
+            let speed_factor = mod_state.get_attribute(attr_ids::SPEED_FACTOR, sde);
+            let speed_boost_factor = mod_state.get_attribute(567, sde);
+            let mass_addition = if mod_state.base_attributes.contains_key(&attr_ids::MASS_ADDITION)
+                || mod_type.is_some_and(|t| t.default_attributes.contains_key(&attr_ids::MASS_ADDITION))
+            {
+                mod_state.get_attribute(attr_ids::MASS_ADDITION, sde)
+            } else if is_mwd || is_afterburner {
+                mod_state.get_attribute(attr_ids::MASS, sde)
+            } else {
+                0.0
+            };
+            let sig_radius_bonus_pct = if is_mwd {
+                let s554 = mod_state.get_attribute(554, sde);
+                if s554 > 0.0 {
+                    s554
+                } else {
+                    mod_state.get_attribute(986, sde).max(0.0)
+                }
+            } else {
+                0.0
+            };
+            let prop_speed_boost = if is_mwd || is_afterburner {
+                compute_propulsion_speed_boost(
+                    speed_factor,
+                    speed_boost_factor,
+                    base_mass,
+                    mass_addition,
+                )
+            } else {
+                0.0
+            };
+
+            let is_covert_cloak = mod_type.is_some_and(|t| {
+                t.effect_ids.iter().any(|&eid| {
+                    eid == 980
+                        || sde
+                            .effects
+                            .get(&eid)
+                            .is_some_and(|e| e.name == "cloakingWarpSafe" || e.is_warp_safe)
+                })
+            });
+            let cloak_velocity_bonus_pct = if is_cloak && !is_covert_cloak {
+                let vel_mod = mod_state.get_attribute(306, sde);
+                if vel_mod > 0.0 && vel_mod < 1.0 {
+                    vel_mod - 1.0
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
+
+            let is_overloaded = fitted.state == ModuleState::Overloaded;
+            let is_active = matches!(fitted.state, ModuleState::Active | ModuleState::Overloaded);
+            if is_active && (is_mwd || is_afterburner) {
+                active_propulsion = Some(PropulsionParams {
+                    module_id,
+                    module_type_id: fitted.type_id,
+                    is_mwd,
+                    is_overloaded,
+                    speed_factor,
+                    speed_boost_factor,
+                    mass_addition,
+                    signature_radius_bonus_pct: sig_radius_bonus_pct,
+                    speed_boost: prop_speed_boost,
+                });
+            }
+
+            modules.insert(
+                module_id,
+                CycleParams {
+                    module_id,
+                    module_type_id: fitted.type_id,
+                    flag_id: fitted.flag_id,
+                    state: fitted.state,
+                    is_overloaded,
+                    charge_type_id: fitted.charge_type_id,
+                    duration_ms,
+                    capacitor_need,
+                    is_turret,
+                    is_missile,
+                    damage,
+                    damage_multiplier,
+                    optimal_range_m,
+                    falloff_m,
+                    tracking_speed,
+                    sig_resolution_m,
+                    missile_explosion_radius_m,
+                    missile_explosion_velocity_ms,
+                    missile_drf,
+                    missile_flight_time_ms,
+                    missile_max_velocity_ms,
+                    shield_boost_amount,
+                    armor_repair_amount,
+                    hull_repair_amount,
+                    speed_factor,
+                    speed_boost_factor,
+                    mass_addition,
+                    sig_radius_bonus_pct,
+                    prop_speed_boost,
+                    is_mwd,
+                    is_afterburner,
+                    is_cloak,
+                    cloak_velocity_bonus_pct,
+                    is_hic_wdfg,
+                },
+            );
+        }
+
+        FitProjection {
+            rev,
+            ship_id: self.ship.item_id,
+            ship_type_id: self.ship.type_id,
+            active_stance_type_id: self.active_stance_type_id,
+            last_stance_switch_ms: self.last_stance_switch_ms,
+            baseline,
+            propulsion: active_propulsion,
+            modules,
+        }
     }
 }
 

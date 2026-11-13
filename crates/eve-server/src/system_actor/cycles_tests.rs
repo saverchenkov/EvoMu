@@ -883,3 +883,184 @@ fn tick_capacitor_deltas_emit_attr_18_and_repair_unhydrated_cap() {
             }))
     }));
 }
+
+#[tokio::test]
+async fn ecm_jam_and_burst_clear_target_bound_cycles_and_fit_projection_syncs_turret_on_cycle_boundary() {
+    let reg = SystemRegistry::new();
+    let handle = reg.get_or_spawn(30_000_143);
+    let attacker: BallId = 800_001;
+    let target: BallId = 800_002;
+    let mod_id: i64 = 900_001;
+
+    handle
+        .spawn_ball_with_combat(
+            make_ship(attacker, 587, DVec3::ZERO),
+            CombatState {
+                capacitor: 1_000.0,
+                max_capacitor: 1_000.0,
+                capacitor_recharge_time_ms: 0.0,
+                shield_recharge_time_ms: 0.0,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    handle
+        .spawn_ball_with_combat(
+            make_ship(target, 587, DVec3::new(1_000.0, 0.0, 0.0)),
+            CombatState {
+                shield_hp: 1_000.0,
+                max_shield_hp: 1_000.0,
+                armor_hp: 1_000.0,
+                max_armor_hp: 1_000.0,
+                signature_radius: 100.0,
+                shield_recharge_time_ms: 0.0,
+                capacitor_recharge_time_ms: 0.0,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let mk_turret_cycle = |elapsed_s: f64| ActiveModuleCycle {
+        ship_id: attacker,
+        module_id: mod_id,
+        module_type_id: 565,
+        effect_name: "targetAttack".into(),
+        target_id: Some(target),
+        repeat: 1,
+        duration_s: 2.0,
+        elapsed_s,
+        cap_need_per_cycle: 0.0,
+        damage_vector: DamageVector::new(100.0, 0.0, 0.0, 0.0),
+        weapon_optimal_m: 5_000.0,
+        weapon_falloff_m: 2_000.0,
+        weapon_tracking_speed: 0.25,
+        weapon_sig_resolution_m: 40.0,
+        ..Default::default()
+    };
+
+    // 1. ApplyEcmJam clears active target-bound cycles (`#859`).
+    handle.add_module_cycle(mk_turret_cycle(0.0)).await.unwrap();
+    assert!(handle.has_module_cycle(attacker, mod_id).await);
+    assert!(handle.apply_ecm_jam(attacker, 5.0).await.unwrap());
+    assert!(
+        !handle.has_module_cycle(attacker, mod_id).await,
+        "ApplyEcmJam must clear active target-bound cycles on jammed attacker"
+    );
+
+    // Clear jam by spawning fresh combat state, then verify ApplyEcmBurst also clears target-bound cycles (`#859`).
+    handle
+        .set_combat_state(
+            attacker,
+            CombatState {
+                capacitor: 1_000.0,
+                max_capacitor: 1_000.0,
+                capacitor_recharge_time_ms: 0.0,
+                shield_recharge_time_ms: 0.0,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    handle.add_module_cycle(mk_turret_cycle(0.0)).await.unwrap();
+    let jammed = handle
+        .apply_ecm_burst(target, 20_000.0, [200.0; 4], 5.0, 0.0)
+        .await
+        .unwrap();
+    assert!(jammed.contains(&attacker), "ApplyEcmBurst must jam nearby attacker");
+    assert!(
+        !handle.has_module_cycle(attacker, mod_id).await,
+        "ApplyEcmBurst must clear active target-bound cycles on jammed ships"
+    );
+
+    // 2. Mid-fight FitProjection push updates active turret params on next cycle boundary (`#859`).
+    let mut cycle = mk_turret_cycle(1.5);
+    let mut modules = HashMap::new();
+    modules.insert(
+        mod_id,
+        eve_dogma::CycleParams {
+            module_id: mod_id,
+            module_type_id: 565,
+            flag_id: 27,
+            state: eve_dogma::ModuleState::Active,
+            is_overloaded: false,
+            charge_type_id: None,
+            duration_ms: 1_500.0,
+            capacitor_need: 0.0,
+            is_turret: true,
+            is_missile: false,
+            damage: [250.0, 0.0, 0.0, 0.0],
+            damage_multiplier: 1.0,
+            optimal_range_m: 12_000.0,
+            falloff_m: 4_000.0,
+            tracking_speed: 0.45,
+            sig_resolution_m: 40.0,
+            missile_explosion_radius_m: 0.0,
+            missile_explosion_velocity_ms: 0.0,
+            missile_drf: 0.0,
+            missile_flight_time_ms: 0.0,
+            missile_max_velocity_ms: 0.0,
+            shield_boost_amount: 0.0,
+            armor_repair_amount: 0.0,
+            hull_repair_amount: 0.0,
+            speed_factor: 0.0,
+            speed_boost_factor: 0.0,
+            mass_addition: 0.0,
+            sig_radius_bonus_pct: 0.0,
+            prop_speed_boost: 0.0,
+            is_mwd: false,
+            is_afterburner: false,
+            is_cloak: false,
+            cloak_velocity_bonus_pct: 0.0,
+            is_hic_wdfg: false,
+        },
+    );
+    let proj = eve_dogma::FitProjection {
+        rev: eve_dogma::FitRev(2),
+        ship_id: attacker,
+        ship_type_id: 587,
+        active_stance_type_id: None,
+        last_stance_switch_ms: None,
+        baseline: eve_dogma::CombatBaseline {
+            max_velocity: 350.0,
+            mass: 1_500_000.0,
+            agility: 2.5,
+            signature_radius: 40.0,
+            max_shield_hp: 500.0,
+            max_armor_hp: 500.0,
+            max_structure_hp: 400.0,
+            max_capacitor: 1_000.0,
+            shield_recharge_time_ms: 100_000.0,
+            capacitor_recharge_time_ms: 100_000.0,
+            shield_resonance: [1.0; 4],
+            armor_resonance: [1.0; 4],
+            structure_resonance: [1.0; 4],
+            warp_speed_au_s: 5.0,
+            max_locked_targets: 4,
+            max_target_range: 25_000.0,
+            scan_resolution: 500.0,
+        },
+        propulsion: None,
+        modules,
+    };
+    let mut projections = HashMap::new();
+    projections.insert(attacker, proj.clone());
+    sync_cycle_from_fit_projection(&mut cycle, &projections);
+    assert!((cycle.duration_s - 1.5).abs() < 1e-6);
+    assert!((cycle.weapon_optimal_m - 12_000.0).abs() < 1e-6);
+    assert!((cycle.weapon_tracking_speed - 0.45).abs() < 1e-6);
+    assert!((cycle.damage_vector.em - 250.0).abs() < 1e-6);
+
+    // End-to-end actor step crosses cycle 1 boundary (100 EM), syncs projected 250 EM / 1.5s, and completes cycle 2.
+    handle.add_module_cycle(mk_turret_cycle(1.5)).await.unwrap();
+    assert!(handle.apply_fit_projection(attacker, proj).await);
+    let _ = handle.step_manual(1.0).await.unwrap();
+    let _ = handle.step_manual(1.6).await.unwrap();
+    let target_cs = handle.get_combat_state(target).await.unwrap().unwrap();
+    assert!(
+        target_cs.shield_hp < 700.0,
+        "Crossing cycle boundary with active FitProjection must apply updated 250 EM volley on cycle 2 (got shield={})",
+        target_cs.shield_hp
+    );
+}

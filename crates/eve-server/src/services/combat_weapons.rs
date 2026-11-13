@@ -460,8 +460,7 @@ pub async fn handle_weapons(
                             snap.module_active_states.remove(&module_id);
                             snap.module_active_charges.remove(&module_id);
                         });
-                        let _ = fit.deactivate_module(module_id, &ctx.sde);
-                        ctx.store_ship_fitting(ship_id, fit);
+                        ctx.invalidate_and_push_fit(ship_id);
                         combat_weapons_spool::reset_entropic_spool(ctx, ship_id, module_id);
                         return Some(Err(BridgeRpcError {
                             code: "TargetNotLocked".into(),
@@ -663,7 +662,7 @@ pub async fn handle_weapons(
                         fm.state = eve_dogma::ModuleState::Online;
                     }
                     fit.recalculate_stats(&ctx.sde);
-                    ctx.store_ship_fitting(ship_id, fit.clone());
+                    ctx.invalidate_and_push_fit(ship_id);
                 }
             }
             if is_entropic {
@@ -1431,7 +1430,7 @@ pub async fn handle_weapons(
                 });
                 let _ = fit.activate_module(module_id, is_overloaded, &ctx.sde);
             }
-            ctx.store_ship_fitting(ship_id, fit);
+            ctx.invalidate_and_push_fit(ship_id);
             ctx.record_module_reactivation_delay(ship_id, module_id, cycle_secs);
 
             let st_state = if is_upwell_target {

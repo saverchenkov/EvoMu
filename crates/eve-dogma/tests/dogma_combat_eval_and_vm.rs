@@ -98,6 +98,7 @@ fn test_propulsion_neuts_nos_burst_jammer_and_warp_scram() {
     // MWD type 60001 (effect 6730) using fallback sig attr 986 & custom overload 1223
     let mut mwd_attrs = HashMap::new();
     mwd_attrs.insert(attr_ids::SPEED_FACTOR, 500.0);
+    mwd_attrs.insert(567, 1_500_000.0);
     mwd_attrs.insert(attr_ids::MASS_ADDITION, 500_000.0);
     mwd_attrs.insert(986, 500.0);
     mwd_attrs.insert(1223, 50.0);
@@ -127,6 +128,7 @@ fn test_propulsion_neuts_nos_burst_jammer_and_warp_scram() {
     // AB type 60002 (effect 6731) without attr 796 uses attr MASS (4), unaffected by scram
     let mut ab_attrs = HashMap::new();
     ab_attrs.insert(attr_ids::SPEED_FACTOR, 100.0);
+    ab_attrs.insert(567, 1_250_000.0);
     ab_attrs.insert(attr_ids::MASS, 250_000.0);
     sde.types.insert(
         60002,

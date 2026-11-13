@@ -303,6 +303,14 @@ fn populate_all_domains(snap: &mut WorldStateSnapshot, cid: i64, alt_cid: i64, c
     snap.module_online_states.insert(100_000_001, true);
     snap.module_active_states.insert(100_000_001);
     snap.module_active_charges.insert(100_000_001, 185);
+    snap.ship_fit_inputs.insert(
+        100_000_001,
+        crate::ShipFitInputsRecord {
+            active_stance_type_id: Some(34321),
+            last_stance_switch_ms: Some(1_700_000_123_456),
+            overloaded_modules: std::collections::BTreeSet::from([100_000_002, 100_000_003]),
+        },
+    );
     snap.weapon_banks.insert(100_000_001, HashMap::from([(1, vec![100_000_001])]));
     snap.paused_skill_queues.insert(alt_cid);
     snap.wh_polarizations.insert((cid, 50_000_777), 1_700_001_000);
@@ -421,6 +429,7 @@ fn sqlite_store_insert_update_rollback_delete_and_wal_recovery() {
         snap.fw_wars.clear();
         snap.mining_ledger.clear();
         snap.module_online_states.clear();
+        snap.ship_fit_inputs.clear();
         snap.quasar_state_blobs.clear();
         snap.service_state_blobs.clear();
         Err(DbError::ValidationError("rollback test".into()))
@@ -436,6 +445,10 @@ fn sqlite_store_insert_update_rollback_delete_and_wal_recovery() {
         assert_eq!(snap.corp_member_limits[&corp_id], 500);
         assert_eq!(snap.mining_ledger.len(), 1);
         assert_eq!(snap.fw_wars, vec![(500_001, 500_004)]);
+        assert_eq!(
+            snap.ship_fit_inputs[&100_000_001].active_stance_type_id,
+            Some(34321)
+        );
     });
 
     // 4. Delete rows from all maps & tables and commit (exercises DELETE paths across sync modules)

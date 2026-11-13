@@ -1250,6 +1250,7 @@ impl WorldStateSnapshot {
             self.module_online_states.remove(&item_id);
             self.module_active_states.remove(&item_id);
             self.module_active_charges.remove(&item_id);
+            self.ship_fit_inputs.remove(&item_id);
             self.applied_ship_skins.remove(&item_id);
         }
         removed

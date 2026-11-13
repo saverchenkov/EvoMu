@@ -492,13 +492,6 @@ def build_modifier_effect(eff_id, eff_spec, mod_attrs=None):
                 "modifying_attribute_id": mass_attr_id,
                 "modified_attribute_id": 4,
             },
-            {
-                "func": "ItemModifier",
-                "domain": "shipID",
-                "operator": 6,
-                "modifying_attribute_id": 20,
-                "modified_attribute_id": 37,
-            },
         ]
         if eff_id == 6730:
             sig_attr = 554 if (mod_attrs and ("554" in mod_attrs or 554 in mod_attrs)) else (986 if (mod_attrs and ("986" in mod_attrs or 986 in mod_attrs)) else 0)
@@ -803,6 +796,23 @@ def evaluate_dogma_fit(ship_type_id, skills, modules, implants, boosters=None, g
             eff_obj = build_modifier_effect(eid, eff, mod["type"]["attributes"])
             env = ModEnv(mod["item"].itemID, ship.itemID, char_id)
             eff_obj.Start(env, lm, mod["item"].itemID, ship.itemID, char_id, None, None)
+
+    # Apply propulsion velocity boosts using total ship mass (hull + plates + prop massAddition)
+    # and thrust (`speedBoostFactor` 567) unpenalized (#860): `(speedFactor/100) * speedBoostFactor / totalMass`.
+    total_mass = ship.get_or_create_attr(4).GetValue()
+    if total_mass > 0.0:
+        for mod in mod_items:
+            is_overloaded = mod["raw"].get("overloaded") or mod["raw"].get("state") == "Overloaded"
+            is_active = mod["raw"].get("active") or is_overloaded
+            if not is_active:
+                continue
+            if any(eid in (6730, 6731) for eid in mod["type"]["effects"]):
+                sf = mod["item"].get_or_create_attr(20).GetValue()
+                sbf = mod["item"].get_or_create_attr(567).GetValue()
+                if sf > 0.0 and sbf > 0.0:
+                    boost_pct = (sf / 100.0) * (sbf / total_mass) * 100.0
+                    mod_source = SimpleMod(boost_pct, item_id=mod["item"].itemID, cat_id=16, lm=lm)
+                    lm.AddModifierWithSource(const.dgmAssPostPercent, ship.itemID, 37, mod_source)
 
     # 3. Active command burst / gang warfare burst effects (plan:T-12)
     # DERIVED_DBUFF_COLLECTION_AGGREGATION: dbuffCollections operationName

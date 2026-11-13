@@ -239,6 +239,14 @@ fn populate_all_27_batch4_blobs_and_mining_ledger() -> WorldStateSnapshot {
     snap.module_online_states.insert(100_000_010, true);
     snap.module_active_states.insert(100_000_010);
     snap.module_active_charges.insert(100_000_010, 190);
+    snap.ship_fit_inputs.insert(
+        100_000_001,
+        crate::ShipFitInputsRecord {
+            active_stance_type_id: Some(34321),
+            last_stance_switch_ms: Some(1_700_000_123_456),
+            overloaded_modules: std::collections::BTreeSet::from([100_000_010]),
+        },
+    );
     snap.weapon_banks
         .entry(100_000_001)
         .or_default()
@@ -343,11 +351,11 @@ fn all_27_batch4_blobs_and_mining_ledger_roundtrip_and_rollback() {
 
     let empty = WorldStateSnapshot::default();
     let empty_fp = compute_d6_batch4_fingerprints(&empty);
-    assert_eq!(empty_fp.blobs.len(), 35);
+    assert_eq!(empty_fp.blobs.len(), 36);
 
     let full = populate_all_27_batch4_blobs_and_mining_ledger();
     let full_fp = compute_d6_batch4_fingerprints(&full);
-    assert_eq!(full_fp.blobs.len(), 35);
+    assert_eq!(full_fp.blobs.len(), 36);
     assert_ne!(full_fp.mining_ledger, empty_fp.mining_ledger);
     for (key, empty_hash) in &empty_fp.blobs {
         assert_ne!(
@@ -400,6 +408,7 @@ fn all_27_batch4_blobs_and_mining_ledger_roundtrip_and_rollback() {
     assert_eq!(loaded.module_online_states, full.module_online_states);
     assert_eq!(loaded.module_active_states, full.module_active_states);
     assert_eq!(loaded.module_active_charges, full.module_active_charges);
+    assert_eq!(loaded.ship_fit_inputs, full.ship_fit_inputs);
     assert_eq!(loaded.weapon_banks, full.weapon_banks);
     assert_eq!(loaded.paused_skill_queues, full.paused_skill_queues);
     assert_eq!(loaded.starbase_settings, full.starbase_settings);
@@ -433,6 +442,7 @@ fn all_27_batch4_blobs_and_mining_ledger_roundtrip_and_rollback() {
     assert_eq!(dirty.module_online_states, full.module_online_states);
     assert_eq!(dirty.module_active_states, full.module_active_states);
     assert_eq!(dirty.module_active_charges, full.module_active_charges);
+    assert_eq!(dirty.ship_fit_inputs, full.ship_fit_inputs);
     assert_eq!(dirty.weapon_banks, full.weapon_banks);
     assert_eq!(dirty.paused_skill_queues, full.paused_skill_queues);
     assert_eq!(dirty.starbase_settings, full.starbase_settings);

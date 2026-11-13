@@ -328,7 +328,7 @@ pub(crate) fn handle_unload_ammo(
 
     let eval_cargo_cap = (dest_loc_id == ship_id)
         .then(|| {
-            ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok().map(|f| f.ship.get_attribute(attr_ids::CAPACITY, &ctx.sde))
+            ctx.fit(char_id, ship_id).ok().map(|f| f.ship.get_attribute(attr_ids::CAPACITY, &ctx.sde))
                 .or_else(|| ctx.db.with_snapshot(|s| s.items.get(&ship_id).and_then(|sh| ctx.sde.types.get(&sh.type_id)).map(|t| t.capacity)))
         })
         .flatten();
@@ -500,7 +500,7 @@ pub(crate) fn handle_unload_ammo(
         ship_id,
         &all_target_modules,
     );
-    ctx.invalidate_ship_fitting(ship_id);
+    ctx.invalidate_and_push_fit(ship_id);
     Ok(PyRep::None)
 }
 
@@ -593,7 +593,7 @@ pub(crate) fn emit_godma_charge_sublocation_prime(
     if ship_id <= 0 || c_item.quantity <= 0 {
         return;
     }
-    let fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
+    let fit_opt = ctx.fit(char_id, ship_id).ok();
     let c_attrs = build_charge_sublocation_attrs(ctx, c_item, fit_opt.as_ref());
     let subloc_key = charge_sublocation_key(ship_id, c_item.flag, c_item.type_id);
     let now_ft = ctx.now_blueos_filetime_ticks();
@@ -644,7 +644,7 @@ pub(crate) fn evaluate_ship_dogma_attributes(
     char_id: i64,
     ship_id: i64,
 ) -> Result<(u32, PyRep, Vec<(PyRep, PyRep)>, Vec<(PyRep, PyRep)>), BridgeRpcError> {
-    let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id)?;
+    let fit = ctx.fit(char_id, ship_id)?;
     let computed_ctx;
     let eval_ctx = match fit.persisted_context() {
         Some(c) => c,
@@ -775,7 +775,6 @@ pub(crate) fn evaluate_ship_dogma_attributes(
         .map(|tid| PyRep::Integer(tid as i64))
         .unwrap_or(PyRep::None);
 
-    ctx.store_ship_fitting(ship_id, fit);
     Ok((ship_type_id, active_stance, entries, module_entries))
 }
 
@@ -1117,7 +1116,7 @@ pub(crate) fn build_all_info(
             (d, tm, atm)
         });
         let (max_active_drones, max_locked_targets, drone_ctrl_dist) =
-            if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
+            if let Ok(fit) = ctx.fit(char_id, ship_id) {
                 let d = fit.get_character_effective_attribute(352, &ctx.sde).max(drones_lv);
                 let t = fit
                     .get_character_effective_attribute(192, &ctx.sde)
@@ -1211,7 +1210,7 @@ pub(crate) async fn handle_ecm_or_burst_jammer_activation(
         let mut best_sensor_idx = 0usize;
         let mut target_sensor_strength = 0.0;
         if let Some((t_owner, t_tid)) = target_type_id_opt {
-            if let Ok(t_fit) = ctx.get_or_rebuild_ship_fitting(t_owner, target_id) {
+            if let Ok(t_fit) = ctx.fit(t_owner, target_id) {
                 for (idx, &s_attr) in SENSOR_ATTRS.iter().enumerate() {
                     let val = t_fit.ship.get_attribute(s_attr, &ctx.sde);
                     if val > target_sensor_strength {
@@ -1357,7 +1356,7 @@ pub(crate) async fn handle_ecm_or_burst_jammer_activation(
                     .with_snapshot(|snap| snap.items.get(&b.id).map(|i| i.owner_id))
             });
             if let Some(t_owner) = owner_for_fit {
-                if let Ok(t_fit) = ctx.get_or_rebuild_ship_fitting(t_owner, b.id) {
+                if let Ok(t_fit) = ctx.fit(t_owner, b.id) {
                     for (idx, &s_attr) in SENSOR_ATTRS.iter().enumerate() {
                         let val = t_fit.ship.get_attribute(s_attr, &ctx.sde);
                         if val > target_sensor_strength {
@@ -1600,10 +1599,7 @@ async fn deactivate_repeating_cycle_after_action(
         snap.module_active_charges.remove(&module_id);
     });
     if let Some(cid) = owner_char_id {
-        if let Ok(mut fit) = ctx.get_or_rebuild_ship_fitting(cid, ship_id) {
-            let _ = fit.deactivate_module(module_id, &ctx.sde);
-            ctx.store_ship_fitting(ship_id, fit);
-        }
+        ctx.invalidate_and_push_fit(ship_id);
         let godma_effect = if effect_name.starts_with("superWeapon") {
             let mod_type_id = ctx
                 .db
@@ -1731,10 +1727,11 @@ pub(crate) async fn execute_pending_cycle_actions_list(
                 )
                 .await;
                 if repeat == 0 {
-                    if let Ok(mut fit) = ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
-                        let _ = fit.deactivate_module(module_id, &ctx.sde);
-                        ctx.store_ship_fitting(ship_id, fit);
-                    }
+                    ctx.db.with_mut_snapshot(|snap| {
+                        snap.module_active_states.remove(&module_id);
+                        snap.module_active_charges.remove(&module_id);
+                    });
+                    ctx.invalidate_and_push_fit(ship_id);
                 } else {
                     let keep_repeating = matches!(
                         &res,
@@ -1996,7 +1993,7 @@ pub(crate) async fn execute_pending_cycle_actions_list(
                 let Some(mod_type) = ctx.sde.types.get(&module_type_id).cloned() else {
                     continue;
                 };
-                let fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
+                let fit_opt = ctx.fit(char_id, ship_id).ok();
                 let mod_state = fit_opt
                     .as_ref()
                     .map(|f| {
@@ -2035,20 +2032,20 @@ pub(crate) async fn execute_pending_cycle_actions_list(
             }
             crate::system_actor::PendingCycleAction::SyncOverloadState { char_id, ship_id, module_id, is_overloaded } => {
                 if let Some(cid) = char_id.or_else(|| ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.owner_id))) {
-                    if let Ok(mut fit) = ctx.get_or_rebuild_ship_fitting(cid, ship_id) {
+                    if let Ok(mut fit) = ctx.fit(cid, ship_id) {
                         if let Some(fm) = fit.modules.get_mut(&module_id).filter(|m| m.state != eve_dogma::ModuleState::Offline) {
                             fm.state = if is_overloaded { eve_dogma::ModuleState::Overloaded } else { eve_dogma::ModuleState::Active };
                         }
-                        fit.recalculate_stats(&ctx.sde);
-                        ctx.store_ship_fitting(ship_id, fit);
+                        ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
+                        ctx.invalidate_and_push_fit(ship_id);
                         crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, cid, sys_id, ship_id).await;
                     }
                 }
             }
             crate::system_actor::PendingCycleAction::InvalidateShipFitting { char_id, ship_id } => {
-                ctx.ship_fittings.write().unwrap_or_else(|e| e.into_inner()).remove(&ship_id);
+                ctx.invalidate_and_push_fit(ship_id);
                 if let Some(cid) = char_id.or_else(|| ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.owner_id))) {
-                    let _ = ctx.get_or_rebuild_ship_fitting(cid, ship_id);
+                    let _ = ctx.fit(cid, ship_id);
                     crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, cid, sys_id, ship_id).await;
                 }
             }

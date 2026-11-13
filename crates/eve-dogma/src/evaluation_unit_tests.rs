@@ -402,6 +402,7 @@ fn persisted_dogma_context_and_invalidation_on_direct_mutation() {
             7,
             &[
                 (attr_ids::SPEED_FACTOR, 100.0),
+                (567, 1_500_000.0),
                 (attr_ids::MASS_ADDITION, 500_000.0),
                 (attr_ids::REQUIRED_SKILL_1, 3450.0),
             ],
@@ -1408,4 +1409,312 @@ fn missile_damage_multiplier_or_legs_are_independently_necessary_and_modifier_on
             .any(|m| m.target_attribute_id == attr_ids::EXPLOSIVE_DAMAGE)
     );
 }
+
+#[test]
+fn fit_projection_excludes_propulsion_cloak_hic_and_dbuffs_from_baseline() {
+    let mut sde = SdeRegistry::default();
+    sde.types.insert(
+        639,
+        make_type(
+            639,
+            27,
+            6,
+            &[
+                (attr_ids::MAX_VELOCITY, 127.0),
+                (attr_ids::MASS, 99_500_000.0),
+                (attr_ids::SIGNATURE_RADIUS, 360.0),
+                (attr_ids::SHIELD_EM_DAMAGE_RESONANCE, 1.0),
+                (attr_ids::SHIELD_THERMAL_DAMAGE_RESONANCE, 0.8),
+                (attr_ids::SHIELD_KINETIC_DAMAGE_RESONANCE, 0.6),
+                (attr_ids::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE, 0.5),
+                (attr_ids::CPU_OUTPUT, 500.0),
+                (attr_ids::POWER_OUTPUT, 500.0),
+            ],
+            &[],
+        ),
+    );
+    sde.effects.insert(
+        6730,
+        DogmaEffectType {
+            effect_id: 6730,
+            name: "moduleBonusMicrowarpdrive".to_string(),
+            effect_category: 1,
+            ..Default::default()
+        },
+    );
+    sde.types.insert(
+        434,
+        make_type(
+            434,
+            46,
+            7,
+            &[
+                (attr_ids::SPEED_FACTOR, 500.0),
+                (567, 1_500_000.0),
+                (attr_ids::MASS_ADDITION, 500_000.0),
+                (554, 500.0),
+            ],
+            &[6730],
+        ),
+    );
+    sde.effects.insert(
+        607,
+        DogmaEffectType {
+            effect_id: 607,
+            name: "cloaking".to_string(),
+            effect_category: 1,
+            modifiers: vec![EffectModifierSpec {
+                domain: "shipID".to_string(),
+                func: "ItemModifier".to_string(),
+                modified_attribute_id: attr_ids::MAX_VELOCITY,
+                modifying_attribute_id: 306,
+                operator: 4, // PostMul
+                group_id: None,
+                skill_type_id: None,
+                effect_id: None,
+            }],
+            ..Default::default()
+        },
+    );
+    sde.types.insert(
+        11577,
+        make_type(11577, 330, 7, &[(306, 0.25)], &[607]),
+    );
+    sde.effects.insert(
+        5230,
+        DogmaEffectType {
+            effect_id: 5230,
+            name: "modifyActiveShieldResonancePostPercent".to_string(),
+            effect_category: 1,
+            modifiers: vec![EffectModifierSpec {
+                domain: "shipID".to_string(),
+                func: "ItemModifier".to_string(),
+                modified_attribute_id: attr_ids::SHIELD_EM_DAMAGE_RESONANCE,
+                modifying_attribute_id: 984,
+                operator: 6, // PostPercent
+                group_id: None,
+                skill_type_id: None,
+                effect_id: None,
+            }],
+            ..Default::default()
+        },
+    );
+    sde.types.insert(
+        2281,
+        make_type(2281, 77, 7, &[(984, -30.0)], &[5230]),
+    );
+    sde.dbuff_collections.insert(
+        10,
+        eve_sde::DbuffCollectionInfo {
+            dbuff_id: 10,
+            name: "skirmishSpeed".to_string(),
+            operation: "PostPercent".to_string(),
+            aggregate_mode: "Maximum".to_string(),
+            display_name_id: None,
+            show_output_value_in_ui: None,
+            item_modifiers: vec![attr_ids::MAX_VELOCITY],
+            location_modifiers: Vec::new(),
+            location_group_modifiers: Vec::new(),
+            location_required_skill_modifiers: Vec::new(),
+            target_attribute_ids: Vec::new(),
+        },
+    );
+
+    let mut eng = ShipFittingEngine::from_sde(1, 639, &sde);
+    eng.modules.insert(
+        10,
+        FittedModule {
+            item_id: 10,
+            type_id: 434,
+            flag_id: 19,
+            state: ModuleState::Active,
+            damage_hp: 0.0,
+            max_hp: 40.0,
+            charge_type_id: None,
+            charge_quantity: 0,
+            dynamic_attribute_overrides: HashMap::new(),
+        },
+    );
+    eng.modules.insert(
+        11,
+        FittedModule {
+            item_id: 11,
+            type_id: 11577,
+            flag_id: 27,
+            state: ModuleState::Active,
+            damage_hp: 0.0,
+            max_hp: 40.0,
+            charge_type_id: None,
+            charge_quantity: 0,
+            dynamic_attribute_overrides: HashMap::new(),
+        },
+    );
+    eng.modules.insert(
+        12,
+        FittedModule {
+            item_id: 12,
+            type_id: 2281,
+            flag_id: 20,
+            state: ModuleState::Active,
+            damage_hp: 0.0,
+            max_hp: 40.0,
+            charge_type_id: None,
+            charge_quantity: 0,
+            dynamic_attribute_overrides: HashMap::new(),
+        },
+    );
+    eng.add_gang_burst(GangBurstEffect {
+        source_item_id: 9001,
+        source_type_id: None,
+        dbuff_id: Some(10),
+        value: 20.0,
+        modifiers: Vec::new(),
+    });
+    eng.recalculate_stats(&sde);
+
+    let proj = eng.to_projection(FitRev(3), &sde);
+    assert_eq!(proj.rev, FitRev(3));
+    // Active hardener stays in CombatBaseline: EM resonance 1.0 * 0.7 = 0.7
+    assert!((proj.baseline.shield_resonance[0] - 0.7).abs() < 1e-9);
+    // Active MWD, Cloak, and Dbuff are excluded from CombatBaseline!
+    assert!((proj.baseline.max_velocity - 127.0).abs() < 1e-9);
+    assert!((proj.baseline.mass - 99_500_000.0).abs() < 1e-9);
+    assert!((proj.baseline.signature_radius - 360.0).abs() < 1e-9);
+    // Active propulsion carries the mass-normalized +7.5% boost for a 5MN MWD on Tempest
+    let prop = proj.propulsion.expect("active MWD propulsion params");
+    assert!(prop.is_mwd);
+    assert!((prop.speed_boost - 0.075).abs() < 1e-9);
+    // Module cycle params expose cloak multiplier
+    assert!((proj.modules[&11].cloak_velocity_bonus_pct - (-0.75)).abs() < 1e-9);
+}
+
+#[test]
+fn fit_projection_preserves_stance_and_overload_persisted_inputs() {
+    let mut sde = SdeRegistry::default();
+    sde.types.insert(
+        34828,
+        make_type(
+            34828,
+            1305,
+            6,
+            &[(attr_ids::MAX_VELOCITY, 200.0), (attr_ids::MASS, 1_000_000.0)],
+            &[],
+        ),
+    );
+    sde.effects.insert(
+        9201,
+        DogmaEffectType {
+            effect_id: 9201,
+            name: "stanceProp".to_string(),
+            effect_category: 0,
+            modifiers: vec![EffectModifierSpec {
+                domain: "shipID".to_string(),
+                func: "ItemModifier".to_string(),
+                modified_attribute_id: attr_ids::MAX_VELOCITY,
+                modifying_attribute_id: 1986,
+                operator: 6,
+                group_id: None,
+                skill_type_id: None,
+                effect_id: None,
+            }],
+            ..Default::default()
+        },
+    );
+    sde.types.insert(
+        35678,
+        make_type(35678, 1306, 7, &[(1986, 50.0)], &[9201]),
+    );
+    sde.effects.insert(
+        6731,
+        DogmaEffectType {
+            effect_id: 6731,
+            name: "moduleBonusAfterburner".to_string(),
+            effect_category: 1,
+            ..Default::default()
+        },
+    );
+    sde.effects.insert(
+        3175,
+        DogmaEffectType {
+            effect_id: 3175,
+            name: "overloadSelfSpeedBonus".to_string(),
+            effect_category: 5,
+            modifiers: vec![EffectModifierSpec {
+                domain: "itemID".to_string(),
+                func: "ItemModifier".to_string(),
+                modified_attribute_id: attr_ids::SPEED_FACTOR,
+                modifying_attribute_id: 1223,
+                operator: 6,
+                group_id: None,
+                skill_type_id: None,
+                effect_id: None,
+            }],
+            ..Default::default()
+        },
+    );
+    sde.types.insert(
+        438,
+        make_type(
+            438,
+            46,
+            7,
+            &[
+                (attr_ids::SPEED_FACTOR, 100.0),
+                (567, 1_500_000.0),
+                (attr_ids::MASS_ADDITION, 500_000.0),
+                (1223, 50.0),
+            ],
+            &[6731, 3175],
+        ),
+    );
+
+    let mut eng = ShipFittingEngine::from_sde(1, 34828, &sde);
+    eng.active_stance_type_id = Some(35678);
+    eng.last_stance_switch_ms = Some(42_000);
+    eng.modules.insert(
+        20,
+        FittedModule {
+            item_id: 20,
+            type_id: 438,
+            flag_id: 19,
+            state: ModuleState::Overloaded,
+            damage_hp: 0.0,
+            max_hp: 40.0,
+            charge_type_id: None,
+            charge_quantity: 0,
+            dynamic_attribute_overrides: HashMap::new(),
+        },
+    );
+    let saved = eng.persisted_inputs();
+    assert_eq!(saved.active_stance_type_id, Some(35678));
+    assert_eq!(saved.last_stance_switch_ms, Some(42_000));
+    assert!(saved.overloaded_modules.contains(&20));
+
+    let mut rebuilt = ShipFittingEngine::from_sde(1, 34828, &sde);
+    rebuilt.modules.insert(
+        20,
+        FittedModule {
+            item_id: 20,
+            type_id: 438,
+            flag_id: 19,
+            state: ModuleState::Active,
+            damage_hp: 0.0,
+            max_hp: 40.0,
+            charge_type_id: None,
+            charge_quantity: 0,
+            dynamic_attribute_overrides: HashMap::new(),
+        },
+    );
+    rebuilt.apply_persisted_inputs(&saved, &sde);
+    let proj = rebuilt.to_projection(FitRev(5), &sde);
+    assert_eq!(proj.active_stance_type_id, Some(35678));
+    assert_eq!(proj.last_stance_switch_ms, Some(42_000));
+    // Propulsion Stance (+50%) applies to CombatBaseline (200 * 1.5 = 300)
+    assert!((proj.baseline.max_velocity - 300.0).abs() < 1e-9);
+    // Overloaded AB: speedFactor = 100 * 1.5 = 150 -> prop_speed_boost = 1.5
+    assert!(proj.modules[&20].is_overloaded);
+    assert!((proj.modules[&20].speed_factor - 150.0).abs() < 1e-9);
+    assert!((proj.modules[&20].prop_speed_boost - 1.5).abs() < 1e-9);
+}
+
 

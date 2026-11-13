@@ -225,30 +225,16 @@ pub async fn handle_active_overload_toggle(
     ship_id: i64,
     module_id: i64,
     mut fit: ShipFittingEngine,
-    already_active: bool,
+    _already_active: bool,
 ) -> PyRep {
     let _ = sys.update_module_overload(ship_id, module_id, true).await;
-    if !already_active {
-        if let Some(fm) = fit.modules.get_mut(&module_id) {
-            fm.state = eve_dogma::ModuleState::Overloaded;
-        }
-        fit.recalculate_stats(&ctx.sde);
-        let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
-        ctx.store_ship_fitting(ship_id, fit);
-        ctx.notify(
-            crate::router::NotificationTarget::Character(char_id),
-            "OnHeatAdded",
-            "charid",
-            vec![PyRep::Integer(module_id)],
-        );
-        return PyRep::keyval([
-            ("moduleID", PyRep::Integer(module_id)),
-            ("overloaded", PyRep::Bool(true)),
-            ("effectiveMaxVelocity", PyRep::Real(max_vel)),
-        ]);
+    if let Some(fm) = fit.modules.get_mut(&module_id) {
+        fm.state = eve_dogma::ModuleState::Overloaded;
     }
+    fit.recalculate_stats(&ctx.sde);
     let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
-    ctx.store_ship_fitting(ship_id, fit);
+    ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
+    ctx.invalidate_and_push_fit(ship_id);
     ctx.notify(
         crate::router::NotificationTarget::Character(char_id),
         "OnHeatAdded",

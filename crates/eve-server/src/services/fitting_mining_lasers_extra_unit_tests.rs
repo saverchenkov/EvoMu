@@ -141,18 +141,18 @@ fn compute_nanite_repair_params_boundary_and_fallback_branches() {
 #[tokio::test]
 async fn deactivate_error_guards_entosis_mining_cycle_gated_and_weather_generator() {
     let ctx = test_ctx_with_custom(|sde| {
-        sde.types.insert(995_010, custom_inv_type(sde, 995_010, 54, 7, "Miner I", &[(40, 40.0)], &[]));
+        sde.types.insert(995_010, custom_inv_type(sde, 995_010, 54, 7, "Miner I", &[(40, 40.0)], &[12]));
         sde.types.insert(
             995_011,
-            custom_inv_type(sde, 995_011, 353, 7, "Cloak", &[(40, 40.0), (669, 4_000.0)], &[]),
+            custom_inv_type(sde, 995_011, 353, 7, "Cloak", &[(40, 40.0), (669, 4_000.0)], &[12]),
         );
         sde.types.insert(
             995_012,
-            custom_inv_type(sde, 995_012, 1533, 7, "Capital Micro Jump Field Generator", &[(40, 40.0)], &[]),
+            custom_inv_type(sde, 995_012, 1533, 7, "Capital Micro Jump Field Generator", &[(40, 40.0)], &[13]),
         );
         sde.types.insert(
             995_013,
-            custom_inv_type(sde, 995_013, 1815, 7, "Weather Generator", &[(40, 40.0)], &[]),
+            custom_inv_type(sde, 995_013, 1815, 7, "Weather Generator", &[(40, 40.0)], &[12]),
         );
     });
 
@@ -432,6 +432,7 @@ async fn overload_rack_nanite_repair_guards_ehe_burnout_and_mining_scan_branches
         );
     }
     fit.recalculate_stats(&ctx.sde);
+    ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
     ctx.store_ship_fitting(ship_id, fit);
 
     let mut sess = SessionState {
@@ -595,6 +596,7 @@ async fn deactivate_online_mining_undocked_and_effect_id_fallback_ladder() {
         );
     }
     fit.recalculate_stats(&ctx.sde);
+    ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
     ctx.store_ship_fitting(ship_id, fit);
 
     // 1. "online" early-return NoActiveShip vs happy path
@@ -700,11 +702,11 @@ async fn stop_overload_and_rack_edges_and_nanite_repair_conflict_refund_done() {
             custom_inv_type(
                 sde,
                 995_040,
-                46,
+                53,
                 7,
                 "Overloadable Prop",
                 &[(40, 40.0), (1267, 10.0), (1277, 1.0)],
-                &[],
+                &[11, 12, 13],
             ),
         );
     });
@@ -771,6 +773,7 @@ async fn stop_overload_and_rack_edges_and_nanite_repair_conflict_refund_done() {
                 ..Default::default()
             },
         );
+        snap.module_online_states.insert(offline_low_mod, false);
         uid
     });
     let _ = ctx
@@ -800,6 +803,7 @@ async fn stop_overload_and_rack_edges_and_nanite_repair_conflict_refund_done() {
         );
     }
     fit.recalculate_stats(&ctx.sde);
+    ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
     ctx.store_ship_fitting(ship_id, fit);
 
     // A. NoActiveShip guards for StopOverload, OverloadRack, RepairModule, perform_scan
@@ -1065,6 +1069,7 @@ async fn perform_scan_zero_pos_fallback_and_dbuff_attr23_range_multiplier() {
         },
     );
     fit.recalculate_stats(&ctx.sde);
+    ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
     ctx.store_ship_fitting(ship_id, fit);
 
     let mut sess = SessionState {
@@ -1145,7 +1150,7 @@ async fn mutants_cov_tp_sig_mult_fallback_effects_and_overload() {
                 7,
                 "Test Target Painter",
                 &[(40, 40.0), (54, 30_000.0), (158, 15_000.0), (554, 30.0)],
-                &[],
+                &[13],
             ),
         );
         sde.types.insert(
@@ -1157,12 +1162,12 @@ async fn mutants_cov_tp_sig_mult_fallback_effects_and_overload() {
                 7,
                 "Micro Target Painter",
                 &[(40, 40.0), (54, 100_000.0), (158, 50_000.0), (554, 1e-4)],
-                &[],
+                &[13],
             ),
         );
         sde.types.insert(
             995_093,
-            custom_inv_type(sde, 995_093, 46, 7, "Dummy Module", &[(40, 40.0)], &[]),
+            custom_inv_type(sde, 995_093, 53, 7, "Dummy Module", &[(40, 40.0)], &[11]),
         );
         sde.types.insert(
             995_094,
@@ -1173,7 +1178,7 @@ async fn mutants_cov_tp_sig_mult_fallback_effects_and_overload() {
                 7,
                 "Overload Module",
                 &[(40, 40.0), (1267, 10.0), (1277, 1.0)],
-                &[],
+                &[12],
             ),
         );
     });
@@ -1217,6 +1222,9 @@ async fn mutants_cov_tp_sig_mult_fallback_effects_and_overload() {
         snap.items.insert(tp3_id, make_item(tp3_id, 995_092, char_id, ship_id, InventoryFlag::MedSlot2, 0.0));
         snap.items.insert(dummy_id, make_item(dummy_id, 995_093, char_id, ship_id, InventoryFlag::LoSlot0, 0.0));
         snap.items.insert(overload_id, make_item(overload_id, 995_094, char_id, ship_id, InventoryFlag::HiSlot0, 0.0));
+        for active_mid in [tp1_id, tp2_id, dummy_id] {
+            snap.module_active_states.insert(active_mid);
+        }
     });
 
     let sys = ctx.systems.get_or_spawn(sys_id);
@@ -1265,6 +1273,7 @@ async fn mutants_cov_tp_sig_mult_fallback_effects_and_overload() {
         );
     }
     fit.recalculate_stats(&ctx.sde);
+    ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
     ctx.store_ship_fitting(ship_id, fit);
 
     // 1. L166 TP threshold (`tp_mult > 1.0 + 1e-6`): 2 TPs -> deactivate tp1 leaves ~1.30 (kills +->/, > -> ==);

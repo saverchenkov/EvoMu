@@ -456,20 +456,7 @@ pub async fn execute_shipcaster_jump(
     };
     crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
 
-    let saved_heat = ctx
-        .ship_fittings
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&ship_id)
-        .map(|f| {
-            let dmg: Vec<(i64, f64)> = f
-                .modules
-                .iter()
-                .filter(|(_, m)| m.damage_hp.is_finite() && m.damage_hp > 0.0)
-                .map(|(&mid, m)| (mid, m.damage_hp))
-                .collect();
-            (f.rack_heat, dmg)
-        });
+    let saved_heat = ctx.snapshot_rack_heat_and_damage(ship_id);
 
     let cleared_zarzakh_gate = ctx.db.with_mut_snapshot(|snap| {
         if let Some((_, ref dmg_list)) = saved_heat {
@@ -511,10 +498,7 @@ pub async fn execute_shipcaster_jump(
     );
     if let Some((rack_heat, _)) = saved_heat {
         if rack_heat.iter().any(|&h| h.is_finite() && h > 0.0) {
-            if let Ok(mut fit) = ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
-                fit.rack_heat = rack_heat;
-                ctx.store_ship_fitting(ship_id, fit);
-            }
+            ctx.update_ship_rack_heat(char_id, ship_id, rack_heat, false);
         }
     }
     ctx.sync_character_local_chat(char_id, Some(origin_sys), dest_sys);

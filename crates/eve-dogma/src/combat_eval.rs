@@ -16,7 +16,34 @@ pub struct PropulsionModuleStats {
     pub can_activate: bool,
 }
 
-/// Evaluates propulsion module (Afterburner / MWD) activation, mass increase, and signature radius bloom (`DG-1`).
+/// Computes the fractional velocity boost `(speedFactor / 100.0) * speedBoostFactor / (hullMass + massAddition)`
+/// for an active Microwarpdrive or Afterburner (`#860`, `#922`).
+///
+/// The active velocity multiplier is `1.0 + boost`. Returns `0.0` when `speed_factor <= 0.0`,
+/// `speed_boost_factor <= 0.0`, or total mass `<= 0.0`.
+pub fn compute_propulsion_speed_boost(
+    speed_factor: f64,
+    speed_boost_factor: f64,
+    hull_mass: f64,
+    mass_addition: f64,
+) -> f64 {
+    if !speed_factor.is_finite()
+        || !speed_boost_factor.is_finite()
+        || !hull_mass.is_finite()
+        || !mass_addition.is_finite()
+        || speed_factor <= 0.0
+        || speed_boost_factor <= 0.0
+    {
+        return 0.0;
+    }
+    let total_mass = hull_mass + mass_addition;
+    if total_mass <= 0.0 {
+        return 0.0;
+    }
+    ((speed_factor / 100.0) * speed_boost_factor / total_mass).max(0.0)
+}
+
+/// Evaluates propulsion module (Afterburner / MWD) activation, mass increase, and signature radius bloom (`DG-1`, `#860`).
 pub fn eval_propulsion_module(
     ship: &DogmaItemState,
     module: &DogmaItemState,
@@ -69,7 +96,10 @@ pub fn eval_propulsion_module(
         module.get_attribute(attr_ids::MASS, sde)
     };
 
-    let effective_vel = base_vel * (1.0 + speed_factor / 100.0);
+    let speed_boost_factor = module.get_attribute(567, sde);
+    let speed_boost =
+        compute_propulsion_speed_boost(speed_factor, speed_boost_factor, base_mass, mass_addition);
+    let effective_vel = base_vel * (1.0 + speed_boost);
     let effective_mass = base_mass + mass_addition;
 
     let mut effective_sig = base_sig;

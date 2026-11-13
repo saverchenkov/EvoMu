@@ -67,7 +67,7 @@ pub(crate) async fn handle_module_cycles(
                     .with_snapshot(|s| s.module_online_states.get(&module_id).copied())
                     == Some(false)
                     || ctx
-                        .get_or_rebuild_ship_fitting(char_id, ship_id)
+                        .fit(char_id, ship_id)
                         .ok()
                         .and_then(|f| {
                             f.modules
@@ -104,7 +104,7 @@ pub(crate) async fn handle_module_cycles(
             };
             let sys = ctx.systems.get_or_spawn(sys_id);
 
-            let mut fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
+            let mut fit = match ctx.fit(char_id, ship_id) {
                 Ok(f) => f,
                 Err(e) => return Some(Err(e)),
             };
@@ -619,7 +619,7 @@ pub(crate) async fn handle_module_cycles(
                 else {
                     return Some(Err(BridgeRpcError { code: "NoProbesLoaded".into(), message: "Survey probe launcher has no survey probes loaded".into(), client_error: None }));
                 };
-                ctx.invalidate_ship_fitting(ship_id);
+                ctx.invalidate_and_push_fit(ship_id);
                 emit_ship_charge_item_diffs(ctx, char_id, ship_id, &item_diffs);
 
                 let probe_sde = ctx.sde.types.get(&probe_type_id);
@@ -749,7 +749,8 @@ pub(crate) async fn handle_module_cycles(
                     if let Some(fm) = fit.modules.get_mut(&module_id) {
                         fm.state = eve_dogma::ModuleState::Online;
                     }
-                    ctx.store_ship_fitting(ship_id, fit.clone());
+                    ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
+                    ctx.invalidate_and_push_fit(ship_id);
                 }
                 let already_active = matches!(
                     m_effective_state,
@@ -778,16 +779,7 @@ pub(crate) async fn handle_module_cycles(
                     let code = if matches!(mod_type.group_id, 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807) { "ModuleAlreadyActive" } else { "ModuleReactivationDelay" };
                     return Some(Err(BridgeRpcError { code: code.into(), message: format!("Module {module_id} cannot reactivate before delay expires"), client_error: None }));
                 }
-                if method == "Activate"
-                    && already_active
-                    && matches!(
-                        mod_type.group_id,
-                        40 | 1156 | 41 | 1697 | 67 | 71 | 76 | 1122 | 650 | 80 | 353
-                            | 46 | 65 | 52 | 62 | 68 | 201 | 208 | 291 | 325 | 379
-                            | 585 | 1199 | 1672 | 1698
-                            | 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807
-                    )
-                {
+                if method == "Activate" && already_active {
                     return Some(Err(BridgeRpcError {
                         code: "ModuleAlreadyActive".into(),
                         message: format!("Module {module_id} is already active in a cycle"),
@@ -952,7 +944,15 @@ pub(crate) async fn handle_module_cycles(
                 let vel_mod = mod_state.get_attribute(306, &ctx.sde);
                 if is_covert_cloak || (vel_mod - 1.0).abs() < 1e-6 { 0.0 } else if vel_mod > 0.0 && vel_mod < 1.0 { vel_mod - 1.0 } else { 0.0 }
             } else if has_speed_factor_attr && speed_factor > 0.0 {
-                speed_factor / 100.0
+                let speed_boost_attr = mod_state.get_attribute(567, &ctx.sde);
+                let ship_mass = fit.ship.get_attribute(4, &ctx.sde);
+                let mass_addition = mod_state.get_attribute(796, &ctx.sde);
+                eve_dogma::compute_propulsion_speed_boost(
+                    speed_factor,
+                    speed_boost_attr,
+                    ship_mass,
+                    mass_addition,
+                )
             } else {
                 0.0
             };
@@ -1219,7 +1219,7 @@ pub(crate) async fn handle_module_cycles(
                                         .filter(|oid| snap.characters.contains_key(oid))
                                 })
                         })
-                        .and_then(|cid| ctx.get_or_rebuild_ship_fitting(cid, tid).ok())
+                        .and_then(|cid| ctx.fit(cid, tid).ok())
                         .map(|t_fit| t_fit.ship.get_attribute(2045, &ctx.sde).clamp(0.0, 1.0))
                         .unwrap_or(1.0);
                     (
@@ -1702,6 +1702,13 @@ pub(crate) async fn handle_module_cycles(
                 }
             });
             let _ = fit.activate_module(module_id, is_overloaded, &ctx.sde);
+            if (is_turret_group || is_missile_group || is_vorton_group) && target_id_opt.is_some() {
+                if let Ok(weapon_actions) = sys.fire_weapon_cycle_volley(ship_id, module_id).await {
+                    if !weapon_actions.is_empty() {
+                        execute_pending_cycle_actions_list(ctx, sys_id, weapon_actions).await;
+                    }
+                }
+            }
             if mod_type.group_id == 330 || m.type_id == 83485 {
                 crate::services::space_destiny::space_nav_travel::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
             }
@@ -1741,7 +1748,10 @@ pub(crate) async fn handle_module_cycles(
                     fm.charge_quantity = fm.charge_quantity.max(1);
                 }
             }
-            ctx.store_ship_fitting(ship_id, fit.clone());
+            if is_overloaded {
+                ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
+            }
+            ctx.invalidate_and_push_fit(ship_id);
             if mod_type.group_id == 330 || m.type_id == 83485 {
                 crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(
                     ctx, char_id, sys_id, ship_id,

@@ -85,6 +85,7 @@ fn propulsion_module_ab_and_mwd_branches() {
         1,
         &[
             (attr_ids::SPEED_FACTOR, 100.0),
+            (567, 1_500_000.0),
             (796, 500_000.0),
             (554, 500.0), // ignored for AB
         ],
@@ -118,6 +119,7 @@ fn propulsion_module_ab_and_mwd_branches() {
         2,
         &[
             (attr_ids::SPEED_FACTOR, 500.0),
+            (567, 2_500_000.0),
             (1223, 50.0),
             (attr_ids::MASS, 1_500_000.0),
             (554, 500.0),
@@ -144,6 +146,7 @@ fn propulsion_module_ab_and_mwd_branches() {
         2,
         &[
             (attr_ids::SPEED_FACTOR, 500.0),
+            (567, 1_250_000.0),
             (554, 0.0),
             (986, 400.0),
             (796, 250_000.0),
@@ -534,7 +537,11 @@ fn propulsion_nosferatu_burst_and_hull_detection_edge_mutants() {
     let ab_sde_796 = make_item(
         12,
         1,
-        &[(attr_ids::SPEED_FACTOR, 100.0), (attr_ids::MASS, 999_999.0)],
+        &[
+            (attr_ids::SPEED_FACTOR, 100.0),
+            (567, 1_500_000.0),
+            (attr_ids::MASS, 999_999.0),
+        ],
     );
     let res_ab = eval_propulsion_module(&ship, &ab_sde_796, true, false, false, &sde);
     assert!(res_ab.can_activate);
@@ -548,7 +555,11 @@ fn propulsion_nosferatu_burst_and_hull_detection_edge_mutants() {
     let ab_fallback_mass = make_item(
         19,
         3,
-        &[(attr_ids::SPEED_FACTOR, 100.0), (attr_ids::MASS, 250_000.0)],
+        &[
+            (attr_ids::SPEED_FACTOR, 100.0),
+            (567, 1_250_000.0),
+            (attr_ids::MASS, 250_000.0),
+        ],
     );
     let res_ab_mass = eval_propulsion_module(&ship, &ab_fallback_mass, true, false, false, &sde);
     assert_eq!(res_ab_mass.mass_addition, 250_000.0);
@@ -744,4 +755,42 @@ fn ewar_sorting_multi_module_clamping_cap_and_projected_boundaries() {
     assert_eq!(eng.evaluate_projected_remote_repair(&rep_shield, 25_001.0, &sde), 0.0);
     eng.ship.base_attributes.insert(2116, -0.5);
     assert_eq!(eng.evaluate_projected_remote_repair(&rep_shield, 0.0, &sde), 0.0);
+}
+
+#[test]
+fn propulsion_speed_boost_formula_and_tempest_undersized_mwd() {
+    // Edge guards
+    assert_eq!(compute_propulsion_speed_boost(0.0, 1_500_000.0, 1_000_000.0, 500_000.0), 0.0);
+    assert_eq!(compute_propulsion_speed_boost(500.0, 0.0, 1_000_000.0, 500_000.0), 0.0);
+    assert_eq!(compute_propulsion_speed_boost(500.0, 1_500_000.0, -500_000.0, 500_000.0), 0.0);
+    assert_eq!(compute_propulsion_speed_boost(f64::NAN, 1_500_000.0, 1_000_000.0, 500_000.0), 0.0);
+
+    // 5MN Microwarpdrive I (500% speedFactor, 1,500,000 speedBoostFactor, 500,000 massAddition)
+    // fitted onto Tempest (99,500,000 kg mass, 127 m/s base maxVelocity) must give +7.5% velocity!
+    let mut sde = SdeRegistry::default();
+    sde.types
+        .insert(434, make_inv_type(434, 46, "5MN MWD I", &[(796, 500_000.0)], &[6730]));
+    let tempest = make_item(
+        100,
+        639,
+        &[
+            (attr_ids::MAX_VELOCITY, 127.0),
+            (attr_ids::MASS, 99_500_000.0),
+            (attr_ids::SIGNATURE_RADIUS, 360.0),
+        ],
+    );
+    let mwd_5mn = make_item(
+        101,
+        434,
+        &[
+            (attr_ids::SPEED_FACTOR, 500.0),
+            (567, 1_500_000.0),
+            (attr_ids::MASS_ADDITION, 500_000.0),
+            (554, 500.0),
+        ],
+    );
+    let res = eval_propulsion_module(&tempest, &mwd_5mn, true, false, false, &sde);
+    assert!((res.max_velocity - 127.0 * 1.075).abs() < 1e-9);
+    assert!((res.mass - 100_000_000.0).abs() < 1e-9);
+    assert!((res.signature_radius - 360.0 * 6.0).abs() < 1e-9);
 }

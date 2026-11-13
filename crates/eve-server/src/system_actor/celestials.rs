@@ -1661,6 +1661,42 @@ impl SystemHandle {
         rx.await.map_err(|_| "Solar system reply dropped".to_string())?
     }
 
+    pub async fn request_cycle_deactivation(&self, ship_id: BallId, module_id: i64) -> Result<bool, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_sender()
+            .send(SystemCommand::RequestCycleDeactivation { ship_id, module_id, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())
+    }
+
+    pub async fn fire_weapon_cycle_volley(
+        &self,
+        ship_id: BallId,
+        module_id: i64,
+    ) -> Result<Vec<super::PendingCycleAction>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_sender()
+            .send(SystemCommand::FireWeaponCycleVolley { ship_id, module_id, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        let (destroyed, actions) = rx.await.map_err(|_| "Solar system reply dropped".to_string())?;
+        if !destroyed.is_empty() {
+            let hook = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
+            for (target_ball_id, owner_char_id) in destroyed {
+                if let Some(fut) = super::on_ball_destroyed_by_damage(
+                    self.solar_system_id,
+                    target_ball_id,
+                    owner_char_id,
+                    hook.as_ref(),
+                ) {
+                    let _ = fut.await;
+                }
+            }
+        }
+        Ok(actions)
+    }
+
     pub async fn has_module_cycle(&self, ship_id: BallId, module_id: i64) -> bool {
         let (tx, rx) = oneshot::channel();
         if self
