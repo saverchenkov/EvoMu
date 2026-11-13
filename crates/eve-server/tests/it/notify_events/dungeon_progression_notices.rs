@@ -31,17 +31,15 @@ async fn pilot(ctx: &ServerContext, sid: u64, user: &str, pass: &str, char_id: i
     let mut s = SessionState::new(sid);
     common::login_pilot(ctx, &mut s, user, pass).await;
     let args = [PyRep::Integer(char_id)];
-    ctx.dispatch_rpc(
-        &mut s,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &args,
-        &HashMap::new(),
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
+    common::borrow_wire_harness(ctx, &mut s)
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &args,
+            &HashMap::new(),
+        )
+        .await;
     ctx.advance_secs(12);
     ctx.drain_notifications_for_char(char_id);
     s
