@@ -4,6 +4,11 @@
 //! whose signature defines the payload. Emission happens from the `fleetMgr` / `fleetObjectHandler`
 //! / `fleetProxy` code paths right after the fleet state change commits to `WorldRepository`.
 
+use crate::router::notify_registry::{
+    OnChangeFleetBoss, OnChannelLeft, OnFleetJoin, OnFleetLeave, OnFleetMemberChanged,
+    OnFleetMotdChanged, OnFleetOptionsChanged, OnFleetStateChange,
+    OnOrganizationContactsUpdated, OnSessionChanged, OnSetCorpStanding,
+};
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::FleetMemberRecord;
 use eve_machonet::SessionState;
@@ -66,16 +71,24 @@ pub(crate) fn emit_join(ctx: &ServerContext, fleet_id: i64, char_id: i64) {
         snap.fleets.get(&fleet_id).and_then(|f| f.member_details.get(&char_id).cloned())
     });
     if let Some(m) = member {
-        ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetJoin", "fleetid", vec![member_keyval(&m)]);
+        ctx.emit_typed(
+            NotificationTarget::Fleet(fleet_id),
+            OnFleetJoin {
+                member: member_keyval(&m),
+            },
+        );
     }
 }
 
 /// `FleetSvc.OnFleetLeave(charID)` to the leaver (client `Clear()`s when `charID == session.charid`)
 /// and to the remaining members (already removed from `WorldRepository` when this runs).
 pub(crate) fn emit_leave(ctx: &ServerContext, fleet_id: i64, char_id: i64) {
-    let args = vec![PyRep::Integer(char_id)];
-    ctx.notify(NotificationTarget::Character(char_id), "OnFleetLeave", "charid", args.clone());
-    ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetLeave", "fleetid", args);
+    ctx.emit_typed_with_id_type(
+        NotificationTarget::Character(char_id),
+        "charid",
+        OnFleetLeave { char_id },
+    );
+    ctx.emit_typed(NotificationTarget::Fleet(fleet_id), OnFleetLeave { char_id });
 }
 
 /// `FleetSvc.OnFleetMemberChanged(charID, fleetID, oldWingID, oldSquadID, oldRole, oldJob,
@@ -88,35 +101,49 @@ pub(crate) fn emit_member_changed(
     new: &FleetMemberRecord,
     is_only_member: bool,
 ) {
-    let opt = |v: Option<i64>| v.map(PyRep::Integer).unwrap_or(PyRep::None);
-    let args = vec![
-        PyRep::Integer(new.character_id),
-        PyRep::Integer(fleet_id),
-        opt(old.wing_id),
-        opt(old.squad_id),
-        PyRep::Integer(role_to_i64(old.role)),
-        PyRep::Integer(old.job as i64),
-        member_opt_outs(old),
-        opt(new.wing_id),
-        opt(new.squad_id),
-        PyRep::Integer(role_to_i64(new.role)),
-        PyRep::Integer(new.job as i64),
-        member_opt_outs(new),
-        PyRep::Bool(is_only_member),
-    ];
-    ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetMemberChanged", "fleetid", args);
+    ctx.emit_typed(
+        NotificationTarget::Fleet(fleet_id),
+        OnFleetMemberChanged {
+            char_id: new.character_id,
+            fleet_id,
+            old_wing_id: old.wing_id,
+            old_squad_id: old.squad_id,
+            old_role: role_to_i64(old.role),
+            old_job: old.job as i64,
+            old_member_opt_outs: member_opt_outs(old),
+            new_wing_id: new.wing_id,
+            new_squad_id: new.squad_id,
+            new_role: role_to_i64(new.role),
+            new_job: new.job as i64,
+            new_member_opt_outs: member_opt_outs(new),
+            is_only_member,
+        },
+    );
 }
 
 /// `FleetSvc.OnFleetOptionsChanged(oldOptions, options)` to the whole fleet.
 pub(crate) fn emit_options_changed(ctx: &ServerContext, fleet_id: i64, old: PyRep, new: PyRep) {
-    ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetOptionsChanged", "fleetid", vec![old, new]);
+    ctx.emit_typed(
+        NotificationTarget::Fleet(fleet_id),
+        OnFleetOptionsChanged {
+            old_options: old,
+            options: new,
+        },
+    );
 }
 
 /// `FleetSvc.OnFleetMotdChanged(motd, reloadMotd)`; `reloadMotd` makes the client push the text into
 /// the fleet chat window (`SetMotd`).
 pub(crate) fn emit_motd(ctx: &ServerContext, target: NotificationTarget, motd: &str, reload: bool) {
-    let id_type = if matches!(target, NotificationTarget::Fleet(_)) { "fleetid" } else { "charid" };
-    ctx.notify(target, "OnFleetMotdChanged", id_type, vec![PyRep::String(motd.to_string()), PyRep::Bool(reload)]);
+    let notif = OnFleetMotdChanged {
+        motd: motd.to_string(),
+        reload_motd: reload,
+    };
+    if matches!(target, NotificationTarget::Fleet(_)) {
+        ctx.emit_typed(target, notif);
+    } else {
+        ctx.emit_typed_with_id_type(target, "charid", notif);
+    }
 }
 
 /// Recipients of a broadcast sent with group `scope` by `sender` (`evefleet/const.pyj`
@@ -208,14 +235,12 @@ pub(crate) fn emit_fleet_member_removed(
         emit_leave(ctx, outcome.fleet_id, outcome.removed_char_id);
         if let Some((old, new, only)) = &outcome.handover {
             emit_member_changed(ctx, outcome.fleet_id, old, new, *only);
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Fleet(outcome.fleet_id),
-                "OnChangeFleetBoss",
-                "fleetid",
-                vec![
-                    PyRep::Integer(outcome.removed_char_id),
-                    PyRep::Integer(new.character_id),
-                ],
+                OnChangeFleetBoss {
+                    char_id: outcome.removed_char_id,
+                    respond_to_node_id: new.character_id,
+                },
             );
         }
     }
@@ -242,11 +267,13 @@ pub(crate) fn emit_fleet_session_cleared(
         ("fleetid", PyRep::None),
         ("fleetrole", PyRep::None),
     ]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(target_id),
-        "OnSessionChanged",
-        "charid",
-        vec![PyRep::Bool(false), sess_rep, sess_change],
+        OnSessionChanged {
+            is_remote: false,
+            session: sess_rep,
+            change: sess_change,
+        },
     );
 }
 
@@ -349,13 +376,12 @@ pub fn remove_character_from_chat_channels(
                 continue;
             }
         }
-        let left_args = vec![PyRep::String(chan_id)];
         for mid in remaining_members {
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(mid),
-                "OnChannelLeft",
-                "channelid",
-                left_args.clone(),
+                OnChannelLeft {
+                    channel: PyRep::String(chan_id.clone()),
+                },
             );
         }
     }
@@ -478,11 +504,12 @@ pub fn reassign_fleet_boss_on_disconnect(ctx: &ServerContext, char_id: i64) {
             }
         }
         emit_member_changed(ctx, fid, &old_rec, &new_rec, false);
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Fleet(fid),
-            "OnChangeFleetBoss",
-            "fleetid",
-            vec![PyRep::Integer(char_id), PyRep::Integer(new_boss_id)],
+            OnChangeFleetBoss {
+                char_id,
+                respond_to_node_id: new_boss_id,
+            },
         );
     }
 }
@@ -931,11 +958,11 @@ pub fn stream_fleet_watchlist_damage(
                 hull_ratio,
             );
         }
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(watcher_id),
-            "OnFleetStateChange",
-            "charid",
-            vec![fleet_state.clone()],
+            OnFleetStateChange {
+                fleet_state: fleet_state.clone(),
+            },
         );
     }
 }
@@ -1117,11 +1144,12 @@ pub(super) fn handle_corp_contacts_and_labels(
             };
             let mut updates_rep = Vec::new();
             for &(cid, st, mask) in &updated {
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Corporation(corp_id),
-                    "OnSetCorpStanding",
-                    "corpid",
-                    vec![PyRep::Integer(cid), PyRep::Real(st)],
+                    OnSetCorpStanding {
+                        contact_id: cid,
+                        standing: st,
+                    },
                 );
                 updates_rep.push(PyRep::keyval([
                     ("contactID", PyRep::Integer(cid)),
@@ -1129,11 +1157,12 @@ pub(super) fn handle_corp_contacts_and_labels(
                     ("labelMask", PyRep::Integer(mask)),
                 ]));
             }
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Corporation(corp_id),
-                "OnOrganizationContactsUpdated",
-                "corpid",
-                vec![PyRep::Integer(corp_id), PyRep::List(updates_rep)],
+                OnOrganizationContactsUpdated {
+                    owner_id: corp_id,
+                    updates: PyRep::List(updates_rep),
+                },
             );
             let (first_cid, first_st, first_mask) = updated[0];
             Some(Ok(PyRep::keyval([
@@ -1244,11 +1273,12 @@ pub(super) fn handle_corp_contacts_and_labels(
                     ])
                 })
                 .collect();
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Corporation(corp_id),
-                "OnOrganizationContactsUpdated",
-                "corpid",
-                vec![PyRep::Integer(corp_id), PyRep::List(updates_rep)],
+                OnOrganizationContactsUpdated {
+                    owner_id: corp_id,
+                    updates: PyRep::List(updates_rep),
+                },
             );
             Some(Ok(PyRep::keyval([("labelID", PyRep::Integer(lid))])))
         }

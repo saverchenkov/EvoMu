@@ -3,6 +3,12 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+use crate::router::notify_registry::{
+    OnAccountChange, OnCrimewatchEngagementCreated, OnCrimewatchEngagementUpdated,
+    OnDisapprovalTimerUpdate, OnDuelChallenge, OnKillRightActivated, OnKillRightForYouSold,
+    OnKillRightSold, OnKillRightUsed, OnNpcTimerUpdate, OnSafetyLevelChanged,
+    OnSecurityStatusUpdate,
+};
 
 /// Evaluates Faction Police security status threshold for a given high-security system (`feat:crimewatch.faction-police-thresholds`).
 pub fn faction_police_sec_threshold(system_security: f64) -> Option<f64> {
@@ -302,7 +308,31 @@ pub fn emit_crimewatch_timer_notifications_with_state(
             "OnWeaponsTimerUpdate" => { let (exp, c) = code_fn(&mut a, 100); crate::services::notify_emitters_fleet_combat::emit_weapons_timer_update(ctx, char_id, c, exp); }
             "OnPvpTimerUpdate" => { let (exp, c) = code_fn(&mut a, 200); crate::services::notify_emitters_fleet_combat::emit_pvp_timer_update(ctx, char_id, c, exp); }
             "OnCriminalTimerUpdate" => { let (exp, c) = code_fn(&mut a, 300); crate::services::notify_emitters_fleet_combat::emit_criminal_timer_update(ctx, char_id, c, exp); }
-            _ => { ctx.notify(NotificationTarget::Character(char_id), ev, "charid", a); }
+            "OnNpcTimerUpdate" => {
+                let (exp, c) = code_fn(&mut a, 400);
+                ctx.emit_typed(
+                    NotificationTarget::Character(char_id),
+                    OnNpcTimerUpdate {
+                        state: c,
+                        expiry_time: exp,
+                        do_alert: None,
+                    },
+                );
+            }
+            "OnDisapprovalTimerUpdate" => {
+                let (exp, c) = code_fn(&mut a, 500);
+                ctx.emit_typed(
+                    NotificationTarget::Character(char_id),
+                    OnDisapprovalTimerUpdate {
+                        state: c,
+                        expiry_time: exp,
+                        do_alert: None,
+                    },
+                );
+            }
+            other => {
+                debug_assert!(false, "unexpected crimewatch timer event: {other}");
+            }
         }
     }
     if let Some(sys_id) = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.solar_system_id)) {
@@ -586,7 +616,12 @@ pub fn apply_illegal_pvp_sec_status_loss(
                 other_type_id: None,
             });
     });
-    ctx.notify(NotificationTarget::Character(char_id), "OnSecurityStatusUpdate", "charid", vec![PyRep::Real(new_sec)]);
+    ctx.emit_typed(
+        NotificationTarget::Character(char_id),
+        OnSecurityStatusUpdate {
+            new_security_status: new_sec,
+        },
+    );
 }
 
 pub fn is_new_pvp_aggression(ctx: &ServerContext, attacker_char_id: i64, victim_char_id: i64, is_pod: bool, now_unix: u64) -> bool {
@@ -726,9 +761,21 @@ pub async fn handle_crimewatch(
                     ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner())
                         .get_or_create(target_id).suspect_flag_until_unix = now_unix.saturating_add(900);
                     emit_crimewatch_timer_notifications(ctx, target_id, now_unix);
-                    ctx.notify(NotificationTarget::Character(char_id), "OnKillRightActivated", "charid", vec![]);
-                    ctx.notify(NotificationTarget::Character(char_id), "OnKillRightUsed", "charid", vec![PyRep::Integer(kr_id), PyRep::Integer(target_id)]);
-                    ctx.notify(NotificationTarget::Character(target_id), "OnKillRightUsed", "charid", vec![PyRep::Integer(kr_id), PyRep::Integer(target_id)]);
+                    ctx.emit_typed(NotificationTarget::Character(char_id), OnKillRightActivated {});
+                    ctx.emit_typed(
+                        NotificationTarget::Character(char_id),
+                        OnKillRightUsed {
+                            kill_right_id: kr_id,
+                            to_id: target_id,
+                        },
+                    );
+                    ctx.emit_typed(
+                        NotificationTarget::Character(target_id),
+                        OnKillRightUsed {
+                            kill_right_id: kr_id,
+                            to_id: target_id,
+                        },
+                    );
                     Some(Ok(PyRep::keyval([
                         ("killRightID", PyRep::Integer(kr_id)),
                         ("suspectFlagActive", PyRep::Bool(true)),
@@ -819,14 +866,50 @@ pub async fn handle_crimewatch(
                     let now_unix = ctx.now_unix();
                     ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner())
                         .get_or_create(target_id).suspect_flag_until_unix = now_unix.saturating_add(900);
-                    ctx.notify(NotificationTarget::Character(char_id), "OnAccountChange", "charid", vec![PyRep::String("cash".into()), PyRep::Integer(char_id), PyRep::Real(caller_bal)]);
-                    ctx.notify(NotificationTarget::Character(owner_id), "OnAccountChange", "charid", vec![PyRep::String("cash".into()), PyRep::Integer(owner_id), PyRep::Real(owner_bal)]);
+                    ctx.emit_typed(
+                        NotificationTarget::Character(char_id),
+                        OnAccountChange {
+                            account_key: "cash".into(),
+                            owner_id: char_id,
+                            balance: caller_bal,
+                        },
+                    );
+                    ctx.emit_typed(
+                        NotificationTarget::Character(owner_id),
+                        OnAccountChange {
+                            account_key: "cash".into(),
+                            owner_id,
+                            balance: owner_bal,
+                        },
+                    );
                     emit_crimewatch_timer_notifications(ctx, target_id, now_unix);
-                    ctx.notify(NotificationTarget::Character(owner_id), "OnKillRightSold", "charid", vec![PyRep::Integer(kr_id)]);
-                    ctx.notify(NotificationTarget::Character(owner_id), "OnKillRightForYouSold", "charid", vec![PyRep::Integer(kr_id)]);
-                    ctx.notify(NotificationTarget::Character(char_id), "OnKillRightActivated", "charid", vec![]);
-                    ctx.notify(NotificationTarget::Character(char_id), "OnKillRightUsed", "charid", vec![PyRep::Integer(kr_id), PyRep::Integer(target_id)]);
-                    ctx.notify(NotificationTarget::Character(target_id), "OnKillRightUsed", "charid", vec![PyRep::Integer(kr_id), PyRep::Integer(target_id)]);
+                    ctx.emit_typed(
+                        NotificationTarget::Character(owner_id),
+                        OnKillRightSold {
+                            kill_right_id: kr_id,
+                        },
+                    );
+                    ctx.emit_typed(
+                        NotificationTarget::Character(owner_id),
+                        OnKillRightForYouSold {
+                            kill_right_id: kr_id,
+                        },
+                    );
+                    ctx.emit_typed(NotificationTarget::Character(char_id), OnKillRightActivated {});
+                    ctx.emit_typed(
+                        NotificationTarget::Character(char_id),
+                        OnKillRightUsed {
+                            kill_right_id: kr_id,
+                            to_id: target_id,
+                        },
+                    );
+                    ctx.emit_typed(
+                        NotificationTarget::Character(target_id),
+                        OnKillRightUsed {
+                            kill_right_id: kr_id,
+                            to_id: target_id,
+                        },
+                    );
                     Some(Ok(PyRep::keyval([
                         ("killRightID", PyRep::Integer(kr_id)),
                         ("feePaidISK", PyRep::Real(fee_paid)),
@@ -999,11 +1082,11 @@ pub async fn handle_crimewatch(
             with_mut_combat_runtime(ctx, |rt| {
                 rt.safety_levels.insert(char_id, lvl);
             });
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(char_id),
-                "OnSafetyLevelChanged",
-                "charid",
-                vec![PyRep::Integer(lvl as i64)],
+                OnSafetyLevelChanged {
+                    safety_level: lvl as i64,
+                },
             );
             Some(Ok(PyRep::keyval([
                 ("characterID", PyRep::Integer(char_id)),
@@ -1043,16 +1126,14 @@ pub async fn handle_crimewatch(
             with_mut_combat_runtime(ctx, |rt| {
                 rt.duel_challenges.insert((char_id, target_char_id), now_unix.saturating_add(60));
             });
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(target_char_id),
-                "OnDuelChallenge",
-                "charid",
-                vec![
-                    PyRep::Integer(char_id),
-                    PyRep::Integer(from_corp_id),
-                    from_alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                    PyRep::Integer(expiry_ft),
-                ],
+                OnDuelChallenge {
+                    from_char_id: char_id,
+                    from_corp_id,
+                    from_alliance_id,
+                    expiry_time: expiry_ft,
+                },
             );
             Some(Ok(PyRep::keyval([
                 ("challengerID", PyRep::Integer(char_id)),
@@ -1113,29 +1194,35 @@ pub async fn handle_crimewatch(
             }
             if accept {
                 let timeout_ft = ctx.now_blueos_filetime_ticks() + 3_000_000_000;
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Character(char_id),
-                    "OnCrimewatchEngagementCreated",
-                    "charid",
-                    vec![PyRep::Integer(challenger_id), PyRep::Integer(timeout_ft)],
+                    OnCrimewatchEngagementCreated {
+                        other_char_id: challenger_id,
+                        timeout: timeout_ft,
+                    },
                 );
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Character(challenger_id),
-                    "OnCrimewatchEngagementCreated",
-                    "charid",
-                    vec![PyRep::Integer(char_id), PyRep::Integer(timeout_ft)],
+                    OnCrimewatchEngagementCreated {
+                        other_char_id: char_id,
+                        timeout: timeout_ft,
+                    },
                 );
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Character(char_id),
-                    "OnCrimewatchEngagementUpdated",
-                    "charid",
-                    vec![PyRep::Integer(challenger_id), PyRep::Bool(true)],
+                    OnCrimewatchEngagementUpdated {
+                        other_char_id: challenger_id,
+                        timeout: PyRep::Bool(true),
+                        do_alert: None,
+                    },
                 );
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Character(challenger_id),
-                    "OnCrimewatchEngagementUpdated",
-                    "charid",
-                    vec![PyRep::Integer(char_id), PyRep::Bool(true)],
+                    OnCrimewatchEngagementUpdated {
+                        other_char_id: char_id,
+                        timeout: PyRep::Bool(true),
+                        do_alert: None,
+                    },
                 );
             }
             Some(Ok(PyRep::keyval([
@@ -1320,8 +1407,20 @@ pub fn evaluate_and_record_pvp_aggression(
         });
         if le_created {
             let timeout_ft = ctx.now_blueos_filetime_ticks() + 3_000_000_000;
-            ctx.notify(NotificationTarget::Character(attacker_char_id), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(vcid), PyRep::Integer(timeout_ft)]);
-            ctx.notify(NotificationTarget::Character(vcid), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(attacker_char_id), PyRep::Integer(timeout_ft)]);
+            ctx.emit_typed(
+                NotificationTarget::Character(attacker_char_id),
+                OnCrimewatchEngagementCreated {
+                    other_char_id: vcid,
+                    timeout: timeout_ft,
+                },
+            );
+            ctx.emit_typed(
+                NotificationTarget::Character(vcid),
+                OnCrimewatchEngagementCreated {
+                    other_char_id: attacker_char_id,
+                    timeout: timeout_ft,
+                },
+            );
         }
         if !is_legal {
             record_illegal_pvp_penalties_if_new(ctx, attacker_char_id, vcid, sys_id, sys_sec, is_pod_target, is_new_agg, now_unix);
@@ -1418,8 +1517,20 @@ pub fn evaluate_and_record_remote_assistance(
         });
         let timeout_ft = ctx.now_blueos_filetime_ticks() + 3_000_000_000;
         for &pid in &ben_le_partners {
-            ctx.notify(NotificationTarget::Character(helper_char_id), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(pid), PyRep::Integer(timeout_ft)]);
-            ctx.notify(NotificationTarget::Character(pid), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(helper_char_id), PyRep::Integer(timeout_ft)]);
+            ctx.emit_typed(
+                NotificationTarget::Character(helper_char_id),
+                OnCrimewatchEngagementCreated {
+                    other_char_id: pid,
+                    timeout: timeout_ft,
+                },
+            );
+            ctx.emit_typed(
+                NotificationTarget::Character(pid),
+                OnCrimewatchEngagementCreated {
+                    other_char_id: helper_char_id,
+                    timeout: timeout_ft,
+                },
+            );
         }
     }
     {

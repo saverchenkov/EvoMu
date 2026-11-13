@@ -12,6 +12,11 @@
 
 #![forbid(unsafe_code)]
 
+use crate::router::notify_registry::{
+    OnOfferReceived, OnProgressionTaskWidgetUpdate, OnRecommendationsChanged, OnServerBrainUpdated,
+    OnServerMapDataPush, OnStartConversation, OnUpdateLocalizationTextCache,
+    OnUpdateServiceMapping,
+};
 use crate::router::{NotificationTarget, ServerContext};
 use eve_proto::PyRep;
 
@@ -89,11 +94,12 @@ pub fn emit_offer_received(
         ])
     });
 
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnOfferReceived",
-        "charid",
-        vec![PyRep::Integer(offer_id), offer_dict],
+        OnOfferReceived {
+            offer_id,
+            offer: offer_dict,
+        },
     );
 }
 
@@ -106,27 +112,20 @@ pub fn emit_progression_task_widget_update(
     task_widget_id: i64,
     widget_state: PyRep,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnProgressionTaskWidgetUpdate",
-        "charid",
-        vec![
-            PyRep::Integer(task_id),
-            PyRep::Integer(task_widget_id),
+        OnProgressionTaskWidgetUpdate {
+            task_id,
+            task_widget_id,
             widget_state,
-        ],
+        },
     );
 }
 
 /// Emits `OnRecommendationsChanged()` (`0` args, `id_type = "charid"`).
 /// Matches `eve/client/script/ui/shared/infoPanels/infoPanelRecommendations.pyj:InfoPanelRecommendations.OnRecommendationsChanged`.
 pub fn emit_recommendations_changed(ctx: &ServerContext, char_id: i64) {
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnRecommendationsChanged",
-        "charid",
-        vec![],
-    );
+    ctx.emit_typed(NotificationTarget::Character(char_id), OnRecommendationsChanged);
 }
 
 /// Emits `OnServerBrainUpdated(brainData)` (`1` arg, `id_type = "charid"`).
@@ -134,11 +133,9 @@ pub fn emit_recommendations_changed(ctx: &ServerContext, char_id: i64) {
 /// V24 client unpacks `brainVersion, grayMatter = brainData` (`eve/common/script/dogma/baseDogmaLocation.pyj:ProcessBrainData`).
 pub fn emit_server_brain_updated(ctx: &ServerContext, char_id: i64, brain_version: i64) {
     let brain_data = PyRep::Tuple(vec![PyRep::Integer(brain_version), PyRep::None]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnServerBrainUpdated",
-        "charid",
-        vec![brain_data],
+        OnServerBrainUpdated { brain_data },
     );
 }
 
@@ -170,11 +167,13 @@ pub fn emit_server_map_data_push(
             ])
         })
         .collect();
-    ctx.notify(
+    ctx.emit_typed_with_id_type(
         target,
-        "OnServerMapDataPush",
         "charid",
-        vec![PyRep::List(tri_reps), PyRep::List(data_reps)],
+        OnServerMapDataPush {
+            tricolors: PyRep::List(tri_reps),
+            data: PyRep::List(data_reps),
+        },
     );
 }
 
@@ -186,14 +185,12 @@ pub fn emit_start_conversation(
     conversation_id: i64,
     show_continue_button: bool,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnStartConversation",
-        "charid",
-        vec![
-            PyRep::Integer(conversation_id),
-            PyRep::Bool(show_continue_button),
-        ],
+        OnStartConversation {
+            conversation_id,
+            show_continue_button,
+        },
     );
 }
 
@@ -211,11 +208,12 @@ pub fn emit_update_localization_text_cache(
             PyRep::Dict(Vec::new()),
         ])
     });
-    ctx.notify(
+    ctx.emit_typed_with_id_type(
         target,
-        "OnUpdateLocalizationTextCache",
         "charid",
-        vec![payload],
+        OnUpdateLocalizationTextCache {
+            cache_data: payload,
+        },
     );
 }
 
@@ -227,11 +225,13 @@ pub fn emit_update_service_mapping(
     svc: &str,
     node_id: i64,
 ) {
-    ctx.notify(
+    ctx.emit_typed_with_id_type(
         target,
-        "OnUpdateServiceMapping",
         "charid",
-        vec![PyRep::String(svc.to_string()), PyRep::Integer(node_id)],
+        OnUpdateServiceMapping {
+            svc: svc.to_string(),
+            node_id,
+        },
     );
 }
 

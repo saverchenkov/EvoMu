@@ -4,6 +4,16 @@
 #![forbid(unsafe_code)]
 
 use crate::router::cache_notifications::PendingMachoNotification;
+use crate::router::notify_registry::{
+    emit_typed_char_with_db, OnCargoScanComplete, OnCharNoLongerInStation, OnCharNowInStation,
+    OnCombatMessage, OnDamageStateChange, OnESSMainBankLinkNotification,
+    OnESSReserveBankLinkNotification, OnKillNotification, OnMainBankPlayerHackSuccess,
+    OnMainBankPlayerLinkDisconnected, OnOreMined, OnPlayerPodDeath, OnPlayerPodRespawn,
+    OnPodDeath, OnPodKilled, OnProgressionAdvanced, OnProgressionTaskCompleted,
+    OnReserveBankPlayerLinkDisconnected, OnReserveBankUnlock, OnSecurityModified, OnShipDeath,
+    OnShipScanCompleted, OnSystemCriminalFlagUpdates, OnSystemDisapprovalFlagUpdates,
+    OnSystemDynamicBountyStateChanged, OnSystemESSDataChanged,
+};
 use crate::router::{NotificationTarget, ServerContext};
 use eve_db::lock_rank::AnyRwLock;
 use eve_proto::PyRep;
@@ -56,14 +66,12 @@ pub fn emit_progression_advanced(
     objective_id: i64,
     last_completed_task_id: i64,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnProgressionAdvanced",
-        "charid",
-        vec![
-            PyRep::Integer(objective_id),
-            PyRep::Integer(last_completed_task_id),
-        ],
+        OnProgressionAdvanced {
+            objective_id,
+            last_completed_task_id,
+        },
     );
 }
 
@@ -76,16 +84,15 @@ pub fn emit_progression_advanced_with_db(
     objective_id: i64,
     last_completed_task_id: i64,
 ) {
-    push_char_notification_with_db(
+    emit_typed_char_with_db(
         db,
         pending_notifications,
         notify_tx,
         char_id,
-        "OnProgressionAdvanced",
-        vec![
-            PyRep::Integer(objective_id),
-            PyRep::Integer(last_completed_task_id),
-        ],
+        OnProgressionAdvanced {
+            objective_id,
+            last_completed_task_id,
+        },
     );
 }
 
@@ -93,11 +100,9 @@ pub fn emit_progression_advanced_with_db(
 /// Matches `progression/client/progressionSvc.pyj:ProgressionService.OnProgressionTaskCompleted`.
 #[allow(dead_code)]
 pub fn emit_progression_task_completed(ctx: &ServerContext, char_id: i64, task_id: i64) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnProgressionTaskCompleted",
-        "charid",
-        vec![PyRep::Integer(task_id)],
+        OnProgressionTaskCompleted { task_id },
     );
 }
 
@@ -109,13 +114,12 @@ pub fn emit_progression_task_completed_with_db(
     char_id: i64,
     task_id: i64,
 ) {
-    push_char_notification_with_db(
+    emit_typed_char_with_db(
         db,
         pending_notifications,
         notify_tx,
         char_id,
-        "OnProgressionTaskCompleted",
-        vec![PyRep::Integer(task_id)],
+        OnProgressionTaskCompleted { task_id },
     );
 }
 
@@ -158,11 +162,12 @@ pub fn emit_combat_message(
         ),
         (PyRep::String("isWrecking".into()), PyRep::Bool(is_wrecking)),
     ]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnCombatMessage",
-        "charid",
-        vec![PyRep::String(message_name.into()), message_args],
+        OnCombatMessage {
+            message_name: message_name.into(),
+            message_args,
+        },
     );
 }
 
@@ -189,18 +194,17 @@ pub fn emit_char_station_notification(
         war_faction_id.map(PyRep::Integer).unwrap_or(PyRep::None),
     ]);
 
-    let event = if is_docked {
-        "OnCharNowInStation"
+    if is_docked {
+        ctx.emit_typed(
+            NotificationTarget::Station(station_id),
+            OnCharNowInStation { rec: guest_row },
+        );
     } else {
-        "OnCharNoLongerInStation"
-    };
-
-    ctx.notify(
-        NotificationTarget::Station(station_id),
-        event,
-        "charid",
-        vec![guest_row],
-    );
+        ctx.emit_typed(
+            NotificationTarget::Station(station_id),
+            OnCharNoLongerInStation { rec: guest_row },
+        );
+    }
 }
 
 /// Emits `OnCargoScanComplete(targetID, cargoList)` (`id_type = "charid"`).
@@ -211,20 +215,12 @@ pub fn emit_cargo_scan_complete(
     target_id: i64,
     items: Vec<(i32, i64)>,
 ) {
-    let cargo_list = items
-        .into_iter()
-        .map(|(tid, qty)| {
-            PyRep::Tuple(vec![
-                PyRep::Integer(i64::from(tid)),
-                PyRep::Integer(qty),
-            ])
-        })
-        .collect();
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnCargoScanComplete",
-        "charid",
-        vec![PyRep::Integer(target_id), PyRep::List(cargo_list)],
+        OnCargoScanComplete {
+            ship_id: target_id,
+            cargo_list: items,
+        },
     );
 }
 
@@ -238,25 +234,14 @@ pub fn emit_ship_scan_completed(
     max_cap: f64,
     hardware: Vec<(i32, i64)>,
 ) {
-    let hw_list = hardware
-        .into_iter()
-        .map(|(tid, qty)| {
-            PyRep::Tuple(vec![
-                PyRep::Integer(i64::from(tid)),
-                PyRep::Integer(qty),
-            ])
-        })
-        .collect();
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnShipScanCompleted",
-        "charid",
-        vec![
-            PyRep::Integer(target_id),
-            PyRep::Real(cap_charge),
-            PyRep::Real(max_cap),
-            PyRep::List(hw_list),
-        ],
+        OnShipScanCompleted {
+            ship_id: target_id,
+            capacitor_charge: cap_charge,
+            capacitor_capacity: max_cap,
+            hardware_list: hardware,
+        },
     );
 }
 
@@ -273,20 +258,20 @@ pub fn emit_ore_mined(
     target_id: i64,
     module_id: i64,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnOreMined",
-        "charid",
-        vec![PyRep::Dict(vec![
-            (PyRep::String("oreType".into()), PyRep::Integer(i64::from(ore_type_id))),
-            (PyRep::String("quantity_added".into()), PyRep::Integer(delivered)),
-            (PyRep::String("quantity_removed".into()), PyRep::Integer(mined)),
-            (PyRep::String("hasRewards".into()), PyRep::Bool(false)),
-            (PyRep::String("amountWasted".into()), PyRep::Integer(wasted)),
-            (PyRep::String("amountCritBonus".into()), PyRep::Integer(crit_bonus)),
-            (PyRep::String("itemID".into()), PyRep::Integer(target_id)),
-            (PyRep::String("moduleItemID".into()), PyRep::Integer(module_id)),
-        ])],
+        OnOreMined {
+            data_dict: PyRep::Dict(vec![
+                (PyRep::String("oreType".into()), PyRep::Integer(i64::from(ore_type_id))),
+                (PyRep::String("quantity_added".into()), PyRep::Integer(delivered)),
+                (PyRep::String("quantity_removed".into()), PyRep::Integer(mined)),
+                (PyRep::String("hasRewards".into()), PyRep::Bool(false)),
+                (PyRep::String("amountWasted".into()), PyRep::Integer(wasted)),
+                (PyRep::String("amountCritBonus".into()), PyRep::Integer(crit_bonus)),
+                (PyRep::String("itemID".into()), PyRep::Integer(target_id)),
+                (PyRep::String("moduleItemID".into()), PyRep::Integer(module_id)),
+            ]),
+        },
     );
 }
 
@@ -302,21 +287,20 @@ pub fn emit_damage_state_change(
     let damage_tuple = super::notify_emitters_space_dungeons::build_damage_state_tuple(
         ctx, ship_id, shield, armor, structure,
     );
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnDamageStateChange",
-        "charid",
-        vec![PyRep::Integer(ship_id), damage_tuple],
+        OnDamageStateChange {
+            ship_id,
+            damage_state: damage_tuple,
+        },
     );
 }
 
 /// Emits `OnSystemESSDataChanged(systemID, data)` (`id_type = "solarsystemid"`).
 pub fn emit_system_ess_data_changed(ctx: &ServerContext, system_id: i64, data: PyRep) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(system_id as u32),
-        "OnSystemESSDataChanged",
-        "solarsystemid",
-        vec![PyRep::Integer(system_id), data],
+        OnSystemESSDataChanged { system_id, data },
     );
 }
 
@@ -326,31 +310,29 @@ pub fn emit_system_dynamic_bounty_state_changed(
     system_id: i64,
     rate: f64,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(system_id as u32),
-        "OnSystemDynamicBountyStateChanged",
-        "solarsystemid",
-        vec![PyRep::Integer(system_id), PyRep::Real(rate)],
+        OnSystemDynamicBountyStateChanged { system_id, rate },
     );
 }
 
 /// Emits `OnESSMainBankLinkNotification(solarSystemID)` (`id_type = "solarsystemid"`).
 pub fn emit_ess_main_bank_link_notification(ctx: &ServerContext, system_id: u32) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(system_id),
-        "OnESSMainBankLinkNotification",
-        "solarsystemid",
-        vec![PyRep::Integer(i64::from(system_id))],
+        OnESSMainBankLinkNotification {
+            solar_system_id: i64::from(system_id),
+        },
     );
 }
 
 /// Emits `OnESSReserveBankLinkNotification(solar_system_id)` (`id_type = "solarsystemid"`).
 pub fn emit_ess_reserve_bank_link_notification(ctx: &ServerContext, system_id: u32) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(system_id),
-        "OnESSReserveBankLinkNotification",
-        "solarsystemid",
-        vec![PyRep::Integer(i64::from(system_id))],
+        OnESSReserveBankLinkNotification {
+            solar_system_id: i64::from(system_id),
+        },
     );
 }
 
@@ -368,11 +350,9 @@ pub fn emit_main_bank_player_link_disconnected(
         ("reason", PyRep::String(reason.to_string())),
         ("linkID", PyRep::Integer(link_id)),
     ]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnMainBankPlayerLinkDisconnected",
-        "charid",
-        vec![payload],
+        OnMainBankPlayerLinkDisconnected { data: payload },
     );
 }
 
@@ -388,11 +368,9 @@ pub fn emit_reserve_bank_player_link_disconnected(
         ("solarSystemID", PyRep::Integer(i64::from(system_id))),
         ("reason", PyRep::Integer(reason)),
     ]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnReserveBankPlayerLinkDisconnected",
-        "charid",
-        vec![payload],
+        OnReserveBankPlayerLinkDisconnected { data: payload },
     );
 }
 
@@ -408,69 +386,48 @@ pub fn emit_main_bank_player_hack_success(
         ("solarSystemID", PyRep::Integer(i64::from(system_id))),
         ("linkID", PyRep::Integer(link_id)),
     ]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnMainBankPlayerHackSuccess",
-        "charid",
-        vec![payload],
+        OnMainBankPlayerHackSuccess { data: payload },
     );
 }
 
 /// Emits `OnReserveBankUnlock(data)` (`id_type = "solarsystemid"`).
 pub fn emit_reserve_bank_unlock(ctx: &ServerContext, sys_id: u32, region_id: i64) {
     let payload = PyRep::keyval([("regionID", PyRep::Integer(region_id))]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnReserveBankUnlock",
-        "solarsystemid",
-        vec![payload],
+        OnReserveBankUnlock { data: payload },
     );
 }
 
 /// Emits `OnKillNotification()` (`id_type = "charid"`).
 pub fn emit_kill_notification(ctx: &ServerContext, char_id: i64) {
     if char_id > 0 {
-        ctx.notify(
-            NotificationTarget::Character(char_id),
-            "OnKillNotification",
-            "charid",
-            vec![],
-        );
+        ctx.emit_typed(NotificationTarget::Character(char_id), OnKillNotification {});
     }
 }
 
 /// Emits `OnShipDeath()` (`id_type = "charid"`).
 pub fn emit_ship_death(ctx: &ServerContext, char_id: i64) {
     if char_id > 0 {
-        ctx.notify(
-            NotificationTarget::Character(char_id),
-            "OnShipDeath",
-            "charid",
-            vec![],
-        );
+        ctx.emit_typed(NotificationTarget::Character(char_id), OnShipDeath {});
     }
 }
 
 /// Emits `OnPodDeath()` (`id_type = "charid"`).
 pub fn emit_pod_death(ctx: &ServerContext, char_id: i64) {
     if char_id > 0 {
-        ctx.notify(
-            NotificationTarget::Character(char_id),
-            "OnPodDeath",
-            "charid",
-            vec![],
-        );
+        ctx.emit_typed(NotificationTarget::Character(char_id), OnPodDeath {});
     }
 }
 
 /// Emits `OnPodKilled(destroyedPodID)` (`id_type = "charid"`).
 pub fn emit_pod_killed(ctx: &ServerContext, char_id: i64, destroyed_pod_id: i64) {
     if char_id > 0 {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnPodKilled",
-            "charid",
-            vec![PyRep::Integer(destroyed_pod_id)],
+            OnPodKilled { destroyed_pod_id },
         );
     }
 }
@@ -478,24 +435,14 @@ pub fn emit_pod_killed(ctx: &ServerContext, char_id: i64, destroyed_pod_id: i64)
 /// Emits `OnPlayerPodDeath()` (`id_type = "charid"`).
 pub fn emit_player_pod_death(ctx: &ServerContext, char_id: i64) {
     if char_id > 0 {
-        ctx.notify(
-            NotificationTarget::Character(char_id),
-            "OnPlayerPodDeath",
-            "charid",
-            vec![],
-        );
+        ctx.emit_typed(NotificationTarget::Character(char_id), OnPlayerPodDeath {});
     }
 }
 
 /// Emits `OnPlayerPodRespawn()` (`id_type = "charid"`).
 pub fn emit_player_pod_respawn(ctx: &ServerContext, char_id: i64) {
     if char_id > 0 {
-        ctx.notify(
-            NotificationTarget::Character(char_id),
-            "OnPlayerPodRespawn",
-            "charid",
-            vec![],
-        );
+        ctx.emit_typed(NotificationTarget::Character(char_id), OnPlayerPodRespawn {});
     }
 }
 
@@ -507,12 +454,13 @@ pub fn emit_system_criminal_flag_updates(
     new_suspects: &[i64],
     new_criminals: &[i64],
 ) {
-    let ids = |v: &[i64]| PyRep::List(v.iter().map(|c| PyRep::Integer(*c)).collect());
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnSystemCriminalFlagUpdates",
-        "solarsystemid",
-        vec![ids(new_idles), ids(new_suspects), ids(new_criminals)],
+        OnSystemCriminalFlagUpdates {
+            new_idles: new_idles.to_vec(),
+            new_suspects: new_suspects.to_vec(),
+            new_criminals: new_criminals.to_vec(),
+        },
     );
 }
 
@@ -523,12 +471,12 @@ pub fn emit_system_disapproval_flag_updates(
     new_idles: &[i64],
     new_naughty: &[i64],
 ) {
-    let ids = |v: &[i64]| PyRep::List(v.iter().map(|c| PyRep::Integer(*c)).collect());
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnSystemDisapprovalFlagUpdates",
-        "solarsystemid",
-        vec![ids(new_idles), ids(new_naughty)],
+        OnSystemDisapprovalFlagUpdates {
+            new_idles: new_idles.to_vec(),
+            new_naughty_boys_and_girls: new_naughty.to_vec(),
+        },
     );
 }
 
@@ -539,15 +487,13 @@ pub fn emit_security_modified(
     modifier_amount: f64,
     new_security: f64,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnSecurityModified",
-        "solarsystemid",
-        vec![
-            PyRep::Integer(i64::from(sys_id)),
-            PyRep::Real(modifier_amount),
-            PyRep::Real(new_security),
-        ],
+        OnSecurityModified {
+            solar_system_id: i64::from(sys_id),
+            modifier_amount,
+            new_security,
+        },
     );
 }
 

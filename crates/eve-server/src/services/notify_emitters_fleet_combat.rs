@@ -16,6 +16,11 @@
 
 #![forbid(unsafe_code)]
 
+use crate::router::notify_registry::{
+    OnCriminalTimerUpdate, OnInvalidateCacheForLocations, OnOperationReplayed, OnPasswordChanged,
+    OnPvpTimerUpdate, OnShipDeath, OnSolarSystemLPChange, OnUiRevealForced,
+    OnVictoryPointStateUpdated, OnWeaponsTimerUpdate,
+};
 use crate::router::{BoundObjectEntry, NotificationTarget, ServerContext};
 use crate::services::inventory_fitting::fitting_containers_ships;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -24,23 +29,19 @@ use eve_sde::TypeId;
 /// Emits `OnOperationReplayed(categoryID, operationID)` (`2` args, `id_type = "charid"`).
 /// Emitter for notify:OnOperationReplayed
 pub fn emit_operation_replayed(ctx: &ServerContext, char_id: i64, cat_id: i64, op_id: i64) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnOperationReplayed",
-        "charid",
-        vec![PyRep::Integer(cat_id), PyRep::Integer(op_id)],
+        OnOperationReplayed {
+            category_id: cat_id,
+            operation_id: op_id,
+        },
     );
 }
 
 /// Emits `OnUiRevealForced()` (`0` args, `id_type = "charid"`).
 /// Emitter for notify:OnUiRevealForced
 pub fn emit_ui_reveal_forced(ctx: &ServerContext, char_id: i64) {
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnUiRevealForced",
-        "charid",
-        vec![],
-    );
+    ctx.emit_typed(NotificationTarget::Character(char_id), OnUiRevealForced {});
 }
 
 /// Emits `OnPasswordChanged(which, containerItem)` (`2` args, `id_type = "charid"`).
@@ -56,11 +57,12 @@ pub fn emit_password_changed(
         ("itemID", PyRep::Integer(container_id)),
         ("typeID", PyRep::Integer(i64::from(type_id))),
     ]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnPasswordChanged",
-        "charid",
-        vec![PyRep::Integer(which), container_item],
+        OnPasswordChanged {
+            which,
+            container_item,
+        },
     );
 }
 
@@ -74,12 +76,11 @@ pub fn emit_invalidate_cache_for_locations(
     if location_ids.is_empty() {
         return;
     }
-    let list = location_ids.iter().copied().map(PyRep::Integer).collect();
-    ctx.notify(
+    ctx.emit_typed(
         target,
-        "OnInvalidateCacheForLocations",
-        "charid",
-        vec![PyRep::List(list)],
+        OnInvalidateCacheForLocations {
+            location_ids: location_ids.to_vec(),
+        },
     );
 }
 
@@ -102,11 +103,12 @@ pub fn emit_solar_system_lp_change(
     if old_points == new_points {
         return;
     }
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnSolarSystemLPChange",
-        "solarsystemid",
-        vec![PyRep::Integer(old_points), PyRep::Integer(new_points)],
+        OnSolarSystemLPChange {
+            old_points,
+            new_points,
+        },
     );
 }
 
@@ -125,11 +127,12 @@ pub fn emit_victory_point_state_updated(
         ("contestedPercentage", PyRep::Real(contested)),
         ("threshold", PyRep::Integer(threshold_i)),
     ]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnVictoryPointStateUpdated",
-        "solarsystemid",
-        vec![PyRep::Integer(i64::from(sys_id)), vp_state],
+        OnVictoryPointStateUpdated {
+            solar_system_id: i64::from(sys_id),
+            new_victory_point_state: vp_state,
+        },
     );
 }
 
@@ -141,11 +144,13 @@ pub fn emit_weapons_timer_update(
     state_code: i64,
     expiry_val: PyRep,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnWeaponsTimerUpdate",
-        "charid",
-        vec![PyRep::Integer(state_code), expiry_val],
+        OnWeaponsTimerUpdate {
+            state: state_code,
+            expiry_time: expiry_val,
+            do_alert: None,
+        },
     );
 }
 
@@ -157,11 +162,13 @@ pub fn emit_pvp_timer_update(
     state_code: i64,
     expiry_val: PyRep,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnPvpTimerUpdate",
-        "charid",
-        vec![PyRep::Integer(state_code), expiry_val],
+        OnPvpTimerUpdate {
+            state: state_code,
+            expiry_time: expiry_val,
+            do_alert: None,
+        },
     );
 }
 
@@ -173,11 +180,13 @@ pub fn emit_criminal_timer_update(
     state_code: i64,
     expiry_val: PyRep,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnCriminalTimerUpdate",
-        "charid",
-        vec![PyRep::Integer(state_code), expiry_val],
+        OnCriminalTimerUpdate {
+            state: state_code,
+            expiry_time: expiry_val,
+            do_alert: None,
+        },
     );
 }
 
@@ -201,12 +210,7 @@ pub fn emit_ship_death(ctx: &ServerContext, char_id: i64) {
     if char_id <= 0 {
         return;
     }
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnShipDeath",
-        "charid",
-        vec![],
-    );
+    ctx.emit_typed(NotificationTarget::Character(char_id), OnShipDeath {});
 }
 
 fn parse_optional_password(rep: Option<&PyRep>, field: &str) -> Result<Option<String>, BridgeRpcError> {

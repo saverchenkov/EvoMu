@@ -3,6 +3,12 @@
 
 #![forbid(unsafe_code)]
 
+use crate::router::notify_registry::{
+    OnAllianceApplicationChanged, OnAllianceChanged, OnAllianceLogoReady,
+    OnAllianceMemberChanged, OnAllianceRelationshipChanged, OnCapitalSystemChanged,
+    OnCorpWalletBillsChanged, OnOrganizationContactsUpdated, OnSetAllianceStanding,
+    OnUpdateCapitalInfo,
+};
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::{
     corp_roles, AllianceRecord, FleetMemberRecord, FleetRecord, FleetRole,
@@ -184,16 +190,37 @@ fn sync_alliance_timers(ctx: &ServerContext, aid: i64) -> bool {
             (PyRep::String(("allianceID").into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(aid)])),
             (PyRep::String(("corporationID").into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(*cid)])),
         ]);
-        ctx.notify(NotificationTarget::Alliance(aid), "OnAllianceMemberChanged", "allianceid", vec![PyRep::Integer(aid), PyRep::Integer(*cid), change]);
+        ctx.emit_typed(
+            NotificationTarget::Alliance(aid),
+            OnAllianceMemberChanged {
+                alliance_id: aid,
+                corp_id: *cid,
+                change,
+            },
+        );
     }
     for cid in &left {
         let m_change = PyRep::Dict(vec![
             (PyRep::String(("allianceID").into()), PyRep::Tuple(vec![PyRep::Integer(aid), PyRep::None])),
             (PyRep::String(("corporationID").into()), PyRep::Tuple(vec![PyRep::Integer(*cid), PyRep::None])),
         ]);
-        let m_args = vec![PyRep::Integer(aid), PyRep::Integer(*cid), m_change];
-        ctx.notify(NotificationTarget::Alliance(aid), "OnAllianceMemberChanged", "allianceid", m_args.clone());
-        ctx.notify(NotificationTarget::Corporation(*cid), "OnAllianceMemberChanged", "corpid", m_args);
+        ctx.emit_typed(
+            NotificationTarget::Alliance(aid),
+            OnAllianceMemberChanged {
+                alliance_id: aid,
+                corp_id: *cid,
+                change: m_change.clone(),
+            },
+        );
+        ctx.emit_typed_with_id_type(
+            NotificationTarget::Corporation(*cid),
+            "corpid",
+            OnAllianceMemberChanged {
+                alliance_id: aid,
+                corp_id: *cid,
+                change: m_change,
+            },
+        );
     }
     let now = ctx.now_unix();
     let members_to_refresh: Vec<u32> = ctx.db.with_snapshot(|snap| {
@@ -393,7 +420,13 @@ pub async fn handle(
                         (PyRep::String(("shortName").into()), PyRep::Tuple(vec![PyRep::None, PyRep::String(short_name.to_string())])),
                         (PyRep::String(("executorCorpID").into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(corp_id)])),
                     ]);
-                    ctx.notify(NotificationTarget::Alliance(aid), "OnAllianceChanged", "allianceid", vec![PyRep::Integer(aid), change]);
+                    ctx.emit_typed(
+                        NotificationTarget::Alliance(aid),
+                        OnAllianceChanged {
+                            alliance_id: aid,
+                            change,
+                        },
+                    );
                     Some(Ok(PyRep::keyval([
                         ("allianceID", PyRep::Integer(aid)),
                         ("allianceName", PyRep::String(name.to_string())),
@@ -440,9 +473,23 @@ pub async fn handle(
                 (PyRep::String(("applicationText").into()), PyRep::Tuple(vec![PyRep::None, PyRep::String(msg.to_string())])),
                 (PyRep::String(("state").into()), PyRep::Tuple(vec![PyRep::None, PyRep::String(("Pending").into())])),
             ]);
-            let app_args = vec![PyRep::Integer(aid), PyRep::Integer(corp_id), app_change];
-            ctx.notify(NotificationTarget::Alliance(aid), "OnAllianceApplicationChanged", "allianceid", app_args.clone());
-            ctx.notify(NotificationTarget::Corporation(corp_id), "OnAllianceApplicationChanged", "corpid", app_args);
+            ctx.emit_typed(
+                NotificationTarget::Alliance(aid),
+                OnAllianceApplicationChanged {
+                    alliance_id: aid,
+                    corp_id,
+                    change: app_change.clone(),
+                },
+            );
+            ctx.emit_typed_with_id_type(
+                NotificationTarget::Corporation(corp_id),
+                "corpid",
+                OnAllianceApplicationChanged {
+                    alliance_id: aid,
+                    corp_id,
+                    change: app_change,
+                },
+            );
             Some(Ok(PyRep::keyval([
                 ("allianceID", PyRep::Integer(aid)),
                 ("corporationID", PyRep::Integer(corp_id)),
@@ -638,7 +685,13 @@ pub async fn handle(
                     PyRep::String(("executorCorpID").into()),
                     PyRep::Tuple(vec![PyRep::Integer(old_exec), PyRep::Integer(exec_id)]),
                 )]);
-                ctx.notify(NotificationTarget::Alliance(aid), "OnAllianceChanged", "allianceid", vec![PyRep::Integer(aid), change]);
+                ctx.emit_typed(
+                    NotificationTarget::Alliance(aid),
+                    OnAllianceChanged {
+                        alliance_id: aid,
+                        change,
+                    },
+                );
             }
             let current_exec = ctx.db.with_snapshot(|snap| snap.alliances.get(&aid).map(|a| a.executor_corp_id).unwrap_or(0));
             Some(Ok(PyRep::keyval([
@@ -763,20 +816,32 @@ pub async fn handle(
                 (PyRep::String(("relationshipID").into()), PyRep::Tuple(vec![old_st, PyRep::Real(standing)])),
                 (PyRep::String(("labelMask").into()), PyRep::Tuple(vec![old_mask, PyRep::Integer(label_mask as i64)])),
             ]);
-            ctx.notify(NotificationTarget::Alliance(aid), "OnAllianceRelationshipChanged", "allianceid", vec![PyRep::Integer(aid), PyRep::Integer(contact_id), rel_change]);
-            ctx.notify(NotificationTarget::Alliance(aid), "OnSetAllianceStanding", "allianceid", vec![PyRep::Integer(contact_id), PyRep::Real(standing)]);
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Alliance(aid),
-                "OnOrganizationContactsUpdated",
+                OnAllianceRelationshipChanged {
+                    alliance_id: aid,
+                    to_id: contact_id,
+                    change: rel_change,
+                },
+            );
+            ctx.emit_typed(
+                NotificationTarget::Alliance(aid),
+                OnSetAllianceStanding {
+                    contact_id,
+                    standing,
+                },
+            );
+            ctx.emit_typed_with_id_type(
+                NotificationTarget::Alliance(aid),
                 "allianceid",
-                vec![
-                    PyRep::Integer(aid),
-                    PyRep::List(vec![PyRep::keyval([
+                OnOrganizationContactsUpdated {
+                    owner_id: aid,
+                    updates: PyRep::List(vec![PyRep::keyval([
                         ("contactID", PyRep::Integer(contact_id)),
                         ("standing", PyRep::Real(standing)),
                         ("labelMask", PyRep::Integer(label_mask as i64)),
                     ])]),
-                ],
+                },
             );
             Some(Ok(PyRep::keyval([
                 ("contactID", PyRep::Integer(contact_id)),
@@ -813,7 +878,14 @@ pub async fn handle(
                     (PyRep::String(("toID").into()), PyRep::Tuple(vec![PyRep::Integer(cid), PyRep::None])),
                     (PyRep::String(("relationshipID").into()), PyRep::Tuple(vec![old_st, PyRep::None])),
                 ]);
-                ctx.notify(NotificationTarget::Alliance(aid), "OnAllianceRelationshipChanged", "allianceid", vec![PyRep::Integer(aid), PyRep::Integer(cid), rel_change]);
+                ctx.emit_typed(
+                    NotificationTarget::Alliance(aid),
+                    OnAllianceRelationshipChanged {
+                        alliance_id: aid,
+                        to_id: cid,
+                        change: rel_change,
+                    },
+                );
             }
             Some(Ok(PyRep::List(ids.into_iter().map(PyRep::Integer).collect())))
         }
@@ -1163,11 +1235,12 @@ pub async fn handle(
                     std::mem::replace(&mut st.logo_extra_colors, (c2, c3)),
                 )
             });
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Alliance(aid),
-                "OnAllianceLogoReady",
-                "allianceid",
-                vec![PyRep::Integer(aid), PyRep::Integer(128)],
+                OnAllianceLogoReady {
+                    alliance_id: aid,
+                    size: 128,
+                },
             );
             let change = PyRep::Dict(vec![
                 (PyRep::String(("shape1").into()), PyRep::Tuple(vec![PyRep::Integer(old_logo.0), PyRep::Integer(s1)])),
@@ -1177,11 +1250,12 @@ pub async fn handle(
                 (PyRep::String(("color2").into()), PyRep::Tuple(vec![PyRep::Integer(old_extra.0), PyRep::Integer(c2)])),
                 (PyRep::String(("color3").into()), PyRep::Tuple(vec![PyRep::Integer(old_extra.1), PyRep::Integer(c3)])),
             ]);
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Alliance(aid),
-                "OnAllianceChanged",
-                "allianceid",
-                vec![PyRep::Integer(aid), change],
+                OnAllianceChanged {
+                    alliance_id: aid,
+                    change,
+                },
             );
             Some(Ok(PyRep::keyval([
                 ("allianceID", PyRep::Integer(aid)),
@@ -1300,22 +1374,22 @@ fn handle_update_alliance_application(
         ));
     }
     let app_change = PyRep::Dict(change_entries);
-    let app_args = vec![
-        PyRep::Integer(aid),
-        PyRep::Integer(applicant_corp_id),
-        app_change,
-    ];
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Alliance(aid),
-        "OnAllianceApplicationChanged",
-        "allianceid",
-        app_args.clone(),
+        OnAllianceApplicationChanged {
+            alliance_id: aid,
+            corp_id: applicant_corp_id,
+            change: app_change.clone(),
+        },
     );
-    ctx.notify(
+    ctx.emit_typed_with_id_type(
         NotificationTarget::Corporation(applicant_corp_id),
-        "OnAllianceApplicationChanged",
         "corpid",
-        app_args,
+        OnAllianceApplicationChanged {
+            alliance_id: aid,
+            corp_id: applicant_corp_id,
+            change: app_change,
+        },
     );
     Ok(PyRep::keyval([
         ("allianceID", PyRep::Integer(aid)),
@@ -1596,11 +1670,12 @@ fn handle_update_alliance(
             PyRep::Tuple(vec![PyRep::String(old_url), PyRep::String(url.clone())]),
         ),
     ]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Alliance(aid),
-        "OnAllianceChanged",
-        "allianceid",
-        vec![PyRep::Integer(aid), change],
+        OnAllianceChanged {
+            alliance_id: aid,
+            change,
+        },
     );
     if let Some(allow_war) = args.get(2).and_then(|a| a.as_bool()) {
         crate::services::notify_emitters_character_services::emit_allow_war_updated_for_alliance(
@@ -1729,21 +1804,16 @@ fn handle_set_capital_system(
         write_alliance_sov_cfg(snap, aid, &cfg);
         Ok(prev)
     })?;
-    ctx.notify(
+    ctx.emit_typed(NotificationTarget::Alliance(aid), OnUpdateCapitalInfo {});
+    ctx.emit_typed(
         NotificationTarget::Alliance(aid),
-        "OnUpdateCapitalInfo",
-        "allianceid",
-        Vec::new(),
-    );
-    ctx.notify(
-        NotificationTarget::Alliance(aid),
-        "OnCapitalSystemChanged",
-        "allianceid",
-        vec![PyRep::Tuple(vec![
-            PyRep::Integer(aid),
-            old_cap.map(PyRep::Integer).unwrap_or(PyRep::None),
-            PyRep::Integer(sys_id),
-        ])],
+        OnCapitalSystemChanged {
+            change: PyRep::Tuple(vec![
+                PyRep::Integer(aid),
+                old_cap.map(PyRep::Integer).unwrap_or(PyRep::None),
+                PyRep::Integer(sys_id),
+            ]),
+        },
     );
     Ok(PyRep::Bool(true))
 }
@@ -1769,12 +1839,7 @@ fn handle_cancel_capital_system_transition(
         write_alliance_sov_cfg(snap, aid, &cfg);
         Ok(())
     })?;
-    ctx.notify(
-        NotificationTarget::Alliance(aid),
-        "OnUpdateCapitalInfo",
-        "allianceid",
-        Vec::new(),
-    );
+    ctx.emit_typed(NotificationTarget::Alliance(aid), OnUpdateCapitalInfo {});
     Ok(PyRep::Bool(true))
 }
 
@@ -1828,12 +1893,7 @@ fn handle_set_prime_hour(
         write_alliance_sov_cfg(snap, aid, &cfg);
         Ok(())
     })?;
-    ctx.notify(
-        NotificationTarget::Alliance(aid),
-        "OnUpdateCapitalInfo",
-        "allianceid",
-        Vec::new(),
-    );
+    ctx.emit_typed(NotificationTarget::Alliance(aid), OnUpdateCapitalInfo {});
     Ok(PyRep::Bool(true))
 }
 
@@ -2158,11 +2218,10 @@ fn handle_pay_alliance_bill(
         );
         Ok(())
     })?;
-    ctx.notify(
+    ctx.emit_typed_with_id_type(
         NotificationTarget::Alliance(aid),
-        "OnCorpWalletBillsChanged",
         "allianceid",
-        Vec::new(),
+        OnCorpWalletBillsChanged {},
     );
     Ok(PyRep::Bool(true))
 }
@@ -2248,36 +2307,34 @@ fn handle_gm_force_accept_application(
             PyRep::String("Accepted".into()),
         ]),
     )]);
-    let app_args = vec![
-        PyRep::Integer(aid),
-        PyRep::Integer(applicant_corp_id),
-        app_change,
-    ];
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Alliance(aid),
-        "OnAllianceApplicationChanged",
-        "allianceid",
-        app_args.clone(),
+        OnAllianceApplicationChanged {
+            alliance_id: aid,
+            corp_id: applicant_corp_id,
+            change: app_change.clone(),
+        },
     );
-    ctx.notify(
+    ctx.emit_typed_with_id_type(
         NotificationTarget::Corporation(applicant_corp_id),
-        "OnAllianceApplicationChanged",
         "corpid",
-        app_args,
+        OnAllianceApplicationChanged {
+            alliance_id: aid,
+            corp_id: applicant_corp_id,
+            change: app_change,
+        },
     );
     let member_change = PyRep::Dict(vec![(
         PyRep::String("corporationID".into()),
         PyRep::Tuple(vec![PyRep::None, PyRep::Integer(applicant_corp_id)]),
     )]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Alliance(aid),
-        "OnAllianceMemberChanged",
-        "allianceid",
-        vec![
-            PyRep::Integer(aid),
-            PyRep::Integer(applicant_corp_id),
-            member_change,
-        ],
+        OnAllianceMemberChanged {
+            alliance_id: aid,
+            corp_id: applicant_corp_id,
+            change: member_change,
+        },
     );
     Ok(PyRep::Bool(true))
 }

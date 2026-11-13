@@ -522,6 +522,7 @@ pub fn step_segment(val: &PyRep, seg: &str) -> Vec<PyRep> {
         "[*]" => match &val {
             PyRep::Dict(entries) => entries.iter().map(|(_, v)| v.clone()).collect(),
             PyRep::KeyVal(map) => map.values().cloned().collect(),
+            PyRep::DBRow { columns, .. } => columns.iter().map(|(_, v)| v.clone()).collect(),
             PyRep::IndexRowset { columns, items, .. } => items
                 .iter()
                 .map(|(_, r)| rowset_row_to_keyval(columns, r))
@@ -1710,15 +1711,27 @@ pub fn validate_notification_contract(
     event: &str,
     nargs: &[PyRep],
 ) -> Vec<String> {
+    validate_notification_contract_with_metrics(lookup, notify_map, event, nargs).0
+}
+
+/// Validates an emitted notification `(event, args)` against `notify_map[event]` and returns
+/// `(violations, had_unexercised_collection_elements)` so callers can assert non-vacuous coverage.
+pub fn validate_notification_contract_with_metrics(
+    lookup: Option<&SemanticLookupContext<'_>>,
+    notify_map: &serde_json::Map<String, Value>,
+    event: &str,
+    nargs: &[PyRep],
+) -> (Vec<String>, bool) {
     let mut violations = Vec::new();
+    let mut had_unexercised_collection_elements = false;
     // `OnSessionChanged` in `session.notifications` is an internal trigger intercepted by
     // `macho_listener` to build a wire `SessionChangeNotification` packet; on the client,
     // `arg1(sess)` is the client's local `blue.pyos.synchro` session object.
     if event == "OnSessionChanged" {
-        return violations;
+        return (violations, false);
     }
     let Some(nspec) = notify_map.get(event) else {
-        return violations;
+        return (violations, false);
     };
 
     let mut arity_min = nspec["arity_min"].as_u64().unwrap_or(0) as usize;
@@ -1752,7 +1765,7 @@ pub fn validate_notification_contract(
             "notify:{event}: emitted {} args, client expects {arity_min}..={arity_max} ({nargs:?})",
             nargs.len()
         ));
-        return violations;
+        return (violations, false);
     }
 
     if let Some(reads) = nspec["reads"].as_array() {
@@ -1802,18 +1815,21 @@ pub fn validate_notification_contract(
         }
         for (arg_idx, shape_map) in arg_shapes {
             if let Some(arg_val) = nargs.get(arg_idx) {
-                let v = validate_reply_shape(
+                let outcome = validate_reply_shape_with_metrics(
                     lookup,
                     &format!("notify:{event}[arg{arg_idx}]"),
                     arg_val,
                     &shape_map,
                 );
-                violations.extend(v);
+                violations.extend(outcome.violations);
+                if outcome.had_unexercised_collection_elements {
+                    had_unexercised_collection_elements = true;
+                }
             }
         }
     }
 
-    violations
+    (violations, had_unexercised_collection_elements)
 }
 
 /// Convenience wrapper validating an emitted wire notification against `expectations["notify"]`.

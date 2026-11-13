@@ -6,6 +6,11 @@
 //! `OnNewMailReceived` and `OnMailCountersUpdate` are *not* sent from here: `mailSvc.OnMailSent`
 //! calls `self.OnNewMailReceived(header)` and `mailSvc` scatters `OnMailCountersUpdate` itself.
 
+use crate::router::notify_registry::{
+    OnCharacterPokedByGM, OnEventResponseByExternal, OnLabelsCreatedByExternal, OnMailDeleted,
+    OnMailSent, OnMailUpdatedByExternal, OnMailingListDeleted, OnMailingListLeave,
+    OnMailingListSetClear, OnMailingListSetMuted, OnMailingListSetOperator,
+};
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -67,30 +72,36 @@ pub(crate) struct SentMail<'a> {
 /// inbox / sent folder and raises its own `OnNewMailReceived`).
 pub(crate) fn emit_mail_sent(ctx: &ServerContext, mail: &SentMail<'_>, recipients: &[i64]) {
     let sent_date = ctx.now_blueos_filetime_ticks() / FILETIME_MINUTE * FILETIME_MINUTE;
-    let opt = |v: Option<i64>| v.map(PyRep::Integer).unwrap_or(PyRep::None);
-    let args = vec![
-        PyRep::Integer(mail.message_id),
-        PyRep::Integer(mail.sender_id),
-        PyRep::Integer(sent_date),
-        PyRep::List(mail.to_character_ids.iter().map(|&c| PyRep::Integer(c)).collect()),
-        opt(mail.to_list_id),
-        opt(mail.to_corp_or_alliance_id),
-        PyRep::String(mail.title.to_string()),
-        PyRep::Integer(mail.status_mask),
-    ];
+    let to_chars = mail.to_character_ids.to_vec();
     let mut seen = Vec::with_capacity(recipients.len());
     for &cid in recipients {
         if !seen.contains(&cid) {
             seen.push(cid);
-            ctx.notify(NotificationTarget::Character(cid), "OnMailSent", "charid", args.clone());
+            ctx.emit_typed(
+                NotificationTarget::Character(cid),
+                OnMailSent {
+                    message_id: mail.message_id,
+                    sender_id: mail.sender_id,
+                    sent_date,
+                    to_character_ids: to_chars.clone(),
+                    to_list_id: mail.to_list_id,
+                    to_corp_or_alliance_id: mail.to_corp_or_alliance_id,
+                    title: mail.title.to_string(),
+                    status_mask: mail.status_mask,
+                },
+            );
         }
     }
 }
 
 /// `mailSvc.OnMailDeleted(messageIDs)`: the mail was deleted outside the client (ESI).
 pub(crate) fn emit_mail_deleted(ctx: &ServerContext, char_id: i64, message_ids: &[i64]) {
-    let ids = PyRep::List(message_ids.iter().map(|&m| PyRep::Integer(m)).collect());
-    ctx.notify(NotificationTarget::Character(char_id), "OnMailDeleted", "charid", vec![ids]);
+    ctx.emit_typed(
+        NotificationTarget::Character(char_id),
+        OnMailDeleted {
+            message_ids: message_ids.to_vec(),
+        },
+    );
 }
 
 /// `mailSvc.OnMailUpdatedByExternal(messageIDs, is_read, new_label)`: read flag and/or label mask
@@ -103,12 +114,14 @@ pub(crate) fn emit_mail_updated_by_external(
     is_read: Option<bool>,
     new_label: Option<i64>,
 ) {
-    let args = vec![
-        PyRep::List(message_ids.iter().map(|&m| PyRep::Integer(m)).collect()),
-        is_read.map(PyRep::Bool).unwrap_or(PyRep::None),
-        new_label.map(PyRep::Integer).unwrap_or(PyRep::None),
-    ];
-    ctx.notify(NotificationTarget::Character(char_id), "OnMailUpdatedByExternal", "charid", args);
+    ctx.emit_typed(
+        NotificationTarget::Character(char_id),
+        OnMailUpdatedByExternal {
+            message_ids: message_ids.to_vec(),
+            is_read,
+            new_label,
+        },
+    );
 }
 
 /// `mailSvc.OnLabelsCreatedByExternal(label)`: unpacks `label.labelID`, `label.name`, `label.color`
@@ -125,23 +138,58 @@ pub(crate) fn emit_labels_created_by_external(
         ("name", PyRep::String(name.to_string())),
         ("color", PyRep::String(color.to_string())),
     ]);
-    ctx.notify(NotificationTarget::Character(char_id), "OnLabelsCreatedByExternal", "charid", vec![label]);
+    ctx.emit_typed(
+        NotificationTarget::Character(char_id),
+        OnLabelsCreatedByExternal { label },
+    );
 }
 
 /// `mailingListsSvc.OnMailingListSetOperator(listID)` / `OnMailingListSetMuted(listID)` /
 /// `OnMailingListSetClear(listID)` / `OnMailingListDeleted(listID)`.
 pub(crate) fn emit_mailing_list_list_id(ctx: &ServerContext, event: &str, list_id: i64, recipients: &[i64]) {
-    let args = vec![PyRep::Integer(list_id)];
     for &cid in recipients {
-        ctx.notify(NotificationTarget::Character(cid), event, "charid", args.clone());
+        match event {
+            "OnMailingListSetOperator" => {
+                ctx.emit_typed(
+                    NotificationTarget::Character(cid),
+                    OnMailingListSetOperator { list_id },
+                );
+            }
+            "OnMailingListSetMuted" => {
+                ctx.emit_typed(
+                    NotificationTarget::Character(cid),
+                    OnMailingListSetMuted { list_id },
+                );
+            }
+            "OnMailingListSetClear" => {
+                ctx.emit_typed(
+                    NotificationTarget::Character(cid),
+                    OnMailingListSetClear { list_id },
+                );
+            }
+            "OnMailingListDeleted" => {
+                ctx.emit_typed(
+                    NotificationTarget::Character(cid),
+                    OnMailingListDeleted { list_id },
+                );
+            }
+            other => {
+                debug_assert!(false, "unexpected mailing list event: {other}");
+            }
+        }
     }
 }
 
 /// `mailingListsSvc.OnMailingListLeave(listID, characterID)`: sent to a member kicked from `listID`.
 pub(crate) fn emit_mailing_list_leave(ctx: &ServerContext, list_id: i64, kicked_ids: &[i64]) {
     for &cid in kicked_ids {
-        let args = vec![PyRep::Integer(list_id), PyRep::Integer(cid)];
-        ctx.notify(NotificationTarget::Character(cid), "OnMailingListLeave", "charid", args);
+        ctx.emit_typed(
+            NotificationTarget::Character(cid),
+            OnMailingListLeave {
+                list_id,
+                character_id: cid,
+            },
+        );
     }
 }
 
@@ -168,12 +216,14 @@ pub(crate) fn emit_event_response_by_external(
         ("flag", PyRep::Integer(owner_id)),
         ("isDeleted", PyRep::Bool(false)),
     ]);
-    let args = vec![
-        PyRep::Integer(event_id),
-        event_kv,
-        PyRep::Integer(response_code),
-    ];
-    ctx.notify(NotificationTarget::Character(char_id), "OnEventResponseByExternal", "charid", args);
+    ctx.emit_typed(
+        NotificationTarget::Character(char_id),
+        OnEventResponseByExternal {
+            event_id,
+            event_kv,
+            response: response_code,
+        },
+    );
 }
 
 /// `xmppchatclient/xmppchatsvc.pyj:XmppChatService.OnCharacterPokedByGM(gmCharID, channelName)`:
@@ -184,15 +234,12 @@ pub(crate) fn emit_character_poked_by_gm(
     gm_char_id: i64,
     channel_name: &str,
 ) {
-    let args = vec![
-        PyRep::Integer(gm_char_id),
-        PyRep::String(channel_name.to_string()),
-    ];
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(target_char_id),
-        "OnCharacterPokedByGM",
-        "charid",
-        args,
+        OnCharacterPokedByGM {
+            gm_char_id,
+            channel_name: channel_name.to_string(),
+        },
     );
 }
 

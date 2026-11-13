@@ -2,6 +2,12 @@
 
 #![forbid(unsafe_code)]
 
+use crate::router::notify_registry::{
+    OnBeanPrime, OnClearFetchedData, OnClientEventMarketItemReceived, OnDungeonCameraInterest,
+    OnDungeonTriggerAmbientSound, OnDungeonTriggerAudio, OnDungeonTriggerMessage,
+    OnDungeonTriggerMusic, OnEffectMessage, OnFlaggedListsChange, OnNotificationUndeleted,
+    OnPlexDepositFailed, OnPlexWithdrawFailed,
+};
 use crate::router::{NotificationTarget, ServerContext};
 use eve_proto::PyRep;
 
@@ -17,11 +23,12 @@ pub fn emit_effect_message(
         .iter()
         .map(|(k, v)| (PyRep::String((*k).to_string()), v.clone()))
         .collect();
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnEffectMessage",
-        "charid",
-        vec![PyRep::String(msg_key.to_string()), PyRep::Dict(args_dict)],
+        OnEffectMessage {
+            msgkey: msg_key.to_string(),
+            args: PyRep::Dict(args_dict),
+        },
     );
 }
 
@@ -33,11 +40,12 @@ pub fn emit_plex_deposit_failed(
     error_key: &str,
     reference: PyRep,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnPlexDepositFailed",
-        "charid",
-        vec![PyRep::String(error_key.to_string()), reference],
+        OnPlexDepositFailed {
+            error_key: error_key.to_string(),
+            reference,
+        },
     );
 }
 
@@ -49,11 +57,12 @@ pub fn emit_plex_withdraw_failed(
     error_key: &str,
     reference: PyRep,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnPlexWithdrawFailed",
-        "charid",
-        vec![PyRep::String(error_key.to_string()), reference],
+        OnPlexWithdrawFailed {
+            error_key: error_key.to_string(),
+            reference,
+        },
     );
 }
 
@@ -73,34 +82,24 @@ pub fn emit_bean_prime(
             )
         })
         .collect();
-    ctx.notify(
+    ctx.emit_typed(
         target,
-        "OnBeanPrime",
-        "charid",
-        vec![PyRep::Dict(dict_entries)],
+        OnBeanPrime {
+            beans: PyRep::Dict(dict_entries),
+        },
     );
 }
 
 /// Emits `OnClearFetchedData()` (`0` args, cluster broadcast).
 /// Matches `carbon/common/script/net/machoNet.pyj:MachoNetService.OnClearFetchedData`.
 pub fn emit_clear_fetched_data(ctx: &ServerContext) {
-    ctx.notify(
-        NotificationTarget::All,
-        "OnClearFetchedData",
-        "clientID",
-        vec![],
-    );
+    ctx.emit_typed(NotificationTarget::All, OnClearFetchedData);
 }
 
 /// Emits `OnFlaggedListsChange()` (`0` args, broadcast).
 /// Matches `carbonui/control/browser/sites.pyj:SitesSvc.OnFlaggedListsChange`.
 pub fn emit_flagged_lists_change(ctx: &ServerContext) {
-    ctx.notify(
-        NotificationTarget::All,
-        "OnFlaggedListsChange",
-        "clientID",
-        vec![],
-    );
+    ctx.emit_typed(NotificationTarget::All, OnFlaggedListsChange);
 }
 
 /// Emits `OnNotificationUndeleted(notificationIDs)` (`1` arg, `id_type = "charid"`).
@@ -110,12 +109,11 @@ pub fn emit_notification_undeleted(
     char_id: i64,
     notification_ids: &[i64],
 ) {
-    let ids = notification_ids.iter().copied().map(PyRep::Integer).collect();
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnNotificationUndeleted",
-        "charid",
-        vec![PyRep::List(ids)],
+        OnNotificationUndeleted {
+            notification_ids: notification_ids.to_vec(),
+        },
     );
 }
 
@@ -156,16 +154,14 @@ pub fn emit_client_event_market_item_received(
     flag: i64,
     location_id: i64,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnClientEvent_MarketItemReceived",
-        "charid",
-        vec![
-            PyRep::Integer(item_id),
-            PyRep::Integer(type_id),
-            PyRep::Integer(flag),
-            PyRep::Integer(location_id),
-        ],
+        OnClientEventMarketItemReceived {
+            item_id,
+            type_id,
+            flag_id: flag,
+            location_id,
+        },
     );
 }
 
@@ -177,15 +173,13 @@ pub fn emit_dungeon_camera_interest(
     speed: f64,
     duration: f64,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnDungeonCameraInterest",
-        "charid",
-        vec![
-            PyRep::Integer(item_id),
-            PyRep::Real(speed),
-            PyRep::Real(duration),
-        ],
+        OnDungeonCameraInterest {
+            item_id,
+            speed,
+            duration,
+        },
     );
 }
 
@@ -197,15 +191,13 @@ pub fn emit_dungeon_trigger_ambient_sound(
     sound_id: i64,
     entity_item_id: i64,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnDungeonTriggerAmbientSound",
-        "charid",
-        vec![
-            PyRep::Integer(dungeon_id),
-            PyRep::Integer(sound_id),
-            PyRep::Integer(entity_item_id),
-        ],
+        OnDungeonTriggerAmbientSound {
+            dungeon_id,
+            sound_id,
+            entity_item_id,
+        },
     );
 }
 
@@ -216,14 +208,12 @@ pub fn emit_dungeon_trigger_audio(
     dungeon_id: i64,
     audio_url: &str,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnDungeonTriggerAudio",
-        "charid",
-        vec![
-            PyRep::Integer(dungeon_id),
-            PyRep::String(audio_url.to_string()),
-        ],
+        OnDungeonTriggerAudio {
+            dungeon_id,
+            audio_url: audio_url.to_string(),
+        },
     );
 }
 
@@ -234,14 +224,12 @@ pub fn emit_dungeon_trigger_message(
     message_type: i64,
     message_id: i64,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnDungeonTriggerMessage",
-        "charid",
-        vec![
-            PyRep::Integer(message_type),
-            PyRep::Integer(message_id),
-        ],
+        OnDungeonTriggerMessage {
+            message_type,
+            message_id,
+        },
     );
 }
 
@@ -252,14 +240,12 @@ pub fn emit_dungeon_trigger_music(
     dungeon_id: i64,
     music_trigger_id: i64,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnDungeonTriggerMusic",
-        "charid",
-        vec![
-            PyRep::Integer(dungeon_id),
-            PyRep::Integer(music_trigger_id),
-        ],
+        OnDungeonTriggerMusic {
+            dungeon_id,
+            music_trigger_id,
+        },
     );
 }
 

@@ -13,6 +13,7 @@ pub mod context;
 mod context_charges;
 mod context_runtime_persistence;
 pub mod dispatch;
+pub mod notify_registry;
 pub mod rpc_args;
 pub mod session;
 pub mod session_transition;
@@ -36,6 +37,8 @@ mod binding_hooks_and_skills_extra_unit_tests;
 mod cache_notifications_deep_extra_unit_tests;
 #[cfg(test)]
 mod dispatch_deep_extra_unit_tests;
+#[cfg(test)]
+mod notify_registry_tests;
 #[cfg(test)]
 mod session_sync_object_binding_security_tests;
 #[cfg(test)]

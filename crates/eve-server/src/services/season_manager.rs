@@ -3,6 +3,12 @@
 //! Tracks active seasons, character challenges, progress, rewards, and loot tables.
 #![forbid(unsafe_code)]
 
+use crate::router::notify_registry::{
+    OnAccountChange, OnChallengeCompleted, OnChallengeExpired, OnChallengeProgressUpdate,
+    OnChallengeRewardsGranted, OnItemChange, OnRedeemingQueueUpdated, OnRedeemingTokensUpdated,
+    OnSeasonOmegaRewardsClaimed, OnSeasonSelected, OnSeasonalGoalCompleted,
+    OnSeasonalPointsUpdated, OnSeasonsFsdDataChanged,
+};
 use crate::router::{NotificationTarget, ServerContext};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -59,14 +65,12 @@ fn emit_expired_challenges(
     expired: &[(i64, CharacterChallenge)],
 ) {
     for (old_id, new_ch) in expired {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnChallengeExpired",
-            "charid",
-            vec![
-                PyRep::Integer(*old_id),
-                challenge_to_keyval(new_ch, season_points),
-            ],
+            OnChallengeExpired {
+                challenge_id: *old_id,
+                new_challenge: challenge_to_keyval(new_ch, season_points),
+            },
         );
     }
 }
@@ -509,15 +513,13 @@ pub fn handle_season_manager(
             });
             match res {
                 Ok((season_data_kv, character_progress_kv)) => {
-                    ctx.notify(
+                    ctx.emit_typed(
                         NotificationTarget::Character(char_id),
-                        "OnSeasonSelected",
-                        "charid",
-                        vec![
-                            PyRep::Integer(char_id),
-                            season_data_kv,
-                            character_progress_kv,
-                        ],
+                        OnSeasonSelected {
+                            character_id: char_id,
+                            season_data: season_data_kv,
+                            character_progress: character_progress_kv,
+                        },
                     );
                     Some(Ok(PyRep::Bool(true)))
                 }
@@ -815,9 +817,18 @@ pub fn handle_season_manager(
                 Ok((expired, pts, updates)) => {
                     emit_expired_challenges(ctx, char_id, pts, &expired);
                     for (cid, new_prog, newly_completed) in updates {
-                        ctx.notify(NotificationTarget::Character(char_id), "OnChallengeProgressUpdate", "charid", vec![PyRep::Integer(cid), PyRep::Integer(new_prog)]);
+                        ctx.emit_typed(
+                            NotificationTarget::Character(char_id),
+                            OnChallengeProgressUpdate {
+                                challenge_id: cid,
+                                new_progress: new_prog,
+                            },
+                        );
                         if newly_completed {
-                            ctx.notify(NotificationTarget::Character(char_id), "OnChallengeCompleted", "charid", vec![PyRep::Integer(cid)]);
+                            ctx.emit_typed(
+                                NotificationTarget::Character(char_id),
+                                OnChallengeCompleted { challenge_id: cid },
+                            );
                         }
                     }
                     Some(Ok(PyRep::None))
@@ -980,15 +991,13 @@ pub fn handle_season_manager(
                 Ok((rep, season_id, prev_pts, pts, is_omega, expired, new_balance_cents, created_item_notif, enqueued_redeem)) => {
                     emit_expired_challenges(ctx, char_id, pts, &expired);
                     if let Some(bal_cents) = new_balance_cents {
-                        ctx.notify(
+                        ctx.emit_typed(
                             NotificationTarget::Character(char_id),
-                            "OnAccountChange",
-                            "charid",
-                            vec![
-                                PyRep::String("cash".into()),
-                                PyRep::Integer(char_id),
-                                PyRep::Real(eve_db::IskCents(bal_cents).to_f64_isk()),
-                            ],
+                            OnAccountChange {
+                                account_key: "cash".into(),
+                                owner_id: char_id,
+                                balance: eve_db::IskCents(bal_cents).to_f64_isk(),
+                            },
                         );
                     }
                     if let Some((item_id, type_id, loc_id, qty)) = created_item_notif {
@@ -998,12 +1007,10 @@ pub fn handle_season_manager(
                             .get(&type_id)
                             .map(|t| (t.group_id, t.category_id))
                             .unwrap_or((0, 0));
-                        ctx.notify(
+                        ctx.emit_typed(
                             NotificationTarget::Character(char_id),
-                            "OnItemChange",
-                            "charid",
-                            vec![
-                                PyRep::keyval([
+                            OnItemChange {
+                                item: PyRep::keyval([
                                     ("itemID", PyRep::Integer(item_id)),
                                     ("typeID", PyRep::Integer(type_id as i64)),
                                     ("ownerID", PyRep::Integer(char_id)),
@@ -1015,16 +1022,32 @@ pub fn handle_season_manager(
                                     ("categoryID", PyRep::Integer(i64::from(category_id))),
                                     ("singleton", PyRep::Bool(false)),
                                 ]),
-                                PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))]),
-                            ],
+                                change: PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))]),
+                                location: PyRep::None,
+                            },
                         );
                     }
                     if enqueued_redeem {
-                        ctx.notify(NotificationTarget::Character(char_id), "OnRedeemingQueueUpdated", "charid", vec![]);
-                        ctx.notify(NotificationTarget::Character(char_id), "OnRedeemingTokensUpdated", "charid", vec![]);
+                        ctx.emit_typed(
+                            NotificationTarget::Character(char_id),
+                            OnRedeemingQueueUpdated {},
+                        );
+                        ctx.emit_typed(
+                            NotificationTarget::Character(char_id),
+                            OnRedeemingTokensUpdated {},
+                        );
                     }
-                    ctx.notify(NotificationTarget::Character(char_id), "OnChallengeRewardsGranted", "charid", vec![PyRep::Integer(ch_id)]);
-                    ctx.notify(NotificationTarget::Character(char_id), "OnSeasonalPointsUpdated", "charid", vec![PyRep::Integer(season_id), PyRep::Integer(pts)]);
+                    ctx.emit_typed(
+                        NotificationTarget::Character(char_id),
+                        OnChallengeRewardsGranted { challenge_id: ch_id },
+                    );
+                    ctx.emit_typed(
+                        NotificationTarget::Character(char_id),
+                        OnSeasonalPointsUpdated {
+                            season_id,
+                            new_points: pts,
+                        },
+                    );
                     // Emit OnSeasonalGoalCompleted and Omega reward tier notifications across 10-point milestones
                     let (prev_goal, new_goal) = (prev_pts / 10, pts / 10);
                     if new_goal > prev_goal {
@@ -1034,11 +1057,22 @@ pub fn handle_season_manager(
                                 (PyRep::String("points_required".into()), PyRep::Integer((g_idx + 1) * 10)),
                                 (PyRep::String("completed".into()), PyRep::Bool(true)),
                             ]);
-                            ctx.notify(NotificationTarget::Character(char_id), "OnSeasonalGoalCompleted", "charid", vec![PyRep::Integer(g_idx), goal_data]);
+                            ctx.emit_typed(
+                                NotificationTarget::Character(char_id),
+                                OnSeasonalGoalCompleted {
+                                    goal_index: g_idx,
+                                    goal_data,
+                                },
+                            );
                         }
                         if is_omega {
-                            let claimed_idxs: Vec<PyRep> = (prev_goal..new_goal).map(PyRep::Integer).collect();
-                            ctx.notify(NotificationTarget::Character(char_id), "OnSeasonOmegaRewardsClaimed", "charid", vec![PyRep::List(claimed_idxs)]);
+                            let claimed_idxs: Vec<i64> = (prev_goal..new_goal).collect();
+                            ctx.emit_typed(
+                                NotificationTarget::Character(char_id),
+                                OnSeasonOmegaRewardsClaimed {
+                                    claimed_goal_indexes: claimed_idxs,
+                                },
+                            );
                         }
                     }
                     Some(Ok(rep))
@@ -1260,9 +1294,12 @@ pub fn handle_season_manager(
             match res {
                 Ok((pts, expired)) => {
                     emit_expired_challenges(ctx, char_id, pts, &expired);
-                    let sent = ctx.notify(NotificationTarget::All, "OnSeasonsFsdDataChanged", "charid", vec![]);
+                    let sent = ctx.emit_typed(NotificationTarget::All, OnSeasonsFsdDataChanged {});
                     if !sent.iter().any(|n| n.recipient_char_id == char_id) {
-                        ctx.notify(NotificationTarget::Character(char_id), "OnSeasonsFsdDataChanged", "charid", vec![]);
+                        ctx.emit_typed(
+                            NotificationTarget::Character(char_id),
+                            OnSeasonsFsdDataChanged {},
+                        );
                     }
                     Some(Ok(PyRep::Bool(true)))
                 }

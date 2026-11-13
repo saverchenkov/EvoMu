@@ -9,6 +9,11 @@
 
 #![forbid(unsafe_code)]
 
+use crate::router::notify_registry::{
+    OnAirNpeStateChanged, OnOperationTaskSkipped, OnStartClientNodeGraph,
+    OnStopAllClientNodeGraphs, OnStopClientNodeGraph, OnStopClientNodeGraphById,
+    OnTutorialSkipped,
+};
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::operations_manager::{
     load_store, save_store, CharacterOperationsRecord,
@@ -142,15 +147,13 @@ pub fn start_client_node_graph_instance(
         Ok((seq, dict))
     })?;
 
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnStartClientNodeGraph",
-        "charid",
-        vec![
-            PyRep::Integer(graph_id),
-            PyRep::Integer(instance_id),
-            bb_dict,
-        ],
+        OnStartClientNodeGraph {
+            node_graph_id: graph_id,
+            node_graph_instance_id: instance_id,
+            blackboard_parameters: bb_dict,
+        },
     );
     Ok(instance_id)
 }
@@ -226,11 +229,11 @@ pub fn stop_active_operation_node_graph_for_category(ctx: &ServerContext, char_i
     });
 
     for inst_id in stopped_ids {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnStopClientNodeGraph",
-            "charid",
-            vec![PyRep::Integer(inst_id)],
+            OnStopClientNodeGraph {
+                node_graph_instance_id: inst_id,
+            },
         );
     }
 }
@@ -255,11 +258,11 @@ pub fn stop_client_node_graph_instances_by_id(
         changed
     });
     if removed_any {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnStopClientNodeGraphById",
-            "charid",
-            vec![PyRep::Integer(graph_id)],
+            OnStopClientNodeGraphById {
+                node_graph_id: graph_id,
+            },
         );
     }
     removed_any
@@ -272,21 +275,20 @@ pub fn stop_all_client_node_graphs_for_char(ctx: &ServerContext, char_id: i64) {
         graphs.clear();
         save_active_client_graphs(snap, char_id, &graphs);
     });
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnStopAllClientNodeGraphs",
-        "charid",
-        vec![],
+        OnStopAllClientNodeGraphs {},
     );
 }
 
 /// Emits `OnAirNpeStateChanged` when `start_tutorial` runs.
 pub fn on_tutorial_started(ctx: &ServerContext, char_id: i64, state_id: i64) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnAirNpeStateChanged",
-        "charid",
-        vec![PyRep::Integer(char_id), PyRep::Integer(state_id)],
+        OnAirNpeStateChanged {
+            character_id: char_id,
+            new_state_id: state_id,
+        },
     );
 }
 
@@ -295,18 +297,14 @@ pub const AIR_NPE_STATE_SKIPPED: i64 = 3;
 
 /// Emits `OnAirNpeStateChanged([char_id, AIR_NPE_STATE_SKIPPED])` when `skip_tutorial` runs.
 pub fn on_tutorial_skipped(ctx: &ServerContext, char_id: i64) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnAirNpeStateChanged",
-        "charid",
-        vec![PyRep::Integer(char_id), PyRep::Integer(AIR_NPE_STATE_SKIPPED)],
+        OnAirNpeStateChanged {
+            character_id: char_id,
+            new_state_id: AIR_NPE_STATE_SKIPPED,
+        },
     );
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnTutorialSkipped",
-        "charid",
-        vec![],
-    );
+    ctx.emit_typed(NotificationTarget::Character(char_id), OnTutorialSkipped {});
 }
 
 /// Emits `OnOperationTaskSkipped([task_list, includes_current])` in V24 tuple format.
@@ -335,11 +333,12 @@ pub fn emit_operation_task_skipped(
         PyRep::Integer(task_id),
         next_task_rep,
     ])]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnOperationTaskSkipped",
-        "charid",
-        vec![task_list, PyRep::Bool(true)],
+        OnOperationTaskSkipped {
+            task_list,
+            includes_current: true,
+        },
     );
 }
 

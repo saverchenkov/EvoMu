@@ -4,6 +4,9 @@
 #![forbid(unsafe_code)]
 
 use crate::router::cache_notifications::PendingMachoNotification;
+use crate::router::notify_registry::{
+    emit_typed_char_with_db, OnCombatMessage, OnProgressionAdvanced, OnProgressionTaskCompleted,
+};
 use crate::router::{NotificationTarget, ServerContext};
 use eve_db::lock_rank::AnyRwLock;
 use eve_proto::PyRep;
@@ -56,14 +59,12 @@ pub(crate) fn emit_progression_advanced(
     objective_id: i64,
     last_completed_task_id: i64,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnProgressionAdvanced",
-        "charid",
-        vec![
-            PyRep::Integer(objective_id),
-            PyRep::Integer(last_completed_task_id),
-        ],
+        OnProgressionAdvanced {
+            objective_id,
+            last_completed_task_id,
+        },
     );
 }
 
@@ -76,16 +77,15 @@ pub(crate) fn emit_progression_advanced_with_db(
     objective_id: i64,
     last_completed_task_id: i64,
 ) {
-    push_char_notification_with_db(
+    emit_typed_char_with_db(
         db,
         pending_notifications,
         notify_tx,
         char_id,
-        "OnProgressionAdvanced",
-        vec![
-            PyRep::Integer(objective_id),
-            PyRep::Integer(last_completed_task_id),
-        ],
+        OnProgressionAdvanced {
+            objective_id,
+            last_completed_task_id,
+        },
     );
 }
 
@@ -93,11 +93,9 @@ pub(crate) fn emit_progression_advanced_with_db(
 /// Matches `progression/client/progressionSvc.pyj:ProgressionService.OnProgressionTaskCompleted`.
 #[allow(dead_code)]
 pub(crate) fn emit_progression_task_completed(ctx: &ServerContext, char_id: i64, task_id: i64) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnProgressionTaskCompleted",
-        "charid",
-        vec![PyRep::Integer(task_id)],
+        OnProgressionTaskCompleted { task_id },
     );
 }
 
@@ -109,13 +107,12 @@ pub(crate) fn emit_progression_task_completed_with_db(
     char_id: i64,
     task_id: i64,
 ) {
-    push_char_notification_with_db(
+    emit_typed_char_with_db(
         db,
         pending_notifications,
         notify_tx,
         char_id,
-        "OnProgressionTaskCompleted",
-        vec![PyRep::Integer(task_id)],
+        OnProgressionTaskCompleted { task_id },
     );
 }
 
@@ -158,11 +155,12 @@ pub(crate) fn emit_combat_message(
         ),
         (PyRep::String("isWrecking".into()), PyRep::Bool(is_wrecking)),
     ]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnCombatMessage",
-        "charid",
-        vec![PyRep::String(message_name.into()), message_args],
+        OnCombatMessage {
+            message_name: message_name.into(),
+            message_args,
+        },
     );
 }
 
