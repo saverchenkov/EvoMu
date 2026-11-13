@@ -1487,18 +1487,14 @@ fn inspect_remote_assistance_context(
     Some((ben_id, sys_sec, ben_criminal, ben_suspect, ben_le_partners, third_party_interference))
 }
 
-pub fn can_perform_remote_assistance_in_safety(
+fn check_remote_assistance_safety_level(
     ctx: &ServerContext,
     helper_char_id: i64,
-    sys_id: u32,
-    target_id: i64,
+    sys_sec: f64,
+    ben_criminal: bool,
+    ben_suspect: bool,
+    third_party_interference: bool,
 ) -> Result<(), BridgeRpcError> {
-    let now_unix = ctx.now_unix();
-    let Some((_, sys_sec, ben_criminal, ben_suspect, _, third_party_interference)) =
-        inspect_remote_assistance_context(ctx, helper_char_id, sys_id, target_id, now_unix)
-    else {
-        return Ok(());
-    };
     let safety = with_combat_runtime(ctx, |rt| rt.safety_levels.get(&helper_char_id).copied().unwrap_or(SafetyLevel::Red));
     if ((ben_criminal && sys_sec > 0.0) || (third_party_interference && sys_sec >= 0.45))
         && matches!(safety, SafetyLevel::Green | SafetyLevel::Yellow)
@@ -1511,6 +1507,21 @@ pub fn can_perform_remote_assistance_in_safety(
     Ok(())
 }
 
+pub fn can_perform_remote_assistance_in_safety(
+    ctx: &ServerContext,
+    helper_char_id: i64,
+    sys_id: u32,
+    target_id: i64,
+) -> Result<(), BridgeRpcError> {
+    let now_unix = ctx.now_unix();
+    let Some((_, sys_sec, ben_criminal, ben_suspect, _, third_party_interference)) =
+        inspect_remote_assistance_context(ctx, helper_char_id, sys_id, target_id, now_unix)
+    else {
+        return Ok(());
+    };
+    check_remote_assistance_safety_level(ctx, helper_char_id, sys_sec, ben_criminal, ben_suspect, third_party_interference)
+}
+
 pub fn evaluate_and_record_remote_assistance(
     ctx: &ServerContext, helper_char_id: i64, helper_ship_id: i64, sys_id: u32, target_id: i64,
 ) -> Result<(), BridgeRpcError> {
@@ -1520,15 +1531,7 @@ pub fn evaluate_and_record_remote_assistance(
     else {
         return Ok(());
     };
-    let safety = with_combat_runtime(ctx, |rt| rt.safety_levels.get(&helper_char_id).copied().unwrap_or(SafetyLevel::Red));
-    if ((ben_criminal && sys_sec > 0.0) || (third_party_interference && sys_sec >= 0.45))
-        && matches!(safety, SafetyLevel::Green | SafetyLevel::Yellow)
-    {
-        return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
-    }
-    if ((ben_suspect && sys_sec > 0.0) || (third_party_interference && sys_sec > 0.0)) && safety == SafetyLevel::Green {
-        return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
-    }
+    check_remote_assistance_safety_level(ctx, helper_char_id, sys_sec, ben_criminal, ben_suspect, third_party_interference)?;
     if (ben_criminal && sys_sec > 0.0) || (third_party_interference && sys_sec >= 0.45) {
         let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
         let _ = cw.handle_criminal_remote_assistance(helper_char_id, ben_id, helper_ship_id, sys_id, sys_sec, now_unix);

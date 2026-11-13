@@ -906,19 +906,6 @@ pub(crate) async fn handle_module_cycles(
                         }
                     }
                 }
-                // Burst Jammer / ECM Burst (`group_id == 80 || 353`), Smartbomb (`group_id == 72`),
-                // & Supercarrier Burst Projector (`group_id == 842`) Crimewatch safety check:
-                // require Safety Red in empire space (`sys_sec > 0.0`) before any resource/AoE execution.
-                if matches!(mod_type.group_id, 72 | 80 | 353 | 842) {
-                    let sys_sec = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| rt.modified_system_securities.get(&sys_id).copied())
-                        .unwrap_or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0));
-                    let safety = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                        rt.safety_levels.get(&char_id).copied().unwrap_or(crate::services::combat_crimewatch::SafetyLevel::Red)
-                    });
-                    if sys_sec > 0.0 && safety != crate::services::combat_crimewatch::SafetyLevel::Red {
-                        return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
-                    }
-                }
                 let EwarCapitalPrep {
                     warp_scramble_points, disables_target_mwd_mjd, warp_core_stab_bonus,
                     hic_bubble_radius_m, hic_velocity_multiplier, hic_sig_multiplier, hic_mass_addition,
