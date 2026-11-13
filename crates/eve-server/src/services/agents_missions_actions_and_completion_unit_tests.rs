@@ -692,6 +692,59 @@ async fn gh998_gh999_gh1000_bookmarks_dungeon_owner_and_courier_item_notificatio
     assert_eq!(bms[0].dict_get("locationNumber"), Some(&PyRep::Integer(0)));
     assert_eq!(bms[0].dict_get("agentID"), Some(&PyRep::Integer(ag.agent_id)));
     assert_eq!(bms[0].dict_get("locationType"), Some(&PyRep::String("dungeon".into())));
+    assert_eq!(bms[0].dict_get("itemID"), Some(&PyRep::None));
+    assert_eq!(bms[0].dict_get("typeID"), Some(&PyRep::Integer(5)));
+
+    // #1017: Bookmark referencing an SDE station item carries itemID and station_type_id.
+    let station_id = ctx
+        .sde
+        .stations
+        .values()
+        .find(|s| s.solar_system_id == sys_id)
+        .map(|s| (s.station_id, s.station_type_id as i64));
+    if let Some((st_id, st_type_id)) = station_id {
+        let st_bm_id = 91_000_002_i64;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.bookmarks.insert(
+                st_bm_id,
+                eve_db::BookmarkRecord {
+                    bookmark_id: st_bm_id,
+                    owner_id: char_id,
+                    item_id: Some(st_id),
+                    solar_system_id: sys_id,
+                    x: 100.0,
+                    y: 200.0,
+                    z: 300.0,
+                    label: "Mission Pocket Station".into(),
+                    memo: "Mission Pocket Station".into(),
+                    folder_id: None,
+                    is_shared: false,
+                },
+            );
+        });
+        let journal2 = call_agent_mgr(&ctx, &mut sess, "GetMyJournalDetails", &[], &kw)
+            .await
+            .expect("GetMyJournalDetails with station bookmark");
+        let PyRep::Tuple(j2_parts) = journal2 else {
+            panic!("expected tuple");
+        };
+        let PyRep::List(ref j2_missions) = j2_parts[0] else {
+            panic!("expected missions");
+        };
+        let enc_row2 = j2_missions
+            .iter()
+            .find(|r| r.dict_get("missionID") == Some(&PyRep::Integer(encounter_mid as i64)))
+            .expect("encounter row2");
+        let Some(PyRep::List(bms2)) = enc_row2.dict_get("bookmarks") else {
+            panic!("expected bookmarks list2");
+        };
+        let st_bm = bms2
+            .iter()
+            .find(|b| b.dict_get("bookmarkID") == Some(&PyRep::Integer(st_bm_id)))
+            .expect("station bookmark");
+        assert_eq!(st_bm.dict_get("itemID"), Some(&PyRep::Integer(st_id)));
+        assert_eq!(st_bm.dict_get("typeID"), Some(&PyRep::Integer(st_type_id)));
+    }
 
     // #999: GetMissionObjectiveInfo dungeons[].ownerID is an NPC faction or corp ID, never ag.agent_id
     let obj_info = call_agent_mgr(
@@ -759,4 +812,129 @@ async fn gh998_gh999_gh1000_bookmarks_dungeon_owner_and_courier_item_notificatio
         }),
         "Accepting Courier mission must emit OnItemChange containing granted_courier_item_id={granted_cid}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bound_get_my_journal_details_filters_by_bound_agent_id_1016() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let mut agent_ids: Vec<i64> = ctx.sde.agents.keys().copied().take(2).collect();
+    agent_ids.sort_unstable();
+    assert_eq!(agent_ids.len(), 2, "expected at least 2 agents in SDE");
+    let (ag1_id, ag2_id) = (agent_ids[0], agent_ids[1]);
+    let sys_id = ctx.sde.agents[&ag1_id].solar_system_id.unwrap_or(30_000_142);
+    let st_id = ctx.sde.agents[&ag1_id].station_id.unwrap_or(60_003_760);
+    let mut sess = char_session(char_id, Some(sys_id), Some(st_id));
+    let kw = HashMap::new();
+    let now = ctx.now_unix();
+    let (mid1, mid2) = (21_001_u32, 21_002_u32);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.insert(
+            (char_id, mid1),
+            make_active_mission(mid1, char_id, ag1_id, sys_id, "Accepted", None),
+        );
+        save_mission_meta(snap, char_id, &make_meta(mid1, ag1_id, now + 86_400, Some(now + 86_400)));
+
+        snap.active_missions.insert(
+            (char_id, mid2),
+            make_active_mission(mid2, char_id, ag2_id, sys_id, "Offered", None),
+        );
+        save_mission_meta(snap, char_id, &make_meta(mid2, ag2_id, now + 86_400, None));
+
+        save_rnd_research_entries(
+            snap,
+            char_id,
+            &[
+                RndResearchEntry {
+                    agent_id: ag1_id,
+                    research_type_id: 11442,
+                    points_per_day: 10.0,
+                    started_unix: now,
+                    initial_points: 5.0,
+                },
+                RndResearchEntry {
+                    agent_id: ag2_id,
+                    research_type_id: 11442,
+                    points_per_day: 20.0,
+                    started_unix: now,
+                    initial_points: 15.0,
+                },
+            ],
+        );
+    });
+
+    // Unbound call returns all missions and research entries for the character.
+    let unbound = call_agent_mgr(&ctx, &mut sess, "GetMyJournalDetails", &[], &kw)
+        .await
+        .expect("unbound GetMyJournalDetails");
+    let PyRep::Tuple(u_parts) = unbound else { panic!("expected tuple") };
+    let PyRep::List(u_missions) = &u_parts[0] else { panic!("expected missions list") };
+    let PyRep::List(u_research) = &u_parts[1] else { panic!("expected research list") };
+    assert_eq!(u_missions.len(), 2);
+    assert_eq!(u_research.len(), 2);
+
+    // Bound call on agentMgr object_id = ag1_id returns only ag1_id's mission and research entry (#1016).
+    let bound_ag1 = crate::router::BoundObjectEntry {
+        bound_id: 10_009,
+        session_id: sess.session_id,
+        user_id: 1,
+        character_id: char_id,
+        service: "agentMgr".into(),
+        object_id: ag1_id,
+        oid_str: format!("agentMgr:{ag1_id}"),
+        ref_id: 1,
+    };
+    let res_ag1 = crate::services::agents_missions::handle_with_bound(
+        &ctx,
+        &mut sess,
+        Some(&bound_ag1),
+        "agentMgr",
+        "GetMyJournalDetails",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("bound GetMyJournalDetails ag1");
+    let PyRep::Tuple(b1_parts) = res_ag1 else { panic!("expected tuple") };
+    let PyRep::List(b1_missions) = &b1_parts[0] else { panic!("expected missions list") };
+    let PyRep::List(b1_research) = &b1_parts[1] else { panic!("expected research list") };
+    assert_eq!(b1_missions.len(), 1);
+    assert_eq!(b1_missions[0].dict_get("agentID"), Some(&PyRep::Integer(ag1_id)));
+    assert_eq!(b1_missions[0].dict_get("missionID"), Some(&PyRep::Integer(mid1 as i64)));
+    assert_eq!(b1_research.len(), 1);
+    assert_eq!(b1_research[0].dict_get("agentID"), Some(&PyRep::Integer(ag1_id)));
+
+    // Bound call on agentMgr object_id = ag2_id returns only ag2_id's mission and research entry.
+    let bound_ag2 = crate::router::BoundObjectEntry {
+        bound_id: 10_010,
+        session_id: sess.session_id,
+        user_id: 1,
+        character_id: char_id,
+        service: "agentMgr".into(),
+        object_id: ag2_id,
+        oid_str: format!("agentMgr:{ag2_id}"),
+        ref_id: 2,
+    };
+    let res_ag2 = crate::services::agents_missions::handle_with_bound(
+        &ctx,
+        &mut sess,
+        Some(&bound_ag2),
+        "agentMgr",
+        "GetMyJournalDetails",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("bound GetMyJournalDetails ag2");
+    let PyRep::Tuple(b2_parts) = res_ag2 else { panic!("expected tuple") };
+    let PyRep::List(b2_missions) = &b2_parts[0] else { panic!("expected missions list") };
+    let PyRep::List(b2_research) = &b2_parts[1] else { panic!("expected research list") };
+    assert_eq!(b2_missions.len(), 1);
+    assert_eq!(b2_missions[0].dict_get("agentID"), Some(&PyRep::Integer(ag2_id)));
+    assert_eq!(b2_missions[0].dict_get("missionID"), Some(&PyRep::Integer(mid2 as i64)));
+    assert_eq!(b2_research.len(), 1);
+    assert_eq!(b2_research[0].dict_get("agentID"), Some(&PyRep::Integer(ag2_id)));
 }

@@ -5,6 +5,44 @@
 
 use super::*;
 
+/// Transfers in-space observer ownership and all queued `observer_events` from
+/// `from_ball_id` to `to_ball_id`, optionally ensuring one incremental `AddBalls2`
+/// for `to_ball_id` without triggering an in-system `SetState` (`#992`, `HF1005-02`).
+fn handoff_in_space_pilot_observer(
+    sys: &crate::system_actor::SystemHandle,
+    from_ball_id: i64,
+    to_ball_id: i64,
+    ensure_add_to_ball: bool,
+) {
+    let mut bp = sys.ballpark.write().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref mut set) = bp.registered_observers {
+        set.remove(&from_ball_id);
+        set.insert(to_ball_id);
+    }
+    let add_ball = if ensure_add_to_ball {
+        bp.balls.get(&to_ball_id).cloned()
+    } else {
+        None
+    };
+    let carried = bp.observer_events.remove(&from_ball_id);
+    let target_queue = bp.observer_events.entry(to_ball_id).or_default();
+    if let Some(prev_events) = carried {
+        target_queue.extend(prev_events);
+    }
+    if let Some(ball) = add_ball {
+        let already_added = target_queue.iter().any(|ev| {
+            matches!(
+                ev,
+                eve_destiny::DestinyEvent::AddBalls2 { balls }
+                    if balls.iter().any(|b| b.id == to_ball_id)
+            )
+        });
+        if !already_added {
+            target_queue.push(eve_destiny::DestinyEvent::AddBalls2 { balls: vec![ball] });
+        }
+    }
+}
+
 pub(crate) async fn handle_ships_mastery_and_fitting_ext(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -289,7 +327,9 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     let _ = sys
                         .spawn_ball_with_meta(pod_ball, pod_cs, pod_slim)
                         .await;
-                    let _ = sys.push_set_state(capsule_id).await;
+                    // Transfer observer registration and pre-handoff events to `capsule_id`,
+                    // ensuring one incremental `AddBalls2` without emitting `SetState` (`#992`, `HF1005-02`).
+                    handoff_in_space_pilot_observer(&sys, old_ship_id, capsule_id, true);
                     let vacated_meta =
                         build_vacated_ship_slim_meta(ctx, &sys, char_id, old_ship_id);
                     let slim_changed = sys
@@ -649,6 +689,15 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                                     Some(sys_id),
                                     prev,
                                 );
+                                if !was_capsule {
+                                    let _ = sys
+                                        .set_movement_mode(prev, eve_destiny::MovementMode::Stop)
+                                        .await;
+                                }
+                                // Transfer observer registration and pre-handoff events to `sid`
+                                // before `take_ball(prev)` so `RemoveBall(prev)` and `OnSlimItemChange`
+                                // flow incrementally (`#992`, `HF1005-02`) without `SetState` or stranded events.
+                                handoff_in_space_pilot_observer(&sys, prev, sid, false);
                                 let mut pkg_events = Vec::new();
                                 if was_capsule {
                                     let _ = sys.take_ball(prev).await;
@@ -656,9 +705,6 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                                         snap.sp6_lifecycle.ship_combat_hp.remove(&(-prev));
                                     });
                                 } else {
-                                    let _ = sys
-                                        .set_movement_mode(prev, eve_destiny::MovementMode::Stop)
-                                        .await;
                                     if let Ok(Some((_, prev_ball))) = sys.get_ball_snapshot(prev).await {
                                         ctx.db.with_mut_snapshot(|snap| {
                                             snap.item_positions.insert(prev, prev_ball.position.to_array());

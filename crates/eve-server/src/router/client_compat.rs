@@ -2621,6 +2621,16 @@ fn normalize_mission_journal_bookmark(
             PyRep::String(default_loc_type.to_string()),
         );
     }
+    if !map.contains_key("itemID") {
+        map.insert("itemID".into(), PyRep::None);
+    }
+    let has_type_id = map
+        .get("typeID")
+        .and_then(PyRep::as_i64)
+        .is_some_and(|v| v > 0);
+    if !has_type_id {
+        map.insert("typeID".into(), PyRep::Integer(5));
+    }
     PyRep::KeyVal(map)
 }
 

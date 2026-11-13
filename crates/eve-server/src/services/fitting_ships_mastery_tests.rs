@@ -461,11 +461,16 @@ async fn eject_in_space_sets_capsule_name_and_queues_set_state() {
 
     let (_tick, events, _rep) = sys.drain_observer_updates(cap_id).await.unwrap();
     assert!(
+        !events.iter().any(|e| matches!(e, eve_destiny::DestinyEvent::SetState { .. })),
+        "ship.Eject must NOT queue SetState for new capsule (#992); got {events:?}"
+    );
+    assert!(
         events.iter().any(|e| matches!(
             e,
-            eve_destiny::DestinyEvent::SetState { observer_ball_id } if *observer_ball_id == cap_id
+            eve_destiny::DestinyEvent::AddBalls2 { balls }
+                if balls.iter().any(|b| b.id == cap_id)
         )),
-        "ship.Eject must queue SetState for new capsule (#729)"
+        "ship.Eject must queue incremental AddBalls2 for new capsule (#992); got {events:?}"
     );
 }
 
@@ -605,6 +610,8 @@ async fn in_space_eject_and_ship_to_ship_board_lifecycle_and_guards() {
         .await;
     {
         let mut bp = sys.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        bp.register_observer(ship_a);
+        bp.register_observer(ship_manned);
         bp.target_locks.entry(ship_a).or_default().push(eve_destiny::TargetLock {
             target_id: ship_b,
             lock_time_ms: 2_000.0,
@@ -699,7 +706,41 @@ async fn in_space_eject_and_ship_to_ship_board_lifecycle_and_guards() {
         assert_eq!(bp.ball_interactive_overrides.get(&ship_a), Some(&false));
         assert_eq!(bp.ball_slim_meta.get(&ship_a).and_then(|m| m.char_id), None);
         assert!(bp.target_locks.get(&ship_a).is_none_or(|v| v.is_empty()));
+        assert!(
+            bp.observer_events.get(&ship_a).is_none_or(|v| v.is_empty()),
+            "HF1005-02: Eject must not strand observer_events under vacated ship_a: {:?}",
+            bp.observer_events.get(&ship_a)
+        );
     }
+    let (_t_ej, cap_events, _) = sys.drain_observer_updates(cap_id).await.unwrap();
+    assert!(
+        !cap_events.iter().any(|e| matches!(e, eve_destiny::DestinyEvent::SetState { .. })),
+        "ship.Eject must NOT emit SetState (#992); got {cap_events:?}"
+    );
+    assert!(
+        cap_events.iter().any(|e| matches!(e, eve_destiny::DestinyEvent::Stop { ball_id } if *ball_id == ship_a)),
+        "HF1005-02: pre-handoff Stop(ship_a) must carry into capsule drain; got {cap_events:?}"
+    );
+    assert!(
+        cap_events.iter().any(|e| matches!(
+            e,
+            eve_destiny::DestinyEvent::OnSpecialFX { ball_id, guid, is_active: false, .. }
+                if *ball_id == ship_a && !guid.is_empty()
+        )),
+        "HF1005-02: pre-handoff module deactivation OnSpecialFX must carry into capsule drain; got {cap_events:?}"
+    );
+    let add_cap_count = cap_events
+        .iter()
+        .filter(|e| matches!(
+            e,
+            eve_destiny::DestinyEvent::AddBalls2 { balls }
+                if balls.iter().any(|b| b.id == cap_id)
+        ))
+        .count();
+    assert_eq!(
+        add_cap_count, 1,
+        "HF1005-02: AddBalls2 for cap_id must be emitted exactly once; got {cap_events:?}"
+    );
     assert!(sys.actor_state.read().unwrap().active_module_cycles.iter().all(|c| c.ship_id != ship_a));
     ctx.db.with_snapshot(|s| {
         assert!(s.item_positions.contains_key(&ship_a));
@@ -755,6 +796,8 @@ async fn in_space_eject_and_ship_to_ship_board_lifecycle_and_guards() {
         )
         .await;
     let _ = sys.drain_observer_updates(ship_manned).await;
+    let _ = sys.drain_observer_updates(ship_a).await;
+    let _ = sys.drain_observer_updates(ship_b).await;
     ctx.advance_secs(12);
     let _ = handle_ships_mastery_and_fitting_ext(
         &ctx,
@@ -777,7 +820,21 @@ async fn in_space_eject_and_ship_to_ship_board_lifecycle_and_guards() {
         assert_eq!(bp.ball_slim_meta.get(&ship_a).and_then(|m| m.char_id), None);
         assert_eq!(bp.ball_interactive_overrides.get(&ship_b), Some(&true));
         assert_eq!(bp.ball_slim_meta.get(&ship_b).and_then(|m| m.char_id), Some(char_id));
+        assert!(
+            bp.observer_events.get(&ship_a).is_none_or(|v| v.is_empty()),
+            "HF1005-02: ship-to-ship Board must not strand observer_events under vacated ship_a: {:?}",
+            bp.observer_events.get(&ship_a)
+        );
     }
+    let (_tb, pilot_board_events, _) = sys.drain_observer_updates(ship_b).await.unwrap();
+    assert!(
+        !pilot_board_events.iter().any(|e| matches!(e, eve_destiny::DestinyEvent::SetState { .. })),
+        "ship-to-ship Board must NOT emit SetState (#992); got {pilot_board_events:?}"
+    );
+    assert!(
+        pilot_board_events.iter().any(|e| matches!(e, eve_destiny::DestinyEvent::Stop { ball_id } if *ball_id == ship_a)),
+        "HF1005-02: pre-handoff Stop(ship_a) must carry into ship_b drain; got {pilot_board_events:?}"
+    );
     let (_t, obs_events, _) = sys.drain_observer_updates(ship_manned).await.unwrap();
     assert!(obs_events.iter().any(|e| matches!(
         e,

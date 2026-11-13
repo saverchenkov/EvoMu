@@ -204,6 +204,8 @@ async fn drone_assist_guard_auto_aggression_return_scoop_damage_and_salvage() {
     };
     let combat_bid = bids[0].as_i64().unwrap();
     let salvage_bid = bids[1].as_i64().unwrap();
+    assert_eq!(combat_bid, 700_020, "single-qty launched drone ballID must equal itemID (#1008)");
+    assert_eq!(salvage_bid, 700_021, "single-qty launched drone ballID must equal itemID (#1008)");
 
     // 1. ChangeDroneSettings / SetAggressive (bool + float 0.0/1.0 + reject non-0/1 float)
     let set_float = handle_npcs_drones(
@@ -971,6 +973,8 @@ async fn drone_math_tractor_modifiers_launch_meta_engage_and_scoop_boundary_muta
         .await.unwrap().unwrap();
     let PyRep::List(l_ids) = ok_launch else { panic!("expected list") };
     let launched_bid = l_ids[0].as_i64().unwrap();
+    let split_item_id = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&launched_bid].drone_item_id);
+    assert_eq!(launched_bid, split_item_id, "launched drone ballID must equal drone itemID (#1008)");
     let slim = sys_handle.get_ball_slim_item(launched_bid).await.unwrap().unwrap();
     let PyRep::Object { args: slim_dict, .. } = slim else { panic!("expected SlimItem") };
     assert_eq!(py_dict_get(&slim_dict, "groupID").and_then(|v| v.as_i64()), Some(100));

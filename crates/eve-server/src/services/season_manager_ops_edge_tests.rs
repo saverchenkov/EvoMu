@@ -30,7 +30,7 @@ fn season_ops_localization_schedule_expiration_and_challenge_fill() {
     assert!(ep_start <= now_ft && now_ft < ep_end);
     assert_eq!(ep_end - ep_start, 30 * 86_400 * 10_000_000);
 
-    // 3. compute_challenge_expiration_ft across all 6 branches
+    // 3. compute_challenge_expiration_ft across all 6 branches (deterministic 02:00 UTC base so 10:50-11:00 UTC never collides with soon_end)
     let mut def = SeasonalChallengeDef {
         challenge_id: 700_001,
         season_id: 1,
@@ -42,33 +42,40 @@ fn season_ops_localization_schedule_expiration_and_challenge_fill() {
         expiration_time_minutes: 60,
         ..Default::default()
     };
-    let future_end = now_ft + 10 * 86_400 * 10_000_000;
-    let soon_end = now_ft + 600 * 10_000_000; // 10 min < 60 min
+    let test_now_ft = midnight_ft + 2 * 3_600 * 10_000_000; // 02:00 UTC
+    let future_end = test_now_ft + 10 * 86_400 * 10_000_000;
+    let soon_end = test_now_ft + 600 * 10_000_000; // 10 min < 60 min and < 11:00 UTC downtime
     assert_eq!(
-        compute_challenge_expiration_ft(&def, now_ft, future_end),
-        now_ft + 3_600 * 10_000_000
+        compute_challenge_expiration_ft(&def, test_now_ft, future_end),
+        test_now_ft + 3_600 * 10_000_000
     );
-    assert_eq!(compute_challenge_expiration_ft(&def, now_ft, soon_end), soon_end);
+    assert_eq!(compute_challenge_expiration_ft(&def, test_now_ft, soon_end), soon_end);
     assert_eq!(
-        compute_challenge_expiration_ft(&def, now_ft, now_ft - 10),
-        now_ft + 3_600 * 10_000_000
+        compute_challenge_expiration_ft(&def, test_now_ft, test_now_ft - 10),
+        test_now_ft + 3_600 * 10_000_000
     );
 
     // Zero expiration_time_minutes, expires at downtime (capped by season_end_ft)
     def.expiration_time_minutes = 0;
     def.should_not_expire_at_downtime = false;
-    assert_eq!(compute_challenge_expiration_ft(&def, now_ft, soon_end), soon_end);
+    assert_eq!(compute_challenge_expiration_ft(&def, test_now_ft, soon_end), soon_end);
     assert_eq!(
-        compute_challenge_expiration_ft(&def, now_ft, now_ft - 1),
-        next_downtime_filetime_ticks(now_ft)
+        compute_challenge_expiration_ft(&def, test_now_ft, test_now_ft - 1),
+        next_downtime_filetime_ticks(test_now_ft)
+    );
+    // Near downtime (10:55 UTC), 10-min season end is past 11:00 UTC so downtime caps it
+    let pre_dt_ft = eleven_am_ft - 300 * 10_000_000;
+    assert_eq!(
+        compute_challenge_expiration_ft(&def, pre_dt_ft, pre_dt_ft + 600 * 10_000_000),
+        eleven_am_ft
     );
 
     // Zero expiration_time_minutes, should_not_expire_at_downtime = true
     def.should_not_expire_at_downtime = true;
-    assert_eq!(compute_challenge_expiration_ft(&def, now_ft, future_end), future_end);
+    assert_eq!(compute_challenge_expiration_ft(&def, test_now_ft, future_end), future_end);
     assert_eq!(
-        compute_challenge_expiration_ft(&def, now_ft, now_ft - 1),
-        now_ft + 86_400 * 10_000_000
+        compute_challenge_expiration_ft(&def, test_now_ft, test_now_ft - 1),
+        test_now_ft + 86_400 * 10_000_000
     );
 
     // 4. localize_challenge_def & load_localized_challenge_definitions (custom blob vs FSD fallback)
@@ -157,9 +164,10 @@ fn season_ops_localization_schedule_expiration_and_challenge_fill() {
         date: "2026-11-08".into(),
         timestamp_unix: 1_800_000_000,
     });
-    let built = build_character_challenge(&def, 77, &snap_custom, char_id, now_ft, future_end, false);
+    let chal_future_end = now_ft + 10 * 86_400 * 10_000_000;
+    let built = build_character_challenge(&def, 77, &snap_custom, char_id, now_ft, chal_future_end, false);
     assert_eq!(built.baseline_progress, 250);
-    assert_eq!(built.expiration_date, future_end);
+    assert_eq!(built.expiration_date, chal_future_end);
     assert!(!built.is_dormant);
 
     // Placeholder title/description on existing challenge gets normalized by fill_and_normalize_character_challenges

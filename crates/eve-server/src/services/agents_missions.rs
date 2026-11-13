@@ -301,6 +301,9 @@ pub async fn handle_with_bound(
 
         ("agentMgr", "GetMyJournalDetails") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let bound_agent_id = bound_entry
+                .filter(|b| b.service == "agentMgr" && b.object_id > 0)
+                .map(|b| b.object_id);
             let now = ctx.now_unix();
             let (missions, research) = ctx.db.with_mut_snapshot(|snap| {
                 // Sweep and transition any expired offers or accepted missions (feat:pve.mission-expiration)
@@ -329,6 +332,7 @@ pub async fn handle_with_bound(
                 let mut active: Vec<ActiveMissionRecord> = snap.active_missions.values().filter(|m| {
                         m.character_id == char_id
                             && matches!(m.state.as_str(), "Offered" | "Accepted")
+                            && bound_agent_id.is_none_or(|aid| m.agent_id == aid)
                     }).cloned()
                     .collect();
                 active.sort_by_key(|m| m.mission_id);
@@ -381,6 +385,19 @@ pub async fn handle_with_bound(
                             .into_iter()
                             .enumerate()
                             .map(|(idx, b)| {
+                                let bm_type_id = b
+                                    .item_id
+                                    .and_then(|eid| {
+                                        ctx.sde
+                                            .stations
+                                            .get(&eid)
+                                            .map(|s| s.station_type_id as i64)
+                                            .or_else(|| snap.items.get(&eid).map(|i| i.type_id as i64))
+                                            .or_else(|| {
+                                                snap.structures.get(&eid).map(|st| st.type_id as i64)
+                                            })
+                                    })
+                                    .unwrap_or(5_i64);
                                 PyRep::keyval([
                                     ("bookmarkID", PyRep::Integer(b.bookmark_id)),
                                     ("agentID", PyRep::Integer(m.agent_id)),
@@ -388,6 +405,11 @@ pub async fn handle_with_bound(
                                     ("locationID", PyRep::Integer(b.solar_system_id as i64)),
                                     ("locationNumber", PyRep::Integer(idx as i64)),
                                     ("locationType", PyRep::String(bm_loc_type.into())),
+                                    (
+                                        "itemID",
+                                        b.item_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                                    ),
+                                    ("typeID", PyRep::Integer(bm_type_id)),
                                     ("hint", PyRep::String(bm_hint.into())),
                                     ("label", PyRep::String(b.label.clone())),
                                     ("x", PyRep::Real(b.x)),
@@ -419,7 +441,9 @@ pub async fn handle_with_bound(
                     .collect::<Vec<PyRep>>();
 
                 let research_list = load_rnd_research_entries(snap, char_id)
-                    .into_iter().map(|r| {
+                    .into_iter()
+                    .filter(|r| bound_agent_id.is_none_or(|aid| r.agent_id == aid))
+                    .map(|r| {
                         let elapsed_days =
                             (now.saturating_sub(r.started_unix) as f64) / 86_400.0;
                         let total_rp = r.initial_points + r.points_per_day * elapsed_days;

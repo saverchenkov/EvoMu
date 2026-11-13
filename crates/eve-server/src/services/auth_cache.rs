@@ -1660,6 +1660,8 @@ async fn handle_slash_teleport(
             }
         };
 
+        let same_sys_in_space = was_in_space && old_sys_id > 0 && old_sys_id == dest_sys_id;
+        let mut stopped_mid_warp = false;
         if was_in_space && old_sys_id > 0 {
             let removed_active = ctx
                 .active_warps
@@ -1680,10 +1682,16 @@ async fn handle_slash_teleport(
                 .flatten()
                 .is_some_and(|(_, b)| matches!(b.mode, MovementMode::Warp { .. }));
             if removed_active || removed_return || ball_warping {
-                // #994: Emit and flush Stop + effects.Warping(0) in a preceding DoDestinyUpdate
-                // before SetState / SessionChangeNotification tears down the client shipModel.
                 let _ = pre_handle.force_stop_warp(ship_id);
-                let _ = pre_handle.flush_peer_observer_updates(None).await;
+                stopped_mid_warp = true;
+                if !same_sys_in_space {
+                    // #994: For cross-system teleports, flush Stop + effects.Warping(0) in a
+                    // preceding DoDestinyUpdate before SetState / SessionChangeNotification tears
+                    // down the client shipModel. For same-system teleports, keep them queued with
+                    // SetBallPosition + RemoveBalls/AddBalls2 so the ballpark updates incrementally
+                    // without DoBallClear (#1005, #1006).
+                    let _ = pre_handle.flush_peer_observer_updates(None).await;
+                }
             }
         }
 
@@ -1778,13 +1786,17 @@ async fn handle_slash_teleport(
                 let _ = new_handle.push_set_state(ship_id).await;
                 persisted_pos = Some(tr_pos);
             } else {
+                if !stopped_mid_warp {
+                    let _ = new_handle
+                        .set_movement_mode(ship_id, MovementMode::Stop)
+                        .await;
+                }
                 if let Some(tr_pos) = explicit_pos {
                     let _ = new_handle.set_ball_position(ship_id, tr_pos).await;
                 }
-                let _ = new_handle
-                    .set_movement_mode(ship_id, MovementMode::Stop)
-                    .await;
-                let _ = new_handle.push_set_state(ship_id).await;
+                if !was_in_space {
+                    let _ = new_handle.push_set_state(ship_id).await;
+                }
                 persisted_pos = explicit_pos;
             }
         }

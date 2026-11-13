@@ -993,7 +993,10 @@ pub fn handle_batch3_gm_slash_cmd(
                 .get(1)
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(3600);
-            ctx.advance_secs(secs);
+            // #1005 / #1015: Advance server timers without emitting `DoSimClockRebase` so live
+            // client `Ballpark.AdjustTimes` and `blue.os` clocks are not pushed into the future
+            // (`router/dispatch.rs` `timeControl.AdvanceClock` parity).
+            ctx.advance_secs_without_sim_clock_rebase(secs);
             crate::services::space_destiny::clear_session_change_timer(ctx, caller_cid);
             Some(Ok(PyRep::keyval([
                 ("command", PyRep::String(cmd.to_string())),

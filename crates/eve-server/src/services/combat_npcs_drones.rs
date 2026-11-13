@@ -735,13 +735,9 @@ pub async fn handle_npcs_drones(
                         }
                         it.quantity
                     };
-                    let mut bid = snap.alloc_entity_id();
-                    while snap.items.contains_key(&bid) {
-                        bid = snap.alloc_entity_id();
-                    }
                     let actual_item_id = if cur_qty > 1 {
                         let mut split_id = snap.alloc_entity_id();
-                        while snap.items.contains_key(&split_id) || split_id == bid {
+                        while snap.items.contains_key(&split_id) {
                             split_id = snap.alloc_entity_id();
                         }
                         let mut split_rec = {
@@ -772,9 +768,9 @@ pub async fn handle_npcs_drones(
                         it.version += 1;
                         rec.item_id
                     };
+                    let bid = actual_item_id;
                     crate::sp6_lifecycle::record_drone_ball_meta_in_snap(snap, actual_item_id, bid);
                     snap.item_positions.insert(actual_item_id, [d_pos.x, d_pos.y, d_pos.z]);
-                    snap.item_positions.insert(bid, [d_pos.x, d_pos.y, d_pos.z]);
                     results.push((bid, actual_item_id, rec.type_id));
                 }
                 Ok((results, bay_stack_decrements))

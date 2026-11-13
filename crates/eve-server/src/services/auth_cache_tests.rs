@@ -939,8 +939,10 @@ async fn slash_tr_mid_warp_stops_warp_and_flushes_pre_set_state_tick_gh994() {
     let jita_sys = 30_000_142_u32;
     let perim_sys = 30_000_144_u32;
 
-    // 1. Same-system /tr while mid-warp: must clear active_warps/return_warps, flush Stop +
-    //    effects.Warping(0) in a preceding TickBroadcast BEFORE SetState, and leave ball Stopped.
+    // 1. Same-system /tr while mid-warp: must clear active_warps/return_warps, keep Stop +
+    //    effects.Warping(0) + SetBallPosition queued for one atomic DoDestinyUpdate WITHOUT SetState
+    //    (so DoBallClear does not wedge WarpLoop/signal_in_warp or reset Overview to 0 m, #1005/#1006),
+    //    and leave the ball Stopped.
     ctx.db.with_mut_snapshot(|s| {
         if let Some(ch) = s.characters.get_mut(&cid) {
             ch.station_id = None;
@@ -999,41 +1001,37 @@ async fn slash_tr_mid_warp_stops_warp_and_flushes_pre_set_state_tick_gh994() {
     assert_eq!(keyval_i64(&same_res, "solarSystemID"), Some(i64::from(jita_sys)));
     assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
     assert!(!ctx.return_warps.lock().unwrap().contains(&ship_id));
-
-    let pre_bcast = jita_rx
-        .try_recv()
-        .expect("warp-stop batch must be flushed onto event_tx before SetState");
-    assert_eq!(pre_bcast.solar_system_id, jita_sys);
-    let obs_stop = pre_bcast
-        .observer_events
-        .get(&ship_id)
-        .expect("flushed TickBroadcast must include observer events for ship");
-    assert!(obs_stop.iter().any(|ev| matches!(
-        ev,
-        eve_destiny::DestinyEvent::SetBallMassive { ball_id, is_massive: true } if *ball_id == ship_id
-    )));
-    assert!(obs_stop.iter().any(|ev| matches!(
-        ev,
-        eve_destiny::DestinyEvent::OnSpecialFX { ball_id, guid, is_active: false, .. }
-            if *ball_id == ship_id && guid == "effects.Warping"
-    )));
-    assert!(obs_stop.iter().any(|ev| matches!(
-        ev,
-        eve_destiny::DestinyEvent::Stop { ball_id } if *ball_id == ship_id
-    )));
-    assert!(!obs_stop.iter().any(|ev| matches!(
-        ev,
-        eve_destiny::DestinyEvent::SetState { .. }
-    )));
+    assert!(
+        jita_rx.try_recv().is_err(),
+        "same-system /tr must not emit a premature TickBroadcast splitting Stop from SetBallPosition (#1005/#1006)"
+    );
 
     let (_, post_evs, _) = jita_handle
         .drain_observer_updates(ship_id)
         .await
         .expect("post-teleport drain");
-    assert!(matches!(
-        post_evs.first(),
-        Some(eve_destiny::DestinyEvent::SetState { observer_ball_id }) if *observer_ball_id == ship_id
-    ));
+    assert!(!post_evs.iter().any(|ev| matches!(
+        ev,
+        eve_destiny::DestinyEvent::SetState { .. }
+    )), "same-system /tr must update incrementally without SetState/DoBallClear (#1005/#1006)");
+    assert!(post_evs.iter().any(|ev| matches!(
+        ev,
+        eve_destiny::DestinyEvent::SetBallMassive { ball_id, is_massive: true } if *ball_id == ship_id
+    )));
+    assert!(post_evs.iter().any(|ev| matches!(
+        ev,
+        eve_destiny::DestinyEvent::OnSpecialFX { ball_id, guid, is_active: false, .. }
+            if *ball_id == ship_id && guid == "effects.Warping"
+    )));
+    let stop_idx = post_evs.iter().position(|ev| matches!(
+        ev,
+        eve_destiny::DestinyEvent::Stop { ball_id } if *ball_id == ship_id
+    )).expect("post-teleport drain must include Stop");
+    let pos_idx = post_evs.iter().position(|ev| matches!(
+        ev,
+        eve_destiny::DestinyEvent::SetBallPosition { ball_id, .. } if *ball_id == ship_id
+    )).expect("post-teleport drain must include SetBallPosition");
+    assert!(stop_idx < pos_idx, "Stop must precede SetBallPosition so client is out of warp before repositioning");
     let (_, same_snap) = jita_handle
         .get_ball_snapshot(ship_id)
         .await

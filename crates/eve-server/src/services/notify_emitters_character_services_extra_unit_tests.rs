@@ -535,6 +535,60 @@ fn gm_timer_acceleration_slash_commands_cover_all_aliases_branches_and_notificat
     assert_eq!(ff_short.dict_get("advancedSeconds"), Some(&PyRep::Integer(45)));
     assert_eq!(ctx.now_unix(), base_now + 3600 + 120 + 45);
 
+    // #1015: Large /advancetime 691200 (+8d) for an online in-space pilot must not emit
+    // DoSimClockRebase or OnClusterShutdownInitiated, and subsequent session timers remain 10s.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+        }
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let pre_large = ctx.now_unix();
+    crate::services::space_destiny::record_session_change_timer(&ctx, char_id, pre_large, sys_id, 0, "test_jump");
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let adv_large = handle_batch3_gm_slash_cmd(&ctx, char_id, Some(sys_id), "/advancetime 691200")
+        .unwrap()
+        .unwrap();
+    assert_eq!(adv_large.dict_get("advancedSeconds"), Some(&PyRep::Integer(691_200)));
+    assert_eq!(
+        adv_large.dict_get("nowUnix"),
+        Some(&PyRep::Integer((pre_large + 691_200) as i64))
+    );
+    assert!(crate::services::space_destiny::get_session_change_timer(&ctx, char_id).is_none());
+    let large_char_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        !large_char_notifs
+            .iter()
+            .any(|n| n.event == "DoSimClockRebase"),
+        "#1015: /advancetime 691200 must never emit DoSimClockRebase onto live in-space clients"
+    );
+    assert!(
+        !large_char_notifs
+            .iter()
+            .any(|n| n.event == "OnClusterShutdownInitiated"),
+        "#1015: /advancetime 691200 must not emit OnClusterShutdownInitiated"
+    );
+    let post_large = ctx.now_unix();
+    crate::services::space_destiny::record_session_change_timer(
+        &ctx,
+        char_id,
+        post_large,
+        sys_id,
+        0,
+        "board_or_eject",
+    );
+    assert!(
+        crate::services::space_destiny::check_session_change_timer_active(&ctx, char_id, post_large + 9, None).is_some()
+    );
+    assert!(
+        crate::services::space_destiny::check_session_change_timer_active(&ctx, char_id, post_large + 10, None).is_none()
+    );
+    crate::services::space_destiny::clear_session_change_timer(&ctx, char_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
     // 2. /completeskills [all|seconds] + /trainskills + /finishskills
     let skill_tid = 3402_u32; // Science (rank 1)
     let rank = ctx

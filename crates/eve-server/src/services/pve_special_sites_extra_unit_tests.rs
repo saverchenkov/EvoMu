@@ -286,7 +286,49 @@ fn build_interference_state_keyval_and_gate_access_cover_all_bands() {
             kv.dict_get("interferencePct").and_then(|v| v.as_f64()),
             Some(50.0)
         );
+        assert_eq!(
+            kv.dict_get("isAtQuiescentLevel").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            kv.dict_get("quiescentInterferenceLevel").and_then(|v| v.as_f64()),
+            Some(0.0)
+        );
+        assert_eq!(
+            kv.dict_get("maxInterferenceLevel").and_then(|v| v.as_f64()),
+            Some(1.0)
+        );
+        assert_eq!(
+            kv.dict_get("normalisedInterferenceLevel").and_then(|v| v.as_f64()),
+            Some(0.5)
+        );
+        assert!(kv.dict_get("decayTickPeriod").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+        assert!(
+            kv.dict_get("lastDecayTickTimestamp")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0)
+                > 0
+        );
+        assert!(
+            kv.dict_get("interferenceDecreasePerDecayTick")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0)
+                > 0.0
+        );
     }
+    let quiescent_kv = build_interference_state_keyval_at(30_000_142, 0.0, 1, 1_775_000_000);
+    assert_eq!(
+        quiescent_kv
+            .dict_get("isAtQuiescentLevel")
+            .and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        quiescent_kv
+            .dict_get("normalisedInterferenceLevel")
+            .and_then(|v| v.as_f64()),
+        Some(0.0)
+    );
 
     let sys_id = 31_000_001;
     let (ctx, _, _, _) = make_ctx_and_pilot(sys_id, true);

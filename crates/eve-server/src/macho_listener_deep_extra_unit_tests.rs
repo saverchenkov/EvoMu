@@ -1411,3 +1411,264 @@ async fn pod_ejection_handoff_in_space_emits_incremental_destiny_without_set_sta
     assert!(saw_remove_ball, "same-system pod ejection must emit RemoveBall (#970)");
     assert!(saw_add_balls2, "same-system pod ejection must emit AddBalls2 (#970)");
 }
+
+#[tokio::test]
+async fn ship_eject_and_board_in_space_emit_incremental_destiny_without_set_state_992() {
+    let ctx = Arc::new(ServerContext::new());
+    let clock = Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000));
+    ctx.set_clock(Arc::clone(&clock) as Arc<dyn ServerClock>);
+    let addr = spawn_listener(Arc::clone(&ctx)).await;
+    let (mut s, client_id, user_id) = connect_login(addr, "demo", "demo-secret").await;
+    let (char_id, old_ship_id) = (90_000_001_i64, 100_000_001_i64);
+    let sys_id = 30_000_142_u32;
+
+    let call = |cid: u64, svc: &str, bid: Option<u64>, m: &str, args: Vec<PyRep>| {
+        build_call_pkt(
+            client_id,
+            user_id,
+            cid,
+            MachoAddress::Node {
+                node_id: MACHO_PROXY_NODE_ID,
+                service: Some(svc.into()),
+                call_id: 0,
+            },
+            bid,
+            m,
+            args,
+        )
+    };
+
+    write_framed_pyrep(
+        &mut s,
+        &call(1, "charUnboundMgr", None, "SelectCharacterID", vec![PyRep::Integer(char_id)]).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let _ = read_until_call_reply(&mut s).await;
+    write_framed_pyrep(&mut s, &call(2, "stationSvc", None, "Undock", vec![]).to_pyrep())
+        .await
+        .unwrap();
+    let _ = read_until_call_reply(&mut s).await;
+    let jita = ctx.systems.get_or_spawn(sys_id);
+    let _ = jita.step_manual(1.0).await.unwrap();
+    write_framed_pyrep(
+        &mut s,
+        &call(3, "beyonce", None, "MachoBindObject", vec![PyRep::Integer(sys_id as i64), PyRep::None]).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let bind_rsp = read_until_call_reply(&mut s).await;
+    let oid_val = bind_rsp
+        .named_payload
+        .get("OID+")
+        .map(as_dict)
+        .and_then(|e| e.first())
+        .and_then(|(k, _)| k.as_str())
+        .and_then(|s_oid| s_oid.split(':').nth(1))
+        .and_then(|n| n.parse::<u64>().ok())
+        .expect("beyonce bind OID+");
+    write_framed_pyrep(
+        &mut s,
+        &call(4, "beyonce", Some(oid_val), "UpdateStateRequest", vec![]).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(read_until_call_reply(&mut s).await.packet_type, MachoPacketType::CallRsp);
+    while tokio::time::timeout(std::time::Duration::from_millis(20), read_pkt(&mut s))
+        .await
+        .is_ok()
+    {}
+
+    // 1. ship.Eject while DestinyStream is Live must NOT emit SetState (#992).
+    clock.advance_secs(12);
+    write_framed_pyrep(&mut s, &call(5, "ship", None, "Eject", vec![]).to_pyrep())
+        .await
+        .unwrap();
+    let mut eject_dest_pos = None;
+    let mut eject_sess_pos = None;
+    let mut eject_rsp_pos = None;
+    let mut eject_set_state = false;
+    let mut eject_add_balls2 = false;
+    for idx in 0..12 {
+        let Ok(Some(raw)) = tokio::time::timeout(std::time::Duration::from_millis(500), read_pkt(&mut s)).await else {
+            break;
+        };
+        let pkt = MachoPacket::from_pyrep(&raw).unwrap();
+        assert_ne!(pkt.packet_type, MachoPacketType::ErrorResponse, "unexpected Eject error: {raw:?}");
+        if pkt.packet_type == MachoPacketType::Notification
+            && pyrep_contains_ascii(&raw, "DoDestinyUpdate")
+        {
+            eject_dest_pos.get_or_insert(idx);
+            eject_set_state |= pyrep_contains_ascii(&raw, "SetState");
+            eject_add_balls2 |= pyrep_contains_ascii(&raw, "AddBalls2");
+        } else if pkt.packet_type == MachoPacketType::SessionChangeNotification {
+            eject_sess_pos.get_or_insert(idx);
+        } else if pkt.packet_type == MachoPacketType::CallRsp {
+            eject_rsp_pos = Some(idx);
+            break;
+        }
+    }
+    let ed = eject_dest_pos.expect("Eject DoDestinyUpdate");
+    let es = eject_sess_pos.expect("Eject SessionChangeNotification");
+    let er = eject_rsp_pos.expect("Eject CallRsp");
+    assert!(ed < es && es < er, "expected DoDestinyUpdate ({ed}) < SessionChange ({es}) < CallRsp ({er})");
+    assert!(!eject_set_state, "in-space ship.Eject must NOT emit SetState (#992)");
+    assert!(eject_add_balls2, "in-space ship.Eject must emit AddBalls2 (#992)");
+    while tokio::time::timeout(std::time::Duration::from_millis(20), read_pkt(&mut s))
+        .await
+        .is_ok()
+    {}
+
+    // 2. ship.Board back into old_ship_id must emit incremental RemoveBall without SetState (#992).
+    clock.advance_secs(12);
+    write_framed_pyrep(
+        &mut s,
+        &call(6, "ship", None, "Board", vec![PyRep::Integer(old_ship_id)]).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let mut board_dest_pos = None;
+    let mut board_sess_pos = None;
+    let mut board_rsp_pos = None;
+    let mut board_set_state = false;
+    let mut board_remove_ball = false;
+    for idx in 0..12 {
+        let Ok(Some(raw)) = tokio::time::timeout(std::time::Duration::from_millis(500), read_pkt(&mut s)).await else {
+            break;
+        };
+        let pkt = MachoPacket::from_pyrep(&raw).unwrap();
+        assert_ne!(pkt.packet_type, MachoPacketType::ErrorResponse, "unexpected Board error: {raw:?}");
+        if pkt.packet_type == MachoPacketType::Notification
+            && pyrep_contains_ascii(&raw, "DoDestinyUpdate")
+        {
+            board_dest_pos.get_or_insert(idx);
+            board_set_state |= pyrep_contains_ascii(&raw, "SetState");
+            board_remove_ball |= pyrep_contains_ascii(&raw, "RemoveBall");
+        } else if pkt.packet_type == MachoPacketType::SessionChangeNotification {
+            board_sess_pos.get_or_insert(idx);
+        } else if pkt.packet_type == MachoPacketType::CallRsp {
+            board_rsp_pos = Some(idx);
+            break;
+        }
+    }
+    let bd = board_dest_pos.expect("Board DoDestinyUpdate");
+    let bs = board_sess_pos.expect("Board SessionChangeNotification");
+    let br = board_rsp_pos.expect("Board CallRsp");
+    assert!(bd < bs && bs < br, "expected DoDestinyUpdate ({bd}) < SessionChange ({bs}) < CallRsp ({br})");
+    assert!(!board_set_state, "in-space ship.Board must NOT emit SetState (#992)");
+    assert!(board_remove_ball, "in-space ship.Board from capsule must emit RemoveBall (#992)");
+}
+
+#[tokio::test]
+async fn death_respawn_from_space_to_station_detaches_without_stale_destiny_1010() {
+    let ctx = Arc::new(ServerContext::new());
+    let clock = Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000));
+    ctx.set_clock(Arc::clone(&clock) as Arc<dyn ServerClock>);
+    let addr = spawn_listener(Arc::clone(&ctx)).await;
+    let (mut s, client_id, user_id) = connect_login(addr, "demo", "demo-secret").await;
+    let (char_id, old_ship_id) = (90_000_001_i64, 100_000_001_i64);
+    let sys_id = 30_000_142_u32;
+
+    let call = |cid: u64, svc: &str, bid: Option<u64>, m: &str, args: Vec<PyRep>| {
+        build_call_pkt(
+            client_id,
+            user_id,
+            cid,
+            MachoAddress::Node {
+                node_id: MACHO_PROXY_NODE_ID,
+                service: Some(svc.into()),
+                call_id: 0,
+            },
+            bid,
+            m,
+            args,
+        )
+    };
+
+    write_framed_pyrep(
+        &mut s,
+        &call(1, "charUnboundMgr", None, "SelectCharacterID", vec![PyRep::Integer(char_id)]).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let _ = read_until_call_reply(&mut s).await;
+    write_framed_pyrep(&mut s, &call(2, "stationSvc", None, "Undock", vec![]).to_pyrep())
+        .await
+        .unwrap();
+    let _ = read_until_call_reply(&mut s).await;
+    let jita = ctx.systems.get_or_spawn(sys_id);
+    let _ = jita.step_manual(1.0).await.unwrap();
+    write_framed_pyrep(
+        &mut s,
+        &call(3, "beyonce", None, "MachoBindObject", vec![PyRep::Integer(sys_id as i64), PyRep::None]).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let bind_rsp = read_until_call_reply(&mut s).await;
+    let oid_val = bind_rsp
+        .named_payload
+        .get("OID+")
+        .map(as_dict)
+        .and_then(|e| e.first())
+        .and_then(|(k, _)| k.as_str())
+        .and_then(|s_oid| s_oid.split(':').nth(1))
+        .and_then(|n| n.parse::<u64>().ok())
+        .expect("beyonce bind OID+");
+    write_framed_pyrep(
+        &mut s,
+        &call(4, "beyonce", Some(oid_val), "UpdateStateRequest", vec![]).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(read_until_call_reply(&mut s).await.packet_type, MachoPacketType::CallRsp);
+    while tokio::time::timeout(std::time::Duration::from_millis(20), read_pkt(&mut s))
+        .await
+        .is_ok()
+    {}
+
+    // Simulate fatal pod damage + DeathRespawn to home station + manual tick broadcast (#1010).
+    {
+        let mut bp = jita.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        let grid_id = bp.ball_grid_ids.get(&old_ship_id).copied();
+        bp.emit_damage_and_destruction_events(old_ship_id, grid_id, 0.0, 0.0, 0.0, true);
+    }
+    let _ = ctx
+        .db
+        .respawn_character_at_home_station(char_id, old_ship_id, &ctx.sde);
+    crate::services::notify_emitters_combat_ess_progression::emit_player_pod_respawn(&ctx, char_id);
+    let _ = jita.step_manual(1.0).await.unwrap();
+
+    let mut saw_sess_pos: Option<usize> = None;
+    let mut saw_respawn_pos: Option<usize> = None;
+    let mut saw_destiny_update = false;
+    let mut saw_terminal_explosion = false;
+    for idx in 0..8 {
+        let Ok(Some(raw)) = tokio::time::timeout(std::time::Duration::from_millis(250), read_pkt(&mut s)).await else {
+            break;
+        };
+        let pkt = MachoPacket::from_pyrep(&raw).unwrap();
+        if pkt.packet_type == MachoPacketType::SessionChangeNotification {
+            saw_sess_pos.get_or_insert(idx);
+        } else if pkt.packet_type == MachoPacketType::Notification {
+            if pyrep_contains_ascii(&raw, "DoDestinyUpdate") {
+                saw_destiny_update = true;
+            }
+            if pyrep_contains_ascii(&raw, "TerminalPlayDestructionEffect") {
+                saw_terminal_explosion = true;
+            }
+            if pyrep_contains_ascii(&raw, "OnPlayerPodRespawn") {
+                saw_respawn_pos.get_or_insert(idx);
+            }
+        }
+    }
+    let sess_idx = saw_sess_pos.expect("DeathRespawn must emit SessionChangeNotification (#1010)");
+    let respawn_idx = saw_respawn_pos.expect("DeathRespawn must emit OnPlayerPodRespawn (#1010)");
+    assert!(
+        sess_idx < respawn_idx,
+        "SessionChangeNotification ({sess_idx}) must precede OnPlayerPodRespawn ({respawn_idx})"
+    );
+    assert!(
+        !saw_destiny_update && !saw_terminal_explosion,
+        "DeathRespawn space -> station must NOT leak stale DoDestinyUpdate/TerminalPlayDestructionEffect (#1010)"
+    );
+}

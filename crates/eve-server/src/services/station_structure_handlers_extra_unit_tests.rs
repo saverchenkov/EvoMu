@@ -451,12 +451,11 @@ fn get_structures_directory_info_standing_gates_and_fulcrum_timers() {
             .code,
         "MissingStructureId"
     );
-    assert_eq!(
+    assert!(matches!(
         handle_get_structure_info(&ctx, &mut outsider_sess, &[PyRep::Integer(st_destroyed)])
-            .unwrap_err()
-            .code,
-        "StructureNotFound"
-    );
+            .unwrap(),
+        PyRep::None
+    ));
     assert_eq!(
         handle_get_structure_info(&ctx, &mut outsider_sess, &[PyRep::Integer(st_online)])
             .unwrap_err()

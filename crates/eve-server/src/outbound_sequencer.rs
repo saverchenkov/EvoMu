@@ -357,16 +357,16 @@ pub fn sequence(state: &mut SessionWireState, done: RpcCompletion) -> Vec<OutFra
 
     // 2. SessionChangeNotification precedes CallRsp (#883, #928) so MachoNet's TransportReader
     //    advances `receivedVersion` before stamping `CallRsp`.
-    //    Exception (#970): when an in-space ship switch occurs in the same solar system while
-    //    `state.destiny` is already `Live` (`DestinyDrain::Updates(batch)` with
-    //    `batch.has_set_state == true` and a session change), emit `DoDestinyUpdate(SetState)`
-    //    first so `michelle` has the new ball and `ego`, then `SessionChangeNotification`, then
-    //    `CallRsp`.
+    //    Exception (#970, #992): when an in-space ship switch occurs in the same solar system while
+    //    `state.destiny` is already `Live` (`DestinyDrain::Updates(batch)` — either `SetState` or
+    //    incremental `RemoveBall`/`AddBalls2`/`OnSlimItemChange` handoff) with a session change,
+    //    emit `DoDestinyUpdate` first so `michelle` has the new ball and `ego`, then
+    //    `SessionChangeNotification`, then `CallRsp`.
     let mut deferred_session_change = done.session_change_frame;
-    let in_space_ship_switch_set_state = deferred_session_change.is_some()
+    let in_space_ship_switch_updates = deferred_session_change.is_some()
         && state.destiny.is_live()
-        && matches!(&destiny_drain, DestinyDrain::Updates(b) if b.has_set_state);
-    if !in_space_ship_switch_set_state {
+        && matches!(&destiny_drain, DestinyDrain::Updates(_));
+    if !in_space_ship_switch_updates {
         if let Some(sess_frame) = deferred_session_change.take() {
             out.push(OutFrame::SessionChange { frame: sess_frame });
         }

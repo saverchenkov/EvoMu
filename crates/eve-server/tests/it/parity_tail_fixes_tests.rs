@@ -379,21 +379,36 @@ async fn non_gm_paragon_hub_and_skinr_sde_grounded_e2e_and_sqlite_reload() {
 
         // 2. Non-GM component purchase from SDE-seeded Paragon Hub + hangar item ConsumeRequest (zero GM grants)
         let skinr_cat = eve_server::services::quasar_cosmetics_skinr::SkinrStaticCatalog::load(&ctx.sde);
-        let (&coat_item_tid, &(coat_comp_id, uses_per_item)) = skinr_cat.item_type_to_component.iter().find(|(_, &(cid, uses))| {
-            uses > 0 && skinr_cat.components.get(&cid).is_some_and(|c| !c.is_pattern() && !c.disallowed_slots.contains(&1))
-        }).expect("SDE coating component item");
-
         let comps_wm = WireMessage::decode(&qrpc(&ctx, &mut seller, "eve_public.cosmetic.market.component.listing.api.GetAllRequest", Vec::new()).await.payload.unwrap().value).unwrap();
-        let target_comp_uuid: [u8; 16] = comps_wm.fields.iter().filter(|f| f.field_number == 1).find_map(|f| {
-            let entry = WireMessage::decode(f.value.as_bytes()?).ok()?;
-            let id_m = WireMessage::decode(entry.fields.iter().find(|x| x.field_number == 1)?.value.as_bytes()?).ok()?;
-            let attrs = WireMessage::decode(entry.fields.iter().find(|x| x.field_number == 2)?.value.as_bytes()?).ok()?;
-            let has_isk = attrs.fields.iter().any(|x| x.field_number == 3);
-            let bundle = attrs.fields.iter().find(|x| x.field_number == 6).and_then(|x| x.value.as_varint()).unwrap_or(0);
-            let tid_m = WireMessage::decode(attrs.fields.iter().find(|x| x.field_number == 5)?.value.as_bytes()?).ok()?;
-            let tid = tid_m.fields.iter().find(|x| x.field_number == 1)?.value.as_varint()? as u32;
-            (has_isk && bundle == 1 && tid == coat_item_tid).then(|| id_m.fields[0].value.as_bytes().unwrap().try_into().unwrap())
-        }).expect("seeded ISK listing for SDE coating component");
+        let mut seeded_isk_listings: Vec<(u32, [u8; 16])> = comps_wm
+            .fields
+            .iter()
+            .filter(|f| f.field_number == 1)
+            .filter_map(|f| {
+                let entry = WireMessage::decode(f.value.as_bytes()?).ok()?;
+                let id_m = WireMessage::decode(entry.fields.iter().find(|x| x.field_number == 1)?.value.as_bytes()?).ok()?;
+                let attrs = WireMessage::decode(entry.fields.iter().find(|x| x.field_number == 2)?.value.as_bytes()?).ok()?;
+                let has_isk = attrs.fields.iter().any(|x| x.field_number == 3);
+                let bundle = attrs.fields.iter().find(|x| x.field_number == 6).and_then(|x| x.value.as_varint()).unwrap_or(0);
+                let tid_m = WireMessage::decode(attrs.fields.iter().find(|x| x.field_number == 5)?.value.as_bytes()?).ok()?;
+                let tid = tid_m.fields.iter().find(|x| x.field_number == 1)?.value.as_varint()? as u32;
+                let uuid: [u8; 16] = id_m.fields.first()?.value.as_bytes()?.try_into().ok()?;
+                (has_isk && bundle == 1).then_some((tid, uuid))
+            })
+            .collect();
+        seeded_isk_listings.sort_by_key(|(tid, uuid)| (*tid, *uuid));
+        let (coat_item_tid, coat_comp_id, uses_per_item, target_comp_uuid) = seeded_isk_listings
+            .into_iter()
+            .find_map(|(tid, uuid)| {
+                let &(cid, uses) = skinr_cat.item_type_to_component.get(&tid)?;
+                let is_coating = uses > 0
+                    && skinr_cat
+                        .components
+                        .get(&cid)
+                        .is_some_and(|c| !c.is_pattern() && !c.disallowed_slots.contains(&1));
+                is_coating.then_some((tid, cid, uses, uuid))
+            })
+            .expect("seeded ISK listing for SDE coating component");
 
         let need_items = ((120 + uses_per_item as u64 - 1) / (uses_per_item as u64)).max(1);
         let mut buy_comp = Vec::new();

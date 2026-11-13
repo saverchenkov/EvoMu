@@ -604,10 +604,19 @@ pub async fn execute_call_req_wire(
     };
 
     let docking_transition = was_in_space && !is_in_space;
+    let death_respawn_docking = docking_transition && session.ship_id != prev_session.ship_id;
 
     let mut pre_dock_destiny = None;
     if !matches!(wire.wire_state.destiny, DestinyStream::Detached) && docking_transition {
-        if let (Some(sys_id), Some(ship_id)) = (
+        if death_respawn_docking {
+            let _ = drain_sys_rx_discarding_lag(wire.sys_rx);
+            if let Some(old_sys_id) = prev_session.solar_system_id.or(session.solar_system_id) {
+                let sys_handle = ctx.systems.get_or_spawn(old_sys_id);
+                if let Some(old_ship_id) = prev_session.ship_id {
+                    let _ = sys_handle.drain_observer_updates(old_ship_id).await;
+                }
+            }
+        } else if let (Some(sys_id), Some(ship_id)) = (
             session.solar_system_id.or(prev_session.solar_system_id),
             session.ship_id.or(prev_session.ship_id),
         ) {
@@ -623,11 +632,11 @@ pub async fn execute_call_req_wire(
     }
 
     if docking_transition {
-        if let Some(sys_id) = session.solar_system_id.or(prev_session.solar_system_id) {
+        if let Some(sys_id) = prev_session.solar_system_id.or(session.solar_system_id) {
             let _ = ctx
                 .systems
                 .get_or_spawn(sys_id)
-                .flush_peer_observer_updates(session.ship_id.or(prev_session.ship_id))
+                .flush_peer_observer_updates(prev_session.ship_id.or(session.ship_id))
                 .await;
         }
     } else if was_in_space && prev_session.solar_system_id != session.solar_system_id {
@@ -1022,35 +1031,50 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                 break;
             }
             tick_res = sys_rx.recv(), if !matches!(wire_state.destiny, crate::outbound_sequencer::DestinyStream::Detached) => {
+                // Guard against emitting stale space ticks (or pod TerminalExplosion/RemoveBall)
+                // after an out-of-band DeathRespawn has already transitioned the session in DB
+                // (#1010), before `notify_rx` wakes up to emit `SessionChangeNotification`.
+                let mut db_probe = session.clone();
+                if session.character_id.is_some() {
+                    ctx.sync_session(&mut db_probe);
+                }
+                let still_in_same_live_space = db_probe.character_id.is_some()
+                    && db_probe.station_id.is_none()
+                    && db_probe.structure_id.is_none()
+                    && db_probe.solar_system_id == session.solar_system_id
+                    && db_probe.solar_system_id == subscribed_sys_id
+                    && db_probe.ship_id == session.ship_id;
                 match tick_res {
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                         warn!("machoNet session {session_id} sys_rx lagged by {skipped} ticks; resyncing SetState (ORD-5)");
-                        wire_state.on_broadcast_lagged();
-                        if session.character_id.is_some()
-                            && session.station_id.is_none()
-                            && session.structure_id.is_none()
-                        {
-                            if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
-                                let sys_handle = ctx.systems.get_or_spawn(sys_id);
-                                let _ = sys_handle.push_set_state(ship_id).await;
-                                if let Ok((tick, obs_evs, updates_pyrep)) = sys_handle.drain_observer_updates(ship_id).await {
-                                    let ep = wire_state.current_epoch();
-                                    if let Some(batch) = build_destiny_batch(&ctx, ep, tick, &obs_evs, updates_pyrep) {
-                                        if let Some(frame) = crate::outbound_sequencer::sequence_tick(
-                                            &mut wire_state,
-                                            batch,
-                                        ) {
-                                            if write_out_frames(
-                                                &mut writer,
-                                                MACHO_PROXY_NODE_ID,
-                                                client_id,
-                                                session.user_id,
-                                                &[frame],
-                                            )
-                                            .await
-                                            .is_err()
-                                            {
-                                                break;
+                        if still_in_same_live_space {
+                            wire_state.on_broadcast_lagged();
+                            if session.character_id.is_some()
+                                && session.station_id.is_none()
+                                && session.structure_id.is_none()
+                            {
+                                if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
+                                    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+                                    let _ = sys_handle.push_set_state(ship_id).await;
+                                    if let Ok((tick, obs_evs, updates_pyrep)) = sys_handle.drain_observer_updates(ship_id).await {
+                                        let ep = wire_state.current_epoch();
+                                        if let Some(batch) = build_destiny_batch(&ctx, ep, tick, &obs_evs, updates_pyrep) {
+                                            if let Some(frame) = crate::outbound_sequencer::sequence_tick(
+                                                &mut wire_state,
+                                                batch,
+                                            ) {
+                                                if write_out_frames(
+                                                    &mut writer,
+                                                    MACHO_PROXY_NODE_ID,
+                                                    client_id,
+                                                    session.user_id,
+                                                    &[frame],
+                                                )
+                                                .await
+                                                .is_err()
+                                                {
+                                                    break;
+                                                }
                                             }
                                         }
                                     }
@@ -1060,7 +1084,8 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {}
                     Ok(tick_msg) => {
-                        if session.character_id.is_some()
+                        if still_in_same_live_space
+                            && session.character_id.is_some()
                             && session.station_id.is_none()
                             && session.structure_id.is_none()
                             && session.solar_system_id == Some(tick_msg.solar_system_id)
@@ -1108,66 +1133,69 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                     if should_drain {
                         let prev_session = session.clone();
                         ctx.sync_session(&mut session);
-                        if session.solar_system_id != prev_session.solar_system_id
-                            || session.solar_system_id != subscribed_sys_id
-                        {
-                            wire_state.leave_space();
-                            if let Some(new_sys) = session.solar_system_id {
-                                sys_rx = ctx.systems.get_or_spawn(new_sys).subscribe();
-                            }
-                            subscribed_sys_id = session.solar_system_id;
-                        }
-                        let mut write_failed = false;
+                        let mut pending_notifs = Vec::new();
                         for notif in ctx.drain_notifications_for_char(cid) {
                             if notif.event == "OnSessionChanged" {
-                                let inner_prev_sys = session.solar_system_id;
                                 ctx.sync_session(&mut session);
-                                if session.solar_system_id != inner_prev_sys
-                                    || session.solar_system_id != subscribed_sys_id
-                                {
-                                    wire_state.leave_space();
-                                    if let Some(new_sys) = session.solar_system_id {
-                                        sys_rx = ctx.systems.get_or_spawn(new_sys).subscribe();
-                                    }
-                                    subscribed_sys_id = session.solar_system_id;
-                                }
-                                if session.station_id.is_some() || session.structure_id.is_some() {
-                                    wire_state.leave_space();
-                                }
                                 continue;
                             }
-                            if let Some(typed_notif) = build_typed_notification(&ctx, notif.event, notif.args) {
-                                let notif_pkt = MachoPacket::new_broadcast_notification(
-                                    MACHO_PROXY_NODE_ID,
-                                    client_id,
-                                    session.user_id,
-                                    &typed_notif.event,
-                                    typed_notif.args,
-                                );
-                                if write_framed_pyrep(&mut writer, &notif_pkt.to_pyrep()).await.is_err() {
-                                    write_failed = true;
-                                    break;
+                            if let Some(typed_notif) =
+                                build_typed_notification(&ctx, notif.event, notif.args)
+                            {
+                                pending_notifs.push(typed_notif);
+                            }
+                        }
+                        let was_in_space = prev_session.character_id.is_some()
+                            && prev_session.station_id.is_none()
+                            && prev_session.structure_id.is_none()
+                            && prev_session.solar_system_id.is_some();
+                        let is_in_space = session.character_id.is_some()
+                            && session.station_id.is_none()
+                            && session.structure_id.is_none()
+                            && session.solar_system_id.is_some();
+                        let docking_transition = was_in_space && !is_in_space;
+                        let sys_changed = session.solar_system_id != prev_session.solar_system_id
+                            || session.solar_system_id != subscribed_sys_id;
+
+                        if docking_transition || sys_changed || !is_in_space {
+                            let _ = drain_sys_rx_discarding_lag(&mut sys_rx);
+                            if !matches!(
+                                wire_state.destiny,
+                                crate::outbound_sequencer::DestinyStream::Detached
+                            ) && (docking_transition || sys_changed)
+                            {
+                                if let Some(old_sys_id) = prev_session.solar_system_id {
+                                    let old_sys = ctx.systems.get_or_spawn(old_sys_id);
+                                    if let Some(old_ship_id) = prev_session.ship_id {
+                                        // Discard stale old-system observer updates (e.g. pod
+                                        // TerminalExplosion / RemoveBall / SetState) on async
+                                        // DeathRespawn (#1010) before SessionChangeNotification
+                                        // tears down the client ballpark via OnPrimaryViewChanged.
+                                        let _ = old_sys.drain_observer_updates(old_ship_id).await;
+                                    }
+                                    let _ = old_sys
+                                        .flush_peer_observer_updates(prev_session.ship_id)
+                                        .await;
                                 }
                             }
-                        }
-                        if write_failed {
-                            break;
-                        }
-                        if session.solar_system_id != prev_session.solar_system_id
-                            || session.solar_system_id != subscribed_sys_id
-                        {
                             wire_state.leave_space();
-                            if let Some(new_sys) = session.solar_system_id {
-                                sys_rx = ctx.systems.get_or_spawn(new_sys).subscribe();
+                            if sys_changed {
+                                if let Some(new_sys) = session.solar_system_id {
+                                    sys_rx = ctx.systems.get_or_spawn(new_sys).subscribe();
+                                }
+                                subscribed_sys_id = session.solar_system_id;
                             }
-                            subscribed_sys_id = session.solar_system_id;
                         }
-                        if session.station_id.is_some() || session.structure_id.is_some() {
-                            wire_state.leave_space();
-                        }
-                        if let Some(sess_change_payload) = prev_session
+
+                        if let Some(mut sess_change_payload) = prev_session
                             .to_session_change_pyrep(&session, vec![MACHO_PROXY_NODE_ID as i64])
                         {
+                            enrich_session_change_scoped_roles(
+                                &ctx,
+                                &prev_session,
+                                &session,
+                                &mut sess_change_payload,
+                            );
                             // When an in-space ship switch occurs in the same solar system (e.g. pod
                             // ejection on ship destruction `#970`), emit incremental `DoDestinyUpdate`
                             // (`RemoveBall` + `AddBalls2` from `queue_in_space_ship_handoff`) BEFORE
@@ -1175,8 +1203,9 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             // `Live`, avoiding `SetState` (`Park.SetState` triggers `DoBallClear` and
                             // breaks `OverviewWindow` weakrefs to celestial `Ball`s). Only synthesize
                             // `SetState` if the destiny stream is still `AwaitingSetState`.
-                            if session.station_id.is_none()
-                                && session.structure_id.is_none()
+                            if is_in_space
+                                && !docking_transition
+                                && !sys_changed
                                 && session.ship_id != prev_session.ship_id
                             {
                                 if let (Some(new_ship_id), Some(sys_id)) =
@@ -1267,6 +1296,23 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             if write_framed_pyrep(&mut writer, &sess_pkt.to_pyrep()).await.is_err() {
                                 break;
                             }
+                        }
+                        let mut write_failed = false;
+                        for typed_notif in pending_notifs {
+                            let notif_pkt = MachoPacket::new_broadcast_notification(
+                                MACHO_PROXY_NODE_ID,
+                                client_id,
+                                session.user_id,
+                                &typed_notif.event,
+                                typed_notif.args,
+                            );
+                            if write_framed_pyrep(&mut writer, &notif_pkt.to_pyrep()).await.is_err() {
+                                write_failed = true;
+                                break;
+                            }
+                        }
+                        if write_failed {
+                            break;
                         }
                     }
                 }

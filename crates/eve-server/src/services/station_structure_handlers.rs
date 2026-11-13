@@ -561,11 +561,13 @@ pub(crate) fn handle_get_structure_info(ctx: &ServerContext, session: &mut Sessi
     let now = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
         let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
-        let st = snap
+        let Some(st) = snap
             .structures
             .get(&structure_id)
             .filter(|s| s.state != life::STATE_DESTROYED)
-            .ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found")))?;
+        else {
+            return Ok(PyRep::None);
+        };
         let has_acl = structure_upwell_ops::evaluate_character_structure_access_in_snap_at(snap, structure_id, char_id, Some(now));
         if caller_corp != st.owner_corp_id && session.solar_system_id != Some(st.solar_system_id) && !has_acl {
             return Err(err("StructureAccessDenied", format!("Character {char_id} lacks access to structure {structure_id}")));

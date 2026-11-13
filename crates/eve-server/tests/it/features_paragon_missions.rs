@@ -662,7 +662,7 @@ async fn test_structure_directory_accessible_structures_and_services() {
     out_sess.solar_system_id = Some(AMARR_SYS);
     ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&OUT_ID).unwrap().solar_system_id = AMARR_SYS);
     assert_eq!(rpc(&ctx, &mut out_sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(ST_PRIVATE)]).await.unwrap_err().code, "StructureAccessDenied");
-    assert_eq!(rpc(&ctx, &mut dir_sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(999_999_999)]).await.unwrap_err().code, "StructureNotFound");
+    assert_eq!(rpc(&ctx, &mut dir_sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(999_999_999)]).await.unwrap(), PyRep::None);
     let PyRep::Dict(corp_map) = rpc(&ctx, &mut dir_sess, "structureDirectory", "GetMyCorporationStructures", &[]).await.unwrap() else { panic!("Dict") };
     assert_eq!(corp_map.len(), 3);
     let hub_dir = &corp_map.iter().find(|(k, _)| k.as_i64() == Some(ST_HUB)).unwrap().1;
