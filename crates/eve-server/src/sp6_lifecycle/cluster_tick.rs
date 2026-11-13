@@ -397,6 +397,80 @@ pub fn populate_persisted_space_objects(
             ballpark.combat_states.insert(disc.ship_id, cs);
         }
 
+        // 3b. Abandoned / unpiloted ships in space (`#918`, `#835`)
+        for item in snap.items.values() {
+            if item.location_id != solar_system_id as i64
+                || !snap.characters.contains_key(&item.owner_id)
+                || player_ship_ids.contains(&item.item_id)
+                || ballpark.balls.contains_key(&item.item_id)
+                || sp6
+                    .disconnected_ships
+                    .values()
+                    .any(|d| d.ship_id == item.item_id)
+            {
+                continue;
+            }
+            let is_ship = sde
+                .types
+                .get(&item.type_id)
+                .is_some_and(|t| t.category_id == 6 && t.type_id != 670);
+            if !is_ship {
+                continue;
+            }
+            let Some(&pos_arr) = snap.item_positions.get(&item.item_id) else {
+                continue;
+            };
+            let pos = DVec3::from_array(pos_arr);
+            let (group_id, category_id, mass, radius, max_vel, inertia, _warp_speed_au_s) =
+                sde_ship_physics(sde, item.type_id);
+            let (corp_id, alliance_id, sec_status) = snap
+                .characters
+                .get(&item.owner_id)
+                .map(|c| {
+                    (
+                        c.corporation_id,
+                        c.alliance_id.unwrap_or(-1),
+                        c.security_status,
+                    )
+                })
+                .unwrap_or((1_000_009, -1, 0.0));
+            ballpark.set_ball_slim_meta(
+                item.item_id,
+                SlimItemMeta {
+                    group_id,
+                    category_id,
+                    owner_id: item.owner_id,
+                    char_id: None,
+                    corp_id,
+                    alliance_id,
+                    security_status: sec_status,
+                    is_cloaked: false,
+                    ..Default::default()
+                },
+            );
+            ballpark.add_ball(Ball {
+                id: item.item_id,
+                type_id: item.type_id,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: max_vel,
+                inertia,
+                mass,
+                radius,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            });
+            let mut cs = default_combat_state_for_type(sde, item.type_id);
+            if let Some(hp) = sp6.ship_combat_hp.get(&item.item_id) {
+                cs.shield_hp = hp.shield_hp.clamp(0.0, cs.max_shield_hp);
+                cs.armor_hp = hp.armor_hp.clamp(0.0, cs.max_armor_hp);
+                if hp.hull_hp > 0.0 {
+                    cs.structure_hp = hp.hull_hp.clamp(0.0, cs.max_structure_hp);
+                }
+            }
+            ballpark.combat_states.insert(item.item_id, cs);
+        }
+
         // 4. Persisted scanner probes in space (`#543`)
         for p in sp6.active_scanner_probes.values() {
             if p.solar_system_id != solar_system_id || p.state < 0 {
@@ -930,7 +1004,15 @@ pub fn on_advance_secs_internal(
 
         with_mut_sp6_state(&ctx.db, |st, snap| {
             for cd in rt_self_destructs {
-                st.self_destructs.entry(cd.ship_id).or_insert(cd);
+                let started = cd.started_unix;
+                let detonate = cd.detonate_at_unix;
+                st.self_destructs
+                    .entry(cd.ship_id)
+                    .and_modify(|e| {
+                        e.started_unix = started;
+                        e.detonate_at_unix = detonate;
+                    })
+                    .or_insert(cd);
             }
 
             // Prune disconnected_ships entries whose ship was destroyed or pilot docked/changed ship

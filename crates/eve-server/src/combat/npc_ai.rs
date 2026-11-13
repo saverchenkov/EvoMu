@@ -1346,110 +1346,21 @@ impl NpcSpawnManager {
 }
 
 /// Processes ball destructions returned by `bp.apply_damage_to_ball` during NPC AI ticks:
-/// invokes `execute_death_pipeline_sync` for player ships/capsules, cleans up destroyed player drones,
-/// and removes destroyed extended NPC entities.
+/// routes all destroyed balls through the unified [`crate::combat::death_pipeline::on_ball_destroyed_sync`]
+/// pipeline (`#918`, `#835`, `#858`).
 pub(crate) fn handle_npc_ai_ball_destructions(
     ctx: &ServerContext,
     sys_id: u32,
     destructions: Vec<(i64, i64, Ball)>,
 ) {
-    if destructions.is_empty() {
-        return;
-    }
-    let now_unix = ctx.now_unix();
     for (attacker_npc_id, target_id, dead_ball) in destructions {
-        let removed_drone = if crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-            rt.active_drones_in_space.contains_key(&target_id)
-        }) {
-            crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-                let d = rt.active_drones_in_space.remove(&target_id);
-                if d.is_some() {
-                    rt.active_drone_miners.remove(&target_id);
-                    rt.drone_next_ready_unix.remove(&target_id);
-                }
-                d
-            })
-        } else {
-            None
-        };
-        if let Some(d) = removed_drone {
-            ctx.db.with_mut_snapshot(|snap| {
-                snap.items.remove(&d.drone_item_id);
-                snap.item_positions.remove(&d.ball_id);
-                snap.sp6_lifecycle.space_object_meta.remove(&d.ball_id);
-            });
-            continue;
-        }
-
-        let victim_char_opt = ctx.db.with_snapshot(|snap| {
-            snap.characters
-                .values()
-                .find(|c| c.active_ship_id == target_id)
-                .map(|c| c.character_id)
-                .or_else(|| {
-                    snap.sp6_lifecycle
-                        .disconnected_ships
-                        .values()
-                        .find(|d| d.ship_id == target_id)
-                        .map(|d| d.char_id)
-                })
-                .or_else(|| {
-                    snap.items
-                        .get(&target_id)
-                        .filter(|it| {
-                            it.owner_id >= 90_000_000
-                                && ctx
-                                    .sde
-                                    .types
-                                    .get(&it.type_id)
-                                    .is_some_and(|t| t.category_id == 6)
-                        })
-                        .map(|it| it.owner_id)
-                })
-        });
-        if let Some(victim_char_id) = victim_char_opt {
-            let final_blow_id =
-                crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                    let mut latest: Option<(u64, i64)> = None;
-                    for key in [target_id, victim_char_id] {
-                        if let Some(list) = rt.aggression_assist_log.get(&key) {
-                            for e in list {
-                                if now_unix.saturating_sub(e.last_action_unix)
-                                    <= crate::services::combat_crimewatch::KILLMAIL_ASSIST_WINDOW_SECS
-                                    && e.attacker_char_id != victim_char_id
-                                    && latest.is_none_or(|(ts, _)| e.last_action_unix > ts)
-                                {
-                                    latest = Some((e.last_action_unix, e.attacker_char_id));
-                                }
-                            }
-                        }
-                    }
-                    latest.map(|(_, cid)| cid)
-                })
-                .unwrap_or(attacker_npc_id);
-            let _ = crate::combat::death_pipeline::execute_death_pipeline_sync(
-                ctx,
-                sys_id,
-                victim_char_id,
-                target_id,
-                final_blow_id,
-                dead_ball.position,
-                now_unix,
-            );
-            continue;
-        }
-
-        let removed_ext_npc =
-            crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-                rt.npc_entities.remove(&target_id).is_some()
-            });
-        if removed_ext_npc {
-            ctx.db.with_mut_snapshot(|snap| {
-                snap.items.remove(&target_id);
-                snap.item_positions.remove(&target_id);
-                snap.sp6_lifecycle.space_object_meta.remove(&target_id);
-            });
-        }
+        let _ = crate::combat::death_pipeline::on_ball_destroyed_sync(
+            ctx,
+            sys_id,
+            target_id,
+            Some(attacker_npc_id),
+            dead_ball.position,
+        );
     }
 }
 

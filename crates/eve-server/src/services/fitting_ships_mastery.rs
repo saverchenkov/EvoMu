@@ -122,6 +122,21 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 .or(if char_home > 0 { Some(char_home) } else { None })
                 .unwrap_or(0);
 
+            let live_eject_pos = if dock_opt.is_none() {
+                if let Some(sys_id) = sys_opt {
+                    let sys = ctx.systems.get_or_spawn(sys_id);
+                    sys.get_ball_snapshot(old_ship_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|(_, b)| b.position)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(old_ship) = snap.items.get(&old_ship_id).cloned() else {
                     return Err(BridgeRpcError {
@@ -174,6 +189,18 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     );
                     cid
                 };
+                if dock_opt.is_none() {
+                    let old_pos_arr = live_eject_pos
+                        .map(|p| p.to_array())
+                        .or_else(|| snap.item_positions.get(&old_ship_id).copied())
+                        .unwrap_or([0.0, 0.0, 0.0]);
+                    let pod_pos_arr = [old_pos_arr[0] + 150.0, old_pos_arr[1], old_pos_arr[2]];
+                    snap.item_positions.insert(old_ship_id, old_pos_arr);
+                    snap.item_positions.insert(capsule_id, pod_pos_arr);
+                    if let Some(sys_id) = sys_opt {
+                        crate::sp6_lifecycle::enter_space_in_snap(snap, capsule_id, sys_id);
+                    }
+                }
                 let _ = crate::router::apply_character_transition_in_snap(
                     snap,
                     &ctx.sde,
@@ -342,6 +369,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 }));
             }
 
+            let mut in_space_board_positions: Option<(i64, [f64; 3], [f64; 3], u32)> = None;
             if session.station_id.is_none() && session.structure_id.is_none() {
                 let Some(sys_id) = session.solar_system_id else {
                     return Some(Err(BridgeRpcError {
@@ -383,7 +411,42 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         }));
                     }
                     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-                    let cur_ball = sys_handle.get_ball_snapshot(cur_ship_id).await.ok().flatten();
+                    let mut cur_ball = sys_handle.get_ball_snapshot(cur_ship_id).await.ok().flatten();
+                    if cur_ball.is_none() {
+                        if let Some((cur_type_id, cur_pos)) = ctx.db.with_snapshot(|snap| {
+                            let it = snap.items.get(&cur_ship_id)?;
+                            if it.location_id != i64::from(sys_id) {
+                                return None;
+                            }
+                            let &pos_arr = snap.item_positions.get(&cur_ship_id)?;
+                            Some((it.type_id, DVec3::from_array(pos_arr)))
+                        }) {
+                            let sde_t = ctx.sde.types.get(&cur_type_id);
+                            let _ = sys_handle
+                                .spawn_ball_with_meta(
+                                    eve_destiny::Ball {
+                                        id: cur_ship_id,
+                                        type_id: cur_type_id,
+                                        position: cur_pos,
+                                        velocity: DVec3::ZERO,
+                                        max_velocity: sde_t
+                                            .and_then(|t| t.default_attributes.get(&37).copied())
+                                            .unwrap_or(300.0),
+                                        inertia: sde_t
+                                            .and_then(|t| t.default_attributes.get(&70).copied())
+                                            .unwrap_or(2.0),
+                                        mass: sde_t.map(|t| t.mass.max(1_000.0)).unwrap_or(1_000_000.0),
+                                        radius: sde_t.map(|t| t.radius.max(15.0)).unwrap_or(40.0),
+                                        speed_fraction: 0.0,
+                                        mode: eve_destiny::MovementMode::Stop,
+                                    },
+                                    ctx.build_ship_combat_state(char_id, cur_ship_id, cur_type_id),
+                                    ctx.build_ship_slim_meta(char_id, cur_type_id),
+                                )
+                                .await;
+                            cur_ball = sys_handle.get_ball_snapshot(cur_ship_id).await.ok().flatten();
+                        }
+                    }
                     let tgt_ball = sys_handle
                         .get_ball_snapshot(target_ship_id)
                         .await
@@ -439,6 +502,8 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     {
                         return Some(Err(e));
                     }
+                    in_space_board_positions =
+                        Some((cur_ship_id, cb.position.to_array(), tb.position.to_array(), sys_id));
                 }
             }
 
@@ -485,6 +550,15 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     return Err(BridgeRpcError { code: "NotAShip".into(), message: format!("Item {target_ship_id} is not a ship") });
                 }
                 ctx.check_type_skill_prerequisites_in_snapshot(snap, char_id, ship.type_id)?;
+                if let Some((prev_sid, prev_pos_arr, tgt_pos_arr, sys_id)) = in_space_board_positions {
+                    if prev_sid != target_ship_id
+                        && snap.items.get(&prev_sid).is_some_and(|it| it.type_id != 670)
+                    {
+                        snap.item_positions.insert(prev_sid, prev_pos_arr);
+                    }
+                    snap.item_positions.insert(target_ship_id, tgt_pos_arr);
+                    crate::sp6_lifecycle::enter_space_in_snap(snap, target_ship_id, sys_id);
+                }
                 let _ = crate::router::apply_character_transition_in_snap(
                     snap,
                     &ctx.sde,
