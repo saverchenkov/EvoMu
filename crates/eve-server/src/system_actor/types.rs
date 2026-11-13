@@ -230,7 +230,7 @@ pub const fn is_condition_checkpoint_tick(solar_system_id: SolarSystemId, tick: 
 }
 
 /// Dirty-only in-space ship condition checkpoint entry emitted in [`StepOutput`] (`RFC-1 E-4`, `T-2`, `T-5`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct ConditionCheckpointEntry {
     pub ball_id: BallId,
     pub space_entry_epoch: u64,

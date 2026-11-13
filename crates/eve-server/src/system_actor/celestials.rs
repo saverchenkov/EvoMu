@@ -1533,8 +1533,9 @@ impl SystemHandle {
         Ok(output.broadcast.unwrap_or_else(|| TickBroadcast {
             solar_system_id: self.solar_system_id,
             tick: output.tick,
-            events: Arc::new(Vec::new()),
-            marshaled_observer_updates: Arc::new(HashMap::new()),
+            events: Vec::new(),
+            observer_events: std::collections::BTreeMap::new(),
+            observer_updates_pyrep: std::collections::BTreeMap::new(),
         }))
     }
 

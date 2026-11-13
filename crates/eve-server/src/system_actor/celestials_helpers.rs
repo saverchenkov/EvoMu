@@ -568,7 +568,7 @@ pub(crate) fn update_system_hibernation_flag(
         || state
             .asteroids
             .values()
-            .any(|a| a.depleted_at_sim_s.is_some());
+            .any(|a| a.depleted || a.respawn_at_tick.is_some());
     if has_active_work {
         state.hibernated.store(false, Ordering::Relaxed);
         state.hibernated_since_unix.store(0, Ordering::Relaxed);
