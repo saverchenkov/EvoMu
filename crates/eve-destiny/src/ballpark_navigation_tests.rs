@@ -484,3 +484,76 @@ fn gate_cloak_decloak_events_precede_warp_to_and_goto_point_while_covert_cloak_p
         .set_mode(proto_ship, MovementMode::new_warp(DVec3::ZERO, dest, 3.0))
         .is_err());
 }
+
+#[test]
+fn force_stop_warp_emits_zero_velocity_event_for_warp_and_subwarp_gh1025() {
+    let mut park = Ballpark::new(30_000_142);
+    let warper = 1_301;
+    let subwarper = 1_302;
+    let dest = DVec3::new(42.48 * AU_METERS, 0.0, 0.0);
+
+    park.add_ball(make_ship_ball(warper, DVec3::ZERO, 335.0));
+    park.add_ball(make_ship_ball(subwarper, DVec3::new(0.0, 500.0, 0.0), 335.0));
+
+    park.set_mode(warper, MovementMode::new_warp(DVec3::ZERO, dest, 5.0))
+        .expect("start warp");
+    for _ in 0..20 {
+        park.step(1.0);
+        if park.balls[&warper].velocity.length() > 1.0e10 {
+            break;
+        }
+    }
+    assert!(
+        park.balls[&warper].velocity.length() > 1.0e10,
+        "warper must reach multi-AU/s warp velocity before force_stop_warp"
+    );
+
+    park.drain_all_observer_events();
+    park.force_stop_warp(warper).expect("force_stop_warp warper");
+    assert!(matches!(park.balls[&warper].mode, MovementMode::Stop));
+    assert_eq!(park.balls[&warper].velocity, DVec3::ZERO);
+    assert_eq!(park.balls[&warper].speed_fraction, 0.0);
+    let warp_evs = park.drain_observer_events(warper);
+    assert!(
+        warp_evs.iter().any(|e| matches!(e, DestinyEvent::Stop { ball_id } if *ball_id == warper)),
+        "expected Stop event: {warp_evs:?}"
+    );
+    assert!(
+        warp_evs.iter().any(|e| matches!(
+            e,
+            DestinyEvent::SetBallVelocity { ball_id, velocity }
+                if *ball_id == warper && *velocity == [0.0, 0.0, 0.0]
+        )),
+        "force_stop_warp must emit SetBallVelocity([0,0,0]) so DSTBALL_STOP does not coast at warp speed: {warp_evs:?}"
+    );
+
+    // Subwarp moving ship stopped via force_stop_warp must also emit SetBallVelocity([0,0,0]).
+    park.set_speed_fraction(subwarper, 1.0);
+    park.set_mode(
+        subwarper,
+        MovementMode::GotoDirection {
+            direction: DVec3::X,
+        },
+    )
+    .expect("subwarp goto");
+    for _ in 0..10 {
+        park.step(1.0);
+    }
+    assert!(park.balls[&subwarper].velocity.length() > 10.0);
+    park.drain_all_observer_events();
+    park.force_stop_warp(subwarper).expect("force_stop_warp subwarper");
+    assert_eq!(park.balls[&subwarper].velocity, DVec3::ZERO);
+    let sub_evs = park.drain_observer_events(subwarper);
+    assert!(
+        sub_evs.iter().any(|e| matches!(e, DestinyEvent::Stop { ball_id } if *ball_id == subwarper)),
+        "expected Stop event for subwarper: {sub_evs:?}"
+    );
+    assert!(
+        sub_evs.iter().any(|e| matches!(
+            e,
+            DestinyEvent::SetBallVelocity { ball_id, velocity }
+                if *ball_id == subwarper && *velocity == [0.0, 0.0, 0.0]
+        )),
+        "subwarp force_stop_warp must emit SetBallVelocity([0,0,0]): {sub_evs:?}"
+    );
+}

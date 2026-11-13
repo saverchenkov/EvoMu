@@ -375,6 +375,13 @@ impl Ballpark {
             self.emit_warp_cancelled_events(ball_id);
         }
         self.emit_event(Some(ball_id), DestinyEvent::Stop { ball_id });
+        self.emit_event(
+            Some(ball_id),
+            DestinyEvent::SetBallVelocity {
+                ball_id,
+                velocity: [0.0, 0.0, 0.0],
+            },
+        );
         Ok(())
     }
 }

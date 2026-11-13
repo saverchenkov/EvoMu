@@ -760,6 +760,250 @@ async fn dedicated_physics_and_cluster_ticks_yield_1x_mining_not_2x() {
     });
 }
 
+#[tokio::test]
+async fn gh1024_mining_and_godma_effect_timestamps_stay_anchored_across_advancetime_8_days() {
+    let ctx = make_ctx();
+    let char_id = 90_000_001_i64;
+    let ship_id = 99_102_401_i64;
+    let sys_id = 30_000_142_u32;
+    let mod_id = 99_102_402_i64;
+    let ast_id = 99_102_403_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 32880,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mod_id,
+            InventoryItemRecord {
+                item_id: mod_id,
+                type_id: 483, // Miner I
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(mod_id, true);
+        snap.skills.entry(char_id).or_default().insert(
+            3386,
+            eve_db::TrainedSkillRecord {
+                type_id: 3386,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+        snap.asteroids.insert(
+            ast_id,
+            AsteroidRecord {
+                asteroid_id: ast_id,
+                solar_system_id: sys_id,
+                belt_id: 0,
+                type_id: 1230,
+                quantity: 5_000,
+                initial_quantity: 5_000,
+                position: (1_000.0, 0.0, 0.0),
+                radius: 100.0,
+            },
+        );
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys
+        .spawn_ball(Ball {
+            id: ast_id,
+            type_id: 1230,
+            position: DVec3::new(1_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e9,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    let _ = sys
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 32880,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 335.0,
+            inertia: 1.0,
+            mass: 1e6,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    let _ = sys
+        .set_combat_state(
+            ship_id,
+            CombatState {
+                shield_hp: 500.0,
+                max_shield_hp: 500.0,
+                armor_hp: 500.0,
+                max_armor_hp: 500.0,
+                structure_hp: 500.0,
+                max_structure_hp: 500.0,
+                capacitor: 250.0,
+                max_capacitor: 250.0,
+                signature_radius: 40.0,
+                ..Default::default()
+            },
+        )
+        .await;
+    let _ = sys
+        .add_target_lock(
+            ship_id,
+            TargetLock {
+                target_id: ast_id,
+                lock_time_ms: 1000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(20_000.0),
+            },
+        )
+        .await;
+    let mut fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
+    if let Some(m) = fit.modules.get_mut(&mod_id) {
+        m.state = eve_dogma::ModuleState::Online;
+    }
+    ctx.store_ship_fitting(ship_id, fit);
+
+    // Simulate `/advancetime 691200` (+8 days) via `advance_secs_without_sim_clock_rebase`.
+    ctx.advance_secs_without_sim_clock_rebase(691_200);
+    let client_sim_ft = crate::router::host_wall_blueos_filetime_ticks();
+    assert!(
+        ctx.now_blueos_filetime_ticks() - client_sim_ft > 7 * 86_400 * 10_000_000,
+        "virtual server clock must be >7 days ahead of client blue.os.GetSimTime()"
+    );
+
+    let max_skew_ticks: i64 = 5 * 10_000_000; // 5s tolerance around host wallclock
+    let day_ticks: i64 = 86_400 * 10_000_000;
+
+    // 1. Activate and manually deactivate Miner I after +8d advance.
+    let _ = ctx.drain_notifications_for_char(char_id);
+    activate(&ctx, char_id, ship_id, sys_id, mod_id, ast_id)
+        .await
+        .expect("mining activate after +8d");
+    let _ = deactivate(&ctx, char_id, Some(ship_id), mod_id)
+        .await
+        .expect("cycle was active")
+        .expect("mining deactivate ok");
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    let gse_count = notifs.iter().filter(|n| n.event == "OnGodmaShipEffect").count();
+    assert_eq!(gse_count, 2, "expected start + stop OnGodmaShipEffect");
+    for n in notifs.iter().filter(|n| n.event == "OnGodmaShipEffect") {
+        for &idx in &[2usize, 6usize] {
+            let ts = n.args[idx].as_i64().expect("FILETIME int");
+            let delta = (ts - client_sim_ft).abs();
+            assert!(
+                delta < max_skew_ticks && ts - client_sim_ft < day_ticks,
+                "OnGodmaShipEffect arg[{idx}] drifted from client sim clock: delta_ms={}",
+                delta / 10_000
+            );
+        }
+        if let Some(stop_ts) = n.args.get(10).and_then(PyRep::as_i64) {
+            let delta = (stop_ts - client_sim_ft).abs();
+            assert!(
+                delta < max_skew_ticks && stop_ts - client_sim_ft < day_ticks,
+                "OnGodmaShipEffect actualStopTime drifted from client sim clock: delta_ms={}",
+                delta / 10_000
+            );
+        }
+    }
+    for n in notifs.iter().filter(|n| n.event == "OnSpecialFX") {
+        let ts = n.args[11].as_i64().expect("OnSpecialFX startTime FILETIME");
+        assert!(
+            (ts - client_sim_ft).abs() < max_skew_ticks,
+            "OnSpecialFX startTime drifted from client sim clock"
+        );
+    }
+
+    // 2. Also verify warp/auto-deactivation hook + router godma/attr helpers + ItemGetInfo/GetAllInfo.
+    ctx.wire_module_deactivation_hook();
+    let hook = ctx
+        .systems
+        .module_deactivation_hook
+        .read()
+        .unwrap()
+        .clone()
+        .expect("deactivation hook");
+    hook(
+        char_id,
+        &crate::system_actor::ActiveModuleCycle {
+            module_id: mod_id,
+            module_type_id: 483,
+            ship_id,
+            effect_name: "miningLaser".into(),
+            duration_s: 60.0,
+            ..Default::default()
+        },
+    );
+    ctx.notify_ship_fitting_load_changes(char_id, ship_id, 10.0, 20.0, 5.0, 15.0);
+    ctx.notify_ship_capacitor_change(char_id, ship_id, 200.0, 250.0, Some(220.0));
+    let hook_notifs = ctx.drain_notifications_for_char(char_id);
+    for n in hook_notifs.iter().filter(|n| n.event == "OnGodmaShipEffect") {
+        let ts = n.args[2].as_i64().unwrap();
+        let st = n.args[6].as_i64().unwrap();
+        assert!((ts - client_sim_ft).abs() < max_skew_ticks);
+        assert!((st - client_sim_ft).abs() < max_skew_ticks);
+    }
+    for n in hook_notifs.iter().filter(|n| n.event == "OnModuleAttributeChanges") {
+        let PyRep::List(entries) = &n.args[0] else { panic!() };
+        for e in entries {
+            let PyRep::Tuple(t) = e else { panic!() };
+            let ts = t[4].as_i64().expect("attr change timestamp");
+            assert!((ts - client_sim_ft).abs() < max_skew_ticks);
+        }
+    }
+
+    let mut sess = eve_machonet::SessionState {
+        user_id: Some(1),
+        character_id: Some(char_id),
+        ship_id: Some(ship_id),
+        solar_system_id: Some(sys_id),
+        ..Default::default()
+    };
+    let item_info = crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "ItemGetInfo",
+        &[PyRep::Integer(mod_id)],
+        &std::collections::HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .expect("ItemGetInfo ok");
+    let info_wt = item_info
+        .dict_get("wallclockTime")
+        .and_then(PyRep::as_i64)
+        .expect("ItemGetInfo wallclockTime");
+    assert!((info_wt - client_sim_ft).abs() < max_skew_ticks);
+}
+
 #[cfg(test)]
 #[path = "mining_cycle_extra_unit_tests.rs"]
 mod extra_unit_tests;

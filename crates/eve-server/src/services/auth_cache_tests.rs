@@ -1113,3 +1113,174 @@ async fn slash_tr_mid_warp_stops_warp_and_flushes_pre_set_state_tick_gh994() {
         Some(eve_destiny::DestinyEvent::SetState { observer_ball_id }) if *observer_ball_id == ship_id
     ));
 }
+
+#[tokio::test]
+async fn slash_tr_same_system_zeroes_client_velocity_after_warp_and_subwarp_gh1025() {
+    use eve_destiny::{Ball, DestinyEvent, MovementMode};
+    use glam::DVec3;
+
+    let ctx = test_ctx();
+    let uid = 98_u64;
+    let cid = 90_000_098_i64;
+    let ship_id = 98_000_098_i64;
+    let jita_id = 30_000_142_u32;
+    let station_id = 60_003_760_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap
+            .characters
+            .get(&90_000_001)
+            .cloned()
+            .expect("seed char");
+        ch.character_id = cid;
+        ch.user_id = uid;
+        ch.solar_system_id = jita_id;
+        ch.station_id = None;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(cid, ch);
+
+        snap.items.insert(
+            ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 32880,
+                owner_id: cid,
+                location_id: jita_id as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut sess = auth_session(uid, cid, ship_id, jita_id);
+    sess.role = service_roles::ROLE_GM_MASK | service_roles::ROLE_ADMIN;
+    let kw = HashMap::new();
+    let sys_h = ctx.systems.get_or_spawn(jita_id);
+
+    let station_pos = ctx
+        .sde
+        .stations
+        .get(&station_id)
+        .map(|s| s.position)
+        .expect("Jita 4-4 CNAP");
+    let far_start = station_pos + DVec3::new(42.48 * eve_destiny::AU_METERS, 0.0, 0.0);
+
+    sys_h
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 32880,
+            position: far_start,
+            velocity: DVec3::new(-252_511_539_724.72, 0.0, 0.0),
+            max_velocity: 335.0,
+            inertia: 3.919896,
+            mass: 1_200_000.0,
+            radius: 40.0,
+            speed_fraction: 1.0,
+            mode: MovementMode::new_warp(far_start, station_pos, 5.0),
+        })
+        .await
+        .expect("spawn far warping Venture");
+    {
+        let mut bp = sys_h.ballpark.write().unwrap();
+        bp.balls.get_mut(&ship_id).unwrap().velocity = DVec3::new(-252_511_539_724.72, 0.0, 0.0);
+        bp.drain_observer_events(ship_id);
+    }
+
+    let tr_res = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/tr me {station_id}"))],
+        &kw,
+    )
+    .await;
+    assert!(matches!(tr_res, Some(Ok(_))), "unexpected /tr res: {tr_res:?}");
+
+    let snap_after_warp_tr = sys_h
+        .get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .expect("ship in system");
+    assert!(matches!(snap_after_warp_tr.1.mode, MovementMode::Stop));
+    assert_eq!(snap_after_warp_tr.1.velocity, DVec3::ZERO);
+    assert!(
+        snap_after_warp_tr.1.position.distance(station_pos) < 200_000.0,
+        "ship must land on station grid (~95km), got dist={}",
+        snap_after_warp_tr.1.position.distance(station_pos)
+    );
+
+    let (_, obs_evs, _) = sys_h
+        .drain_observer_updates(ship_id)
+        .await
+        .expect("drain warp /tr events");
+    let stop_idx = obs_evs
+        .iter()
+        .position(|e| matches!(e, DestinyEvent::Stop { ball_id } if *ball_id == ship_id))
+        .expect("mid-warp /tr must emit Stop");
+    let zero_vel_idx = obs_evs
+        .iter()
+        .position(|e| matches!(
+            e,
+            DestinyEvent::SetBallVelocity { ball_id, velocity }
+                if *ball_id == ship_id && *velocity == [0.0, 0.0, 0.0]
+        ))
+        .expect("mid-warp /tr must emit SetBallVelocity([0,0,0])");
+    let pos_idx = obs_evs
+        .iter()
+        .position(|e| matches!(e, DestinyEvent::SetBallPosition { ball_id, .. } if *ball_id == ship_id))
+        .expect("mid-warp /tr must emit SetBallPosition");
+    assert!(
+        stop_idx < zero_vel_idx && zero_vel_idx < pos_idx,
+        "expected Stop -> SetBallVelocity(0) -> SetBallPosition order: {obs_evs:?}"
+    );
+
+    // Same-system /tr from active subwarp motion must also zero velocity and emit SetBallVelocity(0).
+    let subwarp_start = station_pos + DVec3::new(10_000_000.0, 0.0, 0.0);
+    assert!(sys_h.set_ball_position(ship_id, subwarp_start).await);
+    let _ = sys_h
+        .set_movement_mode(ship_id, MovementMode::GotoDirection { direction: DVec3::X })
+        .await;
+    {
+        let mut bp = sys_h.ballpark.write().unwrap();
+        bp.balls.get_mut(&ship_id).unwrap().velocity = DVec3::new(335.0, 0.0, 0.0);
+        bp.drain_observer_events(ship_id);
+    }
+
+    let tr_sub = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/tr me {station_id}"))],
+        &kw,
+    )
+    .await;
+    assert!(matches!(tr_sub, Some(Ok(_))), "unexpected /tr subwarp res: {tr_sub:?}");
+    let snap_after_sub_tr = sys_h
+        .get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .expect("ship in system");
+    assert!(matches!(snap_after_sub_tr.1.mode, MovementMode::Stop));
+    assert_eq!(snap_after_sub_tr.1.velocity, DVec3::ZERO);
+
+    let (_, sub_evs, _) = sys_h
+        .drain_observer_updates(ship_id)
+        .await
+        .expect("drain subwarp /tr events");
+    assert!(
+        sub_evs.iter().any(|e| matches!(
+            e,
+            DestinyEvent::SetBallVelocity { ball_id, velocity }
+                if *ball_id == ship_id && *velocity == [0.0, 0.0, 0.0]
+        )),
+        "subwarp same-system /tr must emit SetBallVelocity([0,0,0]): {sub_evs:?}"
+    );
+    assert!(
+        sub_evs.iter().any(|e| matches!(e, DestinyEvent::SetBallPosition { ball_id, .. } if *ball_id == ship_id)),
+        "subwarp same-system /tr must emit SetBallPosition: {sub_evs:?}"
+    );
+}

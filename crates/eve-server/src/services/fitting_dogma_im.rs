@@ -274,7 +274,7 @@ fn handle_item_get_info(
     } else {
         String::new()
     };
-    let now_ft = ctx.now_blueos_filetime_ticks();
+    let now_ft = ctx.now_client_sim_filetime_ticks();
     let inv_item = if subloc_key_opt.is_some() {
         PyRep::None
     } else {
@@ -696,7 +696,7 @@ pub(crate) async fn handle_dogma_im(
                     PyRep::Integer(char_id),
                     PyRep::Integer(ship_id),
                     PyRep::Integer(eve_sde::attr_ids::MAX_VELOCITY as i64),
-                    PyRep::Integer(ctx.now_blueos_filetime_ticks()),
+                    PyRep::Integer(ctx.now_client_sim_filetime_ticks()),
                     PyRep::Real(max_vel),
                     PyRep::Real(max_vel),
                     PyRep::None,

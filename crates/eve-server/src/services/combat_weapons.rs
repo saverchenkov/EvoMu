@@ -801,7 +801,7 @@ pub async fn handle_weapons(
                                 PyRep::Integer(char_id),
                                 PyRep::Integer(charge_item_id),
                                 PyRep::Integer(eve_sde::attr_ids::DAMAGE as i64),
-                                PyRep::Integer(ctx.now_blueos_filetime_ticks()),
+                                PyRep::Integer(ctx.now_client_sim_filetime_ticks()),
                                 PyRep::Real(next_dmg),
                                 PyRep::Real(prev_dmg),
                                 PyRep::None,

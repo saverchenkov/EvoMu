@@ -639,7 +639,7 @@ pub(crate) fn emit_godma_charge_sublocation_prime(
     let fit_opt = ctx.fit(char_id, ship_id).ok();
     let c_attrs = build_charge_sublocation_attrs(ctx, c_item, fit_opt.as_ref());
     let subloc_key = charge_sublocation_key(ship_id, c_item.flag, c_item.type_id);
-    let now_ft = ctx.now_blueos_filetime_ticks();
+    let now_ft = ctx.now_client_sim_filetime_ticks();
     let keyval = build_charge_sublocation_keyval(subloc_key, c_attrs, now_ft);
     ctx.notify(
         crate::router::NotificationTarget::Character(char_id),
@@ -664,7 +664,7 @@ pub(crate) fn emit_charge_sublocation_quantity_change(
         return;
     }
     let subloc_key = charge_sublocation_key(ship_id, flag, charge_type_id);
-    let now_ft = ctx.now_blueos_filetime_ticks();
+    let now_ft = ctx.now_client_sim_filetime_ticks();
     ctx.notify(
         crate::router::NotificationTarget::Character(char_id),
         "OnModuleAttributeChanges",
@@ -1054,7 +1054,7 @@ pub(crate) fn prime_ship_on_board(
     char_id: i64,
     ship_id: i64,
 ) -> PyRep {
-    let now_ft = ctx.now_blueos_filetime_ticks();
+    let now_ft = ctx.now_client_sim_filetime_ticks();
     let header = eve_proto::DBRowDescriptor::inv_item_header();
     let (ship_type_id, entries, module_entries) =
         match evaluate_ship_dogma_attributes(ctx, char_id, ship_id) {
@@ -1094,7 +1094,7 @@ pub(crate) fn build_all_info(
     module_entries: Vec<(PyRep, PyRep)>,
     args: &[PyRep],
 ) -> PyRep {
-    let now_ft = ctx.now_blueos_filetime_ticks();
+    let now_ft = ctx.now_client_sim_filetime_ticks();
     let header = eve_proto::DBRowDescriptor::inv_item_header();
     let prime_char = !matches!(args.first(), Some(PyRep::Bool(false) | PyRep::Integer(0) | PyRep::None));
     let prime_ship = !matches!(args.get(1), Some(PyRep::Bool(false) | PyRep::Integer(0) | PyRep::None));
