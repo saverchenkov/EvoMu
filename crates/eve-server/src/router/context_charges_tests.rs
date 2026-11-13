@@ -482,8 +482,8 @@ fn load_charge_into_weapon_slot_emits_exact_item_change_diffs_and_splits_from_ha
     let ch1 = item_changes(ctx.drain_notifications_for_char(char1));
     // Hangar stack MUST have pre captured -> exact delta column (9 = ixStackSize -> max_cap + 17)
     assert_eq!(ch1.get(&hangar_stack_id), Some(&vec![(9, (max_cap + 17) as i64)]));
-    // New loaded stack MUST be in notifications with empty create diff `vec![]`
-    assert_eq!(ch1.get(&new_loaded_id), Some(&vec![]));
+    // New loaded stack MUST be in notifications with create diff `ixLocationID=3 -> 0` (#1026)
+    assert_eq!(ch1.get(&new_loaded_id), Some(&vec![(3, 0)]));
 
     // 2) Swap to c2_tid when NO c1_tid exists in Cargo (moves new_loaded_id to Cargo, c2_cargo_id to HiSlot7)
     let _ = ctx.drain_notifications_for_char(char1);
