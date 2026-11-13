@@ -545,8 +545,8 @@ fn system_command_all_variants_construct_and_match() {
         SystemCommand::FlushConditionCheckpoint { reply: oneshot::channel().0 },
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
-    assert_eq!(tags.len(), 67);
+    assert_eq!(tags.len(), 68);
     assert_eq!(tags[0], "SpawnBall");
-    assert_eq!(tags[65], "FlushPeerObserverUpdates");
-    assert_eq!(tags[66], "FlushConditionCheckpoint");
+    assert_eq!(tags[66], "FlushPeerObserverUpdates");
+    assert_eq!(tags[67], "FlushConditionCheckpoint");
 }
