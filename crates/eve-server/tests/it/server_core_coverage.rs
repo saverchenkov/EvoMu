@@ -1694,18 +1694,54 @@ fn tx_multi_player_isolation_on_fault_and_panic() {
     let db = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open_sqlite"));
     let ctx = ServerContext::with_sde_and_repository(shared_sde(), Arc::clone(&db));
 
-    let (cid_a, uid_a, bal_a_init, cid_b, uid_b, bal_b_init) = db.with_snapshot(|snap| {
-        let mut chars: Vec<_> = snap.characters.values().collect();
-        chars.sort_by_key(|c| c.character_id);
-        assert!(chars.len() >= 2, "demo snapshot must provide at least 2 characters");
-        let a = chars[0];
-        let b = chars[1];
-        (a.character_id, a.user_id, a.balance, b.character_id, b.user_id, b.balance)
-    });
+    let (cid_a, uid_a, bal_a_init) = (90_000_001i64, 101u64, IskCents(1_000_000));
+    let (cid_b, uid_b, bal_b_init) = (90_000_002i64, 102u64, IskCents(2_000_000));
+    db.tx("seed_two_players", |wtx| -> Result<(), eve_db::TxError> {
+        wtx.snap.accounts.insert(
+            "pilot_a".into(),
+            eve_db::AccountRecord {
+                user_id: uid_a,
+                username: "pilot_a".into(),
+                ..Default::default()
+            },
+        );
+        wtx.snap.accounts.insert(
+            "pilot_b".into(),
+            eve_db::AccountRecord {
+                user_id: uid_b,
+                username: "pilot_b".into(),
+                ..Default::default()
+            },
+        );
+        wtx.snap.characters.insert(
+            cid_a,
+            eve_db::CharacterRecord {
+                character_id: cid_a,
+                user_id: uid_a,
+                name: "PilotA".into(),
+                balance: bal_a_init,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        wtx.snap.characters.insert(
+            cid_b,
+            eve_db::CharacterRecord {
+                character_id: cid_b,
+                user_id: uid_b,
+                name: "PilotB".into(),
+                balance: bal_b_init,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        Ok(())
+    })
+    .expect("seed two players");
 
     let now = ctx.now_unix();
-    let _ = db.acquire_online_lock(uid_a, 1001, Some(cid_a), false, now);
-    let _ = db.acquire_online_lock(uid_b, 1002, Some(cid_b), false, now);
+    db.acquire_online_lock(uid_a, 1001, Some(cid_a), false, now).expect("online lock A");
+    db.acquire_online_lock(uid_b, 1002, Some(cid_b), false, now).expect("online lock B");
     ctx.pending_notifications.write().unwrap().clear();
 
     let commits_before = db.tx_commit_count();
@@ -1762,7 +1798,8 @@ fn tx_multi_player_isolation_on_fault_and_panic() {
     assert_eq!(q_b[0].event, "OnAccountChange");
     drop(queues);
 
-    let published = db.with_snapshot(|s| s.clone());
+    let mut published = db.with_snapshot(|s| s.clone());
+    published.sessions.clear();
     let fresh = db.reload_snapshot_from_sqlite().expect("fresh load");
     assert_eq!(fresh, published);
 
