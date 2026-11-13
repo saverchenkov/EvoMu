@@ -969,7 +969,7 @@ fn issue_771_and_776_get_members_paged_crowset_and_reprocess_list_compat() {
     assert_eq!(dungeons.len(), 1);
     assert_eq!(dungeons[0].dict_get("optional"), Some(&PyRep::Bool(false)));
     assert_eq!(dungeons[0].dict_get("objectiveCompleted"), Some(&PyRep::None));
-    assert_eq!(dungeons[0].dict_get("ownerID"), Some(&PyRep::Integer(3_008_416)));
+    assert_eq!(dungeons[0].dict_get("ownerID"), Some(&PyRep::Integer(1_000_002)));
     assert!(dungeons[0].dict_get("location").is_some());
     assert!(dungeons[0].dict_get("completionStatus").is_none());
 

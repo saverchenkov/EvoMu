@@ -151,6 +151,11 @@ pub fn encode_single_ball_with_park(
         } else {
             flags &= !BALL_FLAG_IS_INTERACTIVE;
         }
+    } else if meta.is_some_and(|m| m.category_id == 6 && m.char_id.is_none()) {
+        // Unpiloted ship hulls (`category_id == 6`, `char_id == None`) must clear
+        // `BALL_FLAG_IS_INTERACTIVE` so V24.01 `CelestialChecker.OfferBoardShip`
+        // (`celestialCheckers.pyj:584`) offers 'Board Ship' (`#983`).
+        flags &= !BALL_FLAG_IS_INTERACTIVE;
     }
 
     // BallHeader (38 bytes): entityID(i64), mode(u8), radius(f32), posX(f64), posY(f64), posZ(f64), flags(u8)
@@ -197,11 +202,13 @@ pub fn encode_single_ball_with_park(
     // Mode-specific sector (`DestinyStructs.h:136-210`)
     match &ball.mode {
         MovementMode::GotoDirection { direction } => {
-            // GOTO_Struct (25 bytes): uint8 formationID, double x, double y, double z
+            // GOTO_Struct (25 bytes, V24.01 `_destiny.so` `0x38a80..0x38bd8`, `#989`):
+            // uint8 formationID, double gotoX, double gotoY, double gotoZ (world-space gotoPoint).
+            let goto_point = ball.position + direction.normalize_or_zero() * 1.0e16;
             buf.push(0xFFu8);
-            buf.extend_from_slice(&direction.x.to_le_bytes());
-            buf.extend_from_slice(&direction.y.to_le_bytes());
-            buf.extend_from_slice(&direction.z.to_le_bytes());
+            buf.extend_from_slice(&goto_point.x.to_le_bytes());
+            buf.extend_from_slice(&goto_point.y.to_le_bytes());
+            buf.extend_from_slice(&goto_point.z.to_le_bytes());
         }
         MovementMode::Follow { target_id, range } => {
             // FOLLOW_Struct (13 bytes, `DestinyStructs.h:143-147`): uint8 formationID, int64 followID, float followRange

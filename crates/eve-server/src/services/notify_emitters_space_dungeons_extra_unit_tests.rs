@@ -67,6 +67,12 @@ fn damage_tuple_custom_shield_tau_and_exact_clamping_boundaries() {
         );
     });
 
+    // Advance virtual server clock 30 days without sim-clock rebase; timestampFt must still
+    // track real OS wallclock FILETIME ticks (`#990`).
+    ctx.advance_secs_without_sim_clock_rebase(30 * 86_400);
+    let (wall_s, wall_ns) = eve_db::clock::host_wall_unix_secs_and_nanos();
+    let wall_ft = (wall_s as i64 + 11_644_473_600) * 10_000_000 + (wall_ns as i64 / 100);
+
     let tup = build_damage_state_tuple(&ctx, ship_id, -0.5, 0.75, 2.0);
     let PyRep::Tuple(outer) = tup else {
         panic!("expected outer tuple");
@@ -76,11 +82,16 @@ fn damage_tuple_custom_shield_tau_and_exact_clamping_boundaries() {
         panic!("expected inner shield tuple");
     };
     assert_eq!(shield_inner[0], PyRep::Real(0.0));
-    assert_eq!(shield_inner[1], PyRep::Real(250_000.0));
+    assert_eq!(shield_inner[1], PyRep::Real(50_000.0));
+    let tup_ft = shield_inner[2].as_i64().expect("timestampFt integer");
+    assert!(
+        (tup_ft - wall_ft).abs() < 50_000_000,
+        "timestampFt must track real wallclock FILETIME within 5s even after virtual clock advance"
+    );
     assert_eq!(outer[1], PyRep::Real(0.75));
     assert_eq!(outer[2], PyRep::Real(1.0));
 
-    // Missing item falls back to 100_000.0 tau_ms
+    // Missing item falls back to 100_000.0 / 5.0 = 20_000.0 tau_ms
     let fallback_tup = build_damage_state_tuple(&ctx, 999_999_999, 0.25, 1.0, 0.0);
     let PyRep::Tuple(fb_outer) = fallback_tup else {
         panic!("expected tuple");
@@ -89,7 +100,7 @@ fn damage_tuple_custom_shield_tau_and_exact_clamping_boundaries() {
         panic!("expected inner tuple");
     };
     assert_eq!(fb_inner[0], PyRep::Real(0.25));
-    assert_eq!(fb_inner[1], PyRep::Real(100_000.0));
+    assert_eq!(fb_inner[1], PyRep::Real(20_000.0));
     assert_eq!(fb_outer[1], PyRep::Real(1.0));
     assert_eq!(fb_outer[2], PyRep::Real(0.0));
 }

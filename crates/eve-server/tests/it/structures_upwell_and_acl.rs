@@ -1023,14 +1023,14 @@ async fn test_upwell_anchoring_restrictions_end_to_end() {
     let pharo_item = grant(&ctx, OWNER, sess.ship_id.unwrap(), 35840, InventoryFlag::Cargo, 1);
     assert_eq!(
         rpc(&ctx, &mut sess, "structureDeployment", "Anchor", &[
-            PyRep::Integer(pharo_item), PyRep::Real(pharo_ship_pos.x + 20_000.0), PyRep::Real(pharo_ship_pos.z),
+            PyRep::Integer(pharo_item), PyRep::Real(20_000.0), PyRep::Real(0.0),
             PyRep::Real(0.0), PyRep::Integer(0), PyRep::Integer(3), PyRep::Integer(19),
             PyRep::String("Too Close 10-Arg Pharolux".into()), PyRep::String("desc".into()), PyRep::None,
         ]).await.expect_err("10-arg 20 km < 50 km").code,
         "InvalidAnchorDistanceFromShip"
     );
     let pharo_rep = rpc(&ctx, &mut sess, "structureDeployment", "Anchor", &[
-        PyRep::Integer(pharo_item), PyRep::Real(pharo_ship_pos.x + 60_000.0), PyRep::Real(pharo_ship_pos.z),
+        PyRep::Integer(pharo_item), PyRep::Real(60_000.0), PyRep::Real(0.0),
         PyRep::Real(0.0), PyRep::Integer(0), PyRep::Integer(3), PyRep::Integer(19),
         PyRep::String("HED-GP Pharolux".into()), PyRep::String("V24 10-arg FLEX beacon".into()), PyRep::None,
     ]).await.expect("V24 10-arg Anchor succeeds at 60 km");

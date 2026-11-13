@@ -621,11 +621,11 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
 
 pub fn pirate_npc_type_for_system(sde: &eve_sde::SdeRegistry, solar_system_id: SolarSystemId) -> TypeId {
     match pirate_faction_for_system(sde, solar_system_id) {
-        PirateFaction::Guristas => 10_962,
-        PirateFaction::BloodRaiders => 10_960,
-        PirateFaction::Sansha => 10_961,
-        PirateFaction::Serpentis => 10_963,
-        PirateFaction::AngelCartel => 10_959,
+        PirateFaction::Guristas => 16_981,     // Pithi Arrogator (category 11)
+        PirateFaction::BloodRaiders => 16_932, // Corpii Diviner (category 11)
+        PirateFaction::Sansha => 17_059,       // Centii Butcher (category 11)
+        PirateFaction::Serpentis => 17_035,    // Coreli Guardian Scout (category 11)
+        PirateFaction::AngelCartel => 16_874,  // Gistii Ambusher (category 11)
     }
 }
 

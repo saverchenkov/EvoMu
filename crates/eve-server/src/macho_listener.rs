@@ -62,6 +62,62 @@ fn drain_sys_rx_discarding_lag<T: Clone>(
     lagged_total
 }
 
+fn drain_pending_tick_batches_for_sys(
+    ctx: &ServerContext,
+    sys_rx: &mut tokio::sync::broadcast::Receiver<crate::system_actor::TickBroadcast>,
+    sys_id: u32,
+    ship_id: i64,
+    wire_state: &mut crate::outbound_sequencer::SessionWireState,
+    pending_tick_batches: &mut Vec<crate::outbound_sequencer::DestinyBatch>,
+    session_id: u64,
+) -> (u32, bool) {
+    let mut ep = wire_state.current_epoch();
+    let mut effective_was_live = true;
+    loop {
+        match sys_rx.try_recv() {
+            Ok(tick_out) => {
+                if !effective_was_live {
+                    continue;
+                }
+                if tick_out.solar_system_id == sys_id {
+                    if let Some(updates_pyrep) = tick_out.observer_updates_pyrep.get(&ship_id) {
+                        let evs = tick_out
+                            .observer_events
+                            .get(&ship_id)
+                            .map(Vec::as_slice)
+                            .unwrap_or(&tick_out.events);
+                        if let Some(batch) = build_destiny_batch(
+                            ctx,
+                            ep,
+                            tick_out.tick,
+                            evs,
+                            updates_pyrep.clone(),
+                        ) {
+                            pending_tick_batches.push(batch);
+                        }
+                    }
+                }
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
+                warn!(
+                    session_id,
+                    skipped,
+                    "Destiny broadcast channel lagged during pre-RPC drain; discarding stale ticks and resyncing SetState (ORD-5)"
+                );
+                pending_tick_batches.clear();
+                wire_state.on_broadcast_lagged();
+                ep = wire_state.current_epoch();
+                effective_was_live = false;
+            }
+            Err(
+                tokio::sync::broadcast::error::TryRecvError::Empty
+                | tokio::sync::broadcast::error::TryRecvError::Closed,
+            ) => break,
+        }
+    }
+    (ep, effective_was_live)
+}
+
 pub use crate::router::NEXT_TRANSPORT_SESSION_ID as NEXT_MACHO_SESSION_ID;
 /// Global monotonic session-ID counter shared across `machoNet`, Python Bridge, and Quasar gRPC (`ORD-9`).
 pub use crate::router::NEXT_TRANSPORT_SESSION_ID as NEXT_SESSION_ID;
@@ -397,15 +453,59 @@ pub async fn execute_call_req_wire(
         ctx.sync_session(session);
     }
 
+    let was_in_space = prev_session.station_id.is_none() && prev_session.structure_id.is_none();
+    let is_in_space = session.station_id.is_none() && session.structure_id.is_none();
+    let mut cross_sys_pre_ticks = Vec::new();
+    let mut cross_sys_pre_destiny = None;
     if session.solar_system_id != prev_session.solar_system_id
         || session.solar_system_id != *wire.subscribed_sys_id
     {
-        wire.wire_state.leave_space();
+        if was_in_space
+            && is_in_space
+            && session.solar_system_id != prev_session.solar_system_id
+            && matches!(wire.wire_state.destiny, DestinyStream::Live { .. })
+        {
+            if let (Some(old_sys_id), Some(old_ship_id)) = (
+                prev_session.solar_system_id,
+                prev_session.ship_id.or(session.ship_id),
+            ) {
+                let (ep, live_ok) = drain_pending_tick_batches_for_sys(
+                    ctx,
+                    wire.sys_rx,
+                    old_sys_id,
+                    old_ship_id,
+                    wire.wire_state,
+                    &mut cross_sys_pre_ticks,
+                    session.session_id,
+                );
+                if live_ok {
+                    let old_handle = ctx.systems.get_or_spawn(old_sys_id);
+                    if let Ok((tick, obs_evs, updates_pyrep)) =
+                        old_handle.drain_observer_updates(old_ship_id).await
+                    {
+                        cross_sys_pre_destiny = build_destiny_batch(
+                            ctx,
+                            ep,
+                            tick,
+                            &obs_evs,
+                            updates_pyrep,
+                        );
+                    }
+                } else {
+                    cross_sys_pre_ticks.clear();
+                }
+            }
+        }
+        if cross_sys_pre_ticks.is_empty() && cross_sys_pre_destiny.is_none() {
+            wire.wire_state.leave_space();
+        }
         if let Some(new_sys) = session.solar_system_id {
             *wire.sys_rx = ctx.systems.get_or_spawn(new_sys).subscribe();
         }
         *wire.subscribed_sys_id = session.solar_system_id;
     }
+    let cross_sys_pre_detach =
+        !cross_sys_pre_ticks.is_empty() || cross_sys_pre_destiny.is_some();
     let mut was_live = matches!(wire.wire_state.destiny, DestinyStream::Live { .. });
     let is_ballpark_init_rpc = (method == "UpdateStateRequest"
         || (service == "beyonce" && method == "MachoBindObject"))
@@ -503,8 +603,6 @@ pub async fn execute_call_req_wire(
         }
     };
 
-    let was_in_space = prev_session.station_id.is_none() && prev_session.structure_id.is_none();
-    let is_in_space = session.station_id.is_none() && session.structure_id.is_none();
     let docking_transition = was_in_space && !is_in_space;
 
     let mut pre_dock_destiny = None;
@@ -572,67 +670,35 @@ pub async fn execute_call_req_wire(
             sess_pkt.to_pyrep()
         });
 
-    let mut pending_tick_batches = Vec::new();
+    let mut pending_tick_batches = cross_sys_pre_ticks;
     let mut post_rpc_direct_batch = None;
     let mut effective_was_live = was_live;
     if !matches!(wire.wire_state.destiny, DestinyStream::Detached)
         && !docking_transition
+        && !cross_sys_pre_detach
         && (was_in_space || is_in_space)
     {
         if let (Some(sys_id), Some(ship_id)) = (
             session.solar_system_id.or(prev_session.solar_system_id),
             session.ship_id.or(prev_session.ship_id),
         ) {
-            let mut ep = wire.wire_state.current_epoch();
             // Drain any buffered 1Hz tick broadcasts that occurred before this RPC's
             // synchronous observer drain so ticks older than the direct drain are
             // never discarded (`#844`), and explicitly recover from `Lagged` (`ORD-5`).
-            if effective_was_live {
-                loop {
-                    match wire.sys_rx.try_recv() {
-                        Ok(tick_out) => {
-                            if !effective_was_live {
-                                continue;
-                            }
-                            if tick_out.solar_system_id == sys_id {
-                                if let Some(updates_pyrep) =
-                                    tick_out.observer_updates_pyrep.get(&ship_id)
-                                {
-                                    let evs = tick_out
-                                        .observer_events
-                                        .get(&ship_id)
-                                        .map(Vec::as_slice)
-                                        .unwrap_or(&tick_out.events);
-                                    if let Some(batch) = build_destiny_batch(
-                                        ctx,
-                                        ep,
-                                        tick_out.tick,
-                                        evs,
-                                        updates_pyrep.clone(),
-                                    ) {
-                                        pending_tick_batches.push(batch);
-                                    }
-                                }
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
-                            warn!(
-                                session_id = session.session_id,
-                                skipped,
-                                "Destiny broadcast channel lagged during pre-RPC drain; discarding stale ticks and resyncing SetState (ORD-5)"
-                            );
-                            pending_tick_batches.clear();
-                            wire.wire_state.on_broadcast_lagged();
-                            ep = wire.wire_state.current_epoch();
-                            effective_was_live = false;
-                        }
-                        Err(
-                            tokio::sync::broadcast::error::TryRecvError::Empty
-                            | tokio::sync::broadcast::error::TryRecvError::Closed,
-                        ) => break,
-                    }
-                }
-            }
+            let (ep, next_live) = if effective_was_live {
+                drain_pending_tick_batches_for_sys(
+                    ctx,
+                    wire.sys_rx,
+                    sys_id,
+                    ship_id,
+                    wire.wire_state,
+                    &mut pending_tick_batches,
+                    session.session_id,
+                )
+            } else {
+                (wire.wire_state.current_epoch(), false)
+            };
+            effective_was_live = next_live;
 
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             if let Ok((mut tick, mut obs_evs, mut updates_pyrep)) =
@@ -723,6 +789,10 @@ pub async fn execute_call_req_wire(
     let destiny_drain = if docking_transition {
         DestinyDrain::Detach {
             pre_detach: pre_dock_destiny,
+        }
+    } else if cross_sys_pre_detach {
+        DestinyDrain::Detach {
+            pre_detach: cross_sys_pre_destiny,
         }
     } else if let Some(batch) = post_rpc_direct_batch {
         if !effective_was_live && batch.has_set_state {

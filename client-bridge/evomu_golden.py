@@ -53,6 +53,13 @@ def decode_add_balls(raw_bytes):
         if mode_byte == 0:
             dx, dy, dz = struct.unpack("<ddd", bytes(ba[pos:pos + 24]))
             pos += 24
+            if max(abs(dx), abs(dy), abs(dz)) > 2.0 or (dx * dx + dy * dy + dz * dz) > 4.0:
+                rx, ry, rz = dx - px, dy - py, dz - pz
+                rl = (rx * rx + ry * ry + rz * rz) ** 0.5
+                if rl > 0.0:
+                    dx, dy, dz = rx / rl, ry / rl, rz / rl
+                else:
+                    dx, dy, dz = 0.0, 0.0, 0.0
             extra = {"direction": [dx, dy, dz]}
         elif mode_byte == 1:
             tid = struct.unpack("<q", bytes(ba[pos:pos + 8]))[0]
@@ -123,7 +130,14 @@ def encode_add_balls(stamp, balls):
         extra = b.get("extra", {})
         if mode_byte == 0:
             dx, dy, dz = extra["direction"]
-            out.extend(bytearray(struct.pack("<ddd", float(dx), float(dy), float(dz))))
+            dl = (float(dx) ** 2 + float(dy) ** 2 + float(dz) ** 2) ** 0.5
+            if dl > 0.0:
+                ux, uy, uz = float(dx) / dl, float(dy) / dl, float(dz) / dl
+            else:
+                ux, uy, uz = 0.0, 0.0, 0.0
+            out.extend(bytearray(struct.pack(
+                "<ddd", float(px) + ux * 1.0e16, float(py) + uy * 1.0e16, float(pz) + uz * 1.0e16
+            )))
         elif mode_byte in (1, 4):
             out.extend(bytearray(struct.pack(
                 "<qf", int(extra["target_id"]), float(extra["range"])

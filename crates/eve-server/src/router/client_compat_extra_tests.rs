@@ -400,24 +400,49 @@ fn destiny_and_notification_normalizers_and_suppression_branches() {
             PyRep::Tuple(vec![PyRep::String(name.into()), PyRep::Tuple(vec![])]),
         ])
     };
-    // When SetState is present, OnSlimItemChange / OnDockingAccepted / OnClientControllerEvent are filtered out.
+    // When SetState is present, OnSlimItemChange / SetBallInteractive / PackagedAction / OnDockingAccepted / OnClientControllerEvent are filtered out (#992).
     let norm_with_add = normalize_destiny_payload_arg(PyRep::List(vec![
         mk_ev("SetState"),
         mk_ev("OnSlimItemChange"),
+        mk_ev("SetBallInteractive"),
+        mk_ev("PackagedAction"),
         mk_ev("OnDockingAccepted"),
         mk_ev("OnClientControllerEvent"),
         mk_ev("Orbit"),
     ]));
     assert_eq!(norm_with_add, PyRep::List(vec![mk_ev("SetState"), mk_ev("Orbit")]));
 
-    // Without SetState/AddBalls/AddBalls2, OnSlimItemChange is preserved.
+    // Without SetState (including alongside AddBalls2), SetBallInteractive and PackagedAction are preserved,
+    // while OnSlimItemChange is only filtered when AddBalls/AddBalls2/SetState is present.
+    let norm_add_balls2 = normalize_destiny_payload_arg(PyRep::List(vec![
+        mk_ev("AddBalls2"),
+        mk_ev("OnSlimItemChange"),
+        mk_ev("SetBallInteractive"),
+        mk_ev("PackagedAction"),
+    ]));
+    assert_eq!(
+        norm_add_balls2,
+        PyRep::List(vec![
+            mk_ev("AddBalls2"),
+            mk_ev("SetBallInteractive"),
+            mk_ev("PackagedAction"),
+        ])
+    );
+
+    // Without SetState/AddBalls/AddBalls2, OnSlimItemChange, SetBallInteractive, and PackagedAction are preserved.
     let norm_no_add = normalize_destiny_payload_arg(PyRep::Tuple(vec![PyRep::List(vec![
         mk_ev("OnSlimItemChange"),
+        mk_ev("SetBallInteractive"),
+        mk_ev("PackagedAction"),
         mk_ev("OnDockingAccepted"),
     ])]));
     assert_eq!(
         norm_no_add,
-        PyRep::Tuple(vec![PyRep::List(vec![mk_ev("OnSlimItemChange")])])
+        PyRep::Tuple(vec![PyRep::List(vec![
+            mk_ev("OnSlimItemChange"),
+            mk_ev("SetBallInteractive"),
+            mk_ev("PackagedAction"),
+        ])])
     );
 
     // should_suppress_macho_notification
@@ -1555,4 +1580,114 @@ fn issue_935_and_969_contract_wire_compat_shapes() {
     };
     assert_eq!(search_bids[0].dict_get("amount"), Some(&PyRep::Real(5_000.0)));
     assert_eq!(entry.dict_get("numBids"), Some(&PyRep::Integer(1)));
+}
+
+#[test]
+fn gh998_and_gh999_agent_journal_bookmarks_and_dungeon_owner_compat() {
+    // #998: GetMyJournalDetails bookmark dicts/KeyVals (both from KeyVal rows and 10-tuple rows)
+    // must contain non-empty `hint`, positive `locationID`, and `0`-based `locationNumber`.
+    let raw_journal = PyRep::Tuple(vec![
+        PyRep::List(vec![
+            PyRep::keyval([
+                ("missionID", PyRep::Integer(101)),
+                ("agentID", PyRep::Integer(3_008_416)),
+                ("solarSystemID", PyRep::Integer(30_000_142)),
+                ("missionType", PyRep::String("Courier".into())),
+                (
+                    "bookmarks",
+                    PyRep::List(vec![PyRep::keyval([
+                        ("bookmarkID", PyRep::Integer(900_001)),
+                        ("solarSystemID", PyRep::Integer(30_000_142)),
+                        ("label", PyRep::String("Mission: Courier Run".into())),
+                        ("coords", PyRep::None),
+                    ])]),
+                ),
+            ]),
+            PyRep::Tuple(vec![
+                PyRep::Integer(2),
+                PyRep::Bool(false),
+                PyRep::String("UI/Agents/MissionTypes/Encounter".into()),
+                PyRep::String("Encounter Run".into()),
+                PyRep::Integer(3_008_416),
+                PyRep::None,
+                PyRep::List(vec![PyRep::keyval([
+                    ("bookmarkID", PyRep::Integer(900_002)),
+                    ("solarSystemID", PyRep::Integer(30_000_144)),
+                ])]),
+                PyRep::Bool(false),
+                PyRep::Bool(false),
+                PyRep::Integer(102),
+            ]),
+        ]),
+        PyRep::List(Vec::new()),
+        PyRep::List(Vec::new()),
+    ]);
+    let norm_journal = normalize_macho_rpc_reply("agentMgr", "GetMyJournalDetails", Ok(raw_journal))
+        .expect("normalize GetMyJournalDetails");
+    let PyRep::Tuple(parts) = norm_journal else {
+        panic!("expected tuple from GetMyJournalDetails");
+    };
+    let PyRep::List(ref m_rows) = parts[0] else {
+        panic!("expected missions list");
+    };
+    assert_eq!(m_rows.len(), 2);
+    for (row_idx, expected_loc, expected_hint) in [
+        (0usize, 30_000_142_i64, "UI/Agents/MissionTypes/Courier"),
+        (1usize, 30_000_144_i64, "UI/Agents/MissionTypes/Encounter"),
+    ] {
+        let PyRep::Tuple(ref cols) = m_rows[row_idx] else {
+            panic!("expected 10-tuple row");
+        };
+        let PyRep::List(ref bms) = cols[6] else {
+            panic!("expected bookmarks list");
+        };
+        assert_eq!(bms.len(), 1);
+        assert!(matches!(bms[0], PyRep::KeyVal(_)));
+        assert_eq!(bms[0].dict_get("hint"), Some(&PyRep::String(expected_hint.into())));
+        assert_eq!(bms[0].dict_get("locationID"), Some(&PyRep::Integer(expected_loc)));
+        assert_eq!(bms[0].dict_get("locationNumber"), Some(&PyRep::Integer(0)));
+        assert!(bms[0].dict_get("coords").is_none());
+    }
+
+    // #999: GetMissionObjectiveInfo dungeons[].ownerID must never be an agent/character ID
+    // (3_000_000..4_000_000 or player char), while preserving valid NPC faction (500_010) and corp (1_000_035) IDs.
+    let obj_bad_owner = normalize_macho_rpc_reply(
+        "agentMgr",
+        "GetMissionObjectiveInfo",
+        Ok(PyRep::keyval([
+            ("missionID", PyRep::Integer(502)),
+            ("agentID", PyRep::Integer(3_008_416)),
+            ("solarSystemID", PyRep::Integer(30_000_142)),
+            ("originStationID", PyRep::Integer(60_003_760)),
+            ("dungeons", PyRep::List(vec![PyRep::Dict(vec![
+                (PyRep::String("dungeonID".into()), PyRep::Integer(213)),
+                (PyRep::String("ownerID".into()), PyRep::Integer(3_008_416)),
+            ])])),
+        ])),
+    )
+    .expect("normalize bad dungeon ownerID");
+    let Some(PyRep::List(bad_duns)) = obj_bad_owner.dict_get("dungeons") else {
+        panic!("expected dungeons");
+    };
+    assert_eq!(bad_duns[0].dict_get("ownerID"), Some(&PyRep::Integer(1_000_002)));
+
+    let obj_faction_owner = normalize_macho_rpc_reply(
+        "agentMgr",
+        "GetMissionObjectiveInfo",
+        Ok(PyRep::keyval([
+            ("missionID", PyRep::Integer(503)),
+            ("agentID", PyRep::Integer(3_008_416)),
+            ("solarSystemID", PyRep::Integer(30_000_142)),
+            ("originStationID", PyRep::Integer(60_003_760)),
+            ("dungeons", PyRep::List(vec![PyRep::Dict(vec![
+                (PyRep::String("dungeonID".into()), PyRep::Integer(213)),
+                (PyRep::String("ownerID".into()), PyRep::Integer(500_010)),
+            ])])),
+        ])),
+    )
+    .expect("normalize faction dungeon ownerID");
+    let Some(PyRep::List(fac_duns)) = obj_faction_owner.dict_get("dungeons") else {
+        panic!("expected dungeons");
+    };
+    assert_eq!(fac_duns[0].dict_get("ownerID"), Some(&PyRep::Integer(500_010)));
 }

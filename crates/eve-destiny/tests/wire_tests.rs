@@ -107,7 +107,8 @@ fn test_binary_add_balls_roundtrip_all_13_modes() {
     encode_single_ball_with_meta(&mut form_buf, &balls[12], 42, Some(&meta));
     assert_eq!(i32::from_le_bytes(form_buf[112..116].try_into().unwrap()), 42);
 
-    assert_eq!(decoded[0].direction, Some(DVec3::new(0.6, 0.8, 0.0)));
+    let dec_goto_dir = decoded[0].direction.expect("GotoDirection unit vector");
+    assert!((dec_goto_dir - DVec3::new(0.6, 0.8, 0.0)).length() < 1e-12);
     assert_eq!(decoded[1].target_id, Some(40_009_076));
     assert_eq!(decoded[1].follow_range, Some(2_500.0));
     assert_eq!(decoded[3].warp_destination, Some(DVec3::new(2.0 * AU_METERS, 1.0e8, -5.0e7)));

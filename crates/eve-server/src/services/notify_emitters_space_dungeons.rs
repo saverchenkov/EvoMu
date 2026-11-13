@@ -6,8 +6,10 @@
 use crate::router::{NotificationTarget, ServerContext};
 use eve_proto::{DBRowDescriptor, PyRep};
 
-/// Builds the V24 `OnDamageStateChange` 3-tuple:
-/// `((shieldRatio, shieldTauMs, timestampFt), armorRatio, structureRatio)`.
+/// Builds the V24 `OnDamageStateChange` 3-tuple (`#990`):
+/// `((shieldRatio, shieldTauMs, timestampFt), armorRatio, structureRatio)`,
+/// where `shieldTauMs = recharge_ms / 5.0` and `timestampFt` uses real OS wallclock FILETIME ticks
+/// matching live client `blue.os.GetSimTime()`.
 pub fn build_damage_state_tuple(
     ctx: &ServerContext,
     item_id: i64,
@@ -15,19 +17,30 @@ pub fn build_damage_state_tuple(
     armor: f64,
     structure: f64,
 ) -> PyRep {
-    let now_ft = ctx.now_blueos_filetime_ticks();
-    let tau_ms = ctx
+    let (secs, nanos) = eve_db::clock::host_wall_unix_secs_and_nanos();
+    let sim_ft = (secs as i64 + 11_644_473_600) * 10_000_000 + (nanos as i64 / 100);
+    let recharge_ms = ctx
         .db
-        .with_snapshot(|snap| snap.items.get(&item_id).map(|i| i.type_id))
-        .and_then(|tid| ctx.sde.types.get(&tid))
-        .and_then(|t| t.default_attributes.get(&479).copied())
+        .with_snapshot(|snap| {
+            let it = snap.items.get(&item_id)?;
+            it.dynamic_attributes
+                .get(&479)
+                .copied()
+                .or_else(|| {
+                    ctx.sde
+                        .types
+                        .get(&it.type_id)
+                        .and_then(|t| t.default_attributes.get(&479).copied())
+                })
+        })
         .filter(|&v| v > 0.0)
         .unwrap_or(100_000.0);
+    let tau_ms = (recharge_ms / 5.0).max(1.0);
     PyRep::Tuple(vec![
         PyRep::Tuple(vec![
             PyRep::Real(shield.clamp(0.0, 1.0)),
             PyRep::Real(tau_ms),
-            PyRep::Integer(now_ft),
+            PyRep::Integer(sim_ft),
         ]),
         PyRep::Real(armor.clamp(0.0, 1.0)),
         PyRep::Real(structure.clamp(0.0, 1.0)),

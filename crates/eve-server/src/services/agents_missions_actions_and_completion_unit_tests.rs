@@ -420,6 +420,17 @@ async fn mission_completion_expiry_penalty_and_courier_delivery_branches() {
         remote_greet.dict_get("dialogue"),
         Some(&PyRep::List(Vec::new()))
     );
+    let Some(PyRep::String(agent_says)) = remote_greet.dict_get("agentSays") else {
+        panic!("remote greeting must include agentSays string");
+    };
+    assert!(
+        !agent_says.contains("Some(") && !agent_says.contains("None"),
+        "remote greeting dialogue must not format Rust Option Debug output: {agent_says}"
+    );
+    assert_eq!(
+        remote_greet.dict_get("briefing"),
+        Some(&PyRep::String(agent_says.clone()))
+    );
     assert_eq!(
         call_agent_mgr(
             &ctx,
@@ -595,5 +606,155 @@ async fn unbound_briefing_and_objective_info_reject_completed_and_declined_missi
         .unwrap_err()
         .code,
         "MissionNotActive"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gh998_gh999_gh1000_bookmarks_dungeon_owner_and_courier_item_notification() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let ag = find_standard_agent(&ctx, 1);
+    let sys_id = ag.solar_system_id.unwrap();
+    let st_id = ag.station_id.unwrap();
+    let mut sess = char_session(char_id, Some(sys_id), Some(st_id));
+    let kw = HashMap::new();
+    let now = ctx.now_unix();
+
+    // Pick a real non-courier mission (for #998 bookmark + #999 dungeon ownerID) and a courier mission (for #1000).
+    let encounter_mid = ctx
+        .sde
+        .missions
+        .values()
+        .find(|m| !m.is_courier && !m.content_template.as_deref().unwrap_or_default().contains("Trade"))
+        .map(|m| m.mission_id)
+        .unwrap_or(10_301);
+    let courier_mid = ctx
+        .sde
+        .missions
+        .values()
+        .find(|m| m.is_courier && !m.content_template.as_deref().unwrap_or_default().contains("Trade"))
+        .map(|m| m.mission_id)
+        .expect("SDE should contain at least one courier mission");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.insert(
+            (char_id, encounter_mid),
+            make_active_mission(encounter_mid, char_id, ag.agent_id, sys_id, "Accepted", Some(888_998)),
+        );
+        save_mission_meta(
+            snap,
+            char_id,
+            &make_meta(encounter_mid, ag.agent_id, now + 86_400, Some(now + 86_400)),
+        );
+        snap.bookmarks.insert(
+            888_998,
+            BookmarkRecord {
+                bookmark_id: 888_998,
+                owner_id: char_id,
+                solar_system_id: sys_id,
+                label: "Mission Pocket".into(),
+                x: 100.0,
+                y: 200.0,
+                z: 300.0,
+                item_id: None,
+                memo: "Mission Pocket Destination".into(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+    });
+
+    // #998: GetMyJournalDetails bookmarks include hint, locationID, and 0-based locationNumber
+    let journal = call_agent_mgr(&ctx, &mut sess, "GetMyJournalDetails", &[], &kw)
+        .await
+        .expect("GetMyJournalDetails");
+    let PyRep::Tuple(j_parts) = journal else {
+        panic!("expected tuple from GetMyJournalDetails");
+    };
+    let PyRep::List(ref j_missions) = j_parts[0] else {
+        panic!("expected missions list");
+    };
+    let enc_row = j_missions
+        .iter()
+        .find(|r| r.dict_get("missionID") == Some(&PyRep::Integer(encounter_mid as i64)))
+        .expect("encounter mission in journal");
+    let Some(PyRep::List(bms)) = enc_row.dict_get("bookmarks") else {
+        panic!("expected bookmarks list");
+    };
+    assert_eq!(bms.len(), 1);
+    assert!(
+        bms[0]
+            .dict_get("hint")
+            .and_then(PyRep::as_str)
+            .is_some_and(|s| s.starts_with("UI/Agents/"))
+    );
+    assert_eq!(bms[0].dict_get("locationID"), Some(&PyRep::Integer(sys_id as i64)));
+    assert_eq!(bms[0].dict_get("locationNumber"), Some(&PyRep::Integer(0)));
+
+    // #999: GetMissionObjectiveInfo dungeons[].ownerID is an NPC faction or corp ID, never ag.agent_id
+    let obj_info = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "GetMissionObjectiveInfo",
+        &[PyRep::Integer(ag.agent_id), PyRep::Integer(encounter_mid as i64)],
+        &kw,
+    )
+    .await
+    .expect("GetMissionObjectiveInfo");
+    let Some(PyRep::List(dungeons)) = obj_info.dict_get("dungeons") else {
+        panic!("expected dungeons list");
+    };
+    assert_eq!(dungeons.len(), 1);
+    let dun_owner = dungeons[0]
+        .dict_get("ownerID")
+        .and_then(PyRep::as_i64)
+        .expect("dungeon ownerID");
+    assert_ne!(dun_owner, ag.agent_id, "dungeon ownerID must never be agent character ID");
+    assert!(
+        (500_000..3_000_000).contains(&dun_owner),
+        "dungeon ownerID {dun_owner} must be NPC faction or corp ID"
+    );
+
+    // #1000: Accepting a Courier mission via DoAction(3) emits OnItemChange for granted_courier_item_id
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.insert(
+            (char_id, courier_mid),
+            make_active_mission(courier_mid, char_id, ag.agent_id, sys_id, "Offered", None),
+        );
+        let mut cmeta = make_meta(courier_mid, ag.agent_id, now + 86_400, None);
+        cmeta.required_delivery_type_id = Some(34);
+        cmeta.required_delivery_qty = 6;
+        cmeta.origin_station_id = Some(st_id);
+        cmeta.destination_station_id = Some(st_id);
+        save_mission_meta(snap, char_id, &cmeta);
+    });
+    let _ = ctx.db.acquire_online_lock(1, sess.session_id, Some(char_id), false, now);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "DoAction",
+        &[
+            PyRep::Integer(3),
+            PyRep::Integer(ag.agent_id),
+            PyRep::Integer(courier_mid as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("DoAction(3) accept courier");
+
+    let granted_cid = ctx
+        .db
+        .with_snapshot(|snap| load_mission_meta(snap, char_id, courier_mid).and_then(|m| m.granted_courier_item_id))
+        .expect("granted_courier_item_id recorded");
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs.iter().any(|n| {
+            n.event == "OnItemChange"
+                && format!("{:?}", n.args).contains(&granted_cid.to_string())
+        }),
+        "Accepting Courier mission must emit OnItemChange containing granted_courier_item_id={granted_cid}"
     );
 }

@@ -419,7 +419,7 @@ async fn gm_slash_commands_giveisk_ban_suspend_role_giveitem_setskill_teleport_a
     }
     assert_eq!(
         item_change.args.get(1),
-        Some(&PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))]))
+        Some(&PyRep::Dict(Vec::new()))
     );
 }
 
@@ -817,4 +817,301 @@ async fn slash_tr_moveme_translocate_and_teleport_support_me_and_location_types(
     .unwrap()
     .unwrap_err();
     assert_eq!(err_role.code, "InsufficientRole");
+}
+
+#[tokio::test]
+async fn createitem_and_giveitem_blueprint_emits_on_blueprints_updated() {
+    // Issue #988: `/createitem` and `/giveitem` for blueprint types (`category_id == 9` /
+    // `sde.blueprints.contains_key(&type_id)`) must emit `OnBlueprintsUpdated(ownerID)` alongside
+    // `OnItemChange` so V24.01 `BlueprintService` invalidates its `@Memoize(15)` cache.
+    let ctx = test_ctx();
+    let uid = 1_u64;
+    let cid = 90_000_001_i64;
+    let mut sess = auth_session(uid, cid, 98_000_001, 30_000_142);
+    sess.role = service_roles::ROLE_GM_MASK;
+    let kw = HashMap::new();
+    let _ = ctx
+        .db
+        .acquire_online_lock(uid, sess.session_id.max(1), Some(cid), true, ctx.now_unix());
+    let _ = ctx.drain_notifications_for_char(cid);
+
+    let bp_tid: u32 = if ctx.sde.blueprints.contains_key(&967) {
+        967
+    } else {
+        *ctx.sde.blueprints.keys().next().expect("SDE has blueprints")
+    };
+
+    for slash_str in [
+        format!("/createitem {bp_tid} 1"),
+        format!("/giveitem {bp_tid} 1"),
+    ] {
+        let _ = ctx.drain_notifications_for_char(cid);
+        let res = handle(
+            &ctx,
+            &mut sess,
+            "slash",
+            "SlashCmd",
+            &[PyRep::String(slash_str.clone())],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect("blueprint slash command ok");
+        assert_eq!(res.dict_get("typeID"), Some(&PyRep::Integer(bp_tid as i64)));
+
+        let notifs = ctx.drain_notifications_for_char(cid);
+        assert!(
+            notifs.iter().any(|n| n.event == "OnItemChange"),
+            "expected OnItemChange for {slash_str}"
+        );
+        let bp_notif = notifs
+            .iter()
+            .find(|n| n.event == "OnBlueprintsUpdated")
+            .expect("blueprint creation must emit OnBlueprintsUpdated");
+        assert_eq!(bp_notif.id_type, "ownerID");
+        assert_eq!(bp_notif.args, vec![PyRep::Integer(cid)]);
+    }
+
+    // Negative: non-blueprint items (ship 587, mineral 34) must NOT emit OnBlueprintsUpdated
+    for non_bp_cmd in ["/createitem 587 1", "/giveitem 34 10"] {
+        let _ = ctx.drain_notifications_for_char(cid);
+        let _ = handle(
+            &ctx,
+            &mut sess,
+            "slash",
+            "SlashCmd",
+            &[PyRep::String(non_bp_cmd.into())],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect("non-bp slash ok");
+        let notifs = ctx.drain_notifications_for_char(cid);
+        assert!(notifs.iter().any(|n| n.event == "OnItemChange"));
+        assert!(
+            !notifs.iter().any(|n| n.event == "OnBlueprintsUpdated"),
+            "non-blueprint command {non_bp_cmd} must not emit OnBlueprintsUpdated"
+        );
+    }
+
+    // Negative: zero quantity and unprivileged player session fail without emitting notifications
+    let _ = ctx.drain_notifications_for_char(cid);
+    let zero_err = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/createitem {bp_tid} 0"))],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("zero quantity must fail");
+    assert_eq!(zero_err.code, "InvalidSlashArgument");
+    assert!(ctx.drain_notifications_for_char(cid).is_empty());
+
+    sess.role = service_roles::ROLE_PLAYER;
+    let role_err = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/createitem {bp_tid} 1"))],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("non-GM player must be rejected");
+    assert_eq!(role_err.code, "InsufficientRole");
+    assert!(ctx.drain_notifications_for_char(cid).is_empty());
+}
+
+#[tokio::test]
+async fn slash_tr_mid_warp_stops_warp_and_flushes_pre_set_state_tick_gh994() {
+    let ctx = test_ctx();
+    let cid = 90_000_001_i64;
+    let ship_id = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&cid).map(|c| c.active_ship_id))
+        .unwrap_or(0);
+    assert!(ship_id > 0);
+    let kw = HashMap::new();
+    let jita_sys = 30_000_142_u32;
+    let perim_sys = 30_000_144_u32;
+
+    // 1. Same-system /tr while mid-warp: must clear active_warps/return_warps, flush Stop +
+    //    effects.Warping(0) in a preceding TickBroadcast BEFORE SetState, and leave ball Stopped.
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&cid) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = jita_sys;
+        }
+    });
+    let mut sess = auth_session(1, cid, 98_000_001, jita_sys);
+    sess.role = service_roles::ROLE_GMH;
+    let jita_handle = ctx.systems.get_or_spawn(jita_sys);
+    let ball = eve_destiny::Ball {
+        id: ship_id,
+        type_id: 587,
+        position: glam::DVec3::new(10_000.0, 0.0, 0.0),
+        velocity: glam::DVec3::new(3.0 * eve_destiny::AU_METERS, 0.0, 0.0),
+        max_velocity: 300.0,
+        inertia: 0.5,
+        mass: 1_000_000.0,
+        radius: 50.0,
+        speed_fraction: 1.0,
+        mode: MovementMode::Warp {
+            origin: glam::DVec3::ZERO,
+            destination: glam::DVec3::new(1.0e12, 0.0, 0.0),
+            warp_speed_au_s: 3.0,
+            total_distance: 1.0e12,
+            phase: eve_destiny::WarpPhase::Cruising,
+            elapsed_warp_time: 4.0,
+        },
+    };
+    let combat = ctx.build_ship_combat_state(cid, ship_id, 587);
+    let slim = ctx.build_ship_slim_meta(cid, 587);
+    assert!(jita_handle.spawn_ball_with_meta(ball, combat, slim).await.is_ok());
+    // Consume initial spawn observer events so only post-warp-stop updates remain.
+    let _ = jita_handle.drain_observer_updates(ship_id).await;
+    ctx.active_warps
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(ship_id, cid);
+    ctx.return_warps
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(ship_id);
+    let mut jita_rx = jita_handle.subscribe();
+
+    let same_res = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/tr me 60003760".into())],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("same-system /tr mid-warp succeeds");
+    assert_eq!(keyval_i64(&same_res, "solarSystemID"), Some(i64::from(jita_sys)));
+    assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+    assert!(!ctx.return_warps.lock().unwrap().contains(&ship_id));
+
+    let pre_bcast = jita_rx
+        .try_recv()
+        .expect("warp-stop batch must be flushed onto event_tx before SetState");
+    assert_eq!(pre_bcast.solar_system_id, jita_sys);
+    let obs_stop = pre_bcast
+        .observer_events
+        .get(&ship_id)
+        .expect("flushed TickBroadcast must include observer events for ship");
+    assert!(obs_stop.iter().any(|ev| matches!(
+        ev,
+        eve_destiny::DestinyEvent::SetBallMassive { ball_id, is_massive: true } if *ball_id == ship_id
+    )));
+    assert!(obs_stop.iter().any(|ev| matches!(
+        ev,
+        eve_destiny::DestinyEvent::OnSpecialFX { ball_id, guid, is_active: false, .. }
+            if *ball_id == ship_id && guid == "effects.Warping"
+    )));
+    assert!(obs_stop.iter().any(|ev| matches!(
+        ev,
+        eve_destiny::DestinyEvent::Stop { ball_id } if *ball_id == ship_id
+    )));
+    assert!(!obs_stop.iter().any(|ev| matches!(
+        ev,
+        eve_destiny::DestinyEvent::SetState { .. }
+    )));
+
+    let (_, post_evs, _) = jita_handle
+        .drain_observer_updates(ship_id)
+        .await
+        .expect("post-teleport drain");
+    assert!(matches!(
+        post_evs.first(),
+        Some(eve_destiny::DestinyEvent::SetState { observer_ball_id }) if *observer_ball_id == ship_id
+    ));
+    let (_, same_snap) = jita_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .expect("ship ball present after same-system /tr");
+    assert_eq!(same_snap.mode, MovementMode::Stop);
+    assert_eq!(same_snap.velocity, glam::DVec3::ZERO);
+
+    // 2. Cross-system /tr while mid-warp: must flush warp-stop on old system before take_ball
+    //    and spawn stopped in destination system with SetState queued.
+    let mut warp_ball = same_snap;
+    warp_ball.velocity = glam::DVec3::new(2.0 * eve_destiny::AU_METERS, 0.0, 0.0);
+    warp_ball.mode = MovementMode::Warp {
+        origin: glam::DVec3::ZERO,
+        destination: glam::DVec3::new(1.0e12, 0.0, 0.0),
+        warp_speed_au_s: 3.0,
+        total_distance: 1.0e12,
+        phase: eve_destiny::WarpPhase::Cruising,
+        elapsed_warp_time: 2.0,
+    };
+    let combat2 = ctx.build_ship_combat_state(cid, ship_id, 587);
+    let slim2 = ctx.build_ship_slim_meta(cid, 587);
+    let _ = jita_handle.take_ball(ship_id).await;
+    assert!(jita_handle.spawn_ball_with_meta(warp_ball, combat2, slim2).await.is_ok());
+    let _ = jita_handle.drain_observer_updates(ship_id).await;
+    ctx.active_warps
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(ship_id, cid);
+    while jita_rx.try_recv().is_ok() {}
+
+    let cross_res = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/tr me {perim_sys}"))],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("cross-system /tr mid-warp succeeds");
+    assert_eq!(keyval_i64(&cross_res, "solarSystemID"), Some(i64::from(perim_sys)));
+    assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+    assert!(!ctx.return_warps.lock().unwrap().contains(&ship_id));
+
+    let old_bcast = jita_rx
+        .try_recv()
+        .expect("old system must emit warp-stop TickBroadcast before take_ball");
+    assert_eq!(old_bcast.solar_system_id, jita_sys);
+    let old_obs = old_bcast
+        .observer_events
+        .get(&ship_id)
+        .expect("old system broadcast must target ship_id");
+    assert!(old_obs.iter().any(|ev| matches!(
+        ev,
+        eve_destiny::DestinyEvent::OnSpecialFX { ball_id, guid, is_active: false, .. }
+            if *ball_id == ship_id && guid == "effects.Warping"
+    )));
+    assert!(old_obs.iter().any(|ev| matches!(
+        ev,
+        eve_destiny::DestinyEvent::Stop { ball_id } if *ball_id == ship_id
+    )));
+
+    let perim_handle = ctx.systems.get_or_spawn(perim_sys);
+    let (_, dest_snap) = perim_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .expect("ship spawned in destination system");
+    assert_eq!(dest_snap.mode, MovementMode::Stop);
+    assert_eq!(dest_snap.velocity, glam::DVec3::ZERO);
+    let (_, dest_evs, _) = perim_handle
+        .drain_observer_updates(ship_id)
+        .await
+        .expect("destination drain");
+    assert!(matches!(
+        dest_evs.first(),
+        Some(eve_destiny::DestinyEvent::SetState { observer_ball_id }) if *observer_ball_id == ship_id
+    ));
 }

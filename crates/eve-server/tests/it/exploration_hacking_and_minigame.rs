@@ -3171,7 +3171,7 @@ async fn test_pve_combat_anomalies_regional_spawns_and_loot() {
     let _sess = create_in_space_session(&ctx, 77_009, sys_id, char_id, ship_id, 587).await;
     ensure_system_pve_sites_seeded(&ctx, sys_id).await;
 
-    // Verify regional Guristas NPC type (10962) and CombatState
+    // Verify regional Guristas NPC type (16981, Pithi Arrogator) and CombatState
     let (site_id, initial_npcs) = with_pve_exploration_reg(&ctx, |reg| {
         let sites = reg.sites_by_system.get(&sys_id).cloned().unwrap_or_default();
         let s = sites.into_iter().find(|site| site.site_category == "CombatAnomaly" && !site.active_npc_ball_ids.is_empty()).unwrap();
@@ -3181,7 +3181,7 @@ async fn test_pve_combat_anomalies_regional_spawns_and_loot() {
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     for &npc_id in &initial_npcs {
         let snap = sys_handle.get_ball_snapshot(npc_id).await.unwrap().expect("NPC ball must exist");
-        assert_eq!(snap.1.type_id, 10_962, "The Forge anomalies must spawn Guristas NPCs (10962)");
+        assert_eq!(snap.1.type_id, 16_981, "The Forge anomalies must spawn Guristas NPCs (16981)");
         let cs = sys_handle.get_combat_state(npc_id).await.unwrap();
         assert!(cs.is_some(), "Spawned PvE NPC ball must have CombatState");
     }

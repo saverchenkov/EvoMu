@@ -81,7 +81,7 @@ async fn test_fw_warzones_victory_points_and_system_capture() {
             assert_eq!(amo.dict_get("occupierFactionID"), Some(&PyRep::Integer(FACTION_MINMATAR)));
             assert_eq!(
                 amo.dict_get("adjacencyState"),
-                Some(&PyRep::Integer(eve_server::services::fw_services::ADJACENCY_STATE_REARGUARD))
+                Some(&PyRep::String(eve_server::services::fw_services::ADJACENCY_STATE_BACKLINE.into()))
             );
             assert_eq!(amo.dict_get("frontlineStatus"), Some(&PyRep::Integer(STATUS_REARGUARD)));
             assert!(matches!(amo.dict_get("contestedPercentage"), Some(&PyRep::Real(_))));
@@ -89,8 +89,16 @@ async fn test_fw_warzones_victory_points_and_system_capture() {
             // Frontline system 30002087 and Command system 30002086
             let fl = find_sys(30002087).expect("30002087 must be present");
             assert_eq!(fl.dict_get("frontlineStatus"), Some(&PyRep::Integer(STATUS_FRONTLINE)));
+            assert_eq!(
+                fl.dict_get("adjacencyState"),
+                Some(&PyRep::String(eve_server::services::fw_services::ADJACENCY_STATE_FRONTLINE.into()))
+            );
             let cmd = find_sys(30002086).expect("30002086 must be present");
             assert_eq!(cmd.dict_get("frontlineStatus"), Some(&PyRep::Integer(STATUS_COMMAND)));
+            assert_eq!(
+                cmd.dict_get("adjacencyState"),
+                Some(&PyRep::String(eve_server::services::fw_services::ADJACENCY_STATE_SECONDLINE.into()))
+            );
         }
         other => panic!("Expected Dict for GetAllWarzonesOccupationStates, got {other:?}"),
     }

@@ -163,6 +163,7 @@ fn all_modes_with_park_metadata_and_exhaustive_truncation_errors() {
         1,
         SlimItemMeta {
             owner_id: 500,
+            char_id: Some(500),
             corp_id: 98_000_001,
             alliance_id: 99_000_001,
             ..SlimItemMeta::default()

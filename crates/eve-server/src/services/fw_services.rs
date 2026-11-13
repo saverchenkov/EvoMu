@@ -30,17 +30,19 @@ pub const STATUS_FRONTLINE: i64 = 1;
 pub const STATUS_COMMAND: i64 = 2;
 pub const STATUS_REARGUARD: i64 = 3;
 
-/// V24.01 `fwwarzone/common/const.py` 0-indexed `ADJACENCY_STATES`:
-/// `0 = Rearguard`, `1 = Command Operations`, `2 = Frontline`.
-pub const ADJACENCY_STATE_REARGUARD: i64 = 0;
-pub const ADJACENCY_STATE_COMMAND_OPERATIONS: i64 = 1;
-pub const ADJACENCY_STATE_FRONTLINE: i64 = 2;
+/// V24.01 `factionwarfare/const.pyj` 2-character string `ADJACENCY_STATES` (`#981`):
+/// `'FL'` = Frontline, `'SL'` = Secondline (Command Operations), `'BL'` = Backline (Rearguard).
+pub const ADJACENCY_STATE_FRONTLINE: &str = "FL";
+pub const ADJACENCY_STATE_SECONDLINE: &str = "SL";
+pub const ADJACENCY_STATE_BACKLINE: &str = "BL";
+pub const ADJACENCY_STATE_COMMAND_OPERATIONS: &str = ADJACENCY_STATE_SECONDLINE;
+pub const ADJACENCY_STATE_REARGUARD: &str = ADJACENCY_STATE_BACKLINE;
 
-pub const fn frontline_status_to_adjacency_state(frontline_status: i64) -> i64 {
+pub const fn frontline_status_to_adjacency_state(frontline_status: i64) -> &'static str {
     match frontline_status {
         STATUS_FRONTLINE => ADJACENCY_STATE_FRONTLINE,
-        STATUS_COMMAND => ADJACENCY_STATE_COMMAND_OPERATIONS,
-        _ => ADJACENCY_STATE_REARGUARD,
+        STATUS_COMMAND => ADJACENCY_STATE_SECONDLINE,
+        _ => ADJACENCY_STATE_BACKLINE,
     }
 }
 
@@ -273,7 +275,7 @@ pub fn add_victory_points(ctx: &ServerContext, sys_id: u32, vp: i64) -> (i64, f6
         ("occupierFactionID", PyRep::Integer(occupier_fac)),
         (
             "adjacencyState",
-            PyRep::Integer(frontline_status_to_adjacency_state(front)),
+            PyRep::String(frontline_status_to_adjacency_state(front).into()),
         ),
         ("frontlineStatus", PyRep::Integer(front)),
         ("contestedPercentage", PyRep::Real(contested)),
@@ -343,7 +345,7 @@ pub fn capture_warzone_system(
         ("occupierFactionID", PyRep::Integer(new_occupier_faction_id)),
         (
             "adjacencyState",
-            PyRep::Integer(frontline_status_to_adjacency_state(front)),
+            PyRep::String(frontline_status_to_adjacency_state(front).into()),
         ),
         ("frontlineStatus", PyRep::Integer(front)),
         ("contestedPercentage", PyRep::Real(0.0)),
@@ -805,7 +807,7 @@ pub async fn handle(
                         ("ownerFactionID", PyRep::Integer(occ.owner_faction_id)),
                         ("occupierID", PyRep::Integer(occ.occupier_faction_id)),
                         ("occupierFactionID", PyRep::Integer(occ.occupier_faction_id)),
-                        ("adjacencyState", PyRep::Integer(adj_state)),
+                        ("adjacencyState", PyRep::String(adj_state.into())),
                         ("frontlineStatus", PyRep::Integer(front)),
                         ("contestedPercentage", PyRep::Real(c)),
                         ("dateTaken", PyRep::Integer(0)),
@@ -872,7 +874,7 @@ pub async fn handle(
                     ("occupierFactionID", PyRep::Integer(occ.occupier_faction_id)),
                     ("ownerID", PyRep::Integer(occ.owner_faction_id)),
                     ("ownerFactionID", PyRep::Integer(occ.owner_faction_id)),
-                    ("adjacencyState", PyRep::Integer(adj_state)),
+                    ("adjacencyState", PyRep::String(adj_state.into())),
                     ("frontlineStatus", PyRep::Integer(front)),
                     ("contestedPercentage", PyRep::Real(c)),
                     ("dateTaken", PyRep::Integer(0)),

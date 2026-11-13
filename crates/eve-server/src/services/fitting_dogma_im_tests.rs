@@ -1177,3 +1177,217 @@ async fn destroy_fitting_removes_loaded_charges_and_notifies_947() {
         "DestroyFitting must emit OnItemChange deletion for loaded charge (#947), got {notifs:?}"
     );
 }
+
+#[tokio::test]
+async fn get_layer_damage_values_by_items_encodes_v24_shield_ratio_tau_and_wallclock_ft() {
+    // Issue #990: `dogmaIM.GetLayerDamageValuesByItems` must return `shieldInfo = (shieldRatio, tauMs, simFt)`
+    // where `shieldRatio` is normalized `0.0..=1.0`, `tauMs = rechargeMs / 5.0`, and `simFt` is anchored to
+    // real OS wallclock FILETIME ticks so `eveInflight/damageStateValue.pyj` `exp((time - now) / 10000 / tau)`
+    // never overflows even after `advance_secs_without_sim_clock_rebase`.
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 96_399_001i64;
+    let other_char_id = 96_399_002i64;
+    let sys_id = 30_000_142u32;
+    let ship_id = 96_399_100i64;
+    let drone_healthy_id = 96_399_201i64;
+    let drone_damaged_id = 96_399_202i64;
+    let foreign_drone_id = 96_399_203i64;
+    let hobgoblin_tid = 2_454u32;
+
+    let hob_type = ctx.sde.types.get(&hobgoblin_tid).expect("Hobgoblin I in SDE");
+    let max_shield = hob_type
+        .default_attributes
+        .get(&eve_sde::attr_ids::SHIELD_CAPACITY)
+        .copied()
+        .unwrap_or(26.0);
+    let max_armor = hob_type
+        .default_attributes
+        .get(&eve_sde::attr_ids::ARMOR_HP)
+        .copied()
+        .unwrap_or(29.0);
+    let max_hull = hob_type
+        .default_attributes
+        .get(&eve_sde::attr_ids::HP_STRUCT)
+        .copied()
+        .unwrap_or(35.0);
+    let recharge_ms = hob_type
+        .default_attributes
+        .get(&479)
+        .copied()
+        .unwrap_or(400_000.0);
+    let expected_tau_ms = recharge_ms / 5.0;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base_ch = snap.characters.values().next().cloned().unwrap();
+        for cid in [char_id, other_char_id] {
+            let mut ch = base_ch.clone();
+            ch.character_id = cid;
+            ch.user_id = cid as u64;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.active_ship_id = ship_id;
+            snap.characters.insert(cid, ch);
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 645,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        for (did, oid, dyn_attrs) in [
+            (drone_healthy_id, char_id, HashMap::new()),
+            (
+                drone_damaged_id,
+                char_id,
+                HashMap::from([
+                    (eve_sde::attr_ids::ARMOR_DAMAGE, 5.0),
+                    (eve_sde::attr_ids::DAMAGE, 3.0),
+                ]),
+            ),
+            (
+                foreign_drone_id,
+                other_char_id,
+                HashMap::from([
+                    (eve_sde::attr_ids::ARMOR_DAMAGE, 12.0),
+                    (eve_sde::attr_ids::DAMAGE, 9.0),
+                ]),
+            ),
+        ] {
+            snap.items.insert(
+                did,
+                InventoryItemRecord {
+                    item_id: did,
+                    type_id: hobgoblin_tid,
+                    owner_id: oid,
+                    location_id: ship_id,
+                    flag: InventoryFlag::DroneBay,
+                    quantity: 1,
+                    singleton: true,
+                    dynamic_attributes: dyn_attrs,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.sp6_lifecycle.ship_combat_hp.insert(
+            drone_damaged_id,
+            eve_db::PersistedCombatHp {
+                shield_hp: max_shield * 0.25,
+                armor_hp: (max_armor - 5.0).max(0.0),
+                hull_hp: (max_hull - 3.0).max(0.0),
+            },
+        );
+        snap.sp6_lifecycle.ship_combat_hp.insert(
+            foreign_drone_id,
+            eve_db::PersistedCombatHp {
+                shield_hp: max_shield * 0.1,
+                armor_hp: (max_armor - 12.0).max(0.0),
+                hull_hp: (max_hull - 9.0).max(0.0),
+            },
+        );
+    });
+
+    // Advance virtual clock 30 days ahead without rebasing live clients' GetSimTime()
+    ctx.advance_secs_without_sim_clock_rebase(30 * 86_400);
+    let (wall_s, wall_ns) = eve_db::clock::host_wall_unix_secs_and_nanos();
+    let client_sim_ft = (wall_s as i64 + 11_644_473_600) * 10_000_000 + (wall_ns as i64 / 100);
+    assert!(
+        ctx.now_blueos_filetime_ticks() - client_sim_ft > 20 * 86_400 * 10_000_000,
+        "virtual server clock must be >20 days ahead of wallclock sim time"
+    );
+
+    // Negative 1: unauthenticated session rejected
+    let mut unauth_sess = SessionState::new(99_901);
+    assert!(
+        handle_dogma_im(
+            &ctx,
+            &mut unauth_sess,
+            None,
+            "dogmaIM",
+            "GetLayerDamageValuesByItems",
+            &[PyRep::PySet(vec![PyRep::Integer(drone_healthy_id)])],
+            &HashMap::new(),
+        )
+        .await
+        .expect("handled")
+        .is_err()
+    );
+
+    let mut sess = SessionState::new(99_902);
+    sess.user_id = Some(char_id as u64);
+    sess.character_id = Some(char_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_id);
+    sess.role = eve_machonet::service_roles::ROLE_PLAYER;
+
+    let rep = handle_dogma_im(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "GetLayerDamageValuesByItems",
+        &[PyRep::PySet(vec![
+            PyRep::Integer(drone_healthy_id),
+            PyRep::Integer(drone_damaged_id),
+            PyRep::Integer(foreign_drone_id),
+        ])],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("GetLayerDamageValuesByItems ok");
+
+    let PyRep::Dict(entries) = rep else {
+        panic!("expected Dict from GetLayerDamageValuesByItems");
+    };
+    let find_entry = |iid: i64| -> &PyRep {
+        &entries
+            .iter()
+            .find(|(k, _)| *k == PyRep::Integer(iid))
+            .expect("entry present")
+            .1
+    };
+
+    // Healthy Hobgoblin I: shieldRatio == 1.0, tau == recharge_ms / 5.0, finite exp()
+    let healthy_kv = find_entry(drone_healthy_id);
+    let Some(PyRep::Tuple(h_sh)) = healthy_kv.dict_get("shieldInfo") else {
+        panic!("expected shieldInfo tuple");
+    };
+    assert!((h_sh[0].as_f64().unwrap() - 1.0).abs() < 1e-9);
+    assert!((h_sh[1].as_f64().unwrap() - expected_tau_ms).abs() < 1e-6);
+    let h_ft = h_sh[2].as_i64().unwrap();
+    assert!((h_ft - client_sim_ft).abs() < 50_000_000);
+    let exp_arg = ((h_ft - client_sim_ft) as f64) / 10_000.0 / h_sh[1].as_f64().unwrap();
+    assert!(exp_arg.exp().is_finite(), "CalculateCurrentDamageStateValues exp must not overflow");
+
+    // Damaged Hobgoblin I: shieldRatio == 0.25, tau == recharge_ms / 5.0, armorDamage == 5.0, hullDamage == 3.0
+    let dmg_kv = find_entry(drone_damaged_id);
+    let Some(PyRep::Tuple(d_sh)) = dmg_kv.dict_get("shieldInfo") else {
+        panic!("expected shieldInfo tuple");
+    };
+    assert!((d_sh[0].as_f64().unwrap() - 0.25).abs() < 1e-6);
+    assert!((d_sh[1].as_f64().unwrap() - expected_tau_ms).abs() < 1e-6);
+    assert_eq!(dmg_kv.dict_get("armorDamage").and_then(PyRep::as_f64), Some(5.0));
+    assert_eq!(dmg_kv.dict_get("hullDamage").and_then(PyRep::as_f64), Some(3.0));
+
+    // Negative 2: non-GM player querying another pilot's drone receives neutral fallback (no damage leak)
+    let foreign_kv = find_entry(foreign_drone_id);
+    let Some(PyRep::Tuple(f_sh)) = foreign_kv.dict_get("shieldInfo") else {
+        panic!("expected shieldInfo tuple");
+    };
+    assert_eq!(f_sh[0].as_f64(), Some(1.0));
+    assert_eq!(f_sh[1].as_f64(), Some(20_000.0));
+    assert_eq!(foreign_kv.dict_get("armorDamage").and_then(PyRep::as_f64), Some(0.0));
+    assert_eq!(foreign_kv.dict_get("hullDamage").and_then(PyRep::as_f64), Some(0.0));
+}

@@ -238,10 +238,10 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
         .await.expect("enlist Caldari");
 
     // 1. Verify Frontline (1), Command Operations (2), Rearguard (3) stargate adjacency & site seeding.
-    let occ_adj = |rep: &PyRep| -> Option<i64> {
+    fn occ_adj(rep: &PyRep) -> Option<&str> {
         let PyRep::Tuple(t) = rep else { return None };
-        t.get(1)?.dict_get("adjacencyState")?.as_i64()
-    };
+        t.get(1)?.dict_get("adjacencyState")?.as_str()
+    }
     set_pilot_location(&ctx, &mut s_gal, front_sys, None);
     let f_state = rpc_call(&ctx, &mut s_gal, "fwWarzoneSolarsystem", "GetLocalOccupationState", &[]).await.unwrap();
     set_pilot_location(&ctx, &mut s_gal, cmd_sys, None);
@@ -918,7 +918,7 @@ async fn test_fw_ihub_siege_tiers_war_hqs_leaderboards_missions_and_corp_enlistm
     let cmd_after = rpc_call(&ctx, &mut s_gal, "fwWarzoneSolarsystem", "GetLocalOccupationState", &[]).await.unwrap();
     let PyRep::Tuple(cmd_tup) = &cmd_after else { panic!("expected Tuple, got {cmd_after:?}") };
     assert_eq!(
-        cmd_tup[1].dict_get("adjacencyState").and_then(|v| v.as_i64()),
+        cmd_tup[1].dict_get("adjacencyState").and_then(|v| v.as_str()),
         Some(eve_server::services::fw_services::ADJACENCY_STATE_FRONTLINE)
     );
     assert_eq!(cmd_tup[1].dict_get("frontlineStatus").and_then(|v| v.as_i64()), Some(STATUS_FRONTLINE));

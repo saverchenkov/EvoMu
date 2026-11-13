@@ -187,6 +187,194 @@ async fn fw_services_helpers_and_rpc_mutations() {
     });
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn warzone_occupation_adjacency_state_uses_v24_two_char_codes() {
+    // Issue #981: V24.01 `factionwarfare/const.pyj` & `fwwarzone/client/dashboard/const.pyj`
+    // define `ADJACENCY_STATES = {'FL', 'SL', 'BL'}`.
+    assert_eq!(frontline_status_to_adjacency_state(STATUS_FRONTLINE), "FL");
+    assert_eq!(frontline_status_to_adjacency_state(STATUS_COMMAND), "SL");
+    assert_eq!(frontline_status_to_adjacency_state(STATUS_REARGUARD), "BL");
+    assert_eq!(frontline_status_to_adjacency_state(0), "BL");
+    assert_eq!(frontline_status_to_adjacency_state(-7), "BL");
+    assert_eq!(frontline_status_to_adjacency_state(99), "BL");
+
+    let ctx = test_ctx();
+    let cid = 90_000_001_i64;
+    let kw = HashMap::new();
+    let rear_sys = 30_002_055_u32; // Amo (Rearguard / Backline)
+    let cmd_sys = 30_002_086_u32; // Secondline / Command Operations
+    let front_sys = 30_002_087_u32; // Frontline
+
+    let mut sess = auth_session(1, cid, 98_000_001, rear_sys);
+    let _ = ctx
+        .db
+        .acquire_online_lock(1, sess.session_id.max(1), Some(cid), true, ctx.now_unix());
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.solar_system_id = rear_sys;
+        }
+    });
+
+    for method in [
+        "GetAllWarzonesOccupationStates",
+        "GetAllWarzonesOccupationStatesUncached",
+    ] {
+        let all_rep = handle(&ctx, &mut sess, "fwWarzoneSolarsystem", method, &[], &kw)
+            .await
+            .expect("handled")
+            .expect("ok");
+        let PyRep::Dict(by_wz) = all_rep else {
+            panic!("expected Dict from {method}");
+        };
+        let find_sys = |sid: u32| -> &PyRep {
+            by_wz
+                .iter()
+                .find_map(|(_, v)| match v {
+                    PyRep::Dict(m) => m
+                        .iter()
+                        .find_map(|(k, kv)| (*k == PyRep::Integer(i64::from(sid))).then_some(kv)),
+                    _ => None,
+                })
+                .expect("system must exist in warzone occupation dict")
+        };
+        assert_eq!(
+            find_sys(rear_sys).dict_get("adjacencyState"),
+            Some(&PyRep::String("BL".into()))
+        );
+        assert_eq!(
+            find_sys(cmd_sys).dict_get("adjacencyState"),
+            Some(&PyRep::String("SL".into()))
+        );
+        assert_eq!(
+            find_sys(front_sys).dict_get("adjacencyState"),
+            Some(&PyRep::String("FL".into()))
+        );
+    }
+
+    for (sys_id, expected_code) in [(rear_sys, "BL"), (cmd_sys, "SL"), (front_sys, "FL")] {
+        sess.solar_system_id = Some(sys_id);
+        let local_rep = handle(
+            &ctx,
+            &mut sess,
+            "fwWarzoneSolarsystem",
+            "GetLocalOccupationState",
+            &[],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect("GetLocalOccupationState ok");
+        let PyRep::Tuple(tup) = local_rep else {
+            panic!("expected 2-tuple");
+        };
+        assert_eq!(tup[0], PyRep::Integer(i64::from(sys_id)));
+        assert_eq!(
+            tup[1].dict_get("adjacencyState"),
+            Some(&PyRep::String(expected_code.into()))
+        );
+    }
+
+    // Negative paths: missing solar_system_id fails with NoSolarSystem; non-warzone returns None;
+    // capture_warzone_system rejects non-warzone and <100% contested systems.
+    sess.solar_system_id = None;
+    let no_sys_err = handle(
+        &ctx,
+        &mut sess,
+        "fwWarzoneSolarsystem",
+        "GetLocalOccupationState",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("missing solar_system_id must fail");
+    assert_eq!(no_sys_err.code, "NoSolarSystem");
+
+    sess.solar_system_id = Some(30_000_142);
+    let non_wz = handle(
+        &ctx,
+        &mut sess,
+        "fwWarzoneSolarsystem",
+        "GetLocalOccupationState",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("non-warzone ok");
+    assert_eq!(non_wz, PyRep::Tuple(vec![PyRep::Integer(30_000_142), PyRep::None]));
+    assert_eq!(
+        capture_warzone_system(&ctx, 30_000_142, FACTION_AMARR)
+            .expect_err("non-warzone system cannot be captured")
+            .code,
+        "SystemNotWarzone"
+    );
+    assert_eq!(
+        capture_warzone_system(&ctx, front_sys, FACTION_AMARR)
+            .expect_err("uncontested system cannot be captured")
+            .code,
+        "SystemNotVulnerable"
+    );
+
+    // Notification emission (`OnWarzoneOccupationStateUpdated`) on VP gain and full capture
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.solar_system_id = front_sys;
+        }
+    });
+    let _ = ctx.drain_notifications_for_char(cid);
+    let threshold = ctx
+        .db
+        .with_snapshot(|s| s.fw_system_occupations[&front_sys].victory_points_threshold);
+    add_victory_points(&ctx, front_sys, threshold);
+    let vp_notifs = ctx.drain_notifications_for_char(cid);
+    let vp_occ_notif = vp_notifs
+        .iter()
+        .find(|n| n.event == "OnWarzoneOccupationStateUpdated")
+        .expect("add_victory_points must emit OnWarzoneOccupationStateUpdated");
+    assert_eq!(
+        vp_occ_notif.args[1].dict_get("adjacencyState"),
+        Some(&PyRep::String("FL".into()))
+    );
+
+    capture_warzone_system(&ctx, front_sys, FACTION_AMARR).expect("capture vulnerable warzone");
+    let cap_notifs = ctx.drain_notifications_for_char(cid);
+    let cap_occ_notif = cap_notifs
+        .iter()
+        .find(|n| n.event == "OnWarzoneOccupationStateUpdated")
+        .expect("capture_warzone_system must emit OnWarzoneOccupationStateUpdated");
+    let cap_adj = cap_occ_notif.args[1]
+        .dict_get("adjacencyState")
+        .and_then(PyRep::as_str)
+        .expect("string adjacencyState on capture notification");
+    assert!(matches!(cap_adj, "FL" | "SL" | "BL"));
+
+    // Collection methods (`iteritems`, `itervalues`) also expose 2-char string `adjacencyState`
+    sess.solar_system_id = Some(front_sys);
+    let iter_vals = crate::services::sov_warzone_dynamic::handle(
+        &ctx,
+        &mut sess,
+        "fwWarzoneSolarsystem",
+        "itervalues",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("itervalues ok");
+    let PyRep::List(vals) = iter_vals else {
+        panic!("expected List from itervalues");
+    };
+    assert!(!vals.is_empty());
+    for entry in &vals {
+        let code = entry
+            .dict_get("adjacencyState")
+            .and_then(PyRep::as_str)
+            .expect("itervalues entry must carry string adjacencyState");
+        assert!(matches!(code, "FL" | "SL" | "BL"));
+    }
+}
+
 #[cfg(test)]
 #[path = "fw_services_cov_edges_tests.rs"]
 mod fw_services_cov_edges_tests;

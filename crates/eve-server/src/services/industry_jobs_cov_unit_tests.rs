@@ -1071,4 +1071,55 @@ fn lifecycle_cancel_paused_ceo_refund_stacking_and_complete_edge_paths() {
         item_change_count >= 2,
         "CompleteJob must emit OnItemChange for unlocked blueprint and delivered item (#982), got {item_change_count}"
     );
+
+    // CompleteManyJobs with V24.01 (jobID, solarSystemID) 2-tuples (#993) and negative check on invalid tuple
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut bpo_993 = mk_item(74_031, 688, char_id, station_id, InventoryFlag::Hangar, 1, true);
+        bpo_993.singleton = true;
+        snap.items.insert(74_031, bpo_993);
+    });
+    let inst_993 = handle_industry_jobs(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintItemID", PyRep::Integer(74_031)),
+            ("blueprintTypeID", PyRep::Integer(688)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(1)),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let jid_993 = inst_993.dict_get("jobID").unwrap().as_i64().unwrap();
+    ctx.db.with_mut_snapshot(|snap| snap.industry_jobs.get_mut(&jid_993).unwrap().start_unix = 0);
+    let _ = ctx.drain_notifications(char_id);
+
+    let comp_tuple_res = handle_industry_jobs(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "CompleteManyJobs",
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(jid_993),
+            PyRep::Integer(30_000_142),
+        ])])],
+        &kw,
+    )
+    .unwrap()
+    .expect("CompleteManyJobs with (jobID, solarSystemID) tuple must succeed (#993)");
+    assert!(comp_tuple_res.dict_get("deliveredItemID").is_some());
+
+    let neg_empty = handle_industry_jobs(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "CompleteManyJobs",
+        &[PyRep::List(vec![PyRep::Tuple(vec![])])],
+        &kw,
+    )
+    .unwrap();
+    assert_eq!(neg_empty.unwrap_err().code, "JobNotFound");
 }

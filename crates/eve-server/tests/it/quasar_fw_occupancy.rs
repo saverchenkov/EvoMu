@@ -427,7 +427,7 @@ async fn test_fw_occupancy_warzone_scope_and_dynamic_threshold() {
             );
             assert_eq!(
                 fw_entry.dict_get("adjacencyState"),
-                Some(&PyRep::Integer(eve_server::services::fw_services::ADJACENCY_STATE_REARGUARD))
+                Some(&PyRep::String(eve_server::services::fw_services::ADJACENCY_STATE_BACKLINE.into()))
             );
             assert_eq!(
                 fw_entry.dict_get("frontlineStatus"),
@@ -441,6 +441,10 @@ async fn test_fw_occupancy_warzone_scope_and_dynamic_threshold() {
                 frontline_entry.dict_get("frontlineStatus"),
                 Some(&PyRep::Integer(eve_server::services::fw_services::STATUS_FRONTLINE))
             );
+            assert_eq!(
+                frontline_entry.dict_get("adjacencyState"),
+                Some(&PyRep::String(eve_server::services::fw_services::ADJACENCY_STATE_FRONTLINE.into()))
+            );
 
             // Natural command system (30002086, adjacent to frontline 30002087)
             let command_entry =
@@ -448,6 +452,10 @@ async fn test_fw_occupancy_warzone_scope_and_dynamic_threshold() {
             assert_eq!(
                 command_entry.dict_get("frontlineStatus"),
                 Some(&PyRep::Integer(eve_server::services::fw_services::STATUS_COMMAND))
+            );
+            assert_eq!(
+                command_entry.dict_get("adjacencyState"),
+                Some(&PyRep::String(eve_server::services::fw_services::ADJACENCY_STATE_SECONDLINE.into()))
             );
 
             assert!(
