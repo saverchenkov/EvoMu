@@ -805,11 +805,12 @@ fn mutants_cov_notification_seq_flag_module_fx_tombstone_and_target_edges() {
         .sde
         .types
         .values()
-        .find(|t| t.category_id == 7 && t.effect_ids.contains(&16))
+        .filter(|t| t.category_id == 7 && t.effect_ids.contains(&16))
         .map(|t| t.type_id)
+        .min()
         .unwrap_or(2048);
     {
-        let mut fit = eve_dogma::ShipFittingEngine::from_sde(ship_id, 587, &ctx.sde);
+        let mut fit = eve_dogma::ShipFittingEngine::from_sde(ship_id, 670, &ctx.sde);
         let mut dyn_zero = std::collections::HashMap::new();
         dyn_zero.insert(73_u16, 0.0);
         dyn_zero.insert(51_u16, 4_321.0);
