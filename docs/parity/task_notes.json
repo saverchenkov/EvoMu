@@ -155,6 +155,38 @@
     "assessment": "DONE",
     "note": "All 24 Fleets and User Interface ESI routes implemented and verified end-to-end."
   },
+  "LW-1": {
+    "assessment": "NOT STARTED",
+    "note": "Scheduled post-Phase-Z: numeric living_world TOML config, DoctrineTemplate and FittedNpcRuntime engine, wreck module drops, and OnSpecialFX moduleTypeID."
+  },
+  "LW-2": {
+    "assessment": "NOT STARTED",
+    "note": "Scheduled post-Phase-Z: canonical faction hostility matrix, NPC-vs-NPC Dogma combat parity, SlimItemMeta NPC corp rules, and WingGroup formation kinematics."
+  },
+  "LW-3": {
+    "assessment": "NOT STARTED",
+    "note": "Scheduled post-Phase-Z: trade-hub undock and dock heartbeat, escorted freighter caravans, jump-freighter cyno runs, gate ambushes, and market depth loop."
+  },
+  "LW-4": {
+    "assessment": "NOT STARTED",
+    "note": "Scheduled post-Phase-Z: fitted Orca, Porpoise, and Rorqual multi-barge mining fleets, pirate belt raids, distress beacons, shared bursts, and ore buyback."
+  },
+  "LW-5": {
+    "assessment": "NOT STARTED",
+    "note": "Scheduled post-Phase-Z: roaming subcap doctrines, cyno-in Titan and Carrier armadas, JumpPortal bridging, Grand Faction Battles, and Noctis salvage crews."
+  },
+  "LW-6": {
+    "assessment": "NOT STARTED",
+    "note": "Scheduled post-Phase-Z: bootstrap seeded NPC moon POS starbases and forward Citadels, NPC structure auto-defense, TakeControl gunnery, and lethal sieges."
+  },
+  "LW-7": {
+    "assessment": "NOT STARTED",
+    "note": "Scheduled post-Phase-Z: three-stage system-wide invasions across Triglavian, Drifter, Sansha, Pirate, and Rogue Drone archetypes plus livingworld GM command."
+  },
+  "LW-8": {
+    "assessment": "NOT STARTED",
+    "note": "Scheduled post-Phase-Z: joinable NPC open fleets in Fleet Finder, high-standing allied capital cyno hot-drops, tactical radio comms, and corp vendetta hunters."
+  },
   "MN-01": {
     "assessment": "DONE",
     "note": "SDE typeMaterials, compressible types, ore type attributes, and regional ore/ice distribution tables loaded from V24 client FSD and verified."
