@@ -15,6 +15,74 @@ pub fn jump_clone_install_fee_cents() -> IskCents {
     IskCents::from_isk(900_000)
 }
 
+/// Builds the V24.01 `paperDollServer.GetPaperDollData` / `GetPaperDollDataBatch` KeyVal (`#1014`).
+///
+/// Both `corpse.GetCorpseColor` (`GetSkinTypeOrToneColorVariation`) and
+/// `Character.AddCharacterToScene -> ApplyDBRowToDoll` require `.modifiers`, `.colors`,
+/// `.sculpts`, and `.appearance` attributes on the returned row.
+fn paperdoll_data_keyval(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    target_cid: i64,
+) -> Option<PyRep> {
+    let c = snap.characters.get(&target_cid)?;
+    let (doll_dna, portrait_info) = snap
+        .character_doll_info
+        .get(&target_cid)
+        .cloned()
+        .unwrap_or_else(|| {
+            (
+                format!("bloodline:{}", c.bloodline_id),
+                format!("portrait:bloodline:{}", c.bloodline_id),
+            )
+        });
+    let mut worn_apparel: Vec<u32> = snap
+        .items
+        .values()
+        .filter(|i| {
+            i.owner_id == target_cid
+                && matches!(i.flag, InventoryFlag::Wardrobe | InventoryFlag::Pilot)
+                && ctx
+                    .sde
+                    .types
+                    .get(&i.type_id)
+                    .is_some_and(|t| t.category_id == 30)
+        })
+        .map(|i| i.type_id)
+        .collect();
+    worn_apparel.sort_unstable();
+    let gender_label = if c.gender == 0 { "female" } else { "male" };
+    Some(PyRep::keyval([
+        ("characterID", PyRep::Integer(target_cid)),
+        ("dollDNA", PyRep::String(doll_dna.clone())),
+        ("dollInfo", PyRep::String(doll_dna.clone())),
+        ("paperdollState", PyRep::String(doll_dna)),
+        ("portraitInfo", PyRep::String(portrait_info)),
+        ("gender", PyRep::Integer(c.gender as i64)),
+        ("genderLabel", PyRep::String(gender_label.into())),
+        ("bloodlineID", PyRep::Integer(c.bloodline_id as i64)),
+        (
+            "wornApparel",
+            PyRep::List(
+                worn_apparel
+                    .into_iter()
+                    .map(|t| PyRep::Integer(i64::from(t)))
+                    .collect(),
+            ),
+        ),
+        (
+            "appearance",
+            PyRep::keyval([
+                ("hairDarkness", PyRep::Real(0.0)),
+                ("lastUpdate", PyRep::Integer(0)),
+            ]),
+        ),
+        ("sculpts", PyRep::List(Vec::new())),
+        ("colors", PyRep::List(Vec::new())),
+        ("modifiers", PyRep::List(Vec::new())),
+    ]))
+}
+
 
 pub fn handle_clones_and_sheet(
     ctx: &ServerContext,
@@ -901,9 +969,9 @@ pub fn handle_clones_and_sheet(
                     client_error: None,
                 }));
             };
-            let Some(gender) = ctx
+            let Some(details) = ctx
                 .db
-                .with_snapshot(|snap| snap.characters.get(&target_cid).map(|c| c.gender))
+                .with_snapshot(|snap| paperdoll_data_keyval(ctx, snap, target_cid))
             else {
                 return Some(Err(BridgeRpcError {
                     code: "CharacterNotFound".into(),
@@ -911,12 +979,7 @@ pub fn handle_clones_and_sheet(
                     client_error: None,
                 }));
             };
-            // V24.01 `AvatarCharacterSceneContext` (`avatardisplay.pyj:1390`, `dna[0] == "male"`) and
-            // `Doll.MatchDNA` (`paperDollImpl.pyj:2308-2323`, `dna[0] in pdDef.GENDER` followed by
-            // `CreateModifierFromFootPrint` indexing `footPrint['path']` on `dna[1:]`) require
-            // `[gender_label]` when no modifier footprints exist (`#650`).
-            let gender_label = if gender == 0 { "female" } else { "male" };
-            Some(Ok(PyRep::List(vec![PyRep::String(gender_label.into())])))
+            Some(Ok(details))
         }
 
         ("paperDollServer", "GetPaperDollDataBatch") => {
@@ -933,12 +996,8 @@ pub fn handle_clones_and_sheet(
             let entries = ctx.db.with_snapshot(|snap| {
                 let mut out = Vec::new();
                 for cid in char_ids {
-                    if let Some(c) = snap.characters.get(&cid) {
-                        let gender_label = if c.gender == 0 { "female" } else { "male" };
-                        out.push((
-                            PyRep::Integer(cid),
-                            PyRep::List(vec![PyRep::String(gender_label.into())]),
-                        ));
+                    if let Some(details) = paperdoll_data_keyval(ctx, snap, cid) {
+                        out.push((PyRep::Integer(cid), details));
                     }
                 }
                 out

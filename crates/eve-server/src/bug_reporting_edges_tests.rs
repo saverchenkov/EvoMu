@@ -119,6 +119,7 @@ fn runtime_storage_limits_fifo_eviction_disk_enforcement_and_lookup() {
 
 #[test]
 fn build_client_global_config_handles_ipv4_ipv6_loopback_and_esi_port_branches() {
+    let _env_guard = crate::lock_test_env_read();
     let ctx = build_bug_test_ctx();
     ctx.set_esi_port(8443);
 

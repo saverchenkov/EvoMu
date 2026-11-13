@@ -1141,14 +1141,11 @@ pub(crate) async fn handle_cyno_portal(
                 .map(|o| jump_outcome_rep(&o, session.solar_system_id.unwrap_or(0))),
         ),
         ("beyonce", "GetCynoJammerState") => {
-            if ctx.db.with_snapshot(|s| !s.structure_vulnerability_windows.is_empty()) {
-                return None;
-            }
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(err("NoSolarSystem", "Session has no solarSystemID")));
             };
             // Client `cynoJammerIcon` treats the reply as the jammer's online sim time (`None` = not jammed).
-            Some(Ok(active_cyno_jammer(ctx, sys_id).map(PyRep::Integer).unwrap_or(PyRep::None)))
+            Some(Ok(cyno_jammer_state_ticks(ctx, sys_id).map(PyRep::Integer).unwrap_or(PyRep::None)))
         }
         _ => None,
     }

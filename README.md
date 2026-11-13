@@ -55,7 +55,6 @@ flowchart LR
 ### Prerequisites
 
 - **Rust (`1.75+`)** and **Python (`3.9+`)**.
-- **C compiler:** Xcode Command Line Tools on macOS (`xcode-select --install`) for FSD extraction and CoreGraphics window capture.
 - **EVE Online V24.01 client (build 3619879):** Installed locally with a populated `SharedCache` (`tq/` + `ResFiles/`).
 
 ### Import Static Data
@@ -131,7 +130,7 @@ python3 tools/client-harness/run_journeys \
 
 ### Live-Client AI Playtester & Telemetry
 
-[`tools/client-harness/playtester.py`](./tools/client-harness/playtester.py) runs a continuous hybrid Planner/Executor AI agent against a live V24.01 `EVE.app` client:
+[`tools/client-harness/playtester.py`](./tools/client-harness/playtester.py) runs a continuous hybrid Planner/Executor AI agent against a live V24.01 `EVE.app` client (requires Xcode Command Line Tools on macOS, `xcode-select --install`, to compile its CoreGraphics window-capture helper):
 - **In-Client CarbonUI Bridge (`127.0.0.1:26099`):** [`evomu_playtester_hook.py`](./tools/client-harness/evomu_playtester_hook.py) introspects live `uicore` windows/modals/widgets, dispatches non-blocking UI clicks, slash commands, and `uicore.cmd` actions, and records `sm.RemoteSvc` calls and client exceptions.
 - **Background Retina Capture:** Captures `EVE.app` by `CGWindowID` across macOS Spaces without stealing focus.
 - **In-Band Crash & `F12` Bug Reporting:** Unhandled client tracebacks (`alert.SendClientStackTraceAlert`) and in-game **`F12` -> Report a Bug** submissions (`/bugs/api` on `:26004`) are enriched with a 20-call MachoNet flight recorder, server log slices, and spatial/fitting snapshots, staged in `.evomu-bugs/queue/`, and deduplicated onto GitHub issues via [`tools/sync_bugs_to_github.py`](./tools/sync_bugs_to_github.py).

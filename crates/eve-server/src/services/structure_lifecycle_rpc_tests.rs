@@ -544,6 +544,11 @@ async fn handle_anchor_10arg_treats_xz_offsets_as_relative_to_ship_gh995() {
     let ship_pos = DVec3::new(1.0e11, 2.0e10, -3.0e11);
     spawn_ship_ball(&ctx, sys_id, ship_id, ship_pos).await;
     let mut sess = make_session(char_id, corp_id, sys_id, Some(ship_id), 1);
+    let user_id = ctx.db.with_snapshot(|snap| snap.characters[&char_id].user_id);
+    sess.user_id = Some(user_id);
+    ctx.db
+        .acquire_online_lock(user_id, sess.session_id, Some(char_id), true, ctx.now_unix())
+        .expect("register online session for OnItemChange delivery");
 
     let item_ok = 99_500_001_i64;
     let item_too_close = 99_500_002_i64;
@@ -592,7 +597,21 @@ async fn handle_anchor_10arg_treats_xz_offsets_as_relative_to_ship_gh995() {
     ctx.db.with_snapshot(|snap| {
         let st = snap.structures.get(&struct_id).expect("anchored structure");
         assert_eq!(st.position, [ship_pos.x + 60_000.0, ship_pos.y, ship_pos.z]);
+        assert!(snap.items.get(&item_ok).is_none(), "anchored cargo item must be consumed");
     });
+    let anchor_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        anchor_notifs.iter().any(|n| {
+            n.event == "OnItemChange"
+                && matches!(
+                    n.args.as_slice(),
+                    [PyRep::DBRow { columns, .. }, PyRep::Dict(_)]
+                        if columns.iter().any(|(k, v)| k == "itemID" && v.as_i64() == Some(item_ok))
+                            && columns.iter().any(|(k, v)| k == "locationID" && v.as_i64() == Some(6))
+                )
+        }),
+        "Anchor must emit OnItemChange moving consumed structure item {item_ok} to locJunkyard (6) (#1012), got {anchor_notifs:?}"
+    );
 
     // Negative: relative offset (10_000, 0) is < 50 km from ship and must fail distance validation.
     let err = handle_anchor(

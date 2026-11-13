@@ -353,5 +353,82 @@ fn flex_sovereignty_corp_age_adm_and_pochven_customs_standing() {
             },
         );
         assert!(validate_pochven_customs_office_standing(snap, cid, poch_sys, &ctx.sde).is_ok());
+
+        // Large (Fortizar r=85 km -> [90 km, 115 km]) & XLarge (Keepstar r=150 km -> [155 km, 180 km]) distance bounds (#1011)
+        let keep_prof = structure_profile(&ctx, 35_834).unwrap();
+        assert_eq!(anchor_ship_distance_bounds(&ctx, &astra_prof), (50_000.0, 75_000.0, 60_000.0));
+        assert_eq!(anchor_ship_distance_bounds(&ctx, &fort_prof), (90_000.0, 115_000.0, 100_000.0));
+        assert_eq!(anchor_ship_distance_bounds(&ctx, &keep_prof), (155_000.0, 180_000.0, 165_000.0));
+
+        // Explicit 165 km Keepstar anchor (matching live V24 client offset) succeeds; 60 km & 200 km fail.
+        let (keep_pos, _) = validate_and_resolve_anchor(
+            &ctx,
+            snap,
+            &keep_prof,
+            null_sys,
+            corp_id,
+            ship_pos,
+            Some(ship_pos + DVec3::new(0.0, 165_000.0, 0.0)),
+            1_800_000_000,
+        )
+        .expect("Keepstar at 165 km from ship must succeed (#1011)");
+        assert!((keep_pos.distance(ship_pos) - 165_000.0).abs() < 1e-3);
+        assert_eq!(
+            validate_and_resolve_anchor(
+                &ctx,
+                snap,
+                &keep_prof,
+                null_sys,
+                corp_id,
+                ship_pos,
+                Some(ship_pos + DVec3::new(0.0, 60_000.0, 0.0)),
+                1_800_000_000,
+            )
+            .unwrap_err()
+            .code,
+            "InvalidAnchorDistanceFromShip"
+        );
+        assert_eq!(
+            validate_and_resolve_anchor(
+                &ctx,
+                snap,
+                &keep_prof,
+                null_sys,
+                corp_id,
+                ship_pos,
+                Some(ship_pos + DVec3::new(0.0, 200_000.0, 0.0)),
+                1_800_000_000,
+            )
+            .unwrap_err()
+            .code,
+            "InvalidAnchorDistanceFromShip"
+        );
+        // Fortizar 100 km succeeds, 60 km fails (inside 85 km radius)
+        assert!(validate_and_resolve_anchor(
+            &ctx,
+            snap,
+            &fort_prof,
+            null_sys,
+            corp_id,
+            ship_pos,
+            Some(ship_pos + DVec3::new(100_000.0, 0.0, 0.0)),
+            1_800_000_000,
+        )
+        .is_ok());
+        assert_eq!(
+            validate_and_resolve_anchor(
+                &ctx,
+                snap,
+                &fort_prof,
+                null_sys,
+                corp_id,
+                ship_pos,
+                Some(ship_pos + DVec3::new(60_000.0, 0.0, 0.0)),
+                1_800_000_000,
+            )
+            .unwrap_err()
+            .code,
+            "InvalidAnchorDistanceFromShip"
+        );
     });
 }

@@ -80,18 +80,16 @@ async fn test_space_cyno_and_inventory_vault_containers() {
     sess.solar_system_id = Some(SYS_JITA);
     sess.station_id = Some(STATION_JITA_4_4);
 
-    // Ensure structure vulnerability window is registered so sov_services handles GetCynoJammerState
+    // Ensure structure vulnerability window is registered (both handlers return V24.01 scalar format)
     ctx.db.with_mut_snapshot(|s| {
         s.structure_vulnerability_windows.insert(920_001, (1000, 5000));
     });
 
-    // 2. rpc:beyonce.GetCynoJammerState: initially unjammed system returns isJammed = false
+    // 2. rpc:beyonce.GetCynoJammerState: initially unjammed system returns None
     let unjammed_state = rpc_call(&ctx, &mut sess, "beyonce", "GetCynoJammerState", &[], &kw)
         .await
         .expect("GetCynoJammerState initial");
-    assert_eq!(dict_get(&unjammed_state, "isJammed"), Some(&PyRep::Bool(false)));
-    assert_eq!(dict_get(&unjammed_state, "cynoSuppression"), Some(&PyRep::Bool(false)));
-    assert_eq!(dict_get(&unjammed_state, "structureInhibitor"), Some(&PyRep::Bool(false)));
+    assert_eq!(unjammed_state, PyRep::None);
 
     // Deploy an active mobile cyno inhibitor in space in Jita
     let inhibitor_item_id = 920_001;
@@ -112,13 +110,12 @@ async fn test_space_cyno_and_inventory_vault_containers() {
         );
     });
 
-    // Verify GetCynoJammerState now reports cyno jammed and structure inhibitor active
+    // Verify GetCynoJammerState now reports cyno jammed with V24.01 online timestamp
     let jammed_state = rpc_call(&ctx, &mut sess, "beyonce", "GetCynoJammerState", &[], &kw)
         .await
         .expect("GetCynoJammerState with inhibitor");
-    assert_eq!(dict_get(&jammed_state, "isJammed"), Some(&PyRep::Bool(true)));
-    assert_eq!(dict_get(&jammed_state, "active"), Some(&PyRep::Bool(true)));
-    assert_eq!(dict_get(&jammed_state, "structureInhibitor"), Some(&PyRep::Bool(true)));
+    let now_ticks = ctx.now_blueos_filetime_ticks();
+    assert!(matches!(jammed_state, PyRep::Integer(ts) if ts > 0 && ts <= now_ticks));
 
     // Remove inhibitor -> system returns to unjammed state
     ctx.db.with_mut_snapshot(|s| {
@@ -127,7 +124,7 @@ async fn test_space_cyno_and_inventory_vault_containers() {
     let cleared_state = rpc_call(&ctx, &mut sess, "beyonce", "GetCynoJammerState", &[], &kw)
         .await
         .expect("GetCynoJammerState cleared");
-    assert_eq!(dict_get(&cleared_state, "isJammed"), Some(&PyRep::Bool(false)));
+    assert_eq!(cleared_state, PyRep::None);
 
     // Deploy Pharolux Cyno Beacon (35841) -> beacon allows cyno generation and does NOT jam
     let beacon_structure_id = 920_002;
@@ -156,7 +153,7 @@ async fn test_space_cyno_and_inventory_vault_containers() {
     let beacon_state = rpc_call(&ctx, &mut sess, "beyonce", "GetCynoJammerState", &[], &kw)
         .await
         .expect("GetCynoJammerState with beacon");
-    assert_eq!(dict_get(&beacon_state, "isJammed"), Some(&PyRep::Bool(false)));
+    assert_eq!(beacon_state, PyRep::None);
 
     // Deploy Tenebrex Cyno Jammer (37534) + Sov Hub with Cynosural Suppression -> flex jammer actively jams system cynos
     let hub_structure_id = 920_002;
@@ -220,7 +217,8 @@ async fn test_space_cyno_and_inventory_vault_containers() {
     let tenebrex_state = rpc_call(&ctx, &mut sess, "beyonce", "GetCynoJammerState", &[], &kw)
         .await
         .expect("GetCynoJammerState with Tenebrex");
-    assert_eq!(dict_get(&tenebrex_state, "isJammed"), Some(&PyRep::Bool(true)));
+    let tenebrex_ticks = ctx.now_blueos_filetime_ticks();
+    assert!(matches!(tenebrex_state, PyRep::Integer(ts) if ts > 0 && ts <= tenebrex_ticks));
 
     // Clean up structures
     ctx.db.with_mut_snapshot(|s| {

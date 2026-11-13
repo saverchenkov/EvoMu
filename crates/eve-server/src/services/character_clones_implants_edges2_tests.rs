@@ -693,7 +693,7 @@ fn paper_doll_batch_portrait_apparel_split_and_list_stations() {
     );
     sess.character_id = Some(char_id);
 
-    // Female GetPaperDollData + Batch skipping unknown ID
+    // Female GetPaperDollData (KeyVal with modifiers/colors/sculpts/appearance for V24 StartDeathScene) + Batch skipping unknown ID
     let pd = handle_clones_and_sheet(
         &ctx,
         &mut sess,
@@ -704,7 +704,9 @@ fn paper_doll_batch_portrait_apparel_split_and_list_stations() {
     )
     .unwrap()
     .unwrap();
-    assert_eq!(pd, PyRep::List(vec![PyRep::String("female".into())]));
+    assert_eq!(pd.dict_get("genderLabel").and_then(PyRep::as_str), Some("female"));
+    assert_eq!(pd.dict_get("modifiers"), Some(&PyRep::List(Vec::new())));
+    assert_eq!(pd.dict_get("colors"), Some(&PyRep::List(Vec::new())));
     let batch = handle_clones_and_sheet(
         &ctx,
         &mut sess,

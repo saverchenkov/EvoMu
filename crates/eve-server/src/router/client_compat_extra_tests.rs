@@ -1133,23 +1133,33 @@ fn w4_mutant_killers_untouched_services_helpers_and_defaults() {
     assert_eq!(inc_rows[2].dict_get("state"), Some(&PyRep::Integer(2)));
     assert_eq!(inc_rows[2].dict_get("aggressorFactionID"), Some(&PyRep::Integer(500_020)));
 
+    let female_doll = PyRep::keyval([
+        ("gender", PyRep::Integer(0)),
+        ("modifiers", PyRep::List(Vec::new())),
+        ("colors", PyRep::List(Vec::new())),
+    ]);
     assert_eq!(
         normalize_macho_rpc_reply(
             "paperDollServer",
             "GetPaperDollData",
-            Ok(PyRep::keyval([("gender", PyRep::Integer(0))])),
+            Ok(female_doll.clone()),
         )
         .unwrap(),
-        PyRep::List(vec![PyRep::String("female".into())])
+        female_doll
     );
+    let male_doll = PyRep::keyval([
+        ("gender", PyRep::Integer(1)),
+        ("modifiers", PyRep::List(Vec::new())),
+        ("colors", PyRep::List(Vec::new())),
+    ]);
     assert_eq!(
         normalize_macho_rpc_reply(
             "paperDollServer",
             "GetPaperDollData",
-            Ok(PyRep::keyval([("gender", PyRep::Integer(1))])),
+            Ok(male_doll.clone()),
         )
         .unwrap(),
-        PyRep::List(vec![PyRep::String("male".into())])
+        male_doll
     );
 
     let offer = normalize_macho_rpc_reply(

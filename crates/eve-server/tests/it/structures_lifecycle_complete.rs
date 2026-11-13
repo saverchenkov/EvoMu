@@ -435,7 +435,8 @@ async fn test_low_power_large_structure_skips_armor_reinforcement() {
     let res = attack(&ctx, &mut sess, low).await.expect("strip low-power shield");
     assert_eq!(kv_str(&res, "state"), life::STATE_ARMOR_VULNERABLE, "low-power large structures skip armor reinforcement");
 
-    move_ship(&ctx, &sess, open_space(&ctx, 2.0)).await;
+    let full_pos = ctx.db.with_snapshot(|s| DVec3::from_array(s.structures[&full].position));
+    move_ship(&ctx, &sess, full_pos).await;
     prepare_siege(&ctx, full);
     set_hp(&ctx, full, 1.0, attr(&ctx, 35833, life::ATTR_ARMOR_HP), attr(&ctx, 35833, life::ATTR_HP));
     let res = attack(&ctx, &mut sess, full).await.expect("strip full-power shield");

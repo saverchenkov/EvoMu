@@ -1079,6 +1079,8 @@ async fn test_upwell_anchoring_restrictions_end_to_end() {
         &try_anchor(&ctx, &mut sess, 35832, None, "Hostile Sov Astrahus").await.expect("ADM <= 4.0 allows Medium"),
         "structureID",
     );
+    let watcher_cid = sess.character_id.unwrap();
+    let _ = ctx.drain_notifications_for_char(watcher_cid);
     ctx.advance_virtual_clock(life::ANCHOR_VULNERABLE_SECS + life::ANCHORING_SECS + 10);
     life::sync_all_structures(&ctx);
     assert_eq!(
@@ -1086,12 +1088,26 @@ async fn test_upwell_anchoring_restrictions_end_to_end() {
         life::STATE_ANCHORING,
         "At 24h, Strategic Index 2 hostile sov structure must still be Anchoring (needs 72h)"
     );
+    let anchoring_notifs = ctx.drain_notifications_for_char(watcher_cid);
+    assert!(
+        anchoring_notifs.iter().any(|n| n.event == "OnStructureStateChanged" && n.args == vec![PyRep::Integer(i64::from(HED_GP)), PyRep::Integer(hostile_med_id), PyRep::String(life::STATE_ANCHORING.into())])
+            && anchoring_notifs.iter().any(|n| n.event == "OnCurrentStructureStateChanged" && n.args == vec![PyRep::Integer(i64::from(HED_GP)), PyRep::Integer(hostile_med_id), PyRep::String(life::STATE_ANCHORING.into())])
+            && anchoring_notifs.iter().any(|n| n.event == "OnCorporationStructuresUpdated"),
+        "sync_all_structures transition to Anchoring must emit OnStructureStateChanged/OnCurrentStructureStateChanged/OnCorporationStructuresUpdated (#1012), got {anchoring_notifs:?}"
+    );
     ctx.advance_virtual_clock(2 * 86_400);
     life::sync_all_structures(&ctx);
     assert_eq!(
         ctx.db.with_snapshot(|s| s.structures[&hostile_med_id].state.clone()),
         life::STATE_NO_CORE,
         "At 72h (24h + 2 * 24h), Strategic Index 2 structure finishes anchoring"
+    );
+    let nocore_notifs = ctx.drain_notifications_for_char(watcher_cid);
+    assert!(
+        nocore_notifs.iter().any(|n| n.event == "OnStructureStateChanged" && n.args == vec![PyRep::Integer(i64::from(HED_GP)), PyRep::Integer(hostile_med_id), PyRep::String(life::STATE_NO_CORE.into())])
+            && nocore_notifs.iter().any(|n| n.event == "OnCurrentStructureStateChanged" && n.args == vec![PyRep::Integer(i64::from(HED_GP)), PyRep::Integer(hostile_med_id), PyRep::String(life::STATE_NO_CORE.into())])
+            && nocore_notifs.iter().any(|n| n.event == "OnCorporationStructuresUpdated"),
+        "sync_all_structures transition to NoCore must emit OnStructureStateChanged/OnCurrentStructureStateChanged/OnCorporationStructuresUpdated (#1012), got {nocore_notifs:?}"
     );
 }
 

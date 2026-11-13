@@ -27,6 +27,30 @@ pub const MIN_ANCHOR_SHIP_DISTANCE_M: f64 = 50_000.0;
 pub const MAX_ANCHOR_SHIP_DISTANCE_M: f64 = 75_000.0;
 /// DERIVED: server fallback offset (`60 km` inside `[50 km, 75 km]`) when 2-arg `Anchor` omits explicit coordinates.
 pub const DEFAULT_ANCHOR_SHIP_OFFSET_M: f64 = 60_000.0;
+/// Extra clearance past a structure's SDE radius for minimum anchor distance (`#1011`).
+pub const MIN_ANCHOR_SURFACE_CLEARANCE_M: f64 = 5_000.0;
+/// Extra clearance past a structure's SDE radius for maximum anchor distance (`#1011`).
+pub const MAX_ANCHOR_SURFACE_CLEARANCE_M: f64 = 30_000.0;
+/// Extra clearance past a structure's SDE radius for default 2-arg `Anchor` offset (`#1011`).
+pub const DEFAULT_ANCHOR_SURFACE_CLEARANCE_M: f64 = 15_000.0;
+
+/// Returns `(min_dist_m, max_dist_m, default_offset_m)` from the deploying ship for `profile` (`#1011`).
+///
+/// The V24.01 deployment UI places Large/XL structures (Fortizar `85 km`, Keepstar `150 km`)
+/// around `radius + 15 km` from the deploying ship, whereas Medium/FLEX structures stay in `[50 km, 75 km]`.
+pub fn anchor_ship_distance_bounds(ctx: &ServerContext, profile: &StructureProfile) -> (f64, f64, f64) {
+    let radius = ctx
+        .sde
+        .types
+        .get(&profile.type_id)
+        .map(|t| t.radius.max(0.0))
+        .unwrap_or(0.0);
+    let min_dist = (radius + MIN_ANCHOR_SURFACE_CLEARANCE_M).max(MIN_ANCHOR_SHIP_DISTANCE_M);
+    let max_dist = (radius + MAX_ANCHOR_SURFACE_CLEARANCE_M).max(MAX_ANCHOR_SHIP_DISTANCE_M);
+    let default_offset =
+        (radius + DEFAULT_ANCHOR_SURFACE_CLEARANCE_M).max(DEFAULT_ANCHOR_SHIP_OFFSET_M);
+    (min_dist, max_dist, default_offset)
+}
 /// Minimum distance from other Upwell structures when anchoring a FLEX structure (`500 km`).
 pub const FLEX_MIN_STRUCTURE_DISTANCE_M: f64 = 500_000.0;
 /// Minimum distance from stargates when anchoring an Ansiblex Jump Gate (`35841`, `100,000 km`).
@@ -269,9 +293,10 @@ pub fn validate_and_resolve_anchor(
             ));
         }
     }
+    let (min_dist_m, max_dist_m, default_offset_m) = anchor_ship_distance_bounds(ctx, profile);
     let anchor_pos = match explicit_pos {
         Some(pos) => pos,
-        None => ship_pos + DVec3::new(DEFAULT_ANCHOR_SHIP_OFFSET_M, 0.0, 0.0),
+        None => ship_pos + DVec3::new(default_offset_m, 0.0, 0.0),
     };
     if !anchor_pos.is_finite() || anchor_pos.abs().max_element() > 1.0e14 {
         return Err(err(
@@ -280,11 +305,13 @@ pub fn validate_and_resolve_anchor(
         ));
     }
     let dist = anchor_pos.distance(ship_pos);
-    if !(MIN_ANCHOR_SHIP_DISTANCE_M - 1e-3..=MAX_ANCHOR_SHIP_DISTANCE_M + 1e-3).contains(&dist) {
+    if !(min_dist_m - 1e-3..=max_dist_m + 1e-3).contains(&dist) {
         return Err(err(
             "InvalidAnchorDistanceFromShip",
             format!(
-                "Anchoring position must be between 50 km and 75 km from the deploying ship (got {:.1} km)",
+                "Anchoring position must be between {:.0} km and {:.0} km from the deploying ship (got {:.1} km)",
+                min_dist_m / 1_000.0,
+                max_dist_m / 1_000.0,
                 dist / 1_000.0
             ),
         ));

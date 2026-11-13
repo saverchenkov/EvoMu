@@ -1410,15 +1410,6 @@ pub fn normalize_macho_rpc_reply(
                 rows,
             ));
         }
-    } else if service == "paperDollServer" && method == "GetPaperDollData" {
-        if let Ok(PyRep::KeyVal(map)) = rpc_res {
-            let gender = map
-                .get("gender")
-                .and_then(PyRep::as_i64)
-                .map(|g| if g == 0 { "female" } else { "male" })
-                .unwrap_or("male");
-            return Ok(PyRep::List(vec![PyRep::String(gender.into())]));
-        }
     } else if service == "paperDollServer" && method == "GetPaperDollPortraitDataFor" {
         if let Ok(rep) = rpc_res {
             if matches!(rep, PyRep::KeyVal(_) | PyRep::Dict(_)) {

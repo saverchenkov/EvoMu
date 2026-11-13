@@ -821,7 +821,8 @@ async fn test_sov_cyno_jammer_upgrade_and_hub_hacking_parity() {
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
     let jam_on = rpc_call(&ctx, &mut s_dir, "beyonce", "GetCynoJammerState", &[]).await.expect("GetCynoJammerState");
-    assert_eq!(jam_on.dict_get("isJammed"), Some(&PyRep::Bool(true)));
+    let now_ticks = ctx.now_blueos_filetime_ticks();
+    assert!(matches!(jam_on, PyRep::Integer(ts) if ts > 0 && ts <= now_ticks), "expected active jammer <= {now_ticks}, got {jam_on:?}");
     ctx.db.with_mut_snapshot(|s| {
         s.fleets.insert(5001, eve_db::FleetRecord { fleet_id: 5001, boss_id: PILOT, members: vec![PILOT], ..Default::default() });
     });
@@ -906,7 +907,7 @@ async fn test_sov_cyno_jammer_upgrade_and_hub_hacking_parity() {
 
     // While hacked, Cynosural Suppression upgrade is disabled so Tenebrex immediately stops jamming!
     let jam_hacked = rpc_call(&ctx, &mut s_dir, "beyonce", "GetCynoJammerState", &[]).await.expect("GetCynoJammerState while hacked");
-    assert_eq!(jam_hacked.dict_get("isJammed"), Some(&PyRep::Bool(false)));
+    assert_eq!(jam_hacked, PyRep::None);
     let cyno_ok = rpc_call(&ctx, &mut s_dir, "dogmaIM", "Activate", &[PyRep::Integer(984_020), PyRep::String("cynosuralGeneration".into())]).await;
     assert_eq!(cyno_ok.unwrap().dict_get("solarSystemID").and_then(|v| v.as_i64()), Some(null_sys as i64));
 
@@ -916,7 +917,9 @@ async fn test_sov_cyno_jammer_upgrade_and_hub_hacking_parity() {
     assert_eq!(is_hub_hacked(&ctx, hub_id), false);
     ctx.advance_secs(TENEBREX_SPOOL_UP_SECS + 5);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-    assert_eq!(rpc_call(&ctx, &mut s_dir, "beyonce", "GetCynoJammerState", &[]).await.unwrap().dict_get("isJammed"), Some(&PyRep::Bool(true)));
+    let jam_restored = rpc_call(&ctx, &mut s_dir, "beyonce", "GetCynoJammerState", &[]).await.unwrap();
+    let restored_ticks = ctx.now_blueos_filetime_ticks();
+    assert!(matches!(jam_restored, PyRep::Integer(ts) if ts > 0 && ts <= restored_ticks));
 
     drop(ctx);
 }

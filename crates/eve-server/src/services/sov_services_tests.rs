@@ -630,14 +630,14 @@ async fn sov_services_cyno_warp_clone_skyhook_guards_and_corp_contracts() {
         assert!(s.sov_runtime.sov_hubs[&hub_id].upgrades[0].low_power);
     });
 
-    // beyonce.GetCynoJammerState detects both item inhibitor and suppressor structure
+    // beyonce.GetCynoJammerState returns V24.01 online timestamp when inhibitor/jammer is active
     let mut sess = sov_session(char_id, corp_id, sys_id, None);
     let cyno = handle(&ctx, &mut sess, "beyonce", "GetCynoJammerState", &[PyRep::Integer(i64::from(sys_id))], &kw)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(cyno.dict_get("isJammed"), Some(&PyRep::Bool(true)));
-    assert_eq!(cyno.dict_get("structureInhibitor"), Some(&PyRep::Bool(true)));
+    let now_ticks = ctx.now_blueos_filetime_ticks();
+    assert!(matches!(cyno, PyRep::Integer(ts) if ts > 0 && ts <= now_ticks), "expected active jammer ticks <= {now_ticks}, got {cyno:?}");
 
     // handle_reset_last_clone_jump_time error without GM role, CharacterNotFound, then success with GM role
     assert_eq!(handle_reset_last_clone_jump_time(&ctx, &sess).unwrap_err().code, "GMRoleRequired");

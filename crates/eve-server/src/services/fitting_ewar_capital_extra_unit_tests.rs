@@ -349,12 +349,13 @@ async fn siege_triage_bastion_indy_core_phenomena_mwd_and_mjd_branches() {
             .await.err().unwrap().code,
         "InvalidShipGroup"
     );
+    let before_secs = ctx.now_unix_secs();
     let bas_ok = run_prep(
         &ctx, &sys, sys_id, char_id, ship_id, 900, mod_id, &bas_fm, &bas_type, &bas_st, &fit, None, false, false, false,
     ).await.unwrap();
     assert!(bas_ok.immobilize_self && !bas_ok.self_ewar_immune);
     let wep_until = ctx.crimewatch.write().unwrap().get_or_create(char_id).weapon_timer_until_unix;
-    assert!(wep_until >= ctx.now_unix_secs() + 60);
+    assert!(wep_until >= before_secs + 60);
 
     // Phenomena Generator (group 1815) hull check, partial fuel removal, and dbuff application
     let (ph_fm, ph_st) = synth_module_and_state(mod_id, 43554, 27, None, &[(2468, 9901.0), (2469, 25.0)]);
