@@ -443,6 +443,7 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::TakeBall { .. } => "TakeBall",
             SystemCommand::RestoreBall { .. } => "RestoreBall",
             SystemCommand::ModifyCombatState { .. } => "ModifyCombatState",
+            SystemCommand::FlushConditionCheckpoint { .. } => "FlushConditionCheckpoint",
         }
     }
 
@@ -534,9 +535,11 @@ fn system_command_all_variants_construct_and_match() {
         SystemCommand::RecordIncomingArmorDamage { ship_id: 1, damage: [1.0, 2.0, 3.0, 4.0], reply: oneshot::channel().0 },
         SystemCommand::StopNonWarpModuleCycles { ship_id: 1, reply: oneshot::channel().0 },
         SystemCommand::FlushPeerObserverUpdates { exclude_ball_id: None, reply: oneshot::channel().0 },
+        SystemCommand::FlushConditionCheckpoint { reply: oneshot::channel().0 },
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
-    assert_eq!(tags.len(), 64);
+    assert_eq!(tags.len(), 65);
     assert_eq!(tags[0], "SpawnBall");
     assert_eq!(tags[63], "FlushPeerObserverUpdates");
+    assert_eq!(tags[64], "FlushConditionCheckpoint");
 }

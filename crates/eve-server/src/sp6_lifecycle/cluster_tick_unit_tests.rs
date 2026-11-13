@@ -1298,3 +1298,360 @@ fn social_extras_leaf_lock_and_no_nested_world_snapshots_825_838_891_909() {
         .unwrap();
     assert!(resolved.0 > 0);
 }
+
+#[tokio::test]
+async fn step_output_condition_checkpoint_epoch_guard_and_dirty_only_919_839_866() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let sys_id = 30_000_142_u32;
+
+    let epoch_1 = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        if let Some(item) = snap.items.get_mut(&ship_id) {
+            item.location_id = sys_id as i64;
+        }
+        let ep = crate::sp6_lifecycle::bump_ship_space_entry_epoch_in_snap(snap, ship_id, sys_id);
+        crate::sp6_lifecycle::write_ship_condition_in_snap(
+            snap,
+            ship_id,
+            crate::sp6_lifecycle::PersistedShipCondition {
+                shield_hp: 500.0,
+                armor_hp: 400.0,
+                hull_hp: 350.0,
+                capacitor: Some(250.0),
+                in_space_system: Some(sys_id),
+                space_entry_epoch: ep,
+            },
+        );
+        ep
+    });
+
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    handle
+        .spawn_ball_with_combat_state(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: glam::DVec3::new(1_000.0, 2_000.0, 3_000.0),
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 2.5,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            eve_destiny::CombatState {
+                shield_hp: 500.0,
+                max_shield: 500.0,
+                shield_recharge_rate_ms: 0.0,
+                armor_hp: 400.0,
+                max_armor: 400.0,
+                structure_hp: 350.0,
+                max_structure: 350.0,
+                capacitor: 250.0,
+                max_capacitor: 250.0,
+                capacitor_recharge_rate_ms: 0.0,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // 1. T-5: Step through 10 ticks with zero HP/cap/position changes; the staggered checkpoint tick
+    // must emit `Some(vec![])` (0 dirty rows).
+    let mut saw_checkpoint_tick = false;
+    for _ in 0..10 {
+        let out = handle.step_with_output(1.0).await.unwrap();
+        if crate::system_actor::is_condition_checkpoint_tick(sys_id, out.tick) {
+            saw_checkpoint_tick = true;
+            assert_eq!(
+                out.condition_checkpoint.as_ref().map(Vec::len),
+                Some(0),
+                "T-5: unchanged ball must produce 0 dirty checkpoint entries on checkpoint tick"
+            );
+        } else {
+            assert!(
+                out.condition_checkpoint.is_none(),
+                "non-checkpoint tick without armor/hull change must not emit condition_checkpoint"
+            );
+        }
+    }
+    assert!(saw_checkpoint_tick);
+
+    // 2. T-4: Armor damage on a non-10-tick step commits immediately via StepOutput.
+    handle
+        .modify_combat_state(ship_id, |cs| {
+            cs.armor_hp = 275.0;
+        })
+        .await
+        .unwrap();
+    let out_armor = handle.step_with_output(1.0).await.unwrap();
+    assert!(
+        out_armor
+            .condition_checkpoint
+            .as_ref()
+            .is_some_and(|v| v.len() == 1 && v[0].ball_id == ship_id),
+        "T-4: armor HP change must emit immediate condition_checkpoint entry"
+    );
+    let persisted_armor = ctx
+        .db
+        .with_snapshot(|snap| crate::sp6_lifecycle::read_ship_condition_in_snap(snap, ship_id))
+        .unwrap();
+    assert!((persisted_armor.armor_hp - 275.0).abs() < 1e-6);
+
+    // 3. T-2: Stale space_entry_epoch or wrong solar_system_id is rejected by apply_condition_checkpoint_for_system_in_db.
+    let epoch_2 = ctx.db.with_mut_snapshot(|snap| {
+        let ep = crate::sp6_lifecycle::bump_ship_space_entry_epoch_in_snap(snap, ship_id, sys_id);
+        crate::sp6_lifecycle::write_ship_condition_in_snap(
+            snap,
+            ship_id,
+            crate::sp6_lifecycle::PersistedShipCondition {
+                shield_hp: 500.0,
+                armor_hp: 400.0,
+                hull_hp: 350.0,
+                capacitor: Some(250.0),
+                in_space_system: Some(sys_id),
+                space_entry_epoch: ep,
+            },
+        );
+        ep
+    });
+    assert!(epoch_2 > epoch_1);
+
+    let stale_entry = crate::system_actor::ConditionCheckpointEntry {
+        ball_id: ship_id,
+        space_entry_epoch: epoch_1, // Stale epoch!
+        combat_state: Some(eve_destiny::CombatState {
+            shield_hp: 10.0,
+            armor_hp: 10.0,
+            structure_hp: 10.0,
+            capacitor: 10.0,
+            ..Default::default()
+        }),
+        position: [99_999.0, 0.0, 0.0],
+    };
+    let written_stale = crate::sp6_lifecycle::apply_condition_checkpoint_for_system_in_db(
+        &ctx.db,
+        sys_id,
+        &[stale_entry.clone()],
+    );
+    assert_eq!(
+        written_stale, 0,
+        "T-2: checkpoint entry with stale space_entry_epoch must be rejected"
+    );
+    let written_wrong_sys = crate::sp6_lifecycle::apply_condition_checkpoint_for_system_in_db(
+        &ctx.db,
+        30_002_187,
+        &[crate::system_actor::ConditionCheckpointEntry {
+            space_entry_epoch: epoch_2,
+            ..stale_entry
+        }],
+    );
+    assert_eq!(
+        written_wrong_sys, 0,
+        "T-2: checkpoint entry for wrong solar_system_id must be rejected"
+    );
+    let cond_after = ctx
+        .db
+        .with_snapshot(|snap| crate::sp6_lifecycle::read_ship_condition_in_snap(snap, ship_id))
+        .unwrap();
+    assert!((cond_after.armor_hp - 400.0).abs() < 1e-6);
+}
+
+#[tokio::test]
+async fn system_step_hook_and_npc_death_hook_use_live_server_context_839() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let probe_id = 990_001_111_i64;
+    let npc_ball_id = -88_001_i64;
+    let spawn_group_id = 777_u32;
+
+    // 1. Seed a live scanner probe in `ctx.active_scanner_probes` and `sp6_lifecycle.active_scanner_probes`.
+    let probe = crate::sp6_lifecycle::PersistedScannerProbe {
+        probe_id,
+        owner_char_id: char_id,
+        ship_id: 100_000_001,
+        launcher_item_id: 100_000_002,
+        probe_type_id: 30013,
+        solar_system_id: sys_id,
+        position: [1_000.0, 0.0, 0.0],
+        destination: [1_000.0, 0.0, 0.0],
+        scan_range_au: 4.0,
+        state: 1,
+        launched_at_unix: 1_700_000_000,
+        expires_at_unix: 1_900_000_000,
+    };
+    ctx.active_scanner_probes
+        .write()
+        .unwrap()
+        .insert(probe_id, probe.clone());
+    with_mut_sp6_state(&ctx.db, |st, _| {
+        st.active_scanner_probes.insert(probe_id, probe);
+    });
+
+    // 2. Seed an NPC entity in `ctx.npc_spawns` for `sys_id`.
+    {
+        let mut spawns = ctx.npc_spawns.write().unwrap();
+        let mgr = spawns
+            .entry(sys_id)
+            .or_insert_with(crate::combat::npc_ai::NpcSpawnManager::new);
+        mgr.entities.insert(
+            npc_ball_id,
+            crate::combat::npc_ai::NpcEntity {
+                ball_id: npc_ball_id,
+                type_id: 10001,
+                faction_id: 500010,
+                state: crate::combat::npc_ai::NpcAiState::Idle,
+                spawn_group_id,
+                spawn_pos: glam::DVec3::ZERO,
+                target_id: None,
+                bounty_isk: 1_500.0,
+                optimal_range: 5_000.0,
+                orbit_range: 2_500.0,
+                base_dps: 10.0,
+                damage_vector: [2.5; 4],
+                last_attack_tick: 0,
+                has_shield_rep: false,
+                has_armor_rep: false,
+            },
+        );
+    }
+
+    // 3. Apply a StepOutput that destroys `npc_ball_id` and runs `npc_death_hook` + `system_step_hook`.
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    let step_out = crate::system_actor::StepOutput {
+        solar_system_id: sys_id,
+        tick: 1,
+        dt_sim: 1.0,
+        landed_warps: Vec::new(),
+        destroyed_balls: vec![(npc_ball_id, Some(char_id))],
+        lock_completed_events: Vec::new(),
+        target_lost_events: Vec::new(),
+        cycle_actions: Vec::new(),
+        condition_checkpoint: None,
+        broadcast: None,
+    };
+    handle.apply_step_output(&step_out).await;
+
+    // 4. Verify `ctx.npc_spawns` recorded the respawn timer on the real `ServerContext` (#839)
+    // and `active_scanner_probes` in `ctx.db` was NOT wiped by a throwaway shadow ServerContext (#839).
+    {
+        let spawns = ctx.npc_spawns.read().unwrap();
+        let mgr = spawns.get(&sys_id).expect("npc_spawns entry exists");
+        assert!(
+            !mgr.entities.contains_key(&npc_ball_id),
+            "#839: destroyed NPC ball must be removed from live ctx.npc_spawns"
+        );
+        assert!(
+            mgr.respawn_timers.contains_key(&(sys_id, spawn_group_id)),
+            "#839: live ctx.npc_spawns must record respawn timer when NPC dies in step hook"
+        );
+    }
+    ctx.persist_server_runtime_to_db();
+    let probe_still_persisted =
+        super::super::with_sp6_state(&ctx.db, |st| st.active_scanner_probes.contains_key(&probe_id));
+    assert!(
+        probe_still_persisted,
+        "#839: persisted scanner probes must not be clobbered after system_step_hook"
+    );
+}
+
+#[tokio::test]
+async fn system_hibernation_zero_idle_tick_work_and_eviction_919_866_869() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let idle_sys = 30_002_187_u32; // Amarr (no characters in demo seed)
+    let idle_handle = ctx.systems.get_or_spawn(idle_sys);
+
+    // 1. Empty system with no characters, no dynamic balls, and no subscribers starts hibernated (#919, #866).
+    assert!(
+        idle_handle.is_hibernated(),
+        "empty system with no dynamic balls or sessions must hibernate"
+    );
+    assert!(idle_handle.hibernated_since_unix() > 0);
+    let tick_before = idle_handle.ballpark.read().unwrap().current_tick;
+
+    // 2. Physics tick skips hibernated empty systems (0 per-tick physics work) and records idle ticks.
+    crate::sp6_lifecycle::step_active_systems_physics_tick(&ctx, 1).await;
+    assert_eq!(
+        idle_handle.ballpark.read().unwrap().current_tick,
+        tick_before,
+        "#919: hibernated empty system must do zero per-tick physics work"
+    );
+    assert!(idle_handle.idle_ticks() >= 1);
+
+    // 3. Spawning a dynamic ball wakes the system out of hibernation immediately.
+    let temp_ball_id = 777_888_999_i64;
+    idle_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: temp_ball_id,
+            type_id: 587,
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 2.5,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+    assert!(
+        !idle_handle.is_hibernated(),
+        "#919: spawning a dynamic ball must wake the system from hibernation"
+    );
+    crate::sp6_lifecycle::step_active_systems_physics_tick(&ctx, 1).await;
+    assert_eq!(
+        idle_handle.ballpark.read().unwrap().current_tick,
+        tick_before + 1,
+        "awake system must advance physics tick"
+    );
+
+    // 4. Removing the last dynamic ball returns the system to hibernation, and evict_idle_systems evicts it.
+    idle_handle.remove_ball(temp_ball_id).await.unwrap();
+    assert!(
+        idle_handle.is_hibernated(),
+        "removing the last dynamic ball must return empty system to hibernation"
+    );
+    drop(idle_handle);
+    let evicted = ctx
+        .systems
+        .evict_idle_systems(&ctx.db, ctx.now_unix().saturating_add(600), 300);
+    assert!(
+        evicted.contains(&idle_sys),
+        "#919/#866: evict_idle_systems must evict hibernated empty system past threshold"
+    );
+    assert!(ctx.systems.get_handle(idle_sys).is_none());
+
+    // 5. #869: npc_spawns entry for an active system is updated in place without remove->await->insert.
+    let active_sys = 30_000_142_u32;
+    let _ = ctx.systems.get_or_spawn(active_sys);
+    {
+        let mut spawns = ctx.npc_spawns.write().unwrap();
+        let mgr = spawns
+            .entry(active_sys)
+            .or_insert_with(crate::combat::npc_ai::NpcSpawnManager::new);
+        mgr.respawn_timers.insert((active_sys, 42_424), 9_999_999_999);
+    }
+    ctx.clock().advance_secs(1);
+    tick_background_cluster(&ctx).await;
+    let preserved_timer = ctx
+        .npc_spawns
+        .read()
+        .unwrap()
+        .get(&active_sys)
+        .and_then(|mgr| mgr.respawn_timers.get(&(active_sys, 42_424)).copied());
+    assert_eq!(
+        preserved_timer,
+        Some(9_999_999_999),
+        "#869: npc_spawns state must never be dropped or overwritten across cluster tick awaits"
+    );
+}

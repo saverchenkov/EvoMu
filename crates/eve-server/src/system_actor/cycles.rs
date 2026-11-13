@@ -1550,7 +1550,7 @@ impl SystemHandle {
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
             asteroids, asteroid_templates, sde_opt, db_opt, mechanic_rng_opt,
             sim_elapsed_secs, pending_cycle_actions, tactical_state,
-            pending_notifications_opt, notify_tx_opt,
+            pending_notifications_opt, notify_tx_opt, ..
         } = &mut *st;
         if dt > 0.0 && dt.is_finite() {
             *sim_elapsed_secs += dt;
