@@ -17,6 +17,15 @@ use std::sync::{Arc, LockResult, PoisonError, RwLock, TryLockError, TryLockResul
 
 pub static NEXT_BOUND_ID: AtomicU64 = AtomicU64::new(10_000);
 
+/// Returns current host wallclock time as EVE BlueOS 100ns FILETIME ticks.
+///
+/// Live clients keep `blue.os.GetSimTime()` anchored to host wallclock when
+/// `/advancetime` advances server timers without emitting `DoSimClockRebase`.
+pub fn host_wall_blueos_filetime_ticks() -> i64 {
+    let (secs, nanos) = eve_db::clock::host_wall_unix_secs_and_nanos();
+    (secs as i64 + 11_644_473_600) * 10_000_000 + (nanos as i64 / 100)
+}
+
 pub const EMBEDDED_RPC_CATALOG_JSON: &str =
     include_str!("../../../../docs/index/rpc_service_catalog.json");
 pub const EMBEDDED_QUASAR_CATALOG_JSON: &str =
@@ -1621,6 +1630,14 @@ impl ServerContext {
 
     pub fn now_blueos_filetime_ticks(&self) -> i64 {
         self.clock().now_blueos_filetime_ticks()
+    }
+
+    /// Returns a BlueOS 100ns FILETIME timestamp anchored to the client's `blue.os.GetSimTime()`
+    /// baseline (host wallclock), so `/advancetime` calls via
+    /// [`Self::advance_secs_without_sim_clock_rebase`] never push godma/FX/timer timestamps
+    /// >24h into the client's future and trigger `godma.py ActualStopEffect` sleep overflows.
+    pub fn now_client_sim_filetime_ticks(&self) -> i64 {
+        host_wall_blueos_filetime_ticks()
     }
 
     /// Advances all active character skill queues by `elapsed_secs` of virtual time (`T-7`).

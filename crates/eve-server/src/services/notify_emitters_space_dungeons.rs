@@ -562,7 +562,7 @@ pub fn emit_module_activation_godma_notifications(
     ) else {
         return;
     };
-    let now_ft = ctx.now_blueos_filetime_ticks();
+    let now_ft = ctx.now_client_sim_filetime_ticks();
     let dur_ms_f64 = (duration_s.max(1.0)) * 1_000.0;
     let dur_ms = dur_ms_f64.round() as i64;
     let active_effect_line = PyRep::List(vec![
@@ -916,7 +916,7 @@ pub fn emit_ecm_jam_landed(
     target_id: i64,
     duration_s: f64,
 ) {
-    let now_ft = ctx.now_blueos_filetime_ticks();
+    let now_ft = ctx.now_client_sim_filetime_ticks();
     let duration_ms = (duration_s.max(1.0)) * 1_000.0;
     ctx.notify(
         NotificationTarget::SolarSystem(sys_id),
@@ -1006,7 +1006,7 @@ pub fn emit_incursion_influence_update(
 /// when gate or wormhole jump cloak begins in the destination solar system.
 pub fn emit_jump_cloak_started(ctx: &ServerContext, char_id: i64, ship_id: i64) {
     let duration_ft: i64 = 600_000_000;
-    let end_ft = ctx.now_blueos_filetime_ticks().saturating_add(duration_ft);
+    let end_ft = ctx.now_client_sim_filetime_ticks().saturating_add(duration_ft);
     ctx.notify(
         NotificationTarget::Character(char_id),
         "OnJumpCloakUpdated",

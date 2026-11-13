@@ -1184,7 +1184,7 @@ impl ServerContext {
         duration_ms: i64,
         repeat: i32,
     ) -> Vec<PendingMachoNotification> {
-        let now_ticks = self.now_blueos_filetime_ticks();
+        let now_ticks = self.now_client_sim_filetime_ticks();
         let flag = if active { 1 } else { 0 };
         self.notify(
             target,
@@ -1467,7 +1467,7 @@ impl ServerContext {
         } else {
             repeat_opt.unwrap_or(1000)
         };
-        let now = self.now_blueos_filetime_ticks();
+        let now = self.now_client_sim_filetime_ticks();
         let environment = PyRep::Tuple(vec![
             PyRep::Integer(module_id),
             PyRep::Integer(char_id),
@@ -1535,7 +1535,7 @@ impl ServerContext {
         online: bool,
     ) -> Vec<PendingMachoNotification> {
         let (new_v, old_v) = if online { (1.0, 0.0) } else { (0.0, 1.0) };
-        let now = self.now_blueos_filetime_ticks();
+        let now = self.now_client_sim_filetime_ticks();
         let entry = PyRep::Tuple(vec![
             PyRep::String("OnModuleAttributeChange".into()),
             PyRep::Integer(char_id),
@@ -1564,7 +1564,7 @@ impl ServerContext {
         old_pg: f64,
         new_pg: f64,
     ) -> Vec<PendingMachoNotification> {
-        let now = self.now_blueos_filetime_ticks();
+        let now = self.now_client_sim_filetime_ticks();
         let changes = vec![
             PyRep::Tuple(vec![
                 PyRep::String("OnModuleAttributeChange".into()),
@@ -1629,7 +1629,7 @@ impl ServerContext {
         if char_id <= 0 || ship_id <= 0 || !new_cap.is_finite() || !max_cap.is_finite() {
             return Vec::new();
         }
-        let now = self.now_blueos_filetime_ticks();
+        let now = self.now_client_sim_filetime_ticks();
         let prev = old_cap.filter(|v| v.is_finite()).unwrap_or(new_cap);
         let mut out = self.notify(
             NotificationTarget::Character(char_id),

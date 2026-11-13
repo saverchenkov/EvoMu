@@ -257,7 +257,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                             name_opt,
                         )
                     {
-                        let now = ctx.now_blueos_filetime_ticks();
+                        let now = ctx.now_client_sim_filetime_ticks();
                         ctx.notify(
                             crate::router::NotificationTarget::Character(char_id),
                             "OnSpecialFX",
@@ -413,7 +413,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                     PyRep::Integer(char_id),
                     PyRep::Integer(module_id),
                     PyRep::Integer(eve_sde::attr_ids::DAMAGE as i64),
-                    PyRep::Integer(ctx.now_blueos_filetime_ticks()),
+                    PyRep::Integer(ctx.now_client_sim_filetime_ticks()),
                     PyRep::Real(0.0),
                     PyRep::Real(0.0),
                     PyRep::None,

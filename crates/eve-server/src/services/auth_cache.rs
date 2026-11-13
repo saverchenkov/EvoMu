@@ -1787,9 +1787,7 @@ async fn handle_slash_teleport(
                 persisted_pos = Some(tr_pos);
             } else {
                 if !stopped_mid_warp {
-                    let _ = new_handle
-                        .set_movement_mode(ship_id, MovementMode::Stop)
-                        .await;
+                    let _ = new_handle.force_stop_warp(ship_id);
                 }
                 if let Some(tr_pos) = explicit_pos {
                     let _ = new_handle.set_ball_position(ship_id, tr_pos).await;

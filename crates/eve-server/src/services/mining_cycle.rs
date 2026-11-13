@@ -808,7 +808,7 @@ pub(crate) fn emit_mining_godma_and_special_fx(
     active: bool,
     duration_ms: u64,
 ) {
-    let now_ft = ctx.now_blueos_filetime_ticks();
+    let now_ft = ctx.now_client_sim_filetime_ticks();
     let flag = i64::from(active);
     let repeat = if active { 1000_i64 } else { 0_i64 };
     let actual_stop_time = if active {

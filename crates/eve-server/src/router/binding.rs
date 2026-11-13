@@ -1198,7 +1198,7 @@ impl ServerContext {
             );
 
             let effect_id = effect_id_for_module_sde(sde, cycle.module_type_id, Some(&cycle.effect_name)).unwrap_or(0);
-            let now = db.clock().now_blueos_filetime_ticks();
+            let now = crate::router::host_wall_blueos_filetime_ticks();
             let environment = PyRep::Tuple(vec![
                 PyRep::Integer(cycle.module_id),
                 PyRep::Integer(char_id),

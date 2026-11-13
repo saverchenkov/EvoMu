@@ -2047,7 +2047,7 @@ pub(crate) fn flush_pending_cycle_damage_notifications(
                     crate::router::ServerContext::build_ship_capacitor_attr_change_rep(
                         *char_id,
                         *ship_id,
-                        now,
+                        crate::router::host_wall_blueos_filetime_ticks(),
                         *new_cap,
                         if old_cap.is_finite() { *old_cap } else { *new_cap },
                     ),

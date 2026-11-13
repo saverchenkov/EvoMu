@@ -1071,7 +1071,7 @@ async fn handle_fighters_inner(
                 let _ = sys_handle.spawn_ball_with_meta(ball, cs, fighter_meta).await;
 
                 let tube_flag = (159 + tube_idx) as i64;
-                let now_ft = ctx.now_blueos_filetime_ticks();
+                let now_ft = ctx.now_client_sim_filetime_ticks();
                 crate::router::notify_registry::push_typed_session_notification(
                     session,
                     crate::router::notify_registry::OnFighterTubeTaskStatus {
@@ -1266,7 +1266,7 @@ async fn handle_fighters_inner(
                 });
                 let tube_flag = (159 + f.tube_index) as i64;
                 let recalled_qty = ctx.db.with_snapshot(|s| s.items.get(&f.item_id).map(|i| i.quantity).unwrap_or(f.squadron_size as i32)) as i64;
-                let now_ft = ctx.now_blueos_filetime_ticks();
+                let now_ft = ctx.now_client_sim_filetime_ticks();
                 let end_ft = now_ft + (total_rearm_secs as i64) * 10_000_000;
                 crate::router::notify_registry::push_typed_session_notification(
                     session,
