@@ -1131,15 +1131,43 @@ impl ShadowClient {
     }
 
     pub fn apply_session_change(&mut self, args: &[PyRep]) {
-        let entries_opt = args.iter().rev().find_map(|arg| match arg {
-            PyRep::Dict(entries) => Some(entries.as_slice()),
-            PyRep::Tuple(inner) => inner.iter().rev().find_map(|sub| match sub {
-                PyRep::Dict(entries) => Some(entries.as_slice()),
+        fn is_session_change_dict(entries: &[(PyRep, PyRep)]) -> bool {
+            entries.iter().any(|(k, _)| {
+                matches!(
+                    k.as_str(),
+                    Some(
+                        "charid"
+                            | "userid"
+                            | "stationid"
+                            | "stationid2"
+                            | "structureid"
+                            | "solarsystemid"
+                            | "solarsystemid2"
+                            | "shipid"
+                            | "corpid"
+                            | "allianceid"
+                            | "warfactionid"
+                            | "factionid"
+                            | "fleetid"
+                            | "wingid"
+                            | "squadid"
+                            | "constellationid"
+                            | "regionid"
+                            | "role"
+                    )
+                )
+            })
+        }
+        fn find_dict(rep: &PyRep) -> Option<&[(PyRep, PyRep)]> {
+            match rep {
+                PyRep::Dict(entries) if is_session_change_dict(entries) => Some(entries.as_slice()),
+                PyRep::Tuple(inner) | PyRep::List(inner) => inner.iter().rev().find_map(find_dict),
+                PyRep::SubStream(inner) => find_dict(inner),
+                PyRep::Object { args, .. } => find_dict(args),
                 _ => None,
-            }),
-            _ => None,
-        });
-        let Some(entries) = entries_opt else { return };
+            }
+        }
+        let Some(entries) = args.iter().rev().find_map(find_dict) else { return };
         self.session.synced = true;
         for (k, v) in entries {
             let Some(attr) = k.as_str() else { continue };

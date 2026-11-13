@@ -27,11 +27,45 @@ fn drain_and_apply_notifications(
     }
 }
 
+async fn wire_call(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    service: &str,
+    bound_id: Option<u64>,
+    method: &str,
+    args: &[PyRep],
+    kw: &HashMap<String, PyRep>,
+    shadow: Option<&mut ShadowClient>,
+) -> PyRep {
+    let mut harness = common::borrow_wire_harness(ctx, sess);
+    let out = harness.call_exchange(service, bound_id, method, args, kw).await;
+    if let Some(sh) = shadow {
+        for frame in &out.frames {
+            match &frame.kind {
+                eve_testkit::client_harness::ClientWireFrameKind::Notification { event, args } => {
+                    sh.apply_notification(event, args);
+                }
+                eve_testkit::client_harness::ClientWireFrameKind::DoDestinyUpdate { updates, .. } => {
+                    sh.apply_notification("DoDestinyUpdate", std::slice::from_ref(updates));
+                }
+                eve_testkit::client_harness::ClientWireFrameKind::SessionChange { packet } => {
+                    sh.apply_notification("SessionChangeNotification", std::slice::from_ref(packet));
+                }
+                eve_testkit::client_harness::ClientWireFrameKind::CallRsp { .. }
+                | eve_testkit::client_harness::ClientWireFrameKind::ErrorResponse { .. } => {}
+            }
+        }
+    }
+    out.result
+        .unwrap_or_else(|e| panic!("{service}.{method} failed: {e:?}"))
+}
+
 async fn login_and_select_pilot(ctx: &ServerContext, sess_id: u64) -> SessionState {
     let kw = HashMap::new();
     let mut sess = SessionState::new(sess_id);
     common::login_pilot(ctx, &mut sess, "demo", "demo-secret").await;
-    ctx.dispatch_rpc(
+    wire_call(
+        ctx,
         &mut sess,
         "charUnboundMgr",
         None,
@@ -40,8 +74,7 @@ async fn login_and_select_pilot(ctx: &ServerContext, sess_id: u64) -> SessionSta
         &kw,
         None,
     )
-    .await
-    .expect("SelectCharacterID");
+    .await;
     let _ = sess.drain_notifications();
     let _ = ctx.drain_notifications_for_char(PILOT);
     sess
@@ -210,7 +243,8 @@ async fn test_shadow_client_941_948_loaded_charges_across_login_undock_jump_and_
     shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
 
     // 1. Load ammo into HiSlot0 and scanner probes into HiSlot1 while docked via dogmaIM.LoadAmmo.
-    ctx.dispatch_rpc(
+    wire_call(
+        &ctx,
         &mut sess,
         "dogmaIM",
         None,
@@ -222,12 +256,12 @@ async fn test_shadow_client_941_948_loaded_charges_across_login_undock_jump_and_
             PyRep::Integer(ship_id),
         ],
         &kw,
-        None,
+        Some(&mut shadow),
     )
-    .await
-    .expect("dogmaIM.LoadAmmo autocannon");
+    .await;
 
-    ctx.dispatch_rpc(
+    wire_call(
+        &ctx,
         &mut sess,
         "dogmaIM",
         None,
@@ -239,28 +273,24 @@ async fn test_shadow_client_941_948_loaded_charges_across_login_undock_jump_and_
             PyRep::Integer(ship_id),
         ],
         &kw,
-        None,
+        Some(&mut shadow),
     )
-    .await
-    .expect("dogmaIM.LoadAmmo probe launcher");
+    .await;
 
-    drain_and_apply_notifications(&ctx, &mut sess, PILOT, &mut shadow);
     shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
 
     // 2. Call dogmaIM.GetAllInfo while docked (login prime) -> verify loaded charges in HiSlot0 & HiSlot1 converge.
-    let all_info_login = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "GetAllInfo",
-            &[PyRep::Bool(true), PyRep::Bool(true)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("dogmaIM.GetAllInfo on login");
-    drain_and_apply_notifications(&ctx, &mut sess, PILOT, &mut shadow);
+    let all_info_login = wire_call(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        None,
+        "GetAllInfo",
+        &[PyRep::Bool(true), PyRep::Bool(true)],
+        &kw,
+        Some(&mut shadow),
+    )
+    .await;
     shadow.sync_from_get_all_info(&all_info_login);
     shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
     assert!(shadow
@@ -274,29 +304,23 @@ async fn test_shadow_client_941_948_loaded_charges_across_login_undock_jump_and_
 
     // 3. Undock (stationSvc.Undock) and call dogmaIM.GetAllInfo (#948) -> verify convergence after undock.
     ctx.advance_secs(12);
-    let undock_res = ctx
-        .dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
-        .await
-        .expect("stationSvc.Undock");
+    let undock_res = wire_call(&ctx, &mut sess, "stationSvc", None, "Undock", &[], &kw, Some(&mut shadow)).await;
     let beyonce_id = undock_res
         .dict_get("beyonceBoundID")
         .and_then(|v| v.as_i64())
         .expect("beyonceBoundID") as u64;
-    drain_and_apply_notifications(&ctx, &mut sess, PILOT, &mut shadow);
 
-    let all_info_undock = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "GetAllInfo",
-            &[PyRep::Bool(true), PyRep::Bool(true)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("dogmaIM.GetAllInfo after undock");
-    drain_and_apply_notifications(&ctx, &mut sess, PILOT, &mut shadow);
+    let all_info_undock = wire_call(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        None,
+        "GetAllInfo",
+        &[PyRep::Bool(true), PyRep::Bool(true)],
+        &kw,
+        Some(&mut shadow),
+    )
+    .await;
     shadow.sync_from_get_all_info(&all_info_undock);
     shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
 
@@ -313,37 +337,35 @@ async fn test_shadow_client_941_948_loaded_charges_across_login_undock_jump_and_
         .set_ball_position(ship_id, jita_gate.position + DVec3::new(1_000.0, 0.0, 0.0))
         .await;
     ctx.advance_secs(12);
-    ctx.dispatch_rpc(
+    wire_call(
+        &ctx,
         &mut sess,
         "beyonce",
         Some(beyonce_id),
         "CmdStargateJump",
         &[PyRep::Integer(jita_gate.stargate_id)],
         &kw,
-        None,
+        Some(&mut shadow),
     )
-    .await
-    .expect("beyonce.CmdStargateJump");
-    drain_and_apply_notifications(&ctx, &mut sess, PILOT, &mut shadow);
+    .await;
 
-    let all_info_jump = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "GetAllInfo",
-            &[PyRep::Bool(true), PyRep::Bool(true)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("dogmaIM.GetAllInfo after stargate jump");
-    drain_and_apply_notifications(&ctx, &mut sess, PILOT, &mut shadow);
+    let all_info_jump = wire_call(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        None,
+        "GetAllInfo",
+        &[PyRep::Bool(true), PyRep::Bool(true)],
+        &kw,
+        Some(&mut shadow),
+    )
+    .await;
     shadow.sync_from_get_all_info(&all_info_jump);
     shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
 
     // 5. Unload ammo in space via dogmaIM.UnloadAmmo (#941) -> no UnprimedFittedItemChange and full convergence.
-    ctx.dispatch_rpc(
+    wire_call(
+        &ctx,
         &mut sess,
         "dogmaIM",
         None,
@@ -353,11 +375,9 @@ async fn test_shadow_client_941_948_loaded_charges_across_login_undock_jump_and_
             PyRep::List(vec![PyRep::Integer(gun_id)]),
         ],
         &kw,
-        None,
+        Some(&mut shadow),
     )
-    .await
-    .expect("dogmaIM.UnloadAmmo in space");
-    drain_and_apply_notifications(&ctx, &mut sess, PILOT, &mut shadow);
+    .await;
     shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
     assert!(!shadow
         .inventory
@@ -371,7 +391,8 @@ async fn test_shadow_client_941_948_loaded_charges_across_login_undock_jump_and_
         shadow.apply_notification("DoDestinyUpdate", &[init_updates]);
     }
 
-    ctx.dispatch_rpc(
+    wire_call(
+        &ctx,
         &mut sess,
         "dogmaIM",
         None,
@@ -383,12 +404,10 @@ async fn test_shadow_client_941_948_loaded_charges_across_login_undock_jump_and_
             PyRep::Integer(0),
         ],
         &kw,
-        None,
+        Some(&mut shadow),
     )
-    .await
-    .expect("dogmaIM.Activate Core Probe Launcher I (#937)");
+    .await;
 
-    drain_and_apply_notifications(&ctx, &mut sess, PILOT, &mut shadow);
     if let Ok((_, _, probe_updates)) = dest_handle.drain_observer_updates(ship_id).await {
         shadow.apply_notification("DoDestinyUpdate", &[probe_updates]);
     }
