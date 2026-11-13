@@ -265,8 +265,8 @@ async fn test_payment_purchase_and_store_catalog() {
     let prod_attr = raw_msg(&prod_msg, 1).expect("product attributes");
     assert_eq!(raw_str(&prod_attr, 1).as_deref(), Some("30 Days Omega"));
     let eve_item = raw_msg(&prod_attr, 2).expect("product item");
-    assert_eq!(raw_u64(&eve_item, 1), Some(3966));
-    assert_eq!(raw_u64(&eve_item, 2), Some(1));
+    let item_type = raw_msg(&eve_item, 1).expect("product item type");
+    assert_eq!(raw_u64(&item_type, 1), Some(3966));
 
     let mut prod_miss_id_msg = Vec::new();
     encode_varint_field(1, 999_999, &mut prod_miss_id_msg);
@@ -309,7 +309,11 @@ async fn test_payment_purchase_and_store_catalog() {
     let off_attr = raw_msg(&off_get_msg, 1).expect("offer attributes");
     assert_eq!(raw_str(&off_attr, 1).as_deref(), Some("Fiat-Priced Offer"));
     let price_msg = raw_msg(&off_attr, 12).expect("offer_price");
-    assert_eq!(raw_u64(&price_msg, 1), Some(50_000));
+    let plex_price = raw_msg(&price_msg, 6).expect("plex_price");
+    assert_eq!(
+        eve_proto::quasar::decode_zigzag64(raw_u64(&plex_price, 1).expect("total_in_cents")),
+        50_000
+    );
 
     let offers_tgt = quasar_rpc(
         &ctx,

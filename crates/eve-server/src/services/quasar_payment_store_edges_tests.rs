@@ -10,8 +10,8 @@ use crate::quasar_gateway::{
 use eve_db::WorldRepository;
 use eve_machonet::service_roles;
 use eve_proto::quasar::{
-    encode_varint_field, AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny,
-    QuasarDescriptorRegistry, WireMessage,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny,
+    QuasarDescriptorRegistry, WireField, WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
@@ -504,10 +504,23 @@ fn fulfillment_and_purchase_nested_order_omega_and_raw_fallback_edges() {
     assert!(sched_exists);
 
     // Raw protobuf bytes fallback when dyn_msg is empty (field 1 = offer 2001, field 2 = token 3, field 3 = qty 2)
-    let mut raw_bytes = Vec::new();
-    encode_varint_field(1, 2001, &mut raw_bytes);
-    encode_varint_field(2, 3, &mut raw_bytes);
-    encode_varint_field(3, 2, &mut raw_bytes);
+    let raw_bytes = WireMessage {
+        fields: vec![
+            WireField {
+                field_number: 1,
+                value: WireValue::Varint(2001),
+            },
+            WireField {
+                field_number: 2,
+                value: WireValue::Varint(3),
+            },
+            WireField {
+                field_number: 3,
+                value: WireValue::Varint(2),
+            },
+        ],
+    }
+    .encode();
     let raw_any = GoogleAny {
         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.purchase.api.TokenRequest"),
         value: raw_bytes,

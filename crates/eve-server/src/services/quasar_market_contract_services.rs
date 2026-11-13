@@ -14,9 +14,10 @@ use crate::quasar_gateway::{
     STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
-    DynamicQuasarMessage, DynamicValue, GoogleAny, WireMessage, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, WireMessage,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::Arc;
@@ -43,22 +44,19 @@ fn hex_uuid(bytes: &[u8]) -> String {
 }
 
 fn encode_transaction_attributes(tx: &CosmeticTransactionRecord) -> Vec<u8> {
-    let mut ts = Vec::new();
-    encode_varint_field(1, tx.last_updated_unix, &mut ts);
-
-    let mut details = Vec::new();
-    let detail_field = match tx.details {
-        CosmeticTransactionDetails::PurchasingComponent => 1,
-        CosmeticTransactionDetails::PurchasingSkin => 2,
-        CosmeticTransactionDetails::CreatingSkinListing => 3,
-    };
-    encode_bytes_field(detail_field, &[], &mut details);
-
-    let mut attrs = Vec::new();
-    encode_bytes_field(1, &ts, &mut attrs);
-    encode_varint_field(2, u64::from(tx.status), &mut attrs);
-    encode_bytes_field(3, &details, &mut attrs);
-    attrs
+    pb::message("eve_public.cosmetic.market.transaction.Attributes")
+        .set("last_updated.seconds", tx.last_updated_unix as i64)
+        .set("status", tx.status as i32)
+        .set_with("details", |d| match tx.details {
+            CosmeticTransactionDetails::PurchasingComponent => {
+                d.set_with("purchasing_component", |b| b)
+            }
+            CosmeticTransactionDetails::PurchasingSkin => d.set_with("purchasing_skin", |b| b),
+            CosmeticTransactionDetails::CreatingSkinListing => {
+                d.set_with("creating_skin_listing", |b| b)
+            }
+        })
+        .must_encode()
 }
 
 fn extract_uint64_field(raw_bytes: &[u8], field_num: u32) -> Option<u64> {
@@ -162,12 +160,11 @@ pub fn register_handlers(
                 drop(data);
                 let _ = caller;
                 let attrs = encode_draft_attributes(&record);
-                let mut out = Vec::new();
-                encode_bytes_field(1, &attrs, &mut out);
-                Ok(any(
+                Ok(pb::message(
                     "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSharedResponse",
-                    out,
-                ))
+                )
+                .set_raw_message("draft", attrs)
+                .must_to_any())
             }),
         );
     }
@@ -204,12 +201,9 @@ pub fn register_handlers(
                     ));
                 }
                 let attrs = encode_transaction_attributes(&tx);
-                let mut out = Vec::new();
-                encode_bytes_field(1, &attrs, &mut out);
-                Ok(any(
-                    "eve_public.cosmetic.market.transaction.api.GetResponse",
-                    out,
-                ))
+                Ok(pb::message("eve_public.cosmetic.market.transaction.api.GetResponse")
+                    .set_raw_message("status", attrs)
+                    .must_to_any())
             }),
         );
     }
@@ -234,16 +228,11 @@ pub fn register_handlers(
                         .map(|tx| tx.uuid)
                         .collect::<Vec<[u8; 16]>>()
                 });
-                let mut out = Vec::new();
+                let mut resp = pb::message("eve_public.cosmetic.market.transaction.api.GetAllResponse");
                 for u in uuids {
-                    let mut id_msg = Vec::new();
-                    encode_bytes_field(1, &u, &mut id_msg);
-                    encode_bytes_field(1, &id_msg, &mut out);
+                    resp = resp.add_with("transactions", |t| t.set("uuid", u.to_vec()));
                 }
-                Ok(any(
-                    "eve_public.cosmetic.market.transaction.api.GetAllResponse",
-                    out,
-                ))
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -253,9 +242,9 @@ pub fn register_handlers(
         router.register_handler(
             "eve.cdn.api.GetActiveURLSigningKeyRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                let mut out = Vec::new();
-                encode_string_field(1, "evomu-cdn-v24", &mut out);
-                Ok(any("eve.cdn.api.GetActiveURLSigningKeyResponse", out))
+                Ok(pb::message("eve.cdn.api.GetActiveURLSigningKeyResponse")
+                    .set("key_id", "evomu-cdn-v24")
+                    .must_to_any())
             }),
         );
         router.register_handler(
@@ -280,13 +269,11 @@ pub fn register_handlers(
                 } else {
                     format!("{url}?sig=evomu_v24_signed")
                 };
-                let mut out = Vec::new();
-                encode_string_field(1, &signed, &mut out);
-                let mut ts = Vec::new();
-                encode_varint_field(1, 1_800_000_000, &mut ts);
-                encode_bytes_field(2, &ts, &mut out);
-                encode_string_field(3, "evomu-cdn-v24", &mut out);
-                Ok(any("eve.cdn.api.SignURLResponse", out))
+                Ok(pb::message("eve.cdn.api.SignURLResponse")
+                    .set("signed_url", signed)
+                    .set("valid_until.seconds", 1_800_000_000i64)
+                    .set("key_id", "evomu-cdn-v24")
+                    .must_to_any())
             }),
         );
     }
@@ -296,14 +283,14 @@ pub fn register_handlers(
         router.register_handler(
             "eve.client.host.GetRequest",
             Arc::new(move |_ctx, _req_any, _dyn_msg| {
-                let mut host_attr = Vec::new();
-                encode_varint_field(1, 12345678, &mut host_attr);
-                encode_string_field(2, "en_US", &mut host_attr);
-                encode_varint_field(4, 16384, &mut host_attr);
-                encode_string_field(10, "24.01.2024", &mut host_attr);
-                let mut out = Vec::new();
-                encode_bytes_field(1, &host_attr, &mut out);
-                Ok(any("eve.client.host.GetResponse", out))
+                Ok(pb::message("eve.client.host.GetResponse")
+                    .set_with("host", |h| {
+                        h.set("legacy_hash", 12345678i64)
+                            .set("locale", "en_US")
+                            .set("ram_mb", 16384i32)
+                            .set("client_version", "24.01.2024")
+                    })
+                    .must_to_any())
             }),
         );
         router.register_handler(
@@ -323,38 +310,32 @@ pub fn register_handlers(
                 let Some(char_id) = ctx.effective_character_id().filter(|&v| v > 0).map(i64::from) else {
                     return Err((STATUS_UNAUTHORIZED, "Active character session required".into()));
                 };
-                let mut out = Vec::new();
-                db_contacts.with_snapshot(|snap| {
+                let resp = db_contacts.with_snapshot(|snap| {
+                    let mut r = pb::message("eve.contacts.GetAllForCharacterResponse");
                     if let Some(ch) = snap.characters.get(&char_id) {
                         for (&contact_id, &standing) in &ch.standings {
-                            let mut personal = Vec::new();
-                            let mut char_id_msg = Vec::new();
-                            encode_varint_field(1, contact_id as u64, &mut char_id_msg);
-                            let mut ind_msg = Vec::new();
-                            encode_bytes_field(1, &char_id_msg, &mut ind_msg);
-                            encode_bytes_field(1, &ind_msg, &mut personal);
-                            let rel_val = (standing + 10.0).round() as u64;
-                            encode_varint_field(4, rel_val, &mut personal);
-                            encode_bytes_field(1, &personal, &mut out);
+                            let rel_val = (standing + 10.0).round() as i32;
+                            r = r.add_with("contacts", |personal| {
+                                personal
+                                    .set("individual.character.sequential", contact_id as u32)
+                                    .set("relationship", rel_val)
+                            });
                         }
                     }
+                    r
                 });
-                Ok(any("eve.contacts.GetAllForCharacterResponse", out))
+                Ok(resp.must_to_any())
             }),
         );
         router.register_handler(
             "eve.contact.label.GetForAllianceRequest",
             Arc::new(move |_ctx, _req_any, _dyn_msg| {
-                let mut out = Vec::new();
-                let mut inst = Vec::new();
-                let mut id_msg = Vec::new();
-                encode_varint_field(1, 1, &mut id_msg);
-                encode_bytes_field(1, &id_msg, &mut inst);
-                let mut attr = Vec::new();
-                encode_string_field(1, "Alliance Contacts", &mut attr);
-                encode_bytes_field(2, &attr, &mut inst);
-                encode_bytes_field(1, &inst, &mut out);
-                Ok(any("eve.contact.label.GetForAllianceResponse", out))
+                Ok(pb::message("eve.contact.label.GetForAllianceResponse")
+                    .add_with("labels", |inst| {
+                        inst.set("id.bit", 1u64)
+                            .set("label.name", "Alliance Contacts")
+                    })
+                    .must_to_any())
             }),
         );
     }
@@ -364,36 +345,30 @@ pub fn register_handlers(
         router.register_handler(
             "eve.content.GetAllRequest",
             Arc::new(move |_ctx, _req_any, _dyn_msg| {
-                let mut out = Vec::new();
-                for id in 1..=3u64 {
-                    let mut id_msg = Vec::new();
-                    encode_varint_field(1, id, &mut id_msg);
-                    encode_bytes_field(1, &id_msg, &mut out);
+                let mut resp = pb::message("eve.content.GetAllResponse");
+                for id in 1..=3u32 {
+                    resp = resp.add_with("id", |i| i.set("sequential", id));
                 }
-                Ok(any("eve.content.GetAllResponse", out))
+                Ok(resp.must_to_any())
             }),
         );
         router.register_handler(
             "eve.content.GetRequest",
             Arc::new(move |_ctx, req_any, _dyn_msg| {
                 let cid = extract_uint64_field(&req_any.value, 1).unwrap_or(1);
-                let mut attrs = Vec::new();
-                let mut details = Vec::new();
-                let mut op_id = Vec::new();
-                encode_varint_field(1, 100, &mut op_id);
-                encode_bytes_field(1, &op_id, &mut details);
-                encode_bytes_field(1, &details, &mut attrs);
-                let mut tags = Vec::new();
-                encode_string_field(1, "news", &mut tags);
-                encode_string_field(2, "community", &mut tags);
-                encode_bytes_field(2, &tags, &mut attrs);
-                encode_varint_field(3, 1, &mut attrs);
-                encode_string_field(4, &format!("Article #{cid}: News from New Eden"), &mut attrs);
-
-                let mut out = Vec::new();
-                encode_bytes_field(1, &attrs, &mut out);
-                encode_string_field(2, "ccp-content", &mut out);
-                Ok(any("eve.content.GetResponse", out))
+                Ok(pb::message("eve.content.GetResponse")
+                    .set_with("attributes", |attrs| {
+                        attrs
+                            .set("content.operation.sequential", 100u32)
+                            .set_with("tags", |tags| {
+                                tags.set("primary_tag", "news")
+                                    .add("secondary_tags", "community")
+                            })
+                            .set("publish_state", 1i32)
+                            .set("description", format!("Article #{cid}: News from New Eden"))
+                    })
+                    .set("user", "ccp-content")
+                    .must_to_any())
             }),
         );
     }

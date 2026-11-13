@@ -5,9 +5,9 @@ use crate::quasar_gateway::{
     PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
 };
 use eve_db::{InventoryFlag, WorldRepository};
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext, GoogleAny,
-    QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, GoogleAny, QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
@@ -83,22 +83,11 @@ fn make_ctx(char_id: Option<u32>, role: u64) -> AuthoritativeContext {
 }
 
 fn encode_entitlement_id(holder: u32, asset_uuid: &[u8; 16], group_name: &str) -> Vec<u8> {
-    let mut ch = Vec::new();
-    encode_varint_field(1, holder as u64, &mut ch);
-    let mut holder_msg = Vec::new();
-    encode_bytes_field(1, &ch, &mut holder_msg);
-
-    let mut asset_msg = Vec::new();
-    encode_bytes_field(1, asset_uuid, &mut asset_msg);
-
-    let mut group_msg = Vec::new();
-    encode_string_field(1, group_name, &mut group_msg);
-
-    let mut id_msg = Vec::new();
-    encode_bytes_field(1, &holder_msg, &mut id_msg);
-    encode_bytes_field(2, &asset_msg, &mut id_msg);
-    encode_bytes_field(3, &group_msg, &mut id_msg);
-    id_msg
+    pb::message("eve_public.assetholding.entitlement.Identifier")
+        .set("holder.character.sequential", holder)
+        .set("asset.uuid", asset_uuid)
+        .set("group_by.name", group_name)
+        .must_encode()
 }
 
 fn extract_spawned_uuid(resp: &GoogleAny) -> [u8; 16] {
@@ -169,16 +158,12 @@ fn spawn_hold_create_and_encode_asset_attributes() {
     );
 
     // Spawn itemstack (type 34, qty 500)
-    let mut t_msg = Vec::new();
-    encode_varint_field(1, 34, &mut t_msg);
-    let mut st_entry = Vec::new();
-    encode_bytes_field(1, &t_msg, &mut st_entry);
-    encode_varint_field(2, 500, &mut st_entry);
-    let mut st_list = Vec::new();
-    encode_bytes_field(1, &st_entry, &mut st_list);
-    let mut spawn_stack_bytes = Vec::new();
-    encode_string_field(2, "tritanium_pack", &mut spawn_stack_bytes);
-    encode_bytes_field(6, &st_list, &mut spawn_stack_bytes);
+    let spawn_stack_bytes = pb::message("eve.assetholding.asset.api.SpawnRequest")
+        .set("internal_name", "tritanium_pack")
+        .add_with("itemstack.stacks", |s| {
+            s.set("type.sequential", 34u64).set("quantity", 500u32)
+        })
+        .must_encode();
     let spawn_resp1 = router
         .dispatch(
             &admin,
@@ -194,13 +179,10 @@ fn spawn_hold_create_and_encode_asset_attributes() {
     // Spawn character_title with finite capacity = 5
     let mut title_uuid = [0u8; 16];
     title_uuid[8..16].copy_from_slice(&42u64.to_be_bytes());
-    let mut title_id_msg = Vec::new();
-    encode_bytes_field(1, &title_uuid, &mut title_id_msg);
-    let mut title_sp = Vec::new();
-    encode_bytes_field(1, &title_id_msg, &mut title_sp);
-    encode_varint_field(3, 5, &mut title_sp);
-    let mut spawn_title_bytes = Vec::new();
-    encode_bytes_field(13, &title_sp, &mut spawn_title_bytes);
+    let spawn_title_bytes = pb::message("eve.assetholding.asset.api.SpawnRequest")
+        .set("character_title.title.uuid", title_uuid)
+        .set("character_title.finite", 5u64)
+        .must_encode();
     let spawn_resp2 = router
         .dispatch(
             &admin,
@@ -222,15 +204,10 @@ fn spawn_hold_create_and_encode_asset_attributes() {
         STATUS_BAD_REQUEST
     );
 
-    let mut skin_inner = Vec::new();
-    encode_string_field(1, "skin_hex_01", &mut skin_inner);
-    let mut lic_inner = Vec::new();
-    encode_bytes_field(1, &skin_inner, &mut lic_inner);
-    let mut skin_hp = Vec::new();
-    encode_bytes_field(1, &lic_inner, &mut skin_hp);
-    encode_varint_field(2, 3, &mut skin_hp);
-    let mut hold_skin_bytes = Vec::new();
-    encode_bytes_field(11, &skin_hp, &mut hold_skin_bytes);
+    let hold_skin_bytes = pb::message("eve.assetholding.asset.api.HoldRequest")
+        .set("ship_skin_license.license.skin.hex", "skin_hex_01")
+        .set("ship_skin_license.capacity", 3u64)
+        .must_encode();
     let hold_resp1 = router
         .dispatch(
             &admin,
@@ -242,12 +219,11 @@ fn spawn_hold_create_and_encode_asset_attributes() {
         .expect("Hold skin license");
     let _uuid3 = extract_spawned_uuid(&hold_resp1);
 
-    let mut typed_qty = Vec::new();
-    encode_bytes_field(1, &st_entry, &mut typed_qty);
-    let mut hold_stack_hp = Vec::new();
-    encode_bytes_field(1, &typed_qty, &mut hold_stack_hp);
-    let mut hold_stack_bytes = Vec::new();
-    encode_bytes_field(7, &hold_stack_hp, &mut hold_stack_bytes);
+    let hold_stack_bytes = pb::message("eve.assetholding.asset.api.HoldRequest")
+        .add_with("itemstack.by_typed_quantities.items", |s| {
+            s.set("type.sequential", 34u64).set("quantity", 500u32)
+        })
+        .must_encode();
     let hold_resp2 = router
         .dispatch(
             &admin,
@@ -269,27 +245,26 @@ fn spawn_hold_create_and_encode_asset_attributes() {
         STATUS_BAD_REQUEST
     );
 
-    let mut unit8 = Vec::new();
-    encode_bytes_field(8, &st_list, &mut unit8);
-    let mut create8 = Vec::new();
-    encode_bytes_field(4, &unit8, &mut create8);
-    encode_varint_field(6, 10, &mut create8);
+    let create8 = pb::message("eve.assetholding.asset.api.CreateRequest")
+        .add_with("unit.unit_inventory_stack.stacks", |s| {
+            s.set("type.sequential", 34u64).set("quantity", 500u32)
+        })
+        .set("finite", 10u64)
+        .must_encode();
     assert!(router
         .dispatch(&admin, &GoogleAny { type_url: create_type.clone(), value: create8 })
         .is_ok());
 
-    let mut unit10 = Vec::new();
-    encode_bytes_field(10, &lic_inner, &mut unit10);
-    let mut create10 = Vec::new();
-    encode_bytes_field(4, &unit10, &mut create10);
+    let create10 = pb::message("eve.assetholding.asset.api.CreateRequest")
+        .set("unit.unit_ship_skin_license.skin.hex", "skin_hex_01")
+        .must_encode();
     assert!(router
         .dispatch(&admin, &GoogleAny { type_url: create_type.clone(), value: create10 })
         .is_ok());
 
-    let mut unit12 = Vec::new();
-    encode_bytes_field(12, &title_sp, &mut unit12);
-    let mut create12 = Vec::new();
-    encode_bytes_field(4, &unit12, &mut create12);
+    let create12 = pb::message("eve.assetholding.asset.api.CreateRequest")
+        .set("unit.unit_character_title.title.uuid", title_uuid)
+        .must_encode();
     assert!(router
         .dispatch(&admin, &GoogleAny { type_url: create_type, value: create12 })
         .is_ok());
@@ -310,15 +285,11 @@ fn direct_delivery_get_redeem_delete_expire_autoredeem_and_redeliver() {
 
     // Spawn 3 assets: (a) itemstack, (b) character_title with finite cap 2, (c) skin_license
     let spawn_type = format!("{TYPE_GOOGLEAPIS_PREFIX}eve.assetholding.asset.api.SpawnRequest");
-    let mut t_msg = Vec::new();
-    encode_varint_field(1, 34, &mut t_msg);
-    let mut st_entry = Vec::new();
-    encode_bytes_field(1, &t_msg, &mut st_entry);
-    encode_varint_field(2, 250, &mut st_entry);
-    let mut st_list = Vec::new();
-    encode_bytes_field(1, &st_entry, &mut st_list);
-    let mut sp_stack = Vec::new();
-    encode_bytes_field(6, &st_list, &mut sp_stack);
+    let sp_stack = pb::message("eve.assetholding.asset.api.SpawnRequest")
+        .add_with("itemstack.stacks", |s| {
+            s.set("type.sequential", 34u64).set("quantity", 250u32)
+        })
+        .must_encode();
     let asset_stack = extract_spawned_uuid(
         &router
             .dispatch(&admin, &GoogleAny { type_url: spawn_type.clone(), value: sp_stack })
@@ -327,13 +298,10 @@ fn direct_delivery_get_redeem_delete_expire_autoredeem_and_redeliver() {
 
     let mut title_uuid = [0u8; 16];
     title_uuid[8..16].copy_from_slice(&99u64.to_be_bytes());
-    let mut title_id_msg = Vec::new();
-    encode_bytes_field(1, &title_uuid, &mut title_id_msg);
-    let mut title_sp = Vec::new();
-    encode_bytes_field(1, &title_id_msg, &mut title_sp);
-    encode_varint_field(3, 2, &mut title_sp);
-    let mut sp_title = Vec::new();
-    encode_bytes_field(13, &title_sp, &mut sp_title);
+    let sp_title = pb::message("eve.assetholding.asset.api.SpawnRequest")
+        .set("character_title.title.uuid", title_uuid)
+        .set("character_title.finite", 2u64)
+        .must_encode();
     let asset_title = extract_spawned_uuid(
         &router
             .dispatch(&admin, &GoogleAny { type_url: spawn_type, value: sp_title })
@@ -341,15 +309,10 @@ fn direct_delivery_get_redeem_delete_expire_autoredeem_and_redeliver() {
     );
 
     let hold_type = format!("{TYPE_GOOGLEAPIS_PREFIX}eve.assetholding.asset.api.HoldRequest");
-    let mut skin_inner = Vec::new();
-    encode_string_field(1, "skin_abc", &mut skin_inner);
-    let mut lic_inner = Vec::new();
-    encode_bytes_field(1, &skin_inner, &mut lic_inner);
-    let mut skin_hp = Vec::new();
-    encode_bytes_field(1, &lic_inner, &mut skin_hp);
-    encode_varint_field(2, 5, &mut skin_hp);
-    let mut hold_skin = Vec::new();
-    encode_bytes_field(11, &skin_hp, &mut hold_skin);
+    let hold_skin = pb::message("eve.assetholding.asset.api.HoldRequest")
+        .set("ship_skin_license.license.skin.hex", "skin_abc")
+        .set("ship_skin_license.capacity", 5u64)
+        .must_encode();
     let asset_skin = extract_spawned_uuid(
         &router
             .dispatch(&admin, &GoogleAny { type_url: hold_type, value: hold_skin })
@@ -369,12 +332,12 @@ fn direct_delivery_get_redeem_delete_expire_autoredeem_and_redeliver() {
 
     let deliver_one = |asset: &[u8; 16], qty: u64| -> Vec<u8> {
         let ent_id = encode_entitlement_id(holder, asset, "grp1");
-        let mut entry = Vec::new();
-        encode_bytes_field(2, &ent_id, &mut entry);
-        encode_varint_field(10, qty, &mut entry);
-        let mut dd = Vec::new();
-        encode_bytes_field(2, &entry, &mut dd);
-        dd
+        pb::message("eve.assetholding.entitlement.api.DirectDeliveryRequest")
+            .add_with("entitlements", |e| {
+                e.set_raw_message("entitlement", ent_id)
+                    .set("quantity", qty)
+            })
+            .must_encode()
     };
 
     // Deliver exceeding finite capacity (asset_title has finite cap 2; delivering 3 -> BAD_REQUEST)
@@ -406,12 +369,9 @@ fn direct_delivery_get_redeem_delete_expire_autoredeem_and_redeliver() {
     }
 
     // GetRequest (public and internal)
-    let mut get_stack_bytes = Vec::new();
-    encode_bytes_field(
-        1,
-        &encode_entitlement_id(holder, &asset_stack, "grp1"),
-        &mut get_stack_bytes,
-    );
+    let get_stack_bytes = pb::message("eve_public.assetholding.entitlement.api.GetRequest")
+        .set_raw_message("entitlement", encode_entitlement_id(holder, &asset_stack, "grp1"))
+        .must_encode();
     let pub_get = GoogleAny {
         type_url: format!(
             "{TYPE_GOOGLEAPIS_PREFIX}eve_public.assetholding.entitlement.api.GetRequest"

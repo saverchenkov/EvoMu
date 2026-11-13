@@ -5,9 +5,10 @@ use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, DynamicQuasarMessage,
-    DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
+    DynamicQuasarMessage, DynamicValue, GoogleAny, WireField, WireMessage, WireValue,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use std::sync::Arc;
 
@@ -50,14 +51,10 @@ fn extract_logo_entitlement_target(
 }
 
 pub fn encode_logo_identifier(char_id: u64, ship_type_id: u64) -> Vec<u8> {
-    let mut char_buf = Vec::new();
-    encode_varint_field(1, char_id, &mut char_buf);
-    let mut ship_buf = Vec::new();
-    encode_varint_field(1, ship_type_id, &mut ship_buf);
-    let mut ident = Vec::new();
-    encode_bytes_field(1, &char_buf, &mut ident);
-    encode_bytes_field(2, &ship_buf, &mut ident);
-    ident
+    pb::message("eve_public.entitlement.character.ship.corplogo.Identifier")
+        .set("character.sequential", char_id as u32)
+        .set("ship_type.sequential", ship_type_id)
+        .must_encode()
 }
 
 pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
@@ -96,22 +93,24 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 out
             });
 
-            let mut out = Vec::new();
+            // Descriptor declares `entitlement` (field 1) singular, while gateway callers expect all active entries repeated on field 1.
+            let mut fields = Vec::with_capacity(active_ents.len());
             for (ent_name, exp_opt) in active_ents {
-                let mut ent_bytes = Vec::new();
-                encode_string_field(1, &ent_name, &mut ent_bytes);
+                let mut ent = pb::message("eve_public.entitlement.user.entitlement.Entitlement")
+                    .set("name", ent_name);
                 if let Some(exp_secs) = exp_opt {
-                    let mut ts_bytes = Vec::new();
-                    encode_varint_field(1, exp_secs, &mut ts_bytes);
-                    encode_bytes_field(2, &ts_bytes, &mut ent_bytes);
+                    ent = ent.set("expiry_date.seconds", exp_secs as i64);
                 }
-                encode_bytes_field(1, &ent_bytes, &mut out);
+                fields.push(WireField {
+                    field_number: 1,
+                    value: WireValue::LengthDelimited(ent.must_encode()),
+                });
             }
             Ok(GoogleAny {
                 type_url: format!(
                     "{TYPE_GOOGLEAPIS_PREFIX}eve_public.entitlement.user.api.GetResponse"
                 ),
-                value: out,
+                value: WireMessage { fields }.encode(),
             })
         }),
     );
@@ -160,23 +159,24 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                     let a = st.char_alliance_logo_ships.get(&char_id).cloned().unwrap_or_default();
                     (c, a)
                 });
-                let mut out = Vec::new();
+                let mut resp = pb::message(rsp_name);
                 for ship_type_id in corp_ships {
-                    let ident = encode_logo_identifier(char_id, ship_type_id);
-                    let mut ent_msg = Vec::new();
-                    encode_bytes_field(1, &ident, &mut ent_msg); // field 1: corporation_logo
-                    encode_bytes_field(1, &ent_msg, &mut out); // field 1: repeated entitlements
+                    resp = resp.add_with("entitlements", |e| {
+                        e.set_with("corporation_logo", |l| {
+                            l.set("character.sequential", char_id as u32)
+                                .set("ship_type.sequential", ship_type_id)
+                        })
+                    });
                 }
                 for ship_type_id in alliance_ships {
-                    let ident = encode_logo_identifier(char_id, ship_type_id);
-                    let mut ent_msg = Vec::new();
-                    encode_bytes_field(2, &ident, &mut ent_msg); // field 2: alliance_logo
-                    encode_bytes_field(1, &ent_msg, &mut out); // field 1: repeated entitlements
+                    resp = resp.add_with("entitlements", |e| {
+                        e.set_with("alliance_logo", |l| {
+                            l.set("character.sequential", char_id as u32)
+                                .set("ship_type.sequential", ship_type_id)
+                        })
+                    });
                 }
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{rsp_name}"),
-                    value: out,
-                })
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -321,38 +321,28 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                         is_alliance,
                     );
                 }
-                let ident = encode_logo_identifier(target_cid, ship_type_id);
                 let pkg = if is_alliance {
                     "eve_public.entitlement.character.ship.alliancelogo"
                 } else {
                     "eve_public.entitlement.character.ship.corplogo"
                 };
-                let (notice_type, notice_bytes) = if is_grant {
-                    let mut b = Vec::new();
-                    encode_bytes_field(1, &ident, &mut b);
-                    (format!("{TYPE_GOOGLEAPIS_PREFIX}{pkg}.GrantedNotice"), b)
+                let notice = if is_grant {
+                    pb::message(&format!("{pkg}.GrantedNotice"))
+                        .set("entitlement.character.sequential", target_cid as u32)
+                        .set("entitlement.ship_type.sequential", ship_type_id)
+                        .must_to_any()
                 } else {
-                    let mut revoker_buf = Vec::new();
-                    encode_varint_field(1, caller_cid, &mut revoker_buf);
-                    let mut b = Vec::new();
-                    encode_bytes_field(1, &revoker_buf, &mut b);
-                    encode_bytes_field(2, &ident, &mut b);
-                    (format!("{TYPE_GOOGLEAPIS_PREFIX}{pkg}.RevokedNotice"), b)
+                    pb::message(&format!("{pkg}.RevokedNotice"))
+                        .set("revoker.sequential", caller_cid as u32)
+                        .set("entitlement.character.sequential", target_cid as u32)
+                        .set("entitlement.ship_type.sequential", ship_type_id)
+                        .must_to_any()
                 };
                 pending_logo
                     .write()
                     .unwrap_or_else(|e| e.into_inner())
-                    .push((
-                        NoticeScope::Character(target_cid as u32),
-                        GoogleAny {
-                            type_url: notice_type,
-                            value: notice_bytes,
-                        },
-                    ));
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{rsp_name}"),
-                    value: Vec::new(),
-                })
+                    .push((NoticeScope::Character(target_cid as u32), notice));
+                Ok(pb::message(rsp_name).must_to_any())
             }),
         );
     }
@@ -438,27 +428,15 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 });
             }
 
-            let mut id_bytes = Vec::new();
-            encode_string_field(1, &ent_name, &mut id_bytes);
-            let mut notice_bytes = Vec::new();
-            encode_bytes_field(1, &id_bytes, &mut notice_bytes);
+            let granted_notice = pb::message("eve_public.assetholding.entitlement.api.GrantedNotice")
+                .set("entitlement.group_by.name", &ent_name)
+                .must_to_any();
             router_pending
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
-                .push((
-                    NoticeScope::User(uid as i32),
-                    GoogleAny {
-                        type_url: format!(
-                            "{TYPE_GOOGLEAPIS_PREFIX}eve_public.assetholding.entitlement.api.GrantedNotice"
-                        ),
-                        value: notice_bytes,
-                    },
-                ));
+                .push((NoticeScope::User(uid as i32), granted_notice));
 
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.entitlement.user.api.GrantResponse"),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve.entitlement.user.api.GrantResponse").must_to_any())
         }),
     );
 
@@ -500,25 +478,13 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                     now_unix,
                 )
             });
-            let mut id_bytes = Vec::new();
-            encode_string_field(1, &sub_name, &mut id_bytes);
-            let mut granted_bytes = Vec::new();
-            encode_bytes_field(1, &id_bytes, &mut granted_bytes);
-            let granted_notice = GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.assetholding.entitlement.api.GrantedNotice"
-                ),
-                value: granted_bytes,
-            };
+            let granted_notice = pb::message("eve_public.assetholding.entitlement.api.GrantedNotice")
+                .set("entitlement.group_by.name", &sub_name)
+                .must_to_any();
             let mut q = pending_sub.write().unwrap_or_else(|e| e.into_inner());
             q.push((NoticeScope::User(uid as i32), activated_notice));
             q.push((NoticeScope::User(uid as i32), granted_notice));
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.entitlement.user.subscription.api.GrantResponse"
-                ),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve.entitlement.user.subscription.api.GrantResponse").must_to_any())
         }),
     );
 
@@ -538,36 +504,19 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 }
             });
 
-            let mut mem_attr = Vec::new();
-            // f#1: corporation_id (.eve.corporation.Identifier)
-            let mut corp_sub = Vec::new();
-            encode_varint_field(1, corp_id as u64, &mut corp_sub);
-            encode_bytes_field(1, &corp_sub, &mut mem_attr);
-
-            // f#2: alliance_membership (.eve.membership.AllMembership.AllianceMembership)
-            let mut all_sub = Vec::new();
-            if let Some(aid) = alliance_id {
-                let mut aid_sub = Vec::new();
-                encode_varint_field(1, aid as u64, &mut aid_sub);
-                encode_bytes_field(2, &aid_sub, &mut all_sub);
-            } else {
-                encode_varint_field(1, 1, &mut all_sub); // unaffiliated = true
-            }
-            encode_bytes_field(2, &all_sub, &mut mem_attr);
-
-            // f#3: faction_membership (.eve.membership.AllMembership.FactionMembership)
-            let mut fac_sub = Vec::new();
-            encode_varint_field(1, 1, &mut fac_sub); // unaffiliated = true
-            encode_bytes_field(3, &fac_sub, &mut mem_attr);
-
-            let mut out = Vec::new();
-            encode_bytes_field(1, &mem_attr, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.membership.GetCharacterAllResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve.membership.GetCharacterAllResponse")
+                .set_with("membership", |m| {
+                    m.set("corporation_id.sequential", corp_id as u32)
+                        .set_with("alliance_membership", |am| {
+                            if let Some(aid) = alliance_id {
+                                am.set("alliance_id.sequential", aid as i32)
+                            } else {
+                                am.set("unaffiliated", true)
+                            }
+                        })
+                        .set("faction_membership.unaffiliated", true)
+                })
+                .must_to_any())
         }),
     );
 
@@ -617,19 +566,10 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 }
             });
 
-            let mut out = Vec::new();
-            let mut corp_sub = Vec::new();
-            encode_varint_field(1, corp_id as u64, &mut corp_sub);
-            encode_bytes_field(1, &corp_sub, &mut out);
-
-            let mut attr_sub = Vec::new();
-            encode_string_field(1, &title, &mut attr_sub);
-            encode_bytes_field(2, &attr_sub, &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.membership.corporation.GetCharacterResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve.membership.corporation.GetCharacterResponse")
+                .set("corporation_id.sequential", corp_id as u32)
+                .set("attributes.title", title)
+                .must_to_any())
         }),
     );
 
@@ -774,16 +714,23 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                     Ok((skill_ids, total_cost))
                 });
             let (bought, total_cost) = res?;
-            let mut out = Vec::new();
-            for sk in bought {
-                encode_varint_field(1, sk as u64, &mut out);
-            }
-            encode_varint_field(2, total_cost as u64, &mut out);
+            // Synthetic response (`eve.character.skill.PurchaseSkillsResponse` has no proto descriptor).
+            let mut fields: Vec<WireField> = bought
+                .into_iter()
+                .map(|sk| WireField {
+                    field_number: 1,
+                    value: WireValue::Varint(u64::from(sk)),
+                })
+                .collect();
+            fields.push(WireField {
+                field_number: 2,
+                value: WireValue::Varint(total_cost as u64),
+            });
             Ok(GoogleAny {
                 type_url: format!(
                     "{TYPE_GOOGLEAPIS_PREFIX}eve.character.skill.PurchaseSkillsResponse"
                 ),
-                value: out,
+                value: WireMessage { fields }.encode(),
             })
         }),
     );

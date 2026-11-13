@@ -9,10 +9,10 @@ use crate::quasar_gateway::{
 };
 use eve_db::WorldRepository;
 use eve_machonet::{service_roles, SessionState};
+use eve_proto::pb::{self, enum_name};
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, DynamicQuasarMessage,
-    DynamicValue, EvePublicRequest, EvePublicResponse, GoogleAny, GoogleTimestamp,
-    QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
+    DynamicQuasarMessage, DynamicValue, EvePublicRequest, EvePublicResponse, GoogleAny,
+    GoogleTimestamp, QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
@@ -143,52 +143,50 @@ fn plex_vault_purchase_request_handles_items_gifts_omega_and_errors() {
     let p_nostation = make_sess(Some(33), Some(cid_nostation), service_roles::ROLE_PLAYER_DEFAULT);
     let now = 1_760_000_000u64;
 
-    let encode_offer_field = |id: &str, out: &mut Vec<u8>| {
-        let mut inner = Vec::new();
-        encode_string_field(1, id, &mut inner);
-        encode_bytes_field(1, &inner, out);
-    };
-
     // Missing offer ID -> 400; qty = 0 -> 400; unknown offer -> 404; negative price -> 400
     assert_eq!(call(&router, &p1, "eve_public.plex.vault.api.PurchaseRequest", Vec::new(), now).status_code, STATUS_BAD_REQUEST);
 
-    let mut zero_qty = Vec::new();
-    encode_offer_field("2002", &mut zero_qty);
-    encode_varint_field(2, 0, &mut zero_qty);
+    let zero_qty = pb::message("eve_public.plex.vault.api.PurchaseRequest")
+        .set("offer.store_offer", "2002")
+        .set("quantity", 0u32)
+        .must_encode();
     assert_eq!(call(&router, &p1, "eve_public.plex.vault.api.PurchaseRequest", zero_qty, now).status_code, STATUS_BAD_REQUEST);
 
-    let mut unknown_off = Vec::new();
-    encode_offer_field("9999", &mut unknown_off);
-    encode_varint_field(2, 1, &mut unknown_off);
+    let unknown_off = pb::message("eve_public.plex.vault.api.PurchaseRequest")
+        .set("offer.store_offer", "9999")
+        .set("quantity", 1u32)
+        .must_encode();
     assert_eq!(call(&router, &p1, "eve_public.plex.vault.api.PurchaseRequest", unknown_off, now).status_code, STATUS_NOT_FOUND);
 
-    let mut neg_off = Vec::new();
-    encode_offer_field("2003", &mut neg_off);
-    encode_varint_field(2, 1, &mut neg_off);
+    let neg_off = pb::message("eve_public.plex.vault.api.PurchaseRequest")
+        .set("offer.store_offer", "2003")
+        .set("quantity", 1u32)
+        .must_encode();
     assert_eq!(call(&router, &p1, "eve_public.plex.vault.api.PurchaseRequest", neg_off, now).status_code, STATUS_BAD_REQUEST);
 
     // Unknown gift recipient -> 404; recipient with no station -> 400
-    let mut bad_gift = Vec::new();
-    encode_offer_field("2002", &mut bad_gift);
-    encode_varint_field(2, 1, &mut bad_gift);
-    let mut gift_char = Vec::new();
-    encode_varint_field(1, 99_999_999, &mut gift_char);
-    let mut gift_msg = Vec::new();
-    encode_bytes_field(3, &gift_char, &mut gift_msg);
-    encode_bytes_field(3, &gift_msg, &mut bad_gift);
+    let bad_gift = pb::message("eve_public.plex.vault.api.PurchaseRequest")
+        .set("offer.store_offer", "2002")
+        .set("quantity", 1u32)
+        .set("gift.character.sequential", 99_999_999u64)
+        .must_encode();
     assert_eq!(call(&router, &p1, "eve_public.plex.vault.api.PurchaseRequest", bad_gift, now).status_code, STATUS_NOT_FOUND);
 
-    let mut item_req = Vec::new();
-    encode_offer_field("2002", &mut item_req);
-    encode_varint_field(2, 2, &mut item_req);
+    let item_req = pb::message("eve_public.plex.vault.api.PurchaseRequest")
+        .set("offer.store_offer", "2002")
+        .set("quantity", 2u32)
+        .must_encode();
+    assert_eq!(call(&router, &p1, "eve_public.plex.vault.api.PurchaseRequest", Vec::new(), now).status_code, STATUS_BAD_REQUEST);
+    let _ = &p_nostation;
     assert_eq!(call(&router, &p_nostation, "eve_public.plex.vault.api.PurchaseRequest", item_req.clone(), now).status_code, STATUS_BAD_REQUEST);
 
     // Valid item purchase (qty=2 -> 240 PLEX, 6 items delivered to cid1)
     assert_eq!(call(&router, &p1, "eve_public.plex.vault.api.PurchaseRequest", item_req, now).status_code, STATUS_OK);
     // Valid Omega purchase (500 PLEX -> activates Omega for uid1, leaves 260 PLEX)
-    let mut omega_req = Vec::new();
-    encode_offer_field("2001", &mut omega_req);
-    encode_varint_field(2, 1, &mut omega_req);
+    let omega_req = pb::message("eve_public.plex.vault.api.PurchaseRequest")
+        .set("offer.store_offer", "2001")
+        .set("quantity", 1u32)
+        .must_encode();
     assert_eq!(call(&router, &p1, "eve_public.plex.vault.api.PurchaseRequest", omega_req.clone(), now).status_code, STATUS_OK);
     // Second Omega purchase exceeds remaining 260 PLEX -> 400 Insufficient PLEX balance
     assert_eq!(call(&router, &p1, "eve_public.plex.vault.api.PurchaseRequest", omega_req, now).status_code, STATUS_BAD_REQUEST);
@@ -212,51 +210,38 @@ fn admin_store_creation_invoices_tag_lookup_and_credit_card_disabled() {
     assert_eq!(call(&router, &player, "eve.store.admin.api.CreateCategoryRequest", Vec::new(), now).status_code, STATUS_FORBIDDEN);
     assert_eq!(call(&router, &gm, "eve.store.admin.api.CreateCategoryRequest", Vec::new(), now).status_code, STATUS_BAD_REQUEST);
 
-    let mut cat_attrs = Vec::new();
-    encode_string_field(1, "Bundles", &mut cat_attrs);
-    encode_varint_field(6, 1, &mut cat_attrs);
-    let mut cat_req = Vec::new();
-    encode_bytes_field(1, &cat_attrs, &mut cat_req);
+    let cat_req = pb::message("eve.store.admin.api.CreateCategoryRequest")
+        .set("attributes.name", "Bundles")
+        .set("attributes.catalog", enum_name("CATALOG_NES"))
+        .must_encode();
     assert_eq!(call(&router, &gm, "eve.store.admin.api.CreateCategoryRequest", cat_req, now).status_code, STATUS_OK);
 
-    let mut prod_attrs = Vec::new();
-    encode_string_field(1, "Starter Pack", &mut prod_attrs);
-    let mut prod_req = Vec::new();
-    encode_bytes_field(2, &prod_attrs, &mut prod_req);
+    let prod_req = pb::message("eve.store.admin.api.CreateProductRequest")
+        .set("attributes.name", "Starter Pack")
+        .must_encode();
     assert_eq!(call(&router, &gm, "eve.store.admin.api.CreateProductRequest", prod_req, now).status_code, STATUS_OK);
 
     // Public tagged offer (repeated categories & products) + targeted offer (single category & product)
-    let mut off_attrs = Vec::new();
-    encode_string_field(1, "Flash Bundle", &mut off_attrs);
-    let mut cp = Vec::new();
-    encode_string_field(1, "USD", &mut cp);
-    encode_varint_field(2, 999, &mut cp);
-    encode_bytes_field(3, &cp, &mut off_attrs);
-    let mut pp = Vec::new();
-    encode_varint_field(1, 25_000, &mut pp);
-    encode_bytes_field(5, &pp, &mut off_attrs);
-    encode_string_field(16, "flash", &mut off_attrs);
-    let mut cid_msg = Vec::new();
-    encode_varint_field(1, 1, &mut cid_msg);
-    encode_bytes_field(17, &cid_msg, &mut off_attrs);
-    encode_bytes_field(17, &cid_msg, &mut off_attrs);
-    let mut op_msg = Vec::new();
-    let mut pid_msg = Vec::new();
-    encode_varint_field(1, 1, &mut pid_msg);
-    encode_bytes_field(1, &pid_msg, &mut op_msg);
-    encode_bytes_field(18, &op_msg, &mut off_attrs);
-    encode_bytes_field(18, &op_msg, &mut off_attrs);
-    let mut off_req = Vec::new();
-    encode_bytes_field(1, &off_attrs, &mut off_req);
+    let off_req = pb::message("eve.store.admin.api.CreateOfferRequest")
+        .set("attributes.name", "Flash Bundle")
+        .add_with("attributes.currency_prices", |cp| {
+            cp.set("code", "USD").set("amount_in_cents", 999i64)
+        })
+        .set("attributes.plex_price.amount_in_cents", 25_000i64)
+        .add("attributes.tags", "flash")
+        .add_with("attributes.categories", |c| c.set("sequential", 1u32))
+        .add_with("attributes.categories", |c| c.set("sequential", 1u32))
+        .add_with("attributes.products", |p| p.set("product.sequential", 1u32))
+        .add_with("attributes.products", |p| p.set("product.sequential", 1u32))
+        .must_encode();
     assert_eq!(call(&router, &gm, "eve.store.admin.api.CreateOfferRequest", off_req, now).status_code, STATUS_OK);
 
-    let mut tgt_attrs = Vec::new();
-    encode_string_field(1, "VIP Promo", &mut tgt_attrs);
-    encode_varint_field(7, 1, &mut tgt_attrs);
-    encode_bytes_field(17, &cid_msg, &mut tgt_attrs);
-    encode_bytes_field(18, &op_msg, &mut tgt_attrs);
-    let mut tgt_req = Vec::new();
-    encode_bytes_field(1, &tgt_attrs, &mut tgt_req);
+    let tgt_req = pb::message("eve.store.admin.api.CreateOfferRequest")
+        .set("attributes.name", "VIP Promo")
+        .set("attributes.targeted", true)
+        .add_with("attributes.categories", |c| c.set("sequential", 1u32))
+        .add_with("attributes.products", |p| p.set("product.sequential", 1u32))
+        .must_encode();
     assert_eq!(call(&router, &gm, "eve.store.admin.api.CreateOfferRequest", tgt_req, now).status_code, STATUS_OK);
 
     // Direct register_user_payment_token persists token & publishes QuickPayAddedNotice
@@ -276,27 +261,26 @@ fn admin_store_creation_invoices_tag_lookup_and_credit_card_disabled() {
 
     // GetAllByTagRequest: empty tag -> 400; "FLASH" (case-insensitive) -> 200
     assert_eq!(call(&router, &player, "eve_public.store.offer.api.GetAllByTagRequest", Vec::new(), now).status_code, STATUS_BAD_REQUEST);
-    let mut tag_req = Vec::new();
-    encode_string_field(2, "FLASH", &mut tag_req);
+    let tag_req = pb::message("eve_public.store.offer.api.GetAllByTagRequest")
+        .set("tag", "FLASH")
+        .must_encode();
     assert_eq!(call(&router, &player, "eve_public.store.offer.api.GetAllByTagRequest", tag_req, now).status_code, STATUS_OK);
 
     // 2. RecordInvoiceRequest
     assert_eq!(call(&router, &player, "eve.plex.vault.transaction.invoice.api.admin.RecordInvoiceRequest", Vec::new(), now).status_code, STATUS_FORBIDDEN);
     assert_eq!(call(&router, &gm, "eve.plex.vault.transaction.invoice.api.admin.RecordInvoiceRequest", Vec::new(), now).status_code, STATUS_BAD_REQUEST);
-    let mut inv_id = Vec::new();
-    encode_bytes_field(1, &[0xAB; 16], &mut inv_id);
-    let mut inv_req = Vec::new();
-    encode_bytes_field(1, &inv_id, &mut inv_req);
+    let inv_req = pb::message("eve.plex.vault.transaction.invoice.api.admin.RecordInvoiceRequest")
+        .set("identifier.uuid", [0xABu8; 16])
+        .must_encode();
     assert_eq!(call(&router, &gm, "eve.plex.vault.transaction.invoice.api.admin.RecordInvoiceRequest", inv_req, now).status_code, STATUS_OK);
 
     // 3. Assetholding operation GetRequest (owner vs other user vs admin)
     router.db.with_mut_snapshot(|snap| {
         record_plex_transaction(snap, 7001, 10, 100, 100, "Seed", now);
     });
-    let mut op_id = Vec::new();
-    encode_bytes_field(1, b"7001", &mut op_id);
-    let mut op_req = Vec::new();
-    encode_bytes_field(1, &op_id, &mut op_req);
+    let op_req = pb::message("eve.plex.vault.assetholding.operation.api.GetRequest")
+        .set("operation.uuid", b"7001".as_slice())
+        .must_encode();
     assert_eq!(call(&router, &player, "eve.plex.vault.assetholding.operation.api.GetRequest", op_req.clone(), now).status_code, STATUS_OK);
 
     let intruder = make_sess(Some(888), Some(90_000_888), service_roles::ROLE_PLAYER_DEFAULT);
@@ -457,11 +441,10 @@ fn due_payment_schedules_renew_with_quick_pay_or_cancel_without_token() {
         snap.account_plex_vault.insert(uid_sp, 100);
     });
     let sess_sp = make_sess(Some(uid_sp), Some(cid_sp), service_roles::ROLE_PLAYER_DEFAULT);
-    let mut buy_1005 = Vec::new();
-    let mut off_inner = Vec::new();
-    encode_string_field(1, "1005", &mut off_inner);
-    encode_bytes_field(1, &off_inner, &mut buy_1005);
-    encode_varint_field(2, 1, &mut buy_1005);
+    let buy_1005 = pb::message("eve_public.plex.vault.api.PurchaseRequest")
+        .set("offer.store_offer", "1005")
+        .set("quantity", 1u32)
+        .must_encode();
 
     let t_claim = 1_750_000_000u64;
     router

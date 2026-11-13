@@ -7,9 +7,10 @@ use crate::quasar_gateway::{
 };
 use crate::services::quasar_cosmetics_drafts::{id_to_uuid_bytes, SkinrDraftRecord};
 use eve_db::WorldRepository;
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext, GoogleAny,
-    QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, GoogleAny, QuasarDescriptorRegistry, WireField, WireMessage, WireValue,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
@@ -177,20 +178,21 @@ fn draft_get_shared_and_cosmetic_market_transactions() {
         STATUS_BAD_REQUEST
     );
     // Char ID present, missing UUID -> BAD_REQUEST
-    let mut only_char = Vec::new();
-    encode_varint_field(1, owner_cid as u64, &mut only_char);
+    let only_char = pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSharedRequest")
+        .set("character.sequential", owner_cid)
+        .must_encode();
     assert_eq!(
         router
-            .dispatch(&buyer_ctx, &GoogleAny { type_url: shared_type.clone(), value: only_char.clone() })
+            .dispatch(&buyer_ctx, &GoogleAny { type_url: shared_type.clone(), value: only_char })
             .unwrap_err()
             .0,
         STATUS_BAD_REQUEST
     );
     // Short UUID (not 16 bytes) -> BAD_REQUEST
-    let mut short_uuid = only_char.clone();
-    let mut bad_id = Vec::new();
-    encode_bytes_field(1, &[1, 2, 3], &mut bad_id);
-    encode_bytes_field(2, &bad_id, &mut short_uuid);
+    let short_uuid = pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSharedRequest")
+        .set("character.sequential", owner_cid)
+        .set("draft.uuid", vec![1u8, 2, 3])
+        .must_encode();
     assert_eq!(
         router
             .dispatch(&buyer_ctx, &GoogleAny { type_url: shared_type.clone(), value: short_uuid })
@@ -199,10 +201,10 @@ fn draft_get_shared_and_cosmetic_market_transactions() {
         STATUS_BAD_REQUEST
     );
     // Unknown draft UUID -> NOT_FOUND
-    let mut nf_req = only_char.clone();
-    let mut nf_id = Vec::new();
-    encode_bytes_field(1, &[0x99u8; 16], &mut nf_id);
-    encode_bytes_field(2, &nf_id, &mut nf_req);
+    let nf_req = pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSharedRequest")
+        .set("character.sequential", owner_cid)
+        .set("draft.uuid", vec![0x99u8; 16])
+        .must_encode();
     assert_eq!(
         router
             .dispatch(&buyer_ctx, &GoogleAny { type_url: shared_type.clone(), value: nf_req })
@@ -211,10 +213,10 @@ fn draft_get_shared_and_cosmetic_market_transactions() {
         STATUS_NOT_FOUND
     );
     // Valid draft UUID -> GetSharedResponse
-    let mut ok_shared = only_char;
-    let mut ok_id = Vec::new();
-    encode_bytes_field(1, &draft_uuid, &mut ok_id);
-    encode_bytes_field(2, &ok_id, &mut ok_shared);
+    let ok_shared = pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSharedRequest")
+        .set("character.sequential", owner_cid)
+        .set("draft.uuid", draft_uuid.to_vec())
+        .must_encode();
     let shared_resp = router
         .dispatch(&stranger_ctx, &GoogleAny { type_url: shared_type, value: ok_shared })
         .expect("GetSharedRequest");
@@ -240,10 +242,9 @@ fn draft_get_shared_and_cosmetic_market_transactions() {
         STATUS_BAD_REQUEST
     );
 
-    let mut tx_id_msg = Vec::new();
-    encode_bytes_field(1, &tx_uuid, &mut tx_id_msg);
-    let mut tx_req = Vec::new();
-    encode_bytes_field(1, &tx_id_msg, &mut tx_req);
+    let tx_req = pb::message("eve_public.cosmetic.market.transaction.api.GetRequest")
+        .set("transaction.uuid", tx_uuid.to_vec())
+        .must_encode();
 
     // Stranger -> FORBIDDEN, Admin -> OK, Buyer -> OK, Seller -> OK
     assert_eq!(
@@ -318,8 +319,9 @@ fn cdn_client_host_contacts_and_content_handlers() {
         ("https://cdn.evomu.org/a", "?sig="),
         ("https://cdn.evomu.org/a?v=1", "&sig="),
     ] {
-        let mut b = Vec::new();
-        encode_string_field(1, u, &mut b);
+        let b = pb::message("eve.cdn.api.SignURLRequest")
+            .set("url", u)
+            .must_encode();
         let r = router
             .dispatch(&user, &GoogleAny { type_url: sign_type.clone(), value: b })
             .unwrap();
@@ -400,15 +402,31 @@ fn market_contract_services_edge_branches_decoding_and_mutants() {
     );
     assert_eq!(require_character(&buyer_ctx).unwrap(), 900101);
 
-    let mut u64_wrap = Vec::new();
-    let mut inner_u64 = Vec::new();
-    encode_varint_field(1, 777, &mut inner_u64);
-    encode_bytes_field(1, &inner_u64, &mut u64_wrap);
+    let u64_wrap = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(
+                WireMessage {
+                    fields: vec![WireField {
+                        field_number: 1,
+                        value: WireValue::Varint(777),
+                    }],
+                }
+                .encode(),
+            ),
+        }],
+    }
+    .encode();
     assert_eq!(extract_uint64_field(&u64_wrap, 1), Some(777));
     assert_eq!(extract_uint64_field(&[0xff, 0xff], 1), None);
 
-    let mut u32_overflow = Vec::new();
-    encode_varint_field(1, u64::from(u32::MAX) + 1, &mut u32_overflow);
+    let u32_overflow = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(u64::from(u32::MAX) + 1),
+        }],
+    }
+    .encode();
     assert_eq!(extract_uint32_field(&DynamicQuasarMessage::new("test"), &u32_overflow, 1), None);
 
     // extract_uuid_field across Message, 16B Bytes, wrapped Bytes, and WireMessage fallbacks
@@ -423,20 +441,41 @@ fn market_contract_services_edge_branches_decoding_and_mutants() {
     dyn_bytes_direct.fields.insert(2, DynamicValue::Bytes(raw_uuid.clone()));
     assert_eq!(extract_uuid_field(&dyn_bytes_direct, &[], 2), Some(raw_uuid.clone()));
 
-    let mut wrapped_short = Vec::new();
-    encode_bytes_field(1, b"short", &mut wrapped_short);
+    let wrapped_short = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(b"short".to_vec()),
+        }],
+    }
+    .encode();
     let mut dyn_bytes_wrapped = DynamicQuasarMessage::new("test");
     dyn_bytes_wrapped.fields.insert(2, DynamicValue::Bytes(wrapped_short.clone()));
     assert_eq!(extract_uuid_field(&dyn_bytes_wrapped, &[], 2), Some(b"short".to_vec()));
 
-    let mut wire_direct_16 = Vec::new();
-    encode_bytes_field(2, &raw_uuid, &mut wire_direct_16);
+    let wire_direct_16 = WireMessage {
+        fields: vec![WireField {
+            field_number: 2,
+            value: WireValue::LengthDelimited(raw_uuid.clone()),
+        }],
+    }
+    .encode();
     assert_eq!(extract_uuid_field(&DynamicQuasarMessage::new("test"), &wire_direct_16, 2), Some(raw_uuid.clone()));
 
-    let mut wire_wrapped_16 = Vec::new();
-    let mut inner_uuid_wire = Vec::new();
-    encode_bytes_field(1, &raw_uuid, &mut inner_uuid_wire);
-    encode_bytes_field(2, &inner_uuid_wire, &mut wire_wrapped_16);
+    let wire_wrapped_16 = WireMessage {
+        fields: vec![WireField {
+            field_number: 2,
+            value: WireValue::LengthDelimited(
+                WireMessage {
+                    fields: vec![WireField {
+                        field_number: 1,
+                        value: WireValue::LengthDelimited(raw_uuid.clone()),
+                    }],
+                }
+                .encode(),
+            ),
+        }],
+    }
+    .encode();
     assert_eq!(extract_uuid_field(&DynamicQuasarMessage::new("test"), &wire_wrapped_16, 2), Some(raw_uuid.clone()));
     assert_eq!(extract_uuid_field(&DynamicQuasarMessage::new("test"), &[0xff, 0xff], 2), None);
 
@@ -446,21 +485,28 @@ fn market_contract_services_edge_branches_decoding_and_mutants() {
         dispatch_raw(&anon, rpc_draft, vec![], DynamicQuasarMessage::new("test")).unwrap_err().0,
         STATUS_UNAUTHORIZED
     );
-    let mut bad_zero_char = Vec::new();
-    encode_varint_field(1, 0, &mut bad_zero_char);
-    encode_bytes_field(2, &raw_uuid, &mut bad_zero_char);
+    let bad_zero_char = pb::message(rpc_draft)
+        .set("character.sequential", 0u32)
+        .set("draft.uuid", raw_uuid)
+        .must_encode();
     assert_eq!(
         dispatch_raw(&buyer_ctx, rpc_draft, bad_zero_char, DynamicQuasarMessage::new("test")).unwrap_err().0,
         STATUS_BAD_REQUEST
     );
-    let mut valid_char_only = Vec::new();
-    encode_varint_field(1, 900101, &mut valid_char_only);
+    let valid_char_only = pb::message(rpc_draft)
+        .set("character.sequential", 900101u32)
+        .must_encode();
     assert_eq!(
-        dispatch_raw(&buyer_ctx, rpc_draft, valid_char_only.clone(), DynamicQuasarMessage::new("test")).unwrap_err().0,
+        dispatch_raw(&buyer_ctx, rpc_draft, valid_char_only, DynamicQuasarMessage::new("test")).unwrap_err().0,
         STATUS_BAD_REQUEST
     );
-    let mut bad_uuid_len = valid_char_only.clone();
-    encode_bytes_field(2, &wrapped_short, &mut bad_uuid_len);
+    let bad_uuid_len = WireMessage {
+        fields: vec![
+            WireField { field_number: 1, value: WireValue::Varint(900101) },
+            WireField { field_number: 2, value: WireValue::LengthDelimited(wrapped_short.clone()) },
+        ],
+    }
+    .encode();
     let err_len = dispatch_raw(&buyer_ctx, rpc_draft, bad_uuid_len, DynamicQuasarMessage::new("test")).unwrap_err();
     assert_eq!(err_len.0, STATUS_BAD_REQUEST);
     assert!(err_len.1.contains("16 bytes"));
@@ -487,8 +533,13 @@ fn market_contract_services_edge_branches_decoding_and_mutants() {
         }
         st.sync_to_db();
     }
-    let mut scan_req = valid_char_only.clone();
-    encode_bytes_field(2, &custom_draft_uuid, &mut scan_req);
+    let scan_req = WireMessage {
+        fields: vec![
+            WireField { field_number: 1, value: WireValue::Varint(900101) },
+            WireField { field_number: 2, value: WireValue::LengthDelimited(custom_draft_uuid.to_vec()) },
+        ],
+    }
+    .encode();
     let scan_resp = dispatch_raw(&outsider_ctx, rpc_draft, scan_req, DynamicQuasarMessage::new("test"))
         .expect("custom uuid scan fallback");
     assert_eq!(
@@ -498,8 +549,10 @@ fn market_contract_services_edge_branches_decoding_and_mutants() {
     let wm_draft = WireMessage::decode(&scan_resp.value).unwrap();
     assert!(!wm_draft.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap().is_empty());
 
-    let mut missing_draft_req = valid_char_only;
-    encode_bytes_field(2, &vec![0xBB; 16], &mut missing_draft_req);
+    let missing_draft_req = pb::message(rpc_draft)
+        .set("character.sequential", 900101u32)
+        .set("draft.uuid", vec![0xBBu8; 16])
+        .must_encode();
     assert_eq!(
         dispatch_raw(&outsider_ctx, rpc_draft, missing_draft_req, DynamicQuasarMessage::new("test")).unwrap_err().0,
         STATUS_NOT_FOUND
@@ -522,8 +575,10 @@ fn market_contract_services_edge_branches_decoding_and_mutants() {
         dispatch_raw(&buyer_ctx, rpc_tx_get, vec![], DynamicQuasarMessage::new("test")).unwrap_err().0,
         STATUS_BAD_REQUEST
     );
-    let mut tx_bad_len = Vec::new();
-    encode_bytes_field(1, &wrapped_short, &mut tx_bad_len);
+    let tx_bad_len = WireMessage {
+        fields: vec![WireField { field_number: 1, value: WireValue::LengthDelimited(wrapped_short) }],
+    }
+    .encode();
     assert_eq!(
         dispatch_raw(&buyer_ctx, rpc_tx_get, tx_bad_len, DynamicQuasarMessage::new("test")).unwrap_err().0,
         STATUS_BAD_REQUEST
@@ -533,8 +588,9 @@ fn market_contract_services_edge_branches_decoding_and_mutants() {
     db.with_mut_snapshot(|snap| {
         snap.quasar_state_blobs.insert("quasar_cosmetics_market".to_string(), "{not-valid-json".to_string());
     });
-    let mut tx_req_missing = Vec::new();
-    encode_bytes_field(1, &vec![0x55; 16], &mut tx_req_missing);
+    let tx_req_missing = pb::message(rpc_tx_get)
+        .set("transaction.uuid", vec![0x55u8; 16])
+        .must_encode();
     assert_eq!(
         dispatch_raw(&buyer_ctx, rpc_tx_get, tx_req_missing, DynamicQuasarMessage::new("test")).unwrap_err().0,
         STATUS_NOT_FOUND
@@ -592,8 +648,13 @@ fn market_contract_services_edge_branches_decoding_and_mutants() {
         (&seller_ctx, &outsider_ctx, uuid_skin, 3u64, 1_760_000_022u64, 2u32),
         (&admin_ctx, &buyer_ctx, uuid_list, 4u64, 1_760_000_033u64, 3u32),
     ] {
-        let mut req_bytes = Vec::new();
-        encode_bytes_field(1, &uuid, &mut req_bytes);
+        let req_bytes = WireMessage {
+            fields: vec![WireField {
+                field_number: 1,
+                value: WireValue::LengthDelimited(uuid.to_vec()),
+            }],
+        }
+        .encode();
         assert_eq!(
             dispatch_raw(ctx_deny, rpc_tx_get, req_bytes.clone(), DynamicQuasarMessage::new("test")).unwrap_err().0,
             STATUS_FORBIDDEN
@@ -625,8 +686,9 @@ fn market_contract_services_edge_branches_decoding_and_mutants() {
     let key_wm = WireMessage::decode(&key_resp.value).unwrap();
     assert_eq!(key_wm.fields[0].value.as_str().unwrap(), Some("evomu-cdn-v24"));
 
-    let mut sign_wire_req = Vec::new();
-    encode_string_field(1, "https://cdn.example/skin?v=2", &mut sign_wire_req);
+    let sign_wire_req = pb::message("eve.cdn.api.SignURLRequest")
+        .set("url", "https://cdn.example/skin?v=2")
+        .must_encode();
     let signed_query = dispatch_raw(&buyer_ctx, "eve.cdn.api.SignURLRequest", sign_wire_req, DynamicQuasarMessage::new("test")).unwrap();
     let sq_wm = WireMessage::decode(&signed_query.value).unwrap();
     assert_eq!(sq_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_str().unwrap(), Some("https://cdn.example/skin?v=2&sig=evomu_v24_signed"));
@@ -702,10 +764,9 @@ fn market_contract_services_edge_branches_decoding_and_mutants() {
     }).collect();
     assert_eq!(ids, vec![1, 2, 3]);
 
-    let mut content_req_wrap = Vec::new();
-    let mut inner_cid = Vec::new();
-    encode_varint_field(1, 42, &mut inner_cid);
-    encode_bytes_field(1, &inner_cid, &mut content_req_wrap);
+    let content_req_wrap = pb::message("eve.content.GetRequest")
+        .set("id.sequential", 42u32)
+        .must_encode();
     let c_resp = dispatch_raw(&buyer_ctx, "eve.content.GetRequest", content_req_wrap, DynamicQuasarMessage::new("test")).unwrap();
     let c_wm = WireMessage::decode(&c_resp.value).unwrap();
     assert_eq!(c_wm.fields.iter().find(|f| f.field_number == 2).unwrap().value.as_str().unwrap(), Some("ccp-content"));

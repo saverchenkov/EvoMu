@@ -12,9 +12,10 @@ use eve_db::{
     WorldStateSnapshot,
 };
 use eve_machonet::SessionState;
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, AuthoritativeContext, EvePublicRequest,
-    EvePublicResponse, GoogleAny, QuasarDescriptorRegistry, WireMessage, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, EvePublicRequest, EvePublicResponse, GoogleAny, QuasarDescriptorRegistry,
+    WireField, WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
@@ -80,12 +81,6 @@ fn auth_ctx(cid: Option<i64>, corp: Option<i64>, roles: u64) -> AuthoritativeCon
         vec![],
         1_760_000_500,
     )
-}
-
-fn encode_seq(field: u32, id: u64, out: &mut Vec<u8>) {
-    let mut sub = Vec::new();
-    encode_varint_field(1, id, &mut sub);
-    encode_bytes_field(field, &sub, out);
 }
 
 fn extract_varints(wire: &WireMessage, field: u32) -> Vec<u64> {
@@ -405,24 +400,27 @@ fn market_get_orders_and_for_all_types_respect_zero_vol_and_200_cap_and_filters(
     });
 
     // GetForAllTypesRequest caps at 200
-    let mut req_all = Vec::new();
-    encode_seq(1, 1000_0002, &mut req_all);
+    let req_all = pb::message("eve.market.price.GetForAllTypesRequest")
+        .set("head", true)
+        .must_encode();
     let resp_all = call(&router, &s, "eve.market.price.GetForAllTypesRequest", req_all, 1_760_000_100);
     assert_eq!(resp_all.status_code, STATUS_OK);
     let w_all = WireMessage::decode(&resp_all.payload.unwrap().value).unwrap();
     assert_eq!(extract_messages(&w_all, 1).len(), 200, "GetForAllTypesRequest must cap at 200");
 
     // GetOrdersRequest with empty type_ids returns empty
-    let mut req_empty = Vec::new();
-    encode_seq(2, 1000_0002, &mut req_empty);
+    let req_empty = pb::message("eve.market.orders.GetOrdersRequest")
+        .set("station_id.sequential", 1000_0002u64)
+        .must_encode();
     let resp_empty = call(&router, &s, "eve.market.orders.GetOrdersRequest", req_empty, 1_760_000_100);
     assert_eq!(resp_empty.status_code, STATUS_OK);
     let w_empty = WireMessage::decode(&resp_empty.payload.unwrap().value).unwrap();
     assert!(extract_messages(&w_empty, 1).is_empty());
 
     // GetTypesWithActiveOrdersInRegionRequest excludes exhausted type 35
-    let mut req_types = Vec::new();
-    encode_seq(1, 1000_0002, &mut req_types);
+    let req_types = pb::message("eve.market.orders.GetTypesWithActiveOrdersInRegionRequest")
+        .set("region.sequential", 1000_0002u64)
+        .must_encode();
     let resp_types = call(
         &router,
         &s,
@@ -501,10 +499,20 @@ fn public_buy_sell_region_endpoints_respect_no_type_filter_flag_and_item_type() 
     });
 
     // no_type_filter = true (field 2), even with field 3 = 34 -> returns both type 34 and 35 buy orders
-    let mut req_all_buy = Vec::new();
-    encode_seq(1, 1000_0002, &mut req_all_buy);
-    encode_seq(3, 34, &mut req_all_buy);
-    encode_varint_field(2, 1, &mut req_all_buy);
+    let region_bytes = pb::message("eve.region.Identifier")
+        .set("sequential", 1000_0002u64)
+        .must_encode();
+    let type34_bytes = pb::message("eve.inventory.genericitemtype.Identifier")
+        .set("sequential", 34u64)
+        .must_encode();
+    let req_all_buy = WireMessage {
+        fields: vec![
+            WireField { field_number: 1, value: WireValue::LengthDelimited(region_bytes.clone()) },
+            WireField { field_number: 3, value: WireValue::LengthDelimited(type34_bytes) },
+            WireField { field_number: 2, value: WireValue::Varint(1) },
+        ],
+    }
+    .encode();
     let resp_buy_all = call(
         &router,
         &s,
@@ -524,10 +532,17 @@ fn public_buy_sell_region_endpoints_respect_no_type_filter_flag_and_item_type() 
     assert!(!buy_all_ids.contains(&70_003));
 
     // sellorder with item_type=35 and no_type_filter=false -> returns only sell order 70_003
-    let mut req_sell = Vec::new();
-    encode_seq(1, 1000_0002, &mut req_sell);
-    encode_varint_field(2, 0, &mut req_sell);
-    encode_seq(3, 35, &mut req_sell);
+    let type35_bytes = pb::message("eve.inventory.genericitemtype.Identifier")
+        .set("sequential", 35u64)
+        .must_encode();
+    let req_sell = WireMessage {
+        fields: vec![
+            WireField { field_number: 1, value: WireValue::LengthDelimited(region_bytes) },
+            WireField { field_number: 2, value: WireValue::Varint(0) },
+            WireField { field_number: 3, value: WireValue::LengthDelimited(type35_bytes) },
+        ],
+    }
+    .encode();
     let resp_sell = call(
         &router,
         &s,
@@ -689,14 +704,16 @@ fn character_and_corporation_open_vs_history_and_station_structure_filters() {
     assert!(corp_hist_ids.contains(&80_003) && corp_hist_ids.contains(&80_004));
 
     // Station & Structure filters exclude vol_remaining==0
-    let mut req_st = Vec::new();
-    encode_seq(1, 6000_3760, &mut req_st);
+    let req_st = pb::message("eve.market.orders.GetOpenInStationRequest")
+        .set("station.sequential", 6000_3760u64)
+        .must_encode();
     let resp_st = call(&router, &ceo_s, "eve.market.orders.GetOpenInStationRequest", req_st, 1_760_000_100);
     let st_ids = extract_composite_ids(&resp_st.payload.unwrap().value);
     assert!(st_ids.contains(&80_001) && !st_ids.contains(&80_002) && !st_ids.contains(&80_003));
 
-    let mut req_str = Vec::new();
-    encode_seq(1, 1_000_000_099, &mut req_str);
+    let req_str = pb::message("eve.market.orders.GetOpenInStructureRequest")
+        .set("structure.sequential", 1_000_000_099u64)
+        .must_encode();
     let resp_str = call(&router, &ceo_s, "eve.market.orders.GetOpenInStructureRequest", req_str, 1_760_000_100);
     let str_ids = extract_composite_ids(&resp_str.payload.unwrap().value);
     assert_eq!(str_ids, vec![80_003]);

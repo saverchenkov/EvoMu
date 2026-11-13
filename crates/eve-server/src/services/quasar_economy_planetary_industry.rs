@@ -18,19 +18,12 @@ use crate::quasar_gateway::{
     NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
-    DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleTimestamp, QuasarDescriptorRegistry,
-    QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, QuasarDescriptorRegistry,
 };
 use eve_sde::SdeRegistry;
 use std::sync::Arc;
-
-fn encode_identifier(field_num: u32, id: u64, out: &mut Vec<u8>) {
-    let mut id_buf = Vec::new();
-    encode_varint_field(1, id, &mut id_buf);
-    encode_bytes_field(field_num, &id_buf, out);
-}
 
 fn caller_solar_system(ctx: &AuthoritativeContext, db: &WorldRepository) -> u64 {
     ctx.effective_character_id()
@@ -60,18 +53,10 @@ fn caller_station_and_solar_system(
         .unwrap_or((0, 0))
 }
 
-fn encode_currency(field_num: u32, isk_cents: i64, out: &mut Vec<u8>) {
-    let mut cur_buf = Vec::new();
-    encode_varint_field(1, (isk_cents.max(0) / 100) as u64, &mut cur_buf);
-    encode_bytes_field(field_num, &cur_buf, out);
-}
-
-fn encode_timestamp(field_num: u32, secs: i64, out: &mut Vec<u8>) {
-    let ts = GoogleTimestamp {
-        seconds: secs,
-        nanos: 0,
-    };
-    encode_bytes_field(field_num, &ts.encode_proto(), out);
+fn set_isk_currency(b: pb::ProtoBuilder, isk_cents: i64) -> pb::ProtoBuilder {
+    let clamped = isk_cents.max(0);
+    b.set("units", clamped / 100)
+        .set("nanos", ((clamped % 100) * 10_000_000) as i32)
 }
 
 fn extract_u64_from_field(dyn_msg: &DynamicQuasarMessage, field_num: u32) -> u64 {
@@ -219,27 +204,26 @@ pub fn register_economy_planetary_industry_handlers(
                     .collect::<Vec<_>>()
             });
 
-            let mut out = Vec::new();
+            let mut resp = pb::message(
+                "eve.accounting.character.journal.GetCharacterEntriesResponse",
+            );
             for e in entries.iter().take(200) {
-                let mut entry = Vec::new();
-                encode_identifier(1, e.entry_id as u64, &mut entry);
-
-                let mut attrs = Vec::new();
-                encode_timestamp(2, 1_760_000_000, &mut attrs);
-                encode_currency(4, e.amount.0, &mut attrs);
-                encode_currency(5, e.balance_after.0, &mut attrs);
-                encode_string_field(6, &e.reason, &mut attrs);
-                encode_bytes_field(2, &attrs, &mut entry);
-
-                encode_bytes_field(1, &entry, &mut out);
+                resp = resp.add_with("entries", |entry| {
+                    entry
+                        .set("id.transaction", e.entry_id as u64)
+                        .set_with("attributes", |attrs| {
+                            attrs
+                                .set("date.seconds", 1_760_000_000i64)
+                                .set_with("amount", |c| set_isk_currency(c, e.amount.0))
+                                .set_with("account_balance", |c| {
+                                    set_isk_currency(c, e.balance_after.0)
+                                })
+                                .set("description", &e.reason)
+                        })
+                });
             }
 
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.accounting.character.journal.GetCharacterEntriesResponse"
-                ),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -266,24 +250,25 @@ pub fn register_economy_planetary_industry_handlers(
                 )
             })?;
 
-            let mut out = Vec::new();
+            let mut resp = pb::message(
+                "eve.accounting.corporation.journal.GetCorporationEntriesResponse",
+            );
             for e in entries.iter().take(200) {
-                let mut entry = Vec::new();
-                encode_identifier(1, e.entry_id as u64, &mut entry);
-                let mut attrs = Vec::new();
-                encode_timestamp(2, 1_760_000_000, &mut attrs);
-                encode_currency(4, e.amount.0, &mut attrs);
-                encode_currency(5, e.balance_after.0, &mut attrs);
-                encode_bytes_field(2, &attrs, &mut entry);
-                encode_bytes_field(1, &entry, &mut out);
+                resp = resp.add_with("entries", |entry| {
+                    entry
+                        .set("id.transaction", e.entry_id as u64)
+                        .set_with("attributes", |attrs| {
+                            attrs
+                                .set("date.seconds", 1_760_000_000i64)
+                                .set_with("amount", |c| set_isk_currency(c, e.amount.0))
+                                .set_with("account_balance", |c| {
+                                    set_isk_currency(c, e.balance_after.0)
+                                })
+                        })
+                });
             }
 
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.accounting.corporation.journal.GetCorporationEntriesResponse"
-                ),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -291,28 +276,19 @@ pub fn register_economy_planetary_industry_handlers(
     router.register_handler(
         "eve.accounting.entrytype.GetAllRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
             let sample_types = [
-                (1, "Player Trading", "Transfer between players"),
-                (2, "Market Transaction", "Market purchase or sale"),
-                (10, "Bounty Prize", "NPC bounty reward"),
-                (42, "Industry Job Fee", "Installation cost"),
+                (1u32, "Player Trading"),
+                (2u32, "Market Transaction"),
+                (10u32, "Bounty Prize"),
+                (42u32, "Industry Job Fee"),
             ];
-            for (id, name, desc) in sample_types {
-                let mut et = Vec::new();
-                encode_identifier(1, id, &mut et);
-                let mut attrs = Vec::new();
-                encode_string_field(1, name, &mut attrs);
-                encode_string_field(2, desc, &mut attrs);
-                encode_bytes_field(2, &attrs, &mut et);
-                encode_bytes_field(1, &et, &mut out);
+            let mut resp = pb::message("eve.accounting.entrytype.GetAllResponse");
+            for (id, name) in sample_types {
+                resp = resp.add_with("entry_types", |et| {
+                    et.set("id.sequential", id).set("attributes.name", name)
+                });
             }
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.accounting.entrytype.GetAllResponse"
-                ),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -328,12 +304,8 @@ pub fn register_economy_planetary_industry_handlers(
                     "Authentication required for loyaltypoints assetholding WithdrawRequest".into(),
                 ));
             }
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.assetholding.operation.api.WithdrawResponse"
-                ),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve.loyaltypoints.assetholding.operation.api.WithdrawResponse")
+                .must_to_any())
         }),
     );
 
@@ -349,12 +321,8 @@ pub fn register_economy_planetary_industry_handlers(
                     "Authentication required for loyaltypoints assetholding DepositRequest".into(),
                 ));
             }
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.assetholding.operation.api.DepositResponse"
-                ),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve.loyaltypoints.assetholding.operation.api.DepositResponse")
+                .must_to_any())
         }),
     );
 
@@ -406,87 +374,55 @@ pub fn register_economy_planetary_industry_handlers(
                 Ok(Some(c))
             })?;
 
-            let mut attrs = Vec::new();
-            if let Some(c) = contract {
-                let mut issuer = Vec::new();
-                encode_identifier(1, c.issuer_id as u64, &mut issuer);
-                encode_bytes_field(1, &issuer, &mut attrs);
-                encode_varint_field(2, if c.availability == "Public" { 1 } else { 0 }, &mut attrs);
-                encode_timestamp(3, 1_760_000_000, &mut attrs);
-                encode_timestamp(4, c.expiration_unix as i64, &mut attrs);
-                encode_currency(8, c.price.0, &mut attrs);
-                encode_currency(10, c.reward.0, &mut attrs);
-            } else {
-                encode_varint_field(2, 1, &mut attrs); // public
-                encode_timestamp(3, 1_760_000_000, &mut attrs);
-                encode_currency(8, 1_000_000, &mut attrs);
-            }
-
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attrs, &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.contract.item_exchange.GetResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve.contract.item_exchange.GetResponse")
+                .set_with("contract", |attrs| {
+                    if let Some(c) = contract {
+                        attrs
+                            .set("issuer.character.sequential", c.issuer_id as u32)
+                            .set("available_to_public", c.availability == "Public")
+                            .set("issued_time.seconds", 1_760_000_000i64)
+                            .set("expiry_time.seconds", c.expiration_unix as i64)
+                            .set_with("price", |p| set_isk_currency(p, c.price.0))
+                            .set_with("reward", |r| set_isk_currency(r, c.reward.0))
+                    } else {
+                        attrs
+                            .set("available_to_public", true)
+                            .set("issued_time.seconds", 1_760_000_000i64)
+                            .set_with("price", |p| set_isk_currency(p, 1_000_000))
+                    }
+                })
+                .must_to_any())
         }),
     );
 
     // 7. eve.character.industry.job.GetRequest
-    router.register_handler(
-        "eve.character.industry.job.GetRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
-            let mut job_entry = Vec::new();
-            encode_identifier(1, 80001, &mut job_entry);
-            encode_bytes_field(1, &job_entry, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.character.industry.job.GetResponse"),
-                value: out,
-            })
-        }),
-    );
-    router.register_handler(
-        "eve.character.industry.job.GetActiveRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
-            let mut job_entry = Vec::new();
-            encode_identifier(1, 80001, &mut job_entry);
-            encode_bytes_field(1, &job_entry, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.character.industry.job.GetActiveResponse"
-                ),
-                value: out,
-            })
-        }),
-    );
-    router.register_handler(
-        "eve.character.industry.job.GetCompletedRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
-            let mut job_entry = Vec::new();
-            encode_identifier(1, 80001, &mut job_entry);
-            encode_bytes_field(1, &job_entry, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.character.industry.job.GetCompletedResponse"
-                ),
-                value: out,
-            })
-        }),
-    );
+    for (req_name, resp_name) in [
+        (
+            "eve.character.industry.job.GetRequest",
+            "eve.character.industry.job.GetResponse",
+        ),
+        (
+            "eve.character.industry.job.GetActiveRequest",
+            "eve.character.industry.job.GetActiveResponse",
+        ),
+        (
+            "eve.character.industry.job.GetCompletedRequest",
+            "eve.character.industry.job.GetCompletedResponse",
+        ),
+    ] {
+        router.register_handler(
+            req_name,
+            Arc::new(move |_ctx, _any, _dyn_msg| {
+                Ok(pb::message(resp_name)
+                    .add_with("jobs", |j| j.set("id.sequential", 80001u32))
+                    .must_to_any())
+            }),
+        );
+    }
     router.register_handler(
         "eve.character.industry.blueprints.GetRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.character.industry.blueprints.GetResponse"
-                ),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve.character.industry.blueprints.GetResponse").must_to_any())
         }),
     );
 
@@ -496,21 +432,18 @@ pub fn register_economy_planetary_industry_handlers(
         "eve.industry.facility.GetRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
             let (station_id, sys_id) = caller_station_and_solar_system(ctx, &db_fac);
-            let mut out = Vec::new();
-            let mut fac = Vec::new();
-            encode_identifier(1, station_id, &mut fac);
-            let mut attrs = Vec::new();
-            encode_identifier(1, 1000002, &mut attrs); // corp
-            encode_identifier(2, 10000002, &mut attrs); // region
-            encode_identifier(3, sys_id, &mut attrs); // solar system
-            encode_varint_field(5, 1, &mut attrs); // online
-            encode_bytes_field(2, &attrs, &mut fac);
-            encode_bytes_field(1, &fac, &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.industry.facility.GetResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve.industry.facility.GetResponse")
+                .add_with("facilities", |fac| {
+                    fac.set("id.sequential", station_id)
+                        .set_with("attributes", |attrs| {
+                            attrs
+                                .set("corporation.sequential", 1000002u32)
+                                .set("region.sequential", 10000002u64)
+                                .set("solar_system.sequential", sys_id)
+                                .set("online", true)
+                        })
+                })
+                .must_to_any())
         }),
     );
 
@@ -520,17 +453,9 @@ pub fn register_economy_planetary_industry_handlers(
         "eve.industry.system.GetCostIndicesRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
             let sys_id = caller_solar_system(ctx, &db_cost);
-            let mut out = Vec::new();
-            let mut idx = Vec::new();
-            encode_identifier(1, sys_id, &mut idx);
-            encode_bytes_field(1, &idx, &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.industry.system.GetCostIndicesResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve.industry.system.GetCostIndicesResponse")
+                .add_with("cost_indices", |idx| idx.set("solar_system.sequential", sys_id))
+                .must_to_any())
         }),
     );
 
@@ -541,18 +466,14 @@ pub fn register_economy_planetary_industry_handlers(
         Arc::new(move |ctx, _any, dyn_msg| {
             let sys_id = caller_solar_system(ctx, &db_planet);
             let planet_id = extract_u64_from_field(dyn_msg, 1);
-            let mut attrs = Vec::new();
-            encode_identifier(1, sys_id, &mut attrs); // solar system
-            encode_string_field(3, &format!("Planet #{planet_id}"), &mut attrs);
-            encode_identifier(5, 11, &mut attrs); // planet type Temperate
-
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attrs, &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.planet.GetResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve.planet.GetResponse")
+                .set_with("planet", |attrs| {
+                    attrs
+                        .set("solarsystem.sequential", sys_id)
+                        .set("name", format!("Planet #{planet_id}"))
+                        .set("type.sequential", 11u64)
+                })
+                .must_to_any())
         }),
     );
 
@@ -561,17 +482,12 @@ pub fn register_economy_planetary_industry_handlers(
         "eve.planet.GetPlanetsInSolarSystemRequest",
         Arc::new(move |_ctx, _any, dyn_msg| {
             let sys_id = extract_u64_from_field(dyn_msg, 1);
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve.planet.GetPlanetsInSolarSystemResponse");
             for i in 1..=8 {
                 let planet_id = sys_id * 100 + i;
-                encode_identifier(1, planet_id, &mut out);
+                resp = resp.add_with("planets", |p| p.set("sequential", planet_id));
             }
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.planet.GetPlanetsInSolarSystemResponse"
-                ),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -580,12 +496,7 @@ pub fn register_economy_planetary_industry_handlers(
         "eve.planet.skyhook.admin.api.ChangeOwnerRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
             crate::quasar_gateway::require_admin_role(ctx)?;
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.planet.skyhook.admin.api.ChangeOwnerResponse"
-                ),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve.planet.skyhook.admin.api.ChangeOwnerResponse").must_to_any())
         }),
     );
 
@@ -593,14 +504,9 @@ pub fn register_economy_planetary_industry_handlers(
     router.register_handler(
         "eve.planet.skyhook.api.GetReinforcementExitHourRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
-            encode_varint_field(1, 18, &mut out); // 18:00 UTC
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.planet.skyhook.api.GetReinforcementExitHourResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve.planet.skyhook.api.GetReinforcementExitHourResponse")
+                .set("reinforcement_exit_hour", 18u32) // 18:00 UTC
+                .must_to_any())
         }),
     );
 
@@ -608,15 +514,10 @@ pub fn register_economy_planetary_industry_handlers(
     router.register_handler(
         "eve.planet.skyhook.api.GetStateRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
-            encode_varint_field(1, 1, &mut out); // Online
-            encode_varint_field(2, 1, &mut out); // no_timer = true
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.planet.skyhook.api.GetStateResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve.planet.skyhook.api.GetStateResponse")
+                .set("state", pb::enum_name("STATE_SHIELD_VULNERABLE"))
+                .set("no_timer", true)
+                .must_to_any())
         }),
     );
 
@@ -625,18 +526,14 @@ pub fn register_economy_planetary_industry_handlers(
         "eve.planetinteraction.collector.GetRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let col_id = extract_u64_from_field(dyn_msg, 1);
-            let cid = ctx.effective_character_id().unwrap_or(0) as u64;
-            let mut attrs = Vec::new();
-            encode_identifier(1, cid, &mut attrs);
-            encode_identifier(2, col_id.max(1), &mut attrs);
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attrs, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.planetinteraction.collector.GetResponse"
-                ),
-                value: out,
-            })
+            let cid = ctx.effective_character_id().unwrap_or(0) as u32;
+            Ok(pb::message("eve.planetinteraction.collector.GetResponse")
+                .set_with("collector", |attrs| {
+                    attrs
+                        .set("character.sequential", cid)
+                        .set("planet.sequential", col_id.max(1))
+                })
+                .must_to_any())
         }),
     );
 
@@ -645,18 +542,14 @@ pub fn register_economy_planetary_industry_handlers(
         "eve.planetinteraction.factory.GetRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let fact_id = extract_u64_from_field(dyn_msg, 1);
-            let cid = ctx.effective_character_id().unwrap_or(0) as u64;
-            let mut attrs = Vec::new();
-            encode_identifier(1, cid, &mut attrs);
-            encode_identifier(2, fact_id.max(1), &mut attrs);
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attrs, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.planetinteraction.factory.GetResponse"
-                ),
-                value: out,
-            })
+            let cid = ctx.effective_character_id().unwrap_or(0) as u32;
+            Ok(pb::message("eve.planetinteraction.factory.GetResponse")
+                .set_with("factory", |attrs| {
+                    attrs
+                        .set("character.sequential", cid)
+                        .set("planet.sequential", fact_id.max(1))
+                })
+                .must_to_any())
         }),
     );
 
@@ -665,17 +558,13 @@ pub fn register_economy_planetary_industry_handlers(
         "eve.planetinteraction.schematic.GetRequest",
         Arc::new(move |_ctx, _any, dyn_msg| {
             let sch_id = extract_u64_from_field(dyn_msg, 1);
-            let mut attrs = Vec::new();
-            encode_varint_field(1, 3600, &mut attrs); // 1h cycle
-            encode_string_field(2, &format!("PI Schematic #{sch_id}"), &mut attrs);
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attrs, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.planetinteraction.schematic.GetResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve.planetinteraction.schematic.GetResponse")
+                .set_with("schematic", |attrs| {
+                    attrs
+                        .set("cycle_time_sec", 3600u32) // 1h cycle
+                        .set("schematic_name", format!("PI Schematic #{sch_id}"))
+                })
+                .must_to_any())
         }),
     );
 
@@ -684,18 +573,14 @@ pub fn register_economy_planetary_industry_handlers(
         "eve.planetinteraction.storage.GetRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let store_id = extract_u64_from_field(dyn_msg, 1);
-            let cid = ctx.effective_character_id().unwrap_or(0) as u64;
-            let mut attrs = Vec::new();
-            encode_identifier(1, cid, &mut attrs);
-            encode_identifier(2, store_id.max(1), &mut attrs);
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attrs, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.planetinteraction.storage.GetResponse"
-                ),
-                value: out,
-            })
+            let cid = ctx.effective_character_id().unwrap_or(0) as u32;
+            Ok(pb::message("eve.planetinteraction.storage.GetResponse")
+                .set_with("storage", |attrs| {
+                    attrs
+                        .set("character.sequential", cid)
+                        .set("planet.sequential", store_id.max(1))
+                })
+                .must_to_any())
         }),
     );
 
@@ -706,15 +591,13 @@ pub fn register_economy_planetary_industry_handlers(
         Arc::new(move |ctx, _any, dyn_msg| {
             let sys_id = caller_solar_system(ctx, &db_moon);
             let moon_id = extract_u64_from_field(dyn_msg, 1);
-            let mut attrs = Vec::new();
-            encode_string_field(1, &format!("Moon #{moon_id}"), &mut attrs);
-            encode_identifier(3, sys_id, &mut attrs); // solar system
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attrs, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.moon.GetResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve.moon.GetResponse")
+                .set_with("attributes", |attrs| {
+                    attrs
+                        .set("name", format!("Moon #{moon_id}"))
+                        .set("solar_system.sequential", sys_id)
+                })
+                .must_to_any())
         }),
     );
 
@@ -723,14 +606,11 @@ pub fn register_economy_planetary_industry_handlers(
         "eve.moon.GetMoonsOfPlanetRequest",
         Arc::new(move |_ctx, _any, dyn_msg| {
             let planet_id = extract_u64_from_field(dyn_msg, 1);
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve.moon.GetMoonsOfPlanetResponse");
             for i in 1..=4 {
-                encode_identifier(1, planet_id * 10 + i, &mut out);
+                resp = resp.add_with("moons", |m| m.set("sequential", planet_id * 10 + i));
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.moon.GetMoonsOfPlanetResponse"),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -741,15 +621,13 @@ pub fn register_economy_planetary_industry_handlers(
         Arc::new(move |ctx, _any, dyn_msg| {
             let sys_id = caller_solar_system(ctx, &db_belt);
             let belt_id = extract_u64_from_field(dyn_msg, 1);
-            let mut attrs = Vec::new();
-            encode_string_field(1, &format!("Asteroid Belt #{belt_id}"), &mut attrs);
-            encode_identifier(3, sys_id, &mut attrs); // solar system
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attrs, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.asteroidbelt.GetResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve.asteroidbelt.GetResponse")
+                .set_with("attributes", |attrs| {
+                    attrs
+                        .set("name", format!("Asteroid Belt #{belt_id}"))
+                        .set("solar_system.sequential", sys_id)
+                })
+                .must_to_any())
         }),
     );
 
@@ -758,16 +636,11 @@ pub fn register_economy_planetary_industry_handlers(
         "eve.asteroidbelt.GetBeltsOfPlanetRequest",
         Arc::new(move |_ctx, _any, dyn_msg| {
             let planet_id = extract_u64_from_field(dyn_msg, 1);
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve.asteroidbelt.GetBeltsOfPlanetResponse");
             for i in 1..=2 {
-                encode_identifier(1, planet_id * 100 + i, &mut out);
+                resp = resp.add_with("belts", |b| b.set("sequential", planet_id * 100 + i));
             }
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.asteroidbelt.GetBeltsOfPlanetResponse"
-                ),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -776,33 +649,30 @@ pub fn register_economy_planetary_industry_handlers(
     router.register_handler(
         "eve.bloodline.GetAllRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve.bloodline.GetAllResponse");
             let mut bl_ids: Vec<_> = sde_bloodlines.bloodlines.keys().copied().collect();
             bl_ids.sort_unstable();
             for id in bl_ids {
                 if let Some(bl) = sde_bloodlines.bloodlines.get(&id) {
-                    let mut bloodline_entry = Vec::new();
-                    encode_identifier(1, id as u64, &mut bloodline_entry);
-                    let mut attrs = Vec::new();
-                    encode_string_field(1, &bl.name, &mut attrs);
-                    encode_string_field(2, &bl.description, &mut attrs);
-                    encode_identifier(3, bl.race_id as u64, &mut attrs);
-                    if let Some(ship_type) = bl.ship_type_id {
-                        encode_identifier(4, ship_type as u64, &mut attrs);
-                    }
-                    encode_varint_field(5, bl.charisma.max(0) as u64, &mut attrs);
-                    encode_varint_field(6, bl.intelligence.max(0) as u64, &mut attrs);
-                    encode_varint_field(7, bl.memory.max(0) as u64, &mut attrs);
-                    encode_varint_field(8, bl.perception.max(0) as u64, &mut attrs);
-                    encode_varint_field(9, bl.willpower.max(0) as u64, &mut attrs);
-                    encode_bytes_field(2, &attrs, &mut bloodline_entry);
-                    encode_bytes_field(1, &bloodline_entry, &mut out);
+                    resp = resp.add_with("bloodlines", |entry| {
+                        entry
+                            .set("identifier.sequential", id as u32)
+                            .set_with("attributes", |attrs| {
+                                attrs
+                                    .set("name", &bl.name)
+                                    .set("description", &bl.description)
+                                    .set("race.sequential", bl.race_id as u32)
+                                    .set_opt("ship_type.sequential", bl.ship_type_id.map(|t| t as u64))
+                                    .set("charisma", bl.charisma.max(0) as u32)
+                                    .set("intelligence", bl.intelligence.max(0) as u32)
+                                    .set("memory", bl.memory.max(0) as u32)
+                                    .set("perception", bl.perception.max(0) as u32)
+                                    .set("willpower", bl.willpower.max(0) as u32)
+                            })
+                    });
                 }
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.bloodline.GetAllResponse"),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -834,19 +704,15 @@ pub fn register_economy_planetary_industry_handlers(
                 }
                 Ok(())
             })?;
-            let mut notice_val = Vec::new();
-            encode_varint_field(1, amount.max(0) as u64, &mut notice_val);
-            isk_notices.write().unwrap_or_else(|e| e.into_inner()).push((
-                NoticeScope::Character(caller as u32),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.isk.wallet.api.GrantCommanded"),
-                    value: notice_val,
-                },
-            ));
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.isk.wallet.api.TransferByOwnerResponse"),
-                value: Vec::new(),
-            })
+            let notice = pb::message("eve.isk.wallet.api.GrantCommanded")
+                .set("from_wallet_owner", true)
+                .set_with("amount", |a| a.set("units", amount.max(0)).set("nanos", 0i32))
+                .must_to_any();
+            isk_notices
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((NoticeScope::Character(caller as u32), notice));
+            Ok(pb::message("eve.isk.wallet.api.TransferByOwnerResponse").must_to_any())
         }),
     );
 
@@ -862,12 +728,9 @@ pub fn register_economy_planetary_industry_handlers(
                 },
                 _ => 1,
             };
-            let mut out = Vec::new();
-            encode_string_field(1, &format!("LocalizedText#{seq}"), &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.localization.message.api.GetLocalizedTextResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve.localization.message.api.GetLocalizedTextResponse")
+                .set("text", format!("LocalizedText#{seq}"))
+                .must_to_any())
         }),
     );
 
@@ -875,12 +738,9 @@ pub fn register_economy_planetary_industry_handlers(
     router.register_handler(
         "eve.localization.cerberus.api.GetLocalizedTextRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
-            encode_string_field(1, "CerberusLocalizedText", &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.localization.cerberus.api.GetLocalizedTextResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve.localization.cerberus.api.GetLocalizedTextResponse")
+                .set("text", "CerberusLocalizedText")
+                .must_to_any())
         }),
     );
 
@@ -888,12 +748,7 @@ pub fn register_economy_planetary_industry_handlers(
     router.register_handler(
         "eve.killmail.Attributes",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
-            encode_identifier(1, 1, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.killmail.Attributes"),
-                value: out,
-            })
+            Ok(pb::message("eve.killmail.Attributes").must_to_any())
         }),
     );
 
@@ -901,15 +756,10 @@ pub fn register_economy_planetary_industry_handlers(
     router.register_handler(
         "eve.id.api.GetRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
-            let uid = ctx.effective_user_id().unwrap_or(1) as u64;
-            let mut out = Vec::new();
-            let mut attrs = Vec::new();
-            encode_identifier(1, uid, &mut attrs);
-            encode_bytes_field(1, &attrs, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.id.api.GetResponse"),
-                value: out,
-            })
+            let uid = ctx.effective_user_id().unwrap_or(1) as i32;
+            Ok(pb::message("eve.id.api.GetResponse")
+                .set_with("id", |attrs| attrs.add_with("users", |u| u.set("sequential", uid)))
+                .must_to_any())
         }),
     );
 
@@ -924,15 +774,10 @@ pub fn register_economy_planetary_industry_handlers(
                 },
                 _ => ctx.effective_user_id().unwrap_or(1) as u64,
             };
-            let mut out = Vec::new();
-            let mut id_val = Vec::new();
             let uuid_str = format!("usr-{:016x}", uid);
-            encode_bytes_field(1, uuid_str.as_bytes(), &mut id_val);
-            encode_bytes_field(1, &id_val, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.id.api.GetByUserResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve.id.api.GetByUserResponse")
+                .set("id.uuid", uuid_str.into_bytes())
+                .must_to_any())
         }),
     );
 
@@ -952,17 +797,15 @@ pub fn register_economy_planetary_industry_handlers(
             let username = db_id_legacy.with_snapshot(|snap| {
                 snap.accounts.values().find(|a| a.user_id == uid).map(|a| a.username.clone())
             }).unwrap_or_else(|| format!("pilot_{uid}"));
-            let mut out = Vec::new();
-            encode_string_field(1, &username, &mut out);
-            let mut email = Vec::new();
-            encode_string_field(1, &format!("{username}@ccpgames.test"), &mut email);
-            encode_varint_field(2, 1, &mut email);
-            encode_bytes_field(2, &email, &mut out);
-            encode_varint_field(4, 1, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.id.legacy.api.GetUserResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve.id.legacy.api.GetUserResponse")
+                .set("username", &username)
+                .set_with("email", |email| {
+                    email
+                        .set("address", format!("{username}@ccpgames.test"))
+                        .set("verified", true)
+                })
+                .set("eula_agreed", true)
+                .must_to_any())
         }),
     );
 }

@@ -11,8 +11,8 @@ use crate::quasar_gateway::{
 use eve_db::WorldRepository;
 use eve_machonet::service_roles;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, AuthoritativeContext, DynamicQuasarMessage,
-    DynamicValue, GoogleAny, QuasarDescriptorRegistry,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, QuasarDescriptorRegistry,
+    WireField, WireMessage, WireValue,
 };
 use eve_sde::{SdeRegistry, SkinLicenseInfo};
 use std::sync::{Arc, OnceLock};
@@ -56,11 +56,26 @@ fn sub_val(val: DynamicValue) -> DynamicValue {
 #[test]
 fn raw_varint_parser_id_extractor_and_sde_catalog_hydration_boundaries() {
     // Multi-byte varint (>= 128), nested wire-type 2 submessage, truncated wire-type 2, and unknown wire-type 5 break
-    let mut sub = Vec::new();
-    encode_varint_field(1, 300, &mut sub); // 2-byte varint
-    let mut raw = Vec::new();
-    encode_bytes_field(2, &sub, &mut raw);
-    encode_varint_field(4, 20_000, &mut raw);
+    let sub = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(300), // 2-byte varint
+        }],
+    }
+    .encode();
+    let mut raw = WireMessage {
+        fields: vec![
+            WireField {
+                field_number: 2,
+                value: WireValue::LengthDelimited(sub),
+            },
+            WireField {
+                field_number: 4,
+                value: WireValue::Varint(20_000),
+            },
+        ],
+    }
+    .encode();
     raw.push((7 << 3) | 5); // wire_type 5 -> breaks loop cleanly
     raw.extend_from_slice(&[1, 2, 3, 4]);
     let parsed = parse_raw_varints(&raw);
@@ -87,8 +102,13 @@ fn raw_varint_parser_id_extractor_and_sde_catalog_hydration_boundaries() {
     ] {
         assert_eq!(extract_u64_id(&empty_raw, &msg_with(1, v)), Some(41));
     }
-    let mut fallback_raw = Vec::new();
-    encode_varint_field(1, 999, &mut fallback_raw);
+    let fallback_raw = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(999),
+        }],
+    }
+    .encode();
     assert_eq!(extract_u64_id(&fallback_raw, &msg_with(1, DynamicValue::Uint64(0))), Some(999));
     assert_eq!(extract_u64_id(&empty_raw, &msg_with(1, DynamicValue::Bool(true))), None);
 
