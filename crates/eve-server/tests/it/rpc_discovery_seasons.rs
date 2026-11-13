@@ -313,6 +313,15 @@ async fn test_season_manager_rpc_suite() {
     let unsel_data = rpc(&ctx, &mut p1, "seasonManager", "get_season_data_for_character", &[]).await.expect("get_season_data unselected");
     let PyRep::List(ref list) = unsel_data else { panic!("expected List when no season selected, got {unsel_data:?}") };
     assert!(list.len() >= 2, "catalog must return at least 2 active seasons");
+    for card in list {
+        assert!(card.dict_get("season_id").and_then(|v| v.as_i64()).is_some());
+        assert!(card.dict_get("navigation_card_picture_path").and_then(|v| v.as_str()).is_some());
+        assert!(card.dict_get("agency_card_title").and_then(|v| v.as_i64()).is_some());
+        assert!(card.dict_get("agency_card_hint").and_then(|v| v.as_i64()).is_some());
+        assert_eq!(card.dict_get("agency_card_description"), Some(&PyRep::None));
+        assert_eq!(card.dict_get("is_auto_claim_enabled"), Some(&PyRep::Bool(false)));
+        assert_eq!(card.dict_get("feature_tag_id"), Some(&PyRep::None));
+    }
 
     // 3. select_season (validates against FSD seasonalcampaignsloginrewards / community_track_templates & rejects unknown ID)
     assert!(rpc(&ctx, &mut p1, "seasonManager", "select_season", &[PyRep::Integer(999)]).await.is_err());
@@ -327,6 +336,10 @@ async fn test_season_manager_rpc_suite() {
     assert_eq!(sel_notif.args.len(), 3, "OnSeasonSelected must be a 3-tuple payload");
     assert_eq!(sel_notif.args[0], PyRep::Integer(P1));
     assert_eq!(sel_notif.args[1].dict_get("season_id").and_then(|v| v.as_i64()), Some(2));
+    assert!(sel_notif.args[1].dict_get("agency_card_title").and_then(|v| v.as_i64()).is_some());
+    assert_eq!(sel_notif.args[1].dict_get("agency_card_description"), Some(&PyRep::None));
+    assert_eq!(sel_notif.args[1].dict_get("is_auto_claim_enabled"), Some(&PyRep::Bool(false)));
+    assert_eq!(sel_notif.args[1].dict_get("feature_tag_id"), Some(&PyRep::None));
     assert_eq!(sel_notif.args[2].dict_get("season_id").and_then(|v| v.as_i64()), Some(2));
 
     // 4. get_season_data_for_character: returns FSD-backed season KeyVal from seasonselection.fsdbinary
@@ -334,6 +347,11 @@ async fn test_season_manager_rpc_suite() {
     assert_eq!(season_data.dict_get("season_id").and_then(|v| v.as_i64()), Some(2));
     assert_eq!(season_data.dict_get("agencyLargeSeasonSelectionTitleID").and_then(|v| v.as_i64()), Some(583_380));
     assert_eq!(season_data.dict_get("end_time").and_then(|v| v.as_i64()), Some(end_ft));
+    assert!(season_data.dict_get("agency_card_title").and_then(|v| v.as_i64()).is_some());
+    assert_eq!(season_data.dict_get("agency_card_hint").and_then(|v| v.as_i64()), Some(583_335));
+    assert_eq!(season_data.dict_get("agency_card_description"), Some(&PyRep::None));
+    assert_eq!(season_data.dict_get("is_auto_claim_enabled"), Some(&PyRep::Bool(false)));
+    assert_eq!(season_data.dict_get("feature_tag_id"), Some(&PyRep::None));
 
     // 5. fill_up_and_return_challenges_for_character (returns Dict keyed by challenge_id from challenges.fsdbinary)
     let filled = rpc(&ctx, &mut p1, "seasonManager", "fill_up_and_return_challenges_for_character", &[]).await.expect("fill_up_and_return_challenges");

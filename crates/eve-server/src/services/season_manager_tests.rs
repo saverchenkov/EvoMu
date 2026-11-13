@@ -416,3 +416,124 @@ fn season_manager_catalog_queries_dormancy_expiration_and_claim_ops() {
     let updated = ctx.db.with_snapshot(|s| load_season_state(s, cid));
     assert_eq!(updated.season_points, 575);
 }
+
+fn assert_v24_season_keyval_contract(kv: &PyRep, expected_title_id: Option<i64>, expected_hint_id: Option<i64>) {
+    assert!(kv.dict_get("season_id").and_then(|v| v.as_i64()).is_some());
+    assert!(kv.dict_get("template_id").and_then(|v| v.as_i64()).is_some());
+    assert!(kv.dict_get("title").and_then(|v| v.as_i64()).is_some());
+    assert!(kv.dict_get("news").and_then(|v| v.as_i64()).is_some());
+    assert!(kv.dict_get("navigation_card_picture_path").and_then(|v| v.as_str()).is_some());
+    assert!(kv.dict_get("content_card_picture_path").and_then(|v| v.as_str()).is_some());
+    assert!(kv.dict_get("background_no_logo").and_then(|v| v.as_str()).is_some());
+    assert!(kv.dict_get("start_time").and_then(|v| v.as_i64()).is_some());
+    assert!(kv.dict_get("end_time").and_then(|v| v.as_i64()).is_some());
+    assert!(kv.dict_get("multiple_season_running").and_then(|v| v.as_bool()).is_some());
+    assert!(matches!(kv.dict_get("tracked_event_types"), Some(PyRep::List(_))));
+    assert_eq!(
+        kv.dict_get("agency_card_title").and_then(|v| v.as_i64()),
+        expected_title_id
+    );
+    assert_eq!(
+        kv.dict_get("agency_card_hint").and_then(|v| v.as_i64()),
+        expected_hint_id
+    );
+    if expected_title_id.is_none() {
+        assert_eq!(kv.dict_get("agency_card_title"), Some(&PyRep::None));
+    }
+    if expected_hint_id.is_none() {
+        assert_eq!(kv.dict_get("agency_card_hint"), Some(&PyRep::None));
+    }
+    // Must stay None to avoid CCP's `self.agencyCardDescription` typo crash in CustomContentGroupCard.
+    assert_eq!(kv.dict_get("agency_card_description"), Some(&PyRep::None));
+    assert_eq!(kv.dict_get("is_auto_claim_enabled"), Some(&PyRep::Bool(false)));
+    assert_eq!(kv.dict_get("feature_tag_id"), Some(&PyRep::None));
+}
+
+#[test]
+fn season_config_keyval_emits_v24_agency_selection_and_service_fields() {
+    let cfg = eve_db::SeasonConfig::default();
+    let kv = season_config_to_keyval(&cfg, &[]);
+    assert_v24_season_keyval_contract(
+        &kv,
+        Some(cfg.title_message_id),
+        Some(cfg.hint_message_id),
+    );
+
+    let zero_msg_cfg = eve_db::SeasonConfig {
+        title_message_id: 0,
+        hint_message_id: 0,
+        ..Default::default()
+    };
+    let zero_kv = season_config_to_keyval(&zero_msg_cfg, &[]);
+    assert_v24_season_keyval_contract(&zero_kv, None, None);
+
+    // Multi-season unselected list & selected single KeyVal contract via RPC handler (#1029)
+    let ctx = test_ctx();
+    let cid = 970_099_i64;
+    let kw = HashMap::new();
+    let mut sess = season_session(cid, false);
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.seasons_and_campaigns.season_configuration = None;
+        snap.seasons_and_campaigns.seasons_catalog.clear();
+        for sid in [10_i64, 20_i64] {
+            snap.seasons_and_campaigns.seasons_catalog.insert(
+                sid,
+                eve_db::SeasonConfig {
+                    season_id: sid,
+                    template_id: sid,
+                    start_time_ft: now_ft - 1_000,
+                    end_time_ft: now_ft + 100_000_000,
+                    multiple_season_running: true,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let unsel = handle_season_manager(
+        &ctx,
+        &mut sess,
+        "seasonManager",
+        "get_season_data_for_character",
+        &[],
+        &kw,
+    )
+    .unwrap()
+    .expect("get_season_data_for_character unselected");
+    let PyRep::List(cards) = unsel else {
+        panic!("expected List of season KeyVals when unselected, got {unsel:?}");
+    };
+    assert_eq!(cards.len(), 2);
+    for card in &cards {
+        assert_v24_season_keyval_contract(card, Some(583_333), Some(583_335));
+    }
+
+    let sel_res = handle_season_manager(
+        &ctx,
+        &mut sess,
+        "seasonManager",
+        "select_season",
+        &[PyRep::Integer(10)],
+        &kw,
+    )
+    .unwrap()
+    .expect("select_season");
+    assert_eq!(sel_res, PyRep::Bool(true));
+
+    let selected = handle_season_manager(
+        &ctx,
+        &mut sess,
+        "seasonManager",
+        "get_season_data_for_character",
+        &[],
+        &kw,
+    )
+    .unwrap()
+    .expect("get_season_data_for_character selected");
+    assert_eq!(
+        selected.dict_get("season_id").and_then(|v| v.as_i64()),
+        Some(10)
+    );
+    assert_v24_season_keyval_contract(&selected, Some(583_333), Some(583_335));
+}
