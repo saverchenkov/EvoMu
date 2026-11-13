@@ -831,11 +831,15 @@ pub fn sync_combat_runtime_from_db(ctx: &ServerContext) {
         return;
     }
     drop(guard_read);
-    rehydrate_combat_runtime_from_db_forced(ctx);
+    rehydrate_combat_runtime_with_mode(ctx, false);
 }
 
 /// Unconditionally rehydrates [`CombatRuntimeState`] from the currently published `ctx.db` snapshot.
 pub fn rehydrate_combat_runtime_from_db_forced(ctx: &ServerContext) {
+    rehydrate_combat_runtime_with_mode(ctx, true);
+}
+
+fn rehydrate_combat_runtime_with_mode(ctx: &ServerContext, force_full: bool) {
     if ctx.db.is_write_locked_by_current_thread() {
         return;
     }
@@ -845,7 +849,9 @@ pub fn rehydrate_combat_runtime_from_db_forced(ctx: &ServerContext) {
             .write()
             .unwrap_or_else(|e| e.into_inner());
         let combat_epoch = ctx.db.combat_state_epoch();
-        guard.synced_db_epoch = 0;
+        if force_full {
+            guard.synced_db_epoch = 0;
+        }
         guard.rehydrate_from_persisted_epochs(&s.combat_crimewatch_state, combat_epoch);
     });
 }
