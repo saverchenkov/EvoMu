@@ -508,15 +508,15 @@ fn sqlite_store_insert_update_rollback_delete_and_wal_recovery() {
     assert!(!json_repo.is_write_locked_by_current_thread());
     assert!(wal_path.exists());
 
-    // Fault mode 1 (partial write rollback) & fault mode 2 (sync_data rollback)
-    json_repo.wal_fault_mode.store(1, std::sync::atomic::Ordering::SeqCst);
+    // TxFaultPlan FailNthStatement & FailAtCommit roll back cleanly
+    json_repo.set_fault_plan_for_test(crate::TxFaultPlan::FailNthStatement(1));
     let err1: Result<(), DbError> = json_repo.try_with_mut_snapshot(|snap| {
         snap.committed_idempotency_keys.insert((1, "k_fail1".into()));
         Ok(())
     });
     assert!(err1.is_err());
 
-    json_repo.wal_fault_mode.store(2, std::sync::atomic::Ordering::SeqCst);
+    json_repo.set_fault_plan_for_test(crate::TxFaultPlan::FailAtCommit);
     let err2: Result<(), DbError> = json_repo.try_with_mut_snapshot(|snap| {
         snap.committed_idempotency_keys.insert((1, "k_fail2".into()));
         Ok(())

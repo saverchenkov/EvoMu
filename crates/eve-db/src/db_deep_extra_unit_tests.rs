@@ -364,13 +364,21 @@ fn accounts_courier_contract_failure_snapshot_path_and_try_read_branches_work() 
     std::fs::create_dir_all(snap_path.parent().unwrap()).unwrap();
     let persistent = WorldRepository::new_empty_with_snapshot_path(Some(snap_path.clone())).unwrap();
     assert!(snap_path.exists());
+    let pre_next_id = persistent.with_snapshot(|s| s.next_entity_id);
     persistent.with_mut_snapshot(|snap| {
         snap.next_entity_id += 7;
         assert!(persistent.is_write_locked_by_current_thread());
-        assert!(persistent.try_with_snapshot(|_| ()).is_none());
+        // CoW readers see the pre-transaction published snapshot without blocking (`RFC-2 §3.2`).
+        assert_eq!(
+            persistent.try_with_snapshot(|s| s.next_entity_id),
+            Some(pre_next_id)
+        );
     });
     assert!(!persistent.is_write_locked_by_current_thread());
-    assert!(persistent.try_with_snapshot(|_| ()).is_some());
+    assert_eq!(
+        persistent.try_with_snapshot(|s| s.next_entity_id),
+        Some(pre_next_id + 7)
+    );
     drop(persistent);
 
     let reopened = WorldRepository::new_empty_with_snapshot_path(Some(snap_path.clone())).unwrap();
@@ -1279,7 +1287,6 @@ fn characters_snapshot_persistence_accounts_and_gateway_deep_branches() {
 
     // 4. persistence epochs, save_to_sqlite, prune_expired_auth_runtime + accounts + gateway_tokens local dev JWT
     assert!(repo.state_epoch() >= 1);
-    assert!(repo.rollback_epoch() >= 1);
     assert!(repo.combat_state_epoch() >= 1);
     assert!(repo.sqlite_path().is_none());
     let save_dir = temp_dir("save_to_sqlite");

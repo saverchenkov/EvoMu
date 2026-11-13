@@ -106,7 +106,7 @@ impl<'a> Sp6RestoreGuard<'a> {
 impl<'a> Drop for Sp6RestoreGuard<'a> {
     fn drop(&mut self) {
         self.snap.sp6_lifecycle = std::mem::take(&mut self.state);
-        self.snap.mark_other_domains_dirty();
+        // Dirty-hint tracking replaced by CoW ChangeSet diffing (`#915`).
     }
 }
 

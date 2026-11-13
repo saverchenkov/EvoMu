@@ -162,12 +162,12 @@ impl WorldRepository {
             }
         }
         let active_sqlite_path = self.sqlite_path.as_ref().filter(|p| p.exists());
-        if let Ok(primary) = self.sqlite_conn.try_lock() {
+        self.try_with_sqlite_conn(|primary| {
             let _ = primary.execute_batch("PRAGMA busy_timeout = 5000; PRAGMA synchronous = NORMAL;");
             if active_sqlite_path.is_some() {
                 let _ = primary.execute_batch("PRAGMA journal_mode = WAL;");
             }
-        }
+        });
         let conn = if let Some(path) = active_sqlite_path {
             let c = rusqlite::Connection::open(path).map_err(|e| e.to_string())?;
             c.execute_batch(

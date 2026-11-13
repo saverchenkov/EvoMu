@@ -496,30 +496,28 @@ fn quasar_gateway_sync_meta_reentrancy_direct_persistence_and_hooks() {
 }
 
 #[test]
-fn quasar_gateway_ensure_rollback_synced_epoch_equality_guard() {
+fn quasar_gateway_cow_abort_preserves_published_state_until_explicit_rehydrate() {
     use std::sync::atomic::Ordering;
 
     let router = new_router();
     router.sync_all_to_db();
     assert_eq!(router.next_notice_seq.load(Ordering::Relaxed), 1);
 
-    // Mutate RAM only (no DB sync) while rollback_epoch is unchanged -> ensure_rollback_synced must NOT clobber RAM
+    let commits_before = router.db.tx_commit_count();
     router.next_notice_seq.store(9, Ordering::Relaxed);
-    router.ensure_rollback_synced();
-    assert_eq!(router.next_notice_seq.load(Ordering::Relaxed), 9);
 
-    // Trigger rollback via failing try_with_mut_snapshot -> bumps rollback_epoch
+    // Aborting try_with_mut_snapshot restores working snapshot and does not bump commit count.
     let err: Result<(), String> = router
         .db
         .try_with_mut_snapshot(|_| Err("force rollback".to_string()));
     assert!(err.is_err());
+    assert_eq!(router.db.tx_commit_count(), commits_before);
+    assert_eq!(router.next_notice_seq.load(Ordering::Relaxed), 9);
 
-    // Epoch changed -> ensure_rollback_synced rehydrates persisted DB state (`next_notice_seq = 1`)
-    router.ensure_rollback_synced();
+    // Explicit rehydrate restores persisted DB state (`next_notice_seq = 1`)
+    router.rehydrate_all_from_db();
     assert_eq!(router.next_notice_seq.load(Ordering::Relaxed), 1);
 
-    // Subsequent in-memory change while epoch matches again stays untouched
     router.next_notice_seq.store(15, Ordering::Relaxed);
-    router.ensure_rollback_synced();
     assert_eq!(router.next_notice_seq.load(Ordering::Relaxed), 15);
 }

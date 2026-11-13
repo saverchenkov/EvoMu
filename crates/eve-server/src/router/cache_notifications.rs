@@ -1881,6 +1881,93 @@ impl ServerContext {
             ],
         )
     }
+
+    /// Registers a post-commit listener on `self.db` so `TxNotificationEffect` entries pushed to
+    /// `WorldTx::effects` dispatch to online recipients right after SQLite `COMMIT` + publish,
+    /// and vanish on any abort/panic/SQLite error (`RFC-2 §3.2`, `#915`).
+    pub fn install_tx_post_commit_listener(&self) {
+        let db_w = std::sync::Arc::downgrade(&self.db);
+        let pend_w = std::sync::Arc::downgrade(&self.pending_notifications);
+        let notify_tx = self.notify_tx.clone();
+        self.db.register_post_commit_listener(std::sync::Arc::new(
+            move |snap, _changes, effects| {
+                if effects.notifications.is_empty() {
+                    return;
+                }
+                let (Some(db), Some(pend)) = (db_w.upgrade(), pend_w.upgrade()) else {
+                    return;
+                };
+                let now_ft = db.clock().now_blueos_filetime_ticks();
+                for effect in &effects.notifications {
+                    let mut candidates: Vec<(i64, u64)> = Vec::new();
+                    match effect.target {
+                        eve_db::TxNotificationTarget::Character(cid) => {
+                            if let Some(c) = snap.characters.get(&cid) {
+                                candidates.push((cid, c.user_id));
+                            }
+                        }
+                        eve_db::TxNotificationTarget::Corporation(corp_id) => {
+                            for c in snap.characters.values() {
+                                if c.corporation_id == corp_id {
+                                    candidates.push((c.character_id, c.user_id));
+                                }
+                            }
+                        }
+                        eve_db::TxNotificationTarget::Alliance(ally_id) => {
+                            for c in snap.characters.values() {
+                                if c.alliance_id == Some(ally_id) {
+                                    candidates.push((c.character_id, c.user_id));
+                                }
+                            }
+                        }
+                        eve_db::TxNotificationTarget::SolarSystem(sys_id) => {
+                            for c in snap.characters.values() {
+                                if c.solar_system_id == sys_id {
+                                    candidates.push((c.character_id, c.user_id));
+                                }
+                            }
+                        }
+                    }
+                    let mut recipients: Vec<(i64, Option<u64>)> = candidates
+                        .into_iter()
+                        .filter(|&(cid, uid)| {
+                            db.get_online_session(uid)
+                                .is_some_and(|os| os.character_id == Some(cid))
+                        })
+                        .map(|(cid, uid)| (cid, Some(uid)))
+                        .collect();
+                    recipients.sort_by_key(|(cid, _)| *cid);
+                    recipients.dedup_by_key(|(cid, _)| *cid);
+                    if recipients.is_empty() {
+                        continue;
+                    }
+                    let mut queues = pend.write().unwrap_or_else(|e| e.into_inner());
+                    for (cid, uid) in recipients {
+                        let recipient_args = effect.args.clone();
+                        let (packet, marshaled_packet) = Self::build_macho_notification_packet(
+                            cid,
+                            uid,
+                            &effect.event,
+                            &effect.id_type,
+                            recipient_args.clone(),
+                        );
+                        let notif = PendingMachoNotification::new(
+                            cid,
+                            &effect.event,
+                            &effect.id_type,
+                            recipient_args,
+                            packet,
+                            marshaled_packet,
+                            now_ft,
+                        );
+                        let q = queues.entry(cid).or_default();
+                        push_pending_notification_capped(q, notif.clone());
+                        let _ = notify_tx.send((cid, notif));
+                    }
+                }
+            },
+        ));
+    }
 }
 
 #[cfg(test)] #[path = "cache_notifications_unit_tests.rs"] mod cache_notifications_unit_tests;

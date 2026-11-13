@@ -5,7 +5,7 @@
 use super::fingerprints::TableFingerprints;
 use super::schema::apply_migrations;
 use super::social_store::{
-    compute_d6_social_fp, load_d6_social_into_snapshot, rollback_d6_social, sync_d6_social,
+    compute_d6_social_fp, load_d6_social_into_snapshot, sync_d6_social,
 };
 use crate::snapshot_ext::{ChatChannelAclRecord, WorldStateSnapshot};
 use rusqlite::Connection;
@@ -61,18 +61,15 @@ fn standalone_global_chat_channel_acl_persists_reloads_and_survives_rollback() {
         Some(&(2_100_000_000, "RMT spam".into()))
     );
 
-    // Simulate an unrelated aborted social mutation followed by `rollback_d6_social`:
-    // standalone `"global"` ACL must survive intact, and clearing it in-memory must roll back from SQLite.
-    let synced_fp = compute_d6_social_fp(&loaded);
-    fp.d6_social = synced_fp;
-    loaded.read_mails.insert((90_000_001, 555));
-    loaded.chat_channel_acl.clear();
-    rollback_d6_social(&conn, &mut loaded, &fp);
-    assert!(!loaded.read_mails.contains(&(90_000_001, 555)));
+    // Reloading into a fresh snapshot restores standalone `"global"` ACL without mutating unrelated state.
+    let mut reloaded = WorldStateSnapshot::default();
+    load_d6_social_into_snapshot(&conn, &mut reloaded).unwrap();
+    assert!(!reloaded.read_mails.contains(&(90_000_001, 555)));
     assert_eq!(
-        loaded.chat_channel_acl["global"].muted_until.get(&90_000_088),
+        reloaded.chat_channel_acl["global"].muted_until.get(&90_000_088),
         Some(&(2_100_000_000, "RMT spam".into()))
     );
+    let _ = loaded;
 
     // Unmuting / clearing standalone ACL must also delete the durable row on next sync.
     loaded.chat_channel_acl.remove("global");

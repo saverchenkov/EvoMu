@@ -17,7 +17,7 @@ use crate::client_contract::{
 use eve_proto::PyRep;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -125,6 +125,8 @@ pub struct ClientHarness<T> {
     contracts: &'static LoadedClientContracts,
     buffered_notifications: Vec<(String, Vec<PyRep>)>,
     buffered_frames: Vec<ClientWireFrame>,
+    recorded_commits: Vec<(String, u64)>,
+    multi_commit_ratchet: Option<MultiCommitRpcRatchet>,
 }
 
 impl<T: ClientWireTransport> ClientHarness<T> {
@@ -136,7 +138,30 @@ impl<T: ClientWireTransport> ClientHarness<T> {
             contracts: ClientContractRatchet::load_default_cached(),
             buffered_notifications: Vec::new(),
             buffered_frames: Vec::new(),
+            recorded_commits: Vec::new(),
+            multi_commit_ratchet: None,
         }
+    }
+
+    /// Enables live enforcement of a falling [`MultiCommitRpcRatchet`] after every RPC call.
+    pub fn with_multi_commit_ratchet(mut self, ratchet: MultiCommitRpcRatchet) -> Self {
+        self.multi_commit_ratchet = Some(ratchet);
+        self
+    }
+
+    /// Returns all `(service.method, commits)` pairs observed on this harness in dispatch order.
+    pub fn recorded_commits(&self) -> &[(String, u64)] {
+        &self.recorded_commits
+    }
+
+    /// Clears recorded `(service.method, commits)` entries.
+    pub fn clear_recorded_commits(&mut self) {
+        self.recorded_commits.clear();
+    }
+
+    /// Validates all recorded `(service.method, commits)` entries against `ratchet`.
+    pub fn check_multi_commit_ratchet(&self, ratchet: &MultiCommitRpcRatchet) -> Result<(), String> {
+        ratchet.assert_ratchet(&self.recorded_commits)
     }
 
     /// Configures how contract violations are handled (`Ratcheted`, `Strict`, or `ReportOnly`).
@@ -183,11 +208,26 @@ impl<T: ClientWireTransport> ClientHarness<T> {
         args: &[PyRep],
         kwargs: &HashMap<String, PyRep>,
     ) -> ClientCallOutput {
+        let commits_before = self
+            .transport
+            .semantic_lookup()
+            .map(|l| l.db.tx_commit_count());
         let exchange = self
             .transport
             .send_wire_call(service, bound_id, method, args, kwargs)
             .await;
         let lookup = self.transport.semantic_lookup();
+        let tx_commits = match (commits_before, lookup.as_ref().map(|l| l.db.tx_commit_count())) {
+            (Some(before), Some(after)) => after.saturating_sub(before),
+            _ => 0,
+        };
+        let rpc_name = format!("{service}.{method}");
+        self.recorded_commits.push((rpc_name.clone(), tx_commits));
+        if let Some(ref ratchet) = self.multi_commit_ratchet {
+            ratchet
+                .assert_call(&rpc_name, tx_commits)
+                .unwrap_or_else(|e| panic!("{e}"));
+        }
 
         let mut violations = Vec::new();
         for err in &exchange.marshal_errors {
@@ -343,6 +383,62 @@ pub struct RawDispatchScanReport {
     pub total_dispatch_rpc_calls: usize,
     pub macho_net_calls: usize,
     pub per_file_raw_none: HashMap<String, usize>,
+}
+
+/// Falling ratchet limiting RPCs whose execution commits more than one database transaction
+/// (`RFC-2 §3.2`, `#915`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MultiCommitRpcRatchet {
+    pub version: u32,
+    pub allowed_multi_commit_rpcs: BTreeMap<String, u64>,
+}
+
+impl MultiCommitRpcRatchet {
+    /// Returns the repository path to `crates/eve-testkit/ratchets/multi_commit_rpc_ratchet.json`.
+    pub fn default_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("ratchets")
+            .join("multi_commit_rpc_ratchet.json")
+    }
+
+    /// Loads `multi_commit_rpc_ratchet.json` from its default path.
+    pub fn load_default() -> Result<Self, String> {
+        Self::load_from_path(&Self::default_path())
+    }
+
+    /// Loads a [`MultiCommitRpcRatchet`] from `path`.
+    pub fn load_from_path(path: &Path) -> Result<Self, String> {
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        serde_json::from_str(&raw)
+            .map_err(|e| format!("failed to parse {}: {e}", path.display()))
+    }
+
+    /// Validates a single `(service.method, commits)` observation against the falling ratchet.
+    pub fn assert_call(&self, rpc_name: &str, commits: u64) -> Result<(), String> {
+        if commits <= 1 {
+            return Ok(());
+        }
+        let allowed = self
+            .allowed_multi_commit_rpcs
+            .get(rpc_name)
+            .copied()
+            .unwrap_or(1);
+        if commits > allowed {
+            return Err(format!(
+                "Multi-commit RPC ratchet violation on {rpc_name}: committed {commits} transactions (max allowed: {allowed}). Consolidate handler writes into a single WorldRepository::tx."
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validates all recorded `(service.method, commits)` pairs against this ratchet.
+    pub fn assert_ratchet(&self, recorded: &[(String, u64)]) -> Result<(), String> {
+        for (rpc_name, commits) in recorded {
+            self.assert_call(rpc_name, *commits)?;
+        }
+        Ok(())
+    }
 }
 
 /// Falling ratchet limiting direct unrewritten `ctx.dispatch_rpc(..., None)` calls under
@@ -726,5 +822,95 @@ mod tests {
             report.per_file_raw_none.get("common.rs").copied().unwrap_or(0) == 0,
             "tests/it/common.rs must contain 0 raw dispatch_rpc(..., None) calls"
         );
+    }
+
+    #[tokio::test]
+    async fn harness_records_tx_commits_and_enforces_multi_commit_ratchet() {
+        struct DbMockTransport {
+            db: eve_db::WorldRepository,
+            sde: eve_sde::SdeRegistry,
+            commits_to_run: u64,
+        }
+
+        impl ClientWireTransport for DbMockTransport {
+            fn send_wire_call<'a>(
+                &'a mut self,
+                _service: &'a str,
+                _bound_id: Option<u64>,
+                _method: &'a str,
+                _args: &'a [PyRep],
+                _kwargs: &'a HashMap<String, PyRep>,
+            ) -> Pin<Box<dyn Future<Output = ClientWireExchange> + Send + 'a>> {
+                for idx in 0..self.commits_to_run {
+                    self.db.with_mut_snapshot(|snap| {
+                        snap.service_state_blobs
+                            .insert(format!("harness_commit_{idx}"), "ok".into());
+                    });
+                }
+                let ok_rep = PyRep::Dict(Vec::new());
+                Box::pin(async move {
+                    ClientWireExchange {
+                        rpc_result: Ok(ok_rep.clone()),
+                        frames: vec![ClientWireFrame {
+                            kind: ClientWireFrameKind::CallRsp {
+                                call_id: 1,
+                                reply: ok_rep,
+                            },
+                            wire_packet: PyRep::None,
+                        }],
+                        marshal_errors: Vec::new(),
+                    }
+                })
+            }
+
+            fn semantic_lookup(&self) -> Option<SemanticLookupContext<'_>> {
+                Some(SemanticLookupContext {
+                    sde: &self.sde,
+                    db: &self.db,
+                })
+            }
+        }
+
+        let ratchet = MultiCommitRpcRatchet::load_default().expect("load multi_commit_rpc_ratchet");
+        let transport = DbMockTransport {
+            db: eve_db::WorldRepository::with_demo_seed(),
+            sde: eve_sde::SdeRegistry::with_canonical_seed(),
+            commits_to_run: 1,
+        };
+        let mut harness = ClientHarness::new(transport);
+        let _ = harness
+            .call("stationSvc", None, "GetAllianceSystems", &[], &HashMap::new())
+            .await;
+        harness.transport_mut().commits_to_run = 0;
+        let _ = harness
+            .call("stationSvc", None, "GetAllianceSystems", &[], &HashMap::new())
+            .await;
+        assert_eq!(
+            harness.recorded_commits(),
+            &[
+                ("stationSvc.GetAllianceSystems".to_string(), 1),
+                ("stationSvc.GetAllianceSystems".to_string(), 0),
+            ]
+        );
+        harness
+            .check_multi_commit_ratchet(&ratchet)
+            .expect("single-commit RPC passes multi-commit ratchet");
+
+        harness.transport_mut().commits_to_run = 2;
+        let _ = harness
+            .call("stationSvc", None, "GetAllianceSystems", &[], &HashMap::new())
+            .await;
+        let err = harness
+            .check_multi_commit_ratchet(&ratchet)
+            .expect_err("2-commit unratcheted RPC must fail ratchet");
+        assert!(err.contains("committed 2 transactions"));
+
+        let mut allowlisted = ratchet;
+        allowlisted
+            .allowed_multi_commit_rpcs
+            .insert("stationSvc.GetAllianceSystems".to_string(), 2);
+        harness
+            .check_multi_commit_ratchet(&allowlisted)
+            .expect("allowlisted 2-commit RPC within ceiling passes");
     }
 }

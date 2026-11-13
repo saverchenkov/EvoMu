@@ -589,9 +589,9 @@ fn rollback_reverts_dirty_runtime_state_across_all_caches_and_rehydrates_from_sq
     );
     ctx.sync_runtime_to_db();
 
-    let baseline_rollback_epoch = db.rollback_epoch();
+    let baseline_commit_count = db.tx_commit_count();
 
-    // 2. Dirty RAM-only caches AND simulate a failing transactional mutation that rolls back SQLite
+    // 2. Dirty RAM-only caches AND simulate a failing CoW transaction that restores pre-tx working copy
     ctx.active_scanner_probes.write().unwrap().insert(
         700_999,
         ActiveScannerProbe {
@@ -614,7 +614,7 @@ fn rollback_reverts_dirty_runtime_state_across_all_caches_and_rehydrates_from_sq
     );
     *ctx.combat_ephemeral.write().unwrap() = {
         let mut guard = CombatRuntimeState::default();
-        guard.synced_db_epoch = db.rollback_epoch();
+        guard.synced_db_epoch = db.combat_state_epoch();
         guard.safety_levels.insert(cid, SafetyLevel::Red);
         guard.pending_bounty_ticks.insert((sys_id, cid), 999_999.0);
         guard
@@ -627,7 +627,7 @@ fn rollback_reverts_dirty_runtime_state_across_all_caches_and_rehydrates_from_sq
         };
     assert!(ctx.active_scanner_probes.read().unwrap().contains_key(&700_999));
 
-    // Force an error in try_with_mut_snapshot after mutating snapshot blobs -> triggers rollback_dirty_from_sqlite!
+    // Force an error in try_with_mut_snapshot after mutating snapshot blobs -> CoW restores pre-tx snapshot!
     let res: Result<(), String> = db.try_with_mut_snapshot(|snap| {
         snap.service_state_blobs
             .insert("server_runtime_state".into(), "{}".into());
@@ -638,38 +638,39 @@ fn rollback_reverts_dirty_runtime_state_across_all_caches_and_rehydrates_from_sq
         Err("forced_tx_abort".into())
     });
     assert!(res.is_err());
-    assert!(
-        db.rollback_epoch() > baseline_rollback_epoch,
-        "rollback must bump WorldRepository::rollback_epoch"
+    assert_eq!(
+        db.tx_commit_count(),
+        baseline_commit_count,
+        "aborted tx must not advance WorldRepository::tx_commit_count"
     );
 
-    // 3. Verify lazy epoch auto-rehydrate restores CombatRuntimeState & PublicGatewayRouter immediately
+    // 3. Explicit rehydration restores persisted DB state across CombatRuntimeState, PublicGatewayRouter & ServerContext
+    ctx.quasar_gateway.rehydrate_all_from_db();
+    ctx.rehydrate_runtime_from_db();
     with_combat_ephemeral(&ctx, |st| {
         assert_eq!(st.safety_levels.get(&cid), Some(&SafetyLevel::Yellow));
         assert_eq!(st.pending_bounty_ticks.get(&(sys_id, cid)), Some(&10_000.0));
     });
-    let list_after_rollback = ctx.quasar_gateway.handle_public_request(
+    let list_after_abort = ctx.quasar_gateway.handle_public_request(
         &q_sess,
         &make_public_req("eve.tag.api.ListRequest", Vec::new()),
         None,
         false,
         1_700_000_050,
     );
-    assert_eq!(list_after_rollback.status_code, 200);
+    assert_eq!(list_after_abort.status_code, 200);
     assert!(!ctx.quasar_gateway.server_hijack_state.read().unwrap().enabled);
-    assert!(list_after_rollback
+    assert!(list_after_abort
         .payload
         .unwrap()
         .value
         .windows("fleet_doctrine".len())
         .any(|w| w == b"fleet_doctrine"));
 
-    // 4. Full ServerContext rollback rehydration (what dispatch_rpc WAL rollback calls)
-    ctx.rehydrate_runtime_from_db();
     let probes = ctx.active_scanner_probes.read().unwrap();
     assert!(
         !probes.contains_key(&700_999),
-        "dirty unpersisted probe must be wiped on rollback rehydration"
+        "dirty unpersisted probe must be wiped on rehydration"
     );
     assert_eq!(probes.get(&700_001).map(|p| p.range_step), Some(2));
 }

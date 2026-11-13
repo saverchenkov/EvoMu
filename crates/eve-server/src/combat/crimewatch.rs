@@ -189,7 +189,7 @@ impl<'a> Drop for CrimeWatchRestoreGuard<'a> {
             &self.orig_stages,
             &self.dir.system_corruption_stages,
         );
-        self.snap.mark_crimewatch_dirty(stages_changed);
+        let _ = stages_changed;
     }
 }
 
@@ -409,7 +409,7 @@ impl<'a> Drop for CrimeWatchWriteGuard<'a> {
                 snap.crimewatch_states = states;
                 snap.crimewatch_aggressions = aggs;
                 persist_corruption_stage_diffs(snap, orig_stages, &stages);
-                snap.mark_crimewatch_dirty(stages_changed);
+                let _ = stages_changed;
             });
         }
         if self.director.pending_concord_despawns != self.orig_pending_despawns {

@@ -569,9 +569,8 @@ fn combat_runtime_rehydrate_epochs_hash_safety_levels_and_extended_state() {
     assert!(rt.to_persisted().extended_runtime_json.is_empty());
 
     // 1. Initial rehydrate (synced_db_epoch == 0) performs full sync_from_persisted
-    rt.rehydrate_from_persisted_epochs(&p, 10, 2);
+    rt.rehydrate_from_persisted_epochs(&p, 10);
     assert_eq!(rt.synced_db_epoch, 10);
-    assert_eq!(rt.synced_rollback_epoch, 2);
     assert_eq!(rt.synced_ext_hash, h_non_empty);
     assert_eq!(rt.safety_levels.get(&90_000_001), Some(&SafetyLevel::Red));
     assert_eq!(rt.safety_levels.get(&90_000_002), Some(&SafetyLevel::Yellow));
@@ -589,7 +588,7 @@ fn combat_runtime_rehydrate_epochs_hash_safety_levels_and_extended_state() {
     assert!(rt.has_extended_runtime_state());
     assert!(!rt.to_persisted().extended_runtime_json.is_empty());
 
-    // 2. When synced_db_epoch != 0, rb_epoch matches, and ext_hash matches, only core is synced
+    // 2. When synced_db_epoch != 0 and ext_hash matches, only core is synced
     rt.container_lifetimes.insert(
         202,
         ContainerLifetimeEntry {
@@ -603,23 +602,24 @@ fn combat_runtime_rehydrate_epochs_hash_safety_levels_and_extended_state() {
         },
     );
     p.safety_levels.insert(90_000_001, 2);
-    rt.rehydrate_from_persisted_epochs(&p, 11, 2);
+    rt.rehydrate_from_persisted_epochs(&p, 11);
     assert_eq!(rt.synced_db_epoch, 11);
     assert_eq!(rt.safety_levels.get(&90_000_001), Some(&SafetyLevel::Green));
     assert_eq!(
         rt.container_lifetimes.get(&202).map(|e| e.lifetime_secs),
         Some(999),
-        "core-only sync must keep in-memory extended state when rb_epoch and ext_hash match"
+        "core-only sync must keep in-memory extended state when ext_hash matches"
     );
 
-    // 3. Changing rb_epoch triggers full sync_from_persisted (overwriting transient 202)
-    rt.rehydrate_from_persisted_epochs(&p, 12, 3);
-    assert_eq!(rt.synced_rollback_epoch, 3);
+    // 3. Resetting synced_db_epoch == 0 triggers full sync_from_persisted (overwriting transient 202)
+    rt.synced_db_epoch = 0;
+    rt.rehydrate_from_persisted_epochs(&p, 12);
+    assert_eq!(rt.synced_db_epoch, 12);
     assert!(!rt.container_lifetimes.contains_key(&202));
 
     // 4. Changing extended_runtime_json to empty clears extended state via full sync
     p.extended_runtime_json.clear();
-    rt.rehydrate_from_persisted_epochs(&p, 13, 3);
+    rt.rehydrate_from_persisted_epochs(&p, 13);
     assert!(rt.container_lifetimes.is_empty());
     assert!(!rt.has_extended_runtime_state());
 }

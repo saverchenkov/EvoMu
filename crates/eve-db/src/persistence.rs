@@ -1,10 +1,11 @@
 //! Durable transactional snapshot persistence, WAL journaling, and SQLite relational storage.
 
-use crate::lock_rank::{
-    RankedMutex, RankedRwLock, RANK_CLOCK, RANK_LEAF, RANK_SQLITE_CONN, RANK_SQLITE_FP,
-    RANK_WAL_LOCK, RANK_WORLD_INNER,
-};
+use crate::lock_rank::{RankedMutex, RankedRwLock, RANK_CLOCK, RANK_LEAF, RANK_WAL_LOCK, RANK_WORLD_INNER};
 use crate::sqlite_store;
+use crate::tx_engine::{
+    apply_changeset_to_sqlite, validate_changeset, ChangeSet, Effects, EntityIdAllocator,
+    PostCommitListener, TxError, TxFaultPlan, TxSqlExecutor, WorldTx, DEFAULT_MAX_ROW_JSON_BYTES,
+};
 use crate::types::AuthRuntimeState;
 use crate::types::*;
 use serde::{Deserialize, Serialize};
@@ -404,24 +405,31 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-/// Encapsulated transactional world repository backed by SQLite (`D-3`, `D-4`).
+pub(crate) struct WorldWriter {
+    pub(crate) working: WorldStateSnapshot,
+    pub(crate) conn: rusqlite::Connection,
+    pub(crate) fp: sqlite_store::TableFingerprints,
+    pub(crate) seq: u64,
+}
+
+/// Encapsulated transactional world repository backed by SQLite (`D-3`, `D-4`, `RFC-2 §3.2`).
 pub struct WorldRepository {
     pub(crate) instance_id: u64,
-    pub(crate) inner: RankedRwLock<std::sync::Arc<WorldStateSnapshot>, RANK_WORLD_INNER>,
-    pub(crate) sqlite_conn: RankedMutex<rusqlite::Connection, RANK_SQLITE_CONN>,
-    pub(crate) sqlite_fp: RankedMutex<sqlite_store::TableFingerprints, RANK_SQLITE_FP>,
+    pub(crate) published: std::sync::RwLock<std::sync::Arc<WorldStateSnapshot>>,
+    pub(crate) writer: RankedMutex<WorldWriter, RANK_WORLD_INNER>,
+    pub(crate) entity_ids: std::sync::Arc<EntityIdAllocator>,
     pub(crate) sqlite_path: Option<std::path::PathBuf>,
-    pub(crate) quarantine_unreadable: bool,
     pub(crate) auth_runtime: RankedRwLock<AuthRuntimeState, RANK_LEAF>,
     pub(crate) clock: RankedRwLock<std::sync::Arc<dyn crate::clock::ServerClock>, RANK_CLOCK>,
     pub(crate) wal_lock: RankedMutex<(), RANK_WAL_LOCK>,
     pub(crate) snapshot_path: Option<std::path::PathBuf>,
     pub(crate) pending_wal_records: std::sync::atomic::AtomicUsize,
     pub(crate) state_epoch: std::sync::atomic::AtomicU64,
-    pub(crate) rollback_epoch: std::sync::atomic::AtomicU64,
     pub(crate) combat_state_epoch: std::sync::atomic::AtomicU64,
-    #[cfg(test)]
-    pub(crate) wal_fault_mode: std::sync::atomic::AtomicU8,
+    pub(crate) tx_commit_count: std::sync::atomic::AtomicU64,
+    pub(crate) post_commit_listeners: std::sync::Mutex<Vec<(u64, PostCommitListener)>>,
+    pub(crate) next_listener_id: std::sync::atomic::AtomicU64,
+    pub(crate) fault_plan: std::sync::atomic::AtomicU64,
 }
 
 impl Drop for WorldRepository {
@@ -432,7 +440,10 @@ impl Drop for WorldRepository {
                 .load(std::sync::atomic::Ordering::SeqCst)
                 > 0
             {
-                let _ = self.save_snapshot_to_file(p);
+                let working = self.writer.get_mut().map(|w| w.working.clone());
+                if let Ok(snap) = working {
+                    let _ = self.save_snapshot_locked(p, &snap);
+                }
             }
         }
     }
@@ -445,6 +456,44 @@ impl Default for WorldRepository {
 }
 
 impl WorldRepository {
+    pub(crate) fn from_parts(
+        working: WorldStateSnapshot,
+        conn: rusqlite::Connection,
+        fp: sqlite_store::TableFingerprints,
+        entity_block: i64,
+        sqlite_path: Option<std::path::PathBuf>,
+        auth_runtime: AuthRuntimeState,
+    ) -> Self {
+        let floor = entity_block.max(working.next_entity_id).max(200_000_000);
+        let initial_seq = working.wal_seq;
+        let published = std::sync::Arc::new(working.clone());
+        Self {
+            instance_id: Self::next_instance_id(),
+            published: std::sync::RwLock::new(published),
+            writer: RankedMutex::new(WorldWriter {
+                working,
+                conn,
+                fp,
+                seq: initial_seq,
+            }),
+            entity_ids: std::sync::Arc::new(EntityIdAllocator::new(floor, entity_block)),
+            sqlite_path,
+            auth_runtime: RankedRwLock::new(auth_runtime),
+            clock: RankedRwLock::new(std::sync::Arc::new(
+                crate::clock::VirtualServerClock::new(),
+            )),
+            wal_lock: RankedMutex::new(()),
+            snapshot_path: None,
+            pending_wal_records: std::sync::atomic::AtomicUsize::new(0),
+            state_epoch: std::sync::atomic::AtomicU64::new(1),
+            combat_state_epoch: std::sync::atomic::AtomicU64::new(1),
+            tx_commit_count: std::sync::atomic::AtomicU64::new(0),
+            post_commit_listeners: std::sync::Mutex::new(Vec::new()),
+            next_listener_id: std::sync::atomic::AtomicU64::new(1),
+            fault_plan: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
     pub(crate) fn next_instance_id() -> u64 {
         NEXT_REPO_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
@@ -454,21 +503,65 @@ impl WorldRepository {
         self.instance_id
     }
 
-    /// Returns a monotonic state epoch incremented on every snapshot commit, load, or rollback (`#592`).
+    /// Returns a monotonic state epoch incremented on every snapshot commit or load (`#592`).
     pub fn state_epoch(&self) -> u64 {
         self.state_epoch.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    /// Returns a monotonic epoch incremented specifically when a snapshot load or rollback
-    /// replaces or reverts in-memory snapshot state (`#592`).
-    pub fn rollback_epoch(&self) -> u64 {
-        self.rollback_epoch.load(std::sync::atomic::Ordering::Acquire)
-    }
-
     /// Returns a monotonic epoch incremented whenever persisted crimewatch/combat runtime state
-    /// changes on commit or when a snapshot load or rollback replaces/reverts state (`#592`).
+    /// changes on commit or when a snapshot load replaces state (`#592`).
     pub fn combat_state_epoch(&self) -> u64 {
         self.combat_state_epoch.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Returns the total number of non-empty transactions committed by [`Self::tx`].
+    pub fn tx_commit_count(&self) -> u64 {
+        self.tx_commit_count.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Registers a post-commit listener invoked inside the writer critical section in commit order.
+    pub fn register_post_commit_listener(&self, listener: PostCommitListener) -> u64 {
+        let id = self
+            .next_listener_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut guard = self
+            .post_commit_listeners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.push((id, listener));
+        id
+    }
+
+    /// Unregisters a previously registered post-commit listener.
+    pub fn remove_post_commit_listener(&self, id: u64) {
+        let mut guard = self
+            .post_commit_listeners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.retain(|(entry_id, _)| *entry_id != id);
+    }
+
+    /// Returns a reference to the external block-persisted [`EntityIdAllocator`].
+    pub fn entity_id_allocator(&self) -> &EntityIdAllocator {
+        &self.entity_ids
+    }
+
+    /// Runs `f` with a shared reference to the backing SQLite connection if the writer mutex is uncontended.
+    pub fn try_with_sqlite_conn<R>(&self, f: impl FnOnce(&rusqlite::Connection) -> R) -> Option<R> {
+        self.writer.try_lock().ok().map(|w| f(&w.conn))
+    }
+
+    /// Runs `f` with exclusive access to the backing SQLite connection under the writer lock.
+    pub fn with_sqlite_conn<R>(&self, f: impl FnOnce(&mut rusqlite::Connection) -> R) -> R {
+        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut writer.conn)
+    }
+
+    /// Configures a single-use [`TxFaultPlan`] injected on the next non-empty commit (`#915`).
+    #[doc(hidden)]
+    pub fn set_fault_plan_for_test(&self, plan: TxFaultPlan) {
+        self.fault_plan
+            .store(plan.encode(), std::sync::atomic::Ordering::SeqCst);
     }
 
     #[inline]
@@ -481,14 +574,6 @@ impl WorldRepository {
     pub(crate) fn bump_combat_state_epoch(&self) {
         self.combat_state_epoch
             .fetch_add(1, std::sync::atomic::Ordering::Release);
-    }
-
-    #[inline]
-    pub(crate) fn bump_rollback_epoch(&self) {
-        self.rollback_epoch
-            .fetch_add(1, std::sync::atomic::Ordering::Release);
-        self.bump_combat_state_epoch();
-        self.bump_state_epoch();
     }
 
     /// Returns `true` when this repository is an ephemeral `:memory:` instance with no backing SQLite or snapshot file.
@@ -552,35 +637,24 @@ impl WorldRepository {
         sqlite_store::apply_migrations(&conn)?;
         let (snap, fp) =
             sqlite_store::load_snapshot_from_sqlite_with_options(&conn, quarantine_unreadable)?;
+        let entity_block = sqlite_store::load_entity_block_from_sqlite(&conn)?;
         let jwt_secret =
             sqlite_store::load_or_init_jwt_secret(&conn, Self::generate_random_secret_32)?;
         let auth_runtime = sqlite_store::load_auth_runtime_from_sqlite(&conn, jwt_secret)?;
-        Ok(Self {
-            instance_id: Self::next_instance_id(),
-            inner: RankedRwLock::new(std::sync::Arc::new(snap)),
-            sqlite_conn: RankedMutex::new(conn),
-            sqlite_fp: RankedMutex::new(fp),
-            sqlite_path: Some(target.to_path_buf()),
-            quarantine_unreadable,
-            auth_runtime: RankedRwLock::new(auth_runtime),
-            clock: RankedRwLock::new(std::sync::Arc::new(
-                crate::clock::VirtualServerClock::new(),
-            )),
-            wal_lock: RankedMutex::new(()),
-            snapshot_path: None,
-            pending_wal_records: std::sync::atomic::AtomicUsize::new(0),
-            state_epoch: std::sync::atomic::AtomicU64::new(1),
-            rollback_epoch: std::sync::atomic::AtomicU64::new(1),
-            combat_state_epoch: std::sync::atomic::AtomicU64::new(1),
-            #[cfg(test)]
-            wal_fault_mode: std::sync::atomic::AtomicU8::new(0),
-        })
+        Ok(Self::from_parts(
+            snap,
+            conn,
+            fp,
+            entity_block,
+            Some(target.to_path_buf()),
+            auth_runtime,
+        ))
     }
 
     /// Returns all rows quarantined into `quarantine_rows` in the backing SQLite database (`#906`).
     pub fn quarantined_rows(&self) -> Result<Vec<sqlite_store::QuarantinedRow>, String> {
-        let conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
-        sqlite_store::list_quarantined_rows(&conn)
+        let writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        sqlite_store::list_quarantined_rows(&writer.conn)
     }
 
     /// Returns the file path of the backing SQLite database if opened via [`Self::open_sqlite`].
@@ -595,10 +669,10 @@ impl WorldRepository {
         let repo = Self::open_sqlite(path)?;
         let snap = self.read_state();
         let auth_rt = self.auth_runtime.read().unwrap_or_else(|e| e.into_inner()).clone();
-        let mut conn = repo.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
-        sqlite_store::replace_sqlite_from_snapshot(&mut conn, &snap)?;
-        sqlite_store::save_jwt_secret(&conn, &auth_rt.jwt_signing_secret)?;
-        sqlite_store::replace_auth_runtime_in_sqlite(&mut conn, &auth_rt)?;
+        let mut writer = repo.writer.lock().unwrap_or_else(|e| e.into_inner());
+        sqlite_store::replace_sqlite_from_snapshot(&mut writer.conn, &snap)?;
+        sqlite_store::save_jwt_secret(&writer.conn, &auth_rt.jwt_signing_secret)?;
+        sqlite_store::replace_auth_runtime_in_sqlite(&mut writer.conn, &auth_rt)?;
         Ok(())
     }
 
@@ -610,8 +684,8 @@ impl WorldRepository {
             let mem_pruned = sqlite_store::prune_auth_runtime_locked(&mut rt, now_unix);
             (mem_pruned, rt.last_auth_now_unix)
         };
-        let mut conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = sqlite_store::persist_prune_expired(&mut conn, cutoff);
+        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = sqlite_store::persist_prune_expired(&mut writer.conn, cutoff);
         mem_pruned
     }
 
@@ -727,27 +801,16 @@ impl WorldRepository {
         let fp = sqlite_store::replace_sqlite_from_snapshot(&mut conn, &initial_snap)?;
         let jwt_secret =
             sqlite_store::load_or_init_jwt_secret(&conn, Self::generate_random_secret_32)?;
+        let entity_block = initial_snap.next_entity_id.max(200_000_000);
 
-        let mut repo = Self {
-            instance_id: Self::next_instance_id(),
-            inner: RankedRwLock::new(std::sync::Arc::new(initial_snap)),
-            sqlite_conn: RankedMutex::new(conn),
-            sqlite_fp: RankedMutex::new(fp),
-            sqlite_path: None,
-            quarantine_unreadable: sqlite_store::default_quarantine_unreadable(),
-            auth_runtime: RankedRwLock::new(AuthRuntimeState::new(jwt_secret)),
-            clock: RankedRwLock::new(std::sync::Arc::new(
-                crate::clock::VirtualServerClock::new(),
-            )),
-            wal_lock: RankedMutex::new(()),
-            snapshot_path: None,
-            pending_wal_records: std::sync::atomic::AtomicUsize::new(0),
-            state_epoch: std::sync::atomic::AtomicU64::new(1),
-            rollback_epoch: std::sync::atomic::AtomicU64::new(1),
-            combat_state_epoch: std::sync::atomic::AtomicU64::new(1),
-            #[cfg(test)]
-            wal_fault_mode: std::sync::atomic::AtomicU8::new(0),
-        };
+        let mut repo = Self::from_parts(
+            initial_snap,
+            conn,
+            fp,
+            entity_block,
+            None,
+            AuthRuntimeState::new(jwt_secret),
+        );
 
         if let Some(ref p) = snapshot_path {
             if p.exists() {
@@ -788,9 +851,9 @@ impl WorldRepository {
     /// (`M1` durable persistence) under `inner` + `wal_lock`, using an atomic temp-file write + `fsync` +
     /// rename and atomic `.json.wal` checkpoint rotation (`R21-P1-5`).
     pub fn save_snapshot_to_file(&self, path: impl AsRef<Path>) -> Result<(), String> {
-        let guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        let writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         let _wal_guard = self.wal_lock.lock().unwrap_or_else(|e| e.into_inner());
-        self.save_snapshot_locked(path.as_ref(), &guard)
+        self.save_snapshot_locked(path.as_ref(), &writer.working)
     }
 
     /// Appends a single compact JSONL delta record to `<path>.json.wal` with `sync_data()` (`fsync`)
@@ -837,22 +900,8 @@ impl WorldRepository {
         file.seek(SeekFrom::Start(prev_len))
             .map_err(|e| e.to_string())?;
 
-        #[cfg(test)]
-        let fault_mode = self
-            .wal_fault_mode
-            .swap(0, std::sync::atomic::Ordering::SeqCst);
         let write_and_sync = (|| -> Result<(), String> {
-            #[cfg(test)]
-            if fault_mode == 1 {
-                let half = (line.len() / 2).max(1);
-                file.write_all(&line[..half]).map_err(|e| e.to_string())?;
-                return Err("Injected partial WAL write_all failure".to_string());
-            }
             file.write_all(&line).map_err(|e| e.to_string())?;
-            #[cfg(test)]
-            if fault_mode == 2 {
-                return Err("Injected WAL sync_data failure after write_all".to_string());
-            }
             file.sync_data().map_err(|e| e.to_string())?;
             Ok(())
         })();
@@ -882,9 +931,7 @@ impl WorldRepository {
     /// rejecting duplicate sequence numbers (`R21-P1-5`, `R24-P1-1`, `R25-P1-1`).
     pub fn load_snapshot_from_file(&self, path: impl AsRef<Path>) -> Result<(), String> {
         use std::io::Write as _;
-        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
-        let mut conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
-        let mut fp = self.sqlite_fp.lock().unwrap_or_else(|e| e.into_inner());
+        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         let _wal_guard = self.wal_lock.lock().unwrap_or_else(|e| e.into_inner());
         let target = path.as_ref();
         let json = std::fs::read_to_string(target).map_err(|e| e.to_string())?;
@@ -955,20 +1002,39 @@ impl WorldRepository {
         for (&sid, st) in &mut snap.system_states {
             st.solar_system_id = sid;
         }
-        *fp = sqlite_store::replace_sqlite_from_snapshot(&mut conn, &snap)?;
-        *guard = std::sync::Arc::new(snap);
-        self.bump_rollback_epoch();
+        writer.fp = sqlite_store::replace_sqlite_from_snapshot(&mut writer.conn, &snap)?;
+        let _ = writer.conn.execute(
+            "INSERT OR REPLACE INTO world_meta (meta_key, meta_value) VALUES ('next_entity_block', ?1)",
+            rusqlite::params![snap.next_entity_id.max(200_000_000)],
+        );
+        self.entity_ids
+            .reset_from_load(snap.next_entity_id, snap.next_entity_id);
+        writer.seq = snap.wal_seq;
+        writer.working = snap;
+        *self.published.write().unwrap_or_else(|e| e.into_inner()) =
+            std::sync::Arc::new(writer.working.clone());
+        self.bump_state_epoch();
+        self.bump_combat_state_epoch();
         Ok(())
     }
 
     #[track_caller]
     pub(crate) fn read_state(&self) -> std::sync::Arc<WorldStateSnapshot> {
-        std::sync::Arc::clone(&self.inner.read().unwrap_or_else(|e| e.into_inner()))
+        if !self.is_write_locked_by_current_thread() {
+            crate::lock_rank::assert_locks_below(RANK_WORLD_INNER);
+        }
+        std::sync::Arc::clone(&self.published.read().unwrap_or_else(|e| e.into_inner()))
     }
 
     #[track_caller]
     pub(crate) fn try_read_state(&self) -> Option<std::sync::Arc<WorldStateSnapshot>> {
-        self.inner.try_read().ok().map(|g| std::sync::Arc::clone(&g))
+        if !self.is_write_locked_by_current_thread() {
+            crate::lock_rank::assert_locks_below(RANK_WORLD_INNER);
+        }
+        self.published
+            .try_read()
+            .ok()
+            .map(|g| std::sync::Arc::clone(&g))
     }
 
     #[track_caller]
@@ -987,162 +1053,196 @@ impl WorldRepository {
         }
     }
 
-    #[inline(never)]
-    fn persist_dirty_sqlite_and_wal(
-        &self,
-        conn: &mut rusqlite::Connection,
-        guard: &mut WorldStateSnapshot,
-        staged_fp: &mut sqlite_store::TableFingerprints,
-        prev_wal_seq: u64,
-        need_wal_delta: bool,
-    ) -> Result<bool, String> {
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(|e| e.to_string())?;
-        let mut delta = Box::new(sqlite_store::sync_dirty_to_sqlite(
-            &tx,
-            guard,
-            staged_fp,
-            need_wal_delta,
-        )?);
-        if !delta.dirty {
-            return Ok(false);
-        }
-        if guard.wal_seq <= prev_wal_seq {
-            guard.wal_seq = prev_wal_seq.saturating_add(1);
-            delta.seq = guard.wal_seq;
-            if let Some(ref mut full) = delta.full_snapshot {
-                full.wal_seq = guard.wal_seq;
-            }
-            tx.execute(
-                "INSERT OR REPLACE INTO world_meta (meta_key, meta_value) VALUES ('next_entity_id', ?1), ('wal_seq', ?2), ('markets_seeded', ?3)",
-                rusqlite::params![
-                    guard.next_entity_id,
-                    guard.wal_seq as i64,
-                    i64::from(guard.markets_seeded)
-                ],
-            )
-            .map_err(|e| e.to_string())?;
-            staged_fp.wal_seq = guard.wal_seq;
-        }
-        if need_wal_delta {
-            if let Some(ref p) = self.snapshot_path {
-                let _wal_guard = self.wal_lock.lock().unwrap_or_else(|e| e.into_inner());
-                self.append_wal_delta_locked(p, guard, &delta)?;
-            }
-        }
-        tx.commit().map_err(|e| e.to_string())?;
-        Ok(true)
-    }
-
-    fn rollback_or_reload_from_sqlite(
-        &self,
-        conn: &rusqlite::Connection,
-        guard: &mut WorldStateSnapshot,
-        fp: &mut sqlite_store::TableFingerprints,
-        context: &str,
-    ) {
-        if let Err(rb_err) = sqlite_store::rollback_dirty_from_sqlite(conn, guard, fp) {
-            tracing::error!(
-                "rollback_dirty_from_sqlite failed during {context}: {rb_err}; attempting full reload from SQLite"
-            );
-            match sqlite_store::load_snapshot_from_sqlite_with_options(
-                conn,
-                self.quarantine_unreadable,
-            ) {
-                Ok((clean_snap, clean_fp)) => {
-                    *guard = clean_snap;
-                    *fp = clean_fp;
-                }
-                Err(reload_err) => {
-                    PERSIST_FAILURES_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    tracing::error!(
-                        "Full SQLite reload fallback also failed during {context}: {reload_err}"
-                    );
-                }
-            }
-        }
-    }
-
+    /// Executes a single-writer Copy-on-Write transaction against the authoritative working
+    /// snapshot and durable SQLite database (`RFC-2 §3.2–§3.4`, `#915`).
     #[track_caller]
-    fn run_mut_snapshot_tx(
-        &self,
-        f: &mut dyn FnMut(&mut WorldStateSnapshot) -> bool,
-    ) -> Result<(), String> {
-        let mut arc_guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+    pub fn tx<T, E>(&self, label: &'static str, f: impl FnOnce(&mut WorldTx<'_>) -> Result<T, E>) -> Result<T, E>
+    where
+        E: crate::tx_engine::FromTxError,
+    {
+        let mut writer_guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        let writer: &mut WorldWriter = &mut *writer_guard;
         let _write_depth_guard = DbWriteLockDepthGuard::enter();
-        let guard = std::sync::Arc::make_mut(&mut *arc_guard);
-        guard.dirty_hints.clear();
-        let closure_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(guard)));
-        let mut conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
-        let mut fp = self.sqlite_fp.lock().unwrap_or_else(|e| e.into_inner());
-        let should_commit = match closure_res {
-            Ok(commit) => commit,
+
+        let before = writer.working.clone();
+        let pre_alloc_snap_id = writer.working.next_entity_id;
+        let alloc_start = self.entity_ids.current().max(pre_alloc_snap_id);
+        writer.working.next_entity_id = alloc_start;
+
+        let mut effects = Effects::default();
+        let closure_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut wtx = WorldTx {
+                snap: &mut writer.working,
+                effects: &mut effects,
+                entity_ids: &self.entity_ids,
+                conn: &writer.conn,
+            };
+            f(&mut wtx)
+        }));
+
+        let val = match closure_res {
             Err(panic_payload) => {
                 let msg = panic_payload_message(&*panic_payload);
                 PERSIST_TX_PANICS_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                tracing::error!(
-                    "Snapshot write closure panicked (rolling back dirty state from SQLite): {msg}"
-                );
-                self.rollback_or_reload_from_sqlite(&conn, guard, &mut fp, "closure panic");
-                self.bump_rollback_epoch();
-                return Err(format!("Write closure panicked: {msg}"));
+                tracing::error!("WorldRepository::tx `{label}` panicked (restoring pre-tx snapshot): {msg}");
+                if writer.working.next_entity_id > alloc_start {
+                    let _ = self.entity_ids.advance_to(&writer.conn, writer.working.next_entity_id);
+                }
+                writer.working = before;
+                drop(effects);
+                return Err(E::from_tx_error(TxError::Panicked { label, msg }));
             }
+            Ok(Err(err)) => {
+                if writer.working.next_entity_id > alloc_start {
+                    let _ = self.entity_ids.advance_to(&writer.conn, writer.working.next_entity_id);
+                }
+                writer.working = before;
+                drop(effects);
+                return Err(err);
+            }
+            Ok(Ok(val)) => val,
         };
-        if should_commit {
-            if let Some(poison_err) = check_wal_poison() {
+
+        if writer.working.next_entity_id > alloc_start {
+            if let Err(err) = self.entity_ids.advance_to(&writer.conn, writer.working.next_entity_id) {
                 PERSIST_FAILURES_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.rollback_or_reload_from_sqlite(&conn, guard, &mut fp, "poisoned dispatch");
-                self.bump_rollback_epoch();
-                return Err(poison_err);
+                writer.working = before;
+                drop(effects);
+                return Err(E::from_tx_error(TxError::Persist(err)));
             }
-            for (&sid, st) in &mut guard.system_states {
-                st.solar_system_id = sid;
+        } else {
+            writer.working.next_entity_id = pre_alloc_snap_id;
+        }
+
+        for (&sid, st) in &mut writer.working.system_states {
+            st.solar_system_id = sid;
+        }
+
+        let mut changes = ChangeSet::diff(writer.seq.saturating_add(1), &before, &writer.working);
+        let did_mutate = !changes.is_empty();
+
+        if did_mutate {
+            if let Err(val_err) =
+                validate_changeset(&changes, &before, &writer.working, DEFAULT_MAX_ROW_JSON_BYTES)
+            {
+                writer.working = before;
+                drop(effects);
+                return Err(E::from_tx_error(val_err));
             }
-            let prev_next_entity_id = fp.next_entity_id;
-            let prev_wal_seq = fp.wal_seq;
-            let prev_markets_seeded = fp.markets_seeded;
-            let prev_cw_fp = fp.d6_corp_crimewatch.crimewatch_fp;
+
+            let prev_wal_seq = writer.fp.wal_seq;
+            if writer.working.wal_seq <= prev_wal_seq {
+                writer.working.wal_seq = prev_wal_seq.saturating_add(1);
+                changes.wal_seq = writer.working.wal_seq;
+                changes.meta_changed = true;
+            }
+
+            let fault_plan =
+                TxFaultPlan::decode(self.fault_plan.swap(0, std::sync::atomic::Ordering::SeqCst));
             let need_wal_delta = self.snapshot_path.is_some() && self.sqlite_path.is_none();
-            let persist_res = self.persist_dirty_sqlite_and_wal(
-                &mut conn,
-                guard,
-                &mut fp,
-                prev_wal_seq,
-                need_wal_delta,
-            );
-            let crimewatch_changed = fp.d6_corp_crimewatch.crimewatch_fp != prev_cw_fp;
-            match persist_res {
-                Ok(did_mutate) => {
-                    if did_mutate {
-                        self.bump_state_epoch();
-                        if crimewatch_changed {
-                            self.bump_combat_state_epoch();
-                        }
+            let has_cold_or_meta = changes.meta_changed || changes.cold_domains.any();
+
+            // Stage cold fingerprints without cloning O(N) hot CowMap fingerprint HashMaps.
+            let mut staged_cold_fp = if has_cold_or_meta {
+                let hot_items = std::mem::take(&mut writer.fp.items);
+                let hot_chars = std::mem::take(&mut writer.fp.characters);
+                let hot_skills = std::mem::take(&mut writer.fp.skills);
+                let hot_queues = std::mem::take(&mut writer.fp.skill_queues);
+                let hot_orders = std::mem::take(&mut writer.fp.market_orders);
+                let cloned = writer.fp.clone();
+                writer.fp.items = hot_items;
+                writer.fp.characters = hot_chars;
+                writer.fp.skills = hot_skills;
+                writer.fp.skill_queues = hot_queues;
+                writer.fp.market_orders = hot_orders;
+                Some(cloned)
+            } else {
+                None
+            };
+
+            let persist_res = (|| -> Result<(crate::tx_engine::HotFpDelta, Option<WorldStateWalDelta>), TxError> {
+                let WorldWriter {
+                    ref working,
+                    ref mut conn,
+                    ref fp,
+                    ..
+                } = *writer;
+                let mut dummy_cold_fp = sqlite_store::TableFingerprints::default();
+                let cold_fp_ref = staged_cold_fp.as_mut().unwrap_or(&mut dummy_cold_fp);
+                let sql_tx = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(|e| TxError::Persist(e.to_string()))?;
+                let mut exec = TxSqlExecutor::new(&sql_tx, fault_plan);
+                let (mut delta, hot_fp) = apply_changeset_to_sqlite(
+                    &mut exec,
+                    working,
+                    &changes,
+                    fp,
+                    cold_fp_ref,
+                    need_wal_delta,
+                )?;
+                exec.check_commit_fault()?;
+                if need_wal_delta {
+                    if let Some(ref p) = self.snapshot_path {
+                        let _wal_guard = self.wal_lock.lock().unwrap_or_else(|e| e.into_inner());
+                        delta.seq = working.wal_seq;
+                        self.append_wal_delta_locked(p, working, &delta)
+                            .map_err(TxError::Persist)?;
                     }
-                    Ok(())
+                }
+                sql_tx.commit().map_err(|e| TxError::Persist(e.to_string()))?;
+                Ok((hot_fp, if need_wal_delta { Some(delta) } else { None }))
+            })();
+
+            match persist_res {
+                Ok((hot_fp, _wal_delta)) => {
+                    if let Some(mut next_fp) = staged_cold_fp {
+                        next_fp.items = std::mem::take(&mut writer.fp.items);
+                        next_fp.characters = std::mem::take(&mut writer.fp.characters);
+                        next_fp.skills = std::mem::take(&mut writer.fp.skills);
+                        next_fp.skill_queues = std::mem::take(&mut writer.fp.skill_queues);
+                        next_fp.market_orders = std::mem::take(&mut writer.fp.market_orders);
+                        next_fp.market_orders_digest = writer.fp.market_orders_digest;
+                        writer.fp = next_fp;
+                    }
+                    hot_fp.apply_to(&mut writer.fp);
+                    writer.seq = changes.seq;
+                    *self.published.write().unwrap_or_else(|e| e.into_inner()) =
+                        std::sync::Arc::new(writer.working.clone());
+                    self.tx_commit_count
+                        .fetch_add(1, std::sync::atomic::Ordering::Release);
+                    self.bump_state_epoch();
+                    if changes.cold_domains.crimewatch_changed {
+                        self.bump_combat_state_epoch();
+                    }
                 }
                 Err(persist_err) => {
                     PERSIST_FAILURES_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    fp.next_entity_id = prev_next_entity_id;
-                    fp.wal_seq = prev_wal_seq;
-                    fp.markets_seeded = prev_markets_seeded;
-                    if let Ok((_, clean_fp)) = sqlite_store::load_snapshot_from_sqlite_with_options(
-                        &conn,
-                        self.quarantine_unreadable,
-                    ) {
-                        *fp = clean_fp;
-                    }
-                    self.rollback_or_reload_from_sqlite(&conn, guard, &mut fp, "persist error");
-                    self.bump_rollback_epoch();
-                    Err(persist_err)
+                    tracing::error!(
+                        "WorldRepository::tx `{label}` SQLite commit aborted (restoring pre-tx snapshot): {persist_err}"
+                    );
+                    writer.working = before;
+                    drop(effects);
+                    return Err(E::from_tx_error(persist_err));
                 }
             }
-        } else {
-            self.rollback_or_reload_from_sqlite(&conn, guard, &mut fp, "transaction error");
-            self.bump_rollback_epoch();
-            Ok(())
         }
+
+        if !effects.is_empty() {
+            let listeners: Vec<PostCommitListener> = self
+                .post_commit_listeners
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .map(|(_, l)| std::sync::Arc::clone(l))
+                .collect();
+            for listener in listeners {
+                listener(&writer.working, &changes, &effects);
+            }
+            effects.run_callbacks(&changes);
+        }
+
+        Ok(val)
     }
 
     #[track_caller]
@@ -1178,32 +1278,17 @@ impl WorldRepository {
         }
     }
 
-    /// Delegates infallible snapshot mutations through `run_mut_snapshot_tx`.
-    /// On a durable SQLite/WAL persistence failure, `run_mut_snapshot_tx` rolls back
-    /// `WorldStateSnapshot` from the committed SQLite tables, increments `persist_failures_total()`,
-    /// and records the error via `record_last_wal_error` (`#903` / `#833`).
-    /// If the closure itself panics, `run_mut_snapshot_tx` catches the panic, rolls back
-    /// `WorldStateSnapshot` from SQLite, increments `tx_panics_total()`, releases all locks without
-    /// poisoning, and then propagates the panic (`#904` / `#833`).
+    /// Thin wrapper over [`Self::tx`] for infallible callers.
+    /// Panics if the closure itself panics or if durable validation/SQLite commit fails.
     #[track_caller]
     pub fn with_mut_snapshot<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut WorldStateSnapshot) -> R,
     {
-        let mut f_opt = Some(f);
-        let mut out: Option<R> = None;
-        if let Err(persist_err) = self.run_mut_snapshot_tx(&mut |snap| {
-            if let Some(cb) = f_opt.take() {
-                out = Some(cb(snap));
-            }
-            true
-        }) {
-            let _ = record_last_wal_error(&persist_err);
-            if out.is_none() {
-                panic!("{persist_err}");
-            }
+        match self.tx("with_mut_snapshot", |wtx| Ok::<R, TxError>(f(wtx.snap))) {
+            Ok(val) => val,
+            Err(err) => panic!("{err}"),
         }
-        out.expect("with_mut_snapshot closure must run")
     }
 
     /// Mutates the in-memory `WorldStateSnapshot` directly without running a SQLite/WAL commit,
@@ -1214,48 +1299,44 @@ impl WorldRepository {
     where
         F: FnOnce(&mut WorldStateSnapshot) -> R,
     {
-        let mut arc_guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
-        let guard = std::sync::Arc::make_mut(&mut *arc_guard);
-        let out = f(guard);
-        let mut fp = self.sqlite_fp.lock().unwrap_or_else(|e| e.into_inner());
-        *fp = sqlite_store::compute_fingerprints(guard);
+        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        let out = f(&mut writer.working);
+        writer.fp = sqlite_store::compute_fingerprints(&writer.working);
+        *self.published.write().unwrap_or_else(|e| e.into_inner()) =
+            std::sync::Arc::new(writer.working.clone());
         out
     }
 
     /// Returns `true` if the current thread currently holds the `WorldRepository` write lock
-    /// (inside `with_mut_snapshot` / `try_with_mut_snapshot`). Used to prevent re-entrant
+    /// (inside `tx` / `with_mut_snapshot` / `try_with_mut_snapshot`). Used to prevent re-entrant
     /// same-thread deadlocks from synchronous callbacks such as `SystemHandle::try_remove_ball`.
     pub fn is_write_locked_by_current_thread(&self) -> bool {
         DB_WRITE_LOCK_DEPTH.with(|d| d.get() > 0)
     }
 
-    /// Transactionally applies a fallible closure `f` in-place (with zero whole-world `WorldStateSnapshot`
-    /// cloning) and commits dirty rows inside an immediate `rusqlite::Transaction` ONLY when `f` returns
-    /// `Ok(val)` AND durable persistence succeeds, rolling back in-memory state from the committed SQLite
-    /// tables on any error or closure panic (`D-3`, `R21-P1-5`, `R24-P1-1`, `#903`, `#904`).
+    /// Thin wrapper over [`Self::tx`] preserving [`FromWalError`] compatibility for existing
+    /// domain callers (`RFC-2 §3.2`).
     #[track_caller]
     pub fn try_with_mut_snapshot<F, T, E>(&self, f: F) -> Result<T, E>
     where
         F: FnOnce(&mut WorldStateSnapshot) -> Result<T, E>,
         E: FromWalError,
     {
-        let mut f_opt = Some(f);
-        let mut out: Option<Result<T, E>> = None;
-        let persist_res = self.run_mut_snapshot_tx(&mut |snap| {
-            let res = (f_opt.take().expect("try_with_mut_snapshot closure called once"))(snap);
-            let is_ok = res.is_ok();
-            out = Some(res);
-            is_ok
-        });
-        match (out, persist_res) {
-            (Some(Ok(val)), Ok(())) => Ok(val),
-            (Some(Ok(_)), Err(persist_err)) | (None, Err(persist_err)) => {
-                Err(E::from_wal_error(persist_err))
+        enum AdapterErr<E> {
+            User(E),
+            Tx(TxError),
+        }
+        impl<E> crate::tx_engine::FromTxError for AdapterErr<E> {
+            fn from_tx_error(err: TxError) -> Self {
+                Self::Tx(err)
             }
-            (Some(Err(err)), _) => Err(err),
-            (None, Ok(())) => {
-                unreachable!("try_with_mut_snapshot closure must produce output or error")
-            }
+        }
+        match self.tx("try_with_mut_snapshot", |wtx| {
+            f(wtx.snap).map_err(AdapterErr::User)
+        }) {
+            Ok(val) => Ok(val),
+            Err(AdapterErr::User(e)) => Err(e),
+            Err(AdapterErr::Tx(tx_err)) => Err(E::from_wal_error(tx_err.to_string())),
         }
     }
 
@@ -1275,37 +1356,8 @@ impl WorldRepository {
 
     pub fn spawn_asteroid(&self, record: AsteroidRecord) {
         self.with_mut_snapshot(|snap| {
-            snap.mark_asteroids_dirty();
             snap.asteroids.insert(record.asteroid_id, record);
         });
-    }
-}
-
-static WAL_ERROR_HOOK: std::sync::OnceLock<std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>> =
-    std::sync::OnceLock::new();
-
-static WAL_POISON_CHECK_HOOK: std::sync::OnceLock<
-    std::sync::Arc<dyn Fn() -> Option<String> + Send + Sync>,
-> = std::sync::OnceLock::new();
-
-pub fn set_wal_error_hook(hook: std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>) {
-    let _ = WAL_ERROR_HOOK.set(hook);
-}
-
-pub fn set_wal_poison_check_hook(hook: std::sync::Arc<dyn Fn() -> Option<String> + Send + Sync>) {
-    let _ = WAL_POISON_CHECK_HOOK.set(hook);
-}
-
-pub fn check_wal_poison() -> Option<String> {
-    WAL_POISON_CHECK_HOOK.get().and_then(|hook| hook())
-}
-
-pub fn record_last_wal_error(err: &str) -> bool {
-    tracing::error!("WAL/SQLite persistence error (snapshot rolled back): {err}");
-    if let Some(hook) = WAL_ERROR_HOOK.get() {
-        hook(err)
-    } else {
-        false
     }
 }
 
@@ -1366,7 +1418,7 @@ mod r4_persistence_tests {
             let st = &snap.system_states[&sys_id];
             assert_eq!(
                 st.solar_system_id, sys_id,
-                "rollback_dirty_from_sqlite must hydrate solar_system_id"
+                "aborted transaction must preserve pre-transaction solar_system_id"
             );
             assert_eq!(st.insurgency_corruption_stage, 3);
         });

@@ -17,6 +17,23 @@ pub fn load_snapshot_from_sqlite(
     load_snapshot_from_sqlite_with_options(conn, default_quarantine_unreadable())
 }
 
+/// Loads the persisted `next_entity_block` high-water mark from `world_meta` (falling back to
+/// `next_entity_id` and the minimum `200_000_000` floor).
+pub fn load_entity_block_from_sqlite(conn: &Connection) -> Result<i64, String> {
+    let mut block = 200_000_000_i64;
+    let mut stmt = conn
+        .prepare("SELECT meta_key, meta_value FROM world_meta WHERE meta_key IN ('next_entity_block', 'next_entity_id')")
+        .map_err(|e| e.to_string())?;
+    let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+    while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+        let val: i64 = r.get(1).map_err(|e| e.to_string())?;
+        if val > block {
+            block = val;
+        }
+    }
+    Ok(block)
+}
+
 /// Loads the complete `WorldStateSnapshot` and its `TableFingerprints` from the SQLite database.
 /// When `quarantine_unreadable` is `false`, any unreadable row returns `Err` naming the table and key.
 /// When `quarantine_unreadable` is `true`, offending rows are moved into `quarantine_rows` and logged.

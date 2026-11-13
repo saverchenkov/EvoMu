@@ -4,19 +4,15 @@
 //! 1. [`check_persist_reload_equivalence`] — reloads SQLite into a fresh [`WorldStateSnapshot`]
 //!    and compares it against the live in-memory snapshot, ignoring transient runtime fields
 //!    ([`TRANSIENT_SNAPSHOT_FIELDS`]), reporting the exact table and key of any mismatch.
-//! 2. [`verify_dirty_hints_fast_path`] — verifies that syncing a snapshot with
-//!    `dirty_hints.tracked = true` produces the exact same persisted SQLite state as a full scan.
-//! 3. [`check_world_invariants`] — verifies teardown invariants across `WorldStateSnapshot`:
+//! 2. [`check_world_invariants`] — verifies teardown invariants across `WorldStateSnapshot`:
 //!    - Every charge (`category_id == 8`) in a module slot flag (`11..=34`, `LoSlot0..=HiSlot7`)
 //!      has a fitted non-charge module in the same `(location_id, flag)` (`#947` class guard).
 //!    - Every item's `location_id` resolves to a valid container, owner, station, structure,
 //!      solar system, celestial, or system location without self-parenting loops.
-//! 4. Shrinking ratchet enforcement via [`WorldInvariantsRatchet`].
+//! 3. Shrinking ratchet enforcement via [`WorldInvariantsRatchet`].
 
-use eve_db::sqlite_store::{
-    apply_migrations, load_snapshot_from_sqlite, sync_dirty_to_sqlite, TableFingerprints,
-};
-use eve_db::{SnapshotDirtyHints, WorldRepository, WorldStateSnapshot};
+use eve_db::WorldRepository;
+use eve_db::WorldStateSnapshot;
 use eve_sde::SdeRegistry;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -27,7 +23,6 @@ use std::path::{Path, PathBuf};
 pub const TRANSIENT_SNAPSHOT_FIELDS: &[&str] = &[
     "sessions",
     "transient_item_attributes",
-    "dirty_hints",
 ];
 
 /// Module slot flag codes (`LoSlot0 = 11` through `HiSlot7 = 34`).
@@ -223,12 +218,6 @@ pub fn diff_snapshots_ignore_transient(
     diffs
 }
 
-fn sync_to_conn(conn: &mut rusqlite::Connection, snap: &WorldStateSnapshot, fp: &mut TableFingerprints) -> Result<(), String> {
-    let tx = conn.transaction().map_err(|e| format!("begin sqlite tx: {e}"))?;
-    sync_dirty_to_sqlite(&tx, snap, fp, false)?;
-    tx.commit().map_err(|e| format!("commit sqlite tx: {e}"))
-}
-
 /// Executes the Persist-Reload Equivalence (PRE) check on `repo`:
 /// Reloads the persisted [`WorldStateSnapshot`] directly from `repo`'s SQLite database and
 /// compares it against the live in-memory snapshot, catching both unpersisted in-memory mutations
@@ -239,33 +228,6 @@ pub fn check_persist_reload_equivalence(
     let live = repo.with_snapshot(|s| s.clone());
     let reloaded = repo.reload_snapshot_from_sqlite()?;
     Ok(diff_snapshots_ignore_transient(&live, &reloaded))
-}
-
-/// Verifies that syncing `snap` with `dirty_hints` produces the exact same SQLite snapshot as a
-/// full unhinted scan (`dirty_hints.tracked = false`).
-pub fn verify_dirty_hints_fast_path(
-    snap: &WorldStateSnapshot,
-) -> Result<Vec<PreDiffEntry>, String> {
-    let mut conn_fast = rusqlite::Connection::open_in_memory()
-        .map_err(|e| format!("open fast-path sqlite: {e}"))?;
-    apply_migrations(&conn_fast)?;
-    let mut fp_fast = TableFingerprints::default();
-    let mut seeded_base = snap.clone();
-    seeded_base.dirty_hints = SnapshotDirtyHints::default();
-    sync_to_conn(&mut conn_fast, &seeded_base, &mut fp_fast)?;
-    sync_to_conn(&mut conn_fast, snap, &mut fp_fast)?;
-    let (reloaded_fast, _) = load_snapshot_from_sqlite(&conn_fast)?;
-
-    let mut conn_full = rusqlite::Connection::open_in_memory()
-        .map_err(|e| format!("open full-scan sqlite: {e}"))?;
-    apply_migrations(&conn_full)?;
-    let mut fp_full = TableFingerprints::default();
-    let mut full_snap = snap.clone();
-    full_snap.dirty_hints = SnapshotDirtyHints::default();
-    sync_to_conn(&mut conn_full, &full_snap, &mut fp_full)?;
-    let (reloaded_full, _) = load_snapshot_from_sqlite(&conn_full)?;
-
-    Ok(diff_snapshots_ignore_transient(&reloaded_fast, &reloaded_full))
 }
 
 fn item_category_id(type_id: u32, sde: Option<&SdeRegistry>, fallback_sde: &SdeRegistry) -> Option<u32> {
@@ -420,17 +382,6 @@ pub fn assert_world_and_pre_guards(
             "Persist-Reload Equivalence (PRE) check failed — first differing table/key: {} (total unexpected diffs: {unexpected_diffs:#?})",
             unexpected_diffs[0]
         );
-
-        let fast_diffs = verify_dirty_hints_fast_path(&snap)
-            .expect("SnapshotDirtyHints fast-path verification must succeed");
-        let unexpected_fast: Vec<_> = fast_diffs
-            .iter()
-            .filter(|d| !ratchet.allowed_pre_diff_tables.contains(&d.table))
-            .collect();
-        assert!(
-            unexpected_fast.is_empty(),
-            "SnapshotDirtyHints fast-path diverged from full SQLite scan: {unexpected_fast:#?}"
-        );
     }
 }
 
@@ -459,24 +410,6 @@ mod tests {
         assert!(
             diffs.iter().any(|d| d.table == "characters" && d.key == "90000001"),
             "PRE check must report exact differing table `characters` and key `90000001`, got {diffs:#?}"
-        );
-    }
-
-    #[test]
-    fn dirty_hints_fast_path_matches_full_sqlite_scan() {
-        let repo = WorldRepository::with_demo_seed();
-        repo.with_mut_snapshot(|snap| {
-            snap.dirty_hints.tracked = true;
-            snap.dirty_hints.touched_characters.insert(90_000_001);
-            if let Some(ch) = snap.characters.get_mut(&90_000_001) {
-                ch.free_skill_points += 1234.0;
-            }
-        });
-        let snap = repo.with_snapshot(|s| s.clone());
-        let diffs = verify_dirty_hints_fast_path(&snap).expect("verify_dirty_hints_fast_path");
-        assert!(
-            diffs.is_empty(),
-            "SnapshotDirtyHints fast-path must match full SQLite scan, got {diffs:#?}"
         );
     }
 

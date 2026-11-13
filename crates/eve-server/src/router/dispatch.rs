@@ -5,14 +5,7 @@ use crate::services;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
-use std::sync::{Arc, Once};
 use tracing::{info, warn};
-
-tokio::task_local! {
-    static DISPATCH_WAL_ERROR: std::cell::RefCell<Option<String>>;
-}
-
-static WAL_HOOK_ONCE: Once = Once::new();
 
 #[inline(never)]
 pub fn box_fut<'a, F, Fut, T>(
@@ -80,38 +73,6 @@ fn format_panic_payload(payload: &(dyn std::any::Any + Send)) -> String {
     } else {
         "unexpected panic in RPC handler".to_string()
     }
-}
-
-pub fn ensure_wal_error_hook_installed() {
-    WAL_HOOK_ONCE.call_once(|| {
-        eve_db::set_wal_error_hook(Arc::new(record_dispatch_wal_error));
-        eve_db::set_wal_poison_check_hook(Arc::new(current_dispatch_wal_error));
-    });
-}
-
-pub fn record_dispatch_wal_error(err: &str) -> bool {
-    DISPATCH_WAL_ERROR
-        .try_with(|slot| {
-            let mut guard = slot.borrow_mut();
-            if guard.is_none() {
-                *guard = Some(err.to_string());
-            }
-        })
-        .is_ok()
-}
-
-pub fn current_dispatch_wal_error() -> Option<String> {
-    DISPATCH_WAL_ERROR
-        .try_with(|slot| slot.borrow().clone())
-        .ok()
-        .flatten()
-}
-
-pub fn take_dispatch_wal_error() -> Option<String> {
-    DISPATCH_WAL_ERROR
-        .try_with(|slot| slot.borrow_mut().take())
-        .ok()
-        .flatten()
 }
 
 fn append_unimplemented_rpc_log(
@@ -210,12 +171,11 @@ impl ServerContext {
 
         let prev_station_id = session.station_id;
         let initial_active_char_id = session.character_id;
-        ensure_wal_error_hook_installed();
         let start_time = std::time::Instant::now();
         let mut res = crate::router::cache_notifications::with_active_dispatch_char(
             initial_active_char_id,
-            DISPATCH_WAL_ERROR.scope(std::cell::RefCell::new(None), async {
-                let mut res = match CatchUnwindFuture(dispatch_rpc_inner_boxed(
+            async {
+                match CatchUnwindFuture(dispatch_rpc_inner_boxed(
                     self,
                     session,
                     service,
@@ -243,31 +203,8 @@ impl ServerContext {
                             client_error: None,
                         })
                     }
-                };
-                let wal_err = DISPATCH_WAL_ERROR.with(|slot| slot.borrow().clone());
-                let wal_failed = wal_err.is_some();
-                if let Some(wal_err) = wal_err {
-                    if res.is_ok() {
-                        res = Err(BridgeRpcError {
-                            code: "DatabasePersistenceError".into(),
-                            message: wal_err,
-                            client_error: None,
-                        });
-                    }
                 }
-                if wal_failed {
-                    self.rehydrate_runtime_from_db();
-                    if let Some(cid) = session.character_id {
-                        if let Ok(mut q) = self.pending_notifications.write() {
-                            if let Some(v) = q.get_mut(&cid) {
-                                v.retain(|n| n.seq_id <= pre_seq);
-                            }
-                        }
-                    }
-                }
-                let _ = DISPATCH_WAL_ERROR.with(|slot| slot.borrow_mut().take());
-                res
-            }),
+            },
         )
         .await;
         let duration = start_time.elapsed();

@@ -328,9 +328,16 @@ fn try_with_snapshot_and_try_with_mut_snapshot_rollback_edges() {
     let db_path = dir.join("repo.sqlite");
     let repo = WorldRepository::open_sqlite(&db_path).unwrap();
 
-    // try_with_snapshot returns None while write guard is held
+    // Readers read `published` without blocking on the writer and see pre-transaction state inside
+    // an active write closure; `try_with_snapshot` returns None only during `published.write()`.
+    let pre_id = repo.with_snapshot(|s| s.next_entity_id);
+    repo.with_mut_snapshot(|s| {
+        s.next_entity_id += 5;
+        assert_eq!(repo.try_with_snapshot(|r| r.next_entity_id), Some(pre_id));
+    });
+    assert_eq!(repo.with_snapshot(|s| s.next_entity_id), pre_id + 5);
     {
-        let _w = repo.inner.write().unwrap();
+        let _p = repo.published.write().unwrap();
         assert!(repo.try_with_snapshot(|s| s.next_entity_id).is_none());
     }
     assert!(repo.try_with_snapshot(|s| s.next_entity_id).is_some());
@@ -345,11 +352,11 @@ fn try_with_snapshot_and_try_with_mut_snapshot_rollback_edges() {
     assert!(closure_err.is_err());
     assert_eq!(repo.with_snapshot(|s| s.next_entity_id), initial_next_id);
 
-    // Persistence failure via WAL fault mode on JSON-backed repo rolls back in-memory state
+    // Persistence failure via TxFaultPlan on JSON-backed repo rolls back in-memory state
     let snap_path = dir.join("fault.json");
     let json_repo = WorldRepository::new_empty_with_snapshot_path(Some(snap_path)).unwrap();
     let json_init = json_repo.with_snapshot(|s| s.next_entity_id);
-    json_repo.wal_fault_mode.store(1, Ordering::Relaxed);
+    json_repo.set_fault_plan_for_test(crate::TxFaultPlan::FailNthStatement(1));
     let wal_err: Result<(), String> = json_repo.try_with_mut_snapshot(|s| {
         s.next_entity_id += 777;
         Ok(())
@@ -357,21 +364,19 @@ fn try_with_snapshot_and_try_with_mut_snapshot_rollback_edges() {
     assert!(wal_err.is_err());
     assert_eq!(json_repo.with_snapshot(|s| s.next_entity_id), json_init);
 
-    // WAL fault mode 2 (sync_data error) also rolls back
-    json_repo.wal_fault_mode.store(2, Ordering::Relaxed);
+    // FailAtCommit also rolls back cleanly
+    json_repo.set_fault_plan_for_test(crate::TxFaultPlan::FailAtCommit);
     let sync_err: Result<(), String> = json_repo.try_with_mut_snapshot(|s| {
         s.next_entity_id += 888;
         Ok(())
     });
     assert!(sync_err.is_err());
     assert_eq!(json_repo.with_snapshot(|s| s.next_entity_id), json_init);
-    json_repo.wal_fault_mode.store(0, Ordering::Relaxed);
 
     // SQLite failure during try_with_mut_snapshot (drop a core table and dirty that domain) rolls back
-    {
-        let conn = repo.sqlite_conn.lock().unwrap();
+    repo.with_sqlite_conn(|conn| {
         conn.execute("DROP TABLE d6_corp_crimewatch_kv", []).unwrap();
-    }
+    });
     let sqlite_err: Result<(), String> = repo.try_with_mut_snapshot(|s| {
         s.next_entity_id += 999;
         s.zarzakh_gate_locks.insert(42, (1, 999));

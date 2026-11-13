@@ -107,7 +107,6 @@ pub fn sync_char_contacts_to_db(
         snap.char_contacts.insert(char_id, contacts_for_db);
         Ok::<_, eve_proto::BridgeRpcError>(())
     }) {
-        eve_db::record_last_wal_error(&e.message);
         hydrate_social_state_from_db(ctx);
         return Err(e);
     }
@@ -164,7 +163,6 @@ pub fn sync_contact_notifications_to_db(
         snap.char_contact_notifications.insert(target_char_id, records);
         Ok::<_, eve_proto::BridgeRpcError>(())
     }) {
-        eve_db::record_last_wal_error(&e.message);
         hydrate_social_state_from_db(ctx);
         return Err(e);
     }

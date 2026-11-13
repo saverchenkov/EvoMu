@@ -593,9 +593,6 @@ pub fn handle_contacts(
             ) {
                 return Some(Err(e));
             }
-            if let Some(err_msg) = crate::router::dispatch::take_dispatch_wal_error() {
-                return Some(Err(BridgeRpcError { code: "DatabasePersistenceError".into(), message: err_msg, client_error: None }));
-            }
 
             // AddressBookSvc.OnPersonalContactsAdded(contacts, relationshipID, watchlist, labelMask):
             // each contact is read as `contact.contactID` / `contact.isOnline`. (`OnContactChange` is
@@ -704,9 +701,6 @@ pub fn handle_contacts(
                         return Some(Err(e));
                     }
                 }
-            }
-            if let Some(err_msg) = crate::router::dispatch::take_dispatch_wal_error() {
-                return Some(Err(BridgeRpcError { code: "DatabasePersistenceError".into(), message: err_msg, client_error: None }));
             }
             let id_reps: Vec<PyRep> = contact_ids.iter().map(|&id| PyRep::Integer(id)).collect();
             // AddressBookSvc.OnPersonalContactsUpdated(contactIDs, standing, inWatchlist): `None` keeps
@@ -899,10 +893,7 @@ pub fn handle_contacts(
             });
             match res {
                 Ok(label_id) => Some(Ok(PyRep::Integer(label_id))),
-                Err(e) => {
-                    eve_db::record_last_wal_error(&e.message);
-                    Some(Err(e))
-                }
+                Err(e) => Some(Err(e)),
             }
         }
 
@@ -975,7 +966,6 @@ pub fn handle_contacts(
                 Ok(())
             });
             if let Err(e) = res {
-                eve_db::record_last_wal_error(&e.message);
                 return Some(Err(e));
             }
             Some(Ok(PyRep::keyval([
@@ -1012,10 +1002,7 @@ pub fn handle_contacts(
             });
             let removed = match res {
                 Ok(r) => r,
-                Err(e) => {
-                    eve_db::record_last_wal_error(&e.message);
-                    return Some(Err(e));
-                }
+                Err(e) => return Some(Err(e)),
             };
             if let Ok(mut cguard) = ctx.esi_state.char_contacts.write() {
                 if let Some(list) = cguard.get_mut(&char_id) {

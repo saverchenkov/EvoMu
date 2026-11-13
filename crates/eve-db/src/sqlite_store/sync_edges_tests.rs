@@ -740,115 +740,17 @@ fn replace_sqlite_and_sync_dirty_propagate_sqlite_errors_on_all_table_paths() {
 }
 
 #[test]
-fn snapshot_dirty_hints_and_tracked_hot_table_sync_branches() {
-    // 1. SnapshotDirtyHints PartialEq, clear, is_any_dirty, and mark_* helper methods
-    let mut snap = WorldRepository::create_demo_snapshot();
-    assert!(!snap.dirty_hints.tracked);
-    assert!(!snap.dirty_hints.is_any_dirty());
-
-    let mut hints_a = SnapshotDirtyHints::default();
-    let mut hints_b = SnapshotDirtyHints::default();
-    hints_a.tracked = true;
-    hints_a.asteroids_dirty = true;
-    assert_eq!(hints_a, hints_b);
-    assert!(hints_a.is_any_dirty());
-    hints_a.clear();
-    assert!(!hints_a.tracked);
-    assert!(!hints_a.is_any_dirty());
-
-    // Verify every single field in is_any_dirty() independently flips false -> true
-    let flag_setters: Vec<fn(&mut SnapshotDirtyHints)> = vec![
-        |h| { h.touched_items.insert(1); },
-        |h| { h.deleted_items.insert(1); },
-        |h| { h.touched_characters.insert(1); },
-        |h| { h.touched_skills.insert(1); },
-        |h| { h.touched_skill_queues.insert(1); },
-        |h| { h.touched_market_orders.insert(1); },
-        |h| { h.deleted_market_orders.insert(1); },
-        |h| h.asteroids_dirty = true,
-        |h| h.system_states_dirty = true,
-        |h| h.crimewatch_dirty = true,
-        |h| h.other_domains_dirty = true,
-    ];
-    for setter in flag_setters {
-        hints_b.clear();
-        assert!(!hints_b.is_any_dirty());
-        setter(&mut hints_b);
-        assert!(hints_b.is_any_dirty());
-    }
-
-    // Verify WorldStateSnapshot::mark_* mutual exclusion between touched and deleted sets
-    snap.enable_dirty_tracking();
-    assert!(snap.dirty_hints.tracked);
-    assert!(!snap.dirty_hints.is_any_dirty());
-
-    snap.mark_item_deleted(500);
-    assert!(snap.dirty_hints.deleted_items.contains(&500));
-    snap.mark_item_dirty(500);
-    assert!(!snap.dirty_hints.deleted_items.contains(&500));
-    assert!(snap.dirty_hints.touched_items.contains(&500));
-    snap.mark_item_deleted(500);
-    assert!(!snap.dirty_hints.touched_items.contains(&500));
-    assert!(snap.dirty_hints.deleted_items.contains(&500));
-
-    snap.mark_market_order_deleted(600);
-    assert!(snap.dirty_hints.deleted_market_orders.contains(&600));
-    snap.mark_market_order_dirty(600);
-    assert!(!snap.dirty_hints.deleted_market_orders.contains(&600));
-    assert!(snap.dirty_hints.touched_market_orders.contains(&600));
-    snap.mark_market_order_deleted(600);
-    assert!(!snap.dirty_hints.touched_market_orders.contains(&600));
-    assert!(snap.dirty_hints.deleted_market_orders.contains(&600));
-
-    snap.dirty_hints.clear();
-    snap.mark_crimewatch_dirty(false);
-    assert!(snap.dirty_hints.tracked);
-    assert!(snap.dirty_hints.crimewatch_dirty);
-    assert!(!snap.dirty_hints.system_states_dirty);
-    snap.mark_crimewatch_dirty(true);
-    assert!(snap.dirty_hints.system_states_dirty);
-
-    snap.dirty_hints.clear();
-    snap.mark_character_dirty(90_000_001);
-    assert!(snap.dirty_hints.tracked && snap.dirty_hints.touched_characters.contains(&90_000_001));
-    snap.dirty_hints.clear();
-    snap.mark_skills_dirty(90_000_001);
-    assert!(snap.dirty_hints.tracked && snap.dirty_hints.touched_skills.contains(&90_000_001));
-    snap.dirty_hints.clear();
-    snap.mark_skill_queue_dirty(90_000_001);
-    assert!(snap.dirty_hints.tracked && snap.dirty_hints.touched_skill_queues.contains(&90_000_001));
-    snap.dirty_hints.clear();
-    snap.mark_asteroids_dirty();
-    assert!(snap.dirty_hints.tracked && snap.dirty_hints.asteroids_dirty);
-    snap.dirty_hints.clear();
-    snap.mark_other_domains_dirty();
-    assert!(snap.dirty_hints.tracked && snap.dirty_hints.other_domains_dirty);
-    snap.dirty_hints.clear();
-
-    // 2. Tracked sync_dirty_to_sqlite & sync_part1_hot_tables (touched vs deleted vs unmarked rows)
-    let mut conn = Connection::open_in_memory().unwrap();
-    apply_migrations(&conn).unwrap();
-
-    // When fp.characters.is_empty() (unseeded TableFingerprints::default()), use_hints is false even if tracked == true
-    snap.enable_dirty_tracking();
-    {
-        let mut empty_fp = TableFingerprints::default();
-        let tx = conn.transaction().unwrap();
-        let init_delta = sync_dirty_to_sqlite(&tx, &snap, &mut empty_fp, false).unwrap();
-        tx.commit().unwrap();
-        assert!(init_delta.dirty);
-        assert!(!empty_fp.characters.is_empty());
-    }
-    snap.dirty_hints.clear();
-
+fn changeset_and_selective_cold_domain_sync_branches() {
+    let base = WorldRepository::create_demo_snapshot();
+    let mut after;
     let cid1 = 90_000_001;
     let cid2 = 90_000_002;
     let item_keep = 100_000_001;
-    let item_unmarked = 100_000_002;
     let item_del = 100_000_777;
     let ord_upd = 710_001;
-    let ord_unmarked = 710_003;
     let ord_del = 710_002;
+
+    let mut snap = base;
     snap.items.insert(
         item_del,
         InventoryItemRecord {
@@ -863,7 +765,7 @@ fn snapshot_dirty_hints_and_tracked_hot_table_sync_branches() {
             ..Default::default()
         },
     );
-    for (oid, price) in [(ord_upd, 1_000), (ord_del, 2_000), (ord_unmarked, 3_000)] {
+    for (oid, price) in [(ord_upd, 1_000), (ord_del, 2_000)] {
         snap.market_orders.insert(
             oid,
             MarketOrderRecord {
@@ -890,14 +792,6 @@ fn snapshot_dirty_hints_and_tracked_hot_table_sync_branches() {
             skill_points: 1_415.0,
         },
     );
-    snap.skills.entry(cid2).or_default().insert(
-        3300,
-        TrainedSkillRecord {
-            type_id: 3300,
-            level: 1,
-            skill_points: 250.0,
-        },
-    );
     snap.skill_queues.insert(
         cid1,
         vec![SkillQueueEntry {
@@ -909,119 +803,20 @@ fn snapshot_dirty_hints_and_tracked_hot_table_sync_branches() {
             started_at_unix: Some(1_700_000_000),
         }],
     );
-    snap.skill_queues.insert(
-        cid2,
-        vec![SkillQueueEntry {
-            type_id: 3300,
-            target_level: 2,
-            start_sp: 250.0,
-            end_sp: 1_415.0,
-            duration_seconds: 300.0,
-            started_at_unix: Some(1_700_000_000),
-        }],
-    );
-    let mut fp = replace_sqlite_from_snapshot(&mut conn, &snap).unwrap();
 
-    // Clean tracked hints with no dirty flags do not mark delta dirty; bumping wal_seq (`meta_changed == true`) marks delta dirty.
-    snap.enable_dirty_tracking();
-    snap.wallet_journal.push(WalletJournalEntry {
-        entry_id: 999_001,
-        character_id: cid1,
-        entry_type: "bounty".into(),
-        amount: IskCents(500),
-        balance_after: IskCents(1_500),
-        reason: "early_ret".into(),
-    });
-    {
-        let tx = conn.transaction().unwrap();
-        let clean_delta = sync_dirty_to_sqlite(&tx, &snap, &mut fp, true).unwrap();
-        tx.commit().unwrap();
-        assert!(!clean_delta.dirty);
-        assert!(clean_delta.appended_wallet_journal.is_empty());
-    }
-    snap.wal_seq += 1;
-    {
-        let tx = conn.transaction().unwrap();
-        let meta_delta = sync_dirty_to_sqlite(&tx, &snap, &mut fp, true).unwrap();
-        tx.commit().unwrap();
-        assert!(meta_delta.dirty);
-        assert!(meta_delta.appended_wallet_journal.is_empty());
-    }
+    let mut conn = Connection::open_in_memory().unwrap();
+    apply_migrations(&conn).unwrap();
+    let fp = replace_sqlite_from_snapshot(&mut conn, &snap).unwrap();
 
-    // Mutate BOTH a marked key AND an unmarked key in every hot table + cold tables to prove `if incremental`
-    // only syncs marked keys (killing any `if incremental -> if false` fallback mutant).
-    snap.dirty_hints.clear();
-    snap.enable_dirty_tracking();
-    snap.accounts.insert(
-        "unmarked_cold_account".into(),
-        AccountRecord {
-            user_id: 777_777,
-            username: "unmarked_cold_account".into(),
-            password_token: "pw".into(),
-            role: 0,
-            banned_until_unix: None,
-            ban_reason: None,
-        },
-    );
-    snap.jump_clones.insert(
-        cid2,
-        vec![JumpCloneRecord {
-            jump_clone_id: 501,
-            character_id: cid2,
-            location_id: 60_003_760,
-            implants: vec![],
-        }],
-    );
-    snap.active_implants.insert(cid2, vec![9901]);
-    snap.saved_fittings.insert(
-        801,
-        SavedFittingRecord {
-            fitting_id: 801,
-            owner_id: cid1,
-            name: "UnmarkedFit".into(),
-            ship_type_id: 587,
-            description: String::new(),
-            items: vec![],
-        },
-    );
-
-    snap.characters.get_mut(&cid1).unwrap().balance = IskCents(999_888_777);
-    snap.mark_character_dirty(cid1);
-    snap.characters.get_mut(&cid2).unwrap().balance = IskCents(444_333_222);
-
-    snap.skills.get_mut(&cid1).unwrap().get_mut(&3300).unwrap().skill_points = 5_000.0;
-    snap.mark_skills_dirty(cid1);
-    snap.skills.get_mut(&cid2).unwrap().get_mut(&3300).unwrap().skill_points = 900.0;
-
-    snap.skill_queues.get_mut(&cid1).unwrap()[0].start_sp = 5_000.0;
-    snap.mark_skill_queue_dirty(cid1);
-    snap.skill_queues.get_mut(&cid2).unwrap()[0].start_sp = 900.0;
-
-    snap.items.get_mut(&item_keep).unwrap().quantity += 7;
-    snap.mark_item_dirty(item_keep);
-    snap.items.get_mut(&item_unmarked).unwrap().quantity += 11;
-    snap.items.remove(&item_del);
-    snap.mark_item_deleted(item_del);
-    snap.mark_item_deleted(999_999_999);
-
-    snap.market_orders.get_mut(&ord_upd).unwrap().vol_remaining = 4;
-    snap.mark_market_order_dirty(ord_upd);
-    snap.market_orders.get_mut(&ord_unmarked).unwrap().vol_remaining = 2;
-    snap.market_orders.remove(&ord_del);
-    snap.mark_market_order_deleted(ord_del);
-    snap.mark_market_order_deleted(999_999_999);
-
-    // Also insert an unmarked crimewatch state to verify `hints.crimewatch_dirty == false` skips crimewatch sync
-    let orig_cw_fp = fp.d6_corp_crimewatch.crimewatch_fp;
-    snap.crimewatch_states.insert(
-        cid1,
-        PersistedCrimeWatchState {
-            character_id: cid1,
-            weapon_timer_until_unix: 12_345,
-            ..Default::default()
-        },
-    );
-    snap.asteroids.insert(
+    after = snap.clone();
+    after.characters.get_mut(&cid1).unwrap().balance = IskCents(999_888_777);
+    after.skills.get_mut(&cid1).unwrap().get_mut(&3300).unwrap().skill_points = 5_000.0;
+    after.skill_queues.get_mut(&cid1).unwrap()[0].start_sp = 5_000.0;
+    after.items.get_mut(&item_keep).unwrap().quantity += 7;
+    after.items.remove(&item_del);
+    after.market_orders.get_mut(&ord_upd).unwrap().vol_remaining = 4;
+    after.market_orders.remove(&ord_del);
+    after.asteroids.insert(
         88_001,
         AsteroidRecord {
             asteroid_id: 88_001,
@@ -1034,93 +829,53 @@ fn snapshot_dirty_hints_and_tracked_hot_table_sync_branches() {
             radius: 50.0,
         },
     );
-    snap.mark_asteroids_dirty();
-
-    {
-        let tx = conn.transaction().unwrap();
-        let delta = sync_dirty_to_sqlite(&tx, &snap, &mut fp, true).unwrap();
-        tx.commit().unwrap();
-        assert!(delta.dirty);
-        assert_eq!(delta.upserted_characters.len(), 1);
-        assert_eq!(delta.upserted_skills.len(), 1);
-        assert_eq!(delta.upserted_skill_queues.len(), 1);
-        assert_eq!(delta.upserted_items.len(), 1);
-        assert_eq!(delta.removed_items, vec![item_del]);
-        assert_eq!(delta.upserted_market_orders.len(), 1);
-        assert_eq!(delta.removed_market_orders, vec![ord_del]);
-        assert!(fp.asteroids.contains_key(&88_001));
-        assert_eq!(fp.d6_corp_crimewatch.crimewatch_fp, orig_cw_fp);
-        assert!(!fp.accounts.contains_key("unmarked_cold_account"));
-        assert!(!fp.jump_clones.contains_key(&cid2));
-        assert!(!fp.active_implants.contains_key(&cid2));
-        assert!(!fp.saved_fittings.contains_key(&801));
-    }
-
-    // Test `hints.crimewatch_dirty == true` while `system_states_dirty == false && asteroids_dirty == false`
-    snap.dirty_hints.clear();
-    snap.mark_crimewatch_dirty(false);
-    snap.asteroids.insert(
-        88_002,
-        AsteroidRecord {
-            asteroid_id: 88_002,
-            solar_system_id: 30_000_142,
-            belt_id: 40_000_001,
-            type_id: 1230,
-            quantity: 250,
-            initial_quantity: 250,
-            position: (4.0, 5.0, 6.0),
-            radius: 25.0,
+    after.crimewatch_states.insert(
+        cid1,
+        PersistedCrimeWatchState {
+            character_id: cid1,
+            weapon_timer_until_unix: 12_345,
+            ..Default::default()
         },
     );
-    {
-        let tx = conn.transaction().unwrap();
-        let cw_delta = sync_dirty_to_sqlite(&tx, &snap, &mut fp, true).unwrap();
-        tx.commit().unwrap();
-        assert!(cw_delta.dirty);
-        assert_ne!(fp.d6_corp_crimewatch.crimewatch_fp, orig_cw_fp);
-        assert!(!fp.asteroids.contains_key(&88_002));
-    }
 
-    // Test `hints.system_states_dirty == true` while `asteroids_dirty == false`
-    snap.dirty_hints.clear();
-    snap.mark_crimewatch_dirty(true);
-    snap.dirty_hints.crimewatch_dirty = false;
-    {
-        let tx = conn.transaction().unwrap();
-        let sys_delta = sync_dirty_to_sqlite(&tx, &snap, &mut fp, true).unwrap();
-        tx.commit().unwrap();
-        assert!(sys_delta.dirty);
-        assert!(fp.asteroids.contains_key(&88_002));
-    }
+    let changes = crate::tx_engine::ChangeSet::diff(1, &snap, &after);
+    assert_eq!(changes.characters.len(), 1);
+    assert_eq!(changes.skills.len(), 1);
+    assert_eq!(changes.skill_queues.len(), 1);
+    assert_eq!(changes.items.len(), 2);
+    assert_eq!(changes.market_orders.len(), 2);
+    assert!(changes.cold_domains.part4_world_tail);
+    assert!(changes.cold_domains.d6_corp_crimewatch);
+    assert!(changes.cold_domains.crimewatch_changed);
 
-    // Now mark_other_domains_dirty (`incremental == false`) and verify all unmarked hot/cold rows sync
-    snap.dirty_hints.clear();
-    snap.mark_other_domains_dirty();
+    let mut staged_cold = fp.clone();
     {
         let tx = conn.transaction().unwrap();
-        let delta3 = sync_dirty_to_sqlite(&tx, &snap, &mut fp, false).unwrap();
+        let mut exec = crate::tx_engine::TxSqlExecutor::new(&tx, crate::TxFaultPlan::None);
+        let (delta, hot_fp) = crate::tx_engine::apply_changeset_to_sqlite(
+            &mut exec,
+            &after,
+            &changes,
+            &fp,
+            &mut staged_cold,
+            true,
+        )
+        .unwrap();
         tx.commit().unwrap();
-        assert!(delta3.dirty);
-        assert_eq!(delta3.upserted_characters.len(), 1);
-        assert_eq!(delta3.upserted_skills.len(), 1);
-        assert_eq!(delta3.upserted_skill_queues.len(), 1);
-        assert_eq!(delta3.upserted_items.len(), 1);
-        assert_eq!(delta3.upserted_market_orders.len(), 1);
-        assert_eq!(delta3.appended_wallet_journal.len(), 1);
-        assert!(fp.accounts.contains_key("unmarked_cold_account"));
-        assert!(fp.jump_clones.contains_key(&cid2));
-        assert!(fp.active_implants.contains_key(&cid2));
-        assert!(fp.saved_fittings.contains_key(&801));
+        assert!(delta.dirty);
+        assert_eq!(delta.removed_items, vec![item_del]);
+        assert_eq!(delta.removed_market_orders, vec![ord_del]);
+        let mut next_fp = staged_cold;
+        hot_fp.apply_to(&mut next_fp);
+        assert!(next_fp.asteroids.contains_key(&88_001));
     }
 
     let (reloaded, _) = load_snapshot_from_sqlite(&conn).unwrap();
     assert_eq!(reloaded.characters[&cid1].balance, IskCents(999_888_777));
-    assert_eq!(reloaded.characters[&cid2].balance, IskCents(444_333_222));
     assert!(!reloaded.items.contains_key(&item_del));
     assert!(!reloaded.market_orders.contains_key(&ord_del));
     assert_eq!(reloaded.market_orders[&ord_upd].vol_remaining, 4);
-    assert_eq!(reloaded.market_orders[&ord_unmarked].vol_remaining, 2);
     assert!(reloaded.asteroids.contains_key(&88_001));
-    assert!(reloaded.asteroids.contains_key(&88_002));
     assert_eq!(reloaded.crimewatch_states[&cid1].weapon_timer_until_unix, 12_345);
+    let _ = cid2;
 }

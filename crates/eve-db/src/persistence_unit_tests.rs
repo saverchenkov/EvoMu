@@ -265,8 +265,8 @@ fn snapshot_wal_fault_injection_torn_tail_and_checkpoint_compaction() {
     assert!(!repo.is_ephemeral_in_memory());
     assert!(snap_path.exists());
 
-    // Fault mode 1 (partial write_all) and fault mode 2 (sync_data failure) roll back cleanly
-    repo.wal_fault_mode.store(1, Ordering::SeqCst);
+    // TxFaultPlan FailNthStatement(1) and FailAtCommit roll back cleanly
+    repo.set_fault_plan_for_test(crate::TxFaultPlan::FailNthStatement(1));
     let err1: Result<(), String> = repo.try_with_mut_snapshot(|snap| {
         snap.next_entity_id = 200_000_111;
         Ok(())
@@ -274,7 +274,7 @@ fn snapshot_wal_fault_injection_torn_tail_and_checkpoint_compaction() {
     assert!(err1.is_err());
     assert_eq!(repo.with_snapshot(|s| s.next_entity_id), 200_000_000);
 
-    repo.wal_fault_mode.store(2, Ordering::SeqCst);
+    repo.set_fault_plan_for_test(crate::TxFaultPlan::FailAtCommit);
     let err2: Result<(), String> = repo.try_with_mut_snapshot(|snap| {
         snap.next_entity_id = 200_000_222;
         Ok(())
@@ -525,16 +525,11 @@ fn run_mut_snapshot_tx_clean_tracked_fastpath_and_persist_error_fp_rollback() {
     let seq0 = repo.with_snapshot(|s| s.wal_seq);
     let ep0 = repo.state_epoch();
 
-    // 1. Clean tracked transaction (`enable_dirty_tracking` with no dirty hints or meta change)
-    // returns early without opening a SQLite transaction or bumping wal_seq / state_epoch.
-    repo.with_mut_snapshot(|snap| {
-        snap.enable_dirty_tracking();
-    });
+    // 1. Clean no-op transaction returns early without opening a SQLite transaction or bumping wal_seq / state_epoch.
+    repo.with_mut_snapshot(|_| {});
     assert_eq!(repo.with_snapshot(|s| s.wal_seq), seq0);
     assert_eq!(repo.state_epoch(), ep0);
 
-    // 1b. spawn_asteroid sets `dirty_hints.asteroids_dirty`, and the next `with_mut_snapshot` clears `dirty_hints`;
-    // `add_or_stack_item` marks both newly inserted and merged item stacks in `dirty_hints.touched_items`.
     let cw_ep0 = repo.combat_state_epoch();
     repo.spawn_asteroid(AsteroidRecord {
         asteroid_id: 77_001,
@@ -546,22 +541,19 @@ fn run_mut_snapshot_tx_clean_tracked_fastpath_and_persist_error_fp_rollback() {
         position: (0.0, 0.0, 0.0),
         radius: 10.0,
     });
-    assert!(repo.with_snapshot(|s| s.dirty_hints.asteroids_dirty));
+    assert!(repo.with_snapshot(|s| s.asteroids.contains_key(&77_001)));
     assert_eq!(repo.combat_state_epoch(), cw_ep0);
     repo.with_mut_snapshot(|_| {});
-    assert!(!repo.with_snapshot(|s| s.dirty_hints.asteroids_dirty));
 
     let created = repo
         .add_or_stack_item(cid, 60_003_760, InventoryFlag::Hangar, 38, 10)
         .unwrap();
     assert_eq!(created.quantity, 10);
-    assert!(repo.with_snapshot(|s| s.dirty_hints.touched_items.contains(&created.item_id)));
     let stacked = repo
         .add_or_stack_item(cid, 60_003_760, InventoryFlag::Hangar, 38, 5)
         .unwrap();
     assert_eq!(stacked.item_id, created.item_id);
     assert_eq!(stacked.quantity, 15);
-    assert!(repo.with_snapshot(|s| s.dirty_hints.touched_items.contains(&stacked.item_id)));
 
     repo.with_mut_snapshot(|snap| {
         snap.crimewatch_states.insert(
@@ -572,20 +564,18 @@ fn run_mut_snapshot_tx_clean_tracked_fastpath_and_persist_error_fp_rollback() {
                 ..Default::default()
             },
         );
-        snap.mark_crimewatch_dirty(false);
     });
     assert_eq!(repo.combat_state_epoch(), cw_ep0 + 1);
 
-    // 2. Persist error mid-sync after mutating fp.characters in-place reloads clean `fp` from SQLite
-    // and rolls back `snap` so subsequent mutations to the same character still persist cleanly.
-    {
-        let conn = repo.sqlite_conn.lock().unwrap();
+    // 2. Persist error mid-sync leaves `fp` and `published` untouched (`before == published`),
+    //    so subsequent mutations to the same character still persist cleanly.
+    repo.with_sqlite_conn(|conn| {
         conn.execute_batch(
             "CREATE TRIGGER fail_struct_ins BEFORE INSERT ON structures BEGIN SELECT RAISE(ABORT, 'inject_struct_abort'); END;",
         )
         .unwrap();
-    }
-    let rb0 = repo.rollback_epoch();
+    });
+    let st_ep0 = repo.state_epoch();
     let err_res: Result<(), String> = repo.try_with_mut_snapshot(|snap| {
         snap.characters.get_mut(&cid).unwrap().balance = IskCents(777_666_555);
         snap.structures.insert(
@@ -608,31 +598,24 @@ fn run_mut_snapshot_tx_clean_tracked_fastpath_and_persist_error_fp_rollback() {
             .is_err_and(|e| e.contains("inject_struct_abort")),
         "expected inject_struct_abort, got {err_res:?}"
     );
-    assert_eq!(repo.rollback_epoch(), rb0 + 1);
+    assert_eq!(repo.state_epoch(), st_ep0);
     assert_eq!(repo.with_snapshot(|s| s.characters[&cid].balance), orig_bal);
     assert!(!repo.with_snapshot(|s| s.structures.contains_key(&999_888)));
 
-    // Drop the fault trigger and apply the exact same character balance mutation (`777_666_555`).
-    // Because `*fp = clean_fp` restored `fp.characters[&cid]` to `orig_bal`'s fingerprint,
-    // `sync_dirty_to_sqlite` detects the change and commits it to SQLite.
-    {
-        let conn = repo.sqlite_conn.lock().unwrap();
+    repo.with_sqlite_conn(|conn| {
         conn.execute_batch("DROP TRIGGER fail_struct_ins;").unwrap();
-    }
-    repo.with_mut_snapshot(|snap| {
-        snap.enable_dirty_tracking();
-        snap.characters.get_mut(&cid).unwrap().balance = IskCents(777_666_555);
-        snap.mark_character_dirty(cid);
     });
-    let sql_bal: i64 = {
-        let conn = repo.sqlite_conn.lock().unwrap();
+    repo.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&cid).unwrap().balance = IskCents(777_666_555);
+    });
+    let sql_bal: i64 = repo.with_sqlite_conn(|conn| {
         conn.query_row(
             "SELECT balance_cents FROM characters WHERE character_id = ?1",
             rusqlite::params![cid],
             |r| r.get(0),
         )
         .unwrap()
-    };
+    });
     assert_eq!(sql_bal, 777_666_555);
 }
 
@@ -703,50 +686,33 @@ fn w5a_p2_0b_non_panicking_with_mut_snapshot_and_rollback_reload_fallback() {
         WorldRepository::new_empty_with_snapshot_path(Some(snap_path.clone())).expect("init json");
     let init_id = repo.with_snapshot(|s| s.next_entity_id);
     let failures_before = crate::persist_failures_total();
-    let rb_before = repo.rollback_epoch();
+    let st_before = repo.state_epoch();
 
-    // 1. with_mut_snapshot does NOT panic on WAL write failure outside dispatch_rpc;
-    //    instead it rolls back in-memory state, bumps rollback_epoch, and increments persist_failures_total (#903 / #833).
-    repo.wal_fault_mode.store(1, Ordering::SeqCst);
-    let ret = repo.with_mut_snapshot(|snap| {
-        snap.next_entity_id = 200_999_111;
-        42_u32
+    // 1. tx fault injection returns Err cleanly, restores working to `before`, leaves `state_epoch`
+    //    unchanged, and increments `persist_failures_total()`.
+    repo.set_fault_plan_for_test(crate::TxFaultPlan::FailAtCommit);
+    let err_res: Result<(), crate::TxError> = repo.tx("fault_at_commit", |wtx| {
+        wtx.snap.next_entity_id = 200_999_111;
+        Ok(())
     });
-    assert_eq!(ret, 42);
+    assert!(err_res.is_err());
     assert_eq!(
         repo.with_snapshot(|s| s.next_entity_id),
         init_id,
-        "with_mut_snapshot must roll back in-memory state when persistence fails (#903)"
+        "failed tx must keep pre-transaction published snapshot"
     );
-    assert_eq!(repo.rollback_epoch(), rb_before + 1);
+    assert_eq!(repo.state_epoch(), st_before);
     assert!(crate::persist_failures_total() > failures_before);
 
-    // 2. When incremental rollback_dirty_from_sqlite fails (e.g. a row in accounts has a corrupt column
-    //    or table is altered so rollback_dirty_from_sqlite errors), rollback_or_reload_from_sqlite falls
-    //    back to full reload from SQLite without panicking (#903 / #833).
-    {
-        let conn = repo.sqlite_conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO accounts (username, user_id, password_token, role) VALUES ('u1', 1, 'tok', 0)",
-            [],
-        )
-        .unwrap();
-        repo.sqlite_fp
-            .lock()
-            .unwrap()
-            .accounts
-            .insert("missing_in_sqlite".into(), 123_456);
-    }
-    let rb_mid = repo.rollback_epoch();
+    // 2. with_mut_snapshot panics on persistence failure (while still restoring `before`), and
+    //    try_with_mut_snapshot returns Err cleanly on user error without incrementing persist failures.
     let err_res: Result<(), String> = repo.try_with_mut_snapshot(|snap| {
         snap.next_entity_id = 200_888_777;
-        Err("abort transaction to trigger rollback fallback".into())
+        Err("abort transaction cleanly".into())
     });
     assert!(err_res.is_err());
-    assert_eq!(repo.rollback_epoch(), rb_mid + 1);
+    assert_eq!(repo.state_epoch(), st_before);
     assert_eq!(repo.with_snapshot(|s| s.next_entity_id), init_id);
-    assert!(repo.with_snapshot(|s| s.accounts.contains_key("u1")));
-    assert!(!repo.quarantine_unreadable);
     assert!(repo.quarantined_rows().expect("quarantine_rows").is_empty());
 
     drop(repo);
@@ -761,24 +727,24 @@ fn w5a_p2_0c_closure_panic_catch_unwind_rolls_back_snapshot_and_bumps_counter() 
     let orig_bal = repo.with_snapshot(|s| s.characters[&cid].balance);
     let orig_next_id = repo.with_snapshot(|s| s.next_entity_id);
     let panics_before = crate::tx_panics_total();
-    let rb_before = repo.rollback_epoch();
+    let st_before = repo.state_epoch();
 
-    // 1. Panic inside try_with_mut_snapshot is caught by run_mut_snapshot_tx, rolls back partial
-    //    in-memory mutations from SQLite, increments tx_panics_total(), and returns Err (#904 / #833).
+    // 1. Panic inside try_with_mut_snapshot is caught by WorldRepository::tx, restores `before`,
+    //    increments tx_panics_total(), and returns Err (#904 / #833).
     let res: Result<(), String> = repo.try_with_mut_snapshot(|snap| {
         snap.next_entity_id = 999_111_222;
         snap.characters.get_mut(&cid).unwrap().balance = IskCents(123);
         panic!("simulated try_with_mut_snapshot panic");
     });
     let err_msg = res.expect_err("panic in try_with_mut_snapshot must return Err");
-    assert!(err_msg.contains("Write closure panicked: simulated try_with_mut_snapshot panic"));
+    assert!(err_msg.contains("simulated try_with_mut_snapshot panic"));
     assert_eq!(crate::tx_panics_total(), panics_before + 1);
-    assert_eq!(repo.rollback_epoch(), rb_before + 1);
+    assert_eq!(repo.state_epoch(), st_before);
     assert_eq!(repo.with_snapshot(|s| s.next_entity_id), orig_next_id);
     assert_eq!(repo.with_snapshot(|s| s.characters[&cid].balance), orig_bal);
 
-    // 2. Panic inside with_mut_snapshot rolls back in-memory mutations from SQLite and releases all
-    //    locks cleanly before propagating the panic (#904 / #833).
+    // 2. Panic inside with_mut_snapshot restores `before` and releases all locks cleanly
+    //    before propagating the panic (#904 / #833).
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         repo.with_mut_snapshot(|snap| {
             snap.next_entity_id = 888_222_333;
@@ -788,14 +754,11 @@ fn w5a_p2_0c_closure_panic_catch_unwind_rolls_back_snapshot_and_bumps_counter() 
     }));
     assert!(caught.is_err());
     assert_eq!(crate::tx_panics_total(), panics_before + 2);
-    assert_eq!(repo.rollback_epoch(), rb_before + 2);
+    assert_eq!(repo.state_epoch(), st_before);
     assert_eq!(repo.with_snapshot(|s| s.next_entity_id), orig_next_id);
     assert_eq!(repo.with_snapshot(|s| s.characters[&cid].balance), orig_bal);
-    assert!(!repo.inner.is_poisoned(), "inner RwLock must not be poisoned");
-    assert!(
-        !repo.sqlite_conn.is_poisoned(),
-        "sqlite_conn Mutex must not be poisoned"
-    );
+    assert!(!repo.published.is_poisoned(), "published RwLock must not be poisoned");
+    assert!(!repo.writer.is_poisoned(), "writer Mutex must not be poisoned");
 }
 
 #[test]
@@ -889,8 +852,7 @@ fn w5a_p2_0e_fail_closed_loader_quarantine_unreadable_finite_floats_and_serde_de
 
     // 2. Inject corrupt JSON into char_lp_logs and social_store (`char_contact_labels`), then verify
     //    default `open_sqlite` fails closed naming the table and primary key (#906 / #856).
-    {
-        let conn = repo.sqlite_conn.lock().unwrap();
+    repo.with_sqlite_conn(|conn| {
         conn.execute(
             "INSERT OR REPLACE INTO char_lp_logs (character_id, logs_json) VALUES (90000088, '{corrupt')",
             [],
@@ -901,7 +863,7 @@ fn w5a_p2_0e_fail_closed_loader_quarantine_unreadable_finite_floats_and_serde_de
             [],
         )
         .unwrap();
-    }
+    });
     drop(repo);
 
     let fail_closed_err = match WorldRepository::open_sqlite(&db_path) {

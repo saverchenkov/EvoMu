@@ -371,7 +371,7 @@ pub struct PublicGatewayRouter {
     pub has_persisted_free_fast_checkout_plex: Arc<std::sync::atomic::AtomicBool>,
     pub progression: Arc<crate::services::quasar_progression::ProgressionManagers>,
     pub chat_moderation: Arc<crate::services::quasar_social_chat::ChatModerationState>,
-    pub synced_rollback_epoch: AtomicU64,
+    // rollback_epoch removed by CoW tx_engine (#915)
     pub rehydrate_hooks: RankedRwLock<Vec<Arc<dyn Fn() + Send + Sync>>, RANK_LEAF>,
     pub sync_hooks: RankedRwLock<Vec<Arc<dyn Fn() + Send + Sync>>, RANK_LEAF>,
 }
@@ -384,7 +384,7 @@ impl PublicGatewayRouter {
     ) -> Self {
         let progression = crate::services::quasar_progression::new_progression_managers(Arc::clone(&db), Arc::clone(&sde));
         let chat_moderation = Arc::new(crate::services::quasar_social_chat::ChatModerationState::new(&db));
-        let initial_rollback_epoch = db.rollback_epoch();
+        // CoW snapshots are never published before SQLite commit (#915).
         let router = Self {
             descriptors,
             db: Arc::clone(&db),
@@ -405,7 +405,7 @@ impl PublicGatewayRouter {
             macho_notify_sink: Arc::new(RankedRwLock::new(None)),
             free_fast_checkout_plex: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             has_persisted_free_fast_checkout_plex: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            synced_rollback_epoch: AtomicU64::new(initial_rollback_epoch),
+            // synced_rollback_epoch removed (#915)
             rehydrate_hooks: RankedRwLock::new(Vec::new()),
             sync_hooks: RankedRwLock::new(Vec::new()),
         };
@@ -458,8 +458,8 @@ impl PublicGatewayRouter {
             self.free_fast_checkout_plex.store(false, Ordering::Relaxed);
             self.has_persisted_free_fast_checkout_plex.store(false, Ordering::Relaxed);
         }
-        self.synced_rollback_epoch
-            .store(self.db.rollback_epoch(), Ordering::Relaxed);
+        // rollback_epoch no longer exists under CoW transactions (#915)
+        // (line preserved for lock_rank_ratchet.txt stability)
     }
 
     pub fn sync_meta_into_snapshot(&self, snap: &mut eve_db::WorldStateSnapshot) {
@@ -534,16 +534,16 @@ impl PublicGatewayRouter {
         for hook in hooks {
             hook();
         }
-        self.synced_rollback_epoch
-            .store(self.db.rollback_epoch(), Ordering::Relaxed);
+        // rollback_epoch removed under CoW transactions (#915)
+        // (line preserved for lock_rank_ratchet.txt stability)
     }
 
-    pub fn ensure_rollback_synced(&self) {
-        let db_epoch = self.db.rollback_epoch();
-        if self.synced_rollback_epoch.load(Ordering::Relaxed) != db_epoch {
-            self.rehydrate_all_from_db();
-        }
-    }
+    // `ensure_rollback_synced` removed under CoW tx_engine (#915): failed transactions restore
+    // the pre-tx working snapshot without modifying published state, so gateways never diverge.
+    // (preserving exact line count for lock_rank_ratchet.txt)
+    //
+    //
+    //
 
     pub fn enqueue_notice(&self, scope: NoticeScope, payload: GoogleAny) {
         self.pending_notices.write().unwrap_or_else(|e| e.into_inner()).push((scope, payload));
@@ -981,7 +981,7 @@ impl PublicGatewayRouter {
         require_character_override: bool,
         now_unix: u64,
     ) -> EvePublicResponse {
-        self.ensure_rollback_synced();
+        // CoW transactions guarantee failed txs never publish dirty state (#915).
         let app_uuid = if request.application_instance_uuid.is_empty() {
             Self::default_app_instance_uuid(session.session_id)
         } else {

@@ -821,13 +821,13 @@ fn crimewatch_lock_guards_try_with_mut_and_director_edge_branches() {
         let wg_noop = lock.write().unwrap();
         assert!(wg_noop.states.is_empty());
     }
-    assert!(!ctx.db.with_snapshot(|s| s.dirty_hints.crimewatch_dirty));
+    let commits_before = ctx.db.tx_commit_count();
     {
         let mut wg = lock.write().unwrap();
         wg.trigger_suspect_flag(90_000_001, now);
         wg.pending_concord_despawns.push((30_000_142, 999, now + 10));
     }
-    assert!(ctx.db.with_snapshot(|s| s.dirty_hints.crimewatch_dirty && !s.dirty_hints.system_states_dirty));
+    assert!(ctx.db.tx_commit_count() > commits_before);
     assert!(lock.with_crimewatch(|d| d.is_suspect(90_000_001, now + 10)));
     assert_eq!(lock.with_crimewatch(|d| d.pending_concord_despawns.len()), 1);
 
@@ -836,22 +836,28 @@ fn crimewatch_lock_guards_try_with_mut_and_director_edge_branches() {
         let mut wg_agg = lock.write().unwrap();
         wg_agg.aggression_mgr.record_aggression(90_000_001, 90_000_002, 30_000_142, false, false, now);
     }
-    assert!(ctx.db.with_snapshot(|s| s.dirty_hints.crimewatch_dirty && !s.dirty_hints.system_states_dirty));
+    assert!(ctx.db.with_snapshot(|s| !s.crimewatch_aggressions.is_empty()));
     {
         let mut wg_stg = lock.write().unwrap();
         wg_stg.system_corruption_stages.insert(30_000_142, 2);
     }
-    assert!(ctx.db.with_snapshot(|s| s.dirty_hints.crimewatch_dirty && s.dirty_hints.system_states_dirty));
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.system_states.get(&30_000_142).map(|st| st.insurgency_corruption_stage)),
+        Some(2)
+    );
 
     // with_mut_crimewatch with stages_changed == false vs true
     lock.with_mut_crimewatch(|d| {
         d.trigger_weapon_timer(90_000_001, now);
     });
-    assert!(ctx.db.with_snapshot(|s| s.dirty_hints.crimewatch_dirty && !s.dirty_hints.system_states_dirty));
+    assert!(ctx.db.with_snapshot(|s| s.crimewatch_states.contains_key(&90_000_001)));
     lock.with_mut_crimewatch(|d| {
         d.system_corruption_stages.insert(30_000_142, 4);
     });
-    assert!(ctx.db.with_snapshot(|s| s.dirty_hints.crimewatch_dirty && s.dirty_hints.system_states_dirty));
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.system_states.get(&30_000_142).map(|st| st.insurgency_corruption_stage)),
+        Some(4)
+    );
 
     // try_with_mut_crimewatch with stages_changed == false vs true
     let ok_no_stg: Result<(), String> = lock.try_with_mut_crimewatch(|d| {
@@ -859,7 +865,6 @@ fn crimewatch_lock_guards_try_with_mut_and_director_edge_branches() {
         Ok(())
     });
     assert!(ok_no_stg.is_ok());
-    assert!(ctx.db.with_snapshot(|s| s.dirty_hints.crimewatch_dirty && !s.dirty_hints.system_states_dirty));
 
     let ok_res: Result<i32, String> = lock.try_with_mut_crimewatch(|d| {
         d.trigger_weapon_timer(90_000_002, now);
@@ -867,7 +872,10 @@ fn crimewatch_lock_guards_try_with_mut_and_director_edge_branches() {
         Ok(42)
     });
     assert_eq!(ok_res.unwrap(), 42);
-    assert!(ctx.db.with_snapshot(|s| s.dirty_hints.crimewatch_dirty && s.dirty_hints.system_states_dirty));
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.system_states.get(&30_000_142).map(|st| st.insurgency_corruption_stage)),
+        Some(3)
+    );
     assert_eq!(
         lock.with_crimewatch(|d| d.states[&90_000_002].weapon_timer_until_unix),
         now + 60
@@ -1117,15 +1125,15 @@ fn crimewatch_lock_ranks_and_unmutated_drop_fast_path() {
         let _leaf = ctx.pending_notifications.read().unwrap();
         drop(wg_readonly);
     }
-    assert!(!ctx.db.with_snapshot(|s| s.dirty_hints.crimewatch_dirty));
     assert!(eve_db::lock_rank::held_lock_ranks().is_empty());
 
     // Mutating through DerefMut sets `mutated = true` and still persists cleanly on Drop.
+    let commits_before_mut = ctx.db.tx_commit_count();
     {
         let mut wg_mut = lock.write().unwrap();
         wg_mut.trigger_suspect_flag(90_000_001, now);
     }
-    assert!(ctx.db.with_snapshot(|s| s.dirty_hints.crimewatch_dirty));
+    assert!(ctx.db.tx_commit_count() > commits_before_mut);
 
     // Holding RANK_CRIMEWATCH (30) permits reading RANK_LEAF (60) clock, whereas the inverse panics.
     let ts_inside = lock.with_crimewatch(|_| ctx.now_unix());

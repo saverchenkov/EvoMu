@@ -44,20 +44,8 @@ pub fn sync_dirty_to_sqlite(
         fp.markets_seeded = snap.markets_seeded;
     }
 
-    if snap.dirty_hints.tracked
-        && !fp.characters.is_empty()
-        && !snap.dirty_hints.other_domains_dirty
-    {
-        sync_part1_hot_tables_incremental(tx, snap, fp, &mut delta)?;
-        if snap.dirty_hints.system_states_dirty || snap.dirty_hints.asteroids_dirty {
-            cold_changed |= sync_part4_world_tail_tables(tx, snap, fp, &mut delta)?;
-        }
-        if snap.dirty_hints.crimewatch_dirty {
-            cold_changed |= super::corp_crimewatch_store::sync_d6_corp_crimewatch(tx, snap, fp)?;
-        }
-        cold_changed |= super::service_domains_store::sync_entity_kv(tx, snap, fp)?;
-    } else {
     cold_changed |= sync_part1_hot_tables(tx, snap, fp, &mut delta)?;
+    cold_changed |= sync_part1_cold_tables(tx, snap, fp, &mut delta)?;
     cold_changed |= sync_part2_activity_tables(tx, snap, fp, &mut delta)?;
     cold_changed |= sync_part3_social_corp_tables(tx, snap, fp)?;
     cold_changed |= sync_part4_world_tail_tables(tx, snap, fp, &mut delta)?;
@@ -69,7 +57,6 @@ pub fn sync_dirty_to_sqlite(
     cold_changed |= super::corp_crimewatch_store::sync_d6_corp_crimewatch(tx, snap, fp)?;
     cold_changed |= super::industry_market_pve_store::sync_d6_batch4(tx, snap, fp)?;
     cold_changed |= super::service_domains_store::sync_service_domains(tx, snap, fp)?;
-    }
 
     let hot_changed = !delta.upserted_characters.is_empty()
         || !delta.upserted_skills.is_empty()
@@ -90,187 +77,46 @@ pub fn sync_dirty_to_sqlite(
     Ok(*delta)
 }
 
-#[inline(never)]
-fn sync_part1_hot_tables_incremental(
+/// Syncs only the cold domains flagged in `cd` without scanning unchanged cold tables or the 5 hot `CowMap`s.
+pub(crate) fn sync_selected_cold_domains_to_sqlite(
     tx: &Transaction<'_>,
     snap: &WorldStateSnapshot,
     fp: &mut TableFingerprints,
+    cd: &crate::tx_engine::ColdDomainDiff,
     delta: &mut WorldStateWalDelta,
 ) -> Result<(), String> {
-    let hints = &snap.dirty_hints;
-
-    for &k in &hints.touched_characters {
-        if let Some(v) = snap.characters.get(&k) {
-            let h = fp_character(v);
-            if fp.characters.get(&k) != Some(&h) {
-                let rec_json = to_checked_json_string(v)?;
-                tx.execute(
-                    "INSERT INTO characters (character_id, user_id, name, corporation_id, alliance_id, station_id, structure_id, solar_system_id, active_ship_id, balance_cents, activity_status, version, record_json)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-                     ON CONFLICT(character_id) DO UPDATE SET
-                         user_id = excluded.user_id,
-                         name = excluded.name,
-                         corporation_id = excluded.corporation_id,
-                         alliance_id = excluded.alliance_id,
-                         station_id = excluded.station_id,
-                         structure_id = excluded.structure_id,
-                         solar_system_id = excluded.solar_system_id,
-                         active_ship_id = excluded.active_ship_id,
-                         balance_cents = excluded.balance_cents,
-                         activity_status = excluded.activity_status,
-                         version = excluded.version,
-                         record_json = excluded.record_json",
-                    params![
-                        v.character_id,
-                        v.user_id as i64,
-                        v.name,
-                        v.corporation_id,
-                        v.alliance_id,
-                        v.station_id,
-                        v.structure_id,
-                        v.solar_system_id as i64,
-                        v.active_ship_id,
-                        v.balance.0,
-                        v.activity_status,
-                        v.version as i64,
-                        rec_json,
-                    ],
-                )
-                .map_err(|e| e.to_string())?;
-                fp.characters.insert(k, h);
-                delta.upserted_characters.push(v.clone());
-            }
-        }
+    if cd.part1_cold {
+        sync_part1_cold_tables(tx, snap, fp, delta)?;
     }
-
-    for &cid in &hints.touched_skills {
-        if let Some(sk_map) = snap.skills.get(&cid) {
-            let fp_map = fp.skills.entry(cid).or_default();
-            for (&tid, sk) in sk_map {
-                let digest = canonical_fp(sk);
-                if fp_map.get(&tid) != Some(&digest) {
-                    tx.execute(
-                        "INSERT OR REPLACE INTO skills (character_id, type_id, level, skill_points) VALUES (?1, ?2, ?3, ?4)",
-                        params![cid, tid as i64, sk.level as i64, sk.skill_points],
-                    )
-                    .map_err(|e| e.to_string())?;
-                    fp_map.insert(tid, digest);
-                    delta.upserted_skills.push((cid, sk.clone()));
-                }
-            }
-        }
+    if cd.part2_activity {
+        sync_part2_activity_tables(tx, snap, fp, delta)?;
     }
-
-    for &cid in &hints.touched_skill_queues {
-        if let Some(q) = snap.skill_queues.get(&cid) {
-            let h = fp_skill_queue(q);
-            if fp.skill_queues.get(&cid) != Some(&h) {
-                tx.execute(
-                    "DELETE FROM skill_queues WHERE character_id = ?1",
-                    params![cid],
-                )
-                .map_err(|e| e.to_string())?;
-                for (idx, entry) in q.iter().enumerate() {
-                    tx.execute(
-                        "INSERT INTO skill_queues (character_id, queue_index, type_id, target_level, start_sp, end_sp, duration_seconds, started_at_unix)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                        params![
-                            cid,
-                            idx as i64,
-                            entry.type_id as i64,
-                            entry.target_level as i64,
-                            entry.start_sp,
-                            entry.end_sp,
-                            entry.duration_seconds,
-                            entry.started_at_unix.map(|v| v as i64),
-                        ],
-                    )
-                    .map_err(|e| e.to_string())?;
-                }
-                fp.skill_queues.insert(cid, h);
-                delta.upserted_skill_queues.push((cid, q.clone()));
-            }
-        }
+    if cd.part3_social_corp {
+        sync_part3_social_corp_tables(tx, snap, fp)?;
     }
-
-    for &id in &hints.deleted_items {
-        if fp.items.remove(&id).is_some() {
-            tx.execute("DELETE FROM items WHERE item_id = ?1", params![id])
-                .map_err(|e| e.to_string())?;
-            delta.removed_items.push(id);
-        }
+    if cd.part4_world_tail {
+        sync_part4_world_tail_tables(tx, snap, fp, delta)?;
     }
-    for &id in &hints.touched_items {
-        if let Some(item) = snap.items.get(&id) {
-            let h = fp_item(item);
-            if fp.items.get(&id) != Some(&h) {
-                let rec_json = to_checked_json_string(item)?;
-                tx.execute(
-                    "INSERT OR REPLACE INTO items (item_id, type_id, owner_id, location_id, flag, quantity, singleton, version, record_json)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                    params![
-                        item.item_id,
-                        item.type_id as i64,
-                        item.owner_id,
-                        item.location_id,
-                        item.flag as i64,
-                        item.quantity as i64,
-                        i64::from(item.singleton),
-                        item.version as i64,
-                        rec_json,
-                    ],
-                )
-                .map_err(|e| e.to_string())?;
-                fp.items.insert(id, h);
-                delta.upserted_items.push(item.clone());
-            }
-        }
+    if cd.extension_tables {
+        super::sync_ext::sync_extension_tables(tx, snap, fp)?;
     }
-
-    for &oid in &hints.deleted_market_orders {
-        if let Some(prev_fp) = std::sync::Arc::make_mut(&mut fp.market_orders).remove(&oid) {
-            tx.execute(
-                "DELETE FROM market_orders WHERE order_id = ?1",
-                params![oid],
-            )
-            .map_err(|e| e.to_string())?;
-            delta.removed_market_orders.push(oid);
-            fp.market_orders_digest ^= fp_market_orders_digest_entry(oid, prev_fp);
-        }
+    if cd.ledger {
+        super::ledger_store::sync_ledger(tx, snap, fp)?;
     }
-    for &oid in &hints.touched_market_orders {
-        if let Some(ord) = snap.market_orders.get(&oid) {
-            let h = fp_market_order(ord);
-            if fp.market_orders.get(&oid) != Some(&h) {
-                let mut stmt = tx
-                    .prepare_cached(
-                        "INSERT OR REPLACE INTO market_orders (order_id, owner_id, station_id, region_id, type_id, is_bid, price_cents, vol_entered, vol_remaining, min_volume, is_npc, escrow_cents)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                    )
-                    .map_err(|e| e.to_string())?;
-                stmt.execute(params![
-                    ord.order_id,
-                    ord.owner_id,
-                    ord.station_id,
-                    ord.region_id as i64,
-                    ord.type_id as i64,
-                    i64::from(ord.is_bid),
-                    ord.price.0,
-                    ord.vol_entered as i64,
-                    ord.vol_remaining as i64,
-                    ord.min_volume as i64,
-                    i64::from(ord.is_npc),
-                    ord.escrow.0,
-                ])
-                .map_err(|e| e.to_string())?;
-                let prev_fp = std::sync::Arc::make_mut(&mut fp.market_orders).insert(oid, h);
-                if let Some(old_h) = prev_fp {
-                    fp.market_orders_digest ^= fp_market_orders_digest_entry(oid, old_h);
-                }
-                fp.market_orders_digest ^= fp_market_orders_digest_entry(oid, h);
-                delta.upserted_market_orders.push(ord.clone());
-            }
-        }
+    if cd.d6_notes_lp_seq {
+        super::notes_lp_sequence_store::sync_d6(tx, snap, fp)?;
+    }
+    if cd.d6_social {
+        super::social_store::sync_d6_social(tx, snap, fp)?;
+    }
+    if cd.d6_corp_crimewatch {
+        super::corp_crimewatch_store::sync_d6_corp_crimewatch(tx, snap, fp)?;
+    }
+    if cd.d6_batch4 {
+        super::industry_market_pve_store::sync_d6_batch4(tx, snap, fp)?;
+    }
+    if cd.service_domains {
+        super::service_domains_store::sync_service_domains(tx, snap, fp)?;
     }
     Ok(())
 }
@@ -283,39 +129,6 @@ fn sync_part1_hot_tables(
     delta: &mut WorldStateWalDelta,
 ) -> Result<bool, String> {
     let mut cold_changed = false;
-
-    // 1. accounts
-    let removed_accounts: Vec<String> = fp
-        .accounts
-        .keys()
-        .filter(|k| !snap.accounts.contains_key(*k))
-        .cloned()
-        .collect();
-    for k in removed_accounts {
-        cold_changed = true;
-        tx.execute("DELETE FROM accounts WHERE username = ?1", params![k])
-            .map_err(|e| e.to_string())?;
-        fp.accounts.remove(&k);
-    }
-    for (k, v) in &snap.accounts {
-        let h = fp_account(v);
-        if fp.accounts.get(k) != Some(&h) {
-            cold_changed = true;
-            tx.execute(
-                "INSERT OR REPLACE INTO accounts (username, user_id, password_token, role, banned_until_unix, ban_reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    v.username,
-                    v.user_id as i64,
-                    v.password_token,
-                    v.role as i64,
-                    v.banned_until_unix.map(|u| u as i64),
-                    v.ban_reason,
-                ],
-            )
-            .map_err(|e| e.to_string())?;
-            fp.accounts.insert(k.clone(), h);
-        }
-    }
 
     // 2. characters
     let removed_chars: Vec<i64> = fp
@@ -461,6 +274,140 @@ fn sync_part1_hot_tables(
         }
     }
 
+    // 7. items
+    let removed_items: Vec<i64> = fp
+        .items
+        .keys()
+        .filter(|k| !snap.items.contains_key(*k))
+        .copied()
+        .collect();
+    for id in removed_items {
+        tx.execute("DELETE FROM items WHERE item_id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        fp.items.remove(&id);
+        delta.removed_items.push(id);
+    }
+    for (&id, item) in &snap.items {
+        let h = fp_item(item);
+        if fp.items.get(&id) != Some(&h) {
+            let rec_json = to_checked_json_string(item)?;
+            tx.execute(
+                "INSERT OR REPLACE INTO items (item_id, type_id, owner_id, location_id, flag, quantity, singleton, version, record_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    item.item_id,
+                    item.type_id as i64,
+                    item.owner_id,
+                    item.location_id,
+                    item.flag as i64,
+                    item.quantity as i64,
+                    i64::from(item.singleton),
+                    item.version as i64,
+                    rec_json,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+            fp.items.insert(id, h);
+            delta.upserted_items.push(item.clone());
+        }
+    }
+
+    // 9. market_orders
+    let mkt_digest = fp_market_orders_digest(&snap.market_orders);
+    if mkt_digest != fp.market_orders_digest
+        || snap.market_orders.len() != fp.market_orders.len()
+    {
+        let fp_orders = std::sync::Arc::make_mut(&mut fp.market_orders);
+        let removed_orders: Vec<i64> = fp_orders
+            .keys()
+            .filter(|k| !snap.market_orders.contains_key(*k))
+            .copied()
+            .collect();
+        for oid in removed_orders {
+            tx.execute(
+                "DELETE FROM market_orders WHERE order_id = ?1",
+                params![oid],
+            )
+            .map_err(|e| e.to_string())?;
+            fp_orders.remove(&oid);
+            delta.removed_market_orders.push(oid);
+        }
+        for (&oid, ord) in &snap.market_orders {
+            let h = fp_market_order(ord);
+            if fp_orders.get(&oid) != Some(&h) {
+                let mut stmt = tx
+                    .prepare_cached(
+                        "INSERT OR REPLACE INTO market_orders (order_id, owner_id, station_id, region_id, type_id, is_bid, price_cents, vol_entered, vol_remaining, min_volume, is_npc, escrow_cents)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    )
+                    .map_err(|e| e.to_string())?;
+                stmt.execute(params![
+                    ord.order_id,
+                    ord.owner_id,
+                    ord.station_id,
+                    ord.region_id as i64,
+                    ord.type_id as i64,
+                    i64::from(ord.is_bid),
+                    ord.price.0,
+                    ord.vol_entered as i64,
+                    ord.vol_remaining as i64,
+                    ord.min_volume as i64,
+                    i64::from(ord.is_npc),
+                    ord.escrow.0,
+                ])
+                .map_err(|e| e.to_string())?;
+                fp_orders.insert(oid, h);
+                delta.upserted_market_orders.push(ord.clone());
+            }
+        }
+        fp.market_orders_digest = mkt_digest;
+    }
+
+    Ok(cold_changed)
+}
+
+#[inline(never)]
+fn sync_part1_cold_tables(
+    tx: &Transaction<'_>,
+    snap: &WorldStateSnapshot,
+    fp: &mut TableFingerprints,
+    delta: &mut WorldStateWalDelta,
+) -> Result<bool, String> {
+    let mut cold_changed = false;
+
+    // 1. accounts
+    let removed_accounts: Vec<String> = fp
+        .accounts
+        .keys()
+        .filter(|k| !snap.accounts.contains_key(*k))
+        .cloned()
+        .collect();
+    for k in removed_accounts {
+        cold_changed = true;
+        tx.execute("DELETE FROM accounts WHERE username = ?1", params![k])
+            .map_err(|e| e.to_string())?;
+        fp.accounts.remove(&k);
+    }
+    for (k, v) in &snap.accounts {
+        let h = fp_account(v);
+        if fp.accounts.get(k) != Some(&h) {
+            cold_changed = true;
+            tx.execute(
+                "INSERT OR REPLACE INTO accounts (username, user_id, password_token, role, banned_until_unix, ban_reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    v.username,
+                    v.user_id as i64,
+                    v.password_token,
+                    v.role as i64,
+                    v.banned_until_unix.map(|u| u as i64),
+                    v.ban_reason,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+            fp.accounts.insert(k.clone(), h);
+        }
+    }
+
     // 5. jump_clones & 6. active_implants
     let rem_jc: Vec<i64> = fp
         .jump_clones
@@ -520,44 +467,6 @@ fn sync_part1_hot_tables(
         }
     }
 
-    // 7. items
-    let removed_items: Vec<i64> = fp
-        .items
-        .keys()
-        .filter(|k| !snap.items.contains_key(*k))
-        .copied()
-        .collect();
-    for id in removed_items {
-        tx.execute("DELETE FROM items WHERE item_id = ?1", params![id])
-            .map_err(|e| e.to_string())?;
-        fp.items.remove(&id);
-        delta.removed_items.push(id);
-    }
-    for (&id, item) in &snap.items {
-        let h = fp_item(item);
-        if fp.items.get(&id) != Some(&h) {
-            let rec_json = to_checked_json_string(item)?;
-            tx.execute(
-                "INSERT OR REPLACE INTO items (item_id, type_id, owner_id, location_id, flag, quantity, singleton, version, record_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    item.item_id,
-                    item.type_id as i64,
-                    item.owner_id,
-                    item.location_id,
-                    item.flag as i64,
-                    item.quantity as i64,
-                    i64::from(item.singleton),
-                    item.version as i64,
-                    rec_json,
-                ],
-            )
-            .map_err(|e| e.to_string())?;
-            fp.items.insert(id, h);
-            delta.upserted_items.push(item.clone());
-        }
-    }
-
     // 8. saved_fittings
     let rem_fit: Vec<i64> = fp
         .saved_fittings
@@ -587,57 +496,6 @@ fn sync_part1_hot_tables(
             .map_err(|e| e.to_string())?;
             fp.saved_fittings.insert(fid, h);
         }
-    }
-
-    // 9. market_orders
-    let mkt_digest = fp_market_orders_digest(&snap.market_orders);
-    if mkt_digest != fp.market_orders_digest
-        || snap.market_orders.len() != fp.market_orders.len()
-    {
-        let fp_orders = std::sync::Arc::make_mut(&mut fp.market_orders);
-        let removed_orders: Vec<i64> = fp_orders
-            .keys()
-            .filter(|k| !snap.market_orders.contains_key(*k))
-            .copied()
-            .collect();
-        for oid in removed_orders {
-            tx.execute(
-                "DELETE FROM market_orders WHERE order_id = ?1",
-                params![oid],
-            )
-            .map_err(|e| e.to_string())?;
-            fp_orders.remove(&oid);
-            delta.removed_market_orders.push(oid);
-        }
-        for (&oid, ord) in &snap.market_orders {
-            let h = fp_market_order(ord);
-            if fp_orders.get(&oid) != Some(&h) {
-                let mut stmt = tx
-                    .prepare_cached(
-                        "INSERT OR REPLACE INTO market_orders (order_id, owner_id, station_id, region_id, type_id, is_bid, price_cents, vol_entered, vol_remaining, min_volume, is_npc, escrow_cents)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                    )
-                    .map_err(|e| e.to_string())?;
-                stmt.execute(params![
-                    ord.order_id,
-                    ord.owner_id,
-                    ord.station_id,
-                    ord.region_id as i64,
-                    ord.type_id as i64,
-                    i64::from(ord.is_bid),
-                    ord.price.0,
-                    ord.vol_entered as i64,
-                    ord.vol_remaining as i64,
-                    ord.min_volume as i64,
-                    i64::from(ord.is_npc),
-                    ord.escrow.0,
-                ])
-                .map_err(|e| e.to_string())?;
-                fp_orders.insert(oid, h);
-                delta.upserted_market_orders.push(ord.clone());
-            }
-        }
-        fp.market_orders_digest = mkt_digest;
     }
 
     // 10. wallet_journal

@@ -4,9 +4,8 @@
 
 use super::evedb_sqlite_cov_tests::build_populated_snapshot;
 use super::evedb_sqlite_load_errors_and_schema_tests::open_migrated_conn;
-use crate::sqlite_store::fingerprints::compute_fingerprints;
-use crate::sqlite_store::load::load_snapshot_from_sqlite;
-use crate::sqlite_store::rollback::rollback_dirty_from_sqlite;
+use crate::sqlite_store::compute_fingerprints;
+use crate::sqlite_store::load::{load_snapshot_from_sqlite, load_snapshot_from_sqlite_with_options};
 use crate::sqlite_store::social_store::{load_d6_social_into_snapshot, sync_d6_social};
 use crate::types::WorldStateSnapshot;
 use rusqlite::params;
@@ -250,97 +249,88 @@ fn social_store_sync_and_load_reject_every_dropped_table() {
 }
 
 #[test]
-fn rollback_rejects_missing_tables_and_corrupt_rows_when_sections_are_dirty() {
+fn load_rejects_missing_tables_and_corrupt_rows() {
     let snap = build_populated_snapshot();
-    let fp = compute_fingerprints(&snap);
 
-    // 1. Missing tables when each SQL-backed section in rollback.rs is mutated
-    let mutate_and_table: Vec<(&str, Box<dyn Fn(&mut WorldStateSnapshot)>)> = vec![
-        ("accounts", Box::new(|s| { s.accounts.values_mut().next().unwrap().role = 999; })),
-        ("characters", Box::new(|s| { s.characters.values_mut().next().unwrap().version += 1; })),
-        ("items", Box::new(|s| { s.items.values_mut().next().unwrap().quantity += 1; })),
-        ("market_orders", Box::new(|s| { s.market_orders.values_mut().next().unwrap().vol_remaining += 1; })),
-        ("wallet_journal", Box::new(|s| { s.wallet_journal.clear(); })),
-        ("mail", Box::new(|s| { s.mails.clear(); })),
-        ("skills", Box::new(|s| { s.skills.clear(); })),
-        ("skill_queues", Box::new(|s| { s.skill_queues.clear(); })),
-        ("jump_clones", Box::new(|s| { s.jump_clones.clear(); })),
-        ("active_implants", Box::new(|s| { s.active_implants.clear(); })),
-        ("saved_fittings", Box::new(|s| { s.saved_fittings.clear(); })),
-        ("contracts", Box::new(|s| { s.contracts.clear(); })),
-        ("industry_jobs", Box::new(|s| { s.industry_jobs.clear(); })),
-        ("planetary_colonies", Box::new(|s| { s.planetary_colonies.clear(); })),
-        ("missions", Box::new(|s| { s.active_missions.clear(); })),
-        ("standings", Box::new(|s| { s.standing_transactions.clear(); })),
-        ("npe_progress", Box::new(|s| { s.npe_progress.clear(); })),
-        ("bookmarks", Box::new(|s| { s.bookmarks.clear(); })),
-        ("fleets", Box::new(|s| { s.fleets.clear(); })),
-        ("corps", Box::new(|s| { s.corporations.clear(); })),
-        ("alliances", Box::new(|s| { s.alliances.clear(); })),
-        ("wars", Box::new(|s| { s.wars.clear(); })),
-        ("corp_projects", Box::new(|s| { s.corp_projects.clear(); })),
-        ("killmails", Box::new(|s| { s.killmails.clear(); })),
-        ("kill_rights", Box::new(|s| { s.kill_rights.clear(); })),
-        ("structures", Box::new(|s| { s.structures.clear(); })),
-        ("system_states", Box::new(|s| { s.system_states.clear(); })),
-        ("licensed_skins", Box::new(|s| { s.licensed_skins.clear(); })),
+    // 1. Missing tables when loading SQLite snapshot
+    let required_tables = [
+        "accounts",
+        "characters",
+        "items",
+        "market_orders",
+        "wallet_journal",
+        "mail",
+        "skills",
+        "skill_queues",
+        "jump_clones",
+        "active_implants",
+        "saved_fittings",
+        "contracts",
+        "industry_jobs",
+        "planetary_colonies",
+        "missions",
+        "standings",
+        "npe_progress",
+        "bookmarks",
+        "fleets",
+        "corps",
+        "alliances",
+        "wars",
+        "corp_projects",
+        "killmails",
+        "kill_rights",
+        "structures",
+        "system_states",
+        "licensed_skins",
     ];
 
-    for (tbl, mutator) in &mutate_and_table {
+    for tbl in &required_tables {
         let mut conn = open_migrated_conn();
         crate::sqlite_store::sync::replace_sqlite_from_snapshot(&mut conn, &snap).unwrap();
         conn.execute(&format!("DROP TABLE {tbl}"), []).unwrap();
-        let mut dirty = snap.clone();
-        mutator(&mut dirty);
         assert!(
-            rollback_dirty_from_sqlite(&conn, &mut dirty, &fp).is_err(),
-            "expected rollback Err when dirty section's table {tbl} is dropped"
+            load_snapshot_from_sqlite(&conn).is_err(),
+            "expected load Err when table {tbl} is dropped"
         );
     }
 
-    // 2. Corrupt JSON on characters / items / cold JSON tables during rollback
-    let find_idx = |tbl: &str| mutate_and_table.iter().position(|(t, _)| *t == tbl).unwrap();
-    let corrupt_rollback_sql = [
-        ("UPDATE characters SET record_json = '{bad'", "characters"),
-        ("UPDATE items SET record_json = '{bad'", "items"),
-        ("UPDATE jump_clones SET clones_json = '{bad'", "jump_clones"),
-        ("UPDATE active_implants SET implants_json = '{bad'", "active_implants"),
-        ("UPDATE saved_fittings SET record_json = '{bad'", "saved_fittings"),
-        ("UPDATE contracts SET record_json = '{bad'", "contracts"),
-        ("UPDATE planetary_colonies SET record_json = '{bad'", "planetary_colonies"),
-        ("UPDATE missions SET record_json = '{bad'", "missions"),
-        ("UPDATE standings SET tx_json = '{bad'", "standings"),
-        ("UPDATE npe_progress SET record_json = '{bad'", "npe_progress"),
-        ("UPDATE fleets SET record_json = '{bad'", "fleets"),
-        ("UPDATE corps SET record_json = '{bad'", "corps"),
-        ("UPDATE alliances SET record_json = '{bad'", "alliances"),
-        ("UPDATE structures SET record_json = '{bad'", "structures"),
-        ("UPDATE system_states SET record_json = '{bad'", "system_states"),
-        ("UPDATE licensed_skins SET skins_json = '{bad'", "licensed_skins"),
+    // 2. Corrupt JSON on characters / items / cold JSON tables during load
+    let corrupt_load_sql = [
+        "UPDATE characters SET record_json = '{bad'",
+        "UPDATE items SET record_json = '{bad'",
+        "UPDATE jump_clones SET clones_json = '{bad'",
+        "UPDATE active_implants SET implants_json = '{bad'",
+        "UPDATE saved_fittings SET record_json = '{bad'",
+        "UPDATE contracts SET record_json = '{bad'",
+        "UPDATE planetary_colonies SET record_json = '{bad'",
+        "UPDATE missions SET record_json = '{bad'",
+        "UPDATE standings SET tx_json = '{bad'",
+        "UPDATE npe_progress SET record_json = '{bad'",
+        "UPDATE fleets SET record_json = '{bad'",
+        "UPDATE corps SET record_json = '{bad'",
+        "UPDATE alliances SET record_json = '{bad'",
+        "UPDATE structures SET record_json = '{bad'",
+        "UPDATE system_states SET record_json = '{bad'",
+        "UPDATE licensed_skins SET skins_json = '{bad'",
     ];
-    for (sql, tbl) in corrupt_rollback_sql {
+    for sql in corrupt_load_sql {
         let mut conn = open_migrated_conn();
         crate::sqlite_store::sync::replace_sqlite_from_snapshot(&mut conn, &snap).unwrap();
         conn.execute(sql, []).unwrap();
-        let mut dirty = snap.clone();
-        mutate_and_table[find_idx(tbl)].1(&mut dirty);
         assert!(
-            rollback_dirty_from_sqlite(&conn, &mut dirty, &fp).is_err(),
-            "expected rollback Err for `{sql}`"
+            load_snapshot_from_sqlite(&conn).is_err(),
+            "expected load Err for `{sql}`"
         );
     }
 
-    // 3. Corrupt optional extension tables during rollback (best-effort skips corrupt rows)
+    // 3. Corrupt optional extension tables during load (quarantine mode skips corrupt rows)
     let mut conn = open_migrated_conn();
     crate::sqlite_store::sync::replace_sqlite_from_snapshot(&mut conn, &snap).unwrap();
-    let mut dirty = snap.clone();
-    dirty.asteroids.clear();
-    dirty.item_custom_names.clear();
     conn.execute("UPDATE asteroids SET solar_system_id = 'bad'", [])
         .unwrap();
     conn.execute("UPDATE item_custom_names SET custom_name = X'FF'", [])
         .unwrap();
-    assert!(rollback_dirty_from_sqlite(&conn, &mut dirty, &fp).is_ok());
+    assert!(load_snapshot_from_sqlite_with_options(&conn, true).is_ok());
 
     let _ = params![1i64];
 }

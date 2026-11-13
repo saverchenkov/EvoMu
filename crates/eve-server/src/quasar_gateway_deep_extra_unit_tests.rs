@@ -626,7 +626,7 @@ fn test_quasar_gateway_unsubscribe_user_and_eviction_clean_both_maps() {
 }
 
 #[test]
-fn gateway_persistence_hooks_rollback_epoch_hijack_and_subscriber_boundaries() {
+fn gateway_persistence_hooks_cow_abort_hijack_and_subscriber_boundaries() {
     struct TempDirGuard(std::path::PathBuf);
     impl Drop for TempDirGuard {
         fn drop(&mut self) {
@@ -715,31 +715,26 @@ fn gateway_persistence_hooks_rollback_epoch_hijack_and_subscriber_boundaries() {
     router.hydrate_meta_from_db();
     assert!(!router.is_server_hijack_mode_enabled());
 
-    // 2. ensure_rollback_synced: no-op when synced epoch == db epoch; rehydrates when db rollback_epoch bumps
+    // 2. CoW abort keeps published snapshot clean and leaves commit count untouched; rehydrate_all_from_db restores DB
     router.set_server_hijack_mode(false, None, None);
     *router.server_hijack_state.write().unwrap() = crate::quasar_gateway::QuasarHijackState {
         enabled: true,
         error_code: Some(502),
         latency_sec: None,
     };
-    // Epoch still matches -> must NOT wipe uncommitted in-memory state
-    router.ensure_rollback_synced();
-    assert!(
-        router.is_server_hijack_mode_enabled(),
-        "ensure_rollback_synced must only run when rollback_epoch differs"
-    );
-    // Abort a snapshot transaction to trigger rollback_dirty_from_sqlite & bump rollback_epoch
-    let rb0 = db.rollback_epoch();
+    let commits_before = db.tx_commit_count();
     let abort_res: Result<(), String> = db.try_with_mut_snapshot(|snap| {
         snap.service_state_blobs.insert("rb_probe".into(), "{}".into());
         Err("simulated rollback".into())
     });
     assert!(abort_res.is_err());
-    assert!(db.rollback_epoch() > rb0);
-    router.ensure_rollback_synced();
+    assert_eq!(db.tx_commit_count(), commits_before);
+    assert!(!db.with_snapshot(|s| s.service_state_blobs.contains_key("rb_probe")));
+    assert!(router.is_server_hijack_mode_enabled());
+    router.rehydrate_all_from_db();
     assert!(
         !router.is_server_hijack_mode_enabled(),
-        "ensure_rollback_synced must rehydrate when db.rollback_epoch advanced"
+        "rehydrate_all_from_db must reload persisted hijack state from DB"
     );
 
     // 3. handle_public_request OK path & publish_notice delivered counts (0 vs 2) & live Receiver channel

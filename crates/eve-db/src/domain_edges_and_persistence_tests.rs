@@ -294,7 +294,7 @@ fn wal_recovery_fault_modes_and_domain_serializers() {
         position: (1.0, 2.0, 3.0),
         radius: 100.0,
     });
-    repo.wal_fault_mode.store(1, std::sync::atomic::Ordering::SeqCst);
+    repo.set_fault_plan_for_test(crate::TxFaultPlan::FailNthStatement(1));
     assert!(repo
         .try_with_mut_snapshot(|snap| {
             snap.next_entity_id += 10;
@@ -302,7 +302,7 @@ fn wal_recovery_fault_modes_and_domain_serializers() {
         })
         .is_err());
 
-    repo.wal_fault_mode.store(2, std::sync::atomic::Ordering::SeqCst);
+    repo.set_fault_plan_for_test(crate::TxFaultPlan::FailAtCommit);
     assert!(repo
         .try_with_mut_snapshot(|snap| {
             snap.next_entity_id += 10;

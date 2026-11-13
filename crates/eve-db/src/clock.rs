@@ -228,8 +228,8 @@ impl crate::WorldRepository {
     /// Reloads the persisted [`crate::WorldStateSnapshot`] directly from the attached SQLite
     /// connection without mutating in-memory state (`P2-0g`, `#908`).
     pub fn reload_snapshot_from_sqlite(&self) -> Result<crate::WorldStateSnapshot, String> {
-        let guard = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
-        let (snap, _fp) = crate::sqlite_store::load_snapshot_from_sqlite(&guard)?;
+        let writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        let (snap, _fp) = crate::sqlite_store::load_snapshot_from_sqlite(&writer.conn)?;
         Ok(snap)
     }
 
@@ -240,8 +240,10 @@ impl crate::WorldRepository {
     where
         F: FnOnce(&mut crate::WorldStateSnapshot),
     {
-        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
-        f(std::sync::Arc::make_mut(&mut *guard));
+        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut writer.working);
+        *self.published.write().unwrap_or_else(|e| e.into_inner()) =
+            std::sync::Arc::new(writer.working.clone());
     }
 }
 

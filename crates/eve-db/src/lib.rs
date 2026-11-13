@@ -24,6 +24,7 @@ pub mod seed;
 pub mod service_domains;
 pub mod snapshot_ext;
 pub mod sqlite_store;
+pub mod tx_engine;
 pub mod types;
 
 pub use service_domains::*;
@@ -63,9 +64,11 @@ pub use fw_seed::DEFAULT_FW_WARZONE_SYSTEMS;
 pub use gateway_tokens::QuasarVerifiedToken;
 pub use inventory::{ConsumeExactOptions, TransferItemSpec};
 pub use ledger::{JournalEntryInput, JournalMeta};
-pub use persistence::{
-    persist_failures_total, record_last_wal_error, set_wal_error_hook, set_wal_poison_check_hook,
-    tx_panics_total, WorldRepository,
+pub use persistence::{persist_failures_total, tx_panics_total, WorldRepository};
+pub use tx_engine::{
+    ChangeSet, ColdDomainDiff, Effects, EntityIdAllocator, FromTxError, PostCommitListener,
+    RowChange, TxError, TxFaultPlan, TxNotificationEffect, TxNotificationTarget, WorldTx,
+    DEFAULT_MAX_ROW_JSON_BYTES, ENTITY_ID_BLOCK_SIZE,
 };
 pub use sqlite_store::{
     clear_quarantine_unreadable_override, default_quarantine_unreadable, list_quarantined_rows,

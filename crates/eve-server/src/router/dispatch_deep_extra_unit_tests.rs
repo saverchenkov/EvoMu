@@ -6,10 +6,7 @@
 
 #![forbid(unsafe_code)]
 
-use super::dispatch::{
-    current_dispatch_wal_error, record_dispatch_wal_error, take_dispatch_wal_error,
-    tick_sov_prospecting_deposit_respawn,
-};
+use super::dispatch::tick_sov_prospecting_deposit_respawn;
 use super::ServerContext;
 use crate::services::mining_sites::{seed_system_mining_sites_from_sde, SOV_PROSPECTING_DEPOSITS};
 use eve_db::{
@@ -434,12 +431,7 @@ async fn wal_error_rollback_and_sov_prospecting_deposit_respawn_lifecycle() {
     let now = 1_800_000_000u64;
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now)));
 
-    // 1) Task-local WAL error recording outside scope returns false / None
-    assert!(!record_dispatch_wal_error("outside_scope"));
-    assert_eq!(current_dispatch_wal_error(), None);
-    assert_eq!(take_dispatch_wal_error(), None);
-
-    // 2) Sovereignty Hub prospecting deposit depletion -> cleared timer -> respawn tick
+    // Sovereignty Hub prospecting deposit depletion -> cleared timer -> respawn tick
     let sys_id = 30_004_759u32;
     let hub_id = 1_000_000_888_001i64;
     let upgrade_def = &SOV_PROSPECTING_DEPOSITS[0];
@@ -1024,7 +1016,6 @@ async fn dispatch_box_fut_station_peer_notify_seq_filter_market_cache_and_wal_pr
     ));
 
     // 4. WAL failure drops post-pre_seq notifications and retains <= pre_seq notifications (L213)
-    super::dispatch::ensure_wal_error_hook_installed();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
