@@ -824,18 +824,6 @@ impl BridgeRpcError {
     }
 }
 
-impl From<ClientError> for BridgeRpcError {
-    fn from(err: ClientError) -> Self {
-        Self::from_client_error(err)
-    }
-}
-
-impl From<UserErrorKey> for BridgeRpcError {
-    fn from(key: UserErrorKey) -> Self {
-        Self::from_user_key(key)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
