@@ -122,11 +122,7 @@ impl<'s, 'c> ClientWireTransport for SessionBorrowWireTransport<'s, 'c> {
         kwargs: &'a HashMap<String, PyRep>,
     ) -> Pin<Box<dyn Future<Output = ClientWireExchange> + Send + 'a>> {
         Box::pin(async move {
-            let saved_session_notifs = if self.preserve_char_notifications {
-                std::mem::take(&mut self.session.notifications)
-            } else {
-                Vec::new()
-            };
+            let saved_session_notifs = std::mem::take(&mut self.session.notifications);
             let saved_char_notifs = self
                 .session
                 .character_id
@@ -143,11 +139,11 @@ impl<'s, 'c> ClientWireTransport for SessionBorrowWireTransport<'s, 'c> {
                 kwargs,
             )
             .await;
+            let mut restored_session = saved_session_notifs;
             if self.preserve_char_notifications {
-                let mut restored_session = saved_session_notifs;
                 restored_session.extend(out.notifications.iter().cloned());
-                self.session.notifications = restored_session;
             }
+            self.session.notifications = restored_session;
             let mut restored_char = saved_char_notifs;
             if self.preserve_char_notifications {
                 restored_char.extend(out.drained_char_notifications.iter().cloned());
