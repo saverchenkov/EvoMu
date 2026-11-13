@@ -1618,29 +1618,26 @@ fn emit_structure_state_transition_notifs(
     let mut notified_corps = std::collections::HashSet::new();
     for (sys_id, structure_id, corp_id, new_state) in transitions {
         if notified_corps.insert(corp_id) {
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Corporation(corp_id),
-                "OnCorporationStructuresUpdated",
-                "corpid",
-                vec![],
+                crate::router::notify_registry::OnCorporationStructuresUpdated {},
             );
         }
-        let state_args = vec![
-            eve_proto::PyRep::Integer(i64::from(sys_id)),
-            eve_proto::PyRep::Integer(structure_id),
-            eve_proto::PyRep::String(new_state),
-        ];
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::SolarSystem(sys_id),
-            "OnStructureStateChanged",
-            "solarsystemid",
-            state_args.clone(),
+            crate::router::notify_registry::OnStructureStateChanged {
+                solar_system_id: i64::from(sys_id),
+                structure_id,
+                state: new_state.clone(),
+            },
         );
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::SolarSystem(sys_id),
-            "OnCurrentStructureStateChanged",
-            "solarsystemid",
-            state_args,
+            crate::router::notify_registry::OnCurrentStructureStateChanged {
+                solar_system_id: i64::from(sys_id),
+                structure_id,
+                state: new_state,
+            },
         );
     }
 }
