@@ -484,7 +484,7 @@ async fn station_dock_at_warp_destination_succeeds_while_mid_warp_still_rejects(
         .unwrap_or(st_radius);
     let origin = st_pos + DVec3::new(1_000_000_000.0, 0.0, 0.0);
     let landing = st_pos + DVec3::new(eff_radius + 2_300.0, 0.0, 0.0);
-    // 1. Decelerating with > 1.0s remaining (5,000m from landing at 15.0 AU/s) -> ShipInWarp even with non-empty session.address
+    // 1. Decelerating with > 4.0s remaining (1,000,000m from landing at 15.0 AU/s) -> ShipInWarp even with non-empty session.address
     let mut warp_mode = MovementMode::new_warp(origin, landing, 15.0);
     if let MovementMode::Warp { ref mut phase, .. } = warp_mode {
         *phase = eve_destiny::WarpPhase::Decelerating;
@@ -494,8 +494,8 @@ async fn station_dock_at_warp_destination_succeeds_while_mid_warp_still_rejects(
             eve_destiny::Ball {
                 id: ship_id,
                 type_id: 587,
-                position: landing + DVec3::new(5_000.0, 0.0, 0.0),
-                velocity: DVec3::new(-25_000.0, 0.0, 0.0),
+                position: landing + DVec3::new(1_000_000.0, 0.0, 0.0),
+                velocity: DVec3::new(-2_000_000.0, 0.0, 0.0),
                 max_velocity: 350.0,
                 inertia: 2.0,
                 mass: 1_000_000.0,
@@ -523,12 +523,21 @@ async fn station_dock_at_warp_destination_succeeds_while_mid_warp_still_rejects(
     assert_eq!(sess.station_id, None);
     assert!(ctx.active_warps.lock().unwrap().contains_key(&ship_id));
 
-    // 2. Decelerating with <= 1.0s remaining (300m from landing at capped k_d = 2.0, outside 2,500m perimeter) -> succeeds and terminates warp
-    assert!(sys_h.set_ball_position(ship_id, landing + DVec3::new(300.0, 0.0, 0.0)).await);
+    // 2. Decelerating with ~2.8s remaining at 5.0 AU/s (#1001 client/server decel lead, outside 2,500m perimeter) -> succeeds and terminates warp
+    let mut lead_warp = MovementMode::new_warp(origin, landing, 5.0);
+    if let MovementMode::Warp { ref mut phase, .. } = lead_warp {
+        *phase = eve_destiny::WarpPhase::Decelerating;
+    }
+    {
+        let mut bp = sys_h.ballpark.write().unwrap();
+        let ball = bp.balls.get_mut(&ship_id).expect("ship ball");
+        ball.position = landing + DVec3::new(6_069.0, 0.0, 0.0);
+        ball.mode = lead_warp;
+    }
     let dock_res = handle(&ctx, &mut sess, "stationSvc", "Dock", &[PyRep::Integer(jita_station)], &kw)
         .await
         .unwrap()
-        .expect("stationSvc.Dock should succeed within <= 1.0s warp deceleration to station");
+        .expect("stationSvc.Dock should succeed within <= 4.0s warp deceleration to station (#1001)");
     assert_eq!(dock_res.dict_get("locationID"), Some(&PyRep::Integer(jita_station)));
     assert_eq!(sess.station_id, Some(jita_station));
     assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));

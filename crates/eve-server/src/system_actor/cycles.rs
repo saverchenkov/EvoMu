@@ -1614,6 +1614,7 @@ impl SystemHandle {
                 bp.sim_unix_secs = now_unix;
             }
         }
+        let pre_tick_caps = snapshot_player_ship_capacitors(&bp, db_opt.as_ref());
         let events = bp.step(dt);
         super::persist_landed_warps_in_db(&bp, &events, db_opt, ball_space_entry_epochs);
         flush_target_lost_notifications(
@@ -1672,6 +1673,7 @@ impl SystemHandle {
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
             sde_opt, db_opt, ball_space_entry_epochs, mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions, dt, deact_hook_guard.as_ref(),
         );
+        record_player_ship_capacitor_deltas(&bp, &pre_tick_caps, pending_cycle_actions);
         flush_pending_cycle_damage_notifications(
             db_opt.as_ref(),
             pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>),
@@ -1777,6 +1779,58 @@ impl SystemHandle {
         sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
         let final_pos = bp.balls.get(&ship_id).map(|b| b.position).unwrap_or(dest);
         (final_pos, arrived)
+    }
+}
+
+pub(super) fn snapshot_player_ship_capacitors(
+    ballpark: &Ballpark,
+    db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
+) -> HashMap<BallId, (CharacterId, f64)> {
+    let mut out = HashMap::new();
+    for (&bid, cs) in &ballpark.combat_states {
+        if ballpark.is_static_ball(bid) || !cs.capacitor.is_finite() {
+            continue;
+        }
+        if ballpark
+            .ball_slim_meta
+            .get(&bid)
+            .is_some_and(|m| m.category_id == 11 || m.category_id == 22)
+        {
+            continue;
+        }
+        if let Some(cid) = resolve_ball_pilot_char_id(ballpark, db_opt, bid) {
+            out.insert(bid, (cid, cs.capacitor));
+        }
+    }
+    out
+}
+
+pub(super) fn record_player_ship_capacitor_deltas(
+    ballpark: &Ballpark,
+    pre_tick_caps: &HashMap<BallId, (CharacterId, f64)>,
+    pending_cycle_actions: &mut Vec<super::PendingCycleAction>,
+) {
+    for (&bid, &(char_id, old_cap)) in pre_tick_caps {
+        let Some(cs) = ballpark.combat_states.get(&bid) else {
+            continue;
+        };
+        if !cs.capacitor.is_finite() || !cs.max_capacitor.is_finite() {
+            continue;
+        }
+        let delta = (cs.capacitor - old_cap).abs();
+        let hit_empty = old_cap > 1e-6 && cs.capacitor <= 1e-6;
+        let hit_full =
+            cs.max_capacitor > 0.0 && old_cap < cs.max_capacitor - 1e-6 && cs.capacitor >= cs.max_capacitor - 1e-6;
+        if delta >= 0.25 || hit_empty || hit_full {
+            pending_cycle_actions.push(super::PendingCycleAction::ShipCapacitorChanged {
+                char_id,
+                ship_id: bid,
+                new_cap: cs.capacitor,
+                max_cap: cs.max_capacitor,
+                old_cap,
+                notified: false,
+            });
+        }
     }
 }
 
@@ -1964,6 +2018,43 @@ pub(crate) fn flush_pending_cycle_damage_notifications(
         }
     };
     for action in pending_cycle_actions.iter_mut() {
+        if let super::PendingCycleAction::ShipCapacitorChanged {
+            char_id,
+            ship_id,
+            new_cap,
+            max_cap,
+            old_cap,
+            notified,
+        } = action
+        {
+            if *notified || *char_id <= 0 || *ship_id <= 0 || !new_cap.is_finite() || !max_cap.is_finite() {
+                continue;
+            }
+            *notified = true;
+            enqueue_notif(
+                *char_id,
+                "OnCapacitorChange",
+                vec![
+                    eve_proto::PyRep::Integer(*ship_id),
+                    eve_proto::PyRep::Real(*new_cap),
+                    eve_proto::PyRep::Real(*max_cap),
+                ],
+            );
+            enqueue_notif(
+                *char_id,
+                "OnModuleAttributeChanges",
+                vec![eve_proto::PyRep::List(vec![
+                    crate::router::ServerContext::build_ship_capacitor_attr_change_rep(
+                        *char_id,
+                        *ship_id,
+                        now,
+                        *new_cap,
+                        if old_cap.is_finite() { *old_cap } else { *new_cap },
+                    ),
+                ])],
+            );
+            continue;
+        }
         if let super::PendingCycleAction::CycleWeaponDamage {
             attacker_char_id,
             attacker_ship_id,

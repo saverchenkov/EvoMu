@@ -690,6 +690,8 @@ async fn gh998_gh999_gh1000_bookmarks_dungeon_owner_and_courier_item_notificatio
     );
     assert_eq!(bms[0].dict_get("locationID"), Some(&PyRep::Integer(sys_id as i64)));
     assert_eq!(bms[0].dict_get("locationNumber"), Some(&PyRep::Integer(0)));
+    assert_eq!(bms[0].dict_get("agentID"), Some(&PyRep::Integer(ag.agent_id)));
+    assert_eq!(bms[0].dict_get("locationType"), Some(&PyRep::String("dungeon".into())));
 
     // #999: GetMissionObjectiveInfo dungeons[].ownerID is an NPC faction or corp ID, never ag.agent_id
     let obj_info = call_agent_mgr(

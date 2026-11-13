@@ -788,3 +788,123 @@ async fn in_space_eject_and_ship_to_ship_board_lifecycle_and_guards() {
         eve_destiny::DestinyEvent::SetBallInteractive { ball_id, is_interactive: true } if *ball_id == ship_b
     )));
 }
+
+#[tokio::test]
+async fn ship_board_uses_surface_distance_for_large_titan_hull() {
+    let mut ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let sde_mut = Arc::make_mut(&mut ctx.sde);
+    let titan_tid = 11_567_u32;
+    let mut titan_t = sde_mut.types.get(&587).expect("seed type").clone();
+    titan_t.type_id = titan_tid;
+    titan_t.group_id = 30;
+    titan_t.category_id = 6;
+    titan_t.radius = 6_800.0;
+    titan_t.mass = 2_400_000_000.0;
+    titan_t.name = "Avatar".into();
+    titan_t.default_attributes.insert(4, 2_400_000_000.0);
+    sde_mut.types.insert(titan_tid, titan_t);
+
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let cap_id = 96_600_100_i64;
+    let titan_id = 96_600_101_i64;
+    let st_pos = DVec3::new(100_000.0, 0.0, 0.0);
+
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = cap_id;
+        }
+        s.items.insert(
+            cap_id,
+            InventoryItemRecord {
+                item_id: cap_id,
+                type_id: 670,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        s.items.insert(
+            titan_id,
+            InventoryItemRecord {
+                item_id: titan_id,
+                type_id: titan_tid,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.try_spawn_ball_with_combat(
+        eve_destiny::Ball {
+            id: cap_id,
+            type_id: 670,
+            position: st_pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 335.0,
+            inertia: 0.25,
+            mass: 16_000.0,
+            radius: 15.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        },
+        eve_destiny::CombatState::default(),
+    );
+    sys.try_spawn_ball_with_combat(
+        eve_destiny::Ball {
+            id: titan_id,
+            type_id: titan_tid,
+            position: st_pos + DVec3::new(9_350.0, 0.0, 0.0), // surface dist = 9350 - 15 - 6800 = 2535 m > 2500 m
+            velocity: DVec3::ZERO,
+            max_velocity: 60.0,
+            inertia: 0.5,
+            mass: 2_400_000_000.0,
+            radius: 6_800.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        },
+        eve_destiny::CombatState::default(),
+    );
+
+    let mut sess = SessionState::new(9_830);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(cap_id);
+    let kw = HashMap::new();
+
+    // Surface distance 2535 m (> 2500 m) still rejects with surface distance reported.
+    let too_far = handle_ships_mastery_and_fitting_ext(&ctx, &mut sess, None, "ship", "Board", &[PyRep::Integer(titan_id)], &kw)
+        .await
+        .unwrap()
+        .expect_err("surface distance 2535 m must be out of boarding range");
+    assert_eq!(too_far.code, "ShipOutOfBoardingRange");
+    assert!(too_far.message.contains("2535.0"), "msg={}", too_far.message);
+
+    // Move Titan so center-to-center is 7,000 m (> 2500 m) but surface distance is 185 m (<= 2500 m).
+    sys.try_set_ball_position(titan_id, st_pos + DVec3::new(7_000.0, 0.0, 0.0));
+    let boarded = handle_ships_mastery_and_fitting_ext(&ctx, &mut sess, None, "ship", "Board", &[PyRep::Integer(titan_id)], &kw)
+        .await
+        .unwrap()
+        .expect("boarding Titan at 185 m surface distance must succeed (#1004)");
+    assert_eq!(sess.ship_id, Some(titan_id));
+    assert!(
+        matches!(boarded, PyRep::Tuple(ref t) if t.len() == 4),
+        "expected 4-tuple ship_state from ship.Board, got {boarded:?}"
+    );
+}

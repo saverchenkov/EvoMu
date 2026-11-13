@@ -369,15 +369,25 @@ pub async fn handle_with_bound(
                             })
                             .collect();
                         matching_bms.sort_by_key(|b| b.bookmark_id);
+                        let bm_loc_type = if matches!(
+                            bm_hint,
+                            "UI/Agents/MissionTypes/Courier" | "UI/Agents/MissionTypes/Trade"
+                        ) {
+                            "objective.destination"
+                        } else {
+                            "dungeon"
+                        };
                         let bms: Vec<PyRep> = matching_bms
                             .into_iter()
                             .enumerate()
                             .map(|(idx, b)| {
                                 PyRep::keyval([
                                     ("bookmarkID", PyRep::Integer(b.bookmark_id)),
+                                    ("agentID", PyRep::Integer(m.agent_id)),
                                     ("solarSystemID", PyRep::Integer(b.solar_system_id as i64)),
                                     ("locationID", PyRep::Integer(b.solar_system_id as i64)),
                                     ("locationNumber", PyRep::Integer(idx as i64)),
+                                    ("locationType", PyRep::String(bm_loc_type.into())),
                                     ("hint", PyRep::String(bm_hint.into())),
                                     ("label", PyRep::String(b.label.clone())),
                                     ("x", PyRep::Real(b.x)),

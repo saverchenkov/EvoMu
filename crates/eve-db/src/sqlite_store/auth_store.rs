@@ -345,6 +345,11 @@ pub(crate) fn persist_revoked_jti(
         params![jti, exp_unix as i64],
     )
     .map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE auth_refresh_tokens SET last_access_token_jti = '', last_access_token_exp_unix = 0 WHERE last_access_token_jti = ?1",
+        params![jti],
+    )
+    .map_err(|e| e.to_string())?;
     if last_auth_now_unix > 0 {
         prune_in_tx(&tx, last_auth_now_unix)?;
     }

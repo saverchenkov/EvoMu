@@ -783,6 +783,8 @@ pub(crate) async fn handle_module_cycles(
                     && matches!(
                         mod_type.group_id,
                         40 | 1156 | 41 | 1697 | 67 | 71 | 76 | 1122 | 650 | 80 | 353
+                            | 46 | 65 | 52 | 62 | 68 | 201 | 208 | 291 | 325 | 379
+                            | 585 | 1199 | 1672 | 1698
                             | 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807
                     )
                 {
@@ -1748,7 +1750,35 @@ pub(crate) async fn handle_module_cycles(
             }
 
             // V24 client derives `OnModuleActivated` from `OnGodmaShipEffect` (active=1).
-            let _ = ctx.notify_module_effect_started(char_id, ship_id, module_id, m.type_id, Some(effect_name.as_str()), target_id_opt);
+            let godma_repeat = if repeat == 0 { 0 } else { 1000 };
+            let _ = ctx.notify_module_effect_started_with_cycle(
+                char_id,
+                ship_id,
+                module_id,
+                m.type_id,
+                Some(effect_name.as_str()),
+                target_id_opt,
+                Some(godma_repeat),
+                Some((duration_s * 1_000.0).max(0.0)),
+            );
+            if cap_need > 0.0 || cap_booster_inject_amount > 0.0 || effective_max_capacitor.is_some() {
+                if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
+                    let old_cap = if cap_need > 0.0 && cap_booster_inject_amount == 0.0 {
+                        Some((cs.capacitor + cap_need).min(cs.max_capacitor))
+                    } else if cap_booster_inject_amount > 0.0 && cap_need == 0.0 {
+                        Some((cs.capacitor - cap_booster_inject_amount).max(0.0))
+                    } else {
+                        None
+                    };
+                    let _ = ctx.notify_ship_capacitor_change(
+                        char_id,
+                        ship_id,
+                        cs.capacitor,
+                        cs.max_capacitor,
+                        old_cap,
+                    );
+                }
+            }
             emit_committed_ewar_and_system_wide_notifications(
                 ctx, sys_id, char_id, ship_id, module_id, m.type_id, mod_type, m.charge_type_id,
                 disables_target_mwd_mjd, hic_bubble_radius_m, target_id_opt,

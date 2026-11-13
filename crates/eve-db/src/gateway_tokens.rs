@@ -941,6 +941,38 @@ impl WorldRepository {
         token: &str,
         now_unix: u64,
     ) -> Result<SsoTokenClaims, DbError> {
+        self.verify_sso_access_token_core(token, now_unix, false)
+    }
+
+    /// Verifies a launcher SSO `access_token` for an already-established `:26000` `OnlineSession`
+    /// even past the access token's 20-minute `exp` (`#894`, `BF-07`), while binding the JWT's `jti`
+    /// to an active, non-revoked, non-expired launcher refresh token and evaluating `now_unix`
+    /// directly (never `iat`) against kicks, restrictions, and session revocation.
+    pub fn verify_live_session_launcher_sso_access_token(
+        &self,
+        token: &str,
+        now_unix: u64,
+    ) -> Result<SsoTokenClaims, DbError> {
+        let claims = self.verify_sso_access_token_core(token, now_unix, true)?;
+        let os = self
+            .get_online_session(claims.user_id)
+            .ok_or(DbError::InvalidCredentials)?;
+        if claims.exp < os.connected_at_unix
+            || self
+                .check_session_revoked(claims.user_id, os.session_id, now_unix)
+                .is_some()
+        {
+            return Err(DbError::InvalidCredentials);
+        }
+        Ok(claims)
+    }
+
+    fn verify_sso_access_token_core(
+        &self,
+        token: &str,
+        now_unix: u64,
+        allow_expired_live_session_launcher: bool,
+    ) -> Result<SsoTokenClaims, DbError> {
         let mut parts = token.splitn(3, '.');
         let (Some(header_b64), Some(payload_b64), Some(sig_b64)) =
             (parts.next(), parts.next(), parts.next())
@@ -984,9 +1016,24 @@ impl WorldRepository {
             } else {
                 false
             };
+            let expiry_ok = if allow_expired_live_session_launcher {
+                parsed.exp > parsed.iat
+                    && !parsed.jti.is_empty()
+                    && rt.refresh_tokens.values().any(|rec| {
+                        !rec.revoked
+                            && rec.user_id == parsed.user_id
+                            && rec.character_id == parsed.character_id
+                            && matches!(rec.client_id.as_str(), "eveLauncherTQ" | "evomu-launcher")
+                            && (rec.expires_at_unix == 0 || rec.expires_at_unix >= now_unix)
+                            && !rec.last_access_token_jti.is_empty()
+                            && rec.last_access_token_jti == parsed.jti
+                    })
+            } else {
+                now_unix < parsed.exp
+            };
             if parsed.user_id == 0
                 || parsed.iat > now_unix
-                || now_unix >= parsed.exp
+                || !expiry_ok
                 || parsed.iss != "https://login.eveonline.com"
                 || !parsed.aud.iter().any(|a| a == "EVE Online")
                 || !expected_sub_ok
@@ -1073,7 +1120,13 @@ impl WorldRepository {
                         let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
                         rt.revoked_jtis.insert(parsed.jti.clone());
                         if parsed.exp > 0 {
-                            rt.revoked_jti_expiries.insert(parsed.jti, parsed.exp);
+                            rt.revoked_jti_expiries.insert(parsed.jti.clone(), parsed.exp);
+                        }
+                        for rec in rt.refresh_tokens.values_mut() {
+                            if rec.last_access_token_jti == parsed.jti {
+                                rec.last_access_token_jti.clear();
+                                rec.last_access_token_exp_unix = 0;
+                            }
                         }
                         return Ok(true);
                     }

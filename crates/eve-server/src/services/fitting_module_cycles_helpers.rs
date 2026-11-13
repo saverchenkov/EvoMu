@@ -2044,6 +2044,24 @@ pub(crate) async fn execute_pending_cycle_actions_list(
             } => {
                 emit_ship_charge_item_diffs(ctx, char_id, ship_id, &diffs);
             }
+            crate::system_actor::PendingCycleAction::ShipCapacitorChanged {
+                char_id,
+                ship_id,
+                new_cap,
+                max_cap,
+                old_cap,
+                notified,
+            } => {
+                if !notified {
+                    let _ = ctx.notify_ship_capacitor_change(
+                        char_id,
+                        ship_id,
+                        new_cap,
+                        max_cap,
+                        Some(old_cap),
+                    );
+                }
+            }
         }
     }
 }

@@ -1391,3 +1391,99 @@ async fn get_layer_damage_values_by_items_encodes_v24_shield_ratio_tau_and_wallc
     assert_eq!(foreign_kv.dict_get("armorDamage").and_then(PyRep::as_f64), Some(0.0));
     assert_eq!(foreign_kv.dict_get("hullDamage").and_then(PyRep::as_f64), Some(0.0));
 }
+
+#[tokio::test]
+async fn item_get_info_active_module_uses_attr51_speed_and_repeat_1000_819() {
+    let mut sde = (*shared_sde()).clone();
+    let base_sb = sde
+        .types
+        .values()
+        .find(|t| t.group_id == 40 && t.published && t.effect_ids.iter().any(|&eid| eid != 16))
+        .cloned()
+        .expect("canonical published shield booster in group 40");
+    let sb_type = 999_819_u32;
+    let expected_ms = 4_250.0_f64;
+    let mut sb_mod = base_sb;
+    sb_mod.type_id = sb_type;
+    sb_mod.default_attributes.remove(&73);
+    sb_mod.default_attributes.insert(51, expected_ms);
+    sde.types.insert(sb_type, sb_mod);
+    let ctx = ServerContext::with_sde_and_repository(
+        Arc::new(sde),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 96_300_555_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_id = 96_300_556_i64;
+    let mod_id = 96_300_557_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mod_id,
+            InventoryItemRecord {
+                item_id: mod_id,
+                type_id: sb_type,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::MedSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_active_states.insert(mod_id);
+    });
+
+    let mut sess = SessionState::new(99_903);
+    sess.user_id = Some(char_id as u64);
+    sess.character_id = Some(char_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_id);
+    sess.role = eve_machonet::service_roles::ROLE_PLAYER;
+
+    let info = handle_dogma_im(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "ItemGetInfo",
+        &[PyRep::Integer(mod_id)],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("ItemGetInfo ok");
+
+    let Some(PyRep::Dict(active_effs)) = info.dict_get("activeEffects") else {
+        panic!("expected activeEffects Dict");
+    };
+    let non_online: Vec<&Vec<PyRep>> = active_effs
+        .iter()
+        .filter(|(eid, _)| eid.as_i64() != Some(16))
+        .filter_map(|(_, row)| if let PyRep::List(v) = row { Some(v) } else { None })
+        .collect();
+    assert_eq!(non_online.len(), 1, "expected 1 active non-online effect entry");
+    assert_eq!(non_online[0].get(8), Some(&PyRep::Real(expected_ms)));
+    assert_eq!(non_online[0].get(9), Some(&PyRep::Integer(1000)));
+}

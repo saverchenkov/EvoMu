@@ -597,7 +597,7 @@ async fn cmd_dock_warp_deceleration_1s_tolerance_and_mid_warp_rejection() {
         "ShipInWarp"
     );
 
-    // Live CmdDock RPC: Decelerating with > 1.0s remaining (5,000m from landing at 15 AU/s) -> ShipInWarp
+    // Live CmdDock RPC: Decelerating with > 4.0s remaining (1,000,000m from landing at 15 AU/s) -> ShipInWarp
     let decel_mode = MovementMode::Warp {
         origin,
         destination: landing,
@@ -610,8 +610,8 @@ async fn cmd_dock_warp_deceleration_1s_tolerance_and_mid_warp_rejection() {
         Ball {
             id: ship_id,
             type_id: 606,
-            position: landing + DVec3::new(5_000.0, 0.0, 0.0),
-            velocity: DVec3::new(-25_000.0, 0.0, 0.0),
+            position: landing + DVec3::new(1_000_000.0, 0.0, 0.0),
+            velocity: DVec3::new(-2_000_000.0, 0.0, 0.0),
             max_velocity: 350.0,
             inertia: 2.0,
             mass: 1_100_000.0,
@@ -652,7 +652,25 @@ async fn cmd_dock_warp_deceleration_1s_tolerance_and_mid_warp_rejection() {
     assert_eq!(sess.station_id, None);
     assert!(ctx.active_warps.lock().unwrap().contains_key(&ship_id));
 
-    // Decelerating with <= 1.0s remaining (300m from landing at capped k_d = 2.0, outside 2,500m static perimeter) -> Ok & warp stopped
+    // #1001: Autopilot RealDock -> CmdDock while client exited DSTBALL_WARP ~2.8s ahead of 5.0 AU/s server decel
+    let mut venture_probe = probe.clone();
+    venture_probe.position = landing + DVec3::new(6_069.0, 0.0, 0.0);
+    venture_probe.velocity = DVec3::new(-10_116.53, 0.0, 0.0);
+    venture_probe.max_velocity = 350.0;
+    venture_probe.mode = MovementMode::Warp {
+        origin,
+        destination: landing,
+        warp_speed_au_s: 5.0,
+        total_distance: origin.distance(landing),
+        phase: eve_destiny::WarpPhase::Decelerating,
+        elapsed_warp_time: 5.0,
+    };
+    assert_eq!(
+        evaluate_dock_perimeter(&venture_probe, st_pos, st_radius).unwrap(),
+        true
+    );
+
+    // Decelerating with <= 4.0s remaining (300m from landing at capped k_d = 2.0, outside 2,500m static perimeter) -> Ok & warp stopped
     sys_handle.try_set_ball_position(ship_id, landing + DVec3::new(300.0, 0.0, 0.0));
     let dock_ok = handle(
         &ctx,
@@ -791,6 +809,19 @@ async fn e2_handoffs_b4_b8_c27_take_restore_absent_ball_and_capacitor_persistenc
     assert!(cond.space_entry_epoch >= 1);
 
     // 4. #889 (C27): Undock restores partial capacitor (92.5 GJ, not 250.0 GJ max) and bumps space_entry_epoch
+    let char_uid = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.user_id))
+        .unwrap_or(1);
+    sess.user_id = Some(char_uid);
+    let _ = ctx.db.acquire_online_lock(
+        char_uid,
+        sess.session_id,
+        Some(char_id),
+        true,
+        ctx.now_unix_secs(),
+    );
+    let _ = ctx.drain_notifications_for_char(char_id);
     crate::services::station_structure::handle(
         &ctx,
         &mut sess,
@@ -812,6 +843,20 @@ async fn e2_handoffs_b4_b8_c27_take_restore_absent_ball_and_capacitor_persistenc
         (undocked_cs.capacitor - 92.5).abs() < 1e-4,
         "expected partial capacitor 92.5 GJ after undock, got {}",
         undocked_cs.capacitor
+    );
+    let undock_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        undock_notifs.iter().any(|n| {
+            n.event == "OnModuleAttributeChanges"
+                && matches!(n.args.first(), Some(PyRep::List(entries)) if entries.iter().any(|e| {
+                    matches!(e, PyRep::Tuple(t)
+                        if t.len() >= 7
+                        && t[2].as_i64() == Some(ship_id)
+                        && t[3].as_i64() == Some(18)
+                        && t[5].as_f64().is_some_and(|v| (v - 92.5).abs() < 1e-4))
+                }))
+        }),
+        "Undock must emit OnModuleAttributeChanges (attr 18 CHARGE) for HUD capacitor (#1002)"
     );
     assert!((undocked_cs.shield_hp - 110.0).abs() < 1e-4);
     assert!((undocked_cs.armor_hp - 120.0).abs() < 1e-4);

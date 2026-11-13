@@ -511,6 +511,38 @@ impl Ballpark {
         true
     }
 
+    /// Queues an incremental same-system ship-handoff (`RemoveBall` for `old_ball_id` plus
+    /// `AddBalls2` for `added_ball_ids`) on `new_ball_id` without issuing `SetState` (`#970`).
+    ///
+    /// Keeping `SetState` out of in-system ship swaps preserves the client ballpark's celestial
+    /// `RealBall` weakrefs (otherwise V24 `Park.SetState` triggers `DoBallClear` and resets overview
+    /// celestial distances to `0 m`).
+    pub fn queue_in_space_ship_handoff(
+        &mut self,
+        old_ball_id: BallId,
+        new_ball_id: BallId,
+        added_ball_ids: &[BallId],
+    ) -> bool {
+        if !self.balls.contains_key(&new_ball_id) {
+            return false;
+        }
+        if let Some(ref mut set) = self.registered_observers {
+            set.insert(new_ball_id);
+        }
+        let balls: Vec<Ball> = added_ball_ids
+            .iter()
+            .filter_map(|id| self.balls.get(id).cloned())
+            .collect();
+        let events = self.observer_events.entry(new_ball_id).or_default();
+        events.push(DestinyEvent::RemoveBall {
+            ball_id: old_ball_id,
+        });
+        if !balls.is_empty() {
+            events.push(DestinyEvent::AddBalls2 { balls });
+        }
+        true
+    }
+
     pub fn remove_ball(&mut self, ball_id: BallId) -> Option<Ball> {
         let Some(removed) = self.balls.remove(&ball_id) else {
             self.combat_states.remove(&ball_id);

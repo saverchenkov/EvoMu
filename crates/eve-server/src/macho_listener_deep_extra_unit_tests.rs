@@ -1223,3 +1223,191 @@ async fn resolve_req_ping_list_corrupt_marshal_error_codes_and_revocation() {
         }
     }
 }
+
+fn pyrep_contains_ascii(rep: &PyRep, needle: &str) -> bool {
+    match rep {
+        PyRep::String(s) => s.contains(needle),
+        PyRep::Bytes(b) => String::from_utf8_lossy(b).contains(needle),
+        PyRep::Tuple(xs) | PyRep::List(xs) | PyRep::PySet(xs) => {
+            xs.iter().any(|x| pyrep_contains_ascii(x, needle))
+        }
+        PyRep::Dict(entries) => entries
+            .iter()
+            .any(|(k, v)| pyrep_contains_ascii(k, needle) || pyrep_contains_ascii(v, needle)),
+        PyRep::KeyVal(map) => map
+            .iter()
+            .any(|(k, v)| k.contains(needle) || pyrep_contains_ascii(v, needle)),
+        PyRep::Object { type_name, args } => {
+            type_name.contains(needle) || pyrep_contains_ascii(args, needle)
+        }
+        PyRep::ObjectEx { header, list, dict, .. } => {
+            pyrep_contains_ascii(header, needle)
+                || list.iter().any(|x| pyrep_contains_ascii(x, needle))
+                || dict
+                    .iter()
+                    .any(|(k, v)| pyrep_contains_ascii(k, needle) || pyrep_contains_ascii(v, needle))
+        }
+        PyRep::SubStruct(inner) | PyRep::SubStream(inner) => pyrep_contains_ascii(inner, needle),
+        _ => false,
+    }
+}
+
+#[tokio::test]
+async fn pod_ejection_handoff_in_space_emits_incremental_destiny_without_set_state_970() {
+    let ctx = Arc::new(ServerContext::new());
+    let clock = Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000));
+    ctx.set_clock(Arc::clone(&clock) as Arc<dyn ServerClock>);
+    let addr = spawn_listener(Arc::clone(&ctx)).await;
+    let (mut s, client_id, user_id) = connect_login(addr, "demo", "demo-secret").await;
+    let (char_id, old_ship_id) = (90_000_001_i64, 100_000_001_i64);
+    let sys_id = 30_000_142_u32;
+
+    let call = |cid: u64, svc: &str, bid: Option<u64>, m: &str, args: Vec<PyRep>| {
+        build_call_pkt(
+            client_id,
+            user_id,
+            cid,
+            MachoAddress::Node {
+                node_id: MACHO_PROXY_NODE_ID,
+                service: Some(svc.into()),
+                call_id: 0,
+            },
+            bid,
+            m,
+            args,
+        )
+    };
+
+    write_framed_pyrep(
+        &mut s,
+        &call(1, "charUnboundMgr", None, "SelectCharacterID", vec![PyRep::Integer(char_id)]).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let _ = read_until_call_reply(&mut s).await;
+    write_framed_pyrep(&mut s, &call(2, "stationSvc", None, "Undock", vec![]).to_pyrep())
+        .await
+        .unwrap();
+    let _ = read_until_call_reply(&mut s).await;
+    let jita = ctx.systems.get_or_spawn(sys_id);
+    let _ = jita.step_manual(1.0).await.unwrap();
+    write_framed_pyrep(
+        &mut s,
+        &call(3, "beyonce", None, "MachoBindObject", vec![PyRep::Integer(sys_id as i64), PyRep::None]).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let bind_rsp = read_until_call_reply(&mut s).await;
+    let oid_val = bind_rsp
+        .named_payload
+        .get("OID+")
+        .map(as_dict)
+        .and_then(|e| e.first())
+        .and_then(|(k, _)| k.as_str())
+        .and_then(|s_oid| s_oid.split(':').nth(1))
+        .and_then(|n| n.parse::<u64>().ok())
+        .expect("beyonce bind OID+");
+    write_framed_pyrep(
+        &mut s,
+        &call(4, "beyonce", Some(oid_val), "UpdateStateRequest", vec![]).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(read_until_call_reply(&mut s).await.packet_type, MachoPacketType::CallRsp);
+    while tokio::time::timeout(std::time::Duration::from_millis(20), read_pkt(&mut s))
+        .await
+        .is_ok()
+    {}
+
+    // Simulate in-space pod ejection: remove ship, spawn wreck + capsule, queue incremental
+    // handoff without SetState, update character active_ship_id, and trigger OnSessionChanged.
+    let wreck_id = 1_897_970_001_i64;
+    let capsule_id = 1_897_970_002_i64;
+    jita.try_remove_ball(old_ship_id);
+    jita.try_spawn_ball_with_meta(
+        eve_destiny::Ball {
+            id: wreck_id,
+            type_id: 26557,
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 10_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        },
+        eve_destiny::CombatState::default(),
+        eve_destiny::SlimItemMeta::default(),
+    );
+    jita.try_spawn_ball_with_meta(
+        eve_destiny::Ball {
+            id: capsule_id,
+            type_id: 670,
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 335.0,
+            inertia: 0.25,
+            mass: 16_000.0,
+            radius: 15.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        },
+        ctx.build_ship_combat_state(char_id, capsule_id, 670),
+        ctx.build_ship_slim_meta(char_id, 670),
+    );
+    assert!(jita.try_handoff_in_space_observer(old_ship_id, capsule_id, &[wreck_id, capsule_id]));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            capsule_id,
+            eve_db::InventoryItemRecord {
+                item_id: capsule_id,
+                type_id: 670,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: eve_db::InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = capsule_id;
+        }
+    });
+    ctx.notify(NotificationTarget::Character(char_id), "OnSessionChanged", "charid", vec![]);
+
+    let mut saw_destiny_pos: Option<usize> = None;
+    let mut saw_sess_pos: Option<usize> = None;
+    let mut saw_set_state = false;
+    let mut saw_add_balls2 = false;
+    let mut saw_remove_ball = false;
+    for idx in 0..8 {
+        let Ok(Some(raw)) = tokio::time::timeout(std::time::Duration::from_millis(500), read_pkt(&mut s)).await else {
+            break;
+        };
+        let pkt = MachoPacket::from_pyrep(&raw).unwrap();
+        if pkt.packet_type == MachoPacketType::Notification
+            && pyrep_contains_ascii(&raw, "DoDestinyUpdate")
+        {
+            if saw_destiny_pos.is_none() {
+                saw_destiny_pos = Some(idx);
+            }
+            saw_set_state |= pyrep_contains_ascii(&raw, "SetState");
+            saw_add_balls2 |= pyrep_contains_ascii(&raw, "AddBalls2");
+            saw_remove_ball |= pyrep_contains_ascii(&raw, "RemoveBall");
+        }
+        if pkt.packet_type == MachoPacketType::SessionChangeNotification {
+            saw_sess_pos = Some(idx);
+            break;
+        }
+    }
+    let d_pos = saw_destiny_pos.expect("must send incremental DoDestinyUpdate before SessionChangeNotification");
+    let s_pos = saw_sess_pos.expect("must send SessionChangeNotification for capsule switch");
+    assert!(d_pos < s_pos, "DoDestinyUpdate ({d_pos}) must precede SessionChangeNotification ({s_pos})");
+    assert!(!saw_set_state, "same-system pod ejection must NOT emit SetState (#970)");
+    assert!(saw_remove_ball, "same-system pod ejection must emit RemoveBall (#970)");
+    assert!(saw_add_balls2, "same-system pod ejection must emit AddBalls2 (#970)");
+}

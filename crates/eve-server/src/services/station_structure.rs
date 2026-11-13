@@ -563,6 +563,15 @@ pub async fn handle(
             )
             .with_apply_db(false);
             let _ = ctx.execute_session_transition_sync(Some(session), undock_spec);
+            if let Ok(Some(cs)) = sys_handle.get_combat_state(ship.item_id).await {
+                let _ = ctx.notify_ship_capacitor_change(
+                    char_id,
+                    ship.item_id,
+                    cs.capacitor,
+                    cs.max_capacitor,
+                    None,
+                );
+            }
             if let Some(ship_rec) = ctx.db.with_snapshot(|snap| snap.items.get(&ship.item_id).cloned()) {
                 ctx.notify_item_record_change(
                     char_id,

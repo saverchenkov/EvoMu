@@ -922,8 +922,9 @@ pub fn execute_death_pipeline_sync_inner(
     crate::services::doomsday_aoe_ops::cancel_aoe_superweapon_cycles_for_ship(ctx, victim_ship_id);
 
     // Commit ballpark state (remove destroyed ship ball, spawn wreck ball, spawn capsule/escape
-    // ship ball, and push `SetState(ego=cid)`) BEFORE emitting any notifications (`ctx.notify`),
-    // because `ctx.notify` immediately wakes `macho_listener`'s `notify_rx.recv()` loop (`#970`).
+    // ship ball, and queue incremental `RemoveBall` + `AddBalls2` handoff on `cid` without
+    // `SetState`) BEFORE emitting any notifications (`ctx.notify`), because `ctx.notify`
+    // immediately wakes `macho_listener`'s `notify_rx.recv()` loop (`#970`).
     crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &[victim_ship_id]);
     crate::services::notify_emitters_seasons_tactical::on_deployable_deactivated(ctx, None, victim_ship_id);
     sys_handle.try_remove_ball(victim_ship_id);
@@ -998,7 +999,7 @@ pub fn execute_death_pipeline_sync_inner(
             ctx.build_ship_combat_state(victim_char_id, cid, esc_type_id),
             esc_slim,
         );
-        sys_handle.try_push_set_state(cid);
+        sys_handle.try_handoff_in_space_observer(victim_ship_id, cid, &[wreck_item_id, cid]);
     }
 
     if let Some((ins_corp, owner_id, bal_wire, mid, subject)) = ins_notify {

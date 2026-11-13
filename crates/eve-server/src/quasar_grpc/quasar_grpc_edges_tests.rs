@@ -223,11 +223,11 @@ fn authenticate_grpc_headers_and_build_session_edges() {
             past_mint_u,
         )
         .unwrap();
-    let expired_sso = raw_ctx
+    let past_bundle = raw_ctx
         .db
         .exchange_pkce_code(&past_code, "eveLauncherTQ", verifier, past_mint_u)
-        .unwrap()
-        .access_token;
+        .unwrap();
+    let expired_sso = past_bundle.access_token.clone();
     assert!(verify_gateway_bearer_token(&raw_ctx, &expired_sso, loopback, now_u).is_err());
 
     // Historical token whose `exp` (past_mint_u + 1200) predates `os.connected_at_unix` (now_u) is rejected.
@@ -311,6 +311,59 @@ fn authenticate_grpc_headers_and_build_session_edges() {
 
     raw_ctx.db.release_online_lock(1, 77_000);
     assert!(verify_gateway_bearer_token(&raw_ctx, &expired_sso, loopback, now_u).is_err());
+
+    // BF-07: Refresh rotation and direct access-JWT revocation must stay rejected even after `revoked_jtis` prunes past `exp`.
+    raw_ctx
+        .db
+        .acquire_online_lock(1, 77_001, Some(90_000_001), true, past_mint_u + 10)
+        .unwrap();
+    let rotated = raw_ctx
+        .db
+        .refresh_sso_token(&past_bundle.refresh_token, "eveLauncherTQ", now_u)
+        .expect("rotation of non-revoked refresh token must succeed");
+    assert!(
+        verify_gateway_bearer_token(&raw_ctx, &expired_sso, loopback, now_u).is_err(),
+        "old expired launcher access token must be rejected immediately once its refresh token is rotated"
+    );
+
+    // Direct access-JWT revocation must clear `last_access_token_jti` so pruning `revoked_jtis` past `exp` never resurrects it.
+    let mint2_u = now_u - 1_500;
+    let code2 = raw_ctx
+        .db
+        .authorize_pkce(
+            "demo",
+            "demo-secret",
+            90_000_001,
+            "eveLauncherTQ",
+            "http://127.0.0.1/cb",
+            Vec::new(),
+            &challenge,
+            "S256",
+            mint2_u,
+        )
+        .unwrap();
+    let revoked_sso = raw_ctx
+        .db
+        .exchange_pkce_code(&code2, "eveLauncherTQ", verifier, mint2_u)
+        .unwrap()
+        .access_token;
+    assert!(
+        verify_gateway_bearer_token(&raw_ctx, &revoked_sso, loopback, now_u).is_ok(),
+        "freshly minted expired launcher access token with active OnlineSession should verify before revocation"
+    );
+    assert!(raw_ctx.db.try_revoke_sso_refresh_token(&revoked_sso).unwrap());
+    // Trigger `prune_auth_runtime_locked` past `revoked_sso.exp` (`now_u - 300`) via a subsequent token rotation.
+    let prune_now = now_u + 60;
+    let _ = raw_ctx
+        .db
+        .refresh_sso_token(&rotated.refresh_token, "eveLauncherTQ", prune_now)
+        .unwrap();
+    assert!(
+        verify_gateway_bearer_token(&raw_ctx, &revoked_sso, loopback, prune_now).is_err(),
+        "directly revoked launcher access JWT must stay rejected even after revoked_jtis pruning past exp (BF-07)"
+    );
+    raw_ctx.db.release_online_lock(1, 77_001);
+
     raw_ctx.db.with_mut_snapshot(|snap| {
         snap.characters.remove(&90_000_002);
     });

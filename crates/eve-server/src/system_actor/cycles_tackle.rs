@@ -826,8 +826,21 @@ pub(crate) fn handle_add_module_cycle(
     }
     if let Some(eff_cap_max) = cycle.effective_max_capacitor {
         if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
-            cs.max_capacitor = eff_cap_max;
-            cs.capacitor = cs.capacitor.min(cs.max_capacitor);
+            if !cs.max_capacitor.is_finite() || cs.max_capacitor <= 0.0 {
+                cs.max_capacitor = eff_cap_max;
+            }
+            if !cs.capacitor.is_finite() {
+                cs.capacitor = eff_cap_max;
+            } else if (cs.max_capacitor - 250.0).abs() <= 1e-6
+                && (cs.capacitor - 250.0).abs() <= 1e-6
+                && eff_cap_max > 250.0
+            {
+                cs.max_capacitor = eff_cap_max;
+                cs.capacitor = eff_cap_max;
+            } else {
+                cs.max_capacitor = eff_cap_max;
+                cs.capacitor = cs.capacitor.min(cs.max_capacitor);
+            }
         }
     }
     if cycle.cap_need_per_cycle > 0.0 {

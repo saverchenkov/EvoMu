@@ -1279,3 +1279,71 @@ fn mutant_killers_remove_static_recompute_eps_and_true_damage_ratios() {
     assert!(!dpark.combat_states.contains_key(&999_778));
 }
 
+#[test]
+fn in_space_ship_handoff_queues_incremental_events_without_set_state() {
+    let mut bp = Ballpark::new(100);
+    bp.set_observer_filtering(true);
+    let old_ship = Ball {
+        id: 500,
+        type_id: 587,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 1.0,
+        mass: 1e6,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    let wreck = Ball {
+        id: 501,
+        type_id: 26557,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 10_000.0,
+        radius: 50.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    let capsule = Ball {
+        id: 502,
+        type_id: 670,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: 335.0,
+        inertia: 0.25,
+        mass: 16_000.0,
+        radius: 15.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    assert!(bp.add_ball(old_ship));
+    let _ = bp.remove_ball(500);
+    assert!(bp.add_ball(wreck));
+    assert!(bp.add_ball(capsule));
+
+    // Absent observer rejects handoff cleanly.
+    assert!(!bp.queue_in_space_ship_handoff(500, 999, &[501, 502]));
+
+    assert!(bp.queue_in_space_ship_handoff(500, 502, &[501, 502]));
+    let events = bp.drain_observer_events(502);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, DestinyEvent::SetState { .. })),
+        "in-system handoff must not emit SetState (#970)"
+    );
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, DestinyEvent::RemoveBall { ball_id: 500 })));
+    assert!(events.iter().any(|e| match e {
+        DestinyEvent::AddBalls2 { balls } => {
+            let ids: Vec<i64> = balls.iter().map(|b| b.id).collect();
+            ids == vec![501, 502]
+        }
+        _ => false,
+    }));
+}
+

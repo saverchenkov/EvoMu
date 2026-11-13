@@ -500,7 +500,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                             client_error: None,
                         }));
                     }
-                    let dist = cb.position.distance(tb.position);
+                    let dist = cb.surface_distance(&tb);
                     if dist > 2_500.0 {
                         return Some(Err(BridgeRpcError {
                             code: "ShipOutOfBoardingRange".into(),
@@ -823,8 +823,8 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             };
             let supplied_password = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.iter().find_map(|a| a.as_str()));
             let sys = ctx.systems.get_or_spawn(sys_id);
-            let active_pos = match sys.get_ball_snapshot(active_ship_id).await {
-                Ok(Some((_, b))) => b.position,
+            let (active_pos, active_radius) = match sys.get_ball_snapshot(active_ship_id).await {
+                Ok(Some((_, b))) => (b.position, b.radius.max(0.0)),
                 _ => return Some(Err(BridgeRpcError { code: "ObjectNotInSpace".into(), message: "Active ship not in space".into(), client_error: None })),
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -875,19 +875,31 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let parent_pos = match sys.get_ball_snapshot(parent_id).await {
-                Ok(Some((_, b))) => b.position,
+            let (parent_pos, parent_radius) = match sys.get_ball_snapshot(parent_id).await {
+                Ok(Some((_, b))) => (b.position, b.radius.max(0.0)),
                 _ => {
                     let snap_pos = ctx.db.with_snapshot(|snap| {
                         let in_space = snap.items.get(&parent_id).is_some_and(|i| i.location_id == sys_id as i64);
                         if !in_space {
                             return None;
                         }
-                        snap.item_positions.get(&parent_id).map(|p| DVec3::new(p[0], p[1], p[2]))
-                            .or_else(|| snap.structures.get(&parent_id).map(|s| DVec3::new(s.position[0], s.position[1], s.position[2])))
+                        let rad = snap
+                            .items
+                            .get(&parent_id)
+                            .and_then(|i| ctx.sde.types.get(&i.type_id))
+                            .map(|t| t.radius.max(0.0))
+                            .unwrap_or(0.0);
+                        snap.item_positions
+                            .get(&parent_id)
+                            .map(|p| (DVec3::new(p[0], p[1], p[2]), rad))
+                            .or_else(|| {
+                                snap.structures
+                                    .get(&parent_id)
+                                    .map(|s| (DVec3::new(s.position[0], s.position[1], s.position[2]), rad))
+                            })
                     });
                     match snap_pos {
-                        Some(pos) => pos,
+                        Some(pr) => pr,
                         None => {
                             return Some(Err(BridgeRpcError {
                                 code: "ObjectNotInSpace".into(),
@@ -898,7 +910,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     }
                 }
             };
-            if active_pos.distance(parent_pos) > 2_500.0 {
+            if (active_pos.distance(parent_pos) - active_radius - parent_radius).max(0.0) > 2_500.0 {
                 return Some(Err(BridgeRpcError {
                     code: "OutOfRange".into(),
                     message: "Parent ship/container is out of range (>2500m)".into(),
@@ -1628,8 +1640,22 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                                         .copied()
                                         .map(glam::DVec3::from)
                                 });
+                            let ship_radius = snap
+                                .items
+                                .get(&active_ship_id)
+                                .and_then(|i| ctx.sde.types.get(&i.type_id))
+                                .map(|t| t.radius.max(0.0))
+                                .unwrap_or(0.0);
+                            let ent_radius = snap
+                                .items
+                                .get(&ent_id)
+                                .and_then(|i| ctx.sde.types.get(&i.type_id))
+                                .map(|t| t.radius.max(0.0))
+                                .unwrap_or(0.0);
                             match (ship_pos, ent_pos) {
-                                (Some(sp), Some(ep)) => sp.distance(ep) <= 2_500.0,
+                                (Some(sp), Some(ep)) => {
+                                    (sp.distance(ep) - ship_radius - ent_radius).max(0.0) <= 2_500.0
+                                }
                                 _ => false,
                             }
                         } else {

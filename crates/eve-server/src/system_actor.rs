@@ -144,6 +144,24 @@ impl SystemRegistry {
         *self.npc_death_hook.write().unwrap_or_else(|e| e.into_inner()) = Some(hook);
     }
 
+    /// Invokes the registered `npc_death_hook` for an NPC ball destroyed outside
+    /// standard damage ticks (e.g., GM `/kill <npc_ball_id>`, `#1003`).
+    pub async fn invoke_npc_death_hook(
+        &self,
+        solar_system_id: u32,
+        npc_ball_id: i64,
+        killer_char_id: Option<i64>,
+    ) {
+        let hook = self
+            .npc_death_hook
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(h) = hook {
+            h(solar_system_id, npc_ball_id, killer_char_id).await;
+        }
+    }
+
     pub fn set_module_deactivation_hook(&self, hook: ModuleDeactivationHook) {
         *self.module_deactivation_hook.write().unwrap_or_else(|e| e.into_inner()) = Some(hook);
     }
@@ -1760,6 +1778,7 @@ impl SystemRegistry {
                                     ballpark.sim_unix_secs = now_unix;
                                 }
                             }
+                            let pre_tick_caps = cycles::snapshot_player_ship_capacitors(&ballpark, db_opt.as_ref());
                             let events = ballpark.step(dt_sim);
                             let landed_warps = celestials::collect_landed_warp_positions(&ballpark, &events);
                             persist_landed_warps_in_db(
@@ -1824,6 +1843,7 @@ impl SystemRegistry {
                                 &base_scramble_strengths, &base_core_strengths, &sde_opt, &db_opt,
                                 ball_space_entry_epochs, mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions, dt_sim, deact_guard.as_ref(),
                             );
+                            cycles::record_player_ship_capacitor_deltas(&ballpark, &pre_tick_caps, pending_cycle_actions);
                             cycles::flush_pending_cycle_damage_notifications(
                                 db_opt.as_ref(),
                                 pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>),

@@ -20,7 +20,7 @@ mod ballpark;
 pub mod physics;
 pub mod wire;
 mod wire_batch;
-pub use physics::{combat, is_warp_finishing_within_1s};
+pub use physics::{combat, is_warp_finishing_within, is_warp_finishing_within_1s};
 
 #[cfg(test)]
 mod tests;
@@ -867,6 +867,13 @@ impl Ball {
     #[inline]
     pub fn align_server_ticks(&self) -> u64 {
         self.align_time_seconds().ceil().max(1.0) as u64
+    }
+
+    /// Surface-to-surface distance in meters between `self` and `other` (`#1004`).
+    #[inline]
+    pub fn surface_distance(&self, other: &Ball) -> f64 {
+        (self.position.distance(other.position) - self.radius.max(0.0) - other.radius.max(0.0))
+            .max(0.0)
     }
 }
 

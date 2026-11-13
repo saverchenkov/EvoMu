@@ -486,4 +486,19 @@ fn issue_804_notify_module_effect_started_emits_on_special_fx_for_turrets_ewar_p
     );
     assert_eq!(turret_started[0].args.get(7), Some(&PyRep::Real(turret_eval_ms)));
     assert_eq!(turret_started[0].args.get(8), Some(&PyRep::Integer(1000)));
+
+    // Explicit evaluated cycle duration (e.g. shield_boost_multiplier) and single-cycle repeat=0
+    // override SDE/default fallbacks in OnGodmaShipEffect (#819).
+    let custom_ret = ctx.notify_module_effect_started_with_cycle(
+        char_id,
+        fitted_ship_id,
+        fitted_ab_id,
+        439,
+        Some("moduleBonusAfterburner"),
+        None,
+        Some(0),
+        Some(6_000.0),
+    );
+    assert_eq!(custom_ret[0].args.get(7), Some(&PyRep::Real(6_000.0)));
+    assert_eq!(custom_ret[0].args.get(8), Some(&PyRep::Integer(0)));
 }

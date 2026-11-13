@@ -252,6 +252,8 @@ fn handle_item_get_info(
     let dur_ms = merged_attrs
         .get(&73)
         .copied()
+        .filter(|&v| v > 0.0)
+        .or_else(|| merged_attrs.get(&51).copied().filter(|&v| v > 0.0))
         .unwrap_or(1_000.0)
         .max(0.0);
     let mut attr_entries: Vec<(PyRep, PyRep)> = merged_attrs
@@ -335,7 +337,7 @@ fn handle_item_get_info(
                                     PyRep::Integer(eff_id),
                                     PyRep::Integer(now_ft),
                                     PyRep::Real(dur_ms),
-                                    PyRep::Integer(0),
+                                    PyRep::Integer(1000),
                                 ]),
                             ));
                         }
