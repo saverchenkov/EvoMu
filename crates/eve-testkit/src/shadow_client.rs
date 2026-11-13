@@ -395,11 +395,18 @@ impl ShadowClient {
             self.wallet.personal_balance_isk = Some(ch.balance.to_wire_f64());
             if let Some(corp) = snap.corporations.get(&ch.corporation_id) {
                 for div in 1000..=1006u16 {
+                    let div_id = ((div - 1000) + 1) as u8;
                     self.wallet
                         .corp_division_balances_isk
-                        .insert((ch.corporation_id, div), corp.division_balance(div).to_wire_f64());
+                        .insert((ch.corporation_id, div), corp.division_balance(div_id).to_wire_f64());
                 }
             }
+            let (wing_id, squad_id) = ch
+                .fleet_id
+                .and_then(|fid| snap.fleets.get(&fid))
+                .and_then(|f| f.member_details.get(&ch.character_id))
+                .map(|m| (m.wing_id, m.squad_id))
+                .unwrap_or((None, None));
             self.session = ShadowSession {
                 user_id: Some(ch.user_id),
                 char_id: Some(ch.character_id),
@@ -414,8 +421,8 @@ impl ShadowClient {
                 region_id: None,
                 ship_id: (ch.active_ship_id > 0).then_some(ch.active_ship_id),
                 fleet_id: ch.fleet_id,
-                wing_id: ch.wing_id,
-                squad_id: ch.squad_id,
+                wing_id,
+                squad_id,
                 role: None,
                 synced: true,
             };
@@ -1337,7 +1344,12 @@ impl ShadowClient {
         }
         for (&(corp_id, div_key), &shadow_isk) in &self.wallet.corp_division_balances_isk {
             if let Some(corp) = snap.corporations.get(&corp_id) {
-                let world_isk = corp.division_balance(div_key).to_wire_f64();
+                let div_id = if div_key >= 1000 {
+                    (div_key - 999) as u8
+                } else {
+                    div_key as u8
+                };
+                let world_isk = corp.division_balance(div_id).to_wire_f64();
                 if (shadow_isk - world_isk).abs() > 0.005 {
                     out.push(ShadowDivergence::CorpWalletMismatch { corp_id, division: div_key, shadow_isk, world_isk });
                 }
