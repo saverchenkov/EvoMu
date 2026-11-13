@@ -679,6 +679,7 @@ fn fill_definition(b: ProtoBuilder, d: &UpgradeDefinition) -> ProtoBuilder {
         .set("workforce_produced", d.workforce_produced)
 }
 
+#[cfg(test)]
 pub(crate) fn encode_definition(d: &UpgradeDefinition) -> Vec<u8> {
     fill_definition(pb::message("eve_public.sovereignty.hub.upgrade.Definition"), d).must_encode()
 }

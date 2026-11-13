@@ -62,6 +62,7 @@ fn add_planet_definitions(mut b: ProtoBuilder) -> ProtoBuilder {
     b
 }
 
+#[cfg(test)]
 fn encode_planet_definitions(out: &mut Vec<u8>) {
     out.extend(
         add_planet_definitions(pb::message(
