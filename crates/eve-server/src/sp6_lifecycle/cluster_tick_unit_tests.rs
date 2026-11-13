@@ -1306,6 +1306,19 @@ async fn step_output_condition_checkpoint_epoch_guard_and_dirty_only_919_839_866
     let ship_id = 100_000_001_i64;
     let sys_id = 30_000_142_u32;
 
+    let init_cs = eve_destiny::CombatState {
+        shield_hp: 500.0,
+        max_shield_hp: 500.0,
+        shield_recharge_time_ms: 0.0,
+        armor_hp: 400.0,
+        max_armor_hp: 400.0,
+        structure_hp: 350.0,
+        max_structure_hp: 350.0,
+        capacitor: 250.0,
+        max_capacitor: 250.0,
+        capacitor_recharge_time_ms: 0.0,
+        ..Default::default()
+    };
     let epoch_1 = ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = sys_id;
@@ -1316,25 +1329,18 @@ async fn step_output_condition_checkpoint_epoch_guard_and_dirty_only_919_839_866
         if let Some(item) = snap.items.get_mut(&ship_id) {
             item.location_id = sys_id as i64;
         }
-        let ep = crate::sp6_lifecycle::bump_ship_space_entry_epoch_in_snap(snap, ship_id, sys_id);
-        crate::sp6_lifecycle::write_ship_condition_in_snap(
+        crate::sp6_lifecycle::leave_space_in_snap(
             snap,
             ship_id,
-            crate::sp6_lifecycle::PersistedShipCondition {
-                shield_hp: 500.0,
-                armor_hp: 400.0,
-                hull_hp: 350.0,
-                capacitor: Some(250.0),
-                in_space_system: Some(sys_id),
-                space_entry_epoch: ep,
-            },
-        );
-        ep
+            Some(&init_cs),
+            Some(sys_id),
+            Some([1_000.0, 2_000.0, 3_000.0]),
+        )
     });
 
     let handle = ctx.systems.get_or_spawn(sys_id);
     handle
-        .spawn_ball_with_combat_state(
+        .spawn_ball_with_combat(
             eve_destiny::Ball {
                 id: ship_id,
                 type_id: 587,
@@ -1347,19 +1353,7 @@ async fn step_output_condition_checkpoint_epoch_guard_and_dirty_only_919_839_866
                 speed_fraction: 0.0,
                 mode: eve_destiny::MovementMode::Stop,
             },
-            eve_destiny::CombatState {
-                shield_hp: 500.0,
-                max_shield: 500.0,
-                shield_recharge_rate_ms: 0.0,
-                armor_hp: 400.0,
-                max_armor: 400.0,
-                structure_hp: 350.0,
-                max_structure: 350.0,
-                capacitor: 250.0,
-                max_capacitor: 250.0,
-                capacitor_recharge_rate_ms: 0.0,
-                ..Default::default()
-            },
+            init_cs.clone(),
         )
         .await
         .unwrap();
@@ -1408,20 +1402,13 @@ async fn step_output_condition_checkpoint_epoch_guard_and_dirty_only_919_839_866
 
     // 3. T-2: Stale space_entry_epoch or wrong solar_system_id is rejected by apply_condition_checkpoint_for_system_in_db.
     let epoch_2 = ctx.db.with_mut_snapshot(|snap| {
-        let ep = crate::sp6_lifecycle::bump_ship_space_entry_epoch_in_snap(snap, ship_id, sys_id);
-        crate::sp6_lifecycle::write_ship_condition_in_snap(
+        crate::sp6_lifecycle::leave_space_in_snap(
             snap,
             ship_id,
-            crate::sp6_lifecycle::PersistedShipCondition {
-                shield_hp: 500.0,
-                armor_hp: 400.0,
-                hull_hp: 350.0,
-                capacitor: Some(250.0),
-                in_space_system: Some(sys_id),
-                space_entry_epoch: ep,
-            },
-        );
-        ep
+            Some(&init_cs),
+            Some(sys_id),
+            Some([1_000.0, 2_000.0, 3_000.0]),
+        )
     });
     assert!(epoch_2 > epoch_1);
 
@@ -1475,19 +1462,22 @@ async fn system_step_hook_and_npc_death_hook_use_live_server_context_839() {
     let spawn_group_id = 777_u32;
 
     // 1. Seed a live scanner probe in `ctx.active_scanner_probes` and `sp6_lifecycle.active_scanner_probes`.
-    let probe = crate::sp6_lifecycle::PersistedScannerProbe {
+    let probe = eve_db::PersistedScannerProbe {
         probe_id,
+        probe_type_id: 30013,
         owner_char_id: char_id,
         ship_id: 100_000_001,
-        launcher_item_id: 100_000_002,
-        probe_type_id: 30013,
+        launcher_module_id: 100_000_002,
         solar_system_id: sys_id,
         position: [1_000.0, 0.0, 0.0],
         destination: [1_000.0, 0.0, 0.0],
-        scan_range_au: 4.0,
-        state: 1,
+        range_step: 4,
+        scan_range_m: 4.0 * 149_597_870_700.0,
+        base_sensor_strength: 40.0,
+        max_flight_time_s: 3_600.0,
         launched_at_unix: 1_700_000_000,
-        expires_at_unix: 1_900_000_000,
+        state: 1,
+        warp_end_ft: None,
     };
     ctx.active_scanner_probes
         .write()
@@ -1505,7 +1495,7 @@ async fn system_step_hook_and_npc_death_hook_use_live_server_context_839() {
             .or_insert_with(crate::combat::npc_ai::NpcSpawnManager::new);
         mgr.entities.insert(
             npc_ball_id,
-            crate::combat::npc_ai::NpcEntity {
+            crate::combat::npc_ai::NpcCombatEntity {
                 ball_id: npc_ball_id,
                 type_id: 10001,
                 faction_id: 500010,
@@ -1517,7 +1507,7 @@ async fn system_step_hook_and_npc_death_hook_use_live_server_context_839() {
                 optimal_range: 5_000.0,
                 orbit_range: 2_500.0,
                 base_dps: 10.0,
-                damage_vector: [2.5; 4],
+                damage_vector: eve_destiny::DamageVector::new(2.5, 2.5, 2.5, 2.5),
                 last_attack_tick: 0,
                 has_shield_rep: false,
                 has_armor_rep: false,
@@ -1622,9 +1612,8 @@ async fn system_hibernation_zero_idle_tick_work_and_eviction_919_866_869() {
         "removing the last dynamic ball must return empty system to hibernation"
     );
     drop(idle_handle);
-    let evicted = ctx
-        .systems
-        .evict_idle_systems(&ctx.db, ctx.now_unix().saturating_add(600), 300);
+    ctx.clock().advance_secs(600);
+    let evicted = ctx.systems.evict_idle_systems(300).await;
     assert!(
         evicted.contains(&idle_sys),
         "#919/#866: evict_idle_systems must evict hibernated empty system past threshold"
