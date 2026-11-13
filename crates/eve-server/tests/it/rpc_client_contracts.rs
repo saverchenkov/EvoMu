@@ -1432,6 +1432,24 @@ fn restore_session_profile(ctx: &ServerContext, sess: &mut SessionState, profile
     sess.region_id = Some(10_000_002);
     sess.ship_id = Some(SHIP_ID);
     sess.fleet_id = Some(FLEET_ID);
+    eve_server::services::space_destiny::clear_session_change_timer(ctx, CHAR_ID);
+    ctx.active_warps
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&SHIP_ID);
+    ctx.return_warps
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&SHIP_ID);
+    let cooldown_cleared = {
+        let mut cd = ctx
+            .module_reactivation_cooldowns
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let before = cd.len();
+        cd.retain(|&(sid, _, _), _| sid != SHIP_ID);
+        cd.len() != before
+    };
     if ctx
         .cluster_state
         .read()
@@ -1450,7 +1468,21 @@ fn restore_session_profile(ctx: &ServerContext, sess: &mut SessionState, profile
                 || ch.corporation_id != CORP_ID
                 || ch.alliance_id != Some(ALLIANCE_ID)
                 || ch.fleet_id != Some(FLEET_ID)
-        })
+        }) || snap.crimewatch_states.contains_key(&CHAR_ID)
+            || snap.sp6_lifecycle.safe_logoffs.contains_key(&CHAR_ID)
+            || snap.sp6_lifecycle.self_destructs.contains_key(&CHAR_ID)
+            || snap.sp6_lifecycle.disconnected_ships.contains_key(&SHIP_ID)
+            || snap.sp6_lifecycle.abyssal_sessions.contains_key(&CHAR_ID)
+            || snap.sp6_lifecycle.pvp_timers_until.contains_key(&CHAR_ID)
+            || snap.sp6_lifecycle.npc_timers_until.contains_key(&CHAR_ID)
+            || snap
+                .sp6_lifecycle
+                .weapon_timers_until
+                .contains_key(&CHAR_ID)
+            || snap
+                .sp6_lifecycle
+                .criminal_timers_until
+                .contains_key(&CHAR_ID)
     });
     if needs_db_sync {
         ctx.db.with_mut_snapshot(|snap| {
@@ -1463,8 +1495,39 @@ fn restore_session_profile(ctx: &ServerContext, sess: &mut SessionState, profile
                 ch.alliance_id = Some(ALLIANCE_ID);
                 ch.fleet_id = Some(FLEET_ID);
             }
+            snap.crimewatch_states.remove(&CHAR_ID);
+            snap.sp6_lifecycle.safe_logoffs.remove(&CHAR_ID);
+            snap.sp6_lifecycle.self_destructs.remove(&CHAR_ID);
+            snap.sp6_lifecycle.disconnected_ships.remove(&SHIP_ID);
+            snap.sp6_lifecycle.abyssal_sessions.remove(&CHAR_ID);
+            snap.sp6_lifecycle.pvp_timers_until.remove(&CHAR_ID);
+            snap.sp6_lifecycle.npc_timers_until.remove(&CHAR_ID);
+            snap.sp6_lifecycle.weapon_timers_until.remove(&CHAR_ID);
+            snap.sp6_lifecycle.criminal_timers_until.remove(&CHAR_ID);
         });
     }
+    if cooldown_cleared {
+        ctx.persist_server_runtime_to_db();
+    }
+}
+
+fn assert_world_invariants_before_reset(ctx: &ServerContext, rpc_key: &str) {
+    let ratchet =
+        eve_testkit::pre_check::WorldInvariantsRatchet::load_default().unwrap_or_default();
+    let inv_snap = ctx.db.with_snapshot(|s| s.clone());
+    let inv = eve_testkit::pre_check::check_world_invariants(&inv_snap, Some(&ctx.sde));
+    let unexpected_inv: Vec<_> = inv
+        .into_iter()
+        .filter(|v| {
+            !ratchet
+                .allowed_invariant_violations
+                .contains(&v.ratchet_id())
+        })
+        .collect();
+    assert!(
+        unexpected_inv.is_empty(),
+        "Destructive RPC `{rpc_key}` violated world invariants before snapshot reset: {unexpected_inv:#?}"
+    );
 }
 
 fn is_destructive_rpc(service: &str, method: &str) -> bool {
@@ -1726,14 +1789,9 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
                         }
                         shape_violations.extend(outcome.violations);
                         if sig.destructive {
-                            let inv_snap = ctx.db.with_snapshot(|s| s.clone());
-                            let inv = eve_testkit::pre_check::check_world_invariants(&inv_snap, Some(&ctx.sde));
-                            assert!(
-                                inv.is_empty(),
-                                "Destructive RPC `{}` violated world invariants before snapshot reset: {inv:#?}",
-                                sig.rpc_key
-                            );
-                            ctx.db.with_mut_snapshot(|snap| *snap = base_snapshot.clone());
+                            assert_world_invariants_before_reset(&ctx, &sig.rpc_key);
+                            ctx.db
+                                .with_mut_snapshot(|snap| *snap = base_snapshot.clone());
                         }
                         break;
                     }
@@ -2048,8 +2106,40 @@ async fn test_destiny_ballpark_and_slim_item_client_contracts() {
 
 #[tokio::test]
 async fn test_quasar_public_gateway_client_contracts() {
-    use eve_proto::quasar::{EvePublicRequest, GoogleAny, TYPE_GOOGLEAPIS_PREFIX};
+    use eve_proto::quasar::{
+        EvePublicRequest, EvePublicResponse, GoogleAny, WireMessage, TYPE_GOOGLEAPIS_PREFIX,
+    };
     use eve_server::quasar_gateway::PublicGatewayRouter;
+
+    fn extract_created_uuid(rsp: &EvePublicResponse, label: &str) -> [u8; 16] {
+        assert_eq!(
+            rsp.status_code, 200,
+            "Pre-seeding `{label}` failed with {}: {}",
+            rsp.status_code, rsp.status_message
+        );
+        let payload = rsp
+            .payload
+            .as_ref()
+            .unwrap_or_else(|| panic!("`{label}` CreateResponse missing payload"));
+        let outer = WireMessage::decode(&payload.value)
+            .unwrap_or_else(|e| panic!("decode `{label}` CreateResponse: {e}"));
+        let ident_bytes = outer
+            .fields
+            .iter()
+            .find(|f| f.field_number == 1)
+            .and_then(|f| f.value.as_bytes())
+            .unwrap_or_else(|| panic!("`{label}` CreateResponse missing field 1 Identifier"));
+        let inner = WireMessage::decode(ident_bytes)
+            .unwrap_or_else(|e| panic!("decode `{label}` Identifier: {e}"));
+        let uuid_bytes = inner
+            .fields
+            .iter()
+            .find(|f| f.field_number == 1)
+            .and_then(|f| f.value.as_bytes())
+            .unwrap_or_else(|| panic!("`{label}` Identifier missing field 1 uuid"));
+        <[u8; 16]>::try_from(uuid_bytes)
+            .unwrap_or_else(|_| panic!("`{label}` uuid must be 16 bytes, got {}", uuid_bytes.len()))
+    }
 
     common::ensure_quasar_tap_hook_installed();
     let ctx = shared_comprehensive_ctx().await;
@@ -2085,16 +2175,15 @@ async fn test_quasar_public_gateway_client_contracts() {
     );
 
     let now_unix = ctx.now_unix();
-    let mut gateway_violations = Vec::new();
-    let mut tap_violations = Vec::new();
-    let mut ok_200_count = 0usize;
-
-    for req_type in &handler_names {
+    let build_msg = |type_name: &str| {
+        eve_proto::pb::message_with_registry(Arc::clone(&ctx.quasar_gateway.descriptors), type_name)
+    };
+    let send_quasar = |req_type: &str, value: Vec<u8>| {
         let req = EvePublicRequest {
             correlation_uuid: b"contract-test-01".to_vec(),
             payload: Some(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{req_type}"),
-                value: Vec::new(),
+                value,
             }),
             application_instance_uuid: b"contract-app-001".to_vec(),
             ..Default::default()
@@ -2106,10 +2195,212 @@ async fn test_quasar_public_gateway_client_contracts() {
             &ctx.quasar_gateway.descriptors,
             &mut rsp,
         );
+        rsp
+    };
+
+    let skill_type_id = ctx
+        .sde
+        .types
+        .iter()
+        .filter(|(_, info)| info.published && info.category_id == 16)
+        .map(|(&id, _)| id)
+        .min()
+        .unwrap_or(3300);
+    let region_id = ctx.sde.regions.keys().copied().min().unwrap_or(10_000_002);
+    let constellation_id = ctx
+        .sde
+        .constellations
+        .keys()
+        .copied()
+        .min()
+        .unwrap_or(20_000_020);
+    let solar_system_id = ctx
+        .sde
+        .solar_systems
+        .keys()
+        .copied()
+        .min()
+        .unwrap_or(30_000_142);
+
+    // Pre-seed one kept skill plan, two disposable plans (deleted by legacy and character
+    // DeleteRequest sweeps), and two milestones on the kept plan so every `#936` skill-plan
+    // handler executes cleanly regardless of alphabetical sweep order.
+    let keep_plan_uuid = extract_created_uuid(
+        &send_quasar(
+            "eve_public.character.skill.plan.CreateRequest",
+            build_msg("eve_public.character.skill.plan.CreateRequest")
+                .set("skill_plan.name", "Sweep Kept Skill Plan")
+                .set(
+                    "skill_plan.description",
+                    "Kept plan for Quasar contract sweep",
+                )
+                .add_with("skill_plan.skill_requirements", |req| {
+                    req.set("skill_type.sequential", skill_type_id as u64)
+                        .set("level", 3u32)
+                })
+                .must_encode(),
+        ),
+        "eve_public.character.skill.plan.CreateRequest (kept)",
+    );
+    let del_legacy_plan_uuid = extract_created_uuid(
+        &send_quasar(
+            "eve_public.skill.plan.CreateRequest",
+            build_msg("eve_public.skill.plan.CreateRequest")
+                .set("skill_plan.name", "Sweep Disposable Legacy Plan")
+                .set(
+                    "skill_plan.description",
+                    "Disposable plan for legacy DeleteRequest",
+                )
+                .must_encode(),
+        ),
+        "eve_public.skill.plan.CreateRequest (disposable)",
+    );
+    let del_char_plan_uuid = extract_created_uuid(
+        &send_quasar(
+            "eve_public.character.skill.plan.CreateRequest",
+            build_msg("eve_public.character.skill.plan.CreateRequest")
+                .set("skill_plan.name", "Sweep Disposable Char Plan")
+                .set(
+                    "skill_plan.description",
+                    "Disposable plan for character DeleteRequest",
+                )
+                .must_encode(),
+        ),
+        "eve_public.character.skill.plan.CreateRequest (disposable)",
+    );
+    let keep_milestone_uuid = extract_created_uuid(
+        &send_quasar(
+            "eve_public.character.skill.plan.milestone.CreateRequest",
+            build_msg("eve_public.character.skill.plan.milestone.CreateRequest")
+                .set("milestone.skill_plan.uuid", keep_plan_uuid)
+                .set(
+                    "milestone.skill.skill_type.sequential",
+                    skill_type_id as u64,
+                )
+                .set("milestone.skill.level", 3u32)
+                .set("milestone.description", "Sweep Kept Milestone")
+                .must_encode(),
+        ),
+        "eve_public.character.skill.plan.milestone.CreateRequest (kept)",
+    );
+    let del_milestone_uuid = extract_created_uuid(
+        &send_quasar(
+            "eve_public.character.skill.plan.milestone.CreateRequest",
+            build_msg("eve_public.character.skill.plan.milestone.CreateRequest")
+                .set("milestone.skill_plan.uuid", keep_plan_uuid)
+                .set(
+                    "milestone.skill.skill_type.sequential",
+                    skill_type_id as u64,
+                )
+                .set("milestone.skill.level", 2u32)
+                .set("milestone.description", "Sweep Disposable Milestone")
+                .must_encode(),
+        ),
+        "eve_public.character.skill.plan.milestone.CreateRequest (disposable)",
+    );
+    if let Ok(mut q) = ctx.quasar_gateway.pending_notices.write() {
+        q.clear();
+    }
+
+    let mut gateway_violations = Vec::new();
+    let mut tap_violations = Vec::new();
+    let mut tapped_handlers = BTreeSet::new();
+    let mut untapped_handlers: BTreeMap<String, (u32, String)> = BTreeMap::new();
+
+    for req_type in &handler_names {
+        let payload_bytes = match req_type.as_str() {
+            "eve_public.skill.plan.CreateRequest"
+            | "eve_public.character.skill.plan.CreateRequest" => build_msg(req_type)
+                .set("skill_plan.name", "Sweep Ephemeral Plan")
+                .set(
+                    "skill_plan.description",
+                    "Created during Quasar contract sweep",
+                )
+                .add_with("skill_plan.skill_requirements", |req| {
+                    req.set("skill_type.sequential", skill_type_id as u64)
+                        .set("level", 3u32)
+                })
+                .must_encode(),
+            "eve_public.skill.plan.DeleteRequest" => build_msg(req_type)
+                .set("skill_plan.uuid", del_legacy_plan_uuid)
+                .must_encode(),
+            "eve_public.character.skill.plan.DeleteRequest" => build_msg(req_type)
+                .set("skill_plan.uuid", del_char_plan_uuid)
+                .must_encode(),
+            "eve_public.skill.plan.GetRequest"
+            | "eve_public.skill.plan.SetActiveRequest"
+            | "eve_public.character.skill.plan.GetRequest"
+            | "eve_public.character.skill.plan.GetSharedRequest"
+            | "eve_public.character.skill.plan.SetActiveRequest"
+            | "eve_public.character.skill.plan.milestone.GetAllRequest" => build_msg(req_type)
+                .set("skill_plan.uuid", keep_plan_uuid)
+                .must_encode(),
+            "eve_public.character.skill.plan.SetNameRequest" => build_msg(req_type)
+                .set("skill_plan.uuid", keep_plan_uuid)
+                .set("name", "Sweep Renamed Skill Plan")
+                .must_encode(),
+            "eve_public.character.skill.plan.SetDescriptionRequest" => build_msg(req_type)
+                .set("skill_plan.uuid", keep_plan_uuid)
+                .set("description", "Sweep Updated Skill Plan Description")
+                .must_encode(),
+            "eve_public.character.skill.plan.SetSkillRequirementsRequest" => build_msg(req_type)
+                .set("skill_plan.uuid", keep_plan_uuid)
+                .add_with("requirements", |req| {
+                    req.set("skill_type.sequential", skill_type_id as u64)
+                        .set("level", 4u32)
+                })
+                .must_encode(),
+            "eve_public.character.skill.plan.milestone.CreateRequest" => build_msg(req_type)
+                .set("milestone.skill_plan.uuid", keep_plan_uuid)
+                .set(
+                    "milestone.skill.skill_type.sequential",
+                    skill_type_id as u64,
+                )
+                .set("milestone.skill.level", 4u32)
+                .set("milestone.description", "Sweep Ephemeral Milestone")
+                .must_encode(),
+            "eve_public.character.skill.plan.milestone.DeleteRequest" => build_msg(req_type)
+                .set("milestone.uuid", del_milestone_uuid)
+                .must_encode(),
+            "eve_public.character.skill.plan.milestone.SetDescriptionRequest" => {
+                build_msg(req_type)
+                    .set("identifier.uuid", keep_milestone_uuid)
+                    .set("description", "Sweep Updated Milestone Description")
+                    .must_encode()
+            }
+            "eve.skilltype.GetRequest" => build_msg(req_type)
+                .set("type.sequential", skill_type_id as u64)
+                .must_encode(),
+            "eve.skill.character.api.GetLevelRequest" => build_msg(req_type)
+                .set("character.sequential", CHAR_ID as u32)
+                .set("skill.sequential", skill_type_id as u64)
+                .must_encode(),
+            "eve.character.implant.GetActiveImplantsByCharacterRequest" => build_msg(req_type)
+                .set("character.sequential", CHAR_ID as u32)
+                .must_encode(),
+            "eve.constellation.GetRequest" => build_msg(req_type)
+                .set("constellation.sequential", constellation_id as u64)
+                .must_encode(),
+            "eve.region.GetRequest" => build_msg(req_type)
+                .set("region.sequential", region_id as u64)
+                .must_encode(),
+            "eve_public.solarsystem.api.GetRequest" => build_msg(req_type)
+                .set("solar_system.sequential", solar_system_id as u64)
+                .must_encode(),
+            _ => Vec::new(),
+        };
+
+        let rsp = send_quasar(req_type, payload_bytes);
         if rsp.status_code == 500
-            || rsp.status_message.starts_with("Unknown Quasar protobuf message type")
+            || rsp
+                .status_message
+                .starts_with("Unknown Quasar protobuf message type")
             || rsp.status_message.starts_with("Quasar handler for ")
         {
+            untapped_handlers.insert(
+                req_type.clone(),
+                (rsp.status_code, rsp.status_message.clone()),
+            );
             gateway_violations.push(format!(
                 "Quasar request `{req_type}` returned unexpected status {} ({})",
                 rsp.status_code, rsp.status_message
@@ -2117,7 +2408,7 @@ async fn test_quasar_public_gateway_client_contracts() {
             continue;
         }
         if rsp.status_code == 200 {
-            ok_200_count += 1;
+            tapped_handlers.insert(req_type.clone());
             let notice_anys: Vec<GoogleAny> = ctx
                 .quasar_gateway
                 .pending_notices
@@ -2130,24 +2421,90 @@ async fn test_quasar_public_gateway_client_contracts() {
                 &rsp,
                 &notice_anys,
             ));
+        } else {
+            untapped_handlers.insert(
+                req_type.clone(),
+                (rsp.status_code, rsp.status_message.clone()),
+            );
         }
     }
 
     let tap_ratchet = eve_testkit::quasar_tap::QuasarTapRatchet::load_default()
         .expect("load quasar_tap_ratchet.json");
     println!(
-        "=== QUASAR CONTRACT REPORT: registered_handlers={}, ok_200={}, gateway_violations={}, tap_violations={} ===",
+        "=== QUASAR CONTRACT REPORT: registered_handlers={}, tapped_200={}, untapped_non200={}, gateway_violations={}, tap_violations={} ===",
         handler_names.len(),
-        ok_200_count,
+        tapped_handlers.len(),
+        untapped_handlers.len(),
         gateway_violations.len(),
         tap_violations.len()
     );
+    if !untapped_handlers.is_empty() {
+        let untapped_list: Vec<String> = untapped_handlers
+            .iter()
+            .map(|(name, (code, msg))| format!("{name} ({code}: {msg})"))
+            .collect();
+        println!(
+            "=== G-06 UNTAPPED QUASAR HANDLERS ({}): {:?} ===",
+            untapped_list.len(),
+            untapped_list
+        );
+    }
     assert!(
         gateway_violations.is_empty(),
         "Found Quasar Public Gateway contract violations: {gateway_violations:#?}"
     );
     eve_testkit::quasar_tap::assert_quasar_tap_ratchet(&tap_violations, &tap_ratchet)
         .expect("Quasar Public Gateway tap must satisfy ratchet");
+
+    assert_eq!(
+        tapped_handlers.len() + untapped_handlers.len(),
+        handler_names.len(),
+        "G3 sweep accounting must partition all registered Quasar handlers"
+    );
+    const QUASAR_TAPPED_FLOOR: usize = 180;
+    assert!(
+        tapped_handlers.len() >= QUASAR_TAPPED_FLOOR,
+        "Expected >= {QUASAR_TAPPED_FLOOR} Quasar handlers to return 200 and undergo payload tapping, got {} (untapped={:?})",
+        tapped_handlers.len(),
+        untapped_handlers.keys().collect::<Vec<_>>()
+    );
+
+    const SKILL_PLAN_936_ENDPOINTS: &[&str] = &[
+        "eve_public.skill.plan.DeleteRequest",
+        "eve_public.skill.plan.SetActiveRequest",
+        "eve_public.character.skill.plan.SetActiveRequest",
+        "eve_public.character.skill.plan.SetNameRequest",
+        "eve_public.character.skill.plan.SetDescriptionRequest",
+        "eve_public.character.skill.plan.SetSkillRequirementsRequest",
+        "eve_public.character.skill.plan.DeleteRequest",
+        "eve_public.character.skill.plan.milestone.DeleteRequest",
+        "eve_public.character.skill.plan.milestone.SetDescriptionRequest",
+    ];
+    let untapped_936: Vec<(&str, Option<&(u32, String)>)> = SKILL_PLAN_936_ENDPOINTS
+        .iter()
+        .copied()
+        .filter(|ep| !tapped_handlers.contains(*ep))
+        .map(|ep| (ep, untapped_handlers.get(ep)))
+        .collect();
+    assert!(
+        untapped_936.is_empty(),
+        "G-06 regression: `#936` skill-plan endpoints were left untapped in sweep: {untapped_936:#?}"
+    );
+
+    let untapped_skill_plans: Vec<(&String, Option<&(u32, String)>)> = handler_names
+        .iter()
+        .filter(|h| {
+            h.starts_with("eve_public.skill.plan.")
+                || h.starts_with("eve_public.character.skill.plan.")
+        })
+        .filter(|h| !tapped_handlers.contains(*h))
+        .map(|h| (h, untapped_handlers.get(h)))
+        .collect();
+    assert!(
+        untapped_skill_plans.is_empty(),
+        "All registered `eve_public.{{,character.}}skill.plan.*` endpoints must be tapped with 200: {untapped_skill_plans:#?}"
+    );
 
     let tapped_endpoints = PublicGatewayRouter::tapped_quasar_endpoints();
     let untapped_endpoints = PublicGatewayRouter::untapped_quasar_endpoints();
@@ -2176,6 +2533,7 @@ async fn test_quasar_public_gateway_client_contracts() {
         untapped_endpoints.is_empty(),
         "handle_public_request executed without tap hook installed: {untapped_endpoints:#?}"
     );
+    common::assert_teardown_invariants(&ctx);
 }
 
 #[tokio::test]
@@ -2997,6 +3355,8 @@ async fn test_c2_raw_dispatch_ratchet_and_none_vs_wire_harness_diff_count() {
                 }
 
                 if sig.destructive {
+                    assert_world_invariants_before_reset(&ctx_raw, &sig.rpc_key);
+                    assert_world_invariants_before_reset(&ctx_wire, &sig.rpc_key);
                     ctx_raw
                         .db
                         .with_mut_snapshot(|snap| *snap = raw_base_snapshot.clone());
