@@ -1362,4 +1362,18 @@ async fn machonet_get_time_stays_anchored_to_wallclock_across_advance_clock() {
         ctx.now_blueos_filetime_ticks() - t_after_slash >= 3_700 * 10_000_000,
         "server ctx.clock() should advance by +3720s total while machoNet.GetTime stays at wallclock"
     );
+
+    // Rebased virtual clock advances (advance_virtual_clock / advance_secs) still propagate to machoNet.GetTime.
+    ctx.advance_virtual_clock(60);
+    let t_after_rebased = handle(&ctx, &mut sess, "machoNet", "GetTime", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap()
+        .as_i64()
+        .unwrap();
+    assert!(
+        t_after_rebased >= t_after_slash + 60 * 10_000_000
+            && t_after_rebased < t_after_slash + 65 * 10_000_000,
+        "advance_virtual_clock(60) should advance machoNet.GetTime by ~60s (before={t_after_slash}, after={t_after_rebased})"
+    );
 }

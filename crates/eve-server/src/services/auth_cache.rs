@@ -178,12 +178,12 @@ pub async fn handle(
             Some(Ok(PyRep::Dict(service_entries)))
         }
 
-        // CCP `machoNet.py` `GetTime` returns `blue.os.GetWallclockTimeNow()`. Keeping this anchored
-        // to the client sim baseline (not `ctx.clock()`) prevents `/advancetime` and
-        // `timeControl.AdvanceClock` from skewing `ClockSyncDaemon` `timeSyncAdjustFactor` up to
-        // 1.95x and drifting client warp/deceleration ahead of 1.0x server physics (#1031).
+        // CCP `machoNet.py` `GetTime` returns `blue.os.GetWallclockTimeNow()`. Subtracting offsets
+        // added by `advance_secs_without_sim_clock_rebase` (`timeControl.AdvanceClock` /
+        // `/advancetime`) preserves `SetClock`/`advance_virtual_clock` behavior while preventing
+        // `ClockSyncDaemon` `timeSyncAdjustFactor` from drifting up to 1.95x vs 1.0x physics (#1031).
         ("machoNet", "GetTime") => {
-            let ticks = ctx.now_client_sim_filetime_ticks();
+            let ticks = ctx.now_machonet_wallclock_filetime_ticks();
             Some(Ok(PyRep::Integer(ticks)))
         }
 
