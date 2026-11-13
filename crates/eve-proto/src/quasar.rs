@@ -396,26 +396,41 @@ pub fn encode_tag(field_number: u32, wire_type: WireType, out: &mut Vec<u8>) {
     encode_varint(tag, out);
 }
 
+/// Legacy raw protobuf varint field encoder — ratcheted toward `pub(crate)` (`#933`, C-9).
+/// New code MUST use `eve_proto::pb::message(type_name)` instead of raw field numbers.
+#[doc(hidden)]
 pub fn encode_varint_field(field_number: u32, value: u64, out: &mut Vec<u8>) {
     encode_tag(field_number, WireType::Varint, out);
     encode_varint(value, out);
 }
 
+/// Legacy raw protobuf length-delimited bytes field encoder — ratcheted toward `pub(crate)` (`#933`, C-9).
+/// New code MUST use `eve_proto::pb::message(type_name)` instead of raw field numbers.
+#[doc(hidden)]
 pub fn encode_bytes_field(field_number: u32, bytes: &[u8], out: &mut Vec<u8>) {
     encode_tag(field_number, WireType::LengthDelimited, out);
     encode_varint(bytes.len() as u64, out);
     out.extend_from_slice(bytes);
 }
 
+/// Legacy raw protobuf UTF-8 string field encoder — ratcheted toward `pub(crate)` (`#933`, C-9).
+/// New code MUST use `eve_proto::pb::message(type_name)` instead of raw field numbers.
+#[doc(hidden)]
 pub fn encode_string_field(field_number: u32, s: &str, out: &mut Vec<u8>) {
     encode_bytes_field(field_number, s.as_bytes(), out);
 }
 
+/// Legacy raw protobuf 32-bit fixed field encoder — ratcheted toward `pub(crate)` (`#933`, C-9).
+/// New code MUST use `eve_proto::pb::message(type_name)` instead of raw field numbers.
+#[doc(hidden)]
 pub fn encode_fixed32_field(field_number: u32, v: u32, out: &mut Vec<u8>) {
     encode_tag(field_number, WireType::Fixed32, out);
     out.extend_from_slice(&v.to_le_bytes());
 }
 
+/// Legacy raw protobuf 64-bit fixed field encoder — ratcheted toward `pub(crate)` (`#933`, C-9).
+/// New code MUST use `eve_proto::pb::message(type_name)` instead of raw field numbers.
+#[doc(hidden)]
 pub fn encode_fixed64_field(field_number: u32, v: u64, out: &mut Vec<u8>) {
     encode_tag(field_number, WireType::Fixed64, out);
     out.extend_from_slice(&v.to_le_bytes());

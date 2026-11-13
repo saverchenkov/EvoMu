@@ -9,7 +9,9 @@ use crate::services::quasar_progression::new_progression_managers;
 use crate::services::quasar_progression_extra::CommunityTrackState;
 use eve_db::WorldRepository;
 use eve_machonet::{service_roles, SessionState};
-use eve_proto::quasar::{QuasarDescriptorRegistry, WireMessage};
+use eve_proto::quasar::{
+    encode_bytes_field, encode_string_field, QuasarDescriptorRegistry, WireMessage,
+};
 use eve_sde::SdeRegistry;
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
@@ -940,4 +942,85 @@ fn tale_matching_archetypes_and_inactive_tracks() {
     }
     assert!(noticed_urls.iter().any(|u| u.ends_with("eve_public.communitytrack.api.ProgressedNotice")));
     assert!(noticed_urls.iter().any(|u| u.ends_with("eve_public.test.FlushedNotice")));
+}
+
+#[test]
+fn goal_and_tale_notice_builders_decode_strictly_with_descriptors() {
+    let reg = QuasarDescriptorRegistry::open_default().expect("open default descriptor DB");
+    let uuid = [0x33u8; 16];
+
+    for matcher in [
+        "DeliverItem",
+        "DestroyNPCShips",
+        "DamageShips",
+        "MineOre",
+        "DestroyCapsuleerShips",
+        "CaptureFWComplexes",
+        "DefendFWComplexes",
+        "RemoteRepairArmor",
+        "RemoteRepairShield",
+        "ScanSignatures",
+        "ManufactureItems",
+        "SalvageWrecks",
+        "EarnLoyaltyPoints",
+        "Manual",
+    ] {
+        for fid in [None, Some(34)] {
+            let cfg_bytes = encode_goal_contribution_config(matcher, fid);
+            let dec = reg
+                .decode_dynamic("eve_public.goal.ContributionConfiguration", &cfg_bytes)
+                .unwrap_or_else(|e| panic!("decode {matcher}/{fid:?}: {e}"));
+            assert_eq!(
+                reg.encode_dynamic(&dec).unwrap(),
+                cfg_bytes,
+                "canonical roundtrip mismatch for {matcher}/{fid:?}"
+            );
+        }
+    }
+
+    let cfg = encode_goal_contribution_config("DeliverItem", Some(34));
+    let attrs = GoalAttributesView {
+        created_unix: 1_760_000_000,
+        creator_id: 90_000_001,
+        corp_id: Some(98_000_001),
+        name: "Test Goal",
+        description: "Desc",
+        desired: 100,
+        current: 25,
+        state: None,
+        contribution_config_pb: &cfg,
+    };
+    let created = goal_created(&uuid, &attrs);
+    let closed = goal_closed(&uuid, 90_000_001);
+    let deleted = goal_deleted(&uuid);
+    let completed = goal_completed(&uuid);
+    let progressed = goal_progressed(&uuid, 50);
+    let renamed = goal_name_changed(&uuid, "New Name");
+    let redescribed = goal_description_changed(&uuid, "New Desc");
+    let contributed = goal_contributed(&uuid, 90_000_001, 25, 50, 1_760_000_100);
+    let started = tale_lifecycle(true, 10, 20, 30_000_142);
+    let stopped = tale_lifecycle(false, 10, 20, 30_000_142);
+
+    for notice in [
+        created,
+        closed,
+        deleted,
+        completed,
+        progressed,
+        renamed,
+        redescribed,
+        contributed,
+        started,
+        stopped,
+    ] {
+        let dec = reg
+            .decode_dynamic(&notice.type_url, &notice.value)
+            .unwrap_or_else(|e| panic!("decode {}: {e}", notice.type_url));
+        assert_eq!(
+            reg.encode_dynamic(&dec).unwrap(),
+            notice.value,
+            "canonical roundtrip mismatch for {}",
+            notice.type_url
+        );
+    }
 }

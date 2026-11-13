@@ -502,6 +502,93 @@ fn due_payment_schedules_renew_with_quick_pay_or_cancel_without_token() {
     });
 }
 
+#[test]
+fn payment_store_types_builders_decode_strictly_with_descriptors() {
+    let reg = eve_proto::quasar::QuasarDescriptorRegistry::open_default()
+        .expect("open default descriptor DB");
+
+    let bal = encode_plex_balance_changed_notice(10, 42, -5, 95, "Spend", 1_760_000_000);
+    let dec = reg
+        .decode_dynamic(&bal.type_url, &bal.value)
+        .expect("decode BalanceChangedNotice");
+    assert_eq!(reg.encode_dynamic(&dec).unwrap(), bal.value);
+
+    let router = new_router();
+    let gm = make_sess(Some(10), Some(90_000_010), service_roles::ROLE_GM_DEFAULT);
+    let player = make_sess(Some(10), Some(90_000_010), service_roles::ROLE_PLAYER_DEFAULT);
+    let now = 1_760_000_000;
+
+    publish_schedule_set_notice(&router.pending_notices, 10, 5, 1);
+    publish_quick_pay_added_notice(&router.pending_notices, 10, 88);
+    {
+        let pending = router.pending_notices.read().unwrap();
+        for (_, notice) in pending.iter() {
+            let d = reg
+                .decode_dynamic(&notice.type_url, &notice.value)
+                .unwrap_or_else(|e| panic!("decode {}: {e}", notice.type_url));
+            assert_eq!(reg.encode_dynamic(&d).unwrap(), notice.value);
+        }
+    }
+
+    // ListResponse (targeted offers)
+    let offers = vec![
+        StoreOffer {
+            id: 1,
+            name: "T1".into(),
+            description: String::new(),
+            category_id: 1,
+            price_plex: 10,
+            product_ids: vec![],
+            targeted: true,
+            price_cents: None,
+            currency: None,
+        },
+        StoreOffer {
+            id: 2,
+            name: "T2".into(),
+            description: String::new(),
+            category_id: 1,
+            price_plex: 20,
+            product_ids: vec![],
+            targeted: true,
+            price_cents: None,
+            currency: None,
+        },
+    ];
+    let mut page = DynamicQuasarMessage::new("Page");
+    page.set(1, DynamicValue::Uint32(1));
+    page.set(2, DynamicValue::String("0".into()));
+    let mut list_req = DynamicQuasarMessage::new("List");
+    list_req.set(1, DynamicValue::Message(Box::new(page)));
+    let list_bytes = encode_targeted_offer_list_response(&offers, 10, &list_req);
+    let list_dec = reg
+        .decode_dynamic("eve_public.store.targetaudience.offer.api.ListResponse", &list_bytes)
+        .expect("decode ListResponse");
+    assert_eq!(reg.encode_dynamic(&list_dec).unwrap(), list_bytes);
+
+    // GetAllByTagResponse & assetholding operation GetResponse
+    let tag_req = eve_proto::pb::message("eve_public.store.offer.api.GetAllByTagRequest")
+        .set("tag", "FLASH")
+        .must_encode();
+    let tag_rsp = call(&router, &player, "eve_public.store.offer.api.GetAllByTagRequest", tag_req, now);
+    assert_eq!(tag_rsp.status_code, STATUS_OK);
+    let tag_any = tag_rsp.payload.unwrap();
+    reg.decode_dynamic(&tag_any.type_url, &tag_any.value)
+        .expect("decode GetAllByTagResponse");
+
+    router.db.with_mut_snapshot(|snap| {
+        record_plex_transaction(snap, 7701, 10, -25, 75, "TestOp", now);
+    });
+    let op_req = eve_proto::pb::message("eve.plex.vault.assetholding.operation.api.GetRequest")
+        .set("operation.uuid", b"7701".as_slice())
+        .must_encode();
+    let op_rsp = call(&router, &gm, "eve.plex.vault.assetholding.operation.api.GetRequest", op_req, now);
+    assert_eq!(op_rsp.status_code, STATUS_OK);
+    let op_any = op_rsp.payload.unwrap();
+    reg.decode_dynamic(&op_any.type_url, &op_any.value)
+        .expect("decode assetholding operation GetResponse");
+}
+
 #[cfg(test)]
 #[path = "quasar_payment_store_types_extra_unit_tests.rs"]
 mod quasar_payment_store_types_extra_unit_tests;

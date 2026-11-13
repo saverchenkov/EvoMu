@@ -658,7 +658,7 @@ impl QuasarDescriptorRegistry {
         Ok(msg)
     }
 
-    fn encode_dynamic_field(
+    pub(crate) fn encode_dynamic_field(
         &self,
         field_num: u32,
         ftype: Option<FieldType>,
