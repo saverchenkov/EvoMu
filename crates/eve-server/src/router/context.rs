@@ -1228,19 +1228,35 @@ impl ServerContext {
         (type_id, sys_opt, cur_sys_sim_s)
     }
 
-    fn remaining_cooldown_secs(
+    pub(crate) fn remaining_cooldown_secs(
         entry: &ModuleCooldownEntry,
         now_unix_f64: f64,
         sys_opt: Option<u32>,
         cur_sys_sim_s: f64,
     ) -> f64 {
+        // If `recorded_unix_f64` sits in the future relative to `now_unix_f64` (e.g. persisted from
+        // an earlier `/advancetime` session before server restart reset the virtual clock), treat
+        // the stale entry as expired rather than freezing activation until wall clock catches up (#1036).
+        if !entry.delay_s.is_finite()
+            || !entry.recorded_unix_f64.is_finite()
+            || !now_unix_f64.is_finite()
+            || entry.delay_s <= 0.0
+            || now_unix_f64 + 1e-6 < entry.recorded_unix_f64
+        {
+            return 0.0;
+        }
         let wall_elapsed = (now_unix_f64 - entry.recorded_unix_f64).max(0.0);
-        let sim_elapsed = if entry.solar_system_id.is_some() && entry.solar_system_id == sys_opt {
+        let sim_elapsed = if entry.solar_system_id.is_some()
+            && entry.solar_system_id == sys_opt
+            && cur_sys_sim_s.is_finite()
+            && entry.recorded_sys_sim_s.is_finite()
+            && cur_sys_sim_s >= entry.recorded_sys_sim_s
+        {
             (cur_sys_sim_s - entry.recorded_sys_sim_s).max(0.0)
         } else {
             0.0
         };
-        entry.delay_s - wall_elapsed.max(sim_elapsed)
+        (entry.delay_s - wall_elapsed.max(sim_elapsed)).max(0.0)
     }
 
     /// Checks if a module on a ship is currently under reactivation delay (`feat:dogma.reactivation-delay`, `DG-4`).
@@ -1260,7 +1276,7 @@ impl ServerContext {
 
     /// Records module reactivation delay until `now + delay_s` (`feat:dogma.reactivation-delay`, `DG-4`).
     pub fn record_module_reactivation_delay(&self, ship_id: i64, module_id: i64, delay_s: f64) {
-        if delay_s <= 0.0 {
+        if !delay_s.is_finite() || delay_s <= 0.0 {
             return;
         }
         let now = self.now_unix_secs() as f64;
