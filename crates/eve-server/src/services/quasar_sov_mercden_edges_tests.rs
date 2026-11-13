@@ -12,9 +12,10 @@ use eve_db::{
     TrainedSkillRecord, UpwellStructureRecord, WorldRepository, WorldStateSnapshot,
 };
 use eve_machonet::{service_roles, SessionState};
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, DynamicQuasarMessage, EvePublicRequest,
-    EvePublicResponse, GoogleAny, QuasarDescriptorRegistry, WireMessage, TYPE_GOOGLEAPIS_PREFIX,
+    DynamicQuasarMessage, EvePublicRequest, EvePublicResponse, GoogleAny,
+    QuasarDescriptorRegistry, WireMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
@@ -67,12 +68,6 @@ fn call(
         false,
         now,
     )
-}
-
-fn encode_seq(field: u32, id: u64, out: &mut Vec<u8>) {
-    let mut sub = Vec::new();
-    encode_varint_field(1, id, &mut sub);
-    encode_bytes_field(field, &sub, out);
 }
 
 fn sample_den(den_id: i64, owner_char_id: i64) -> PersistedMercenaryDen {
@@ -325,32 +320,34 @@ fn admin_modify_development_and_anarchy_guards_and_notices() {
             .insert(den_id, sample_den(den_id, 2110_001));
     });
 
-    for ep in [
-        "eve_public.sovereignty.mercenaryden.api.admin.ModifyDevelopmentLevelRequest",
-        "eve_public.sovereignty.mercenaryden.api.admin.ModifyAnarchyLevelRequest",
+    for (ep, lvl_field) in [
+        ("eve_public.sovereignty.mercenaryden.api.admin.ModifyDevelopmentLevelRequest", "development_level"),
+        ("eve_public.sovereignty.mercenaryden.api.admin.ModifyAnarchyLevelRequest", "anarchy_level"),
     ] {
         // Non-admin -> 403
         assert_eq!(call(&router, &player, ep, Vec::new(), 1_700_000_000).status_code, STATUS_FORBIDDEN);
         // Missing den_id -> 400
-        let mut only_lvl = Vec::new();
-        encode_varint_field(2, 50, &mut only_lvl);
+        let only_lvl = pb::message(ep).set(lvl_field, 50u32).must_encode();
         assert_eq!(call(&router, &admin, ep, only_lvl, 1_700_000_000).status_code, STATUS_BAD_REQUEST);
         // Level > 100 -> 400
-        let mut over = Vec::new();
-        encode_seq(1, den_id as u64, &mut over);
-        encode_varint_field(2, 101, &mut over);
+        let over = pb::message(ep)
+            .set("mercenary_den.sequential", den_id as u64)
+            .set(lvl_field, 101u32)
+            .must_encode();
         assert_eq!(call(&router, &admin, ep, over, 1_700_000_000).status_code, STATUS_BAD_REQUEST);
         // Unknown den -> 404
-        let mut missing = Vec::new();
-        encode_seq(1, 999_888, &mut missing);
-        encode_varint_field(2, 50, &mut missing);
+        let missing = pb::message(ep)
+            .set("mercenary_den.sequential", 999_888u64)
+            .set(lvl_field, 50u32)
+            .must_encode();
         assert_eq!(call(&router, &admin, ep, missing, 1_700_000_000).status_code, STATUS_NOT_FOUND);
 
         // Valid -> 200 + EvolutionStateChangedNotice & DefinitionsUpdatedNotice
         router.routing_cache.write().unwrap().entries.clear();
-        let mut ok_req = Vec::new();
-        encode_seq(1, den_id as u64, &mut ok_req);
-        encode_varint_field(2, 85, &mut ok_req);
+        let ok_req = pb::message(ep)
+            .set("mercenary_den.sequential", den_id as u64)
+            .set(lvl_field, 85u32)
+            .must_encode();
         assert_eq!(call(&router, &admin, ep, ok_req, 1_700_000_000).status_code, STATUS_OK);
         let urls: Vec<String> = router
             .routing_cache
@@ -474,8 +471,9 @@ fn player_endpoints_auth_skill_clamp_skyhook_field6_and_activity_start_edges() {
     assert_eq!(cur_max, 5);
 
     // GetAsOwner emits field 6 when skyhook_id is present in snap.structures
-    let mut owner_req = Vec::new();
-    encode_seq(1, den_id as u64, &mut owner_req);
+    let owner_req = pb::message("eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest")
+        .set("id.sequential", den_id as u64)
+        .must_encode();
     let owner_resp = call(&router, &p, "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest", owner_req, 1_700_000_000);
     assert_eq!(owner_resp.status_code, STATUS_OK);
     let owner_wire = WireMessage::decode(&owner_resp.payload.unwrap().value).unwrap();
@@ -485,20 +483,18 @@ fn player_endpoints_auth_skill_clamp_skyhook_field6_and_activity_start_edges() {
     );
 
     // StartRequest unknown uuid -> 404
-    let mut unk_id = Vec::new();
-    encode_bytes_field(1, &vec![0x99; 16], &mut unk_id);
-    let mut unk_start = Vec::new();
-    encode_bytes_field(1, &unk_id, &mut unk_start);
+    let unk_start = pb::message("eve_public.sovereignty.mercenaryden.activity.api.StartRequest")
+        .set("id.uuid", vec![0x99u8; 16])
+        .must_encode();
     assert_eq!(
         call(&router, &p, "eve_public.sovereignty.mercenaryden.activity.api.StartRequest", unk_start, 1_700_000_000).status_code,
         STATUS_NOT_FOUND
     );
 
     // StartRequest already started -> 409
-    let mut dup_id = Vec::new();
-    encode_bytes_field(1, &act_uuid, &mut dup_id);
-    let mut dup_start = Vec::new();
-    encode_bytes_field(1, &dup_id, &mut dup_start);
+    let dup_start = pb::message("eve_public.sovereignty.mercenaryden.activity.api.StartRequest")
+        .set("id.uuid", act_uuid)
+        .must_encode();
     assert_eq!(
         call(&router, &p, "eve_public.sovereignty.mercenaryden.activity.api.StartRequest", dup_start, 1_700_000_000).status_code,
         STATUS_CONFLICT

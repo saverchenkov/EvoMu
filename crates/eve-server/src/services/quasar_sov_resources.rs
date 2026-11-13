@@ -8,27 +8,16 @@ use crate::quasar_gateway::{
     NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_NOT_FOUND, STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
+use eve_proto::pb::{self, ProtoBuilder};
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, DynamicQuasarMessage,
-    DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
+    DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleDuration, GoogleTimestamp,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
 
 /// Longest skyhook theft vulnerability window an owner may schedule.
 const MAX_THEFT_WINDOW_SECS: u64 = 86_400;
-
-fn encode_id_field(field_num: u32, id: u64, out: &mut Vec<u8>) {
-    let mut buf = Vec::new();
-    encode_varint_field(1, id, &mut buf);
-    encode_bytes_field(field_num, &buf, out);
-}
-
-fn encode_timestamp_field(field_num: u32, seconds: u64, out: &mut Vec<u8>) {
-    let mut buf = Vec::new();
-    encode_varint_field(1, seconds, &mut buf);
-    encode_bytes_field(field_num, &buf, out);
-}
 
 /// Reads `google.protobuf.Timestamp.seconds` from the sub-message at `field`.
 fn timestamp_secs(msg: &DynamicQuasarMessage, field: u32) -> Option<u64> {
@@ -42,30 +31,45 @@ fn timestamp_secs(msg: &DynamicQuasarMessage, field: u32) -> Option<u64> {
     }
 }
 
-fn encode_planet_definitions(out: &mut Vec<u8>) {
+fn add_planet_definitions(mut b: ProtoBuilder) -> ProtoBuilder {
     // V24.01 Equinox planetary Power/Workforce & Colony Reagent definitions.
     for &(type_id, _name, power, workforce) in PLANET_RESOURCE_TABLE.iter() {
-        let mut def_buf = Vec::new();
-        encode_id_field(1, u64::from(type_id), &mut def_buf);
-        encode_varint_field(2, power, &mut def_buf);
-        encode_varint_field(3, workforce, &mut def_buf);
-        if let Some(reagent_type) = super::sov_gameplay::planet_reagent_type(type_id) {
-            let hourly_reagent =
-                super::quasar_sov_skyhook::planet_type_base_hourly_reagent_yield(type_id);
-            let mut r_def = Vec::new();
-            encode_id_field(1, u64::from(reagent_type), &mut r_def);
-            let mut amt = Vec::new();
-            encode_varint_field(1, hourly_reagent, &mut amt);
-            encode_varint_field(2, 3_600, &mut amt);
-            encode_varint_field(3, hourly_reagent, &mut amt);
-            encode_varint_field(4, 25_000, &mut amt);
-            encode_varint_field(5, 25_000, &mut amt);
-            encode_bytes_field(2, &amt, &mut r_def);
-            encode_id_field(3, u64::from(reagent_type), &mut r_def);
-            encode_bytes_field(4, &r_def, &mut def_buf);
-        }
-        encode_bytes_field(1, &def_buf, out);
+        b = b.add_with("definitions", |def| {
+            let def = def
+                .set("planet.sequential", type_id)
+                .set("power", power)
+                .set("workforce", workforce);
+            if let Some(reagent_type) = super::sov_gameplay::planet_reagent_type(type_id) {
+                let hourly_reagent =
+                    super::quasar_sov_skyhook::planet_type_base_hourly_reagent_yield(type_id);
+                def.add_with("reagent_definitions", |r_def| {
+                    r_def
+                        .set("type.sequential", reagent_type)
+                        .set_with("definition", |amt| {
+                            amt.set("amount_per_cycle", hourly_reagent)
+                                .set("cycle_period", GoogleDuration { seconds: 3_600, nanos: 0 })
+                                .set("secured_percentage", hourly_reagent)
+                                .set("secured_capacity", 25_000u32)
+                                .set("unsecured_capacity", 25_000u32)
+                        })
+                        .set("reagent_type.sequential", reagent_type)
+                })
+            } else {
+                def
+            }
+        });
     }
+    b
+}
+
+#[cfg(test)]
+fn encode_planet_definitions(out: &mut Vec<u8>) {
+    out.extend(
+        add_planet_definitions(pb::message(
+            "eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionResponse",
+        ))
+        .must_encode(),
+    );
 }
 
 /// Registers planetary/stellar resources and skyhook admin handlers on the gateway router.
@@ -81,7 +85,6 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.sovereignty.resource.planet.api.GetAllDefinitionsRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let mut out = Vec::new();
                 let no_known = dyn_msg.get(2).is_some_and(|v| matches!(v, DynamicValue::Bool(true)));
                 let known_matches = !no_known
                     && match dyn_msg.get(1) {
@@ -107,19 +110,17 @@ pub fn register_handlers(
                         }
                         _ => false,
                     };
+                let mut resp = pb::message(
+                    "eve_public.sovereignty.resource.planet.api.GetAllDefinitionsResponse",
+                );
                 if !known_matches {
-                    encode_planet_definitions(&mut out);
+                    resp = add_planet_definitions(resp);
                 }
-                let mut ver_buf = Vec::new();
-                encode_varint_field(1, 1, &mut ver_buf);
-                encode_varint_field(2, 0, &mut ver_buf);
-                encode_varint_field(3, 0, &mut ver_buf);
-                encode_bytes_field(2, &ver_buf, &mut out);
-
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.resource.planet.api.GetAllDefinitionsResponse"),
-                    value: out,
-                })
+                Ok(resp
+                    .set("version.major", 1u32)
+                    .set("version.minor", 0u32)
+                    .set("version.patch", 0u32)
+                    .must_to_any())
             }),
         );
     }
@@ -146,13 +147,10 @@ pub fn register_handlers(
                         ));
                     }
                 }
-                let mut out = Vec::new();
-                encode_planet_definitions(&mut out);
-
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionResponse"),
-                    value: out,
-                })
+                Ok(add_planet_definitions(pb::message(
+                    "eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionResponse",
+                ))
+                .must_to_any())
             }),
         );
     }
@@ -170,47 +168,58 @@ pub fn register_handlers(
                 let sys_id = db_cfg
                     .with_snapshot(|s| s.characters.get(&cid).map(|c| c.solar_system_id))
                     .ok_or((STATUS_NOT_FOUND, format!("Character {cid} not found")))?;
-                let mut out = Vec::new();
+                let mut resp = pb::message(
+                    "eve_public.sovereignty.resource.planet.api.GetAllConfigurationsResponse",
+                );
                 for cel in sde_cfg.celestials_in_system(sys_id as u32) {
                     if cel.group_id == 7 {
                         let (power, workforce) = super::quasar_sov_hub::planet_yield(cel.type_id);
-                        let mut cfg_buf = Vec::new();
-                        encode_id_field(1, cel.celestial_id as u64, &mut cfg_buf);
-                        encode_varint_field(2, power, &mut cfg_buf);
-                        encode_varint_field(3, workforce, &mut cfg_buf);
-                        if let Some(reagent_type) = super::sov_gameplay::planet_reagent_type(cel.type_id) {
-                            // SDE radius- and security-scaled planetary Colony Reagent harvest rate.
-                            let hourly_reagent =
-                                super::quasar_sov_skyhook::planet_hourly_reagent_yield(
-                                    &sde_cfg,
-                                    Some(cel.celestial_id),
-                                    Some(sys_id as u32),
-                                    reagent_type,
-                                );
-                            let mut r_cfg = Vec::new();
-                            encode_id_field(1, u64::from(reagent_type), &mut r_cfg);
-                            let mut harvest = Vec::new();
-                            encode_varint_field(1, hourly_reagent, &mut harvest);
-                            encode_varint_field(2, 3_600, &mut harvest);
-                            encode_varint_field(3, 0, &mut harvest);
-                            encode_varint_field(4, 25_000, &mut harvest);
-                            encode_bytes_field(2, &harvest, &mut r_cfg);
-                            let mut maturation = Vec::new();
-                            encode_varint_field(1, 100, &mut maturation);
-                            encode_varint_field(2, 86_400, &mut maturation);
-                            encode_varint_field(3, 0, &mut maturation);
-                            encode_varint_field(4, 25_000, &mut maturation);
-                            encode_bytes_field(3, &maturation, &mut r_cfg);
-                            encode_bytes_field(4, &r_cfg, &mut cfg_buf);
-                        }
-                        encode_bytes_field(1, &cfg_buf, &mut out);
+                        resp = resp.add_with("configurations", |cfg| {
+                            let cfg = cfg
+                                .set("planet.sequential", cel.celestial_id as u64)
+                                .set("power", power)
+                                .set("workforce", workforce);
+                            if let Some(reagent_type) =
+                                super::sov_gameplay::planet_reagent_type(cel.type_id)
+                            {
+                                // SDE radius- and security-scaled planetary Colony Reagent harvest rate.
+                                let hourly_reagent =
+                                    super::quasar_sov_skyhook::planet_hourly_reagent_yield(
+                                        &sde_cfg,
+                                        Some(cel.celestial_id),
+                                        Some(sys_id as u32),
+                                        reagent_type,
+                                    );
+                                cfg.add_with("reagent_configurations", |r_cfg| {
+                                    r_cfg
+                                        .set("type.sequential", reagent_type)
+                                        .set_with("harvest", |h| {
+                                            h.set("amount_per_cycle", hourly_reagent)
+                                                .set(
+                                                    "cycle_period",
+                                                    GoogleDuration { seconds: 3_600, nanos: 0 },
+                                                )
+                                                .set("min_stock", 0u64)
+                                                .set("max_stock", 25_000u64)
+                                        })
+                                        .set_with("maturation", |m| {
+                                            m.set("percentage", 100u32)
+                                                .set(
+                                                    "cycle_period",
+                                                    GoogleDuration { seconds: 86_400, nanos: 0 },
+                                                )
+                                                .set("min", 0u64)
+                                                .set("max", 25_000u64)
+                                        })
+                                })
+                            } else {
+                                cfg
+                            }
+                        });
                     }
                 }
 
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.resource.planet.api.GetAllConfigurationsResponse"),
-                    value: out,
-                })
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -228,15 +237,16 @@ pub fn register_handlers(
                     .ok_or((STATUS_UNAUTHORIZED, "Authenticated character required".to_string()))?;
                 let out = star_configs
                     .get_or_init(|| {
-                        let mut buf = Vec::new();
+                        let mut resp = pb::message(
+                            "eve_public.sovereignty.resource.star.api.GetAllConfigurationsResponse",
+                        );
                         for (star_id, type_id) in sde_star.all_stars() {
                             let power = star_power(&sde_star, type_id);
-                            let mut cfg_buf = Vec::new();
-                            encode_id_field(1, star_id as u64, &mut cfg_buf);
-                            encode_varint_field(2, power, &mut cfg_buf);
-                            encode_bytes_field(1, &cfg_buf, &mut buf);
+                            resp = resp.add_with("configurations", |cfg| {
+                                cfg.set("star.sequential", star_id as u64).set("power", power)
+                            });
                         }
-                        buf
+                        resp.must_encode()
                     })
                     .clone();
 
@@ -292,33 +302,29 @@ pub fn register_handlers(
                 })?;
 
                 // Emit ReagentSimulationsNotice
-                let mut sim_payload = Vec::new();
-                encode_id_field(1, skyhook_id as u64, &mut sim_payload);
-                let mut sim_item = Vec::new();
-                encode_id_field(1, reag_type as u64, &mut sim_item);
-                encode_varint_field(2, reag_qty, &mut sim_item);
-                encode_bytes_field(3, &sim_item, &mut sim_payload);
+                let notice = pb::message(
+                    "eve_public.sovereignty.skyhook.api.ReagentSimulationsNotice",
+                )
+                .set("skyhook.sequential", skyhook_id as u64)
+                .add_with("simulations", |s| {
+                    s.set("reagent.sequential", reag_type)
+                        .set("simulation.secured_stock", reag_qty as u32)
+                })
+                .must_to_any();
 
                 pending.write().unwrap_or_else(|e| e.into_inner()).push((
                     NoticeScope::SolarSystem(sys_id),
-                    GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.skyhook.api.ReagentSimulationsNotice"),
-                        value: sim_payload,
-                    },
+                    notice,
                 ));
 
-                let mut out = Vec::new();
-                let mut resp_sim = Vec::new();
-                encode_id_field(1, reag_type as u64, &mut resp_sim);
-                let mut sim_body = Vec::new();
-                encode_varint_field(1, reag_qty, &mut sim_body);
-                encode_bytes_field(2, &sim_body, &mut resp_sim);
-                encode_bytes_field(1, &resp_sim, &mut out);
-
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.skyhook.api.admin.ModifyReagentsResponse"),
-                    value: out,
+                Ok(pb::message(
+                    "eve_public.sovereignty.skyhook.api.admin.ModifyReagentsResponse",
+                )
+                .add_with("reagent_simulations", |s| {
+                    s.set("reagent.sequential", reag_type)
+                        .set("simulation.secured_stock", reag_qty as u32)
                 })
+                .must_to_any())
             }),
         );
     }
@@ -351,23 +357,23 @@ pub fn register_handlers(
                 })?;
 
                 // Emit TheftVulnerabilityWindowScheduledNotice
-                let mut sched_payload = Vec::new();
-                encode_id_field(1, skyhook_id as u64, &mut sched_payload);
-                encode_timestamp_field(2, start, &mut sched_payload);
-                encode_timestamp_field(3, end, &mut sched_payload);
+                let notice = pb::message(
+                    "eve_public.sovereignty.skyhook.api.TheftVulnerabilityWindowScheduledNotice",
+                )
+                .set("skyhook.sequential", skyhook_id as u64)
+                .set("start_time", GoogleTimestamp::from_unix(start as i64, 0))
+                .set("end_time", GoogleTimestamp::from_unix(end as i64, 0))
+                .must_to_any();
 
                 pending.write().unwrap_or_else(|e| e.into_inner()).push((
                     NoticeScope::SolarSystem(sys_id),
-                    GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.skyhook.api.TheftVulnerabilityWindowScheduledNotice"),
-                        value: sched_payload,
-                    },
+                    notice,
                 ));
 
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.skyhook.api.admin.ScheduleTheftVulnerabilityWindowResponse"),
-                    value: Vec::new(),
-                })
+                Ok(pb::message(
+                    "eve_public.sovereignty.skyhook.api.admin.ScheduleTheftVulnerabilityWindowResponse",
+                )
+                .must_to_any())
             }),
         );
     }

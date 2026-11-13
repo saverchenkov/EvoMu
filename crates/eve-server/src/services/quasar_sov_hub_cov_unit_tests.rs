@@ -505,7 +505,9 @@ fn fuel_add_validation_starvation_simulation_and_uninstall_overload_recovery_not
         HubView {
             sys: sys_id,
             resources: HubResources::default(),
-            state: vec![1],
+            state: pb::message("eve_public.sovereignty.hub.workforce.State")
+                .set("inactive", true)
+                .must_encode(),
         },
     )]
     .into_iter()
@@ -515,7 +517,9 @@ fn fuel_add_validation_starvation_simulation_and_uninstall_overload_recovery_not
         HubView {
             sys: sys_id,
             resources: HubResources::default(),
-            state: vec![2],
+            state: pb::message("eve_public.sovereignty.hub.workforce.State")
+                .set_with("transit", |t| t)
+                .must_encode(),
         },
     )]
     .into_iter()

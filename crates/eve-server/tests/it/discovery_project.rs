@@ -974,12 +974,12 @@ async fn test_quasar_sovereignty_resource_planet_requests() {
                     reagent_type_id as u32,
                 ))
             );
-            assert_eq!(varint(&harvest, 2), Some(3_600)); // hourly cycle
+            assert_eq!(varint(&field_msg(&harvest, 2).expect("harvest cycle_period Duration"), 1), Some(3_600)); // hourly cycle
             assert_eq!(varint(&harvest, 4), Some(25_000)); // max storage capacity
 
             let maturation = field_msg(&r_cfg, 3).expect("MaturationConfiguration");
             assert_eq!(varint(&maturation, 1), Some(100));
-            assert_eq!(varint(&maturation, 2), Some(86_400)); // daily cycle
+            assert_eq!(varint(&field_msg(&maturation, 2).expect("maturation cycle_period Duration"), 1), Some(86_400)); // daily cycle
             assert_eq!(varint(&maturation, 4), Some(25_000));
         }
     }

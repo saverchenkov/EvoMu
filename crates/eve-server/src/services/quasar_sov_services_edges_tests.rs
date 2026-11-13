@@ -11,9 +11,10 @@ use eve_db::{
     FwSystemOccupationRecord, PersistedInsurgencyCampaign, UpwellStructureRecord, WorldRepository,
 };
 use eve_machonet::{service_roles, SessionState};
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, EvePublicRequest,
-    EvePublicResponse, GoogleAny, QuasarDescriptorRegistry, WireMessage, TYPE_GOOGLEAPIS_PREFIX,
+    EvePublicRequest, EvePublicResponse, GoogleAny, QuasarDescriptorRegistry, WireField,
+    WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
@@ -67,12 +68,6 @@ fn call(
         false,
         now,
     )
-}
-
-fn encode_seq(field: u32, id: u64, out: &mut Vec<u8>) {
-    let mut sub = Vec::new();
-    encode_varint_field(1, id, &mut sub);
-    encode_bytes_field(field, &sub, out);
 }
 
 fn encode_sint64_varint(v: i64) -> u64 {
@@ -177,48 +172,53 @@ fn skyhook_activate_and_deactivate_authorization_and_state_guards() {
         // Missing id -> 400
         assert_eq!(call(&router, &owner_s, ep, Vec::new(), now).status_code, STATUS_BAD_REQUEST);
         // Unknown structure -> 404
-        let mut unk = Vec::new();
-        encode_seq(1, 9_999_999, &mut unk);
+        let unk = pb::message(ep).set("skyhook.sequential", 9_999_999u64).must_encode();
         assert_eq!(call(&router, &owner_s, ep, unk, now).status_code, STATUS_NOT_FOUND);
         // Wrong type_id -> 404
-        let mut wrong_type = Vec::new();
-        encode_seq(1, non_skyhook_id as u64, &mut wrong_type);
+        let wrong_type = pb::message(ep)
+            .set("skyhook.sequential", non_skyhook_id as u64)
+            .must_encode();
         assert_eq!(call(&router, &owner_s, ep, wrong_type, now).status_code, STATUS_NOT_FOUND);
         // Foreign corp -> 403
-        let mut sky_req = Vec::new();
-        encode_seq(1, skyhook_id as u64, &mut sky_req);
+        let sky_req = pb::message(ep)
+            .set("skyhook.sequential", skyhook_id as u64)
+            .must_encode();
         assert_eq!(call(&router, &foreign_s, ep, sky_req, now).status_code, STATUS_FORBIDDEN);
     }
 
-    let mut sky_req = Vec::new();
-    encode_seq(1, skyhook_id as u64, &mut sky_req);
+    let act_req = pb::message("eve_public.sovereignty.skyhook.api.ActivateRequest")
+        .set("skyhook.sequential", skyhook_id as u64)
+        .must_encode();
+    let deact_req = pb::message("eve_public.sovereignty.skyhook.api.DeactivateRequest")
+        .set("skyhook.sequential", skyhook_id as u64)
+        .must_encode();
     // Activate when default-active -> 400
     assert_eq!(
-        call(&router, &owner_s, "eve_public.sovereignty.skyhook.api.ActivateRequest", sky_req.clone(), now)
+        call(&router, &owner_s, "eve_public.sovereignty.skyhook.api.ActivateRequest", act_req.clone(), now)
             .status_code,
         STATUS_BAD_REQUEST
     );
     // Deactivate even without skyhook_planets entry -> 200
     assert_eq!(
-        call(&router, &owner_s, "eve_public.sovereignty.skyhook.api.DeactivateRequest", sky_req.clone(), now)
+        call(&router, &owner_s, "eve_public.sovereignty.skyhook.api.DeactivateRequest", deact_req.clone(), now)
             .status_code,
         STATUS_OK
     );
     // Deactivate when inactive -> 400
     assert_eq!(
-        call(&router, &owner_s, "eve_public.sovereignty.skyhook.api.DeactivateRequest", sky_req.clone(), now)
+        call(&router, &owner_s, "eve_public.sovereignty.skyhook.api.DeactivateRequest", deact_req.clone(), now)
             .status_code,
         STATUS_BAD_REQUEST
     );
     // Activate even without skyhook_planets entry -> 200
     assert_eq!(
-        call(&router, &owner_s, "eve_public.sovereignty.skyhook.api.ActivateRequest", sky_req.clone(), now)
+        call(&router, &owner_s, "eve_public.sovereignty.skyhook.api.ActivateRequest", act_req, now)
             .status_code,
         STATUS_OK
     );
     // Now deactivate succeeds -> 200
     assert_eq!(
-        call(&router, &owner_s, "eve_public.sovereignty.skyhook.api.DeactivateRequest", sky_req, now)
+        call(&router, &owner_s, "eve_public.sovereignty.skyhook.api.DeactivateRequest", deact_req, now)
             .status_code,
         STATUS_OK
     );
@@ -236,16 +236,18 @@ fn faction_get_and_search_cover_empire_vs_pirate_fields_and_nested_filters() {
         STATUS_BAD_REQUEST
     );
     // 2. Unknown faction -> 404
-    let mut unk = Vec::new();
-    encode_seq(1, 599_999, &mut unk);
+    let unk = pb::message("eve.faction.api.GetRequest")
+        .set("faction.sequential", 599_999u64)
+        .must_encode();
     assert_eq!(
         call(&router, &s, "eve.faction.api.GetRequest", unk, now).status_code,
         STATUS_NOT_FOUND
     );
 
     // 3. Empire faction 500_001 (Caldari State) encodes fields 3 & 4
-    let mut caldari = Vec::new();
-    encode_seq(1, 500_001, &mut caldari);
+    let caldari = pb::message("eve.faction.api.GetRequest")
+        .set("faction.sequential", 500_001u64)
+        .must_encode();
     let r_emp = call(&router, &s, "eve.faction.api.GetRequest", caldari, now);
     assert_eq!(r_emp.status_code, STATUS_OK);
     let w_emp = WireMessage::decode(&r_emp.payload.unwrap().value).unwrap();
@@ -256,8 +258,9 @@ fn faction_get_and_search_cover_empire_vs_pirate_fields_and_nested_filters() {
     );
 
     // 4. Non-empire faction 500_010 (Guristas Pirates) omits fields 3 & 4
-    let mut pirate = Vec::new();
-    encode_seq(1, 500_010, &mut pirate);
+    let pirate = pb::message("eve.faction.api.GetRequest")
+        .set("faction.sequential", 500_010u64)
+        .must_encode();
     let r_pir = call(&router, &s, "eve.faction.api.GetRequest", pirate, now);
     assert_eq!(r_pir.status_code, STATUS_OK);
     let w_pir = WireMessage::decode(&r_pir.payload.unwrap().value).unwrap();
@@ -268,29 +271,32 @@ fn faction_get_and_search_cover_empire_vs_pirate_fields_and_nested_filters() {
     );
 
     // 5. SearchRequest empty/whitespace -> 400
-    let mut ws = Vec::new();
-    encode_string_field(1, "   ", &mut ws);
+    let ws = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(b"   ".to_vec()),
+        }],
+    }
+    .encode();
     assert_eq!(
         call(&router, &s, "eve.faction.SearchRequest", ws, now).status_code,
         STATUS_BAD_REQUEST
     );
 
     // 6. SearchRequest nested Message { 1: Repeated([String, String]) } AND filter ("Caldari", "State")
-    let mut nested_filter = Vec::new();
-    let mut inner = Vec::new();
-    encode_string_field(1, "Caldari", &mut inner);
-    encode_string_field(1, "State", &mut inner);
-    encode_bytes_field(1, &inner, &mut nested_filter);
+    let nested_filter = pb::message("eve.faction.SearchRequest")
+        .add("query.keywords", "Caldari")
+        .add("query.keywords", "State")
+        .must_encode();
     let r_match = call(&router, &s, "eve.faction.SearchRequest", nested_filter, now);
     assert_eq!(r_match.status_code, STATUS_OK);
     let w_match = WireMessage::decode(&r_match.payload.unwrap().value).unwrap();
     assert!(!extract_messages(&w_match, 1).is_empty());
 
     // 7. Non-matching search -> empty result bytes / no field 1 entries
-    let mut nomatch = Vec::new();
-    let mut nomatch_inner = Vec::new();
-    encode_string_field(1, "ZzzNonexistentFactionXyz", &mut nomatch_inner);
-    encode_bytes_field(1, &nomatch_inner, &mut nomatch);
+    let nomatch = pb::message("eve.faction.SearchRequest")
+        .add("query.keywords", "ZzzNonexistentFactionXyz")
+        .must_encode();
     let r_none = call(&router, &s, "eve.faction.SearchRequest", nomatch, now);
     assert_eq!(r_none.status_code, STATUS_OK);
     let bytes = r_none.payload.unwrap().value;
@@ -353,8 +359,9 @@ fn fw_system_scores_contribution_set_and_fallbacks_cover_guards_overrides_and_no
     assert_eq!(r_fallback.status_code, STATUS_OK);
 
     // 3. Non-FW system -> 400
-    let mut non_fw_req = Vec::new();
-    encode_seq(1, u64::from(non_fw_sys), &mut non_fw_req);
+    let non_fw_req = pb::message("eve.faction.activity.GetSolarSystemScoresRequest")
+        .set("solar_system.sequential", u64::from(non_fw_sys))
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -374,16 +381,18 @@ fn fw_system_scores_contribution_set_and_fallbacks_cover_guards_overrides_and_no
     ] {
         assert_eq!(call(&router, &unauth_s, ep, Vec::new(), now).status_code, STATUS_FORBIDDEN);
         assert_eq!(call(&router, &player_s, ep, Vec::new(), now).status_code, STATUS_FORBIDDEN);
-        let mut bad_sys = Vec::new();
-        encode_seq(1, u64::from(non_fw_sys), &mut bad_sys);
+        let bad_sys = pb::message(ep)
+            .set("target_system.sequential", u64::from(non_fw_sys))
+            .must_encode();
         assert_eq!(call(&router, &admin_s, ep, bad_sys, now).status_code, STATUS_BAD_REQUEST);
     }
 
     // 5. Increment emits ScoreContributionNotice + SolarSystemScoresNotice
     router.routing_cache.write().unwrap().entries.clear();
-    let mut inc_req = Vec::new();
-    encode_seq(1, u64::from(fw_sys), &mut inc_req);
-    encode_varint_field(2, 100, &mut inc_req);
+    let inc_req = pb::message("eve_public.faction.activity.admin.IncrementContributionScoreRequest")
+        .set("target_system.sequential", u64::from(fw_sys))
+        .set("adjustment", 100i32)
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -408,11 +417,30 @@ fn fw_system_scores_contribution_set_and_fallbacks_cover_guards_overrides_and_no
 
     // 6. Set with negative contribution clamps to 0, updates occupier_faction_id (via threshold/faction field), emits ONLY SolarSystemScoresNotice
     router.routing_cache.write().unwrap().entries.clear();
-    let mut set_req = Vec::new();
-    encode_seq(1, u64::from(fw_sys), &mut set_req);
-    // Negative sint64 for score delta/value & occupier faction in field 3
-    encode_varint_field(2, encode_sint64_varint(-50), &mut set_req);
-    encode_seq(3, 500_002, &mut set_req);
+    let target_sys_wire = pb::message("eve_public.solarsystem.Identifier")
+        .set("sequential", u64::from(fw_sys))
+        .must_encode();
+    let target_fac_wire = pb::message("eve_public.faction.Identifier")
+        .set("sequential", 500_002u64)
+        .must_encode();
+    // Negative sint64 for score delta/value & occupier faction in field 3 (intentionally swapped wire fields)
+    let set_req = WireMessage {
+        fields: vec![
+            WireField {
+                field_number: 1,
+                value: WireValue::LengthDelimited(target_sys_wire),
+            },
+            WireField {
+                field_number: 2,
+                value: WireValue::Varint(encode_sint64_varint(-50)),
+            },
+            WireField {
+                field_number: 3,
+                value: WireValue::LengthDelimited(target_fac_wire),
+            },
+        ],
+    }
+    .encode();
     let set_resp = call(
         &router,
         &admin_s,
@@ -493,8 +521,9 @@ fn warzone_backfill_pirate_campaign_override_and_operation_recommendations_edges
         );
     });
     for wz_id in [1_u64, 2_u64] {
-        let mut req = Vec::new();
-        encode_seq(1, wz_id, &mut req);
+        let req = pb::message("eve.factionwarfare.warzone.api.GetParticipantsRequest")
+            .set("warzone.sequential", wz_id)
+            .must_encode();
         let r = call(
             &router,
             &s,
@@ -542,9 +571,10 @@ fn warzone_backfill_pirate_campaign_override_and_operation_recommendations_edges
         });
 
         // amount = 99 (clamped <= 20), allow_old = false -> excludes completed `op_id`
-        let mut req_new = Vec::new();
-        encode_varint_field(1, 99, &mut req_new);
-        encode_varint_field(2, 0, &mut req_new);
+        let req_new = pb::message("eve_public.operation.recommendation.GetRequest")
+            .set("amount", 99u32)
+            .set("allow_old", false)
+            .must_encode();
         let r_new = call(&router, &s, "eve_public.operation.recommendation.GetRequest", req_new, now);
         assert_eq!(r_new.status_code, STATUS_OK);
         let w_new = WireMessage::decode(&r_new.payload.unwrap().value).unwrap();
@@ -556,9 +586,10 @@ fn warzone_backfill_pirate_campaign_override_and_operation_recommendations_edges
         assert!(!ops_new.contains(&op_id));
 
         // amount = 0 (clamped >= 1), allow_old = true -> returns >= 1 (if SDE has ops)
-        let mut req_old = Vec::new();
-        encode_varint_field(1, 0, &mut req_old);
-        encode_varint_field(2, 1, &mut req_old);
+        let req_old = pb::message("eve_public.operation.recommendation.GetRequest")
+            .set("amount", 0u32)
+            .set("allow_old", true)
+            .must_encode();
         let r_old = call(&router, &s, "eve_public.operation.recommendation.GetRequest", req_old, now);
         assert_eq!(r_old.status_code, STATUS_OK);
         let w_old = WireMessage::decode(&r_old.payload.unwrap().value).unwrap();

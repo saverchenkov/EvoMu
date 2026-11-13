@@ -9,15 +9,16 @@
 #![forbid(unsafe_code)]
 
 use super::quasar_sov_hub::{
-    any, caller, compute_hub_resources, corp_owned_structure, emit_hub_diffs, encode_hub_upgrades,
-    enforce_hub_power_overload, hub_views, id_field, owned_structure, push_notice, required_id,
+    caller, compute_hub_resources, corp_owned_structure, emit_hub_diffs, encode_hub_upgrades,
+    enforce_hub_power_overload, hub_views, owned_structure, push_notice, required_id,
     require_caller_roles, run_simulation, same_owner, transact, Caller, RpcError, HUB_MANAGER_ROLES,
 };
 use super::quasar_space_services::{get_identifier_or_int, get_int_field};
 use super::sov_services::TYPE_SOVEREIGNTY_HUB;
 use crate::quasar_gateway::{PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_NOT_FOUND};
 use eve_db::{PersistedSovHubData, PersistedWorkforceMode, WorldRepository, WorldStateSnapshot};
-use eve_proto::quasar::{encode_bytes_field, encode_varint_field, DynamicQuasarMessage, DynamicValue};
+use eve_proto::pb::{self, ProtoBuilder};
+use eve_proto::quasar::{DynamicQuasarMessage, DynamicValue};
 use eve_sde::SdeRegistry;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -186,77 +187,68 @@ fn export_connected(snap: &WorldStateSnapshot, sde: &SdeRegistry, hub_id: i64) -
     assigned_importer(snap, sde, hub_id, dest).map(|_| dest)
 }
 
-/// Encodes `eve_public.sovereignty.hub.workforce.Configuration` for a persisted mode.
-pub fn encode_configuration(m: &PersistedWorkforceMode) -> Vec<u8> {
-    let mut b = Vec::new();
+fn fill_configuration(b: ProtoBuilder, m: &PersistedWorkforceMode) -> ProtoBuilder {
     match m {
-        PersistedWorkforceMode::Inactive => encode_varint_field(1, 1, &mut b),
-        PersistedWorkforceMode::Import { sources } => {
-            let mut imp = Vec::new();
+        PersistedWorkforceMode::Inactive => b.set("inactive", true),
+        PersistedWorkforceMode::Import { sources } => b.set_with("import_settings", |mut imp| {
             for s in sources {
-                let mut src = Vec::new();
-                id_field(1, u64::from(*s), &mut src);
-                encode_bytes_field(1, &src, &mut imp);
+                imp = imp.add_with("sources", |src| src.set("source.sequential", *s));
             }
-            encode_bytes_field(2, &imp, &mut b);
-        }
-        PersistedWorkforceMode::Export { destination, amount } => {
-            let mut exp = Vec::new();
-            encode_export_destination(*destination, &mut exp);
-            encode_varint_field(2, *amount, &mut exp);
-            encode_bytes_field(3, &exp, &mut b);
-        }
-        PersistedWorkforceMode::Transit => encode_varint_field(4, 1, &mut b),
+            imp
+        }),
+        PersistedWorkforceMode::Export { destination, amount } => b.set_with("export_settings", |exp| {
+            fill_export_destination(exp, *destination).set("amount", *amount)
+        }),
+        PersistedWorkforceMode::Transit => b.set("transit", true),
     }
-    b
 }
 
-fn encode_export_destination(destination: Option<u32>, out: &mut Vec<u8>) {
+/// Encodes `eve_public.sovereignty.hub.workforce.Configuration` for a persisted mode.
+pub fn encode_configuration(m: &PersistedWorkforceMode) -> Vec<u8> {
+    fill_configuration(pb::message("eve_public.sovereignty.hub.workforce.Configuration"), m)
+        .must_encode()
+}
+
+fn fill_export_destination(b: ProtoBuilder, destination: Option<u32>) -> ProtoBuilder {
     match destination {
-        Some(d) => {
-            id_field(1, u64::from(d), out);
-            id_field(3, u64::from(d), out);
-        }
-        None => encode_varint_field(4, 1, out),
+        Some(d) => b.set("destination.sequential", d).set("destination_system.sequential", d),
+        None => b.set("no_destination", true),
+    }
+}
+
+fn fill_state(
+    b: ProtoBuilder,
+    snap: &WorldStateSnapshot,
+    sde: &SdeRegistry,
+    hub_id: i64,
+) -> ProtoBuilder {
+    match mode(snap, hub_id) {
+        PersistedWorkforceMode::Inactive => b.set("inactive", true),
+        PersistedWorkforceMode::Import { .. } => b.set_with("import_state", |mut imp| {
+            for (src_sys, amount) in imports(snap, sde, hub_id) {
+                imp = imp.add_with("sources", |src| {
+                    src.set("source.sequential", src_sys).set("amount", amount)
+                });
+            }
+            imp
+        }),
+        PersistedWorkforceMode::Export { destination, amount } => b.set_with("export_state", |exp| {
+            let exp = fill_export_destination(exp, destination).set("amount", amount);
+            match export_connected(snap, sde, hub_id) {
+                Some(dest) => exp.set_with("connected", |c| {
+                    c.set("destination_system.sequential", dest).set("exported_quantity", amount)
+                }),
+                None => exp.set_with("disconnected", |d| d.set("local_reserve", amount)),
+            }
+        }),
+        PersistedWorkforceMode::Transit => b.set_with("transit", |t| t),
     }
 }
 
 /// Encodes the computed `eve_public.sovereignty.hub.workforce.State` of a hub.
 pub fn encode_state(snap: &WorldStateSnapshot, sde: &SdeRegistry, hub_id: i64) -> Vec<u8> {
-    let mut b = Vec::new();
-    match mode(snap, hub_id) {
-        PersistedWorkforceMode::Inactive => encode_varint_field(1, 1, &mut b),
-        PersistedWorkforceMode::Import { .. } => {
-            let mut imp = Vec::new();
-            for (src_sys, amount) in imports(snap, sde, hub_id) {
-                let mut src = Vec::new();
-                id_field(1, u64::from(src_sys), &mut src);
-                encode_varint_field(2, amount, &mut src);
-                encode_bytes_field(1, &src, &mut imp);
-            }
-            encode_bytes_field(2, &imp, &mut b);
-        }
-        PersistedWorkforceMode::Export { destination, amount } => {
-            let mut exp = Vec::new();
-            encode_export_destination(destination, &mut exp);
-            encode_varint_field(2, amount, &mut exp);
-            let mut link = Vec::new();
-            match export_connected(snap, sde, hub_id) {
-                Some(dest) => {
-                    id_field(1, u64::from(dest), &mut link);
-                    encode_varint_field(2, amount, &mut link);
-                    encode_bytes_field(5, &link, &mut exp);
-                }
-                None => {
-                    encode_varint_field(1, amount, &mut link);
-                    encode_bytes_field(6, &link, &mut exp);
-                }
-            }
-            encode_bytes_field(3, &exp, &mut b);
-        }
-        PersistedWorkforceMode::Transit => encode_bytes_field(4, &[], &mut b),
-    }
-    b
+    fill_state(pb::message("eve_public.sovereignty.hub.workforce.State"), snap, sde, hub_id)
+        .must_encode()
 }
 
 /// Decodes a `Configuration` sub-message into a persisted workforce mode.
@@ -405,14 +397,16 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
             "eve_public.sovereignty.hub.workforce.api.GetStateRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
                 let hub_id = required_id(dyn_msg, 1, "Hub")?;
-                let state = db.with_snapshot(|snap| {
+                let resp = db.with_snapshot(|snap| {
                     let c = caller(ctx, snap)?;
                     owned_structure(snap, &c, hub_id, &[TYPE_SOVEREIGNTY_HUB], "Sovereignty hub")?;
-                    Ok::<_, RpcError>(encode_state(snap, &sde, hub_id))
+                    Ok::<_, RpcError>(
+                        pb::message("eve_public.sovereignty.hub.workforce.api.GetStateResponse")
+                            .set_with("state", |st| fill_state(st, snap, &sde, hub_id))
+                            .must_to_any(),
+                    )
                 })?;
-                let mut out = Vec::new();
-                encode_bytes_field(1, &state, &mut out);
-                Ok(any("eve_public.sovereignty.hub.workforce.api.GetStateResponse", out))
+                Ok(resp)
             }),
         );
     }
@@ -422,14 +416,17 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
             "eve_public.sovereignty.hub.workforce.api.GetConfigurationRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
                 let hub_id = required_id(dyn_msg, 1, "Hub")?;
-                let cfg = db.with_snapshot(|snap| {
+                let resp = db.with_snapshot(|snap| {
                     let c = caller(ctx, snap)?;
                     owned_structure(snap, &c, hub_id, &[TYPE_SOVEREIGNTY_HUB], "Sovereignty hub")?;
-                    Ok::<_, RpcError>(encode_configuration(&mode(snap, hub_id)))
+                    let m = mode(snap, hub_id);
+                    Ok::<_, RpcError>(
+                        pb::message("eve_public.sovereignty.hub.workforce.api.GetConfigurationResponse")
+                            .set_with("configuration", |cfg| fill_configuration(cfg, &m))
+                            .must_to_any(),
+                    )
                 })?;
-                let mut out = Vec::new();
-                encode_bytes_field(1, &cfg, &mut out);
-                Ok(any("eve_public.sovereignty.hub.workforce.api.GetConfigurationResponse", out))
+                Ok(resp)
             }),
         );
     }
@@ -518,11 +515,12 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                             break;
                         }
                     }
-                    let mut n = Vec::new();
-                    id_field(1, u64::from(sys), &mut n);
-                    encode_bytes_field(2, &encode_configuration(&old), &mut n);
-                    encode_bytes_field(3, &encode_configuration(&new_mode), &mut n);
-                    id_field(4, hub_id as u64, &mut n);
+                    let n = pb::message(CONFIGURED_NOTICE)
+                        .set("solar_system.sequential", sys)
+                        .set_with("old_configuration", |c| fill_configuration(c, &old))
+                        .set_with("new_configuration", |c| fill_configuration(c, &new_mode))
+                        .set("hub.sequential", hub_id as u64)
+                        .must_encode();
                     push_notice(&pending, sys, CONFIGURED_NOTICE, n);
                     for &id in &all_hub_ids {
                         let changed = snap
@@ -532,12 +530,14 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                             .is_some_and(|h| prev_upgrades.get(&id) != Some(&h.upgrades));
                         if changed {
                             if let Some(h_sys) = hub_sys(snap, id) {
-                                let mut sim_n = Vec::new();
-                                encode_bytes_field(
-                                    1,
-                                    &encode_hub_upgrades(&sde, id, snap.sov_runtime.sov_hubs.get(&id)),
-                                    &mut sim_n,
-                                );
+                                let sim_n = pb::message(
+                                    "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice",
+                                )
+                                .set_raw_message(
+                                    "hub_upgrades",
+                                    encode_hub_upgrades(&sde, id, snap.sov_runtime.sov_hubs.get(&id)),
+                                )
+                                .must_encode();
                                 push_notice(
                                     &pending,
                                     h_sys,
@@ -550,7 +550,8 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                     emit_hub_diffs(&pending, &before, &hub_views(snap, &sde, &extra));
                     Ok(())
                 })?;
-                Ok(any("eve_public.sovereignty.hub.workforce.api.ConfigureResponse", Vec::new()))
+                Ok(pb::message("eve_public.sovereignty.hub.workforce.api.ConfigureResponse")
+                    .must_to_any())
             }),
         );
     }
@@ -560,21 +561,24 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
             "eve_public.sovereignty.hub.workforce.api.GetNetworkableHubsRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
                 let hub_id = required_id(dyn_msg, 1, "Hub")?;
-                let out = db.with_snapshot(|snap| {
+                let resp = db.with_snapshot(|snap| {
                     let c = caller(ctx, snap)?;
                     owned_structure(snap, &c, hub_id, &[TYPE_SOVEREIGNTY_HUB], "Sovereignty hub")?;
-                    let mut out = Vec::new();
+                    let mut b = pb::message(
+                        "eve_public.sovereignty.hub.workforce.api.GetNetworkableHubsResponse",
+                    );
                     for (other, sys) in networkable_hubs(snap, &sde, hub_id) {
-                        let mut h = Vec::new();
-                        id_field(1, other as u64, &mut h);
-                        id_field(2, u64::from(sys), &mut h);
-                        encode_bytes_field(3, &encode_configuration(&mode(snap, other)), &mut h);
-                        encode_bytes_field(4, &encode_state(snap, &sde, other), &mut h);
-                        encode_bytes_field(1, &h, &mut out);
+                        let m = mode(snap, other);
+                        b = b.add_with("hubs", |h| {
+                            h.set("hub.sequential", other as u64)
+                                .set("system.sequential", sys)
+                                .set_with("configuration", |cfg| fill_configuration(cfg, &m))
+                                .set_with("state", |st| fill_state(st, snap, &sde, other))
+                        });
                     }
-                    Ok::<_, RpcError>(out)
+                    Ok::<_, RpcError>(b.must_to_any())
                 })?;
-                Ok(any("eve_public.sovereignty.hub.workforce.api.GetNetworkableHubsResponse", out))
+                Ok(resp)
             }),
         );
     }

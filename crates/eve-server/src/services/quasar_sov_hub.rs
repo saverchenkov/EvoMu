@@ -23,9 +23,10 @@ use eve_db::{
     corp_roles, FromWalError, InventoryItemRecord, PersistedHubUpgrade, PersistedSovHubData,
     UpwellStructureRecord, WorldRepository, WorldStateSnapshot,
 };
+use eve_proto::pb::{self, ProtoBuilder};
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
-    DynamicQuasarMessage, DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleTimestamp, WireField,
+    WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -48,16 +49,24 @@ pub(crate) fn any(name: &str, value: Vec<u8>) -> GoogleAny {
 
 /// Encodes a `{ sequential = 1 }` identifier sub-message at `field`.
 pub(crate) fn id_field(field: u32, id: u64, out: &mut Vec<u8>) {
-    let mut buf = Vec::new();
-    encode_varint_field(1, id, &mut buf);
-    encode_bytes_field(field, &buf, out);
+    let sub = WireMessage {
+        fields: vec![WireField { field_number: 1, value: WireValue::Varint(id) }],
+    }
+    .encode();
+    out.extend(
+        WireMessage {
+            fields: vec![WireField {
+                field_number: field,
+                value: WireValue::LengthDelimited(sub),
+            }],
+        }
+        .encode(),
+    );
 }
 
-/// Encodes a `google.protobuf.Timestamp` sub-message at `field`.
+/// Encodes a `{ seconds = 1 }` timestamp sub-message at `field` (for excluded `quasar_sov_skyhook`).
 pub(crate) fn ts_field(field: u32, seconds: u64, out: &mut Vec<u8>) {
-    let mut buf = Vec::new();
-    encode_varint_field(1, seconds, &mut buf);
-    encode_bytes_field(field, &buf, out);
+    id_field(field, seconds, out);
 }
 
 pub(crate) fn push_notice(pending: &PendingNotices, sys: u32, name: &str, value: Vec<u8>) {
@@ -551,12 +560,8 @@ pub(crate) fn hub_views(snap: &WorldStateSnapshot, sde: &SdeRegistry, extra: &[i
         .collect()
 }
 
-pub(crate) fn encode_resource_pair(available: u64, allocated: u64, local: u64) -> Vec<u8> {
-    let mut b = Vec::new();
-    encode_varint_field(1, available, &mut b);
-    encode_varint_field(2, allocated, &mut b);
-    encode_varint_field(3, local, &mut b);
-    b
+fn fill_resource_pair(b: ProtoBuilder, available: u64, allocated: u64, local: u64) -> ProtoBuilder {
+    b.set("available", available).set("allocated", allocated).set("local_harvest", local)
 }
 
 /// Emits `ResourcesSimulatedNotice` / workforce `StateChangedNotice` for every hub whose view changed.
@@ -565,20 +570,33 @@ pub(crate) fn emit_hub_diffs(pending: &PendingNotices, before: &BTreeMap<i64, Hu
         let prev = before.get(hub_id);
         if prev.map(|p| p.resources) != Some(now.resources) {
             let r = now.resources;
-            let mut n = Vec::new();
-            id_field(1, *hub_id as u64, &mut n);
-            id_field(2, now.sys as u64, &mut n);
-            encode_bytes_field(3, &encode_resource_pair(r.power_available, r.power_allocated, r.power_local), &mut n);
-            encode_bytes_field(4, &encode_resource_pair(r.workforce_available, r.workforce_allocated, r.workforce_local), &mut n);
+            let n = pb::message("eve_public.sovereignty.hub.api.ResourcesSimulatedNotice")
+                .set("hub.sequential", *hub_id as u64)
+                .set("solar_system.sequential", now.sys)
+                .set_with("power", |p| {
+                    fill_resource_pair(p, r.power_available, r.power_allocated, r.power_local)
+                })
+                .set_with("workforce", |w| {
+                    fill_resource_pair(
+                        w,
+                        r.workforce_available,
+                        r.workforce_allocated,
+                        r.workforce_local,
+                    )
+                })
+                .must_encode();
             push_notice(pending, now.sys, "eve_public.sovereignty.hub.api.ResourcesSimulatedNotice", n);
         }
         if let Some(p) = prev {
             if p.state != now.state {
-                let mut n = Vec::new();
-                id_field(1, now.sys as u64, &mut n);
-                encode_bytes_field(2, &p.state, &mut n);
-                encode_bytes_field(3, &now.state, &mut n);
-                id_field(4, *hub_id as u64, &mut n);
+                let n = pb::message(
+                    "eve_public.sovereignty.resource.transfer.workforce.api.StateChangedNotice",
+                )
+                .set("solar_system.sequential", now.sys)
+                .set_raw_message("old_state", &p.state)
+                .set_raw_message("new_state", &now.state)
+                .set("hub.sequential", *hub_id as u64)
+                .must_encode();
                 push_notice(pending, now.sys, "eve_public.sovereignty.resource.transfer.workforce.api.StateChangedNotice", n);
             }
         }
@@ -633,8 +651,11 @@ pub(crate) fn run_simulation(snap: &mut WorldStateSnapshot, sde: &SdeRegistry, p
         return;
     }
     enforce_hub_power_overload(snap, sde, hub_id);
-    let mut n = Vec::new();
-    encode_bytes_field(1, &encode_hub_upgrades(sde, hub_id, snap.sov_runtime.sov_hubs.get(&hub_id)), &mut n);
+    let n = pb::message("eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice")
+        .set_with("hub_upgrades", |b| {
+            fill_hub_upgrades(b, sde, hub_id, snap.sov_runtime.sov_hubs.get(&hub_id))
+        })
+        .must_encode();
     push_notice(pending, sys, "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice", n);
     let after = hub_views(snap, sde, &[hub_id]);
     emit_hub_diffs(pending, &before, &after);
@@ -644,20 +665,23 @@ pub(crate) fn run_simulation(snap: &mut WorldStateSnapshot, sde: &SdeRegistry, p
 // Upgrade encoders
 // ---------------------------------------------------------------------------------------------
 
+fn fill_definition(b: ProtoBuilder, d: &UpgradeDefinition) -> ProtoBuilder {
+    b.set("installation_type.sequential", d.type_id)
+        .set("power_required", d.power_required)
+        .set("workforce_required", d.workforce_required)
+        .when(d.fuel_type > 0, |b| {
+            b.set("fuel_type.sequential", d.fuel_type)
+                .set("fuel_consumption_per_hour", d.fuel_per_hour)
+                .set("fuel_startup_cost", d.fuel_startup)
+        })
+        .set("mutually_exclusive_group", d.exclusive_group.as_str())
+        .set("power_produced", d.power_produced)
+        .set("workforce_produced", d.workforce_produced)
+}
+
+#[cfg(test)]
 pub(crate) fn encode_definition(d: &UpgradeDefinition) -> Vec<u8> {
-    let mut b = Vec::new();
-    id_field(1, d.type_id as u64, &mut b);
-    encode_varint_field(2, d.power_required, &mut b);
-    encode_varint_field(3, d.workforce_required, &mut b);
-    if d.fuel_type > 0 {
-        id_field(4, d.fuel_type as u64, &mut b);
-        encode_varint_field(5, d.fuel_per_hour as u64, &mut b);
-        encode_varint_field(6, d.fuel_startup as u64, &mut b);
-    }
-    encode_string_field(7, &d.exclusive_group, &mut b);
-    encode_varint_field(8, d.power_produced, &mut b);
-    encode_varint_field(9, d.workforce_produced, &mut b);
-    b
+    fill_definition(pb::message("eve_public.sovereignty.hub.upgrade.Definition"), d).must_encode()
 }
 
 fn power_state(u: &PersistedHubUpgrade) -> u64 {
@@ -668,37 +692,44 @@ fn power_state(u: &PersistedHubUpgrade) -> u64 {
     }
 }
 
-fn encode_upgrade_identifier(hub_id: i64, type_id: u32) -> Vec<u8> {
-    let mut b = Vec::new();
-    id_field(1, hub_id as u64, &mut b);
-    id_field(2, type_id as u64, &mut b);
-    id_field(3, type_id as u64, &mut b);
-    b
+fn fill_upgrade_identifier(b: ProtoBuilder, hub_id: i64, type_id: u32) -> ProtoBuilder {
+    b.set("hub.sequential", hub_id as u64)
+        .set("installation_type.sequential", type_id)
+        .set("upgrade_type.sequential", type_id)
 }
 
-fn encode_upgrade_attributes(sde: &SdeRegistry, u: &PersistedHubUpgrade) -> Vec<u8> {
-    let mut b = Vec::new();
-    if let Some(d) = upgrade_definition(sde, u.type_id) {
-        encode_bytes_field(1, &encode_definition(&d), &mut b);
+fn fill_upgrade_attributes(b: ProtoBuilder, sde: &SdeRegistry, u: &PersistedHubUpgrade) -> ProtoBuilder {
+    let b = if let Some(d) = upgrade_definition(sde, u.type_id) {
+        b.set_with("definition", |def| fill_definition(def, &d))
+    } else {
+        b
+    };
+    b.set("power_state", power_state(u))
+}
+
+fn fill_hub_upgrades(
+    mut b: ProtoBuilder,
+    sde: &SdeRegistry,
+    hub_id: i64,
+    hub: Option<&PersistedSovHubData>,
+) -> ProtoBuilder {
+    b = b.set("hub.sequential", hub_id as u64);
+    if let Some(h) = hub {
+        for u in &h.upgrades {
+            b = b.add_with("upgrades", |up| {
+                up.set_with("identifier", |id| fill_upgrade_identifier(id, hub_id, u.type_id))
+                    .set_with("attributes", |att| fill_upgrade_attributes(att, sde, u))
+            });
+        }
+        b = b.set("last_updated", GoogleTimestamp::from_unix(h.last_updated_unix as i64, 0));
     }
-    encode_varint_field(2, power_state(u), &mut b);
     b
 }
 
 /// Encodes `eve_public.sovereignty.hub.upgrade.HubUpgrades` from persisted hub state.
 pub(crate) fn encode_hub_upgrades(sde: &SdeRegistry, hub_id: i64, hub: Option<&PersistedSovHubData>) -> Vec<u8> {
-    let mut b = Vec::new();
-    id_field(1, hub_id as u64, &mut b);
-    if let Some(h) = hub {
-        for u in &h.upgrades {
-            let mut up = Vec::new();
-            encode_bytes_field(1, &encode_upgrade_identifier(hub_id, u.type_id), &mut up);
-            encode_bytes_field(2, &encode_upgrade_attributes(sde, u), &mut up);
-            encode_bytes_field(2, &up, &mut b);
-        }
-        ts_field(3, h.last_updated_unix, &mut b);
-    }
-    b
+    fill_hub_upgrades(pb::message("eve_public.sovereignty.hub.upgrade.HubUpgrades"), sde, hub_id, hub)
+        .must_encode()
 }
 
 /// Reads `(hub_id, type_id)` from an `eve_public.sovereignty.hub.upgrade.Identifier` at `field`.
@@ -918,10 +949,19 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                     run_simulation(snap, &sde, &pending, hub_id, ctx.now_unix());
                     compute_hub_resources(snap, &sde, hub_id).ok_or((STATUS_NOT_FOUND, "hub".to_string()))
                 })?;
-                let mut out = Vec::new();
-                encode_bytes_field(1, &encode_resource_pair(r.power_available, r.power_allocated, r.power_local), &mut out);
-                encode_bytes_field(2, &encode_resource_pair(r.workforce_available, r.workforce_allocated, r.workforce_local), &mut out);
-                Ok(any("eve_public.sovereignty.hub.api.GetResourcesResponse", out))
+                Ok(pb::message("eve_public.sovereignty.hub.api.GetResourcesResponse")
+                    .set_with("power", |p| {
+                        fill_resource_pair(p, r.power_available, r.power_allocated, r.power_local)
+                    })
+                    .set_with("workforce", |w| {
+                        fill_resource_pair(
+                            w,
+                            r.workforce_available,
+                            r.workforce_allocated,
+                            r.workforce_local,
+                        )
+                    })
+                    .must_to_any())
             }),
         );
     }
@@ -945,16 +985,18 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                         *burn.entry(d.fuel_type).or_insert(0) += u64::from(d.fuel_per_hour);
                     }
                 }
-                let mut out = Vec::new();
+                let mut resp = pb::message("eve_public.sovereignty.hub.fuel.api.GetResponse");
                 for (fuel_type, per_hour) in burn {
-                    let mut f = Vec::new();
-                    id_field(1, fuel_type as u64, &mut f);
-                    encode_varint_field(2, u64::from(hub.fuel.get(&fuel_type).copied().unwrap_or(0)), &mut f);
-                    encode_varint_field(3, per_hour, &mut f);
-                    encode_bytes_field(1, &f, &mut out);
+                    let amount = hub.fuel.get(&fuel_type).copied().unwrap_or(0);
+                    resp = resp.add_with("fuels", |f| {
+                        f.set("fuel_type.sequential", fuel_type)
+                            .set("amount", amount)
+                            .set("burned_per_hour", per_hour)
+                    });
                 }
-                ts_field(2, hub.last_updated_unix, &mut out);
-                Ok(any("eve_public.sovereignty.hub.fuel.api.GetResponse", out))
+                Ok(resp
+                    .set("last_updated", GoogleTimestamp::from_unix(hub.last_updated_unix as i64, 0))
+                    .must_to_any())
             }),
         );
     }
@@ -1050,14 +1092,19 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                         .get(&hub_id)
                         .is_some_and(|h| h.upgrades != prev_upgrades);
                     if restored {
-                        let mut n = Vec::new();
-                        encode_bytes_field(1, &encode_hub_upgrades(&sde, hub_id, snap.sov_runtime.sov_hubs.get(&hub_id)), &mut n);
+                        let n = pb::message(
+                            "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice",
+                        )
+                        .set_with("hub_upgrades", |b| {
+                            fill_hub_upgrades(b, &sde, hub_id, snap.sov_runtime.sov_hubs.get(&hub_id))
+                        })
+                        .must_encode();
                         push_notice(&pending, sys, "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice", n);
                     }
                     emit_hub_diffs(&pending, &before, &hub_views(snap, &sde, &[hub_id]));
                     Ok(())
                 })?;
-                Ok(any("eve_public.sovereignty.hub.fuel.api.AddResponse", Vec::new()))
+                Ok(pb::message("eve_public.sovereignty.hub.fuel.api.AddResponse").must_to_any())
             }),
         );
     }
@@ -1068,11 +1115,12 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
         router.register_handler(
             "eve_public.sovereignty.hub.upgrade.api.GetDefinitionsRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                let mut out = Vec::new();
+                let mut resp =
+                    pb::message("eve_public.sovereignty.hub.upgrade.api.GetDefinitionsResponse");
                 for d in all_upgrade_definitions(&sde) {
-                    encode_bytes_field(1, &encode_definition(&d), &mut out);
+                    resp = resp.add_with("definitions", |def| fill_definition(def, &d));
                 }
-                Ok(any("eve_public.sovereignty.hub.upgrade.api.GetDefinitionsResponse", out))
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -1090,9 +1138,9 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                     run_simulation(snap, &sde, &pending, hub_id, ctx.now_unix());
                     Ok::<_, RpcError>(snap.clone_sov_hub(hub_id))
                 })?;
-                let mut out = Vec::new();
-                encode_bytes_field(1, &encode_hub_upgrades(&sde, hub_id, Some(&hub)), &mut out);
-                Ok(any("eve_public.sovereignty.hub.upgrade.api.GetHubUpgradesResponse", out))
+                Ok(pb::message("eve_public.sovereignty.hub.upgrade.api.GetHubUpgradesResponse")
+                    .set_with("hub_upgrades", |b| fill_hub_upgrades(b, &sde, hub_id, Some(&hub)))
+                    .must_to_any())
             }),
         );
     }
@@ -1113,9 +1161,9 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                         .and_then(|h| h.upgrades.iter().find(|u| u.type_id == type_id).cloned())
                         .ok_or((STATUS_NOT_FOUND, format!("Upgrade {type_id} is not installed in hub {hub_id}")))
                 })?;
-                let mut out = Vec::new();
-                encode_bytes_field(1, &encode_upgrade_attributes(&sde, &up), &mut out);
-                Ok(any("eve_public.sovereignty.hub.upgrade.api.GetResponse", out))
+                Ok(pb::message("eve_public.sovereignty.hub.upgrade.api.GetResponse")
+                    .set_with("attributes", |att| fill_upgrade_attributes(att, &sde, &up))
+                    .must_to_any())
             }),
         );
     }
@@ -1141,15 +1189,18 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                     let before = hub_views(snap, &sde, &[hub_id]);
                     let sys = process_configuration(snap, &sde, &c, hub_id, &new_items, &config, ctx.now_unix())?;
                     let encoded = encode_hub_upgrades(&sde, hub_id, snap.sov_runtime.sov_hubs.get(&hub_id));
-                    let mut n = Vec::new();
-                    encode_bytes_field(1, &encoded, &mut n);
+                    let n = pb::message(
+                        "eve_public.sovereignty.hub.upgrade.api.HubUpgradesConfiguredNotice",
+                    )
+                    .set_raw_message("hub_upgrades", &encoded)
+                    .must_encode();
                     push_notice(&pending, sys, "eve_public.sovereignty.hub.upgrade.api.HubUpgradesConfiguredNotice", n);
                     emit_hub_diffs(&pending, &before, &hub_views(snap, &sde, &[hub_id]));
                     Ok::<_, RpcError>(encoded)
                 })?;
-                let mut out = Vec::new();
-                encode_bytes_field(1, &hub_upgrades, &mut out);
-                Ok(any("eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationResponse", out))
+                Ok(pb::message("eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationResponse")
+                    .set_raw_message("hub_upgrades", hub_upgrades)
+                    .must_to_any())
             }),
         );
     }
@@ -1216,18 +1267,25 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                         .get(&hub_id)
                         .map(|h| h.upgrades.iter().map(|u| (u.type_id, power_state(u))).collect())
                         .unwrap_or_default();
-                    let mut n = Vec::new();
-                    encode_bytes_field(1, &encode_upgrade_identifier(hub_id, type_id), &mut n);
-                    id_field(2, type_id as u64, &mut n);
-                    id_field(3, hub_id as u64, &mut n);
+                    let n = pb::message("eve_public.sovereignty.hub.upgrade.api.UninstalledNotice")
+                        .set_with("upgrade", |id| fill_upgrade_identifier(id, hub_id, type_id))
+                        .set("upgrade_type.sequential", type_id)
+                        .set("hub.sequential", hub_id as u64)
+                        .must_encode();
                     push_notice(&pending, sys, "eve_public.sovereignty.hub.upgrade.api.UninstalledNotice", n);
                     if prev_states != next_states {
-                        let mut sim_n = Vec::new();
-                        encode_bytes_field(
-                            1,
-                            &encode_hub_upgrades(&sde, hub_id, snap.sov_runtime.sov_hubs.get(&hub_id)),
-                            &mut sim_n,
-                        );
+                        let sim_n = pb::message(
+                            "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice",
+                        )
+                        .set_with("hub_upgrades", |b| {
+                            fill_hub_upgrades(
+                                b,
+                                &sde,
+                                hub_id,
+                                snap.sov_runtime.sov_hubs.get(&hub_id),
+                            )
+                        })
+                        .must_encode();
                         push_notice(
                             &pending,
                             sys,
@@ -1238,7 +1296,8 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                     emit_hub_diffs(&pending, &before, &hub_views(snap, &sde, &[hub_id]));
                     Ok(())
                 })?;
-                Ok(any("eve_public.sovereignty.hub.upgrade.api.UninstallResponse", Vec::new()))
+                Ok(pb::message("eve_public.sovereignty.hub.upgrade.api.UninstallResponse")
+                    .must_to_any())
             }),
         );
     }

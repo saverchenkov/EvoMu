@@ -1149,7 +1149,7 @@ async fn test_quasar_sovereignty_all_seven_protos_parity() {
     let lava_reagent_wrapper = field(lava_def, 4).expect("Lava reagent_definition");
     let lava_reagent_inner = field(&lava_reagent_wrapper, 2).expect("Lava inner ReagentDefinition");
     assert_eq!(varint(&lava_reagent_inner, 1), Some(1_000));
-    assert_eq!(varint(&lava_reagent_inner, 2), Some(3_600));
+    assert_eq!(varint(&field(&lava_reagent_inner, 2).expect("cycle_period Duration"), 1), Some(3_600));
     assert_eq!(varint(&lava_reagent_inner, 3), Some(1_000));
     assert_eq!(varint(&lava_reagent_inner, 4), Some(25_000));
     assert_eq!(varint(&lava_reagent_inner, 5), Some(25_000));
@@ -1171,10 +1171,10 @@ async fn test_quasar_sovereignty_all_seven_protos_parity() {
     assert!(reagent_cfgs.len() >= 2);
     let gas_cfg = reagent_cfgs.iter().find(|c| varint(&field(c, 1).unwrap(), 1) == Some(TYPE_MAGMATIC_GAS as u64)).expect("Magmatic Gas config");
     assert_eq!(varint(&field(gas_cfg, 2).unwrap(), 4), Some(25_000));
-    assert_eq!(varint(&field(gas_cfg, 3).unwrap(), 2), Some(86_400));
+    assert_eq!(varint(&field(&field(gas_cfg, 3).unwrap(), 2).expect("gas maturation cycle_period Duration"), 1), Some(86_400));
     let ice_cfg = reagent_cfgs.iter().find(|c| varint(&field(c, 1).unwrap(), 1) == Some(TYPE_SUPERIONIC_ICE as u64)).expect("Superionic Ice config");
     assert_eq!(varint(&field(ice_cfg, 2).unwrap(), 4), Some(25_000));
-    assert_eq!(varint(&field(ice_cfg, 3).unwrap(), 2), Some(86_400));
+    assert_eq!(varint(&field(&field(ice_cfg, 3).unwrap(), 2).expect("ice maturation cycle_period Duration"), 1), Some(86_400));
 
     // 2. resource.star.api (GetAllConfigurationsRequest)
     let star_cfgs = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.resource.star.api.GetAllConfigurationsRequest", Vec::new()).await;

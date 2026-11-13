@@ -6,9 +6,10 @@ use super::*;
 use crate::quasar_gateway::{PublicGatewayRouter, STATUS_FORBIDDEN, STATUS_OK};
 use eve_db::{CorpProjectRecord, InventoryFlag, InventoryItemRecord, PersistedProjectDetails, WorldRepository};
 use eve_machonet::{service_roles, SessionState};
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_varint_field, DynamicQuasarMessage, EvePublicRequest, EvePublicResponse, GoogleAny,
-    QuasarDescriptorRegistry, WireMessage,
+    DynamicQuasarMessage, EvePublicRequest, EvePublicResponse, GoogleAny, QuasarDescriptorRegistry,
+    WireMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
@@ -42,12 +43,6 @@ fn call(router: &PublicGatewayRouter, s: &SessionState, ty: &str, value: Vec<u8>
         false,
         now,
     )
-}
-
-fn id_wire(val: u64) -> Vec<u8> {
-    let mut out = Vec::new();
-    encode_varint_field(1, val, &mut out);
-    out
 }
 
 #[test]
@@ -146,11 +141,15 @@ fn deliver_request_error_rejection_and_completion_paths() {
     assert_eq!(call(&router, &player, status_ty, Vec::new(), now).status_code, STATUS_BAD_REQUEST);
 
     // Unknown UUID -> STATUS_NOT_FOUND
-    let unknown_uuid = vec![0xee; 16];
-    let mut unk_req = Vec::new();
-    encode_uuid_field(1, &unknown_uuid, &mut unk_req);
-    assert_eq!(call(&router, &player, deliver_ty, unk_req.clone(), now).status_code, STATUS_NOT_FOUND);
-    assert_eq!(call(&router, &player, status_ty, unk_req, now).status_code, STATUS_NOT_FOUND);
+    let unknown_uuid = vec![0xee_u8; 16];
+    let unk_deliv_req = pb::message(deliver_ty)
+        .set("project.uuid", unknown_uuid.clone())
+        .must_encode();
+    let unk_status_req = pb::message(status_ty)
+        .set("delivery.uuid", unknown_uuid)
+        .must_encode();
+    assert_eq!(call(&router, &player, deliver_ty, unk_deliv_req, now).status_code, STATUS_NOT_FOUND);
+    assert_eq!(call(&router, &player, status_ty, unk_status_req, now).status_code, STATUS_NOT_FOUND);
 
     // Non-DeliverItem project returns DeliverResponse field 12 (project_does_not_allow_item_delivery)
     let pid_non_item = 610_i64;
@@ -200,45 +199,50 @@ fn deliver_request_error_rejection_and_completion_paths() {
     });
 
     // GetStatusRequest: active with 0 progress -> field 1
-    let mut st_active_req = Vec::new();
-    encode_uuid_field(1, &uuid_item, &mut st_active_req);
-    let st_active = call(&router, &player, status_ty, st_active_req.clone(), now);
+    let st_active_req = pb::message(status_ty)
+        .set("delivery.uuid", uuid_item.clone())
+        .must_encode();
+    let st_active = call(&router, &player, status_ty, st_active_req, now);
     assert_eq!(st_active.status_code, STATUS_OK);
     assert_eq!(WireMessage::decode(&st_active.payload.unwrap().value).unwrap().fields[0].field_number, 1);
 
     // Non-DeliverItem project -> field 12
-    let mut non_item_req = Vec::new();
-    encode_uuid_field(1, &uuid_non_item, &mut non_item_req);
+    let non_item_req = pb::message(deliver_ty)
+        .set("project.uuid", uuid_non_item.clone())
+        .must_encode();
     let non_item_rsp = call(&router, &player, deliver_ty, non_item_req, now);
     assert_eq!(non_item_rsp.status_code, STATUS_OK);
     assert_eq!(WireMessage::decode(&non_item_rsp.payload.unwrap().value).unwrap().fields[0].field_number, 12);
 
     // Zero / missing quantity -> STATUS_BAD_REQUEST
-    let mut req_zero_qty = Vec::new();
-    encode_uuid_field(1, &uuid_item, &mut req_zero_qty);
-    encode_varint_field(4, 0, &mut req_zero_qty);
+    let req_zero_qty = pb::message(deliver_ty)
+        .set("project.uuid", uuid_item.clone())
+        .set("quantity", 0u32)
+        .must_encode();
     assert_eq!(call(&router, &player, deliver_ty, req_zero_qty, now).status_code, STATUS_BAD_REQUEST);
 
     // Helper to build raw DeliverRequest with optional delivery_loc, item_id, item_loc (container, flag), qty
     let build_deliver = |del_loc: Option<(u32, i64)>, item_id: Option<i64>, item_loc: Option<(i64, i64)>, qty: u64| {
-        let mut req = Vec::new();
-        encode_uuid_field(1, &uuid_item, &mut req);
-        if let Some((f, loc_id)) = del_loc {
-            let mut dl = Vec::new();
-            encode_bytes_field(f, &id_wire(loc_id as u64), &mut dl);
-            encode_bytes_field(2, &dl, &mut req);
-        }
-        if let Some(iid) = item_id {
-            encode_bytes_field(3, &id_wire(iid as u64), &mut req);
-        }
-        encode_varint_field(4, qty, &mut req);
-        if let Some((cont, flg)) = item_loc {
-            let mut il = Vec::new();
-            encode_bytes_field(1, &id_wire(cont as u64), &mut il);
-            encode_varint_field(2, flg as u64, &mut il);
-            encode_bytes_field(5, &il, &mut req);
-        }
-        req
+        pb::message(deliver_ty)
+            .set("project.uuid", uuid_item.clone())
+            .with(|b| match del_loc {
+                Some((1, loc_id)) => b.set("delivery_location.station.sequential", loc_id as u64),
+                Some((2, loc_id)) => b.set("delivery_location.structure.sequential", loc_id as u64),
+                Some((other, _)) => panic!("unsupported delivery_location field {other}"),
+                None => b,
+            })
+            .with(|b| match item_id {
+                Some(iid) => b.set("item.sequential", iid as u64),
+                None => b,
+            })
+            .set("quantity", qty as u32)
+            .with(|b| match item_loc {
+                Some((cont, flg)) => b
+                    .set("item_location.item.sequential", cont as u64)
+                    .set("item_location.flag.value", flg as u64),
+                None => b,
+            })
+            .must_encode()
     };
 
     // Undocked -> rejection 5 (character_not_docked)
@@ -386,21 +390,22 @@ fn deliver_request_error_rejection_and_completion_paths() {
             .unwrap()
             .status = "Cancelled".into();
     });
-    let mut st_cancel_req = Vec::new();
-    encode_uuid_field(1, &uuid_non_item, &mut st_cancel_req);
+    let st_cancel_req = pb::message(status_ty)
+        .set("delivery.uuid", uuid_non_item.clone())
+        .must_encode();
     let st_cancel = call(&router, &player, status_ty, st_cancel_req, now);
     assert_eq!(st_cancel.status_code, STATUS_OK);
     assert_eq!(WireMessage::decode(&st_cancel.payload.unwrap().value).unwrap().fields[0].field_number, 1);
 
-    let mut st_done_req = Vec::new();
-    encode_uuid_field(1, &uuid_item, &mut st_done_req);
+    let st_done_req = pb::message(status_ty)
+        .set("delivery.uuid", uuid_item.clone())
+        .must_encode();
     let st_done = call(&router, &player, status_ty, st_done_req, now);
     assert_eq!(st_done.status_code, STATUS_OK);
 
     // GetAllLatestWithinMajorRequest with major = 0 and missing major
     let def_ty = "eve_public.freelance.contributionmethod.definition.api.GetAllLatestWithinMajorRequest";
-    let mut maj0 = Vec::new();
-    encode_varint_field(1, 0, &mut maj0);
+    let maj0 = pb::message(def_ty).set("major", 0u32).must_encode();
     assert_eq!(call(&router, &player, def_ty, maj0, now).status_code, STATUS_OK);
     assert_eq!(call(&router, &player, def_ty, Vec::new(), now).status_code, STATUS_OK);
 }
@@ -504,13 +509,14 @@ fn mutants_cov_locked_explicit_autoselect_distractors_and_batch_math() {
     });
 
     let build_req = |item_id: Option<i64>, qty: u64| {
-        let mut req = Vec::new();
-        encode_uuid_field(1, &uuid, &mut req);
-        if let Some(iid) = item_id {
-            encode_bytes_field(3, &id_wire(iid as u64), &mut req);
-        }
-        encode_varint_field(4, qty, &mut req);
-        req
+        pb::message(deliver_ty)
+            .set("project.uuid", uuid.clone())
+            .with(|b| match item_id {
+                Some(iid) => b.set("item.sequential", iid as u64),
+                None => b,
+            })
+            .set("quantity", qty as u32)
+            .must_encode()
     };
 
     // 1. Explicit ALSC-locked empty non-singleton stack -> rejection field 7 (kills L266 || -> &&)
