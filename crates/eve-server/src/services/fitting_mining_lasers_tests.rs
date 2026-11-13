@@ -33,6 +33,7 @@ fn custom_inv_type(
     for &(k, v) in attrs {
         t.default_attributes.insert(k, v);
     }
+    t.effect_ids = vec![13];
     t
 }
 
@@ -282,4 +283,155 @@ async fn deactivate_stop_overload_overload_rack_nanite_repair_and_mining_scan() 
     .unwrap()
     .expect("perform_scan");
     assert_eq!(scan_res.dict_get("asteroidCount").and_then(|v| v.as_i64()), Some(1));
+}
+
+#[tokio::test]
+async fn deactivate_active_armor_repairer_defers_removal_and_finishes_paid_cycle_once_890() {
+    let ctx = test_ctx_with_custom(|sde| {
+        sde.types.insert(
+            994_062,
+            custom_inv_type(
+                sde,
+                994_062,
+                62,
+                7,
+                "Small Armor Repairer I",
+                &[(6, 40.0), (73, 4_000.0), (84, 80.0)],
+            ),
+        );
+    });
+    let char_id = 97_406_201;
+    let sys_id = 30_000_142;
+    let ship_id = 1_004_062_001;
+    let rep_id = 1_004_062_002;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("demo char");
+        ch.character_id = char_id;
+        ch.user_id = char_id as u64;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.solar_system_id = sys_id;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+        snap.accounts.insert(
+            format!("user_{char_id}"),
+            eve_db::AccountRecord {
+                user_id: char_id as u64,
+                username: format!("user_{char_id}"),
+                password_token: String::new(),
+                role: 0,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            rep_id,
+            InventoryItemRecord {
+                item_id: rep_id,
+                type_id: 994_062,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::LoSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(rep_id, true);
+        snap.module_active_states.insert(rep_id);
+    });
+    let _ = ctx
+        .db
+        .acquire_online_lock(char_id as u64, char_id as u64, Some(char_id), true, ctx.now_unix_secs());
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball_with_combat(
+        eve_destiny::Ball {
+            id: ship_id,
+            type_id: 587,
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 2.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        },
+        eve_destiny::CombatState {
+            armor_hp: 200.0,
+            max_armor_hp: 1_000.0,
+            capacitor: 500.0,
+            max_capacitor: 500.0,
+            capacitor_recharge_time_ms: 0.0,
+            shield_recharge_time_ms: 0.0,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    sys.add_module_cycle(crate::system_actor::ActiveModuleCycle {
+        ship_id,
+        module_id: rep_id,
+        module_type_id: 994_062,
+        effect_name: "armorRepair".into(),
+        target_id: None,
+        repeat: 1,
+        duration_s: 4.0,
+        elapsed_s: 1.0,
+        cap_need_per_cycle: 40.0,
+        armor_repair_amount: 80.0,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let kw = HashMap::new();
+    let mut sess = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(98_000_001),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+
+    handle_mining_and_deactivate(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Deactivate",
+        &[PyRep::Integer(rep_id), PyRep::String("armorRepair".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("Deactivate Armor Repairer mid-cycle");
+
+    // Cycle remains active (repeat=0) until end of paid cycle; armor not repaired early.
+    assert!(sys.has_module_cycle(ship_id, rep_id).await);
+    let mid_cs = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!((mid_cs.armor_hp - 200.0).abs() < 1e-6);
+
+    // Stepping past end of 4s cycle applies the 80 HP repair once, removes cycle, and charges 0 extra cap for cycle 2 (500 - 40 = 460).
+    let _ = sys.step_manual(3.2).await.unwrap();
+    assert!(!sys.has_module_cycle(ship_id, rep_id).await);
+    let after_cs = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!((after_cs.armor_hp - 280.0).abs() < 1e-3, "got armor_hp={}", after_cs.armor_hp);
+    assert!((after_cs.capacitor - 460.0).abs() < 1e-6, "must not charge cap for cycle 2 (got {})", after_cs.capacitor);
 }

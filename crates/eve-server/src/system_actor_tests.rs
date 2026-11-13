@@ -867,3 +867,95 @@ async fn issue_804_active_module_cycle_weapon_damage_emits_on_damage_message() {
     assert!(victim_notifs.iter().any(|n| n.event == "OnDamageMessage"));
     assert!(victim_notifs.iter().any(|n| n.event == "OnDamageMessages"));
 }
+
+#[tokio::test]
+async fn apply_fit_projection_updates_baseline_preserving_active_multipliers_and_rejecting_stale_rev() {
+    let mut bp = eve_destiny::Ballpark::new(30_000_142);
+    let ship_id: BallId = 700_000_001;
+    bp.add_ball(make_actor_ball(ship_id, 587, DVec3::ZERO));
+    bp.combat_states.insert(
+        ship_id,
+        CombatState {
+            prop_velocity_multiplier: 1.5,
+            web_velocity_multiplier: 0.5,
+            ..Default::default()
+        },
+    );
+
+    let mk_proj = |rev: u64, max_vel: f64, mass: f64| eve_dogma::FitProjection {
+        rev: eve_dogma::FitRev(rev),
+        ship_id,
+        ship_type_id: 587,
+        active_stance_type_id: None,
+        last_stance_switch_ms: None,
+        baseline: eve_dogma::CombatBaseline {
+            max_velocity: max_vel,
+            mass,
+            agility: 3.0,
+            signature_radius: 40.0,
+            max_shield_hp: 600.0,
+            max_armor_hp: 500.0,
+            max_structure_hp: 400.0,
+            max_capacitor: 300.0,
+            shield_recharge_time_ms: 100_000.0,
+            capacitor_recharge_time_ms: 120_000.0,
+            shield_resonance: [1.0; 4],
+            armor_resonance: [1.0; 4],
+            structure_resonance: [1.0; 4],
+            warp_speed_au_s: 5.0,
+            max_locked_targets: 4,
+            max_target_range: 25_000.0,
+            scan_resolution: 500.0,
+        },
+        propulsion: None,
+        modules: std::collections::HashMap::new(),
+    };
+
+    let mut projections = std::collections::HashMap::new();
+    let applied = apply_fit_projection_in_actor(
+        &mut bp,
+        &mut projections,
+        ship_id,
+        mk_proj(2, 400.0, 1_100_000.0),
+    );
+    assert!(applied);
+    assert_eq!(projections[&ship_id].rev, eve_dogma::FitRev(2));
+    // Active prop (1.5) and web (0.5) multipliers remain intact over the new 400.0 baseline.
+    let expected_vel = 400.0 * 1.5 * 0.5;
+    assert!((bp.balls[&ship_id].max_velocity - expected_vel).abs() < 1e-6);
+    assert!(
+        bp.pending_events.iter().any(|ev| matches!(
+            ev,
+            DestinyEvent::SetMaxSpeed { ball_id, max_speed }
+                if *ball_id == ship_id && (*max_speed - expected_vel).abs() < 1e-6
+        )),
+        "ApplyFitProjection must emit SetMaxSpeed on velocity change"
+    );
+
+    // Older FitRev(1) must be rejected without clobbering FitRev(2) baselines.
+    let stale = apply_fit_projection_in_actor(
+        &mut bp,
+        &mut projections,
+        ship_id,
+        mk_proj(1, 200.0, 900_000.0),
+    );
+    assert!(!stale);
+    assert_eq!(projections[&ship_id].rev, eve_dogma::FitRev(2));
+    assert!((bp.balls[&ship_id].max_velocity - expected_vel).abs() < 1e-6);
+
+    // End-to-end actor command handle path stores latest_fit_projection and updates ball.
+    let reg = SystemRegistry::new();
+    let handle = reg.get_or_spawn(30_000_142);
+    handle
+        .spawn_ball(make_actor_ball(ship_id, 587, DVec3::ZERO))
+        .await
+        .unwrap();
+    handle
+        .set_combat_state(ship_id, CombatState::default())
+        .await
+        .unwrap();
+    assert!(handle.apply_fit_projection(ship_id, mk_proj(3, 420.0, 1_050_000.0)).await);
+    assert_eq!(handle.latest_fit_projection(ship_id).unwrap().rev, eve_dogma::FitRev(3));
+    let (_, snap_ball) = handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!((snap_ball.max_velocity - 420.0).abs() < 1e-6);
+}

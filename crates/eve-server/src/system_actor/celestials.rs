@@ -1661,6 +1661,50 @@ impl SystemHandle {
         rx.await.map_err(|_| "Solar system reply dropped".to_string())?
     }
 
+    pub async fn request_cycle_deactivation(&self, ship_id: BallId, module_id: i64) -> Result<bool, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_sender()
+            .send(SystemCommand::RequestCycleDeactivation { ship_id, module_id, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())
+    }
+
+    pub async fn fire_weapon_cycle_volley(
+        &self,
+        ship_id: BallId,
+        module_id: i64,
+    ) -> Result<(Vec<(BallId, Option<CharacterId>)>, Vec<super::PendingCycleAction>), String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_sender()
+            .send(SystemCommand::FireWeaponCycleVolley { ship_id, module_id, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        let (destroyed, actions) = rx.await.map_err(|_| "Solar system reply dropped".to_string())?;
+        if !destroyed.is_empty() {
+            let hook = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
+            for &(target_ball_id, owner_char_id) in &destroyed {
+                if let Some(fut) = super::on_ball_destroyed_by_damage(
+                    self.solar_system_id,
+                    target_ball_id,
+                    owner_char_id,
+                    hook.as_ref(),
+                ) {
+                    let _ = fut.await;
+                }
+            }
+            let step_hook = self
+                .system_step_hook
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if let Some(hook) = step_hook {
+                hook(self.solar_system_id, 0.0, destroyed.clone()).await;
+            }
+        }
+        Ok((destroyed, actions))
+    }
+
     pub async fn has_module_cycle(&self, ship_id: BallId, module_id: i64) -> bool {
         let (tx, rx) = oneshot::channel();
         if self
@@ -1676,6 +1720,31 @@ impl SystemHandle {
             return false;
         }
         rx.await.unwrap_or(false)
+    }
+
+    /// Expires stale (`repeat == 0` / smartbomb clock-elapsed or dead-target) cycles before
+    /// `Activate` validation, returning `(active_repeat_and_target, cleaned_stale_cycle)`.
+    pub async fn reconcile_module_cycle_before_activate(
+        &self,
+        ship_id: BallId,
+        module_id: i64,
+        now_unix: u64,
+    ) -> (Option<(i32, Option<BallId>)>, bool) {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_sender()
+            .send(SystemCommand::ReconcileModuleCycleBeforeActivate {
+                ship_id,
+                module_id,
+                now_unix,
+                reply: tx,
+            })
+            .await
+            .is_err()
+        {
+            return (None, false);
+        }
+        rx.await.unwrap_or((None, false))
     }
 
     /// Parity: [plan:DG-4] Entering warp halts active non-warp module cycles.

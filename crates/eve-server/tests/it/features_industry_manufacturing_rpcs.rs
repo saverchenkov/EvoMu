@@ -133,6 +133,15 @@ async fn test_b33_foreman_bursts_and_harvester_validity() {
     });
     let bid = p.beyonce_id;
     let _ = rpc(&mut p, "beyonceBound", Some(bid), "CmdStop", &[]).await;
+    if let Some(sys_id) = p.sess.solar_system_id {
+        let sys_p = p.ctx.systems.get_or_spawn(sys_id);
+        for _ in 0..30 {
+            let _ = sys_p.step_manual(1.0).await;
+        }
+        if let Ok(Some((_, b))) = sys_p.get_ball_snapshot(p.ship_id).await {
+            p.ship_pos = b.position;
+        }
+    }
 
     // 1. Ice harvester cycle duration modifiers: skill, non-stacking Ice Harvester Upgrade II, Hulk hull, rig, implant (1 block/cycle)
     let (ice_upg_1, ice_upg_2, ice_rig_id) = (9_100_021_i64, 9_100_022_i64, 9_100_023_i64);
@@ -196,6 +205,15 @@ async fn test_b33_foreman_bursts_and_harvester_validity() {
         s.module_online_states.insert(gas_harv_id, true);
     });
     p_dc.ctx.invalidate_ship_fitting(p_dc.ship_id);
+    if let Some(sys_id) = p_dc.sess.solar_system_id {
+        let sys_dc = p_dc.ctx.systems.get_or_spawn(sys_id);
+        for _ in 0..30 {
+            let _ = sys_dc.step_manual(1.0).await;
+        }
+        if let Ok(Some((_, b))) = sys_dc.get_ball_snapshot(p_dc.ship_id).await {
+            p_dc.ship_pos = b.position;
+        }
+    }
     let (dc_veld_rock, dc_merc_rock, dc_gas_cloud) = (9_200_101_i64, 9_200_102_i64, 9_200_103_i64);
     for (rid, tid, qty) in [(dc_veld_rock, VELDSPAR, 10_000), (dc_merc_rock, MERCOXIT, 10_000), (dc_gas_cloud, FULLERITE_C50, 1_000)] {
         rock(&p_dc, rid, tid, qty, 100.0).await;
@@ -440,6 +458,15 @@ async fn test_b33_phased_asteroid_field_mobile_anchor_and_prismaticite() {
     .await;
     let bid = p.beyonce_id;
     let _ = rpc(&mut p, "beyonceBound", Some(bid), "CmdStop", &[]).await;
+    if let Some(sys_id) = p.sess.solar_system_id {
+        let sys_p = p.ctx.systems.get_or_spawn(sys_id);
+        for _ in 0..30 {
+            let _ = sys_p.step_manual(1.0).await;
+        }
+        if let Ok(Some((_, b))) = sys_p.get_ball_snapshot(p.ship_id).await {
+            p.ship_pos = b.position;
+        }
+    }
 
     // 1. High-sec Jita refuses Phased Asteroid Field; null-sec 1DQ1-A spawns probeable signature
     assert!(
@@ -1210,7 +1237,10 @@ async fn test_b33_ancillary_remote_repairers_and_auto_targeting_system() {
     assert!(cap_after_unloaded < cap_after_loaded - 1.0, "Unloaded ARSB must fall back to consuming capacitor");
 
     // 3. ARAR gives 3x repair bonus with Nanite Repair Paste vs unloaded fallback, and reloads in 60s
-    let _ = sys_handle.try_update_combat_state(target_ship_id, |c| { c.armor_hp = 100.0; });
+    let _ = sys_handle.try_update_combat_state(target_ship_id, |c| {
+        c.max_armor_hp = c.max_armor_hp.max(5_000.0);
+        c.armor_hp = 100.0;
+    });
     let armor_0 = sys_handle.get_combat_state(target_ship_id).await.unwrap().unwrap().armor_hp;
     let _ = rpc(&mut p, "dogmaIM", None, "Activate", &[PyRep::Integer(arar_id), PyRep::Integer(target_ship_id)]).await.unwrap();
     sys_handle.step_manual(12.0).await.unwrap();
@@ -1221,7 +1251,10 @@ async fn test_b33_ancillary_remote_repairers_and_auto_targeting_system() {
     p.ctx.clock().advance_secs(60);
     p.ctx.db.with_mut_snapshot(|s| { s.items.remove(&paste_id); });
     p.ctx.invalidate_ship_fitting(p.ship_id);
-    let _ = sys_handle.try_update_combat_state(target_ship_id, |c| { c.armor_hp = 100.0; });
+    let _ = sys_handle.try_update_combat_state(target_ship_id, |c| {
+        c.max_armor_hp = c.max_armor_hp.max(5_000.0);
+        c.armor_hp = 100.0;
+    });
     let armor_2 = sys_handle.get_combat_state(target_ship_id).await.unwrap().unwrap().armor_hp;
     let _ = rpc(&mut p, "dogmaIM", None, "Activate", &[PyRep::Integer(arar_id), PyRep::Integer(target_ship_id)]).await.unwrap();
     sys_handle.step_manual(12.0).await.unwrap();

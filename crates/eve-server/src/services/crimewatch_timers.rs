@@ -1433,13 +1433,20 @@ pub fn evaluate_and_record_pvp_aggression(
 
 
 /// Evaluates ship safety and flag inheritance when applying remote assistance (repair / cap transfer) to another pilot.
-pub fn evaluate_and_record_remote_assistance(
-    ctx: &ServerContext, helper_char_id: i64, helper_ship_id: i64, sys_id: u32, target_id: i64,
-) -> Result<(), BridgeRpcError> {
+/// Read-only Crimewatch safety check for remote assistance (`CantDoInCurrentSafetyLevel`)
+/// returning `(beneficiary_id, sys_sec, ben_criminal, ben_suspect, ben_le_partners, third_party_interference)`
+/// without mutating timers.
+#[allow(clippy::type_complexity)]
+fn inspect_remote_assistance_context(
+    ctx: &ServerContext,
+    helper_char_id: i64,
+    sys_id: u32,
+    target_id: i64,
+    now_unix: u64,
+) -> Option<(i64, f64, bool, bool, Vec<i64>, bool)> {
     if (32_000_000..=33_000_000).contains(&sys_id) {
-        return Ok(());
+        return None;
     }
-    let now_unix = ctx.now_unix();
     let sys_sec = with_combat_runtime(ctx, |rt| rt.modified_system_securities.get(&sys_id).copied())
         .unwrap_or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0));
     let beneficiary_opt = ctx.db.with_snapshot(|snap| {
@@ -1450,12 +1457,15 @@ pub fn evaluate_and_record_remote_assistance(
                 .or_else(|| snap.items.get(&target_id).and_then(|it| snap.characters.contains_key(&it.owner_id).then_some(it.owner_id)))
         }
     });
-    let Some(ben_id) = beneficiary_opt.filter(|&b| b != helper_char_id) else { return Ok(()); };
+    let ben_id = beneficiary_opt.filter(|&b| b != helper_char_id)?;
     let ben_outlaw = ctx.db.with_snapshot(|snap| snap.characters.get(&ben_id).map(|c| c.security_status <= -4.95).unwrap_or(false));
     let (ben_criminal, ben_suspect) = {
-        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-        let st = cw.get_or_create(ben_id);
-        (st.is_criminal(now_unix), st.is_suspect(now_unix) || (ben_outlaw && sys_sec >= 0.45))
+        let cw = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(st) = cw.states.get(&ben_id) {
+            (st.is_criminal(now_unix), st.is_suspect(now_unix) || (ben_outlaw && sys_sec >= 0.45))
+        } else {
+            (false, ben_outlaw && sys_sec >= 0.45)
+        }
     };
     let ben_le_partners: Vec<i64> = with_combat_runtime(ctx, |rt| {
         let helper_les = rt.limited_engagements.get(&helper_char_id);
@@ -1474,6 +1484,17 @@ pub fn evaluate_and_record_remote_assistance(
     });
     let war_interference = is_war_interference_assistance(ctx, helper_char_id, ben_id, now_unix);
     let third_party_interference = !ben_le_partners.is_empty() || war_interference;
+    Some((ben_id, sys_sec, ben_criminal, ben_suspect, ben_le_partners, third_party_interference))
+}
+
+fn check_remote_assistance_safety_level(
+    ctx: &ServerContext,
+    helper_char_id: i64,
+    sys_sec: f64,
+    ben_criminal: bool,
+    ben_suspect: bool,
+    third_party_interference: bool,
+) -> Result<(), BridgeRpcError> {
     let safety = with_combat_runtime(ctx, |rt| rt.safety_levels.get(&helper_char_id).copied().unwrap_or(SafetyLevel::Red));
     if ((ben_criminal && sys_sec > 0.0) || (third_party_interference && sys_sec >= 0.45))
         && matches!(safety, SafetyLevel::Green | SafetyLevel::Yellow)
@@ -1483,6 +1504,34 @@ pub fn evaluate_and_record_remote_assistance(
     if ((ben_suspect && sys_sec > 0.0) || (third_party_interference && sys_sec > 0.0)) && safety == SafetyLevel::Green {
         return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
     }
+    Ok(())
+}
+
+pub fn can_perform_remote_assistance_in_safety(
+    ctx: &ServerContext,
+    helper_char_id: i64,
+    sys_id: u32,
+    target_id: i64,
+) -> Result<(), BridgeRpcError> {
+    let now_unix = ctx.now_unix();
+    let Some((_, sys_sec, ben_criminal, ben_suspect, _, third_party_interference)) =
+        inspect_remote_assistance_context(ctx, helper_char_id, sys_id, target_id, now_unix)
+    else {
+        return Ok(());
+    };
+    check_remote_assistance_safety_level(ctx, helper_char_id, sys_sec, ben_criminal, ben_suspect, third_party_interference)
+}
+
+pub fn evaluate_and_record_remote_assistance(
+    ctx: &ServerContext, helper_char_id: i64, helper_ship_id: i64, sys_id: u32, target_id: i64,
+) -> Result<(), BridgeRpcError> {
+    let now_unix = ctx.now_unix();
+    let Some((ben_id, sys_sec, ben_criminal, ben_suspect, ben_le_partners, third_party_interference)) =
+        inspect_remote_assistance_context(ctx, helper_char_id, sys_id, target_id, now_unix)
+    else {
+        return Ok(());
+    };
+    check_remote_assistance_safety_level(ctx, helper_char_id, sys_sec, ben_criminal, ben_suspect, third_party_interference)?;
     if (ben_criminal && sys_sec > 0.0) || (third_party_interference && sys_sec >= 0.45) {
         let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
         let _ = cw.handle_criminal_remote_assistance(helper_char_id, ben_id, helper_ship_id, sys_id, sys_sec, now_unix);

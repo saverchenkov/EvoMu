@@ -796,88 +796,39 @@ impl ServerContext {
         ship_id: i64,
         type_id: u32,
     ) -> eve_destiny::CombatState {
-        if let Ok(fit) = self.get_or_rebuild_ship_fitting(char_id, ship_id) {
-            use eve_sde::attr_ids as a;
-            let mut eff_attrs: std::collections::HashMap<u16, f64> = [
-                a::SHIELD_CAPACITY, a::ARMOR_HP, a::HP_STRUCT, a::CAPACITOR_CAPACITY,
-                a::SIGNATURE_RADIUS, a::SHIELD_RECHARGE_RATE, a::RECHARGE_RATE,
-                a::MAX_VELOCITY, a::MASS, a::AGILITY,
-                a::SHIELD_EM_DAMAGE_RESONANCE, a::SHIELD_THERMAL_DAMAGE_RESONANCE,
-                a::SHIELD_KINETIC_DAMAGE_RESONANCE, a::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE,
-                a::ARMOR_EM_DAMAGE_RESONANCE, a::ARMOR_THERMAL_DAMAGE_RESONANCE,
-                a::ARMOR_KINETIC_DAMAGE_RESONANCE, a::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE,
-                a::EM_DAMAGE_RESONANCE, a::THERMAL_DAMAGE_RESONANCE,
-                a::KINETIC_DAMAGE_RESONANCE, a::EXPLOSIVE_DAMAGE_RESONANCE,
-            ]
-            .into_iter()
-            .filter(|&aid| {
-                fit.ship.base_attributes.contains_key(&aid)
-                    || self.sde.attributes.contains_key(&aid)
-                    || fit.ship.modifiers.iter().any(|m| m.target_attribute_id == aid)
-            })
-            .map(|aid| (aid, fit.ship.get_attribute(aid, &self.sde)))
-            .collect();
-            crate::services::inventory_fitting::fitting_scanners_superweapons::apply_active_dbuffs_and_system_effects_to_ship_attrs(self, ship_id, &mut eff_attrs);
-            let get_attr = |attr_id: u16, fallback: f64| eff_attrs.get(&attr_id).copied().unwrap_or(fallback);
-            let shield = get_attr(eve_sde::attr_ids::SHIELD_CAPACITY, 450.0);
-            let armor = get_attr(eve_sde::attr_ids::ARMOR_HP, 350.0);
-            let hull = get_attr(eve_sde::attr_ids::HP_STRUCT, 350.0);
-            let raw_cap = get_attr(eve_sde::attr_ids::CAPACITOR_CAPACITY, 250.0);
-            let cap = if raw_cap <= 0.0 { if type_id == 670 { 100.0 } else { 250.0 } } else { raw_cap };
-            let sig = get_attr(eve_sde::attr_ids::SIGNATURE_RADIUS, 35.0);
+        if let Some(proj) = self.build_fit_projection(char_id, ship_id, self.current_fit_rev(ship_id)) {
+            let b = proj.baseline;
             let tp_mult = self.effective_target_painter_multiplier(ship_id);
-            let base_sig = if tp_mult > 1.0 + 1e-6 { sig / tp_mult } else { sig };
-            let max_vel_opt = eff_attrs.get(&a::MAX_VELOCITY).copied().filter(|&v| v > 0.0);
-            let mass_opt = eff_attrs.get(&a::MASS).copied().filter(|&v| v > 0.0);
-            let inertia_opt = eff_attrs.get(&a::AGILITY).copied().filter(|&v| v > 0.0);
-            let shield_rech = get_attr(eve_sde::attr_ids::SHIELD_RECHARGE_RATE, 120_000.0);
-            let cap_rech = get_attr(eve_sde::attr_ids::RECHARGE_RATE, 120_000.0);
-            let shield_res = [
-                get_attr(eve_sde::attr_ids::SHIELD_EM_DAMAGE_RESONANCE, 1.0),
-                get_attr(eve_sde::attr_ids::SHIELD_THERMAL_DAMAGE_RESONANCE, 0.8),
-                get_attr(eve_sde::attr_ids::SHIELD_KINETIC_DAMAGE_RESONANCE, 0.6),
-                get_attr(eve_sde::attr_ids::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE, 0.5),
-            ];
-            let armor_res = [
-                get_attr(eve_sde::attr_ids::ARMOR_EM_DAMAGE_RESONANCE, 0.5),
-                get_attr(eve_sde::attr_ids::ARMOR_THERMAL_DAMAGE_RESONANCE, 0.65),
-                get_attr(eve_sde::attr_ids::ARMOR_KINETIC_DAMAGE_RESONANCE, 0.75),
-                get_attr(eve_sde::attr_ids::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE, 0.9),
-            ];
-            let struct_res = [
-                get_attr(eve_sde::attr_ids::EM_DAMAGE_RESONANCE, 0.67),
-                get_attr(eve_sde::attr_ids::THERMAL_DAMAGE_RESONANCE, 0.67),
-                get_attr(eve_sde::attr_ids::KINETIC_DAMAGE_RESONANCE, 0.67),
-                get_attr(eve_sde::attr_ids::EXPLOSIVE_DAMAGE_RESONANCE, 0.67),
-            ];
+            let base_sig = b.signature_radius;
+            let sig = if tp_mult > 1.0 + 1e-6 { base_sig * tp_mult } else { base_sig };
             let mut cs = eve_destiny::CombatState {
-                shield_hp: shield,
-                max_shield_hp: shield,
-                armor_hp: armor,
-                max_armor_hp: armor,
-                structure_hp: hull,
-                max_structure_hp: hull,
-                capacitor: cap,
-                max_capacitor: cap,
+                shield_hp: b.max_shield_hp,
+                max_shield_hp: b.max_shield_hp,
+                armor_hp: b.max_armor_hp,
+                max_armor_hp: b.max_armor_hp,
+                structure_hp: b.max_structure_hp,
+                max_structure_hp: b.max_structure_hp,
+                capacitor: b.max_capacitor,
+                max_capacitor: b.max_capacitor,
                 signature_radius: sig,
                 base_signature_radius: Some(base_sig),
                 tp_sig_multiplier: (tp_mult > 1.0 + 1e-6).then_some(tp_mult),
-                shield_recharge_time_ms: shield_rech,
-                capacitor_recharge_time_ms: cap_rech,
-                shield_resonance: shield_res,
-                armor_resonance: armor_res,
-                structure_resonance: struct_res,
-                base_max_velocity: max_vel_opt,
-                base_mass: mass_opt,
-                base_inertia: inertia_opt,
-                base_shield_resonance: Some(shield_res),
-                base_armor_resonance: Some(armor_res),
-                base_structure_resonance: Some(struct_res),
-                base_max_shield_hp: Some(shield),
-                base_max_armor_hp: Some(armor),
-                base_max_structure_hp: Some(hull),
-                base_max_capacitor: Some(cap),
-                base_capacitor_recharge_time_ms: Some(cap_rech),
+                shield_recharge_time_ms: b.shield_recharge_time_ms,
+                capacitor_recharge_time_ms: b.capacitor_recharge_time_ms,
+                shield_resonance: b.shield_resonance,
+                armor_resonance: b.armor_resonance,
+                structure_resonance: b.structure_resonance,
+                base_max_velocity: (b.max_velocity > 0.0).then_some(b.max_velocity),
+                base_mass: (b.mass > 0.0).then_some(b.mass),
+                base_inertia: (b.agility > 0.0).then_some(b.agility),
+                base_shield_resonance: Some(b.shield_resonance),
+                base_armor_resonance: Some(b.armor_resonance),
+                base_structure_resonance: Some(b.structure_resonance),
+                base_max_shield_hp: Some(b.max_shield_hp),
+                base_max_armor_hp: Some(b.max_armor_hp),
+                base_max_structure_hp: Some(b.max_structure_hp),
+                base_max_capacitor: Some(b.max_capacitor),
+                base_capacitor_recharge_time_ms: Some(b.capacitor_recharge_time_ms),
                 rng_state: eve_destiny::CombatState::seed_rng_from_u64(
                     (ship_id as u64)
                         ^ (char_id as u64).rotate_left(17)
@@ -1146,11 +1097,20 @@ impl ServerContext {
             let db = &step_ctx.db;
             let pending = &step_ctx.pending_notifications;
             let notify_tx = &step_ctx.notify_tx;
-            step_ctx
-                .ship_fittings
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&cycle.ship_id);
+            if eve_db::lock_rank::held_lock_ranks().is_empty() {
+                step_ctx.invalidate_and_push_fit(cycle.ship_id);
+            } else {
+                step_ctx.invalidate_ship_fitting_cache_only(cycle.ship_id);
+                if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                    let ctx_w_spawn = ctx_w.clone();
+                    let sid = cycle.ship_id;
+                    rt.spawn(async move {
+                        if let Some(c) = ctx_w_spawn.upgrade() {
+                            c.push_fit_projection_for_ship(sid);
+                        }
+                    });
+                }
+            }
 
             let is_cloak = sde.types.get(&cycle.module_type_id).is_some_and(|t| t.group_id == 330)
                 || cycle.effect_name.to_ascii_lowercase().contains("cloak");
@@ -1419,14 +1379,16 @@ impl ServerContext {
                 list.push(effect.clone());
             }
         }
-        if let Some(fit) = self
-            .ship_fittings
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .get_mut(&target_ship_id)
         {
-            fit.upsert_projected_ewar(effect, &self.sde);
+            let mut fit_guard = self
+                .ship_fittings
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(fit) = fit_guard.get_mut(&target_ship_id) {
+                fit.upsert_projected_ewar(effect, &self.sde);
+            }
         }
+        self.push_fit_projection_for_ship(target_ship_id);
     }
 
     pub fn remove_projected_ewar_by_module(&self, source_ship_id: i64, source_module_id: i64) -> Vec<i64> {
@@ -1466,14 +1428,19 @@ impl ServerContext {
             }
         }
         if !affected_ships.is_empty() {
-            let mut fit_guard = self
-                .ship_fittings
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            for &ship_id in &affected_ships {
-                if let Some(fit) = fit_guard.get_mut(&ship_id) {
-                    fit.remove_projected_ewar(source_module_id, &self.sde);
+            {
+                let mut fit_guard = self
+                    .ship_fittings
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                for &ship_id in &affected_ships {
+                    if let Some(fit) = fit_guard.get_mut(&ship_id) {
+                        fit.remove_projected_ewar(source_module_id, &self.sde);
+                    }
                 }
+            }
+            for &ship_id in &affected_ships {
+                self.push_fit_projection_for_ship(ship_id);
             }
         }
         affected_ships
@@ -1493,7 +1460,7 @@ impl ServerContext {
             (char_id, base_sig, tp_resist)
         });
         if let Some(cid) = owner_char_opt {
-            if let Ok(fit) = self.get_or_rebuild_ship_fitting(cid, target_ball_id) {
+            if let Ok(fit) = self.fit(cid, target_ball_id) {
                 let sig = fit.ship.get_attribute(eve_sde::attr_ids::SIGNATURE_RADIUS, &self.sde);
                 if sig > 0.0 {
                     return sig;

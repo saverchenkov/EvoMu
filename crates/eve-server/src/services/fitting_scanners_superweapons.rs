@@ -234,6 +234,32 @@ pub(crate) fn get_aggregated_ship_dbuffs(
 }
 
 /// Applies active `dbuff` modifiers and system-wide wormhole/storm modifiers to a ship's attribute map.
+/// Purges expired command-burst `ship_dbuffs` for `ctx.instance_id` at `now_unix` and pushes
+/// updated fit projections to affected in-space actors (`#834`, `#922`).
+pub fn purge_expired_ship_dbuffs_all(ctx: &ServerContext, now_unix: u64) {
+    let expired_ships: Vec<i64> = {
+        let mut st = scanners_superweapons_state()
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut affected = Vec::new();
+        st.ship_dbuffs.retain(|&(inst_id, ship_id), entries| {
+            if inst_id != ctx.instance_id {
+                return true;
+            }
+            let before = entries.len();
+            entries.retain(|e| e.expires_at_unix > now_unix);
+            if entries.len() != before {
+                affected.push(ship_id);
+            }
+            !entries.is_empty()
+        });
+        affected
+    };
+    for ship_id in expired_ships {
+        ctx.invalidate_and_push_fit(ship_id);
+    }
+}
+
 pub fn apply_active_dbuffs_and_system_effects_to_ship_attrs(
     ctx: &ServerContext,
     ship_id: i64,
@@ -982,7 +1008,7 @@ fn handle_system_wide_effects(
                 if let Some(req_tid) = req_tid_opt {
                     scanners_superweapons_state().write().unwrap_or_else(|e| e.into_inner()).system_wide_effects.insert(sys_id, req_tid);
                     if ship_id > 0 {
-                        ctx.invalidate_ship_fitting(ship_id);
+                        ctx.invalidate_and_push_fit(ship_id);
                     }
                     ctx.notify(
                         crate::router::NotificationTarget::Character(char_id),
@@ -1029,13 +1055,15 @@ fn handle_system_wide_effects(
                 })
                 .unwrap_or(ship_id);
             if target_id > 0 {
-                if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(char_id, target_id) {
+                let mut excluded_dbuffs: Vec<u32> = Vec::new();
+                if let Ok(fit) = ctx.fit(char_id, target_id) {
                     let eval_ctx = fit.evaluated_context(&ctx.sde);
+                    excluded_dbuffs = fit.gang_bursts.iter().filter_map(|b| b.dbuff_id).collect();
                     for &aid in &[20u16, 37, 55, 64, 68, 70, 76, 84, 90, 97, 99, 114, 116, 117, 118, 160, 263, 265, 267, 268, 269, 270, 271, 272, 273, 274, 482, 507, 552, 554, 653, 654, 1210, 1211, 2125, 2129] {
                         ship_attrs.insert(aid, eval_ctx.ship.get_attribute(aid, &ctx.sde));
                     }
                 }
-                apply_active_dbuffs_and_system_effects_to_ship_attrs(ctx, target_id, &mut ship_attrs);
+                apply_active_dbuffs_and_system_effects_to_ship_attrs_excluding(ctx, target_id, &excluded_dbuffs, &mut ship_attrs);
             }
             let ship_attrs_py: Vec<(PyRep, PyRep)> = ship_attrs
                 .iter()
@@ -1412,7 +1440,7 @@ fn handle_dogma_dbuff_rpc(
             }
         }
         for &tsid in &target_ships {
-            ctx.invalidate_ship_fitting(tsid);
+            ctx.invalidate_and_push_fit(tsid);
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
                 "OnDbuffUpdated",

@@ -560,8 +560,7 @@ pub(crate) async fn execute_gm_heal(
     });
 
     let fit_opt = if target_ship_id > 0 && target_char_id > 0 {
-        ctx.get_or_rebuild_ship_fitting(target_char_id, target_ship_id)
-            .ok()
+        ctx.fit(target_char_id, target_ship_id).ok()
     } else {
         None
     };
@@ -740,8 +739,8 @@ pub(crate) async fn execute_gm_heal(
         .as_ref()
         .map(|f| f.rack_heat)
         .unwrap_or([0.0, 0.0, 0.0]);
-    if let Some(mut fit) = fit_opt {
-        for m in fit.modules.values_mut() {
+    if let Some(ref fit) = fit_opt {
+        for m in fit.modules.values() {
             if m.damage_hp > 0.0
                 && !repaired_child_attrs
                     .iter()
@@ -749,10 +748,8 @@ pub(crate) async fn execute_gm_heal(
             {
                 repaired_child_attrs.push((m.item_id, eve_sde::attr_ids::DAMAGE, m.damage_hp));
             }
-            m.damage_hp = 0.0;
         }
-        fit.rack_heat = [0.0, 0.0, 0.0];
-        ctx.store_ship_fitting(target_ship_id, fit);
+        ctx.update_ship_rack_heat(target_char_id, target_ship_id, [0.0, 0.0, 0.0], true);
     }
 
     let eff_max_shield = combat_healed.max_shield_hp.max(fit_max_shield);
@@ -1263,8 +1260,8 @@ pub async fn handle_gm_slash_ext(
 
         return match res {
             Ok((item_id, owner_id, loc_id, old_val)) => {
-                ctx.invalidate_ship_fitting(item_id);
-                ctx.invalidate_ship_fitting(loc_id);
+                ctx.invalidate_and_push_fit(item_id);
+                ctx.invalidate_and_push_fit(loc_id);
                 crate::services::notify_emitters_character_services::emit_setattr_notifications(
                     ctx, owner_id, loc_id, item_id, attr_id, now_ft, val, old_val,
                 );
@@ -1438,7 +1435,7 @@ pub async fn handle_gm_slash_ext(
         };
 
         let pre_fit_opt = if ship_cat_id == 6 {
-            ctx.get_or_rebuild_ship_fitting(ship_owner_id, ship_id).ok()
+            ctx.fit(ship_owner_id, ship_id).ok()
         } else {
             None
         };
@@ -1611,13 +1608,13 @@ pub async fn handle_gm_slash_ext(
 
         return match res {
             Ok((rec, chosen_flag)) => {
-                ctx.invalidate_ship_fitting(ship_id);
+                ctx.invalidate_and_push_fit(ship_id);
                 let flag_u16 = chosen_flag as u16;
                 let is_fitting_slot = matches!(flag_u16, 11..=34 | 92..=94 | 125..=132);
                 let mut is_online = false;
                 let mut new_loads_opt: Option<(f64, f64)> = None;
                 if is_fitting_slot {
-                    if let Ok(mut fit) = ctx.get_or_rebuild_ship_fitting(rec.owner_id, ship_id) {
+                    if let Ok(mut fit) = ctx.fit(rec.owner_id, ship_id) {
                         // Explicit-flag GM `/fit <ship> <type> <flag>` forces the chosen slot online
                         // when hull CPU/PG permits; auto-slot `/fit <type>` checks pilot skills (#648).
                         let online_ok = if explicit_flag.is_some() {
@@ -1640,7 +1637,7 @@ pub async fn handle_gm_slash_ext(
                         ctx.db.with_mut_snapshot(|snap| {
                             snap.module_online_states.insert(rec.item_id, true);
                         });
-                        ctx.invalidate_ship_fitting(ship_id);
+                        ctx.invalidate_and_push_fit(ship_id);
                     }
                 }
                 let item_row = eve_proto::DBRowDescriptor::inv_item_header()

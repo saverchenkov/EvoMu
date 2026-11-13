@@ -108,6 +108,11 @@ pub(crate) async fn handle_mining_and_deactivate(
                 .map(|t| matches!(t.group_id, 54 | 464 | 483 | 737 | 2004 | 4138) || t.default_attributes.contains_key(&77))
                 .unwrap_or(false);
 
+            let is_paid_cycle_deferred = mod_type_opt
+                .and_then(|tid| ctx.sde.types.get(&tid))
+                .is_some_and(|t| {
+                    matches!(t.group_id, 62 | 63 | 68 | 325 | 585 | 1199 | 1698)
+                });
             let mut removed_cycle_delay = None;
             if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
@@ -135,9 +140,29 @@ pub(crate) async fn handle_mining_and_deactivate(
                         client_error: None,
                     }));
                 }
+                if is_paid_cycle_deferred
+                    && sys.request_cycle_deactivation(ship_id, module_id).await.unwrap_or(false)
+                {
+                    ctx.notify(
+                        crate::router::NotificationTarget::Character(char_id),
+                        "OnModulesDeactivating",
+                        "charid",
+                        vec![PyRep::List(vec![PyRep::Integer(module_id)])],
+                    );
+                    let max_vel = ctx
+                        .fit(char_id, ship_id)
+                        .map(|f| f.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde))
+                        .unwrap_or(0.0);
+                    return Some(Ok(PyRep::keyval([
+                        ("moduleID", PyRep::Integer(module_id)),
+                        ("active", PyRep::Bool(false)),
+                        ("overloaded", PyRep::Bool(false)),
+                        ("effectiveMaxVelocity", PyRep::Real(max_vel)),
+                    ])));
+                }
                 removed_cycle_delay = sys.remove_module_cycle(ship_id, module_id).await.ok().flatten();
             }
-            let mut fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
+            let mut fit = match ctx.fit(char_id, ship_id) {
                 Ok(f) => f,
                 Err(e) => return Some(Err(e)),
             };
@@ -304,8 +329,12 @@ pub(crate) async fn handle_mining_and_deactivate(
                     ctx.record_module_reactivation_delay(ship_id, module_id, delay_s);
                 }
             }
-            let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
-            ctx.store_ship_fitting(ship_id, fit);
+            ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
+            ctx.invalidate_and_push_fit(ship_id);
+            let max_vel = ctx
+                .fit(char_id, ship_id)
+                .map(|f| f.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde))
+                .unwrap_or_else(|_| fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde));
             if let Some(sys_id) = session.solar_system_id {
                 crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
             }
@@ -380,7 +409,7 @@ pub(crate) async fn handle_mining_and_deactivate(
             } else {
                 false
             };
-            let mut fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
+            let mut fit = match ctx.fit(char_id, ship_id) {
                 Ok(f) => f,
                 Err(e) => return Some(Err(e)),
             };
@@ -391,7 +420,8 @@ pub(crate) async fn handle_mining_and_deactivate(
                     }
                 }
                 fit.recalculate_stats(&ctx.sde);
-                ctx.store_ship_fitting(ship_id, fit.clone());
+                ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
+                ctx.invalidate_and_push_fit(ship_id);
                 if let Some(sys_id) = session.solar_system_id {
                     crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
                 }
@@ -443,7 +473,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let mut fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
+            let mut fit = match ctx.fit(char_id, ship_id) {
                 Ok(f) => f,
                 Err(e) => return Some(Err(e)),
             };
@@ -519,7 +549,8 @@ pub(crate) async fn handle_mining_and_deactivate(
                 }
             }
             fit.recalculate_stats(&ctx.sde);
-            ctx.store_ship_fitting(ship_id, fit);
+            ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
+            ctx.invalidate_and_push_fit(ship_id);
             let notif_name = if overloaded { "OnHeatAdded" } else { "OnHeatRemoved" };
             for &mid in &notified_modules {
                 ctx.notify(
@@ -829,7 +860,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                             refund,
                         )
                     });
-                    ctx.invalidate_ship_fitting(ship_id);
+                    ctx.invalidate_and_push_fit(ship_id);
                 }
             }
             ctx.notify(

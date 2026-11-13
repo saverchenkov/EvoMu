@@ -646,8 +646,7 @@ pub(crate) async fn handle_dogma_ops(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            ctx.store_ship_fitting(ship_id, fit);
-            ctx.invalidate_ship_fitting(ship_id);
+            ctx.invalidate_and_push_fit(ship_id);
 
             let any_onlined = !committed_onlined.is_empty();
             for mid in committed_onlined {

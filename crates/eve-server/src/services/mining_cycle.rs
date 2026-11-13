@@ -908,14 +908,13 @@ fn stop_module(ctx: &ServerContext, cycle: &ActiveMiningCycle) {
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.remove(&cycle.module_id);
     });
-    if let Ok(mut fit) = ctx.get_or_rebuild_ship_fitting(cycle.char_id, cycle.ship_id) {
+    if let Ok(fit) = ctx.fit(cycle.char_id, cycle.ship_id) {
         if let Some(m) = fit.modules.get(&cycle.module_id) {
             module_type_id = module_type_id.or(Some(m.type_id));
             charge_type_id = m.charge_type_id;
         }
-        let _ = fit.deactivate_module(cycle.module_id, &ctx.sde);
-        ctx.store_ship_fitting(cycle.ship_id, fit);
     }
+    ctx.invalidate_and_push_fit(cycle.ship_id);
     let (effect_id, guid, is_offensive) = resolve_mining_effect_id_and_fx(
         ctx,
         module_type_id,
@@ -1008,7 +1007,7 @@ pub async fn activate(
         return Err(e);
     }
 
-    let mut fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
+    let fit = match ctx.fit(char_id, ship_id) {
         Ok(f) => f,
         Err(e) => {
             ctx.mining_cycles.write().unwrap_or_else(|e| e.into_inner()).remove(&module_id);
@@ -1016,11 +1015,10 @@ pub async fn activate(
         }
     };
     let charge_type_id = fit.modules.get(&module_id).and_then(|m| m.charge_type_id);
-    let _ = fit.activate_module(module_id, false, &ctx.sde);
-    ctx.store_ship_fitting(ship_id, fit);
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.insert(module_id);
     });
+    ctx.invalidate_and_push_fit(ship_id);
     ctx.persist_server_runtime_to_db();
     let (effect_id, guid, is_offensive) = resolve_mining_effect_id_and_fx(
         ctx,

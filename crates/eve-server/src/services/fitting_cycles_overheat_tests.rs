@@ -300,6 +300,33 @@ async fn handle_active_overload_toggle_and_nanite_lockout_check() {
                 ban_reason: None,
             },
         );
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mod_id,
+            InventoryItemRecord {
+                item_id: mod_id,
+                type_id: 439,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::MedSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(mod_id, true);
     });
     let _ = ctx
         .db
@@ -333,7 +360,7 @@ async fn handle_active_overload_toggle_and_nanite_lockout_check() {
         .iter()
         .any(|n| n.event == "OnHeatAdded"));
     assert_eq!(
-        ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap().modules[&mod_id].state,
+        ctx.fit(char_id, ship_id).unwrap().modules[&mod_id].state,
         ModuleState::Overloaded
     );
 

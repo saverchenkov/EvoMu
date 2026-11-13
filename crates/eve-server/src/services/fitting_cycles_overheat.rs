@@ -233,22 +233,10 @@ pub async fn handle_active_overload_toggle(
             fm.state = eve_dogma::ModuleState::Overloaded;
         }
         fit.recalculate_stats(&ctx.sde);
-        let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
-        ctx.store_ship_fitting(ship_id, fit);
-        ctx.notify(
-            crate::router::NotificationTarget::Character(char_id),
-            "OnHeatAdded",
-            "charid",
-            vec![PyRep::Integer(module_id)],
-        );
-        return PyRep::keyval([
-            ("moduleID", PyRep::Integer(module_id)),
-            ("overloaded", PyRep::Bool(true)),
-            ("effectiveMaxVelocity", PyRep::Real(max_vel)),
-        ]);
+        ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
+        ctx.invalidate_and_push_fit(ship_id);
     }
     let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
-    ctx.store_ship_fitting(ship_id, fit);
     ctx.notify(
         crate::router::NotificationTarget::Character(char_id),
         "OnHeatAdded",

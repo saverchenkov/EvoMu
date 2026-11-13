@@ -981,6 +981,65 @@ pub(crate) fn handle_add_module_cycle(
     Ok(())
 }
 
+/// Expires stale cycles for `(ship_id, module_id)` before `Activate` validation:
+/// removes any cycle whose target ball no longer exists in `ballpark`, or any
+/// `repeat == 0` / smartbomb cycle whose virtual-clock duration has elapsed.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn reconcile_module_cycle_before_activate_in_actor(
+    ballpark: &mut Ballpark,
+    active_module_cycles: &mut Vec<ActiveModuleCycle>,
+    base_scramble_strengths: &HashMap<BallId, i32>,
+    base_core_strengths: &HashMap<BallId, i32>,
+    sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    deactivation_hook: Option<&ModuleDeactivationHook>,
+    ship_id: BallId,
+    module_id: i64,
+    now_unix: u64,
+) -> (Option<(i32, Option<BallId>)>, bool) {
+    let mut removed_cycles = Vec::new();
+    let mut active_info = None;
+    for idx in (0..active_module_cycles.len()).rev() {
+        let c = &active_module_cycles[idx];
+        if c.ship_id != ship_id || c.module_id != module_id {
+            continue;
+        }
+        let target_gone = c.target_id.is_some_and(|tid| !ballpark.balls.contains_key(&tid));
+        let is_smartbomb = sde_opt
+            .as_ref()
+            .and_then(|s| s.types.get(&c.module_type_id))
+            .is_some_and(|t| t.group_id == 72)
+            || c.effect_name == "empWave";
+        let clock_expired = (c.repeat == 0 || is_smartbomb)
+            && c.started_at_unix > 0
+            && now_unix
+                >= c.started_at_unix
+                    .saturating_add(c.duration_s.max(1.0).ceil() as u64);
+        if target_gone || clock_expired {
+            let removed = active_module_cycles.swap_remove(idx);
+            cleanup_removed_module_cycle(ballpark, &removed, db_opt);
+            removed_cycles.push(removed);
+        } else if active_info.is_none() {
+            active_info = Some((c.repeat, c.target_id));
+        }
+    }
+    let cleaned = !removed_cycles.is_empty();
+    if cleaned {
+        reconcile_tackle_and_bubbles(
+            ballpark,
+            active_module_cycles,
+            base_scramble_strengths,
+            base_core_strengths,
+            db_opt,
+            deactivation_hook,
+        );
+        for removed in &removed_cycles {
+            emit_cycle_deactivation(removed, ballpark, db_opt, deactivation_hook);
+        }
+    }
+    (active_info, cleaned)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_update_module_overload(
     ballpark: &mut Ballpark,

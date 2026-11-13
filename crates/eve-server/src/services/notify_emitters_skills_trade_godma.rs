@@ -706,8 +706,7 @@ pub async fn handle_dogma_set_module_online(
         snap.module_online_states.insert(module_id, true);
         Ok(resolved_type_id)
     })?;
-    ctx.store_ship_fitting(ship_id, fit);
-    ctx.invalidate_ship_fitting(ship_id);
+    ctx.invalidate_and_push_fit(ship_id);
 
     let _ = ctx.notify_module_online_state(char_id, module_id, true);
     emit_ship_fitting_attr_changes(ctx, char_id, ship_id, &before_ship_attrs, &after_ship_attrs);
@@ -821,7 +820,6 @@ pub async fn handle_dogma_take_module_offline(
         .filter(|m| m.state == eve_dogma::ModuleState::Offline)
         .map(|m| m.item_id)
         .collect();
-    ctx.store_ship_fitting(ship_id, fit);
     ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
         snap.module_online_states.insert(module_id, false);
         snap.module_active_states.remove(&module_id);
@@ -831,7 +829,7 @@ pub async fn handle_dogma_take_module_offline(
         }
         Ok(())
     })?;
-    ctx.invalidate_ship_fitting(ship_id);
+    ctx.invalidate_and_push_fit(ship_id);
     let mut cleanup_mods = vec![module_id];
     for &mid in &offline_mod_ids {
         if mid != module_id {

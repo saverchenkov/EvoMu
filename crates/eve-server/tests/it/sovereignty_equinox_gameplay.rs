@@ -1028,6 +1028,9 @@ async fn test_skyhook_anchoring_linear_maturity_and_live_silo_ship_link_theft() 
     // then verify `InitiateLink` clamps max velocity to `SKYHOOK_SILO_LINK_MAX_SPEED_MS`.
     let mwd_id = 991_050i64;
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship_it) = snap.items.get_mut(&thief_ship) {
+            ship_it.type_id = 621; // Restore Caracal hull after fit_siege_artillery shield-break setup
+        }
         snap.skills.entry(thief_cid).or_default().insert(
             3454,
             TrainedSkillRecord { type_id: 3454, level: 1, skill_points: 1_250.0 },

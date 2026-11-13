@@ -112,7 +112,7 @@ fn handle_item_get_info(
             .map(|sd| (sd.owner_char_id, sd.parent_ship_id))
             .or_else(|| item_opt.as_ref().map(|it| (it.owner_id, it.location_id)));
         if let Some((p_owner, p_ship)) = parent_opt {
-            if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(p_owner, p_ship) {
+            if let Ok(fit) = ctx.fit(p_owner, p_ship) {
                 let drone_state_opt = fit.drone_state(raw_id, &ctx.sde).or_else(|| {
                     fit.evaluated_drones
                         .values()
@@ -144,7 +144,7 @@ fn handle_item_get_info(
         }
     } else if let Some(ref item) = item_opt {
         if item_cat == 6 {
-            if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(item.owner_id, item.item_id) {
+            if let Ok(fit) = ctx.fit(item.owner_id, item.item_id) {
                 let all_aids: std::collections::BTreeSet<u16> = fit
                     .ship
                     .base_attributes
@@ -176,7 +176,7 @@ fn handle_item_get_info(
                 );
             }
         } else if matches!(item.flag as u16, 11..=34 | 92..=94 | 125..=132) {
-            if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(item.owner_id, item.location_id) {
+            if let Ok(fit) = ctx.fit(item.owner_id, item.location_id) {
                 if item_cat == 8 {
                     let slot_flag = item.flag as u16;
                     let launcher_id_opt = fit
@@ -508,7 +508,7 @@ fn handle_dogma_set_session_check(
         })
     });
     let fitting_valid = match session.ship_id {
-        Some(sid) if ship_in_db => ctx.get_or_rebuild_ship_fitting(char_id, sid).is_ok(),
+        Some(sid) if ship_in_db => ctx.fit(char_id, sid).is_ok(),
         Some(_) => false,
         None => true,
     };
@@ -644,18 +644,25 @@ pub(crate) async fn handle_dogma_im(
             } else {
                 (None, args.first().and_then(|a| a.as_i64()))
             };
-            let Some(ship_id) = ship_id_opt
-                .filter(|&id| id > 0)
-                .or_else(|| bound_entry.map(|b| b.object_id))
-                .or(session.ship_id)
-            else {
+            let Some(active_ship_id) = session.ship_id else {
                 return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "No active ship in session".into(), client_error: None }));
             };
+            let ship_id = ship_id_opt
+                .filter(|&id| id > 0)
+                .or_else(|| bound_entry.map(|b| b.object_id))
+                .unwrap_or(active_ship_id);
+            if ship_id != active_ship_id {
+                return Some(Err(BridgeRpcError {
+                    code: "AccessDenied".into(),
+                    message: format!("Cannot change stance on non-active ship {ship_id}"),
+                    client_error: None,
+                }));
+            }
             let Some(stance_type_id) = stance_type_id_opt.filter(|&id| id > 0) else {
                 return Some(Err(BridgeRpcError { code: "InvalidShipStance".into(), message: "SetShipStance requires a valid stance typeID".into(), client_error: None }));
             };
             let now_ms = ctx.now_unix_secs().saturating_mul(1000);
-            let mut fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
+            let mut fit = match ctx.fit(char_id, ship_id) {
                 Ok(f) => f,
                 Err(e) => return Some(Err(e)),
             };
@@ -672,7 +679,8 @@ pub(crate) async fn handle_dogma_im(
                 return Some(Err(BridgeRpcError { code: code.into(), message: e, client_error: None }));
             }
             let max_vel = fit.ship.get_attribute(eve_sde::attr_ids::MAX_VELOCITY, &ctx.sde);
-            ctx.store_ship_fitting(ship_id, fit);
+            ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
+            ctx.invalidate_and_push_fit(ship_id);
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
                 "OnStanceActive",
@@ -746,7 +754,7 @@ pub(crate) async fn handle_dogma_im(
                 .db
                 .with_snapshot(|s| s.items.get(&item_id).map(|i| i.location_id))
                 .and_then(|loc| {
-                    ctx.get_or_rebuild_ship_fitting(char_id, loc).ok().map(|f| {
+                    ctx.fit(char_id, loc).ok().map(|f| {
                         (
                             f.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde),
                             f.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde),
@@ -850,8 +858,8 @@ pub(crate) async fn handle_dogma_im(
                 for c_rec in &removed_charges {
                     ctx.notify_item_mutation(char_id, Some(c_rec), None);
                 }
-                ctx.invalidate_ship_fitting(loc);
-                if let Ok(new_fit) = ctx.get_or_rebuild_ship_fitting(char_id, loc) {
+                ctx.invalidate_and_push_fit(loc);
+                if let Ok(new_fit) = ctx.fit(char_id, loc) {
                     if let Some((old_cpu, old_pg)) = old_fit_loads {
                         let new_cpu = new_fit.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde);
                         let new_pg = new_fit.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde);
@@ -957,7 +965,7 @@ pub(crate) async fn handle_dogma_im(
                 return Some(Err(BridgeRpcError { code: "TargetInvulnerable".into(), message: format!("Target {target_id} is tethered and invulnerable to target locks"), client_error: None }));
             }
             crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
-            let fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
+            let fit = match ctx.fit(char_id, ship_id) {
                 Ok(f) => f,
                 Err(e) => return Some(Err(e)),
             };

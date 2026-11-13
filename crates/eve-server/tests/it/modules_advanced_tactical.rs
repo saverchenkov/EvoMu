@@ -2712,12 +2712,21 @@ async fn test_overheat_rack_heat_analytical_curves_and_overload_bonuses() {
     rpc(&ctx, &mut sess_r, "dogmaIM", "Deactivate", vec![PyRep::Integer(76_031)]).await.unwrap();
 
     // 1e. SDE Overload bonuses: AB (+50% speed), Warp Scrambler II (+20% range at 10km), Armor Repairer (+10% rep / -15% dur), Weapon (-15% ROF)
+    let (_, ab_base) = sys.get_ball_snapshot(ship_a).await.unwrap().unwrap();
     rpc(&ctx, &mut sess_a, "dogmaIM", "Activate", vec![PyRep::Integer(ab_id)]).await.unwrap();
     let (_, ab_norm) = sys.get_ball_snapshot(ship_a).await.unwrap().unwrap();
     rpc(&ctx, &mut sess_a, "dogmaIM", "Deactivate", vec![PyRep::Integer(ab_id)]).await.unwrap();
     rpc(&ctx, &mut sess_a, "dogmaIM", "Overload", vec![PyRep::Integer(ab_id)]).await.unwrap();
     let (_, ab_ovl) = sys.get_ball_snapshot(ship_a).await.unwrap().unwrap();
-    assert!(ab_ovl.max_velocity > ab_norm.max_velocity * 1.15, "Overloaded AB must boost max_velocity: {} vs {}", ab_ovl.max_velocity, ab_norm.max_velocity);
+    let cold_boost = ab_norm.max_velocity - ab_base.max_velocity;
+    let ovl_boost = ab_ovl.max_velocity - ab_base.max_velocity;
+    assert!(
+        ab_ovl.max_velocity > ab_norm.max_velocity && ovl_boost > cold_boost * 1.45,
+        "Overloaded AB (+50% boost) must boost max_velocity: {} vs {} (base {})",
+        ab_ovl.max_velocity,
+        ab_norm.max_velocity,
+        ab_base.max_velocity
+    );
     rpc(&ctx, &mut sess_a, "dogmaIM", "Deactivate", vec![PyRep::Integer(ab_id)]).await.unwrap();
 
     sys.set_ball_position(target_id, origin + DVec3::new(10_200.0, 0.0, 0.0)).await;

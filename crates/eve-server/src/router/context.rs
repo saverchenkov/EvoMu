@@ -56,6 +56,7 @@ pub struct ServerContext {
     pub map_landmarks: Arc<RankedRwLock<Vec<(i64, String, f64, f64, f64)>, RANK_LEAF>>,
     pub session_closers: Arc<RankedRwLock<HashMap<u64, tokio::sync::mpsc::UnboundedSender<(String, String)>>, RANK_LEAF>>,
     pub ship_fittings: Arc<RankedRwLock<HashMap<i64, ShipFittingEngine>, RANK_LEAF>>,
+    pub ship_fit_revs: Arc<RankedRwLock<HashMap<i64, eve_dogma::FitRev>, RANK_LEAF>>,
     pub projected_ewar: Arc<RankedRwLock<HashMap<i64, Vec<eve_dogma::ProjectedEwarEffect>>, RANK_LEAF>>,
     pub projected_ewar_sources: Arc<RankedRwLock<HashMap<i64, i64>, RANK_LEAF>>,
     pub active_ewar_starts: Arc<RankedRwLock<HashMap<(i64, i64), Vec<(i64, &'static str)>>, RANK_LEAF>>,
@@ -131,6 +132,7 @@ pub(crate) struct ServerContextWeak {
     map_landmarks: std::sync::Weak<RankedRwLock<Vec<(i64, String, f64, f64, f64)>, RANK_LEAF>>,
     session_closers: std::sync::Weak<RankedRwLock<HashMap<u64, tokio::sync::mpsc::UnboundedSender<(String, String)>>, RANK_LEAF>>,
     ship_fittings: std::sync::Weak<RankedRwLock<HashMap<i64, ShipFittingEngine>, RANK_LEAF>>,
+    ship_fit_revs: std::sync::Weak<RankedRwLock<HashMap<i64, eve_dogma::FitRev>, RANK_LEAF>>,
     projected_ewar: std::sync::Weak<RankedRwLock<HashMap<i64, Vec<eve_dogma::ProjectedEwarEffect>>, RANK_LEAF>>,
     projected_ewar_sources: std::sync::Weak<RankedRwLock<HashMap<i64, i64>, RANK_LEAF>>,
     active_ewar_starts: std::sync::Weak<RankedRwLock<HashMap<(i64, i64), Vec<(i64, &'static str)>>, RANK_LEAF>>,
@@ -196,6 +198,7 @@ impl ServerContextWeak {
             map_landmarks: self.map_landmarks.upgrade()?,
             session_closers: self.session_closers.upgrade()?,
             ship_fittings: self.ship_fittings.upgrade()?,
+            ship_fit_revs: self.ship_fit_revs.upgrade()?,
             projected_ewar: self.projected_ewar.upgrade()?,
             projected_ewar_sources: self.projected_ewar_sources.upgrade()?,
             active_ewar_starts: self.active_ewar_starts.upgrade()?,
@@ -505,6 +508,7 @@ impl ServerContext {
             map_landmarks: Arc::downgrade(&self.map_landmarks),
             session_closers: Arc::downgrade(&self.session_closers),
             ship_fittings: Arc::downgrade(&self.ship_fittings),
+            ship_fit_revs: Arc::downgrade(&self.ship_fit_revs),
             projected_ewar: Arc::downgrade(&self.projected_ewar),
             projected_ewar_sources: Arc::downgrade(&self.projected_ewar_sources),
             active_ewar_starts: Arc::downgrade(&self.active_ewar_starts),
@@ -557,6 +561,7 @@ impl ServerContext {
         let instance_id = NEXT_CTX_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let pending_notifications = Arc::new(RankedRwLock::new(HashMap::new()));
         let ship_fittings = Arc::new(RankedRwLock::new(HashMap::new()));
+        let ship_fit_revs = Arc::new(RankedRwLock::new(HashMap::new()));
         let projected_ewar = Arc::new(RankedRwLock::new(HashMap::new()));
         let projected_ewar_sources = Arc::new(RankedRwLock::new(HashMap::new()));
         let active_ewar_starts = Arc::new(RankedRwLock::new(HashMap::new()));
@@ -642,6 +647,7 @@ impl ServerContext {
             map_landmarks: Arc::new(RankedRwLock::new(Vec::new())),
             session_closers: Arc::new(RankedRwLock::new(HashMap::new())),
             ship_fittings,
+            ship_fit_revs,
             projected_ewar,
             projected_ewar_sources,
             active_ewar_starts,
@@ -1385,6 +1391,10 @@ impl ServerContext {
             }
         }
         crate::services::implant_plugging::purge_expired_boosters_all(self, self.now_unix_secs());
+        crate::services::inventory_fitting::fitting_scanners_superweapons::purge_expired_ship_dbuffs_all(
+            self,
+            self.now_unix_secs(),
+        );
         crate::services::character_expert_systems::sweep_expired_expert_systems_all(
             self,
             self.now_blueos_filetime_ticks(),
@@ -1839,15 +1849,270 @@ impl ServerContext {
         let Some(handle) = self.systems.get_handle(sys_id) else {
             return;
         };
+        let rev = self.current_fit_rev(ship_id);
         let fresh = self.build_ship_combat_state(char_id, ship_id, type_id);
         let _ = handle.try_sync_ship_ballpark_stats(ship_id, &fresh);
+        if let Some(proj) = self.build_fit_projection(char_id, ship_id, rev) {
+            let _ = handle.try_send_fit_projection(ship_id, proj);
+        }
     }
 
-    pub fn invalidate_ship_fitting(&self, ship_id: i64) {
+    fn resolve_ship_fit_char_id(&self, ship_id: i64) -> Option<i64> {
+        self.db.with_snapshot(|s| {
+            s.characters
+                .values()
+                .find(|c| c.active_ship_id == ship_id)
+                .map(|c| c.character_id)
+                .or_else(|| s.items.get(&ship_id).map(|i| i.owner_id))
+        })
+    }
+
+    /// Computes a [`eve_dogma::FitProjection`] for `(char_id, ship_id)` at `rev`, applying active
+    /// command-burst dbuffs and system-wide phenomena once onto the `ActorBaseline` (which
+    /// excludes propulsion, cloak, HIC, and `gang_bursts` so nothing is double-applied, `#834`, `#922`).
+    pub(crate) fn build_fit_projection(
+        &self,
+        char_id: i64,
+        ship_id: i64,
+        rev: eve_dogma::FitRev,
+    ) -> Option<eve_dogma::FitProjection> {
+        let fit = self.fit(char_id, ship_id).ok()?;
+        if fit.ship.type_id == 0 || !self.sde.types.contains_key(&fit.ship.type_id) {
+            return None;
+        }
+        let mut proj = fit.to_projection(rev, &self.sde);
+        use eve_sde::attr_ids as a;
+        let b = &mut proj.baseline;
+        let mut eff_attrs: HashMap<u16, f64> = [
+            (a::SHIELD_CAPACITY, b.max_shield_hp),
+            (a::ARMOR_HP, b.max_armor_hp),
+            (a::HP_STRUCT, b.max_structure_hp),
+            (a::CAPACITOR_CAPACITY, b.max_capacitor),
+            (a::SIGNATURE_RADIUS, b.signature_radius),
+            (a::MAX_VELOCITY, b.max_velocity),
+            (a::MASS, b.mass),
+            (a::AGILITY, b.agility),
+            (a::SHIELD_RECHARGE_RATE, b.shield_recharge_time_ms),
+            (a::RECHARGE_RATE, b.capacitor_recharge_time_ms),
+            (a::SHIELD_EM_DAMAGE_RESONANCE, b.shield_resonance[0]),
+            (a::SHIELD_THERMAL_DAMAGE_RESONANCE, b.shield_resonance[1]),
+            (a::SHIELD_KINETIC_DAMAGE_RESONANCE, b.shield_resonance[2]),
+            (a::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE, b.shield_resonance[3]),
+            (a::ARMOR_EM_DAMAGE_RESONANCE, b.armor_resonance[0]),
+            (a::ARMOR_THERMAL_DAMAGE_RESONANCE, b.armor_resonance[1]),
+            (a::ARMOR_KINETIC_DAMAGE_RESONANCE, b.armor_resonance[2]),
+            (a::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE, b.armor_resonance[3]),
+            (a::EM_DAMAGE_RESONANCE, b.structure_resonance[0]),
+            (a::THERMAL_DAMAGE_RESONANCE, b.structure_resonance[1]),
+            (a::KINETIC_DAMAGE_RESONANCE, b.structure_resonance[2]),
+            (a::EXPLOSIVE_DAMAGE_RESONANCE, b.structure_resonance[3]),
+            (a::WARP_SPEED_MULTIPLIER, b.warp_speed_au_s),
+            (a::MAX_LOCKED_TARGETS, b.max_locked_targets as f64),
+            (a::MAX_TARGET_RANGE, b.max_target_range),
+            (a::SCAN_RESOLUTION, b.scan_resolution),
+        ]
+        .into_iter()
+        .collect();
+        crate::services::inventory_fitting::fitting_scanners_superweapons::apply_active_dbuffs_and_system_effects_to_ship_attrs_excluding(
+            self,
+            ship_id,
+            &[2141],
+            &mut eff_attrs,
+        );
+        b.max_shield_hp = eff_attrs[&a::SHIELD_CAPACITY].max(0.0);
+        b.max_armor_hp = eff_attrs[&a::ARMOR_HP].max(0.0);
+        b.max_structure_hp = eff_attrs[&a::HP_STRUCT].max(0.0);
+        let raw_cap = eff_attrs[&a::CAPACITOR_CAPACITY];
+        b.max_capacitor = if raw_cap <= 0.0 {
+            if proj.ship_type_id == 670 { 100.0 } else { 250.0 }
+        } else {
+            raw_cap
+        };
+        let tp_mult = self.effective_target_painter_multiplier(ship_id);
+        let sig = eff_attrs[&a::SIGNATURE_RADIUS].max(0.0);
+        b.signature_radius = if tp_mult > 1.0 + 1e-6 { sig / tp_mult } else { sig };
+        b.max_velocity = eff_attrs[&a::MAX_VELOCITY].max(0.0);
+        b.mass = eff_attrs[&a::MASS].max(1.0);
+        b.agility = eff_attrs[&a::AGILITY].max(0.001);
+        b.shield_recharge_time_ms = eff_attrs[&a::SHIELD_RECHARGE_RATE].max(1.0);
+        b.capacitor_recharge_time_ms = eff_attrs[&a::RECHARGE_RATE].max(1.0);
+        b.shield_resonance = [
+            eff_attrs[&a::SHIELD_EM_DAMAGE_RESONANCE],
+            eff_attrs[&a::SHIELD_THERMAL_DAMAGE_RESONANCE],
+            eff_attrs[&a::SHIELD_KINETIC_DAMAGE_RESONANCE],
+            eff_attrs[&a::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE],
+        ];
+        b.armor_resonance = [
+            eff_attrs[&a::ARMOR_EM_DAMAGE_RESONANCE],
+            eff_attrs[&a::ARMOR_THERMAL_DAMAGE_RESONANCE],
+            eff_attrs[&a::ARMOR_KINETIC_DAMAGE_RESONANCE],
+            eff_attrs[&a::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE],
+        ];
+        b.structure_resonance = [
+            eff_attrs[&a::EM_DAMAGE_RESONANCE],
+            eff_attrs[&a::THERMAL_DAMAGE_RESONANCE],
+            eff_attrs[&a::KINETIC_DAMAGE_RESONANCE],
+            eff_attrs[&a::EXPLOSIVE_DAMAGE_RESONANCE],
+        ];
+        b.warp_speed_au_s = eff_attrs[&a::WARP_SPEED_MULTIPLIER].max(0.0);
+        b.max_locked_targets = eff_attrs[&a::MAX_LOCKED_TARGETS].max(0.0).round() as usize;
+        b.max_target_range = eff_attrs[&a::MAX_TARGET_RANGE].max(0.0);
+        b.scan_resolution = eff_attrs[&a::SCAN_RESOLUTION].max(0.0);
+        if let Some(ref mut prop) = proj.propulsion {
+            prop.speed_boost = eve_dogma::compute_propulsion_speed_boost(
+                prop.speed_factor,
+                prop.speed_boost_factor,
+                b.mass,
+                prop.mass_addition,
+            );
+        }
+        Some(proj)
+    }
+
+    /// Invalidates the cached fit for `ship_id`, advances `FitRev`, and pushes a fresh
+    /// `FitProjection` to the system actor when the ship is in space (`#834`, `#922`).
+    pub(crate) fn invalidate_and_push_fit(&self, ship_id: i64) -> Option<eve_dogma::FitRev> {
+        self.invalidate_ship_fitting_cache_only(ship_id);
+        self.push_fit_projection_for_ship(ship_id)
+    }
+
+    /// Resolves the owner/pilot for `ship_id` and invokes [`Self::push_fit_projection`].
+    pub fn push_fit_projection_for_ship(&self, ship_id: i64) -> Option<eve_dogma::FitRev> {
+        if ship_id <= 0 {
+            return None;
+        }
+        if let Some(char_id) = self.resolve_ship_fit_char_id(ship_id) {
+            self.push_fit_projection(char_id, ship_id)
+        } else {
+            Some(self.bump_fit_rev(ship_id))
+        }
+    }
+
+    /// Returns the current monotonic [`eve_dogma::FitRev`] for `ship_id` (`FitRev(0)` if never bumped).
+    pub fn current_fit_rev(&self, ship_id: i64) -> eve_dogma::FitRev {
+        self.ship_fit_revs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&ship_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Advances and returns the monotonic [`eve_dogma::FitRev`] for `ship_id` (`#922`).
+    pub fn bump_fit_rev(&self, ship_id: i64) -> eve_dogma::FitRev {
+        let mut revs = self.ship_fit_revs.write().unwrap_or_else(|e| e.into_inner());
+        let next = revs.get(&ship_id).copied().unwrap_or_default().next();
+        revs.insert(ship_id, next);
+        next
+    }
+
+    /// Bumps `FitRev` for `ship_id` and, when the ship is currently in space with an active
+    /// `SystemActor`, computes and enqueues an immutable [`eve_dogma::FitProjection`] (`#922`).
+    ///
+    /// Drops all locks before calling [`SystemHandle::try_send_fit_projection`].
+    pub fn push_fit_projection(&self, char_id: i64, ship_id: i64) -> Option<eve_dogma::FitRev> {
+        if ship_id <= 0 {
+            return None;
+        }
+        let in_space_sys_id = self.db.with_snapshot(|s| {
+            let item = s.items.get(&ship_id)?;
+            if let Some(ch) = s.characters.get(&char_id) {
+                if ch.station_id.is_none() && ch.structure_id.is_none() {
+                    u32::try_from(ch.solar_system_id).ok()
+                } else {
+                    None
+                }
+            } else {
+                u32::try_from(item.location_id)
+                    .ok()
+                    .filter(|&loc| (30_000_000..40_000_000).contains(&loc))
+            }
+        });
+        if let Some(sys_id) = in_space_sys_id {
+            if let Some(handle) = self.systems.get_handle(sys_id) {
+                let rev = self.bump_fit_rev(ship_id);
+                if let Some(projection) = self.build_fit_projection(char_id, ship_id, rev) {
+                    let _ = handle.try_send_fit_projection(ship_id, projection);
+                }
+                return Some(rev);
+            }
+        }
+        Some(self.bump_fit_rev(ship_id))
+    }
+
+    /// Persists durable ship fit runtime inputs (`active_stance_type_id`, `last_stance_switch_ms`,
+    /// `overloaded_modules`) into `WorldStateSnapshot::ship_fit_inputs` (`#861`, `#922`).
+    pub(crate) fn persist_fit_inputs(&self, ship_id: i64, inputs: &eve_dogma::PersistedFitInputs) {
+        let rec = eve_db::ShipFitInputsRecord {
+            active_stance_type_id: inputs.active_stance_type_id,
+            last_stance_switch_ms: inputs.last_stance_switch_ms,
+            overloaded_modules: inputs.overloaded_modules.clone(),
+        };
+        self.db.with_mut_snapshot(|snap| {
+            if rec.active_stance_type_id.is_none()
+                && rec.last_stance_switch_ms.is_none()
+                && rec.overloaded_modules.is_empty()
+            {
+                snap.ship_fit_inputs.remove(&ship_id);
+            } else {
+                snap.ship_fit_inputs.insert(ship_id, rec);
+            }
+        });
+    }
+
+    /// Captures cached rack heat and module heat damage for `ship_id` before cross-system transit.
+    pub(crate) fn snapshot_rack_heat_and_damage(
+        &self,
+        ship_id: i64,
+    ) -> Option<([f64; 3], Vec<(i64, f64)>)> {
+        self.ship_fittings
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&ship_id)
+            .map(|f| {
+                let dmg = f
+                    .modules
+                    .iter()
+                    .filter(|(_, m)| m.damage_hp.is_finite() && m.damage_hp > 0.0)
+                    .map(|(&mid, m)| (mid, m.damage_hp))
+                    .collect();
+                (f.rack_heat, dmg)
+            })
+    }
+
+    /// Updates cached rack heat (and clears module damage flags when resetting heat) for `ship_id`.
+    pub(crate) fn update_ship_rack_heat(
+        &self,
+        char_id: i64,
+        ship_id: i64,
+        rack_heat: [f64; 3],
+        clear_module_damage: bool,
+    ) {
+        if let Ok(mut fit) = self.fit(char_id, ship_id) {
+            fit.rack_heat = rack_heat;
+            if clear_module_damage {
+                for m in fit.modules.values_mut() {
+                    m.damage_hp = 0.0;
+                }
+            }
+            self.ship_fittings
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(ship_id, fit);
+            let _ = self.bump_fit_rev(ship_id);
+        }
+    }
+
+    pub(crate) fn invalidate_ship_fitting_cache_only(&self, ship_id: i64) {
         self.ship_fittings
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&ship_id);
+        let _ = self.bump_fit_rev(ship_id);
+    }
+
+    pub fn invalidate_ship_fitting(&self, ship_id: i64) {
+        let _ = self.invalidate_and_push_fit(ship_id);
     }
 
     pub fn store_ship_fitting(&self, ship_id: i64, fit: ShipFittingEngine) {
@@ -1855,13 +2120,52 @@ impl ServerContext {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .insert(ship_id, fit);
+        let _ = self.bump_fit_rev(ship_id);
     }
 
+    /// Verifies that `char_id` owns or is currently piloting `ship_id` (or `ship_id` is a valid
+    /// structure item) before serving any cached or rebuilt fit (`#861`, `#922`).
+    fn verify_ship_fit_access(&self, char_id: i64, ship_id: i64) -> Result<(), BridgeRpcError> {
+        let allowed = self.db.with_snapshot(|s| {
+            let Some(item) = s.items.get(&ship_id) else {
+                return false;
+            };
+            item.owner_id == char_id
+                || s.characters
+                    .get(&char_id)
+                    .is_some_and(|c| c.active_ship_id == ship_id)
+                || s.structures.contains_key(&ship_id)
+        });
+        if allowed {
+            Ok(())
+        } else {
+            Err(BridgeRpcError {
+                code: "ShipNotFound".into(),
+                message: format!("Ship item {ship_id} not found for character {char_id}"),
+                client_error: None,
+            })
+        }
+    }
+
+    /// Single checked accessor for a character's ship fit (`#861`, `#922`).
+    ///
+    /// Legacy callers still reach this via [`Self::get_or_rebuild_ship_fitting`] until Phase 2
+    /// migrates all callers and restricts `store_ship_fitting` / `invalidate_ship_fitting`
+    /// visibility.
     pub fn get_or_rebuild_ship_fitting(
         &self,
         char_id: i64,
         ship_id: i64,
     ) -> Result<ShipFittingEngine, BridgeRpcError> {
+        self.fit(char_id, ship_id)
+    }
+
+    pub fn fit(
+        &self,
+        char_id: i64,
+        ship_id: i64,
+    ) -> Result<ShipFittingEngine, BridgeRpcError> {
+        self.verify_ship_fit_access(char_id, ship_id)?;
         let skill_levels = self.character_skill_levels(char_id);
         let active_implants = self.db.with_snapshot(|s| {
             s.active_implants.get(&char_id).cloned().unwrap_or_default()
@@ -2011,7 +2315,14 @@ impl ServerContext {
 
         let items = self.db.get_items_for_character(char_id);
         let ship_item = items.iter().find(|i| i.item_id == ship_id).cloned().or_else(|| {
-            self.db.with_snapshot(|s| s.structures.contains_key(&ship_id).then(|| s.items.get(&ship_id).cloned()).flatten())
+            self.db.with_snapshot(|s| {
+                (s.structures.contains_key(&ship_id)
+                    || s.characters
+                        .get(&char_id)
+                        .is_some_and(|c| c.active_ship_id == ship_id))
+                    .then(|| s.items.get(&ship_id).cloned())
+                    .flatten()
+            })
         });
         let Some(ship_item) = ship_item else {
             return Err(BridgeRpcError { code: "ShipNotFound".into(), message: format!("Ship item {ship_id} not found for character {char_id}"), client_error: None });
@@ -2034,9 +2345,15 @@ impl ServerContext {
         for (&attr_id, &val) in &ship_item.dynamic_attributes {
             fit.ship.base_attributes.insert(attr_id, val);
         }
-        let (online_states, active_states, active_charges) = self.db.with_snapshot(|s| {
-            (s.module_online_states.clone(), s.module_active_states.clone(), s.module_active_charges.clone())
-        });
+        let (online_states, active_states, active_charges, persisted_fit_inputs) =
+            self.db.with_snapshot(|s| {
+                (
+                    s.module_online_states.clone(),
+                    s.module_active_states.clone(),
+                    s.module_active_charges.clone(),
+                    s.ship_fit_inputs.get(&ship_id).cloned(),
+                )
+            });
 
         let mut fittable_items: Vec<_> = items
             .iter()
@@ -2184,9 +2501,22 @@ impl ServerContext {
                 fit.drones.push((probe_id, probe_type_id));
             }
         }
+        if let Some(pfi) = persisted_fit_inputs {
+            fit.apply_persisted_inputs(
+                &eve_dogma::PersistedFitInputs {
+                    active_stance_type_id: pfi.active_stance_type_id,
+                    last_stance_switch_ms: pfi.last_stance_switch_ms,
+                    overloaded_modules: pfi.overloaded_modules,
+                },
+                &self.sde,
+            );
+        }
         fit.recalculate_stats(&self.sde);
 
-        self.store_ship_fitting(ship_id, fit.clone());
+        self.ship_fittings
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(ship_id, fit.clone());
         Ok(fit)
     }
 

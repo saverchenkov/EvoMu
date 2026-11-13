@@ -268,6 +268,134 @@ async fn item_get_info_space_drone_charges_ship_attributes_and_ship_stances() {
     );
 }
 
+#[tokio::test]
+async fn set_ship_stance_enforces_ownership_and_pushes_fit_projection_in_space() {
+    use eve_destiny::{Ball, CombatState, MovementMode};
+    use glam::DVec3;
+
+    let ctx = new_seeded_ctx();
+    let char_id = 92_100_099i64;
+    let other_char_id = 92_100_100i64;
+    let corp_id = 98_100_099i64;
+    let sys_id: u32 = 30_000_142;
+    let ship_id = 10_921_099_001i64;
+    let other_ship_id = 10_921_099_002i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.corporation_id = corp_id;
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch.clone());
+
+        ch.character_id = other_char_id;
+        ch.active_ship_id = other_ship_id;
+        snap.characters.insert(other_char_id, ch);
+
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 34317, // Confessor
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            other_ship_id,
+            InventoryItemRecord {
+                item_id: other_ship_id,
+                type_id: 34317,
+                owner_id: other_char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    sys_h
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 34317,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 100.0,
+            inertia: 3.0,
+            mass: 1_500_000.0,
+            radius: 35.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+    let _ = sys_h.set_combat_state(ship_id, CombatState::default()).await;
+
+    let mut no_ship_session = make_session(char_id, corp_id, Some(sys_id), None, None);
+    assert_eq!(
+        call_ship_stance_mgr(
+            &ctx,
+            &mut no_ship_session,
+            None,
+            "SetShipStance",
+            &[PyRep::Integer(ship_id), PyRep::Integer(34321)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "NoActiveShip"
+    );
+
+    let mut session = make_session(char_id, corp_id, Some(sys_id), None, Some(ship_id));
+    assert_eq!(
+        call_ship_stance_mgr(
+            &ctx,
+            &mut session,
+            None,
+            "SetShipStance",
+            &[PyRep::Integer(other_ship_id), PyRep::Integer(34321)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "AccessDenied"
+    );
+    assert!(sys_h.latest_fit_projection(other_ship_id).is_none());
+
+    let res = call_ship_stance_mgr(
+        &ctx,
+        &mut session,
+        None,
+        "SetShipStance",
+        &[PyRep::Integer(ship_id), PyRep::Integer(34321)],
+    )
+    .await
+    .unwrap();
+    assert_eq!(res, PyRep::Integer(34321));
+
+    // Flush FIFO actor command queue so ApplyFitProjection executes.
+    let _ = sys_h.get_ball_snapshot(ship_id).await.unwrap();
+    let pushed = sys_h
+        .latest_fit_projection(ship_id)
+        .expect("SetShipStance must push FitProjection to in-space actor");
+    let expected = ctx
+        .build_fit_projection(char_id, ship_id, pushed.rev)
+        .expect("projection rebuild");
+    assert_eq!(pushed.baseline, expected.baseline);
+}
+
 fn new_seeded_ctx() -> ServerContext {
     ServerContext::with_sde_and_repository(
         shared_sde(),

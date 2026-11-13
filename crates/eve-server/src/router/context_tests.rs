@@ -422,6 +422,34 @@ fn ship_fitting_cache_rebuild_and_has_fleet_extras_branches() {
 
     ctx.invalidate_ship_fitting(ship_id);
     assert!(!ctx.ship_fittings.read().unwrap().contains_key(&ship_id));
+    assert!(ctx.current_fit_rev(ship_id).0 >= 1);
+
+    // Checked `ctx.fit` verifies pilot/owner even on a warm cache hit (`#861`), while
+    // allowing an active pilot (`active_ship_id == ship_id`).
+    let _warm = ctx.fit(char_id, ship_id).expect("owner fit must succeed");
+    assert!(ctx.ship_fittings.read().unwrap().contains_key(&ship_id));
+    let other_char = 90_000_999_i64;
+    let denied = ctx
+        .fit(other_char, ship_id)
+        .expect_err("non-owner non-pilot must be rejected even on warm cache hit");
+    assert_eq!(denied.code, "ShipNotFound");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.insert(
+            other_char,
+            eve_db::CharacterRecord {
+                active_ship_id: ship_id,
+                ..snap.characters[&char_id].clone()
+            },
+        );
+    });
+    assert!(
+        ctx.fit(other_char, ship_id).is_ok(),
+        "active pilot of the ship must pass ctx.fit check"
+    );
+    let r1 = ctx.bump_fit_rev(ship_id);
+    let r2 = ctx.bump_fit_rev(ship_id);
+    assert!(r2 > r1);
 
     // Exercise every branch of has_fleet_extras_for
     let fid = 777_001_i64;
@@ -689,4 +717,274 @@ async fn unified_clock_tick_pipeline_syncs_ballpark_stats_and_preserves_ice_belt
         assert!(snap.corp_governance[&corp_id].friendly_fire_legal);
         assert!(snap.corp_governance[&corp_id].pending_friendly_fire.is_none());
     });
+}
+
+#[tokio::test]
+async fn push_fit_projection_pushes_to_in_space_actor_and_bumps_rev_when_docked() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_id = 100_000_888_i64;
+
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    sys_h
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: 587,
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 50.0,
+            inertia: 5.0,
+            mass: 2_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+    let _ = sys_h
+        .set_combat_state(ship_id, eve_destiny::CombatState::default())
+        .await;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            make_item(ship_id, 587, char_id, sys_id as i64, InventoryFlag::None, 1),
+        );
+    });
+
+    let rev = ctx
+        .push_fit_projection(char_id, ship_id)
+        .expect("in-space ship must bump FitRev and push projection");
+    assert!(rev.0 >= 1);
+
+    // Flush the single FIFO actor command queue to ensure ApplyFitProjection ran.
+    let (_, ball) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let projected = sys_h
+        .latest_fit_projection(ship_id)
+        .expect("system actor must store pushed FitProjection");
+    assert_eq!(projected.rev, rev);
+    assert!((ball.max_velocity - projected.baseline.max_velocity).abs() < 1e-3);
+
+    // Docked ship still advances FitRev cleanly without panicking or needing an actor.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(60_003_760);
+        }
+    });
+    let docked_rev = ctx
+        .push_fit_projection(char_id, ship_id)
+        .expect("docked ship still bumps FitRev");
+    assert!(docked_rev > rev);
+    assert_eq!(
+        sys_h.latest_fit_projection(ship_id).unwrap().rev,
+        rev,
+        "docked push must not overwrite in-space actor projection"
+    );
+}
+
+#[tokio::test]
+async fn differential_in_space_fit_mutations_match_fresh_combat_state_and_projection() {
+    use crate::services::inventory_fitting::fitting_scanners_superweapons::{
+        purge_expired_ship_dbuffs_all, scanners_superweapons_state, ActiveDbuffEntry,
+    };
+
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_id = 100_000_999_i64;
+    let dcu_mod_id = 100_000_998_i64;
+    let mwd_mod_id = 100_000_997_i64;
+    let ship_type_id = 587_u32; // Rifter
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            make_item(ship_id, ship_type_id, char_id, sys_id as i64, InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            dcu_mod_id,
+            make_item(dcu_mod_id, 2048, char_id, ship_id, InventoryFlag::LoSlot0, 1), // Damage Control II
+        );
+        snap.items.insert(
+            mwd_mod_id,
+            make_item(mwd_mod_id, 5973, char_id, ship_id, InventoryFlag::MedSlot0, 1), // 5MN Y-T8 Compact MWD
+        );
+    });
+
+    let initial_cs = ctx.build_ship_combat_state(char_id, ship_id, ship_type_id);
+    let initial_proj = ctx
+        .build_fit_projection(char_id, ship_id, ctx.current_fit_rev(ship_id))
+        .expect("initial fit projection");
+
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    sys_h
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: ship_type_id,
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: initial_proj.baseline.max_velocity,
+            inertia: initial_proj.baseline.agility,
+            mass: initial_proj.baseline.mass,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+    let _ = sys_h.set_combat_state(ship_id, initial_cs.clone()).await;
+
+    let assert_actor_matches_fresh = |ctx: &ServerContext, actor_cs: &eve_destiny::CombatState, ball: &eve_destiny::Ball| {
+        let fresh_cs = ctx.build_ship_combat_state(char_id, ship_id, ship_type_id);
+        let fresh_proj = ctx
+            .build_fit_projection(char_id, ship_id, ctx.current_fit_rev(ship_id))
+            .expect("fresh projection");
+        assert!((actor_cs.max_shield_hp - fresh_cs.max_shield_hp).abs() < 1e-4);
+        assert!((actor_cs.max_armor_hp - fresh_cs.max_armor_hp).abs() < 1e-4);
+        assert!((actor_cs.max_structure_hp - fresh_cs.max_structure_hp).abs() < 1e-4);
+        assert!((actor_cs.max_capacitor - fresh_cs.max_capacitor).abs() < 1e-4);
+        assert!((actor_cs.signature_radius - fresh_cs.signature_radius).abs() < 1e-4);
+        assert!(
+            (actor_cs.base_max_velocity.unwrap_or_default()
+                - fresh_cs.base_max_velocity.unwrap_or_default())
+            .abs()
+                < 1e-4
+        );
+        assert!((ball.max_velocity - fresh_proj.baseline.max_velocity).abs() < 1e-4);
+        assert!((ball.mass - fresh_proj.baseline.mass).abs() < 1e-4);
+        for idx in 0..4 {
+            assert!(
+                (actor_cs.shield_resonance[idx] - fresh_cs.shield_resonance[idx]).abs() < 1e-5,
+                "shield resonance[{idx}] mismatch: actor={} vs fresh={}",
+                actor_cs.shield_resonance[idx],
+                fresh_cs.shield_resonance[idx]
+            );
+            assert!(
+                (actor_cs.armor_resonance[idx] - fresh_cs.armor_resonance[idx]).abs() < 1e-5,
+                "armor resonance[{idx}] mismatch: actor={} vs fresh={}",
+                actor_cs.armor_resonance[idx],
+                fresh_cs.armor_resonance[idx]
+            );
+            assert!(
+                (actor_cs.structure_resonance[idx] - fresh_cs.structure_resonance[idx]).abs() < 1e-5,
+                "structure resonance[{idx}] mismatch: actor={} vs fresh={}",
+                actor_cs.structure_resonance[idx],
+                fresh_cs.structure_resonance[idx]
+            );
+        }
+    };
+
+    // 1. Offline Damage Control II in-space and push projection: actor resists must match fresh rebuild.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(dcu_mod_id, false);
+    });
+    let rev1 = ctx
+        .invalidate_and_push_fit(ship_id)
+        .expect("in-space invalidate_and_push_fit must advance rev");
+    let actor_cs_1 = sys_h.get_combat_state(ship_id).await.unwrap().unwrap();
+    let (_, ball_1) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert_eq!(sys_h.latest_fit_projection(ship_id).unwrap().rev, rev1);
+    assert_actor_matches_fresh(&ctx, &actor_cs_1, &ball_1);
+    assert!(actor_cs_1.structure_resonance[0] > initial_cs.structure_resonance[0]);
+
+    // 2. Apply an active command burst / dbuff in-space (e.g., shield/velocity dbuff from SDE) and push.
+    let dbuff_id = ctx
+        .sde
+        .dbuff_collections
+        .iter()
+        .find(|(_, coll)| coll.item_modifiers.contains(&263) || coll.location_modifiers.contains(&263))
+        .map(|(&id, _)| id)
+        .unwrap_or(1);
+    let now_unix = ctx.now_unix_secs();
+    {
+        let mut st = scanners_superweapons_state()
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        st.ship_dbuffs
+            .entry((ctx.instance_id, ship_id))
+            .or_default()
+            .push(ActiveDbuffEntry {
+                dbuff_id,
+                value: 20.0,
+                expires_at_unix: now_unix + 60,
+                source_module_id: 1,
+            });
+    }
+    let rev2 = ctx.invalidate_and_push_fit(ship_id).unwrap();
+    assert!(rev2 > rev1);
+    let actor_cs_2 = sys_h.get_combat_state(ship_id).await.unwrap().unwrap();
+    let (_, ball_2) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert_actor_matches_fresh(&ctx, &actor_cs_2, &ball_2);
+
+    // 3. Expire the dbuff and purge expired dbuffs: actor CombatState must revert to baseline.
+    {
+        let mut st = scanners_superweapons_state()
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(entries) = st.ship_dbuffs.get_mut(&(ctx.instance_id, ship_id)) {
+            for e in entries.iter_mut() {
+                e.expires_at_unix = now_unix.saturating_sub(1);
+            }
+        }
+    }
+    purge_expired_ship_dbuffs_all(&ctx, now_unix + 1);
+    let actor_cs_3 = sys_h.get_combat_state(ship_id).await.unwrap().unwrap();
+    let (_, ball_3) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert_actor_matches_fresh(&ctx, &actor_cs_3, &ball_3);
+    assert!((actor_cs_3.max_shield_hp - actor_cs_1.max_shield_hp).abs() < 1e-4);
+}
+
+#[test]
+fn persisted_fit_inputs_rehydrate_stance_cooldown_and_overloaded_modules_after_invalidation() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_955_i64;
+    let mwd_mod_id = 100_000_956_i64;
+    let confessor_type_id = 34317_u32;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            make_item(ship_id, confessor_type_id, char_id, 60_003_760, InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            mwd_mod_id,
+            make_item(mwd_mod_id, 5973, char_id, ship_id, InventoryFlag::MedSlot0, 1),
+        );
+        snap.module_online_states.insert(mwd_mod_id, true);
+        snap.module_active_states.insert(mwd_mod_id);
+    });
+
+    let mut fit = ctx.fit(char_id, ship_id).unwrap();
+    let now_ms = ctx.now_unix_secs().saturating_mul(1000);
+    fit.switch_ship_stance(34321, now_ms, &ctx.sde).unwrap();
+    if let Some(m) = fit.modules.get_mut(&mwd_mod_id) {
+        m.state = eve_dogma::ModuleState::Overloaded;
+    }
+    ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
+    ctx.invalidate_ship_fitting(ship_id);
+
+    let rebuilt = ctx.fit(char_id, ship_id).unwrap();
+    assert_eq!(rebuilt.active_stance_type_id, Some(34321));
+    assert_eq!(rebuilt.last_stance_switch_ms, Some(now_ms));
+    assert_eq!(
+        rebuilt.modules.get(&mwd_mod_id).map(|m| m.state),
+        Some(eve_dogma::ModuleState::Overloaded)
+    );
 }

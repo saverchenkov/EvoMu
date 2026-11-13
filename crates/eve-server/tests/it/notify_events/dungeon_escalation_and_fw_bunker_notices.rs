@@ -177,12 +177,20 @@ async fn destroy_npc_ball(
         if !ctx.db.with_snapshot(|s| s.items.contains_key(&gid)) {
             continue;
         }
+        if sys_handle.get_ball_snapshot(npc_id).await.unwrap().is_none() {
+            sync_weapons = true;
+            break;
+        }
         let res = rpc(
             ctx, sess, "dogmaIM", "Activate",
             &[PyRep::Integer(gid), PyRep::String(effect_name.into()), PyRep::Integer(npc_id), PyRep::Integer(1000)],
         ).await.unwrap_or_else(|e| panic!("Activate gun {idx} on NPC failed: {e:?}"));
         if kv_get(&res, "appliedDamage").is_some() {
             sync_weapons = true;
+        }
+        if kv_get(&res, "destroyed") == Some(&PyRep::Bool(true)) {
+            sync_weapons = true;
+            break;
         }
     }
     let mut last_dmg = 0.0_f64;

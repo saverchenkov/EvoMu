@@ -424,7 +424,10 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::GetCombatState { .. } => "GetCombatState",
             SystemCommand::AddModuleCycle { .. } => "AddModuleCycle",
             SystemCommand::RemoveModuleCycle { .. } => "RemoveModuleCycle",
+            SystemCommand::RequestCycleDeactivation { .. } => "RequestCycleDeactivation",
+            SystemCommand::FireWeaponCycleVolley { .. } => "FireWeaponCycleVolley",
             SystemCommand::HasModuleCycle { .. } => "HasModuleCycle",
+            SystemCommand::ReconcileModuleCycleBeforeActivate { .. } => "ReconcileModuleCycleBeforeActivate",
             SystemCommand::SetInterdictionNullified { .. } => "SetInterdictionNullified",
             SystemCommand::MicroJump { .. } => "MicroJump",
             SystemCommand::MicroJumpField { .. } => "MicroJumpField",
@@ -444,6 +447,7 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::RestoreBall { .. } => "RestoreBall",
             SystemCommand::ModifyCombatState { .. } => "ModifyCombatState",
             SystemCommand::FlushConditionCheckpoint { .. } => "FlushConditionCheckpoint",
+            SystemCommand::ApplyFitProjection { .. } => "ApplyFitProjection",
         }
     }
 
@@ -519,7 +523,10 @@ fn system_command_all_variants_construct_and_match() {
         SystemCommand::GetCombatState { ball_id: 1, reply: oneshot::channel().0 },
         SystemCommand::AddModuleCycle { cycle: ActiveModuleCycle::default(), reply: oneshot::channel().0 },
         SystemCommand::RemoveModuleCycle { ship_id: 1, module_id: 2, reply: oneshot::channel().0 },
+        SystemCommand::RequestCycleDeactivation { ship_id: 1, module_id: 2, reply: oneshot::channel().0 },
+        SystemCommand::FireWeaponCycleVolley { ship_id: 1, module_id: 2, reply: oneshot::channel().0 },
         SystemCommand::HasModuleCycle { ship_id: 1, module_id: 2, reply: oneshot::channel().0 },
+        SystemCommand::ReconcileModuleCycleBeforeActivate { ship_id: 1, module_id: 2, now_unix: 0, reply: oneshot::channel().0 },
         SystemCommand::SetInterdictionNullified { ball_id: 1, nullified: true, reply: oneshot::channel().0 },
         SystemCommand::MicroJump { ball_id: 1, distance_meters: 100_000.0, reply: oneshot::channel().0 },
         SystemCommand::MicroJumpField { ball_id: 1, distance_meters: 100_000.0, field_radius_meters: 6_000.0, max_jumped_ships: 25, reply: oneshot::channel().0 },
@@ -538,8 +545,8 @@ fn system_command_all_variants_construct_and_match() {
         SystemCommand::FlushConditionCheckpoint { reply: oneshot::channel().0 },
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
-    assert_eq!(tags.len(), 65);
+    assert_eq!(tags.len(), 68);
     assert_eq!(tags[0], "SpawnBall");
-    assert_eq!(tags[63], "FlushPeerObserverUpdates");
-    assert_eq!(tags[64], "FlushConditionCheckpoint");
+    assert_eq!(tags[66], "FlushPeerObserverUpdates");
+    assert_eq!(tags[67], "FlushConditionCheckpoint");
 }

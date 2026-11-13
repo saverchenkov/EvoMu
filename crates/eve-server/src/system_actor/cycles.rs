@@ -82,6 +82,306 @@ pub(crate) fn is_capital_remote_repair_module(
 }
 
 #[cfg(test)]
+pub(crate) fn sync_cycle_from_fit_projection(
+    cycle: &mut ActiveModuleCycle,
+    fit_projections: &HashMap<BallId, eve_dogma::FitProjection>,
+) {
+    sync_cycle_from_fit_projection_with_shield_boost_mult(cycle, fit_projections, 1.0);
+}
+
+pub(crate) fn sync_cycle_from_fit_projection_with_shield_boost_mult(
+    cycle: &mut ActiveModuleCycle,
+    fit_projections: &HashMap<BallId, eve_dogma::FitProjection>,
+    shield_boost_multiplier: f64,
+) {
+    let Some(proj) = fit_projections.get(&cycle.ship_id) else {
+        return;
+    };
+    let Some(cp) = proj.modules.get(&cycle.module_id) else {
+        return;
+    };
+    if cp.is_overloaded != cycle.is_overloaded {
+        return;
+    }
+    if !cycle.grants_interdiction_nullification && cp.duration_ms > 0.0 && cp.duration_ms.is_finite()
+    {
+        let mult = if cycle.shield_boost_amount > 0.0
+            && shield_boost_multiplier > 0.0
+            && shield_boost_multiplier.is_finite()
+        {
+            shield_boost_multiplier
+        } else {
+            1.0
+        };
+        cycle.duration_s = ((cp.duration_ms / 1000.0) * mult).max(0.05);
+    }
+    if !cycle.is_asb && cp.capacitor_need >= 0.0 && cp.capacitor_need.is_finite() {
+        cycle.cap_need_per_cycle = cp.capacitor_need;
+    }
+    let bank_mult = (cycle.linked_turrets.len().max(1)) as f64;
+    if cp.is_turret {
+        if cp.optimal_range_m > 0.0 {
+            cycle.weapon_optimal_m = cp.optimal_range_m;
+        }
+        cycle.weapon_falloff_m = cp.falloff_m.max(0.0);
+        if cp.tracking_speed > 0.0 {
+            cycle.weapon_tracking_speed = cp.tracking_speed;
+        }
+        if cp.sig_resolution_m > 0.0 {
+            cycle.weapon_sig_resolution_m = cp.sig_resolution_m;
+        }
+        let dmg_sum: f64 = cp.damage.iter().sum();
+        if dmg_sum > 0.0 && dmg_sum.is_finite() {
+            cycle.damage_vector = eve_destiny::DamageVector::new(
+                cp.damage[0] * bank_mult,
+                cp.damage[1] * bank_mult,
+                cp.damage[2] * bank_mult,
+                cp.damage[3] * bank_mult,
+            );
+        }
+    } else if cp.is_missile {
+        if cp.optimal_range_m > 0.0 {
+            cycle.weapon_optimal_m = cp.optimal_range_m;
+        }
+        if cp.missile_explosion_radius_m > 0.0 {
+            cycle.missile_explosion_radius_m = cp.missile_explosion_radius_m;
+        }
+        if cp.missile_explosion_velocity_ms > 0.0 {
+            cycle.missile_explosion_velocity_ms = cp.missile_explosion_velocity_ms;
+        }
+        if cp.missile_drf > 0.0 {
+            cycle.missile_drf = cp.missile_drf;
+        }
+        let dmg_sum: f64 = cp.damage.iter().sum();
+        if dmg_sum > 0.0 && dmg_sum.is_finite() {
+            cycle.damage_vector = eve_destiny::DamageVector::new(
+                cp.damage[0] * bank_mult,
+                cp.damage[1] * bank_mult,
+                cp.damage[2] * bank_mult,
+                cp.damage[3] * bank_mult,
+            );
+        }
+    }
+    if cp.prop_speed_boost > 0.0 {
+        cycle.speed_boost_factor = cp.prop_speed_boost;
+    }
+}
+
+pub(crate) fn apply_weapon_cycle_damage(
+    cycle: &ActiveModuleCycle,
+    ballpark: &mut Ballpark,
+    rah_incoming_damage: &mut HashMap<BallId, [f64; 4]>,
+    sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    pending_cycle_actions: &mut Vec<PendingCycleAction>,
+    destroyed_balls: &mut Vec<(BallId, Option<CharacterId>)>,
+) {
+    let Some(target_id) = cycle.target_id else {
+        return;
+    };
+    if cycle.damage_vector.total() <= 0.0 {
+        return;
+    }
+    let effective_damage = if cycle.weapon_is_turret {
+        if let (Some(sb), Some(tb)) = (
+            ballpark.balls.get(&cycle.ship_id),
+            ballpark.balls.get(&target_id),
+        ) {
+            let dist = sb.position.distance(tb.position);
+            let angular_vel = eve_destiny::combat::compute_angular_velocity(
+                sb.position,
+                sb.velocity,
+                tb.position,
+                tb.velocity,
+            );
+            let attacker_pylon_mult = ballpark
+                .combat_states
+                .get(&cycle.ship_id)
+                .map(|cs| cs.tracking_speed_multiplier)
+                .filter(|&m| m > 0.0)
+                .unwrap_or(1.0);
+            let tracking_speed = cycle.weapon_tracking_speed.max(1e-6) * attacker_pylon_mult;
+            let sig_res = if cycle.weapon_sig_resolution_m > 0.0 {
+                cycle.weapon_sig_resolution_m
+            } else {
+                40_000.0
+            };
+            let target_sig = ballpark
+                .combat_states
+                .get(&target_id)
+                .map(|cs| {
+                    if cs.signature_radius > 0.0 {
+                        cs.signature_radius
+                    } else {
+                        cs.base_signature_radius.unwrap_or(0.0)
+                    }
+                })
+                .filter(|&s| s > 0.0)
+                .unwrap_or_else(|| tb.radius.max(35.0));
+            let p_hit = crate::formulas::turret_chance_to_hit_with_res(
+                angular_vel,
+                tracking_speed,
+                sig_res,
+                target_sig,
+                dist,
+                cycle.weapon_optimal_m.max(1.0),
+                cycle.weapon_falloff_m.max(1.0),
+            );
+            let mut roll_seed = ((cycle.ship_id ^ cycle.module_id) as u64)
+                .wrapping_add((target_id as u64).wrapping_mul(0x517c_c1b7_2722_0a95))
+                .wrapping_add(ballpark.current_tick);
+            let hit_roll = crate::rng::u64_to_unit_f64(
+                crate::rng::splitmix64_next(&mut roll_seed),
+            );
+            crate::formulas::turret_shot_damage(cycle.damage_vector, p_hit, hit_roll).0
+        } else {
+            eve_destiny::DamageVector::default()
+        }
+    } else if cycle.weapon_is_missile {
+        if let Some(tb) = ballpark.balls.get(&target_id) {
+            let out_of_range = ballpark
+                .balls
+                .get(&cycle.ship_id)
+                .is_some_and(|sb| {
+                    cycle.weapon_optimal_m > 0.0
+                        && sb.position.distance(tb.position) > cycle.weapon_optimal_m
+                });
+            if out_of_range {
+                eve_destiny::DamageVector::default()
+            } else {
+                let target_sig = ballpark
+                    .combat_states
+                    .get(&target_id)
+                    .map(|cs| {
+                        if cs.signature_radius > 0.0 {
+                            cs.signature_radius
+                        } else {
+                            cs.base_signature_radius.unwrap_or(0.0)
+                        }
+                    })
+                    .filter(|&s| s > 0.0)
+                    .unwrap_or_else(|| tb.radius.max(35.0));
+                let target_speed = if tb.velocity.length() > 0.0 {
+                    tb.velocity.length()
+                } else {
+                    tb.max_velocity * tb.speed_fraction
+                };
+                let exp_rad = if cycle.missile_explosion_radius_m > 0.0 {
+                    cycle.missile_explosion_radius_m
+                } else {
+                    40.0
+                };
+                let exp_vel = if cycle.missile_explosion_velocity_ms > 0.0 {
+                    cycle.missile_explosion_velocity_ms
+                } else {
+                    170.0
+                };
+                let drf = if cycle.missile_drf > 0.0 {
+                    cycle.missile_drf
+                } else {
+                    0.604
+                };
+                let factor = crate::formulas::missile_damage_factor(
+                    target_sig,
+                    target_speed,
+                    exp_rad,
+                    exp_vel,
+                    drf,
+                );
+                cycle.damage_vector.scaled(factor)
+            }
+        } else {
+            eve_destiny::DamageVector::default()
+        }
+    } else {
+        cycle.damage_vector
+    };
+    if effective_damage.total() > 0.0 {
+        let now_unix = db_opt.as_ref().map_or(0, |db| db.clock().now_unix_secs());
+        let sys_id = ballpark.solar_system_id;
+        let dmg_res = crate::services::mobile_deployables::handle_ball_damage_in_actor(
+            db_opt,
+            sde_opt,
+            sys_id,
+            target_id,
+            effective_damage,
+            ballpark,
+            now_unix,
+        )
+        .or_else(|| ballpark.apply_damage_to_ball(target_id, effective_damage));
+        let entry = rah_incoming_damage.entry(target_id).or_insert([0.0; 4]);
+        entry[0] += effective_damage.em;
+        entry[1] += effective_damage.thermal;
+        entry[2] += effective_damage.kinetic;
+        entry[3] += effective_damage.explosive;
+        if let Some((applied_dmg, is_destroyed, _)) = dmg_res {
+            let attacker_char_id = cycle
+                .owner_char_id
+                .or_else(|| {
+                    ballpark
+                        .ball_slim_meta
+                        .get(&cycle.ship_id)
+                        .and_then(|m| m.char_id.or(Some(m.owner_id)))
+                })
+                .or_else(|| {
+                    db_opt.as_ref().and_then(|db| {
+                        db.with_snapshot(|s| {
+                            s.characters
+                                .values()
+                                .find(|c| c.active_ship_id == cycle.ship_id)
+                                .map(|c| c.character_id)
+                                .or_else(|| s.items.get(&cycle.ship_id).map(|it| it.owner_id))
+                        })
+                    })
+                });
+            let target_char_id = ballpark
+                .ball_slim_meta
+                .get(&target_id)
+                .and_then(|m| m.char_id)
+                .or_else(|| {
+                    db_opt.as_ref().and_then(|db| {
+                        db.with_snapshot(|s| {
+                            s.characters
+                                .values()
+                                .find(|c| c.active_ship_id == target_id)
+                                .map(|c| c.character_id)
+                                .or_else(|| {
+                                    s.items
+                                        .get(&target_id)
+                                        .map(|it| it.owner_id)
+                                        .filter(|oid| s.characters.contains_key(oid))
+                                })
+                        })
+                    })
+                })
+                .filter(|&cid| cid > 0 && Some(cid) != attacker_char_id);
+            let attacker_ship_type_id = ballpark
+                .balls
+                .get(&cycle.ship_id)
+                .map(|b| b.type_id)
+                .unwrap_or(0);
+            if applied_dmg > 0.0
+                && (attacker_char_id.is_some_and(|c| c > 0) || target_char_id.is_some_and(|c| c > 0))
+            {
+                pending_cycle_actions.push(super::PendingCycleAction::CycleWeaponDamage {
+                    attacker_char_id,
+                    attacker_ship_id: cycle.ship_id,
+                    attacker_ship_type_id,
+                    target_id,
+                    target_char_id,
+                    module_type_id: cycle.module_type_id,
+                    applied_dmg,
+                    notified: false,
+                });
+            }
+            if is_destroyed {
+                destroyed_balls.push((target_id, attacker_char_id));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn step_cycles_and_capacitor(
     ballpark: &mut Ballpark,
@@ -101,6 +401,8 @@ pub(crate) fn step_cycles_and_capacitor(
     deactivation_hook: Option<&ModuleDeactivationHook>,
 ) -> Vec<(BallId, Option<CharacterId>)> {
     let empty_epochs = HashMap::new();
+    let empty_projections = HashMap::new();
+    let mut empty_cycle_start = std::collections::HashSet::new();
     step_cycles_and_capacitor_with_epochs(
         ballpark,
         active_module_cycles,
@@ -113,6 +415,8 @@ pub(crate) fn step_cycles_and_capacitor(
         sde_opt,
         db_opt,
         &empty_epochs,
+        &empty_projections,
+        &mut empty_cycle_start,
         mechanic_rng_opt,
         tactical_state,
         pending_cycle_actions,
@@ -134,6 +438,8 @@ pub(crate) fn step_cycles_and_capacitor_with_epochs(
     sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     ball_space_entry_epochs: &HashMap<BallId, u64>,
+    fit_projections: &HashMap<BallId, eve_dogma::FitProjection>,
+    weapon_cycle_start_modules: &mut std::collections::HashSet<(BallId, i64)>,
     mechanic_rng_opt: &Option<Arc<crate::rng::MechanicRng>>,
     tactical_state: &dyn AnyRwLock<crate::services::tactical_modules::TacticalModulesState>,
     pending_cycle_actions: &mut Vec<PendingCycleAction>,
@@ -467,202 +773,18 @@ pub(crate) fn step_cycles_and_capacitor_with_epochs(
 
             // 2. Target interactions: damage, cap drain, Nosferatu cap transfer, remote shield/armor/hull/cap (`DG-4`, `DG-5`)
             if let Some(target_id) = cycle.target_id {
-                if cycle.damage_vector.total() > 0.0 {
-                    let effective_damage = if cycle.weapon_is_turret {
-                        if let (Some(sb), Some(tb)) = (
-                            ballpark.balls.get(&cycle.ship_id),
-                            ballpark.balls.get(&target_id),
-                        ) {
-                            let dist = sb.position.distance(tb.position);
-                            let angular_vel = eve_destiny::combat::compute_angular_velocity(
-                                sb.position,
-                                sb.velocity,
-                                tb.position,
-                                tb.velocity,
-                            );
-                            let attacker_pylon_mult = ballpark
-                                .combat_states
-                                .get(&cycle.ship_id)
-                                .map(|cs| cs.tracking_speed_multiplier)
-                                .filter(|&m| m > 0.0)
-                                .unwrap_or(1.0);
-                            let tracking_speed =
-                                cycle.weapon_tracking_speed.max(1e-6) * attacker_pylon_mult;
-                            let sig_res = if cycle.weapon_sig_resolution_m > 0.0 {
-                                cycle.weapon_sig_resolution_m
-                            } else {
-                                40_000.0
-                            };
-                            let target_sig = ballpark
-                                .combat_states
-                                .get(&target_id)
-                                .map(|cs| {
-                                    if cs.signature_radius > 0.0 {
-                                        cs.signature_radius
-                                    } else {
-                                        cs.base_signature_radius.unwrap_or(0.0)
-                                    }
-                                })
-                                .filter(|&s| s > 0.0)
-                                .unwrap_or_else(|| tb.radius.max(35.0));
-                            let p_hit = crate::formulas::turret_chance_to_hit_with_res(
-                                angular_vel,
-                                tracking_speed,
-                                sig_res,
-                                target_sig,
-                                dist,
-                                cycle.weapon_optimal_m.max(1.0),
-                                cycle.weapon_falloff_m.max(1.0),
-                            );
-                            let mut roll_seed = ((cycle.ship_id ^ cycle.module_id) as u64)
-                                .wrapping_add((target_id as u64).wrapping_mul(0x517c_c1b7_2722_0a95))
-                                .wrapping_add(ballpark.current_tick);
-                            let hit_roll = crate::rng::u64_to_unit_f64(
-                                crate::rng::splitmix64_next(&mut roll_seed),
-                            );
-                            crate::formulas::turret_shot_damage(
-                                cycle.damage_vector,
-                                p_hit,
-                                hit_roll,
-                            )
-                            .0
-                        } else {
-                            eve_destiny::DamageVector::default()
-                        }
-                    } else if cycle.weapon_is_missile {
-                        if let Some(tb) = ballpark.balls.get(&target_id) {
-                            let out_of_range = ballpark
-                                .balls
-                                .get(&cycle.ship_id)
-                                .is_some_and(|sb| {
-                                    cycle.weapon_optimal_m > 0.0
-                                        && sb.position.distance(tb.position)
-                                            > cycle.weapon_optimal_m
-                                });
-                            if out_of_range {
-                                eve_destiny::DamageVector::default()
-                            } else {
-                                let target_sig = ballpark
-                                    .combat_states
-                                    .get(&target_id)
-                                    .map(|cs| {
-                                        if cs.signature_radius > 0.0 {
-                                            cs.signature_radius
-                                        } else {
-                                            cs.base_signature_radius.unwrap_or(0.0)
-                                        }
-                                    })
-                                    .filter(|&s| s > 0.0)
-                                    .unwrap_or_else(|| tb.radius.max(35.0));
-                                let target_speed = if tb.velocity.length() > 0.0 {
-                                    tb.velocity.length()
-                                } else {
-                                    tb.max_velocity * tb.speed_fraction
-                                };
-                                let exp_rad = if cycle.missile_explosion_radius_m > 0.0 {
-                                    cycle.missile_explosion_radius_m
-                                } else {
-                                    40.0
-                                };
-                                let exp_vel = if cycle.missile_explosion_velocity_ms > 0.0 {
-                                    cycle.missile_explosion_velocity_ms
-                                } else {
-                                    170.0
-                                };
-                                let drf = if cycle.missile_drf > 0.0 {
-                                    cycle.missile_drf
-                                } else {
-                                    0.604
-                                };
-                                let factor = crate::formulas::missile_damage_factor(
-                                    target_sig,
-                                    target_speed,
-                                    exp_rad,
-                                    exp_vel,
-                                    drf,
-                                );
-                                cycle.damage_vector.scaled(factor)
-                            }
-                        } else {
-                            eve_destiny::DamageVector::default()
-                        }
-                    } else {
-                        cycle.damage_vector
-                    };
-                    if effective_damage.total() > 0.0 {
-                        // Mobile Depot / MTU targets follow their deployable rules (anchoring, 25% reinforcement).
-                        let now_unix = db_opt.as_ref().map_or(0, |db| db.clock().now_unix_secs());
-                        let sys_id = ballpark.solar_system_id;
-                        let dmg_res = crate::services::mobile_deployables::handle_ball_damage_in_actor(
-                            db_opt,
-                            sde_opt,
-                            sys_id,
-                            target_id,
-                            effective_damage,
-                            ballpark,
-                            now_unix,
-                        )
-                        .or_else(|| ballpark.apply_damage_to_ball(target_id, effective_damage));
-                        let entry = rah_incoming_damage.entry(target_id).or_insert([0.0; 4]);
-                        entry[0] += effective_damage.em;
-                        entry[1] += effective_damage.thermal;
-                        entry[2] += effective_damage.kinetic;
-                        entry[3] += effective_damage.explosive;
-                        if let Some((applied_dmg, is_destroyed, _)) = dmg_res {
-                            let attacker_char_id = cycle.owner_char_id.or_else(|| {
-                                ballpark.ball_slim_meta.get(&cycle.ship_id).and_then(|m| m.char_id.or(Some(m.owner_id)))
-                            }).or_else(|| {
-                                db_opt.as_ref().and_then(|db| db.with_snapshot(|s| {
-                                    s.characters.values().find(|c| c.active_ship_id == cycle.ship_id).map(|c| c.character_id)
-                                        .or_else(|| s.items.get(&cycle.ship_id).map(|it| it.owner_id))
-                                }))
-                            });
-                            let target_char_id = ballpark
-                                .ball_slim_meta
-                                .get(&target_id)
-                                .and_then(|m| m.char_id)
-                                .or_else(|| {
-                                    db_opt.as_ref().and_then(|db| {
-                                        db.with_snapshot(|s| {
-                                            s.characters
-                                                .values()
-                                                .find(|c| c.active_ship_id == target_id)
-                                                .map(|c| c.character_id)
-                                                .or_else(|| {
-                                                    s.items
-                                                        .get(&target_id)
-                                                        .map(|it| it.owner_id)
-                                                        .filter(|oid| s.characters.contains_key(oid))
-                                                })
-                                        })
-                                    })
-                                })
-                                .filter(|&cid| cid > 0 && Some(cid) != attacker_char_id);
-                            let attacker_ship_type_id = ballpark
-                                .balls
-                                .get(&cycle.ship_id)
-                                .map(|b| b.type_id)
-                                .unwrap_or(0);
-                            if applied_dmg > 0.0
-                                && (attacker_char_id.is_some_and(|c| c > 0)
-                                    || target_char_id.is_some_and(|c| c > 0))
-                            {
-                                pending_cycle_actions.push(super::PendingCycleAction::CycleWeaponDamage {
-                                    attacker_char_id,
-                                    attacker_ship_id: cycle.ship_id,
-                                    attacker_ship_type_id,
-                                    target_id,
-                                    target_char_id,
-                                    module_type_id: cycle.module_type_id,
-                                    applied_dmg,
-                                    notified: false,
-                                });
-                            }
-                            if is_destroyed {
-                                destroyed_balls.push((target_id, attacker_char_id));
-                            }
-                        }
-                    }
+                if cycle.damage_vector.total() > 0.0
+                    && !weapon_cycle_start_modules.contains(&(cycle.ship_id, cycle.module_id))
+                {
+                    apply_weapon_cycle_damage(
+                        cycle,
+                        ballpark,
+                        rah_incoming_damage,
+                        sde_opt,
+                        db_opt,
+                        pending_cycle_actions,
+                        &mut destroyed_balls,
+                    );
                 }
                 let src_cap_info = ballpark
                     .combat_states
@@ -1209,6 +1331,29 @@ pub(crate) fn step_cycles_and_capacitor_with_epochs(
                             is_overloaded: next_ovl,
                         });
                     }
+                    let shield_boost_mult = ballpark
+                        .combat_states
+                        .get(&cycle.ship_id)
+                        .map(|cs| cs.shield_boost_multiplier)
+                        .unwrap_or(1.0);
+                    sync_cycle_from_fit_projection_with_shield_boost_mult(
+                        cycle,
+                        fit_projections,
+                        shield_boost_mult,
+                    );
+                    if weapon_cycle_start_modules.contains(&(cycle.ship_id, cycle.module_id))
+                        && cycle.damage_vector.total() > 0.0
+                    {
+                        apply_weapon_cycle_damage(
+                            cycle,
+                            ballpark,
+                            rah_incoming_damage,
+                            sde_opt,
+                            db_opt,
+                            pending_cycle_actions,
+                            &mut destroyed_balls,
+                        );
+                    }
                     if matches!(mod_grp, 72 | 80 | 353 | 650) {
                         if let Some(cid) = cycle.owner_char_id {
                             pending_cycle_actions.push(PendingCycleAction::RepeatCycleStart {
@@ -1352,6 +1497,11 @@ pub(crate) fn step_cycles_and_capacitor_with_epochs(
         emit_cycle_deactivation(&finished, ballpark, db_opt, deactivation_hook);
     }
     active_module_cycles.extend(lance_requeues);
+    weapon_cycle_start_modules.retain(|&(sid, mid)| {
+        active_module_cycles
+            .iter()
+            .any(|c| c.ship_id == sid && c.module_id == mid)
+    });
     reconcile_tackle_and_bubbles(
         ballpark,
         active_module_cycles,
@@ -1601,7 +1751,8 @@ impl SystemHandle {
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
             asteroids, asteroid_templates, sde_opt, db_opt, mechanic_rng_opt,
             sim_elapsed_secs, pending_cycle_actions, tactical_state,
-            pending_notifications_opt, notify_tx_opt, ball_space_entry_epochs, ..
+            pending_notifications_opt, notify_tx_opt, ball_space_entry_epochs,
+            fit_projections, weapon_cycle_start_modules, ..
         } = &mut *st;
         if dt > 0.0 && dt.is_finite() {
             *sim_elapsed_secs += dt;
@@ -1661,6 +1812,22 @@ impl SystemHandle {
         );
         let step_now_unix = db_opt.as_ref().map(|db| db.clock().now_unix_secs()).unwrap_or(0);
         let deact_hook_guard = self.module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
+        for ev in &events {
+            if let eve_destiny::DestinyEvent::OnTarget { mode, source_id, target_id } = ev {
+                if mode == "lost" {
+                    super::cycles_tackle::on_target_unlocked_in_actor(
+                        &mut bp,
+                        active_module_cycles,
+                        base_scramble_strengths,
+                        base_core_strengths,
+                        db_opt,
+                        *source_id,
+                        Some(*target_id),
+                        deact_hook_guard.as_ref(),
+                    );
+                }
+            }
+        }
         let fallback_rng = crate::rng::MechanicRng::default();
         let rng_ref = mechanic_rng_opt.as_deref().unwrap_or(&fallback_rng);
         crate::services::mobile_deployables::step_mobile_deployables_in_actor(
@@ -1671,7 +1838,8 @@ impl SystemHandle {
         let mut destroyed = step_cycles_and_capacitor_with_epochs(
             &mut bp, active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
-            sde_opt, db_opt, ball_space_entry_epochs, mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions, dt, deact_hook_guard.as_ref(),
+            sde_opt, db_opt, ball_space_entry_epochs, fit_projections, weapon_cycle_start_modules,
+            mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions, dt, deact_hook_guard.as_ref(),
         );
         record_player_ship_capacitor_deltas(&bp, &pre_tick_caps, pending_cycle_actions);
         flush_pending_cycle_damage_notifications(

@@ -56,6 +56,14 @@ pub struct FwWindowedStat {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+pub struct ShipFitInputsRecord {
+    pub active_stance_type_id: Option<TypeId>,
+    pub last_stance_switch_ms: Option<u64>,
+    pub overloaded_modules: std::collections::BTreeSet<i64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FwCharacterStatsRecord {
     pub character_id: i64,
     pub faction_id: Option<i64>,
@@ -698,6 +706,8 @@ pub struct WorldStateSnapshot {
     /// Charge type loaded into an active burst module when it was activated (`dogmaIM.Activate`).
     #[serde(default)]
     pub module_active_charges: HashMap<i64, u32>,
+    #[serde(default)]
+    pub ship_fit_inputs: HashMap<i64, ShipFitInputsRecord>,
     #[serde(default)]
     pub weapon_banks: HashMap<i64, HashMap<i64, Vec<i64>>>,
     #[serde(default)]

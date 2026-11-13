@@ -1172,3 +1172,249 @@ async fn cehe_duration_fallbacks_crystal_volatility_and_survey_cycle_completion(
     assert_eq!(dup_web.code, "ModuleAlreadyActive");
 }
 
+#[tokio::test]
+async fn activate_5mn_mwd_on_battleship_uses_mass_scaled_propulsion_boost_860() {
+    const SYN_RAVEN: u32 = 999_638;
+    const SYN_5MN_MWD: u32 = 999_440;
+    let ctx = test_ctx_with_custom(|sde| {
+        let mut raven = custom_inv_type(
+            sde,
+            SYN_RAVEN,
+            27,
+            6,
+            400_000.0,
+            500.0,
+            "Raven",
+            &[
+                (4, 99_100_000.0),
+                (37, 112.0),
+                (70, 0.115),
+                (482, 5_500.0),
+                (55, 950_000.0),
+                (263, 8_000.0),
+                (265, 5_000.0),
+                (9, 6_000.0),
+                (552, 420.0),
+                (192, 7.0),
+                (76, 95_000.0),
+            ],
+        );
+        raven.mass = 99_100_000.0;
+        sde.types.insert(SYN_RAVEN, raven);
+        let mut mwd = custom_inv_type(
+            sde,
+            SYN_5MN_MWD,
+            46,
+            7,
+            5.0,
+            0.0,
+            "5MN Microwarpdrive II",
+            &[
+                (6, 50.0),
+                (73, 10_000.0),
+                (20, 510.0),
+                (567, 500_000.0),
+                (796, 500_000.0),
+                (554, 500.0),
+            ],
+        );
+        mwd.effect_ids = vec![13, 6730];
+        sde.types.insert(SYN_5MN_MWD, mwd);
+    });
+
+    let char_id = 97_000_860;
+    let sys_id = 30_002_505;
+    let ship_id = 1_000_860_001;
+    let mwd_id = 1_000_860_002;
+    ensure_char(&ctx, char_id, 98_000_001, sys_id, ship_id);
+    insert_item(&ctx, ship_id, SYN_RAVEN, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    insert_item(&ctx, mwd_id, SYN_5MN_MWD, char_id, ship_id, InventoryFlag::MedSlot0, 1, true);
+    spawn_ship(&ctx, sys_id, ship_id, SYN_RAVEN, char_id, 5_500.0).await;
+
+    let kw = HashMap::new();
+    let mut sess = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(98_000_001),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+
+    handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(mwd_id), PyRep::String("moduleBonusMicrowarpdrive".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("Activate 5MN MWD on Raven");
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let (_, ball) = sys.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let expected_boost = eve_dogma::compute_propulsion_speed_boost(510.0, 500_000.0, 99_100_000.0, 500_000.0);
+    let expected_vel = 112.0 * (1.0 + expected_boost);
+    assert!(
+        ball.max_velocity < 125.0 && (ball.max_velocity - expected_vel).abs() < 0.5,
+        "5MN MWD on Battleship must scale by ship mass ({expected_vel:.2} m/s), not raw +510% ({} m/s)",
+        ball.max_velocity
+    );
+}
+
+#[tokio::test]
+async fn weapon_fires_first_volley_on_activate_and_rejects_duplicate_activate_890() {
+    const SYN_PULSE: u32 = 999_503;
+    const SYN_CRYSTAL: u32 = 999_504;
+    let ctx = test_ctx_with_custom(|sde| {
+        let mut turret = custom_inv_type(
+            sde,
+            SYN_PULSE,
+            53,
+            7,
+            5.0,
+            10.0,
+            "Small Focused Pulse Laser I",
+            &[
+                (6, 5.0),
+                (73, 4_000.0),
+                (54, 10_000.0),
+                (158, 5_000.0),
+                (160, 1.0),
+                (620, 40.0),
+                (64, 2.0),
+            ],
+        );
+        turret.effect_ids = vec![13, 10];
+        sde.types.insert(SYN_PULSE, turret);
+        sde.types.insert(
+            SYN_CRYSTAL,
+            custom_inv_type(
+                sde,
+                SYN_CRYSTAL,
+                86,
+                8,
+                1.0,
+                0.0,
+                "Multifrequency S",
+                &[(114, 50.0), (118, 50.0)],
+            ),
+        );
+    });
+
+    let char_id = 97_000_890;
+    let target_char = 97_000_891;
+    let sys_id = 30_002_505;
+    let ship_id = 1_000_890_001;
+    let turret_id = 1_000_890_002;
+    let crystal_id = 1_000_890_003;
+    let target_id = 1_000_890_010;
+
+    ensure_char(&ctx, char_id, 98_000_001, sys_id, ship_id);
+    ensure_char(&ctx, target_char, 98_000_002, sys_id, target_id);
+    insert_item(&ctx, ship_id, 587, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    insert_item(&ctx, turret_id, SYN_PULSE, char_id, ship_id, InventoryFlag::HiSlot0, 1, true);
+    insert_item(&ctx, crystal_id, SYN_CRYSTAL, char_id, ship_id, InventoryFlag::HiSlot0, 1, true);
+    insert_item(&ctx, target_id, 587, target_char, sys_id as i64, InventoryFlag::None, 1, true);
+
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels
+            .insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
+    });
+
+    spawn_ship(&ctx, sys_id, ship_id, 587, char_id, 1_000.0).await;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: target_id,
+            type_id: 587,
+            position: DVec3::new(11_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        CombatState {
+            shield_hp: 500.0,
+            max_shield_hp: 500.0,
+            armor_hp: 500.0,
+            max_armor_hp: 500.0,
+            shield_recharge_time_ms: 0.0,
+            capacitor_recharge_time_ms: 0.0,
+            ..Default::default()
+        },
+        SlimItemMeta {
+            group_id: 25,
+            category_id: 6,
+            owner_id: target_char,
+            char_id: Some(target_char),
+            corp_id: 98_000_002,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    sys.add_target_lock(
+        ship_id,
+        eve_destiny::TargetLock {
+            target_id,
+            lock_time_ms: 100.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: Some(50_000.0),
+        },
+    )
+    .await
+    .unwrap();
+
+    let kw = HashMap::new();
+    let mut sess = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(98_000_001),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+
+    handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(turret_id), PyRep::String("targetAttack".into()), PyRep::Integer(target_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("Activate turret fires immediate first volley");
+
+    let target_cs = sys.get_combat_state(target_id).await.unwrap().unwrap();
+    assert!(
+        target_cs.shield_hp < 500.0,
+        "First weapon volley must apply damage immediately at Activate (t=0) without stepping (got shield={})",
+        target_cs.shield_hp
+    );
+
+    let dup_err = handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(turret_id), PyRep::String("targetAttack".into()), PyRep::Integer(target_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(dup_err.code, "ModuleAlreadyActive");
+}
+

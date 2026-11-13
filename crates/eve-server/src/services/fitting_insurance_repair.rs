@@ -580,7 +580,7 @@ pub(super) fn handle_repair_all(
         ctx.notify_account_change(char_id, "cash", char_id, bal.to_wire_f64());
     }
     if ship_at_dock {
-        ctx.store_ship_fitting(ship_id, fit);
+        ctx.invalidate_and_push_fit(ship_id);
     }
     let repaired_count = target_item_ids.len();
     Ok(PyRep::keyval([

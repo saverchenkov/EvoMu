@@ -86,6 +86,7 @@ impl WorldStateWalDelta {
             && old.module_online_states == new.module_online_states
             && old.module_active_states == new.module_active_states
             && old.module_active_charges == new.module_active_charges
+            && old.ship_fit_inputs == new.ship_fit_inputs
             && old.weapon_banks == new.weapon_banks
             && old.asteroids == new.asteroids
             && old.owner_notes == new.owner_notes
@@ -772,6 +773,7 @@ impl WorldRepository {
             module_online_states: HashMap::new(),
             module_active_states: HashSet::new(),
             module_active_charges: HashMap::new(),
+            ship_fit_inputs: HashMap::new(),
             weapon_banks: HashMap::new(),
             asteroids: HashMap::new(),
             moon_extractions: HashMap::new(),

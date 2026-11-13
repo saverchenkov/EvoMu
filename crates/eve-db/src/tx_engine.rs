@@ -399,6 +399,7 @@ fn compute_cold_domain_diff(before: &WorldStateSnapshot, after: &WorldStateSnaps
         || before.module_online_states != after.module_online_states
         || before.module_active_states != after.module_active_states
         || before.module_active_charges != after.module_active_charges
+        || before.ship_fit_inputs != after.ship_fit_inputs
         || before.weapon_banks != after.weapon_banks
         || before.paused_skill_queues != after.paused_skill_queues
         || before.starbase_settings != after.starbase_settings
