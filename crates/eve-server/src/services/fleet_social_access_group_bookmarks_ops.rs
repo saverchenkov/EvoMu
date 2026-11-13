@@ -236,10 +236,11 @@ pub(crate) async fn handle_bookmark_static_location(
         return Err(BridgeRpcError {
             code: "NoSolarSystem".into(),
             message: "Session has no active solar system".into(),
+            client_error: None,
         });
     };
     if sys_id == 30_100_000 {
-        return Err(BridgeRpcError::user_error("CantbookmarkEveSystem"));
+        return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CantbookmarkEveSystem));
     }
 
     let (explicit_entity_id, folder_id, label_str, memo_str, expiry_hours, subfolder_id) =
@@ -272,6 +273,7 @@ pub(crate) async fn handle_bookmark_static_location(
         return Err(BridgeRpcError {
             code: "InvalidBookmarkLabel".into(),
             message: "Bookmark label must be 1..=100 non-whitespace characters".into(),
+            client_error: None,
         });
     }
 
@@ -286,6 +288,7 @@ pub(crate) async fn handle_bookmark_static_location(
                 return Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: format!("Folder {fid} not accessible for bookmark creation"),
+                    client_error: None,
                 });
             }
         }
@@ -325,6 +328,7 @@ pub(crate) async fn handle_bookmark_static_location(
                 return Err(BridgeRpcError {
                     code: "ShipNotInSpace".into(),
                     message: "Cannot bookmark active ship when absent from ballpark".into(),
+                    client_error: None,
                 });
             }
         } else {
@@ -381,6 +385,7 @@ pub(crate) async fn handle_bookmark_static_location(
             return Err(BridgeRpcError {
                 code: "ShipNotInSpace".into(),
                 message: "Cannot bookmark in-space position when ship ball is absent".into(),
+                client_error: None,
             });
         }
     } else {
@@ -400,6 +405,7 @@ pub(crate) async fn handle_bookmark_static_location(
                 return Err(BridgeRpcError {
                     code: "MaxSharedFolderBookmarksReached".into(),
                     message: "Shared folder has reached the maximum of 500 bookmarks".into(),
+                    client_error: None,
                 });
             }
         } else {
@@ -412,6 +418,7 @@ pub(crate) async fn handle_bookmark_static_location(
                 return Err(BridgeRpcError {
                     code: "MaxBookmarksReached".into(),
                     message: "Character has reached the maximum of 500 personal bookmarks".into(),
+                    client_error: None,
                 });
             }
         }
@@ -420,12 +427,14 @@ pub(crate) async fn handle_bookmark_static_location(
                 return Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "Subfolder bookmarking requires a parent folder".into(),
+                    client_error: None,
                 });
             };
             if snap.bookmark_subfolder_parents.get(&sfid) != Some(&fid) {
                 return Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: format!("Subfolder {sfid} does not belong to folder {fid}"),
+                    client_error: None,
                 });
             }
         }
@@ -568,6 +577,7 @@ pub(crate) async fn handle_update_bookmark(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "UpdateBookmark requires bookmarkID".into(),
+            client_error: None,
         });
     };
 
@@ -592,6 +602,7 @@ pub(crate) async fn handle_update_bookmark(
             return Err(BridgeRpcError {
                 code: "UserError".into(),
                 message: format!("Bookmark {bm_id} not found"),
+                client_error: None,
             });
         };
         let can_edit = if !bm_rec.is_shared && bm_rec.owner_id == char_id {
@@ -614,6 +625,7 @@ pub(crate) async fn handle_update_bookmark(
             return Err(BridgeRpcError {
                 code: "AccessDenied".into(),
                 message: "Cannot edit bookmark without manage rights".into(),
+                client_error: None,
             });
         }
 
@@ -623,12 +635,14 @@ pub(crate) async fn handle_update_bookmark(
                     return Err(BridgeRpcError {
                         code: "UserError".into(),
                         message: format!("Destination folder {new_fid} not found"),
+                        client_error: None,
                     });
                 };
                 if folder_access_level(snap, session, char_id, tf) < AccessLevel::Use {
                     return Err(BridgeRpcError {
                         code: "UserError".into(),
                         message: "No use access to target bookmark folder".into(),
+                        client_error: None,
                     });
                 }
                 tf.is_shared
@@ -650,6 +664,7 @@ pub(crate) async fn handle_update_bookmark(
                     return Err(BridgeRpcError {
                         code: "MaxBookmarksReached".into(),
                         message: "Character has reached the maximum of 500 personal bookmarks".into(),
+                        client_error: None,
                     });
                 }
             } else if new_is_shared && bm_rec.folder_id != Some(new_fid) {
@@ -662,6 +677,7 @@ pub(crate) async fn handle_update_bookmark(
                     return Err(BridgeRpcError {
                         code: "MaxSharedFolderBookmarksReached".into(),
                         message: "Shared folder has reached the maximum of 500 bookmarks".into(),
+                        client_error: None,
                     });
                 }
             }
@@ -681,6 +697,7 @@ pub(crate) async fn handle_update_bookmark(
                 return Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: format!("Subfolder {sfid} does not belong to folder {eff_fid}"),
+                    client_error: None,
                 });
             }
             snap.bookmark_subfolders.insert(bm_id, sfid);
@@ -755,6 +772,7 @@ pub(crate) async fn handle_delete_bookmarks(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "DeleteBookmarks requires bookmarkID".into(),
+            client_error: None,
         });
     }
     let folder_id_arg = args.get(1).and_then(|a| a.as_i64());
@@ -769,6 +787,7 @@ pub(crate) async fn handle_delete_bookmarks(
                 return Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: format!("Bookmark {bm_id} not found"),
+                    client_error: None,
                 });
             };
             if let Some(expected_fid) = folder_id_arg {
@@ -781,6 +800,7 @@ pub(crate) async fn handle_delete_bookmarks(
                     return Err(BridgeRpcError {
                         code: "UserError".into(),
                         message: format!("Bookmark {bm_id} does not belong to folder {expected_fid}"),
+                        client_error: None,
                     });
                 }
             }
@@ -804,6 +824,7 @@ pub(crate) async fn handle_delete_bookmarks(
                 return Err(BridgeRpcError {
                     code: "AccessDenied".into(),
                     message: "Cannot delete another character's bookmark without manage rights".into(),
+                    client_error: None,
                 });
             }
             if bm.is_shared {
@@ -853,6 +874,7 @@ pub(crate) async fn handle_copy_move_bookmarks(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "Move/CopyBookmarksToFolderAndSubfolder requires (folderID, subfolderID, bookmarkIDs, target)".into(),
+            client_error: None,
         });
     };
 
@@ -860,6 +882,7 @@ pub(crate) async fn handle_copy_move_bookmarks(
         return Err(BridgeRpcError {
             code: "BookmarkCopyBatchLimitExceeded".into(),
             message: "Cannot copy or move more than 20 bookmarks in a single operation".into(),
+            client_error: None,
         });
     }
 
@@ -870,12 +893,14 @@ pub(crate) async fn handle_copy_move_bookmarks(
                     return Err(BridgeRpcError {
                         code: "UserError".into(),
                         message: format!("Bookmark folder {fid} not found"),
+                        client_error: None,
                     });
                 };
                 if folder_access_level(snap, session, char_id, tf) < AccessLevel::Use {
                     return Err(BridgeRpcError {
                         code: "UserError".into(),
                         message: "No write access to target bookmark folder".into(),
+                        client_error: None,
                     });
                 }
                 tf.is_shared
@@ -891,12 +916,14 @@ pub(crate) async fn handle_copy_move_bookmarks(
                 return Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "Target subfolder requires a target folder".into(),
+                    client_error: None,
                 });
             };
             if snap.bookmark_subfolder_parents.get(&sfid) != Some(&fid) {
                 return Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: format!("Subfolder {sfid} does not belong to target folder {fid}"),
+                    client_error: None,
                 });
             }
         }
@@ -919,6 +946,7 @@ pub(crate) async fn handle_copy_move_bookmarks(
                 return Err(BridgeRpcError {
                     code: "MaxSharedFolderBookmarksReached".into(),
                     message: "Shared folder capacity (500) exceeded".into(),
+                    client_error: None,
                 });
             }
         } else {
@@ -941,6 +969,7 @@ pub(crate) async fn handle_copy_move_bookmarks(
                 return Err(BridgeRpcError {
                     code: "MaxBookmarksReached".into(),
                     message: "Personal bookmark capacity (500) exceeded".into(),
+                    client_error: None,
                 });
             }
         }
@@ -952,6 +981,7 @@ pub(crate) async fn handle_copy_move_bookmarks(
                 return Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: format!("Bookmark {bm_id} not found"),
+                    client_error: None,
                 });
             };
             let can_access = if is_move {
@@ -978,6 +1008,7 @@ pub(crate) async fn handle_copy_move_bookmarks(
                 return Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: format!("No access to bookmark {bm_id}"),
+                    client_error: None,
                 });
             }
             if is_move {
@@ -1099,6 +1130,7 @@ pub(crate) async fn validate_dynamic_entity_bookmark_coords(
         return Err(BridgeRpcError {
             code: "UserError".into(),
             message: "Must be in space on grid to bookmark dynamic in-space entities".into(),
+            client_error: None,
         });
     };
     let caller_ball = sys_handle
@@ -1111,6 +1143,7 @@ pub(crate) async fn validate_dynamic_entity_bookmark_coords(
         return Err(BridgeRpcError {
             code: "UserError".into(),
             message: "Caller ship not found in ballpark".into(),
+            client_error: None,
         });
     };
     let is_cloaked_combat = sys_handle
@@ -1123,18 +1156,21 @@ pub(crate) async fn validate_dynamic_entity_bookmark_coords(
         return Err(BridgeRpcError {
             code: "UserError".into(),
             message: format!("Entity {ent_id} not found or not visible in current solar system"),
+            client_error: None,
         });
     };
     if is_cloaked_combat {
         return Err(BridgeRpcError {
             code: "UserError".into(),
             message: format!("Entity {ent_id} is cloaked or not visible"),
+            client_error: None,
         });
     }
     if ball.position.distance(caller_ball.position) > 8_000_000.0 {
         return Err(BridgeRpcError {
             code: "UserError".into(),
             message: format!("Entity {ent_id} is off-grid (distance > 8,000 km)"),
+            client_error: None,
         });
     }
     let _ = ctx;

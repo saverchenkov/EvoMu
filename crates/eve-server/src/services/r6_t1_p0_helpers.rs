@@ -615,16 +615,19 @@ pub(crate) async fn verify_special_site_caller_on_grid(
         return Err(BridgeRpcError {
             code: "ShipDocked".into(),
             message: "Cannot complete in-space special dungeon instance while docked".into(),
+            client_error: None,
         });
     }
     let caller_sys = session.solar_system_id.ok_or_else(|| BridgeRpcError {
         code: "NotInSpace".into(),
         message: "Caller must be in space".into(),
+        client_error: None,
     })?;
     let _ = caller_sys;
     let ship_id = session.ship_id.filter(|&id| id > 0).ok_or_else(|| BridgeRpcError {
         code: "NoActiveShip".into(),
         message: "Must have an active ship in space to complete site".into(),
+        client_error: None,
     })?;
     let item_pos_opt = ctx
         .db
@@ -635,6 +638,7 @@ pub(crate) async fn verify_special_site_caller_on_grid(
             return Err(BridgeRpcError {
                 code: "ShipCloaked".into(),
                 message: format!("Cannot complete {site_name} while cloaked"),
+                client_error: None,
             });
         }
         let dist = ship_ball.position.distance(site_pos);
@@ -644,6 +648,7 @@ pub(crate) async fn verify_special_site_caller_on_grid(
                 message: format!(
                     "Must be on-grid within 100 km of {site_name} to complete it (distance {dist:.0} m)"
                 ),
+                client_error: None,
             });
         }
     } else if let Some([x, y, z]) = item_pos_opt {
@@ -654,6 +659,7 @@ pub(crate) async fn verify_special_site_caller_on_grid(
                 message: format!(
                     "Must be on-grid within 100 km of {site_name} to complete it (distance {dist:.0} m)"
                 ),
+                client_error: None,
             });
         }
     }

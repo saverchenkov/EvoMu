@@ -42,6 +42,7 @@ fn check_fighter_class_slot_limit_in_map(
         return Err(BridgeRpcError {
             code: "CannotLaunchFighterNotEnoughTubesAvailableForClass".into(),
             message: "UserError: No fighter launch tubes exist on this hull for that fighter class".into(),
+            client_error: None,
         });
     }
     let is_same_class = |tid: u32| fighter_class_and_slot_attr(&ctx.sde, tid).is_some_and(|(fa, _)| fa == f_attr);
@@ -53,6 +54,7 @@ fn check_fighter_class_slot_limit_in_map(
         return Err(BridgeRpcError {
             code: "CannotLaunchFighterNotEnoughTubesAvailableForClass".into(),
             message: format!("UserError: Fighter class limit ({max_slots}) exceeded for hull {carrier_type_id}"),
+            client_error: None,
         });
     }
     Ok(())
@@ -69,7 +71,7 @@ fn check_fighter_class_slot_limit(
     let max_slots = raw_max.max(0.0) as usize;
     if max_slots == 0 {
         let code = if count_loaded_tubes { "CannotLoadFighterTubeNoTubesExistForClass" } else { "CannotLaunchFighterNotEnoughTubesAvailableForClass" };
-        return Err(BridgeRpcError { code: code.into(), message: "UserError: No fighter launch tubes exist on this hull for that fighter class".into() });
+        return Err(BridgeRpcError { code: code.into(), message: "UserError: No fighter launch tubes exist on this hull for that fighter class".into(), client_error: None });
     }
     let is_same_class = |tid: u32| fighter_class_and_slot_attr(&ctx.sde, tid).is_some_and(|(fa, _)| fa == f_attr);
     let active_in_class = ctx.active_fighters.read().unwrap().values().filter(|f| f.parent_ship_id == ship_id && !f.is_abandoned && is_same_class(f.type_id)).count();
@@ -81,7 +83,7 @@ fn check_fighter_class_slot_limit(
     };
     if active_in_class + loaded_in_class + extra_squadrons > max_slots {
         let code = if count_loaded_tubes { "CannotLoadFighterTubeNoTubesAvailableForClass" } else { "CannotLaunchFighterNotEnoughTubesAvailableForClass" };
-        return Err(BridgeRpcError { code: code.into(), message: format!("UserError: Fighter class limit ({max_slots}) exceeded for hull {carrier_type_id}") });
+        return Err(BridgeRpcError { code: code.into(), message: format!("UserError: Fighter class limit ({max_slots}) exceeded for hull {carrier_type_id}"), client_error: None });
     }
     Ok(())
 }
@@ -199,6 +201,7 @@ async fn handle_fighters_inner(
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "Session has no active ship".into(),
+                    client_error: None,
                 }));
             };
             let authorized = session.ship_id == Some(ship_id)
@@ -214,6 +217,7 @@ async fn handle_fighters_inner(
                 return Some(Err(BridgeRpcError {
                     code: "AccessDenied".into(),
                     message: format!("Character {char_id} does not control ship or structure {ship_id}"),
+                    client_error: None,
                 }));
             }
             let mut tube_pairs: Vec<(usize, i64)> = ctx
@@ -278,6 +282,7 @@ async fn handle_fighters_inner(
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "Session has no active ship".into(),
+                    client_error: None,
                 }));
             };
             let rpc = RpcArgs::positional(args);
@@ -297,6 +302,7 @@ async fn handle_fighters_inner(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidFighterTube".into(),
                     message: "LoadFightersToTube requires a valid tube index".into(),
+                    client_error: None,
                 }));
             };
 
@@ -327,6 +333,7 @@ async fn handle_fighters_inner(
                     message: format!(
                         "Tube index {tube_idx} is invalid (ship/structure has {tube_count} fighter tubes)"
                     ),
+                    client_error: None,
                 }));
             }
 
@@ -339,6 +346,7 @@ async fn handle_fighters_inner(
                     return Some(Err(BridgeRpcError {
                         code: "FighterAlreadyLoaded".into(),
                         message: format!("Fighter item {fighter_item_id} is already loaded in another tube"),
+                        client_error: None,
                     }));
                 }
             }
@@ -351,6 +359,7 @@ async fn handle_fighters_inner(
                     return Some(Err(BridgeRpcError {
                         code: "FighterAlreadyLaunched".into(),
                         message: format!("Fighter item {fighter_item_id} is already launched in space"),
+                        client_error: None,
                     }));
                 }
                 if active
@@ -360,6 +369,7 @@ async fn handle_fighters_inner(
                     return Some(Err(BridgeRpcError {
                         code: "FighterAlreadyLaunched".into(),
                         message: format!("Tube {tube_idx} currently has a squadron deployed in space"),
+                        client_error: None,
                     }));
                 }
             }
@@ -371,18 +381,21 @@ async fn handle_fighters_inner(
                 return Some(Err(BridgeRpcError {
                     code: "ItemNotFound".into(),
                     message: format!("Fighter item {fighter_item_id} not found"),
+                    client_error: None,
                 }));
             };
             if item.owner_id != char_id {
                 return Some(Err(BridgeRpcError {
                     code: "OwnershipViolation".into(),
                     message: format!("Fighter item {fighter_item_id} not owned by pilot"),
+                    client_error: None,
                 }));
             }
             if item.location_id != ship_id || item.flag != InventoryFlag::FighterBay {
                 return Some(Err(BridgeRpcError {
                     code: "ItemNotInFighterBay".into(),
                     message: format!("Fighter item {fighter_item_id} not in pilot's fighter bay"),
+                    client_error: None,
                 }));
             }
             if ctx
@@ -395,6 +408,7 @@ async fn handle_fighters_inner(
                 return Some(Err(BridgeRpcError {
                     code: "FighterAlreadyLoadedInTube".into(),
                     message: format!("Fighter item {fighter_item_id} is already loaded in another fighter tube"),
+                    client_error: None,
                 }));
             }
             let is_fighter_category = ctx
@@ -410,6 +424,7 @@ async fn handle_fighters_inner(
                         "Item {fighter_item_id} (type {}) is not a fighter squadron (category 87)",
                         item.type_id
                     ),
+                    client_error: None,
                 }));
             }
             if let Err(e) = check_fighter_class_slot_limit(
@@ -510,6 +525,7 @@ async fn handle_fighters_inner(
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "Session has no active ship".into(),
+                    client_error: None,
                 }));
             };
             let raw_tube = match RpcArgs::positional(args).req_i64(0, "tubeID") {
@@ -518,6 +534,7 @@ async fn handle_fighters_inner(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidFighterTube".into(),
                         message: e.message,
+                        client_error: None,
                     }));
                 }
             };
@@ -548,6 +565,7 @@ async fn handle_fighters_inner(
                     message: format!(
                         "Tube index {raw_tube} is invalid (ship/structure has {tube_count} tubes)"
                     ),
+                    client_error: None,
                 }));
             }
             let tube_idx = raw_tube as usize;
@@ -560,6 +578,7 @@ async fn handle_fighters_inner(
                     return Some(Err(BridgeRpcError {
                         code: "FighterAlreadyLaunched".into(),
                         message: format!("Cannot unload tube {tube_idx} while squadron is deployed in space"),
+                        client_error: None,
                     }));
                 }
             }
@@ -579,12 +598,14 @@ async fn handle_fighters_inner(
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "Session has no active ship".into(),
+                    client_error: None,
                 }));
             };
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solar system".into(),
+                    client_error: None,
                 }));
             };
             let entry_db_state = ctx.db.with_snapshot(|snap| {
@@ -599,18 +620,21 @@ async fn handle_fighters_inner(
                     return Some(Err(BridgeRpcError {
                         code: "DestinyCommandFailed".into(),
                         message: e,
+                        client_error: None,
                     }))
                 }
             }) else {
                 return Some(Err(BridgeRpcError {
                     code: "ShipNotInSpace".into(),
                     message: "Active ship is not spawned in space".into(),
+                    client_error: None,
                 }));
             };
             if matches!(ship_ball.mode, eve_destiny::MovementMode::Warp { .. }) {
                 return Some(Err(BridgeRpcError {
                     code: "CannotOpenFighterTubesWhileWarping".into(),
                     message: "UserError: Cannot launch fighters while ship is in warp".into(),
+                    client_error: None,
                 }));
             }
             crate::services::space_destiny::space_nav_travel::sync_tether(ctx, char_id, sys_id, ship_id).await;
@@ -626,12 +650,14 @@ async fn handle_fighters_inner(
                     return Some(Err(BridgeRpcError {
                         code: "CannotOpenFighterTubesWhileCloaked".into(),
                         message: "UserError: Cannot launch fighters while cloaked".into(),
+                        client_error: None,
                     }));
                 }
                 if ship_cs.is_tethered {
                     return Some(Err(BridgeRpcError {
                         code: "DeniedTethered".into(),
                         message: "UserError: Cannot launch fighters while tethered to a structure".into(),
+                        client_error: None,
                     }));
                 }
             }
@@ -676,6 +702,7 @@ async fn handle_fighters_inner(
                         return Some(Err(BridgeRpcError {
                             code: "InvalidFighterTube".into(),
                             message: format!("Tube index {tidx} is invalid (ship/structure has {tube_count} tubes)"),
+                            client_error: None,
                         }));
                     }
                     {
@@ -688,12 +715,14 @@ async fn handle_fighters_inner(
                             return Some(Err(BridgeRpcError {
                                 code: "FighterAlreadyLaunched".into(),
                                 message: format!("Fighter squadron in tube {tidx} is already launched in space"),
+                                client_error: None,
                             }));
                         }
                         if !fighters.tube_loads.contains_key(&(ship_id, tidx)) {
                             return Some(Err(BridgeRpcError {
                                 code: "EmptyFighterTube".into(),
                                 message: format!("Fighter tube {tidx} is empty"),
+                                client_error: None,
                             }));
                         }
                     }
@@ -705,6 +734,7 @@ async fn handle_fighters_inner(
                         return Some(Err(BridgeRpcError {
                             code: "TubeRearming".into(),
                             message: format!("Fighter tube {tidx} is currently rearming/repairing"),
+                            client_error: None,
                         }));
                     }
                 }
@@ -724,11 +754,13 @@ async fn handle_fighters_inner(
                         return Some(Err(BridgeRpcError {
                             code: "FighterAlreadyLaunched".into(),
                             message: "All loaded fighter squadrons are already launched in space".into(),
+                            client_error: None,
                         }));
                     }
                     return Some(Err(BridgeRpcError {
                         code: "EmptyFighterTube".into(),
                         message: "No fighters loaded in tubes".into(),
+                        client_error: None,
                     }));
                 }
                 available
@@ -766,6 +798,7 @@ async fn handle_fighters_inner(
                         return Err(BridgeRpcError {
                             code: "ItemNotFound".into(),
                             message: format!("Fighter item {fighter_item_id} in tube {tube_idx} no longer exists"),
+                            client_error: None,
                         });
                     };
                     let tube_flag = InventoryFlag::from_u16(159 + tube_idx as u16);
@@ -777,6 +810,7 @@ async fn handle_fighters_inner(
                         return Err(BridgeRpcError {
                             code: "ItemNotInFighterBay".into(),
                             message: format!("Fighter item {fighter_item_id} is no longer owned by pilot in ship's fighter bay"),
+                            client_error: None,
                         });
                     }
                     out.push((tube_idx, fighter_item_id, item.type_id));
@@ -836,6 +870,7 @@ async fn handle_fighters_inner(
                         return Err(BridgeRpcError {
                             code: "ShipNotInSpace".into(),
                             message: format!("Ship {ship_id} is no longer undocked in solar system {sys_id}"),
+                            client_error: None,
                         });
                     }
                 }
@@ -847,6 +882,7 @@ async fn handle_fighters_inner(
                         .ok_or_else(|| BridgeRpcError {
                             code: "ItemNotFound".into(),
                             message: format!("Fighter item {fighter_item_id} in tube {tube_idx} no longer exists"),
+                            client_error: None,
                         })?
                         .type_id;
                     let max_squadron_size = ctx
@@ -878,6 +914,7 @@ async fn handle_fighters_inner(
                             return Err(BridgeRpcError {
                                 code: "ItemNotInFighterBay".into(),
                                 message: format!("Fighter item {fighter_item_id} is no longer owned by pilot in ship's fighter bay"),
+                                client_error: None,
                             });
                         }
                         let rem = if it.quantity > cap {
@@ -1040,12 +1077,14 @@ async fn handle_fighters_inner(
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "Session has no active ship".into(),
+                    client_error: None,
                 }));
             };
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solar system".into(),
+                    client_error: None,
                 }));
             };
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -1208,6 +1247,7 @@ async fn handle_fighters_inner(
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solar system".into(),
+                    client_error: None,
                 }));
             };
             let fighter_ids: Vec<i64> = match args.first() {
@@ -1221,6 +1261,7 @@ async fn handle_fighters_inner(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "ExecuteMovementCommandOnFighters requires fighterIDs".into(),
+                    client_error: None,
                 }));
             }
             {
@@ -1230,12 +1271,14 @@ async fn handle_fighters_inner(
                         return Some(Err(BridgeRpcError {
                             code: "FighterNotFound".into(),
                             message: format!("Fighter squadron {fid} not found"),
+                            client_error: None,
                         }));
                     };
                     if f.owner_char_id != char_id || f.is_abandoned {
                         return Some(Err(BridgeRpcError {
                             code: "FighterNotOwned".into(),
                             message: format!("Fighter squadron {fid} is not controlled by pilot"),
+                            client_error: None,
                         }));
                     }
                 }
@@ -1285,6 +1328,7 @@ async fn handle_fighters_inner(
                             message: format!(
                                 "Fighter squadron {fid} (type {ftype_id}) does not possess a Micro Jump Drive ability"
                             ),
+                            client_error: None,
                         }));
                     }
                     let slot_idx = mjd_slot_opt.map(|s| s.slot_index as u32).unwrap_or(1);
@@ -1300,6 +1344,7 @@ async fn handle_fighters_inner(
                                 message: format!(
                                     "Fighter MJD ability on squadron {fid} is on cooldown until {ready_at}"
                                 ),
+                                client_error: None,
                             }));
                         }
                     }
@@ -1384,12 +1429,14 @@ async fn handle_fighters_inner(
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "Session has no active ship".into(),
+                    client_error: None,
                 }));
             };
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solar system".into(),
+                    client_error: None,
                 }));
             };
             let target_fighter_id = args.first().and_then(|a| a.as_i64());
@@ -1452,18 +1499,21 @@ async fn handle_scoop_abandoned_fighter(
         return Some(Err(BridgeRpcError {
             code: "ShipDocked".into(),
             message: "Cannot scoop abandoned fighters while docked".into(),
+            client_error: None,
         }));
     }
     let Some(ship_id) = session.ship_id else {
         return Some(Err(BridgeRpcError {
             code: "NoActiveShip".into(),
             message: "Session has no active ship".into(),
+            client_error: None,
         }));
     };
     let Some(sys_id) = session.solar_system_id else {
         return Some(Err(BridgeRpcError {
             code: "NoSolarSystem".into(),
             message: "Session has no active solar system".into(),
+            client_error: None,
         }));
     };
     let entry_db_state = ctx.db.with_snapshot(|snap| {
@@ -1477,6 +1527,7 @@ async fn handle_scoop_abandoned_fighter(
             return Some(Err(BridgeRpcError {
                 code: "InvalidFighterID".into(),
                 message: "CmdScoopAbandonedFighterFromSpace requires a valid target fighter squadron ID".into(),
+                client_error: None,
             }));
         }
     };
@@ -1490,6 +1541,7 @@ async fn handle_scoop_abandoned_fighter(
             return Some(Err(BridgeRpcError {
                 code: "FighterNotFound".into(),
                 message: format!("Fighter squadron {target_fighter_id} not found in space"),
+                client_error: None,
             }));
         };
         let squad_ref = &fighters[&key];
@@ -1497,6 +1549,7 @@ async fn handle_scoop_abandoned_fighter(
             return Some(Err(BridgeRpcError {
                 code: "FighterNotAbandoned".into(),
                 message: format!("Fighter squadron {target_fighter_id} is active and cannot be scooped"),
+                client_error: None,
             }));
         }
         (key, squad_ref.owner_char_id)
@@ -1511,6 +1564,7 @@ async fn handle_scoop_abandoned_fighter(
             return Some(Err(BridgeRpcError {
                 code: "NotFighterOwner".into(),
                 message: "Cannot scoop an abandoned fighter squadron belonging to another pilot or corporation".into(),
+                client_error: None,
             }));
         }
     }
@@ -1524,12 +1578,14 @@ async fn handle_scoop_abandoned_fighter(
             return Some(Err(BridgeRpcError {
                 code: "FighterNotFound".into(),
                 message: format!("Fighter squadron {target_fighter_id} not found in space"),
+                client_error: None,
             }));
         };
         if !fighters[&resolved_key].is_abandoned {
             return Some(Err(BridgeRpcError {
                 code: "FighterNotAbandoned".into(),
                 message: format!("Fighter squadron {target_fighter_id} is active and cannot be scooped"),
+                client_error: None,
             }));
         }
         fighters.remove(&resolved_key).unwrap()
@@ -1549,6 +1605,7 @@ async fn handle_scoop_abandoned_fighter(
         return Some(Err(BridgeRpcError {
             code: "FighterNotInSystem".into(),
             message: format!("Fighter squadron {ball_id} is not in solar system {sys_id}"),
+            client_error: None,
         }));
     }
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -1570,6 +1627,7 @@ async fn handle_scoop_abandoned_fighter(
         return Some(Err(BridgeRpcError {
             code: "FighterNotInSystem".into(),
             message: format!("Fighter ball {ball_id} not found in system {sys_id}"),
+            client_error: None,
         }));
     };
     let Some(s_pos) = s_pos else {
@@ -1577,6 +1635,7 @@ async fn handle_scoop_abandoned_fighter(
         return Some(Err(BridgeRpcError {
             code: "ShipNotInSystem".into(),
             message: format!("Ship ball {ship_id} not found in system {sys_id}"),
+            client_error: None,
         }));
     };
     let dist = (f_pos - s_pos).length();
@@ -1585,6 +1644,7 @@ async fn handle_scoop_abandoned_fighter(
         return Some(Err(BridgeRpcError {
             code: "FighterOutOfRange".into(),
             message: format!("Fighter squadron is {dist:.1}m away, must be within 2500m to scoop"),
+            client_error: None,
         }));
     }
 
@@ -1595,6 +1655,7 @@ async fn handle_scoop_abandoned_fighter(
                 return Err(BridgeRpcError {
                     code: "ShipNotInSystem".into(),
                     message: format!("Ship {ship_id} is no longer undocked in system {sys_id}"),
+                    client_error: None,
                 });
             }
         }
@@ -1608,18 +1669,21 @@ async fn handle_scoop_abandoned_fighter(
             return Err(BridgeRpcError {
                 code: "NoFighterBay".into(),
                 message: "Caller ship has no fighter bay capacity".into(),
+                client_error: None,
             });
         }
         let Some(existing_item) = snap.items.get(&squad.item_id) else {
             return Err(BridgeRpcError {
                 code: "FighterNotFound".into(),
                 message: format!("Fighter item {} no longer exists", squad.item_id),
+                client_error: None,
             });
         };
         if existing_item.location_id != sys_id as i64 || existing_item.flag != InventoryFlag::None {
             return Err(BridgeRpcError {
                 code: "FighterNotInSystem".into(),
                 message: format!("Fighter squadron {} is no longer in space", squad.ball_id),
+                client_error: None,
             });
         }
         let fighter_unit_vol = ctx.sde.types.get(&squad.type_id).map(|t| t.volume).unwrap_or(100.0);
@@ -1636,6 +1700,7 @@ async fn handle_scoop_abandoned_fighter(
             return Err(BridgeRpcError {
                 code: "FighterBayFull".into(),
                 message: format!("Fighter bay volume full: requires {total_fighter_vol:.1}m3, available {:.1}m3", bay_capacity - current_used_vol),
+                client_error: None,
             });
         }
 

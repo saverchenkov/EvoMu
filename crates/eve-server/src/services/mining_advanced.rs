@@ -437,6 +437,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "StartNewExtraction requires structureID".into(),
+                    client_error: None,
                 }));
             };
 
@@ -459,6 +460,7 @@ pub async fn handle(
                             message: format!(
                                 "Moon extraction duration must be between 6 days (518400s) and 56 days (4838400s), got {secs}s"
                             ),
+                            client_error: None,
                         }));
                     }
                     secs
@@ -474,6 +476,7 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "StructureNotFound".into(),
                         message: format!("Structure {structure_id} not found"),
+                        client_error: None,
                     });
                 };
 
@@ -496,6 +499,7 @@ pub async fn handle(
                             "Character {char_id} (corp {caller_corp}) lacks permissions on structure {structure_id} (corp {})",
                             st.owner_corp_id
                         ),
+                        client_error: None,
                     });
                 }
                 if !matches!(st.type_id, 35835 | 35836) {
@@ -505,12 +509,14 @@ pub async fn handle(
                             "Moon extraction requires an Athanor (35835) or Tatara (35836) refinery, got structure type {}",
                             st.type_id
                         ),
+                        client_error: None,
                     });
                 }
                 if !structure_has_online_moon_drill(snap, structure_id) {
                     return Err(BridgeRpcError {
                         code: "StructureServiceOffline".into(),
                         message: "Refinery must be operational with a Quantum Core, fuel blocks, and an online Standup Moon Drill I (45009)".into(),
+                        client_error: None,
                     });
                 }
 
@@ -521,6 +527,7 @@ pub async fn handle(
                         return Err(BridgeRpcError {
                             code: "ExtractionAlreadyActive".into(),
                             message: format!("Structure {structure_id} already has an active moon extraction in state {}", e.status),
+                            client_error: None,
                         });
                     }
                     Ok((e.natural_decay_unix, e.spawned_asteroid_ids.clone()))
@@ -535,6 +542,7 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "NoMoonInSystem".into(),
                         message: format!("No SDE moon celestial found in system {}", st.solar_system_id),
+                        client_error: None,
                     });
                 };
 
@@ -660,6 +668,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "CancelExtraction requires structureID".into(),
+                    client_error: None,
                 }));
             };
 
@@ -668,6 +677,7 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "StructureNotFound".into(),
                         message: format!("Structure {structure_id} not found"),
+                        client_error: None,
                     });
                 };
                 let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
@@ -677,18 +687,21 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),
                         message: "Character lacks permission to cancel extraction".into(),
+                        client_error: None,
                     });
                 }
                 let Some(ext) = snap.moon_extractions.get_mut(&structure_id) else {
                     return Err(BridgeRpcError {
                         code: "NoActiveExtraction".into(),
                         message: format!("No active moon extraction on structure {structure_id}"),
+                        client_error: None,
                     });
                 };
                 if ext.status != "Started" && ext.status != "Ready" {
                     return Err(BridgeRpcError {
                         code: "CannotCancelExtraction".into(),
                         message: format!("Cannot cancel moon extraction in status {}", ext.status),
+                        client_error: None,
                     });
                 }
                 let ev_id = ext.event_id;
@@ -729,6 +742,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "FractureChunkWithStructure requires structureID".into(),
+                    client_error: None,
                 }));
             };
 
@@ -741,6 +755,7 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "StructureNotFound".into(),
                         message: format!("Structure {structure_id} not found"),
+                        client_error: None,
                     });
                 };
                 let (sys_id, st_pos, owner_corp_id) = (st.solar_system_id, st.position, st.owner_corp_id);
@@ -757,12 +772,14 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),
                         message: "Character lacks corporation permission to fracture chunk".into(),
+                        client_error: None,
                     });
                 }
                 if !structure_has_online_moon_drill(snap, structure_id) {
                     return Err(BridgeRpcError {
                         code: "StructureServiceOffline".into(),
                         message: "Refinery must be operational with a Quantum Core, fuel blocks, and an online Standup Moon Drill I (45009) to fracture chunk".into(),
+                        client_error: None,
                     });
                 }
 
@@ -770,24 +787,28 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "NoActiveExtraction".into(),
                         message: format!("No active extraction to fracture on structure {structure_id}"),
+                        client_error: None,
                     });
                 };
                 if ext.status == "Fractured" {
                     return Err(BridgeRpcError {
                         code: "ExtractionAlreadyFractured".into(),
                         message: format!("Moon extraction on structure {structure_id} has already been fractured"),
+                        client_error: None,
                     });
                 }
                 if ext.status != "Started" && ext.status != "Ready" {
                     return Err(BridgeRpcError {
                         code: "InvalidExtractionState".into(),
                         message: format!("Cannot fracture extraction in status {}", ext.status),
+                        client_error: None,
                     });
                 }
                 if now < ext.chunk_arrival_unix {
                     return Err(BridgeRpcError {
                         code: "ChunkNotReadyToFracture".into(),
                         message: format!("Moon chunk has not yet arrived (now={now}, arrival={})", ext.chunk_arrival_unix),
+                        client_error: None,
                     });
                 }
 
@@ -863,6 +884,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "AccessDenied".into(),
                     message: format!("Cannot query moon extractions for foreign corporation {corp_id}"),
+                    client_error: None,
                 }));
             }
             let now = ctx.now_unix();
@@ -910,6 +932,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "GetMoonResourcesForStructure requires structureID".into(),
+                    client_error: None,
                 }));
             };
 
@@ -923,6 +946,7 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "StructureNotFound".into(),
                         message: format!("Structure {structure_id} not found"),
+                        client_error: None,
                     });
                 };
                 if st.owner_corp_id != caller_corp {
@@ -932,6 +956,7 @@ pub async fn handle(
                             "Character {char_id} (corp {caller_corp}) does not belong to structure {structure_id} owner corp {}",
                             st.owner_corp_id
                         ),
+                        client_error: None,
                     });
                 }
                 let existing_moon = snap.moon_extractions.get(&structure_id).map(|e| e.moon_id);
@@ -945,6 +970,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "NoMoonInSystem".into(),
                     message: format!("No SDE moon celestial found in system {sys_id}"),
+                    client_error: None,
                 }));
             };
 
@@ -980,6 +1006,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "GetExtractionAndEventIDFromStructureID requires structureID".into(),
+                    client_error: None,
                 }));
             };
 
@@ -998,12 +1025,14 @@ pub async fn handle(
                                 "Character {char_id} (corp {caller_corp}) does not belong to structure {structure_id} owner corp {}",
                                 st.owner_corp_id
                             ),
+                            client_error: None,
                         });
                     }
                 } else {
                     return Err(BridgeRpcError {
                         code: "StructureNotFound".into(),
                         message: format!("Structure {structure_id} not found"),
+                        client_error: None,
                     });
                 }
                 let d = compute_auto_fracture_delay_secs(&ctx.sde, snap, structure_id);
@@ -1071,6 +1100,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "RequestMiningDetails requires structureID".into(),
+                    client_error: None,
                 }));
             };
 
@@ -1183,6 +1213,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "RequestMiningCycleOutput requires structureID".into(),
+                    client_error: None,
                 }));
             };
 

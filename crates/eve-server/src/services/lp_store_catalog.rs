@@ -375,6 +375,7 @@ pub(crate) fn check_corp_lp_role(
                 message: format!(
                     "Character {char_id} lacks active Director role in corporation {corp_id}"
                 ),
+                client_error: None,
             });
         }
         return Ok((false, roles));
@@ -390,6 +391,7 @@ pub(crate) fn check_corp_lp_role(
             message: format!(
                 "Character {char_id} lacks active Director role in corporation {corp_id}"
             ),
+            client_error: None,
         });
     }
     Ok((false, roles))

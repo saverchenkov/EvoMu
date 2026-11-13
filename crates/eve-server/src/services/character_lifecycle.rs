@@ -36,6 +36,7 @@ fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
         code: code.into(),
         message: message.into(),
+        client_error: None,
     }
 }
 

@@ -181,6 +181,7 @@ pub(super) async fn handle_scanning_and_wormholes(
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solar system".into(),
+                    client_error: None,
                 }));
             };
             let _ = ensure_system_signatures(ctx, sys_id).await;
@@ -268,6 +269,7 @@ pub(super) async fn handle_scanning_and_wormholes(
                     return Err(BridgeRpcError {
                         code: "NoSignaturesInSystem".into(),
                         message: format!("No cosmic signatures initialized in solar system {sys_id}"),
+                        client_error: None,
                     });
                 };
                 sigs.retain(|sig| {
@@ -381,10 +383,11 @@ pub(super) async fn handle_scanning_and_wormholes(
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solar system".into(),
+                    client_error: None,
                 }));
             };
             if sys_id == 30_100_000 || (32_000_000..=32_999_999).contains(&sys_id) {
-                return Some(Err(BridgeRpcError::user_error("CannotDscanInThisSystem")));
+                return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CannotDscanInThisSystem)));
             }
             let scan_angle = args
                 .first()
@@ -493,6 +496,7 @@ pub(super) async fn handle_scanning_and_wormholes(
                 return Some(Err(BridgeRpcError {
                     code: "MaxProbesExceeded".into(),
                     message: format!("Astrometrics skill allows at most {max_probes} active probes"),
+                    client_error: None,
                 }));
             }
             let probe_count = requested.clamp(1, max_probes);
@@ -671,6 +675,7 @@ pub(super) async fn handle_scanning_and_wormholes(
                     return Some(Err(BridgeRpcError {
                         code: "WormholeNotFound".into(),
                         message: format!("Wormhole not found in system {sys_id}"),
+                        client_error: None,
                     }));
                 };
                 let dest_sys = wh.destination_system_id.unwrap_or(31_000_005) as i64;
@@ -722,18 +727,21 @@ pub(super) async fn handle_scanning_and_wormholes(
                 return Some(Err(BridgeRpcError {
                     code: "NotInSpace".into(),
                     message: "Cannot activate an acceleration gate while docked".into(),
+                    client_error: None,
                 }));
             }
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solar system".into(),
+                    client_error: None,
                 }));
             };
             let Some(ship_id) = session.ship_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "Session has no active ship".into(),
+                    client_error: None,
                 }));
             };
             if let Err(e) = crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "activate acceleration gate") {
@@ -784,6 +792,7 @@ pub(super) async fn handle_scanning_and_wormholes(
                 return Some(Err(BridgeRpcError {
                     code: "ShipNotInSpace".into(),
                     message: "Ship is not in space".into(),
+                    client_error: None,
                 }));
             };
             let ship_group_id = validated_gate.ship_group_id;
@@ -804,6 +813,7 @@ pub(super) async fn handle_scanning_and_wormholes(
                         return Some(Err(BridgeRpcError {
                             code: "OutsideGateActivationRange".into(),
                             message: format!("Ship is {:.1} m from gate (must be <= 2500 m)", dist),
+                            client_error: None,
                         }));
                     }
                 }
@@ -841,6 +851,7 @@ pub(super) async fn handle_scanning_and_wormholes(
                                             "Dungeon '{}' (ID {did}, difficulty 1) restricts gate {gate_id} to Frigate/Destroyer hulls",
                                             dungeon.name
                                         ),
+                                        client_error: None,
                                     });
                                 }
                             }
@@ -854,6 +865,7 @@ pub(super) async fn handle_scanning_and_wormholes(
                                             "Dungeon '{}' (ID {did}) restricts gate {gate_id} against Battleship hulls",
                                             dungeon.name
                                         ),
+                                        client_error: None,
                                     });
                                 }
                             }
@@ -881,6 +893,7 @@ pub(super) async fn handle_scanning_and_wormholes(
                             message: format!(
                                 "Acceleration gate {gate_id} requires key item type {req_key_type_id} in active ship cargo"
                             ),
+                            client_error: None,
                         });
                     };
 

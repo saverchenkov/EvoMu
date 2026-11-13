@@ -716,7 +716,7 @@ fn normalize_contact_station_safety_compression_wars_store_and_err_passthrough()
     assert!(matches!(pub_war, PyRep::List(l) if l.len() == 1));
     let store = normalize_macho_rpc_reply("storeManager", "get_products", Ok(PyRep::keyval([("id", PyRep::Integer(7))]))).expect("store");
     assert!(matches!(store, PyRep::Dict(_)));
-    let err_pass = normalize_macho_rpc_reply("storeManager", "get_products", Err(BridgeRpcError { code: "store_offline".into(), message: "offline".into() })).expect_err("err");
+    let err_pass = normalize_macho_rpc_reply("storeManager", "get_products", Err(BridgeRpcError { code: "store_offline".into(), message: "offline".into(), client_error: None })).expect_err("err");
     assert_eq!(err_pass.code, "store_offline");
 }
 

@@ -177,6 +177,7 @@ pub fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidArgument".into(),
                         message: "ConsumeExpertSystem requires an itemID".into(),
+                        client_error: None,
                     }));
                 }
             };
@@ -192,6 +193,7 @@ pub fn handle(
                         return Err(BridgeRpcError {
                             code: "ItemNotFound".into(),
                             message: format!("Inventory item {item_id} not found"),
+                            client_error: None,
                         });
                     }
                 };
@@ -199,6 +201,7 @@ pub fn handle(
                     return Err(BridgeRpcError {
                         code: "ItemNotOwned".into(),
                         message: format!("Item {item_id} is not owned by caller"),
+                        client_error: None,
                     });
                 }
                 let effective_dock = current_dock.or_else(|| {
@@ -218,6 +221,7 @@ pub fn handle(
                         message: format!(
                             "Item {item_id} is not reachable in your hangar/cargo or is locked in a contract"
                         ),
+                        client_error: None,
                     });
                 }
                 let resolved_type_id = item.type_id as i64;
@@ -228,6 +232,7 @@ pub fn handle(
                     .map_err(|e| BridgeRpcError {
                         code: "SdeError".into(),
                         message: e.to_string(),
+                        client_error: None,
                     })?;
                 let sde_rec = match sde_map.get(&resolved_type_id.to_string()) {
                     Some(r) => r,
@@ -235,6 +240,7 @@ pub fn handle(
                         return Err(BridgeRpcError {
                             code: "InvalidItemType".into(),
                             message: format!("Item type {resolved_type_id} is not an expert system"),
+                            client_error: None,
                         });
                     }
                 };
@@ -265,6 +271,7 @@ pub fn handle(
                 .map_err(|e| BridgeRpcError {
                     code: "ItemLocked".into(),
                     message: e.to_string(),
+                    client_error: None,
                 })?;
 
                 let mut records = load_expert_systems(snap, char_id);
@@ -306,6 +313,7 @@ pub fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidArgument".into(),
                         message: "RemoveMyExpertSystem requires an expertSystemTypeID".into(),
+                        client_error: None,
                     }));
                 }
             };
@@ -339,6 +347,7 @@ pub fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidArgument".into(),
                         message: "process_client_blackboard_request requires a valid graph_id".into(),
+                        client_error: None,
                     }));
                 }
             };
@@ -352,6 +361,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "NodeGraphNotFound".into(),
                     message: format!("Node graph {graph_id} not found"),
+                    client_error: None,
                 }));
             }
             let _node_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
@@ -361,6 +371,7 @@ pub fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidArgument".into(),
                         message: "process_client_blackboard_request requires a blackboard key".into(),
+                        client_error: None,
                     }));
                 }
             };
@@ -428,6 +439,7 @@ pub fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidArgument".into(),
                         message: "process_client_graph_message requires a valid graph_id".into(),
+                        client_error: None,
                     }));
                 }
             };
@@ -441,6 +453,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "NodeGraphNotFound".into(),
                     message: format!("Node graph {graph_id} not found"),
+                    client_error: None,
                 }));
             }
             let Some(node_id) = args
@@ -452,6 +465,7 @@ pub fn handle(
                     code: "InvalidArgument".into(),
                     message: "process_client_graph_message requires a valid non-negative node_id"
                         .into(),
+                    client_error: None,
                 }));
             };
             let node_u32 = node_id as u32;
@@ -465,6 +479,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: format!("Node {node_id} not in node graph {graph_id}"),
+                    client_error: None,
                 }));
             }
             let Some(msg_name) = args
@@ -475,6 +490,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "process_client_graph_message requires a valid message key".into(),
+                    client_error: None,
                 }));
             };
             if !is_gm
@@ -489,6 +505,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: "GM role required for AIR NPE control graph message".into(),
+                    client_error: None,
                 }));
             }
             let msg_data = args.get(3).cloned().unwrap_or(PyRep::None);
@@ -522,6 +539,7 @@ pub fn handle(
                         return Err(BridgeRpcError {
                             code: "InvalidArgument".into(),
                             message: "Node graph blackboard key limit reached".into(),
+                            client_error: None,
                         });
                     }
                     bb.insert(msg_name.to_string(), data_str);
@@ -539,6 +557,7 @@ pub fn handle(
                         return Err(BridgeRpcError {
                             code: "InvalidArgument".into(),
                             message: "Node graph blackboard size limit exceeded".into(),
+                            client_error: None,
                         });
                     }
 
@@ -557,6 +576,7 @@ pub fn handle(
                                                 "Out-of-order client node_id {node_id} (expected {})",
                                                 npe.current_node_id
                                             ),
+                                            client_error: None,
                                         });
                                     }
                                     if node_u32 == npe.current_node_id {

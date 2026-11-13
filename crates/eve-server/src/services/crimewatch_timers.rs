@@ -358,6 +358,7 @@ pub fn check_crimewatch_action_restriction(
         return Err(BridgeRpcError {
             code: "CantEnterWormholeGlobalCriminalFlag".into(),
             message: "Mysterious technology prevents a criminal with a pending CONCORD response from entering this wormhole".into(),
+            client_error: None,
         });
     }
 
@@ -366,6 +367,7 @@ pub fn check_crimewatch_action_restriction(
             return Err(BridgeRpcError {
                 code: "CantWarpAwayGlobalCriminalFlag".into(),
                 message: "Ships with an active criminal timer in high-security space cannot warp".into(),
+                client_error: None,
             });
         }
         if matches!(
@@ -399,6 +401,7 @@ pub fn check_crimewatch_action_restriction(
                 message: format!(
                     "Action '{action}' is blocked by an active high-security criminal timer / CONCORD response"
                 ),
+                client_error: None,
             });
         }
     }
@@ -444,6 +447,7 @@ pub fn check_crimewatch_action_restriction(
         return Err(BridgeRpcError {
             code: "PvpTimerBlocksFilament".into(),
             message: "Cannot activate a filament while a 15-minute PvP Logoff Timer is active".into(),
+            client_error: None,
         });
     }
 
@@ -451,6 +455,7 @@ pub fn check_crimewatch_action_restriction(
         return Err(BridgeRpcError {
             code: "PvpLogoffRestricted".into(),
             message: "Safe logoff is prohibited while a 15-minute PvP Logoff Timer is active".into(),
+            client_error: None,
         });
     }
 
@@ -660,6 +665,7 @@ fn check_kill_right_restriction(
             return Err(BridgeRpcError {
                 code: "KillRightRestricted".into(),
                 message: format!("Kill right {kr_id} is restricted to entity {restr}"),
+                client_error: None,
             });
         }
     }
@@ -687,7 +693,7 @@ pub async fn handle_crimewatch(
             let is_docked = session.station_id.is_some() || session.structure_id.is_some();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(kr) = snap.kill_rights.get(&kr_id).cloned() else {
-                    return Err(BridgeRpcError { code: "KillRightNotFound".into(), message: format!("Kill right {kr_id} does not exist") });
+                    return Err(BridgeRpcError { code: "KillRightNotFound".into(), message: format!("Kill right {kr_id} does not exist"), client_error: None });
                 };
                 if kr.owner_id != char_id {
                     let restr = check_kill_right_restriction(snap, kr_id, char_id)?;
@@ -695,19 +701,20 @@ pub async fn handle_crimewatch(
                         return Err(BridgeRpcError {
                             code: "NotKillRightOwner".into(),
                             message: format!("Kill right {kr_id} belongs to {}, not {char_id}; use BuyKillRight to purchase public activation", kr.owner_id),
+                            client_error: None,
                         });
                     }
                 }
                 if kr.is_active_suspect {
-                    return Err(BridgeRpcError { code: "KillRightAlreadyActivated".into(), message: format!("Kill right {kr_id} is already activated") });
+                    return Err(BridgeRpcError { code: "KillRightAlreadyActivated".into(), message: format!("Kill right {kr_id} is already activated"), client_error: None });
                 }
                 if is_docked {
-                    return Err(BridgeRpcError { code: "KillRightCannotActivateDocked".into(), message: "Cannot activate a kill right while docked".into() });
+                    return Err(BridgeRpcError { code: "KillRightCannotActivateDocked".into(), message: "Cannot activate a kill right while docked".into(), client_error: None });
                 }
-                let caller = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found") })?;
-                let target = snap.characters.get(&kr.target_id).ok_or_else(|| BridgeRpcError { code: "TargetNotFound".into(), message: format!("Kill right target {} not found", kr.target_id) })?;
+                let caller = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found"), client_error: None })?;
+                let target = snap.characters.get(&kr.target_id).ok_or_else(|| BridgeRpcError { code: "TargetNotFound".into(), message: format!("Kill right target {} not found", kr.target_id), client_error: None })?;
                 if caller.station_id.is_some() || caller.structure_id.is_some() || target.station_id.is_some() || target.structure_id.is_some() || caller.solar_system_id != target.solar_system_id {
-                    return Err(BridgeRpcError { code: "KillRightTargetNotInSystem".into(), message: "Caller and target must both be undocked in the same solar system".into() });
+                    return Err(BridgeRpcError { code: "KillRightTargetNotInSystem".into(), message: "Caller and target must both be undocked in the same solar system".into(), client_error: None });
                 }
                 super::validate_kill_right_live_preconditions(ctx, snap, kr_id, char_id, kr.target_id)?;
                 if let Some(kr_mut) = snap.kill_rights.get_mut(&kr_id) { kr_mut.is_active_suspect = true; }
@@ -750,44 +757,44 @@ pub async fn handle_crimewatch(
             let is_docked = session.station_id.is_some() || session.structure_id.is_some();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(kr) = snap.kill_rights.get(&kr_id).cloned() else {
-                    return Err(BridgeRpcError { code: "KillRightNotFound".into(), message: format!("Kill right {kr_id} does not exist") });
+                    return Err(BridgeRpcError { code: "KillRightNotFound".into(), message: format!("Kill right {kr_id} does not exist"), client_error: None });
                 };
                 if kr.is_active_suspect {
-                    return Err(BridgeRpcError { code: "KillRightAlreadyActivated".into(), message: format!("Kill right {kr_id} is already activated") });
+                    return Err(BridgeRpcError { code: "KillRightAlreadyActivated".into(), message: format!("Kill right {kr_id} is already activated"), client_error: None });
                 }
                 if char_id == kr.target_id {
-                    return Err(BridgeRpcError { code: "CannotBuyKillRightAgainstSelf".into(), message: "Target pilot cannot buy a kill right against themselves".into() });
+                    return Err(BridgeRpcError { code: "CannotBuyKillRightAgainstSelf".into(), message: "Target pilot cannot buy a kill right against themselves".into(), client_error: None });
                 }
                 if char_id == kr.owner_id {
-                    return Err(BridgeRpcError { code: "AlreadyKillRightOwner".into(), message: "Kill right owner cannot buy their own kill right; use ActivateKillRight instead".into() });
+                    return Err(BridgeRpcError { code: "AlreadyKillRightOwner".into(), message: "Kill right owner cannot buy their own kill right; use ActivateKillRight instead".into(), client_error: None });
                 }
                 if kr.activation_fee.0 <= 0 {
-                    return Err(BridgeRpcError { code: "KillRightNotForSale".into(), message: format!("Kill right {kr_id} is not listed for public sale") });
+                    return Err(BridgeRpcError { code: "KillRightNotForSale".into(), message: format!("Kill right {kr_id} is not listed for public sale"), client_error: None });
                 }
                 if let Some(expected_isk) = expected_price_opt {
                     if expected_isk < 0.0 || IskCents::from_f64_isk(expected_isk) < kr.activation_fee {
-                        return Err(BridgeRpcError { code: "KillRightPriceChanged".into(), message: "Offered price is lower than current kill right sale price".into() });
+                        return Err(BridgeRpcError { code: "KillRightPriceChanged".into(), message: "Offered price is lower than current kill right sale price".into(), client_error: None });
                     }
                 }
                 check_kill_right_restriction(snap, kr_id, char_id)?;
                 if is_docked {
-                    return Err(BridgeRpcError { code: "KillRightCannotActivateDocked".into(), message: "Cannot activate or buy a kill right while docked".into() });
+                    return Err(BridgeRpcError { code: "KillRightCannotActivateDocked".into(), message: "Cannot activate or buy a kill right while docked".into(), client_error: None });
                 }
-                let caller = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found") })?;
-                let target = snap.characters.get(&kr.target_id).ok_or_else(|| BridgeRpcError { code: "TargetNotFound".into(), message: format!("Kill right target {} not found", kr.target_id) })?;
+                let caller = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found"), client_error: None })?;
+                let target = snap.characters.get(&kr.target_id).ok_or_else(|| BridgeRpcError { code: "TargetNotFound".into(), message: format!("Kill right target {} not found", kr.target_id), client_error: None })?;
                 if caller.station_id.is_some() || caller.structure_id.is_some() || target.station_id.is_some() || target.structure_id.is_some() || caller.solar_system_id != target.solar_system_id {
-                    return Err(BridgeRpcError { code: "KillRightTargetNotInSystem".into(), message: "Caller and target must both be undocked in the same solar system".into() });
+                    return Err(BridgeRpcError { code: "KillRightTargetNotInSystem".into(), message: "Caller and target must both be undocked in the same solar system".into(), client_error: None });
                 }
                 super::validate_kill_right_live_preconditions(ctx, snap, kr_id, char_id, kr.target_id)?;
                 let fee = kr.activation_fee;
                 let Some(owner) = snap.characters.get(&kr.owner_id) else {
-                    return Err(BridgeRpcError { code: "OwnerNotFound".into(), message: format!("Kill right owner {} not found", kr.owner_id) });
+                    return Err(BridgeRpcError { code: "OwnerNotFound".into(), message: format!("Kill right owner {} not found", kr.owner_id), client_error: None });
                 };
-                let new_owner_bal = owner.balance.checked_add(fee).ok_or_else(|| BridgeRpcError { code: "BalanceOverflow".into(), message: "Kill right owner ISK balance would overflow".into() })?;
+                let new_owner_bal = owner.balance.checked_add(fee).ok_or_else(|| BridgeRpcError { code: "BalanceOverflow".into(), message: "Kill right owner ISK balance would overflow".into(), client_error: None })?;
                 let Some(caller_mut) = snap.characters.get_mut(&char_id) else {
-                    return Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found") });
+                    return Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found"), client_error: None });
                 };
-                let new_caller_bal = caller_mut.balance.checked_sub(fee).ok_or_else(|| BridgeRpcError { code: "InsufficientFunds".into(), message: "Insufficient ISK to pay kill right activation fee".into() })?;
+                let new_caller_bal = caller_mut.balance.checked_sub(fee).ok_or_else(|| BridgeRpcError { code: "InsufficientFunds".into(), message: "Insufficient ISK to pay kill right activation fee".into(), client_error: None })?;
                 caller_mut.balance = new_caller_bal;
                 if let Some(owner_mut) = snap.characters.get_mut(&kr.owner_id) { owner_mut.balance = new_owner_bal; }
                 snap.append_journal(
@@ -1013,6 +1020,7 @@ pub async fn handle_crimewatch(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "StartDuelChallenge requires target characterID".into(),
+                    client_error: None,
                 }));
             };
             if target_char_id <= 0 || target_char_id == char_id {
@@ -1028,7 +1036,7 @@ pub async fn handle_crimewatch(
                 return Some(Err(BridgeRpcError::user_error("InvalidDuelTarget")));
             };
             if !ctx.is_character_online(target_char_id, target_user_id) {
-                return Some(Err(BridgeRpcError::user_error("DuelChallengeFailNoSesssionForTarget")));
+                return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::DuelChallengeFailNoSesssionForTarget)));
             }
             let now_unix = ctx.now_unix();
             let expiry_ft = ctx.now_blueos_filetime_ticks() + 600_000_000;
@@ -1062,6 +1070,7 @@ pub async fn handle_crimewatch(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "RespondToDuelChallenge requires challengerID".into(),
+                    client_error: None,
                 }));
             };
             let _ = ctx
@@ -1099,6 +1108,7 @@ pub async fn handle_crimewatch(
                 return Some(Err(BridgeRpcError {
                     code: "NoPendingDuelChallenge".into(),
                     message: format!("No active duel challenge from {challenger_id} to {char_id}"),
+                    client_error: None,
                 }));
             }
             if accept {

@@ -20,6 +20,7 @@ fn community_role_denied(action_label: &str) -> BridgeRpcError {
     BridgeRpcError {
         code: "AccessDenied".into(),
         message: format!("{action_label} community fittings requires GM or Content role"),
+        client_error: None,
     }
 }
 
@@ -49,6 +50,7 @@ fn resolve_and_authorize_fitting_owner(
         return Err(BridgeRpcError {
             code: "UserError".into(),
             message: "FittingOwnerMismatch".into(),
+            client_error: None,
         });
     }
     if service.starts_with("corp") && ctx.db.with_snapshot(|s| s.corporations.contains_key(&target_owner)) {
@@ -58,6 +60,7 @@ fn resolve_and_authorize_fitting_owner(
             return Err(BridgeRpcError {
                 code: "CorpRoleDenied".into(),
                 message: format!("{action_label} corporation fittings requires Fitting Manager or Director role"),
+                client_error: None,
             });
         }
     }
@@ -146,7 +149,7 @@ fn handle_get_fittings(
             .unwrap_or(default_owner);
 
         if (!args.is_empty() || method == "GetFittings") && owner_id != expected_owner {
-            return Some(Err(BridgeRpcError { code: "UserError".into(), message: "FittingOwnerMismatch".into() }));
+            return Some(Err(BridgeRpcError { code: "UserError".into(), message: "FittingOwnerMismatch".into(), client_error: None }));
         }
         owner_id
     };
@@ -227,6 +230,7 @@ async fn handle_save_fitting(
                         message:
                             "Fitting items must be a List or Tuple of (typeID, flagID, quantity)"
                                 .into(),
+                        client_error: None,
                     })
                 }
             };
@@ -240,6 +244,7 @@ async fn handle_save_fitting(
                             message:
                                 "Each fitting item must be a (typeID, flagID, quantity) tuple"
                                     .into(),
+                            client_error: None,
                         })
                     }
                 };
@@ -249,6 +254,7 @@ async fn handle_save_fitting(
                     return Err(BridgeRpcError {
                         code: "InvalidFittingItem".into(),
                         message: "Fitting item is missing a positive typeID".into(),
+                        client_error: None,
                     });
                 };
                 let Some(flag_raw) =
@@ -257,6 +263,7 @@ async fn handle_save_fitting(
                     return Err(BridgeRpcError {
                         code: "InvalidFittingItem".into(),
                         message: "Fitting item is missing a valid flagID".into(),
+                        client_error: None,
                     });
                 };
                 let qty_i64 = seq.get(2).and_then(|v| v.as_i64()).unwrap_or(1);
@@ -266,6 +273,7 @@ async fn handle_save_fitting(
                         message: format!(
                             "Fitting item quantity overflows i32 bounds, got {qty_i64}"
                         ),
+                        client_error: None,
                     });
                 };
                 if qty <= 0 {
@@ -274,6 +282,7 @@ async fn handle_save_fitting(
                         message: format!(
                             "Fitting item quantity must be positive, got {qty}"
                         ),
+                        client_error: None,
                     });
                 }
                 let flag_u16 = u16::try_from(flag_raw).ok();
@@ -289,6 +298,7 @@ async fn handle_save_fitting(
                     return Err(BridgeRpcError {
                         code: "InvalidFittingFlag".into(),
                         message: format!("Invalid fitting slot or bay flag {flag_raw}"),
+                        client_error: None,
                     });
                 }
                 out.push((mod_type_id as TypeId, flag, qty));
@@ -348,6 +358,7 @@ async fn handle_save_fitting(
                 return Err(BridgeRpcError {
                     code: "InvalidShipType".into(),
                     message: format!("Type {ship_type_id} is not a valid ship hull"),
+                    client_error: None,
                 });
             }
             let parsed_items = parse_fit_items(items_arg, ship_type_id)?;
@@ -370,6 +381,7 @@ async fn handle_save_fitting(
                             message: format!(
                                 "Fitting slot {flag_u16} requires quantity 1, got {qty}"
                             ),
+                            client_error: None,
                         });
                     }
                     if let Err(e) = validator.fit_and_online_module(
@@ -381,6 +393,7 @@ async fn handle_save_fitting(
                         return Err(BridgeRpcError {
                             code: "InvalidFittingModule".into(),
                             message: e,
+                            client_error: None,
                         });
                     }
                 } else if !ctx.sde.types.contains_key(&mod_type_id) {
@@ -389,6 +402,7 @@ async fn handle_save_fitting(
                         message: format!(
                             "Unknown item type {mod_type_id} in saved fitting"
                         ),
+                        client_error: None,
                     });
                 }
             }
@@ -409,6 +423,7 @@ async fn handle_save_fitting(
             return Err(BridgeRpcError {
                 code: "InvalidShipType".into(),
                 message: "Fitting object requires shipTypeID".into(),
+                client_error: None,
             });
         };
         let description = rep
@@ -437,6 +452,7 @@ async fn handle_save_fitting(
             return Some(Err(BridgeRpcError {
                 code: "InvalidArgument".into(),
                 message: "SaveManyFittings requires fittings collection".into(),
+                client_error: None,
             }));
         };
         match f_arg {
@@ -462,6 +478,7 @@ async fn handle_save_fitting(
                     message:
                         "SaveManyFittings requires a Dict or List of fitting objects"
                             .into(),
+                    client_error: None,
                 }));
             }
         }
@@ -474,6 +491,7 @@ async fn handle_save_fitting(
             return Some(Err(BridgeRpcError {
                 code: "InvalidArgument".into(),
                 message: "SaveFitting(ownerID, fitting) requires fitting object".into(),
+                client_error: None,
             }));
         };
         match extract_fit_from_rep(fit_rep) {
@@ -499,6 +517,7 @@ async fn handle_save_fitting(
             return Some(Err(BridgeRpcError {
                 code: "InvalidShipType".into(),
                 message: "SaveFitting requires shipTypeID".into(),
+                client_error: None,
             }));
         };
         let (description, items_arg) = match args.get(2) {
@@ -524,7 +543,7 @@ async fn handle_save_fitting(
             return Some(Err(community_role_denied("saving")));
         }
     } else if owner_id != expected_owner {
-        return Some(Err(BridgeRpcError { code: "UserError".into(), message: "FittingOwnerMismatch".into() }));
+        return Some(Err(BridgeRpcError { code: "UserError".into(), message: "FittingOwnerMismatch".into(), client_error: None }));
     }
 
     let is_corp_or_alliance = service == "corpFittingMgr"
@@ -540,6 +559,7 @@ async fn handle_save_fitting(
             return Some(Err(BridgeRpcError {
                 code: "CorpRoleDenied".into(),
                 message: "Saving corporation fittings requires Fitting Manager or Director role".into(),
+                client_error: None,
             }));
         }
     }
@@ -558,6 +578,7 @@ async fn handle_save_fitting(
                     "Owner {owner_id} has {current_count} fittings; saving {} more would exceed maximum of {max_fittings}",
                     fits_to_save.len()
                 ),
+                client_error: None,
             });
         }
         let mut saved_ids = Vec::with_capacity(fits_to_save.len());
@@ -700,6 +721,7 @@ async fn handle_update_fitting(
         return Some(Err(BridgeRpcError {
             code: "InvalidFittingName".into(),
             message: "Fitting name cannot be empty".into(),
+            client_error: None,
         }));
     }
     let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -707,12 +729,14 @@ async fn handle_update_fitting(
             return Err(BridgeRpcError {
                 code: "FittingNotFound".into(),
                 message: format!("Saved fitting {fid} not found"),
+                client_error: None,
             });
         };
         if fit.owner_id != target_owner {
             return Err(BridgeRpcError {
                 code: "FittingOwnershipViolation".into(),
                 message: format!("Not authorized to update fitting {fid}"),
+                client_error: None,
             });
         }
         fit.name = new_name.clone();

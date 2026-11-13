@@ -90,12 +90,14 @@ pub fn resolve_decryptor_modifiers(
         return Err(BridgeRpcError {
             code: "InvalidDecryptor".into(),
             message: format!("Decryptor type {decryptor_type_id} not found in SDE"),
+            client_error: None,
         });
     };
     if dtype.group_id != 1304 {
         return Err(BridgeRpcError {
             code: "InvalidDecryptor".into(),
             message: format!("Type {decryptor_type_id} is not a Decryptor (group 1304)"),
+            client_error: None,
         });
     }
     let prob_mult = dtype.default_attributes.get(&1112).copied().filter(|&v| v > 0.0).unwrap_or(1.0);
@@ -203,6 +205,7 @@ pub fn resolve_sde_planet_p0_extraction(
             message: format!(
                 "Planet {planet_id} is not a planet celestial in solar system {solar_system_id}"
             ),
+            client_error: None,
         })?;
     let planet_type = ctx
         .sde
@@ -214,6 +217,7 @@ pub fn resolve_sde_planet_p0_extraction(
                 "Planet type {} not found in SDE types",
                 planet_celestial.type_id
             ),
+            client_error: None,
         })?;
     let restriction_type_id = planet_type
         .variation_parent_type_id
@@ -237,6 +241,7 @@ pub fn resolve_sde_planet_p0_extraction(
                 "Planet {planet_id} ({}) has no SDE extractor pins with planetRestriction {}",
                 planet_type.name, restriction_type_id
             ),
+            client_error: None,
         });
     }
     matching_extractors.sort_by_key(|t| t.type_id);
@@ -257,6 +262,7 @@ pub fn resolve_sde_planet_p0_extraction(
                     "Requested type {req_id} is not a valid SDE extractor pin or harvesterType (709) raw P0 resource on planet {planet_id} ({})",
                     planet_type.name
                 ),
+                client_error: None,
             })?,
     };
     let p0_type_id = extractor_type
@@ -270,6 +276,7 @@ pub fn resolve_sde_planet_p0_extraction(
                 "Extractor pin {} is missing SDE harvesterType (709) attribute",
                 extractor_type.type_id
             ),
+            client_error: None,
         })?;
     let p0_qty_per_pin = extractor_type
         .default_attributes
@@ -282,6 +289,7 @@ pub fn resolve_sde_planet_p0_extraction(
                 "Extractor pin {} is missing SDE pinExtractionQuantity (1642) attribute",
                 extractor_type.type_id
             ),
+            client_error: None,
         })?;
     let cycle_secs = extractor_type
         .default_attributes
@@ -294,10 +302,12 @@ pub fn resolve_sde_planet_p0_extraction(
                 "Extractor pin {} is missing SDE pinCycleTime (1643) attribute",
                 extractor_type.type_id
             ),
+            client_error: None,
         })?;
     let p0_type = ctx.sde.types.get(&p0_type_id).ok_or_else(|| BridgeRpcError {
         code: "MissingPlanetRawResource".into(),
         message: format!("Raw P0 resource {p0_type_id} not found in SDE types"),
+        client_error: None,
     })?;
     let p0_unit_tax_value = p0_type
         .default_attributes
@@ -309,6 +319,7 @@ pub fn resolve_sde_planet_p0_extraction(
             message: format!(
                 "Raw P0 resource {p0_type_id} is missing SDE exportTaxMultiplier (1641) attribute"
             ),
+            client_error: None,
         })?;
     Ok((p0_type_id, cycle_secs, p0_qty_per_pin, p0_unit_tax_value))
 }
@@ -404,6 +415,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "GetPlanetInfo requires an explicit integer planetID or bound planetMgr moniker".into(),
+                    client_error: None,
                 }));
             };
             let planet_sys_id = ctx
@@ -416,6 +428,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: format!("Planet {planet_id} not found in SDE"),
+                    client_error: None,
                 }));
             };
             let planet_type_id = ctx
@@ -496,6 +509,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "GetPlanetResourceInfo requires an explicit integer planetID or bound planetMgr moniker".into(),
+                    client_error: None,
                 }));
             };
             let planet_sys_id = ctx
@@ -508,6 +522,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: format!("Planet {planet_id} not found in SDE"),
+                    client_error: None,
                 }));
             };
             let p0_resources = list_sde_planet_p0_resources(ctx, sys_id, planet_id);
@@ -515,6 +530,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "UncolonizablePlanetType".into(),
                     message: format!("Planet {planet_id} has no harvestable P0 resources in SDE"),
+                    client_error: None,
                 }));
             }
             let (remote_sensing_lvl, planetology_lvl, adv_planetology_lvl, extracted_map) =
@@ -588,6 +604,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "GetResourceData requires planetID or bound planetMgr moniker".into(),
+                    client_error: None,
                 }));
             };
             let planet_sys_id = ctx
@@ -600,6 +617,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: format!("Planet {planet_id} not found in SDE"),
+                    client_error: None,
                 }));
             };
             let p0_resources = list_sde_planet_p0_resources(ctx, sys_id, planet_id);
@@ -613,6 +631,7 @@ pub fn handle(
                     message: format!(
                         "Resource type {req_res_tid} is not present on planet {planet_id}"
                     ),
+                    client_error: None,
                 }));
             }
             let (remote_sensing_lvl, planetology_lvl, adv_planetology_lvl) =
@@ -627,6 +646,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "PISkillRequiredToSurveyPlanetResources".into(),
                     message: "GetResourceData requires Remote Sensing (13279) >= level 1".into(),
+                    client_error: None,
                 }));
             }
             let (col_depletion, gm_depletion) = ctx.db.with_snapshot(|snap| {
@@ -885,6 +905,7 @@ pub(crate) fn handle_industry_job_queries(
                     return Err(BridgeRpcError {
                         code: "JobNotFound".into(),
                         message: format!("Industry job {job_id} not found"),
+                        client_error: None,
                     });
                 };
                 let meta = load_job_cost_meta(snap, j.job_id).unwrap_or_default();
@@ -893,6 +914,7 @@ pub(crate) fn handle_industry_job_queries(
                     return Err(BridgeRpcError {
                         code: "JobOwnershipViolation".into(),
                         message: format!("Industry job {job_id} does not belong to character {char_id}"),
+                        client_error: None,
                     });
                 }
                 let mut rep = format_industry_job_pyrep(j, &meta);
@@ -934,6 +956,7 @@ pub(crate) fn handle_industry_job_queries(
                     message: format!(
                         "Character {char_id} is not authorized to query industry jobs for owner {req_owner_id}"
                     ),
+                    client_error: None,
                 }));
             }
             let now_unix = ctx.now_unix();
@@ -978,6 +1001,7 @@ pub(crate) fn handle_industry_job_queries(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArguments".into(),
                     message: "ConnectJob expects 1 argument (job)".into(),
+                    client_error: None,
                 }));
             }
             let job_arg = &args[0];
@@ -1015,6 +1039,7 @@ pub(crate) fn handle_industry_job_queries(
                         return Err(BridgeRpcError {
                             code: "JobNotFound".into(),
                             message: format!("Industry job {job_id} not found"),
+                            client_error: None,
                         });
                     };
                     let meta = load_job_cost_meta(snap, job_id).unwrap_or_default();
@@ -1033,6 +1058,7 @@ pub(crate) fn handle_industry_job_queries(
                     return Err(BridgeRpcError {
                         code: "InvalidArguments".into(),
                         message: "ConnectJob requires a job KeyVal/Object with locationID/inputLocationID or a valid jobID".into(),
+                        client_error: None,
                     });
                 };
 
@@ -1064,6 +1090,7 @@ pub(crate) fn handle_industry_job_queries(
                             message: format!(
                                 "Caller {char_id} lacks permission to monitor hangar ({owner_id}, {location_id}, {flag_id})"
                             ),
+                            client_error: None,
                         });
                     }
                 }
@@ -1163,6 +1190,7 @@ pub(crate) fn handle_industry_job_queries(
                         return Err(BridgeRpcError {
                             code: "CrpAccessDenied".into(),
                             message: format!("Monitor {job_id} belongs to another character"),
+                            client_error: None,
                         });
                     }
                     monitors.remove(&job_id);
@@ -1170,7 +1198,7 @@ pub(crate) fn handle_industry_job_queries(
                     return Ok(PyRep::Bool(true));
                 }
                 let Some(j) = snap.industry_jobs.get(&job_id) else {
-                    return Err(BridgeRpcError { code: "JobNotFound".into(), message: format!("Industry job {job_id} not found") });
+                    return Err(BridgeRpcError { code: "JobNotFound".into(), message: format!("Industry job {job_id} not found"), client_error: None });
                 };
                 let meta = load_job_cost_meta(snap, job_id).unwrap_or_default();
                 let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
@@ -1186,7 +1214,7 @@ pub(crate) fn handle_industry_job_queries(
                         || (caller_roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_FACTORY_MANAGER) != 0);
                     let is_corp_job = meta.use_corp && meta.owner_id == char_corp && char_corp >= 2_000_000;
                     if !is_corp_job || !has_role {
-                        return Err(BridgeRpcError { code: "CrpAccessDenied".into(), message: format!("Industry job {job_id} does not belong to character {char_id} or caller lacks Director/Factory Manager role") });
+                        return Err(BridgeRpcError { code: "CrpAccessDenied".into(), message: format!("Industry job {job_id} does not belong to character {char_id} or caller lacks Director/Factory Manager role"), client_error: None });
                     }
                 }
                 let nid = -8_950_000_000_000_i64 - char_id;
@@ -1262,6 +1290,7 @@ pub fn finalize_completed_industry_job_response(
         return Err(BridgeRpcError {
             code: "InventionAttemptFailed".into(),
             message: "Invention roll failed to produce a tech II blueprint".into(),
+            client_error: None,
         });
     }
     Ok(PyRep::keyval([

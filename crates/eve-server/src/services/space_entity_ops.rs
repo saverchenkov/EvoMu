@@ -67,26 +67,26 @@ pub async fn handle(
                 None => Vec::new(),
             };
             if target_ids.is_empty() {
-                return Some(Err(BridgeRpcError { code: "ItemNotFound".into(), message: "No wreck/container IDs provided".into() }));
+                return Some(Err(BridgeRpcError { code: "ItemNotFound".into(), message: "No wreck/container IDs provided".into(), client_error: None }));
             }
             let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
+                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into(), client_error: None }));
             };
             let res: Result<Vec<(i64, u32, u32, u32, bool, i64)>, BridgeRpcError> = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut metas = Vec::new();
                 for &tid in &target_ids {
                     let Some(it) = snap.items.get(&tid).cloned() else {
-                        return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {tid} not found") });
+                        return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {tid} not found"), client_error: None });
                     };
                     if it.owner_id != char_id {
-                        return Err(BridgeRpcError { code: "AccessDenied".into(), message: "Only item owner can abandon loot".into() });
+                        return Err(BridgeRpcError { code: "AccessDenied".into(), message: "Only item owner can abandon loot".into(), client_error: None });
                     }
                     if it.location_id != sys_id as i64 {
-                        return Err(BridgeRpcError { code: "ItemNotInSpace".into(), message: "Item must be in space to be abandoned".into() });
+                        return Err(BridgeRpcError { code: "ItemNotInSpace".into(), message: "Item must be in space to be abandoned".into(), client_error: None });
                     }
                     let (grp, cat) = ctx.sde.types.get(&it.type_id).map(|t| (t.group_id, t.category_id)).unwrap_or((0, 0));
                     if grp != 186 && grp != 12 && grp != 340 && grp != 448 {
-                        return Err(BridgeRpcError { code: "InvalidItemType".into(), message: "Only wrecks and containers in space can be abandoned".into() });
+                        return Err(BridgeRpcError { code: "InvalidItemType".into(), message: "Only wrecks and containers in space can be abandoned".into(), client_error: None });
                     }
                     let is_empty = !snap.items.values().any(|c| c.location_id == tid);
                     metas.push((tid, it.type_id, grp, cat, is_empty, it.owner_id));
@@ -173,12 +173,14 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "NotInSpace".into(),
                     message: "Caller must be in space".into(),
+                    client_error: None,
                 }));
             };
             let Some(ship_id) = session.ship_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "Session has no active ship".into(),
+                    client_error: None,
                 }));
             };
             if let Err(e) = crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "issue fleet regroup") {
@@ -222,6 +224,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "FleetAccessDenied".into(),
                     message: "Only fleet commanders can issue regroup".into(),
+                    client_error: None,
                 }));
             };
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -242,12 +245,12 @@ pub async fn handle(
             // parity: feat:fleet.target-tagging
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(target_id) = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
-                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "CmdFleetTagTarget requires a positive target itemID".into() }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "CmdFleetTagTarget requires a positive target itemID".into(), client_error: None }));
             };
             let raw_tag = args.get(1).and_then(|a| match a { PyRep::String(s) => Some(s.trim().to_string()), PyRep::Integer(i) => Some(i.to_string()), _ => None }).unwrap_or_default();
             let tag_str = raw_tag.to_ascii_uppercase();
             let Some(fid) = session.fleet_id.or_else(|| ctx.db.with_snapshot(|s| fleet_of(s, char_id))) else {
-                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into(), client_error: None }));
             };
             let is_lead = ctx.db.with_snapshot(|snap| {
                 let fleet = snap.fleets.get(&fid)?;
@@ -255,22 +258,22 @@ pub async fn handle(
                 Some(fleet.boss_id == char_id || matches!(mem.role, FleetRole::FleetCommander | FleetRole::WingCommander | FleetRole::SquadCommander))
             }).unwrap_or(false);
             if !is_lead {
-                return Some(Err(BridgeRpcError { code: "FleetAccessDenied".into(), message: "Only fleet commanders can tag targets".into() }));
+                return Some(Err(BridgeRpcError { code: "FleetAccessDenied".into(), message: "Only fleet commanders can tag targets".into(), client_error: None }));
             }
             if !tag_str.is_empty() {
                 if tag_str.len() != 1 || !tag_str.chars().all(|c| c.is_ascii_uppercase() || ('1'..='9').contains(&c)) {
-                    return Some(Err(BridgeRpcError { code: "InvalidTargetTag".into(), message: format!("Target tag '{raw_tag}' must be A-Z or 1-9") }));
+                    return Some(Err(BridgeRpcError { code: "InvalidTargetTag".into(), message: format!("Target tag '{raw_tag}' must be A-Z or 1-9"), client_error: None }));
                 }
                 let Some(sys_id) = session.solar_system_id else { return Some(Err(BridgeRpcError::user_error("NotInSpace"))) };
                 let Some(ship_id) = session.ship_id else { return Some(Err(BridgeRpcError::user_error("NoActiveShip"))) };
                 let sys_handle = ctx.systems.get_or_spawn(sys_id);
                 let on_grid = matches!((sys_handle.get_ball_position_sync(ship_id), sys_handle.get_ball_position_sync(target_id)), (Some(sp), Some(tp)) if sp.distance(tp) <= 8_000_000.0);
                 if !on_grid {
-                    return Some(Err(BridgeRpcError { code: "TargetNotOnGrid".into(), message: format!("Target {target_id} is not on grid with caller") }));
+                    return Some(Err(BridgeRpcError { code: "TargetNotOnGrid".into(), message: format!("Target {target_id} is not on grid with caller"), client_error: None }));
                 }
                 let is_locked = sys_handle.get_target_locks(ship_id).await.map(|locks| locks.iter().any(|l| l.target_id == target_id && l.locked)).unwrap_or(false);
                 if !is_locked {
-                    return Some(Err(BridgeRpcError { code: "TargetNotLocked".into(), message: format!("Target {target_id} must be locked before tagging") }));
+                    return Some(Err(BridgeRpcError { code: "TargetNotLocked".into(), message: format!("Target {target_id} must be locked before tagging"), client_error: None }));
                 }
             }
             {
@@ -301,27 +304,31 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "NotInSpace".into(),
                     message: "Docked callers cannot navigate to bookmark".into(),
+                    client_error: None,
                 }));
             }
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NotInSpace".into(),
                     message: "Session has no active solar system".into(),
+                    client_error: None,
                 }));
             };
             if (32_000_000..=32_999_999).contains(&sys_id) {
                 return Some(Err(BridgeRpcError {
                     code: "CannotWarpInAbyssalSpace".into(),
                     message: "Bookmarks and warp navigation are disabled inside Abyssal Deadspace".into(),
+                    client_error: None,
                 }));
             }
             if sys_id == 30_100_000 {
-                return Some(Err(BridgeRpcError::user_error("DunBlacklistCannotWarp")));
+                return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::DunBlacklistCannotWarp)));
             }
             let Some(ship_id) = session.ship_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "Session has no active ship".into(),
+                    client_error: None,
                 }));
             };
             if let Err(e) = crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "align to bookmark") {
@@ -337,12 +344,14 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "BookmarkNotFound".into(),
                         message: format!("Bookmark {bm_id} not found"),
+                        client_error: None,
                     });
                 };
                 if crate::services::fleet_social::is_bookmark_expired_in_snap(s, bm_id, now_unix) {
                     return Err(BridgeRpcError {
                         code: "BookmarkExpired".into(),
                         message: format!("Bookmark {bm_id} has expired"),
+                        client_error: None,
                     });
                 }
                 let caller_corp = session
@@ -362,6 +371,7 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),
                         message: "Cannot access bookmark".into(),
+                        client_error: None,
                     });
                 }
                 Ok(bm)
@@ -374,6 +384,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidTarget".into(),
                     message: format!("Bookmark {bm_id} is in another solar system"),
+                    client_error: None,
                 }));
             }
             let handle = ctx.systems.get_or_spawn(sys_id);
@@ -384,6 +395,7 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "ShipNotInSpace".into(),
                         message: "Active ship is not spawned in Ballpark".into(),
+                        client_error: None,
                     }));
                 }
             };
@@ -391,6 +403,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "ShipNotInSpace".into(),
                     message: "Active ship is already in warp".into(),
+                    client_error: None,
                 }));
             }
             let cur_pos = ball.position;
@@ -414,6 +427,7 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "CantMoveWhileModuleActive".into(),
                         message: "Ship is immobilized while superweapon warmup or 5-minute Lance caster lock is active".into(),
+                        client_error: None,
                     }));
                 }
                 if ball.max_velocity <= 1e-9
@@ -430,6 +444,7 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "CantMoveWhileModuleActive".into(),
                         message: "Ship is immobilized while superweapon warmup, siege/bastion, or cynosural field is active".into(),
+                        client_error: None,
                     }));
                 }
                 if let Err(e) = crate::services::space_destiny::space_nav_travel::ensure_not_mjd_spooling(
@@ -467,6 +482,7 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "StructureNotFound".into(),
                         message: format!("Structure {structure_id} not found"),
+                        client_error: None,
                     });
                 };
                 let owner_corp = st.owner_corp_id;
@@ -476,6 +492,7 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "CrpAccessDenied".into(),
                         message: "Director, Station Manager, or CEO role required to initiate self-destruct".into(),
+                        client_error: None,
                     });
                 }
                 st.self_destruct_at_unix = Some(now + 1200);
@@ -509,6 +526,7 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "StructureNotFound".into(),
                         message: format!("Structure {structure_id} not found"),
+                        client_error: None,
                     });
                 };
                 let owner_corp = st.owner_corp_id;
@@ -518,6 +536,7 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "CrpAccessDenied".into(),
                         message: "Director, Station Manager, or CEO role required to abort self-destruct".into(),
+                        client_error: None,
                     });
                 }
                 st.self_destruct_at_unix = None;
@@ -547,17 +566,17 @@ pub async fn handle(
             });
             let has_role = is_ceo || (roles & eve_db::corp_roles::ROLE_DIRECTOR) != 0;
             if !has_role || caller_corp == 0 {
-                return Some(Err(BridgeRpcError { code: "CrpAccessDenied".into(), message: "Director or CEO role required to transfer corporation assets".into() }));
+                return Some(Err(BridgeRpcError { code: "CrpAccessDenied".into(), message: "Director or CEO role required to transfer corporation assets".into(), client_error: None }));
             }
             // Space mechanics: Caller must be actively uncloaked in space (not docked in station/structure).
             if session.solar_system_id.is_none() || session.station_id.is_some() || session.structure_id.is_some() {
-                return Some(Err(BridgeRpcError { code: "NotInSpace".into(), message: "Caller must be in space (not docked)".into() }));
+                return Some(Err(BridgeRpcError { code: "NotInSpace".into(), message: "Caller must be in space (not docked)".into(), client_error: None }));
             }
             let sys_id = session.solar_system_id.unwrap();
             let released = ctx.db.try_with_mut_snapshot(|snap| {
                 // Invariant: Target corporation must be an existing player corporation (preventing transfer to NPC corps).
                 if target_corp_id <= 0 || !snap.corporations.contains_key(&target_corp_id) || ctx.sde.npc_corporations.contains_key(&target_corp_id) {
-                    return Err(BridgeRpcError { code: "InvalidTargetCorporation".into(), message: format!("Target {target_corp_id} must be an existing player corporation") });
+                    return Err(BridgeRpcError { code: "InvalidTargetCorporation".into(), message: format!("Target {target_corp_id} must be an existing player corporation"), client_error: None });
                 }
                 let target_accepts = snap
                     .corp_governance
@@ -568,6 +587,7 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "CorpDoesNotAcceptStructures".into(),
                         message: format!("Target corporation {target_corp_id} does not accept structure transfers"),
+                        client_error: None,
                     });
                 }
                 let mut transferred = false;
@@ -584,17 +604,17 @@ pub async fn handle(
                 }
                 if let Some(it) = snap.items.get_mut(&item_id) {
                     if it.owner_id != caller_corp {
-                        return Err(BridgeRpcError { code: "CrpAccessDenied".into(), message: "Item is not owned by caller's corporation".into() });
+                        return Err(BridgeRpcError { code: "CrpAccessDenied".into(), message: "Item is not owned by caller's corporation".into(), client_error: None });
                     }
                     if it.location_id != sys_id as i64 || it.flag != eve_db::InventoryFlag::None {
-                        return Err(BridgeRpcError { code: "ItemNotInSpace".into(), message: "Item must be in space in caller's solar system".into() });
+                        return Err(BridgeRpcError { code: "ItemNotInSpace".into(), message: "Item must be in space in caller's solar system".into(), client_error: None });
                     }
                     it.owner_id = target_corp_id;
                     it.version += 1;
                     transferred = true;
                 }
                 if !transferred {
-                    return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("In-space corporation asset {item_id} not found") });
+                    return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("In-space corporation asset {item_id} not found"), client_error: None });
                 }
                 Ok(released)
             });
@@ -612,7 +632,7 @@ pub async fn handle(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             // Administrative command: GM role strictly required.
             if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError { code: "GmRoleRequired".into(), message: "CmdTurboDock requires GM role".into() }));
+                return Some(Err(BridgeRpcError { code: "GmRoleRequired".into(), message: "CmdTurboDock requires GM role".into(), client_error: None }));
             }
             if let Some(ship_id) = session.ship_id {
                 if let Err(e) = crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "dock")
@@ -625,7 +645,7 @@ pub async fn handle(
             let is_sde_station = ctx.sde.stations.contains_key(&target_id);
             let is_struct = ctx.db.with_snapshot(|snap| snap.structures.contains_key(&target_id));
             if !is_sde_station && !is_struct {
-                return Some(Err(BridgeRpcError { code: "DockTargetNotFound".into(), message: format!("Station or structure {target_id} not found") }));
+                return Some(Err(BridgeRpcError { code: "DockTargetNotFound".into(), message: format!("Station or structure {target_id} not found"), client_error: None }));
             }
             // Game mechanics: Despawn active ship ball from physics simulation and commit atomic dock transition.
             let dock_spec = crate::router::SessionTransitionSpec::for_kind(
@@ -663,6 +683,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "ItemNotFound".into(),
                     message: format!("Siphon unit {unit_id} not found"),
+                    client_error: None,
                 }));
             };
             Some(Ok(PyRep::Real(ratio)))
@@ -681,6 +702,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "ContainerNotFound".into(),
                     message: format!("Container {item_id} not found or has no expiry"),
+                    client_error: None,
                 }));
             };
             let expiry_ft = crate::sp6_lifecycle::unix_to_filetime(exp);
@@ -772,6 +794,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "NotInSpace".into(),
                     message: "Session has no active solar system".into(),
+                    client_error: None,
                 }));
             };
             let site_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
@@ -806,6 +829,7 @@ pub async fn handle(
             Some(Err(BridgeRpcError {
                 code: "SiteNotFound".into(),
                 message: format!("Operation site {site_id} not found in system {sys_id}"),
+                client_error: None,
             }))
         }
         ("beyonce", "GetRelativity") => {
@@ -848,6 +872,7 @@ async fn handle_cmd_unanchor(
         return Err(BridgeRpcError {
             code: "NoSolarSystem".into(),
             message: "Session has no active solar system".into(),
+            client_error: None,
         });
     };
     let Some(ship_id) = session.ship_id.or_else(|| {
@@ -857,6 +882,7 @@ async fn handle_cmd_unanchor(
         return Err(BridgeRpcError {
             code: "NoActiveShip".into(),
             message: "Session has no active ship".into(),
+            client_error: None,
         });
     };
 
@@ -875,6 +901,7 @@ async fn handle_cmd_unanchor(
         return Err(BridgeRpcError {
             code: "TargetRequired".into(),
             message: "CmdUnanchor requires a targetID".into(),
+            client_error: None,
         });
     }
 
@@ -883,6 +910,7 @@ async fn handle_cmd_unanchor(
         return Err(BridgeRpcError {
             code: "TargetNotInSpace".into(),
             message: format!("Target ball {target_id} is not in space in system {sys_id}"),
+            client_error: None,
         });
     };
 
@@ -898,6 +926,7 @@ async fn handle_cmd_unanchor(
         return Err(BridgeRpcError {
             code: "TargetOutOfRange".into(),
             message: format!("Target {target_id} is {dist:.1} m away (max interaction distance 5,000 m)"),
+            client_error: None,
         });
     }
 
@@ -905,11 +934,13 @@ async fn handle_cmd_unanchor(
     let deny_access = || BridgeRpcError {
         code: "AccessDenied".into(),
         message: format!("Character {char_id} does not own entity {target_id}"),
+        client_error: None,
     };
     if ctx.db.with_snapshot(|snap| snap.structures.contains_key(&target_id)) {
         return Err(BridgeRpcError {
             code: "CannotUnanchorStructure".into(),
             message: format!("Structure {target_id} must be unanchored via the structure unanchoring lifecycle"),
+            client_error: None,
         });
     }
     match with_combat_runtime(ctx, |rt| rt.active_drones_in_space.get(&target_id).map(|d| d.owner_char_id)) {
@@ -939,6 +970,7 @@ async fn handle_cmd_unanchor(
                 Err(BridgeRpcError {
                     code: "CorpRoleDenied".into(),
                     message: format!("Character {char_id} lacks corporate role required to unanchor entity {target_id}"),
+                    client_error: None,
                 })
             }
         })?,
@@ -948,6 +980,7 @@ async fn handle_cmd_unanchor(
         return Err(BridgeRpcError {
             code: "CannotUnanchor".into(),
             message: "This single-use mobile deployable cannot be unanchored or scooped".into(),
+            client_error: None,
         });
     }
 
@@ -964,6 +997,7 @@ async fn handle_cmd_unanchor(
             return Err(BridgeRpcError {
                 code: "CannotUnanchorStructure".into(),
                 message: format!("Structure {target_id} must be unanchored via the structure unanchoring lifecycle"),
+                client_error: None,
             });
         }
         if !unanchored_drone {
@@ -972,6 +1006,7 @@ async fn handle_cmd_unanchor(
                 return Err(BridgeRpcError {
                     code: "TargetNotFound".into(),
                     message: format!("Target {target_id} is no longer in solar system {sys_id}"),
+                    client_error: None,
                 });
             }
             if item.owner_id != char_id {
@@ -987,6 +1022,7 @@ async fn handle_cmd_unanchor(
                         return Err(BridgeRpcError {
                             code: "CorpRoleDenied".into(),
                             message: format!("Character {char_id} lacks corporate role required to unanchor entity {target_id}"),
+                            client_error: None,
                         });
                     }
                 }
@@ -1033,6 +1069,7 @@ fn handle_enable_behavior_debugging(
         return Err(BridgeRpcError {
             code: "InsufficientRole".into(),
             message: "EnableBehaviorDebugging requires GM role".into(),
+            client_error: None,
         });
     }
     let (_, char_id) = ServerContext::require_character(session)?;
@@ -1069,6 +1106,7 @@ fn handle_disable_behavior_debugging(
         return Err(BridgeRpcError {
             code: "InsufficientRole".into(),
             message: "DisableBehaviorDebugging requires GM role".into(),
+            client_error: None,
         });
     }
     let (_, char_id) = ServerContext::require_character(session)?;
@@ -1226,6 +1264,7 @@ async fn handle_open_shipping_unit_storage(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "OpenShippingUnitStorage requires a valid unitID".into(),
+            client_error: None,
         });
     }
 
@@ -1233,6 +1272,7 @@ async fn handle_open_shipping_unit_storage(
         return Err(BridgeRpcError {
             code: "NoSolarSystem".into(),
             message: "Session has no active solar system".into(),
+            client_error: None,
         });
     };
 
@@ -1240,6 +1280,7 @@ async fn handle_open_shipping_unit_storage(
         return Err(BridgeRpcError {
             code: "NoActiveShip".into(),
             message: "Session has no active ship".into(),
+            client_error: None,
         });
     };
 
@@ -1256,6 +1297,7 @@ async fn handle_open_shipping_unit_storage(
         return Err(BridgeRpcError {
             code: "UnitNotInSpace".into(),
             message: format!("Shipping unit {unit_id} is not in space in system {sys_id}"),
+            client_error: None,
         });
     };
 
@@ -1264,6 +1306,7 @@ async fn handle_open_shipping_unit_storage(
         return Err(BridgeRpcError {
             code: "TargetOutOfRange".into(),
             message: format!("Shipping unit is {dist:.1} m away (max interaction distance 5,000 m)"),
+            client_error: None,
         });
     }
 
@@ -1275,6 +1318,7 @@ async fn handle_open_shipping_unit_storage(
         return Err(BridgeRpcError {
             code: "InvalidTarget".into(),
             message: format!("Target entity {unit_id} is not a shipping unit or deployable container"),
+            client_error: None,
         });
     }
 
@@ -1295,6 +1339,7 @@ async fn handle_open_shipping_unit_storage(
         return Err(BridgeRpcError {
             code: "AccessDenied".into(),
             message: "You are not authorized to access this shipping unit storage".into(),
+            client_error: None,
         });
     }
 
@@ -1314,6 +1359,7 @@ async fn handle_open_shipping_unit_storage(
                     return Err(BridgeRpcError {
                         code: "ALSCPasswordRequired".into(),
                         message: format!("Password required to open container {unit_id}"),
+                        client_error: None,
                     });
                 }
             }

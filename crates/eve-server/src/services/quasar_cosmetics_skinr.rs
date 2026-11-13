@@ -894,12 +894,14 @@ fn handle_item_consume(
                 return Err(eve_proto::BridgeRpcError {
                     code: STATUS_NOT_FOUND.to_string(),
                     message: "Component license item not found in inventory".into(),
+                    client_error: None,
                 });
             };
             if item.owner_id != cid as i64 {
                 return Err(eve_proto::BridgeRpcError {
                     code: STATUS_FORBIDDEN.to_string(),
                     message: "Character does not own component license item".into(),
+                    client_error: None,
                 });
             }
             let (current_dock, current_ship) = match s.characters.get(&(cid as i64)) {
@@ -913,12 +915,14 @@ fn handle_item_consume(
                 return Err(eve_proto::BridgeRpcError {
                     code: STATUS_PRECONDITION_FAILED.to_string(),
                     message: "Component license item is not reachable in your hangar/cargo or is locked in a contract".into(),
+                    client_error: None,
                 });
             }
             if item.quantity <= 0 || (item.quantity as u64) < quantity {
                 return Err(eve_proto::BridgeRpcError {
                     code: STATUS_BAD_REQUEST.to_string(),
                     message: "Insufficient component license item stack quantity".into(),
+                    client_error: None,
                 });
             }
             let type_id = item.type_id;
@@ -926,6 +930,7 @@ fn handle_item_consume(
                 return Err(eve_proto::BridgeRpcError {
                     code: STATUS_BAD_REQUEST.to_string(),
                     message: format!("Item type {type_id} is not a SKINR component license"),
+                    client_error: None,
                 });
             };
             let is_pattern = state
@@ -944,6 +949,7 @@ fn handle_item_consume(
             .map_err(|e| eve_proto::BridgeRpcError {
                 code: STATUS_PRECONDITION_FAILED.to_string(),
                 message: e.to_string(),
+                client_error: None,
             })?;
             Ok((comp_id, uses_granted, is_pattern))
         })

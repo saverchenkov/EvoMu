@@ -883,6 +883,7 @@ async fn test_invariant_atomic_rollback_randomized_fault_injection() {
                     Err(BridgeRpcError {
                         code: "InjectedHandlerFault".into(),
                         message: "Simulated mid-transaction failure".into(),
+                        client_error: None,
                     })
                 });
                 assert!(err_res.is_err());

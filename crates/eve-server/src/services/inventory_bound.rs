@@ -35,7 +35,7 @@ const CONTAINER_CORP_MARKET: i64 = 10_012;
 const ERR_NOT_BOUND: &str = "InvalidBoundObject";
 
 fn err(code: &str, message: String) -> Option<Result<PyRep, BridgeRpcError>> {
-    Some(Err(BridgeRpcError { code: code.into(), message }))
+    Some(Err(BridgeRpcError { code: code.into(), message, client_error: None }))
 }
 
 pub fn handle(
@@ -53,6 +53,7 @@ pub fn handle(
             return Some(Err(BridgeRpcError {
                 code: "GMRoleRequired".into(),
                 message: "i2 requires GM role".into(),
+                client_error: None,
             }));
         }
         let _ = match ServerContext::require_character(session) {
@@ -395,6 +396,7 @@ fn self_inv_item(
     Err(BridgeRpcError {
         code: "UnimplementedRPC".into(),
         message: format!("invbroker.GetSelfInvItem for inventory {object_id} is not yet implemented"),
+        client_error: None,
     })
 }
 
@@ -409,12 +411,14 @@ pub fn handle_i2_is_primed(
         return Err(BridgeRpcError {
             code: "GMRoleRequired".into(),
             message: "i2.IsPrimed requires GM role".into(),
+            client_error: None,
         });
     }
     let Some(item_id) = target_id.filter(|&id| id > 0) else {
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "i2.IsPrimed requires a positive itemID".into(),
+            client_error: None,
         });
     };
     let primed = ctx.db.with_snapshot(|snap| {
@@ -440,12 +444,14 @@ pub fn handle_i2_get_item(
         return Err(BridgeRpcError {
             code: "GMRoleRequired".into(),
             message: "i2.GetItem requires GM role".into(),
+            client_error: None,
         });
     }
     let Some(item_id) = target_id.filter(|&id| id > 0) else {
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "i2.GetItem requires a positive itemID".into(),
+            client_error: None,
         });
     };
     if let Some(item) = ctx.db.get_item(item_id) {
@@ -668,6 +674,7 @@ pub(crate) fn validate_corp_source_item_take_access_in_snap(
                     if inside_corp_container { "container" } else { "hangar" },
                     div_idx + 1
                 ),
+                client_error: None,
             });
         }
         return Ok(());
@@ -686,6 +693,7 @@ pub(crate) fn validate_corp_source_item_take_access_in_snap(
                 message: format!(
                     "Character {char_id} lacks role to take from corporation deliveries"
                 ),
+                client_error: None,
             });
         }
         return Ok(());
@@ -697,6 +705,7 @@ pub(crate) fn validate_corp_source_item_take_access_in_snap(
             "Director or CEO role required to take non-division corporation item from flag {:?}",
             root_flag
         ),
+        client_error: None,
     })
 }
 
@@ -723,6 +732,7 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
                     "Item {} ownership or flag changed concurrently (expected owner {} flag {:?}, found owner {} flag {:?})",
                     orig_item.item_id, prev.owner_id, prev.flag, orig_item.owner_id, orig_item.flag
                 ),
+                client_error: None,
             });
         }
     }
@@ -731,6 +741,7 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
         return Err(BridgeRpcError {
             code: "ALSCItemLocked".into(),
             message: format!("Item {} is locked in an Audit Log Secure Container", orig_item.item_id),
+            client_error: None,
         });
     }
     let live_corp_id = snap
@@ -768,6 +779,7 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
         return Err(BridgeRpcError {
             code: "ItemLocked".into(),
             message: "Quantum core cannot be removed from structure deed bay".into(),
+            client_error: None,
         });
     } else if src_is_struct_fuel {
         let st_owner_corp = snap
@@ -781,6 +793,7 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
                 message: format!(
                     "Character {char_id} does not belong to structure owning corp {st_owner_corp}"
                 ),
+                client_error: None,
             });
         }
         if !session.has_gm_role()
@@ -794,6 +807,7 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
             return Err(BridgeRpcError {
                 code: "CorpRoleDenied".into(),
                 message: "Accessing the structure fuel bay requires Director, Station Manager, or Fuel Technician role".into(),
+                client_error: None,
             });
         }
     } else if orig_item.owner_id == live_corp_id && live_corp_id > 0 {
@@ -819,6 +833,7 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
                     "Character {char_id} is no longer in corporation {} owning item {}",
                     orig_item.owner_id, orig_item.item_id
                 ),
+                client_error: None,
             });
         }
     }
@@ -843,6 +858,7 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
                                         "Password required to take items from secure container {}",
                                         src_cont.item_id
                                     ),
+                                    client_error: None,
                                 });
                             }
                         }
@@ -873,6 +889,7 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
                                 "Character {char_id} is not in corporation {cont_corp} owning container {}",
                                 src_cont.item_id
                             ),
+                            client_error: None,
                         });
                     }
                 } else if cont_corp > 0 && cont_corp == live_corp_id {
@@ -900,6 +917,7 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
                                 "Corporation container take role denied for division {}",
                                 div_idx + 1
                             ),
+                            client_error: None,
                         });
                     }
                 }
@@ -923,6 +941,7 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
             return Err(BridgeRpcError {
                 code: "StructureDestroyed".into(),
                 message: format!("Structure {new_loc} is destroyed"),
+                client_error: None,
             });
         }
         if dest_is_deed_flag && !session.has_gm_role() {
@@ -933,6 +952,7 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
                         "Character {char_id} does not belong to structure owning corp {}",
                         st_dest.owner_corp_id
                     ),
+                    client_error: None,
                 });
             }
             use eve_db::corp_roles::{ROLE_DIRECTOR, ROLE_STATION_MANAGER};
@@ -948,6 +968,7 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
                     code: "CorpRoleDenied".into(),
                     message: "Installing a quantum core requires Director or Station Manager role"
                         .into(),
+                    client_error: None,
                 });
             }
         } else if dest_is_fuel_flag && !session.has_gm_role() {
@@ -960,6 +981,7 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
                         "Character {char_id} does not belong to structure owning corp {}",
                         st_dest.owner_corp_id
                     ),
+                    client_error: None,
                 });
             }
             if is_player_corp
@@ -973,6 +995,7 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
                 return Err(BridgeRpcError {
                     code: "CorpRoleDenied".into(),
                     message: "Accessing the structure fuel bay requires Director, Station Manager, or Fuel Technician role".into(),
+                    client_error: None,
                 });
             }
         } else if st_dest.owner_corp_id != live_corp_id
@@ -984,6 +1007,7 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
             return Err(BridgeRpcError {
                 code: "DestinationAccessDenied".into(),
                 message: format!("Character {char_id} lacks structure access at {new_loc}"),
+                client_error: None,
             });
         }
     } else if let Some(dest) = snap.items.get(&new_loc) {
@@ -1006,6 +1030,7 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
                                 "Password required to move items into container {}",
                                 dest.item_id
                             ),
+                            client_error: None,
                         });
                     }
                 }
@@ -1028,6 +1053,7 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
                     message: format!(
                         "Character {char_id} is not authorized to move items into {new_loc}"
                     ),
+                    client_error: None,
                 });
             }
         }
@@ -1132,6 +1158,7 @@ pub(crate) fn validate_multiadd_destination(
                 return Err(BridgeRpcError {
                     code: "StructureDestroyed".into(),
                     message: format!("Structure {new_loc} is destroyed"),
+                    client_error: None,
                 });
             }
             if st.owner_corp_id != ch.corporation_id
@@ -1142,6 +1169,7 @@ pub(crate) fn validate_multiadd_destination(
                 return Err(BridgeRpcError {
                     code: "DestinationAccessDenied".into(),
                     message: format!("Character {char_id} lacks structure access at {new_loc}"),
+                    client_error: None,
                 });
             }
         }
@@ -1166,6 +1194,7 @@ pub(crate) fn validate_multiadd_destination(
             return Err(BridgeRpcError {
                 code: "DestinationAccessDenied".into(),
                 message: format!("Destination {new_loc} not reachable"),
+                client_error: None,
             });
         }
     }
@@ -1198,6 +1227,7 @@ pub(crate) fn validate_multiadd_structure_fuel_transfers(
         return Err(BridgeRpcError {
             code: "ItemLocked".into(),
             message: "Quantum core cannot be removed from structure deed bay".into(),
+            client_error: None,
         });
     }
     let src_is_struct_fuel = is_struct_loc

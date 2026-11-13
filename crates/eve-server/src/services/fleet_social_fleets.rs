@@ -132,7 +132,7 @@ pub(super) async fn handle_fleets(
         ("fleetObjectHandler", "Init") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(fid) = session.fleet_id.or_else(|| notify::character_active_fleet_id(ctx, char_id)) else {
-                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into(), client_error: None }));
             };
             session.fleet_id = Some(fid);
             let ad_opt = kwargs.get("adInfoData").or_else(|| args.get(2)).filter(|v| !matches!(v, PyRep::None));
@@ -170,7 +170,7 @@ pub(super) async fn handle_fleets(
         ("fleetMgr", "CreateFleet") | ("fleetObjectHandler", "CreateFleet") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             if notify::character_active_fleet_id(ctx, char_id).is_some() {
-                return Some(Err(BridgeRpcError { code: "AlreadyInFleet".into(), message: "Character is already in a fleet".into() }));
+                return Some(Err(BridgeRpcError { code: "AlreadyInFleet".into(), message: "Character is already in a fleet".into(), client_error: None }));
             }
             let is_zero_arg_handler = service == "fleetObjectHandler" && args.is_empty();
             let fleet_name = args.first().and_then(|a| a.as_str()).unwrap_or("New Eden Taskforce").to_string();
@@ -233,7 +233,7 @@ pub(super) async fn handle_fleets(
         ("fleetMgr", "CreateWing") | ("fleetObjectHandler", "CreateWing") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(fleet_id) = session.fleet_id else {
-                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into(), client_error: None }));
             };
             let wing_name = args.first().and_then(|a| a.as_str()).unwrap_or("New Wing");
             match crate::domain::fleets::create_fleet_wing(ctx, fleet_id, Some(char_id), Some(wing_name), true, 1, true) {
@@ -248,10 +248,10 @@ pub(super) async fn handle_fleets(
         ("fleetObjectHandler", "DeleteWing") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(fleet_id) = session.fleet_id else {
-                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into(), client_error: None }));
             };
             let Some(wing_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "DeleteWing requires wingID".into() }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "DeleteWing requires wingID".into(), client_error: None }));
             };
             match crate::domain::fleets::delete_fleet_wing(ctx, fleet_id, Some(char_id), wing_id, true) {
                 Ok(()) => {
@@ -265,10 +265,10 @@ pub(super) async fn handle_fleets(
         ("fleetObjectHandler", "ChangeWingName") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(fleet_id) = session.fleet_id else {
-                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into(), client_error: None }));
             };
             let Some(wing_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "ChangeWingName requires wingID".into() }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "ChangeWingName requires wingID".into(), client_error: None }));
             };
             let new_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("Renamed Wing");
             match crate::domain::fleets::rename_fleet_wing(ctx, fleet_id, Some(char_id), wing_id, new_name, false) {
@@ -283,7 +283,7 @@ pub(super) async fn handle_fleets(
         ("fleetMgr", "CreateSquad") | ("fleetObjectHandler", "CreateSquad") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(fleet_id) = session.fleet_id else {
-                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into(), client_error: None }));
             };
             let wing_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
             let squad_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("New Squad");
@@ -299,10 +299,10 @@ pub(super) async fn handle_fleets(
         ("fleetObjectHandler", "DeleteSquad") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(fleet_id) = session.fleet_id else {
-                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into(), client_error: None }));
             };
             let Some(squad_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "DeleteSquad requires squadID".into() }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "DeleteSquad requires squadID".into(), client_error: None }));
             };
             match crate::domain::fleets::delete_fleet_squad(ctx, fleet_id, Some(char_id), squad_id, true) {
                 Ok(()) => {
@@ -316,10 +316,10 @@ pub(super) async fn handle_fleets(
         ("fleetObjectHandler", "ChangeSquadName") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(fleet_id) = session.fleet_id else {
-                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into(), client_error: None }));
             };
             let Some(squad_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "ChangeSquadName requires squadID".into() }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "ChangeSquadName requires squadID".into(), client_error: None }));
             };
             let new_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("Renamed Squad");
             match crate::domain::fleets::rename_fleet_squad(ctx, fleet_id, Some(char_id), squad_id, new_name, false) {
@@ -343,6 +343,7 @@ pub(super) async fn handle_fleets(
                     return Some(Err(BridgeRpcError {
                         code: "NotInFleet".into(),
                         message: "Character is not in a fleet".into(),
+                        client_error: None,
                     }))
                 }
             };
@@ -350,6 +351,7 @@ pub(super) async fn handle_fleets(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "Invite requires target characterID".into(),
+                    client_error: None,
                 }));
             };
             let wing_id_opt = args.get(1).and_then(|a| a.as_i64());
@@ -497,6 +499,7 @@ pub(super) async fn handle_fleets(
                     return Some(Err(BridgeRpcError {
                         code: "NotInFleet".into(),
                         message: "Character is not in a fleet".into(),
+                        client_error: None,
                     }))
                 }
             };
@@ -507,6 +510,7 @@ pub(super) async fn handle_fleets(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidArgument".into(),
                         message: "KickMember requires target characterID".into(),
+                        client_error: None,
                     }));
                 };
                 tid
@@ -551,6 +555,7 @@ pub(super) async fn handle_fleets(
                     return Some(Err(BridgeRpcError {
                         code: "NotInFleet".into(),
                         message: "Character is not in a fleet".into(),
+                        client_error: None,
                     }))
                 }
             };
@@ -576,6 +581,7 @@ pub(super) async fn handle_fleets(
                     return Some(Err(BridgeRpcError {
                         code: "NotInFleet".into(),
                         message: "Character is not in a fleet".into(),
+                        client_error: None,
                     }))
                 }
             };
@@ -616,6 +622,7 @@ pub(super) async fn handle_fleets(
                 return Some(Err(BridgeRpcError {
                     code: "NotInFleet".into(),
                     message: "Character is not in a fleet".into(),
+                    client_error: None,
                 }));
             }
             Some(Ok(PyRep::None))
@@ -634,6 +641,7 @@ pub(super) async fn handle_fleets(
                     return Some(Err(BridgeRpcError {
                         code: "NotInFleet".into(),
                         message: "Character is not in a fleet".into(),
+                        client_error: None,
                     }))
                 }
             };

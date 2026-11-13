@@ -302,12 +302,14 @@ pub async fn validate_wreck_salvage_target(
             return Err(BridgeRpcError {
                 code: "TargetNotInSpace".into(),
                 message: format!("Target wreck {wreck_id} does not exist"),
+                client_error: None,
             });
         };
         if it.location_id != sys_id as i64 {
             return Err(BridgeRpcError {
                 code: "TargetNotInSpace".into(),
                 message: format!("Target {wreck_id} is not in solar system {sys_id}"),
+                client_error: None,
             });
         }
         let is_wreck = it.type_id == 26468
@@ -320,6 +322,7 @@ pub async fn validate_wreck_salvage_target(
             return Err(BridgeRpcError {
                 code: "InvalidSalvageTarget".into(),
                 message: format!("Target {wreck_id} (type {}) is not a salvageable wreck", it.type_id),
+                client_error: None,
             });
         }
         let vol: f64 = snap
@@ -352,6 +355,7 @@ pub async fn validate_wreck_salvage_target(
             message: format!(
                 "Salvaging wreck {wreck_id} failed: SalvageTooMuchLootBody ({loot_volume:.1} m³ exceeds cargo container capacity {can_capacity:.1} m³)"
             ),
+            client_error: None,
         });
     }
 
@@ -387,6 +391,7 @@ pub async fn validate_wreck_salvage_target(
                     message: format!(
                         "Wreck {wreck_id} is {dist:.1} m away (exceeds salvager module range {max_mod_range:.1} m)"
                     ),
+                    client_error: None,
                 });
             }
         }
@@ -395,6 +400,7 @@ pub async fn validate_wreck_salvage_target(
             return Err(BridgeRpcError {
                 code: "TargetNotInSpace".into(),
                 message: format!("Target wreck {wreck_id} is not in space in solar system {sys_id}"),
+                client_error: None,
             });
         };
         if let Some((_, sb)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() {
@@ -407,6 +413,7 @@ pub async fn validate_wreck_salvage_target(
                     message: format!(
                         "Wreck {wreck_id} is {dist:.1} m away (exceeds salvage drone range {max_drone_range:.1} m)"
                     ),
+                    client_error: None,
                 });
             }
         }
@@ -607,6 +614,7 @@ pub async fn execute_wreck_salvage_cycle(
                         "Insufficient ship cargo space for salvage ({salvage_vol:.2} m³ needed, {:.2}/{ship_cap:.2} m³ used)",
                         used_cargo
                     ),
+                    client_error: None,
                 });
             }
         }
@@ -832,6 +840,7 @@ pub async fn execute_wreck_salvage_cycle_scheduled(
                         "Ship {ship_id} lacks capacitor ({:.1}/{:.1} GJ) to cycle salvager",
                         cs.capacitor, cap_cost
                     ),
+                    client_error: None,
                 });
             }
             let _ = sys_handle

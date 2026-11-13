@@ -16,6 +16,7 @@ async fn check_fighter_and_parent_operational_state(
         return Err(BridgeRpcError {
             code: "FighterInWarp".into(),
             message: format!("Fighter squadron {fighter_ball_id} cannot activate abilities while warping"),
+            client_error: None,
         });
     }
     if let Ok(Some(mut fcs)) = sys_handle.get_combat_state(fighter_ball_id).await {
@@ -24,12 +25,14 @@ async fn check_fighter_and_parent_operational_state(
             return Err(BridgeRpcError {
                 code: "FighterCloaked".into(),
                 message: format!("Fighter squadron {fighter_ball_id} cannot activate abilities while cloaked"),
+                client_error: None,
             });
         }
         if fcs.is_tethered {
             return Err(BridgeRpcError {
                 code: "FighterTethered".into(),
                 message: format!("Fighter squadron {fighter_ball_id} cannot activate abilities while tethered"),
+                client_error: None,
             });
         }
     }
@@ -46,6 +49,7 @@ async fn check_fighter_and_parent_operational_state(
             message: format!(
                 "Fighter squadron {fighter_ball_id} cannot activate abilities while inside a POS forcefield"
             ),
+            client_error: None,
         });
     }
 
@@ -55,6 +59,7 @@ async fn check_fighter_and_parent_operational_state(
                 return Err(BridgeRpcError {
                     code: "ShipInWarp".into(),
                     message: format!("Carrier {parent_ship_id} cannot command fighter abilities while warping"),
+                    client_error: None,
                 });
             }
             if crate::services::inventory_fitting::fitting_ship_forcefield::is_pos_forcefield_protected(
@@ -70,6 +75,7 @@ async fn check_fighter_and_parent_operational_state(
                     message: format!(
                         "Carrier {parent_ship_id} cannot command fighter abilities from inside a POS forcefield"
                     ),
+                    client_error: None,
                 });
             }
         }
@@ -79,12 +85,14 @@ async fn check_fighter_and_parent_operational_state(
                 return Err(BridgeRpcError {
                     code: "CannotActivateWhileCloaked".into(),
                     message: format!("Carrier {parent_ship_id} cannot command fighter abilities while cloaked"),
+                    client_error: None,
                 });
             }
             if pcs.is_tethered {
                 return Err(BridgeRpcError {
                     code: "CannotActivateWhileTethered".into(),
                     message: format!("Carrier {parent_ship_id} cannot command fighter abilities while tethered"),
+                    client_error: None,
                 });
             }
         }
@@ -100,6 +108,7 @@ async fn check_fighter_and_parent_operational_state(
             return Err(BridgeRpcError {
                 code: "CannotActivateWhileCloaked".into(),
                 message: format!("Carrier {parent_ship_id} has an active cloaking device"),
+                client_error: None,
             });
         }
     }
@@ -120,6 +129,7 @@ pub(crate) async fn handle_activate_fighter_ability_slots(
         return Some(Err(BridgeRpcError {
             code: "NoSolarSystem".into(),
             message: "Session has no active solar system".into(),
+            client_error: None,
         }));
     };
     let fighter_ids: Vec<i64> = match args.first() {
@@ -133,6 +143,7 @@ pub(crate) async fn handle_activate_fighter_ability_slots(
         return Some(Err(BridgeRpcError {
             code: "FighterNotFound".into(),
             message: "No fighter IDs provided".into(),
+            client_error: None,
         }));
     }
     let raw_slot_id = match RpcArgs::positional(args).req_i64(1, "slotID") {
@@ -141,6 +152,7 @@ pub(crate) async fn handle_activate_fighter_ability_slots(
             return Some(Err(BridgeRpcError {
                 code: "InvalidFighterAbilitySlot".into(),
                 message: e.message,
+                client_error: None,
             }));
         }
     };
@@ -148,6 +160,7 @@ pub(crate) async fn handle_activate_fighter_ability_slots(
         return Some(Err(BridgeRpcError {
             code: "InvalidFighterAbilitySlot".into(),
             message: format!("Fighter ability slot {raw_slot_id} must be in 0..=2"),
+            client_error: None,
         }));
     }
     if matches!(
@@ -199,6 +212,7 @@ async fn activate_single_fighter_ability(
         return Some(Err(BridgeRpcError {
             code: "FighterNotFound".into(),
             message: format!("Fighter squadron {fighter_ball_id} not found or not launched"),
+            client_error: None,
         }));
     };
     if fighter.owner_char_id != char_id || fighter.is_abandoned {
@@ -207,6 +221,7 @@ async fn activate_single_fighter_ability(
             message: format!(
                 "Fighter squadron {fighter_ball_id} is not controlled by character {char_id}"
             ),
+            client_error: None,
         }));
     }
 
@@ -220,6 +235,7 @@ async fn activate_single_fighter_ability(
         return Some(Err(BridgeRpcError {
             code: "FighterNotInSystem".into(),
             message: format!("Fighter squadron {fighter_ball_id} is not in solar system {sys_id}"),
+            client_error: None,
         }));
     };
     if let Err(e) = check_fighter_and_parent_operational_state(
@@ -248,6 +264,7 @@ async fn activate_single_fighter_ability(
                 message: format!(
                     "Fighter ability slot {slot_id} on {fighter_ball_id} is on cooldown until {ready_at}"
                 ),
+                client_error: None,
             }));
         }
     }
@@ -259,6 +276,7 @@ async fn activate_single_fighter_ability(
                 "Fighter type {} has no defined fighter abilities in SDE",
                 fighter.type_id
             ),
+            client_error: None,
         }));
     };
     let Some(slot_def) = slots.iter().find(|s| s.slot_index as u32 == slot_id) else {
@@ -268,6 +286,7 @@ async fn activate_single_fighter_ability(
                 "Fighter type {} has no ability in slot {slot_id}",
                 fighter.type_id
             ),
+            client_error: None,
         }));
     };
     let ability_id = slot_def.ability_id;
@@ -275,6 +294,7 @@ async fn activate_single_fighter_ability(
         return Some(Err(BridgeRpcError {
             code: "InvalidFighterAbilitySlot".into(),
             message: format!("Fighter ability {ability_id} not found in SDE"),
+            client_error: None,
         }));
     };
 
@@ -297,6 +317,7 @@ async fn activate_single_fighter_ability(
                     "Fighter ability slot {slot_id} on {fighter_ball_id} has exhausted all {} charges",
                     ch.charge_count
                 ),
+                client_error: None,
             }));
         }
     }
@@ -331,6 +352,7 @@ async fn activate_single_fighter_ability(
             message: format!(
                 "Fighter ability {ability_id} is disallowed in high-security space"
             ),
+            client_error: None,
         }));
     }
     if (0.0..0.45).contains(&sec) && fa.disallow_in_low_sec {
@@ -339,6 +361,7 @@ async fn activate_single_fighter_ability(
             message: format!(
                 "Fighter ability {ability_id} is disallowed in low-security space"
             ),
+            client_error: None,
         }));
     }
 
@@ -359,12 +382,14 @@ async fn activate_single_fighter_ability(
             return Some(Err(BridgeRpcError {
                 code: "TargetRequired".into(),
                 message: format!("Fighter ability {ability_id} requires an item target"),
+                client_error: None,
             }));
         };
         if tid <= 0 || tid == fighter_ball_id || tid == fighter.parent_ship_id {
             return Some(Err(BridgeRpcError {
                 code: "InvalidTarget".into(),
                 message: format!("Invalid fighter ability target {tid}"),
+                client_error: None,
             }));
         }
         let Some((_, target_ball)) = sys_handle
@@ -376,6 +401,7 @@ async fn activate_single_fighter_ability(
             return Some(Err(BridgeRpcError {
                 code: "TargetNotInSpace".into(),
                 message: format!("Target {tid} is not in solar system {sys_id}"),
+                client_error: None,
             }));
         };
         let ship_locks = sys_handle
@@ -397,6 +423,7 @@ async fn activate_single_fighter_ability(
                     "Target {tid} must be locked by controlling ship {} before activating fighter ability",
                     fighter.parent_ship_id
                 ),
+                client_error: None,
             }));
         }
         let max_range = match ability_id {
@@ -459,6 +486,7 @@ async fn activate_single_fighter_ability(
                 message: format!(
                     "Target {tid} is {dist:.1}m from fighter {fighter_ball_id} (exceeds SDE ability range {max_range:.1}m)"
                 ),
+                client_error: None,
             }));
         }
 
@@ -483,6 +511,7 @@ async fn activate_single_fighter_ability(
                 return Some(Err(BridgeRpcError {
                     code: "TargetInvulnerable".into(),
                     message: format!("Target character {victim_char_id} is invulnerable due to recent location change"),
+                    client_error: None,
                 }));
             }
             if victim_char_id != char_id {
@@ -523,6 +552,7 @@ async fn activate_single_fighter_ability(
                 return Some(Err(BridgeRpcError {
                     code: "CannotTargetCloaked".into(),
                     message: format!("Cannot activate fighter ability on cloaked target {tid}"),
+                    client_error: None,
                 }));
             }
             if target_cs.is_tethered
@@ -532,6 +562,7 @@ async fn activate_single_fighter_ability(
                 return Some(Err(BridgeRpcError {
                     code: "TargetInvulnerable".into(),
                     message: format!("Target {tid} is tethered or invulnerable"),
+                    client_error: None,
                 }));
             }
         }
@@ -546,6 +577,7 @@ async fn activate_single_fighter_ability(
             return Some(Err(BridgeRpcError {
                 code: "TargetInsideForcefield".into(),
                 message: format!("Target {tid} is protected inside an online POS forcefield"),
+                client_error: None,
             }));
         }
         let is_ewar_ability = matches!(ability_id, 2 | 10 | 11 | 12 | 14 | 17 | 18 | 36);
@@ -561,6 +593,7 @@ async fn activate_single_fighter_ability(
             return Some(Err(BridgeRpcError {
                 code: "StructureImmuneToEwar".into(),
                 message: format!("Upwell structure {tid} is immune to fighter EWAR"),
+                client_error: None,
             }));
         }
 
@@ -929,6 +962,7 @@ async fn activate_single_fighter_ability(
                 message: format!(
                     "Untargeted fighter ability {ability_id} does not accept a target entity ID"
                 ),
+                client_error: None,
             }));
         }
         match ability_id {
@@ -1066,6 +1100,7 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
         return Some(Err(BridgeRpcError {
             code: "NoSolarSystem".into(),
             message: "Session has no active solar system".into(),
+            client_error: None,
         }));
     };
     let (fighter_ids, slot_id, target_point) =
@@ -1086,12 +1121,14 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
             return Some(Err(BridgeRpcError {
                 code: "FighterNotFound".into(),
                 message: format!("Fighter squadron {fighter_ball_id} not found or not launched"),
+                client_error: None,
             }));
         };
     if fighter.owner_char_id != char_id || fighter.is_abandoned {
         return Some(Err(BridgeRpcError {
             code: "FighterNotOwned".into(),
             message: format!("Fighter squadron {fighter_ball_id} not controlled by pilot"),
+            client_error: None,
         }));
     }
 
@@ -1099,18 +1136,21 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
         return Some(Err(BridgeRpcError {
             code: "InvalidFighterAbilitySlot".into(),
             message: "No ability slots".into(),
+            client_error: None,
         }));
     };
     let Some(slot_def) = slots.iter().find(|s| s.slot_index as u32 == slot_id) else {
         return Some(Err(BridgeRpcError {
             code: "InvalidFighterAbilitySlot".into(),
             message: format!("Slot {slot_id} not found"),
+            client_error: None,
         }));
     };
     let Some(fa) = ctx.sde.fighter_abilities.get(&slot_def.ability_id) else {
         return Some(Err(BridgeRpcError {
             code: "InvalidFighterAbilitySlot".into(),
             message: format!("Fighter ability {} not found in SDE", slot_def.ability_id),
+            client_error: None,
         }));
     };
     if fa.target_mode != "pointTargeted" || slot_def.charges.is_none() {
@@ -1120,6 +1160,7 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
                 "Fighter ability {} (targetMode='{}') is not a point-targeted bomb ability",
                 slot_def.ability_id, fa.target_mode
             ),
+            client_error: None,
         }));
     }
 
@@ -1133,6 +1174,7 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
         return Some(Err(BridgeRpcError {
             code: "BombForbiddenInHighSec".into(),
             message: "Point-targeted fighter bomb abilities cannot be used in high-security space".into(),
+            client_error: None,
         }));
     }
     if sys_sec > 0.0 {
@@ -1161,6 +1203,7 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
                 return Some(Err(BridgeRpcError {
                     code: "AbilityOnCooldown".into(),
                     message: format!("Fighter ability slot {slot_id} is on cooldown"),
+                    client_error: None,
                 }));
             }
         }
@@ -1176,6 +1219,7 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
         return Some(Err(BridgeRpcError {
             code: "FighterNotInSystem".into(),
             message: format!("Fighter squadron {fighter_ball_id} is not in solar system {sys_id}"),
+            client_error: None,
         }));
     };
     if let Err(e) = check_fighter_and_parent_operational_state(
@@ -1194,6 +1238,7 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
         return Some(Err(BridgeRpcError {
             code: "TargetOutOfRange".into(),
             message: "Target point is out of fighter ability range".into(),
+            client_error: None,
         }));
     }
 
@@ -1205,6 +1250,7 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
             return Some(Err(BridgeRpcError {
                 code: "OutOfCharges".into(),
                 message: "Fighter ability has exhausted charges".into(),
+                client_error: None,
             }));
         }
         *entry = entry.saturating_add(1);
@@ -1432,6 +1478,7 @@ pub(crate) async fn handle_deactivate_fighter_ability_slots(
         return Some(Err(BridgeRpcError {
             code: "NoSolarSystem".into(),
             message: "Session has no active solar system".into(),
+            client_error: None,
         }));
     };
     let fighter_ball_id = match args.first() {
@@ -1442,6 +1489,7 @@ pub(crate) async fn handle_deactivate_fighter_ability_slots(
                     return Some(Err(BridgeRpcError {
                         code: "FighterNotFound".into(),
                         message: "No valid fighter ID provided".into(),
+                        client_error: None,
                     }));
                 }
             }
@@ -1457,6 +1505,7 @@ pub(crate) async fn handle_deactivate_fighter_ability_slots(
             return Some(Err(BridgeRpcError {
                 code: "InvalidFighterAbilitySlot".into(),
                 message: e.message,
+                client_error: None,
             }));
         }
     };
@@ -1464,6 +1513,7 @@ pub(crate) async fn handle_deactivate_fighter_ability_slots(
         return Some(Err(BridgeRpcError {
             code: "InvalidFighterAbilitySlot".into(),
             message: format!("Fighter ability slot {raw_slot_id} must be in 0..=2"),
+            client_error: None,
         }));
     }
     let slot_id = raw_slot_id as u32;
@@ -1478,6 +1528,7 @@ pub(crate) async fn handle_deactivate_fighter_ability_slots(
         return Some(Err(BridgeRpcError {
             code: "FighterNotFound".into(),
             message: format!("Fighter squadron {fighter_ball_id} not found or not launched"),
+            client_error: None,
         }));
     };
     if fighter.owner_char_id != char_id || fighter.is_abandoned {
@@ -1486,6 +1537,7 @@ pub(crate) async fn handle_deactivate_fighter_ability_slots(
             message: format!(
                 "Fighter squadron {fighter_ball_id} is not controlled by character {char_id}"
             ),
+            client_error: None,
         }));
     }
 
@@ -1496,6 +1548,7 @@ pub(crate) async fn handle_deactivate_fighter_ability_slots(
                 "Fighter type {} has no defined fighter abilities in SDE",
                 fighter.type_id
             ),
+            client_error: None,
         }));
     };
     let Some(slot_def) = slots.iter().find(|s| s.slot_index as u32 == slot_id) else {
@@ -1505,6 +1558,7 @@ pub(crate) async fn handle_deactivate_fighter_ability_slots(
                 "Fighter type {} has no ability in slot {slot_id}",
                 fighter.type_id
             ),
+            client_error: None,
         }));
     };
     let ability_id = slot_def.ability_id;

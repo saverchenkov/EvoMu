@@ -522,6 +522,7 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                             return Some(Err(BridgeRpcError {
                                 code: "NotEnoughCapacitor".into(),
                                 message: format!("Smartbomb requires {cap_need:.1} GJ capacitor (have {:.1} GJ)", cs.capacitor),
+                                client_error: None,
                             }));
                         }
                         cs.capacitor -= cap_need;
@@ -711,6 +712,7 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                         message: format!(
                             "Bomb launchers cannot be activated in high-security space (system {sys_id} security {sys_sec:.2})"
                         ),
+                        client_error: None,
                     }));
                 }
                 let safety = with_combat_runtime(ctx, |rt| {
@@ -745,6 +747,7 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                     return Some(Err(BridgeRpcError {
                         code: "NoAmmoLoaded".into(),
                         message: "Bomb Launcher has no bomb charge loaded".into(),
+                        client_error: None,
                     }));
                 };
                 ctx.db.with_mut_snapshot(|snap| {
@@ -996,6 +999,7 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                     return Some(Err(BridgeRpcError {
                         code: "NoAmmoLoaded".into(),
                         message: "Defender Launcher has no Defender Missile loaded".into(),
+                        client_error: None,
                     }));
                 };
                 ctx.db.with_mut_snapshot(|snap| {

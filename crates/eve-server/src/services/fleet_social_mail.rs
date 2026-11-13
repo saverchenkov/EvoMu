@@ -192,6 +192,7 @@ pub(super) fn handle_mail_and_calendar(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "GetBody requires messageID".into(),
+                    client_error: None,
                 }));
             };
             let res_opt = ctx.db.try_with_mut_snapshot(|snap| {
@@ -214,12 +215,14 @@ pub(super) fn handle_mail_and_calendar(
                 return Some(Err(BridgeRpcError {
                     code: "MailNotFound".into(),
                     message: format!("Mail message {mail_id} not found"),
+                    client_error: None,
                 }));
             };
             if !authorized {
                 return Some(Err(BridgeRpcError {
                     code: "AccessDenied".into(),
                     message: "Cannot read mail belonging to another character".into(),
+                    client_error: None,
                 }));
             }
             let compressed = miniz_oxide::deflate::compress_to_vec_zlib(body.as_bytes(), 6);
@@ -288,6 +291,7 @@ pub(super) fn handle_mail_and_calendar(
                     return Some(Err(BridgeRpcError {
                         code: "AccessDenied".into(),
                         message: "Cannot modify mail belonging to another character".into(),
+                        client_error: None,
                     }));
                 }
             }
@@ -374,6 +378,7 @@ pub(super) fn handle_mail_and_calendar(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidArgument".into(),
                         message: "DeleteMail requires messageID".into(),
+                        client_error: None,
                     }));
                 }
                 let check_ownership = ctx.db.with_snapshot(|snap| {
@@ -383,6 +388,7 @@ pub(super) fn handle_mail_and_calendar(
                     return Some(Err(BridgeRpcError {
                         code: "AccessDenied".into(),
                         message: "Cannot delete mail belonging to another character".into(),
+                        client_error: None,
                     }));
                 }
             }
@@ -396,6 +402,7 @@ pub(super) fn handle_mail_and_calendar(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "DeleteMail requires messageID".into(),
+                    client_error: None,
                 }));
             }
             {
@@ -501,16 +508,16 @@ pub(super) fn handle_mail_and_calendar(
         ("mailMgr", "EditLabel") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(label_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "EditLabel requires labelID".into() }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "EditLabel requires labelID".into(), client_error: None }));
             };
             let name = args.get(1).and_then(|a| a.as_str()).unwrap_or("CustomLabel");
             let color = args.get(2).and_then(|a| a.as_str()).unwrap_or("#ffffff");
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(list) = snap.mail_labels.get_mut(&char_id) else {
-                    return Err(BridgeRpcError { code: "LabelNotFound".into(), message: format!("Label {label_id} not found") });
+                    return Err(BridgeRpcError { code: "LabelNotFound".into(), message: format!("Label {label_id} not found"), client_error: None });
                 };
                 let Some(lbl) = list.iter_mut().find(|l| l.label_id == label_id) else {
-                    return Err(BridgeRpcError { code: "LabelNotFound".into(), message: format!("Label {label_id} not found") });
+                    return Err(BridgeRpcError { code: "LabelNotFound".into(), message: format!("Label {label_id} not found"), client_error: None });
                 };
                 lbl.name = name.to_string();
                 lbl.color = color.to_string();
@@ -533,19 +540,19 @@ pub(super) fn handle_mail_and_calendar(
         ("mailMgr", "DeleteLabel") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(label_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "DeleteLabel requires labelID".into() }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "DeleteLabel requires labelID".into(), client_error: None }));
             };
             if label_id < 64 {
-                return Some(Err(BridgeRpcError { code: "CannotDeleteSystemLabel".into(), message: "Default system mail labels cannot be deleted".into() }));
+                return Some(Err(BridgeRpcError { code: "CannotDeleteSystemLabel".into(), message: "Default system mail labels cannot be deleted".into(), client_error: None }));
             }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(list) = snap.mail_labels.get_mut(&char_id) else {
-                    return Err(BridgeRpcError { code: "LabelNotFound".into(), message: format!("Label {label_id} not found") });
+                    return Err(BridgeRpcError { code: "LabelNotFound".into(), message: format!("Label {label_id} not found"), client_error: None });
                 };
                 let orig_len = list.len();
                 list.retain(|l| l.label_id != label_id);
                 if list.len() == orig_len {
-                    return Err(BridgeRpcError { code: "LabelNotFound".into(), message: format!("Label {label_id} not found") });
+                    return Err(BridgeRpcError { code: "LabelNotFound".into(), message: format!("Label {label_id} not found"), client_error: None });
                 }
                 for ((cid, _), assigned) in snap.mail_assigned_labels.iter_mut() {
                     if *cid == char_id {
@@ -574,6 +581,7 @@ pub(super) fn handle_mail_and_calendar(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "AssignLabels requires messageID or messageIDs list".into(),
+                    client_error: None,
                 }));
             }
             let check_ownership = ctx.db.with_snapshot(|snap| {
@@ -583,6 +591,7 @@ pub(super) fn handle_mail_and_calendar(
                 return Some(Err(BridgeRpcError {
                     code: "AccessDenied".into(),
                     message: "Cannot modify mail belonging to another character".into(),
+                    client_error: None,
                 }));
             }
             let labels_to_add = extract_label_bits(args.get(1));
@@ -618,6 +627,7 @@ pub(super) fn handle_mail_and_calendar(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "RemoveLabels requires messageID or messageIDs list".into(),
+                    client_error: None,
                 }));
             }
             let check_ownership = ctx.db.with_snapshot(|snap| {
@@ -627,6 +637,7 @@ pub(super) fn handle_mail_and_calendar(
                 return Some(Err(BridgeRpcError {
                     code: "AccessDenied".into(),
                     message: "Cannot modify mail belonging to another character".into(),
+                    client_error: None,
                 }));
             }
             let labels_to_remove = extract_label_bits(args.get(1));
@@ -733,6 +744,7 @@ fn handle_mark_as_read(
         return Some(Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "MarkAsRead requires messageID or messageIDs list".into(),
+            client_error: None,
         }));
     }
     let authorized = ctx.db.with_snapshot(|snap| {
@@ -742,6 +754,7 @@ fn handle_mark_as_read(
         return Some(Err(BridgeRpcError {
             code: "AccessDenied".into(),
             message: "Cannot modify mail belonging to another character".into(),
+            client_error: None,
         }));
     }
     Some(Ok(apply_mail_read_status(ctx, char_id, &mail_ids, true)))
@@ -786,6 +799,7 @@ fn handle_mark_as_unread(
         return Some(Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "MarkAsUnread requires messageID or messageIDs list".into(),
+            client_error: None,
         }));
     }
     let authorized = ctx.db.with_snapshot(|snap| {
@@ -795,6 +809,7 @@ fn handle_mark_as_unread(
         return Some(Err(BridgeRpcError {
             code: "AccessDenied".into(),
             message: "Cannot modify mail belonging to another character".into(),
+            client_error: None,
         }));
     }
     Some(Ok(apply_mail_read_status(ctx, char_id, &mail_ids, false)))

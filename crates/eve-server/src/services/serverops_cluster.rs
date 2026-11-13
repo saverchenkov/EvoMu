@@ -1188,6 +1188,7 @@ pub fn require_gm_or_admin(session: &SessionState) -> Result<(), BridgeRpcError>
         return Err(BridgeRpcError {
             code: "InsufficientRole".into(),
             message: "Cluster administration RPC requires GM or Admin role".into(),
+            client_error: None,
         });
     }
     Ok(())
@@ -1226,6 +1227,7 @@ pub fn handle_admin_cluster_rpc(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidArgument".into(),
                         message: "AddClusterNode requires a positive nodeID".into(),
+                        client_error: None,
                     }));
                 }
             }
@@ -1263,6 +1265,7 @@ pub fn handle_admin_cluster_rpc(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "RemoveClusterNode requires a removable secondary nodeID > 1".into(),
+                    client_error: None,
                 }));
             }
             if let Ok(mut state) = ctx.cluster_state.write() {
@@ -1288,6 +1291,7 @@ pub fn handle_admin_cluster_rpc(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "AdminBroadcast requires a non-empty message".into(),
+                    client_error: None,
                 }));
             }
             crate::services::notify_emitters_skills_trade_godma::emit_server_message_broadcast(ctx, msg);
@@ -1312,6 +1316,7 @@ pub fn handle_admin_cluster_rpc(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "SetServiceState requires a service name".into(),
+                    client_error: None,
                 }));
             }
             let enabled = match args
@@ -1357,6 +1362,7 @@ pub fn handle_admin_cluster_rpc(
                 Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "ReinforceNode requires a valid solarSystemID or positive nodeID".into(),
+                    client_error: None,
                 })
             }
         }

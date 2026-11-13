@@ -384,6 +384,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: "dungeon.DEGetArchetypes requires GM/Content role".into(),
+                    client_error: None,
                 }));
             }
             let mut by_aid: BTreeMap<u32, (u32, &str)> = BTreeMap::new();
@@ -421,6 +422,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: "dungeon.DEGetDungeons requires GM/Content role".into(),
+                    client_error: None,
                 }));
             }
             let req_dungeon_id = kwargs
@@ -498,6 +500,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: "dungeon.DEGetFactions requires GM/Content role".into(),
+                    client_error: None,
                 }));
             }
             let mut factions: Vec<_> = ctx.sde.factions.values().collect();
@@ -523,6 +526,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: "dungeon.DEGetRoomObjectPaletteData requires GM/Content role".into(),
+                    client_error: None,
                 }));
             }
             // Populate object palette dynamically across all SDE dungeon-placeable categories:
@@ -576,6 +580,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: "dungeon.DEGetRooms requires GM/Content role".into(),
+                    client_error: None,
                 }));
             }
             let Some(dungeon_id) = kwargs
@@ -705,6 +710,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: "keeper.GetLevelEditor requires GM role".into(),
+                    client_error: None,
                 }));
             }
             let target_oid = session.solar_system_id.map(i64::from).unwrap_or(char_id);
@@ -733,6 +739,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "cannot query another character".into(),
+                    client_error: None,
                 }));
             }
             let operation_id = if args.len() >= 2 {
@@ -782,6 +789,7 @@ pub async fn handle(
             return Some(Err(BridgeRpcError {
                 code: "UnknownSolarSystem".into(),
                 message: "custom_agency_provider.get_content_data requires a session solar system".into(),
+                client_error: None,
             }));
         };
         ensure_system_pve_sites_seeded(ctx, sys_id).await;
@@ -843,18 +851,21 @@ pub async fn handle(
             return Some(Err(BridgeRpcError {
                 code: "UnknownSolarSystem".into(),
                 message: "custom_agency_provider.warp_to_content requires a session solar system".into(),
+                client_error: None,
             }));
         };
         if session.station_id.is_some() || session.structure_id.is_some() {
             return Some(Err(BridgeRpcError {
                 code: "NotInSpace".into(),
                 message: "Cannot warp while docked in station or structure".into(),
+                client_error: None,
             }));
         }
         let Some(ship_id) = session.ship_id else {
             return Some(Err(BridgeRpcError {
                 code: "NoActiveShip".into(),
                 message: "Session has no active ship".into(),
+                client_error: None,
             }));
         };
         if let Err(e) = crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "warp to content") {
@@ -873,6 +884,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "custom_agency_provider.warp_to_content requires contentPiece or contentID".into(),
+                    client_error: None,
                 }));
             }
         };
@@ -907,6 +919,7 @@ pub async fn handle(
             return Some(Err(BridgeRpcError {
                 code: "SignatureNotScanned".into(),
                 message: "Cosmic signature must be probe-scanned to 100% before warping".into(),
+                client_error: None,
             }));
         }
 
@@ -942,6 +955,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "SignatureNotScanned".into(),
                     message: "Cosmic signature must be probe-scanned to 100% before warping".into(),
+                    client_error: None,
                 }));
             }
         }
@@ -952,12 +966,14 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidCoordinates".into(),
                     message: "Resolved site coordinates are not finite".into(),
+                    client_error: None,
                 }));
             }
             None => {
                 return Some(Err(BridgeRpcError {
                     code: "SiteNotFound".into(),
                     message: format!("Target content site ({target_iid:?}, {target_did:?}) not found in system {sys_id}"),
+                    client_error: None,
                 }));
             }
         };
@@ -965,11 +981,12 @@ pub async fn handle(
         let handle = ctx.systems.get_or_spawn(sys_id);
         let Some((_, current_ball)) = (match handle.get_ball_snapshot(ship_id).await {
             Ok(v) => v,
-            Err(e) => return Some(Err(BridgeRpcError { code: "DestinyCommandFailed".into(), message: e })),
+            Err(e) => return Some(Err(BridgeRpcError { code: "DestinyCommandFailed".into(), message: e, client_error: None })),
         }) else {
             return Some(Err(BridgeRpcError {
                 code: "ShipNotInSpace".into(),
                 message: "Active ship is not spawned in Ballpark".into(),
+                client_error: None,
             }));
         };
 
@@ -978,6 +995,7 @@ pub async fn handle(
             return Some(Err(BridgeRpcError {
                 code: "WarpDistanceTooShort".into(),
                 message: format!("Cannot warp {:.1} m (minimum warp distance is 150,000 m)", warp_dist),
+                client_error: None,
             }));
         }
 
@@ -1036,6 +1054,7 @@ pub async fn handle(
         return Some(Err(BridgeRpcError {
             code: "UnknownSolarSystem".into(),
             message: format!("dungeonInstanceCacheMgr.{method} requires a session solar system"),
+            client_error: None,
         }));
     };
 

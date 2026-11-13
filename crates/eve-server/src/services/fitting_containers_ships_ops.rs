@@ -23,6 +23,7 @@ pub(crate) async fn handle_clear_charges(
         return Err(BridgeRpcError {
             code: "InvalidFittingTarget".into(),
             message: "ClearCharges requires a valid shipID".into(),
+            client_error: None,
         });
     }
 
@@ -32,6 +33,7 @@ pub(crate) async fn handle_clear_charges(
             return Err(BridgeRpcError {
                 code: "ShipNotFound".into(),
                 message: format!("Ship {ship_id} not found"),
+                client_error: None,
             });
         };
         let ship_cat = ctx.sde.types.get(&ship.type_id).map(|t| t.category_id).unwrap_or(0);
@@ -39,12 +41,14 @@ pub(crate) async fn handle_clear_charges(
             return Err(BridgeRpcError {
                 code: "InvalidFittingTarget".into(),
                 message: format!("Target {ship_id} is not a ship owned by character {char_id}"),
+                client_error: None,
             });
         }
         if ship.flag == InventoryFlag::Locked || snap.is_item_locked_in_contract_or_job(ship_id) {
             return Err(BridgeRpcError {
                 code: "ItemLocked".into(),
                 message: format!("Ship {ship_id} is locked"),
+                client_error: None,
             });
         }
 
@@ -82,6 +86,7 @@ pub(crate) async fn handle_clear_charges(
                 return Err(BridgeRpcError {
                     code: "ModuleIsActive".into(),
                     message: format!("Cannot unload charges while module {mid} is active"),
+                    client_error: None,
                 });
             }
         }
@@ -122,6 +127,7 @@ pub(crate) async fn handle_clear_charges(
                     "Ship cargo capacity {cargo_cap} m³ exceeded: total {:.1} m³",
                     existing_cargo_vol + incoming_vol
                 ),
+                client_error: None,
             });
         }
 
@@ -136,6 +142,7 @@ pub(crate) async fn handle_clear_charges(
                 return Err(BridgeRpcError {
                     code: "ModuleIsActive".into(),
                     message: format!("Cannot unload charges while module {mid} is active"),
+                    client_error: None,
                 });
             }
         }
@@ -199,6 +206,7 @@ pub(crate) async fn handle_ext_tail(
                 return Some(Err(BridgeRpcError {
                     code: "NotDocked".into(),
                     message: "Fitting requires being docked".into(),
+                    client_error: None,
                 }));
             };
             if station_id < 1_000_000_000_000
@@ -211,6 +219,7 @@ pub(crate) async fn handle_ext_tail(
                 return Some(Err(BridgeRpcError {
                     code: "StationServiceUnavailable".into(),
                     message: format!("Station {station_id} does not offer fitting facilities"),
+                    client_error: None,
                 }));
             }
             let Some(ship_id) = kwargs
@@ -223,6 +232,7 @@ pub(crate) async fn handle_ext_tail(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidFittingTarget".into(),
                     message: "FitFitting requires a valid shipID".into(),
+                    client_error: None,
                 }));
             };
 
@@ -239,6 +249,7 @@ pub(crate) async fn handle_ext_tail(
                     return Some(Err(BridgeRpcError {
                         code: "FittingNotFound".into(),
                         message: format!("Fitting {fid} not found"),
+                        client_error: None,
                     }));
                 };
                 let authorized = saved.owner_id == char_id
@@ -255,6 +266,7 @@ pub(crate) async fn handle_ext_tail(
                     return Some(Err(BridgeRpcError {
                         code: "AccessDenied".into(),
                         message: format!("Not authorized to access fitting {fid}"),
+                        client_error: None,
                     }));
                 }
                 desired_items = saved.items;
@@ -342,12 +354,14 @@ pub(crate) async fn handle_ext_tail(
                             return Some(Err(BridgeRpcError {
                                 code: "ItemNotFound".into(),
                                 message: format!("Invalid typeID {tid}"),
+                                client_error: None,
                             }));
                         };
                         let Ok(u16_flg) = u16::try_from(flg) else {
                             return Some(Err(BridgeRpcError {
                                 code: "InvalidFittingFlag".into(),
                                 message: format!("Invalid flag {flg}"),
+                                client_error: None,
                             }));
                         };
                         let is_allowed_flag = matches!(
@@ -368,6 +382,7 @@ pub(crate) async fn handle_ext_tail(
                             return Some(Err(BridgeRpcError {
                                 code: "InvalidFittingFlag".into(),
                                 message: format!("Flag {flg} is not a valid fitting destination"),
+                                client_error: None,
                             }));
                         }
                         let qty_i64 = seq.get(2).and_then(|v| v.as_i64()).unwrap_or(1);
@@ -375,6 +390,7 @@ pub(crate) async fn handle_ext_tail(
                             return Some(Err(BridgeRpcError {
                                 code: "InvalidQuantity".into(),
                                 message: format!("Invalid quantity {qty_i64}"),
+                                client_error: None,
                             }));
                         };
                         if matches!(u16_flg, 11..=34 | 92..=94 | 125..=132)
@@ -394,18 +410,21 @@ pub(crate) async fn handle_ext_tail(
                             return Some(Err(BridgeRpcError {
                                 code: "ItemNotFound".into(),
                                 message: format!("Invalid typeID {tid}"),
+                                client_error: None,
                             }));
                         };
                         let Some(qty) = i32::try_from(qty_i64).ok().filter(|&q| q > 0) else {
                             return Some(Err(BridgeRpcError {
                                 code: "InvalidQuantity".into(),
                                 message: format!("Invalid quantity {qty_i64}"),
+                                client_error: None,
                             }));
                         };
                         let Some(item_type) = ctx.sde.types.get(&tid_u32) else {
                             return Some(Err(BridgeRpcError {
                                 code: "ItemNotFound".into(),
                                 message: format!("Type {tid_u32} not found in SDE"),
+                                client_error: None,
                             }));
                         };
                         if item_type.category_id == 18 {
@@ -438,6 +457,7 @@ pub(crate) async fn handle_ext_tail(
                                     return Some(Err(BridgeRpcError {
                                         code: "UserError".into(),
                                         message: "SlotIndexExceedsHullSlots".into(),
+                                        client_error: None,
                                     }));
                                 };
                                 occupied_slots.insert(free_flag);
@@ -664,6 +684,7 @@ pub(crate) async fn handle_ext_tail(
                 return Some(Err(BridgeRpcError {
                     code: "NotDocked".into(),
                     message: "Reprocessing requires being docked at a station or structure".into(),
+                    client_error: None,
                 }));
             }
             let has_items = match args.first() {
@@ -754,6 +775,7 @@ pub(crate) async fn handle_ext_tail(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "DecodeItem requires itemID or encoded link".into(),
+                    client_error: None,
                 }));
             };
             let item_opt = ctx.db.with_snapshot(|snap| snap.items.get(&raw_id).cloned());
@@ -766,6 +788,7 @@ pub(crate) async fn handle_ext_tail(
                 return Some(Err(BridgeRpcError {
                     code: "TypeNotFound".into(),
                     message: format!("Encoded item type {type_id} not found"),
+                    client_error: None,
                 }));
             };
             let custom_name = ctx.db.with_snapshot(|snap| snap.item_custom_names.get(&raw_id).cloned()).unwrap_or_default();
@@ -810,15 +833,18 @@ fn parse_pi_xfer_entries(
                 let key = k.as_i64().filter(|&id| id > 0).ok_or_else(|| BridgeRpcError {
                     code: "InvalidCommodity".into(),
                     message: format!("{field_name} keys must be positive integer item/type IDs"),
+                    client_error: None,
                 })?;
                 let qty = v.as_i64().filter(|&q| q > 0).ok_or_else(|| BridgeRpcError {
                     code: "InvalidCommodityQuantity".into(),
                     message: format!("{field_name} quantities must be positive integers"),
+                    client_error: None,
                 })?;
                 let slot = out.entry(key).or_insert(0);
                 *slot = slot.checked_add(qty as u64).ok_or_else(|| BridgeRpcError {
                     code: "InvalidCommodityQuantity".into(),
                     message: format!("{field_name} quantity overflow"),
+                    client_error: None,
                 })?;
             }
             Ok(out)
@@ -828,15 +854,18 @@ fn parse_pi_xfer_entries(
                 let key = k.parse::<i64>().ok().filter(|&id| id > 0).ok_or_else(|| BridgeRpcError {
                     code: "InvalidCommodity".into(),
                     message: format!("{field_name} keys must be positive integer item/type IDs"),
+                    client_error: None,
                 })?;
                 let qty = v.as_i64().filter(|&q| q > 0).ok_or_else(|| BridgeRpcError {
                     code: "InvalidCommodityQuantity".into(),
                     message: format!("{field_name} quantities must be positive integers"),
+                    client_error: None,
                 })?;
                 let slot = out.entry(key).or_insert(0);
                 *slot = slot.checked_add(qty as u64).ok_or_else(|| BridgeRpcError {
                     code: "InvalidCommodityQuantity".into(),
                     message: format!("{field_name} quantity overflow"),
+                    client_error: None,
                 })?;
             }
             Ok(out)
@@ -844,6 +873,7 @@ fn parse_pi_xfer_entries(
         _ => Err(BridgeRpcError {
             code: "InvalidTransferArguments".into(),
             message: format!("{field_name} must be a dict or None"),
+            client_error: None,
         }),
     }
 }
@@ -895,6 +925,7 @@ fn handle_import_export_with_planet(
         return Err(BridgeRpcError {
             code: "PinNotFound".into(),
             message: "ImportExportWithPlanet requires a valid spaceportPinID".into(),
+            client_error: None,
         });
     }
 
@@ -904,6 +935,7 @@ fn handle_import_export_with_planet(
         return Err(BridgeRpcError {
             code: "InvalidTransferArguments".into(),
             message: "ImportExportWithPlanet requires non-empty importData or exportData".into(),
+            client_error: None,
         });
     }
 
@@ -934,6 +966,7 @@ fn handle_import_export_with_planet(
                         message: format!(
                             "No planetary colony found for character {char_id} matching customs office {raw_co_id}"
                         ),
+                        client_error: None,
                     });
                 };
                 if orb_opt.is_none()
@@ -947,6 +980,7 @@ fn handle_import_export_with_planet(
                     return Err(BridgeRpcError {
                         code: "InvalidCustomsOffice".into(),
                         message: format!("Object {raw_co_id} is not a customs office for planet {matched_pid}"),
+                        client_error: None,
                     });
                 }
                 (orb_opt.or_else(|| snap.structures.contains_key(&raw_co_id).then_some(raw_co_id)), matched_pid)
@@ -968,6 +1002,7 @@ fn handle_import_export_with_planet(
                     message: format!(
                         "No planetary colony found for character {char_id} and spaceport pin {spaceport_pin_id}"
                     ),
+                    client_error: None,
                 })?;
             resolve_orbital_and_planet(snap, found_pid)
         };
@@ -976,6 +1011,7 @@ fn handle_import_export_with_planet(
             return Err(BridgeRpcError {
                 code: "ColonyNotFound".into(),
                 message: format!("No colony found for character {char_id} on planet {planet_id}"),
+                client_error: None,
             });
         };
         if current_sys_id != Some(col.solar_system_id) {
@@ -985,6 +1021,7 @@ fn handle_import_export_with_planet(
                     "Planetary colony {planet_id} is in solar system {}, not {:?}",
                     col.solar_system_id, current_sys_id
                 ),
+                client_error: None,
             });
         }
 
@@ -996,6 +1033,7 @@ fn handle_import_export_with_planet(
             .ok_or_else(|| BridgeRpcError {
                 code: "PinNotFound".into(),
                 message: format!("Spaceport pin {spaceport_pin_id} not found on planet {planet_id}"),
+                client_error: None,
             })?;
         if !is_launchpad_pin(&ctx.sde, net.pins[pin_idx].type_id) {
             return Err(BridgeRpcError {
@@ -1004,6 +1042,7 @@ fn handle_import_export_with_planet(
                     "Pin {spaceport_pin_id} (type {}) is not a planetary launchpad/spaceport",
                     net.pins[pin_idx].type_id
                 ),
+                client_error: None,
             });
         }
 
@@ -1037,12 +1076,14 @@ fn handle_import_export_with_planet(
             let _ = i32::try_from(qty).map_err(|_| BridgeRpcError {
                 code: "InvalidCommodityQuantity".into(),
                 message: format!("Import quantity {qty} overflows i32"),
+                client_error: None,
             })?;
             let tid = if let Some(item) = snap.items.get(&key_id) {
                 if item.owner_id != char_id {
                     return Err(BridgeRpcError {
                         code: "ItemNotFound".into(),
                         message: format!("Import item {key_id} not found or not owned"),
+                        client_error: None,
                     });
                 }
                 if item.flag == InventoryFlag::Locked
@@ -1051,6 +1092,7 @@ fn handle_import_export_with_planet(
                     return Err(BridgeRpcError {
                         code: "ItemLocked".into(),
                         message: format!("Import item {key_id} is locked"),
+                        client_error: None,
                     });
                 }
                 if !is_co_hangar_item(item) {
@@ -1059,6 +1101,7 @@ fn handle_import_export_with_planet(
                         message: format!(
                             "Import item {key_id} must be in customs office hangar or active ship cargo"
                         ),
+                        client_error: None,
                     });
                 }
                 if (item.quantity as u64) < qty {
@@ -1068,6 +1111,7 @@ fn handle_import_export_with_planet(
                             "Import item {key_id} has quantity {}, cannot import {qty}",
                             item.quantity
                         ),
+                        client_error: None,
                     });
                 }
                 planned_imports.push(ImportSource::ByItemId(key_id, item.type_id, qty));
@@ -1093,6 +1137,7 @@ fn handle_import_export_with_planet(
                         message: format!(
                             "Commodity type {tid} not found in customs office hangar or ship cargo"
                         ),
+                        client_error: None,
                     });
                 }
                 if avail < qty {
@@ -1101,6 +1146,7 @@ fn handle_import_export_with_planet(
                         message: format!(
                             "Available quantity ({avail}) of type {tid} is less than import quantity ({qty})"
                         ),
+                        client_error: None,
                     });
                 }
                 planned_imports.push(ImportSource::ByTypeId(tid, qty, matching_ids));
@@ -1109,6 +1155,7 @@ fn handle_import_export_with_planet(
                 return Err(BridgeRpcError {
                     code: "ItemNotFound".into(),
                     message: format!("Import commodity/item {key_id} not found"),
+                    client_error: None,
                 });
             };
             let unit_vol = ctx
@@ -1132,10 +1179,12 @@ fn handle_import_export_with_planet(
                 .ok_or_else(|| BridgeRpcError {
                     code: "InvalidCommodity".into(),
                     message: format!("Unknown commodity typeID {tid_raw}"),
+                    client_error: None,
                 })?;
             let _ = i32::try_from(qty).map_err(|_| BridgeRpcError {
                 code: "InvalidCommodityQuantity".into(),
                 message: format!("Export quantity {qty} overflows i32"),
+                client_error: None,
             })?;
             let avail = net.pins[pin_idx].contents.get(&tid).copied().unwrap_or(0);
             if avail < qty {
@@ -1144,6 +1193,7 @@ fn handle_import_export_with_planet(
                     message: format!(
                         "Spaceport pin {spaceport_pin_id} has {avail} of type {tid}, cannot export {qty}"
                     ),
+                    client_error: None,
                 });
             }
             let unit_vol = ctx
@@ -1166,6 +1216,7 @@ fn handle_import_export_with_planet(
                 message: format!(
                     "Cannot import {import_vol_m3:.1} m3 into spaceport {spaceport_pin_id} (capacity {pin_cap_m3:.0} m3)"
                 ),
+                client_error: None,
             });
         }
         if export_vol_m3 > 0.0 {
@@ -1191,6 +1242,7 @@ fn handle_import_export_with_planet(
                     message: format!(
                         "Cannot export {export_vol_m3:.1} m3 to customs office {customs_office_loc_id} (capacity {CUSTOMS_OFFICE_CAPACITY_M3:.0} m3)"
                     ),
+                    client_error: None,
                 });
             }
         }
@@ -1234,6 +1286,7 @@ fn handle_import_export_with_planet(
                     message: format!(
                         "Insufficient ISK to pay POCO import/export tax ({total_tax_isk:.2} ISK)"
                     ),
+                    client_error: None,
                 })?;
                 ch.balance = new_bal;
                 snap.append_journal(
@@ -1383,12 +1436,14 @@ fn handle_retrieve_password(
         return Err(BridgeRpcError {
             code: "InvalidPasswordType".into(),
             message: format!("Invalid container password slot {which}; expected 1 or 2"),
+            client_error: None,
         });
     }
     if container_id <= 0 {
         return Err(BridgeRpcError {
             code: "InvalidArguments".into(),
             message: "RetrievePassword requires a valid containerID".into(),
+            client_error: None,
         });
     }
 
@@ -1398,6 +1453,7 @@ fn handle_retrieve_password(
         let item = snap.items.get(&container_id).ok_or_else(|| BridgeRpcError {
             code: "ItemNotFound".into(),
             message: format!("Secure container {container_id} not found or not owned"),
+            client_error: None,
         })?;
         let corp_id = session
             .corporation_id
@@ -1408,6 +1464,7 @@ fn handle_retrieve_password(
                 return Err(BridgeRpcError {
                     code: "ItemNotFound".into(),
                     message: format!("Secure container {container_id} not found or not owned"),
+                    client_error: None,
                 });
             }
             let (is_ceo, eff_role) =
@@ -1422,6 +1479,7 @@ fn handle_retrieve_password(
                     code: "CorpRoleRequired".into(),
                     message: "Corporation CEO/Director role required to retrieve container password"
                         .into(),
+                    client_error: None,
                 });
             }
         }
@@ -1431,6 +1489,7 @@ fn handle_retrieve_password(
             return Err(BridgeRpcError {
                 code: "ContainerDoesNotSupportPassword".into(),
                 message: format!("Container {container_id} (group {grp_id}) does not support passwords"),
+                client_error: None,
             });
         }
 

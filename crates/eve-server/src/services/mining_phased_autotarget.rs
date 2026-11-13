@@ -627,6 +627,7 @@ pub fn ensure_command_burst_hull_allowed(
                 "{} cannot be fitted or activated on ship type {ship_type_id} (group {ship_group_id})",
                 mod_type.name
             ),
+            client_error: None,
         });
     }
     Ok(())

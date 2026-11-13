@@ -87,6 +87,7 @@ pub(crate) async fn handle_abyssal_gate_activation(
                 return Some(GateInspect::Err(BridgeRpcError {
                     code: "AlreadyInFinalRoom".into(),
                     message: "Character is already in the final room of the Abyssal pocket".into(),
+                    client_error: None,
                 }));
             }
             let curr = p.current_room;
@@ -120,6 +121,7 @@ pub(crate) async fn handle_abyssal_gate_activation(
                 return Err(BridgeRpcError {
                     code: "NotInAbyssalSpace".into(),
                     message: "No active Abyssal Deadspace pocket for character".into(),
+                    client_error: None,
                 });
             }
             Some(GateInspect::Expired { ship_id: sid, abyss_sys, now }) => {
@@ -129,6 +131,7 @@ pub(crate) async fn handle_abyssal_gate_activation(
                 return Err(BridgeRpcError {
                     code: "PocketCollapsed".into(),
                     message: "Abyssal Deadspace pocket has collapsed".into(),
+                    client_error: None,
                 });
             }
             Some(GateInspect::Err(e)) => return Err(e),
@@ -143,6 +146,7 @@ pub(crate) async fn handle_abyssal_gate_activation(
         return Err(BridgeRpcError {
             code: "InvalidGate".into(),
             message: format!("Gate {gate_id} is not the active transfer gate for room {curr_room}"),
+            client_error: None,
         });
     }
 
@@ -159,6 +163,7 @@ pub(crate) async fn handle_abyssal_gate_activation(
                 message: format!(
                     "Transfer gate locked: {alive_count} hostile entities remaining in room {curr_room}"
                 ),
+                client_error: None,
             });
         }
     }
@@ -180,6 +185,7 @@ pub(crate) async fn handle_abyssal_gate_activation(
         .map_err(|e| BridgeRpcError {
             code: "SystemError".into(),
             message: e,
+            client_error: None,
         })?
         .map(|(_, b)| b);
     let gate_ball = abyss_handle
@@ -188,12 +194,14 @@ pub(crate) async fn handle_abyssal_gate_activation(
         .map_err(|e| BridgeRpcError {
             code: "SystemError".into(),
             message: e,
+            client_error: None,
         })?
         .map(|(_, b)| b);
     let (Some(sb), Some(gb)) = (ship_ball, gate_ball) else {
         return Err(BridgeRpcError {
             code: "GateNotFound".into(),
             message: "Gate or ship ball not found in space".into(),
+            client_error: None,
         });
     };
     let surface_dist = (sb.position.distance(gb.position) - sb.radius - gb.radius).max(0.0);
@@ -201,6 +209,7 @@ pub(crate) async fn handle_abyssal_gate_activation(
         return Err(BridgeRpcError {
             code: "GateOutOfRange".into(),
             message: format!("Distance {surface_dist:.1} m exceeds 2,500 m gate activation proximity"),
+            client_error: None,
         });
     }
 
@@ -243,6 +252,7 @@ pub(crate) async fn handle_abyssal_gate_activation(
         return Err(BridgeRpcError {
             code: "NotInAbyssalSpace".into(),
             message: "Abyssal pocket disappeared during gate activation".into(),
+            client_error: None,
         });
     };
 
@@ -363,6 +373,7 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
                         "Exit conduit only accessible from final room (currently in room {})",
                         p.current_room
                     ),
+                    client_error: None,
                 }));
             }
             let r3_npcs = p.rooms[2].npc_ball_ids.clone();
@@ -382,6 +393,7 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
                 return Err(BridgeRpcError {
                     code: "NotInAbyssalSpace".into(),
                     message: "No active Abyssal Deadspace pocket for character".into(),
+                    client_error: None,
                 });
             }
             Some(EndGateInspect::Expired { ship_id: sid, abyss_sys, now }) => {
@@ -391,6 +403,7 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
                 return Err(BridgeRpcError {
                     code: "PocketCollapsed".into(),
                     message: "Abyssal Deadspace pocket has collapsed".into(),
+                    client_error: None,
                 });
             }
             Some(EndGateInspect::Err(e)) => return Err(e),
@@ -405,6 +418,7 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         return Err(BridgeRpcError {
             code: "InvalidGate".into(),
             message: format!("Gate {gate_id} is not the active exit conduit for room 3"),
+            client_error: None,
         });
     }
 
@@ -419,6 +433,7 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
             return Err(BridgeRpcError {
                 code: "GateLocked".into(),
                 message: format!("Exit conduit locked: {alive_count} hostiles remaining in room 3"),
+                client_error: None,
             });
         }
     }
@@ -440,6 +455,7 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         .map_err(|e| BridgeRpcError {
             code: "SystemError".into(),
             message: e,
+            client_error: None,
         })?
         .map(|(_, b)| b);
     let gate_ball = abyss_handle
@@ -448,12 +464,14 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         .map_err(|e| BridgeRpcError {
             code: "SystemError".into(),
             message: e,
+            client_error: None,
         })?
         .map(|(_, b)| b);
     let (Some(sb), Some(gb)) = (ship_ball, gate_ball) else {
         return Err(BridgeRpcError {
             code: "GateNotFound".into(),
             message: "Gate or ship ball not found in space".into(),
+            client_error: None,
         });
     };
     let surface_dist = (sb.position.distance(gb.position) - sb.radius - gb.radius).max(0.0);
@@ -461,6 +479,7 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         return Err(BridgeRpcError {
             code: "GateOutOfRange".into(),
             message: format!("Distance {surface_dist:.1} m exceeds 2,500 m gate activation proximity"),
+            client_error: None,
         });
     }
 
@@ -468,6 +487,7 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         return Err(BridgeRpcError {
             code: "SystemTransitionFailed".into(),
             message: format!("Ship {ship_id} is no longer in solar system {pocket_sys}"),
+            client_error: None,
         });
     };
     let taken_cs = taken.combat_state.clone();
@@ -502,6 +522,7 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         return Err(BridgeRpcError {
             code: "SystemTransitionFailed".into(),
             message: e.to_string(),
+            client_error: None,
         });
     }
 
@@ -678,6 +699,7 @@ pub(crate) async fn handle_void_space_player_jump(
         return Err(BridgeRpcError {
             code: "MissingRequiredArgument".into(),
             message: "VoidSpacePlayerJump requires a valid target ID".into(),
+            client_error: None,
         });
     }
 
@@ -731,6 +753,7 @@ pub(crate) async fn handle_void_space_player_jump(
             return Err(BridgeRpcError {
                 code: "InvalidTarget".into(),
                 message: "Cannot target own ship as Void Space entrance gate".into(),
+                client_error: None,
             });
         }
         let target_ball = origin_handle.get_ball_snapshot(target_id).await.ok().flatten();
@@ -740,6 +763,7 @@ pub(crate) async fn handle_void_space_player_jump(
                 message: format!(
                     "Target {target_id} is neither a filament in ship cargo nor a gate in space"
                 ),
+                client_error: None,
             });
         };
         if !is_valid_void_entrance_gate(ctx, target_id, target_b.type_id) {
@@ -749,6 +773,7 @@ pub(crate) async fn handle_void_space_player_jump(
                     "Target {target_id} (type {}) is not a valid Void Space entrance gate",
                     target_b.type_id
                 ),
+                client_error: None,
             });
         }
         let dist = ship_vec.distance(target_b.position);
@@ -756,6 +781,7 @@ pub(crate) async fn handle_void_space_player_jump(
             return Err(BridgeRpcError {
                 code: "OutOfRange".into(),
                 message: format!("Void Space gate is too far ({dist:.1}m > 5000.0m)"),
+                client_error: None,
             });
         }
     }
@@ -771,6 +797,7 @@ pub(crate) async fn handle_void_space_player_jump(
         return Err(BridgeRpcError {
             code: "SystemTransitionFailed".into(),
             message: format!("Ship {ship_id} is no longer in solar system {cur_sys}"),
+            client_error: None,
         });
     };
     let taken_void_cs = taken.combat_state.clone();
@@ -782,6 +809,7 @@ pub(crate) async fn handle_void_space_player_jump(
         let ch = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
             code: "CharacterNotFound".into(),
             message: format!("Character {char_id} not found"),
+            client_error: None,
         })?;
         if ch.station_id.is_some()
             || ch.structure_id.is_some()
@@ -791,6 +819,7 @@ pub(crate) async fn handle_void_space_player_jump(
             return Err(BridgeRpcError {
                 code: "SystemTransitionFailed".into(),
                 message: format!("Character {char_id} is no longer undocked in system {cur_sys}"),
+                client_error: None,
             });
         }
         if let Some(iid) = cargo_filament_iid {
@@ -798,6 +827,7 @@ pub(crate) async fn handle_void_space_player_jump(
                 return Err(BridgeRpcError {
                     code: "ItemNotFound".into(),
                     message: format!("Filament {iid} no longer in cargo"),
+                    client_error: None,
                 });
             };
             if item.owner_id != char_id
@@ -808,6 +838,7 @@ pub(crate) async fn handle_void_space_player_jump(
                 return Err(BridgeRpcError {
                     code: "ItemNotFound".into(),
                     message: format!("Filament {iid} no longer in cargo"),
+                    client_error: None,
                 });
             }
             snap.consume_exact_item_quantity(
@@ -818,6 +849,7 @@ pub(crate) async fn handle_void_space_player_jump(
             .map_err(|e| BridgeRpcError {
                 code: "ItemLocked".into(),
                 message: e.to_string(),
+                client_error: None,
             })?;
         }
         let _ = crate::router::apply_character_transition_in_snap(
@@ -832,6 +864,7 @@ pub(crate) async fn handle_void_space_player_jump(
         .map_err(|e| BridgeRpcError {
             code: "SystemTransitionFailed".into(),
             message: e.to_string(),
+            client_error: None,
         })?;
         crate::sp6_lifecycle::leave_space_in_snap(
             snap,
@@ -998,6 +1031,7 @@ pub(crate) async fn handle_void_space_end_gate_activation(
         return Err(BridgeRpcError {
             code: "InvalidGate".into(),
             message: "VoidSpaceEndGateActivation requires a valid exit gateID".into(),
+            client_error: None,
         });
     }
 
@@ -1010,6 +1044,7 @@ pub(crate) async fn handle_void_space_end_gate_activation(
         return Err(BridgeRpcError {
             code: "NotInVoidSpace".into(),
             message: "No active Void Space session record for character".into(),
+            client_error: None,
         });
     };
 
@@ -1023,6 +1058,7 @@ pub(crate) async fn handle_void_space_end_gate_activation(
         return Err(BridgeRpcError {
             code: "PocketCollapsed".into(),
             message: "Void Space pocket has expired and evacuated pilot to origin solar system".into(),
+            client_error: None,
         });
     }
 
@@ -1036,6 +1072,7 @@ pub(crate) async fn handle_void_space_end_gate_activation(
                     "Cannot activate Void Space exit gate while 10s session-change timer ({}) is active",
                     active_timer.reason
                 ),
+                client_error: None,
             });
         }
     }
@@ -1055,12 +1092,14 @@ pub(crate) async fn handle_void_space_end_gate_activation(
         return Err(BridgeRpcError {
             code: "InvalidGate".into(),
             message: format!("Gate {gate_id} is not present in Void Space"),
+            client_error: None,
         });
     };
     if !is_valid_void_exit_gate(gb.type_id) {
         return Err(BridgeRpcError {
             code: "InvalidGate".into(),
             message: format!("Ball {gate_id} (type {}) is not a valid Void Space exit gate", gb.type_id),
+            client_error: None,
         });
     }
     if let Some((_, sb)) = void_handle.get_ball_snapshot(ship_id).await.ok().flatten() {
@@ -1069,6 +1108,7 @@ pub(crate) async fn handle_void_space_end_gate_activation(
             return Err(BridgeRpcError {
                 code: "GateOutOfRange".into(),
                 message: format!("Distance {surface_dist:.1} m exceeds 2,500 m gate activation proximity"),
+                client_error: None,
             });
         }
     }
@@ -1077,6 +1117,7 @@ pub(crate) async fn handle_void_space_end_gate_activation(
         return Err(BridgeRpcError {
             code: "SystemTransitionFailed".into(),
             message: format!("Ship {ship_id} is no longer in solar system {cur_sys}"),
+            client_error: None,
         });
     };
     let taken_exit_cs = taken.combat_state.clone();
@@ -1100,6 +1141,7 @@ pub(crate) async fn handle_void_space_end_gate_activation(
         .map_err(|e| BridgeRpcError {
             code: "SystemTransitionFailed".into(),
             message: e.to_string(),
+            client_error: None,
         })?;
         crate::sp6_lifecycle::leave_space_in_snap(
             snap,

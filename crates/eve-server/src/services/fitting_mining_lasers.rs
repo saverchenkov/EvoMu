@@ -33,6 +33,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                     return Some(Err(BridgeRpcError {
                         code: "NoActiveShip".into(),
                         message: "No active ship in session".into(),
+                        client_error: None,
                     }));
                 };
                 let _ = crate::services::mining_cycle::deactivate(ctx, char_id, Some(ship_id), module_id).await;
@@ -61,6 +62,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "No active ship in session".into(),
+                    client_error: None,
                 }));
             };
             // Validate ship and fitted-module ownership BEFORE mutating any EWAR, remote-assist,
@@ -70,18 +72,21 @@ pub(crate) async fn handle_mining_and_deactivate(
                     return Err(BridgeRpcError {
                         code: "ShipNotFound".into(),
                         message: format!("Active ship {ship_id} not found"),
+                        client_error: None,
                     });
                 };
                 if ship_item.owner_id != char_id {
                     return Err(BridgeRpcError {
                         code: "ShipOwnershipViolation".into(),
                         message: format!("Ship {ship_id} is not owned by character {char_id}"),
+                        client_error: None,
                     });
                 }
                 let Some(mod_item) = snap.items.get(&module_id) else {
                     return Err(BridgeRpcError {
                         code: "ModuleNotFound".into(),
                         message: format!("Module {module_id} not found"),
+                        client_error: None,
                     });
                 };
                 let flag_u16 = mod_item.flag as u16;
@@ -90,6 +95,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                     return Err(BridgeRpcError {
                         code: "ModuleNotOwnedByShip".into(),
                         message: format!("Module {module_id} is not fitted to active ship {ship_id}"),
+                        client_error: None,
                     });
                 }
                 Ok(mod_item.type_id)
@@ -109,6 +115,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                     return Some(Err(BridgeRpcError {
                         code: "CantDeactivateWhileSpooling".into(),
                         message: "Cannot deactivate Micro Jump Drive or Micro Jump Field Generator while spooling".into(),
+                        client_error: None,
                     }));
                 }
                 let is_cap_mjfg = mod_type_opt
@@ -125,6 +132,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                     return Some(Err(BridgeRpcError {
                         code: "CantDeactivateWhileSpooling".into(),
                         message: "Cannot deactivate Capital Micro Jump Field Generator while spooling".into(),
+                        client_error: None,
                     }));
                 }
                 removed_cycle_delay = sys.remove_module_cycle(ship_id, module_id).await.ok().flatten();
@@ -148,7 +156,7 @@ pub(crate) async fn handle_mining_and_deactivate(
             let deact_res = fit.deactivate_module(module_id, &ctx.sde);
             if let Err(e) = deact_res {
                 if removed_cycle_delay.is_none() && !is_mining && !removed_entosis {
-                    return Some(Err(BridgeRpcError { code: "DogmaDeactivateFailed".into(), message: e.to_string() }));
+                    return Some(Err(BridgeRpcError { code: "DogmaDeactivateFailed".into(), message: e.to_string(), client_error: None }));
                 }
             }
             let affected_ewar_ships = crate::services::notify_emitters_space_dungeons::flush_module_ewar_end(
@@ -363,6 +371,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "No active ship in session".into(),
+                    client_error: None,
                 }));
             };
             let was_cycling = if let Some(sys_id) = session.solar_system_id {
@@ -427,6 +436,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "No active ship in session".into(),
+                    client_error: None,
                 }));
             };
             let arg_val = match crate::router::RpcArgs::positional(args).req_non_negative_i64(0, "rackOrModuleID") {
@@ -459,6 +469,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                 return Some(Err(BridgeRpcError {
                     code: "CannotOverheatWhileRepairing".into(),
                     message: "UserError: Cannot overheat modules while in-space Nanite Repair Paste repair is active".into(),
+                    client_error: None,
                 }));
             }
             let mut notified_modules = Vec::new();
@@ -538,12 +549,14 @@ pub(crate) async fn handle_mining_and_deactivate(
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "No active ship in session".into(),
+                    client_error: None,
                 }));
             };
             if session.station_id.is_some() || session.structure_id.is_some() || session.solar_system_id.is_none() {
                 return Some(Err(BridgeRpcError {
                     code: "CannotRepairModuleWhileDocked".into(),
                     message: "In-space Nanite Repair Paste module repair requires being in space".into(),
+                    client_error: None,
                 }));
             }
             let sys_id = session.solar_system_id.unwrap();
@@ -562,12 +575,14 @@ pub(crate) async fn handle_mining_and_deactivate(
                 return Some(Err(BridgeRpcError {
                     code: "ModuleAlreadyRepairing".into(),
                     message: format!("Module {module_id} is already undergoing nanite repair"),
+                    client_error: None,
                 }));
             }
             if sys.has_active_overloaded_cycle_sync(ship_id) {
                 return Some(Err(BridgeRpcError {
                     code: "CannotRepairWhileOverloaded".into(),
                     message: "UserError: Cannot initiate Nanite Repair Paste repair while another module on the ship is overloaded".into(),
+                    client_error: None,
                 }));
             }
 
@@ -576,6 +591,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                     return Err(BridgeRpcError {
                         code: "ModuleNotFound".into(),
                         message: format!("Module {module_id} not found"),
+                        client_error: None,
                     });
                 };
                 if m_item.owner_id != char_id
@@ -587,6 +603,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                         message: format!(
                             "Module {module_id} is not fitted on active ship {ship_id} owned by character {char_id}"
                         ),
+                        client_error: None,
                     });
                 }
                 let active = snap.module_active_states.contains(&module_id);
@@ -601,6 +618,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                     return Err(BridgeRpcError {
                         code: "ModuleBurnedOut".into(),
                         message: "UserError: Capital Emergency Hull Energizer cannot be repaired with Nanite Repair Paste".into(),
+                        client_error: None,
                     });
                 }
                 let dmg = m_item
@@ -635,12 +653,14 @@ pub(crate) async fn handle_mining_and_deactivate(
                 return Some(Err(BridgeRpcError {
                     code: "CannotRepairActiveModule".into(),
                     message: "Module must be deactivated before initiating nanite repair".into(),
+                    client_error: None,
                 }));
             }
             if cur_dmg >= max_hp - 1e-6 {
                 return Some(Err(BridgeRpcError {
                     code: "ModuleBurnedOut".into(),
                     message: "Completely burned-out modules cannot be repaired with Nanite Repair Paste in space".into(),
+                    client_error: None,
                 }));
             }
             if cur_dmg <= 1e-6 {
@@ -665,6 +685,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                     return Err(BridgeRpcError {
                         code: "ModuleNotFound".into(),
                         message: format!("Module {module_id} not found"),
+                        client_error: None,
                     });
                 };
                 if m_item.owner_id != char_id
@@ -676,6 +697,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                         message: format!(
                             "Module {module_id} is not fitted on active ship {ship_id} owned by character {char_id}"
                         ),
+                        client_error: None,
                     });
                 }
                 let initial_deduct = if session.solar_system_id.is_some() {
@@ -702,6 +724,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                         message: format!(
                             "Need {initial_deduct} Nanite Repair Paste (type 28668) in ship cargo"
                         ),
+                        client_error: None,
                     });
                 }
                 let taken = crate::services::tactical_module_mechanics::deduct_paste_from_cargo_in_snap(
@@ -769,6 +792,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "No active ship in session".into(),
+                    client_error: None,
                 }));
             };
             let module_id = args
@@ -834,6 +858,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "No active ship in session".into(),
+                    client_error: None,
                 }));
             };
             let items = ctx.db.get_items_for_character(char_id);
@@ -849,6 +874,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                 return Some(Err(BridgeRpcError {
                     code: "ModuleNotFound".into(),
                     message: "No survey scanner fitted to ship".into(),
+                    client_error: None,
                 }));
             };
             let scanner_type = ctx.sde.types.get(&scanner.type_id);

@@ -1790,7 +1790,7 @@ impl ServerContext {
             self.db.with_snapshot(|s| s.structures.contains_key(&ship_id).then(|| s.items.get(&ship_id).cloned()).flatten())
         });
         let Some(ship_item) = ship_item else {
-            return Err(BridgeRpcError { code: "ShipNotFound".into(), message: format!("Ship item {ship_id} not found for character {char_id}") });
+            return Err(BridgeRpcError { code: "ShipNotFound".into(), message: format!("Ship item {ship_id} not found for character {char_id}"), client_error: None });
         };
 
         let mut fit = ShipFittingEngine::from_sde(ship_id, ship_item.type_id, &self.sde)

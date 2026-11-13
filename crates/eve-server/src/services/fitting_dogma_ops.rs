@@ -44,6 +44,7 @@ pub(crate) async fn handle_dogma_ops(
                 return Some(Err(BridgeRpcError {
                     code: "TargetingFailed".into(),
                     message: "Cannot target self".into(),
+                    client_error: None,
                 }));
             }
 
@@ -66,6 +67,7 @@ pub(crate) async fn handle_dogma_ops(
                 return Some(Err(BridgeRpcError {
                     code: "ShipOwnershipViolation".into(),
                     message: format!("Source entity {source_id} is not owned or controlled by character {char_id}"),
+                    client_error: None,
                 }));
             }
 
@@ -73,6 +75,7 @@ pub(crate) async fn handle_dogma_ops(
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session is not in space".into(),
+                    client_error: None,
                 }));
             };
 
@@ -85,12 +88,14 @@ pub(crate) async fn handle_dogma_ops(
                 return Some(Err(BridgeRpcError {
                     code: "TargetingFailed".into(),
                     message: format!("Source ball {source_id} not found in system"),
+                    client_error: None,
                 }));
             };
             let Some((_, target_ball)) = sys.get_ball_snapshot(target_id).await.unwrap_or(None) else {
                 return Some(Err(BridgeRpcError {
                     code: "TargetingFailed".into(),
                     message: format!("Target ball {target_id} not found in system"),
+                    client_error: None,
                 }));
             };
 
@@ -115,6 +120,7 @@ pub(crate) async fn handle_dogma_ops(
                     return Some(Err(BridgeRpcError {
                         code: "TargetInvulnerable".into(),
                         message: "Target is invulnerable due to recent location change".into(),
+                        client_error: None,
                     }));
                 }
             }
@@ -123,6 +129,7 @@ pub(crate) async fn handle_dogma_ops(
                 return Some(Err(BridgeRpcError {
                     code: "TargetInvulnerable".into(),
                     message: format!("Target {target_id} is tethered and invulnerable to target locks"),
+                    client_error: None,
                 }));
             }
             if session.ship_id == Some(source_id) {
@@ -135,6 +142,7 @@ pub(crate) async fn handle_dogma_ops(
                     return Some(Err(BridgeRpcError {
                         code: "ShipJammed".into(),
                         message: "Targeting systems are jammed by ECM".into(),
+                        client_error: None,
                     }));
                 }
                 if (cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0)
@@ -143,6 +151,7 @@ pub(crate) async fn handle_dogma_ops(
                     return Some(Err(BridgeRpcError {
                         code: "TargetingFailed".into(),
                         message: "Targeting systems cannot acquire lock while cloaked or during sensor recalibration delay".into(),
+                        client_error: None,
                     }));
                 }
             }
@@ -157,6 +166,7 @@ pub(crate) async fn handle_dogma_ops(
                 return Some(Err(BridgeRpcError {
                     code: "TargetingFailed".into(),
                     message: format!("Target distance ({dist:.1} m) exceeds maxTargetRange ({max_range:.1} m)"),
+                    client_error: None,
                 }));
             }
 
@@ -217,6 +227,7 @@ pub(crate) async fn handle_dogma_ops(
                 return Some(Err(BridgeRpcError {
                     code: "TargetingFailed".into(),
                     message: format!("Max locked targets exceeded ({max_locked})"),
+                    client_error: None,
                 }));
             }
 
@@ -249,6 +260,7 @@ pub(crate) async fn handle_dogma_ops(
                 return Some(Err(BridgeRpcError {
                     code: "TargetingFailed".into(),
                     message: e,
+                    client_error: None,
                 }));
             }
 
@@ -299,12 +311,14 @@ pub(crate) async fn handle_dogma_ops(
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "No active ship in session".into(),
+                    client_error: None,
                 }));
             };
             let Some(target_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "CancelAddTarget requires targetID".into(),
+                    client_error: None,
                 }));
             };
             let mut removed = false;
@@ -361,6 +375,7 @@ pub(crate) async fn handle_dogma_ops(
                 return Some(Err(BridgeRpcError {
                     code: "ShipOwnershipViolation".into(),
                     message: format!("Source entity {source_id} is not owned or controlled by character {char_id}"),
+                    client_error: None,
                 }));
             }
 
@@ -401,6 +416,7 @@ pub(crate) async fn handle_dogma_ops(
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "No active ship in session".into(),
+                    client_error: None,
                 }));
             };
             if let Some(sys_id) = session.solar_system_id {
@@ -531,6 +547,7 @@ pub(crate) async fn handle_dogma_ops(
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "No active ship in session".into(),
+                    client_error: None,
                 }));
             };
 
@@ -546,6 +563,7 @@ pub(crate) async fn handle_dogma_ops(
                     return Some(Err(BridgeRpcError {
                         code: "StationServiceUnavailable".into(),
                         message: format!("Station {did} does not offer fitting facilities"),
+                        client_error: None,
                     }));
                 }
             } else if let Some(sys_id) = session.solar_system_id {
@@ -558,6 +576,7 @@ pub(crate) async fn handle_dogma_ops(
                                 "Capacitor level ({:.1} GJ / {:.1} GJ) is below 75% requirement to online modules in space",
                                 cs.capacitor, cs.max_capacitor
                             ),
+                            client_error: None,
                         }));
                     }
                 }
@@ -609,6 +628,7 @@ pub(crate) async fn handle_dogma_ops(
                     return Err(BridgeRpcError {
                         code: "ShipOwnershipViolation".into(),
                         message: format!("Ship {ship_id} is no longer the active owned ship of {char_id}"),
+                        client_error: None,
                     });
                 }
                 let mut valid = Vec::with_capacity(newly_onlined.len());
@@ -656,18 +676,21 @@ pub(crate) async fn handle_dogma_ops(
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "No active ship in session".into(),
+                    client_error: None,
                 }));
             };
             if session.station_id.is_some() || session.structure_id.is_some() {
                 return Some(Err(BridgeRpcError {
                     code: "CannotRepairNaniteWhileDocked".into(),
                     message: "Nanite Repair Paste can only be used in space; use station/structure repair services while docked".into(),
+                    client_error: None,
                 }));
             }
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no solarSystemID".into(),
+                    client_error: None,
                 }));
             };
             let sys = ctx.systems.get_or_spawn(sys_id);
@@ -696,6 +719,7 @@ pub(crate) async fn handle_dogma_ops(
                 return Some(Err(BridgeRpcError {
                     code: "CannotRepairWhileOverheating".into(),
                     message: "UserError: Cannot initiate in-space Nanite Repair Paste repair while modules are overheating".into(),
+                    client_error: None,
                 }));
             }
 
@@ -881,6 +905,7 @@ pub(crate) async fn handle_dogma_ops(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "ChangeDroneSettings requires aggression and focus_fire".into(),
+                    client_error: None,
                 }));
             }
 
@@ -891,6 +916,7 @@ pub(crate) async fn handle_dogma_ops(
                         return Some(Err(BridgeRpcError {
                             code: "InvalidArgument".into(),
                             message: "aggression must be boolean or 0..=1".into(),
+                            client_error: None,
                         }));
                     }
                 },
@@ -904,6 +930,7 @@ pub(crate) async fn handle_dogma_ops(
                         return Some(Err(BridgeRpcError {
                             code: "InvalidArgument".into(),
                             message: "focus_fire must be boolean or 0..=1".into(),
+                            client_error: None,
                         }));
                     }
                 },
@@ -1368,6 +1395,7 @@ fn check_dogma_item_access(
         return Err(BridgeRpcError {
             code: "AccessDenied".into(),
             message: "Cannot query attributes for invalid item ID".into(),
+            client_error: None,
         });
     }
     if session.ship_id == Some(item_id) {
@@ -1404,6 +1432,7 @@ fn check_dogma_item_access(
         Err(BridgeRpcError {
             code: "AccessDenied".into(),
             message: format!("Character {char_id} is not authorized to query attributes for item {item_id}"),
+            client_error: None,
         })
     }
 }

@@ -69,6 +69,7 @@ pub async fn handle_corp_hangar_invbroker(
             return Some(Err(BridgeRpcError {
                 code: "InvalidLocation".into(),
                 message: "invbroker.List requires a bound inventory location or active station/ship".into(),
+                client_error: None,
             }));
         };
         if ((60_000_000..=69_999_999).contains(&bound_loc_id)
@@ -81,6 +82,7 @@ pub async fn handle_corp_hangar_invbroker(
                 message: format!(
                     "Character {char_id} is not docked at bound inventory location {bound_loc_id}"
                 ),
+                client_error: None,
             }));
         }
         let corp_id = session
@@ -102,6 +104,7 @@ pub async fn handle_corp_hangar_invbroker(
             return Some(Err(BridgeRpcError {
                 code: "CorpRoleDenied".into(),
                 message: format!("Corporation role denied for division {} query", div_idx + 1),
+                client_error: None,
             }));
         }
         let rows = ctx.db.with_snapshot(|snap| {
@@ -153,6 +156,7 @@ pub async fn handle_corp_hangar_invbroker(
                 return Some(Err(BridgeRpcError {
                     code: "CorpRoleDenied".into(),
                     message: format!("Corporation role denied for division {} take", div_idx + 1),
+                    client_error: None,
                 }));
             }
         }
@@ -192,7 +196,7 @@ pub fn handle(
                 .and_then(|a| a.as_i64())
                 .unwrap_or(caller_corp);
             if caller_corp <= 0 || target_corp_id <= 0 || target_corp_id != caller_corp {
-                return Some(Err(BridgeRpcError::user_error("CrpAccessDenied")));
+                return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied)));
             }
             let rows = ctx.db.with_snapshot(|snap| {
                 let corp_id = target_corp_id;
@@ -371,6 +375,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidAccountKey".into(),
                     message: format!("Account key {key} must be between 1000 and 1006"),
+                    client_error: None,
                 }));
             }
             let corp_id = session.corporation_id.unwrap_or(0);
@@ -387,7 +392,7 @@ pub fn handle(
                 is_ceo || role_mask == u64::MAX || (role_mask & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_ACCOUNTANT | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT | take_bit)) != 0
             });
             if !can_use {
-                return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: format!("Character {char_id} lacks wallet division access for account key {key}") }));
+                return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: format!("Character {char_id} lacks wallet division access for account key {key}"), client_error: None }));
             }
             let old_key = session.corp_account_key as i64;
             if old_key == key {
@@ -397,6 +402,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "SessionChangeInProgress".into(),
                     message: format!("Cannot change account key while 10s session-change timer ({}) is active", active_timer.reason),
+                    client_error: None,
                 }));
             }
             session.corp_account_key = key as i32;
@@ -440,6 +446,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "CorpRoleDenied".into(),
                     message: "CEO or Director role required to execute corporation member actions".into(),
+                    client_error: None,
                 }));
             }
 
@@ -476,6 +483,7 @@ pub fn handle(
                         return Err(BridgeRpcError {
                             code: "CorporationNotFound".into(),
                             message: format!("Corporation {corp_id} not found"),
+                            client_error: None,
                         });
                     };
                     let caller_is_director =
@@ -487,10 +495,11 @@ pub fn handle(
                                 message: format!(
                                     "Character {tid} is not a member of corporation {corp_id}"
                                 ),
+                                client_error: None,
                             });
                         }
                         if !is_ceo && corp.ceo_id == tid {
-                            return Err(BridgeRpcError::user_error("CrpAccessDenied"));
+                            return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied));
                         }
                     }
                     let caller_ra = snap
@@ -585,7 +594,7 @@ pub fn handle(
                             let prop = t.get(1).and_then(|x| x.as_str()).unwrap_or("");
                             let val_i64 = t.get(2).and_then(|x| x.as_i64().or_else(|| x.as_bool().map(|b| if b { 1 } else { 0 }))).unwrap_or(0);
                             if val_i64 < 0 {
-                                return Err(BridgeRpcError::user_error("CrpAccessDenied"));
+                                return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied));
                             }
                             let val_u64 = val_i64 as u64;
                             let apply_mask = |cur: u64| -> u64 {
@@ -597,14 +606,14 @@ pub fn handle(
                                     "roles" | "role" | "rolesAtHQ" | "rolesAtBase" | "rolesAtOther"
                                 )
                             {
-                                return Err(BridgeRpcError::user_error("CrpAccessDenied"));
+                                return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied));
                             }
                             let check_scoped = |cur: u64, next: u64, grantable: u64| -> Result<u64, BridgeRpcError> {
                                 if !is_ceo && (((cur ^ next) & eve_db::corp_roles::ROLE_DIRECTOR) != 0 || (val_u64 & eve_db::corp_roles::ROLE_DIRECTOR) != 0) {
-                                    return Err(BridgeRpcError::user_error("CrpAccessDenied"));
+                                    return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied));
                                 }
                                 if !caller_is_director && ((cur ^ next) & !grantable) != 0 {
-                                    return Err(BridgeRpcError::user_error("CrpAccessDenied"));
+                                    return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied));
                                 }
                                 Ok(next)
                             };
@@ -655,7 +664,7 @@ pub fn handle(
                                         }
                                     }
                                     if !is_ceo && ((old_tr_all ^ new_tr_all) & eve_db::corp_roles::ROLE_DIRECTOR) != 0 {
-                                        return Err(BridgeRpcError::user_error("CrpAccessDenied"));
+                                        return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied));
                                     }
                                     let newly_td = new_td & !(old_td & !prev_tp) & !(old_role & HANGAR_DIV_MASK) & !prev_tp;
                                     let still_td = newly_td | (new_td & prev_tp);
@@ -856,7 +865,7 @@ pub fn handle(
                     })
                     .unwrap_or_default();
                 if !is_director_or_ceo {
-                    return Err(BridgeRpcError::user_error("CrpAccessDenied"));
+                    return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied));
                 }
                 const HANGAR_DIV_MASK: u64 = eve_db::corp_roles::CORP_DELAYED_DIVISION_ROLE_MASK;
                 let mut notices: Vec<LegacyNotice> = Vec::new();
@@ -868,7 +877,7 @@ pub fn handle(
                             match name {
                                 "SetAccountKey" | "setAccountKey" => {
                                     if let (Some(target), Some(key)) = (t.get(1).and_then(|x| x.as_i64()), t.get(2).and_then(|x| x.as_i64())) {
-                                        if !members_set.contains(&target) { return Err(BridgeRpcError::user_error("CrpAccessDenied")); }
+                                        if !members_set.contains(&target) { return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied)); }
                                         if (1000..=1006).contains(&key) {
                                             let state = snap.corp_governance.entry(corp_id).or_default();
                                             let old = state.member_account_keys.get(&target).copied().unwrap_or(1000);
@@ -882,7 +891,7 @@ pub fn handle(
                                 "SetTitle" | "setTitle" => {
                                     if let (Some(target), Some(mask)) = (t.get(1).and_then(|x| x.as_i64()), t.get(2).and_then(|x| x.as_i64())) {
                                         if mask < 0 || !members_set.contains(&target) {
-                                            return Err(BridgeRpcError::user_error("CrpAccessDenied"));
+                                            return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied));
                                         }
                                         let (_, old_eff_roles) = snap.effective_corp_roles_at(
                                             corp_id, target, None, 0, now_unix,
@@ -914,7 +923,7 @@ pub fn handle(
                                                     & eve_db::corp_roles::ROLE_DIRECTOR)
                                                     != 0
                                             {
-                                                return Err(BridgeRpcError::user_error("CrpAccessDenied"));
+                                                return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied));
                                             }
                                             let old_direct = member_roles_map.get(&target).copied().unwrap_or(0);
                                             let newly_td = new_td
@@ -959,7 +968,7 @@ pub fn handle(
                                 }
                                 "SetNote" | "setNote" => {
                                     if let (Some(target), Some(note)) = (t.get(1).and_then(|x| x.as_i64()), t.get(2).and_then(|x| x.as_str())) {
-                                        if !members_set.contains(&target) { return Err(BridgeRpcError::user_error("CrpAccessDenied")); }
+                                        if !members_set.contains(&target) { return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied)); }
                                         let state = snap.corp_governance.entry(corp_id).or_default();
                                         let old = state.member_notes.get(&target).cloned().unwrap_or_default();
                                         state.member_notes.insert(target, note.to_string());
@@ -1117,7 +1126,7 @@ pub(crate) fn handle_get_corp_market_info(
                 if !corp.members.contains(&caller_id)
                     || (!is_ceo && caller_role != u64::MAX && (caller_role & allowed) == 0)
                 {
-                    return Err(BridgeRpcError::user_error("CrpAccessDenied"));
+                    return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied));
                 }
             } else {
                 let caller_corp = session
@@ -1125,7 +1134,7 @@ pub(crate) fn handle_get_corp_market_info(
                     .or_else(|| snap.characters.get(&caller_id).map(|c| c.corporation_id))
                     .unwrap_or(0);
                 if corp_id <= 0 || corp_id != caller_corp || (session.corp_role & allowed) == 0 {
-                    return Err(BridgeRpcError::user_error("CrpAccessDenied"));
+                    return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CrpAccessDenied));
                 }
             }
         }
@@ -1196,7 +1205,7 @@ pub(crate) fn handle_get_info_window_data_for_char(
             (arg_id, None)
         };
         let Some(ch) = snap.characters.get(&target_char_id) else {
-            return Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {target_char_id} not found") });
+            return Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {target_char_id} not found"), client_error: None });
         };
         let corp_id = corp_id_override.unwrap_or(ch.corporation_id);
         let is_npc_corp = corp_id < 98_000_000 || ctx.sde.npc_corporations.contains_key(&corp_id);
@@ -1268,6 +1277,7 @@ pub(crate) fn handle_get_member(
                 return Err(BridgeRpcError {
                     code: "NotCorpMember".into(),
                     message: format!("Character {target_char_id} is not a member of corporation {corp_id}"),
+                    client_error: None,
                 });
             }
             let ch = snap.characters.get(&target_char_id);
@@ -1322,6 +1332,7 @@ pub(crate) fn handle_get_member(
             return Err(BridgeRpcError {
                 code: "CorporationNotFound".into(),
                 message: format!("Corporation {corp_id} not found"),
+                client_error: None,
             });
         };
         let ch = snap.characters.get(&target_char_id);
@@ -1331,6 +1342,7 @@ pub(crate) fn handle_get_member(
             return Err(BridgeRpcError {
                 code: "NotCorpMember".into(),
                 message: format!("Character {target_char_id} is not a member of corporation {corp_id}"),
+                client_error: None,
             });
         }
         let name = ch.map(|c| c.name.clone()).unwrap_or_else(|| format!("Pilot {target_char_id}"));
@@ -1370,7 +1382,7 @@ pub(crate) fn handle_get_member_tracking_info(
         Err(e) => return Some(Err(e)),
     };
     if method == "GetMemberTrackingInfo" && !has_director {
-        return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Director or Personnel Manager role required for full member tracking info".into() }));
+        return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Director or Personnel Manager role required for full member tracking info".into(), client_error: None }));
     }
     let now_unix = ctx.now_unix();
     crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);

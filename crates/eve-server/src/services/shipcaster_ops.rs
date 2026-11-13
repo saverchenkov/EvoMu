@@ -36,6 +36,7 @@ fn rpc_err(code: impl Into<String>, msg: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
         code: code.into(),
         message: msg.into(),
+        client_error: None,
     }
 }
 
@@ -290,6 +291,7 @@ pub async fn deploy_fw_beacon_constructor(
             .map_err(|e| BridgeRpcError {
                 code: "ConstructorLocked".into(),
                 message: e.to_string(),
+                client_error: None,
             })?;
         }
         Ok::<LandingPadRecord, BridgeRpcError>(new_pad)
@@ -450,6 +452,7 @@ async fn contribute_fw_beacon_material_inner(
                 .map_err(|e| BridgeRpcError {
                     code: "MaterialLocked".into(),
                     message: e.to_string(),
+                    client_error: None,
                 })?;
         }
         if let Some((lp_corp, lp_per_unit)) = lp_reward_opt {

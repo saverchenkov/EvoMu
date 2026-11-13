@@ -589,18 +589,21 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "ShipDocked".into(),
                     message: "Cannot unlock ESS Reserve Bank while docked".into(),
+                    client_error: None,
                 }));
             }
             let Some(ship_id) = session.ship_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "Session has no active ship".into(),
+                    client_error: None,
                 }));
             };
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solar system".into(),
+                    client_error: None,
                 }));
             };
             let sys_sec = ctx
@@ -615,6 +618,7 @@ pub async fn handle(
                     message: format!(
                         "ESS Reserve Bank only exists in K-space null-sec systems (system {sys_id} has security {sys_sec:.2})"
                     ),
+                    client_error: None,
                 }));
             }
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -622,6 +626,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "OutsideEssLinkRange".into(),
                     message: "Active ship is not present in system space near the ESS beacon".into(),
+                    client_error: None,
                 }));
             };
             let balls = sys_handle.list_balls().await.unwrap_or_default();
@@ -632,6 +637,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "OutsideEssLinkRange".into(),
                     message: "ESS beacon is not present in system space".into(),
+                    client_error: None,
                 }));
             };
             let dist = ship_ball.position.distance(ess.position);
@@ -639,6 +645,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "OutsideEssLinkRange".into(),
                     message: format!("Ship is {:.1} m from ESS beacon (must be <= 2500 m)", dist),
+                    client_error: None,
                 }));
             }
             let now_unix = ctx.now_unix();
@@ -658,6 +665,7 @@ pub async fn handle(
                 snap.consume_exact_item_quantity(key_item_id, 1, key_opts).map_err(|e| BridgeRpcError {
                     code: "InventoryError".into(),
                     message: e.to_string(),
+                    client_error: None,
                 })?;
                 let pulses = duration_mins as u32;
                 let unlock_until = now_unix + (duration_mins as u64) * 60;
@@ -772,6 +780,7 @@ pub(crate) async fn handle_update_state_request(
                         "Bound beyonce solar system {bound_sys} does not match session solar system {:?}",
                         session.solar_system_id
                     ),
+                    client_error: None,
                 });
             }
             bound_sys
@@ -779,6 +788,7 @@ pub(crate) async fn handle_update_state_request(
         None => session.solar_system_id.ok_or_else(|| BridgeRpcError {
             code: "NoSolarSystem".into(),
             message: "Session has no active solar system".into(),
+            client_error: None,
         })?,
     };
     if session.station_id.is_some() || session.structure_id.is_some() {
@@ -799,6 +809,7 @@ pub(crate) async fn handle_update_state_request(
         .map_err(|e| BridgeRpcError {
             code: "DestinyQueryFailed".into(),
             message: e,
+            client_error: None,
         })? {
         Some((_, b)) => b,
         None => {
@@ -925,6 +936,7 @@ pub(crate) async fn handle_update_state_request(
         .map_err(|e| BridgeRpcError {
             code: "DestinyQueryFailed".into(),
             message: e,
+            client_error: None,
         })?;
     crate::services::pve_incursion_lifecycle::emit_active_incursion_tale_data_for_system(ctx, sys_id);
     Ok(PyRep::None)
@@ -941,6 +953,7 @@ async fn handle_admin_get_bubble_id(
         return Err(BridgeRpcError {
             code: "InsufficientRoles".into(),
             message: "AdminGetBubbleID requires a GM or Admin role".into(),
+            client_error: None,
         });
     }
     let sys_id = ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?;
@@ -948,6 +961,7 @@ async fn handle_admin_get_bubble_id(
         return Err(BridgeRpcError {
             code: "NoActiveShip".into(),
             message: "Session has no active ship".into(),
+            client_error: None,
         });
     };
     let target_ball_id = args
@@ -963,6 +977,7 @@ async fn handle_admin_get_bubble_id(
                 message: format!(
                     "Ball {target_ball_id} is not visible in caller ship {ship_id}'s grid bubble"
                 ),
+                client_error: None,
             });
         }
     }
@@ -971,10 +986,12 @@ async fn handle_admin_get_bubble_id(
         Ok(None) => Err(BridgeRpcError {
             code: "BallNotFound".into(),
             message: format!("Ball {target_ball_id} is not present in system {sys_id}"),
+            client_error: None,
         }),
         Err(e) => Err(BridgeRpcError {
             code: "DestinyQueryFailed".into(),
             message: e,
+            client_error: None,
         }),
     }
 }
@@ -993,20 +1010,24 @@ async fn handle_call_component_from_client(
         .ok_or_else(|| BridgeRpcError {
             code: "NoSolarSystem".into(),
             message: "Session has no active solar system".into(),
+            client_error: None,
         })?;
     if session.station_id.is_some() || session.structure_id.is_some() {
         return Err(BridgeRpcError {
             code: "NotInSpace".into(),
             message: "Must be in space to interact with a space component".into(),
+            client_error: None,
         });
     }
     let ship_id = session.ship_id.ok_or_else(|| BridgeRpcError {
         code: "NoActiveShip".into(),
         message: "Must have an active ship to interact with an item trader".into(),
+        client_error: None,
     })?;
     let trader_id = args.first().and_then(|a| a.as_i64()).ok_or_else(|| BridgeRpcError {
         code: "InvalidArgument".into(),
         message: "CallComponentFromClient requires target itemID".into(),
+        client_error: None,
     })?;
     let comp_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("");
     let comp_method = args.get(2).and_then(|a| a.as_str()).unwrap_or("");
@@ -1046,6 +1067,7 @@ async fn handle_call_component_from_client(
         return Err(BridgeRpcError {
             code: "UnsupportedComponentCall".into(),
             message: format!("Unsupported component call {comp_name}.{comp_method}"),
+            client_error: None,
         });
     }
     let recipe_id = args
@@ -1055,6 +1077,7 @@ async fn handle_call_component_from_client(
         .ok_or_else(|| BridgeRpcError {
             code: "InvalidRecipeID".into(),
             message: "ProcessTrade requires a positive recipeID".into(),
+            client_error: None,
         })? as u32;
     let raw_mult = args.get(4).and_then(|a| a.as_i64()).unwrap_or(1);
     let multiplier = u32::try_from(raw_mult)
@@ -1063,6 +1086,7 @@ async fn handle_call_component_from_client(
         .ok_or_else(|| BridgeRpcError {
             code: "InvalidMultiplier".into(),
             message: "ProcessTrade multiplier must be between 1 and 100,000".into(),
+            client_error: None,
         })? as i32;
 
     let handle = ctx.systems.get_or_spawn(sys_id);
@@ -1098,6 +1122,7 @@ async fn handle_call_component_from_client(
             return Err(BridgeRpcError {
                 code: "ItemTraderNotFoundInSystem".into(),
                 message: format!("Item trader {trader_id} is not present in system {sys_id}"),
+                client_error: None,
             });
         };
         let rad = ctx.sde.types.get(&tid).map(|t| t.radius).unwrap_or(500.0);
@@ -1110,15 +1135,18 @@ async fn handle_call_component_from_client(
         .map_err(|e| BridgeRpcError {
             code: "SdeError".into(),
             message: e.to_string(),
+            client_error: None,
         })?
         .ok_or_else(|| BridgeRpcError {
             code: "NotAnItemTrader".into(),
             message: format!("Type {trader_type_id} does not have an itemTrader component"),
+            client_error: None,
         })?;
     let (Some(sb), Some(tpos)) = (&ship_ball, trader_pos) else {
         return Err(BridgeRpcError {
             code: "ItemTraderOutOfRange".into(),
             message: format!("Ship or item trader {trader_id} does not have a valid position in system {sys_id}"),
+            client_error: None,
         });
     };
     let surface_dist = (sb.position.distance(tpos) - sb.radius - trader_radius).max(0.0);
@@ -1128,6 +1156,7 @@ async fn handle_call_component_from_client(
             message: format!(
                 "Ship is {surface_dist:.0} m from item trader {trader_id} (max {range_m:.0} m)"
             ),
+            client_error: None,
         });
     }
     if !allowed_recipes.contains(&recipe_id) {
@@ -1136,6 +1165,7 @@ async fn handle_call_component_from_client(
             message: format!(
                 "Recipe {recipe_id} is not offered by item trader type {trader_type_id}"
             ),
+            client_error: None,
         });
     }
     crate::services::insurgency_complex_ops::check_insurgency_laundering_access(
@@ -1151,12 +1181,14 @@ async fn handle_call_component_from_client(
         .map_err(|e| BridgeRpcError {
             code: "SdeError".into(),
             message: e.to_string(),
+            client_error: None,
         })?;
     let recipe_val = recipes_table
         .get(&recipe_id.to_string())
         .ok_or_else(|| BridgeRpcError {
             code: "RecipeNotFound".into(),
             message: format!("Item trader recipe {recipe_id} not found in SDE"),
+            client_error: None,
         })?;
     let input_isk = recipe_val
         .get("inputIsk")
@@ -1174,6 +1206,7 @@ async fn handle_call_component_from_client(
                     .ok_or_else(|| BridgeRpcError {
                         code: "InvalidMultiplier".into(),
                         message: "Item trader input quantity overflow".into(),
+                        client_error: None,
                     })?;
                 req_inputs.push((tid, q));
             }
@@ -1190,6 +1223,7 @@ async fn handle_call_component_from_client(
                     .ok_or_else(|| BridgeRpcError {
                         code: "InvalidMultiplier".into(),
                         message: "Item trader output quantity overflow".into(),
+                        client_error: None,
                     })?;
                 out_items.push((tid, q));
             }
@@ -1213,6 +1247,7 @@ async fn handle_call_component_from_client(
                 return Err(BridgeRpcError {
                     code: "InsufficientFunds".into(),
                     message: format!("Item trader recipe {recipe_id} requires {input_isk:.2} ISK"),
+                    client_error: None,
                 });
             }
         }
@@ -1235,6 +1270,7 @@ async fn handle_call_component_from_client(
                     message: format!(
                         "Recipe {recipe_id} requires {req_qty}x type {in_tid} in ship cargo (have {have_qty})"
                     ),
+                    client_error: None,
                 });
             }
         }
@@ -1286,6 +1322,7 @@ async fn handle_call_component_from_client(
                             message: format!(
                                 "Item trader output volume ({projected_vol:.1} m3) exceeds ship cargo capacity ({cargo_cap:.1} m3)"
                             ),
+                            client_error: None,
                         });
                     }
                 }

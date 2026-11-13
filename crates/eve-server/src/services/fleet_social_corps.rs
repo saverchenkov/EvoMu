@@ -252,11 +252,11 @@ pub(crate) fn require_corp_caller(
     }
     let caller_corp = match session.corporation_id {
         Some(cid) if cid > 0 => cid,
-        _ => return Err(BridgeRpcError { code: "CorpAccessDenied".into(), message: "Character does not belong to a corporation".into() }),
+        _ => return Err(BridgeRpcError { code: "CorpAccessDenied".into(), message: "Character does not belong to a corporation".into(), client_error: None }),
     };
     if let Some(target) = target_corp_arg {
         if target != caller_corp {
-            return Err(BridgeRpcError { code: "CorpAccessDenied".into(), message: "Access denied to external corporation members".into() });
+            return Err(BridgeRpcError { code: "CorpAccessDenied".into(), message: "Access denied to external corporation members".into(), client_error: None });
         }
     }
     promote_due_pending_corp_grants(ctx, caller_corp);
@@ -621,7 +621,7 @@ fn handle_audit_member(
         snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, now_unix)
     });
     if !is_ceo && !eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR) {
-        return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only Directors and CEO can audit member roles and permissions".into() }));
+        return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only Directors and CEO can audit member roles and permissions".into(), client_error: None }));
     }
     let target_id = args.first().and_then(|a| a.as_i64()).or_else(|| kwargs.get("characterID").and_then(|a| a.as_i64()));
     let from_ts = args.get(1).and_then(|a| a.as_i64()).or_else(|| kwargs.get("fromDate").and_then(|a| a.as_i64())).and_then(normalize_audit_timestamp_to_unix);
@@ -748,7 +748,7 @@ pub(super) fn handle_corps(
             });
 
             let Some((cid, name, ticker, ceo_id, m_count, m_limit, tax, alliance_id, hq_station, desc, url, h_divs, w_divs, allow_war)) = corp_info else {
-                return Some(Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") }));
+                return Some(Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found"), client_error: None }));
             };
             let ((s1, s2, s3, c1), (c2, c3), apps_enabled, friendly_fire) = read_corp_gov(ctx, |g| {
                 g.get(&cid)
@@ -856,6 +856,7 @@ pub(super) fn handle_corps(
                     return Some(Err(BridgeRpcError {
                         code: "NoCorporation".into(),
                         message: "Character has no active corporation".into(),
+                        client_error: None,
                     }))
                 }
             };
@@ -876,10 +877,10 @@ pub(super) fn handle_corps(
                 let (is_ceo, caller_role) =
                     snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
                 let Some(corp) = snap.corporations.get_mut(&corp_id) else {
-                    return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
+                    return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found"), client_error: None });
                 };
                 if !is_ceo && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR) {
-                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only CEO or Director can update corporation details".into() });
+                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only CEO or Director can update corporation details".into(), client_error: None });
                 }
                 let (old_desc, old_url, old_tax) = (corp.description.clone(), corp.url.clone(), corp.tax_rate);
                 corp.description = desc.to_string();
@@ -937,7 +938,7 @@ pub(super) fn handle_corps(
                 is_ceo || corp_roles::has_role(roles, corp_roles::ROLE_DIRECTOR)
             });
             if !is_ceo_or_dir {
-                return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only CEO or Director can update the corporation logo".into() }));
+                return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only CEO or Director can update the corporation logo".into(), client_error: None }));
             }
             let (old_logo, old_extra) = with_corp_gov(ctx, |g| {
                 let state = g.entry(corp_id).or_default();
@@ -968,7 +969,7 @@ pub(super) fn handle_corps(
         | ("corporationSvc", "UpdateDivisionNames") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(corp_id) = session.corporation_id else {
-                return Some(Err(BridgeRpcError { code: "NoCorporation".into(), message: "Character has no active corporation".into() }));
+                return Some(Err(BridgeRpcError { code: "NoCorporation".into(), message: "Character has no active corporation".into(), client_error: None }));
             };
             let dict_payload = args.first().and_then(|a| match a { PyRep::Dict(d) => Some(d.as_slice()), _ => None });
             if args.len() >= 14 || args.first().and_then(|a| a.as_str()).is_some() || dict_payload.is_some() {
@@ -979,10 +980,10 @@ pub(super) fn handle_corps(
                     let (is_ceo, caller_role) =
                         snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
                     let Some(corp) = snap.corporations.get_mut(&corp_id) else {
-                        return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
+                        return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found"), client_error: None });
                     };
                     if !is_ceo && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR) {
-                        return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only CEO or Director can update division names".into() });
+                        return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only CEO or Director can update division names".into(), client_error: None });
                     }
                     corp.ensure_wallet_divisions();
                     let mut diff = Vec::new();
@@ -1038,15 +1039,15 @@ pub(super) fn handle_corps(
                 let (is_ceo, caller_role) =
                     snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
                 let Some(corp) = snap.corporations.get_mut(&corp_id) else {
-                    return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
+                    return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found"), client_error: None });
                 };
                 if !is_ceo && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR) {
-                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only CEO or Director can update division names".into() });
+                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only CEO or Director can update division names".into(), client_error: None });
                 }
                 let old_w = if let Some(div) = corp.wallet_divisions.iter_mut().find(|d| d.division_id == div_id) {
                     std::mem::replace(&mut div.name, wallet_name.to_string())
                 } else {
-                    return Err(BridgeRpcError { code: "DivisionNotFound".into(), message: format!("Division {div_id} not found") });
+                    return Err(BridgeRpcError { code: "DivisionNotFound".into(), message: format!("Division {div_id} not found"), client_error: None });
                 };
                 snap.corp_hangar_divisions.entry(corp_id).or_default().insert(div_id, new_name.to_string());
                 Ok(old_w)
@@ -1114,12 +1115,14 @@ pub(super) fn handle_corps(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "InsertApplication requires target corporationID".into(),
+                    client_error: None,
                 }));
             };
             if ctx.sde.npc_corporations.contains_key(&corp_id) || (1_000_000..2_000_000).contains(&corp_id) {
                 return Some(Err(BridgeRpcError {
                     code: "CannotApplyToNpcCorporation".into(),
                     message: "Players cannot submit membership applications to NPC corporations".into(),
+                    client_error: None,
                 }));
             }
             let message = args
@@ -1132,12 +1135,14 @@ pub(super) fn handle_corps(
                     return Err(BridgeRpcError {
                         code: "CorporationNotFound".into(),
                         message: format!("Corporation {corp_id} not found"),
+                        client_error: None,
                     });
                 };
                 if corp.members.contains(&char_id) {
                     return Err(BridgeRpcError {
                         code: "AlreadyInCorporation".into(),
                         message: "Character is already a member of this corporation".into(),
+                        client_error: None,
                     });
                 }
                 snap.next_entity_id += 1;
@@ -1219,6 +1224,7 @@ pub(super) fn handle_corps(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "UpdateApplicationOffer requires applicationID".into(),
+                    client_error: None,
                 }));
             };
             let action = args
@@ -1243,11 +1249,13 @@ pub(super) fn handle_corps(
                     .ok_or_else(|| BridgeRpcError {
                         code: "NoCorporation".into(),
                         message: "Application corporation not found".into(),
+                        client_error: None,
                     })?;
                 let Some(corp) = snap.corporations.get(&corp_id) else {
                     return Err(BridgeRpcError {
                         code: "CorporationNotFound".into(),
                         message: format!("Corporation {corp_id} not found"),
+                        client_error: None,
                     });
                 };
                 let ceo_id = corp.ceo_id;
@@ -1255,9 +1263,9 @@ pub(super) fn handle_corps(
                     .applications
                     .get(&app_id)
                     .map(|a| (a.character_id, a.message.clone(), a.created_unix, a.status.clone()))
-                    .ok_or_else(|| BridgeRpcError { code: "ApplicationNotFound".into(), message: format!("Application {app_id} not found") })?;
+                    .ok_or_else(|| BridgeRpcError { code: "ApplicationNotFound".into(), message: format!("Application {app_id} not found"), client_error: None })?;
                 if !matches!(app_status.as_str(), "Pending" | "Open" | "Applied" | "Invited" | "Offered" | "Renegotiated") {
-                    return Err(BridgeRpcError { code: "ApplicationAlreadyClosed".into(), message: format!("Application {app_id} is already closed ('{app_status}')") });
+                    return Err(BridgeRpcError { code: "ApplicationAlreadyClosed".into(), message: format!("Application {app_id} is already closed ('{app_status}')"), client_error: None });
                 }
                 let old_corp_id = snap.characters.get(&applicant_id).map(|c| c.corporation_id).unwrap_or(0);
                 let is_invitation = app_status.eq_ignore_ascii_case("invited");
@@ -1270,7 +1278,7 @@ pub(super) fn handle_corps(
 
                 if action.eq_ignore_ascii_case("withdrawn") {
                     if char_id != applicant_id && !(is_invitation && has_personnel_role) {
-                        return Err(BridgeRpcError { code: "AccessDenied".into(), message: "Only the applicant can withdraw their application".into() });
+                        return Err(BridgeRpcError { code: "AccessDenied".into(), message: "Only the applicant can withdraw their application".into(), client_error: None });
                     }
                     let corp_mut = snap.corporations.get_mut(&corp_id).unwrap();
                     if let Some(app) = corp_mut.applications.get_mut(&app_id) {
@@ -1281,10 +1289,10 @@ pub(super) fn handle_corps(
 
                 if is_invitation {
                     if char_id != applicant_id {
-                        return Err(BridgeRpcError { code: "AccessDenied".into(), message: "Only the invited character can accept or reject a corporation invitation".into() });
+                        return Err(BridgeRpcError { code: "AccessDenied".into(), message: "Only the invited character can accept or reject a corporation invitation".into(), client_error: None });
                     }
                 } else if !has_personnel_role {
-                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Updating applications requires Personnel Manager or Director role".into() });
+                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Updating applications requires Personnel Manager or Director role".into(), client_error: None });
                 }
 
                 if action.eq_ignore_ascii_case("rejected") {
@@ -1295,13 +1303,13 @@ pub(super) fn handle_corps(
                     return Ok((corp_id, applicant_id, old_corp_id, "Rejected".to_string(), app_msg, app_ts, None, Vec::new()));
                 }
                 if !action.eq_ignore_ascii_case("accepted") {
-                    return Err(BridgeRpcError { code: "InvalidApplicationAction".into(), message: format!("Unknown application action '{action}'") });
+                    return Err(BridgeRpcError { code: "InvalidApplicationAction".into(), message: format!("Unknown application action '{action}'"), client_error: None });
                 }
                 if let Some(active_timer) = crate::services::space_destiny::check_session_change_timer_active(ctx, applicant_id, now_unix, None) {
-                    return Err(BridgeRpcError { code: "SessionChangeInProgress".into(), message: format!("Cannot join corporation while 10s session-change timer ({}) is active", active_timer.reason) });
+                    return Err(BridgeRpcError { code: "SessionChangeInProgress".into(), message: format!("Cannot join corporation while 10s session-change timer ({}) is active", active_timer.reason), client_error: None });
                 }
                 if snap.characters.get(&applicant_id).is_some_and(|ch| ch.station_id.is_none() && ch.structure_id.is_none()) {
-                    return Err(BridgeRpcError { code: "MustBeDockedToJoinCorp".into(), message: "Character must be docked in a station or structure to accept a corporation transition".into() });
+                    return Err(BridgeRpcError { code: "MustBeDockedToJoinCorp".into(), message: "Character must be docked in a station or structure to accept a corporation transition".into(), client_error: None });
                 }
                 if snap.corporations.values().any(|c| c.corporation_id != corp_id && c.ceo_id == applicant_id) {
                     return Err(BridgeRpcError::user_error("CeoCannotLeaveCorp"));
@@ -1313,7 +1321,7 @@ pub(super) fn handle_corps(
                             return Err(BridgeRpcError::user_error("CeoCannotLeaveCorp"));
                         }
                         if let Some(blocker) = super::fleet_social_corp_tail::member_kick_blocker(snap, old_corp_id, applicant_id, now_unix) {
-                            return Err(BridgeRpcError { code: "CannotLeaveOldCorpWithRoles".into(), message: format!("Cannot leave current corporation while {blocker}") });
+                            return Err(BridgeRpcError { code: "CannotLeaveOldCorpWithRoles".into(), message: format!("Cannot leave current corporation while {blocker}"), client_error: None });
                         }
                     }
                 }
@@ -1325,6 +1333,7 @@ pub(super) fn handle_corps(
                         message: format!(
                             "Corporation has reached its CEO skill member limit of {max_members}"
                         ),
+                        client_error: None,
                     });
                 }
 
@@ -1533,6 +1542,7 @@ pub(super) fn handle_corps(
                 return Some(Err(BridgeRpcError {
                     code: "AccessDenied".into(),
                     message: "InsertInvitation cannot auto-join a character; the target must accept via UpdateApplicationOffer".into(),
+                    client_error: None,
                 }));
             }
             promote_due_pending_corp_grants(ctx, corp_id);
@@ -1542,6 +1552,7 @@ pub(super) fn handle_corps(
                     return Err(BridgeRpcError {
                         code: "CorporationNotFound".into(),
                         message: format!("Corporation {corp_id} not found"),
+                        client_error: None,
                     });
                 };
                 let ceo_id = corp.ceo_id;
@@ -1555,12 +1566,14 @@ pub(super) fn handle_corps(
                     return Err(BridgeRpcError {
                         code: "CorpRoleDenied".into(),
                         message: "Inviting characters requires Personnel Manager role".into(),
+                        client_error: None,
                     });
                 }
                 if !snap.characters.contains_key(&target_id) {
                     return Err(BridgeRpcError {
                         code: "CharacterNotFound".into(),
                         message: format!("Character {target_id} not found"),
+                        client_error: None,
                     });
                 }
                 let max_members = compute_corp_member_limit(ctx, snap, corp_id, ceo_id);
@@ -1570,6 +1583,7 @@ pub(super) fn handle_corps(
                         message: format!(
                             "Corporation has reached its CEO skill member limit of {max_members}"
                         ),
+                        client_error: None,
                     });
                 }
                 snap.next_entity_id += 1;
@@ -1693,6 +1707,7 @@ pub(super) fn handle_corps(
                     return Some(Err(BridgeRpcError {
                         code: "NoCorporation".into(),
                         message: "Character has no active corporation".into(),
+                        client_error: None,
                     }))
                 }
             };
@@ -1703,6 +1718,7 @@ pub(super) fn handle_corps(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidTransferDivision".into(),
                         message: e.message,
+                        client_error: None,
                     }));
                 }
             };
@@ -1712,6 +1728,7 @@ pub(super) fn handle_corps(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidTransferDivision".into(),
                         message: e.message,
+                        client_error: None,
                     }));
                 }
             };
@@ -1720,17 +1737,17 @@ pub(super) fn handle_corps(
                 Err(e) => return Some(Err(e)),
             };
             let (Ok(from_div), Ok(to_div)) = (u8::try_from(from_div_i), u8::try_from(to_div_i)) else {
-                return Some(Err(BridgeRpcError { code: "InvalidTransferDivision".into(), message: "Source and target wallet divisions must be distinct (1..=7)".into() }));
+                return Some(Err(BridgeRpcError { code: "InvalidTransferDivision".into(), message: "Source and target wallet divisions must be distinct (1..=7)".into(), client_error: None }));
             };
             if from_div == to_div || !(1..=7).contains(&from_div) || !(1..=7).contains(&to_div) {
-                return Some(Err(BridgeRpcError { code: "InvalidTransferDivision".into(), message: "Source and target wallet divisions must be distinct (1..=7)".into() }));
+                return Some(Err(BridgeRpcError { code: "InvalidTransferDivision".into(), message: "Source and target wallet divisions must be distinct (1..=7)".into(), client_error: None }));
             }
             let transfer_amount = IskCents::from_f64_isk(amount_isk);
             promote_due_pending_corp_grants(ctx, corp_id);
             let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if !snap.corporations.contains_key(&corp_id) {
-                    return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
+                    return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found"), client_error: None });
                 }
                 let (is_ceo, eff_roles) =
                     crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
@@ -1738,13 +1755,13 @@ pub(super) fn handle_corps(
                     );
                 let take_bit = corp_roles::ROLE_ACCOUNT_CAN_TAKE[usize::from(from_div - 1)];
                 if !is_ceo && (eff_roles & (corp_roles::ROLE_DIRECTOR | take_bit)) == 0 {
-                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Transferring between corp wallet divisions requires Director or source wallet division take role".into() });
+                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Transferring between corp wallet divisions requires Director or source wallet division take role".into(), client_error: None });
                 }
                 let corp = snap.corporations.get_mut(&corp_id).unwrap();
                 corp.ensure_wallet_divisions();
                 let source_bal = corp.division_balance(from_div);
                 let new_source = source_bal.checked_sub(transfer_amount)
-                    .ok_or_else(|| BridgeRpcError { code: "InsufficientDivisionFunds".into(), message: "Insufficient funds in source wallet division".into() })?;
+                    .ok_or_else(|| BridgeRpcError { code: "InsufficientDivisionFunds".into(), message: "Insufficient funds in source wallet division".into(), client_error: None })?;
                 corp.set_division_balance(from_div, new_source);
                 let new_target = corp.credit_division(to_div, transfer_amount);
                 snap.next_entity_id += 2;

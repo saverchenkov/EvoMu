@@ -214,12 +214,14 @@ pub fn execute_post_classification(
                 "task_id {} does not match current active task {}",
                 req_task_index, st.current_task_index
             ),
+            client_error: None,
         });
     }
     if st.last_submitted_task_index >= st.current_task_index {
         return Err(BridgeRpcError {
             code: "TaskAlreadySubmitted".into(),
             message: "Active task has already been submitted".into(),
+            client_error: None,
         });
     }
 

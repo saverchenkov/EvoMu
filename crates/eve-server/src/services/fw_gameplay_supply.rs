@@ -152,21 +152,25 @@ pub(crate) async fn apply_supply_site_damage(
             .ok_or_else(|| BridgeRpcError {
                 code: "NotEnlistedInMilitia".into(),
                 message: "Only militia-enlisted pilots can attack FW Supply Caches/Depots".into(),
+                client_error: None,
             })?;
         if att_fac == site_fac {
             return Err(BridgeRpcError {
                 code: "CannotAttackFriendlyStructure".into(),
                 message: "Cannot attack your own militia's Supply Cache/Depot".into(),
+                client_error: None,
             });
         }
         let st = snap.structures.get_mut(&structure_id).ok_or_else(|| BridgeRpcError {
             code: "StructureNotFound".into(),
             message: format!("Supply site {structure_id} not found"),
+            client_error: None,
         })?;
         if st.state == "Destroyed" {
             return Err(BridgeRpcError {
                 code: "StructureDestroyed".into(),
                 message: format!("Supply site {structure_id} is already destroyed"),
+                client_error: None,
             });
         }
         let pos = st.position;

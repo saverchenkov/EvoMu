@@ -128,6 +128,7 @@ impl ServerContext {
                 message: format!(
                     "Charges/scripts can only be loaded into module slots 11..=34 (got {flag_u16})"
                 ),
+                client_error: None,
             });
         }
         {
@@ -135,6 +136,7 @@ impl ServerContext {
                 return Err(BridgeRpcError {
                     code: "ShipNotFound".into(),
                     message: format!("Target ship {ship_id} not found"),
+                    client_error: None,
                 });
             };
             let is_ship = self
@@ -150,6 +152,7 @@ impl ServerContext {
                 return Err(BridgeRpcError {
                     code: "InvalidFittingTarget".into(),
                     message: format!("Target {ship_id} is not an owned co-located ship"),
+                    client_error: None,
                 });
             }
 
@@ -173,12 +176,14 @@ impl ServerContext {
                     message: format!(
                         "High slot {flag_u16} on ship {ship_id} has no fitted weapon module"
                     ),
+                    client_error: None,
                 });
             };
             let Some(weapon_type) = self.sde.types.get(&wtid) else {
                 return Err(BridgeRpcError {
                     code: "UnknownWeaponType".into(),
                     message: format!("Unknown weapon type {wtid}"),
+                    client_error: None,
                 });
             };
 
@@ -186,6 +191,7 @@ impl ServerContext {
                 return Err(BridgeRpcError {
                     code: "ItemNotFound".into(),
                     message: format!("Charge item {charge_item_id} not found"),
+                    client_error: None,
                 });
             };
             if src_charge.location_id == ship_id && src_charge.flag == flag {
@@ -202,12 +208,14 @@ impl ServerContext {
                     message: format!(
                         "Charge item {charge_item_id} must be owned, unlocked, and in ship {ship_id} Cargo or current station Hangar"
                     ),
+                    client_error: None,
                 });
             }
             let Some(charge_type) = self.sde.types.get(&src_charge.type_id) else {
                 return Err(BridgeRpcError {
                     code: "UnknownChargeType".into(),
                     message: format!("Unknown charge type {}", src_charge.type_id),
+                    client_error: None,
                 });
             };
             if !Self::is_charge_compatible_with_weapon(weapon_type, charge_type) {
@@ -217,6 +225,7 @@ impl ServerContext {
                         "Charge {} (type {}) is not compatible with weapon {} (type {wtid})",
                         charge_type.name, src_charge.type_id, weapon_type.name
                     ),
+                    client_error: None,
                 });
             }
             self.check_type_skill_prerequisites_in_snapshot(snap, char_id, src_charge.type_id)?;

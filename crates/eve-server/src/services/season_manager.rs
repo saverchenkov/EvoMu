@@ -466,6 +466,7 @@ pub fn handle_season_manager(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSeasonId".into(),
                     message: "select_season requires an integer season ID".into(),
+                    client_error: None,
                 }));
             };
             let res = with_season_state(ctx, char_id, |st, snap| {
@@ -475,12 +476,14 @@ pub fn handle_season_manager(
                     return Err(BridgeRpcError {
                         code: "InvalidSeasonId".into(),
                         message: format!("Unknown or inactive season ID {season_id}"),
+                        client_error: None,
                     });
                 };
                 if active_cfg.end_time_ft <= now_ft {
                     return Err(BridgeRpcError {
                         code: "InvalidSeasonId".into(),
                         message: format!("Season ID {season_id} has already ended"),
+                        client_error: None,
                     });
                 }
                 st.selected_season_id = season_id;
@@ -591,6 +594,7 @@ pub fn handle_season_manager(
                 return Some(Err(BridgeRpcError {
                     code: "ChallengeNotFound".into(),
                     message: "get_challenge requires a challenge ID".into(),
+                    client_error: None,
                 }));
             };
             let res = read_character_season_state(ctx, char_id, |st, snap| {
@@ -607,6 +611,7 @@ pub fn handle_season_manager(
                         Err(BridgeRpcError {
                             code: "ChallengeNotFound".into(),
                             message: format!("Challenge {ch_id} not found"),
+                            client_error: None,
                         })
                     }
                 }
@@ -622,6 +627,7 @@ pub fn handle_season_manager(
                 return Some(Err(BridgeRpcError {
                     code: "ChallengeNotFound".into(),
                     message: "challenge_is_dormant requires a challenge ID".into(),
+                    client_error: None,
                 }));
             };
             let res = read_character_season_state(ctx, char_id, |st, snap| {
@@ -636,6 +642,7 @@ pub fn handle_season_manager(
                         Err(BridgeRpcError {
                             code: "ChallengeNotFound".into(),
                             message: format!("Challenge {ch_id} not found"),
+                            client_error: None,
                         })
                     }
                 }
@@ -651,6 +658,7 @@ pub fn handle_season_manager(
                 return Some(Err(BridgeRpcError {
                     code: "ChallengeNotFound".into(),
                     message: "get_challenge_expiration_date requires a challenge ID".into(),
+                    client_error: None,
                 }));
             };
             let res = read_character_season_state(ctx, char_id, |st, snap| {
@@ -667,6 +675,7 @@ pub fn handle_season_manager(
                         Err(BridgeRpcError {
                             code: "ChallengeNotFound".into(),
                             message: format!("Challenge {ch_id} not found"),
+                            client_error: None,
                         })
                     }
                 }
@@ -691,6 +700,7 @@ pub fn handle_season_manager(
                 return Some(Err(BridgeRpcError {
                     code: "ChallengeNotFound".into(),
                     message: "Challenge not found".into(),
+                    client_error: None,
                 }));
             }
             let amount = if let Some(v) = kwargs.get("amount").filter(|v| !matches!(v, PyRep::None)) {
@@ -698,6 +708,7 @@ pub fn handle_season_manager(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidEventProgress".into(),
                         message: "Event progress increment must be a positive integer".into(),
+                        client_error: None,
                     }));
                 };
                 n
@@ -706,6 +717,7 @@ pub fn handle_season_manager(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidEventProgress".into(),
                         message: "Event progress increment must be a positive integer".into(),
+                        client_error: None,
                     }));
                 };
                 n
@@ -733,17 +745,20 @@ pub fn handle_season_manager(
                             return Err(BridgeRpcError {
                                 code: "InvalidChallengeEvent".into(),
                                 message: "Server-side activity challenge cannot be progressed via client events".into(),
+                                client_error: None,
                             });
                         }
                         return Err(BridgeRpcError {
                             code: "ChallengeNotFound".into(),
                             message: "Challenge not found".into(),
+                            client_error: None,
                         });
                     };
                     if ch.is_dormant {
                         return Err(BridgeRpcError {
                             code: "ChallengeDormant".into(),
                             message: "Dormant challenge cannot be progressed".into(),
+                            client_error: None,
                         });
                     }
                     let is_client_driven = def_opt.map(|d| d.client_event_driven).unwrap_or(ch.client_event_driven);
@@ -751,6 +766,7 @@ pub fn handle_season_manager(
                         return Err(BridgeRpcError {
                             code: "InvalidChallengeEvent".into(),
                             message: "Server-side activity challenge cannot be progressed via client events".into(),
+                            client_error: None,
                         });
                     }
                     if def_opt.is_some_and(|d| !matches_challenge_conditions(d, extra_data, cond_catalog)) {
@@ -819,6 +835,7 @@ pub fn handle_season_manager(
                 return Some(Err(BridgeRpcError {
                     code: "ChallengeNotFound".into(),
                     message: "claim_challenge_rewards requires a challenge ID".into(),
+                    client_error: None,
                 }));
             };
             let now_unix = ctx.now_unix();
@@ -840,30 +857,35 @@ pub fn handle_season_manager(
                     return Err(BridgeRpcError {
                         code: "ChallengeAlreadyClaimed".into(),
                         message: "Challenge rewards already claimed".into(),
+                        client_error: None,
                     });
                 }
                 let Some(ch_ref) = st.challenges.get(&ch_id) else {
                     return Err(BridgeRpcError {
                         code: "ChallengeNotFound".into(),
                         message: "Challenge not found".into(),
+                        client_error: None,
                     });
                 };
                 if ch_ref.is_dormant {
                     return Err(BridgeRpcError {
                         code: "ChallengeDormant".into(),
                         message: "Dormant challenge cannot be claimed".into(),
+                        client_error: None,
                     });
                 }
                 if ch_ref.claimed {
                     return Err(BridgeRpcError {
                         code: "ChallengeAlreadyClaimed".into(),
                         message: "Challenge rewards already claimed".into(),
+                        client_error: None,
                     });
                 }
                 if !ch_ref.completed && ch_ref.progress < ch_ref.max_progress {
                     return Err(BridgeRpcError {
                         code: "ChallengeNotCompleted".into(),
                         message: "Challenge is not yet completed".into(),
+                        client_error: None,
                     });
                 }
                 let mut ch = st.challenges.remove(&ch_id).expect("verified present");
@@ -1037,6 +1059,7 @@ pub fn handle_season_manager(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidTypeId".into(),
                     message: "Invalid or unknown type ID".into(),
+                    client_error: None,
                 }));
             };
             let custom_loot: Option<Vec<(u32, i64, f64)>> = ctx.db.with_snapshot(|snap| {
@@ -1073,6 +1096,7 @@ pub fn handle_season_manager(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidGoalId".into(),
                         message: format!("goal_id {raw_goal_id} is out of valid u32 range"),
+                        client_error: None,
                     }));
                 };
                 let milestones = crate::services::quasar_career_goals::default_career_milestones();
@@ -1086,6 +1110,7 @@ pub fn handle_season_manager(
                     return Some(Err(BridgeRpcError {
                         code: "ChallengeNotFound".into(),
                         message: format!("Goal or challenge {goal_id} not found"),
+                        client_error: None,
                     }));
                 };
                 Some((
@@ -1158,6 +1183,7 @@ pub fn handle_season_manager(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidGoalId".into(),
                     message: format!("goal_id {raw_goal_id} is out of valid u32 range"),
+                    client_error: None,
                 }));
             };
             let milestones = crate::services::quasar_career_goals::default_career_milestones();
@@ -1171,6 +1197,7 @@ pub fn handle_season_manager(
                 return Some(Err(BridgeRpcError {
                     code: "ChallengeNotFound".into(),
                     message: format!("Goal or challenge {goal_id} not found"),
+                    client_error: None,
                 }));
             };
             let target_prog = resolved.required_progress;

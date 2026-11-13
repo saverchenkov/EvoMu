@@ -154,6 +154,7 @@ pub async fn handle(
                     code: "InvalidArguments".into(),
                     message: "alert.SendClientStackTraceAlert expects (stackID, stackTrace, mode, ...)"
                         .into(),
+                    client_error: None,
                 }));
             };
             let trace = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
@@ -281,6 +282,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "NotAuthorized".into(),
+                    client_error: None,
                 }));
             }
             let (error_id, log_mode) = match args {
@@ -298,6 +300,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArguments".into(),
                     message: "alert.LogModeChanged expects (errorID, logMode)".into(),
+                    client_error: None,
                 }));
             }
             ctx.db.with_mut_snapshot(|snap| {
@@ -328,6 +331,7 @@ pub async fn handle(
                     code: "InvalidArguments".into(),
                     message: "alert.SendProxyStackTraceAlert expects (stackID, stackTrace, mode, ...)"
                         .into(),
+                    client_error: None,
                 }));
             };
             let trace = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
@@ -577,6 +581,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArguments".into(),
                     message: "populationCap.GetCharacterLoadSlot expects (charID,)".into(),
+                    client_error: None,
                 }));
             };
             let Some(ch) = ctx
@@ -588,6 +593,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "CharacterOwnershipError".into(),
                     message: format!("Character {char_id} does not belong to user {user_id}"),
+                    client_error: None,
                 }));
             };
             let cur_sys = ch.solar_system_id;
@@ -617,12 +623,14 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArguments".into(),
                     message: "populationCap.MoveCharacterToNewSystem expects (charID, selectedSolarSystemID, slotKey)".into(),
+                    client_error: None,
                 }));
             };
             let Some(new_system_id_raw) = args.get(1).and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArguments".into(),
                     message: "populationCap.MoveCharacterToNewSystem requires selectedSolarSystemID".into(),
+                    client_error: None,
                 }));
             };
             let selected_sys = match u32::try_from(new_system_id_raw) {
@@ -631,6 +639,7 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSolarSystem".into(),
                         message: format!("Invalid solar system ID {new_system_id_raw}"),
+                        client_error: None,
                     }));
                 }
             };
@@ -645,12 +654,14 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "CharacterOwnershipError".into(),
                     message: format!("Character {char_id} does not belong to user {user_id}"),
+                    client_error: None,
                 }));
             }
             if !ctx.sde.solar_systems.contains_key(&selected_sys) {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSolarSystem".into(),
                     message: format!("Solar system {selected_sys} does not exist in SDE"),
+                    client_error: None,
                 }));
             }
 
@@ -666,6 +677,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "SystemNotOffered".into(),
                     message: format!("Solar system {selected_sys} was not offered for character {char_id} with slot key '{slot_key_str}'"),
+                    client_error: None,
                 }));
             }
 
@@ -692,6 +704,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArguments".into(),
                     message: "charUnboundMgr.GetCharacterLockType expects (charID,)".into(),
+                    client_error: None,
                 }));
             };
             let owned = ctx
@@ -703,6 +716,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "CharacterOwnershipError".into(),
                     message: format!("Character {char_id} does not belong to user {user_id}"),
+                    client_error: None,
                 }));
             }
             let lock_type = ctx.db.with_snapshot(|s| {
@@ -750,6 +764,7 @@ pub async fn handle(
                             code: "SessionError".into(),
                             message: "photoUploadSvc.Upload requires an authenticated character"
                                 .into(),
+                            client_error: None,
                         }));
                     }
                 },
@@ -760,6 +775,7 @@ pub async fn handle(
                             code: "SessionError".into(),
                             message: "photoUploadSvc.Upload requires an authenticated character"
                                 .into(),
+                            client_error: None,
                         }));
                     }
                 },
@@ -769,6 +785,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArguments".into(),
                     message: "photoUploadSvc.Upload requires characterID and portrait data".into(),
+                    client_error: None,
                 }));
             }
             if portrait_data.len() > MAX_PORTRAIT_UPLOAD_BYTES {
@@ -779,6 +796,7 @@ pub async fn handle(
                         portrait_data.len(),
                         MAX_PORTRAIT_UPLOAD_BYTES
                     ),
+                    client_error: None,
                 }));
             }
             let is_owner = ctx.db.with_snapshot(|s| {
@@ -788,6 +806,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "CharacterOwnershipError".into(),
                     message: format!("Character {char_id} does not belong to user {user_id}"),
+                    client_error: None,
                 }));
             }
             let hex_str = portrait_data.iter().map(|b| format!("{b:02x}")).collect::<String>();
@@ -855,6 +874,7 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "StationNotFound".into(),
                         message: format!("Station {sid} not found"),
+                        client_error: None,
                     }));
                 }
             }
@@ -920,6 +940,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "CharacterNotFound".into(),
                     message: format!("character {char_id} not found"),
+                    client_error: None,
                 }));
             };
             // `{attributeID: value}` for dogma attributes 164..=168 (charisma, intelligence,
@@ -941,6 +962,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "CharacterNotFound".into(),
                     message: format!("character {char_id} not found"),
+                    client_error: None,
                 }));
             };
             Some(Ok(PyRep::Integer(ch.free_skill_points as i64)))
@@ -978,6 +1000,7 @@ fn handle_alert_bean_count(
         return Some(Err(BridgeRpcError {
             code: "InvalidArguments".into(),
             message: "alert.BeanCount expects (stackIDHash,)".into(),
+            client_error: None,
         }));
     };
     let entry = ctx
@@ -1005,6 +1028,7 @@ fn handle_alert_bean_delivery(
         return Some(Err(BridgeRpcError {
             code: "InvalidArguments".into(),
             message: "alert.BeanDelivery expects ({errorID: (count, time)},)".into(),
+            client_error: None,
         }));
     };
     let mut beans = Vec::with_capacity(entries.len());
@@ -1017,6 +1041,7 @@ fn handle_alert_bean_delivery(
             return Some(Err(BridgeRpcError {
                 code: "InvalidArguments".into(),
                 message: format!("alert.BeanDelivery count for errorID {error_id} is negative"),
+                client_error: None,
             }));
         }
         beans.push((error_id, n));

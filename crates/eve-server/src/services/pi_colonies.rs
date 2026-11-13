@@ -41,6 +41,7 @@ pub fn handle_pi_colonies(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "GetColony requires an explicit integer planetID or bound planetMgr moniker".into(),
+                    client_error: None,
                 }));
             };
             let now_unix = ctx.now_unix();
@@ -49,6 +50,7 @@ pub fn handle_pi_colonies(
                     return Err(BridgeRpcError {
                         code: "ColonyNotFound".into(),
                         message: format!("No planetary colony found on planet {planet_id}"),
+                        client_error: None,
                     });
                 };
                 let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
@@ -149,6 +151,7 @@ pub fn handle_pi_colonies(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "GetCommandPinsForPlanet requires an explicit integer planetID or bound planetMgr moniker".into(),
+                    client_error: None,
                 }));
             };
             let res = ctx.db.with_snapshot(|snap| {
@@ -187,6 +190,7 @@ pub fn handle_pi_colonies(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "GetExtractorsForPlanet requires an explicit integer planetID or bound planetMgr moniker".into(),
+                    client_error: None,
                 }));
             };
             let res = ctx.db.with_snapshot(|snap| {
@@ -230,6 +234,7 @@ pub fn handle_pi_colonies(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "GetCommandCenterLevel requires planetID or bound planetMgr moniker".into(),
+                    client_error: None,
                 }));
             };
             let lvl = ctx.db.with_snapshot(|snap| {
@@ -254,6 +259,7 @@ pub fn handle_pi_colonies(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "GetPin requires planetID or bound planetMgr moniker".into(),
+                    client_error: None,
                 }));
             };
             let res = ctx.db.with_snapshot(|snap| {
@@ -261,6 +267,7 @@ pub fn handle_pi_colonies(
                     return Err(BridgeRpcError {
                         code: "ColonyNotFound".into(),
                         message: format!("No colony on planet {planet_id}"),
+                        client_error: None,
                     });
                 };
                 let net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
@@ -268,6 +275,7 @@ pub fn handle_pi_colonies(
                     return Err(BridgeRpcError {
                         code: "PinNotFound".into(),
                         message: format!("Pin {pin_id} not found on planet {planet_id}"),
+                        client_error: None,
                     });
                 };
                 let schem_id = pin.schematic_id.unwrap_or(0);
@@ -304,6 +312,7 @@ pub fn handle_pi_colonies(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "UserAbandonPlanet requires planetID or bound planetMgr moniker".into(),
+                    client_error: None,
                 }));
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -311,6 +320,7 @@ pub fn handle_pi_colonies(
                     return Err(BridgeRpcError {
                         code: "ColonyNotFound".into(),
                         message: format!("No colony on planet {planet_id} to abandon"),
+                        client_error: None,
                     });
                 }
                 snap.owner_notes.remove(&pi_network_note_id(char_id, planet_id));
@@ -341,6 +351,7 @@ pub fn handle_pi_colonies(
                 return Some(Err(BridgeRpcError {
                     code: "ClientSchematicOverrideForbidden".into(),
                     message: "UserUpdateNetwork only accepts (planetID, [commandStream])".into(),
+                    client_error: None,
                 }));
             }
             let (planet_id_opt, cmd_list_opt) = match (args.first(), args.get(1)) {
@@ -357,18 +368,21 @@ pub fn handle_pi_colonies(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "UserUpdateNetwork requires planetID and a commandStream list".into(),
+                    client_error: None,
                 }));
             };
             if !(40_000_000..50_000_000).contains(&planet_id) {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: format!("Planet ID {planet_id} is outside 40000000..50000000"),
+                    client_error: None,
                 }));
             }
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solar system".into(),
+                    client_error: None,
                 }));
             };
             let planet_in_current_sys = ctx
@@ -381,6 +395,7 @@ pub fn handle_pi_colonies(
                 return Some(Err(BridgeRpcError {
                     code: "PlanetNotInCurrentSystem".into(),
                     message: format!("Planet {planet_id} is not in solar system {sys_id}"),
+                    client_error: None,
                 }));
             }
             let _ = match resolve_sde_planet_p0_extraction(ctx, sys_id, planet_id, None) {
@@ -404,6 +419,7 @@ pub fn handle_pi_colonies(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidCommandStream".into(),
                     message: "UserUpdateNetwork requires a non-empty commandStream".into(),
+                    client_error: None,
                 }));
             };
 
@@ -442,6 +458,7 @@ pub fn handle_pi_colonies(
                                 return Err(BridgeRpcError {
                                     code: "InvalidCommandStream".into(),
                                     message: "Each command must be a tuple, list, or KeyVal".into(),
+                                    client_error: None,
                                 });
                             }
                         };
@@ -468,6 +485,7 @@ pub fn handle_pi_colonies(
                                     return Err(BridgeRpcError {
                                         code: "InvalidPinType".into(),
                                         message: format!("Invalid pin typeID {type_id_raw}"),
+                                        client_error: None,
                                     });
                                 };
                                 let half_pi = std::f64::consts::FRAC_PI_2 + 1e-6;
@@ -476,6 +494,7 @@ pub fn handle_pi_colonies(
                                     return Err(BridgeRpcError {
                                         code: "InvalidPinCoordinates".into(),
                                         message: "Pin coordinates must be finite radians".into(),
+                                        client_error: None,
                                     });
                                 }
 
@@ -484,18 +503,21 @@ pub fn handle_pi_colonies(
                                         return Err(BridgeRpcError {
                                             code: "CannotPlaceCommandCenterWhileDocked".into(),
                                             message: "Cannot deploy a Command Center while docked".into(),
+                                            client_error: None,
                                         });
                                     }
                                     let Some(ship_id) = active_ship_id else {
                                         return Err(BridgeRpcError {
                                             code: "CommandCenterItemRequired".into(),
                                             message: "Deploying a Command Center requires an active ship".into(),
+                                            client_error: None,
                                         });
                                     };
                                     if snap.planetary_colonies.contains_key(&(char_id, planet_id)) {
                                         return Err(BridgeRpcError {
                                             code: "ColonyAlreadyExists".into(),
                                             message: format!("Colony already exists on planet {planet_id}"),
+                                            client_error: None,
                                         });
                                     }
                                     let char_colony_count = snap.planetary_colonies.keys().filter(|(cid, _)| *cid == char_id).count();
@@ -504,6 +526,7 @@ pub fn handle_pi_colonies(
                                         return Err(BridgeRpcError {
                                             code: "MaxColoniesReached".into(),
                                             message: "Maximum planetary colonies reached".into(),
+                                            client_error: None,
                                         });
                                     }
                                     if let Some(cc_sde_type) = ctx.sde.types.get(&pin_type_id) {
@@ -513,6 +536,7 @@ pub fn handle_pi_colonies(
                                                 return Err(BridgeRpcError {
                                                     code: "IncompatibleCommandCenterPlanetType".into(),
                                                     message: format!("Command Center type {pin_type_id} requires planet type {req_id}"),
+                                                    client_error: None,
                                                 });
                                             }
                                         }
@@ -521,6 +545,7 @@ pub fn handle_pi_colonies(
                                         return Err(BridgeRpcError {
                                             code: "DuplicatePinID".into(),
                                             message: format!("Duplicate pin ID {pin_id_raw}"),
+                                            client_error: None,
                                         });
                                     }
                                     let matching_cc_item_id = snap
@@ -539,6 +564,7 @@ pub fn handle_pi_colonies(
                                         return Err(BridgeRpcError {
                                             code: "CommandCenterItemRequired".into(),
                                             message: "Command Center item required in ship cargo".into(),
+                                            client_error: None,
                                         });
                                     };
                                     if let Some(cc_item) = snap.items.get(&cc_item_id).cloned() {
@@ -551,6 +577,7 @@ pub fn handle_pi_colonies(
                                         .map_err(|e| BridgeRpcError {
                                             code: "CommandCenterItemLocked".into(),
                                             message: e.to_string(),
+                                            client_error: None,
                                         })?;
                                     }
                                     snap.next_entity_id += 1;
@@ -590,6 +617,7 @@ pub fn handle_pi_colonies(
                                         return Err(BridgeRpcError {
                                             code: "ColonyNotFound".into(),
                                             message: format!("No colony on planet {planet_id}"),
+                                            client_error: None,
                                         });
                                     };
                                     let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
@@ -597,6 +625,7 @@ pub fn handle_pi_colonies(
                                         return Err(BridgeRpcError {
                                             code: "DuplicatePinID".into(),
                                             message: format!("Pin ID {pin_id_raw} already exists"),
+                                            client_error: None,
                                         });
                                     }
                                     let (pin_cpu, pin_pg, pin_cost_isk) = resolve_pi_pin_stats(ctx, pin_type_id);
@@ -604,6 +633,7 @@ pub fn handle_pi_colonies(
                                         return Err(BridgeRpcError {
                                             code: "InsufficientColonyCpuOrPowergrid".into(),
                                             message: "Placing pin exceeds colony CPU or Powergrid".into(),
+                                            client_error: None,
                                         });
                                     }
                                     let cost_cents = IskCents::from_f64_isk(pin_cost_isk);
@@ -612,6 +642,7 @@ pub fn handle_pi_colonies(
                                             return Err(BridgeRpcError {
                                                 code: "InsufficientFunds".into(),
                                                 message: "Insufficient ISK to construct planetary pin".into(),
+                                                client_error: None,
                                             });
                                         }
                                         ch.balance = ch.balance.checked_sub(cost_cents).unwrap_or(IskCents(0));
@@ -659,6 +690,7 @@ pub fn handle_pi_colonies(
                                     return Err(BridgeRpcError {
                                         code: "ColonyNotFound".into(),
                                         message: format!("No colony on planet {planet_id}"),
+                                        client_error: None,
                                     });
                                 };
                                 let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
@@ -666,6 +698,7 @@ pub fn handle_pi_colonies(
                                     return Err(BridgeRpcError {
                                         code: "PinNotFound".into(),
                                         message: format!("Pin {pin_id} not found"),
+                                        client_error: None,
                                     });
                                 };
                                 let removed = net.pins.remove(idx);
@@ -696,6 +729,7 @@ pub fn handle_pi_colonies(
                                     return Err(BridgeRpcError {
                                         code: "InvalidLinkParameters".into(),
                                         message: "CreateLink requires distinct positive pinIDs and level 0..=10".into(),
+                                        client_error: None,
                                     });
                                 }
                                 let level = level_raw as u8;
@@ -703,6 +737,7 @@ pub fn handle_pi_colonies(
                                     return Err(BridgeRpcError {
                                         code: "ColonyNotFound".into(),
                                         message: format!("No colony on planet {planet_id}"),
+                                        client_error: None,
                                     });
                                 };
                                 let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
@@ -710,12 +745,14 @@ pub fn handle_pi_colonies(
                                     return Err(BridgeRpcError {
                                         code: "PinNotFound".into(),
                                         message: format!("Source pin {src_id} not found"),
+                                        client_error: None,
                                     });
                                 };
                                 let Some(p2) = net.pins.iter().find(|p| p.pin_id == dst_id).cloned() else {
                                     return Err(BridgeRpcError {
                                         code: "PinNotFound".into(),
                                         message: format!("Destination pin {dst_id} not found"),
+                                        client_error: None,
                                     });
                                 };
                                 if net.links.iter().any(|l| {
@@ -725,6 +762,7 @@ pub fn handle_pi_colonies(
                                     return Err(BridgeRpcError {
                                         code: "LinkAlreadyExists".into(),
                                         message: "Link already exists".into(),
+                                        client_error: None,
                                     });
                                 }
                                 let cos_dsigma = (p1.latitude.sin() * p2.latitude.sin()
@@ -736,6 +774,7 @@ pub fn handle_pi_colonies(
                                     return Err(BridgeRpcError {
                                         code: "InsufficientColonyCpuOrPowergrid".into(),
                                         message: "Link exceeds colony CPU or Powergrid".into(),
+                                        client_error: None,
                                     });
                                 }
                                 let link_cost_isk = (2_500.0 + 10.0 * length_km) * 2.0_f64.powi(level as i32);
@@ -745,6 +784,7 @@ pub fn handle_pi_colonies(
                                         return Err(BridgeRpcError {
                                             code: "InsufficientFunds".into(),
                                             message: "Insufficient ISK to build planetary link".into(),
+                                            client_error: None,
                                         });
                                     }
                                     ch.balance = ch.balance.checked_sub(link_cost_cents).unwrap_or(IskCents(0));
@@ -773,6 +813,7 @@ pub fn handle_pi_colonies(
                                     return Err(BridgeRpcError {
                                         code: "ColonyNotFound".into(),
                                         message: format!("No colony on planet {planet_id}"),
+                                        client_error: None,
                                     });
                                 };
                                 let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
@@ -783,6 +824,7 @@ pub fn handle_pi_colonies(
                                     return Err(BridgeRpcError {
                                         code: "LinkNotFound".into(),
                                         message: "Link not found".into(),
+                                        client_error: None,
                                     });
                                 };
                                 let removed = net.links.remove(idx);
@@ -807,6 +849,7 @@ pub fn handle_pi_colonies(
                                     return Err(BridgeRpcError {
                                         code: "InvalidLinkLevel".into(),
                                         message: "Link upgrade level must be in 1..=10".into(),
+                                        client_error: None,
                                     });
                                 }
                                 let new_level = new_lvl_raw as u8;
@@ -814,6 +857,7 @@ pub fn handle_pi_colonies(
                                     return Err(BridgeRpcError {
                                         code: "ColonyNotFound".into(),
                                         message: format!("No colony on planet {planet_id}"),
+                                        client_error: None,
                                     });
                                 };
                                 let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
@@ -824,6 +868,7 @@ pub fn handle_pi_colonies(
                                     return Err(BridgeRpcError {
                                         code: "LinkNotFound".into(),
                                         message: "Link not found".into(),
+                                        client_error: None,
                                     });
                                 };
                                 let old_link = net.links[idx].clone();
@@ -831,6 +876,7 @@ pub fn handle_pi_colonies(
                                     return Err(BridgeRpcError {
                                         code: "InvalidLinkLevel".into(),
                                         message: "New link level must exceed current level".into(),
+                                        client_error: None,
                                     });
                                 }
                                 let (new_pg, new_cpu) = compute_pi_link_cost(old_link.length_km, new_level);
@@ -840,6 +886,7 @@ pub fn handle_pi_colonies(
                                     return Err(BridgeRpcError {
                                         code: "InsufficientColonyCpuOrPowergrid".into(),
                                         message: "Upgrading link exceeds colony CPU or Powergrid".into(),
+                                        client_error: None,
                                     });
                                 }
                                 let upgrade_cost_isk = (2_500.0 + 10.0 * old_link.length_km) * 2.0_f64.powi(new_level as i32);
@@ -849,6 +896,7 @@ pub fn handle_pi_colonies(
                                         return Err(BridgeRpcError {
                                             code: "InsufficientFunds".into(),
                                             message: "Insufficient ISK to upgrade link".into(),
+                                            client_error: None,
                                         });
                                     }
                                     ch.balance = ch.balance.checked_sub(upgrade_cents).unwrap_or(IskCents(0));
@@ -879,6 +927,7 @@ pub fn handle_pi_colonies(
                                     return Err(BridgeRpcError {
                                         code: "ColonyNotFound".into(),
                                         message: format!("No colony on planet {planet_id}"),
+                                        client_error: None,
                                     });
                                 };
                                 let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
@@ -886,6 +935,7 @@ pub fn handle_pi_colonies(
                                     return Err(BridgeRpcError {
                                         code: "InvalidRoutePath".into(),
                                         message: "PI route path must contain at least 2 connected pins".into(),
+                                        client_error: None,
                                     });
                                 }
                                 let unit_vol = ctx.sde.types.get(&ctype).map(|t| t.volume.max(0.01)).unwrap_or(0.38);
@@ -899,6 +949,7 @@ pub fn handle_pi_colonies(
                                         return Err(BridgeRpcError {
                                             code: "RouteLinkNotFound".into(),
                                             message: format!("No PI link exists between pins {u} and {v}"),
+                                            client_error: None,
                                         });
                                     };
                                     let existing_bw: f64 = net
@@ -924,6 +975,7 @@ pub fn handle_pi_colonies(
                                         return Err(BridgeRpcError {
                                             code: "InsufficientLinkBandwidth".into(),
                                             message: "Route exceeds link bandwidth".into(),
+                                            client_error: None,
                                         });
                                     }
                                 }
@@ -957,6 +1009,7 @@ pub fn handle_pi_colonies(
                                     return Err(BridgeRpcError {
                                         code: "InvalidSchematic".into(),
                                         message: format!("Unknown planetary schematic ID {schem_raw}"),
+                                        client_error: None,
                                     });
                                 };
                                 if let Some(col) = snap.planetary_colonies.get(&(char_id, planet_id)).cloned() {
@@ -970,6 +1023,7 @@ pub fn handle_pi_colonies(
                                                     "Pin {pin_id} (type {}) cannot run schematic {schem_raw} ({})",
                                                     p.type_id, schem_info.name
                                                 ),
+                                                client_error: None,
                                             });
                                         }
                                         p.schematic_id = Some(schem_info.schematic_id);
@@ -989,6 +1043,7 @@ pub fn handle_pi_colonies(
                                     return Err(BridgeRpcError {
                                         code: "InvalidCommandCenterLevel".into(),
                                         message: "Target Command Center level must be in 1..=5".into(),
+                                        client_error: None,
                                     });
                                 }
                                 let target_level = target_lvl_raw as u8;
@@ -996,12 +1051,14 @@ pub fn handle_pi_colonies(
                                     return Err(BridgeRpcError {
                                         code: "ColonyNotFound".into(),
                                         message: format!("No colony on planet {planet_id}"),
+                                        client_error: None,
                                     });
                                 };
                                 if target_level <= col.command_center_level {
                                     return Err(BridgeRpcError {
                                         code: "InvalidCommandCenterLevel".into(),
                                         message: "Target level must exceed current level".into(),
+                                        client_error: None,
                                     });
                                 }
                                 let cc_skill_lvl = snap.skills.get(&char_id).and_then(|m| m.get(&2505)).map(|s| s.level).unwrap_or(0);
@@ -1009,6 +1066,7 @@ pub fn handle_pi_colonies(
                                     return Err(BridgeRpcError {
                                         code: "MissingSkillForCommandCenterUpgrade".into(),
                                         message: "Command Center Upgrades skill (2505) insufficient".into(),
+                                        client_error: None,
                                     });
                                 }
                                 let upgrade_cost_isk = cc_upgrade_cost_isk(col.command_center_level, target_level);
@@ -1018,6 +1076,7 @@ pub fn handle_pi_colonies(
                                         return Err(BridgeRpcError {
                                             code: "InsufficientFunds".into(),
                                             message: "Insufficient funds for command center upgrade".into(),
+                                            client_error: None,
                                         });
                                     }
                                     ch.balance = ch.balance.checked_sub(upgrade_cost_cents).unwrap_or(IskCents(0));
@@ -1081,12 +1140,14 @@ pub fn handle_pi_colonies(
                                     return Err(BridgeRpcError {
                                         code: "InvalidExtractorHeadCount".into(),
                                         message: "Extractor head count must be in 1..=10".into(),
+                                        client_error: None,
                                     });
                                 }
                                 let Some(col) = snap.planetary_colonies.get(&(char_id, planet_id)).cloned() else {
                                     return Err(BridgeRpcError {
                                         code: "ColonyNotFound".into(),
                                         message: format!("No colony on planet {planet_id}"),
+                                        client_error: None,
                                     });
                                 };
                                 let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
@@ -1094,6 +1155,7 @@ pub fn handle_pi_colonies(
                                     return Err(BridgeRpcError {
                                         code: "PinNotFound".into(),
                                         message: format!("Extractor pin {pin_id} not found"),
+                                        client_error: None,
                                     });
                                 };
                                 if let Some(heads) = parsed_heads {
@@ -1102,6 +1164,7 @@ pub fn handle_pi_colonies(
                                             return Err(BridgeRpcError {
                                                 code: "ExtractorHeadOutOfRange".into(),
                                                 message: "Extractor head exceeds maximum extraction radius from ECU".into(),
+                                                client_error: None,
                                             });
                                         }
                                     }
@@ -1147,6 +1210,7 @@ pub fn handle_pi_colonies(
                                     return Err(BridgeRpcError {
                                         code: "ColonyNotFound".into(),
                                         message: format!("No colony on planet {planet_id}"),
+                                        client_error: None,
                                     });
                                 };
                                 let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
@@ -1154,12 +1218,14 @@ pub fn handle_pi_colonies(
                                     return Err(BridgeRpcError {
                                         code: "PinNotFound".into(),
                                         message: format!("Extractor pin {pin_id} not found"),
+                                        client_error: None,
                                     });
                                 };
                                 if (hlat - pin.latitude).hypot(hlon - pin.longitude) > 0.50 {
                                     return Err(BridgeRpcError {
                                         code: "ExtractorHeadOutOfRange".into(),
                                         message: "Extractor head exceeds maximum extraction radius from ECU".into(),
+                                        client_error: None,
                                     });
                                 }
                                 if let Some(existing) = pin.extractor_heads.iter_mut().find(|h| h.0 == head_id) {
@@ -1170,6 +1236,7 @@ pub fn handle_pi_colonies(
                                         return Err(BridgeRpcError {
                                             code: "InvalidExtractorHeadCount".into(),
                                             message: "Extractor head count must be in 1..=10".into(),
+                                            client_error: None,
                                         });
                                     }
                                     pin.extractor_heads.push((head_id, hlat, hlon));
@@ -1182,6 +1249,7 @@ pub fn handle_pi_colonies(
                                 return Err(BridgeRpcError {
                                     code: "UnsupportedPlanetCommand".into(),
                                     message: format!("Unsupported UserUpdateNetwork command code {other}"),
+                                    client_error: None,
                                 });
                             }
                         }
@@ -1223,6 +1291,7 @@ pub fn handle_pi_colonies(
                     .ok_or_else(|| BridgeRpcError {
                         code: "ColonyNotFound".into(),
                         message: format!("No colony on planet {planet_id}"),
+                        client_error: None,
                     })?;
                 let net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
                 let (pins_rep, links_rep, _) = format_pi_pins_links(&net);

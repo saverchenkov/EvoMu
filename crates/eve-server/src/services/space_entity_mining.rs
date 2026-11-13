@@ -26,6 +26,7 @@ fn no_solar_system() -> BridgeRpcError {
         // rpc-lint: allow "NoSolarSystem" is an error code, not a beyonce method
         code: "NoSolarSystem".into(),
         message: "Session has no active solarSystemID".into(),
+        client_error: None,
     }
 }
 
@@ -43,6 +44,7 @@ pub(crate) async fn handle_mine(
         return Err(BridgeRpcError {
             code: "NoActiveShip".into(),
             message: "Session has no active ship".into(),
+            client_error: None,
         });
     };
 
@@ -89,6 +91,7 @@ pub(crate) async fn handle_mine(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "CmdMineRepeatedly requires target asteroidID".into(),
+            client_error: None,
         });
     }
 
@@ -97,12 +100,14 @@ pub(crate) async fn handle_mine(
         return Err(BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: "Active ship is not spawned in Ballpark".into(),
+            client_error: None,
         });
     };
     if matches!(ship_ball.mode, eve_destiny::MovementMode::Warp { .. }) {
         return Err(BridgeRpcError {
             code: "CannotMineInWarp".into(),
             message: "Cannot activate mining lasers or drones while in warp".into(),
+            client_error: None,
         });
     }
     if handle
@@ -115,6 +120,7 @@ pub(crate) async fn handle_mine(
         return Err(BridgeRpcError {
             code: "CannotMineWhileCloaked".into(),
             message: "Cannot activate mining lasers or drones while cloaked".into(),
+            client_error: None,
         });
     }
     let ship_hull_type = ctx
@@ -132,6 +138,7 @@ pub(crate) async fn handle_mine(
         return Err(BridgeRpcError {
             code: "InvalidShipForMining".into(),
             message: "Capsules cannot mine asteroids".into(),
+            client_error: None,
         });
     }
 
@@ -145,12 +152,14 @@ pub(crate) async fn handle_mine(
                         "Asteroid {asteroid_id} belongs to solar system {}, not {sys_id}",
                         db_ast.solar_system_id
                     ),
+                    client_error: None,
                 });
             }
             if db_ast.quantity <= 0 {
                 return Err(BridgeRpcError {
                     code: "AsteroidDepleted".into(),
                     message: format!("Asteroid {asteroid_id} is depleted"),
+                    client_error: None,
                 });
             }
             let unit_vol = ctx
@@ -193,6 +202,7 @@ pub(crate) async fn handle_mine(
         return Err(BridgeRpcError {
             code: "AsteroidNotFound".into(),
             message: format!("Asteroid {asteroid_id} not found in system {sys_id}"),
+            client_error: None,
         });
     };
 
@@ -200,6 +210,7 @@ pub(crate) async fn handle_mine(
         return Err(BridgeRpcError {
             code: "AsteroidDepleted".into(),
             message: format!("Asteroid {asteroid_id} is depleted"),
+            client_error: None,
         });
     }
 
@@ -244,6 +255,7 @@ pub(crate) async fn handle_mine(
         return Err(BridgeRpcError {
             code: "DroneAlreadyMining".into(),
             message: "One or more drones are already mining this asteroid".into(),
+            client_error: None,
         });
     }
 
@@ -259,6 +271,7 @@ pub(crate) async fn handle_mine(
             return Err(BridgeRpcError {
                 code: "InvalidDroneOwner".into(),
                 message: format!("Drone {did} is not owned by character {char_id}"),
+                client_error: None,
             });
         }
     }
@@ -337,6 +350,7 @@ pub(crate) async fn handle_mine(
                         "Mining drone {} must be launched into space before mining",
                         d_item.item_id
                     ),
+                    client_error: None,
                 });
             }
             let is_ice_drone = ctx
@@ -349,12 +363,14 @@ pub(crate) async fn handle_mine(
                 return Err(BridgeRpcError {
                     code: "InvalidTargetGroup".into(),
                     message: "Ice harvesting drones can only harvest Ice asteroids (group 465)".into(),
+                    client_error: None,
                 });
             }
             if !is_ice_drone && ast_group_id == 465 {
                 return Err(BridgeRpcError {
                     code: "InvalidTargetGroup".into(),
                     message: "Ore mining drones cannot harvest Ice asteroids (group 465)".into(),
+                    client_error: None,
                 });
             }
             // Excavator mining/ice drones (SDE group 101, 25 Mbit bandwidth attr 1272) require Capital Industrial Ship (attrs 3223/3224) + active Industrial Core (group 515)
@@ -371,12 +387,14 @@ pub(crate) async fn handle_mine(
                     return Err(BridgeRpcError {
                         code: "InvalidShipForExcavator".into(),
                         message: "Excavator mining drones can only be operated by a Capital Industrial Ship".into(),
+                        client_error: None,
                     });
                 }
                 if active_ind_core_type.is_none() {
                     return Err(BridgeRpcError {
                         code: "IndustrialCoreRequired".into(),
                         message: "Excavator mining drones require an active Capital Industrial Core on the Rorqual".into(),
+                        client_error: None,
                     });
                 }
             }
@@ -509,10 +527,10 @@ pub(crate) async fn handle_mine(
         (total_drone_yield, max_waste_prob, drone_range)
     } else if let (Some(fit), Some(mod_id)) = (&fit, primary_id) {
         let Some(m) = fit.modules.get(&mod_id) else {
-            return Err(BridgeRpcError { code: "InvalidMiningModule".into(), message: "Mining module is not fitted to active ship".into() });
+            return Err(BridgeRpcError { code: "InvalidMiningModule".into(), message: "Mining module is not fitted to active ship".into(), client_error: None });
         };
         if m.state == eve_dogma::ModuleState::Offline || !mod_compatible(m.type_id) {
-            return Err(BridgeRpcError { code: "InvalidMiningModule".into(), message: "Specified module is offline or incompatible with target resource".into() });
+            return Err(BridgeRpcError { code: "InvalidMiningModule".into(), message: "Specified module is offline or incompatible with target resource".into(), client_error: None });
         }
         let y = fit.get_module_effective_attribute(mod_id, 77, &ctx.sde);
         let raw_w = fit.get_module_effective_attribute(mod_id, 3154, &ctx.sde);
@@ -529,12 +547,14 @@ pub(crate) async fn handle_mine(
             return Err(BridgeRpcError {
                 code: "NoMiningModuleFitted".into(),
                 message: "Ship has no online compatible mining/harvesting module fitted".into(),
+                client_error: None,
             });
         }
     } else {
         return Err(BridgeRpcError {
             code: "NoMiningModuleFitted".into(),
             message: "Ship has no online compatible mining/harvesting module fitted".into(),
+            client_error: None,
         });
     };
 
@@ -542,6 +562,7 @@ pub(crate) async fn handle_mine(
         return Err(BridgeRpcError {
             code: "OutOfRange".into(),
             message: format!("Asteroid {asteroid_id} is {ast_surface_dist_m:.1} m away (max range {max_range} m)"),
+            client_error: None,
         });
     }
 
@@ -649,6 +670,7 @@ pub(crate) async fn handle_mine(
         return Err(BridgeRpcError {
             code: "CargoFull".into(),
             message: "Target mining hold is full".into(),
+            client_error: None,
         });
     }
     let phase_eff =
@@ -671,6 +693,7 @@ pub(crate) async fn handle_mine(
             return Err(BridgeRpcError {
                 code: "MiningFailed".into(),
                 message: e,
+                client_error: None,
             });
         }
     };
@@ -886,6 +909,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "NotDocked".into(),
                     message: "Reprocessing requires being docked at a station or structure".into(),
+                    client_error: None,
                 }));
             };
             let is_multi_arg = args.len() >= 2;
@@ -922,6 +946,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "Reprocess requires at least one integer itemID".into(),
+                    client_error: None,
                 }));
             }
 
@@ -950,6 +975,7 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "StationServiceUnavailable".into(),
                         message: format!("Station {station_id} does not offer reprocessing facilities"),
+                        client_error: None,
                     });
                 }
 
@@ -957,7 +983,7 @@ pub async fn handle(
                 let mut batch_results = Vec::with_capacity(item_ids.len());
                 for item_id in item_ids {
                     let Some(item) = snap.items.get(&item_id).cloned() else {
-                        return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {item_id} does not exist") });
+                        return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {item_id} does not exist"), client_error: None });
                     };
                     let personal_ok = item.owner_id == char_id
                         && matches!(
@@ -1011,28 +1037,29 @@ pub async fn handle(
                         return Err(BridgeRpcError {
                             code: "OwnershipOrLocationViolation".into(),
                             message: format!("Item {item_id} must be owned by character {char_id} or an authorized corporate division at station {station_id}"),
+                            client_error: None,
                         });
                     }
                     let active_ship_id = snap.characters.get(&char_id).map(|c| c.active_ship_id).or(session.ship_id);
                     if active_ship_id == Some(item_id) || snap.is_character_boarded_or_saved_ship(char_id, session.ship_id, item_id) {
-                        return Err(BridgeRpcError { code: "CannotReprocessActiveShip".into(), message: format!("Item {item_id} is your currently active ship and cannot be reprocessed") });
+                        return Err(BridgeRpcError { code: "CannotReprocessActiveShip".into(), message: format!("Item {item_id} is your currently active ship and cannot be reprocessed"), client_error: None });
                     }
                     let Some(inv_type) = ctx.sde.types.get(&item.type_id) else {
-                        return Err(BridgeRpcError { code: "ItemNotReprocessable".into(), message: format!("Unknown item type {}", item.type_id) });
+                        return Err(BridgeRpcError { code: "ItemNotReprocessable".into(), message: format!("Unknown item type {}", item.type_id), client_error: None });
                     };
                     if !ctx.sde.type_materials.get(&inv_type.type_id).is_some_and(|m| !m.is_empty())
                         && ctx.sde.randomized_type_materials_for(inv_type.type_id).is_empty()
                     {
-                        return Err(BridgeRpcError { code: "ItemNotReprocessable".into(), message: format!("Item type {} ({}) has no SDE typeMaterials and cannot be reprocessed", item.type_id, inv_type.name) });
+                        return Err(BridgeRpcError { code: "ItemNotReprocessable".into(), message: format!("Item type {} ({}) has no SDE typeMaterials and cannot be reprocessed", item.type_id, inv_type.name), client_error: None });
                     }
                     if crate::services::inventory_fitting::fitting_containers_ships::container_has_active_audit_log_snap(snap, item_id, now_unix as u64) {
-                        return Err(BridgeRpcError { code: "ContainerHasActiveAuditLog".into(), message: format!("Container {item_id} has audit log entries younger than 3 weeks and cannot be reprocessed") });
+                        return Err(BridgeRpcError { code: "ContainerHasActiveAuditLog".into(), message: format!("Container {item_id} has audit log entries younger than 3 weeks and cannot be reprocessed"), client_error: None });
                     }
                     if item.singleton || snap.items.values().any(|child| child.location_id == item_id) {
-                        return Err(BridgeRpcError { code: "ItemMustBeRepackaged".into(), message: format!("Item {item_id} must be emptied and repackaged before reprocessing") });
+                        return Err(BridgeRpcError { code: "ItemMustBeRepackaged".into(), message: format!("Item {item_id} must be emptied and repackaged before reprocessing"), client_error: None });
                     }
                     if item.flag == InventoryFlag::Locked || snap.is_item_locked_in_contract_or_job(item_id) {
-                        return Err(BridgeRpcError { code: "ItemLocked".into(), message: format!("Item {item_id} is locked and cannot be reprocessed") });
+                        return Err(BridgeRpcError { code: "ItemLocked".into(), message: format!("Item {item_id} is locked and cannot be reprocessed"), client_error: None });
                     }
                     let portion_size = inv_type.portion_size.max(1) as i32;
                     let portions = item.quantity / portion_size;
@@ -1047,10 +1074,10 @@ pub async fn handle(
                         portions.max(1),
                         false,
                     ) else {
-                        return Err(BridgeRpcError { code: "ItemNotReprocessable".into(), message: format!("Item type {} ({}) has no SDE typeMaterials and cannot be reprocessed", item.type_id, inv_type.name) });
+                        return Err(BridgeRpcError { code: "ItemNotReprocessable".into(), message: format!("Item type {} ({}) has no SDE typeMaterials and cannot be reprocessed", item.type_id, inv_type.name), client_error: None });
                     };
                     if item.quantity < portion_size {
-                        return Err(BridgeRpcError { code: "InsufficientBatchPortion".into(), message: format!("Need at least {portion_size} units to reprocess type {} (have {})", item.type_id, item.quantity) });
+                        return Err(BridgeRpcError { code: "InsufficientBatchPortion".into(), message: format!("Need at least {portion_size} units to reprocess type {} (have {})", item.type_id, item.quantity), client_error: None });
                     }
                     let (station_base_yield, yield_rate, station_tax_rate) =
                         compute_reprocessing_rates_for_item_at(&ctx.sde, snap, char_id, station_id, inv_type, Some(now_unix));
@@ -1070,7 +1097,7 @@ pub async fn handle(
                     if tax_cents.0 > 0 {
                         let char_balance = snap.characters.get(&char_id).map(|c| c.balance).unwrap_or(IskCents(0));
                         if char_balance < tax_cents {
-                            return Err(BridgeRpcError { code: "InsufficientFunds".into(), message: format!("Insufficient ISK to pay reprocessing tax ({:.2} ISK required)", tax_isk) });
+                            return Err(BridgeRpcError { code: "InsufficientFunds".into(), message: format!("Insufficient ISK to pay reprocessing tax ({:.2} ISK required)", tax_isk), client_error: None });
                         }
                     }
                     let old_qty = item.quantity;
@@ -1279,6 +1306,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "NotDocked".into(),
                     message: "Reprocessing quote requires being docked at a station or structure".into(),
+                    client_error: None,
                 }));
             };
             if station_id < 1_000_000_000_000
@@ -1287,6 +1315,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "StationServiceUnavailable".into(),
                     message: format!("Station {station_id} does not offer reprocessing facilities"),
+                    client_error: None,
                 }));
             }
             let now_unix = ctx.now_unix();
@@ -1298,6 +1327,7 @@ pub async fn handle(
                         return Err(BridgeRpcError {
                             code: "AccessDenied".into(),
                             message: format!("Character {char_id} is denied access to structure {station_id}"),
+                            client_error: None,
                         });
                     }
                     let _ = crate::services::structure_profile_services::check_service_domain_acl_and_tax(

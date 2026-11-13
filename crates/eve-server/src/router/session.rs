@@ -18,6 +18,7 @@ impl ServerContext {
         session.user_id.ok_or_else(|| BridgeRpcError {
             code: "Unauthorized".into(),
             message: "Authentication required before calling this service".into(),
+            client_error: None,
         })
     }
 
@@ -27,6 +28,7 @@ impl ServerContext {
             return Err(BridgeRpcError {
                 code: "CustomError".into(),
                 message: "GM/Admin role required".into(),
+                client_error: None,
             });
         }
         Ok(uid)
@@ -37,6 +39,7 @@ impl ServerContext {
         let cid = session.character_id.ok_or_else(|| BridgeRpcError {
             code: "CharacterNotSelected".into(),
             message: "Character selection required before calling this service".into(),
+            client_error: None,
         })?;
         Ok((uid, cid))
     }
@@ -48,6 +51,7 @@ impl ServerContext {
         let entry = bound_entry.ok_or_else(|| BridgeRpcError {
             code: "BoundObjectRequired".into(),
             message: format!("Calls to {expected_service} require a bound object handle"),
+            client_error: None,
         })?;
         if entry.service != expected_service {
             return Err(BridgeRpcError {
@@ -56,6 +60,7 @@ impl ServerContext {
                     "Expected bound service {expected_service}, got {}",
                     entry.service
                 ),
+                client_error: None,
             });
         }
         Ok(entry.object_id as SolarSystemId)

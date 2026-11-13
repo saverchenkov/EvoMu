@@ -20,6 +20,7 @@ fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
         code: code.into(),
         message: message.into(),
+        client_error: None,
     }
 }
 
@@ -241,7 +242,7 @@ pub fn check_abyssal_in_pocket_rpc_restrictions(
         return Some(Err(err_map_disabled_in_abyssal()));
     }
     if matches!(service, "scanMgr" | "scanSvc") && matches!(method, "DirectionalScan" | "ConeScan") {
-        return Some(Err(BridgeRpcError::user_error("CannotDscanInThisSystem")));
+        return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CannotDscanInThisSystem)));
     }
     let is_lsc_method = (service == "LSC" || service.eq_ignore_ascii_case("lsc"))
         && matches!(method, "JoinChannel" | "SendMessage");

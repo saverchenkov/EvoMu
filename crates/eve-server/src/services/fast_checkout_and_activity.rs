@@ -329,6 +329,7 @@ fn handle_request_mining_cycle_output(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "RequestMiningCycleOutput requires structureID".into(),
+            client_error: None,
         });
     };
 
@@ -392,6 +393,7 @@ fn handle_request_mining_details(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "RequestMiningDetails requires structureID".into(),
+            client_error: None,
         });
     };
 
@@ -402,6 +404,7 @@ fn handle_request_mining_details(
                 return Err(BridgeRpcError {
                     code: "StructureNotFound".into(),
                     message: format!("Structure {structure_id} not found"),
+                    client_error: None,
                 });
             };
 
@@ -421,6 +424,7 @@ fn handle_request_mining_details(
                 return Err(BridgeRpcError {
                     code: "AccessDenied".into(),
                     message: "Character lacks corporation permissions for structure mining details".into(),
+                    client_error: None,
                 });
             }
 
@@ -635,6 +639,7 @@ fn handle_activity_seen(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "ActivitySeen requires a positive activityID".into(),
+            client_error: None,
         });
     };
 
@@ -645,6 +650,7 @@ fn handle_activity_seen(
             message: format!(
                 "Unknown activityID {activity_id} not in res:/staticdata/newactivities.fsdbinary"
             ),
+            client_error: None,
         });
     }
 
@@ -714,6 +720,7 @@ fn handle_set_activities_pop_state(
             return Err(BridgeRpcError {
                 code: "InvalidArgument".into(),
                 message: "Expected dict of pop states".into(),
+                client_error: None,
             });
         }
     };
@@ -880,6 +887,7 @@ fn handle_buy_offer(
         return Err(BridgeRpcError {
             code: "FastCheckoutDisabled".into(),
             message: "Fast checkout is disabled for this user".into(),
+            client_error: None,
         });
     }
 
@@ -897,12 +905,14 @@ fn handle_buy_offer(
             return Err(BridgeRpcError {
                 code: "OfferNotFound".into(),
                 message: "UserError: OfferNotFound: invalid offerID".into(),
+                client_error: None,
             });
         }
         _ => {
             return Err(BridgeRpcError {
                 code: "InvalidArgument".into(),
                 message: "BuyOffer requires offerID".into(),
+                client_error: None,
             });
         }
     };
@@ -927,6 +937,7 @@ fn handle_buy_offer(
         return Err(BridgeRpcError {
             code: "InvalidQuantity".into(),
             message: "Quantity must be positive".into(),
+            client_error: None,
         });
     }
 
@@ -938,6 +949,7 @@ fn handle_buy_offer(
         return Err(BridgeRpcError {
             code: "InvalidPassword".into(),
             message: "Password required for FastCheckout purchase".into(),
+            client_error: None,
         });
     }
 
@@ -959,6 +971,7 @@ fn handle_buy_offer(
         return Err(BridgeRpcError {
             code: "UserNotFound".into(),
             message: format!("User account {user_id} not found"),
+            client_error: None,
         });
     };
 
@@ -966,6 +979,7 @@ fn handle_buy_offer(
         return Err(BridgeRpcError {
             code: "AccountBanned".into(),
             message: e.to_string(),
+            client_error: None,
         });
     }
 
@@ -985,6 +999,7 @@ fn handle_buy_offer(
         return Err(BridgeRpcError {
             code: "OfferNotFound".into(),
             message: format!("UserError: Offer {offer_id} not found in catalog"),
+            client_error: None,
         });
     };
 
@@ -997,6 +1012,7 @@ fn handle_buy_offer(
         return Err(BridgeRpcError {
             code: "InvalidPassword".into(),
             message: "Incorrect password for fast checkout authorization".into(),
+            client_error: None,
         });
     }
 
@@ -1004,6 +1020,7 @@ fn handle_buy_offer(
         return Err(BridgeRpcError {
             code: "InvalidOffer".into(),
             message: format!("Offer {offer_id} has invalid negative PLEX price"),
+            client_error: None,
         });
     }
 
@@ -1014,6 +1031,7 @@ fn handle_buy_offer(
         .ok_or_else(|| BridgeRpcError {
             code: "ArithmeticOverflow".into(),
             message: "Total PLEX quantity overflows i64".into(),
+            client_error: None,
         })?;
     let total_cost_plex = offer
         .price_plex
@@ -1022,6 +1040,7 @@ fn handle_buy_offer(
         .ok_or_else(|| BridgeRpcError {
             code: "ArithmeticOverflow".into(),
             message: "Total PLEX price overflows i64".into(),
+            client_error: None,
         })?;
 
     let now_unix = ctx.now_unix();
@@ -1036,11 +1055,13 @@ fn handle_buy_offer(
         .ok_or_else(|| BridgeRpcError {
             code: "ArithmeticOverflow".into(),
             message: "Payment amount overflows u32".into(),
+            client_error: None,
         })?;
     if !free_plex_mode && offer.price_plex <= 0 && amount_in_cents == 0 {
         return Err(BridgeRpcError {
             code: "InvalidOffer".into(),
             message: format!("Offer {offer_id} has no valid price"),
+            client_error: None,
         });
     }
 
@@ -1055,6 +1076,7 @@ fn handle_buy_offer(
                 return Err(BridgeRpcError {
                     code: "PaymentTokenRequired".into(),
                     message: "No active quick-pay payment token for user".into(),
+                    client_error: None,
                 });
             };
             token.consumed = true;
@@ -1072,6 +1094,7 @@ fn handle_buy_offer(
                     message: format!(
                         "UserError: Insufficient balance: need {total_cost_plex} PLEX, have {cur_rem}"
                     ),
+                    client_error: None,
                 })?;
         }
 
@@ -1081,6 +1104,7 @@ fn handle_buy_offer(
                 .ok_or_else(|| BridgeRpcError {
                     code: "ArithmeticOverflow".into(),
                     message: "Account PLEX vault overflows i64".into(),
+                    client_error: None,
                 })?;
         }
 
@@ -1093,6 +1117,7 @@ fn handle_buy_offer(
                 .ok_or_else(|| BridgeRpcError {
                     code: "ArithmeticOverflow".into(),
                     message: "Net PLEX delta overflows i64".into(),
+                    client_error: None,
                 })?;
             crate::services::quasar_payment_store::record_plex_transaction(
                 snap,
@@ -1122,11 +1147,13 @@ fn handle_buy_offer(
                         .ok_or_else(|| BridgeRpcError {
                             code: "ArithmeticOverflow".into(),
                             message: "Product quantity overflows i32".into(),
+                            client_error: None,
                         })?,
                 )
                 .map_err(|_| BridgeRpcError {
                     code: "ArithmeticOverflow".into(),
                     message: "Product quantity overflows i32".into(),
+                    client_error: None,
                 })?;
                 snap.next_entity_id += 1;
                 let item_id = snap.next_entity_id;

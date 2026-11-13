@@ -316,6 +316,7 @@ pub fn claim_system_sovereignty(
             return Err(BridgeRpcError {
                 code: "SystemNotFound".into(),
                 message: format!("System {sys_id} not initialized"),
+                client_error: None,
             });
         };
         if let Some(existing) = st.sov_alliance_id {
@@ -323,6 +324,7 @@ pub fn claim_system_sovereignty(
                 return Err(BridgeRpcError {
                     code: "SovereigntyHeldByAnotherAlliance".into(),
                     message: format!("System {sys_id} sovereignty is held by alliance {existing}"),
+                    client_error: None,
                 });
             }
         }
@@ -431,6 +433,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArguments".into(),
                     message: "SetSovHubFuelAccessGroup requires hubID or solarSystemID".into(),
+                    client_error: None,
                 }));
             };
             let access_group_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
@@ -466,6 +469,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "CorpRoleDenied".into(),
                     message: "Only owner corporation directors or station managers may set hub fuel access group".into(),
+                    client_error: None,
                 }));
             }
 
@@ -485,6 +489,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArguments".into(),
                     message: "GetSovHubFuelAccessGroup requires hubID or solarSystemID".into(),
+                    client_error: None,
                 }));
             };
             let group_id = read_sov_runtime(ctx, |rt| rt.fuel_access_groups.get(&hub_id).copied().unwrap_or(0));
@@ -549,6 +554,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "DestroySkyhooks requires a valid solarSystemID".into(),
+                    client_error: None,
                 }));
             };
 
@@ -576,6 +582,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "CorpRoleDenied".into(),
                     message: "Only owner corporation directors or station managers may destroy skyhooks".into(),
+                    client_error: None,
                 }));
             }
 
@@ -608,6 +615,7 @@ pub async fn handle(
                             message: format!(
                                 "Cannot destroy Skyhook {sid} while a reagent siphon link is active"
                             ),
+                            client_error: None,
                         });
                     }
                     let damaged_hp = (*shield_hp > 0.0 && *shield_hp < 4_999.0)
@@ -630,6 +638,7 @@ pub async fn handle(
                             message: format!(
                                 "Cannot destroy Skyhook {sid} while reinforced or damaged (state={state})"
                             ),
+                            client_error: None,
                         });
                     }
                 }
@@ -754,6 +763,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSolarSystem".into(),
                     message: format!("Solar system {raw_sys} does not exist"),
+                    client_error: None,
                 }));
             };
             let res = ctx.db.with_snapshot(|snap| {
@@ -829,6 +839,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solar system".into(),
+                    client_error: None,
                 }));
             };
             let now = ctx.now_unix();
@@ -911,6 +922,7 @@ pub fn handle_reset_last_clone_jump_time(
         return Err(BridgeRpcError {
             code: "GMRoleRequired".into(),
             message: "jumpCloneSvc.ResetLastCloneJumpTime requires GM role".into(),
+            client_error: None,
         });
     }
     let (_, char_id) = ServerContext::require_character(session)?;
@@ -918,6 +930,7 @@ pub fn handle_reset_last_clone_jump_time(
         let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
             code: "CharacterNotFound".into(),
             message: format!("Character {char_id} not found"),
+            client_error: None,
         })?;
         ch.last_clone_jump_unix = 0;
         ch.version += 1;
@@ -1007,6 +1020,7 @@ pub fn handle_contract_delete_notif(
         .ok_or_else(|| BridgeRpcError {
             code: "InvalidArgument".into(),
             message: format!("contractProxy.{method} requires a positive contractID"),
+            client_error: None,
         })?;
     let for_corp = args
         .get(1)
@@ -1020,6 +1034,7 @@ pub fn handle_contract_delete_notif(
                 return Err(BridgeRpcError {
                     code: "CrpAccessDenied".into(),
                     message: "Corporation contract notifications require a player corporation".into(),
+                    client_error: None,
                 });
             }
             let allowed = effective_contract_helper_corp_roles(
@@ -1037,6 +1052,7 @@ pub fn handle_contract_delete_notif(
                 return Err(BridgeRpcError {
                     code: "CrpAccessDenied".into(),
                     message: "Deleting corporation contract notifications requires Contract Manager or Director role".into(),
+                    client_error: None,
                 });
             }
         }
@@ -1044,6 +1060,7 @@ pub fn handle_contract_delete_notif(
             return Err(BridgeRpcError {
                 code: "ContractNotFound".into(),
                 message: format!("Contract {cid} does not exist"),
+                client_error: None,
             });
         };
         let is_related = c.issuer_id == owner_id
@@ -1056,6 +1073,7 @@ pub fn handle_contract_delete_notif(
             return Err(BridgeRpcError {
                 code: "ContractAccessDenied".into(),
                 message: format!("Owner {owner_id} is not associated with contract {cid}"),
+                client_error: None,
             });
         }
         if c.status == "Outstanding" && c.expiration_unix > 0 && c.expiration_unix <= now_unix {
@@ -1100,6 +1118,7 @@ pub fn handle_contract_delete_multiple(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "contractProxy.DeleteMultipleContracts requires a non-empty list of contractIDs".into(),
+            client_error: None,
         });
     }
     let caller_corp = session.corporation_id.unwrap_or(0);
@@ -1231,6 +1250,7 @@ pub fn handle_contract_get_items_in_dockable(
         .ok_or_else(|| BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "contractProxy.GetItemsInDockableLocation requires a valid dockable locationID".into(),
+            client_error: None,
         })?;
     let for_corp = args
         .get(1)

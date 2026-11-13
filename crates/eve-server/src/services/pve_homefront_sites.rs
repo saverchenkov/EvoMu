@@ -121,10 +121,12 @@ pub fn handle_get_homefront_site_instances(
         let raw = arg0.as_i64().ok_or_else(|| BridgeRpcError {
             code: "UnknownSolarSystem".into(),
             message: "GetHomefrontSiteInstances requires an integer solarSystemID".into(),
+            client_error: None,
         })?;
         let sid = u32::try_from(raw).ok().filter(|id| ctx.sde.solar_systems.contains_key(id)).ok_or_else(|| BridgeRpcError {
             code: "UnknownSolarSystem".into(),
             message: format!("Unknown solar system ID {raw}"),
+            client_error: None,
         })?;
         sid
     } else {
@@ -139,6 +141,7 @@ pub fn handle_get_homefront_site_instances(
             .ok_or_else(|| BridgeRpcError {
                 code: "NotInSpace".into(),
                 message: "Action requires an active solar system session".into(),
+                client_error: None,
             })?
     };
 

@@ -183,6 +183,7 @@ pub fn validate_rnd_research_access(
                 "Must be docked in R&D agent {}'s station to start research",
                 agent_info.agent_id
             ),
+            client_error: None,
         });
     }
 
@@ -192,6 +193,7 @@ pub fn validate_rnd_research_access(
                 return Err(BridgeRpcError {
                     code: "InvalidResearchSkill".into(),
                     message: format!("Type {sk} is not a valid Datacore-producing R&D science field skill"),
+                    client_error: None,
                 });
             }
             if !agent_info.research_skills.is_empty() && !agent_info.research_skills.contains(&sk) {
@@ -201,6 +203,7 @@ pub fn validate_rnd_research_access(
                         "R&D agent {} does not offer research in skill {sk}",
                         agent_info.agent_id
                     ),
+                    client_error: None,
                 });
             }
             sk
@@ -216,6 +219,7 @@ pub fn validate_rnd_research_access(
                     "R&D agent {} has no Datacore-producing research field skills",
                     agent_info.agent_id
                 ),
+                client_error: None,
             })?,
     };
 
@@ -223,6 +227,7 @@ pub fn validate_rnd_research_access(
         return Err(BridgeRpcError {
             code: "ErrorNoRelevantResearchSkills".into(),
             message: "Starting R&D research requires Science V".into(),
+            client_error: None,
         });
     }
 
@@ -233,6 +238,7 @@ pub fn validate_rnd_research_access(
         return Err(BridgeRpcError {
             code: "ErrorNoRelevantResearchSkills".into(),
             message: "Starting R&D research requires Mechanics V, Power Grid Management V, or CPU Management V".into(),
+            client_error: None,
         });
     }
 
@@ -244,6 +250,7 @@ pub fn validate_rnd_research_access(
                 "Starting R&D research with agent {} requires field skill {req_field_skill} >= 1",
                 agent_info.agent_id
             ),
+            client_error: None,
         });
     }
 
@@ -259,6 +266,7 @@ pub fn validate_rnd_research_access(
                     "Character already has {} active R&D agents (maximum {max_agents} with Research Project Management {rpm_lvl})",
                     entries.len()
                 ),
+                client_error: None,
             });
         }
     }
@@ -291,6 +299,7 @@ pub fn validate_rnd_research_access(
                 "R&D agent {} (level {}) requires effective standing >= {req_st:.1} (have {eff_any:.2})",
                 agent_info.agent_id, agent_info.level
             ),
+            client_error: None,
         });
     }
     if agent_info.level > 1 {
@@ -310,6 +319,7 @@ pub fn validate_rnd_research_access(
                     "R&D agent {} (level {}) requires effective corporation standing >= {min_corp_st:.1} (have {eff_corp:.2})",
                     agent_info.agent_id, agent_info.level
                 ),
+                client_error: None,
             });
         }
     }
@@ -686,6 +696,7 @@ pub async fn try_activate_ess_acceleration_gate(
         return Some(Err(BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: "Ship is not in space".into(),
+            client_error: None,
         }));
     };
     if crate::services::space_destiny::check_session_change_timer_active(
@@ -715,6 +726,7 @@ pub async fn try_activate_ess_acceleration_gate(
         return Some(Err(BridgeRpcError {
             code: "GateNotFound".into(),
             message: format!("ESS acceleration gate {gate_id} is not present in system {sys_id}"),
+            client_error: None,
         }));
     };
     let dist = ship_ball.position.distance(gate_ball.position);
@@ -722,12 +734,14 @@ pub async fn try_activate_ess_acceleration_gate(
         return Some(Err(BridgeRpcError {
             code: "OutsideGateActivationRange".into(),
             message: format!("Ship is {dist:.1} m from ESS gate (must be <= 2500 m)"),
+            client_error: None,
         }));
     }
     if !is_ess_gate_eligible_hull(&ctx.sde, ship_ball.type_id) {
         return Some(Err(BridgeRpcError {
             code: "ShipRestrictedByEssGate".into(),
             message: "ESS acceleration gate admits only eligible combat Tactical Destroyer, Cruiser, Battlecruiser, and Battleship hulls".into(),
+            client_error: None,
         }));
     }
     if let Ok(Some(mut cs)) = sys_handle.get_combat_state(ship_id).await {
@@ -787,6 +801,7 @@ pub async fn check_ess_warp_destination_allowed(
         return Err(BridgeRpcError {
             code: "EssIntrusionBubbleWarpBlocked".into(),
             message: "Cannot warp directly onto the 75 km ESS intrusion grid; use the ESS acceleration gate".into(),
+            client_error: None,
         });
     }
     Ok(())
@@ -848,6 +863,7 @@ pub async fn check_ess_intrusion_bubble_restriction(
     Err(BridgeRpcError {
         code: code.into(),
         message: msg.into(),
+        client_error: None,
     })
 }
 
@@ -1031,6 +1047,7 @@ pub fn ensure_ess_reserve_bank_not_already_unlocked(
         return Err(BridgeRpcError {
             code: "EssReserveBankAlreadyUnlocked".into(),
             message: "ESS Reserve Bank is already unlocked or has an active link".into(),
+            client_error: None,
         });
     }
     Ok(())

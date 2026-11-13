@@ -234,6 +234,7 @@ pub async fn handle_in_space_compression_mgr(
         return Err(BridgeRpcError {
             code: "MustBeInSpace".into(),
             message: "CompressItemInSpace requires being undocked in space".into(),
+            client_error: None,
         });
     }
 
@@ -241,6 +242,7 @@ pub async fn handle_in_space_compression_mgr(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "CompressItemInSpace requires itemID".into(),
+            client_error: None,
         });
     };
 
@@ -249,6 +251,7 @@ pub async fn handle_in_space_compression_mgr(
         return Err(BridgeRpcError {
             code: "MustBeInSpace".into(),
             message: "CompressItemInSpace requires a valid solarSystemID in space".into(),
+            client_error: None,
         });
     };
 
@@ -257,24 +260,28 @@ pub async fn handle_in_space_compression_mgr(
             return Err(BridgeRpcError {
                 code: "ItemNotFound".into(),
                 message: format!("Item {item_id} not found"),
+                client_error: None,
             });
         };
         if item.owner_id != char_id || Some(item.location_id) != ship_id {
             return Err(BridgeRpcError {
                 code: "CompressionFailed".into(),
                 message: "Item must be owned by character and located on the active ship".into(),
+                client_error: None,
             });
         }
         if item.flag == InventoryFlag::Locked || snap.is_item_locked_in_contract_or_job(item_id) {
             return Err(BridgeRpcError {
                 code: "ItemLocked".into(),
                 message: "Item is locked in a contract or job and cannot be compressed".into(),
+                client_error: None,
             });
         }
         if item.quantity < 1 {
             return Err(BridgeRpcError {
                 code: "CompressionFailed".into(),
                 message: "Item has invalid quantity".into(),
+                client_error: None,
             });
         }
         let in_mining_hold = matches!(
@@ -288,18 +295,21 @@ pub async fn handle_in_space_compression_mgr(
             return Err(BridgeRpcError {
                 code: "NotInMiningHold".into(),
                 message: "Material to compress in space must be in the ship's mining hold".into(),
+                client_error: None,
             });
         }
         let Some(&comp_type) = ctx.sde.compressible_types.get(&item.type_id) else {
             return Err(BridgeRpcError {
                 code: "CompressionFailed".into(),
                 message: format!("Type {} is not compressible", item.type_id),
+                client_error: None,
             });
         };
         let Some(item_t) = ctx.sde.types.get(&item.type_id) else {
             return Err(BridgeRpcError {
                 code: "CompressionFailed".into(),
                 message: format!("Unknown SDE type {}", item.type_id),
+                client_error: None,
             });
         };
         Ok((comp_type, item_t.type_id))
@@ -356,6 +366,7 @@ pub async fn handle_in_space_compression_mgr(
             return Err(BridgeRpcError {
                 code: "CannotCompressWhileCloaked".into(),
                 message: "Cannot compress ore while ship is cloaked".into(),
+                client_error: None,
             });
         }
         if handle
@@ -368,6 +379,7 @@ pub async fn handle_in_space_compression_mgr(
             return Err(BridgeRpcError {
                 code: "CannotCompressWhileTethered".into(),
                 message: "Cannot compress ore in space while ship is tethered".into(),
+                client_error: None,
             });
         }
     }
@@ -404,6 +416,7 @@ pub async fn handle_in_space_compression_mgr(
         return Err(BridgeRpcError {
             code: "NoActiveCompressorInRange".into(),
             message: "In-space compression requires a ship with an active Industrial Core and matching active Compressor module in range".into(),
+            client_error: None,
         });
     }
 
@@ -417,6 +430,7 @@ pub async fn handle_in_space_compression_mgr(
                 return Err(BridgeRpcError {
                     code: "ShipNotInSpace".into(),
                     message: "Character ship state changed before compression completed".into(),
+                    client_error: None,
                 });
             }
         }
@@ -424,12 +438,14 @@ pub async fn handle_in_space_compression_mgr(
             return Err(BridgeRpcError {
                 code: "ItemLocked".into(),
                 message: "Item is locked in a contract or job and cannot be compressed".into(),
+                client_error: None,
             });
         }
         let Some(item) = snap.items.get_mut(&item_id) else {
             return Err(BridgeRpcError {
                 code: "ItemNotFound".into(),
                 message: format!("Item {item_id} not found"),
+                client_error: None,
             });
         };
         let in_mining_hold = matches!(
@@ -443,6 +459,7 @@ pub async fn handle_in_space_compression_mgr(
             return Err(BridgeRpcError {
                 code: "CompressionFailed".into(),
                 message: "Item cannot be compressed in space".into(),
+                client_error: None,
             });
         }
         item.type_id = comp_type;
@@ -477,12 +494,14 @@ pub fn handle_structure_compression_mgr(
                 return Some(Err(BridgeRpcError {
                     code: "NotDocked".into(),
                     message: "CompressItemInStructure requires being docked at an Upwell structure".into(),
+                    client_error: None,
                 }));
             }
             let Some(structure_id) = session.structure_id else {
                 return Some(Err(BridgeRpcError {
                     code: "MustBeInStructure".into(),
                     message: "CompressItemInStructure requires an Upwell structure with reprocessing, not an NPC station".into(),
+                    client_error: None,
                 }));
             };
             let rpc = crate::router::RpcArgs::positional(args);
@@ -495,6 +514,7 @@ pub fn handle_structure_compression_mgr(
                         return Some(Err(BridgeRpcError {
                             code: "InvalidStructure".into(),
                             message: format!("Cannot compress using structure {arg_sid} while docked at {structure_id}"),
+                            client_error: None,
                         }));
                     }
                 }
@@ -518,6 +538,7 @@ pub fn handle_structure_compression_mgr(
                     return Err(BridgeRpcError {
                         code: "StructureNotFound".into(),
                         message: format!("Structure {structure_id} not found"),
+                        client_error: None,
                     });
                 };
                 let has_reproc_service = structure_has_online_reprocessing_service(
@@ -532,6 +553,7 @@ pub fn handle_structure_compression_mgr(
                         message: format!(
                             "Structure {structure_id} does not have an online Reprocessing service"
                         ),
+                        client_error: None,
                     });
                 }
                 if !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
@@ -542,6 +564,7 @@ pub fn handle_structure_compression_mgr(
                         message: format!(
                             "Character {char_id} is denied access to structure {structure_id} by its access profile"
                         ),
+                        client_error: None,
                     });
                 }
 
@@ -549,6 +572,7 @@ pub fn handle_structure_compression_mgr(
                     return Err(BridgeRpcError {
                         code: "ItemLocked".into(),
                         message: format!("Item {item_id} is locked in a contract or job"),
+                        client_error: None,
                     });
                 }
 
@@ -562,6 +586,7 @@ pub fn handle_structure_compression_mgr(
                         return Err(BridgeRpcError {
                             code: "CompressionFailed".into(),
                             message: format!("Item {item_id} not found"),
+                            client_error: None,
                         });
                     };
                     (it.owner_id, it.flag)
@@ -570,6 +595,7 @@ pub fn handle_structure_compression_mgr(
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),
                         message: "Character does not own this item".into(),
+                        client_error: None,
                     });
                 }
                 if caller_corp > 0
@@ -586,18 +612,21 @@ pub fn handle_structure_compression_mgr(
                     return Err(BridgeRpcError {
                         code: "CrpAccessDenied".into(),
                         message: "Character lacks corporation hangar take role for this division".into(),
+                        client_error: None,
                     });
                 }
                 let Some(item) = snap.items.get_mut(&item_id) else {
                     return Err(BridgeRpcError {
                         code: "CompressionFailed".into(),
                         message: format!("Item {item_id} not found"),
+                        client_error: None,
                     });
                 };
                 if item.flag == InventoryFlag::Locked {
                     return Err(BridgeRpcError {
                         code: "ItemLocked".into(),
                         message: format!("Item {item_id} is locked"),
+                        client_error: None,
                     });
                 }
                 let reachable = (item.location_id == structure_id
@@ -627,12 +656,14 @@ pub fn handle_structure_compression_mgr(
                     return Err(BridgeRpcError {
                         code: "CompressionFailed".into(),
                         message: "Item cannot be compressed (invalid quantity or not in current structure hangar)".into(),
+                        client_error: None,
                     });
                 }
                 let Some(&comp_type) = ctx.sde.compressible_types.get(&item.type_id) else {
                     return Err(BridgeRpcError {
                         code: "CompressionFailed".into(),
                         message: format!("Type {} is not compressible", item.type_id),
+                        client_error: None,
                     });
                 };
                 let group_id = ctx
@@ -645,6 +676,7 @@ pub fn handle_structure_compression_mgr(
                     return Err(BridgeRpcError {
                         code: "StructureCannotCompressType".into(),
                         message: "Gas and Moon Ore cannot be compressed in a structure; use an in-space compressor".into(),
+                        client_error: None,
                     });
                 }
 
@@ -677,12 +709,14 @@ pub fn handle_structure_compression_mgr(
                     message:
                         "DecompressGasInStructure requires being docked at an Upwell structure"
                             .into(),
+                    client_error: None,
                 }));
             }
             let Some(structure_id) = session.structure_id else {
                 return Some(Err(BridgeRpcError {
                     code: "MustBeInStructure".into(),
                     message: "DecompressGasInStructure requires an Upwell structure".into(),
+                    client_error: None,
                 }));
             };
 
@@ -698,6 +732,7 @@ pub fn handle_structure_compression_mgr(
                             message: format!(
                                 "Cannot decompress gas using structure {arg_sid} while docked at {structure_id}"
                             ),
+                            client_error: None,
                         }));
                     }
                 }
@@ -724,6 +759,7 @@ pub fn handle_structure_compression_mgr(
                     return Err(BridgeRpcError {
                         code: "StructureNotFound".into(),
                         message: format!("Structure {structure_id} not found"),
+                        client_error: None,
                     });
                 };
                 let has_reproc_service = structure_has_online_reprocessing_service(
@@ -738,6 +774,7 @@ pub fn handle_structure_compression_mgr(
                         message: format!(
                             "Structure {structure_id} does not have an online Reprocessing service"
                         ),
+                        client_error: None,
                     });
                 }
                 if !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
@@ -748,6 +785,7 @@ pub fn handle_structure_compression_mgr(
                         message: format!(
                             "Character {char_id} is denied access to structure {structure_id} by its access profile"
                         ),
+                        client_error: None,
                     });
                 }
 
@@ -758,6 +796,7 @@ pub fn handle_structure_compression_mgr(
                         return Err(BridgeRpcError {
                             code: "ItemNotFound".into(),
                             message: format!("Item {item_id} not found"),
+                            client_error: None,
                         });
                     };
                     (it.owner_id, it.flag)
@@ -766,6 +805,7 @@ pub fn handle_structure_compression_mgr(
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),
                         message: "Character does not own this item".into(),
+                        client_error: None,
                     });
                 }
                 if caller_corp > 0
@@ -782,6 +822,7 @@ pub fn handle_structure_compression_mgr(
                     return Err(BridgeRpcError {
                         code: "CrpAccessDenied".into(),
                         message: "Character lacks corporation hangar take role for this division".into(),
+                        client_error: None,
                     });
                 }
 
@@ -790,6 +831,7 @@ pub fn handle_structure_compression_mgr(
                         return Err(BridgeRpcError {
                             code: "ItemNotFound".into(),
                             message: format!("Item {item_id} not found"),
+                            client_error: None,
                         });
                     };
 
@@ -799,6 +841,7 @@ pub fn handle_structure_compression_mgr(
                             message: format!(
                                 "Item {item_id} is locked (e.g. in courier escrow or contract) and cannot be decompressed"
                             ),
+                            client_error: None,
                         });
                     }
 
@@ -822,6 +865,7 @@ pub fn handle_structure_compression_mgr(
                             message: format!(
                                 "Item {item_id} must be in your hangar at structure {structure_id} to decompress"
                             ),
+                            client_error: None,
                         });
                     }
 
@@ -837,6 +881,7 @@ pub fn handle_structure_compression_mgr(
                         return Err(BridgeRpcError {
                             code: "NotCompressedItem".into(),
                             message: format!("Type {} is not a compressed item", item.type_id),
+                            client_error: None,
                         });
                     };
 
@@ -852,6 +897,7 @@ pub fn handle_structure_compression_mgr(
                                 "Type {} (raw type {raw_tid}) is not compressed harvestable cloud gas (group 711)",
                                 item.type_id
                             ),
+                            client_error: None,
                         });
                     }
 
@@ -860,6 +906,7 @@ pub fn handle_structure_compression_mgr(
                         return Err(BridgeRpcError {
                             code: "InsufficientQuantityToDecompress".into(),
                             message: "Quantity too small to yield decompressed gas units".into(),
+                            client_error: None,
                         });
                     }
                     (raw_tid, total_raw, item.quantity)
@@ -871,6 +918,7 @@ pub fn handle_structure_compression_mgr(
                     .map_err(|e| BridgeRpcError {
                         code: "ItemLocked".into(),
                         message: e.to_string(),
+                        client_error: None,
                     })?;
 
                 snap.next_entity_id += 1;
@@ -917,6 +965,7 @@ pub fn handle_structure_compression_mgr(
                         message: format!(
                             "Cannot query gas decompression efficiency for structure {arg_sid} while not docked there"
                         ),
+                        client_error: None,
                     }));
                 }
             }
@@ -956,6 +1005,7 @@ pub async fn handle_compression(
                     return Err(BridgeRpcError {
                         code: "NoCorporation".into(),
                         message: "Character does not belong to a corporation".into(),
+                        client_error: None,
                     });
                 }
                 let (is_ceo, effective_role) = snap.effective_corp_roles_at(
@@ -974,6 +1024,7 @@ pub async fn handle_compression(
                     return Err(BridgeRpcError {
                         code: "CrpAccessDenied".into(),
                         message: "Corporate mining ledger requires Director, Accountant, Junior Accountant, or Station Manager role".into(),
+                        client_error: None,
                     });
                 }
                 let mut list = Vec::new();
@@ -1030,6 +1081,7 @@ pub async fn handle_compression(
                         return Some(Err(BridgeRpcError {
                             code: "InvalidArgument".into(),
                             message: "GetObserverLedger requires observerID".into(),
+                            client_error: None,
                         }));
                     }
                 },
@@ -1043,6 +1095,7 @@ pub async fn handle_compression(
                     return Err(BridgeRpcError {
                         code: "CrpAccessDenied".into(),
                         message: format!("Observer structure {observer_id} not found or access denied"),
+                        client_error: None,
                     });
                 };
                 if st.owner_corp_id != caller_corp {
@@ -1052,6 +1105,7 @@ pub async fn handle_compression(
                             "Character {char_id} (corp {caller_corp}) lacks ACL access to observer {observer_id} (owner corp {})",
                             st.owner_corp_id
                         ),
+                        client_error: None,
                     });
                 }
                 let (is_ceo, effective_role) = snap.effective_corp_roles_at(
@@ -1070,6 +1124,7 @@ pub async fn handle_compression(
                     return Err(BridgeRpcError {
                         code: "CrpAccessDenied".into(),
                         message: "Corporate mining ledger requires Director, Accountant, Junior Accountant, or Station Manager role".into(),
+                        client_error: None,
                     });
                 }
                 let solar_system_id = i64::from(st.solar_system_id);
@@ -1335,6 +1390,7 @@ pub(crate) fn inspect_metenox_drill(
         return Err(BridgeRpcError {
             code: "StructureNotFound".into(),
             message: format!("Structure {structure_id} not found"),
+            client_error: None,
         });
     };
     // SDE group 4744 (Upwell Moon Drill, type 81826 Metenox Moon Drill).
@@ -1345,6 +1401,7 @@ pub(crate) fn inspect_metenox_drill(
                 "Auto moon mining requires a Metenox Moon Drill (type 81826), got structure type {}",
                 st.type_id
             ),
+            client_error: None,
         });
     }
     let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
@@ -1353,6 +1410,7 @@ pub(crate) fn inspect_metenox_drill(
         return Err(BridgeRpcError {
             code: "AccessDenied".into(),
             message: "Character lacks corporation permissions for auto moon mining".into(),
+            client_error: None,
         });
     }
     let st_sys_id = st.solar_system_id;
@@ -1363,6 +1421,7 @@ pub(crate) fn inspect_metenox_drill(
             message: format!(
                 "Metenox Moon Drill cannot operate in High-Sec system {st_sys_id} (security {sec:.2}); requires Low-Sec (< 0.45), Null-Sec, or Wormhole space"
             ),
+            client_error: None,
         });
     }
     let matches_reagent_owner = |item_owner_id: i64| -> bool {
@@ -1390,11 +1449,11 @@ pub(crate) fn inspect_metenox_drill(
         })
         .fold(0u32, |acc, it| acc.saturating_add(it.quantity.max(0) as u32));
     let Some(moon_id) = super::resolve_structure_moon_id(sde, st_sys_id, st.position) else {
-        return Err(BridgeRpcError { code: "NoMoonInSystem".into(), message: format!("No SDE moon celestial found in system {st_sys_id}") });
+        return Err(BridgeRpcError { code: "NoMoonInSystem".into(), message: format!("No SDE moon celestial found in system {st_sys_id}"), client_error: None });
     };
     let hourly_materials = derive_metenox_moon_materials(sde, st_sys_id, moon_id, efficiency, 1);
     let Some(&(primary_mat_tid, _)) = hourly_materials.first() else {
-        return Err(BridgeRpcError { code: "NoMoonMaterials".into(), message: format!("Moon {moon_id} in system {st_sys_id} yields no group-427 moon materials") });
+        return Err(BridgeRpcError { code: "NoMoonMaterials".into(), message: format!("Moon {moon_id} in system {st_sys_id} yields no group-427 moon materials"), client_error: None });
     };
     let hourly_yield: u64 = hourly_materials.iter().map(|&(_, q)| q).sum();
     Ok(MetenoxDrillInspection {

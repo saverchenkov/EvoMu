@@ -78,6 +78,7 @@ pub(crate) fn ship_free_cargo_m3(
     let ship_item = snap.items.get(&ship_id).ok_or_else(|| BridgeRpcError {
         code: "ShipNotFound".into(),
         message: format!("Active ship {ship_id} not found in inventory"),
+        client_error: None,
     })?;
     let cap = ship_item
         .dynamic_attributes
@@ -89,6 +90,7 @@ pub(crate) fn ship_free_cargo_m3(
         return Err(BridgeRpcError {
             code: "NotEnoughCargoSpace".into(),
             message: format!("Active ship {ship_id} has no cargo hold capacity"),
+            client_error: None,
         });
     }
     let used: f64 = snap
@@ -131,15 +133,18 @@ pub async fn handle_anchor_mercenary_den_rpc(
         return Err(BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: "Cannot anchor a Mercenary Den while docked".into(),
+            client_error: None,
         });
     }
     let sys_id = session.solar_system_id.ok_or_else(|| BridgeRpcError {
         code: "NoSolarSystem".into(),
         message: "No active solar system".into(),
+        client_error: None,
     })?;
     let ship_id = session.ship_id.filter(|&id| id > 0).ok_or_else(|| BridgeRpcError {
         code: "NoActiveShip".into(),
         message: "Active ship required in space".into(),
+        client_error: None,
     })?;
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let (_, ship_ball) = sys_handle
@@ -150,6 +155,7 @@ pub async fn handle_anchor_mercenary_den_rpc(
         .ok_or_else(|| BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: format!("Ship {ship_id} is not present in space"),
+            client_error: None,
         })?;
 
     let first_arg = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
@@ -187,6 +193,7 @@ pub async fn handle_anchor_mercenary_den_rpc(
         return Err(BridgeRpcError {
             code: "SovereigntyNullsecRequired".into(),
             message: "Mercenary Dens can only be anchored in claimable sovereign nullsec".into(),
+            client_error: None,
         });
     }
 
@@ -241,6 +248,7 @@ pub async fn handle_anchor_mercenary_den_rpc(
         return Err(BridgeRpcError {
             code: "SkyhookNotFound".into(),
             message: "No active Orbital Skyhook found in this solar system".into(),
+            client_error: None,
         });
     }
 
@@ -270,6 +278,7 @@ pub async fn handle_anchor_mercenary_den_rpc(
                 "Ship or deployment position is {:.0} m from Orbital Skyhook {skyhook_id} (maximum {MERC_DEN_MAX_SKYHOOK_DIST_M:.0} m)",
                 dist_m.max(deploy_dist_m)
             ),
+            client_error: None,
         });
     }
 
@@ -279,6 +288,7 @@ pub async fn handle_anchor_mercenary_den_rpc(
             return Err(BridgeRpcError {
                 code: "DenPlanetMismatch".into(),
                 message: format!("Planet {ep} does not match Skyhook {skyhook_id} planet {sp}"),
+                client_error: None,
             });
         }
         (Some(sp), _) => sp,
@@ -287,6 +297,7 @@ pub async fn handle_anchor_mercenary_den_rpc(
             return Err(BridgeRpcError {
                 code: "SkyhookPlanetUnknown".into(),
                 message: format!("Orbital Skyhook {skyhook_id} has no bound planet"),
+                client_error: None,
             });
         }
     };
@@ -300,6 +311,7 @@ pub async fn handle_anchor_mercenary_den_rpc(
         return Err(BridgeRpcError {
             code: "PlanetNotTemperate".into(),
             message: format!("Planet {planet_id} is not a Temperate planet (type 11)"),
+            client_error: None,
         });
     }
 
@@ -320,6 +332,7 @@ pub async fn handle_anchor_mercenary_den_rpc(
             return Err(BridgeRpcError {
                 code: "SovereigntyNotClaimed".into(),
                 message: format!("System {sys_id} does not have claimed sovereignty"),
+                client_error: None,
             });
         }
         let skill_lvl = snap
@@ -341,6 +354,7 @@ pub async fn handle_anchor_mercenary_den_rpc(
                 message: format!(
                     "Character {char_id} owns {owned} Mercenary Dens (Mercenary Den Management cap: {skill_lvl})"
                 ),
+                client_error: None,
             });
         }
         if snap
@@ -352,21 +366,23 @@ pub async fn handle_anchor_mercenary_den_rpc(
             return Err(BridgeRpcError {
                 code: "MercenaryDenAlreadyAnchoredOnSkyhook".into(),
                 message: format!("Orbital Skyhook {skyhook_id} already hosts a Mercenary Den"),
+                client_error: None,
             });
         }
         let item_id = if first_arg > 0 && first_arg != i64::from(TYPE_MERCENARY_DEN) {
             let it = snap.items.get(&first_arg).filter(|i| i.type_id == TYPE_MERCENARY_DEN && i.quantity >= 1).ok_or_else(|| BridgeRpcError {
                 code: "MissingMercenaryDenItem".into(),
                 message: format!("Mercenary Den item {first_arg} not found"),
+                client_error: None,
             })?;
             if it.owner_id != char_id {
-                return Err(BridgeRpcError { code: "ItemOwnershipViolation".into(), message: format!("Character {char_id} does not own Mercenary Den item {first_arg}") });
+                return Err(BridgeRpcError { code: "ItemOwnershipViolation".into(), message: format!("Character {char_id} does not own Mercenary Den item {first_arg}"), client_error: None });
             }
             if it.location_id != ship_id || it.flag != InventoryFlag::Cargo {
-                return Err(BridgeRpcError { code: "ItemNotInCargo".into(), message: format!("Mercenary Den item {first_arg} must be in active ship cargo") });
+                return Err(BridgeRpcError { code: "ItemNotInCargo".into(), message: format!("Mercenary Den item {first_arg} must be in active ship cargo"), client_error: None });
             }
             if snap.is_item_or_ancestor_locked_or_impounded(first_arg) {
-                return Err(BridgeRpcError { code: "ItemLockedInContractOrJob".into(), message: format!("Mercenary Den item {first_arg} is locked in an open contract or industry job") });
+                return Err(BridgeRpcError { code: "ItemLockedInContractOrJob".into(), message: format!("Mercenary Den item {first_arg} is locked in an open contract or industry job"), client_error: None });
             }
             first_arg
         } else {
@@ -385,6 +401,7 @@ pub async fn handle_anchor_mercenary_den_rpc(
                 .ok_or_else(|| BridgeRpcError {
                     code: "MissingMercenaryDenItem".into(),
                     message: "Ship cargo does not contain an unlocked Mercenary Den (85230)".into(),
+                    client_error: None,
                 })?
         };
         snap.consume_exact_item_quantity(
@@ -395,6 +412,7 @@ pub async fn handle_anchor_mercenary_den_rpc(
         .map_err(|e| BridgeRpcError {
             code: "InventoryError".into(),
             message: e.to_string(),
+            client_error: None,
         })?;
 
         snap.next_entity_id += 1;
@@ -512,6 +530,7 @@ pub async fn handle_mercden_component_call(
         return Err(BridgeRpcError {
             code: "UnsupportedComponentCall".into(),
             message: format!("Unsupported Mercenary Den component method {comp_name}.{comp_method}"),
+            client_error: None,
         });
     }
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -523,6 +542,7 @@ pub async fn handle_mercden_component_call(
         .ok_or_else(|| BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: format!("Ship {ship_id} is not in space in system {sys_id}"),
+            client_error: None,
         })?;
     let den_pos = ctx
         .db
@@ -530,11 +550,13 @@ pub async fn handle_mercden_component_call(
         .ok_or_else(|| BridgeRpcError {
             code: "MercenaryDenNotFound".into(),
             message: format!("Mercenary Den {den_id} not found"),
+            client_error: None,
         })?;
     if den_pos.0 != sys_id {
         return Err(BridgeRpcError {
             code: "MercenaryDenNotInSystem".into(),
             message: format!("Mercenary Den {den_id} is not in system {sys_id}"),
+            client_error: None,
         });
     }
     let live_den_pos = sys_handle
@@ -549,6 +571,7 @@ pub async fn handle_mercden_component_call(
         return Err(BridgeRpcError {
             code: "MercenaryDenOutOfRange".into(),
             message: format!("Ship is {dist:.0} m from Mercenary Den {den_id} (max 10,000 m)"),
+            client_error: None,
         });
     }
 
@@ -569,17 +592,20 @@ pub async fn handle_mercden_component_call(
             .ok_or_else(|| BridgeRpcError {
                 code: "MercenaryDenNotFound".into(),
                 message: format!("Mercenary Den {den_id} not found"),
+                client_error: None,
             })?;
         if den_check.owner_char_id != char_id {
             return Err(BridgeRpcError {
                 code: "NotMercenaryDenOwner".into(),
                 message: "Only the owning character may extract Infomorph Decryption Keys".into(),
+                client_error: None,
             });
         }
         if !den_check.enabled || reinf.2 < 50 || now < reinf.0 {
             return Err(BridgeRpcError {
                 code: "MercenaryDenReinforced".into(),
                 message: "Mercenary Den is reinforced and inaccessible until shields reach >= 50%".into(),
+                client_error: None,
             });
         }
         let free_m3 = ship_free_cargo_m3(ctx, snap, ship_id)?;
@@ -609,6 +635,7 @@ pub async fn handle_mercden_component_call(
             return Err(BridgeRpcError {
                 code: "NoInfomorphsAvailable".into(),
                 message: "Mercenary Den currently holds 0 Infomorph Decryption Keys".into(),
+                client_error: None,
             });
         }
         let skyhook_id = den_mut.skyhook_id;
@@ -626,6 +653,7 @@ pub async fn handle_mercden_component_call(
             return Err(BridgeRpcError {
                 code: "NotEnoughCargoSpace".into(),
                 message: "Active ship does not have enough free cargo capacity to extract Infomorph Decryption Keys".into(),
+                client_error: None,
             });
         }
         let extracted_total = if max_owner_units >= full_owner_qty || tax_pct >= 100 {
@@ -637,6 +665,7 @@ pub async fn handle_mercden_component_call(
             return Err(BridgeRpcError {
                 code: "NotEnoughCargoSpace".into(),
                 message: "Active ship does not have enough free cargo capacity to extract Infomorph Decryption Keys".into(),
+                client_error: None,
             });
         }
         let den_mut = snap.sov_runtime.mercenary_dens.get_mut(&den_id).expect("checked");
@@ -789,16 +818,19 @@ pub async fn apply_mercenary_den_weapon_damage(
             return Err(BridgeRpcError {
                 code: "MercenaryDenReinforced".into(),
                 message: format!("Mercenary Den {den_id} is reinforced until {reinf_until}"),
+                client_error: None,
             });
         }
         let st = snap.structures.get_mut(&den_id).ok_or_else(|| BridgeRpcError {
             code: "MercenaryDenNotFound".into(),
             message: format!("Mercenary Den {den_id} not found"),
+            client_error: None,
         })?;
         if st.state == "Destroyed" {
             return Err(BridgeRpcError {
                 code: "StructureDestroyed".into(),
                 message: format!("Mercenary Den {den_id} is already destroyed"),
+                client_error: None,
             });
         }
         if vuln_end > 0 && now >= vuln_end {
@@ -996,6 +1028,7 @@ pub async fn apply_mercenary_den_shield_repair(
         .ok_or_else(|| BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: "Ship must be in space to repair Mercenary Den shields".into(),
+            client_error: None,
         })?;
     let den_pos_opt = ctx
         .db
@@ -1004,12 +1037,14 @@ pub async fn apply_mercenary_den_shield_repair(
         return Err(BridgeRpcError {
             code: "MercenaryDenNotFound".into(),
             message: format!("Mercenary Den {den_id} not found"),
+            client_error: None,
         });
     };
     if den_sys != sys_id {
         return Err(BridgeRpcError {
             code: "TargetNotInSystem".into(),
             message: "Mercenary Den is not in the same solar system".into(),
+            client_error: None,
         });
     }
     let den_pos = sys_handle
@@ -1023,6 +1058,7 @@ pub async fn apply_mercenary_den_shield_repair(
         return Err(BridgeRpcError {
             code: "TargetOutOfRange".into(),
             message: "Mercenary Den is outside Remote Shield Booster range".into(),
+            client_error: None,
         });
     }
 
@@ -1039,11 +1075,13 @@ pub async fn apply_mercenary_den_shield_repair(
             return Err(BridgeRpcError {
                 code: "MercenaryDenStillInReinforcement".into(),
                 message: format!("Mercenary Den {den_id} cannot be repaired while reinforced until {reinf_until}"),
+                client_error: None,
             });
         }
         let st = snap.structures.get_mut(&den_id).ok_or_else(|| BridgeRpcError {
             code: "MercenaryDenNotFound".into(),
             message: format!("Mercenary Den {den_id} not found"),
+            client_error: None,
         })?;
         st.shield_hp = (st.shield_hp + repair_hp.max(500.0)).min(MERC_DEN_BASE_HP);
         let pct = ((st.shield_hp / MERC_DEN_BASE_HP) * 100.0).round().clamp(0.0, 100.0) as u8;
@@ -1099,6 +1137,7 @@ pub async fn dispatch_special_structure_attack(
         return Err(BridgeRpcError {
             code: "InvalidSpecialStructure".into(),
             message: format!("Structure {structure_id} is not a special target"),
+            client_error: None,
         });
     };
     ctx.db.with_mut_snapshot(|snap| {
@@ -1158,6 +1197,7 @@ pub async fn handle_confirm_skyhook_sov_management(
         return Err(BridgeRpcError {
             code: "InvalidArguments".into(),
             message: "ConfirmSkyhookSovManagement requires skyhookID".into(),
+            client_error: None,
         });
     };
     let tax_pct = args
@@ -1201,6 +1241,7 @@ pub async fn handle_confirm_skyhook_sov_management(
         return Err(BridgeRpcError {
             code: "CorpRoleDenied".into(),
             message: "Only owner corporation directors or sovereign alliance directors may configure Skyhook management and tax".into(),
+            client_error: None,
         });
     }
 
@@ -1242,18 +1283,21 @@ pub fn try_handle_sov_hub_data_hack(
         return Some(Err(BridgeRpcError {
             code: "DataAnalyzerRequired".into(),
             message: "Hacking a Sovereignty Hub requires a Data Analyzer".into(),
+            client_error: None,
         }));
     }
     if is_destroyed {
         return Some(Err(BridgeRpcError {
             code: "TargetDestroyed".into(),
             message: "Cannot hack destroyed Sovereignty Hub".into(),
+            client_error: None,
         }));
     }
     if is_friendly {
         return Some(Err(BridgeRpcError {
             code: "CannotHackFriendlySovHub".into(),
             message: "Cannot hack your own corporation or alliance Sovereignty Hub".into(),
+            client_error: None,
         }));
     }
     let skills = ctx.character_skill_levels(char_id);
@@ -1262,6 +1306,7 @@ pub fn try_handle_sov_hub_data_hack(
         return Some(Err(BridgeRpcError {
             code: "HackingSkillRequired".into(),
             message: "Hacking (3405) or Archaeology (3408) skill required to operate analyzer".into(),
+            client_error: None,
         }));
     }
     let coherence = base_coherence + 10.0 * (hack_lvl as f64);
@@ -1332,51 +1377,51 @@ pub async fn handle_anchor_sov_hub_rpc(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     if session.station_id.is_some() || session.structure_id.is_some() {
-        return Err(BridgeRpcError { code: "ShipDocked".into(), message: "Cannot anchor a Sovereignty Hub while docked".into() });
+        return Err(BridgeRpcError { code: "ShipDocked".into(), message: "Cannot anchor a Sovereignty Hub while docked".into(), client_error: None });
     }
-    let sys_id = session.solar_system_id.ok_or_else(|| BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solarSystemID".into() })?;
+    let sys_id = session.solar_system_id.ok_or_else(|| BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solarSystemID".into(), client_error: None })?;
     let ship_id = session.ship_id.unwrap_or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0)));
     if !is_claimable_nullsec_system(&ctx.sde, sys_id) {
-        return Err(BridgeRpcError { code: "CannotAnchorSovHubOutsideNullSec".into(), message: format!("Sovereignty Hub can only be anchored in claimable null-security space (system {sys_id})") });
+        return Err(BridgeRpcError { code: "CannotAnchorSovHubOutsideNullSec".into(), message: format!("Sovereignty Hub can only be anchored in claimable null-security space (system {sys_id})"), client_error: None });
     }
-    let (_, ship_ball) = ctx.systems.get_or_spawn(sys_id).get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError { code: "DestinyQueryFailed".into(), message: e })?
-        .ok_or_else(|| BridgeRpcError { code: "ShipNotInSpace".into(), message: format!("Active ship {ship_id} is not spawned in space") })?;
+    let (_, ship_ball) = ctx.systems.get_or_spawn(sys_id).get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError { code: "DestinyQueryFailed".into(), message: e, client_error: None })?
+        .ok_or_else(|| BridgeRpcError { code: "ShipNotInSpace".into(), message: format!("Active ship {ship_id} is not spawned in space"), client_error: None })?;
     let name = args.iter().filter_map(|a| a.as_str()).map(str::trim).filter(|s| !s.is_empty()).next_back().unwrap_or("Sovereignty Hub").to_string();
     let first_arg = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
     let now = ctx.now_unix();
     let hub_id = ctx.db.try_with_mut_snapshot(|snap| {
         let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
         let ally_id = snap.corporations.get(&corp_id).and_then(|c| c.alliance_id).or(session.alliance_id)
-            .ok_or_else(|| BridgeRpcError { code: "AllianceRequired".into(), message: "Anchoring a Sovereignty Hub requires membership in an alliance".into() })?;
+            .ok_or_else(|| BridgeRpcError { code: "AllianceRequired".into(), message: "Anchoring a Sovereignty Hub requires membership in an alliance".into(), client_error: None })?;
         let (is_ceo, roles) =
             snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, now);
         if !is_ceo && (roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER)) == 0 {
-            return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Anchoring a Sovereignty Hub requires Director or Station Manager role".into() });
+            return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Anchoring a Sovereignty Hub requires Director or Station Manager role".into(), client_error: None });
         }
         if snap.system_states.get(&sys_id).and_then(|s| s.sov_alliance_id).is_some_and(|aid| aid != ally_id) {
-            return Err(BridgeRpcError { code: "SovereigntyHeldByAnotherAlliance".into(), message: format!("System {sys_id} is currently claimed by another alliance") });
+            return Err(BridgeRpcError { code: "SovereigntyHeldByAnotherAlliance".into(), message: format!("System {sys_id} is currently claimed by another alliance"), client_error: None });
         }
         if snap.structures.values().any(|s| s.solar_system_id == sys_id && s.type_id == TYPE_SOVEREIGNTY_HUB && !s.state.eq_ignore_ascii_case("destroyed")) {
-            return Err(BridgeRpcError { code: "SovHubAlreadyPresent".into(), message: format!("System {sys_id} already has an active Sovereignty Hub") });
+            return Err(BridgeRpcError { code: "SovHubAlreadyPresent".into(), message: format!("System {sys_id} already has an active Sovereignty Hub"), client_error: None });
         }
         let item_id = if first_arg > 0 && first_arg != i64::from(TYPE_SOVEREIGNTY_HUB) {
             let it = snap.items.get(&first_arg).filter(|i| i.type_id == TYPE_SOVEREIGNTY_HUB && i.quantity >= 1)
-                .ok_or_else(|| BridgeRpcError { code: "MissingStructureItem".into(), message: format!("Sovereignty Hub item {first_arg} not found") })?;
+                .ok_or_else(|| BridgeRpcError { code: "MissingStructureItem".into(), message: format!("Sovereignty Hub item {first_arg} not found"), client_error: None })?;
             if it.owner_id != char_id && it.owner_id != corp_id {
-                return Err(BridgeRpcError { code: "ItemOwnershipViolation".into(), message: format!("Character {char_id} does not own Sovereignty Hub item {first_arg}") });
+                return Err(BridgeRpcError { code: "ItemOwnershipViolation".into(), message: format!("Character {char_id} does not own Sovereignty Hub item {first_arg}"), client_error: None });
             }
             if it.location_id != ship_id || it.flag != InventoryFlag::Cargo {
-                return Err(BridgeRpcError { code: "ItemNotInCargo".into(), message: format!("Sovereignty Hub item {first_arg} must be in active ship cargo") });
+                return Err(BridgeRpcError { code: "ItemNotInCargo".into(), message: format!("Sovereignty Hub item {first_arg} must be in active ship cargo"), client_error: None });
             }
             if snap.is_item_or_ancestor_locked_or_impounded(first_arg) {
-                return Err(BridgeRpcError { code: "ItemLockedInContractOrJob".into(), message: format!("Sovereignty Hub item {first_arg} is locked in an open contract or industry job") });
+                return Err(BridgeRpcError { code: "ItemLockedInContractOrJob".into(), message: format!("Sovereignty Hub item {first_arg} is locked in an open contract or industry job"), client_error: None });
             }
             first_arg
         } else {
             snap.items.values()
                 .filter(|i| i.type_id == TYPE_SOVEREIGNTY_HUB && i.location_id == ship_id && i.flag == InventoryFlag::Cargo && (i.owner_id == char_id || i.owner_id == corp_id) && i.quantity >= 1 && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id))
                 .map(|i| i.item_id).min()
-                .ok_or_else(|| BridgeRpcError { code: "MissingStructureItem".into(), message: "Unlocked Sovereignty Hub item not found in active ship cargo".into() })?
+                .ok_or_else(|| BridgeRpcError { code: "MissingStructureItem".into(), message: "Unlocked Sovereignty Hub item not found in active ship cargo".into(), client_error: None })?
         };
         if let Some(hub_owner) = snap.items.get(&item_id).map(|i| i.owner_id) {
             let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), hub_owner);
@@ -1384,6 +1429,7 @@ pub async fn handle_anchor_sov_hub_rpc(
             snap.consume_exact_item_quantity(item_id, 1, opts).map_err(|e| BridgeRpcError {
                 code: "ItemLockedInContractOrJob".into(),
                 message: e.to_string(),
+                client_error: None,
             })?;
         }
         snap.next_entity_id += 1;

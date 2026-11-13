@@ -41,6 +41,7 @@ pub fn set_jump_clone_name(
         .ok_or_else(|| BridgeRpcError {
             code: "InvalidJumpCloneID".into(),
             message: "SetJumpCloneName requires cloneID".into(),
+            client_error: None,
         })?;
     let name = args
         .get(1)
@@ -54,6 +55,7 @@ pub fn set_jump_clone_name(
             message: format!(
                 "Jump clone names are limited to {MAX_JUMP_CLONE_NAME_LEN} characters"
             ),
+            client_error: None,
         });
     }
     ctx.db.try_with_mut_snapshot(|snap| {
@@ -65,6 +67,7 @@ pub fn set_jump_clone_name(
             return Err(BridgeRpcError {
                 code: "JumpCloneNotFound".into(),
                 message: format!("Jump clone {clone_id} not found"),
+                client_error: None,
             });
         }
         let mut names = load(snap);
@@ -168,6 +171,7 @@ pub fn get_ship_clone_state(
         return Err(BridgeRpcError {
             code: "ShipAccessDenied".into(),
             message: "Caller must own or pilot the target ship to query its clone state".into(),
+            client_error: None,
         });
     }
     let rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
@@ -321,6 +325,7 @@ pub(crate) fn extract_skills(
         return Err(BridgeRpcError {
             code: "MissingSkillExtractor".into(),
             message: "ExtractSkills requires a valid Skill Extractor itemID".into(),
+            client_error: None,
         });
     };
 
@@ -343,6 +348,7 @@ pub(crate) fn extract_skills(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "ExtractSkills requires non-empty skills dict".into(),
+            client_error: None,
         });
     }
 
@@ -360,18 +366,21 @@ pub(crate) fn extract_skills(
             return Err(BridgeRpcError {
                 code: "SkillCannotBeExtracted".into(),
                 message: format!("Skill {tid} cannot be extracted"),
+                client_error: None,
             });
         }
         if !seen.insert(tid) {
             return Err(BridgeRpcError {
                 code: "InvalidSkillPointAmount".into(),
                 message: "Duplicate skill in extraction request".into(),
+                client_error: None,
             });
         }
         if !take.is_finite() || take <= 0.0 {
             return Err(BridgeRpcError {
                 code: "InvalidSkillPointAmount".into(),
                 message: "Each requested extraction amount must be positive and finite".into(),
+                client_error: None,
             });
         }
     }
@@ -388,6 +397,7 @@ pub(crate) fn extract_skills(
             return Err(BridgeRpcError {
                 code: "NotDocked".into(),
                 message: "Must be docked in a station or structure to extract skills".into(),
+                client_error: None,
             });
         };
         let ship_id = snap
@@ -400,12 +410,14 @@ pub(crate) fn extract_skills(
             return Err(BridgeRpcError {
                 code: "MissingSkillExtractor".into(),
                 message: "Skill Extractor item not found".into(),
+                client_error: None,
             });
         };
         if extractor.owner_id != char_id || extractor.type_id != 40519 || extractor.quantity < 1 {
             return Err(BridgeRpcError {
                 code: "MissingSkillExtractor".into(),
                 message: "Valid Skill Extractor (type 40519) owned by character is required".into(),
+                client_error: None,
             });
         }
         let in_hangar =
@@ -417,6 +429,7 @@ pub(crate) fn extract_skills(
             return Err(BridgeRpcError {
                 code: "MissingSkillExtractor".into(),
                 message: "Skill Extractor must be located in character station hangar or active ship cargo".into(),
+                client_error: None,
             });
         }
         if snap.is_item_locked_in_contract_or_job(extractor_item_id)
@@ -425,12 +438,14 @@ pub(crate) fn extract_skills(
             return Err(BridgeRpcError {
                 code: "SkillExtractorLocked".into(),
                 message: "Skill Extractor is locked in an active contract or industry job".into(),
+                client_error: None,
             });
         }
 
         let ch_rec = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
             code: "CharacterNotFound".into(),
             message: format!("Character {char_id} not found"),
+            client_error: None,
         })?;
 
         // 4. Omega clone check
@@ -438,6 +453,7 @@ pub(crate) fn extract_skills(
             return Err(BridgeRpcError {
                 code: "OmegaCloneRequired".into(),
                 message: "Skill extraction requires an active Omega clone account".into(),
+                client_error: None,
             });
         }
 
@@ -449,6 +465,7 @@ pub(crate) fn extract_skills(
                 message: format!(
                     "Skill extraction requires extracting exactly 500,000 skill points (got {total_req})"
                 ),
+                client_error: None,
             });
         }
 
@@ -460,12 +477,14 @@ pub(crate) fn extract_skills(
                 message: format!(
                     "Skill extraction requires at least 5,500,000 allocated SP (character has {allocated_sp:.0} SP)"
                 ),
+                client_error: None,
             });
         }
         if allocated_sp - 500_000.0 < 5_000_000.0 - 0.01 {
             return Err(BridgeRpcError {
                 code: "InsufficientSkillPoints".into(),
                 message: "ExtractSkills requires at least 5,000,000 allocated SP to remain after extraction".into(),
+                client_error: None,
             });
         }
 
@@ -481,6 +500,7 @@ pub(crate) fn extract_skills(
                 return Err(BridgeRpcError {
                     code: "SkillNotTrained".into(),
                     message: format!("Skill {tid} is not trained by character {char_id}"),
+                    client_error: None,
                 });
             };
             if take > rec.skill_points {
@@ -490,6 +510,7 @@ pub(crate) fn extract_skills(
                         "Skill {tid} only has {:.0} SP (attempted to extract {:.0})",
                         rec.skill_points, take
                     ),
+                    client_error: None,
                 });
             }
             let rem_sp = rec.skill_points - take;
@@ -540,6 +561,7 @@ pub(crate) fn extract_skills(
                                     message: format!(
                                         "Cannot extract skill {req_tid}: required at level {req_lvl} for trained skill {s_tid}"
                                     ),
+                                    client_error: None,
                                 });
                             }
                         }
@@ -657,6 +679,7 @@ pub(crate) fn extract_skills(
         .map_err(|e| BridgeRpcError {
             code: "SkillExtractorConsumeFailed".into(),
             message: e.to_string(),
+            client_error: None,
         })?;
         let post_extractor = snap.items.get(&extractor_item_id).cloned();
 
@@ -1055,6 +1078,7 @@ pub(crate) async fn handle_public_qa_tools(
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: "publicQaToolsServer.MoveMeTo requires GM/QA role".into(),
+                    client_error: None,
                 }));
             }
             Some(handle_qa_move_me_to(ctx, session, cid, args).await)
@@ -1094,6 +1118,7 @@ pub(crate) async fn handle_qa_move_me_to(
         return Err(BridgeRpcError {
             code: "DestinationNotFound".into(),
             message: format!("Destination {dest_raw} not found in SDE"),
+            client_error: None,
         });
     };
     let (old_sys_id, ship_id) = ctx
@@ -1121,6 +1146,7 @@ pub(crate) async fn handle_qa_move_me_to(
             return Err(BridgeRpcError {
                 code: "TeleportFailed".into(),
                 message: e.to_string(),
+                client_error: None,
             })
         }
     };

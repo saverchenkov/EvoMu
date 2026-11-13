@@ -11,7 +11,7 @@ use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
 
 fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
-    BridgeRpcError { code: code.into(), message: message.into() }
+    BridgeRpcError { code: code.into(), message: message.into(), client_error: None }
 }
 
 pub(crate) fn has_structure_manager_role(snap: &eve_db::WorldStateSnapshot, session: &SessionState, char_id: i64, corp_id: i64) -> bool {

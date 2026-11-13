@@ -773,18 +773,21 @@ pub async fn handle_wrecks_killmails(
                 return Some(Err(BridgeRpcError {
                     code: "CannotSelfDestructWhileDocked".into(),
                     message: "Cannot self-destruct a ship while docked in a station or structure".into(),
+                    client_error: None,
                 }));
             }
             let Some(ship_id) = session.ship_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "Session has no active ship".into(),
+                    client_error: None,
                 }));
             };
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no solar system".into(),
+                    client_error: None,
                 }));
             };
             let now_unix = ctx.now_unix();
@@ -981,6 +984,7 @@ pub async fn handle_wrecks_killmails(
                 Err(e) => Some(Err(BridgeRpcError {
                     code: "SelfDestructFailed".into(),
                     message: e,
+                    client_error: None,
                 })),
             }
         }
@@ -1017,7 +1021,7 @@ pub async fn handle_wrecks_killmails(
             };
             let ship_id = session.ship_id.unwrap_or(0);
             if !ctx.db.with_snapshot(|s| s.items.get(&module_id).is_some_and(|i| i.owner_id == char_id && i.location_id == ship_id)) {
-                return Some(Err(BridgeRpcError { code: "ModuleNotOwnedByShip".into(), message: format!("Module {module_id} is not fitted to active ship {ship_id}") }));
+                return Some(Err(BridgeRpcError { code: "ModuleNotOwnedByShip".into(), message: format!("Module {module_id} is not fitted to active ship {ship_id}"), client_error: None }));
             }
             with_mut_combat_runtime(ctx, |rt| { rt.entropic_spools.remove(&(ship_id, module_id)); });
             if let Some(sys_id) = session.solar_system_id {

@@ -33,6 +33,7 @@ pub fn get_character_selection_data(
         return Err(BridgeRpcError {
             code: "ClusterShuttingDown".into(),
             message: "Cluster shutdown in progress.".into(),
+            client_error: None,
         });
     }
     let chars = ctx.db.get_characters_for_user(user_id);

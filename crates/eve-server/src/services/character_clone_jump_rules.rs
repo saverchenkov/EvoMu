@@ -60,6 +60,7 @@ pub fn check_alpha_clone_install_capacity(
             return Err(BridgeRpcError {
                 code: "OmegaCapacityRequired".into(),
                 message: "Installing jump clones requires an active Omega clone account".into(),
+                client_error: None,
             });
         }
     }
@@ -131,6 +132,7 @@ pub fn handle_clone_jump(
         return Some(Err(BridgeRpcError {
             code: "MustBeDocked".into(),
             message: "Clone jump requires being docked at a station or structure".into(),
+            client_error: None,
         }));
     }
     let Some(departure_loc_id) = ctx
@@ -145,6 +147,7 @@ pub fn handle_clone_jump(
         return Some(Err(BridgeRpcError {
             code: "MustBeDocked".into(),
             message: "Clone jump requires being docked at a station or structure".into(),
+            client_error: None,
         }));
     };
 
@@ -157,6 +160,7 @@ pub fn handle_clone_jump(
         return Some(Err(BridgeRpcError {
             code: "InvalidJumpCloneID".into(),
             message: "CloneJump requires a positive jumpCloneID".into(),
+            client_error: None,
         }));
     }
 
@@ -217,6 +221,7 @@ pub fn handle_clone_jump(
             return Err(BridgeRpcError {
                 code: "CharacterNotFound".into(),
                 message: format!("Character {char_id} not found"),
+                client_error: None,
             });
         };
 
@@ -224,6 +229,7 @@ pub fn handle_clone_jump(
             let clones = snap.jump_clones.get(&char_id).ok_or_else(|| BridgeRpcError {
                 code: "JumpCloneNotFound".into(),
                 message: format!("Jump clone {target_jc_id} not found"),
+                client_error: None,
             })?;
             let c = clones
                 .iter()
@@ -231,6 +237,7 @@ pub fn handle_clone_jump(
                 .ok_or_else(|| BridgeRpcError {
                     code: "JumpCloneNotFound".into(),
                     message: format!("Jump clone {target_jc_id} not found"),
+                    client_error: None,
                 })?;
             c.location_id
         };
@@ -244,6 +251,7 @@ pub fn handle_clone_jump(
                 message: format!(
                     "Clone jump from {departure_loc_id} requires an active clone bay to store your left-behind clone"
                 ),
+                client_error: None,
             });
         }
         let effective_cooldown = if same_location_swap { 0 } else { full_cooldown_sec };
@@ -253,6 +261,7 @@ pub fn handle_clone_jump(
             return Err(BridgeRpcError {
                 code: "SessionChangeTimerActive".into(),
                 message: "Session change timer is active".into(),
+                client_error: None,
             });
         }
 
@@ -271,6 +280,7 @@ pub fn handle_clone_jump(
                         .saturating_add(full_cooldown_sec)
                         .saturating_sub(now_unix)
                 ),
+                client_error: None,
             });
         }
 
@@ -280,12 +290,14 @@ pub fn handle_clone_jump(
             let st = snap.structures.get(&departure_loc_id).ok_or_else(|| BridgeRpcError {
                 code: "DepartureStructureNotFound".into(),
                 message: format!("Departure structure {departure_loc_id} not found"),
+                client_error: None,
             })?;
             dep_custom_acl_fee =
                 check_structure_clone_bay_access_at(snap, departure_loc_id, char_id, Some(now_unix))?;
             let sys = ctx.sde.solar_systems.get(&st.solar_system_id).ok_or_else(|| BridgeRpcError {
                 code: "DepartureSystemNotFound".into(),
                 message: format!("Departure system {} not found in SDE", st.solar_system_id),
+                client_error: None,
             })?;
             (st.solar_system_id, sys.region_id)
         } else {
@@ -302,6 +314,7 @@ pub fn handle_clone_jump(
                 .ok_or_else(|| BridgeRpcError {
                     code: "DepartureStationNotFound".into(),
                     message: format!("Departure station {departure_loc_id} not found in SDE"),
+                    client_error: None,
                 })?;
             (sys.solar_system_id, sys.region_id)
         };
@@ -313,6 +326,7 @@ pub fn handle_clone_jump(
                 return Err(BridgeRpcError {
                     code: "CloneDestinationNotFound".into(),
                     message: format!("Destination structure {dest_loc_id} no longer exists"),
+                    client_error: None,
                 });
             };
             if !structure_has_online_clone_bay(snap, dest_loc_id) {
@@ -321,6 +335,7 @@ pub fn handle_clone_jump(
                     message: format!(
                         "Destination structure {dest_loc_id} does not have an online Standup Cloning Center service"
                     ),
+                    client_error: None,
                 });
             }
             // feat:clones.jump-clone-structure-dock: clone bay on Upwell structures is access-list gated
@@ -331,6 +346,7 @@ pub fn handle_clone_jump(
                 return Err(BridgeRpcError {
                     code: "CloneDestinationNotFound".into(),
                     message: format!("Destination solar system {sys_id} not found in SDE"),
+                    client_error: None,
                 });
             };
             (sys_id, sys.constellation_id, sys.region_id)
@@ -343,12 +359,14 @@ pub fn handle_clone_jump(
                 return Err(BridgeRpcError {
                     code: "NoActiveCloneVatBay".into(),
                     message: "Host ship pilot not found".into(),
+                    client_error: None,
                 });
             };
             if host_ch.active_ship_id != dest_loc_id || host_ch.station_id.is_some() || host_ch.structure_id.is_some() {
                 return Err(BridgeRpcError {
                     code: "NoActiveCloneVatBay".into(),
                     message: "Host Titan or Rorqual must be piloted in space".into(),
+                    client_error: None,
                 });
             }
             let in_fleet = char_id == host_owner
@@ -357,12 +375,14 @@ pub fn handle_clone_jump(
                 return Err(BridgeRpcError {
                     code: "NotInHostShipFleet".into(),
                     message: "Clone jump to a ship Clone Vat Bay requires being in the host pilot's fleet".into(),
+                    client_error: None,
                 });
             }
             if !is_ship_clone_vat_bay_active(ctx, snap, dest_loc_id, now_unix) {
                 return Err(BridgeRpcError {
                     code: "NoActiveCloneVatBay".into(),
                     message: "Host ship Clone Vat Bay is not currently active".into(),
+                    client_error: None,
                 });
             }
             let sys_id = host_ch.solar_system_id;
@@ -370,6 +390,7 @@ pub fn handle_clone_jump(
                 return Err(BridgeRpcError {
                     code: "CloneDestinationNotFound".into(),
                     message: format!("Host ship solar system {sys_id} not found in SDE"),
+                    client_error: None,
                 });
             };
             let has_active_cloak = snap.items.values().any(|i| {
@@ -382,12 +403,14 @@ pub fn handle_clone_jump(
                 return Err(BridgeRpcError {
                     code: "NoActiveCloneVatBay".into(),
                     message: "Host Titan or Rorqual is not present in live space".into(),
+                    client_error: None,
                 });
             };
             if live_cloaked || has_active_cloak {
                 return Err(BridgeRpcError {
                     code: "ShipCloaked".into(),
                     message: "Cannot clone jump to a cloaked Titan or Rorqual".into(),
+                    client_error: None,
                 });
             }
             ship_clone_spawn_pos = Some(live_spawn_pos);
@@ -402,12 +425,14 @@ pub fn handle_clone_jump(
                 return Err(BridgeRpcError {
                     code: "CloneDestinationNotFound".into(),
                     message: format!("Destination station {dest_loc_id} not found in SDE"),
+                    client_error: None,
                 });
             };
             if !dest_station.has_clone_bay {
                 return Err(BridgeRpcError {
                     code: "StationHasNoCloneBay".into(),
                     message: format!("Destination station {dest_loc_id} does not have an active clone bay"),
+                    client_error: None,
                 });
             }
             (sys.solar_system_id, sys.constellation_id, sys.region_id)
@@ -418,6 +443,7 @@ pub fn handle_clone_jump(
             return Err(BridgeRpcError {
                 code: "SessionChangeTimerActive".into(),
                 message: "Session change timer is active".into(),
+                client_error: None,
             });
         }
 
@@ -434,6 +460,7 @@ pub fn handle_clone_jump(
                         .saturating_add(full_cooldown_sec)
                         .saturating_sub(now_unix)
                 ),
+                client_error: None,
             });
         }
 
@@ -452,6 +479,7 @@ pub fn handle_clone_jump(
                 return Err(BridgeRpcError {
                     code: "MustBeInCapsule".into(),
                     message: "Clone jump requires being in a capsule (not in any ship)".into(),
+                    client_error: None,
                 });
             }
         }
@@ -467,6 +495,7 @@ pub fn handle_clone_jump(
             return Err(BridgeRpcError {
                 code: "InfomorphPsychologyRequired".into(),
                 message: "Clone actions require Infomorph Psychology level 1 or higher".into(),
+                client_error: None,
             });
         }
 
@@ -480,6 +509,7 @@ pub fn handle_clone_jump(
                 return Err(BridgeRpcError {
                     code: "CannotCloneJumpInWormholeSpace".into(),
                     message: "Clone jumps into, out of or between wormhole systems are refused (except to/from Thera)".into(),
+                    client_error: None,
                 });
             }
         }
@@ -491,12 +521,14 @@ pub fn handle_clone_jump(
                 return Err(BridgeRpcError {
                     code: "CannotCloneJumpToPochven".into(),
                     message: "Clone jumps into Pochven are refused; clone bays in Pochven allow local clone swaps only".into(),
+                    client_error: None,
                 });
             }
             if dep_reg_id == POCHVEN_REGION_ID {
                 return Err(BridgeRpcError {
                     code: "CannotCloneJumpFromPochven".into(),
                     message: "Clone bays in Pochven allow local clone swaps only".into(),
+                    client_error: None,
                 });
             }
             if dest_loc_id == 60_015_187 {
@@ -505,6 +537,7 @@ pub fn handle_clone_jump(
                     return Err(BridgeRpcError {
                         code: "FulcrumCloneRequiresPirateEnlistment".into(),
                         message: "Clone jump to The Fulcrum requires pirate militia enlistment".into(),
+                        client_error: None,
                     });
                 }
             }
@@ -536,6 +569,7 @@ pub fn handle_clone_jump(
                     BridgeRpcError {
                         code: "InsufficientFunds".into(),
                         message: format!("Leaving your clone behind requires {} ISK", leave_behind_fee.to_wire_f64()),
+                        client_error: None,
                     }
                 })?;
                 ch.balance = new_bal;
@@ -844,22 +878,26 @@ pub async fn activate_clone_vat_bay(
     let ship_type = ctx.sde.types.get(&ship_type_id).ok_or_else(|| BridgeRpcError {
         code: "ShipNotFound".into(),
         message: "Ship type unknown".into(),
+        client_error: None,
     })?;
     if !matches!(ship_type.group_id, 30 | 883) {
         return Err(BridgeRpcError {
             code: "ShipCannotFitModule".into(),
             message: "Clone Vat Bay requires a Titan or Rorqual".into(),
+            client_error: None,
         });
     }
     if sys.get_combat_state(ship_id).await.ok().flatten().is_some_and(|cs| cs.is_cloaked) {
         return Err(BridgeRpcError {
             code: "ShipCloaked".into(),
             message: "Cannot activate Clone Vat Bay while cloaked".into(),
+            client_error: None,
         });
     }
     let mod_type = ctx.sde.types.get(&mod_type_id).ok_or_else(|| BridgeRpcError {
         code: "ModuleNotFound".into(),
         message: "Module type unknown".into(),
+        client_error: None,
     })?;
     let (duration_ms, fuel_qty) = if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
         let ev = fit.evaluated_context(&ctx.sde);
@@ -895,18 +933,21 @@ pub async fn activate_clone_vat_bay(
             return Err(BridgeRpcError {
                 code: "ModuleAlreadyActive".into(),
                 message: format!("Clone Vat Bay is already active on ship {ship_id}"),
+                client_error: None,
             });
         }
         let Some(mod_it) = s.items.get(&module_id) else {
             return Err(BridgeRpcError {
                 code: "ModuleNotFound".into(),
                 message: format!("Module {module_id} not found"),
+                client_error: None,
             });
         };
         if mod_it.location_id != ship_id || mod_it.owner_id != char_id {
             return Err(BridgeRpcError {
                 code: "ModuleNotFitted".into(),
                 message: format!("Module {module_id} is no longer fitted to ship {ship_id}"),
+                client_error: None,
             });
         }
         let mut stacks: Vec<(i64, InventoryFlag, i32)> = s
@@ -926,6 +967,7 @@ pub async fn activate_clone_vat_bay(
             return Err(BridgeRpcError {
                 code: "NotEnoughFuel".into(),
                 message: format!("Clone Vat Bay requires {needed} x type {fuel_type}, ship holds {have}"),
+                client_error: None,
             });
         }
         let mut rem = needed;
@@ -969,7 +1011,7 @@ pub async fn activate_clone_vat_bay(
                 save_clone_vat_bay_state(s, &st);
             }
         });
-        return Err(BridgeRpcError { code: "ModuleActivationFailed".into(), message: e });
+        return Err(BridgeRpcError { code: "ModuleActivationFailed".into(), message: e, client_error: None });
     }
 
     ctx.db.with_mut_snapshot(|s| {

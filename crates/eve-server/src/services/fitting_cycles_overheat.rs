@@ -277,6 +277,7 @@ pub fn check_nanite_repair_overheat_lockout(
             message: format!(
                 "UserError: Module {module_id} cannot be activated while Nanite Repair Paste repair is in progress"
             ),
+            client_error: None,
         });
     }
     if (method == "Overload" || mod_state == eve_dogma::ModuleState::Overloaded)
@@ -285,6 +286,7 @@ pub fn check_nanite_repair_overheat_lockout(
         return Err(eve_proto::BridgeRpcError {
             code: "CannotOverheatWhileRepairing".into(),
             message: "UserError: Cannot overheat modules while in-space Nanite Repair Paste repair is active".into(),
+            client_error: None,
         });
     }
     Ok(())

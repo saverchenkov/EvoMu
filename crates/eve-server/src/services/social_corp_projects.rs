@@ -1262,12 +1262,14 @@ pub fn handle_edit_project(
             return Err(BridgeRpcError {
                 code: "ProjectNotFound".into(),
                 message: format!("Corporation project {pid} not found"),
+                client_error: None,
             });
         };
         if proj.corporation_id != corp_id {
             return Err(BridgeRpcError {
                 code: "AccessDenied".into(),
                 message: "Cannot edit a project belonging to another corporation".into(),
+                client_error: None,
             });
         }
         let is_gm = session.has_gm_role();
@@ -1282,6 +1284,7 @@ pub fn handle_edit_project(
             return Err(BridgeRpcError {
                 code: "CorpRoleDenied".into(),
                 message: "Editing corporation projects requires Project Manager or Director role".into(),
+                client_error: None,
             });
         }
         if let Some(new_name) = &new_name_opt {

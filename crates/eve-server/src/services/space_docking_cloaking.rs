@@ -755,11 +755,13 @@ fn validate_cosmic_wormhole_jump_in_snap(
     let ch = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
         code: "SystemTransitionFailed".into(),
         message: format!("Character {char_id} not found"),
+        client_error: None,
     })?;
     if ch.station_id.is_some() || ch.structure_id.is_some() {
         return Err(BridgeRpcError {
             code: "SystemTransitionFailed".into(),
             message: format!("Character {char_id} is docked and cannot transition in space"),
+            client_error: None,
         });
     }
     if ch.solar_system_id != old_sys {
@@ -769,6 +771,7 @@ fn validate_cosmic_wormhole_jump_in_snap(
                 "Character {char_id} moved to solar system {} concurrently",
                 ch.solar_system_id
             ),
+            client_error: None,
         });
     }
     let ch_const = ch.constellation_id;
@@ -839,6 +842,7 @@ fn validate_cosmic_wormhole_jump_in_snap(
         return Err(BridgeRpcError {
             code: "WormholeNotFound".into(),
             message: "No signatures in system".into(),
+            client_error: None,
         });
     };
     let matches_wh = |s: &CosmicSignatureRecord| {
@@ -858,6 +862,7 @@ fn validate_cosmic_wormhole_jump_in_snap(
         return Err(BridgeRpcError {
             code: "WormholeNotFound".into(),
             message: format!("Wormhole not found in system {old_sys}"),
+            client_error: None,
         });
     };
 
@@ -883,6 +888,7 @@ fn validate_cosmic_wormhole_jump_in_snap(
                 wh_id,
                 pol_expiry.saturating_sub(now_unix)
             ),
+            client_error: None,
         });
     }
 
@@ -894,6 +900,7 @@ fn validate_cosmic_wormhole_jump_in_snap(
         return Err(BridgeRpcError {
             code: "OutsideWormholeJumpRange".into(),
             message: format!("Ship is {:.1} m from wormhole (must be <= 2500 m)", dist),
+            client_error: None,
         });
     }
 
@@ -918,6 +925,7 @@ fn validate_cosmic_wormhole_jump_in_snap(
             already_collapsed: Some(BridgeRpcError {
                 code: code.into(),
                 message: "Wormhole has collapsed".into(),
+                client_error: None,
             }),
         });
     }
@@ -938,6 +946,7 @@ fn validate_cosmic_wormhole_jump_in_snap(
                 "Ship mass {:.1} kg exceeds wormhole jump limit {:.1} kg",
                 ship_mass, max_jump
             ),
+            client_error: None,
         });
     }
 
@@ -945,6 +954,7 @@ fn validate_cosmic_wormhole_jump_in_snap(
         Some(BridgeRpcError {
             code: "WormholeMassCollapsed".into(),
             message: "Wormhole lacks remaining mass capacity and has collapsed".into(),
+            client_error: None,
         })
     } else {
         None
@@ -988,6 +998,7 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
                 "Cannot jump wormhole while 10s session-change timer ({}) is active",
                 active_timer.reason
             ),
+            client_error: None,
         }));
     }
 
@@ -1085,6 +1096,7 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
             return Some(Err(BridgeRpcError {
                 code: "SystemTransitionFailed".into(),
                 message: format!("Ship {ship_id} is no longer in solar system {old_sys}"),
+                client_error: None,
             }));
         };
         Some(taken)
@@ -1139,6 +1151,7 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
                 return Err(BridgeRpcError {
                     code: "WormholeNotFound".into(),
                     message: "No signatures in system".into(),
+                    client_error: None,
                 });
             };
             let next_seq = sigs.len() as u32 + 1;
@@ -1249,6 +1262,7 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
             let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
                 code: "SystemTransitionFailed".into(),
                 message: format!("Character {char_id} not found"),
+                client_error: None,
             })?;
             ch.solar_system_id = dest_sys;
             ch.constellation_id = const_id;
@@ -1379,6 +1393,7 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
                 return Some(Err(BridgeRpcError {
                     code: "SystemTransitionFailed".into(),
                     message: format!("Ship {ship_id} is no longer in solar system {old_sys}"),
+                    client_error: None,
                 }));
             };
             let prev_cs = taken.combat_state.clone();

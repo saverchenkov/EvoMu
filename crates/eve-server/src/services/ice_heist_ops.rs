@@ -142,6 +142,7 @@ pub async fn spawn_ice_heist_checked(
             message: format!(
                 "Ice Refinery Heist only spawns at corruption stage 3-4 (current stage: {stage})"
             ),
+            client_error: None,
         });
     }
 
@@ -159,6 +160,7 @@ pub async fn spawn_ice_heist_checked(
             message: format!(
                 "Ice Refinery Heist in system {sys_id} is on 4-hour respawn cooldown until {respawn_until}"
             ),
+            client_error: None,
         });
     }
 
@@ -204,12 +206,14 @@ pub async fn escort_ice_heist_tanker(
                 return Err(BridgeRpcError {
                     code: "InstanceNotFound".into(),
                     message: format!("Ice Heist instance {instance_id} not found"),
+                    client_error: None,
                 });
             };
             if inst.completed {
                 return Err(BridgeRpcError {
                     code: "InstanceAlreadyCompleted".into(),
                     message: format!("Ice Heist instance {instance_id} is already completed"),
+                    client_error: None,
                 });
             }
             if pirate_side {

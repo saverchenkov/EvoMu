@@ -240,6 +240,7 @@ impl ServerContext {
                         Err(BridgeRpcError {
                             code: "InternalError".into(),
                             message: format!("RPC handler panicked in {service}.{method}: {panic_msg}"),
+                            client_error: None,
                         })
                     }
                 };
@@ -250,6 +251,7 @@ impl ServerContext {
                         res = Err(BridgeRpcError {
                             code: "DatabasePersistenceError".into(),
                             message: wal_err,
+                            client_error: None,
                         });
                     }
                 }
@@ -483,6 +485,7 @@ impl ServerContext {
             return Err(BridgeRpcError {
                 code: "ClusterShuttingDown".into(),
                 message: "Cluster is undergoing scheduled daily downtime; non-GM gameplay RPCs are rejected".into(),
+                client_error: None,
             });
         }
 
@@ -496,7 +499,7 @@ impl ServerContext {
                     self.quasar_gateway.unsubscribe_session(session.session_id);
                     if code == "MultiLoginBlocked" {
                         if !is_multi_login_blocker_call {
-                            return Err(BridgeRpcError { code, message: msg });
+                            return Err(BridgeRpcError { code, message: msg, client_error: None });
                         }
                     } else {
                         let _ = self.db.release_online_lock(uid, session.session_id);
@@ -521,7 +524,7 @@ impl ServerContext {
                         session.corporation_id = None;
                         session.alliance_id = None;
                         crate::router::clear_session_character_state(session);
-                        return Err(BridgeRpcError { code, message: msg });
+                        return Err(BridgeRpcError { code, message: msg, client_error: None });
                     }
                 }
             }
@@ -559,6 +562,7 @@ impl ServerContext {
                 code: "FeatureDisabled".into(),
                 message: "Living World Director (taleMgr) is disabled in evomu.toml feature_flags"
                     .into(),
+                client_error: None,
             });
         }
 
@@ -567,6 +571,7 @@ impl ServerContext {
                 // rpc-lint: allow "FeatureDisabled" is an error code, not a publicGatewaySvc method
                 code: "FeatureDisabled".into(),
                 message: "Quasar publicGatewaySvc is disabled in evomu.toml feature_flags".into(),
+                client_error: None,
             });
         }
 
@@ -584,6 +589,7 @@ impl ServerContext {
                     message: format!(
                         "UserError: GM_InsufficientRole: {effective_service}.{method} requires a V24.01 GM/Admin service role bitmask"
                     ),
+                    client_error: None,
                 });
             }
             let secs = match args.first() {
@@ -591,6 +597,7 @@ impl ServerContext {
                     return Err(BridgeRpcError {
                         code: "InvalidArgument".into(),
                         message: "AdvanceClock seconds must be non-negative".into(),
+                        client_error: None,
                     });
                 }
                 Some(PyRep::Integer(i)) => *i as u64,
@@ -616,6 +623,7 @@ impl ServerContext {
                     message: format!(
                         "UserError: GM_InsufficientRole: {effective_service}.{method} requires a V24.01 GM/Admin service role bitmask"
                     ),
+                    client_error: None,
                 });
             }
             if let Some(cid) = session.character_id {
@@ -672,6 +680,7 @@ impl ServerContext {
                     message: format!(
                         "UserError: GM_InsufficientRole: {effective_service}.{method} requires a V24.01 GM/Admin service role bitmask"
                     ),
+                    client_error: None,
                 });
             }
         } else if is_qa_surface {
@@ -683,6 +692,7 @@ impl ServerContext {
                     message: format!(
                         "UserError: GM_InsufficientRole: {effective_service}.{method} requires a V24.01 GM/QA/Admin service role bitmask"
                     ),
+                    client_error: None,
                 });
             }
         }
@@ -719,6 +729,7 @@ impl ServerContext {
                         message: format!(
                             "Quasar domain '{domain}' is not in quasar_protobuf_catalog.json"
                         ),
+                        client_error: None,
                     });
                 }
                 let msg_type = args.get(1).and_then(|a| a.as_str()).unwrap_or("GetRequest");
@@ -735,6 +746,7 @@ impl ServerContext {
                     message: format!(
                         "publicGatewaySvc.{method}({domain} / {msg_type}) is not yet implemented"
                     ),
+                    client_error: None,
                 });
             }
         }
@@ -779,6 +791,7 @@ impl ServerContext {
                         return Err(BridgeRpcError {
                             code: "InvalidArgument".into(),
                             message: "MachoBindObject bind tuple missing objectID".into(),
+                            client_error: None,
                         });
                     }
                 }
@@ -787,6 +800,7 @@ impl ServerContext {
                         code: "InvalidArgument".into(),
                         message: "MachoBindObject requires an explicit integer or string objectID"
                             .into(),
+                        client_error: None,
                     })
                 }
             };
@@ -830,6 +844,7 @@ impl ServerContext {
                             message:
                                 "Piggybacked call in MachoBindObject requires string method name"
                                     .into(),
+                            client_error: None,
                         }
                         })?;
                     let sub_args: Vec<PyRep> = match call_tuple.get(1) {
@@ -1165,6 +1180,7 @@ impl ServerContext {
         Err(BridgeRpcError {
             code: "UnimplementedRPC".into(),
             message: format!("{effective_service}.{method} is not yet implemented"),
+            client_error: None,
         })
     }
 }

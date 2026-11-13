@@ -300,6 +300,7 @@ pub fn capture_warzone_system(
             BridgeRpcError {
                 code: "SystemNotWarzone".into(),
                 message: format!("System {sys_id} is not an FW warzone system"),
+                client_error: None,
             }
         })?;
         let current_c = snap.system_states.get(&sys_id).map(|s| s.fw_contested_pct).unwrap_or_else(|| {
@@ -311,6 +312,7 @@ pub fn capture_warzone_system(
             return Err(BridgeRpcError {
                 code: "SystemNotVulnerable".into(),
                 message: format!("System {sys_id} is only {current_c:.1}% contested; must be 100% to capture"),
+                client_error: None,
             });
         }
         let old_occupier = occ.occupier_faction_id;
@@ -843,6 +845,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solar system".into(),
+                    client_error: None,
                 }));
             };
             let occ_state = ctx.db.with_snapshot(|snap| {
@@ -886,6 +889,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solar system".into(),
+                    client_error: None,
                 }));
             };
             let opt_state = ctx.db.with_snapshot(|snap| {

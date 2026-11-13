@@ -105,6 +105,7 @@ pub(crate) fn check_module_reloading(
         return Err(BridgeRpcError {
             code: "ModuleIsReloading".into(),
             message: format!("Module {module_id} is reloading until {until} (now {now_unix})"),
+            client_error: None,
         });
     }
     Ok(())
@@ -249,6 +250,7 @@ pub(crate) fn handle_unload_ammo(
         return Err(BridgeRpcError {
             code: "ShipOwnershipViolation".into(),
             message: format!("Ship {ship_id} is not owned by character {char_id}"),
+            client_error: None,
         });
     }
     let requested_module_ids: Vec<i64> = match args.get(1) {
@@ -291,12 +293,12 @@ pub(crate) fn handle_unload_ammo(
         Some(PyRep::Integer(loc_id)) if *loc_id > 0 => (*loc_id, None, None),
         Some(PyRep::Tuple(elems) | PyRep::List(elems)) => {
             let Some(loc_id) = elems.first().and_then(|e| e.as_i64()).filter(|&id| id > 0) else {
-                return Err(BridgeRpcError { code: "InvalidDestination".into(), message: "Unload destination locationID must be a positive integer".into() });
+                return Err(BridgeRpcError { code: "InvalidDestination".into(), message: "Unload destination locationID must be a positive integer".into(), client_error: None });
             };
             let parse_flag = |rep: Option<&PyRep>| -> Result<Option<i64>, BridgeRpcError> {
                 match rep {
                     None | Some(PyRep::None) => Ok(None),
-                    Some(e) => e.as_i64().map(Some).ok_or_else(|| BridgeRpcError { code: "InvalidInventoryFlag".into(), message: "Invalid unload destination flag".into() }),
+                    Some(e) => e.as_i64().map(Some).ok_or_else(|| BridgeRpcError { code: "InvalidInventoryFlag".into(), message: "Invalid unload destination flag".into(), client_error: None }),
                 }
             };
             match elems.len() {
@@ -305,22 +307,22 @@ pub(crate) fn handle_unload_ammo(
                 _ => {
                     let owner_opt = match elems.get(1) {
                         None | Some(PyRep::None) => None,
-                        Some(e) => Some(e.as_i64().filter(|&id| id > 0).ok_or_else(|| BridgeRpcError { code: "ItemOwnershipViolation".into(), message: "Invalid unload destination ownerID".into() })?),
+                        Some(e) => Some(e.as_i64().filter(|&id| id > 0).ok_or_else(|| BridgeRpcError { code: "ItemOwnershipViolation".into(), message: "Invalid unload destination ownerID".into(), client_error: None })?),
                     };
                     (loc_id, owner_opt, parse_flag(elems.get(2))?)
                 }
             }
         }
-        Some(_) => return Err(BridgeRpcError { code: "InvalidDestination".into(), message: "Invalid unload destination".into() }),
+        Some(_) => return Err(BridgeRpcError { code: "InvalidDestination".into(), message: "Invalid unload destination".into(), client_error: None }),
     };
     if let Some(dest_owner) = dest_owner_opt {
         if dest_owner != char_id {
-            return Err(BridgeRpcError { code: "ItemOwnershipViolation".into(), message: format!("Destination owner {dest_owner} does not match character {char_id}") });
+            return Err(BridgeRpcError { code: "ItemOwnershipViolation".into(), message: format!("Destination owner {dest_owner} does not match character {char_id}"), client_error: None });
         }
     }
     if let Some(rf) = dest_flag_raw_opt {
         if !matches!(rf, 4 | 5 | 64 | 133..=151 | 155 | 177 | 179 | 181 | 182 | 185) || (dest_loc_id == ship_id && matches!(rf, 4 | 64)) {
-            return Err(BridgeRpcError { code: "InvalidInventoryFlag".into(), message: format!("Invalid unload destination flag {rf}") });
+            return Err(BridgeRpcError { code: "InvalidInventoryFlag".into(), message: format!("Invalid unload destination flag {rf}"), client_error: None });
         }
     }
 
@@ -340,12 +342,12 @@ pub(crate) fn handle_unload_ammo(
             let is_docked_target = ch_dock == Some(dest_loc_id);
             if is_docked_target {
                 if dest_flag_raw_opt.is_some_and(|rf| rf != 4) {
-                    return Err(BridgeRpcError { code: "InvalidInventoryFlag".into(), message: "Station/structure unload requires Hangar flag (4)".into() });
+                    return Err(BridgeRpcError { code: "InvalidInventoryFlag".into(), message: "Station/structure unload requires Hangar flag (4)".into(), client_error: None });
                 }
                 InventoryFlag::Hangar
             } else {
                 let Some(d) = snap.items.get(&dest_loc_id) else {
-                    return Err(BridgeRpcError { code: "InvalidDestination".into(), message: format!("Unload destination {dest_loc_id} is not accessible to character {char_id}") });
+                    return Err(BridgeRpcError { code: "InvalidDestination".into(), message: format!("Unload destination {dest_loc_id} is not accessible to character {char_id}"), client_error: None });
                 };
                 let d_grp = ctx.sde.types.get(&d.type_id).map(|t| t.group_id).unwrap_or(0);
                 if d.owner_id != char_id
@@ -354,18 +356,18 @@ pub(crate) fn handle_unload_ammo(
                     || d_grp == crate::services::mobile_deployables::GROUP_CRAB_BEACON
                     || d_grp == 1247
                 {
-                    return Err(BridgeRpcError { code: "InvalidDestination".into(), message: format!("Unload destination {dest_loc_id} is not an accessible container") });
+                    return Err(BridgeRpcError { code: "InvalidDestination".into(), message: format!("Unload destination {dest_loc_id} is not an accessible container"), client_error: None });
                 }
                 if !d.singleton && d_grp != crate::services::mobile_deployables::GROUP_MOBILE_DEPOT {
-                    return Err(BridgeRpcError { code: "ContainerNotAssembled".into(), message: format!("Target container {dest_loc_id} must be assembled before storing items") });
+                    return Err(BridgeRpcError { code: "ContainerNotAssembled".into(), message: format!("Target container {dest_loc_id} must be assembled before storing items"), client_error: None });
                 }
                 if dest_flag_raw_opt.is_some_and(|rf| !matches!(rf, 5 | 64)) {
-                    return Err(BridgeRpcError { code: "InvalidInventoryFlag".into(), message: "Container unload requires Cargo (5) or Unlocked (64) flag".into() });
+                    return Err(BridgeRpcError { code: "InvalidInventoryFlag".into(), message: "Container unload requires Cargo (5) or Unlocked (64) flag".into(), client_error: None });
                 }
                 crate::services::fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, d)?;
                 let st = crate::services::fitting_containers_ships::read_container_ship_state_snap(snap);
                 if st.container_passwords.get(&dest_loc_id).is_some_and(|pw| !pw.is_empty() && !st.unlocked_containers.contains(&(dest_loc_id, char_id))) {
-                    return Err(BridgeRpcError { code: "ALSCPasswordRequired".into(), message: format!("Password required to move items into container {dest_loc_id}") });
+                    return Err(BridgeRpcError { code: "ALSCPasswordRequired".into(), message: format!("Password required to move items into container {dest_loc_id}"), client_error: None });
                 }
                 is_owned_container_target = true;
                 if dest_flag_raw_opt == Some(64) { InventoryFlag::Unlocked } else { InventoryFlag::Cargo }
@@ -379,7 +381,10 @@ pub(crate) fn handle_unload_ammo(
                 ship_type.map(|st| crate::services::fitting_saved_apply::get_ship_hold_capacity(dest_flag as u16, st, eval_cargo_cap)).unwrap_or(0.0)
             };
             if hold_cap <= 0.0 {
-                return Err(BridgeRpcError { code: "NotEnoughCargoSpace".into(), message: "Not enough cargo space to unload ammo".into() });
+                return Err(BridgeRpcError::user_error_with_args(
+                    eve_proto::UserErrorKey::NotEnoughCargoSpace,
+                    [("free", PyRep::Real(0.0)), ("required", PyRep::Real(1.0))],
+                ));
             }
             Some(hold_cap)
         } else if is_owned_container_target {
@@ -389,7 +394,10 @@ pub(crate) fn handle_unload_ammo(
                 })
             }).unwrap_or(0.0);
             if cont_cap <= 0.0 {
-                return Err(BridgeRpcError { code: "NotEnoughCargoSpace".into(), message: "Not enough cargo space to unload ammo".into() });
+                return Err(BridgeRpcError::user_error_with_args(
+                    eve_proto::UserErrorKey::NotEnoughCargoSpace,
+                    [("free", PyRep::Real(0.0)), ("required", PyRep::Real(1.0))],
+                ));
             }
             Some(cont_cap)
         } else {
@@ -426,7 +434,11 @@ pub(crate) fn handle_unload_ammo(
                 }
                 if let Some(cap) = dest_cap {
                     if cap > 0.0 && used_cargo + vol > cap + 1e-4 {
-                        return Err(BridgeRpcError { code: "NotEnoughCargoSpace".into(), message: "Not enough cargo space to unload ammo".into() });
+                        let free = (cap - used_cargo).max(0.0);
+                        return Err(BridgeRpcError::user_error_with_args(
+                            eve_proto::UserErrorKey::NotEnoughCargoSpace,
+                            [("free", PyRep::Real(free)), ("required", PyRep::Real(vol))],
+                        ));
                     }
                 }
                 if let Some(ci) = snap.items.get_mut(&cid) {
@@ -1183,6 +1195,7 @@ pub(crate) async fn handle_ecm_or_burst_jammer_activation(
             return Err(BridgeRpcError {
                 code: "TargetRequired".into(),
                 message: "ECM module requires a locked target".into(),
+                client_error: None,
             });
         };
         let mut distance_m = 0.0;
@@ -1383,6 +1396,7 @@ pub(crate) async fn handle_ecm_or_burst_jammer_activation(
                 return Err(BridgeRpcError {
                     code: "SafetyBlocked".into(),
                     message: "Safety setting prevents activating Burst Jammer near neutral capsuleers in empire space".into(),
+                    client_error: None,
                 });
             }
         }
@@ -2123,14 +2137,14 @@ pub(crate) async fn try_handle_mercden_remote_shield_repair(
 ) -> Result<Option<PyRep>, BridgeRpcError> {
     let locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
     if !locks.iter().any(|l| l.target_id == target_id && l.locked) {
-        return Err(BridgeRpcError { code: "TargetNotLocked".into(), message: format!("Target {target_id} is not locked") });
+        return Err(BridgeRpcError { code: "TargetNotLocked".into(), message: format!("Target {target_id} is not locked"), client_error: None });
     }
     if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
         if cs.is_cloaked {
-            return Err(BridgeRpcError { code: "Cloaked".into(), message: "Cannot activate module while cloaked".into() });
+            return Err(BridgeRpcError { code: "Cloaked".into(), message: "Cannot activate module while cloaked".into(), client_error: None });
         }
         if cs.is_tethered {
-            return Err(BridgeRpcError { code: "Tethered".into(), message: "Cannot activate remote assistance module while tethered".into() });
+            return Err(BridgeRpcError { code: "Tethered".into(), message: "Cannot activate remote assistance module while tethered".into(), client_error: None });
         }
     }
     let is_overloaded = method == "Overload" || m.state == eve_dogma::ModuleState::Overloaded;
@@ -2142,7 +2156,7 @@ pub(crate) async fn try_handle_mercden_remote_shield_repair(
     let target_pos = ctx.db.with_snapshot(|s| s.structures.get(&target_id).map(|st| DVec3::from_array(st.position)));
     if let (Some(apos), Some(tpos)) = (attacker_pos, target_pos) {
         if apos.distance(tpos) > max_range {
-            return Err(BridgeRpcError { code: "TargetOutOfRange".into(), message: format!("Target {target_id} is out of module range") });
+            return Err(BridgeRpcError { code: "TargetOutOfRange".into(), message: format!("Target {target_id} is out of module range"), client_error: None });
         }
     }
     let cap_need = mod_state.get_attribute(attr_ids::CAPACITOR_NEED, &ctx.sde);
@@ -2150,7 +2164,7 @@ pub(crate) async fn try_handle_mercden_remote_shield_repair(
         let cs = sys.get_combat_state(ship_id).await.ok().flatten();
         let cur_cap = cs.as_ref().map(|c| c.capacitor).unwrap_or(0.0);
         if cur_cap < cap_need {
-            return Err(BridgeRpcError { code: "NotEnoughCapacitor".into(), message: "Not enough capacitor to activate module".into() });
+            return Err(BridgeRpcError { code: "NotEnoughCapacitor".into(), message: "Not enough capacitor to activate module".into(), client_error: None });
         }
         let _ = sys.set_capacitor(ship_id, cur_cap - cap_need).await;
     }

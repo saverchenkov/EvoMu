@@ -17,13 +17,13 @@ pub async fn handle_cmd_return_bay(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let Some(ship_id) = session.ship_id.or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id))) else {
-        return Err(BridgeRpcError { code: "NoActiveShip".into(), message: "Session has no active ship".into() });
+        return Err(BridgeRpcError { code: "NoActiveShip".into(), message: "Session has no active ship".into(), client_error: None });
     };
     if session.station_id.is_some() || session.structure_id.is_some() {
-        return Err(BridgeRpcError { code: "ShipNotInSpace".into(), message: "Cannot recall drones while docked in station or structure".into() });
+        return Err(BridgeRpcError { code: "ShipNotInSpace".into(), message: "Cannot recall drones while docked in station or structure".into(), client_error: None });
     }
     let Some(sys_id) = session.solar_system_id else {
-        return Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() });
+        return Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into(), client_error: None });
     };
 
     let filter_drone_ids: Option<Vec<i64>> = match args.first().or_else(|| kwargs.get("droneIDs")) {
@@ -57,6 +57,7 @@ pub async fn handle_cmd_return_bay(
             return Err(BridgeRpcError {
                 code: "SentryDroneOutOfScoopRange".into(),
                 message: format!("Immobile sentry drone {} is {dist:.1} m away (must be within 2,500 m to return to bay)", d.ball_id),
+                client_error: None,
             });
         }
         drones_with_dist.push((d, dist));

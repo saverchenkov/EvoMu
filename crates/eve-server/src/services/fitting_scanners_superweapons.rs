@@ -445,6 +445,7 @@ async fn scanner_range_check(
         return Err(BridgeRpcError {
             code: "TargetNotInSpace".into(),
             message: format!("Scan target {target_id} is not in space with ship {ship_id}"),
+            client_error: None,
         });
     };
     let dist = (own.position - tgt.position).length() - own.radius - tgt.radius;
@@ -452,6 +453,7 @@ async fn scanner_range_check(
         return Err(BridgeRpcError {
             code: "TargetOutOfRange".into(),
             message: format!("Target {target_id} is {dist:.0} m away; scanner range is {range_m:.0} m"),
+            client_error: None,
         });
     }
     Ok(())
@@ -477,6 +479,7 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
                 return Some(Err(BridgeRpcError {
                     code: "TargetRequired".into(),
                     message: "Data/Relic Analyzer requires a locked target container".into(),
+                    client_error: None,
                 }));
             };
             if let Err(e) = scanner_range_check(ctx, sys, ship_id, target_id, mod_state, 54).await {
@@ -495,12 +498,14 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
                     return Some(Err(BridgeRpcError {
                         code: "CannotHackOwnStructure".into(),
                         message: "Cannot run a Data Analyzer hack against a structure owned by your own corporation".into(),
+                        client_error: None,
                     }));
                 }
                 if mod_type.name.contains("Relic") || matches!(mod_type.type_id, 22177 | 22178) {
                     return Some(Err(BridgeRpcError {
                         code: "DataAnalyzerRequired".into(),
                         message: "Hacking an Upwell structure requires a Data Analyzer".into(),
+                        client_error: None,
                     }));
                 }
             }
@@ -572,6 +577,7 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
                 return Some(Err(BridgeRpcError {
                     code: "TargetRequired".into(),
                     message: "Cargo Scanner requires a locked target".into(),
+                    client_error: None,
                 }));
             };
             if let Err(e) = scanner_range_check(ctx, sys, ship_id, target_id, mod_state, 126).await {
@@ -667,6 +673,7 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
                 return Some(Err(BridgeRpcError {
                     code: "TargetRequired".into(),
                     message: "Ship Scanner requires a locked target ship".into(),
+                    client_error: None,
                 }));
             };
             if let Err(e) = scanner_range_check(ctx, sys, ship_id, target_id, mod_state, 125).await {
@@ -818,10 +825,10 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                 return Some(Err(BridgeRpcError::user_error("CantDoThatWhileDocked")));
             }
             let Some(ship_id) = session.ship_id else {
-                return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "Activating a superweapon requires an active Titan".into() }));
+                return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "Activating a superweapon requires an active Titan".into(), client_error: None }));
             };
             let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError { code: "NotInSpace".into(), message: "Superweapons can only be activated in space".into() }));
+                return Some(Err(BridgeRpcError { code: "NotInSpace".into(), message: "Superweapons can only be activated in space".into(), client_error: None }));
             };
             if let Err(e) = crate::services::tactical_modules::check_superweapon_tether_guard(ctx, sys_id, ship_id).await {
                 return Some(Err(e));
@@ -926,6 +933,7 @@ fn handle_system_wide_effects(
                     return Some(Err(BridgeRpcError {
                         code: "GMRoleRequired".into(),
                         message: "ResetSystemWideEffects requires GM/Admin authority".into(),
+                        client_error: None,
                     }));
                 }
                 let reset_sys = args
@@ -956,6 +964,7 @@ fn handle_system_wide_effects(
                     return Some(Err(BridgeRpcError {
                         code: "GMRoleRequired".into(),
                         message: "RefreshSystemWideEnvironment requires GM/Admin authority".into(),
+                        client_error: None,
                     }));
                 }
                 let phenom_str_opt = args.get(1).and_then(|a| a.as_str()).or_else(|| args.first().and_then(|a| a.as_str()));
@@ -1144,18 +1153,21 @@ fn handle_ship_clone_installation(
                     return Some(Err(BridgeRpcError {
                         code: "MustPilotHostShip".into(),
                         message: "Caller must own and actively pilot the host ship".into(),
+                        client_error: None,
                     }));
                 }
                 if !has_vat_bay {
                     return Some(Err(BridgeRpcError {
                         code: "NoActiveCloneVatBay".into(),
                         message: "Host ship must be a Titan or Rorqual with an online Clone Vat Bay I (type 23735/24258)".into(),
+                        client_error: None,
                     }));
                 }
                 if !same_sys_and_fleet {
                     return Some(Err(BridgeRpcError {
                         code: "TargetNotInSameFleetOrSystem".into(),
                         message: "Target character must be in the same fleet and solar system as the offering ship".into(),
+                        client_error: None,
                     }));
                 }
                 ctx.db.with_mut_snapshot(|snap| {
@@ -1212,6 +1224,7 @@ fn handle_ship_clone_installation(
                     return Some(Err(BridgeRpcError {
                         code: "NoCloneOfferFound".into(),
                         message: "No pending ship clone installation offer found".into(),
+                        client_error: None,
                     }));
                 };
                 if let Some(req_ship_id) = explicit_ship_id {
@@ -1219,6 +1232,7 @@ fn handle_ship_clone_installation(
                         return Some(Err(BridgeRpcError {
                             code: "NoCloneOfferFound".into(),
                             message: "Requested ship ID does not match the pending clone installation offer".into(),
+                            client_error: None,
                         }));
                     }
                 }
@@ -1238,6 +1252,7 @@ fn handle_ship_clone_installation(
                         return Err(BridgeRpcError {
                             code: "MustPilotHostShip".into(),
                             message: "Offering character no longer owns or pilots the host ship".into(),
+                            client_error: None,
                         });
                     }
                     let offerer_sys = snap
@@ -1253,6 +1268,7 @@ fn handle_ship_clone_installation(
                         return Err(BridgeRpcError {
                             code: "TargetNotInSameFleetOrSystem".into(),
                             message: "Accepting character is no longer in the same solar system as the host ship".into(),
+                            client_error: None,
                         });
                     }
                     if !crate::services::character_clone_jump_rules::is_ship_clone_vat_bay_active(
@@ -1261,6 +1277,7 @@ fn handle_ship_clone_installation(
                         return Err(BridgeRpcError {
                             code: "NoActiveCloneVatBay".into(),
                             message: "Host ship does not have an active Clone Vat Bay".into(),
+                            client_error: None,
                         });
                     }
                     let same_fleet = char_id == offerer_id
@@ -1272,6 +1289,7 @@ fn handle_ship_clone_installation(
                         return Err(BridgeRpcError {
                             code: "TargetNotInSameFleetOrSystem".into(),
                             message: "Accepting character must be in the host pilot's fleet".into(),
+                            client_error: None,
                         });
                     }
                     let existing_count = snap.jump_clones.get(&char_id).map_or(0, |v| v.len());
@@ -1279,6 +1297,7 @@ fn handle_ship_clone_installation(
                         return Err(BridgeRpcError {
                             code: "JumpCloneLimitReached".into(),
                             message: format!("Character {char_id} has {existing_count} jump clones (max {max_clones})"),
+                            client_error: None,
                         });
                     }
                     snap.next_entity_id += 1;
@@ -1330,6 +1349,7 @@ fn handle_dogma_dbuff_rpc(
             return Some(Err(BridgeRpcError {
                 code: "GMRoleRequired".into(),
                 message: "ApplyBuffsToItems requires GM/Admin authority".into(),
+                client_error: None,
             }));
         }
         let mut target_ships = Vec::new();

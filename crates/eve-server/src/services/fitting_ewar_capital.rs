@@ -229,6 +229,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                                 message: format!(
                                     "Weapon module {module_id} has no compatible ammunition loaded"
                                 ),
+                                client_error: None,
                             }));
                         }
                     }
@@ -274,6 +275,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                             message: format!(
                                 "Interdiction Nullifier cannot be activated on hull group {ship_group_id}"
                             ),
+                            client_error: None,
                         }));
                     }
                     if let Ok(Some((_, sb))) = sys.get_ball_snapshot(ship_id).await {
@@ -285,6 +287,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                             return Some(Err(BridgeRpcError {
                                 code: "CannotActivateInWarp".into(),
                                 message: "Interdiction Nullifier must be activated before entering the warp tunnel".into(),
+                                client_error: None,
                             }));
                         }
                     }
@@ -307,6 +310,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidShipGroup".into(),
                         message: "Assault Damage Control can only be fitted/activated on Assault Frigates (324) or Heavy Assault Cruisers (358)".into(),
+                        client_error: None,
                     }));
                 }
                 let is_cehe = matches!(m.type_id, 40714..=40718) || mod_type.effect_ids.contains(&6484);
@@ -314,6 +318,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidShipGroup".into(),
                         message: "Capital Emergency Hull Energizer can only be activated on capital hulls".into(),
+                        client_error: None,
                     }));
                 }
                 let has_active_triage = fit.modules.values().any(|fm| {
@@ -324,6 +329,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                     return Some(Err(BridgeRpcError {
                         code: "EwarDisabledInTriage".into(),
                         message: "EWAR modules are disabled while Triage Module is active".into(),
+                        client_error: None,
                     }));
                 }
                 if matches!(mod_type.group_id, 290 | 209) {
@@ -331,6 +337,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         return Some(Err(BridgeRpcError {
                             code: "TargetRequired".into(),
                             message: format!("{} requires a locked target", mod_type.name),
+                            client_error: None,
                         }));
                     };
                     let mut dist_m = 0.0;
@@ -343,6 +350,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         return Some(Err(BridgeRpcError {
                             code: "OutOfRange".into(),
                             message: format!("{} target at {dist_m:.1}m exceeds optimal ({optimal:.1}m) + 2*falloff ({falloff:.1}m)", mod_type.name),
+                            client_error: None,
                         }));
                     }
                     deferred_post_cycle.projected_assist_dist_m = Some(dist_m);
@@ -354,6 +362,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         return Some(Err(BridgeRpcError {
                             code: "InvalidShipGroup".into(),
                             message: "Zero-Point Mass Entangler can only be activated on Heavy Interdiction Cruisers (894) or Odysseus (89607)".into(),
+                            client_error: None,
                         }));
                     }
                     self_disable_mwd_mjd = true;
@@ -374,16 +383,16 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                     let is_phenomena = mod_type.group_id == 1815;
 
                     if is_siege && !matches!(ship_group_id, 485 | 4594) {
-                        return Some(Err(BridgeRpcError { code: "InvalidShipGroup".into(), message: "Siege Module can only be activated on Dreadnoughts (485) or Lancer Dreadnoughts (4594)".into() }));
+                        return Some(Err(BridgeRpcError { code: "InvalidShipGroup".into(), message: "Siege Module can only be activated on Dreadnoughts (485) or Lancer Dreadnoughts (4594)".into(), client_error: None }));
                     }
                     if is_triage && !matches!(ship_group_id, 1538 | 547) {
-                        return Some(Err(BridgeRpcError { code: "InvalidShipGroup".into(), message: "Triage Module can only be activated on Force Auxiliaries (group 1538)".into() }));
+                        return Some(Err(BridgeRpcError { code: "InvalidShipGroup".into(), message: "Triage Module can only be activated on Force Auxiliaries (group 1538)".into(), client_error: None }));
                     }
                     if is_bastion && ship_group_id != 900 {
-                        return Some(Err(BridgeRpcError { code: "InvalidShipGroup".into(), message: "Bastion Module can only be activated on Marauders (group 900)".into() }));
+                        return Some(Err(BridgeRpcError { code: "InvalidShipGroup".into(), message: "Bastion Module can only be activated on Marauders (group 900)".into(), client_error: None }));
                     }
                     if is_phenomena && ship_group_id != 30 {
-                        return Some(Err(BridgeRpcError { code: "InvalidShipGroup".into(), message: "Phenomena Generator can only be activated on Titans (group 30)".into() }));
+                        return Some(Err(BridgeRpcError { code: "InvalidShipGroup".into(), message: "Phenomena Generator can only be activated on Titans (group 30)".into(), client_error: None }));
                     }
 
                     let fuel_type_id = mod_type.default_attributes.get(&713).map(|&v| v as u32).unwrap_or(0);
@@ -416,7 +425,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                             }
                             Ok(false) => {}
                             Err(msg) => {
-                                return Some(Err(BridgeRpcError { code: "InsufficientFuel".into(), message: msg }));
+                                return Some(Err(BridgeRpcError { code: "InsufficientFuel".into(), message: msg, client_error: None }));
                             }
                         }
                     }
@@ -513,6 +522,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                                 "{} cannot be activated on ship group {}",
                                 mod_type.name, ship_group_id
                             ),
+                            client_error: None,
                         }));
                     }
                     let jump_dist = [2066u16, 2064u16]
@@ -551,12 +561,14 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         return Some(Err(BridgeRpcError {
                             code: "TargetRequired".into(),
                             message: "Warp disruptor/scrambler requires a locked target".into(),
+                            client_error: None,
                         }));
                     };
                     if target_id == ship_id {
                         return Some(Err(BridgeRpcError {
                             code: "CannotActivateOnSelf".into(),
                             message: "Cannot activate warp disruptor/scrambler on self".into(),
+                            client_error: None,
                         }));
                     }
                     let scram_eval = eve_dogma::eval_warp_scrambler_effects(&[&mod_state], &[0.0], &ctx.sde);
@@ -589,6 +601,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                                 message: format!(
                                     "Target {target_id} is at {dist:.1} m, exceeding module optimal range {max_range:.1} m"
                                 ),
+                                client_error: None,
                             }));
                         }
                     }
@@ -617,6 +630,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         return Some(Err(BridgeRpcError {
                             code: "IndustrialCoreNotActive".into(),
                             message: "Module requires an active Industrial Core (attribute 3265 activationRequiresActiveIndustrialCore)".into(),
+                            client_error: None,
                         }));
                     }
                 }
@@ -627,6 +641,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         return Some(Err(BridgeRpcError {
                             code: "InvalidShipGroup".into(),
                             message: "Warp Disruption Field Generator can only be activated on Heavy Interdiction Cruisers (group 894)".into(),
+                            client_error: None,
                         }));
                     }
                     let loaded_script_id = m.charge_type_id.filter(|&cid| {
@@ -646,6 +661,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                             return Some(Err(BridgeRpcError {
                                 code: "TargetRequired".into(),
                                 message: "Scripted Warp Disruption Field Generator requires a locked target".into(),
+                                client_error: None,
                             }));
                         };
                         let range_mult = if script_tid == 29003 {
@@ -668,6 +684,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                                     message: format!(
                                         "Target {target_id} is at {dist:.1} m, exceeding scripted WDFG range {scripted_max_range:.1} m"
                                     ),
+                                    client_error: None,
                                 }));
                             }
                         }
@@ -715,12 +732,14 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         return Some(Err(BridgeRpcError {
                             code: "TargetRequired".into(),
                             message: "EWAR module requires a locked target".into(),
+                            client_error: None,
                         }));
                     };
                     if target_id == ship_id {
                         return Some(Err(BridgeRpcError {
                             code: "CannotActivateOnSelf".into(),
                             message: "Cannot activate offensive EWAR module on self".into(),
+                            client_error: None,
                         }));
                     }
                     let mut distance_m = 0.0;
@@ -756,6 +775,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                                 message: format!(
                                     "Target {target_id} is at {distance_m:.1} m, exceeding webifier range {max_range:.1} m"
                                 ),
+                                client_error: None,
                             }));
                         }
                         let att = eve_dogma::compute_falloff_attenuation(distance_m, max_range, falloff);
@@ -818,12 +838,14 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         return Some(Err(BridgeRpcError {
                             code: "TargetRequired".into(),
                             message: "Remote assistance module requires a locked target".into(),
+                            client_error: None,
                         }));
                     };
                     if target_id == ship_id {
                         return Some(Err(BridgeRpcError {
                             code: "CannotActivateOnSelf".into(),
                             message: "Cannot activate remote assistance module on self".into(),
+                            client_error: None,
                         }));
                     }
                     if let Ok(Some(t_cs)) = sys.get_combat_state(target_id).await {
@@ -831,6 +853,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                             return Some(Err(BridgeRpcError {
                                 code: "TargetDisallowsAssistance".into(),
                                 message: format!("Target {target_id} has disallowAssistance active (Siege/Triage/HIC bubble)"),
+                                client_error: None,
                             }));
                         }
                     }
@@ -852,6 +875,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                                 message: format!(
                                     "Target {target_id} is at {dist:.1} m, exceeding remote assistance range {max_range:.1} m"
                                 ),
+                                client_error: None,
                             }));
                         }
                     }
@@ -983,6 +1007,7 @@ pub(crate) async fn validate_passive_targeter_activation(
         return Err(BridgeRpcError {
             code: "CannotActivateOnSelf".into(),
             message: "Cannot activate Passive Targeter on self".into(),
+            client_error: None,
         });
     }
     if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
@@ -990,6 +1015,7 @@ pub(crate) async fn validate_passive_targeter_activation(
             return Err(BridgeRpcError {
                 code: "ShipJammed".into(),
                 message: "Targeting systems are jammed by ECM".into(),
+                client_error: None,
             });
         }
         if (cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0)
@@ -998,6 +1024,7 @@ pub(crate) async fn validate_passive_targeter_activation(
             return Err(BridgeRpcError {
                 code: "TargetingFailed".into(),
                 message: "Cannot acquire target lock while cloaked or during decloak delay".into(),
+                client_error: None,
             });
         }
     }
@@ -1005,12 +1032,14 @@ pub(crate) async fn validate_passive_targeter_activation(
         return Err(BridgeRpcError {
             code: "TargetingFailed".into(),
             message: "Ship is not present in space ballpark".into(),
+            client_error: None,
         });
     };
     let Some((_, t_ball)) = sys.get_ball_snapshot(target_id).await.ok().flatten() else {
         return Err(BridgeRpcError {
             code: "TargetingFailed".into(),
             message: format!("Target {target_id} not found in space"),
+            client_error: None,
         });
     };
     let t_cs = sys.get_combat_state(target_id).await.ok().flatten();
@@ -1018,6 +1047,7 @@ pub(crate) async fn validate_passive_targeter_activation(
         return Err(BridgeRpcError {
             code: "TargetingFailed".into(),
             message: format!("Target {target_id} is cloaked"),
+            client_error: None,
         });
     }
     if t_cs
@@ -1027,6 +1057,7 @@ pub(crate) async fn validate_passive_targeter_activation(
         return Err(BridgeRpcError {
             code: "TargetInvulnerable".into(),
             message: format!("Target {target_id} is tethered or invulnerable"),
+            client_error: None,
         });
     }
     let max_range = fit
@@ -1041,6 +1072,7 @@ pub(crate) async fn validate_passive_targeter_activation(
             message: format!(
                 "Target {target_id} at {dist:.0}m exceeds max targeting range {max_range:.0}m"
             ),
+            client_error: None,
         });
     }
     let ship_max = fit
@@ -1056,6 +1088,7 @@ pub(crate) async fn validate_passive_targeter_activation(
         return Err(BridgeRpcError {
             code: "TooManyLockedTargets".into(),
             message: format!("Max locked targets exceeded ({max_locked})"),
+            client_error: None,
         });
     }
     let scan_res = fit

@@ -38,6 +38,7 @@ pub fn handle_pi_orbital_registry(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "GetTaxRate requires planetID".into(),
+                    client_error: None,
                 }));
             };
             let res = ctx.db.with_snapshot(|snap| {
@@ -58,6 +59,7 @@ pub fn handle_pi_orbital_registry(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "GetSettingsInfo requires planetID".into(),
+                    client_error: None,
                 }));
             };
             let cfg = ctx.db.with_snapshot(|snap| {
@@ -103,6 +105,7 @@ pub fn handle_pi_orbital_registry(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidOrbitalID".into(),
                     message: "UpdateSettings requires orbitalID".into(),
+                    client_error: None,
                 }));
             };
             let (office_id, planet_id, res) = match ctx.db.try_with_mut_snapshot(|snap| {
@@ -118,18 +121,21 @@ pub fn handle_pi_orbital_registry(
                         return Err(BridgeRpcError {
                             code: "CrpAccessDenied".into(),
                             message: format!("No player corporation orbital deployed at planet {planet_id}"),
+                            client_error: None,
                         });
                     };
                     if existing.owner_corp_id != char_corp {
                         return Err(BridgeRpcError {
                             code: "CrpAccessDenied".into(),
                             message: format!("Orbital at planet {planet_id} belongs to corporation {}", existing.owner_corp_id),
+                            client_error: None,
                         });
                     }
                     if !snap.corporations.contains_key(&char_corp) {
                         return Err(BridgeRpcError {
                             code: "CrpAccessDenied".into(),
                             message: "Updating orbital settings requires a player corporation".into(),
+                            client_error: None,
                         });
                     }
                     let (is_ceo, role) = snap.effective_corp_roles_at(
@@ -146,6 +152,7 @@ pub fn handle_pi_orbital_registry(
                         return Err(BridgeRpcError {
                             code: "CrpAccessDenied".into(),
                             message: "Updating orbital settings requires Director or Station Manager role".into(),
+                            client_error: None,
                         });
                     }
                 }
@@ -159,6 +166,7 @@ pub fn handle_pi_orbital_registry(
                         return Err(BridgeRpcError {
                             code: "InvalidOrbitalType".into(),
                             message: "Players cannot set orbitalTypeID to NPC InterBus Customs Office (4318)".into(),
+                            client_error: None,
                         });
                     }
                     if matches!(otid, 2233 | 4318 | 81080) {
@@ -201,6 +209,7 @@ pub fn handle_pi_orbital_registry(
                             return Err(BridgeRpcError {
                                 code: "InvalidOrbitalType".into(),
                                 message: "Players cannot set orbitalTypeID to NPC InterBus Customs Office (4318)".into(),
+                                client_error: None,
                             });
                         }
                         if matches!(v, 2233 | 4318 | 81080) {
@@ -279,6 +288,7 @@ pub fn handle_pi_orbital_registry(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "RevertOrbitalsToInterBus requires planetID".into(),
+                    client_error: None,
                 }));
             };
             if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| {
@@ -288,18 +298,21 @@ pub fn handle_pi_orbital_registry(
                         return Err(BridgeRpcError {
                             code: "CrpAccessDenied".into(),
                             message: "Only an existing corporation-owned Customs Office can be reverted to InterBus".into(),
+                            client_error: None,
                         });
                     };
                     if existing.owner_corp_id != char_corp {
                         return Err(BridgeRpcError {
                             code: "CrpAccessDenied".into(),
                             message: "Only the owning corporation or a GM can revert orbital ownership to InterBus".into(),
+                            client_error: None,
                         });
                     }
                     if !snap.corporations.contains_key(&char_corp) {
                         return Err(BridgeRpcError {
                             code: "CrpAccessDenied".into(),
                             message: "Reverting orbital ownership to InterBus requires a player corporation Director or Station Manager role".into(),
+                            client_error: None,
                         });
                     }
                     let (is_ceo, role) = snap.effective_corp_roles_at(
@@ -314,6 +327,7 @@ pub fn handle_pi_orbital_registry(
                         return Err(BridgeRpcError {
                             code: "CrpAccessDenied".into(),
                             message: "Reverting orbital ownership to InterBus requires Director or Station Manager role".into(),
+                            client_error: None,
                         });
                     }
                 }

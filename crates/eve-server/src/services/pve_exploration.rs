@@ -777,12 +777,14 @@ pub async fn advance_site_wave_or_complete(
         return Err(BridgeRpcError {
             code: "ShipDocked".into(),
             message: format!("Cannot advance PvE site {site_id} while docked"),
+            client_error: None,
         });
     }
     if session.solar_system_id != Some(solar_system_id) {
         return Err(BridgeRpcError {
             code: "NotInSiteSystem".into(),
             message: format!("Caller must be in solar system {solar_system_id} to advance site {site_id}"),
+            client_error: None,
         });
     }
     ensure_system_pve_sites_seeded(ctx, solar_system_id).await;
@@ -796,12 +798,14 @@ pub async fn advance_site_wave_or_complete(
             return Err(BridgeRpcError {
                 code: "SiteNotFound".into(),
                 message: format!("PvE site {site_id} not found in system {solar_system_id}"),
+                client_error: None,
             });
         };
         if site.cleared {
             return Err(BridgeRpcError {
                 code: "SiteAlreadyCleared".into(),
                 message: format!("PvE site {site_id} is already cleared"),
+                client_error: None,
             });
         }
         if matches!(site.site_category.as_str(), "Data" | "Relic" | "Ghost")
@@ -814,6 +818,7 @@ pub async fn advance_site_wave_or_complete(
             return Err(BridgeRpcError {
                 code: "SiteContainersUnhacked".into(),
                 message: format!("Cannot complete exploration site {site_id} while hackable containers remain unhacked"),
+                client_error: None,
             });
         }
         Ok((
@@ -829,6 +834,7 @@ pub async fn advance_site_wave_or_complete(
                 return Err(BridgeRpcError {
                     code: "WaveNpcsRemaining".into(),
                     message: format!("Cannot advance site {site_id}: wave NPC ball {bid} has not been destroyed"),
+                    client_error: None,
                 });
             }
         }
@@ -855,6 +861,7 @@ pub async fn advance_site_wave_or_complete(
             return Err(BridgeRpcError {
                 code: "SiteNotFound".into(),
                 message: format!("PvE site {site_id} not found in system {solar_system_id}"),
+                client_error: None,
             });
         };
         let old = std::mem::take(&mut site.active_npc_ball_ids);
@@ -1038,6 +1045,7 @@ fn resolve_session_system_id(
         .ok_or_else(|| BridgeRpcError {
             code: "NotInSpace".into(),
             message: "Action requires an active solar system session".into(),
+            client_error: None,
         })
 }
 
@@ -1397,6 +1405,7 @@ async fn handle_get_dungeon_info(
             return Err(BridgeRpcError {
                 code: "DungeonNotFound".into(),
                 message: format!("Dungeon site {site_id} not found"),
+                client_error: None,
             });
         };
         Ok(PyRep::keyval([

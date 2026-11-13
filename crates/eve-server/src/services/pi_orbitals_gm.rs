@@ -31,6 +31,7 @@ pub fn handle_pi_orbitals_gm(
                 return Some(Err(BridgeRpcError {
                     code: "AdminAccessDenied".into(),
                     message: "planetMgr.GMAddCommodity requires GM role".into(),
+                    client_error: None,
                 }));
             }
             let planet_id_opt = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64()));
@@ -38,6 +39,7 @@ pub fn handle_pi_orbitals_gm(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "planetMgr.GMAddCommodity requires planetID".into(),
+                    client_error: None,
                 }));
             };
             let (pin_id, type_id, qty) = if args.len() >= 4 {
@@ -105,6 +107,7 @@ pub fn handle_pi_orbitals_gm(
                 return Some(Err(BridgeRpcError {
                     code: "AdminAccessDenied".into(),
                     message: "planetMgr.GMConvertCommandCenter requires GM role".into(),
+                    client_error: None,
                 }));
             }
             let planet_id_opt = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64()));
@@ -112,6 +115,7 @@ pub fn handle_pi_orbitals_gm(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "planetMgr.GMConvertCommandCenter requires planetID".into(),
+                    client_error: None,
                 }));
             };
             let (target_type_id, new_level) = if args.len() >= 3 {
@@ -154,6 +158,7 @@ pub fn handle_pi_orbitals_gm(
                 return Some(Err(BridgeRpcError {
                     code: "AdminAccessDenied".into(),
                     message: "planetMgr.GMForceInstallProgram requires GM role".into(),
+                    client_error: None,
                 }));
             }
             let planet_id_opt = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64()));
@@ -161,6 +166,7 @@ pub fn handle_pi_orbitals_gm(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "planetMgr.GMForceInstallProgram requires planetID".into(),
+                    client_error: None,
                 }));
             };
             let pin_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
@@ -200,6 +206,7 @@ pub fn handle_pi_orbitals_gm(
                 return Some(Err(BridgeRpcError {
                     code: "AdminAccessDenied".into(),
                     message: "planetMgr.GMVerifySimulation requires GM role".into(),
+                    client_error: None,
                 }));
             }
             let planet_id_opt = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64()));
@@ -207,6 +214,7 @@ pub fn handle_pi_orbitals_gm(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "planetMgr.GMVerifySimulation requires planetID".into(),
+                    client_error: None,
                 }));
             };
             let (cpu_ok, pg_ok, links_ok) = ctx.db.with_snapshot(|snap| {
@@ -235,6 +243,7 @@ pub fn handle_pi_orbitals_gm(
                 return Some(Err(BridgeRpcError {
                     code: "AdminAccessDenied".into(),
                     message: "planetMgr.GMGetLocalDistributionReport requires GM role".into(),
+                    client_error: None,
                 }));
             }
             let (planet_id_opt, theta_rep, phi_rep) = match bound_planet {
@@ -245,6 +254,7 @@ pub fn handle_pi_orbitals_gm(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "planetMgr.GMGetLocalDistributionReport requires planetID".into(),
+                    client_error: None,
                 }));
             };
             let Some(sys_id) = ctx
@@ -257,6 +267,7 @@ pub fn handle_pi_orbitals_gm(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: format!("Planet {planet_id} not found in SDE"),
+                    client_error: None,
                 }));
             };
             let (theta, phi) = parse_theta_phi(theta_rep, phi_rep);
@@ -287,6 +298,7 @@ pub fn handle_pi_orbitals_gm(
                 return Some(Err(BridgeRpcError {
                     code: "AdminAccessDenied".into(),
                     message: "planetMgr.GMGetSynchedServerState requires GM role".into(),
+                    client_error: None,
                 }));
             }
             let planet_id_opt = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64()));
@@ -294,6 +306,7 @@ pub fn handle_pi_orbitals_gm(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "planetMgr.GMGetSynchedServerState requires planetID".into(),
+                    client_error: None,
                 }));
             };
             let rep = ctx.db.with_snapshot(|snap| {
@@ -323,6 +336,7 @@ pub fn handle_pi_orbitals_gm(
                 return Some(Err(BridgeRpcError {
                     code: "AdminAccessDenied".into(),
                     message: "planetMgr.GMRunDepletionSim requires GM role".into(),
+                    client_error: None,
                 }));
             }
             let (planet_id_opt, duration_opt) = match bound_planet {
@@ -333,6 +347,7 @@ pub fn handle_pi_orbitals_gm(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "planetMgr.GMRunDepletionSim requires planetID".into(),
+                    client_error: None,
                 }));
             };
             let duration_hours = duration_opt.and_then(|a| a.as_i64()).unwrap_or(24);
@@ -379,6 +394,7 @@ pub fn handle_pi_orbitals_gm(
                 return Some(Err(BridgeRpcError {
                     code: "AdminAccessDenied".into(),
                     message: "planetMgr.GMCreateNuggetLayer requires GM role".into(),
+                    client_error: None,
                 }));
             }
             let (explicit_planet, arg_offset) = match bound_planet {
@@ -409,6 +425,7 @@ pub fn handle_pi_orbitals_gm(
                         return Err(BridgeRpcError {
                             code: "InvalidPlanetID".into(),
                             message: format!("Planet {pid} not found"),
+                            client_error: None,
                         });
                     }
                     pid
@@ -475,6 +492,7 @@ pub fn handle_pi_orbitals_gm(
                 return Some(Err(BridgeRpcError {
                     code: "AdminAccessDenied".into(),
                     message: "planetMgr.GMGetCompleteResource requires GM role".into(),
+                    client_error: None,
                 }));
             }
             let (explicit_planet, res_arg) = match bound_planet {
@@ -493,6 +511,7 @@ pub fn handle_pi_orbitals_gm(
                         return Err(BridgeRpcError {
                             code: "InvalidPlanetID".into(),
                             message: format!("Planet {pid} not found"),
+                            client_error: None,
                         });
                     }
                     pid

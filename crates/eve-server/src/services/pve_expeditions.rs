@@ -850,6 +850,7 @@ pub async fn validate_and_advance_pve_site_room(
             return Err(BridgeRpcError {
                 code: "ShipNotFound".into(),
                 message: "Acceleration gate activation requires an active ship item with an SDE hull type".into(),
+                client_error: None,
             });
         };
         crate::services::pve_exploration_sites::check_ded_gate_ship_allowed(
@@ -877,6 +878,7 @@ pub async fn validate_and_advance_pve_site_room(
                     message: format!(
                         "Pilot is {dist:.1}m from acceleration gate; must be within 2,500m to activate"
                     ),
+                    client_error: None,
                 });
             }
         } else if session.ship_id.is_none() || rating_to_check.is_some() || sleeper_info.is_some()
@@ -884,6 +886,7 @@ pub async fn validate_and_advance_pve_site_room(
             return Err(BridgeRpcError {
                 code: "NotInSpace".into(),
                 message: "Acceleration gate activation requires the pilot's ship in space".into(),
+                client_error: None,
             });
         }
     }
@@ -977,6 +980,7 @@ pub fn enter_combat_anomaly_site(
             return Err(BridgeRpcError {
                 code: "AnomalyNotFound".into(),
                 message: format!("Combat anomaly {site_id} not found"),
+                client_error: None,
             });
         };
         if let Some(list) = reg.escalations_by_char.get_mut(&char_id) {

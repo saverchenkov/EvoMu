@@ -312,6 +312,7 @@ pub fn compute_industry_job_costs_with_step(
         return Err(BridgeRpcError {
             code: "UnknownBlueprint".into(),
             message: format!("Blueprint type {bp_type_id} not found in SDE"),
+            client_error: None,
         });
     };
     let eiv_per_run = compute_blueprint_eiv_per_run_with_snap(ctx, Some(snap), bp, activity_id);
@@ -596,7 +597,7 @@ pub fn handle_industry_facilities_bps(
                             && !(1_000_000..2_000_000).contains(&owner_id)
                             && (is_ceo || (eff_roles & CORP_BP_ROLES) != 0);
                         if !has_corp_access {
-                            return Err(BridgeRpcError { code: "OwnerAccessDenied".into(), message: format!("Character {char_id} is not authorized to query blueprints for owner {owner_id}") });
+                            return Err(BridgeRpcError { code: "OwnerAccessDenied".into(), message: format!("Character {char_id} is not authorized to query blueprints for owner {owner_id}"), client_error: None });
                         }
                     }
                     let mut active_jobs: HashMap<i64, i64> = HashMap::new();
@@ -687,6 +688,7 @@ pub fn handle_industry_facilities_bps(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidBlueprintTypeID".into(),
                     message: "GetBlueprintData requires a blueprint typeID or itemID".into(),
+                    client_error: None,
                 }));
             };
             let (bp_type_id, bp_item_opt) = match ctx.db.with_snapshot(|snap| -> Result<(TypeId, Option<eve_db::InventoryItemRecord>), BridgeRpcError> {
@@ -719,6 +721,7 @@ pub fn handle_industry_facilities_bps(
                             return Err(BridgeRpcError {
                                 code: "CrpAccessDenied".into(),
                                 message: format!("Access denied to blueprint item {raw_id}"),
+                                client_error: None,
                             });
                         }
                         return Ok((it.type_id, Some(it.clone())));
@@ -733,6 +736,7 @@ pub fn handle_industry_facilities_bps(
                 return Some(Err(BridgeRpcError {
                     code: "UnknownBlueprint".into(),
                     message: format!("Blueprint type {bp_type_id} not found in SDE"),
+                    client_error: None,
                 }));
             };
             let facility_id = resolve_caller_facility_id(
@@ -1029,6 +1033,7 @@ pub fn handle_industry_facilities_bps(
                     .ok_or_else(|| BridgeRpcError {
                         code: "FacilityLocationNotFound".into(),
                         message: format!("Could not resolve solar system for facility {fid}"),
+                        client_error: None,
                     })?;
                 let type_id = snap.structures.get(&fid).map(|s| s.type_id as i64)
                     .or_else(|| ctx.sde.stations.get(&fid).map(|st| st.station_type_id as i64))
@@ -1073,6 +1078,7 @@ pub fn handle_industry_facilities_bps(
                 build_facility_pyrep(ctx, snap, facility_id).ok_or_else(|| BridgeRpcError {
                     code: "FacilityNotFound".into(),
                     message: format!("Industry facility {facility_id} not found"),
+                    client_error: None,
                 })
             });
             Some(res)
@@ -1084,7 +1090,7 @@ pub fn handle_industry_facilities_bps(
             let now = ctx.now_unix();
             let res = ctx.db.with_snapshot(|snap| {
                 if resolve_facility_modifiers_and_system(ctx, snap, facility_id).is_none() {
-                    return Err(BridgeRpcError { code: "FacilityNotFound".into(), message: format!("Industry facility {facility_id} not found") });
+                    return Err(BridgeRpcError { code: "FacilityNotFound".into(), message: format!("Industry facility {facility_id} not found"), client_error: None });
                 }
                 let mut taxes = load_facility_taxes_with_sde(Some(&ctx.sde), snap, facility_id);
                 if snap.structures.contains_key(&facility_id) {
@@ -1125,6 +1131,7 @@ pub fn handle_industry_facilities_bps(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidFacilityID".into(),
                     message: "SetFacilityTaxes requires an explicit integer facilityID".into(),
+                    client_error: None,
                 }));
             };
             let tax_arg = if args.len() >= 3 {
@@ -1138,6 +1145,7 @@ pub fn handle_industry_facilities_bps(
                     return Err(BridgeRpcError {
                         code: "InvalidFacilityTaxRate".into(),
                         message: format!("Facility tax rate {raw} must be non-negative and finite"),
+                        client_error: None,
                     });
                 }
                 let rate = if raw > 1.0 && raw <= 100.0 {
@@ -1151,6 +1159,7 @@ pub fn handle_industry_facilities_bps(
                     return Err(BridgeRpcError {
                         code: "InvalidFacilityTaxRate".into(),
                         message: format!("Facility tax rate {rate} exceeds 100%"),
+                        client_error: None,
                     });
                 }
                 Ok(rate)
@@ -1212,6 +1221,7 @@ pub fn handle_industry_facilities_bps(
                         code: "InvalidFacilityTaxRate".into(),
                         message: "SetFacilityTaxes requires a taxRateValues dict/KeyVal or float"
                             .into(),
+                        client_error: None,
                     }));
                 }
             }
@@ -1220,12 +1230,14 @@ pub fn handle_industry_facilities_bps(
                     code: "InvalidFacilityTaxRate".into(),
                     message: "SetFacilityTaxes requires at least one valid activity tax rate"
                         .into(),
+                    client_error: None,
                 }));
             }
             if updates.iter().any(|&(act, rate)| act != 0 && rate > 0.10) {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidFacilityTaxRate".into(),
                     message: "Structure industry facility tax rate cannot exceed 10%".into(),
+                    client_error: None,
                 }));
             }
 
@@ -1234,6 +1246,7 @@ pub fn handle_industry_facilities_bps(
                     return Err(BridgeRpcError {
                         code: "FacilityNotFound".into(),
                         message: format!("Industry facility {facility_id} not found"),
+                        client_error: None,
                     });
                 };
                 let sys_id = fac.solar_system_id;
@@ -1266,6 +1279,7 @@ pub fn handle_industry_facilities_bps(
                             message: format!(
                                 "Character {char_id} (corp {char_corp}) does not own structure {facility_id} (owner {owner_corp_id})"
                             ),
+                            client_error: None,
                         });
                     }
                     if owner_corp_id != char_id {
@@ -1287,6 +1301,7 @@ pub fn handle_industry_facilities_bps(
                                 message:
                                     "Setting facility taxes requires Director or Station Manager role"
                                         .into(),
+                                client_error: None,
                             });
                         }
                     }

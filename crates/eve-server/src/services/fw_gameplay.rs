@@ -429,6 +429,7 @@ pub(crate) async fn check_gate_tackle_and_nav_locks(
         return Err(BridgeRpcError {
             code: "WarpCoreStabilizerRestricted".into(),
             message: "Ships fitted with Warp Core Stabilizers cannot activate this acceleration gate".into(),
+            client_error: None,
         });
     }
     ctx.validate_ship_movement(
@@ -462,6 +463,7 @@ pub async fn activate_fw_complex_gate_in_space(
         .ok_or_else(|| BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: format!("Active ship {ship_id} is not spawned in space in system {sys_id}"),
+            client_error: None,
         })?;
 
     let (complex_sys, tier, completed, persisted_gate_pos) = ctx
@@ -474,18 +476,21 @@ pub async fn activate_fw_complex_gate_in_space(
         .ok_or_else(|| BridgeRpcError {
             code: "ComplexNotFound".into(),
             message: format!("FW complex {gate_id} not found"),
+            client_error: None,
         })?;
 
     if complex_sys != sys_id {
         return Err(BridgeRpcError {
             code: "GateNotInSystem".into(),
             message: format!("Acceleration gate {gate_id} is in system {complex_sys}, not {sys_id}"),
+            client_error: None,
         });
     }
     if completed {
         return Err(BridgeRpcError {
             code: "ComplexAlreadyCompleted".into(),
             message: format!("FW complex {gate_id} has already been captured"),
+            client_error: None,
         });
     }
 
@@ -497,6 +502,7 @@ pub async fn activate_fw_complex_gate_in_space(
         return Err(BridgeRpcError {
             code: "GateNotInSpace".into(),
             message: format!("Acceleration gate {gate_id} has no space coordinates"),
+            client_error: None,
         });
     };
     let dist = (ship_ball.position.distance(gate_pos) - ship_ball.radius - gate_radius).max(0.0);
@@ -506,6 +512,7 @@ pub async fn activate_fw_complex_gate_in_space(
             message: format!(
                 "Ship is {dist:.1} m from FW acceleration gate {gate_id} (must be <= 2500 m)"
             ),
+            client_error: None,
         });
     }
     check_gate_tackle_and_nav_locks(ctx, &sys_handle, ship_id, &ship_ball).await?;
@@ -529,6 +536,7 @@ pub async fn activate_fw_complex_gate_in_space(
         return Err(BridgeRpcError {
             code: "ShipTypeNotAllowedInComplex".into(),
             message: "Capsules cannot activate FW complex acceleration gates".into(),
+            client_error: None,
         });
     }
 
@@ -548,6 +556,7 @@ pub async fn activate_fw_complex_gate_in_space(
             message: format!(
                 "Ship type {ship_type_id} (group {group_id}) is too large for a {t} acceleration gate"
             ),
+            client_error: None,
         })
     };
     match tier.as_str() {
@@ -559,6 +568,7 @@ pub async fn activate_fw_complex_gate_in_space(
                         message: format!(
                             "Ship type {ship_type_id} (group {group_id}) is not allowed in a Novice complex (T1/Navy Frigates only)"
                         ),
+                        client_error: None,
                     });
                 }
                 return too_large("Novice");
@@ -673,6 +683,7 @@ pub async fn apply_fw_or_insurgency_structure_damage(
         .ok_or_else(|| BridgeRpcError {
             code: "StructureNotFound".into(),
             message: format!("Structure {structure_id} not found"),
+            client_error: None,
         })?;
     if matches!(st_type, PIRATE_STRONGHOLD_ANGEL_TYPE | PIRATE_STRONGHOLD_GURISTAS_TYPE)
         || ctx.sde.types.get(&st_type).is_some_and(|t| t.group_id == 4644)
@@ -708,10 +719,12 @@ pub async fn apply_fw_or_insurgency_structure_damage(
             .ok_or_else(|| BridgeRpcError {
                 code: "StructureNotFound".into(),
                 message: format!("FW I-Hub {structure_id} not found"),
+                client_error: None,
             })?;
         let occ = snap.fw_system_occupations.get(&sys_id).ok_or_else(|| BridgeRpcError {
             code: "SystemNotWarzone".into(),
             message: format!("System {sys_id} is not an FW warzone system"),
+            client_error: None,
         })?;
         let occ_fac = occ.occupier_faction_id;
         // An invulnerable I-Hub rejects every attacker before militia checks (client shows it as invulnerable).
@@ -733,6 +746,7 @@ pub async fn apply_fw_or_insurgency_structure_damage(
                 message: format!(
                     "FW Infrastructure Hub in system {sys_id} is invulnerable until 100% contested or post-surrender window"
                 ),
+                client_error: None,
             });
         }
         let att_fac = snap
@@ -742,6 +756,7 @@ pub async fn apply_fw_or_insurgency_structure_damage(
             .ok_or_else(|| BridgeRpcError {
                 code: "NotEnlistedInOpposingMilitia".into(),
                 message: "Only opposing militia pilots can attack an FW Infrastructure Hub".into(),
+                client_error: None,
             })?;
         if fw_opposing_faction(occ_fac) != Some(att_fac) {
             return Err(BridgeRpcError {
@@ -749,6 +764,7 @@ pub async fn apply_fw_or_insurgency_structure_damage(
                 message: format!(
                     "Pilot faction {att_fac} is not the opposing militia for occupier {occ_fac}"
                 ),
+                client_error: None,
             });
         }
         if surr_vuln {

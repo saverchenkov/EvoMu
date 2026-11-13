@@ -118,6 +118,7 @@ pub fn handle_pi_orbitals(
                     code: "ClientSchematicOverrideForbidden".into(),
                     message: "Flush accepts at most (planetID, [planetHarvesterOrResourceTypeID])"
                         .into(),
+                    client_error: None,
                 }));
             }
             let (planet_id_opt, requested_arg) = match bound_planet {
@@ -142,6 +143,7 @@ pub fn handle_pi_orbitals(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "Flush requires an explicit integer planetID or bound planetMgr moniker".into(),
+                    client_error: None,
                 }));
             };
             let requested_resource_or_pin = match requested_arg {
@@ -164,6 +166,7 @@ pub fn handle_pi_orbitals(
                         return Some(Err(BridgeRpcError {
                             code: "ClientSchematicOverrideForbidden".into(),
                             message: "Flush optional second argument must be a valid planet extractor pin or raw P0 resource typeID".into(),
+                            client_error: None,
                         }));
                     };
                     Some(raw_id)
@@ -181,6 +184,7 @@ pub fn handle_pi_orbitals(
                             message: format!(
                                 "No planetary colony found for character {char_id} on planet {planet_id}"
                             ),
+                            client_error: None,
                         });
                     };
                     if current_sys_id != Some(col.solar_system_id) {
@@ -190,6 +194,7 @@ pub fn handle_pi_orbitals(
                                 "Planetary colony {planet_id} is in solar system {}, not {:?}",
                                 col.solar_system_id, current_sys_id
                             ),
+                            client_error: None,
                         });
                     }
                     (
@@ -266,6 +271,7 @@ pub fn handle_pi_orbitals(
                         message: format!(
                             "Extracted quantity {produced_qty} overflows i32 inventory stack"
                         ),
+                        client_error: None,
                     })?;
 
                 {
@@ -281,6 +287,7 @@ pub fn handle_pi_orbitals(
                             message: format!(
                                 "Extractor cycle on planet {planet_id} requires {cycle_secs}s between flushes"
                             ),
+                            client_error: None,
                         });
                     }
                 }
@@ -326,6 +333,7 @@ pub fn handle_pi_orbitals(
                                     message: format!(
                                         "Insufficient ISK to pay POCO export tax ({export_tax:.2} ISK)"
                                     ),
+                                    client_error: None,
                                 })?;
                         ch.balance = new_bal;
                         let bal_after = ch.balance;
@@ -419,18 +427,21 @@ pub fn handle_pi_orbitals(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "UpgradeCommandCenter requires an explicit integer planetID or bound planetMgr moniker".into(),
+                    client_error: None,
                 }));
             };
             let Some(target_level_raw) = target_level_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidCommandCenterLevel".into(),
                     message: "UpgradeCommandCenter requires target upgrade level (1..=5)".into(),
+                    client_error: None,
                 }));
             };
             if !(1..=5).contains(&target_level_raw) {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidCommandCenterLevel".into(),
                     message: format!("Target level {target_level_raw} must be in range 1..=5"),
+                    client_error: None,
                 }));
             }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -450,6 +461,7 @@ pub fn handle_pi_orbitals(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "UserTransferCommodities requires an explicit integer planetID or bound planetMgr moniker".into(),
+                    client_error: None,
                 }));
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -482,6 +494,7 @@ pub fn handle_pi_orbitals(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "UserLaunchCommodities requires planetID or bound planetMgr moniker".into(),
+                    client_error: None,
                 }));
             };
             let lrpc = crate::router::RpcArgs::positional(launch_args);
@@ -546,6 +559,7 @@ pub fn handle_pi_orbitals(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidRoutingParameters".into(),
                     message: "UserLaunchCommodities requires commodity typeID".into(),
+                    client_error: None,
                 }));
             }
 
@@ -566,6 +580,7 @@ pub fn handle_pi_orbitals(
                         message: format!(
                             "No colony found for character {char_id} on planet {planet_id}"
                         ),
+                        client_error: None,
                     });
                 };
                 if current_sys_id != Some(col.solar_system_id) {
@@ -575,6 +590,7 @@ pub fn handle_pi_orbitals(
                             "Planetary colony {planet_id} is in solar system {}, not {:?}",
                             col.solar_system_id, current_sys_id
                         ),
+                        client_error: None,
                     });
                 }
 
@@ -597,6 +613,7 @@ pub fn handle_pi_orbitals(
                         .ok_or_else(|| BridgeRpcError {
                             code: "PinNotFound".into(),
                             message: format!("No target pin found for import on planet {planet_id}"),
+                            client_error: None,
                         })?;
 
                     let target_cap_m3 = pin_storage_capacity_m3(&ctx.sde, net.pins[target_idx].type_id);
@@ -607,6 +624,7 @@ pub fn handle_pi_orbitals(
                             message: format!(
                                 "Import volume {total_vol_m3:.1} m3 exceeds pin available capacity ({target_cap_m3:.0} m3)"
                             ),
+                            client_error: None,
                         });
                     }
 
@@ -630,6 +648,7 @@ pub fn handle_pi_orbitals(
                             let new_bal = ch.balance.checked_sub(tax_cents).ok_or_else(|| BridgeRpcError {
                                 code: "InsufficientFunds".into(),
                                 message: format!("Insufficient ISK to pay POCO import tax ({import_tax_isk:.2} ISK)"),
+                                client_error: None,
                             })?;
                             ch.balance = new_bal;
                             let bal_after = ch.balance;
@@ -663,11 +682,13 @@ pub fn handle_pi_orbitals(
                     let idx = net.pins.iter().position(|p| p.pin_id == pid).ok_or_else(|| BridgeRpcError {
                         code: "PinNotFound".into(),
                         message: format!("Launching pin {pid} not found on planet {planet_id}"),
+                        client_error: None,
                     })?;
                     if !is_storage_or_cc_or_launchpad_pin(&ctx.sde, net.pins[idx].type_id) {
                         return Err(BridgeRpcError {
                             code: "InvalidPinTypeForLaunch".into(),
                             message: format!("Pin {pid} is not a storage, command center, or launchpad pin"),
+                            client_error: None,
                         });
                     }
                     idx
@@ -679,6 +700,7 @@ pub fn handle_pi_orbitals(
                         .ok_or_else(|| BridgeRpcError {
                             code: "PinNotFound".into(),
                             message: format!("No launching pin found on planet {planet_id}"),
+                            client_error: None,
                         })?
                 };
 
@@ -692,6 +714,7 @@ pub fn handle_pi_orbitals(
                         return Err(BridgeRpcError {
                             code: code.into(),
                             message: format!("Transfer volume {total_vol_m3:.1} m3 exceeds {max_vol:.0} m3 limit for {destination}"),
+                            client_error: None,
                         });
                     }
                 }
@@ -704,6 +727,7 @@ pub fn handle_pi_orbitals(
                         message: format!(
                             "Launching pin {launch_pin_id} has {available} of type {type_id}, cannot route {qty}"
                         ),
+                        client_error: None,
                     });
                 }
 
@@ -720,6 +744,7 @@ pub fn handle_pi_orbitals(
                             ch.balance = ch.balance.checked_sub(tax_cents).ok_or_else(|| BridgeRpcError {
                                 code: "InsufficientFunds".into(),
                                 message: format!("Insufficient ISK to pay POCO export tax ({export_tax_isk:.2} ISK)"),
+                                client_error: None,
                             })?;
                             let bal_after = ch.balance;
                             snap.append_journal(char_id, "CustomOfficeTax", tax_cents, bal_after, format!("POCO export tax for {qty}x type {type_id} on planet {planet_id}"));
@@ -962,6 +987,7 @@ pub fn handle_pi_orbitals(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidLaunchID".into(),
                     message: "DeleteLaunch requires a positive integer launchID".into(),
+                    client_error: None,
                 }));
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -969,12 +995,14 @@ pub fn handle_pi_orbitals(
                     return Err(BridgeRpcError {
                         code: "LaunchNotFound".into(),
                         message: format!("Launch item {launch_id} not found"),
+                        client_error: None,
                     });
                 };
                 if it.owner_id != char_id {
                     return Err(BridgeRpcError {
                         code: "LaunchAccessDenied".into(),
                         message: format!("Launch item {launch_id} does not belong to character {char_id}"),
+                        client_error: None,
                     });
                 }
                 let launch_planet_opt = snap
@@ -987,6 +1015,7 @@ pub fn handle_pi_orbitals(
                     return Err(BridgeRpcError {
                         code: "InvalidLaunchID".into(),
                         message: format!("Item {launch_id} is not a planetary launch container (location_id: {})", it.location_id),
+                        client_error: None,
                     });
                 };
                 if let Some(bp) = bound_planet {
@@ -994,6 +1023,7 @@ pub fn handle_pi_orbitals(
                         return Err(BridgeRpcError {
                             code: "LaunchNotFound".into(),
                             message: format!("Launch item {launch_id} is on planet {launch_planet}, not bound planet {bp}"),
+                            client_error: None,
                         });
                     }
                 }
@@ -1038,6 +1068,7 @@ pub fn handle_pi_orbitals(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "CancelInstallProgram requires planetID or bound planetMgr moniker".into(),
+                    client_error: None,
                 }));
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -1045,6 +1076,7 @@ pub fn handle_pi_orbitals(
                     return Err(BridgeRpcError {
                         code: "ColonyNotFound".into(),
                         message: format!("No colony on planet {planet_id}"),
+                        client_error: None,
                     });
                 };
                 let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
@@ -1061,6 +1093,7 @@ pub fn handle_pi_orbitals(
                     return Err(BridgeRpcError {
                         code: "PinNotFound".into(),
                         message: format!("Pin {pin_id} not found in colony on planet {planet_id}"),
+                        client_error: None,
                     });
                 }
                 if let Some(i) = idx {
@@ -1088,6 +1121,7 @@ pub fn handle_pi_orbitals(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "RevertChanges requires planetID or bound planetMgr moniker".into(),
+                    client_error: None,
                 }));
             };
             let res = ctx.db.with_snapshot(|snap| {
@@ -1095,6 +1129,7 @@ pub fn handle_pi_orbitals(
                     return Err(BridgeRpcError {
                         code: "ColonyNotFound".into(),
                         message: format!("No colony found for character {char_id} on planet {planet_id}"),
+                        client_error: None,
                     });
                 };
                 let _net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
@@ -1113,6 +1148,7 @@ pub fn handle_pi_orbitals(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "StartTicking requires planetID or bound planetMgr moniker".into(),
+                    client_error: None,
                 }));
             };
             let now_unix = ctx.now_unix();
@@ -1121,6 +1157,7 @@ pub fn handle_pi_orbitals(
                     return Err(BridgeRpcError {
                         code: "ColonyNotFound".into(),
                         message: format!("No colony found for character {char_id} on planet {planet_id}"),
+                        client_error: None,
                     });
                 };
                 let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
@@ -1200,6 +1237,7 @@ pub fn handle_pi_orbitals(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "GetProgramResultInfo requires planetID or bound planetMgr moniker".into(),
+                    client_error: None,
                 }));
             };
 
@@ -1255,6 +1293,7 @@ pub fn handle_pi_orbitals(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "GetLocalDistributionReport requires planetID or bound planetMgr moniker".into(),
+                    client_error: None,
                 }));
             };
             let (pins_count, report_dict) = ctx.db.with_snapshot(|snap| {
@@ -1296,6 +1335,7 @@ pub fn handle_pi_orbitals(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "celestialIndex requires planetID or bound planetMgr moniker".into(),
+                    client_error: None,
                 }));
             };
             let idx = ctx.sde.solar_systems.values()
@@ -1342,6 +1382,7 @@ pub fn handle_pi_orbitals(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "planetID requires bound planetMgr moniker or explicit planetID".into(),
+                    client_error: None,
                 }));
             };
             let known_in_sde = ctx.sde.solar_systems.values().any(|s| s.planet_ids.contains(&planet_id));
@@ -1350,6 +1391,7 @@ pub fn handle_pi_orbitals(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: format!("Unknown planetID {planet_id}"),
+                    client_error: None,
                 }));
             }
             Some(Ok(PyRep::Integer(planet_id)))

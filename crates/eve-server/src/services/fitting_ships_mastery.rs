@@ -24,18 +24,21 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "No active ship to leave or eject from".into(),
+                    client_error: None,
                 }));
             };
             if method == "LeaveShip" && session.station_id.is_none() && session.structure_id.is_none() {
                 return Some(Err(BridgeRpcError {
                     code: "CannotLeaveShipInSpace".into(),
                     message: "LeaveShip is only allowed while docked; use Eject in space".into(),
+                    client_error: None,
                 }));
             }
             if method == "Eject" && (session.station_id.is_some() || session.structure_id.is_some()) {
                 return Some(Err(BridgeRpcError {
                     code: "CannotEjectWhileDocked".into(),
                     message: "Eject is only possible in space; use LeaveShip while docked".into(),
+                    client_error: None,
                 }));
             }
             let is_capsule = ctx.db.with_snapshot(|snap| {
@@ -45,6 +48,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 return Some(Err(BridgeRpcError {
                     code: "CannotEjectFromCapsule".into(),
                     message: "Cannot eject from a Capsule".into(),
+                    client_error: None,
                 }));
             }
             let now_unix = ctx.now_unix_secs();
@@ -67,6 +71,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                             return Some(Err(BridgeRpcError {
                                 code: "ShipInWarp".into(),
                                 message: "Cannot eject from ship while in active warp".into(),
+                                client_error: None,
                             }));
                         }
                     }
@@ -75,6 +80,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     return Some(Err(BridgeRpcError {
                         code: "CynosuralFieldActive".into(),
                         message: "Cannot eject from ship while a Cynosural Field Generator is active".into(),
+                        client_error: None,
                     }));
                 }
                 let (has_weapon_timer, has_criminal_timer) = {
@@ -89,6 +95,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     return Some(Err(BridgeRpcError {
                         code: "CannotEjectActiveWeaponsTimer".into(),
                         message: "Cannot eject from ship while a weapons timer is active".into(),
+                        client_error: None,
                     }));
                 }
                 let sys_sec = session
@@ -100,6 +107,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     return Some(Err(BridgeRpcError {
                         code: "CannotEjectInvolvedInCrime".into(),
                         message: "Cannot eject from ship while involved in a high-security crime".into(),
+                        client_error: None,
                     }));
                 }
             }
@@ -107,6 +115,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 return Some(Err(BridgeRpcError {
                     code: "SessionChangeTimerActive".into(),
                     message: "Session change timer is active".into(),
+                    client_error: None,
                 }));
             }
             let (char_dock, char_sys, char_home) = ctx.db.with_snapshot(|snap| {
@@ -142,12 +151,14 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     return Err(BridgeRpcError {
                         code: "ShipNotFound".into(),
                         message: format!("Active ship {old_ship_id} not found"),
+                        client_error: None,
                     });
                 };
                 if old_ship.type_id == 670 {
                     return Err(BridgeRpcError {
                         code: "CannotEjectFromCapsule".into(),
                         message: "Cannot eject from a Capsule".into(),
+                        client_error: None,
                     });
                 }
                 if let Some(os_mut) = snap.items.get_mut(&old_ship_id) {
@@ -359,6 +370,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     code: "ShipNotFound".into(),
                     message: "Board requires target shipID argument or active ship in session"
                         .into(),
+                    client_error: None,
                 }));
             };
             let now_unix = ctx.now_unix_secs();
@@ -366,6 +378,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 return Some(Err(BridgeRpcError {
                     code: "SessionChangeTimerActive".into(),
                     message: "Session change timer is active".into(),
+                    client_error: None,
                 }));
             }
 
@@ -375,12 +388,14 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     return Some(Err(BridgeRpcError {
                         code: "NoSolarSystem".into(),
                         message: "Session has no active solar system".into(),
+                        client_error: None,
                     }));
                 };
                 let Some(cur_ship_id) = session.ship_id else {
                     return Some(Err(BridgeRpcError {
                         code: "NoActiveShip".into(),
                         message: "Cannot board in space without an active vessel/capsule".into(),
+                        client_error: None,
                     }));
                 };
                 if cur_ship_id != target_ship_id {
@@ -396,6 +411,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         return Some(Err(BridgeRpcError {
                             code: "CannotStoreShipActiveWeaponsTimer".into(),
                             message: "Cannot board or switch ships in space while a weapons timer is active".into(),
+                            client_error: None,
                         }));
                     }
                     let sys_sec = ctx
@@ -408,6 +424,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         return Some(Err(BridgeRpcError {
                             code: "CannotBoardShipInHighSecAsCriminal".into(),
                             message: "Cannot board a ship in high-security space while a Criminal Timer is active".into(),
+                            client_error: None,
                         }));
                     }
                     let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -458,6 +475,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                             message: format!(
                                 "Target ship {target_ship_id} is not spawned on grid in system {sys_id}"
                             ),
+                            client_error: None,
                         }));
                     };
                     if let Err(e) = crate::services::space_navigation_advanced::check_immobilizing_module_active(
@@ -479,6 +497,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                             code: "ShipInWarp".into(),
                             message: "Cannot board a ship while either vessel is in active warp"
                                 .into(),
+                            client_error: None,
                         }));
                     }
                     let dist = cb.position.distance(tb.position);
@@ -489,6 +508,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                                 "Target ship {target_ship_id} is {:.1} m away (must be <= 2500 m)",
                                 dist
                             ),
+                            client_error: None,
                         }));
                     }
                     if let Err(e) = fitting_ship_bays::check_pos_forcefield_coverage(
@@ -509,12 +529,13 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if session.ship_id.is_some_and(|sid| snap.structures.contains_key(&sid)) {
-                    return Err(BridgeRpcError { code: "ControllingStructure".into(), message: "Release structure control before boarding another ship".into() });
+                    return Err(BridgeRpcError { code: "ControllingStructure".into(), message: "Release structure control before boarding another ship".into(), client_error: None });
                 }
                 let Some(ship) = snap.items.get(&target_ship_id).cloned() else {
                     return Err(BridgeRpcError {
                         code: "ShipNotFound".into(),
                         message: format!("Ship {target_ship_id} not found"),
+                        client_error: None,
                     });
                 };
                 if ship.owner_id != char_id {
@@ -523,6 +544,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         message: format!(
                             "Ship {target_ship_id} is not owned by character {char_id}"
                         ),
+                        client_error: None,
                     });
                 };
                 let in_docked_hangar = session.station_id.or(session.structure_id).is_some();
@@ -543,11 +565,11 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                                 && c.structure_id.is_none()
                         }))
                 {
-                    return Err(BridgeRpcError { code: "ShipNotBoardable".into(), message: format!("Ship {target_ship_id} must be assembled, unlocked, unmanned, and at your current location") });
+                    return Err(BridgeRpcError { code: "ShipNotBoardable".into(), message: format!("Ship {target_ship_id} must be assembled, unlocked, unmanned, and at your current location"), client_error: None });
                 }
                 let is_ship = ctx.sde.types.get(&ship.type_id).map(|t| t.category_id == 6).unwrap_or(false);
                 if !is_ship {
-                    return Err(BridgeRpcError { code: "NotAShip".into(), message: format!("Item {target_ship_id} is not a ship") });
+                    return Err(BridgeRpcError { code: "NotAShip".into(), message: format!("Item {target_ship_id} is not a ship"), client_error: None });
                 }
                 ctx.check_type_skill_prerequisites_in_snapshot(snap, char_id, ship.type_id)?;
                 if let Some((prev_sid, prev_pos_arr, tgt_pos_arr, sys_id)) = in_space_board_positions {
@@ -776,6 +798,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 return Some(Err(BridgeRpcError {
                     code: "NotInSpace".into(),
                     message: "Launching a ship from a container or bay requires being in space".into(),
+                    client_error: None,
                 }));
             };
             let active_ship_id = match session.ship_id {
@@ -783,6 +806,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 None => return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "LaunchFromContainer requires an active ship".into(),
+                    client_error: None,
                 })),
             };
             let rpc = crate::router::RpcArgs::positional(args);
@@ -801,7 +825,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             let sys = ctx.systems.get_or_spawn(sys_id);
             let active_pos = match sys.get_ball_snapshot(active_ship_id).await {
                 Ok(Some((_, b))) => b.position,
-                _ => return Some(Err(BridgeRpcError { code: "ObjectNotInSpace".into(), message: "Active ship not in space".into() })),
+                _ => return Some(Err(BridgeRpcError { code: "ObjectNotInSpace".into(), message: "Active ship not in space".into(), client_error: None })),
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let (type_id, parent_id, item_owner) = {
@@ -809,6 +833,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         return Err(BridgeRpcError {
                             code: "ItemNotFound".into(),
                             message: format!("Item {item_id} not found"),
+                            client_error: None,
                         });
                     };
                     let it_type = ctx.sde.types.get(&it.type_id);
@@ -820,6 +845,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         return Err(BridgeRpcError {
                             code: "InvalidLaunchItem".into(),
                             message: "Only assembled ships and valid containers can be launched".into(),
+                            client_error: None,
                         });
                     }
                     (it.type_id, it.location_id, it.owner_id)
@@ -840,6 +866,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     return Err(BridgeRpcError {
                         code: "LaunchAccessDenied".into(),
                         message: format!("Item {item_id} is not inside an accessible container or ship bay in system {sys_id}"),
+                        client_error: None,
                     });
                 }
                 Ok((type_id, parent_id, item_owner))
@@ -865,6 +892,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                             return Some(Err(BridgeRpcError {
                                 code: "ObjectNotInSpace".into(),
                                 message: format!("Parent {parent_id} is not in space in system {sys_id}"),
+                                client_error: None,
                             }));
                         }
                     }
@@ -874,6 +902,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 return Some(Err(BridgeRpcError {
                     code: "OutOfRange".into(),
                     message: "Parent ship/container is out of range (>2500m)".into(),
+                    client_error: None,
                 }));
             }
             let launch_pos = DVec3::new(parent_pos.x + 300.0, parent_pos.y, parent_pos.z);
@@ -884,16 +913,19 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     return Err(BridgeRpcError {
                         code: "ObjectNotInSpace".into(),
                         message: format!("Parent {parent_id} is not in space in system {sys_id}"),
+                        client_error: None,
                     });
                 }
                 let it = snap.items.get_mut(&item_id).ok_or_else(|| BridgeRpcError {
                     code: "ItemNotFound".into(),
                     message: format!("Item {item_id} not found"),
+                    client_error: None,
                 })?;
                 if it.location_id != parent_id {
                     return Err(BridgeRpcError {
                         code: "LaunchAccessDenied".into(),
                         message: format!("Item {item_id} is no longer in parent {parent_id}"),
+                        client_error: None,
                     });
                 }
                 let old_loc = it.location_id;
@@ -987,6 +1019,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 return Some(Err(BridgeRpcError {
                     code: "NotDocked".into(),
                     message: "CreateNewbieShip requires being docked at a station or structure".into(),
+                    client_error: None,
                 }));
             };
             let req_ship_id = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0);
@@ -995,6 +1028,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     return Some(Err(BridgeRpcError {
                         code: "StationMismatch".into(),
                         message: format!("Requested station {req_loc_id} does not match docked station {station_id}"),
+                        client_error: None,
                     }));
                 }
             }
@@ -1010,6 +1044,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 return Some(Err(BridgeRpcError {
                     code: "NewbieShipCooldown".into(),
                     message: "Corvette claim cooldown is still active".into(),
+                    client_error: None,
                 }));
             }
             let capsule_group = ctx.sde.groups.values().find(|g| g.name == "Capsule").map(|g| g.group_id);
@@ -1033,6 +1068,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 return Some(Err(BridgeRpcError {
                     code: "AlreadyInNewbieShip".into(),
                     message: "Character is already in a corvette".into(),
+                    client_error: None,
                 }));
             }
             let prev_ship_id = session.ship_id.unwrap_or(active_ship_id);
@@ -1051,6 +1087,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     return Err(BridgeRpcError {
                         code: "AlreadyHaveShipInStation".into(),
                         message: "Character already has a corvette in this station".into(),
+                        client_error: None,
                     });
                 }
                 let race_id = snap
@@ -1071,6 +1108,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     return Err(BridgeRpcError {
                         code: "NoRacialCorvette".into(),
                         message: format!("No published SDE corvette for race {race_id}"),
+                        client_error: None,
                     });
                 };
 
@@ -1227,6 +1265,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 return Some(Err(BridgeRpcError {
                     code: "TypeNotFound".into(),
                     message: format!("Type {type_id} not found"),
+                    client_error: None,
                 }));
             };
             let mut req_skills = Vec::new();
@@ -1317,6 +1356,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     return Some(Err(BridgeRpcError {
                         code: "GMRoleRequired".into(),
                         message: "SetShipKillCounter requires GM role".into(),
+                        client_error: None,
                     }));
                 }
                 let kills = match crate::router::RpcArgs::positional(args).opt_i64(1, "kills") {
@@ -1328,12 +1368,14 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         return Err(BridgeRpcError {
                             code: "ItemNotFound".into(),
                             message: format!("Ship {ship_id} not found"),
+                            client_error: None,
                         });
                     };
                     if it.owner_id != char_id {
                         return Err(BridgeRpcError {
                             code: "ShipOwnershipViolation".into(),
                             message: format!("Ship {ship_id} is not owned by character {char_id}"),
+                            client_error: None,
                         });
                     }
                     it.dynamic_attributes.insert(9998, kills as f64);
@@ -1471,6 +1513,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 return Some(Err(BridgeRpcError {
                     code: "DeleteFailed".into(),
                     message: "TrashItems requires at least one itemID".into(),
+                    client_error: None,
                 }));
             }
             let expected_station = args.get(1).and_then(|a| a.as_i64()).filter(|&st| st > 0);
@@ -1513,36 +1556,36 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 let mut trashed: Vec<eve_db::InventoryItemRecord> = Vec::with_capacity(item_ids.len());
                 for &item_id in &item_ids {
                     let Some(item) = snap.items.get(&item_id) else {
-                        return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Item {item_id} not found") });
+                        return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Item {item_id} not found"), client_error: None });
                     };
                     if item.owner_id != char_id {
-                        return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Item {item_id} is not owned by character {char_id}") });
+                        return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Item {item_id} is not owned by character {char_id}"), client_error: None });
                     }
                     if item_id == active_ship_id || snap.is_character_boarded_or_saved_ship(char_id, session.ship_id, item_id) {
-                        return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Cannot trash active ship {item_id}") });
+                        return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Cannot trash active ship {item_id}"), client_error: None });
                     }
                     if (30_000_000..=50_000_000).contains(&item.location_id)
                         && ctx.sde.types.get(&item.type_id).is_some_and(|t| matches!(t.category_id, 6 | 65))
                     {
-                        return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Cannot trash in-space ship or structure {item_id}") });
+                        return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Cannot trash in-space ship or structure {item_id}"), client_error: None });
                     }
                     let is_fitted = matches!(item.flag as u16, 11..=34 | 87 | 92..=94 | 125..=132 | 158 | 164..=171);
                     if is_fitted {
-                        return Err(BridgeRpcError { code: "CannotTrashFittedItem".into(), message: format!("Cannot trash fitted item {item_id}") });
+                        return Err(BridgeRpcError { code: "CannotTrashFittedItem".into(), message: format!("Cannot trash fitted item {item_id}"), client_error: None });
                     }
                     if item.flag == InventoryFlag::Locked || alsc_locked.contains(&item_id) || snap.is_item_locked_in_contract_or_job(item_id) {
-                        return Err(BridgeRpcError { code: "ItemLocked".into(), message: format!("Item {item_id} is locked by an active contract, industry job, or container") });
+                        return Err(BridgeRpcError { code: "ItemLocked".into(), message: format!("Item {item_id} is locked by an active contract, industry job, or container"), client_error: None });
                     }
                     if fitting_containers_ships::container_has_active_audit_log_snap(snap, item_id, now_unix) {
-                        return Err(BridgeRpcError { code: "ContainerHasActiveAuditLog".into(), message: format!("Container {item_id} has audit log entries younger than 3 weeks and cannot be trashed") });
+                        return Err(BridgeRpcError { code: "ContainerHasActiveAuditLog".into(), message: format!("Container {item_id} has audit log entries younger than 3 weeks and cannot be trashed"), client_error: None });
                     }
                     if item.flag as u16 == 36 {
-                        return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Cannot trash item {item_id} in Asset Safety") });
+                        return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Cannot trash item {item_id} in Asset Safety"), client_error: None });
                     }
                     if let Some(st_id) = expected_station {
                         let in_station = item.location_id == st_id || snap.items.get(&item.location_id).is_some_and(|parent| parent.location_id == st_id);
                         if current_dock != Some(st_id) || !in_station {
-                            return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Item {item_id} is located at {}, not accessible station {st_id}", item.location_id) });
+                            return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Item {item_id} is located at {}, not accessible station {st_id}", item.location_id), client_error: None });
                         }
                     } else if let Some(dock_id) = current_dock {
                         let active_ship_at_dock = active_ship_id > 0 && snap.items.get(&active_ship_id).is_some_and(|s| s.location_id == dock_id);
@@ -1552,7 +1595,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                                 parent.location_id == dock_id || (active_ship_at_dock && parent.location_id == active_ship_id)
                             });
                         if !in_accessible_hangar {
-                            return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Item {item_id} at {} is not in an accessible hangar at {dock_id}", item.location_id) });
+                            return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Item {item_id} at {} is not in an accessible hangar at {dock_id}", item.location_id), client_error: None });
                         }
                     } else {
                         let active_ship_in_sys = active_ship_id > 0 && snap.items.get(&active_ship_id).is_some_and(|s| s.location_id == current_sys);
@@ -1593,11 +1636,11 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                             false
                         };
                         if !in_active_ship && !in_nearby_space {
-                            return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Item {item_id} at {} is not accessible while undocked in system {current_sys}", item.location_id) });
+                            return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Item {item_id} at {} is not accessible while undocked in system {current_sys}", item.location_id), client_error: None });
                         }
                     }
                     if snap.items.values().any(|child| child.location_id == item_id) {
-                        return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Cannot trash non-empty container or fitted ship {item_id}") });
+                        return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Cannot trash non-empty container or fitted ship {item_id}"), client_error: None });
                     }
                     trashed.push(item.clone());
                 }
@@ -1701,6 +1744,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArguments".into(),
                     message: "ship.GetDirtTimestamp expects (itemID,)".into(),
+                    client_error: None,
                 }));
             };
             let ts = ctx.db.with_snapshot(|snap| {
@@ -1721,6 +1765,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         Some(Err(BridgeRpcError {
                             code: "ItemNotFound".into(),
                             message: format!("ship {ship_id} not found"),
+                            client_error: None,
                         }))
                     }
                 }
@@ -1740,6 +1785,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArguments".into(),
                     message: "ship.ResetDirtTimestamp expects (itemID,)".into(),
+                    client_error: None,
                 }));
             };
             let now = ctx.now_blueos_filetime_ticks();
@@ -1749,12 +1795,14 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     return Err(BridgeRpcError {
                         code: "ItemNotFound".into(),
                         message: format!("ship {ship_id} not found"),
+                        client_error: None,
                     });
                 };
                 if item.owner_id != char_id {
                     return Err(BridgeRpcError {
                         code: "ShipOwnershipViolation".into(),
                         message: format!("Ship {ship_id} is not owned by character {char_id}"),
+                        client_error: None,
                     });
                 }
                 item.dynamic_attributes.insert(1969, ts_i64 as f64);

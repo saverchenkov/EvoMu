@@ -29,6 +29,7 @@ pub(crate) fn verify_and_consume_mission_delivery_items(
         let dest_station = destination_station_id.ok_or_else(|| BridgeRpcError {
             code: "MissingDestinationStation".into(),
             message: format!("Courier mission {mission_id} has no valid destination station"),
+            client_error: None,
         })?;
         if current_station != Some(dest_station) {
             return Err(BridgeRpcError {
@@ -36,6 +37,7 @@ pub(crate) fn verify_and_consume_mission_delivery_items(
                 message: format!(
                     "Courier mission {mission_id} requires delivery to destination station {dest_station}, character is currently docked at {current_station:?}"
                 ),
+                client_error: None,
             });
         }
         let courier_tag = format!("courier_cargo:{char_id}:{mission_id}");
@@ -65,6 +67,7 @@ pub(crate) fn verify_and_consume_mission_delivery_items(
                 message: format!(
                     "Courier mission {mission_id} requires delivering {req_units} units of type {req_tid} from ship cargo at destination station, character only has {found_qty}"
                 ),
+                client_error: None,
             });
         }
         let mut rem = req_units;
@@ -91,6 +94,7 @@ pub(crate) fn verify_and_consume_mission_delivery_items(
                 .map_err(|e| BridgeRpcError {
                     code: "InventoryError".into(),
                     message: e.to_string(),
+                    client_error: None,
                 })?;
             rem -= take;
         }
@@ -104,6 +108,7 @@ pub(crate) fn verify_and_consume_mission_delivery_items(
                 message: format!(
                     "Mission {mission_id} delivery requires character to be docked at agent station {ast_id}, currently at {current_station:?}"
                 ),
+                client_error: None,
             });
         }
     }
@@ -141,6 +146,7 @@ pub(crate) fn verify_and_consume_mission_delivery_items(
             message: format!(
                 "Mission {mission_id} requires delivering {req_units} units of type {req_tid} at agent station, character only has {found_qty}"
             ),
+            client_error: None,
         });
     }
 

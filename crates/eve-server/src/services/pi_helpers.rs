@@ -189,6 +189,7 @@ pub fn has_pi_link_path(links: &[PiLinkState], path: &[i64], transfer_vol_m3: f6
         return Err(BridgeRpcError {
             code: "InvalidTransferSource".into(),
             message: "Source and destination pin must be distinct".into(),
+            client_error: None,
         });
     }
     let src = path[0];
@@ -197,6 +198,7 @@ pub fn has_pi_link_path(links: &[PiLinkState], path: &[i64], transfer_vol_m3: f6
         return Err(BridgeRpcError {
             code: "InvalidTransferSource".into(),
             message: "Source and destination pin must be distinct".into(),
+            client_error: None,
         });
     }
 
@@ -239,6 +241,7 @@ pub fn has_pi_link_path(links: &[PiLinkState], path: &[i64], transfer_vol_m3: f6
             return Err(BridgeRpcError {
                 code: "NoLinkBetweenPins".into(),
                 message: format!("No link or route path exists between pin {src} and pin {dst}"),
+                client_error: None,
             });
         }
         let mut curr = dst;
@@ -258,6 +261,7 @@ pub fn has_pi_link_path(links: &[PiLinkState], path: &[i64], transfer_vol_m3: f6
         }).ok_or_else(|| BridgeRpcError {
             code: "NoLinkBetweenPins".into(),
             message: format!("No link exists between hop pin {u} and pin {v}"),
+            client_error: None,
         })?;
 
         let effective_bw = if link.bandwidth > 0.0 {
@@ -272,6 +276,7 @@ pub fn has_pi_link_path(links: &[PiLinkState], path: &[i64], transfer_vol_m3: f6
                 message: format!(
                     "Link between pin {u} and pin {v} bandwidth ({effective_bw:.1} m3) is insufficient for transfer volume ({transfer_vol_m3:.1} m3)"
                 ),
+                client_error: None,
             });
         }
     }
@@ -1020,6 +1025,7 @@ pub fn resolve_character_orbital_access_and_tax(
                 return Err(eve_proto::BridgeRpcError {
                     code: "CustomsOfficeAccessDenied".into(),
                     message: format!("Customs Office on planet {planet_id} denies alliance access"),
+                    client_error: None,
                 });
             }
             return Ok((cfg.alliance_tax_rate, cfg.orbital_type_id));
@@ -1035,6 +1041,7 @@ pub fn resolve_character_orbital_access_and_tax(
                 "Customs Office / Skyhook on planet {planet_id} denies access (standing {standing:.1} < minimum {:.1})",
                 cfg.minimum_standing
             ),
+            client_error: None,
         });
     }
     let rate = if standing > 5.0 {
@@ -1061,12 +1068,14 @@ pub fn upgrade_command_center_logic(
         return Err(BridgeRpcError {
             code: "ColonyNotFound".into(),
             message: format!("No colony found for character {char_id} on planet {planet_id}"),
+            client_error: None,
         });
     };
     if target_level <= col.command_center_level {
         return Err(BridgeRpcError {
             code: "InvalidCommandCenterLevel".into(),
             message: format!("Target level {target_level} must be greater than current level {}", col.command_center_level),
+            client_error: None,
         });
     }
     let cc_skill_lvl = snap.skills.get(&char_id).and_then(|m| m.get(&2505)).map(|s| s.level).unwrap_or(0);
@@ -1074,6 +1083,7 @@ pub fn upgrade_command_center_logic(
         return Err(BridgeRpcError {
             code: "MissingSkillForCommandCenterUpgrade".into(),
             message: format!("Command Center upgrade to level {target_level} requires Command Center Upgrades skill (2505) >= {target_level} (current: {cc_skill_lvl})"),
+            client_error: None,
         });
     }
     let upgrade_cost_isk = cc_upgrade_cost_isk(col.command_center_level, target_level);
@@ -1083,6 +1093,7 @@ pub fn upgrade_command_center_logic(
             return Err(BridgeRpcError {
                 code: "InsufficientFunds".into(),
                 message: format!("Insufficient funds for command center upgrade ({upgrade_cost_isk:.2} ISK required)"),
+                client_error: None,
             });
         }
         ch.balance = ch.balance.checked_sub(upgrade_cost_cents).unwrap_or(IskCents(0));
@@ -1162,12 +1173,14 @@ pub fn consume_pi_import_commodities(
         return Err(BridgeRpcError {
             code: "ItemNotFound".into(),
             message: format!("Commodity item type {type_id} not found in ship cargo or customs office hangar"),
+            client_error: None,
         });
     }
     if total_available < qty as i64 {
         return Err(BridgeRpcError {
             code: "InsufficientCommodityQuantity".into(),
             message: format!("Available quantity ({total_available}) is less than required import quantity ({qty})"),
+            client_error: None,
         });
     }
 
@@ -1186,6 +1199,7 @@ pub fn consume_pi_import_commodities(
             .map_err(|e| BridgeRpcError {
                 code: "InventoryError".into(),
                 message: e.to_string(),
+                client_error: None,
             })?;
         remaining -= take;
         if remaining == 0 {
@@ -1213,25 +1227,30 @@ pub fn user_transfer_commodities_logic(
                     let tid_raw = k.as_i64().ok_or_else(|| BridgeRpcError {
                         code: "InvalidCommodity".into(),
                         message: "Commodity type ID must be an integer".into(),
+                        client_error: None,
                     })?;
                     let tid = u32::try_from(tid_raw).map_err(|_| BridgeRpcError {
                         code: "InvalidCommodity".into(),
                         message: format!("Commodity type ID {tid_raw} out of range"),
+                        client_error: None,
                     })?;
                     let qty_raw = v.as_i64().ok_or_else(|| BridgeRpcError {
                         code: "InvalidCommodityQuantity".into(),
                         message: "Commodity quantity must be an integer".into(),
+                        client_error: None,
                     })?;
                     if qty_raw <= 0 {
                         return Err(BridgeRpcError {
                             code: "InvalidCommodityQuantity".into(),
                             message: format!("Commodity quantity must be positive, got {qty_raw}"),
+                            client_error: None,
                         });
                     }
                     let slot = comm_map.entry(tid).or_insert(0);
                     *slot = slot.checked_add(qty_raw as u64).ok_or_else(|| BridgeRpcError {
                         code: "InvalidCommodityQuantity".into(),
                         message: "Commodity quantity overflow".into(),
+                        client_error: None,
                     })?;
                 }
             }
@@ -1240,25 +1259,30 @@ pub fn user_transfer_commodities_logic(
                     let tid_raw = k.parse::<i64>().map_err(|_| BridgeRpcError {
                         code: "InvalidCommodity".into(),
                         message: "Commodity type ID must be an integer".into(),
+                        client_error: None,
                     })?;
                     let tid = u32::try_from(tid_raw).map_err(|_| BridgeRpcError {
                         code: "InvalidCommodity".into(),
                         message: format!("Commodity type ID {tid_raw} out of range"),
+                        client_error: None,
                     })?;
                     let qty_raw = v.as_i64().ok_or_else(|| BridgeRpcError {
                         code: "InvalidCommodityQuantity".into(),
                         message: "Commodity quantity must be an integer".into(),
+                        client_error: None,
                     })?;
                     if qty_raw <= 0 {
                         return Err(BridgeRpcError {
                             code: "InvalidCommodityQuantity".into(),
                             message: format!("Commodity quantity must be positive, got {qty_raw}"),
+                            client_error: None,
                         });
                     }
                     let slot = comm_map.entry(tid).or_insert(0);
                     *slot = slot.checked_add(qty_raw as u64).ok_or_else(|| BridgeRpcError {
                         code: "InvalidCommodityQuantity".into(),
                         message: "Commodity quantity overflow".into(),
+                        client_error: None,
                     })?;
                 }
             }
@@ -1284,6 +1308,7 @@ pub fn user_transfer_commodities_logic(
         let comm_type_id = u32::try_from(comm_raw).map_err(|_| BridgeRpcError {
             code: "InvalidCommodity".into(),
             message: format!("Commodity type ID {comm_raw} out of range"),
+            client_error: None,
         })?;
         let qty_raw = args
             .get(4)
@@ -1294,6 +1319,7 @@ pub fn user_transfer_commodities_logic(
             return Err(BridgeRpcError {
                 code: "InvalidCommodityQuantity".into(),
                 message: format!("Commodity quantity must be positive, got {qty_raw}"),
+                client_error: None,
             });
         }
         comm_map.insert(comm_type_id, qty_raw as u64);
@@ -1304,6 +1330,7 @@ pub fn user_transfer_commodities_logic(
         return Err(BridgeRpcError {
             code: "PinNotFound".into(),
             message: "UserTransferCommodities requires at least source and destination pins".into(),
+            client_error: None,
         });
     }
     let src_pin_id = path[0];
@@ -1312,6 +1339,7 @@ pub fn user_transfer_commodities_logic(
         return Err(BridgeRpcError {
             code: "InvalidTransferSource".into(),
             message: "Source and destination pin must be distinct".into(),
+            client_error: None,
         });
     }
 
@@ -1319,6 +1347,7 @@ pub fn user_transfer_commodities_logic(
         return Err(BridgeRpcError {
             code: "InvalidCommodity".into(),
             message: "UserTransferCommodities requires at least one commodity to transfer".into(),
+            client_error: None,
         });
     }
 
@@ -1336,6 +1365,7 @@ pub fn user_transfer_commodities_logic(
         return Err(BridgeRpcError {
             code: "ColonyNotFound".into(),
             message: format!("No colony found for character {char_id} on planet {planet_id}"),
+            client_error: None,
         });
     };
     let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
@@ -1343,10 +1373,12 @@ pub fn user_transfer_commodities_logic(
     let src_idx = net.pins.iter().position(|p| p.pin_id == src_pin_id).ok_or_else(|| BridgeRpcError {
         code: "PinNotFound".into(),
         message: format!("Source pin {src_pin_id} not found on planet {planet_id}"),
+        client_error: None,
     })?;
     let dst_idx = net.pins.iter().position(|p| p.pin_id == dst_pin_id).ok_or_else(|| BridgeRpcError {
         code: "PinNotFound".into(),
         message: format!("Destination pin {dst_pin_id} not found on planet {planet_id}"),
+        client_error: None,
     })?;
 
     // Verify every hop in path exists and link bandwidth accommodates volume
@@ -1358,6 +1390,7 @@ pub fn user_transfer_commodities_logic(
         return Err(BridgeRpcError {
             code: "ExpeditedTransferOnCooldown".into(),
             message: format!("Source pin {src_pin_id} expedited transfer is on cooldown for {cooldown_secs}s"),
+            client_error: None,
         });
     }
 
@@ -1367,6 +1400,7 @@ pub fn user_transfer_commodities_logic(
             return Err(BridgeRpcError {
                 code: "InsufficientCommodityStorage".into(),
                 message: format!("Source pin {src_pin_id} has {src_qty} of commodity {comm_type_id}, but {qty} is required"),
+                client_error: None,
             });
         }
     }
@@ -1378,6 +1412,7 @@ pub fn user_transfer_commodities_logic(
         return Err(BridgeRpcError {
             code: "PinStorageFull".into(),
             message: format!("Expedited transfer volume {total_transfer_vol_m3:.1} m3 exceeds destination pin available capacity"),
+            client_error: None,
         });
     }
 
@@ -1385,11 +1420,13 @@ pub fn user_transfer_commodities_logic(
         let src_entry = net.pins[src_idx].contents.get_mut(&comm_type_id).ok_or_else(|| BridgeRpcError {
             code: "InsufficientCommodityStorage".into(),
             message: format!("Source pin missing commodity {comm_type_id}"),
+            client_error: None,
         })?;
         if *src_entry < qty {
             return Err(BridgeRpcError {
                 code: "InsufficientCommodityStorage".into(),
                 message: format!("Source pin has insufficient commodity {comm_type_id}"),
+                client_error: None,
             });
         }
         if *src_entry == qty {
@@ -1401,6 +1438,7 @@ pub fn user_transfer_commodities_logic(
         *dst_entry = dst_entry.checked_add(qty).ok_or_else(|| BridgeRpcError {
             code: "InvalidCommodityQuantity".into(),
             message: "Destination pin quantity overflow".into(),
+            client_error: None,
         })?;
     }
     net.pins[src_idx].last_expedited_transfer_unix = now_unix;

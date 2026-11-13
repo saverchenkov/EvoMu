@@ -213,6 +213,7 @@ fn validate_system_movement_locks(
             message: format!(
                 "Cannot {action} while controlling an anchored Upwell structure ({ship_id})"
             ),
+            client_error: None,
         });
     }
 
@@ -226,6 +227,7 @@ fn validate_system_movement_locks(
                 return Err(BridgeRpcError {
                     code: "CannotWarpInAbyssalSpace".into(),
                     message: "Warp navigation is disabled inside Abyssal Deadspace".into(),
+                    client_error: None,
                 });
             }
         }
@@ -257,12 +259,14 @@ fn validate_system_movement_locks(
                     message:
                         "Jump drive and cynosural beacon operations are prohibited in wormhole space"
                             .into(),
+                    client_error: None,
                 });
             }
             if from_sys == SOLAR_SYSTEM_ZARZAKH || to_sys == SOLAR_SYSTEM_ZARZAKH {
                 return Err(BridgeRpcError {
                     code: "JumpDriveForbiddenInZarzakh".into(),
                     message: "Jump drives are disabled inside Zarzakh".into(),
+                    client_error: None,
                 });
             }
         }
@@ -300,6 +304,7 @@ fn validate_navigation_and_immobilizing_locks(
             return Err(BridgeRpcError {
                 code: "ShipNavigationLocked".into(),
                 message: err.message,
+                client_error: None,
             });
         }
         return Err(err);
@@ -319,6 +324,7 @@ fn validate_navigation_and_immobilizing_locks(
         return Err(BridgeRpcError {
             code: code.into(),
             message: err.message,
+            client_error: None,
         });
     }
 
@@ -396,6 +402,7 @@ impl ServerContext {
             .map_err(|e| BridgeRpcError {
                 code: "DestinyQueryFailed".into(),
                 message: e,
+                client_error: None,
             })?
             .map(|(_, b)| b);
 
@@ -403,6 +410,7 @@ impl ServerContext {
             return Err(BridgeRpcError {
                 code: "ShipNotInSpace".into(),
                 message: "Active ship is not spawned in space".into(),
+                client_error: None,
             });
         }
 
@@ -416,6 +424,7 @@ impl ServerContext {
                         return Err(BridgeRpcError {
                             code: "ShipNotInSpace".into(),
                             message: "Active ship is already in warp".into(),
+                            client_error: None,
                         });
                     }
                 } else {
@@ -431,6 +440,7 @@ impl ServerContext {
                 return Err(BridgeRpcError {
                     code: code.into(),
                     message: "Cannot perform movement while ship is in warp".into(),
+                    client_error: None,
                 });
             }
         }
@@ -453,6 +463,7 @@ impl ServerContext {
                         intent.action_label(),
                         cs.lance_disrupted_remaining_s
                     ),
+                    client_error: None,
                 });
             }
         }
@@ -484,6 +495,7 @@ impl ServerContext {
                 return Err(BridgeRpcError {
                     code: code.into(),
                     message: "WarpScrambled: movement blocked by warp scrambler or warp disruption bubble".into(),
+                    client_error: None,
                 });
             }
         }
@@ -502,6 +514,7 @@ impl ServerContext {
                     return Err(BridgeRpcError {
                         code: "CloakedCannotWarp".into(),
                         message: "Cannot initiate warp while cloaked without a Covert Ops Cloaking Device".into(),
+                        client_error: None,
                     });
                 }
                 is_covert_cloaked = cs.is_cloaked
@@ -517,12 +530,14 @@ impl ServerContext {
                     return Err(BridgeRpcError {
                         code: "ShipIsCloaked".into(),
                         message: "Cannot activate filament while cloaked".into(),
+                        client_error: None,
                     });
                 }
                 if reject_when_tethered && cs.is_tethered {
                     return Err(BridgeRpcError {
                         code: "ShipIsTethered".into(),
                         message: "Cannot activate filament while tethered".into(),
+                        client_error: None,
                     });
                 }
             }
@@ -570,6 +585,7 @@ impl ServerContext {
                         message: format!(
                             "Capital ship or freighter type {ship_type_id} (group {ship_group_id}) cannot jump stargate {gate_id}"
                         ),
+                        client_error: None,
                     });
                 }
                 let is_pochven_gate = self
@@ -604,6 +620,7 @@ impl ServerContext {
                         message: format!(
                             "Capital ship or freighter type {ship_type_id} (group {ship_group_id}) cannot jump stargate {gate_id}"
                         ),
+                        client_error: None,
                     });
                 }
             }
@@ -614,6 +631,7 @@ impl ServerContext {
                         message: format!(
                             "Ship type {ship_type_id} (group {ship_group_id}) is restricted from entering wormholes (Supercarrier/Titan prohibition)"
                         ),
+                        client_error: None,
                     });
                 }
                 if let Some(max_mass) = max_jump_mass {
@@ -623,6 +641,7 @@ impl ServerContext {
                             message: format!(
                                 "Ship mass ({effective_mass:.0} kg) exceeds wormhole single-jump mass limit ({max_mass:.0} kg)"
                             ),
+                            client_error: None,
                         });
                     }
                 }
@@ -632,6 +651,7 @@ impl ServerContext {
                     return Err(BridgeRpcError {
                         code: "ShipNotAllowedThroughAnsiblex".into(),
                         message: "Ship exceeds Ansiblex mass limit of 1.48 Mt".into(),
+                        client_error: None,
                     });
                 }
             }
@@ -648,6 +668,7 @@ impl ServerContext {
                             code: "ShipTooLargeForGate".into(),
                             message: "Capital ships cannot activate this acceleration gate"
                                 .into(),
+                            client_error: None,
                         });
                     }
                 } else if matches!(kind, AccelerationGateKind::AnomicBurner) {
@@ -659,6 +680,7 @@ impl ServerContext {
                             message: format!(
                                 "Ship type {ship_type_id} (group {ship_group_id}) is too large for this Anomic Burner acceleration gate"
                             ),
+                            client_error: None,
                         });
                     }
                 }

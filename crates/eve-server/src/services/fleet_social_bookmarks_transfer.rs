@@ -41,6 +41,7 @@ fn transfer_bookmarks_to_folder_and_subfolder(
         return Some(Err(BridgeRpcError {
             code: "BookmarkCopyBatchLimitExceeded".into(),
             message: "Cannot copy or move more than 20 bookmarks in a single operation".into(),
+            client_error: None,
         }));
     }
     let target_folder_id = args.get(1).and_then(|a| a.as_i64());
@@ -56,12 +57,14 @@ fn transfer_bookmarks_to_folder_and_subfolder(
                     return Err(BridgeRpcError {
                         code: "FolderNotFound".into(),
                         message: format!("Bookmark folder {fid} not found"),
+                        client_error: None,
                     });
                 };
                 if folder_access_level(snap, session, char_id, tf) < AccessLevel::Use {
                     return Err(BridgeRpcError {
                         code: "BookmarkFolderAccessDenied".into(),
                         message: "No write access to target bookmark folder".into(),
+                        client_error: None,
                     });
                 }
                 tf.is_shared
@@ -77,6 +80,7 @@ fn transfer_bookmarks_to_folder_and_subfolder(
                     return Err(BridgeRpcError {
                         code: "BookmarkFolderAccessDenied".into(),
                         message: "Target subfolder does not belong to target bookmark folder".into(),
+                        client_error: None,
                     });
                 }
             }
@@ -109,6 +113,7 @@ fn transfer_bookmarks_to_folder_and_subfolder(
             return Err(BridgeRpcError {
                 code: code.into(),
                 message: "Bookmark folder capacity (500) exceeded".into(),
+                client_error: None,
             });
         }
         let mut out_ids = Vec::new();
@@ -117,6 +122,7 @@ fn transfer_bookmarks_to_folder_and_subfolder(
                 return Err(BridgeRpcError {
                     code: "BookmarkNotFound".into(),
                     message: format!("Bookmark {bm_id} not found"),
+                    client_error: None,
                 });
             };
             let can_access = if let Some(sf) =
@@ -157,6 +163,7 @@ fn transfer_bookmarks_to_folder_and_subfolder(
                 return Err(BridgeRpcError {
                     code: "BookmarkAccessDenied".into(),
                     message: format!("No access to bookmark {bm_id}"),
+                    client_error: None,
                 });
             }
             if is_move {

@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, HashMap};
 use tracing::debug;
 
 fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
-    BridgeRpcError { code: code.into(), message: message.into() }
+    BridgeRpcError { code: code.into(), message: message.into(), client_error: None }
 }
 
 fn check_starbase_auth(
@@ -1415,6 +1415,7 @@ fn handle_reload_fsd_pickle(
         return Err(BridgeRpcError {
             code: "RoleRequired".into(),
             message: "localizationServer.ReloadFSDPickle requires GM or Content/Programmer role".into(),
+            client_error: None,
         });
     }
     if args.is_empty() {
@@ -1428,6 +1429,7 @@ fn handle_reload_fsd_pickle(
         Err(BridgeRpcError {
             code: "UnimplementedRPC".into(),
             message: "FSD pickle hot-reloading is not implemented".into(),
+            client_error: None,
         })
     }
 }

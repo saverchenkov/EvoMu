@@ -114,28 +114,28 @@ pub fn check_ship_navigation_lock(ctx: &ServerContext, ship_id: i64, action: &st
     let st = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
     if let Some(&until) = st.lance_caster_lock_until.get(&(db_key, ship_id)).or_else(|| st.lance_caster_lock_until.get(&(inst_key, ship_id))) {
         if now_unix < until {
-            return Err(BridgeRpcError { code: "LanceFiringLockActive".into(), message: format!("Cannot {action} while Disruptive Lance 5-minute firing lock is active ({}s remaining)", until - now_unix) });
+            return Err(BridgeRpcError { code: "LanceFiringLockActive".into(), message: format!("Cannot {action} while Disruptive Lance 5-minute firing lock is active ({}s remaining)", until - now_unix), client_error: None });
         }
     }
     if let Some(&until) = st.lance_victim_debuff_until.get(&(db_key, ship_id)).or_else(|| st.lance_victim_debuff_until.get(&(inst_key, ship_id))) {
         if now_unix < until {
-            return Err(BridgeRpcError { code: "DisruptiveLanceDebuffActive".into(), message: format!("Cannot {action} while Disruptive Lance debuff is active ({}s remaining)", until - now_unix) });
+            return Err(BridgeRpcError { code: "DisruptiveLanceDebuffActive".into(), message: format!("Cannot {action} while Disruptive Lance debuff is active ({}s remaining)", until - now_unix), client_error: None });
         }
     }
     if let Some(ent) = st.entosis_active_links.get(&(db_key, ship_id)).or_else(|| st.entosis_active_links.get(&(inst_key, ship_id))) {
         if now_unix < ent.expires_unix {
-            return Err(BridgeRpcError { code: "EntosisLinkActive".into(), message: format!("Cannot {action} while Entosis Link cycle is active ({}s remaining)", ent.expires_unix - now_unix) });
+            return Err(BridgeRpcError { code: "EntosisLinkActive".into(), message: format!("Cannot {action} while Entosis Link cycle is active ({}s remaining)", ent.expires_unix - now_unix), client_error: None });
         }
     }
     if crate::services::inventory_fitting::fitting_cyno_portal::is_ship_cyno_active(ctx, ship_id) {
-        return Err(BridgeRpcError { code: "CynosuralFieldActive".into(), message: format!("Cannot {action} while Cynosural Field Generator is active") });
+        return Err(BridgeRpcError { code: "CynosuralFieldActive".into(), message: format!("Cannot {action} while Cynosural Field Generator is active"), client_error: None });
     }
     drop(st);
     if crate::services::sov_gameplay::is_ship_skyhook_linked(ctx, ship_id, now_unix) {
-        return Err(BridgeRpcError { code: "SkyhookLinkActive".into(), message: format!("Cannot {action} while linked to an Orbital Skyhook Reagent Silo") });
+        return Err(BridgeRpcError { code: "SkyhookLinkActive".into(), message: format!("Cannot {action} while linked to an Orbital Skyhook Reagent Silo"), client_error: None });
     }
     if crate::services::pve_crab_beacons::is_ship_crab_linked(ctx, ship_id, now_unix) {
-        return Err(BridgeRpcError { code: "CrabLinkActive".into(), message: format!("Cannot {action} while linked to a CONCORD Rogue Analysis Beacon") });
+        return Err(BridgeRpcError { code: "CrabLinkActive".into(), message: format!("Cannot {action} while linked to a CONCORD Rogue Analysis Beacon"), client_error: None });
     }
     Ok(())
 }
@@ -196,6 +196,7 @@ pub fn apply_projected_remote_assistance(
         return Err(BridgeRpcError {
             code: "TargetRequired".into(),
             message: format!("{} requires a locked target", mod_type.name),
+            client_error: None,
         });
     };
     let optimal = mod_state.get_attribute(54, &ctx.sde);
@@ -204,6 +205,7 @@ pub fn apply_projected_remote_assistance(
         return Err(BridgeRpcError {
             code: "OutOfRange".into(),
             message: format!("{} target at {dist_m:.1}m exceeds optimal ({optimal:.1}m) + 2*falloff ({falloff:.1}m)", mod_type.name),
+            client_error: None,
         });
     }
     let falloff_mult = if optimal <= 0.0 || dist_m <= optimal || falloff <= 0.0 {
@@ -219,6 +221,7 @@ pub fn apply_projected_remote_assistance(
         .ok_or_else(|| BridgeRpcError {
             code: "CharacterNotFound".into(),
             message: format!("Character {char_id} not found for remote assistance"),
+            client_error: None,
         })?;
     crate::services::combat_crimewatch::crimewatch_timers::evaluate_and_record_remote_assistance(
         ctx,
@@ -482,6 +485,7 @@ pub async fn activate_target_spectrum_breaker(
             return Err(BridgeRpcError {
                 code: "NotEnoughCapacitor".into(),
                 message: format!("Insufficient capacitor for {}: need {cap_need:.1} GJ", mod_type.name),
+                client_error: None,
             });
         }
         let _ = sys.set_capacitor(ship_id, (cs.capacitor - cap_need).max(0.0)).await;
@@ -658,7 +662,7 @@ pub async fn prepare_ship_for_wormhole_jump(
     });
 
     if let Some(block_tid) = blocking_mod {
-        return Err(BridgeRpcError { code: "CannotJumpWormholeWhileImmobilized".into(), message: format!("Cannot jump wormhole while immobilizing module (type {block_tid}) is active") });
+        return Err(BridgeRpcError { code: "CannotJumpWormholeWhileImmobilized".into(), message: format!("Cannot jump wormhole while immobilizing module (type {block_tid}) is active"), client_error: None });
     }
     Ok(false)
 }
@@ -678,7 +682,7 @@ pub async fn handle_entosis_link_activation(
     target_id_opt: Option<i64>,
 ) -> Result<PyRep, BridgeRpcError> {
     let Some(target_id) = target_id_opt else {
-        return Err(BridgeRpcError { code: "TargetRequired".into(), message: "Entosis Link requires a locked target sovereignty structure or node".into() });
+        return Err(BridgeRpcError { code: "TargetRequired".into(), message: "Entosis Link requires a locked target sovereignty structure or node".into(), client_error: None });
     };
 
     let (ship_group_id, side_id, is_vulnerable, adm, stront_avail_id) = ctx.db.with_snapshot(|snap| {
@@ -694,10 +698,10 @@ pub async fn handle_entosis_link_activation(
     });
 
     if ship_group_id == 831 {
-        return Err(BridgeRpcError { code: "InterceptorCannotActivateEntosis".into(), message: "Interceptors (group 831) cannot activate Entosis Links".into() });
+        return Err(BridgeRpcError { code: "InterceptorCannotActivateEntosis".into(), message: "Interceptors (group 831) cannot activate Entosis Links".into(), client_error: None });
     }
     if !is_vulnerable {
-        return Err(BridgeRpcError { code: "TargetNotVulnerable".into(), message: format!("Target {target_id} is outside its vulnerability window") });
+        return Err(BridgeRpcError { code: "TargetNotVulnerable".into(), message: format!("Target {target_id} is outside its vulnerability window"), client_error: None });
     }
 
     let db_key = db_key_of(ctx);
@@ -705,14 +709,14 @@ pub async fn handle_entosis_link_activation(
     if let Some(existing) = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner()).entosis_active_links.get(&(db_key, ship_id)) {
         if now_unix < existing.expires_unix {
             if existing.module_id != module_id {
-                return Err(BridgeRpcError { code: "MaxGroupActiveExceeded".into(), message: "Only 1 Entosis Link can be active per ship".into() });
+                return Err(BridgeRpcError { code: "MaxGroupActiveExceeded".into(), message: "Only 1 Entosis Link can be active per ship".into(), client_error: None });
             }
-            return Err(BridgeRpcError { code: "ModuleAlreadyActive".into(), message: "Entosis Link is already cycling".into() });
+            return Err(BridgeRpcError { code: "ModuleAlreadyActive".into(), message: "Entosis Link is already cycling".into(), client_error: None });
         }
     }
 
     let Some(stront_item_id) = stront_avail_id else {
-        return Err(BridgeRpcError { code: "InsufficientFuel".into(), message: "Entosis Link requires 1 Strontium Clathrates (16275) per cycle".into() });
+        return Err(BridgeRpcError { code: "InsufficientFuel".into(), message: "Entosis Link requires 1 Strontium Clathrates (16275) per cycle".into(), client_error: None });
     };
     ctx.db.try_with_mut_snapshot(|snap| {
         if let Some(owner) = snap.items.get(&stront_item_id).map(|i| i.owner_id) {
@@ -727,6 +731,7 @@ pub async fn handle_entosis_link_activation(
             .map_err(|e| BridgeRpcError {
                 code: "InsufficientFuel".into(),
                 message: e.to_string(),
+                client_error: None,
             })?;
             let _ = owner;
         }
@@ -809,10 +814,10 @@ pub async fn activate_command_burst(
         (cg, s_tid, s_grp, act_bursts, rig_bonus, ind_core)
     });
 
-    if clone_grade == 0 { return Err(BridgeRpcError { code: "OmegaRequiredForCommandBurst".into(), message: "Alpha clones cannot activate Command Burst modules".into() }); }
+    if clone_grade == 0 { return Err(BridgeRpcError { code: "OmegaRequiredForCommandBurst".into(), message: "Alpha clones cannot activate Command Burst modules".into(), client_error: None }); }
     super::mining_phased_autotarget::ensure_command_burst_hull_allowed(&ctx.sde, mod_type, ship_type_id)?;
     let max_active_allowed = 2 + cmd_rig_bonus;
-    if active_burst_count >= max_active_allowed { return Err(BridgeRpcError { code: "MaxGroupActiveExceeded".into(), message: format!("Cannot activate more than {max_active_allowed} Command Burst module(s) without additional Command Processor rigs") }); }
+    if active_burst_count >= max_active_allowed { return Err(BridgeRpcError { code: "MaxGroupActiveExceeded".into(), message: format!("Cannot activate more than {max_active_allowed} Command Burst module(s) without additional Command Processor rigs"), client_error: None }); }
 
     let allowed_charge_groups: Vec<u32> = [604u16, 605, 606, 609, 610]
         .into_iter().filter_map(|aid| mod_type.default_attributes.get(&aid).map(|&v| v as u32)).filter(|&g| g > 0).collect();
@@ -849,12 +854,12 @@ pub async fn activate_command_burst(
             snap.items.values().any(|i| i.location_id == ship_id && i.item_id != module_id && Some(i.flag) == mod_flag && i.quantity > 0)
         });
         if has_wrong_group_in_slot {
-            return Err(BridgeRpcError { code: "InvalidChargeGroup".into(), message: format!("Loaded charge is incompatible with {}", mod_type.name) });
+            return Err(BridgeRpcError { code: "InvalidChargeGroup".into(), message: format!("Loaded charge is incompatible with {}", mod_type.name), client_error: None });
         }
-        return Err(BridgeRpcError { code: "NoChargesLoaded".into(), message: "Command Burst module requires a loaded Command Burst charge".into() });
+        return Err(BridgeRpcError { code: "NoChargesLoaded".into(), message: "Command Burst module requires a loaded Command Burst charge".into(), client_error: None });
     };
     if !is_valid_charge_type(c_tid) {
-        return Err(BridgeRpcError { code: "InvalidChargeGroup".into(), message: format!("Charge {c_tid} is incompatible with {}", mod_type.name) });
+        return Err(BridgeRpcError { code: "InvalidChargeGroup".into(), message: format!("Charge {c_tid} is incompatible with {}", mod_type.name), client_error: None });
     }
 
     let skills = &fit.character_skills;
@@ -871,7 +876,7 @@ pub async fn activate_command_burst(
         .or_else(|| mod_type.default_attributes.get(&184).and_then(|&sid| skills.get(&(sid as u32)).copied()))
         .unwrap_or(0).min(5);
     if is_t2_module && specialist_lvl == 0 {
-        return Err(BridgeRpcError { code: "SkillMissing".into(), message: format!("Tech II Command Burst {} requires Specialist skill {specialist_skill_id}", mod_type.name) });
+        return Err(BridgeRpcError { code: "SkillMissing".into(), message: format!("Tech II Command Burst {} requires Specialist skill {specialist_skill_id}", mod_type.name), client_error: None });
     }
 
     let wing_cmd_lvl = skills.get(&11574).or_else(|| skills.get(&11572)).copied().unwrap_or(0).min(5);

@@ -245,6 +245,7 @@ fn validate_pilot_ship_modules_and_implants(
             message: format!(
                 "Ship type {ship_type_id} is not permitted by Proving Grounds filament {filament_type_id}"
             ),
+            client_error: None,
         });
     }
     let max_meta = f64::from(spec.max_meta_level);
@@ -275,6 +276,7 @@ fn validate_pilot_ship_modules_and_implants(
                         "Module {} (meta {meta:.0}) exceeds Proving Grounds limit (<= {})",
                         t.name, spec.max_meta_level
                     ),
+                    client_error: None,
                 });
             }
             if let Some(ban_lid) = spec.banned_modules_list_id {
@@ -282,6 +284,7 @@ fn validate_pilot_ship_modules_and_implants(
                     return Err(BridgeRpcError {
                         code: "BannedModuleForFilament".into(),
                         message: format!("Module {} is banned in this Proving Grounds event", t.name),
+                        client_error: None,
                     });
                 }
             }
@@ -293,6 +296,7 @@ fn validate_pilot_ship_modules_and_implants(
                             return Err(BridgeRpcError {
                                 code: "InvalidModuleTierForFilament".into(),
                                 message: "Fitted modules exceed Proving Grounds limited-module cap".into(),
+                                client_error: None,
                             });
                         }
                     }
@@ -318,6 +322,7 @@ fn validate_pilot_ship_modules_and_implants(
             return Err(BridgeRpcError {
                 code: "InvalidImplantsForFilament".into(),
                 message: format!("Unknown implant {imp_tid} is not permitted in Proving Grounds"),
+                client_error: None,
             });
         };
         let imp_meta = t
@@ -337,6 +342,7 @@ fn validate_pilot_ship_modules_and_implants(
                     "Implant {} (meta {imp_meta:.0}) violates Proving Grounds implant restrictions",
                     t.name
                 ),
+                client_error: None,
             });
         }
     }
@@ -646,6 +652,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "MustBeInSpace".into(),
                     message: "Cannot activate filament while docked in a station or structure".into(),
+                    client_error: None,
                 }));
             }
             let Some(cur_sys_for_check) = session.solar_system_id else {
@@ -676,6 +683,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "Valid filament itemID is required to join queue".into(),
+                    client_error: None,
                 }));
             }
 
@@ -690,6 +698,7 @@ pub async fn handle(
                         return Some(BridgeRpcError {
                             code: "InvalidShipForFilament".into(),
                             message: "Capsules and capital/freighter hulls cannot enter Proving Grounds arenas".into(),
+                            client_error: None,
                         });
                     }
                 }
@@ -697,12 +706,14 @@ pub async fn handle(
                     return Some(BridgeRpcError {
                         code: "ItemNotFound".into(),
                         message: "Filament item not found in inventory".into(),
+                        client_error: None,
                     });
                 };
                 if it.owner_id != char_id {
                     return Some(BridgeRpcError {
                         code: "ItemNotOwned".into(),
                         message: "Filament item is not owned by pilot".into(),
+                        client_error: None,
                     });
                 }
                 if it.location_id != active_ship_id || it.flag != eve_db::InventoryFlag::Cargo {
@@ -739,6 +750,7 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "NotFleetBoss".into(),
                         message: "Only the fleet boss may activate a Proving Grounds filament for a fleet".into(),
+                        client_error: None,
                     });
                 }
                 let mut members = Vec::with_capacity(fl.members.len());
@@ -769,6 +781,7 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "FleetMemberNotInSystem".into(),
                         message: "All fleet members must be undocked in the same solar system to queue".into(),
+                        client_error: None,
                     }));
                 }
                 if let Err(e) = crate::sp6_lifecycle::require_ship_ready_for_filament_jump(
@@ -796,12 +809,14 @@ pub async fn handle(
                         return Some(Err(BridgeRpcError {
                             code: "FleetMemberNotInSystem".into(),
                             message: "Fleet member ship position not found in space".into(),
+                            client_error: None,
                         }));
                     };
                     if mcid != char_id && DVec3::from_array(pos).distance(caller_pos_vec) > 30_000.0 {
                         return Some(Err(BridgeRpcError {
                             code: "FleetMemberOutOfRange".into(),
                             message: "All fleet members must be within 30 km of the filament activator".into(),
+                            client_error: None,
                         }));
                     }
                     party_origins.push((mcid, mship, pos));
@@ -851,6 +866,7 @@ pub async fn handle(
                         return Err(BridgeRpcError {
                             code: "AlreadyInPvpQueue".into(),
                             message: "Character or fleet member is already queued for a PvP filament event".into(),
+                            client_error: None,
                         });
                     }
                     if cur_sys_for_check == 32_000_001
@@ -863,6 +879,7 @@ pub async fn handle(
                         return Err(BridgeRpcError {
                             code: "AlreadyInPvpMatch".into(),
                             message: "Character or fleet member is already inside an active Proving Grounds arena".into(),
+                            client_error: None,
                         });
                     }
                 }
@@ -882,6 +899,7 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "ItemNotFound".into(),
                         message: "Filament item not found in inventory".into(),
+                        client_error: None,
                     });
                 };
                 if it.owner_id != char_id
@@ -892,12 +910,14 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "ItemNotFound".into(),
                         message: "Filament item is not available in active ship cargo".into(),
+                        client_error: None,
                     });
                 }
                 if type_id > 0 && it.type_id != type_id as u32 {
                     return Err(BridgeRpcError {
                         code: "InvalidFilamentType".into(),
                         message: "Item type mismatch".into(),
+                        client_error: None,
                     });
                 }
                 let it_type_id = it.type_id;
@@ -944,6 +964,7 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "InvalidFilamentType".into(),
                         message: format!("Item type {it_type_id} is not a valid PvP filament"),
+                        client_error: None,
                     });
                 }
                 if in_inactive_only {
@@ -952,6 +973,7 @@ pub async fn handle(
                         message: format!(
                             "Proving Grounds event for filament type {it_type_id} is not currently active"
                         ),
+                        client_error: None,
                     });
                 }
                 let match_spec = get_pvp_filament_match_spec(&ctx.sde, it_type_id);
@@ -963,6 +985,7 @@ pub async fn handle(
                             party_origins.len(),
                             match_spec.fleet_size
                         ),
+                        client_error: None,
                     });
                 }
                 if party_origins.len() > match_spec.fleet_size {
@@ -973,6 +996,7 @@ pub async fn handle(
                             party_origins.len(),
                             match_spec.fleet_size
                         ),
+                        client_error: None,
                     });
                 }
                 for &(pcid, pship, _) in &party_origins {
@@ -998,6 +1022,7 @@ pub async fn handle(
                     .map_err(|e| BridgeRpcError {
                         code: "FilamentLocked".into(),
                         message: e.to_string(),
+                        client_error: None,
                     })?;
                 }
 
@@ -1200,13 +1225,13 @@ pub async fn handle(
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_pvp_store(snap);
                 let Some(entry) = store.queue.remove(&char_id) else {
-                    return Err(BridgeRpcError { code: "NotInPvpQueue".into(), message: "Character is not queued for PvP".into() });
+                    return Err(BridgeRpcError { code: "NotInPvpQueue".into(), message: "Character is not queued for PvP".into(), client_error: None });
                 };
                 if let Some(expected_id) = item_id_arg {
                     if entry.item_id != expected_id {
                         store.queue.insert(char_id, entry);
                         save_pvp_store(snap, &store);
-                        return Err(BridgeRpcError { code: "FilamentNotFound".into(), message: "Filament item does not match queued filament".into() });
+                        return Err(BridgeRpcError { code: "FilamentNotFound".into(), message: "Filament item does not match queued filament".into(), client_error: None });
                     }
                 }
                 let ticket_id = store.ticket_id_for_entry(char_id, &entry);

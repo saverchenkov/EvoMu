@@ -73,16 +73,18 @@ pub(super) async fn handle_bookmarks(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidBookmarkLabel".into(),
                     message: "Bookmark label must be 1..=100 non-whitespace characters".into(),
+                    client_error: None,
                 }));
             }
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solar system".into(),
+                    client_error: None,
                 }));
             };
             if sys_id == 30_100_000 {
-                return Some(Err(BridgeRpcError::user_error("CantbookmarkEveSystem")));
+                return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CantbookmarkEveSystem)));
             }
 
             let (explicit_entity_id, memo, folder_id) = if args.first().and_then(|a| a.as_i64()).is_some() {
@@ -144,6 +146,7 @@ pub(super) async fn handle_bookmarks(
                         return Some(Err(BridgeRpcError {
                             code: "FolderNotFound".into(),
                             message: format!("Folder {fid} not accessible"),
+                            client_error: None,
                         }));
                     }
                 }
@@ -216,6 +219,7 @@ pub(super) async fn handle_bookmarks(
                     return Some(Err(BridgeRpcError {
                         code: "ShipNotInSpace".into(),
                         message: "Cannot bookmark in-space position when ship ball is absent".into(),
+                        client_error: None,
                     }));
                 }
             } else {
@@ -238,6 +242,7 @@ pub(super) async fn handle_bookmarks(
                         return Err(BridgeRpcError {
                             code: "MaxSharedFolderBookmarksReached".into(),
                             message: "Shared folder has reached the maximum of 500 bookmarks".into(),
+                            client_error: None,
                         });
                     }
                 } else {
@@ -250,6 +255,7 @@ pub(super) async fn handle_bookmarks(
                         return Err(BridgeRpcError {
                             code: "MaxBookmarksReached".into(),
                             message: "Character has reached the maximum of 500 personal bookmarks".into(),
+                            client_error: None,
                         });
                     }
                 }
@@ -437,6 +443,7 @@ pub(super) async fn handle_bookmarks(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "UpdateBookmark requires bookmarkID".into(),
+                    client_error: None,
                 }));
             };
             let label_opt = args.get(1).and_then(|a| a.as_str());
@@ -469,6 +476,7 @@ pub(super) async fn handle_bookmarks(
                             return Err(BridgeRpcError {
                                 code: "AccessDenied".into(),
                                 message: "Cannot move bookmark into a folder without use/add access".into(),
+                                client_error: None,
                             });
                         }
                         Some(tf.is_shared)
@@ -476,6 +484,7 @@ pub(super) async fn handle_bookmarks(
                         return Err(BridgeRpcError {
                             code: "FolderNotFound".into(),
                             message: format!("Target folder {fid} not found"),
+                            client_error: None,
                         });
                     } else {
                         Some(false)
@@ -487,12 +496,14 @@ pub(super) async fn handle_bookmarks(
                     return Err(BridgeRpcError {
                         code: "BookmarkNotFound".into(),
                         message: format!("Bookmark {bm_id} not found"),
+                        client_error: None,
                     });
                 };
                 if bm.owner_id != char_id && !(bm.is_shared && has_manage_access) {
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),
                         message: "Cannot edit another character's bookmark without manage/admin rights".into(),
+                        client_error: None,
                     });
                 }
                 if bm.owner_id == char_id
@@ -502,6 +513,7 @@ pub(super) async fn handle_bookmarks(
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),
                         message: "Cannot edit bookmark in a shared folder without use access".into(),
+                        client_error: None,
                     });
                 }
                 if let Some(l) = label_opt {
@@ -570,6 +582,7 @@ pub(super) async fn handle_bookmarks(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "DeleteBookmarks requires bookmarkID".into(),
+                    client_error: None,
                 }));
             }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -580,6 +593,7 @@ pub(super) async fn handle_bookmarks(
                         return Err(BridgeRpcError {
                             code: "BookmarkNotFound".into(),
                             message: format!("Bookmark {bm_id} not found"),
+                            client_error: None,
                         });
                     };
                     let src_folder_lvl = bm
@@ -598,6 +612,7 @@ pub(super) async fn handle_bookmarks(
                         return Err(BridgeRpcError {
                             code: "AccessDenied".into(),
                             message: "Cannot delete another character's bookmark without manage/admin rights".into(),
+                            client_error: None,
                         });
                     }
                     if bm.owner_id == char_id
@@ -607,6 +622,7 @@ pub(super) async fn handle_bookmarks(
                         return Err(BridgeRpcError {
                             code: "AccessDenied".into(),
                             message: "Cannot delete bookmark in a shared folder without use access".into(),
+                            client_error: None,
                         });
                     }
                     if bm.is_shared {
@@ -660,12 +676,14 @@ pub(super) async fn handle_bookmarks(
                         return Err(BridgeRpcError {
                             code: "FolderNotFound".into(),
                             message: format!("Folder {folder_id} not found"),
+                            client_error: None,
                         });
                     };
                     if f.owner_id != char_id {
                         return Err(BridgeRpcError {
                             code: "AccessDenied".into(),
                             message: "Only folder owner can rename folder".into(),
+                            client_error: None,
                         });
                     }
                     f.folder_name = new_name.to_string();
@@ -722,6 +740,7 @@ pub(super) async fn handle_bookmarks(
                         return Some(Err(BridgeRpcError {
                             code: "NoCorporation".into(),
                             message: "Creating shared folder requires corporation membership".into(),
+                            client_error: None,
                         }))
                     }
                 };
@@ -742,6 +761,7 @@ pub(super) async fn handle_bookmarks(
                         return Err(BridgeRpcError {
                             code: "BookmarkAccessDenied".into(),
                             message: "Creating a shared bookmark folder requires corporation Director/CEO access-group rights".into(),
+                            client_error: None,
                         });
                     }
                     snap.next_entity_id += 1;
@@ -807,6 +827,7 @@ pub(super) async fn handle_bookmarks(
                     return Err(BridgeRpcError {
                         code: "MaxPersonalFoldersReached".into(),
                         message: "Character has reached the maximum of 5 personal bookmark folders".into(),
+                        client_error: None,
                     });
                 }
                 snap.next_entity_id += 1;
@@ -900,14 +921,14 @@ pub(super) async fn handle_bookmarks(
         ("bookmark", "DeleteFolder") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(folder_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "DeleteFolder requires folderID".into() }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "DeleteFolder requires folderID".into(), client_error: None }));
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(f) = snap.bookmark_folders.get(&folder_id).cloned() else {
-                    return Err(BridgeRpcError { code: "FolderNotFound".into(), message: format!("Folder {folder_id} not found") });
+                    return Err(BridgeRpcError { code: "FolderNotFound".into(), message: format!("Folder {folder_id} not found"), client_error: None });
                 };
                 if f.owner_id != char_id {
-                    return Err(BridgeRpcError { code: "AccessDenied".into(), message: "Cannot delete another character's folder".into() });
+                    return Err(BridgeRpcError { code: "AccessDenied".into(), message: "Cannot delete another character's folder".into(), client_error: None });
                 }
                 let child_sfs: Vec<i64> = snap
                     .bookmark_subfolder_parents
@@ -970,6 +991,7 @@ pub(super) async fn handle_bookmarks(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "CreateSubfolder requires parent folderID".into(),
+                    client_error: None,
                 }));
             };
             let sub_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("Subfolder");
@@ -986,6 +1008,7 @@ pub(super) async fn handle_bookmarks(
                                     message:
                                         "Cannot update subfolder in another character's folder without manage/admin rights"
                                             .into(),
+                                    client_error: None,
                                 });
                             }
                         }
@@ -1010,6 +1033,7 @@ pub(super) async fn handle_bookmarks(
                     return Err(BridgeRpcError {
                         code: "FolderNotFound".into(),
                         message: format!("Parent folder {parent_folder_id} not found"),
+                        client_error: None,
                     });
                 };
                 if parent.owner_id != char_id
@@ -1020,6 +1044,7 @@ pub(super) async fn handle_bookmarks(
                         message:
                             "Cannot create subfolder in another character's folder without manage/admin rights"
                                 .into(),
+                        client_error: None,
                     });
                 }
                 let prefix = format!("{}/", parent.folder_name);
@@ -1036,6 +1061,7 @@ pub(super) async fn handle_bookmarks(
                     return Err(BridgeRpcError {
                         code: "MaxSubfoldersReached".into(),
                         message: format!("Maximum of {max_subs} subfolders reached"),
+                        client_error: None,
                     });
                 }
                 let full_name = format!("{}/{sub_name}", parent.folder_name);
@@ -1073,6 +1099,7 @@ pub(super) async fn handle_bookmarks(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "DeleteSubfolder requires subfolderID".into(),
+                    client_error: None,
                 }));
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -1080,12 +1107,14 @@ pub(super) async fn handle_bookmarks(
                     return Err(BridgeRpcError {
                         code: "SubfolderNotFound".into(),
                         message: format!("Subfolder {subfolder_id} not found"),
+                        client_error: None,
                     });
                 };
                 if f.owner_id != char_id {
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),
                         message: "Cannot delete another character's subfolder".into(),
+                        client_error: None,
                     });
                 }
                 snap.bookmark_folders.remove(&subfolder_id);
@@ -1114,6 +1143,7 @@ pub(super) async fn handle_bookmarks(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "AddToKnownFolders requires folderID".into(),
+                    client_error: None,
                 }));
             };
             let active = args.get(1).map(|a| matches!(a, PyRep::Bool(true) | PyRep::Integer(1))).unwrap_or(true);
@@ -1131,18 +1161,21 @@ pub(super) async fn handle_bookmarks(
                     return Err(BridgeRpcError {
                         code: "FolderNotFound".into(),
                         message: format!("Subfolder {folder_id} cannot be subscribed as a root folder"),
+                        client_error: None,
                     });
                 }
                 let Some(f) = snap.bookmark_folders.get(&folder_id) else {
                     return Err(BridgeRpcError {
                         code: "FolderNotFound".into(),
                         message: format!("Shared folder {folder_id} not found"),
+                        client_error: None,
                     });
                 };
                 if !f.is_shared || folder_access_level(snap, session, char_id, f) < AccessLevel::View {
                     return Err(BridgeRpcError {
                         code: "BookmarkAccessDenied".into(),
                         message: "Character lacks access-group rights to subscribe to this shared bookmark folder".into(),
+                        client_error: None,
                     });
                 }
                 Ok((f.folder_name.clone(), f.corporation_id))
@@ -1159,6 +1192,7 @@ pub(super) async fn handle_bookmarks(
                             return Err(BridgeRpcError {
                                 code: "MaxActiveSharedFoldersReached".into(),
                                 message: "Maximum of 3 online shared bookmark folders reached".into(),
+                                client_error: None,
                             });
                         }
                         snap.bookmark_folder_known_by
@@ -1207,6 +1241,7 @@ pub(super) async fn handle_bookmarks(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "RemoveFromKnownFolders requires folderID".into(),
+                    client_error: None,
                 }));
             };
             let exists = ctx.db.with_snapshot(|snap| snap.bookmark_folders.contains_key(&folder_id));
@@ -1214,6 +1249,7 @@ pub(super) async fn handle_bookmarks(
                 return Some(Err(BridgeRpcError {
                     code: "FolderNotFound".into(),
                     message: format!("Shared folder {folder_id} not found"),
+                    client_error: None,
                 }));
             }
             ctx.db.with_mut_snapshot(|snap| {
@@ -1244,11 +1280,11 @@ pub(super) async fn handle_bookmarks(
             // In EVE, cosmic signature scanning and bookmarking can only occur
             // while uncloaked in active space. Docked sessions (station or structure) are rejected.
             if session.solar_system_id.is_none() || session.station_id.is_some() || session.structure_id.is_some() {
-                return Some(Err(BridgeRpcError { code: "NotInSpace".into(), message: "Must be in space to bookmark scans".into() }));
+                return Some(Err(BridgeRpcError { code: "NotInSpace".into(), message: "Must be in space to bookmark scans".into(), client_error: None }));
             }
             let sys_id = session.solar_system_id.unwrap();
             if sys_id == 30_100_000 {
-                return Some(Err(BridgeRpcError::user_error("CantbookmarkEveSystem")));
+                return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CantbookmarkEveSystem)));
             }
             let (sig_id, label, folder_id) = if let Some(s) = args.first().and_then(|a| a.as_str()) {
                 (s, args.get(1).and_then(|a| a.as_str()).unwrap_or(s), args.get(2).and_then(|a| a.as_i64()))
@@ -1256,13 +1292,13 @@ pub(super) async fn handle_bookmarks(
                 // Prevent cross-system signature exploit: location argument must match caller's active solar system.
                 if let Some(loc_arg) = args.first().and_then(|a| a.as_i64()) {
                     if u32::try_from(loc_arg).map_err(|_| ()).ok() != Some(sys_id) {
-                        return Some(Err(BridgeRpcError { code: "NotInSameSystem".into(), message: "Different solar system".into() }));
+                        return Some(Err(BridgeRpcError { code: "NotInSameSystem".into(), message: "Different solar system".into(), client_error: None }));
                     }
                 }
                 let fid = args.get(4).and_then(|a| a.as_i64()).or_else(|| _kwargs.get("subfolderID").and_then(|v| v.as_i64())).or_else(|| args.get(5).and_then(|a| a.as_i64()));
                 (s, args.get(1).and_then(|a| a.as_str()).unwrap_or(s), fid)
             } else {
-                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Requires signatureID".into() }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Requires signatureID".into(), client_error: None }));
             };
             // Folder 0 or char_id represents root personal folder; custom non-root folders require ownership or shared access.
             if let Some(fid) = folder_id {
@@ -1276,6 +1312,7 @@ pub(super) async fn handle_bookmarks(
                         return Some(Err(BridgeRpcError {
                             code: "FolderNotFound".into(),
                             message: format!("Folder {fid} not accessible"),
+                            client_error: None,
                         }));
                     }
                 }
@@ -1289,10 +1326,10 @@ pub(super) async fn handle_bookmarks(
                 })
             });
             let Some((pos, signal_strength, sig_type_id)) = sig_res else {
-                return Some(Err(BridgeRpcError { code: "SignatureNotFound".into(), message: format!("Cosmic signature {sig_id} not found") }));
+                return Some(Err(BridgeRpcError { code: "SignatureNotFound".into(), message: format!("Cosmic signature {sig_id} not found"), client_error: None }));
             };
             if signal_strength < 1.0 {
-                return Some(Err(BridgeRpcError { code: "SignatureNotResolved".into(), message: format!("Signature {sig_id} not resolved") }));
+                return Some(Err(BridgeRpcError { code: "SignatureNotResolved".into(), message: format!("Signature {sig_id} not resolved"), client_error: None }));
             }
             let bm_id = ctx.db.try_with_mut_snapshot(|snap| {
                 let is_shared = folder_id.and_then(|fid| snap.bookmark_folders.get(&fid)).map(|f| f.is_shared).unwrap_or(false);

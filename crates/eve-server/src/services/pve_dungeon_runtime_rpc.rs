@@ -121,6 +121,7 @@ pub async fn try_activate_dungeon_runtime_gate(
             return Some(Err(BridgeRpcError {
                 code: "OutsideGateActivationRange".into(),
                 message: format!("Ship is {dist:.1} m from gate (must be <= 2500 m)"),
+                client_error: None,
             }));
         }
     }
@@ -129,6 +130,7 @@ pub async fn try_activate_dungeon_runtime_gate(
         return Some(Err(BridgeRpcError {
             code: "GateLocked".into(),
             message: "Acceleration gate is locked until room objectives are completed".into(),
+            client_error: None,
         }));
     }
 
@@ -1280,6 +1282,7 @@ pub fn check_warp_target_blocked_by_gated_dungeon_room(
         return Err(BridgeRpcError {
             code: "WarpBlockedByDeadspacePocket".into(),
             message: "Cannot warp directly into a gated deadspace pocket; use the acceleration gate".into(),
+            client_error: None,
         });
     }
     Ok(())
@@ -1313,6 +1316,7 @@ pub async fn check_deadspace_mwd_disallowed(
         return Err(BridgeRpcError {
             code: "MicroWarpdriveDisallowedInDeadspace".into(),
             message: "Microwarpdrive activation is disallowed in this deadspace pocket".into(),
+            client_error: None,
         });
     }
     Ok(())

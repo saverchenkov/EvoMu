@@ -292,6 +292,7 @@ pub async fn handle_gm_dungeon_editor_op(
         return Err(BridgeRpcError {
             code: "InsufficientRole".into(),
             message: format!("{method} requires GM/Content role"),
+            client_error: None,
         });
     }
     let sys_id_opt = session.solar_system_id;

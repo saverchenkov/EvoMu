@@ -112,6 +112,7 @@ pub async fn handle(
                             return Some(Err(BridgeRpcError {
                                 code: "StationNotFound".into(),
                                 message: format!("Station or structure {id} not found"),
+                                client_error: None,
                             }));
                         }
                     }
@@ -123,6 +124,7 @@ pub async fn handle(
                         return Some(Err(BridgeRpcError {
                             code: "NoSolarSystem".into(),
                             message: "No solarSystemID argument or active session solar system".into(),
+                            client_error: None,
                         }))
                     }
                 },
@@ -141,6 +143,7 @@ pub async fn handle(
                 Some(Err(BridgeRpcError {
                     code: "SolarSystemNotFound".into(),
                     message: format!("Solar system {sys_id} not found in SDE"),
+                    client_error: None,
                 }))
             }
         }
@@ -159,6 +162,7 @@ pub async fn handle(
                     code: "MissingStationId".into(),
                     message: "GetStation requires a stationID argument or active session stationID"
                         .into(),
+                    client_error: None,
                 }));
             };
             let found = ctx
@@ -215,6 +219,7 @@ pub async fn handle(
                 Some(Err(BridgeRpcError {
                     code: "StationNotFound".into(),
                     message: format!("Station {station_id} not found in SDE"),
+                    client_error: None,
                 }))
             }
         }
@@ -228,12 +233,14 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "MissingStationId".into(),
                     message: "GetStationItemBits requires stationID".into(),
+                    client_error: None,
                 }));
             };
             let Some(st) = ctx.sde.stations.get(&station_id) else {
                 return Some(Err(BridgeRpcError {
                     code: "StationNotFound".into(),
                     message: format!("Station {station_id} not found in SDE"),
+                    client_error: None,
                 }));
             };
             // `StationSvc.SetStationItemBits(bits)` builds
@@ -259,6 +266,7 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "NotDockedInStation".into(),
                         message: "station.GetGuests requires being docked in a station".into(),
+                        client_error: None,
                     }));
                 }
             };
@@ -297,12 +305,14 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidStationService".into(),
                     message: "DoStandingCheckForStationService requires a positive stationServiceID".into(),
+                    client_error: None,
                 }));
             }
             let Some(station_id) = args.get(1).and_then(|a| a.as_i64()).or(session.station_id) else {
                 return Some(Err(BridgeRpcError {
                     code: "NotDocked".into(),
                     message: "DoStandingCheckForStationService requires an active station session or stationID".into(),
+                    client_error: None,
                 }));
             };
             Some(crate::services::station_structure_handlers::evaluate_station_service_standing_gate(
@@ -328,6 +338,7 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "SessionChangeInProgress".into(),
                         message: "Cannot undock while pod-respawn session-change timer is active".into(),
+                        client_error: None,
                     }));
                 }
             }
@@ -356,6 +367,7 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "UndockFailed".into(),
                         message: e.to_string(),
+                        client_error: None,
                     }));
                 }
             };
@@ -396,6 +408,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "UnknownShipType".into(),
                     message: format!("Active ship type {} not found in SDE", ship.type_id),
+                    client_error: None,
                 }));
             };
 
@@ -516,6 +529,7 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "SystemActorError".into(),
                         message: e,
+                        client_error: None,
                     }));
                 }
             };
@@ -622,27 +636,31 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "AlreadyDocked".into(),
                     message: "Character is already docked in a station or structure".into(),
+                    client_error: None,
                 }));
             }
             let Some(ship_id) = session.ship_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "Cannot dock without an active ship in space".into(),
+                    client_error: None,
                 }));
             };
             let Some(dock_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
                     code: "MissingLocationId".into(),
                     message: "Dock requires an explicit station or structure ID argument".into(),
+                    client_error: None,
                 }));
             };
             if args.get(1).and_then(|a| a.as_i64()).is_some_and(|req| req != ship_id) {
-                return Some(Err(BridgeRpcError { code: "InvalidShipId".into(), message: "Requested shipID does not match active ship".into() }));
+                return Some(Err(BridgeRpcError { code: "InvalidShipId".into(), message: "Requested shipID does not match active ship".into(), client_error: None }));
             }
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solarSystemID".into(),
+                    client_error: None,
                 }));
             };
             let is_structure = service == "structureDocking"
@@ -656,12 +674,14 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "DestinyQueryFailed".into(),
                         message: e,
+                        client_error: None,
                     }))
                 }
             }) else {
                 return Some(Err(BridgeRpcError {
                     code: "ShipNotInSpace".into(),
                     message: format!("Ship {ship_id} is not spawned in solar system {sys_id} Ballpark"),
+                    client_error: None,
                 }));
             };
 
@@ -673,6 +693,7 @@ pub async fn handle(
                         "Cannot dock while 10s session-change timer ({}) is active",
                         active_timer.reason
                     ),
+                    client_error: None,
                 }));
             }
             let sys_sec = ctx
@@ -700,12 +721,14 @@ pub async fn handle(
                         return Some(Err(BridgeRpcError {
                             code: "WeaponsTimerActive".into(),
                             message: "Cannot dock while a 60s Weapons Timer is active".into(),
+                            client_error: None,
                         }));
                     }
                     if sys_sec >= 0.45 && cw_state.is_criminal(now_unix) && !is_capsule {
                         return Some(Err(BridgeRpcError {
                             code: "CantDockGlobalCriminalFlag".into(),
                             message: "Cannot dock a non-capsule ship in high-sec while a Criminal Timer is active".into(),
+                            client_error: None,
                         }));
                     }
                 }
@@ -715,6 +738,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "FactionPoliceRefusedDocking".into(),
                     message: "Faction police refuse docking permissions to outlaw ships in high-security space".into(),
+                    client_error: None,
                 }));
             }
 
@@ -747,6 +771,7 @@ pub async fn handle(
                         message: format!(
                             "Station {dock_id} does not exist in current solar system {sys_id}"
                         ),
+                        client_error: None,
                     }));
                 };
                 if let Err(e) = crate::services::station_structure_handlers::validate_npc_station_docking_gate(ctx, char_id, dock_id) {
@@ -788,12 +813,13 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             if is_structure && handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
-                return Some(Err(BridgeRpcError { code: "ShipWarpScrambled".into(), message: "Cannot dock at an Upwell structure while ship is warp scrambled".into() }));
+                return Some(Err(BridgeRpcError { code: "ShipWarpScrambled".into(), message: "Cannot dock at an Upwell structure while ship is warp scrambled".into(), client_error: None }));
             }
             let Some(taken) = handle.take_ball_for_docking(ship_id, dock_id, target_pos).await else {
                 return Some(Err(BridgeRpcError {
                     code: "DockFailed".into(),
                     message: format!("Ship {ship_id} is no longer in space in solar system {sys_id}"),
+                    client_error: None,
                 }));
             };
             match ctx.db.dock_character_if_in_space(char_id, sys_id, dock_id, is_structure) {
@@ -961,6 +987,7 @@ pub async fn handle(
                     Some(Err(BridgeRpcError {
                         code: "DockFailed".into(),
                         message: e.to_string(),
+                        client_error: None,
                     }))
                 }
             }
@@ -978,6 +1005,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "MissingArgument".into(),
                     message: "AnchorStructure requires an itemID".into(),
+                    client_error: None,
                 }));
             };
             if item_id == i64::from(crate::services::sov_gameplay::TYPE_MERCENARY_DEN) {
@@ -989,6 +1017,7 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "StarbaseRemoved".into(),
                         message: "Legacy POS starbases and control towers are superseded by Upwell structures in V24.01".into(),
+                        client_error: None,
                     }));
                 }
             };
@@ -999,53 +1028,61 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "StarbaseRemoved".into(),
                     message: "Legacy POS starbases and control towers are superseded by Upwell structures in V24.01".into(),
+                    client_error: None,
                 }));
             };
             if item_type.group_id == 365 || item_type.category_id == 23 {
                 return Some(Err(BridgeRpcError {
                     code: "StarbaseRemoved".into(),
                     message: "Legacy POS starbases and control towers are superseded by Upwell structures in V24.01".into(),
+                    client_error: None,
                 }));
             }
             if item_type.group_id == 649 {
                 return Some(Err(BridgeRpcError {
                     code: "CannotAnchorFreightContainer".into(),
                     message: "Freight containers cannot be anchored in space".into(),
+                    client_error: None,
                 }));
             }
             if item_type.category_id != 22 && !item_type.effect_ids.contains(&649) {
                 return Some(Err(BridgeRpcError {
                     code: "ItemNotAnchorable".into(),
                     message: format!("Item {} (type {}) cannot be anchored in space", item_id, item.type_id),
+                    client_error: None,
                 }));
             }
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solarSystemID".into(),
+                    client_error: None,
                 }));
             };
             let (_, is_thera, is_shattered, _) =
                 crate::services::space_destiny::system_wormhole_profile(sys_id);
             if is_thera || is_shattered {
-                return Some(Err(BridgeRpcError { code: "AnchoringDisallowedInTheraOrShattered".into(), message: format!("Anchoring starbases or deployables is disallowed in Thera or shattered wormhole system {sys_id}") }));
+                return Some(Err(BridgeRpcError { code: "AnchoringDisallowedInTheraOrShattered".into(), message: format!("Anchoring starbases or deployables is disallowed in Thera or shattered wormhole system {sys_id}"), client_error: None }));
             }
             if session.station_id.is_some() || session.structure_id.is_some() {
                 return Some(Err(BridgeRpcError {
                     code: "NotInSpace".into(),
                     message: "Cannot anchor a structure while docked".into(),
+                    client_error: None,
                 }));
             }
             let Some(ship_id) = session.ship_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "Cannot anchor a structure without an active ship in space".into(),
+                    client_error: None,
                 }));
             };
             if item.owner_id != char_id {
                 return Some(Err(BridgeRpcError {
                     code: "NotItemOwner".into(),
                     message: format!("Character {char_id} does not own item {item_id}"),
+                    client_error: None,
                 }));
             }
             let already_anchored = ctx.db.with_snapshot(|snap| {
@@ -1059,6 +1096,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "StructureAlreadyAnchored".into(),
                     message: format!("Structure {item_id} is already anchored in space; unanchor and scoop first"),
+                    client_error: None,
                 }));
             }
             let is_mobile = crate::services::mobile_deployables::is_mobile_structure(&ctx.sde, item.type_id);
@@ -1068,12 +1106,14 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "CannotDeployInAbyssalSpace".into(),
                     message: "Mobile depots and deployable structures cannot be anchored inside Abyssal Deadspace".into(),
+                    client_error: None,
                 }));
             }
             if is_mobile && item.location_id != ship_id {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidItemLocation".into(),
                     message: format!("Mobile deployable {item_id} must be deployed from ship cargo"),
+                    client_error: None,
                 }));
             }
             if item.location_id != ship_id && item.location_id != sys_id as i64 {
@@ -1082,6 +1122,7 @@ pub async fn handle(
                     message: format!(
                         "Item {item_id} must be in active ship cargo or unanchored in space in system {sys_id}"
                     ),
+                    client_error: None,
                 }));
             }
 
@@ -1108,6 +1149,7 @@ pub async fn handle(
                             message: format!(
                                 "Character {char_id} lacks required skill {req_skill_id} level {req_lvl} (has {have_lvl})"
                             ),
+                            client_error: None,
                         }));
                     }
                 }
@@ -1129,6 +1171,7 @@ pub async fn handle(
                     message: format!(
                         "Mobile Cynosural Inhibitor cannot be anchored in high-sec, wormhole, Abyssal, or Zarzakh space (system {sys_id})"
                     ),
+                    client_error: None,
                 }));
             }
             if sys_id == 30_100_000
@@ -1143,6 +1186,7 @@ pub async fn handle(
                     message: format!(
                         "Mobile Warp Disruptor cannot be anchored in high-sec or low-sec system {sys_id} (security {sys_sec:.2} > 0.0)"
                     ),
+                    client_error: None,
                 }));
             }
             if matches!(item_type.group_id, 12 | 340 | 448) && item_type.type_id != 23 && sys_sec >= 0.75 {
@@ -1151,6 +1195,7 @@ pub async fn handle(
                     message: format!(
                         "Secure container cannot be anchored in high-sec system {sys_id} with security >= 0.8 (security {sys_sec:.2})"
                     ),
+                    client_error: None,
                 }));
             }
 
@@ -1161,12 +1206,14 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "SystemActorError".into(),
                         message: e,
+                        client_error: None,
                     }))
                 }
             }) else {
                 return Some(Err(BridgeRpcError {
                     code: "ShipNotInSpace".into(),
                     message: "Active ship is not spawned in space".into(),
+                    client_error: None,
                 }));
             };
 
@@ -1192,6 +1239,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "CannotDeployInAbyssalSpace".into(),
                     message: "Mobile depots and deployable structures cannot be anchored inside Abyssal Deadspace".into(),
+                    client_error: None,
                 }));
             }
             if is_mobile {
@@ -1246,6 +1294,7 @@ pub async fn handle(
                         return Err(BridgeRpcError {
                             code: "ShipNotInSpace".into(),
                             message: format!("Ship {ship_id} is no longer undocked in solar system {sys_id}"),
+                            client_error: None,
                         });
                     }
                 }
@@ -1253,29 +1302,34 @@ pub async fn handle(
                 let it = snap.items.get_mut(&item_id).ok_or_else(|| BridgeRpcError {
                     code: "ItemNotFound".into(),
                     message: format!("Item {item_id} not found"),
+                    client_error: None,
                 })?;
                 if it.owner_id != char_id {
                     return Err(BridgeRpcError {
                         code: "ItemOwnershipViolation".into(),
                         message: format!("Character {char_id} does not own item {item_id}"),
+                        client_error: None,
                     });
                 }
                 if it.flag == InventoryFlag::Locked || item_locked_job {
                     return Err(BridgeRpcError {
                         code: "ItemLocked".into(),
                         message: format!("Item {item_id} is locked and cannot be anchored"),
+                        client_error: None,
                     });
                 }
                 if it.location_id != ship_id && it.location_id != sys_id as i64 {
                     return Err(BridgeRpcError {
                         code: "InvalidItemLocation".into(),
                         message: format!("Item {item_id} must be in active ship cargo or unanchored in space in system {sys_id}"),
+                        client_error: None,
                     });
                 }
                 if snap.sp6_lifecycle.space_object_meta.get(&item_id).is_some_and(|m| m.anchor_completed || m.anchor_start_unix.is_some()) {
                     return Err(BridgeRpcError {
                         code: "AlreadyAnchored".into(),
                         message: format!("Item {item_id} is already anchored or anchoring"),
+                        client_error: None,
                     });
                 }
                 it.location_id = sys_id as i64;
@@ -1322,6 +1376,7 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "SystemActorError".into(),
                         message: e,
+                        client_error: None,
                     }));
                 }
             } else {
@@ -1378,6 +1433,7 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "SystemActorError".into(),
                         message: e,
+                        client_error: None,
                     }));
                 }
             }

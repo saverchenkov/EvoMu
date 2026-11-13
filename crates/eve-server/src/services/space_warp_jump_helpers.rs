@@ -19,6 +19,7 @@ pub(crate) fn resolve_bound_or_session_sys(
                 return Err(BridgeRpcError {
                     code: "InvalidBoundService".into(),
                     message: format!("Expected bound service {expected_service}, got {}", b.service),
+                    client_error: None,
                 });
             }
             Ok(b.object_id as u32)
@@ -28,6 +29,7 @@ pub(crate) fn resolve_bound_or_session_sys(
             message: format!(
                 "Calls to {expected_service} require a bound object handle or active solar system"
             ),
+            client_error: None,
         }),
     }
 }
@@ -36,6 +38,7 @@ pub(crate) fn bookmark_expired_err(bm_id: i64) -> BridgeRpcError {
     BridgeRpcError {
         code: "BookmarkExpired".into(),
         message: format!("Bookmark {bm_id} has expired"),
+        client_error: None,
     }
 }
 
@@ -92,6 +95,7 @@ pub(crate) async fn handle_undock(
                 "Cannot undock while 10s session-change timer ({}) is active",
                 active_timer.reason
             ),
+            client_error: None,
         }));
     }
     let res = crate::services::station_structure::handle(

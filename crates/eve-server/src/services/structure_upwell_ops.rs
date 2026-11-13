@@ -131,7 +131,7 @@ pub fn save_ext_state(snap: &mut WorldStateSnapshot, state: &StructureExtendedSt
     }
 }
 
-pub(crate) fn err(code: &str, message: impl Into<String>) -> BridgeRpcError { BridgeRpcError { code: code.into(), message: message.into() } }
+pub(crate) fn err(code: &str, message: impl Into<String>) -> BridgeRpcError { BridgeRpcError { code: code.into(), message: message.into(), client_error: None } }
 pub(crate) fn arg_i64(args: &[PyRep], idx: usize) -> Option<i64> { args.get(idx).and_then(|a| a.as_i64()) }
 
 /// Applies a pending vulnerability-schedule change once its change delay has elapsed.

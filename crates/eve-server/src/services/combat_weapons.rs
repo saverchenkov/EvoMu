@@ -29,18 +29,21 @@ pub async fn handle_weapons(
                 return Some(Err(BridgeRpcError {
                     code: "ShipDocked".into(),
                     message: "Cannot activate combat modules while docked".into(),
+                    client_error: None,
                 }));
             }
             let Some(ship_id) = session.ship_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
                     message: "Session has no active ship".into(),
+                    client_error: None,
                 }));
             };
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solar system".into(),
+                    client_error: None,
                 }));
             };
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -53,6 +56,7 @@ pub async fn handle_weapons(
                 return Some(Err(BridgeRpcError {
                     code: "ShipNotInSpace".into(),
                     message: format!("Active ship {ship_id} is not spawned in space"),
+                    client_error: None,
                 }));
             };
 
@@ -105,12 +109,14 @@ pub async fn handle_weapons(
                 return Some(Err(BridgeRpcError {
                     code: "ModuleNotFound".into(),
                     message: format!("Module {module_id} not found on ship {ship_id}"),
+                    client_error: None,
                 }));
             };
             if m.state == eve_dogma::ModuleState::Offline {
                 return Some(Err(BridgeRpcError {
                     code: "ModuleOffline".into(),
                     message: format!("Module {module_id} is offline"),
+                    client_error: None,
                 }));
             }
             if let Err(e) =
@@ -122,6 +128,7 @@ pub async fn handle_weapons(
                 return Some(Err(BridgeRpcError {
                     code: "ModuleNotFound".into(),
                     message: format!("Module type {} not found in SDE", m.type_id),
+                    client_error: None,
                 }));
             };
             if let Some(res) = crate::router::box_fut(|| {
@@ -154,6 +161,7 @@ pub async fn handle_weapons(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidTarget".into(),
                         message: "Interdiction probes cannot be targeted directly; use area-of-effect weapons".into(),
+                        client_error: None,
                     }));
                 }
             }
@@ -165,6 +173,7 @@ pub async fn handle_weapons(
                 return Some(Err(BridgeRpcError {
                     code: "CantActivateWhileTethered".into(),
                     message: "Cannot activate offensive modules, smartbombs, or bomb launchers while tethered".into(),
+                    client_error: None,
                 }));
             }
             let mod_state =
@@ -189,6 +198,7 @@ pub async fn handle_weapons(
                     return Some(Err(BridgeRpcError {
                         code: "TargetRequired".into(),
                         message: "Targeted EWAR/tackle module requires a locked target".into(),
+                        client_error: None,
                     }));
                 };
                 let locks = sys_handle.get_target_locks(ship_id).await.unwrap_or_default();
@@ -196,6 +206,7 @@ pub async fn handle_weapons(
                     return Some(Err(BridgeRpcError {
                         code: "TargetNotLocked".into(),
                         message: format!("Target {tid} is not locked"),
+                        client_error: None,
                     }));
                 }
                 if ctx.db.with_snapshot(|snap| crate::services::structure_acl_defense_rules::is_structure_immune_to_ewar(snap, tid)) {
@@ -225,6 +236,7 @@ pub async fn handle_weapons(
                         return Some(Err(BridgeRpcError {
                             code: "TargetInvulnerable".into(),
                             message: format!("Target character {vc} is invulnerable due to recent location change"),
+                            client_error: None,
                         }));
                     }
                     if vc != char_id {
@@ -423,6 +435,7 @@ pub async fn handle_weapons(
                 return Some(Err(BridgeRpcError {
                     code: "NoAmmoLoaded".into(),
                     message: format!("Weapon module {module_id} has no compatible charge loaded"),
+                    client_error: None,
                 }));
             };
             if let Some(fm) = fit.modules.get_mut(&module_id) {
@@ -453,6 +466,7 @@ pub async fn handle_weapons(
                         return Some(Err(BridgeRpcError {
                             code: "TargetNotLocked".into(),
                             message: format!("Target {tid} is not locked"),
+                            client_error: None,
                         }));
                     }
                 }
@@ -482,6 +496,7 @@ pub async fn handle_weapons(
                     return Some(Err(BridgeRpcError {
                         code: "NoValidAutoTarget".into(),
                         message: "No hostile entity within auto-targeting missile range".into(),
+                        client_error: None,
                     }));
                 };
                 ntid
@@ -489,6 +504,7 @@ pub async fn handle_weapons(
                 return Some(Err(BridgeRpcError {
                     code: "TargetRequired".into(),
                     message: "Weapon activation requires a locked target".into(),
+                    client_error: None,
                 }));
             };
 
@@ -529,6 +545,7 @@ pub async fn handle_weapons(
                 return Some(Err(BridgeRpcError {
                     code: "TargetNotInSpace".into(),
                     message: format!("Target ball {target_ball_id} is not in space"),
+                    client_error: None,
                 }));
             };
 
@@ -538,6 +555,7 @@ pub async fn handle_weapons(
                     return Some(Err(BridgeRpcError {
                         code: "TargetInvulnerable".into(),
                         message: format!("Target character {victim_char_id} is invulnerable due to recent location change"),
+                        client_error: None,
                     }));
                 }
                 if victim_char_id != char_id {
@@ -631,6 +649,7 @@ pub async fn handle_weapons(
                         "Target {target_ball_id} is {dist:.1} m away (exceeds range {:.1} m)",
                         optimal_range + 3.0 * falloff_range
                     ),
+                    client_error: None,
                 }));
             }
 
@@ -651,14 +670,14 @@ pub async fn handle_weapons(
                 let is_already_active = ctx.db.with_snapshot(|snap| snap.module_active_states.contains(&module_id))
                     && with_combat_runtime(ctx, |rt| rt.entropic_spools.get(&(ship_id, module_id)).is_some_and(|entry| entry.target_id == target_ball_id));
                 if is_already_active {
-                    return Some(Err(BridgeRpcError { code: "AlreadyActive".into(), message: format!("Module {module_id} is already active") }));
+                    return Some(Err(BridgeRpcError { code: "AlreadyActive".into(), message: format!("Module {module_id} is already active"), client_error: None }));
                 }
             }
             let already_active = matches!(m.state, eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded)
                 || ctx.db.with_snapshot(|s| s.module_active_states.contains(&module_id))
                 || in_cycle || in_delay;
             if method == "Activate" && (in_delay || already_active) {
-                return Some(Err(BridgeRpcError { code: "ModuleAlreadyActive".into(), message: format!("Module {module_id} is already active in a cycle") }));
+                return Some(Err(BridgeRpcError { code: "ModuleAlreadyActive".into(), message: format!("Module {module_id} is already active in a cycle"), client_error: None }));
             }
 
             // Capacitor check & deduction:
@@ -696,6 +715,7 @@ pub async fn handle_weapons(
                                 "Weapon requires {base_cap_need:.2} GJ capacitor (have {:.2} GJ)",
                                 cs.capacitor
                             ),
+                            client_error: None,
                         }));
                     }
                     cs.capacitor = (cs.capacitor - base_cap_need).max(0.0);

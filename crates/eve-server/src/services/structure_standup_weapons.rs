@@ -26,7 +26,7 @@ pub const TYPE_KEEPSTAR: u32 = 35834;
 pub const TYPE_PALATINE_KEEPSTAR: u32 = 40340;
 
 fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
-    BridgeRpcError { code: code.into(), message: message.into() }
+    BridgeRpcError { code: code.into(), message: message.into(), client_error: None }
 }
 
 /// Blocks `ReleaseControl`, `EjectFromStructure`, and `Undock` while a structure gunner is immobilized by a superweapon cycle.

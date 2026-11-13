@@ -111,12 +111,14 @@ pub fn create_ccp_calendar_event(
         return Err(BridgeRpcError {
             code: "UserError".into(),
             message: "Cannot create a calendar event in the past".into(),
+            client_error: None,
         });
     }
     if !(0..=10_000).contains(&duration) {
         return Err(BridgeRpcError {
             code: "UserError".into(),
             message: "Calendar event duration must be between 0 and 10000 minutes".into(),
+            client_error: None,
         });
     }
     let clean_title = title.trim();
@@ -124,6 +126,7 @@ pub fn create_ccp_calendar_event(
         return Err(BridgeRpcError {
             code: "UserError".into(),
             message: "CalendarEventMustSpecifyTitle: Event title cannot be empty".into(),
+            client_error: None,
         });
     }
     let max_db_id = ctx
@@ -208,6 +211,7 @@ pub(crate) fn handle_calendar_create(
             return Err(BridgeRpcError {
                 code: "CalendarAccessDenied".into(),
                 message: "Creating corporation calendar events requires Communications Officer or Director role".into(),
+                client_error: None,
             });
         }
     } else if method == "CreateAllianceEvent" {
@@ -215,6 +219,7 @@ pub(crate) fn handle_calendar_create(
             return Err(BridgeRpcError {
                 code: "CalendarAccessDenied".into(),
                 message: "Creating alliance calendar events requires membership in an alliance".into(),
+                client_error: None,
             });
         }
         let is_executor = ctx.db.with_snapshot(|snap| {
@@ -225,6 +230,7 @@ pub(crate) fn handle_calendar_create(
             return Err(BridgeRpcError {
                 code: "CalendarAccessDenied".into(),
                 message: "Creating alliance calendar events requires being a Director or Communications Officer of the executor corporation".into(),
+                client_error: None,
             });
         }
     }
@@ -233,6 +239,7 @@ pub(crate) fn handle_calendar_create(
         return Err(BridgeRpcError {
             code: "UserError".into(),
             message: "Calendar event requires a valid dateTime".into(),
+            client_error: None,
         });
     };
     let now_ft = (ctx.now_unix() as i64 + 11_644_473_600) * 10_000_000;
@@ -240,6 +247,7 @@ pub(crate) fn handle_calendar_create(
         return Err(BridgeRpcError {
             code: "UserError".into(),
             message: "Cannot create a calendar event in the past".into(),
+            client_error: None,
         });
     }
     let duration = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
@@ -247,6 +255,7 @@ pub(crate) fn handle_calendar_create(
         return Err(BridgeRpcError {
             code: "UserError".into(),
             message: "Calendar event duration must be between 0 and 10000 minutes".into(),
+            client_error: None,
         });
     }
     let Some(title) = args
@@ -258,6 +267,7 @@ pub(crate) fn handle_calendar_create(
         return Err(BridgeRpcError {
             code: "UserError".into(),
             message: "CalendarEventMustSpecifyTitle: Event title cannot be empty".into(),
+            client_error: None,
         });
     };
     let desc = args.get(3).and_then(|a| a.as_str()).unwrap_or("");
@@ -267,6 +277,7 @@ pub(crate) fn handle_calendar_create(
         return Err(BridgeRpcError {
             code: "UserError".into(),
             message: "CalendarMaxInviteesExceeded: Personal calendar events allow at most 50 invitees".into(),
+            client_error: None,
         });
     }
 
@@ -416,6 +427,7 @@ pub(crate) fn handle_calendar_mutate(
             return Err(BridgeRpcError {
                 code: "CalendarEventNotFound".into(),
                 message: "Calendar mutation requires a valid positive eventID".into(),
+                client_error: None,
             })
         }
     };
@@ -426,18 +438,21 @@ pub(crate) fn handle_calendar_mutate(
                 return Err(BridgeRpcError {
                     code: "CalendarEventNotFound".into(),
                     message: format!("Calendar event {eid} not found"),
+                    client_error: None,
                 });
             };
             if ev.is_deleted {
                 return Err(BridgeRpcError {
                     code: "CalendarEventNotFound".into(),
                     message: format!("Calendar event {eid} not found"),
+                    client_error: None,
                 });
             }
             if !check_auth(ev) {
                 return Err(BridgeRpcError {
                     code: "CalendarAccessDenied".into(),
                     message: "Only the event creator or authorized director may delete it".into(),
+                    client_error: None,
                 });
             }
             ev.is_deleted = true;
@@ -491,12 +506,14 @@ pub(crate) fn handle_calendar_mutate(
                 return Err(BridgeRpcError {
                     code: "CalendarEventNotFound".into(),
                     message: format!("Calendar event {eid} not found"),
+                    client_error: None,
                 });
             };
             if ev.is_deleted {
                 return Err(BridgeRpcError {
                     code: "CalendarEventNotFound".into(),
                     message: format!("Calendar event {eid} not found"),
+                    client_error: None,
                 });
             }
             if !check_auth(ev) {
@@ -504,6 +521,7 @@ pub(crate) fn handle_calendar_mutate(
                     code: "CalendarAccessDenied".into(),
                     message: "Only the event owner or authorized director may update participants"
                         .into(),
+                    client_error: None,
                 });
             }
             let (mut added, mut removed) = (Vec::new(), Vec::new());
@@ -560,12 +578,14 @@ pub(crate) fn handle_calendar_mutate(
             return Err(BridgeRpcError {
                 code: "CalendarEventNotFound".into(),
                 message: format!("Calendar event {eid} not found"),
+                client_error: None,
             });
         };
         if ev.is_deleted {
             return Err(BridgeRpcError {
                 code: "CalendarEventNotFound".into(),
                 message: format!("Calendar event {eid} not found"),
+                client_error: None,
             });
         }
         if method == "SendEventResponse" {
@@ -578,18 +598,21 @@ pub(crate) fn handle_calendar_mutate(
                 return Err(BridgeRpcError {
                     code: "CalendarAccessDenied".into(),
                     message: "You are not invited to this event".into(),
+                    client_error: None,
                 });
             }
             let Some(arg_owner) = args.get(1).and_then(|a| a.as_i64()) else {
                 return Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "SendEventResponse requires (eventID, ownerID, response)".into(),
+                    client_error: None,
                 });
             };
             if arg_owner != ev.owner_id {
                 return Err(BridgeRpcError {
                     code: "CalendarEventNotFound".into(),
                     message: "Event ownerID mismatch".into(),
+                    client_error: None,
                 });
             }
             let raw_resp = args.get(2).and_then(|a| a.as_i64());
@@ -599,6 +622,7 @@ pub(crate) fn handle_calendar_mutate(
                 return Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "Invalid calendar event response status (must be 2=Declined, 4=Accepted, or 5=Tentative)".into(),
+                    client_error: None,
                 });
             };
             resp_val = r;
@@ -613,6 +637,7 @@ pub(crate) fn handle_calendar_mutate(
                 return Err(BridgeRpcError {
                     code: "CalendarAccessDenied".into(),
                     message: "Only the event creator or authorized director may edit it".into(),
+                    client_error: None,
                 });
             }
             let mut old_dt = ev.event_date_time;
@@ -622,6 +647,7 @@ pub(crate) fn handle_calendar_mutate(
                     return Err(BridgeRpcError {
                         code: "UserError".into(),
                         message: "Cannot move a calendar event into the past".into(),
+                        client_error: None,
                     });
                 }
                 let dur_opt = args.get(3).and_then(|a| a.as_i64());
@@ -630,6 +656,7 @@ pub(crate) fn handle_calendar_mutate(
                         return Err(BridgeRpcError {
                             code: "UserError".into(),
                             message: "Calendar event duration must be between 0 and 10000 minutes".into(),
+                            client_error: None,
                         });
                     }
                 }
@@ -645,6 +672,7 @@ pub(crate) fn handle_calendar_mutate(
                     return Err(BridgeRpcError {
                         code: "UserError".into(),
                         message: "CalendarEventMustSpecifyTitle: Event title cannot be empty".into(),
+                        client_error: None,
                     });
                 };
                 ev.event_date_time = new_dt;
@@ -667,6 +695,7 @@ pub(crate) fn handle_calendar_mutate(
                         return Err(BridgeRpcError {
                             code: "UserError".into(),
                             message: "Cannot move a calendar event into the past".into(),
+                            client_error: None,
                         });
                     }
                 }
@@ -676,6 +705,7 @@ pub(crate) fn handle_calendar_mutate(
                         return Err(BridgeRpcError {
                             code: "UserError".into(),
                             message: "Calendar event duration must be between 0 and 10000 minutes".into(),
+                            client_error: None,
                         });
                     }
                 }
@@ -689,6 +719,7 @@ pub(crate) fn handle_calendar_mutate(
                     return Err(BridgeRpcError {
                         code: "UserError".into(),
                         message: "CalendarEventMustSpecifyTitle: Event title cannot be empty".into(),
+                        client_error: None,
                     });
                 };
                 if let Some(dt) = dt_opt {
@@ -821,12 +852,14 @@ pub fn handle_calendar_get(
             return Some(Err(BridgeRpcError {
                 code: "CalendarEventNotFound".into(),
                 message: format!("Calendar event {eid} not found"),
+                client_error: None,
             }));
         };
         if ev.is_deleted {
             return Some(Err(BridgeRpcError {
                 code: "CalendarEventNotFound".into(),
                 message: format!("Calendar event {eid} not found"),
+                client_error: None,
             }));
         }
         if let Some(arg_owner) = args.get(1).and_then(|a| a.as_i64()) {
@@ -834,6 +867,7 @@ pub fn handle_calendar_get(
                 return Some(Err(BridgeRpcError {
                     code: "CalendarEventNotFound".into(),
                     message: "Event ownerID mismatch".into(),
+                    client_error: None,
                 }));
             }
         }
@@ -849,6 +883,7 @@ pub fn handle_calendar_get(
             return Some(Err(BridgeRpcError {
                 code: "CalendarAccessDenied".into(),
                 message: "Not authorized to view details of this event".into(),
+                client_error: None,
             }));
         }
         let flag = match ev._scope.as_str() {
@@ -894,12 +929,14 @@ pub fn handle_calendar_get(
             return Some(Err(BridgeRpcError {
                 code: "CalendarEventNotFound".into(),
                 message: format!("Calendar event {eid} not found"),
+                client_error: None,
             }));
         };
         if ev.is_deleted {
             return Some(Err(BridgeRpcError {
                 code: "CalendarEventNotFound".into(),
                 message: format!("Calendar event {eid} not found"),
+                client_error: None,
             }));
         }
         if let Some(arg_owner) = args.get(1).and_then(|a| a.as_i64()) {
@@ -907,6 +944,7 @@ pub fn handle_calendar_get(
                 return Some(Err(BridgeRpcError {
                     code: "CalendarEventNotFound".into(),
                     message: "Event ownerID mismatch".into(),
+                    client_error: None,
                 }));
             }
         }
@@ -919,6 +957,7 @@ pub fn handle_calendar_get(
             return Some(Err(BridgeRpcError {
                 code: "CalendarAccessDenied".into(),
                 message: "Not authorized to view responses to this event".into(),
+                client_error: None,
             }));
         }
         let rows: Vec<Vec<PyRep>> = ev

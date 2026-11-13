@@ -23,7 +23,7 @@ use eve_proto::{BridgeRpcError, DBRowDescriptor, DbColumnType, PyRep};
 use std::collections::HashMap;
 
 fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
-    BridgeRpcError { code: code.into(), message: message.into() }
+    BridgeRpcError { code: code.into(), message: message.into(), client_error: None }
 }
 
 /// Windows FILETIME (100 ns ticks since 1601-01-01) for a unix timestamp.

@@ -17,6 +17,7 @@ fn parse_id_list(
         BridgeRpcError {
             code: "InvalidArgument".into(),
             message: format!("config.{method} requires an integer ID list argument ({kw_name})"),
+            client_error: None,
         }
     })?;
     match container {
@@ -29,6 +30,7 @@ fn parse_id_list(
                         message: format!(
                             "config.{method}: element {idx} in {kw_name} is not an integer"
                         ),
+                        client_error: None,
                     });
                 };
                 out.push(val);
@@ -39,6 +41,7 @@ fn parse_id_list(
         _ => Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: format!("config.{method} expects a List or Tuple of integer IDs"),
+            client_error: None,
         }),
     }
 }
@@ -83,6 +86,7 @@ pub fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidArgument".into(),
                         message: "objectCaching.GetCachableObject requires (shared, objectID, (timestamp, version), nodeID) or (objectID,)".into(),
+                        client_error: None,
                     }));
                 }
             };
@@ -90,6 +94,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "CachedObjectNotFound".into(),
                     message: format!("Cached object {:?} is not registered", object_id),
+                    client_error: None,
                 }));
             };
             Some(Ok(rec.to_cached_object_pyrep()))
@@ -103,6 +108,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: "objectCaching.InvalidateCachedObjects requires GM/Admin role".into(),
+                    client_error: None,
                 }));
             }
             let mut invalidated = 0i64;
@@ -507,6 +513,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "config.GetStationSolarSystemsByOwner requires ownerID".into(),
+                    client_error: None,
                 }));
             };
             let mut rows: Vec<(i64, u32)> = Vec::new();
@@ -551,12 +558,14 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "config.GetMap requires solarSystemID".into(),
+                    client_error: None,
                 }));
             };
             let Some(sys) = ctx.sde.solar_systems.get(&sys_id) else {
                 return Some(Err(BridgeRpcError {
                     code: "SolarSystemNotFound".into(),
                     message: format!("Solar system {sys_id} not found"),
+                    client_error: None,
                 }));
             };
             let cels = ctx.sde.celestials_in_system(sys_id);
@@ -671,6 +680,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "notificationMgr.GetByGroupID requires groupID".into(),
+                    client_error: None,
                 }));
             };
             let rows = ctx
@@ -802,6 +812,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "notificationMgr.MarkGroupAsProcessed requires groupID".into(),
+                    client_error: None,
                 }));
             };
             let mut updated = 0i64;
@@ -877,6 +888,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "notificationMgr.DeleteGroupNotifications requires groupID".into(),
+                    client_error: None,
                 }));
             };
             let mut deleted = 0i64;
@@ -1058,6 +1070,7 @@ pub fn get_multi_graphics_ex(
     Err(BridgeRpcError {
         code: "UnimplementedRPC".into(),
         message: "GetMultiGraphicsEx requires sde_graphics table import".into(),
+        client_error: None,
     })
 }
 
@@ -1069,6 +1082,7 @@ pub fn get_celestial_statistic(
     Err(BridgeRpcError {
         code: "UnimplementedRPC".into(),
         message: "GetCelestialStatistic requires sde_celestial_statistics table import".into(),
+        client_error: None,
     })
 }
 
@@ -1086,6 +1100,7 @@ pub fn get_map_objects(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "GetMapObjects requires entityID".into(),
+            client_error: None,
         });
     };
     let explicit_flags = args.len() > 1;
@@ -1232,6 +1247,7 @@ pub fn get_map_connections(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "GetMapConnections requires itemID".into(),
+            client_error: None,
         });
     };
     let explicit_flags = args.len() > 1;

@@ -9,7 +9,7 @@ mod fitting_insurance_repair;
 
 #[inline]
 fn rpc_err(code: &str, msg: impl Into<String>) -> BridgeRpcError {
-    BridgeRpcError { code: code.into(), message: msg.into() }
+    BridgeRpcError { code: code.into(), message: msg.into(), client_error: None }
 }
 
 pub(crate) async fn handle_ships_and_services(
@@ -188,12 +188,14 @@ pub(crate) async fn handle_ships_and_services(
                     return Some(Err(BridgeRpcError {
                         code: "CorpRoleDenied".into(),
                         message: "Character does not belong to a corporation".into(),
+                        client_error: None,
                     }));
                 }
                 if !has_privs {
                     return Some(Err(BridgeRpcError {
                         code: "CorpRoleDenied".into(),
                         message: "Director or accountant role required to view corporation insurance contracts".into(),
+                        client_error: None,
                     }));
                 }
                 corp_id
@@ -234,6 +236,7 @@ pub(crate) async fn handle_ships_and_services(
                     return Some(Err(BridgeRpcError {
                         code: "StationServiceUnavailable".into(),
                         message: format!("Station {dock_id} does not offer insurance"),
+                        client_error: None,
                     }));
                 }
             }
@@ -301,6 +304,7 @@ pub(crate) async fn handle_ships_and_services(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidMutaplasmid".into(),
                     message: "CreateDynamicItem requires mutaplasmid typeID".into(),
+                    client_error: None,
                 }));
             };
             let mutaplasmid_type_id = if let Some(it) = ctx.db.with_snapshot(|s| s.items.get(&raw_muta).cloned()) {
@@ -312,6 +316,7 @@ pub(crate) async fn handle_ships_and_services(
                 return Some(Err(BridgeRpcError {
                     code: "TargetItemNotFound".into(),
                     message: "CreateDynamicItem requires target itemID".into(),
+                    client_error: None,
                 }));
             };
 
@@ -319,6 +324,7 @@ pub(crate) async fn handle_ships_and_services(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidMutaplasmid".into(),
                     message: format!("Unknown mutaplasmid type {mutaplasmid_type_id}"),
+                    client_error: None,
                 }));
             };
 
@@ -331,6 +337,7 @@ pub(crate) async fn handle_ships_and_services(
                     return Err(BridgeRpcError {
                         code: "TargetItemNotFound".into(),
                         message: format!("Target item {target_item_id} not found"),
+                        client_error: None,
                     });
                 };
                 if target_item.owner_id != char_id || target_item.quantity <= 0 {
@@ -339,6 +346,7 @@ pub(crate) async fn handle_ships_and_services(
                         message: format!(
                             "Target item {target_item_id} is not owned by character {char_id}"
                         ),
+                        client_error: None,
                     });
                 }
                 let active_ship_colocated = current_ship
@@ -355,6 +363,7 @@ pub(crate) async fn handle_ships_and_services(
                             "Target item {target_item_id} is currently fitted in slot {:?} and must be unfitted to Cargo or Hangar before mutating",
                             target_item.flag
                         ),
+                        client_error: None,
                     });
                 }
                 let target_reachable = (current_dock.is_some()
@@ -372,6 +381,7 @@ pub(crate) async fn handle_ships_and_services(
                         message: format!(
                             "Target item {target_item_id} is locked in a contract/job or not at the caller's current station/structure or active ship"
                         ),
+                        client_error: None,
                     });
                 }
                 if !muta_def.applicable_type_ids.contains(&target_item.type_id) {
@@ -381,6 +391,7 @@ pub(crate) async fn handle_ships_and_services(
                             "Mutaplasmid {mutaplasmid_type_id} cannot be applied to item type {}",
                             target_item.type_id
                         ),
+                        client_error: None,
                     });
                 }
 
@@ -400,6 +411,7 @@ pub(crate) async fn handle_ships_and_services(
                         message: format!(
                             "Character does not own an unlocked, reachable mutaplasmid type {mutaplasmid_type_id}"
                         ),
+                        client_error: None,
                     });
                 };
 
@@ -408,6 +420,7 @@ pub(crate) async fn handle_ships_and_services(
                 snap.consume_exact_item_quantity(mid, 1, muta_opts).map_err(|e| BridgeRpcError {
                     code: "MutaplasmidItemNotFound".into(),
                     message: e.to_string(),
+                    client_error: None,
                 })?;
 
                 let base_attrs = ctx
@@ -504,6 +517,7 @@ pub(crate) async fn handle_ships_and_services(
                 return Some(Err(BridgeRpcError {
                     code: "ItemNotFound".into(),
                     message: "GetDynamicItemInfo requires itemID".into(),
+                    client_error: None,
                 }));
             };
             let res = ctx.db.with_snapshot(|snap| {
@@ -522,6 +536,7 @@ pub(crate) async fn handle_ships_and_services(
                             message: format!(
                                 "Item {item_id} is not owned by character {char_id}"
                             ),
+                            client_error: None,
                         }));
                     }
                     let mut attr_entries: Vec<(PyRep, PyRep)> = item
@@ -554,6 +569,7 @@ pub(crate) async fn handle_ships_and_services(
                 None => Some(Err(BridgeRpcError {
                     code: "ItemNotFound".into(),
                     message: format!("Item {item_id} not found"),
+                    client_error: None,
                 })),
             }
         }
@@ -567,6 +583,7 @@ pub(crate) async fn handle_ships_and_services(
                 return Some(Err(BridgeRpcError {
                     code: "NotDocked".into(),
                     message: "Repackaging items requires being docked".into(),
+                    client_error: None,
                 }));
             };
             let extract_ids = |list: &[PyRep]| -> Vec<i64> {
@@ -589,6 +606,7 @@ pub(crate) async fn handle_ships_and_services(
                 return Some(Err(BridgeRpcError {
                     code: "ItemNotFound".into(),
                     message: "RepackageItems requires at least one itemID".into(),
+                    client_error: None,
                 }));
             }
             for &item_id in &item_ids {
@@ -596,6 +614,7 @@ pub(crate) async fn handle_ships_and_services(
                     return Some(Err(BridgeRpcError {
                         code: "CannotRepackageActiveShip".into(),
                         message: "Cannot repackage your currently active ship".into(),
+                        client_error: None,
                     }));
                 }
                 let has_module_damage = ctx
@@ -610,6 +629,7 @@ pub(crate) async fn handle_ships_and_services(
                         message: format!(
                             "Item {item_id} has heat or module damage and must be repaired before repackaging"
                         ),
+                        client_error: None,
                     }));
                 }
             }
@@ -633,61 +653,70 @@ pub(crate) async fn handle_ships_and_services(
                         return Err(BridgeRpcError {
                             code: "CannotRepackageActiveShip".into(),
                             message: "Cannot repackage your currently active ship".into(),
+                            client_error: None,
                         });
                     }
                     let Some(item) = snap.items.get(&item_id) else {
                         return Err(BridgeRpcError {
                             code: "ItemNotFound".into(),
                             message: format!("Item {item_id} not found"),
+                            client_error: None,
                         });
                     };
                     if item.owner_id != char_id {
                         return Err(BridgeRpcError {
                             code: "OwnershipOrLocationViolation".into(),
                             message: format!("Item {item_id} must be owned by character {char_id} at station {station_id}"),
+                            client_error: None,
                         });
                     }
                     if matches!(item.flag as u16, 11..=34 | 92..=94 | 125..=132 | 158) {
                         return Err(BridgeRpcError {
                             code: "CanNotUnassembleInThisItemLoc".into(),
                             message: format!("Cannot repackage item {item_id} while it is fitted in slot {:?}", item.flag),
+                            client_error: None,
                         });
                     }
                     if snap.items.get(&item.location_id).is_some_and(|p| fitting_containers_ships::is_container_group(ctx.sde.types.get(&p.type_id).map(|t| t.group_id).unwrap_or(0), p.type_id)) {
-                        return Err(BridgeRpcError { code: "ItemInsideContainer".into(), message: format!("Item {item_id} is inside a container and must be moved to item hangar before repackaging") });
+                        return Err(BridgeRpcError { code: "ItemInsideContainer".into(), message: format!("Item {item_id} is inside a container and must be moved to item hangar before repackaging"), client_error: None });
                     }
                     if item.location_id != station_id {
                         return Err(BridgeRpcError {
                             code: "OwnershipOrLocationViolation".into(),
                             message: format!("Item {item_id} must be owned by character {char_id} at station {station_id}"),
+                            client_error: None,
                         });
                     }
                     if item.flag != InventoryFlag::Hangar {
                         return Err(BridgeRpcError {
                             code: "ItemLocked".into(),
                             message: format!("Item {item_id} must be in your station Hangar (current flag: {:?}) to repackage", item.flag),
+                            client_error: None,
                         });
                     }
                     if snap.is_item_locked_in_contract_or_job(item_id) {
                         return Err(BridgeRpcError {
                             code: "ItemLocked".into(),
                             message: format!("Item {item_id} is locked in an active contract or industry job"),
+                            client_error: None,
                         });
                     }
                     if fitting_containers_ships::container_has_active_audit_log_snap(snap, item_id, now_unix as u64) {
-                        return Err(BridgeRpcError { code: "ContainerHasActiveAuditLog".into(), message: format!("Container {item_id} has audit log entries younger than 3 weeks and cannot be repackaged") });
+                        return Err(BridgeRpcError { code: "ContainerHasActiveAuditLog".into(), message: format!("Container {item_id} has audit log entries younger than 3 weeks and cannot be repackaged"), client_error: None });
                     }
                     let has_contained_items = snap.items.values().any(|o| o.item_id != item_id && o.location_id == item_id && o.quantity > 0);
                     if has_contained_items {
                         return Err(BridgeRpcError {
                             code: "CannotRepackageNonEmptyItem".into(),
                             message: format!("Cannot repackage item {item_id} while it contains fitted modules, rigs, or cargo"),
+                            client_error: None,
                         });
                     }
                     if item.is_blueprint_copy {
                         return Err(BridgeRpcError {
                             code: "CannotRepackageBlueprintCopy".into(),
                             message: format!("Blueprint copy {item_id} cannot be repackaged"),
+                            client_error: None,
                         });
                     }
                     let hull_or_armor_damage = item.dynamic_attributes.get(&attr_ids::DAMAGE).copied().unwrap_or(0.0) > 0.0
@@ -696,6 +725,7 @@ pub(crate) async fn handle_ships_and_services(
                         return Err(BridgeRpcError {
                             code: "CantRepackageDamagedItem".into(),
                             message: format!("Item {item_id} has structural or armor damage and must be repaired before repackaging"),
+                            client_error: None,
                         });
                     }
                     let is_researched_bpo = !item.is_blueprint_copy
@@ -715,6 +745,7 @@ pub(crate) async fn handle_ships_and_services(
                         return Err(BridgeRpcError {
                             code: "CannotRepackageMutatedItem".into(),
                             message: format!("Abyssal mutated or researched item {item_id} cannot be repackaged without confirming reset"),
+                            client_error: None,
                         });
                     }
                 }
@@ -797,6 +828,7 @@ pub(crate) async fn handle_ships_and_services(
                 return Some(Err(BridgeRpcError {
                     code: "NotDocked".into(),
                     message: "Assembling a ship requires being docked".into(),
+                    client_error: None,
                 }));
             };
             let first_item_id = match args.first() {
@@ -812,6 +844,7 @@ pub(crate) async fn handle_ships_and_services(
                     code: "ItemNotFound".into(),
                     message: "AssembleShip requires itemID argument or active ship in session"
                         .into(),
+                    client_error: None,
                 }));
             };
             let cs_state = fitting_containers_ships::read_container_ship_state(ctx);
@@ -819,6 +852,7 @@ pub(crate) async fn handle_ships_and_services(
                 return Some(Err(BridgeRpcError {
                     code: "ItemLocked".into(),
                     message: format!("Item {item_id} is locked in an Audit Log Secure Container"),
+                    client_error: None,
                 }));
             }
             if let Some(corp_id) = ctx.db.with_snapshot(|snap| {
@@ -848,6 +882,7 @@ pub(crate) async fn handle_ships_and_services(
                             message: format!(
                                 "Character {char_id} is not physically docked at {station_id}"
                             ),
+                            client_error: None,
                         });
                     }
                 }
@@ -855,6 +890,7 @@ pub(crate) async fn handle_ships_and_services(
                     return Err(BridgeRpcError {
                         code: "ItemNotFound".into(),
                         message: format!("Ship item {item_id} not found"),
+                        client_error: None,
                     });
                 };
                 let corp_id = snap
@@ -870,6 +906,7 @@ pub(crate) async fn handle_ships_and_services(
                         message: format!(
                             "Ship item {item_id} must be owned by character {char_id} at station {station_id}"
                         ),
+                        client_error: None,
                     });
                 }
                 if matches!(item.flag as u16, 11..=34 | 92..=94 | 125..=132 | 158) {
@@ -879,6 +916,7 @@ pub(crate) async fn handle_ships_and_services(
                             "Item {item_id} is currently fitted in slot {:?} and cannot be assembled/repackaged in this location",
                             item.flag
                         ),
+                        client_error: None,
                     });
                 }
                 if item.location_id != station_id || snap.items.contains_key(&station_id) {
@@ -887,6 +925,7 @@ pub(crate) async fn handle_ships_and_services(
                         message: format!(
                             "Ship item {item_id} must be owned by character {char_id} at station {station_id}"
                         ),
+                        client_error: None,
                     });
                 }
                 if item.flag == InventoryFlag::Locked
@@ -895,6 +934,7 @@ pub(crate) async fn handle_ships_and_services(
                     return Err(BridgeRpcError {
                         code: "ItemLocked".into(),
                         message: format!("Item {item_id} is locked"),
+                        client_error: None,
                     });
                 }
                 let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
@@ -907,6 +947,7 @@ pub(crate) async fn handle_ships_and_services(
                     return Err(BridgeRpcError {
                         code: "ItemLocked".into(),
                         message: format!("Item {item_id} is sealed inside an Asset Safety wrap"),
+                        client_error: None,
                     });
                 }
                 if is_corp_item {
@@ -917,6 +958,7 @@ pub(crate) async fn handle_ships_and_services(
                                 "Corporation ship {item_id} cannot be assembled in flag {:?}",
                                 item.flag
                             ),
+                            client_error: None,
                         });
                     }
                     crate::services::inventory_bound::validate_corp_source_item_take_access_in_snap(
@@ -929,6 +971,7 @@ pub(crate) async fn handle_ships_and_services(
                             "Ship {item_id} must be in Hangar or ShipHangar to assemble (flag {:?})",
                             item.flag
                         ),
+                        client_error: None,
                     });
                 }
                 let hull_or_armor_damage = item
@@ -947,6 +990,7 @@ pub(crate) async fn handle_ships_and_services(
                     return Err(BridgeRpcError {
                         code: "CantRepackageDamagedItem".into(),
                         message: format!("Item {item_id} is damaged and must be repaired first"),
+                        client_error: None,
                     });
                 }
                 let is_ship = ctx
@@ -959,6 +1003,7 @@ pub(crate) async fn handle_ships_and_services(
                     return Err(BridgeRpcError {
                         code: "NotAShip".into(),
                         message: format!("Item {item_id} (type {}) is not a ship", item.type_id),
+                        client_error: None,
                     });
                 }
                 if !item.singleton && item.quantity > 1 {
@@ -1080,12 +1125,14 @@ pub(crate) async fn handle_ships_and_services(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidLabel".into(),
                     message: "Item/ship custom name must be 1..=100 characters".into(),
+                    client_error: None,
                 }));
             }
             if label.starts_with("courier_cargo:") {
                 return Some(Err(BridgeRpcError {
                     code: "CustomNameNotAllowed".into(),
                     message: "Courier cargo prefix is reserved".into(),
+                    client_error: None,
                 }));
             }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -1093,12 +1140,14 @@ pub(crate) async fn handle_ships_and_services(
                     return Err(BridgeRpcError {
                         code: "ItemNotFound".into(),
                         message: format!("Item {item_id} not found"),
+                        client_error: None,
                     });
                 };
                 if snap.item_custom_names.get(&item_id).map_or(false, |s| s.starts_with("courier_cargo:")) {
                     return Err(BridgeRpcError {
                         code: "CustomNameNotAllowed".into(),
                         message: "Cannot rename courier mission cargo".into(),
+                        client_error: None,
                     });
                 }
                 let is_ship = ctx.sde.types.get(&item.type_id).is_some_and(|t| t.category_id == 6);
@@ -1106,6 +1155,7 @@ pub(crate) async fn handle_ships_and_services(
                     return Err(BridgeRpcError {
                         code: "InvalidLabel".into(),
                         message: "Ship custom name must be 1..=32 characters".into(),
+                        client_error: None,
                     });
                 }
                 if item.owner_id != char_id {
@@ -1129,6 +1179,7 @@ pub(crate) async fn handle_ships_and_services(
                             message: format!(
                                 "Character {char_id} lacks permission to rename item {item_id}"
                             ),
+                            client_error: None,
                         });
                     }
                 }

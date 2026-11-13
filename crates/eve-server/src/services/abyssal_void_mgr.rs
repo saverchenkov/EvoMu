@@ -66,6 +66,7 @@ pub(crate) fn err_no_solar_system() -> BridgeRpcError {
     BridgeRpcError {
         code: "NoSolarSystem".into(),
         message: "Session has no active solar system".into(),
+        client_error: None,
     }
 }
 
@@ -73,6 +74,7 @@ pub(crate) fn err_no_active_ship() -> BridgeRpcError {
     BridgeRpcError {
         code: "NoActiveShip".into(),
         message: "Session has no active ship".into(),
+        client_error: None,
     }
 }
 
@@ -80,6 +82,7 @@ pub(crate) fn err_ship_docked(msg: &str) -> BridgeRpcError {
     BridgeRpcError {
         code: "ShipDocked".into(),
         message: msg.into(),
+        client_error: None,
     }
 }
 
@@ -141,6 +144,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "MissingRequiredArgument".into(),
                     message: "AbyssalEntranceDeployment requires a valid filament itemID (> 0)".into(),
+                    client_error: None,
                 }));
             }
             Some(crate::services::pve_special_sites::handle_abyssal_entrance_deployment(ctx, session, args).await)
@@ -151,6 +155,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "MissingRequiredArgument".into(),
                     message: "AbyssalEntranceGateActivation requires a valid gateID or filament itemID (> 0)".into(),
+                    client_error: None,
                 }));
             };
             let (_, char_id) = match ServerContext::require_character(session) {
@@ -177,6 +182,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "NotInAbyssalSpace".into(),
                     message: "AbyssalGateActivation only valid inside Abyssal Deadspace".into(),
+                    client_error: None,
                 }));
             }
             Some(handle_abyssal_gate_activation(ctx, session, char_id, args, kwargs).await)
@@ -195,6 +201,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "NotInAbyssalSpace".into(),
                     message: "AbyssalEndGateActivation only valid inside Abyssal Deadspace".into(),
+                    client_error: None,
                 }));
             }
             Some(handle_abyssal_end_gate_activation(ctx, session, char_id, args).await)
@@ -213,6 +220,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "NotInAbyssalSpace".into(),
                     message: "ClientIsReady for abyssalMgr only valid inside Abyssal Deadspace".into(),
+                    client_error: None,
                 }));
             }
             crate::services::pve_special_sites::ensure_abyssal_room_balls_for_ctx(ctx, char_id).await;
@@ -275,6 +283,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError {
                     code: "MissingRequiredArgument".into(),
                     message: "VoidSpacePlayerJump requires arguments".into(),
+                    client_error: None,
                 }));
             }
             Some(handle_void_space_player_jump(ctx, session, char_id, args).await)
@@ -317,6 +326,7 @@ async fn activate_trace(
         return Err(BridgeRpcError {
             code: "WrongSolarSystem".into(),
             message: "Abyssal entrance gate is located in another solar system".into(),
+            client_error: None,
         });
     }
 
@@ -338,6 +348,7 @@ async fn activate_trace(
         return Err(BridgeRpcError {
             code: "TraceExpired".into(),
             message: "Abyssal entrance trace has expired and collapsed".into(),
+            client_error: None,
         });
     }
 
@@ -347,12 +358,14 @@ async fn activate_trace(
             return Err(BridgeRpcError {
                 code: "ShipIsCloaked".into(),
                 message: "Cannot activate Abyssal entrance trace while cloaked".into(),
+                client_error: None,
             });
         }
         if cs.is_tethered {
             return Err(BridgeRpcError {
                 code: "ShipIsTethered".into(),
                 message: "Cannot activate Abyssal entrance trace while tethered".into(),
+                client_error: None,
             });
         }
     }
@@ -373,6 +386,7 @@ async fn activate_trace(
         return Err(BridgeRpcError {
             code: "OutOfRange".into(),
             message: format!("Ship is too far from Abyssal entrance gate ({dist:.1}m > 2500.0m)"),
+            client_error: None,
         });
     }
 
@@ -384,6 +398,7 @@ async fn activate_trace(
             message: format!(
                 "Trace requires ship class capacity {eff_cap}, but activating ship has capacity {hull_cap}"
             ),
+            client_error: None,
         });
     }
     if eff_cap == 1 {
@@ -391,6 +406,7 @@ async fn activate_trace(
             return Err(BridgeRpcError {
                 code: "AccessDenied".into(),
                 message: "Solo Cruiser Abyssal trace may only be entered by its creator".into(),
+                client_error: None,
             });
         }
     } else {
@@ -400,6 +416,7 @@ async fn activate_trace(
             return Err(BridgeRpcError {
                 code: "NotInFleet".into(),
                 message: "Frigate and destroyer Abyssal traces can be activated only by fleet members".into(),
+                client_error: None,
             });
         };
         if let Some(bound_fid) = trace.fleet_id {
@@ -407,12 +424,14 @@ async fn activate_trace(
                 return Err(BridgeRpcError {
                     code: "AccessDenied".into(),
                     message: "Caller is not in the fleet that opened this Abyssal trace".into(),
+                    client_error: None,
                 });
             }
         } else if char_id != trace.char_id && !is_in_trace_fleet(ctx, char_id, trace.char_id) {
             return Err(BridgeRpcError {
                 code: "AccessDenied".into(),
                 message: "Caller is neither the trace owner nor in the owner's fleet".into(),
+                client_error: None,
             });
         }
     }
@@ -437,6 +456,7 @@ async fn activate_trace(
                 return Err(BridgeRpcError {
                     code: "TraceAlreadyEntered".into(),
                     message: "Pilot has already entered this Abyssal entrance trace".into(),
+                    client_error: None,
                 });
             }
             if t.entered_char_ids.len() >= eff_cap as usize {
@@ -445,6 +465,7 @@ async fn activate_trace(
                     message: format!(
                         "Abyssal trace ship limit ({eff_cap}) reached for this hull class"
                     ),
+                    client_error: None,
                 });
             }
             t.entered_char_ids.push(char_id);
@@ -466,6 +487,7 @@ async fn activate_trace(
             return Err(BridgeRpcError {
                 code: "SystemTransitionFailed".into(),
                 message: e.to_string(),
+                client_error: None,
             });
         }
     };
@@ -604,6 +626,7 @@ async fn activate_inventory_filament(
         .map_err(|e| BridgeRpcError {
             code: "SystemTransitionFailed".into(),
             message: e.to_string(),
+            client_error: None,
         })?;
 
     let now_unix = ctx.now_unix();

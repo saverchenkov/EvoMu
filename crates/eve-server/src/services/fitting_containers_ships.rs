@@ -516,12 +516,14 @@ pub(crate) fn check_item_lock_impound_asset_safety_in_snap(
             return Err(BridgeRpcError {
                 code: "ImpoundedItem".into(),
                 message: format!("Item {} is impounded and cannot be moved until impound fees are paid", rec.item_id),
+                client_error: None,
             });
         }
         if rec.flag as u16 == 36 || rec.type_id == 60 || in_active_wrap(rec.item_id, rec.location_id) {
             return Err(BridgeRpcError {
                 code: "AssetSafetyLocked".into(),
                 message: format!("Item {} is sealed in Asset Safety until retrieval fees are paid", rec.item_id),
+                client_error: None,
             });
         }
         if rec.flag == InventoryFlag::Locked
@@ -531,6 +533,7 @@ pub(crate) fn check_item_lock_impound_asset_safety_in_snap(
             return Err(BridgeRpcError {
                 code: "ItemLocked".into(),
                 message: format!("Item {} is locked by contract, job, or corporation lockdown", rec.item_id),
+                client_error: None,
             });
         }
         Ok(())
@@ -559,24 +562,27 @@ pub(crate) fn validate_container_and_bay_move(
     requested_qty: Option<i64>,
 ) -> Result<(), BridgeRpcError> {
     if item_id == new_loc {
-        return Err(BridgeRpcError { code: "UserError".into(), message: "CannotStoreShipInItself".into() });
+        return Err(BridgeRpcError { code: "UserError".into(), message: "CannotStoreShipInItself".into(), client_error: None });
     }
     if flag_u16 == 72 {
         return Err(BridgeRpcError {
             code: "ImpoundedItem".into(),
             message: "Cannot move items into Impounded flag".into(),
+            client_error: None,
         });
     }
     if flag_u16 == 36 {
         return Err(BridgeRpcError {
             code: "AssetSafetyLocked".into(),
             message: "Cannot move items into Asset Safety flag".into(),
+            client_error: None,
         });
     }
     if flag_u16 == 63 {
         return Err(BridgeRpcError {
             code: "ItemLocked".into(),
             message: "Cannot move items into Locked flag".into(),
+            client_error: None,
         });
     }
     ctx.db.with_snapshot(|snap| {
@@ -595,6 +601,7 @@ pub(crate) fn validate_container_and_bay_move(
         return Err(BridgeRpcError {
             code: "ALSCItemLocked".into(),
             message: format!("Item {item_id} is locked in an Audit Log Secure Container"),
+            client_error: None,
         });
     }
 
@@ -626,7 +633,7 @@ pub(crate) fn validate_container_and_bay_move(
         }
         if src_grp == crate::services::mobile_deployables::GROUP_MOBILE_DEPOT {
             if src_cont_owner != char_id {
-                return Err(BridgeRpcError { code: "OwnershipViolation".into(), message: "Only the owner may take items from this Mobile Depot".into() });
+                return Err(BridgeRpcError { code: "OwnershipViolation".into(), message: "Only the owner may take items from this Mobile Depot".into(), client_error: None });
             }
         }
         let mut st = read_container_ship_state(ctx);
@@ -640,6 +647,7 @@ pub(crate) fn validate_container_and_bay_move(
                     return Err(BridgeRpcError {
                         code: "ALSCPasswordNeededToOpen".into(),
                         message: format!("Password required to take items from secure container {src_loc}"),
+                        client_error: None,
                     });
                 }
                 st.unlocked_containers.insert((src_loc, char_id));
@@ -670,6 +678,7 @@ pub(crate) fn validate_container_and_bay_move(
                         "Corporation container take role denied for division {}",
                         div_idx + 1
                     ),
+                    client_error: None,
                 });
             }
         }
@@ -680,7 +689,7 @@ pub(crate) fn validate_container_and_bay_move(
             return Ok(None);
         };
         if moving_item.flag == InventoryFlag::Locked || snap.is_item_locked_in_contract_or_job(item_id) {
-            return Err(BridgeRpcError { code: "ItemLocked".into(), message: format!("Item {item_id} is locked by contract or job") });
+            return Err(BridgeRpcError { code: "ItemLocked".into(), message: format!("Item {item_id} is locked by contract or job"), client_error: None });
         }
         let moving_type = ctx.sde.types.get(&moving_item.type_id);
         let moving_grp = moving_type.map(|t| t.group_id).unwrap_or(0);
@@ -713,12 +722,14 @@ pub(crate) fn validate_container_and_bay_move(
             return Err(BridgeRpcError {
                 code: "CapacityExceeded".into(),
                 message: "Assembled Station Containers cannot be loaded into a ship".into(),
+                client_error: None,
             });
         }
         if matches!(dest_type.group_id, 513 | 902) && dest_type.category_id == 6 && moving_item.singleton && is_container_group(moving_grp, moving_item.type_id) && moving_grp != 649 {
             return Err(BridgeRpcError {
                 code: "OnlyFreightContainersAllowedInFreighters".into(),
                 message: "Freight containers are the only containers allowed assembled in freighter holds".into(),
+                client_error: None,
             });
         }
 
@@ -728,22 +739,24 @@ pub(crate) fn validate_container_and_bay_move(
                 return Err(BridgeRpcError::user_error("CannotPutItemsInCrabBeacon"));
             }
             if dest_type.group_id == 1247 {
-                return Err(BridgeRpcError { code: "CannotAddToSiphon".into(), message: "Items cannot be placed into a Mobile Siphon Unit".into() });
+                return Err(BridgeRpcError { code: "CannotAddToSiphon".into(), message: "Items cannot be placed into a Mobile Siphon Unit".into(), client_error: None });
             }
             if dest_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_DEPOT {
                 if dest_item.owner_id != char_id {
-                    return Err(BridgeRpcError { code: "OwnershipViolation".into(), message: "Only the owner may store items in this Mobile Depot".into() });
+                    return Err(BridgeRpcError { code: "OwnershipViolation".into(), message: "Only the owner may store items in this Mobile Depot".into(), client_error: None });
                 }
             } else if !dest_item.singleton {
                 return Err(BridgeRpcError {
                     code: "ContainerNotAssembled".into(),
                     message: format!("Target container {new_loc} must be assembled before storing items"),
+                    client_error: None,
                 });
             }
             if is_container_group(moving_grp, moving_item.type_id) {
                 return Err(BridgeRpcError {
                     code: "CannotPutContainerInContainer".into(),
                     message: "Cannot place a container inside another container".into(),
+                    client_error: None,
                 });
             }
             let cap = dest_item
@@ -766,6 +779,7 @@ pub(crate) fn validate_container_and_bay_move(
                 return Err(BridgeRpcError {
                     code: "CapacityExceeded".into(),
                     message: format!("Container {} has no storage capacity", dest_type.name),
+                    client_error: None,
                 });
             }
             let used: f64 = snap
@@ -780,6 +794,7 @@ pub(crate) fn validate_container_and_bay_move(
                     message: format!(
                         "Container capacity of {cap} m³ exceeded (used {used:.1} m³, adding {moving_total_vol:.1} m³)"
                     ),
+                    client_error: None,
                 });
             }
             return Ok(Some((dest_type.group_id, moving_item.type_id, moving_item.quantity)));
@@ -796,18 +811,21 @@ pub(crate) fn validate_container_and_bay_move(
                 return Err(BridgeRpcError {
                     code: "NoShipMaintenanceBay".into(),
                     message: format!("Ship {} does not have a Ship Maintenance Bay", dest_type.name),
+                    client_error: None,
                 });
             }
             if moving_cat != 6 {
                 return Err(BridgeRpcError {
                     code: "CannotStoreCargoInSMA".into(),
                     message: "Only ships can be stored in a Ship Maintenance Bay".into(),
+                    client_error: None,
                 });
             }
             if !moving_item.singleton {
                 return Err(BridgeRpcError {
                     code: "OnlyAssembledShipsInSMA".into(),
                     message: "Only assembled ships can be stored in a Ship Maintenance Bay".into(),
+                    client_error: None,
                 });
             }
             // Reject storing ship if it contains non-charge cargo (`category_id != 8` in cargo/holds)
@@ -826,6 +844,7 @@ pub(crate) fn validate_container_and_bay_move(
                 return Err(BridgeRpcError {
                     code: "ShipHasNonChargeCargo".into(),
                     message: "Cannot store ship in Ship Maintenance Bay while it carries cargo other than charges/ammo".into(),
+                    client_error: None,
                 });
             }
             let used_sma: f64 = snap
@@ -839,6 +858,7 @@ pub(crate) fn validate_container_and_bay_move(
                 return Err(BridgeRpcError {
                     code: "CapacityExceeded".into(),
                     message: format!("Ship Maintenance Bay capacity {sma_cap} m³ exceeded"),
+                    client_error: None,
                 });
             }
             let supplied_pw = kwargs.get("password").and_then(|v| v.as_str());
@@ -846,6 +866,7 @@ pub(crate) fn validate_container_and_bay_move(
                 return Err(BridgeRpcError {
                     code: "SMAAccessDenied".into(),
                     message: "Ship Maintenance Bay access denied by ship configuration or password".into(),
+                    client_error: None,
                 });
             }
         }
@@ -861,6 +882,7 @@ pub(crate) fn validate_container_and_bay_move(
                 return Err(BridgeRpcError {
                     code: "NoFleetHangar".into(),
                     message: format!("Ship {} does not have a Fleet Hangar", dest_type.name),
+                    client_error: None,
                 });
             }
             let used_fh: f64 = snap
@@ -873,6 +895,7 @@ pub(crate) fn validate_container_and_bay_move(
                 return Err(BridgeRpcError {
                     code: "CapacityExceeded".into(),
                     message: format!("Fleet Hangar capacity {fh_cap} m³ exceeded"),
+                    client_error: None,
                 });
             }
             let supplied_pw = kwargs.get("password").and_then(|v| v.as_str());
@@ -880,6 +903,7 @@ pub(crate) fn validate_container_and_bay_move(
                 return Err(BridgeRpcError {
                     code: "FleetHangarAccessDenied".into(),
                     message: "Fleet Hangar access denied by ship configuration or password".into(),
+                    client_error: None,
                 });
             }
         }
@@ -909,7 +933,7 @@ pub(crate) fn validate_container_and_bay_move(
                 if provided != req_pw {
                     st.alsc_logs.entry(new_loc).or_default().push(AlscLogEntry { timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionPasswordFailure".into(), item_id: new_loc, item_type_id: tid, quantity: 1 });
                     save_container_ship_state(ctx, &st);
-                    return Err(BridgeRpcError { code: "ALSCPasswordNeededToOpen".into(), message: format!("Password required to access secure container {new_loc}") });
+                    return Err(BridgeRpcError { code: "ALSCPasswordNeededToOpen".into(), message: format!("Password required to access secure container {new_loc}"), client_error: None });
                 }
                 st.alsc_logs.entry(new_loc).or_default().push(AlscLogEntry { timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionPasswordSuccess".into(), item_id: new_loc, item_type_id: tid, quantity: 1 });
                 st.unlocked_containers.insert((new_loc, char_id));
@@ -930,12 +954,13 @@ pub async fn validate_single_item_can_be_opened(
     item_id: i64,
 ) -> Result<(), BridgeRpcError> {
     if item_id <= 0 {
-        return Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Valid itemID required".into() });
+        return Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Valid itemID required".into(), client_error: None });
     }
     let (item_type_id, owner_id, location_id, singleton) = ctx.db.with_snapshot(|snap| {
         let it = snap.items.get(&item_id).ok_or_else(|| BridgeRpcError {
             code: "ItemNotFound".into(),
             message: format!("Container item {item_id} not found"),
+            client_error: None,
         })?;
         Ok::<_, BridgeRpcError>((it.type_id, it.owner_id, it.location_id, it.singleton))
     })?;
@@ -943,6 +968,7 @@ pub async fn validate_single_item_can_be_opened(
         return Err(BridgeRpcError {
             code: "CantOpenPackagedItem".into(),
             message: format!("Item {item_id} is packaged and cannot be opened. Assemble it first."),
+            client_error: None,
         });
     }
     let grp = ctx.sde.types.get(&item_type_id).map(|t| t.group_id).unwrap_or(0);
@@ -951,6 +977,7 @@ pub async fn validate_single_item_can_be_opened(
         return Err(BridgeRpcError {
             code: "NotAContainer".into(),
             message: format!("Item {item_id} (type {item_type_id}) is not a container"),
+            client_error: None,
         });
     }
     if grp == crate::services::mobile_deployables::GROUP_CRAB_BEACON {
@@ -959,6 +986,7 @@ pub async fn validate_single_item_can_be_opened(
         return Err(BridgeRpcError {
             code: "OwnershipViolation".into(),
             message: "Only the owner may access this structure's inventory".into(),
+            client_error: None,
         });
     }
     if grp == 1246 {
@@ -972,6 +1000,7 @@ pub async fn validate_single_item_can_be_opened(
         return Err(BridgeRpcError {
             code: "ContainerIsLocked".into(),
             message: format!("Container {item_id} is password-locked. Enter password to unlock."),
+            client_error: None,
         });
     }
     Ok(())
@@ -993,7 +1022,7 @@ fn handle_alsc_lock_unlock(
         .or_else(|| bound_entry.map(|b| b.object_id))
         .unwrap_or(0);
     if container_id <= 0 {
-        return Err(BridgeRpcError { code: "InvalidContainer".into(), message: "Valid containerID required for ALSC lock/unlock".into() });
+        return Err(BridgeRpcError { code: "InvalidContainer".into(), message: "Valid containerID required for ALSC lock/unlock".into(), client_error: None });
     }
     let item_ids: Vec<i64> = match args.get(1).or_else(|| args.first()) {
         Some(PyRep::List(v) | PyRep::Tuple(v)) => v.iter().filter_map(|x| x.as_i64()).collect(),
@@ -1011,7 +1040,7 @@ fn handle_alsc_lock_unlock(
         );
     }
     ctx.db.with_snapshot(|snap| {
-        let cont = snap.items.get(&container_id).ok_or_else(|| BridgeRpcError { code: "ContainerNotFound".into(), message: format!("Container {container_id} not found") })?;
+        let cont = snap.items.get(&container_id).ok_or_else(|| BridgeRpcError { code: "ContainerNotFound".into(), message: format!("Container {container_id} not found"), client_error: None })?;
         let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
         let ch_loc = snap.characters.get(&char_id).and_then(|c| c.station_id.or(c.structure_id).or(Some(c.solar_system_id as i64))).unwrap_or(0);
         let ch_ship = snap.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0);
@@ -1035,7 +1064,7 @@ fn handle_alsc_lock_unlock(
             root_flag = parent.flag;
         }
         if cont.location_id != ch_loc && cont.location_id != ch_ship && root_loc != ch_loc {
-            return Err(BridgeRpcError { code: "ColocationRequired".into(), message: format!("Must be co-located with container {container_id} to lock/unlock items") });
+            return Err(BridgeRpcError { code: "ColocationRequired".into(), message: format!("Must be co-located with container {container_id} to lock/unlock items"), client_error: None });
         }
         let is_authorized = if cont.owner_id == char_id {
             true
@@ -1061,12 +1090,12 @@ fn handle_alsc_lock_unlock(
             false
         };
         if !is_authorized {
-            return Err(BridgeRpcError { code: "ALSCAccessDenied".into(), message: format!("Not authorized to lock/unlock items in container {container_id}") });
+            return Err(BridgeRpcError { code: "ALSCAccessDenied".into(), message: format!("Not authorized to lock/unlock items in container {container_id}"), client_error: None });
         }
         for &iid in &item_ids {
-            let it = snap.items.get(&iid).ok_or_else(|| BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {iid} not found") })?;
+            let it = snap.items.get(&iid).ok_or_else(|| BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {iid} not found"), client_error: None })?;
             if it.location_id != container_id {
-                return Err(BridgeRpcError { code: "ItemNotInContainer".into(), message: format!("Item {iid} is not located inside container {container_id}") });
+                return Err(BridgeRpcError { code: "ItemNotInContainer".into(), message: format!("Item {iid} is not located inside container {container_id}"), client_error: None });
             }
         }
         Ok(())
@@ -1082,7 +1111,7 @@ fn handle_alsc_lock_unlock(
             if provided != req_pw {
                 st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry { timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionPasswordFailure".into(), item_id: container_id, item_type_id: tid, quantity: 1 });
                 save_container_ship_state(ctx, &st);
-                return Err(BridgeRpcError { code: if is_lock { "ALSCPasswordNeededToLock".into() } else { "ALSCPasswordNeededToUnlock".into() }, message: "Container password required".into() });
+                return Err(BridgeRpcError { code: if is_lock { "ALSCPasswordNeededToLock".into() } else { "ALSCPasswordNeededToUnlock".into() }, message: "Container password required".into(), client_error: None });
             }
             st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry { timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionPasswordSuccess".into(), item_id: container_id, item_type_id: tid, quantity: 1 });
             st.unlocked_containers.insert((container_id, char_id));
@@ -1146,7 +1175,7 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                 _ => Vec::new(),
             };
             if item_ids.is_empty() {
-                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "ValidateItemListCanBeOpened requires a list of itemIDs".into() }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "ValidateItemListCanBeOpened requires a list of itemIDs".into(), client_error: None }));
             }
             for &id in &item_ids {
                 if let Err(e) = validate_single_item_can_be_opened(ctx, char_id, id).await {
@@ -1159,29 +1188,29 @@ pub(crate) async fn handle_containers_ships_and_fitting(
         ("invbroker", "AssembleCargoContainer") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(item_id) = args.first().and_then(|a| a.as_i64()).or_else(|| bound_entry.map(|b| b.object_id)) else {
-                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "AssembleCargoContainer requires container itemID".into() }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "AssembleCargoContainer requires container itemID".into(), client_error: None }));
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(item) = snap.items.get(&item_id).cloned() else {
-                    return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Container {item_id} not found") });
+                    return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Container {item_id} not found"), client_error: None });
                 };
                 let corp_id = session.corporation_id.unwrap_or(0);
                 if item.owner_id != char_id {
                     let is_ceo = snap.corporations.get(&corp_id).map(|c| c.ceo_id == char_id).unwrap_or(false);
                     if corp_id == 0 || item.owner_id != corp_id {
-                        return Err(BridgeRpcError { code: "OwnershipViolation".into(), message: format!("Container {item_id} is not owned by {char_id}") });
+                        return Err(BridgeRpcError { code: "OwnershipViolation".into(), message: format!("Container {item_id} is not owned by {char_id}"), client_error: None });
                     }
                     if session.corp_role == 0 && !is_ceo {
-                        return Err(BridgeRpcError { code: "CorpRoleRequired".into(), message: "Corporation role required to assemble corp container".into() });
+                        return Err(BridgeRpcError { code: "CorpRoleRequired".into(), message: "Corporation role required to assemble corp container".into(), client_error: None });
                     }
                 }
                 let caller_loc = session.station_id.or(session.structure_id).or_else(|| session.solar_system_id.map(i64::from));
                 if Some(item.location_id) != caller_loc && session.ship_id != Some(item.location_id) {
-                    return Err(BridgeRpcError { code: "ColocationRequired".into(), message: "Character must be colocated with container to assemble it".into() });
+                    return Err(BridgeRpcError { code: "ColocationRequired".into(), message: "Character must be colocated with container to assemble it".into(), client_error: None });
                 }
                 let grp = ctx.sde.types.get(&item.type_id).map(|t| t.group_id).unwrap_or(0);
                 if !is_container_group(grp, item.type_id) {
-                    return Err(BridgeRpcError { code: "NotAContainer".into(), message: format!("Item {item_id} (group {grp}) is not a cargo container") });
+                    return Err(BridgeRpcError { code: "NotAContainer".into(), message: format!("Item {item_id} (group {grp}) is not a cargo container"), client_error: None });
                 }
                 if !item.singleton && item.quantity > 1 {
                     if let Some(orig) = snap.items.get_mut(&item_id) {
@@ -1278,7 +1307,7 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                 }
             });
             if !auth_ok {
-                return Some(Err(BridgeRpcError { code: "ALSCAccessDenied".into(), message: format!("Not authorized to view audit log for container {container_id}") }));
+                return Some(Err(BridgeRpcError { code: "ALSCAccessDenied".into(), message: format!("Not authorized to view audit log for container {container_id}"), client_error: None }));
             }
             let mut st = read_container_ship_state(ctx);
             let cfg = st.container_configs.get(&container_id).cloned().unwrap_or_default();
@@ -1291,7 +1320,7 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                     if provided != req_pw {
                         st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry { timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionPasswordFailure".into(), item_id: container_id, item_type_id: tid, quantity: 1 });
                         save_container_ship_state(ctx, &st);
-                        return Some(Err(BridgeRpcError { code: "ALSCPasswordNeededToViewAuditLog".into(), message: "Container password required to view audit log".into() }));
+                        return Some(Err(BridgeRpcError { code: "ALSCPasswordNeededToViewAuditLog".into(), message: "Container password required to view audit log".into(), client_error: None }));
                     }
                     st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry { timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionPasswordSuccess".into(), item_id: container_id, item_type_id: tid, quantity: 1 });
                     st.unlocked_containers.insert((container_id, char_id));
@@ -1406,10 +1435,10 @@ pub(crate) async fn handle_containers_ships_and_fitting(
             let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(wrap) = snap.items.get(&wrap_id).cloned() else {
-                    return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Plastic Wrap {wrap_id} not found") });
+                    return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Plastic Wrap {wrap_id} not found"), client_error: None });
                 };
                 if wrap.type_id != 3468 {
-                    return Err(BridgeRpcError { code: "InvalidPlasticWrap".into(), message: format!("Item {wrap_id} is not a Plastic Wrap") });
+                    return Err(BridgeRpcError { code: "InvalidPlasticWrap".into(), message: format!("Item {wrap_id} is not a Plastic Wrap"), client_error: None });
                 }
                 let ch_opt = snap.characters.get(&char_id);
                 let eff_dock = sess_dock.or_else(|| if sess_ship.is_none() { ch_opt.and_then(|c| c.station_id.or(c.structure_id)) } else { None });
@@ -1425,6 +1454,7 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                     return Err(BridgeRpcError {
                         code: "ItemNotAtStation".into(),
                         message: format!("Plastic Wrap {wrap_id} is at {} which is not co-located with character {char_id}", wrap.location_id),
+                        client_error: None,
                     });
                 }
                 let has_courier = snap.contracts.values().any(|c| {
@@ -1439,7 +1469,7 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                     return Ok((Some((cid, issuer_id)), wrap.location_id, wrap.flag, changed));
                 }
                 if wrap.owner_id != char_id {
-                    return Err(BridgeRpcError { code: "NotItemOwner".into(), message: format!("Character {char_id} does not own Plastic Wrap {wrap_id}") });
+                    return Err(BridgeRpcError { code: "NotItemOwner".into(), message: format!("Character {char_id} does not own Plastic Wrap {wrap_id}"), client_error: None });
                 }
                 let parent_loc = wrap.location_id;
                 let parent_flag = wrap.flag;
@@ -1540,6 +1570,7 @@ pub(crate) async fn validate_ship_module_unfit_auth(
             return Err(BridgeRpcError {
                 code: "ItemOwnershipViolation".into(),
                 message: format!("Item {} is not owned by {char_id}", src_item.item_id),
+                client_error: None,
             });
         }
         if src_item.flag == InventoryFlag::Locked
@@ -1548,12 +1579,14 @@ pub(crate) async fn validate_ship_module_unfit_auth(
             return Err(BridgeRpcError {
                 code: "ItemLocked".into(),
                 message: format!("Item {} is locked and cannot be unfitted", src_item.item_id),
+                client_error: None,
             });
         }
         let Some(ship_item) = snap.items.get(&src_item.location_id) else {
             return Err(BridgeRpcError {
                 code: "ShipNotFound".into(),
                 message: format!("Source ship {} not found", src_item.location_id),
+                client_error: None,
             });
         };
         let ship_cat = ctx.sde.types.get(&ship_item.type_id).map(|t| t.category_id).unwrap_or(0);
@@ -1561,6 +1594,7 @@ pub(crate) async fn validate_ship_module_unfit_auth(
             return Err(BridgeRpcError {
                 code: "ShipOwnershipViolation".into(),
                 message: format!("Source {} is not a ship owned by {char_id}", src_item.location_id),
+                client_error: None,
             });
         }
         let (char_dock, char_sys, active_ship_id) = snap
@@ -1590,16 +1624,16 @@ pub(crate) async fn validate_ship_module_unfit_auth(
         if ch_dock > 0 {
             crate::services::structure_acl_defense_rules::validate_docked_ship_fitting_facility_in_snap(ctx, snap, ch_dock)?;
             if !resolves_to_loc(ship_item.location_id, ch_dock) {
-                return Err(BridgeRpcError { code: "InvalidFittingTarget".into(), message: format!("Ship {} is not docked at current location {ch_dock}", ship_item.item_id) });
+                return Err(BridgeRpcError { code: "InvalidFittingTarget".into(), message: format!("Ship {} is not docked at current location {ch_dock}", ship_item.item_id), client_error: None });
             }
             if new_loc != ship_item.item_id && !resolves_to_loc(new_loc, ch_dock) {
-                return Err(BridgeRpcError { code: "InvalidItemLocation".into(), message: format!("Destination {new_loc} is not at current dock {ch_dock}") });
+                return Err(BridgeRpcError { code: "InvalidItemLocation".into(), message: format!("Destination {new_loc} is not at current dock {ch_dock}"), client_error: None });
             }
             Ok(None)
         } else {
             let caller_ship = session.ship_id.filter(|&id| id > 0).unwrap_or(active_ship_id);
             if ship_item.item_id != caller_ship || (ch_sys > 0 && ship_item.location_id != ch_sys) {
-                return Err(BridgeRpcError { code: "InvalidFittingTarget".into(), message: format!("Pilot {char_id} must be aboard ship {} in system {ch_sys} to unfit in space", ship_item.item_id) });
+                return Err(BridgeRpcError { code: "InvalidFittingTarget".into(), message: format!("Pilot {char_id} must be aboard ship {} in system {ch_sys} to unfit in space", ship_item.item_id), client_error: None });
             }
             Ok(Some((session.solar_system_id.unwrap_or(ch_sys.max(0) as u32), caller_ship)))
         }
@@ -1607,10 +1641,10 @@ pub(crate) async fn validate_ship_module_unfit_auth(
     if let Some((sys_id, ship_id)) = in_space_ship {
         let now_unix = ctx.now_unix_secs();
         if ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner()).states.get(&char_id).is_some_and(|cw| cw.is_weapon_timer_active(now_unix)) {
-            return Err(BridgeRpcError { code: "CannotRefitWithWeaponsTimer".into(), message: "Cannot refit or unfit modules in space while weapons timer is active".into() });
+            return Err(BridgeRpcError { code: "CannotRefitWithWeaponsTimer".into(), message: "Cannot refit or unfit modules in space while weapons timer is active".into(), client_error: None });
         }
         if sys_id == 0 || !super::is_near_in_space_fitting_service(ctx, sys_id, ship_id).await {
-            return Err(BridgeRpcError { code: "CannotUnfitInSpace".into(), message: "Unfitting modules requires being docked at a station/structure or within range of a Mobile Depot or capital SMA".into() });
+            return Err(BridgeRpcError { code: "CannotUnfitInSpace".into(), message: "Unfitting modules requires being docked at a station/structure or within range of a Mobile Depot or capital SMA".into(), client_error: None });
         }
     }
     Ok(())

@@ -92,7 +92,7 @@ pub async fn handle(
                 check_referee_auth(session, caller_cid, m)?;
                 let is_locked = if which_team == 0 { m.member_list_locked_red } else { m.member_list_locked_blue };
                 if is_locked {
-                    return Err(BridgeRpcError { code: "MemberListLocked".into(), message: "Cannot modify roster while team member list is locked".into() });
+                    return Err(BridgeRpcError { code: "MemberListLocked".into(), message: "Cannot modify roster while team member list is locked".into(), client_error: None });
                 }
                 let pilot = resolve_pilot(ctx, snap, char_id);
                 if let Err(e) = validate_pilot_for_team(m, which_team, &pilot) {
@@ -120,7 +120,7 @@ pub async fn handle(
                     check_referee_auth(session, caller_cid, m)?;
                 }
                 if m.bans_finalized || !matches!(m.state, TourneyMatchState::Setup | TourneyMatchState::Banning) {
-                    return Err(BridgeRpcError { code: "TourneyBansFinalized".into(), message: "Cannot ban ships outside the Banning phase or after bans are finalized".into() });
+                    return Err(BridgeRpcError { code: "TourneyBansFinalized".into(), message: "Cannot ban ships outside the Banning phase or after bans are finalized".into(), client_error: None });
                 }
                 let team_slot: i64 = if is_blue_capt && !is_red_capt { 1 } else { 0 };
                 let team_bans = if team_slot == 1 {
@@ -139,6 +139,7 @@ pub async fn handle(
                         return Err(BridgeRpcError {
                             code: "TourneyBanLimitExceeded".into(),
                             message: format!("Team ban count exceeds allowed limit of {}", m.autoban_qty),
+                            client_error: None,
                         });
                     }
                 }
@@ -208,7 +209,7 @@ pub async fn handle(
                     check_referee_auth(session, caller_cid, m)?;
                 }
                 if m.bans_finalized || !matches!(m.state, TourneyMatchState::Setup | TourneyMatchState::Banning) {
-                    return Err(BridgeRpcError { code: "TourneyBansFinalized".into(), message: "Cannot ban ship types outside the Banning phase or after bans are finalized".into() });
+                    return Err(BridgeRpcError { code: "TourneyBansFinalized".into(), message: "Cannot ban ship types outside the Banning phase or after bans are finalized".into(), client_error: None });
                 }
                 let is_blue_capt = m.blue_fleet_boss_id == Some(caller_cid) && m.red_fleet_boss_id != Some(caller_cid);
                 let team_idx = if session.has_gm_role() || m.referees.contains(&caller_cid) {
@@ -226,6 +227,7 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "TourneyBanLimitExceeded".into(),
                         message: format!("Team ban count exceeds allowed limit of {}", m.autoban_qty),
+                        client_error: None,
                     });
                 }
                 if !team_bans.contains(&ship_type_id) { team_bans.push(ship_type_id); }
@@ -316,13 +318,13 @@ pub async fn handle(
                         if is_ship_type_banned(m, p.ship_type_id) {
                             let errs = m.pilot_errors.entry(p.character_id).or_default();
                             if !errs.iter().any(|e| e == "TourneyShipTypeBanned") { errs.push("TourneyShipTypeBanned".into()); }
-                            pregame_err.get_or_insert_with(|| BridgeRpcError { code: "TourneyShipTypeBanned".into(), message: format!("Ship type {} is banned in this tournament match", p.ship_type_id) });
+                            pregame_err.get_or_insert_with(|| BridgeRpcError { code: "TourneyShipTypeBanned".into(), message: format!("Ship type {} is banned in this tournament match", p.ship_type_id), client_error: None });
                         } else if m.max_points > 0 && team_pts > m.max_points {
                             let errs = m.pilot_errors.entry(p.character_id).or_default();
                             if !errs.iter().any(|e| e == "TourneyMaxPointsExceeded") { errs.push("TourneyMaxPointsExceeded".into()); }
-                            pregame_err.get_or_insert_with(|| BridgeRpcError { code: "TourneyMaxPointsExceeded".into(), message: format!("Team {team_idx} point total {team_pts} exceeds match max_points {}", m.max_points) });
+                            pregame_err.get_or_insert_with(|| BridgeRpcError { code: "TourneyMaxPointsExceeded".into(), message: format!("Team {team_idx} point total {team_pts} exceeds match max_points {}", m.max_points), client_error: None });
                         } else if let Some(code) = m.pilot_errors.get(&p.character_id).and_then(|v| v.first()).cloned() {
-                            pregame_err.get_or_insert_with(|| BridgeRpcError { code: code.clone(), message: format!("Pilot {} has unresolved pregame error: {code}", p.character_id) });
+                            pregame_err.get_or_insert_with(|| BridgeRpcError { code: code.clone(), message: format!("Pilot {} has unresolved pregame error: {code}", p.character_id), client_error: None });
                         }
                     }
                 }
@@ -338,7 +340,7 @@ pub async fn handle(
         ("tourneyMgr", "CreateMatch") => {
             let caller_cid = require_cid!(session);
             if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError { code: "AdminAccessDenied".into(), message: "Creating a tournament match requires GM administrator privileges".into() }));
+                return Some(Err(BridgeRpcError { code: "AdminAccessDenied".into(), message: "Creating a tournament match requires GM administrator privileges".into(), client_error: None }));
             }
             let tourney_id = extract_id(args, 0).unwrap_or(1);
             let (match_id, tup_red_team, tup_blue_team, tup_red_capt, tup_blue_capt) = match args.get(1) {
@@ -365,7 +367,7 @@ pub async fn handle(
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 if store.matches.contains_key(&match_id) {
-                    return Err(BridgeRpcError { code: "DuplicateMatchID".into(), message: format!("Match ID {match_id} already exists") });
+                    return Err(BridgeRpcError { code: "DuplicateMatchID".into(), message: format!("Match ID {match_id} already exists"), client_error: None });
                 }
                 let mut m = TourneyMatch::new(match_id, tourney_id, match_sys_id, max_points, match_time, overtime, external_ruleset_id);
                 (m.red_team_id, m.red_team_name) = resolve_team_name(snap, red_team, red_capt);
@@ -447,6 +449,7 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidTeamIndex".into(),
                         message: "Tournament team index must be 0 (Red) or 1 (Blue)".into(),
+                        client_error: None,
                     }));
                 };
 
@@ -461,6 +464,7 @@ pub async fn handle(
                         return Err(BridgeRpcError {
                             code: "AccessDenied".into(),
                             message: "Team captains may only modify their own team's roster".into(),
+                            client_error: None,
                         });
                     }
                     if !is_ref
@@ -474,6 +478,7 @@ pub async fn handle(
                         return Err(BridgeRpcError {
                             code: "MatchAlreadyStarted".into(),
                             message: "Cannot modify tournament roster during countdown or after match start".into(),
+                            client_error: None,
                         });
                     }
                     let is_locked = if which_team == 0 {
@@ -482,7 +487,7 @@ pub async fn handle(
                         m.member_list_locked_blue
                     };
                     if is_locked {
-                        return Err(BridgeRpcError { code: "MemberListLocked".into(), message: "Cannot modify roster while team member list is locked".into() });
+                        return Err(BridgeRpcError { code: "MemberListLocked".into(), message: "Cannot modify roster while team member list is locked".into(), client_error: None });
                     }
                     if char_id > 0 {
                         if is_add {
@@ -542,6 +547,7 @@ pub async fn handle(
                 let m_clone = store.resolve_match(target_mid).ok_or_else(|| BridgeRpcError {
                     code: "MatchNotFound".into(),
                     message: format!("Match ID {} not found", target_mid.unwrap_or_default()),
+                    client_error: None,
                 })?;
                 if !matches!(
                     m_clone.state,
@@ -597,6 +603,7 @@ pub async fn handle(
                 let m = store.resolve_match(target_mid).ok_or_else(|| BridgeRpcError {
                     code: "MatchNotFound".into(),
                     message: format!("Match ID {} not found", target_mid.unwrap_or_default()),
+                    client_error: None,
                 })?;
                 if !matches!(
                     m.state,
@@ -797,7 +804,7 @@ pub async fn handle(
                 let mut store = load_store(snap);
                 let m = store.resolve_match_mut(target_mid)?;
                 if !m.referees.contains(&caller_cid) {
-                    return Err(BridgeRpcError { code: "TourneyNotReferee".into(), message: "Caller is not in the match referee list".into() });
+                    return Err(BridgeRpcError { code: "TourneyNotReferee".into(), message: "Caller is not in the match referee list".into(), client_error: None });
                 }
                 m.referees.retain(|&r| r != caller_cid);
                 save_store(snap, &store, now_unix);
@@ -974,6 +981,7 @@ pub async fn handle(
                         return Err(BridgeRpcError {
                             code: "TourneyShipTypeBanned".into(),
                             message: format!("Ship type {} is banned in this tournament match", p.ship_type_id),
+                            client_error: None,
                         });
                     }
                 }
@@ -982,6 +990,7 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "TourneyMaxPointsExceeded".into(),
                         message: format!("Team point total {team_pts} exceeds match max_points {}", m.max_points),
+                        client_error: None,
                     });
                 }
                 if which_team == 0 { m.red_players.clone_from(&refreshed); } else { m.blue_players.clone_from(&refreshed); }
@@ -1165,6 +1174,7 @@ pub async fn handle(
                             return Err(BridgeRpcError {
                                 code: "TourneyShipTypeBanned".into(),
                                 message: format!("Ship type {} is banned in this tournament match", p.ship_type_id),
+                                client_error: None,
                             });
                         }
                     }
@@ -1173,6 +1183,7 @@ pub async fn handle(
                         return Err(BridgeRpcError {
                             code: "TourneyMaxPointsExceeded".into(),
                             message: format!("Team point total {pts} exceeds match max_points {}", m.max_points),
+                            client_error: None,
                         });
                     }
                 }
@@ -1217,7 +1228,7 @@ fn check_tourney_restriction(
                         TourneyRestriction::Move => (m.move_restrict, "MoveRestrictedInTourney", "Ship movement is restricted for tournament participants in arena"),
                     };
                     if restricted {
-                        return Err(BridgeRpcError { code: code.into(), message: msg.into() });
+                        return Err(BridgeRpcError { code: code.into(), message: msg.into(), client_error: None });
                     }
                 }
             }

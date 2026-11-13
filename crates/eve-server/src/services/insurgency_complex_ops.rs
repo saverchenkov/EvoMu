@@ -358,6 +358,7 @@ pub fn check_insurgency_laundering_access(
             return Err(BridgeRpcError {
                 code: "FactionNotAligned".into(),
                 message: "Only aligned Pirate Militia pilots may use a Pirate Laundering Facility".into(),
+                client_error: None,
             });
         }
         let valid_fob = ctx.db.with_snapshot(|snap| {
@@ -371,6 +372,7 @@ pub fn check_insurgency_laundering_access(
             return Err(BridgeRpcError {
                 code: "InvalidLaunderingLocation".into(),
                 message: "Pirate Laundering hand-ins require an active Pirate FOB system".into(),
+                client_error: None,
             });
         }
         return Ok(());
@@ -386,12 +388,14 @@ pub fn check_insurgency_laundering_access(
         return Err(BridgeRpcError {
             code: "InvalidWarHQLocation".into(),
             message: "Counter-Insurgency Outpost hand-ins must occur in the Empire War HQ system".into(),
+            client_error: None,
         });
     }
     if war_fac != Some(req_emp_fac) {
         return Err(BridgeRpcError {
             code: "FactionNotAligned".into(),
             message: "Only pilots enlisted in this War HQ's Empire Militia may hand in Insurgency Data Sequences".into(),
+            client_error: None,
         });
     }
     Ok(())
@@ -547,6 +551,7 @@ pub async fn activate_outpost_raid_gate_in_space(
         return Err(BridgeRpcError {
             code: "GateNotFound".into(),
             message: format!("Outpost raid gate {gate_id} is not active in system {sys_id}"),
+            client_error: None,
         });
     };
     let Some(fac) = war_fac
@@ -555,12 +560,14 @@ pub async fn activate_outpost_raid_gate_in_space(
         return Err(BridgeRpcError {
             code: "NotEnlistedInMilitia".into(),
             message: "Only Pirate or warzone-opposing Empire Militia pilots can enter this Corporate Outpost Raid".into(),
+            client_error: None,
         });
     };
     if has_wcs {
         return Err(BridgeRpcError {
             code: "WarpCoreStabilizerRestricted".into(),
             message: "Ships fitted with Warp Core Stabilizers cannot enter Insurgency Outpost Raid complexes".into(),
+            client_error: None,
         });
     }
     let ship_grp = ctx.sde.types.get(&ship_type_id).map(|t| t.group_id).unwrap_or(0);
@@ -568,6 +575,7 @@ pub async fn activate_outpost_raid_gate_in_space(
         return Err(BridgeRpcError {
             code: "ShipRestrictedForComplex".into(),
             message: format!("Ship type {ship_type_id} is restricted from {:?} Corporate Outpost Raid", raid.size),
+            client_error: None,
         });
     }
 
@@ -586,6 +594,7 @@ pub async fn activate_outpost_raid_gate_in_space(
         return Err(BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: "Active ship ball not found in space".into(),
+            client_error: None,
         });
     };
     crate::services::fw_gameplay::check_gate_tackle_and_nav_locks(ctx, &sys_handle, ship_id, &sb).await?;
@@ -600,6 +609,7 @@ pub async fn activate_outpost_raid_gate_in_space(
         return Err(BridgeRpcError {
             code: "TooFarFromGate".into(),
             message: format!("Ship is {surface_dist:.0} m from acceleration gate (max 2500 m)"),
+            client_error: None,
         });
     }
 

@@ -30,6 +30,7 @@ async fn handle_send_broadcast(
             return Some(Err(BridgeRpcError {
                 code: "NotInFleet".into(),
                 message: "Character is not in a fleet".into(),
+                client_error: None,
             }))
         }
     };
@@ -51,16 +52,19 @@ async fn handle_send_broadcast(
         return Some(Err(BridgeRpcError {
             code: "NotInSolarSystem".into(),
             message: "Fleet broadcasts require a session solar system".into(),
+            client_error: None,
         }));
     };
     let (sender_record, members_raw) = match ctx.db.with_snapshot(|snap| {
         let fleet = snap.fleets.get(&fleet_id).ok_or_else(|| BridgeRpcError {
             code: "FleetNotFound".into(),
             message: format!("Fleet {fleet_id} not found"),
+            client_error: None,
         })?;
         let sender = fleet.member_details.get(&char_id).ok_or_else(|| BridgeRpcError {
             code: "NotInFleet".into(),
             message: "Caller is not in fleet".into(),
+            client_error: None,
         })?;
 
         let is_authorized = fleet.boss_id == char_id
@@ -85,6 +89,7 @@ async fn handle_send_broadcast(
             return Err(BridgeRpcError {
                 code: "CannotBroadcastInFleet".into(),
                 message: "Only fleet commanders and authorized pilots can broadcast in fleet".into(),
+                client_error: None,
             });
         }
 
@@ -118,6 +123,7 @@ async fn handle_send_broadcast(
                 return Some(Err(BridgeRpcError {
                     code: "BroadcastSpamCooldown".into(),
                     message: "Broadcast spam cooldown is active (2s)".into(),
+                    client_error: None,
                 }));
             }
         }
@@ -252,6 +258,7 @@ pub(super) async fn handle_fleet_ops(
                     return Some(Err(BridgeRpcError {
                         code: "NotInFleet".into(),
                         message: "Character is not in a fleet".into(),
+                        client_error: None,
                     }))
                 }
             };
@@ -259,6 +266,7 @@ pub(super) async fn handle_fleet_ops(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "WarpToMember requires target characterID".into(),
+                    client_error: None,
                 }));
             };
             let min_range = args
@@ -273,20 +281,23 @@ pub(super) async fn handle_fleet_ops(
                     return Err(BridgeRpcError {
                         code: "FleetNotFound".into(),
                         message: format!("Fleet {fleet_id} not found"),
+                        client_error: None,
                     });
                 };
                 if !fleet.member_details.contains_key(&char_id) {
-                    return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into() });
+                    return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into(), client_error: None });
                 }
                 if !fleet.member_details.contains_key(&target_char_id) {
                     return Err(BridgeRpcError {
                         code: "MemberNotFound".into(),
                         message: format!("Character {target_char_id} is not in fleet {fleet_id}"),
+                        client_error: None,
                     });
                 }
                 let caller = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
                     code: "CharacterNotFound".into(),
                     message: "Caller character not found".into(),
+                    client_error: None,
                 })?;
                 let target = snap
                     .characters
@@ -294,11 +305,13 @@ pub(super) async fn handle_fleet_ops(
                     .ok_or_else(|| BridgeRpcError {
                         code: "CharacterNotFound".into(),
                         message: "Target character not found".into(),
+                        client_error: None,
                     })?;
                 if caller.solar_system_id != target.solar_system_id {
                     return Err(BridgeRpcError {
                         code: "DifferentSolarSystem".into(),
                         message: "Cannot warp to a fleet member in another solar system".into(),
+                        client_error: None,
                     });
                 }
                 Ok((
@@ -315,6 +328,7 @@ pub(super) async fn handle_fleet_ops(
                 return Some(Err(BridgeRpcError {
                     code: "CannotWarpInAbyssalSpace".into(),
                     message: "Bookmarks and warp navigation are disabled inside Abyssal Deadspace".into(),
+                    client_error: None,
                 }));
             }
             let sys = ctx.systems.get_or_spawn(sys_id);
@@ -323,6 +337,7 @@ pub(super) async fn handle_fleet_ops(
                 return Some(Err(BridgeRpcError {
                     code: "TargetNotInSpace".into(),
                     message: "Target fleet member is not in space".into(),
+                    client_error: None,
                 }));
             };
             let Some((_, caller_ball)) = sys.get_ball_snapshot(caller_ship_id).await.ok().flatten()
@@ -330,6 +345,7 @@ pub(super) async fn handle_fleet_ops(
                 return Some(Err(BridgeRpcError {
                     code: "ShipNotInSpace".into(),
                     message: "Caller ship is not in space".into(),
+                    client_error: None,
                 }));
             };
             if let Err(e) = crate::services::tactical_modules::check_ship_navigation_lock(ctx, caller_ship_id, "warp") {
@@ -342,6 +358,7 @@ pub(super) async fn handle_fleet_ops(
                 return Some(Err(BridgeRpcError {
                     code: "WarpScrambled".into(),
                     message: "Cannot warp to fleet member while warp scrambled or immobilized".into(),
+                    client_error: None,
                 }));
             }
             let dist = caller_ball.position.distance(target_ball.position);
@@ -349,6 +366,7 @@ pub(super) async fn handle_fleet_ops(
                 return Some(Err(BridgeRpcError {
                     code: "WarpDistanceTooClose".into(),
                     message: format!("Fleet member is within minimum warp distance ({dist:.0} m)"),
+                    client_error: None,
                 }));
             }
             let dir = (target_ball.position - caller_ball.position).normalize_or_zero();
@@ -400,6 +418,7 @@ pub(super) async fn handle_fleet_ops(
                     return Some(Err(BridgeRpcError {
                         code: "NotInFleet".into(),
                         message: "Character is not in a fleet".into(),
+                        client_error: None,
                     }))
                 }
             };
@@ -431,7 +450,7 @@ pub(super) async fn handle_fleet_ops(
                 Err(e) => return Some(Err(e)),
             };
             let Some(fleet_id) = session.fleet_id else {
-                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into(), client_error: None }));
             };
             match crate::domain::fleets::get_fleet_settings(ctx, fleet_id, Some(char_id)) {
                 Ok(view) => Some(Ok(PyRep::String(view.motd))),
@@ -448,7 +467,7 @@ pub(super) async fn handle_fleet_ops(
                 Err(e) => return Some(Err(e)),
             };
             let Some(fleet_id) = session.fleet_id else {
-                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into(), client_error: None }));
             };
             let kv_bool = |key: &str| -> Option<bool> {
                 if let Some(PyRep::KeyVal(entries)) = args.first() {
@@ -514,10 +533,10 @@ pub(super) async fn handle_fleet_ops(
             let squad_id = args.first().and_then(|a| a.as_i64());
             let res = ctx.db.with_snapshot(|snap| {
                 let Some(fleet) = snap.fleets.get(&fleet_id) else {
-                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
+                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found"), client_error: None });
                 };
                 if fleet.boss_id != char_id {
-                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Only Fleet Boss can set auto-join squad".into() });
+                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Only Fleet Boss can set auto-join squad".into(), client_error: None });
                 }
                 Ok((fleet.free_move, fleet.is_registered))
             });
@@ -541,10 +560,10 @@ pub(super) async fn handle_fleet_ops(
             let max_size = args.first().and_then(|a| a.as_i64()).unwrap_or(256).clamp(1, 256) as u16;
             let res = ctx.db.with_snapshot(|snap| {
                 let Some(fleet) = snap.fleets.get(&fleet_id) else {
-                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
+                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found"), client_error: None });
                 };
                 if fleet.boss_id != char_id {
-                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Only Fleet Boss can change fleet max size".into() });
+                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Only Fleet Boss can change fleet max size".into(), client_error: None });
                 }
                 Ok(())
             });
@@ -563,11 +582,11 @@ pub(super) async fn handle_fleet_ops(
                 Err(e) => return Some(Err(e)),
             };
             let Some(fleet_id) = session.fleet_id else {
-                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into(), client_error: None }));
             };
             if !ctx.db.with_snapshot(|snap| snap.fleets.get(&fleet_id).is_some_and(|f| f.member_details.contains_key(&char_id))) {
                 session.fleet_id = None;
-                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not a member of this fleet".into() }));
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not a member of this fleet".into(), client_error: None }));
             }
             let max_size = ctx.fleet_extras.lock().unwrap().max_sizes.get(&fleet_id).copied().unwrap_or(256);
             Some(Ok(PyRep::Integer(max_size as i64)))
@@ -599,6 +618,7 @@ pub(super) async fn handle_fleet_ops(
                     return Some(Err(BridgeRpcError {
                         code: "NotInFleet".into(),
                         message: "Character is not in a fleet".into(),
+                        client_error: None,
                     }))
                 }
             };
@@ -623,6 +643,7 @@ pub(super) async fn handle_fleet_ops(
                 return Some(Err(BridgeRpcError {
                     code: "FleetRoleDenied".into(),
                     message: "Only fleet commanders can view fleet composition".into(),
+                    client_error: None,
                 }));
             }
             let members_info = ctx.db.with_snapshot(|snap| {
@@ -762,24 +783,25 @@ pub(super) async fn handle_fleet_ops(
             // parity: feat:fleet.member-movement-optins
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(fleet_id) = session.fleet_id else {
-                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into(), client_error: None }));
             };
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solar system".into(),
+                    client_error: None,
                 }));
             };
             let caller_ship_id = session.ship_id.unwrap_or(0);
             let res = ctx.db.with_snapshot(|snap| {
                 let Some(fleet) = snap.fleets.get(&fleet_id) else {
-                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
+                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found"), client_error: None });
                 };
                 let Some(caller_m) = fleet.member_details.get(&char_id) else {
-                    return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller not in fleet".into() });
+                    return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller not in fleet".into(), client_error: None });
                 };
                 if fleet.boss_id != char_id && role_to_i64(caller_m.role) > 3 {
-                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Only Fleet Commanders can issue Regroup".into() });
+                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Only Fleet Commanders can issue Regroup".into(), client_error: None });
                 }
                 crate::services::structure_control_ops::reject_if_controlling_structure(ctx, caller_ship_id, "issue fleet regroup")?;
                 let mut candidates = Vec::new();
@@ -851,6 +873,7 @@ fn handle_fleet_member_preference(
             return Some(Err(BridgeRpcError {
                 code: "NotInFleet".into(),
                 message: "Character is not in a fleet".into(),
+                client_error: None,
             }))
         }
     };
@@ -864,6 +887,7 @@ fn handle_fleet_member_preference(
             return Err(BridgeRpcError {
                 code: "FleetNotFound".into(),
                 message: format!("Fleet {fleet_id} not found"),
+                client_error: None,
             });
         };
         let only = fleet.members.len() == 1;
@@ -871,6 +895,7 @@ fn handle_fleet_member_preference(
             return Err(BridgeRpcError {
                 code: "MemberNotFound".into(),
                 message: "Character not in fleet".into(),
+                client_error: None,
             });
         };
         let before = member.clone();
@@ -989,6 +1014,7 @@ pub(crate) async fn handle_fleet_warp(
             return Some(Err(BridgeRpcError {
                 code: "NotInFleet".into(),
                 message: "Character is not in a fleet".into(),
+                client_error: None,
             }))
         }
     };
@@ -996,6 +1022,7 @@ pub(crate) async fn handle_fleet_warp(
         return Some(Err(BridgeRpcError {
             code: "NoSolarSystem".into(),
             message: "Session has no active solar system".into(),
+            client_error: None,
         }));
     };
 
@@ -1019,6 +1046,7 @@ pub(crate) async fn handle_fleet_warp(
             return Some(Err(BridgeRpcError {
                 code: "InvalidArgument".into(),
                 message: "FleetWarp requires destination entity ID".into(),
+                client_error: None,
             }));
         };
         let d = match rpc.opt_finite_f64(1, "minRange") {
@@ -1034,12 +1062,14 @@ pub(crate) async fn handle_fleet_warp(
             return Err(BridgeRpcError {
                 code: "FleetNotFound".into(),
                 message: format!("Fleet {fleet_id} not found"),
+                client_error: None,
             });
         };
         let Some(caller_member) = fleet.member_details.get(&char_id) else {
             return Err(BridgeRpcError {
                 code: "NotInFleet".into(),
                 message: "Caller not in fleet".into(),
+                client_error: None,
             });
         };
         let caller_role = role_to_i64(caller_member.role);
@@ -1047,6 +1077,7 @@ pub(crate) async fn handle_fleet_warp(
             return Err(BridgeRpcError {
                 code: "FleetPermissionDenied".into(),
                 message: "Only Fleet, Wing, or Squad Commanders can initiate Fleet Warp".into(),
+                client_error: None,
             });
         }
         if let Some(caller_ship_id) = session.ship_id {
@@ -1136,6 +1167,7 @@ pub(crate) async fn handle_fleet_warp(
         return Some(Err(BridgeRpcError {
             code: "CannotWarpInAbyssalSpace".into(),
             message: "Bookmarks and warp navigation are disabled inside Abyssal Deadspace".into(),
+            client_error: None,
         }));
     }
     let sys = ctx.systems.get_or_spawn(sys_id);
@@ -1154,7 +1186,7 @@ pub(crate) async fn handle_fleet_warp(
     } else if let Some(bm_res) = ctx.db.with_snapshot(|snap| {
         let bm = snap.bookmarks.get(&dest_id)?;
         if sys_id == 30_100_000 || bm.solar_system_id == 30_100_000 {
-            return Some(Err(BridgeRpcError::user_error("DunBlacklistCannotWarp")));
+            return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::DunBlacklistCannotWarp)));
         }
         if super::is_bookmark_expired_in_snap(snap, dest_id, now_unix)
             || bm.solar_system_id != sys_id
@@ -1162,6 +1194,7 @@ pub(crate) async fn handle_fleet_warp(
             return Some(Err(BridgeRpcError {
                 code: "BookmarkNotFound".into(),
                 message: format!("Bookmark {dest_id} not found or inaccessible"),
+                client_error: None,
             }));
         }
         let can_use = bm.owner_id == char_id
@@ -1176,6 +1209,7 @@ pub(crate) async fn handle_fleet_warp(
             return Some(Err(BridgeRpcError {
                 code: "BookmarkNotFound".into(),
                 message: format!("Bookmark {dest_id} not found or inaccessible"),
+                client_error: None,
             }));
         }
         Some(Ok(DVec3::new(bm.x, bm.y, bm.z)))
@@ -1289,6 +1323,7 @@ pub(crate) async fn handle_fleet_warp(
         return Some(Err(BridgeRpcError {
             code: "EssIntrusionBubbleWarpBlocked".into(),
             message: "Cannot fleet warp out from inside the 75 km ESS warp disruption bubble".into(),
+            client_error: None,
         }));
     }
 
@@ -1389,6 +1424,7 @@ fn handle_get_broadcast_history(
         return Err(BridgeRpcError {
             code: "NotInFleet".into(),
             message: "Character is not in a fleet".into(),
+            client_error: None,
         });
     };
     let in_fleet = ctx.db.with_snapshot(|snap| {
@@ -1400,6 +1436,7 @@ fn handle_get_broadcast_history(
         return Err(BridgeRpcError {
             code: "NotInFleet".into(),
             message: "Character is not a member of that fleet".into(),
+            client_error: None,
         });
     }
     let history = ctx

@@ -70,12 +70,14 @@ pub(crate) async fn handle_multi_add(
         return Err(BridgeRpcError {
             code: "InvalidLocation".into(),
             message: "MultiAdd requires target location".into(),
+            client_error: None,
         });
     };
     if matches!(raw_flag_opt, Some(11..=34 | 89 | 92..=94 | 125..=132 | 164..=171)) {
         return Err(BridgeRpcError {
             code: "InvalidLocation".into(),
             message: "MultiAdd cannot be used to fit modules or rigs".into(),
+            client_error: None,
         });
     }
     if matches!(raw_flag_opt, Some(36 | 63 | 72)) {
@@ -90,6 +92,7 @@ pub(crate) async fn handle_multi_add(
             }
             .into(),
             message: format!("Cannot MultiAdd items into restricted inventory flag {bf}"),
+            client_error: None,
         });
     }
     let should_auto_fit = (raw_flag_opt == Some(0) || raw_flag_opt.is_none())
@@ -129,6 +132,7 @@ pub(crate) async fn handle_multi_add(
             }
             .into(),
             message: format!("Cannot MultiAdd items into restricted inventory flag {raw_flag_u16}"),
+            client_error: None,
         });
     }
     let flag = InventoryFlag::from_u16(raw_flag_u16);
@@ -137,6 +141,7 @@ pub(crate) async fn handle_multi_add(
         return Err(BridgeRpcError {
             code: "InvalidLocation".into(),
             message: "MultiAdd cannot be used to fit modules or rigs".into(),
+            client_error: None,
         });
     }
     let active_ship_id = session
@@ -152,6 +157,7 @@ pub(crate) async fn handle_multi_add(
         return Err(BridgeRpcError {
             code: "CannotMoveActiveShip".into(),
             message: "Cannot move active ship".into(),
+            client_error: None,
         });
     }
     for &item_id in &item_ids {
@@ -218,6 +224,7 @@ pub(crate) async fn handle_multi_add(
             return Err(BridgeRpcError {
                 code: "CannotRefitWithWeaponsTimer".into(),
                 message: "Cannot refit or unfit modules in space while weapons timer is active".into(),
+                client_error: None,
             });
         }
         let mut near_service = false;
@@ -229,6 +236,7 @@ pub(crate) async fn handle_multi_add(
             return Err(BridgeRpcError {
                 code: "CannotUnfitInSpace".into(),
                 message: "Unfitting modules requires being docked at a station/structure or within range of a Mobile Depot or capital SMA".into(),
+                client_error: None,
             });
         }
     }
@@ -253,6 +261,7 @@ pub(crate) async fn handle_multi_add(
                 return Err(BridgeRpcError {
                     code: "SubsystemHasFittedModules".into(),
                     message: "Cannot unfit a T3 Strategic Cruiser subsystem while modules are fitted".into(),
+                    client_error: None,
                 });
             }
             if let Ok(mut check_fit) = ctx.get_or_rebuild_ship_fitting(char_id, old_loc) {
@@ -265,6 +274,7 @@ pub(crate) async fn handle_multi_add(
                     return Err(BridgeRpcError {
                         code: "SubsystemHasFittedModules".into(),
                         message: msg,
+                        client_error: None,
                     });
                 }
             }
@@ -360,6 +370,7 @@ pub(crate) async fn handle_multi_add(
                 .ok_or_else(|| BridgeRpcError {
                     code: "ItemNotFound".into(),
                     message: format!("Item {item_id} not found"),
+                    client_error: None,
                 })?;
             let it_snapshot = &pre_item;
             let old_flag = it_snapshot.flag;
@@ -397,6 +408,7 @@ pub(crate) async fn handle_multi_add(
             snap.transfer_inventory_item(item_id, spec).map_err(|e| BridgeRpcError {
                 code: "InventoryMoveFailed".into(),
                 message: e.to_string(),
+                client_error: None,
             })?;
             if old_loc != new_loc {
                 old_containers.insert((old_loc, item_id, it_tid, it_qty));
@@ -560,6 +572,7 @@ async fn handle_multi_add_auto_fit(
         return Err(BridgeRpcError {
             code: "CannotMoveActiveShip".into(),
             message: format!("Cannot move ship {ship_id} into itself"),
+            client_error: None,
         });
     }
     if session.station_id.is_none() && session.structure_id.is_none() {
@@ -575,6 +588,7 @@ async fn handle_multi_add_auto_fit(
             return Err(BridgeRpcError {
                 code: "CannotRefitWithWeaponsTimer".into(),
                 message: "Cannot fit modules in space while weapons timer is active".into(),
+                client_error: None,
             });
         }
         let near_fitting_service = if let (Some(sys_id), Some(active_id)) = (session.solar_system_id, session.ship_id) {
@@ -586,6 +600,7 @@ async fn handle_multi_add_auto_fit(
             return Err(BridgeRpcError {
                 code: "CannotFitInSpace".into(),
                 message: "Fitting modules into ship slots requires being docked at a station or structure or within range of a Mobile Depot or capital SMA".into(),
+                client_error: None,
             });
         }
     }
@@ -615,19 +630,23 @@ async fn handle_multi_add_auto_fit(
         let ch = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
             code: "CharacterNotFound".into(),
             message: format!("Character {char_id} not found"),
+            client_error: None,
         })?;
         let ship_item = snap.items.get(&ship_id).ok_or_else(|| BridgeRpcError {
             code: "ShipNotFound".into(),
             message: format!("Target ship {ship_id} not found"),
+            client_error: None,
         })?;
         let ship_t = ctx.sde.types.get(&ship_item.type_id).ok_or_else(|| BridgeRpcError {
             code: "InvalidFittingTarget".into(),
             message: format!("Unknown hull type {}", ship_item.type_id),
+            client_error: None,
         })?;
         if ship_item.owner_id != char_id || ship_t.category_id != 6 {
             return Err(BridgeRpcError {
                 code: "InvalidFittingTarget".into(),
                 message: format!("Target {ship_id} is not an owned ship"),
+                client_error: None,
             });
         }
         fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, ship_item)?;
@@ -666,12 +685,14 @@ async fn handle_multi_add_auto_fit(
             let item = snap.items.get(&item_id).ok_or_else(|| BridgeRpcError {
                 code: "ItemNotFound".into(),
                 message: format!("Item {item_id} not found"),
+                client_error: None,
             })?;
             fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, item)?;
             if snap.is_item_locked_in_contract_or_job(item_id) {
                 return Err(BridgeRpcError {
                     code: "ItemLocked".into(),
                     message: format!("Item {item_id} is locked by an active contract or job"),
+                    client_error: None,
                 });
             }
             if snap
@@ -682,6 +703,7 @@ async fn handle_multi_add_auto_fit(
                 return Err(BridgeRpcError {
                     code: "CannotDeliverCourierCargo".into(),
                     message: "Courier cargo cannot be fitted".into(),
+                    client_error: None,
                 });
             }
             let is_corp_item = ch.corporation_id > 0 && item.owner_id == ch.corporation_id;
@@ -697,6 +719,7 @@ async fn handle_multi_add_auto_fit(
                 return Err(BridgeRpcError {
                     code: "ItemOwnershipViolation".into(),
                     message: format!("Item {item_id} is not owned by {char_id}"),
+                    client_error: None,
                 });
             }
             if !crate::services::inventory_bound::is_inventory_location_colocated(
@@ -709,6 +732,7 @@ async fn handle_multi_add_auto_fit(
                 return Err(BridgeRpcError {
                     code: "ItemOwnershipViolation".into(),
                     message: format!("Item {item_id} location not reachable"),
+                    client_error: None,
                 });
             }
             if item.location_id == ship_id
@@ -717,11 +741,13 @@ async fn handle_multi_add_auto_fit(
                 return Err(BridgeRpcError {
                     code: "InvalidLocation".into(),
                     message: format!("Item {item_id} is already fitted on ship {ship_id}"),
+                    client_error: None,
                 });
             }
             let mod_t = ctx.sde.types.get(&item.type_id).ok_or_else(|| BridgeRpcError {
                 code: "ItemNotFittableModule".into(),
                 message: format!("Unknown type {}", item.type_id),
+                client_error: None,
             })?;
             if mod_t.category_id != 7 && mod_t.category_id != 32 {
                 return Err(BridgeRpcError {
@@ -730,6 +756,7 @@ async fn handle_multi_add_auto_fit(
                         "Item {item_id} (type {}, category {}) cannot be fitted",
                         item.type_id, mod_t.category_id
                     ),
+                    client_error: None,
                 });
             }
             let is_ehe = matches!(item.type_id, 40714 | 40717)
@@ -745,6 +772,7 @@ async fn handle_multi_add_auto_fit(
                 return Err(BridgeRpcError {
                     code: "CannotRefitDamagedModule".into(),
                     message: "UserError: Damaged or burned-out Capital Emergency Hull Energizer cannot be fitted".into(),
+                    client_error: None,
                 });
             }
             crate::services::tactical_module_mechanics::validate_module_fitting_constraints(
@@ -777,6 +805,7 @@ async fn handle_multi_add_auto_fit(
                 return Err(BridgeRpcError {
                     code: "ItemNotFittableModule".into(),
                     message: format!("Module {} lacks a fitting slot effect", mod_t.name),
+                    client_error: None,
                 });
             };
             meta.push((
@@ -829,6 +858,7 @@ async fn handle_multi_add_auto_fit(
                 message: last_err.unwrap_or_else(|| {
                     format!("No free compatible fitting slot for item {}", src_item.item_id)
                 }),
+                client_error: None,
             });
         };
         planned.push(PlannedFit {
@@ -852,6 +882,7 @@ async fn handle_multi_add_auto_fit(
                 .map_err(|e| BridgeRpcError {
                     code: "SplitFailed".into(),
                     message: e.to_string(),
+                    client_error: None,
                 })?;
             let old_orig_qty = orig_rec.quantity + split_item.quantity;
             (split_item.item_id, Some((orig_rec, old_orig_qty)))
@@ -864,6 +895,7 @@ async fn handle_multi_add_auto_fit(
             let it = snap.items.get_mut(&fitted_id).ok_or_else(|| BridgeRpcError {
                 code: "ItemNotFound".into(),
                 message: format!("Item {fitted_id} not found"),
+                client_error: None,
             })?;
             it.owner_id = char_id;
             it.location_id = ship_id;
@@ -1138,6 +1170,7 @@ pub(super) async fn handle_get_container_contents(
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "GetContainerContents requires containerID".into(),
+            client_error: None,
         });
     };
     let supplied_pw = kwargs
@@ -1160,6 +1193,7 @@ pub(super) async fn handle_get_container_contents(
                     return Err(BridgeRpcError {
                         code: "ALSCPasswordRequired".into(),
                         message: format!("Password required to open container {container_id}"),
+                        client_error: None,
                     });
                 }
             }
@@ -1254,6 +1288,7 @@ fn handle_list_impl(
         return Err(BridgeRpcError {
             code: "InvalidLocation".into(),
             message: "invbroker.List requires a bound inventory location or active station/ship".into(),
+            client_error: None,
         });
     };
     if ((60_000_000..=69_999_999).contains(&bound_loc_id) || bound_loc_id >= 1_000_000_000_000)
@@ -1263,6 +1298,7 @@ fn handle_list_impl(
         return Err(BridgeRpcError {
             code: "BoundObjectOwnershipViolation".into(),
             message: format!("Character {char_id} is not docked at bound inventory location {bound_loc_id}"),
+            client_error: None,
         });
     }
     let mut corp_flags: Vec<i64> = Vec::new();
@@ -1285,6 +1321,7 @@ fn handle_list_impl(
                 return Err(BridgeRpcError {
                     code: "CorpRoleDenied".into(),
                     message: format!("Corporation role denied for division {} query", div_idx + 1),
+                    client_error: None,
                 });
             }
         }
@@ -1307,6 +1344,7 @@ fn handle_list_impl(
                     return Err(BridgeRpcError {
                         code: "ALSCPasswordRequired".into(),
                         message: format!("Password required to list contents of container {bound_loc_id}"),
+                        client_error: None,
                     });
                 }
             }
@@ -1345,6 +1383,7 @@ fn handle_list_impl(
                     return Err(BridgeRpcError {
                         code: "NotInSameSolarSystem".into(),
                         message: format!("Caller must be in space in system {} to list container {bound_loc_id}", it.location_id),
+                        client_error: None,
                     });
                 }
                 let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -1369,6 +1408,7 @@ fn handle_list_impl(
                         return Err(BridgeRpcError {
                             code: "OutOfRange".into(),
                             message: format!("Container {bound_loc_id} is out of range ({edge_dist:.1}m > {max_range:.0}m)"),
+                            client_error: None,
                         });
                     }
                 } else if it.owner_id != char_id {
@@ -1529,6 +1569,7 @@ fn validate_multi_add_in_snap(
     let ch = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
         code: "CharacterNotFound".into(),
         message: format!("Character {char_id} not found"),
+        client_error: None,
     })?;
     let ch_dock = if session.station_id.is_none()
         && session.structure_id.is_none()
@@ -1558,6 +1599,7 @@ fn validate_multi_add_in_snap(
             return Err(BridgeRpcError {
                 code: "ItemNotFound".into(),
                 message: format!("Item {item_id} not found"),
+                client_error: None,
             });
         };
         let src_is_struct_fuel = crate::services::inventory_bound::validate_multiadd_structure_fuel_transfers(
@@ -1577,6 +1619,7 @@ fn validate_multi_add_in_snap(
             return Err(BridgeRpcError {
                 code: "ItemOwnershipViolation".into(),
                 message: format!("Character {char_id} is not authorized to move item {item_id}"),
+                client_error: None,
             });
         }
         if item_id == new_loc
@@ -1588,6 +1631,7 @@ fn validate_multi_add_in_snap(
             return Err(BridgeRpcError {
                 code: "CannotMoveActiveShip".into(),
                 message: format!("Cannot move item {item_id} into {new_loc}"),
+                client_error: None,
             });
         }
         crate::services::fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(
@@ -1602,6 +1646,7 @@ fn validate_multi_add_in_snap(
             return Err(BridgeRpcError {
                 code: "CannotUnfitRig".into(),
                 message: "Fitted rigs cannot be moved via MultiAdd".into(),
+                client_error: None,
             });
         }
         if snap.structures.contains_key(&item.location_id)
@@ -1610,6 +1655,7 @@ fn validate_multi_add_in_snap(
             return Err(BridgeRpcError {
                 code: "InvalidLocation".into(),
                 message: "Structure modules must be unfitted individually".into(),
+                client_error: None,
             });
         }
         if matches!(item.flag as u16, 11..=34 | 125..=132) || matches!(flag_u16, 11..=34 | 125..=132) {
@@ -1630,6 +1676,7 @@ fn validate_multi_add_in_snap(
             return Err(BridgeRpcError {
                 code: "CannotDeliverCourierCargo".into(),
                 message: "Courier cargo cannot be moved into corporation hangar divisions or foreign containers/ships".into(),
+                client_error: None,
             });
         }
         if !src_is_struct_fuel && !crate::services::inventory_bound::is_inventory_location_colocated(
@@ -1638,6 +1685,7 @@ fn validate_multi_add_in_snap(
             return Err(BridgeRpcError {
                 code: "ItemOwnershipViolation".into(),
                 message: format!("Item {item_id} location not reachable"),
+                client_error: None,
             });
         }
         if let Some(dest_type) = dest_type_opt {
@@ -1646,6 +1694,7 @@ fn validate_multi_add_in_snap(
                     return Err(BridgeRpcError {
                         code: "ItemNotFound".into(),
                         message: format!("Type {} not found", item.type_id),
+                        client_error: None,
                     });
                 };
                 if !crate::services::fitting_saved_apply::is_item_allowed_in_ship_hold(
@@ -1705,6 +1754,7 @@ fn validate_multi_add_in_snap(
                     return Err(BridgeRpcError {
                         code: "CapacityExceeded".into(),
                         message: format!("Container capacity of {cap} m³ exceeded"),
+                        client_error: None,
                     });
                 }
             }
@@ -1723,6 +1773,7 @@ fn validate_multi_add_in_snap(
                     return Err(BridgeRpcError {
                         code: "CapacityExceeded".into(),
                         message: format!("Ship Maintenance Bay capacity {sma_cap} m³ exceeded"),
+                        client_error: None,
                     });
                 }
             }
@@ -1744,6 +1795,7 @@ fn validate_multi_add_in_snap(
                     return Err(BridgeRpcError {
                         code: "CapacityExceeded".into(),
                         message: format!("Fleet Hangar capacity {fh_cap} m³ exceeded"),
+                        client_error: None,
                     });
                 }
             }

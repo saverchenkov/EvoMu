@@ -414,15 +414,11 @@ fn decode_wrapped_user_error(body: PyRep) -> (String, Vec<(String, PyRep)>) {
 
 #[test]
 fn map_call_req_error_body_preserves_exact_insurance_user_error_keys() {
-    for (msg, expected_owner_id) in [
-        ("InsureShipFailedSingleContract (ownerName=90000001)", 90_000_001i64),
-        ("InsureShipFailedSingleContract (ownerName=1000009)", 1_000_009i64),
-        ("InsureShipFailedSingleContract", 90_000_001i64),
-    ] {
-        let err = eve_proto::BridgeRpcError {
-            code: "InsureShipFailedSingleContract".into(),
-            message: msg.into(),
-        };
+    for expected_owner_id in [90_000_001i64, 1_000_009i64] {
+        let err = eve_proto::BridgeRpcError::user_error_with_args(
+            eve_proto::UserErrorKey::InsureShipFailedSingleContract,
+            [("ownerName", PyRep::Integer(expected_owner_id))],
+        );
         let (key, dict) = decode_wrapped_user_error(map_call_req_error_body(
             "insuranceSvc",
             "InsureShip",
@@ -436,28 +432,64 @@ fn map_call_req_error_body_preserves_exact_insurance_user_error_keys() {
         );
     }
 
-    for code in ["InsureShipInvalidCost", "InsureShipFailed"] {
-        let err = eve_proto::BridgeRpcError::user_error(code);
+    // Zero-arg InsureShipFailedSingleContract must not inject a hardcoded character ID.
+    let zero_arg_ins = eve_proto::BridgeRpcError::from_user_key(
+        eve_proto::UserErrorKey::InsureShipFailedSingleContract,
+    );
+    let (key, dict) = decode_wrapped_user_error(map_call_req_error_body(
+        "insuranceSvc",
+        "InsureShip",
+        &zero_arg_ins,
+    ));
+    assert_eq!(key, "InsureShipFailedSingleContract");
+    assert!(
+        dict.is_empty(),
+        "zero-arg InsureShipFailedSingleContract must leave ownerName unset for session fallback, got {dict:?}"
+    );
+
+    for key_enum in [
+        eve_proto::UserErrorKey::InsureShipInvalidCost,
+        eve_proto::UserErrorKey::InsureShipFailed,
+        eve_proto::UserErrorKey::SkillMissing,
+        eve_proto::UserErrorKey::CanOnlyDoInStation,
+    ] {
+        let err = eve_proto::BridgeRpcError::from_user_key(key_enum);
         let (key, dict) = decode_wrapped_user_error(map_call_req_error_body(
             "insuranceSvc",
             "InsureShip",
             &err,
         ));
         assert_eq!(
-            key, code,
-            "insurance UserError '{code}' must not collapse to CustomInfo"
+            key,
+            key_enum.as_str(),
+            "named UserError '{key_enum}' must not collapse to CustomInfo"
         );
         assert_ne!(key, "CustomInfo");
         assert!(
             dict.is_empty(),
-            "expected empty dict for '{code}', got {dict:?}"
+            "expected empty dict for '{key_enum}', got {dict:?}"
         );
     }
+
+    let notify_err = eve_proto::BridgeRpcError::user_error_with_args(
+        eve_proto::UserErrorKey::CustomNotify,
+        [("notify", PyRep::String("Clone installed".into()))],
+    );
+    let (n_key, n_dict) = decode_wrapped_user_error(map_call_req_error_body(
+        "jumpCloneSvc",
+        "InstallCloneInStation",
+        &notify_err,
+    ));
+    assert_eq!(n_key, "CustomNotify");
+    assert_eq!(n_dict.len(), 1);
+    assert_eq!(n_dict[0].0, "notify");
+    assert_eq!(n_dict[0].1.as_str(), Some("Clone installed"));
 
     // Fallback still maps unrelated errors to CustomInfo with `code: message` info.
     let fallback_err = eve_proto::BridgeRpcError {
         code: "SomeUnmappedError".into(),
         message: "details".into(),
+        client_error: None,
     };
     let (key, dict) = decode_wrapped_user_error(map_call_req_error_body(
         "insuranceSvc",
@@ -500,18 +532,25 @@ fn decode_wrapped_runtime_error(body: PyRep) -> String {
 
 #[test]
 fn map_call_req_error_body_preserves_existing_rpc_error_mappings() {
-    let unimpl = eve_proto::BridgeRpcError {
-        code: "UnimplementedRPC".into(),
-        message: "missing".into(),
-    };
+    let unimpl = eve_proto::BridgeRpcError::from_client_error(
+        eve_proto::ClientError::Unimplemented {
+            service: "insuranceSvc".into(),
+            method: "InsureShip".into(),
+        },
+    );
     assert_eq!(
-        decode_wrapped_runtime_error(map_call_req_error_body("svc", "m", &unimpl)),
-        "UnimplementedRPC: missing"
+        decode_wrapped_runtime_error(map_call_req_error_body(
+            "insuranceSvc",
+            "InsureShip",
+            &unimpl
+        )),
+        "UnimplementedRPC: insuranceSvc.InsureShip is not yet implemented"
     );
 
     let fake_item = eve_proto::BridgeRpcError {
         code: "FakeItemNotFound".into(),
         message: "item 1".into(),
+        client_error: None,
     };
     assert_eq!(
         decode_wrapped_runtime_error(map_call_req_error_body("inv", "m", &fake_item)),
@@ -521,6 +560,7 @@ fn map_call_req_error_body_preserves_existing_rpc_error_mappings() {
     let bound_err = eve_proto::BridgeRpcError {
         code: "InvalidBoundObject".into(),
         message: "bad oid".into(),
+        client_error: None,
     };
     let (key, dict) = decode_wrapped_user_error(map_call_req_error_body("svc", "m", &bound_err));
     assert_eq!(key, "UnMachoDestination");
@@ -529,6 +569,7 @@ fn map_call_req_error_body_preserves_existing_rpc_error_mappings() {
     let slash_err = eve_proto::BridgeRpcError {
         code: "SlashError".into(),
         message: "bad syntax".into(),
+        client_error: None,
     };
     let (key, dict) = decode_wrapped_user_error(map_call_req_error_body("slash", "SlashCmd", &slash_err));
     assert_eq!(key, "SlashError");
@@ -538,6 +579,7 @@ fn map_call_req_error_body_preserves_existing_rpc_error_mappings() {
     let slash_cmd_err = eve_proto::BridgeRpcError {
         code: "UnknownSlashCommand".into(),
         message: "unknown /foo".into(),
+        client_error: None,
     };
     let (key, dict) = decode_wrapped_user_error(map_call_req_error_body(
         "publicQaToolsServer",
@@ -548,10 +590,13 @@ fn map_call_req_error_body_preserves_existing_rpc_error_mappings() {
     assert_eq!(dict[0].0, "reason");
     assert_eq!(dict[0].1.as_str(), Some("UnknownSlashCommand: unknown /foo"));
 
-    let cargo_err = eve_proto::BridgeRpcError {
-        code: "NotEnoughCargoSpace".into(),
-        message: "free=12.5, required=40.0".into(),
-    };
+    let cargo_err = eve_proto::BridgeRpcError::user_error_with_args(
+        eve_proto::UserErrorKey::NotEnoughCargoSpace,
+        [
+            ("free", PyRep::Real(12.5)),
+            ("required", PyRep::Real(40.0)),
+        ],
+    );
     let (key, dict) = decode_wrapped_user_error(map_call_req_error_body("inv", "Add", &cargo_err));
     assert_eq!(key, "NotEnoughCargoSpace");
     assert_eq!(dict[0].0, "free");
@@ -559,10 +604,7 @@ fn map_call_req_error_body_preserves_existing_rpc_error_mappings() {
     assert_eq!(dict[1].0, "required");
     assert_eq!(dict[1].1.as_f64(), Some(40.0));
 
-    let max_orders = eve_proto::BridgeRpcError {
-        code: "MaxOpenOrdersReached".into(),
-        message: "limit reached (17/17)".into(),
-    };
+    let max_orders = eve_proto::BridgeRpcError::max_open_orders_reached(17, 17);
     let (key, dict) = decode_wrapped_user_error(map_call_req_error_body("marketProxy", "PlaceBuyOrder", &max_orders));
     assert_eq!(key, "MarketExceededOrderCount");
     assert_eq!(dict[0], ("curCnt".to_string(), PyRep::Integer(17)));
@@ -572,6 +614,7 @@ fn map_call_req_error_body_preserves_existing_rpc_error_mappings() {
         let dock_err = eve_proto::BridgeRpcError {
             code: code.into(),
             message: "Ship is 12000.0 m from docking target".into(),
+            client_error: None,
         };
         let (key, dict) = decode_wrapped_user_error(map_call_req_error_body(
             "beyonce",

@@ -261,6 +261,7 @@ pub fn handle_bounty_proxy(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidPrice".into(),
                         message: e.message,
+                        client_error: None,
                     }));
                 }
             };
@@ -285,24 +286,28 @@ pub fn handle_bounty_proxy(
                     return Err(BridgeRpcError {
                         code: "KillRightNotFound".into(),
                         message: format!("Kill right {kr_id} not found"),
+                        client_error: None,
                     });
                 };
                 if kr.owner_id != char_id {
                     return Err(BridgeRpcError {
                         code: "NotKillRightOwner".into(),
                         message: "Only the kill right owner can list it for sale".into(),
+                        client_error: None,
                     });
                 }
                 if kr.is_active_suspect {
                     return Err(BridgeRpcError {
                         code: "KillRightAlreadyActivated".into(),
                         message: format!("Kill right {kr_id} is already activated"),
+                        client_error: None,
                     });
                 }
                 if exp > 0 && now_unix >= exp {
                     return Err(BridgeRpcError {
                         code: "KillRightExpired".into(),
                         message: format!("Kill right {kr_id} has expired"),
+                        client_error: None,
                     });
                 }
                 if !valid_target {
@@ -365,12 +370,14 @@ pub fn handle_bounty_proxy(
                     return Err(BridgeRpcError {
                         code: "KillRightNotFound".into(),
                         message: format!("Kill right {kr_id} not found"),
+                        client_error: None,
                     });
                 };
                 if kr.owner_id != char_id {
                     return Err(BridgeRpcError {
                         code: "NotKillRightOwner".into(),
                         message: "Only the kill right owner can cancel public sale".into(),
+                        client_error: None,
                     });
                 }
                 kr.activation_fee = IskCents(0);
@@ -464,18 +471,21 @@ pub fn handle_bounty_proxy(
                 return Some(Err(BridgeRpcError {
                     code: "BountyAmountTooLow".into(),
                     message: "Minimum bounty placement is 100,000 ISK on a valid target ID".into(),
+                    client_error: None,
                 }));
             };
             let Ok(amount_isk) = rpc.req_finite_f64(1, "amountISK") else {
                 return Some(Err(BridgeRpcError {
                     code: "BountyAmountTooLow".into(),
                     message: "Minimum bounty placement is 100,000 ISK on a valid target ID".into(),
+                    client_error: None,
                 }));
             };
             if amount_isk < 100_000.0 {
                 return Some(Err(BridgeRpcError {
                     code: "BountyAmountTooLow".into(),
                     message: "Minimum bounty placement is 100,000 ISK on a valid target ID".into(),
+                    client_error: None,
                 }));
             }
             let tx_res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -486,18 +496,21 @@ pub fn handle_bounty_proxy(
                     return Err(BridgeRpcError {
                         code: "TargetNotFound".into(),
                         message: format!("Target {target_id} not found"),
+                        client_error: None,
                     });
                 }
                 let Some(ch) = snap.characters.get_mut(&char_id) else {
                     return Err(BridgeRpcError {
                         code: "CharacterNotFound".into(),
                         message: format!("Character {char_id} not found"),
+                        client_error: None,
                     });
                 };
                 let cost = IskCents::from_f64_isk(amount_isk);
                 let new_bal = ch.balance.checked_sub(cost).ok_or_else(|| BridgeRpcError {
                     code: "InsufficientFunds".into(),
                     message: "Insufficient ISK to place bounty".into(),
+                    client_error: None,
                 })?;
                 ch.balance = new_bal;
                 snap.append_journal(
@@ -770,12 +783,14 @@ pub fn handle_apply_tags_for_sec_status(
         return Some(Err(BridgeRpcError {
             code: "NotDockedInStation".into(),
             message: "Security status tag turn-in requires being docked at a CONCORD station".into(),
+            client_error: None,
         }));
     };
     let Some(st) = ctx.sde.stations.get(&station_id) else {
         return Some(Err(BridgeRpcError {
             code: "SecurityOfficeRequired".into(),
             message: "Security status tags can only be turned in at a CONCORD/DED Security Office station".into(),
+            client_error: None,
         }));
     };
     let st_sec = ctx
@@ -790,6 +805,7 @@ pub fn handle_apply_tags_for_sec_status(
         return Some(Err(BridgeRpcError {
             code: "SecurityOfficeRequired".into(),
             message: "Security status tags can only be turned in at a low-security CONCORD/DED Security Office station".into(),
+            client_error: None,
         }));
     }
     let Some(now_target_sec) = (if args.len() == 2 {
@@ -800,6 +816,7 @@ pub fn handle_apply_tags_for_sec_status(
         return Some(Err(BridgeRpcError {
             code: "InvalidSecurityTagArguments".into(),
             message: "ApplyTagsForSecStatus requires (targetSecurityStatus, currentSecurityStatus) or (targetSecStatus, tagsToUseDict)".into(),
+            client_error: None,
         }));
     };
     let requested_by_type: Option<[i32; 4]> = match &args[1] {
@@ -808,6 +825,7 @@ pub fn handle_apply_tags_for_sec_status(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidQuantity".into(),
                     message: "tagsToUseDict must specify at least one tag".into(),
+                    client_error: None,
                 }));
             }
             let mut counts: [i32; 4] = [0; 4];
@@ -816,18 +834,21 @@ pub fn handle_apply_tags_for_sec_status(
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSecurityTagType".into(),
                         message: "Invalid security tag typeID".into(),
+                        client_error: None,
                     }));
                 };
                 let Some(idx) = (33138..=33141).position(|id| id == tag_type_id) else {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSecurityTagType".into(),
                         message: format!("Type {tag_type_id} is not a valid Clone Soldier Tag (33138..=33141)"),
+                        client_error: None,
                     }));
                 };
                 let Some(q) = v.as_i64().and_then(|val| i32::try_from(val).ok()).filter(|&q| q > 0) else {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidQuantity".into(),
                         message: "Tag quantity must be a positive integer".into(),
+                        client_error: None,
                     }));
                 };
                 counts[idx] = counts[idx].saturating_add(q);
@@ -839,6 +860,7 @@ pub fn handle_apply_tags_for_sec_status(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSecurityTagArguments".into(),
                     message: "ApplyTagsForSecStatus second argument must be currentSecurityStatus or tagsToUseDict".into(),
+                    client_error: None,
                 }));
             }
             None
@@ -851,6 +873,7 @@ pub fn handle_apply_tags_for_sec_status(
         return Some(Err(BridgeRpcError {
             code: "NoSolarSystem".into(),
             message: "Character has no active solar system".into(),
+            client_error: None,
         }));
     };
 
@@ -871,6 +894,7 @@ pub fn handle_apply_tags_for_sec_status(
             return Err(BridgeRpcError {
                 code: "NotDockedInStation".into(),
                 message: "Character is not docked at this station".into(),
+                client_error: None,
             });
         }
         let orig_sec = snap
@@ -885,6 +909,7 @@ pub fn handle_apply_tags_for_sec_status(
                 message: format!(
                     "Target security status {now_target_sec:.2} must exceed current security status {orig_sec:.2} (max 0.0)"
                 ),
+                client_error: None,
             });
         }
         let ship_id_opt = session.ship_id.filter(|sid| {
@@ -909,6 +934,7 @@ pub fn handle_apply_tags_for_sec_status(
                         message: format!(
                             "Tag {tag_type_id} is only valid in security band [{min_band:.1}, {max_band:.1}); character is at {cur_sec:.2}"
                         ),
+                        client_error: None,
                     });
                 }
                 if cur_sec + 1e-9 >= effective_target {
@@ -967,6 +993,7 @@ pub fn handle_apply_tags_for_sec_status(
                 message: format!(
                     "No Clone Soldier security tags applicable for transition from {orig_sec:.2} to {effective_target:.2}"
                 ),
+                client_error: None,
             });
         }
         let total_fee = eve_db::IskCents::from_isk(total_fee_isk);
@@ -979,6 +1006,7 @@ pub fn handle_apply_tags_for_sec_status(
             return Err(BridgeRpcError {
                 code: "InsufficientFunds".into(),
                 message: "Insufficient ISK for CONCORD Security Office tag processing fee".into(),
+                client_error: None,
             });
         };
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -1086,6 +1114,7 @@ fn consume_band_tags(
             message: format!(
                 "Missing {consumed_qty}x unlocked tag type {tag_type_id} in local station hangar or active ship cargo"
             ),
+            client_error: None,
         });
     }
     let mut remaining = consumed_qty;

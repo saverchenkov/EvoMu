@@ -15,7 +15,7 @@ use eve_sde::{attr_ids, TypeId};
 use std::collections::HashMap;
 
 fn err(code: &str, msg: impl Into<String>) -> BridgeRpcError {
-    BridgeRpcError { code: code.into(), message: msg.into() }
+    BridgeRpcError { code: code.into(), message: msg.into(), client_error: None }
 }
 
 /// Extracted `crateService` dispatcher emitting `OnCrateLootSpawned` on crate open / loot claim.

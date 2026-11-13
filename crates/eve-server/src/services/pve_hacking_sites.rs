@@ -144,6 +144,7 @@ async fn validate_active_hacking_ship_and_range(
         return Err(BridgeRpcError {
             code: "ShipDocked".into(),
             message: "Cannot continue hacking minigame while docked".into(),
+            client_error: None,
         });
     }
     let ship_id = session.ship_id.unwrap_or_else(|| {
@@ -166,6 +167,7 @@ async fn validate_active_hacking_ship_and_range(
             return Err(BridgeRpcError {
                 code: "NotInSiteSystem".into(),
                 message: "Cannot continue hacking minigame from another solar system".into(),
+                client_error: None,
             });
         }
         let sys_handle = ctx.systems.get_or_spawn(g_sys_id);
@@ -179,6 +181,7 @@ async fn validate_active_hacking_ship_and_range(
             return Err(BridgeRpcError {
                 code: "CannotHackWhileCloaked".into(),
                 message: "Cannot continue hacking minigame while cloaked".into(),
+                client_error: None,
             });
         }
         if let Ok(Some((_, sb))) = sys_handle.get_ball_snapshot(ship_id).await {
@@ -206,6 +209,7 @@ async fn validate_active_hacking_ship_and_range(
                     message: format!(
                         "Target container is {dist:.1} m away (analyzer max range is {max_range:.1} m)"
                     ),
+                    client_error: None,
                 });
             }
         }
@@ -232,6 +236,7 @@ pub async fn handle_pve_hacking(
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solar system".into(),
+                    client_error: None,
                 }));
             };
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
@@ -262,7 +267,7 @@ pub async fn handle_pve_hacking(
                 })
             };
             if container_id == 0 {
-                return Some(Err(BridgeRpcError { code: "TargetNotFound".into(), message: "Target container not specified".into() }));
+                return Some(Err(BridgeRpcError { code: "TargetNotFound".into(), message: "Target container not specified".into(), client_error: None }));
             }
 
             let struct_info = ctx.db.with_snapshot(|s| {
@@ -271,23 +276,23 @@ pub async fn handle_pve_hacking(
             });
             if let Some((_, owner_corp_id, caller_corp)) = struct_info {
                 if caller_corp != 0 && caller_corp == owner_corp_id {
-                    return Some(Err(BridgeRpcError { code: "CannotHackOwnStructure".into(), message: "Cannot run a Data Analyzer hack against a structure owned by your own corporation".into() }));
+                    return Some(Err(BridgeRpcError { code: "CannotHackOwnStructure".into(), message: "Cannot run a Data Analyzer hack against a structure owned by your own corporation".into(), client_error: None }));
                 }
             }
             let struct_pos = struct_info.map(|(p, _, _)| p);
             let site_res = with_pve_exploration_reg(ctx, |reg| {
                 if let Some(st_pos) = struct_pos {
                     if reg.structure_char_failures.get(&(char_id, container_id)).copied().unwrap_or(0) >= 2 {
-                        return Err(BridgeRpcError { code: "HackingGameAlreadyFinished".into(), message: "You have failed to hack this structure twice and are locked out".into() });
+                        return Err(BridgeRpcError { code: "HackingGameAlreadyFinished".into(), message: "You have failed to hack this structure twice and are locked out".into(), client_error: None });
                     }
                     if reg.hacking_games.values().any(|g| g.container_id == container_id && g.status == "InProgress") {
-                        return Err(BridgeRpcError { code: "HackingGameAlreadyInProgress".into(), message: "Another pilot is already hacking this target".into() });
+                        return Err(BridgeRpcError { code: "HackingGameAlreadyInProgress".into(), message: "Another pilot is already hacking this target".into(), client_error: None });
                     }
                     return Ok((format!("STRUCTURE_{container_id}"), false, false, false, st_pos));
                 }
                 let now = now_sec(reg);
-                let sites = reg.sites_by_system.get_mut(&sys_id).ok_or_else(|| BridgeRpcError { code: "TargetNotFound".into(), message: "Target container not found".into() })?;
-                let s = sites.iter_mut().find(|x| x.hackable_can_ids.contains(&container_id) && !x.cleared).ok_or_else(|| BridgeRpcError { code: "TargetNotFound".into(), message: "Target container not found".into() })?;
+                let sites = reg.sites_by_system.get_mut(&sys_id).ok_or_else(|| BridgeRpcError { code: "TargetNotFound".into(), message: "Target container not found".into(), client_error: None })?;
+                let s = sites.iter_mut().find(|x| x.hackable_can_ids.contains(&container_id) && !x.cleared).ok_or_else(|| BridgeRpcError { code: "TargetNotFound".into(), message: "Target container not found".into(), client_error: None })?;
                 let ghost_timer_expired = s.site_category == "Ghost"
                     && !s.ghost_detonated
                     && s.ghost_timer_started_at
@@ -297,10 +302,10 @@ pub async fn handle_pve_hacking(
                         || reg.hacked_containers.contains(&(sys_id, container_id))
                         || reg.failure_counts.get(&(sys_id, container_id)).copied().unwrap_or(0) >= 2)
                 {
-                    return Err(BridgeRpcError { code: "HackingGameAlreadyFinished".into(), message: "Container has already been hacked or emptied".into() });
+                    return Err(BridgeRpcError { code: "HackingGameAlreadyFinished".into(), message: "Container has already been hacked or emptied".into(), client_error: None });
                 }
                 if reg.hacking_games.values().any(|g| g.container_id == container_id && g.status == "InProgress") {
-                    return Err(BridgeRpcError { code: "HackingGameAlreadyInProgress".into(), message: "Another pilot is already hacking this container".into() });
+                    return Err(BridgeRpcError { code: "HackingGameAlreadyInProgress".into(), message: "Another pilot is already hacking this container".into(), client_error: None });
                 }
                 Ok((s.site_id.clone(), s.site_category == "Relic", s.site_category == "Ghost", s.site_category == "SleeperCache", s.position))
             });
@@ -312,11 +317,11 @@ pub async fn handle_pve_hacking(
 
             // BF-PVE-HACK-PROXIMITY-FAILOPEN-04: Explicitly reject hacking while docked or without a ship in space
             if session.station_id.is_some() || session.structure_id.is_some() {
-                return Some(Err(BridgeRpcError { code: "ShipDocked".into(), message: "Cannot initiate hacking minigame while docked".into() }));
+                return Some(Err(BridgeRpcError { code: "ShipDocked".into(), message: "Cannot initiate hacking minigame while docked".into(), client_error: None }));
             }
             let ship_id = match session.ship_id {
                 Some(sid) if sid > 0 => sid,
-                _ => return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "Session has no active ship".into() })),
+                _ => return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "Session has no active ship".into(), client_error: None })),
             };
 
             let ghost_expired = with_pve_exploration_reg(ctx, |reg| {
@@ -358,6 +363,7 @@ pub async fn handle_pve_hacking(
                     return Some(Err(BridgeRpcError {
                         code: "ShipNotInSpace".into(),
                         message: format!("Ship {ship_id} is not spawned in space in system {sys_id}"),
+                        client_error: None,
                     }));
                 }
             };
@@ -371,6 +377,7 @@ pub async fn handle_pve_hacking(
                 return Some(Err(BridgeRpcError {
                     code: "CannotHackWhileCloaked".into(),
                     message: "Cannot initiate hacking minigame while cloaked".into(),
+                    client_error: None,
                 }));
             }
 
@@ -393,6 +400,7 @@ pub async fn handle_pve_hacking(
                 return Some(Err(BridgeRpcError {
                     code: "OutOfRange".into(),
                     message: format!("Target container is {dist:.1} m away (analyzer max range is {analyzer_max_range:.1} m)"),
+                    client_error: None,
                 }));
             }
 
@@ -439,12 +447,12 @@ pub async fn handle_pve_hacking(
             let game = match with_pve_exploration_reg(ctx, |reg| -> Result<HackingGameSession, BridgeRpcError> {
                 if struct_pos.is_some() {
                     if reg.structure_char_failures.get(&(char_id, container_id)).copied().unwrap_or(0) >= 2 {
-                        return Err(BridgeRpcError { code: "HackingGameAlreadyFinished".into(), message: "You have failed to hack this structure twice and are locked out".into() });
+                        return Err(BridgeRpcError { code: "HackingGameAlreadyFinished".into(), message: "You have failed to hack this structure twice and are locked out".into(), client_error: None });
                     }
                 } else {
                     let now = now_sec(reg);
-                    let sites = reg.sites_by_system.get(&sys_id).ok_or_else(|| BridgeRpcError { code: "TargetNotFound".into(), message: "Target container not found".into() })?;
-                    let s = sites.iter().find(|x| x.hackable_can_ids.contains(&container_id) && !x.cleared).ok_or_else(|| BridgeRpcError { code: "TargetNotFound".into(), message: "Target container not found".into() })?;
+                    let sites = reg.sites_by_system.get(&sys_id).ok_or_else(|| BridgeRpcError { code: "TargetNotFound".into(), message: "Target container not found".into(), client_error: None })?;
+                    let s = sites.iter().find(|x| x.hackable_can_ids.contains(&container_id) && !x.cleared).ok_or_else(|| BridgeRpcError { code: "TargetNotFound".into(), message: "Target container not found".into(), client_error: None })?;
                     let ghost_timer_expired = s.site_category == "Ghost"
                         && !s.ghost_detonated
                         && s.ghost_timer_started_at
@@ -454,11 +462,11 @@ pub async fn handle_pve_hacking(
                             || reg.hacked_containers.contains(&(sys_id, container_id))
                             || reg.failure_counts.get(&(sys_id, container_id)).copied().unwrap_or(0) >= 2)
                     {
-                        return Err(BridgeRpcError { code: "HackingGameAlreadyFinished".into(), message: "Container has already been hacked or emptied".into() });
+                        return Err(BridgeRpcError { code: "HackingGameAlreadyFinished".into(), message: "Container has already been hacked or emptied".into(), client_error: None });
                     }
                 }
                 if reg.hacking_games.values().any(|g| g.container_id == container_id && g.status == "InProgress") {
-                    return Err(BridgeRpcError { code: "HackingGameAlreadyInProgress".into(), message: "Another pilot is already hacking this target".into() });
+                    return Err(BridgeRpcError { code: "HackingGameAlreadyInProgress".into(), message: "Another pilot is already hacking this target".into(), client_error: None });
                 }
                 let game_id = 500_000 + next_pve_seq(reg);
                 let tiles = build_hacking_grid_procedural_with_sde(
@@ -536,6 +544,7 @@ pub async fn handle_pve_hacking(
                 return Some(Err(BridgeRpcError {
                     code: "ShipDocked".into(),
                     message: "Cannot continue hacking minigame while docked".into(),
+                    client_error: None,
                 }));
             }
             let (container_id, raw_tile_idx) = if args.len() >= 2 {
@@ -548,6 +557,7 @@ pub async fn handle_pve_hacking(
                     return Some(Err(BridgeRpcError {
                         code: "NoActiveHackingGame".into(),
                         message: "No active hacking session for character".into(),
+                        client_error: None,
                     }));
                 };
                 let coord = extract_tile_index(args.first()).unwrap_or(1);
@@ -567,6 +577,7 @@ pub async fn handle_pve_hacking(
                     return Err(BridgeRpcError {
                         code: "NoActiveHackingGame".into(),
                         message: format!("No active hacking game on container {container_id}"),
+                        client_error: None,
                     });
                 };
                 if session.solar_system_id.is_some_and(|s| s != game.solar_system_id) {
@@ -574,6 +585,7 @@ pub async fn handle_pve_hacking(
                     return Err(BridgeRpcError {
                         code: "NotInSiteSystem".into(),
                         message: "Cannot continue hacking minigame from another solar system".into(),
+                        client_error: None,
                     });
                 }
                 if game.status != "InProgress" {
@@ -581,6 +593,7 @@ pub async fn handle_pve_hacking(
                     return Err(BridgeRpcError {
                         code: "HackingGameAlreadyFinished".into(),
                         message: format!("Hacking game on container {container_id} is already finished"),
+                        client_error: None,
                     });
                 }
                 if tile_idx >= game.tiles.len() as u32 {
@@ -832,6 +845,7 @@ pub async fn handle_pve_hacking(
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveHackingGame".into(),
                     message: "No active hacking game for character".into(),
+                    client_error: None,
                 }));
             };
             let (removed, second_fail_info, ghost_detonate_info) = with_pve_exploration_reg(ctx, |reg| {
@@ -866,6 +880,7 @@ pub async fn handle_pve_hacking(
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveHackingGame".into(),
                     message: format!("No active hacking game on container {container_id}"),
+                    client_error: None,
                 }));
             }
             if let Some((sid, site_id)) = ghost_detonate_info {
@@ -918,6 +933,7 @@ async fn handle_hacking_used_utility_on_virus(
                 return Err(BridgeRpcError {
                     code: "TargetNotFound".into(),
                     message: "Target container not specified".into(),
+                    client_error: None,
                 });
             };
             (cid, *a as usize)
@@ -926,6 +942,7 @@ async fn handle_hacking_used_utility_on_virus(
             return Err(BridgeRpcError {
                 code: "TargetNotFound".into(),
                 message: "Target container not specified".into(),
+                client_error: None,
             });
         }
     };
@@ -943,18 +960,21 @@ async fn handle_hacking_used_utility_on_virus(
             return Err(BridgeRpcError {
                 code: "NoActiveHackingGame".into(),
                 message: format!("No active hacking game on container {container_id}"),
+                client_error: None,
             });
         };
         if game.status != "InProgress" && game.status != "active" {
             return Err(BridgeRpcError {
                 code: "HackingGameAlreadyFinished".into(),
                 message: format!("Hacking game on container {container_id} is already finished"),
+                client_error: None,
             });
         }
         let Some(util) = game.utilities.get(slot_idx).and_then(|u| *u) else {
             return Err(BridgeRpcError {
                 code: "UtilitySlotEmpty".into(),
                 message: format!("Utility slot {slot_idx} is empty"),
+                client_error: None,
             });
         };
         if matches!(
@@ -1024,6 +1044,7 @@ fn handle_hacking_values(
         return Err(BridgeRpcError {
             code: "TargetNotFound".into(),
             message: "Target container not specified".into(),
+            client_error: None,
         });
     };
     let tiles = with_pve_exploration_reg(ctx, |reg| {
@@ -1083,6 +1104,7 @@ async fn handle_hacking_used_utility(
             return Err(BridgeRpcError {
                 code: "NoActiveHackingGame".into(),
                 message: "No active hacking session for character".into(),
+                client_error: None,
             });
         };
         let slot = args.first().and_then(|a| a.as_i64()).unwrap_or(0).max(0) as usize;
@@ -1100,18 +1122,21 @@ async fn handle_hacking_used_utility(
             return Err(BridgeRpcError {
                 code: "NoActiveHackingGame".into(),
                 message: format!("No active hacking game on container {container_id}"),
+                client_error: None,
             });
         };
         if game.status != "InProgress" {
             return Err(BridgeRpcError {
                 code: "HackingGameAlreadyFinished".into(),
                 message: format!("Hacking game on container {container_id} is already finished"),
+                client_error: None,
             });
         }
         let Some(util) = game.utilities.get(slot_idx).and_then(|u| *u) else {
             return Err(BridgeRpcError {
                 code: "UtilitySlotEmpty".into(),
                 message: format!("Utility slot {slot_idx} is empty"),
+                client_error: None,
             });
         };
         if matches!(

@@ -157,6 +157,7 @@ pub fn check_mobile_deployment_restrictions(
         return Err(BridgeRpcError {
             code: "RestrictionsInEffect".into(),
             message: "Deployment restrictions in effect: mobile structures cannot be anchored in starter or career agent systems".into(),
+            client_error: None,
         });
     }
 
@@ -178,6 +179,7 @@ pub fn check_mobile_deployment_restrictions(
                 message: format!(
                     "Mobile Cynosural Inhibitor cannot be anchored in high-sec, wormhole, Abyssal, or Zarzakh space (system {sys_id})"
                 ),
+                client_error: None,
             });
         }
     }
@@ -191,6 +193,7 @@ pub fn check_mobile_deployment_restrictions(
                     "Cannot anchor within 50km of a stargate (distance: {:.1} km)",
                     (anchor_pos - gate.position).length() / 1_000.0
                 ),
+                client_error: None,
             });
         }
     }
@@ -204,6 +207,7 @@ pub fn check_mobile_deployment_restrictions(
                     "Cannot anchor within 50km of a station (distance: {:.1} km)",
                     (anchor_pos - station.position).length() / 1_000.0
                 ),
+                client_error: None,
             });
         }
     }
@@ -231,6 +235,7 @@ pub fn check_mobile_deployment_restrictions(
                             "Cannot anchor within 50km of an Upwell structure (distance: {:.1} km)",
                             (anchor_pos - spos).length() / 1_000.0
                         ),
+                        client_error: None,
                     });
                 }
             }
@@ -251,6 +256,7 @@ pub fn check_mobile_deployment_restrictions(
                                         "Cannot anchor within 5km of another Mobile Tractor Unit (distance: {:.1} km)",
                                         (anchor_pos - opos).length() / 1_000.0
                                     ),
+                                    client_error: None,
                                 });
                             }
                         }
@@ -272,6 +278,7 @@ pub fn check_mobile_deployment_restrictions(
                             "Cannot anchor within 5km of a celestial body (distance: {:.1} km)",
                             (anchor_pos - cel.position).length() / 1_000.0
                         ),
+                        client_error: None,
                     });
                 }
             }
@@ -289,6 +296,7 @@ pub fn check_mobile_deployment_restrictions(
                                         "Cannot anchor within 5km of another Mobile Depot (distance: {:.1} km)",
                                         (anchor_pos - opos).length() / 1_000.0
                                     ),
+                                    client_error: None,
                                 });
                             }
                         }
@@ -302,6 +310,7 @@ pub fn check_mobile_deployment_restrictions(
                                         "Cannot anchor within 5km of another deployable structure (distance: {:.1} km)",
                                         (anchor_pos - opos).length() / 1_000.0
                                     ),
+                                    client_error: None,
                                 });
                             }
                         }
@@ -325,6 +334,7 @@ pub fn check_mobile_deployment_restrictions(
                                         "Cannot anchor within 200km of another Mobile Cynosural Inhibitor (distance: {:.1} km)",
                                         (anchor_pos - opos).length() / 1_000.0
                                     ),
+                                    client_error: None,
                                 });
                             }
                         }
@@ -1061,15 +1071,18 @@ pub async fn handle_activate_micro_jump_unit(
     let ship_id = session.ship_id.ok_or_else(|| BridgeRpcError {
         code: "NoActiveShip".into(),
         message: "Session has no active ship".into(),
+        client_error: None,
     })?;
     let sys_id = session.solar_system_id.ok_or_else(|| BridgeRpcError {
         code: "NoSolarSystem".into(),
         message: "Session has no active solar system".into(),
+        client_error: None,
     })?;
     if mju_id <= 0 {
         return Err(BridgeRpcError {
             code: "MissingItemID".into(),
             message: "microJumpDriver.ActivateMicroJumpDrive requires target mjuID".into(),
+            client_error: None,
         });
     }
 
@@ -1081,24 +1094,28 @@ pub async fn handle_activate_micro_jump_unit(
         .ok_or_else(|| BridgeRpcError {
             code: "DeployableNotFound".into(),
             message: format!("Mobile Micro Jump Unit {mju_id} not found"),
+            client_error: None,
         })?;
 
     if rec.group_id != GROUP_MOBILE_MICRO_JUMP_UNIT || rec.solar_system_id != sys_id || rec.is_unanchored {
         return Err(BridgeRpcError {
             code: "InvalidDeployable".into(),
             message: format!("Item {mju_id} is not an active Mobile Micro Jump Unit in this system"),
+            client_error: None,
         });
     }
     if now_unix < rec.anchor_start_unix.saturating_add(MMJU_ACTIVATION_DELAY_SECS) {
         return Err(BridgeRpcError {
             code: "DeployableAnchoring".into(),
             message: "Mobile Micro Jump Unit is still anchoring (1 minute activation delay)".into(),
+            client_error: None,
         });
     }
     if now_unix >= rec.expires_at_unix {
         return Err(BridgeRpcError {
             code: "DeployableExpired".into(),
             message: "Mobile Micro Jump Unit has expired".into(),
+            client_error: None,
         });
     }
 
@@ -1111,12 +1128,14 @@ pub async fn handle_activate_micro_jump_unit(
         .ok_or_else(|| BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: "Ship is not in space".into(),
+            client_error: None,
         })?;
     let mju_pos = DVec3::from_array(rec.position);
     if (ship_ball.position - mju_pos).length() > 2_500.0 {
         return Err(BridgeRpcError {
             code: "OutOfRange".into(),
             message: "Ship must be within 2,500m of the Mobile Micro Jump Unit".into(),
+            client_error: None,
         });
     }
     let dyn_mass_add: f64 = ctx.db.with_snapshot(|snap| {
@@ -1155,17 +1174,18 @@ pub async fn handle_activate_micro_jump_unit(
         return Err(BridgeRpcError {
             code: "ShipTooHeavy".into(),
             message: format!("Ship mass {:.0} kg exceeds Mobile Micro Jump Unit limit of {:.0} kg", eval_mass, MMJU_MAX_SHIP_MASS_KG),
+            client_error: None,
         });
     }
     if matches!(ship_ball.mode, eve_destiny::MovementMode::Warp { .. }) {
-        return Err(BridgeRpcError { code: "ShipInWarp".into(), message: "Cannot activate Mobile Micro Jump Unit while warping".into() });
+        return Err(BridgeRpcError { code: "ShipInWarp".into(), message: "Cannot activate Mobile Micro Jump Unit while warping".into(), client_error: None });
     }
     let ship_cs = sys_handle.get_combat_state(ship_id).await.ok().flatten();
     if ship_cs.as_ref().is_some_and(|cs| cs.is_cloaked) {
-        return Err(BridgeRpcError { code: "ShipCloaked".into(), message: "Cannot activate Mobile Micro Jump Unit while cloaked".into() });
+        return Err(BridgeRpcError { code: "ShipCloaked".into(), message: "Cannot activate Mobile Micro Jump Unit while cloaked".into(), client_error: None });
     }
     if sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) || ship_cs.as_ref().is_some_and(|cs| cs.is_mwd_mjd_disabled) {
-        return Err(BridgeRpcError { code: "WarpScrambled".into(), message: "Cannot activate Mobile Micro Jump Unit while warp scrambled".into() });
+        return Err(BridgeRpcError { code: "WarpScrambled".into(), message: "Cannot activate Mobile Micro Jump Unit while warp scrambled".into(), client_error: None });
     }
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
     crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "jump")?;
@@ -1187,6 +1207,7 @@ pub async fn handle_activate_micro_jump_unit(
         return Err(BridgeRpcError {
             code: "MicroJumpAlreadySpooling".into(),
             message: "Ship is already spooling a Mobile Micro Jump Unit".into(),
+            client_error: None,
         });
     }
 

@@ -60,12 +60,14 @@ pub async fn dispatch_superweapon_aoe_rpc(
         return Err(BridgeRpcError {
             code: "NoActiveShip".into(),
             message: "Activating a superweapon requires an active Titan".into(),
+            client_error: None,
         });
     };
     let Some(sys_id) = session.solar_system_id else {
         return Err(BridgeRpcError {
             code: "NotInSpace".into(),
             message: "Superweapons can only be activated in space".into(),
+            client_error: None,
         });
     };
     let module_id = RpcArgs::positional(args).req_positive_i64(0, "moduleID")?;
@@ -109,12 +111,14 @@ fn validate_doomsday_target_points(
             return Err(BridgeRpcError {
                 code: "InvalidTargetPoint".into(),
                 message: "Doomsday target coordinates must be finite".into(),
+                client_error: None,
             });
         }
         if (*pt - ship_pos).length() > max_range_m {
             return Err(BridgeRpcError {
                 code: "TargetOutOfRange".into(),
                 message: format!("Doomsday target point exceeds max range ({max_range_m} m)"),
+                client_error: None,
             });
         }
     }
@@ -199,6 +203,7 @@ where
         let ship = snap.items.get(&ship_id).ok_or_else(|| BridgeRpcError {
             code: "ShipNotFound".into(),
             message: format!("Active ship {ship_id} not found"),
+            client_error: None,
         })?;
         let s_group = ctx
             .sde
@@ -209,6 +214,7 @@ where
         let module = snap.items.get(&module_id).ok_or_else(|| BridgeRpcError {
             code: "ModuleNotFound".into(),
             message: format!("Doomsday module {module_id} not found"),
+            client_error: None,
         })?;
         let is_high_slot = matches!(
             module.flag,
@@ -227,6 +233,7 @@ where
                 message: format!(
                     "Module {module_id} must be fitted in a high slot on ship {ship_id}"
                 ),
+                client_error: None,
             });
         }
         if !snap
@@ -238,6 +245,7 @@ where
             return Err(BridgeRpcError {
                 code: "ModuleNotOnline".into(),
                 message: format!("Doomsday module {module_id} must be online"),
+                client_error: None,
             });
         }
         Ok((ship.type_id, s_group, module.type_id))
@@ -247,6 +255,7 @@ where
         return Err(BridgeRpcError {
             code: "ShipCannotActivateSuperweapon".into(),
             message: "Only Titan-class hulls (group 30) can activate Doomsday superweapons".into(),
+            client_error: None,
         });
     }
 
@@ -269,6 +278,7 @@ where
             message: format!(
                 "AoE Doomsday superweapons cannot be activated in empire space (highsec/lowsec, sec={sys_sec:.2})"
             ),
+            client_error: None,
         });
     }
     let safety = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
@@ -290,6 +300,7 @@ where
         return Err(BridgeRpcError {
             code: "ModuleInReactivationDelay".into(),
             message: "Doomsday module is currently in reactivation delay".into(),
+            client_error: None,
         });
     }
 
@@ -299,6 +310,7 @@ where
         return Err(BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: format!("Active Titan {ship_id} is not in space in solar system {sys_id}"),
+            client_error: None,
         });
     };
     if matches!(titan_ball_initial.mode, MovementMode::Warp { .. }) {
@@ -435,6 +447,7 @@ where
         .map_err(|message| BridgeRpcError {
             code: "InsufficientFuel".into(),
             message,
+            client_error: None,
         })?;
 
     let existing_orig = read_superweapon_runtime(&ctx.db).and_then(|rt| {
@@ -537,6 +550,7 @@ fn parse_vec3_arg_res(args: &[PyRep], start_idx: usize) -> Result<Option<DVec3>,
         .map_err(|e| BridgeRpcError {
             code: "InvalidTargetPoint".into(),
             message: e.message,
+            client_error: None,
         })
 }
 
@@ -707,6 +721,7 @@ pub async fn activate_spatial_gtfo_doomsday(
                     .ok_or_else(|| BridgeRpcError {
                         code: "TargetNotFound".into(),
                         message: format!("Target ball {tid} not found in space"),
+                        client_error: None,
                     })?
             } else {
                 ship_pos + DVec3::new(30_000.0, 0.0, 0.0)
@@ -796,10 +811,12 @@ pub async fn activate_multipoint_reaper_doomsday(
         let s = parse_vec3_arg_res(args, 1)?.ok_or_else(|| BridgeRpcError {
             code: "InvalidTargetPoint".into(),
             message: "Reaper sweep start coordinates missing".into(),
+            client_error: None,
         })?;
         let e = parse_vec3_arg_res(args, 2)?.ok_or_else(|| BridgeRpcError {
             code: "InvalidTargetPoint".into(),
             message: "Reaper sweep end coordinates missing".into(),
+            client_error: None,
         })?;
         Some((s, e))
     } else if args.len() >= 7 {
@@ -834,6 +851,7 @@ pub async fn activate_multipoint_reaper_doomsday(
                 return Err(BridgeRpcError {
                     code: "InvalidTargetPoint".into(),
                     message: "Reaper sweep coordinates must be finite".into(),
+                    client_error: None,
                 });
             }
             let arc_len = (end_pt - start_pt).length();
@@ -843,6 +861,7 @@ pub async fn activate_multipoint_reaper_doomsday(
                     message: format!(
                         "Reaper sweep arc ({arc_len:.0} m) exceeds {MAX_REAPER_ARC_LENGTH_M:.0} m maximum"
                     ),
+                    client_error: None,
                 });
             }
             Ok(vec![start_pt, end_pt])

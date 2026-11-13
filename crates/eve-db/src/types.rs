@@ -64,6 +64,7 @@ impl FromWalError for eve_proto::BridgeRpcError {
         eve_proto::BridgeRpcError {
             code: "PersistenceFailure".into(),
             message: err,
+            client_error: None,
         }
     }
 }

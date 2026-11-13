@@ -1713,7 +1713,7 @@ async fn test_skyhook_harvest_gating_anarchy_and_persisted_npc_durability() {
     );
     let _: Result<(), eve_proto::BridgeRpcError> = ctx.db.try_with_mut_snapshot(|snap| {
         snap.sov_runtime.sov_upgrade_combat_npcs.insert(777_888_999);
-        Err(eve_proto::BridgeRpcError { code: "Abort".into(), message: "rollback test".into() })
+        Err(eve_proto::BridgeRpcError { code: "Abort".into(), message: "rollback test".into(), client_error: None })
     });
     assert!(ctx.db.with_snapshot(|s| !s.sov_runtime.sov_upgrade_combat_npcs.contains(&777_888_999)), "failed transaction rolls back sov_upgrade_combat_npcs");
 

@@ -987,6 +987,7 @@ pub(super) fn handle_corp_contacts_and_labels(
             code: "CorpRoleDenied".into(),
             message: "Managing corporate contacts and labels requires Diplomat or Director role"
                 .into(),
+            client_error: None,
         }));
     }
     match method {
@@ -1013,6 +1014,7 @@ pub(super) fn handle_corp_contacts_and_labels(
                             return Err(BridgeRpcError {
                                 code: "OwnerNotFound".into(),
                                 message: format!("Contact owner {contact_id} does not exist"),
+                                client_error: None,
                             });
                         }
                         let ctype = if snap.alliances.contains_key(&contact_id) {
@@ -1031,6 +1033,7 @@ pub(super) fn handle_corp_contacts_and_labels(
                             return Err(BridgeRpcError {
                                 code: "ContactAlreadyExists".into(),
                                 message: format!("Contact {contact_id} already exists"),
+                                client_error: None,
                             });
                         }
                         let label_mask = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0) as u64;
@@ -1070,6 +1073,7 @@ pub(super) fn handle_corp_contacts_and_labels(
                             Err(BridgeRpcError {
                                 code: "ContactNotFound".into(),
                                 message: format!("Contact {contact_id} not found"),
+                                client_error: None,
                             })
                         }
                     } else {
@@ -1084,6 +1088,7 @@ pub(super) fn handle_corp_contacts_and_labels(
                             return Err(BridgeRpcError {
                                 code: "ContactNotFound".into(),
                                 message: "No contacts specified".into(),
+                                client_error: None,
                             });
                         }
                         let list = snap.corp_contacts.entry(corp_id).or_default();
@@ -1092,6 +1097,7 @@ pub(super) fn handle_corp_contacts_and_labels(
                                 return Err(BridgeRpcError {
                                     code: "ContactNotFound".into(),
                                     message: format!("Contact {cid} not found"),
+                                    client_error: None,
                                 });
                             }
                         }
@@ -1146,6 +1152,7 @@ pub(super) fn handle_corp_contacts_and_labels(
                     return Err(BridgeRpcError {
                         code: "LabelNotFound".into(),
                         message: format!("Contact label {lid} not found"),
+                        client_error: None,
                     });
                 }
                 if let Some(contacts) = snap.corp_contacts.get_mut(&corp_id) {
@@ -1190,6 +1197,7 @@ pub(super) fn handle_corp_contacts_and_labels(
                         return Err(BridgeRpcError {
                             code: "ContactNotFound".into(),
                             message: "No contacts specified".into(),
+                            client_error: None,
                         });
                     }
                     let contacts = snap.corp_contacts.entry(corp_id).or_default();
@@ -1198,6 +1206,7 @@ pub(super) fn handle_corp_contacts_and_labels(
                             return Err(BridgeRpcError {
                                 code: "ContactNotFound".into(),
                                 message: format!("Contact {cid} not found"),
+                                client_error: None,
                             });
                         }
                     }

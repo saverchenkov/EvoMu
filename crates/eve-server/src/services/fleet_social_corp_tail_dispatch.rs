@@ -38,6 +38,7 @@ pub fn handle_corp_gov_tail(
         Some(Err(BridgeRpcError {
             code: "CorpRoleDenied".into(),
             message: msg.into(),
+            client_error: None,
         }))
     };
 
@@ -259,6 +260,7 @@ pub fn handle_corp_gov_tail(
                 return Some(Err(BridgeRpcError {
                     code: "CrpAccessDenied".into(),
                     message: format!("Cannot inspect division names for corporation {target_cid}"),
+                    client_error: None,
                 }));
             }
             let default_h = [
@@ -321,6 +323,7 @@ pub fn handle_corp_gov_tail(
                 None => Some(Err(BridgeRpcError {
                     code: "SdeDataMissing".into(),
                     message: "No SDE type carries baseDefenderAllyCost".into(),
+                    client_error: None,
                 })),
             }
         }
@@ -342,6 +345,7 @@ pub fn handle_corp_gov_tail(
                         return Err(BridgeRpcError {
                             code: "CorpRoleDenied".into(),
                             message: "Updating corporation attributes requires CEO or Director role".into(),
+                            client_error: None,
                         });
                     }
                     if corp.ceo_id > 0 && snap.skills.contains_key(&corp.ceo_id) {
@@ -384,12 +388,14 @@ pub fn handle_corp_gov_tail(
                     return Err(BridgeRpcError {
                         code: "CorporationNotFound".into(),
                         message: format!("Corporation {corp_id} not found"),
+                        client_error: None,
                     });
                 };
                 if !is_ceo && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR) {
                     return Err(BridgeRpcError {
                         code: "CorpRoleDenied".into(),
                         message: "Moving corporation HQ requires CEO or Director role".into(),
+                        client_error: None,
                     });
                 }
                 let has_office = snap.items.values().any(|i| {
@@ -399,6 +405,7 @@ pub fn handle_corp_gov_tail(
                     return Err(BridgeRpcError {
                         code: "NoOfficeAtStation".into(),
                         message: format!("Corporation {corp_id} has no office at station {station_id}"),
+                        client_error: None,
                     });
                 }
                 let old_hq = corp.hq_station_id.replace(station_id);
@@ -486,6 +493,7 @@ pub fn handle_corp_gov_tail(
                     return Err(BridgeRpcError {
                         code: "CorporationNotFound".into(),
                         message: format!("Corporation {req_corp_id} not found"),
+                        client_error: None,
                     });
                 }
                 let (is_ceo, caller_role) =
@@ -498,6 +506,7 @@ pub fn handle_corp_gov_tail(
                     return Err(BridgeRpcError {
                         code: "CorpRoleDenied".into(),
                         message: "Viewing corporation asset inventory requires Director, Accountant, or Trader role".into(),
+                        client_error: None,
                     });
                 }
                 let gov_offices = snap.corp_governance.get(&req_corp_id).map(|g| &g.offices);
@@ -679,6 +688,7 @@ pub fn handle_corp_gov_tail(
                 return Some(Err(BridgeRpcError {
                     code: "CorpRoleDenied".into(),
                     message: "Only CEO or Director can change friendly fire settings".into(),
+                    client_error: None,
                 }));
             }
             let ff = matches!(args.first(), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
@@ -884,14 +894,14 @@ pub(crate) fn handle_get_corp_applications_rpc(
     let now_unix = ctx.now_unix();
     let res = ctx.db.with_snapshot(|snap| {
         let Some(corp) = snap.corporations.get(&corp_id) else {
-            return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
+            return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found"), client_error: None });
         };
         let (is_ceo, eff_roles) =
             crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
                 snap, corp_id, char_id, 0, now_unix,
             );
         if !is_ceo && (eff_roles & (corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_PERSONNEL_MANAGER)) == 0 {
-            return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Viewing applications requires Personnel Manager or Director role".into() });
+            return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Viewing applications requires Personnel Manager or Director role".into(), client_error: None });
         }
         if is_old {
             let rows: Vec<Vec<PyRep>> = corp

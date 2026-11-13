@@ -135,12 +135,14 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
                     let corp_mut = snap.corporations.get_mut(&caller_corp_id).ok_or_else(|| BridgeRpcError {
                         code: "CorporationNotFound".into(),
                         message: "Corporation not found".into(),
+                        client_error: None,
                     })?;
                     let div_bal = corp_mut.division_balance(div_id);
                     let Some(bal_after) = div_bal.checked_sub(uncovered) else {
                         return Err(BridgeRpcError {
                             code: "InsufficientFunds".into(),
                             message: "Character does not have sufficient funds to cover margin shortfall".into(),
+                            client_error: None,
                         });
                     };
                     corp_mut.set_division_balance(div_id, bal_after);
@@ -152,6 +154,7 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
                         return Err(BridgeRpcError {
                             code: "InsufficientFunds".into(),
                             message: "Character does not have sufficient funds to cover margin shortfall".into(),
+                            client_error: None,
                         });
                     }
                     let ch_mut = snap.characters.get_mut(&char_id).unwrap();
@@ -729,6 +732,7 @@ pub(crate) fn handle_market_transactions_rpc(
                             return Err(BridgeRpcError {
                                 code: "CrpAccessDenied".into(),
                                 message: "Corporation transactions require Accountant or Junior Accountant".into(),
+                                client_error: None,
                             });
                         }
                     }

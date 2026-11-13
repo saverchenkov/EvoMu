@@ -137,12 +137,12 @@ pub async fn handle_with_bound(
         ("agentMgr", "GetInfoServiceDetails") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
+                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into(), client_error: None }));
             };
             let (agent_id, _) =
                 resolve_target_agent_id_with_bound(ctx, session, bound_entry, char_id, sys_id, args, _kwargs);
             let Some(a) = ctx.sde.agents.get(&agent_id) else {
-                return Some(Err(BridgeRpcError { code: "UnknownAgent".into(), message: format!("Agent {agent_id} does not exist in SDE") }));
+                return Some(Err(BridgeRpcError { code: "UnknownAgent".into(), message: format!("Agent {agent_id} does not exist in SDE"), client_error: None }));
             };
             let mut services = vec![PyRep::keyval([("agentServiceType", PyRep::String("mission".into()))])];
             if a.is_locator {
@@ -169,12 +169,12 @@ pub async fn handle_with_bound(
         ("agentMgr", "GetAgentLocationWrap") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
+                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into(), client_error: None }));
             };
             let (agent_id, _) =
                 resolve_target_agent_id_with_bound(ctx, session, bound_entry, char_id, sys_id, args, _kwargs);
             let Some(a) = ctx.sde.agents.get(&agent_id) else {
-                return Some(Err(BridgeRpcError { code: "UnknownAgent".into(), message: format!("Agent {agent_id} does not exist in SDE") }));
+                return Some(Err(BridgeRpcError { code: "UnknownAgent".into(), message: format!("Agent {agent_id} does not exist in SDE"), client_error: None }));
             };
             let loc_id = a
                 .station_id
@@ -218,6 +218,7 @@ pub async fn handle_with_bound(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSolarSystem".into(),
                     message: format!("Character {char_id} has no active solar system"),
+                    client_error: None,
                 }));
             };
             let bm = ctx.db.with_snapshot(|snap| {
@@ -257,6 +258,7 @@ pub async fn handle_with_bound(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSolarSystem".into(),
                     message: format!("Character {char_id} has no active solar system"),
+                    client_error: None,
                 }));
             };
             let (agent_id, _) = resolve_target_agent_id_with_bound(ctx, session, bound_entry, char_id, sys_id, args, _kwargs);
@@ -284,7 +286,7 @@ pub async fn handle_with_bound(
         ("agentMgr", "GetSolarSystemOfAgent") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
+                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into(), client_error: None }));
             };
             let agent_id = bound_entry
                 .filter(|b| b.service == "agentMgr" && b.object_id > 0)
@@ -292,7 +294,7 @@ pub async fn handle_with_bound(
                 .or_else(|| args.first().and_then(|a| a.as_i64()))
                 .unwrap_or_else(|| resolve_target_agent_id_with_bound(ctx, session, bound_entry, char_id, sys_id, args, _kwargs).0);
             let Some(a) = ctx.sde.agents.get(&agent_id) else {
-                return Some(Err(BridgeRpcError { code: "UnknownAgent".into(), message: format!("Agent {agent_id} does not exist in SDE") }));
+                return Some(Err(BridgeRpcError { code: "UnknownAgent".into(), message: format!("Agent {agent_id} does not exist in SDE"), client_error: None }));
             };
             Some(Ok(a.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None)))
         }
@@ -405,7 +407,7 @@ pub async fn handle_with_bound(
         | ("agentMgr", "GetMissionJournalInfo") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
+                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into(), client_error: None }));
             };
             let (agent_id, explicit_agent) =
                 resolve_target_agent_id_with_bound(ctx, session, bound_entry, char_id, sys_id, args, _kwargs);
@@ -415,7 +417,7 @@ pub async fn handle_with_bound(
             let Some((m, meta)) = ctx.db.with_snapshot(|snap| {
                 snap.active_missions.get(&(char_id, mission_id)).cloned().map(|m| (m, load_mission_meta(snap, char_id, mission_id)))
             }) else {
-                return Some(Err(BridgeRpcError { code: "MissionNotActive".into(), message: format!("Mission {mission_id} is not active for character {char_id}") }));
+                return Some(Err(BridgeRpcError { code: "MissionNotActive".into(), message: format!("Mission {mission_id} is not active for character {char_id}"), client_error: None }));
             };
             let has_explicit_mission_id = args.get(1).and_then(|a| a.as_i64()).is_some()
                 || args.first().and_then(|a| a.as_i64()).is_some_and(|v| {
@@ -437,6 +439,7 @@ pub async fn handle_with_bound(
                         message: format!(
                             "No active Offered/Accepted mission for character {char_id} with agent {agent_id}"
                         ),
+                        client_error: None,
                     }));
                 }
                 if m.state == "Offered" {
@@ -448,6 +451,7 @@ pub async fn handle_with_bound(
                                     "Offered mission {mission_id} with agent {} is not accessible remotely",
                                     m.agent_id
                                 ),
+                                client_error: None,
                             }));
                         }
                     }
@@ -617,7 +621,7 @@ pub async fn handle_with_bound(
         ("agentMgr", "DoAction") | ("agentMgr", "GetOffer") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
+                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into(), client_error: None }));
             };
             let explicit_action_opt = if method == "GetOffer" {
                 Some(2_i64)
@@ -667,7 +671,7 @@ pub async fn handle_with_bound(
                         explicit_agent = true;
                     }
                     let Some(agent_info) = ctx.sde.agents.get(&agent_id) else {
-                        return Some(Err(BridgeRpcError { code: "UnknownAgent".into(), message: format!("Agent {agent_id} does not exist in SDE") }));
+                        return Some(Err(BridgeRpcError { code: "UnknownAgent".into(), message: format!("Agent {agent_id} does not exist in SDE"), client_error: None }));
                     };
                     if is_implicit_greeting {
                         let existing_accepted = ctx.db.with_snapshot(|snap| {
@@ -749,13 +753,13 @@ pub async fn handle_with_bound(
                                 ("dialogue", PyRep::List(Vec::new())),
                             ])));
                         }
-                        return Some(Err(BridgeRpcError { code: "AgentNotCoLocated".into(), message: format!("Agent {agent_id} is in system {:?} / station {:?}, not character's current location (system {sys_id}, station {:?})", agent_info.solar_system_id, agent_info.station_id, session.station_id) }));
+                        return Some(Err(BridgeRpcError { code: "AgentNotCoLocated".into(), message: format!("Agent {agent_id} is in system {:?} / station {:?}, not character's current location (system {sys_id}, station {:?})", agent_info.solar_system_id, agent_info.station_id, session.station_id), client_error: None }));
                     }
                     if is_storyline_agent_type(agent_info.agent_type_id) {
-                        return Some(Err(BridgeRpcError { code: "StorylineAgentRequiresReferral".into(), message: format!("Storyline agent {agent_id} (agentType {}) cannot be requested directly without a 16-mission referral", agent_info.agent_type_id) }));
+                        return Some(Err(BridgeRpcError { code: "StorylineAgentRequiresReferral".into(), message: format!("Storyline agent {agent_id} (agentType {}) cannot be requested directly without a 16-mission referral", agent_info.agent_type_id), client_error: None }));
                     }
                     if agent_info.agent_type_id == 11 {
-                        return Some(Err(BridgeRpcError { code: "UnimplementedRPC".into(), message: format!("Agent {agent_id} (agentType {}) uses Aura node-graph missions which are not yet implemented", agent_info.agent_type_id) }));
+                        return Some(Err(BridgeRpcError { code: "UnimplementedRPC".into(), message: format!("Agent {agent_id} (agentType {}) uses Aura node-graph missions which are not yet implemented", agent_info.agent_type_id), client_error: None }));
                     }
                     let now = ctx.now_unix();
                     if agent_info.agent_type_id == 10 {
@@ -767,14 +771,14 @@ pub async fn handle_with_bound(
                             })
                         });
                         if on_cd {
-                            return Some(Err(BridgeRpcError { code: "EpicArcOnCooldown".into(), message: format!("Epic Arc {arc_id} (agent {agent_id}) is on 90-day repeat cooldown") }));
+                            return Some(Err(BridgeRpcError { code: "EpicArcOnCooldown".into(), message: format!("Epic Arc {arc_id} (agent {agent_id}) is on 90-day repeat cooldown"), client_error: None }));
                         }
                     }
                     if agent_info.agent_type_id == 9 {
                         let req_fac = ctx.sde.factions.values().find(|f| f.militia_corporation_id == Some(agent_info.corporation_id)).map(|f| f.faction_id as i64);
                         let ch_fac = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).and_then(|c| c.war_faction_id));
                         if req_fac.is_some() && ch_fac != req_fac {
-                            return Some(Err(BridgeRpcError { code: "NotEnlistedInMilitia".into(), message: format!("FW agent {agent_id} requires enlistment in militia faction {req_fac:?} (have {ch_fac:?})") }));
+                            return Some(Err(BridgeRpcError { code: "NotEnlistedInMilitia".into(), message: format!("FW agent {agent_id} requires enlistment in militia faction {req_fac:?} (have {ch_fac:?})"), client_error: None }));
                         }
                     }
                     if matches!(agent_info.agent_type_id, 5 | 8 | 12) {
@@ -786,7 +790,7 @@ pub async fn handle_with_bound(
                             })
                         });
                         if already_done {
-                            return Some(Err(BridgeRpcError { code: "OneTimeAgentMissionCompleted".into(), message: format!("One-time COSMOS / Data Center / Career agent {agent_id} mission has already been completed") }));
+                            return Some(Err(BridgeRpcError { code: "OneTimeAgentMissionCompleted".into(), message: format!("One-time COSMOS / Data Center / Career agent {agent_id} mission has already been completed"), client_error: None }));
                         }
                     }
 
@@ -800,6 +804,7 @@ pub async fn handle_with_bound(
                             return Some(Err(BridgeRpcError {
                                 code: "CosmosMissionExpired".into(),
                                 message: format!("One-time COSMOS agent {agent_id} mission offer has expired and cannot be re-offered"),
+                                client_error: None,
                             }));
                         }
                     }
@@ -811,6 +816,7 @@ pub async fn handle_with_bound(
                         return Some(Err(BridgeRpcError {
                             code: "CantDoMissionAlphaClone".into(),
                             message: format!("Agent level {} requires Omega clone state", agent_info.level),
+                            client_error: None,
                         }));
                     }
 
@@ -821,6 +827,7 @@ pub async fn handle_with_bound(
                             return Some(Err(BridgeRpcError {
                                 code: "CantDoMission".into(),
                                 message: format!("Level 5 agent {agent_id} cannot operate in high-security space ({sec:.2})"),
+                                client_error: None,
                             }));
                         }
                     }
@@ -845,7 +852,7 @@ pub async fn handle_with_bound(
                                     ("dialogue", PyRep::List(Vec::new())),
                                 ])));
                             }
-                            return Some(Err(BridgeRpcError { code: "InsufficientAgentStanding".into(), message: format!("Agent {agent_id} (level {}) requires agent/corporation/faction standing >= {required_standing:.1}, character has {effective_standing:.2}", agent_info.level) }));
+                            return Some(Err(BridgeRpcError { code: "InsufficientAgentStanding".into(), message: format!("Agent {agent_id} (level {}) requires agent/corporation/faction standing >= {required_standing:.1}, character has {effective_standing:.2}", agent_info.level), client_error: None }));
                         }
                     } else if !matches!(agent_info.agent_type_id, 7 | 12) && effective_standing <= -2.0 {
                         if is_implicit_greeting {
@@ -861,7 +868,7 @@ pub async fn handle_with_bound(
                                 ("dialogue", PyRep::List(Vec::new())),
                             ])));
                         }
-                        return Some(Err(BridgeRpcError { code: "InsufficientAgentStanding".into(), message: format!("Agent {agent_id} (level 1) requires standing > -2.0, character has {effective_standing:.2}") }));
+                        return Some(Err(BridgeRpcError { code: "InsufficientAgentStanding".into(), message: format!("Agent {agent_id} (level 1) requires standing > -2.0, character has {effective_standing:.2}"), client_error: None }));
                     }
 
                     let is_rnd = is_rnd_agent(agent_info);
@@ -890,6 +897,7 @@ pub async fn handle_with_bound(
                             return Some(Err(BridgeRpcError {
                                 code: "ResearchNotActive".into(),
                                 message: format!("Agent {agent_id} requires active research to offer daily missions"),
+                                client_error: None,
                             }));
                         }
                     }
@@ -932,7 +940,7 @@ pub async fn handle_with_bound(
                                 })
                         };
                         let Some(tmpl) = next_tmpl else {
-                            return Err(BridgeRpcError { code: "NoMissionsAvailable".into(), message: format!("No unoffered missions remaining in SDE pool for agent {agent_id} and character {char_id}") });
+                            return Err(BridgeRpcError { code: "NoMissionsAvailable".into(), message: format!("No unoffered missions remaining in SDE pool for agent {agent_id} and character {char_id}"), client_error: None });
                         };
                         let mission_id = tmpl.mission_id;
                         let title = tmpl.title.clone();
@@ -1035,6 +1043,7 @@ pub async fn handle_with_bound(
                         return Some(Err(BridgeRpcError {
                             code: "CantDoMissionAlphaClone".into(),
                             message: format!("Agent level {agent_lvl} requires Omega clone state"),
+                            client_error: None,
                         }));
                     }
                     let tmpl_opt = ctx.sde.missions.get(&mission_id).cloned();
@@ -1048,6 +1057,7 @@ pub async fn handle_with_bound(
                                     "Agent {actual_agent_id} is in system {:?} / station {:?}, not character's current location (system {sys_id}, station {:?})",
                                     agent_info.solar_system_id, agent_info.station_id, session.station_id
                                 ),
+                                client_error: None,
                             }));
                         }
                         if action_id == 5 && !colocated {
@@ -1065,6 +1075,7 @@ pub async fn handle_with_bound(
                                     message: format!(
                                         "Mission {mission_id} from agent {actual_agent_id} requires visiting the agent to accept"
                                     ),
+                                    client_error: None,
                                 }));
                             }
                         }
@@ -1133,19 +1144,19 @@ pub async fn handle_with_bound(
                                     }
                                     reclaim_courier_cargo(snap, char_id, mission_id);
                                 });
-                                return Some(Err(BridgeRpcError { code: "MissionOfferExpired".into(), message: format!("Mission {mission_id} offer has expired") }));
+                                return Some(Err(BridgeRpcError { code: "MissionOfferExpired".into(), message: format!("Mission {mission_id} offer has expired"), client_error: None }));
                             }
                         } else if !(state == "Accepted" && sys == mission_sys_id && can_respawn_missing) {
-                            return Some(Err(BridgeRpcError { code: "InvalidMissionState".into(), message: format!("Mission {mission_id} is in state '{state}' (system {sys}), not Offered") }));
+                            return Some(Err(BridgeRpcError { code: "InvalidMissionState".into(), message: format!("Mission {mission_id} is in state '{state}' (system {sys}), not Offered"), client_error: None }));
                         }
                     }
 
                     let res = ctx.db.try_with_mut_snapshot(|snap| {
                         let Some(m_check) = snap.active_missions.get(&(char_id, mission_id)) else {
-                            return Err(BridgeRpcError { code: "MissionNotOffered".into(), message: format!("Mission {mission_id} has not been offered to character {char_id}") });
+                            return Err(BridgeRpcError { code: "MissionNotOffered".into(), message: format!("Mission {mission_id} has not been offered to character {char_id}"), client_error: None });
                         };
                         if m_check.state != "Offered" && !(m_check.state == "Accepted" && m_check.solar_system_id == mission_sys_id && can_respawn_missing) {
-                            return Err(BridgeRpcError { code: "InvalidMissionState".into(), message: format!("Mission {mission_id} is in state '{}' (system {}), not Offered", m_check.state, m_check.solar_system_id) });
+                            return Err(BridgeRpcError { code: "InvalidMissionState".into(), message: format!("Mission {mission_id} is in state '{}' (system {}), not Offered", m_check.state, m_check.solar_system_id), client_error: None });
                         }
                         let mut spawned_npcs: Vec<(i64, eve_db::TypeId)> = Vec::new();
                         let mut need_npc = false;
@@ -1181,12 +1192,12 @@ pub async fn handle_with_bound(
                             let is_trade = tmpl_opt.as_ref().is_some_and(|t| t.content_template.as_deref().unwrap_or_default().contains("Trade"));
                             let is_courier = !is_trade && tmpl_opt.as_ref().is_some_and(|t| t.is_courier || t.content_template.as_deref().unwrap_or_default().contains("BasicCourier"));
                             if is_courier && meta.granted_courier_item_id.is_none() {
-                                let cargo_tid = meta.required_delivery_type_id.ok_or_else(|| BridgeRpcError { code: "InvalidMissionLocation".into(), message: format!("Courier mission {mission_id} has no delivery item type specified") })?;
+                                let cargo_tid = meta.required_delivery_type_id.ok_or_else(|| BridgeRpcError { code: "InvalidMissionLocation".into(), message: format!("Courier mission {mission_id} has no delivery item type specified"), client_error: None })?;
                                 let cargo_qty = meta.required_delivery_qty.max(1);
                                 let agent_station = meta.origin_station_id
                                     .or_else(|| ctx.sde.agents.get(&meta.agent_id).and_then(|a| a.station_id))
                                     .or_else(|| ctx.sde.agents.get(&meta.agent_id).and_then(|a| a.solar_system_id).and_then(|sys| ctx.sde.stations.values().filter(|st| st.solar_system_id == sys).map(|st| st.station_id).min()))
-                                    .ok_or_else(|| BridgeRpcError { code: "InvalidMissionLocation".into(), message: "Agent has no valid station location".into() })?;
+                                    .ok_or_else(|| BridgeRpcError { code: "InvalidMissionLocation".into(), message: "Agent has no valid station location".into(), client_error: None })?;
                                 snap.next_entity_id += 1;
                                 let cid = snap.next_entity_id;
                                 snap.items.insert(
@@ -1293,7 +1304,7 @@ pub async fn handle_with_bound(
                     let lookup_agent_id = if explicit_agent { agent_id } else { 0 };
                     let mission_id = match resolve_target_mission_id(ctx, char_id, lookup_agent_id, Some("Accepted"), args, _kwargs) { Ok(v) => v, Err(e) => return Some(Err(e)) };
                     let Some(tmpl) = ctx.sde.missions.get(&mission_id).cloned() else {
-                        return Some(Err(BridgeRpcError { code: "UnknownMission".into(), message: format!("Mission {mission_id} does not exist in SDE") }));
+                        return Some(Err(BridgeRpcError { code: "UnknownMission".into(), message: format!("Mission {mission_id} does not exist in SDE"), client_error: None }));
                     };
                     let is_storyline = is_storyline_template(&tmpl);
                     let (active_agent_id, pre_dest_station, pre_is_dc, pre_is_trade, pre_is_courier) = ctx.db.with_snapshot(|snap| {
@@ -1317,12 +1328,14 @@ pub async fn handle_with_bound(
                                         "Agent {active_agent_id} is in system {:?} / station {:?}, not character's current location (system {sys_id}, station {:?})",
                                         agent_info.solar_system_id, agent_info.station_id, session.station_id
                                     ),
+                                    client_error: None,
                                 }));
                             }
                         } else if pre_is_dc || pre_is_trade {
                             return Some(Err(BridgeRpcError {
                                 code: "UnknownAgent".into(),
                                 message: format!("Agent {active_agent_id} does not exist in SDE"),
+                                client_error: None,
                             }));
                         }
                     }
@@ -1381,13 +1394,14 @@ pub async fn handle_with_bound(
                         return Some(Err(BridgeRpcError {
                             code: "MissionExpired".into(),
                             message: format!("Mission {mission_id} has expired and failed"),
+                            client_error: None,
                         }));
                     }
 
                     let res = ctx.db.try_with_mut_snapshot(|snap| {
                         let meta_opt = load_mission_meta(snap, char_id, mission_id);
                         let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) else {
-                            return Err(BridgeRpcError { code: "MissionNotActive".into(), message: format!("Mission {mission_id} is not active for character {char_id}") });
+                            return Err(BridgeRpcError { code: "MissionNotActive".into(), message: format!("Mission {mission_id} is not active for character {char_id}"), client_error: None });
                         };
                         let is_rnd = meta_opt
                             .as_ref()
@@ -1412,7 +1426,7 @@ pub async fn handle_with_bound(
                         };
 
                         if m.state != "Accepted" || (m.npcs_remaining > 0 && !is_mining_mission && !is_rnd && !is_courier && !is_trade && !is_dc && !is_heraldry) {
-                            return Err(BridgeRpcError { code: "MissionIncomplete".into(), message: format!("Mission {mission_id} cannot be completed (state='{}', npcs_remaining={})", m.state, m.npcs_remaining) });
+                            return Err(BridgeRpcError { code: "MissionIncomplete".into(), message: format!("Mission {mission_id} cannot be completed (state='{}', npcs_remaining={})", m.state, m.npcs_remaining), client_error: None });
                         }
 
                         let req_delivery = meta_opt
@@ -1439,6 +1453,7 @@ pub async fn handle_with_bound(
                                 message: format!(
                                     "Mission {mission_id} requires physical item delivery and cannot be completed remotely"
                                 ),
+                                client_error: None,
                             });
                         }
                         if let Some((req_tid, req_units)) = req_delivery {
@@ -1783,14 +1798,14 @@ pub async fn handle_with_bound(
                     }
                 }
 
-                _ => Some(Err(BridgeRpcError { code: "InvalidDialogueAction".into(), message: format!("Unknown agent dialogue action {action_id}") })),
+                _ => Some(Err(BridgeRpcError { code: "InvalidDialogueAction".into(), message: format!("Unknown agent dialogue action {action_id}"), client_error: None })),
             }
         }
 
         ("agentMgr", "RemoveOfferFromJournal") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
+                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into(), client_error: None }));
             };
             let (agent_id, explicit_agent) =
                 resolve_target_agent_id_with_bound(ctx, session, bound_entry, char_id, sys_id, args, _kwargs);

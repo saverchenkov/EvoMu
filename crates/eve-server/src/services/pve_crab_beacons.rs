@@ -230,7 +230,7 @@ pub fn check_crab_loot_access(
             }
         }
         CrabBeaconPhase::LootRestricted | CrabBeaconPhase::SelfDestructed => {
-            Err(BridgeRpcError::user_error("ItemNotFound"))
+            Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::ItemNotFound))
         }
     }
 }
@@ -1160,6 +1160,7 @@ pub async fn handle_crab_component_call(
         _ => Err(BridgeRpcError {
             code: "UnsupportedComponentCall".into(),
             message: format!("Unsupported CRAB component call {comp_name}.{comp_method}"),
+            client_error: None,
         }),
     }
 }

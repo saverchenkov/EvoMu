@@ -10,6 +10,7 @@ fn rpc_err(code: &str, msg: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
         code: code.into(),
         message: msg.into(),
+        client_error: None,
     }
 }
 
@@ -46,12 +47,15 @@ pub(super) fn handle_insure_ship(
         ));
     };
     let Some(arg1) = args.get(1).and_then(|a| a.as_f64()) else {
-        return Err(BridgeRpcError::user_error("InsureShipInvalidCost"));
+        return Err(BridgeRpcError::from_user_key(
+            eve_proto::UserErrorKey::InsureShipInvalidCost,
+        ));
     };
     if let Some(sid) = session.structure_id {
         return Err(BridgeRpcError {
             code: "StationServiceUnavailable".into(),
             message: format!("Upwell structure {sid} does not offer insurance"),
+            client_error: None,
         });
     }
     let Some(station_id) = session.station_id else {
@@ -66,6 +70,7 @@ pub(super) fn handle_insure_ship(
         return Err(BridgeRpcError {
             code: "StationServiceUnavailable".into(),
             message: format!("Station {station_id} does not offer insurance"),
+            client_error: None,
         });
     }
 
@@ -94,7 +99,9 @@ pub(super) fn handle_insure_ship(
             return Err(rpc_err("ShipNotFound", format!("Ship {ship_id} not found")));
         };
         if ctx.sde.get_type_category(ship.type_id) != Some(6) {
-            return Err(BridgeRpcError::user_error("InsureShipFailed"));
+            return Err(BridgeRpcError::from_user_key(
+                eve_proto::UserErrorKey::InsureShipFailed,
+            ));
         }
         if !ship.singleton {
             return Err(rpc_err(
@@ -166,12 +173,10 @@ pub(super) fn handle_insure_ship(
                 } else {
                     owner_id
                 };
-                return Err(BridgeRpcError {
-                    code: "InsureShipFailedSingleContract".into(),
-                    message: format!(
-                        "InsureShipFailedSingleContract (ownerName={contract_owner_id})"
-                    ),
-                });
+                return Err(BridgeRpcError::user_error_with_args(
+                    eve_proto::UserErrorKey::InsureShipFailedSingleContract,
+                    [("ownerName", PyRep::Integer(contract_owner_id))],
+                ));
             }
         }
         let live_prices =
@@ -197,7 +202,11 @@ pub(super) fn handle_insure_ship(
             }
             match matched {
                 Some(t) => t,
-                None => return Err(BridgeRpcError::user_error("InsureShipInvalidCost")),
+                None => {
+                    return Err(BridgeRpcError::from_user_key(
+                        eve_proto::UserErrorKey::InsureShipInvalidCost,
+                    ))
+                }
             }
         } else if arg1 > 0.0 {
             let idx = standard_fractions
@@ -214,7 +223,9 @@ pub(super) fn handle_insure_ship(
             let (lvl_name, lvl_cost, lvl_payout) = levels[idx];
             (lvl_name, lvl_cost, lvl_payout, standard_fractions[idx])
         } else {
-            return Err(BridgeRpcError::user_error("InsureShipInvalidCost"));
+            return Err(BridgeRpcError::from_user_key(
+                eve_proto::UserErrorKey::InsureShipInvalidCost,
+            ));
         };
         let start_unix = now_unix;
         let end_unix = now_unix.saturating_add(
@@ -365,6 +376,7 @@ pub(super) fn handle_repair_all(
         return Err(BridgeRpcError {
             code: "NotDocked".into(),
             message: "Repairing ship and modules requires being docked".into(),
+            client_error: None,
         });
     };
     life::sync_all_structures(ctx);
@@ -377,12 +389,14 @@ pub(super) fn handle_repair_all(
         return Err(BridgeRpcError {
             code: "StationServiceUnavailable".into(),
             message: format!("Station {dock_id} does not offer repair facilities"),
+            client_error: None,
         });
     }
     let Some(ship_id) = session.ship_id else {
         return Err(BridgeRpcError {
             code: "NoActiveShip".into(),
             message: "Session has no active ship".into(),
+            client_error: None,
         });
     };
     let explicit_ids: Vec<i64> = match args.first() {
@@ -407,12 +421,14 @@ pub(super) fn handle_repair_all(
                 return Err(BridgeRpcError {
                     code: "ItemNotFound".into(),
                     message: format!("Item {eid} not found"),
+                    client_error: None,
                 });
             };
             if it.owner_id != char_id {
                 return Err(BridgeRpcError {
                     code: "ItemOwnershipViolation".into(),
                     message: format!("Item {eid} is not owned by character {char_id}"),
+                    client_error: None,
                 });
             }
             let at_dock = it.location_id == dock_id
@@ -424,6 +440,7 @@ pub(super) fn handle_repair_all(
                 return Err(BridgeRpcError {
                     code: "ItemNotAtStation".into(),
                     message: format!("Item {eid} is not located at docked facility {dock_id}"),
+                    client_error: None,
                 });
             }
         }
@@ -523,11 +540,13 @@ pub(super) fn handle_repair_all(
             let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
                 code: "CharacterNotFound".into(),
                 message: format!("Character {char_id} not found"),
+                client_error: None,
             })?;
             let fee = IskCents::from_f64_isk(cost_isk);
             ch.balance = ch.balance.checked_sub(fee).ok_or_else(|| BridgeRpcError {
                 code: "InsufficientFunds".into(),
                 message: "Insufficient ISK to pay repair bill".into(),
+                client_error: None,
             })?;
             let bal = ch.balance;
             new_char_bal = Some(bal);

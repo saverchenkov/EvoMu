@@ -105,11 +105,13 @@ pub(crate) fn select_ess_reserve_key_in_cargo<'a>(
             message: format!(
                 "ESS Reserve Security Key quadrant does not match solar system {sys_id}"
             ),
+            client_error: None,
         })
     } else {
         Err(BridgeRpcError {
             code: "MissingEssReserveSecurityKey".into(),
             message: "Unlocking the ESS Reserve Bank requires a matching-quadrant ESS Reserve Security Key (type 57714..57721) in active ship cargo".into(),
+            client_error: None,
         })
     }
 }
@@ -232,18 +234,21 @@ pub async fn handle_ess_link(
         return Err(BridgeRpcError {
             code: "ShipDocked".into(),
             message: "Cannot link to ESS while docked".into(),
+            client_error: None,
         });
     }
     let Some(ship_id) = session.ship_id else {
         return Err(BridgeRpcError {
             code: "NoActiveShip".into(),
             message: "Session has no active ship".into(),
+            client_error: None,
         });
     };
     let Some(sys_id) = session.solar_system_id else {
         return Err(BridgeRpcError {
             code: "NoSolarSystem".into(),
             message: "Session has no active solar system".into(),
+            client_error: None,
         });
     };
     let sys_sec = ctx
@@ -258,6 +263,7 @@ pub async fn handle_ess_link(
             message: format!(
                 "ESS banks only exist in K-space null-sec systems (system {sys_id} has security {sys_sec:.2})"
             ),
+            client_error: None,
         });
     }
 
@@ -278,23 +284,27 @@ pub async fn handle_ess_link(
         .map_err(|e| BridgeRpcError {
             code: "DestinyQueryFailed".into(),
             message: e,
+            client_error: None,
         })?
     else {
         return Err(BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: "Active ship ball is not in space".into(),
+            client_error: None,
         });
     };
     if ship_ball.type_id == 670 {
         return Err(BridgeRpcError {
             code: "CantDoThatInPod".into(),
             message: "Capsules cannot link to an Encounter Surveillance System".into(),
+            client_error: None,
         });
     }
     if matches!(ship_ball.mode, MovementMode::Warp { .. }) {
         return Err(BridgeRpcError {
             code: "ShipWarping".into(),
             message: "Cannot link to ESS while warping".into(),
+            client_error: None,
         });
     }
     let ship_cs = sys_handle.get_combat_state(ship_id).await.ok().flatten();
@@ -302,6 +312,7 @@ pub async fn handle_ess_link(
         return Err(BridgeRpcError {
             code: "ShipDestroyed".into(),
             message: "Destroyed ships cannot link to an Encounter Surveillance System".into(),
+            client_error: None,
         });
     }
     let is_cloaked = ship_cs.as_ref().is_some_and(|cs| cs.is_cloaked)
@@ -313,6 +324,7 @@ pub async fn handle_ess_link(
         return Err(BridgeRpcError {
             code: "CantLinkWhileCloaked".into(),
             message: "Cannot link to ESS while cloaked".into(),
+            client_error: None,
         });
     }
 
@@ -320,6 +332,7 @@ pub async fn handle_ess_link(
         return Err(BridgeRpcError {
             code: "EssBeaconNotPresent".into(),
             message: "ESS link requires an explicit integer essBallID".into(),
+            client_error: None,
         });
     };
     let Some((_, ess_ball)) = sys_handle
@@ -328,17 +341,20 @@ pub async fn handle_ess_link(
         .map_err(|e| BridgeRpcError {
             code: "DestinyQueryFailed".into(),
             message: e,
+            client_error: None,
         })?
     else {
         return Err(BridgeRpcError {
             code: "EssBeaconNotPresent".into(),
             message: format!("No ESS beacon present in solar system {sys_id}"),
+            client_error: None,
         });
     };
     if ess_ball.type_id != 32882 {
         return Err(BridgeRpcError {
             code: "EssBeaconNotPresent".into(),
             message: format!("Ball {ess_ball_id} is not an Encounter Surveillance System (32882)"),
+            client_error: None,
         });
     }
 
@@ -347,6 +363,7 @@ pub async fn handle_ess_link(
         return Err(BridgeRpcError {
             code: "OutsideEssLinkRange".into(),
             message: format!("Ship is {:.1} m from ESS beacon (must be <= 2500 m)", dist),
+            client_error: None,
         });
     }
 
@@ -369,6 +386,7 @@ pub async fn handle_ess_link(
                     return Err(BridgeRpcError {
                         code: "EssReserveAlreadyLinked".into(),
                         message: format!("ESS Reserve Bank in system {sys_id} is already linked by character {other}"),
+                        client_error: None,
                     });
                 }
             }
@@ -378,6 +396,7 @@ pub async fn handle_ess_link(
                     return Err(BridgeRpcError {
                         code: "EssAlreadyLinked".into(),
                         message: format!("ESS Main Bank in system {sys_id} is already linked by character {other}"),
+                        client_error: None,
                     });
                 }
             }
@@ -403,6 +422,7 @@ pub async fn handle_ess_link(
                     return Err(BridgeRpcError {
                         code: "EssReservePulsesExhausted".into(),
                         message: "All ESS Reserve Bank pulses for this key have been exhausted".into(),
+                        client_error: None,
                     });
                 }
             } else {
@@ -421,6 +441,7 @@ pub async fn handle_ess_link(
                         .map_err(|e| BridgeRpcError {
                             code: "EssKeyLocked".into(),
                             message: e.to_string(),
+                            client_error: None,
                         })?;
                 }
                 let new_until = now_unix + dur_mins * 60;
@@ -435,6 +456,7 @@ pub async fn handle_ess_link(
             return Err(BridgeRpcError {
                 code: "SystemStateNotFound".into(),
                 message: format!("No ESS state for solar system {sys_id}"),
+                client_error: None,
             });
         };
         let bank_available = if is_reserve {
@@ -446,6 +468,7 @@ pub async fn handle_ess_link(
             return Err(BridgeRpcError {
                 code: "EssBankEmpty".into(),
                 message: format!("ESS Bank in system {sys_id} is empty"),
+                client_error: None,
             });
         };
 
@@ -473,6 +496,7 @@ pub async fn handle_ess_link(
                     "ESS link requires 5 ticks to complete (started at {}, current {})",
                     start_tick, current_tick
                 ),
+                client_error: None,
             });
         }
         let mut reserve_terminated = false;
@@ -481,12 +505,14 @@ pub async fn handle_ess_link(
                 return Err(BridgeRpcError {
                     code: "EssReservePulsesExhausted".into(),
                     message: "All ESS Reserve Bank pulses for this key have been exhausted".into(),
+                    client_error: None,
                 });
             }
             if pulse_st.last_pulse_sec.is_some_and(|last| now_unix < last.saturating_add(60)) {
                 return Err(BridgeRpcError {
                     code: "EssReservePulseCooldown".into(),
                     message: "ESS Reserve Bank pulse is on 60s cooldown".into(),
+                    client_error: None,
                 });
             }
             let p = crate::services::pve_ess_reserve_banks::compute_ess_reserve_pulse_payout_cents(

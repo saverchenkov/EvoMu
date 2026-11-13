@@ -78,11 +78,13 @@ impl TourneyStoreExt for TourneyStore {
             _ => self.active_match_id.ok_or_else(|| BridgeRpcError {
                 code: "MatchNotFound".into(),
                 message: "No active tournament match found".into(),
+                client_error: None,
             })?,
         };
         self.matches.get_mut(&mid).ok_or_else(|| BridgeRpcError {
             code: "MatchNotFound".into(),
             message: format!("Match ID {mid} not found"),
+            client_error: None,
         })
     }
 
@@ -119,11 +121,13 @@ pub fn register_tourney_setup(
         .ok_or_else(|| BridgeRpcError {
             code: "InvalidSolarSystem".into(),
             message: format!("Arena solar system {arena_system_id} not found in SDE"),
+            client_error: None,
         })?;
     if tourney_id <= 0 || tourney_name.trim().is_empty() {
         return Err(BridgeRpcError {
             code: "InvalidTournament".into(),
             message: "Tournament needs a positive ID and a name".into(),
+            client_error: None,
         });
     }
     let now_unix = ctx.now_unix();
@@ -157,7 +161,7 @@ pub(crate) fn check_referee_auth(session: &SessionState, caller_char_id: i64, m:
     if session.has_gm_role() || m.referees.contains(&caller_char_id) {
         Ok(())
     } else {
-        Err(BridgeRpcError { code: "AccessDenied".into(), message: "Caller is not an authorized tournament referee or GM".into() })
+        Err(BridgeRpcError { code: "AccessDenied".into(), message: "Caller is not an authorized tournament referee or GM".into(), client_error: None })
     }
 }
 
@@ -228,14 +232,14 @@ pub(crate) fn validate_pilot_for_team(m: &mut TourneyMatch, which_team: i64, pil
     if is_ship_type_banned(m, pilot.ship_type_id) {
         let errs = m.pilot_errors.entry(pilot.character_id).or_default();
         if !errs.iter().any(|e| e == "TourneyShipTypeBanned") { errs.push("TourneyShipTypeBanned".into()); }
-        return Err(BridgeRpcError { code: "TourneyShipTypeBanned".into(), message: format!("Ship type {} is banned in this tournament match", pilot.ship_type_id) });
+        return Err(BridgeRpcError { code: "TourneyShipTypeBanned".into(), message: format!("Ship type {} is banned in this tournament match", pilot.ship_type_id), client_error: None });
     }
     let existing_pts: i64 = (if which_team == 0 { &m.red_players } else { &m.blue_players })
         .iter().filter(|p| p.character_id != pilot.character_id).map(|p| p.points).sum();
     if m.max_points > 0 && existing_pts + pilot.points > m.max_points {
         let errs = m.pilot_errors.entry(pilot.character_id).or_default();
         if !errs.iter().any(|e| e == "TourneyMaxPointsExceeded") { errs.push("TourneyMaxPointsExceeded".into()); }
-        return Err(BridgeRpcError { code: "TourneyMaxPointsExceeded".into(), message: format!("Team point total {} exceeds match max_points {}", existing_pts + pilot.points, m.max_points) });
+        return Err(BridgeRpcError { code: "TourneyMaxPointsExceeded".into(), message: format!("Team point total {} exceeds match max_points {}", existing_pts + pilot.points, m.max_points), client_error: None });
     }
     Ok(())
 }

@@ -264,6 +264,7 @@ fn handle_office_manager(
                 return Some(Err(BridgeRpcError {
                     code: "NotDockedAtStation".into(),
                     message: format!("Pilot must be docked at station or structure {station_id} to rent an office"),
+                    client_error: None,
                 }));
             }
             fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
@@ -280,6 +281,7 @@ fn handle_office_manager(
                 return Some(Err(BridgeRpcError {
                     code: "CorpRoleDenied".into(),
                     message: "Renting an office requires Director or Rent Office role".into(),
+                    client_error: None,
                 }));
             }
 
@@ -293,6 +295,7 @@ fn handle_office_manager(
                     return Err(BridgeRpcError {
                         code: "StationNotFound".into(),
                         message: format!("Station or structure {station_id} not found"),
+                        client_error: None,
                     });
                 }
                 if station_id == 60_015_187 {
@@ -321,6 +324,7 @@ fn handle_office_manager(
                         return Err(BridgeRpcError {
                             code: "FulcrumOfficeRequiresPirateEnlistment".into(),
                             message: "Renting a corporation office at The Fulcrum requires a pirate-enlisted corporation".into(),
+                            client_error: None,
                         });
                     }
                 }
@@ -328,6 +332,7 @@ fn handle_office_manager(
                     return Err(BridgeRpcError {
                         code: "CorporationNotFound".into(),
                         message: format!("Corporation {corp_id} not found"),
+                        client_error: None,
                     });
                 };
                 let occupied = snap.items.values().filter(|i| i.location_id == station_id && i.type_id == 27).count();
@@ -335,6 +340,7 @@ fn handle_office_manager(
                     return Err(BridgeRpcError {
                         code: "StationOfficesFull".into(),
                         message: format!("Station {station_id} has reached the 16-office capacity limit"),
+                        client_error: None,
                     });
                 }
                 let already_rented = snap.items.values().any(|i| i.owner_id == corp_id && i.location_id == station_id && i.type_id == 27);
@@ -342,6 +348,7 @@ fn handle_office_manager(
                     return Err(BridgeRpcError {
                         code: "OfficeAlreadyRented".into(),
                         message: format!("Corporation {corp_id} already rents an office at station {station_id}"),
+                        client_error: None,
                     });
                 }
                 let quote = 10_000.0 * (1.0 + (occupied as f64) * 0.5);
@@ -350,6 +357,7 @@ fn handle_office_manager(
                     return Err(BridgeRpcError {
                         code: "NotEnoughISK".into(),
                         message: "Not enough ISK in corporation master wallet to rent office".into(),
+                        client_error: None,
                     });
                 }
 
@@ -417,6 +425,7 @@ fn handle_office_manager(
                 None => Some(Err(BridgeRpcError {
                     code: "NoOfficeAtStation".into(),
                     message: format!("Corporation {corp_id} has no office at station {station_id}"),
+                    client_error: None,
                 })),
             }
         }
@@ -499,6 +508,7 @@ fn handle_office_manager(
                 return Some(Err(BridgeRpcError {
                     code: "CorpRoleDenied".into(),
                     message: "Unrenting an office requires Director or Rent Office role".into(),
+                    client_error: None,
                 }));
             }
 
@@ -517,6 +527,7 @@ fn handle_office_manager(
                     return Err(BridgeRpcError {
                         code: "NoOfficeAtStation".into(),
                         message: format!("Corporation {corp_id} has no office at station {station_id}"),
+                        client_error: None,
                     });
                 }
 
@@ -617,6 +628,7 @@ pub async fn handle_with_bound(
             return Some(Err(BridgeRpcError {
                 code: "NotInFleet".into(),
                 message: "Character is not in a fleet".into(),
+                client_error: None,
             }));
         };
         let char_ids: Vec<i64> = match args.first() {
@@ -633,6 +645,7 @@ pub async fn handle_with_bound(
                 return Err(BridgeRpcError {
                     code: "FleetNotFound".into(),
                     message: format!("Fleet {fleet_id} not found"),
+                    client_error: None,
                 });
             };
             let caller_role = fleet
@@ -644,23 +657,27 @@ pub async fn handle_with_bound(
                 return Err(BridgeRpcError {
                     code: "FleetPermissionDenied".into(),
                     message: "MassMoveMembers requires commander privileges".into(),
+                    client_error: None,
                 });
             }
             if new_wing_id <= 0 || !fleet.wing_details.contains_key(&new_wing_id) {
                 return Err(BridgeRpcError {
                     code: "WingNotFound".into(),
                     message: format!("Wing {new_wing_id} not found"),
+                    client_error: None,
                 });
             }
             let sq = if new_squad_id <= 0 { None } else { fleet.squad_details.get(&new_squad_id) }
                 .ok_or_else(|| BridgeRpcError {
                     code: "SquadNotFound".into(),
                     message: format!("Squad {new_squad_id} not found"),
+                    client_error: None,
                 })?;
             if sq.wing_id != new_wing_id {
                 return Err(BridgeRpcError {
                     code: "SquadNotFound".into(),
                     message: format!("Squad {new_squad_id} does not belong to wing {new_wing_id}"),
+                    client_error: None,
                 });
             }
             let is_only_member = fleet.member_details.len() == 1;
@@ -712,18 +729,21 @@ pub async fn handle_with_bound(
             return Some(Err(BridgeRpcError {
                 code: "NotInFleet".into(),
                 message: "Character is not in a fleet".into(),
+                client_error: None,
             }));
         };
         let Some(new_boss_id) = args.first().and_then(|a| a.as_i64()) else {
             return Some(Err(BridgeRpcError {
                 code: "InvalidArgument".into(),
                 message: "MakeLeader requires target characterID".into(),
+                client_error: None,
             }));
         };
         if ctx.fleet_extras.lock().unwrap().disconnected_members.contains_key(&new_boss_id) {
             return Some(Err(BridgeRpcError {
                 code: "TargetMemberOffline".into(),
                 message: format!("Cannot transfer fleet boss to disconnected member {new_boss_id}"),
+                client_error: None,
             }));
         }
         let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -731,24 +751,28 @@ pub async fn handle_with_bound(
                 return Err(BridgeRpcError {
                     code: "FleetNotFound".into(),
                     message: format!("Fleet {fleet_id} not found"),
+                    client_error: None,
                 });
             };
             if fleet.boss_id != char_id {
                 return Err(BridgeRpcError {
                     code: "FleetPermissionDenied".into(),
                     message: "Only the current Fleet Boss can transfer leadership".into(),
+                    client_error: None,
                 });
             }
             if !fleet.member_details.contains_key(&new_boss_id) {
                 return Err(BridgeRpcError {
                     code: "MemberNotFound".into(),
                     message: format!("Character {new_boss_id} is not in fleet {fleet_id}"),
+                    client_error: None,
                 });
             }
             fleet.boss_id = new_boss_id;
             let old_before = fleet.member_details.get(&char_id).cloned().ok_or_else(|| BridgeRpcError {
                 code: "MemberNotFound".into(),
                 message: format!("Boss {char_id} is not in fleet {fleet_id}"),
+                client_error: None,
             })?;
             let mut old_after = old_before.clone();
             old_after.job &= !2;
@@ -757,6 +781,7 @@ pub async fn handle_with_bound(
             let new_before = fleet.member_details.get(&new_boss_id).cloned().ok_or_else(|| BridgeRpcError {
                 code: "MemberNotFound".into(),
                 message: format!("Character {new_boss_id} is not in fleet {fleet_id}"),
+                client_error: None,
             })?;
             let mut new_after = new_before.clone();
             new_after.job |= 2;
@@ -813,6 +838,7 @@ pub(super) fn handle_get_wings(
             return Some(Err(BridgeRpcError {
                 code: "NotInFleet".into(),
                 message: "Character is not in a fleet".into(),
+                client_error: None,
             }))
         }
     };
@@ -821,6 +847,7 @@ pub(super) fn handle_get_wings(
             return Err(BridgeRpcError {
                 code: "FleetNotFound".into(),
                 message: format!("Fleet {fleet_id} not found"),
+                client_error: None,
             });
         };
         Ok(PyRep::Dict(fleet_social_notify::build_wings_dict(fleet)))
@@ -847,6 +874,7 @@ pub(super) fn handle_get_init_state(
             return Some(Err(BridgeRpcError {
                 code: "NotInFleet".into(),
                 message: "Character is not in a fleet".into(),
+                client_error: None,
             }))
         }
     };
@@ -878,12 +906,14 @@ pub(super) fn handle_get_init_state(
             return Err(BridgeRpcError {
                 code: "FleetNotFound".into(),
                 message: format!("Fleet {fleet_id} not found"),
+                client_error: None,
             });
         };
         if !fleet.member_details.contains_key(&char_id) {
             return Err(BridgeRpcError {
                 code: "NotInFleet".into(),
                 message: "Character is no longer in this fleet".into(),
+                client_error: None,
             });
         }
         let wings_dict = fleet_social_notify::build_wings_dict(fleet);

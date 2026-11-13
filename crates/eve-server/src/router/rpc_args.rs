@@ -21,6 +21,7 @@ fn invalid_arg(message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
         code: "InvalidArgument".into(),
         message: message.into(),
+        client_error: None,
     }
 }
 
