@@ -123,10 +123,13 @@ impl WorldInvariantsRatchet {
     }
 }
 
-/// Returns `true` when `EVOMU_PRE_CHECK=1` (or `true`) is set in the environment.
+/// Returns `true` by default unless `EVOMU_PRE_CHECK=0` (or `false`) explicitly disables it (`G-07`).
 pub fn pre_check_enabled() -> bool {
-    std::env::var("EVOMU_PRE_CHECK")
-        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    pre_check_enabled_from_opt(std::env::var("EVOMU_PRE_CHECK").ok().as_deref())
+}
+
+fn pre_check_enabled_from_opt(val: Option<&str>) -> bool {
+    !matches!(val, Some(v) if v == "0" || v.eq_ignore_ascii_case("false"))
 }
 
 fn compact_value_summary(v: Option<&Value>) -> String {
@@ -239,6 +242,25 @@ fn item_category_id(type_id: u32, sde: Option<&SdeRegistry>, fallback_sde: &SdeR
     fallback_sde.types.get(&type_id).map(|t| t.category_id)
 }
 
+fn item_is_hypernet_escrow(item: &eve_db::InventoryItemRecord, snap: &WorldStateSnapshot) -> bool {
+    const HYPERNET_ESCROW_OWNER_ID: i64 = -52_568;
+    const HYPERNET_RAFFLE_NOTE_TAG: i64 = -74;
+    if item.location_id != HYPERNET_ESCROW_OWNER_ID
+        || item.owner_id != HYPERNET_ESCROW_OWNER_ID
+        || item.flag != eve_db::InventoryFlag::Locked
+    {
+        return false;
+    }
+    snap.owner_notes.values().any(|n| {
+        n.character_id == HYPERNET_RAFFLE_NOTE_TAG
+            && n.label.starts_with("raffle:")
+            && serde_json::from_str::<Value>(&n.note)
+                .ok()
+                .and_then(|v| v.get("item_id").and_then(|id| id.as_i64()))
+                == Some(item.item_id)
+    })
+}
+
 fn location_resolves(
     location_id: i64,
     snap: &WorldStateSnapshot,
@@ -286,11 +308,16 @@ fn location_resolves(
 ///    requires a fitted non-charge module (`category_id != 8`) at the same `(location_id, flag)`.
 /// 2. Every item's `location_id` resolves to a valid container, owner, station, structure,
 ///    solar system, or celestial without self-loops.
+fn fallback_sde_registry() -> &'static SdeRegistry {
+    static FALLBACK: std::sync::OnceLock<SdeRegistry> = std::sync::OnceLock::new();
+    FALLBACK.get_or_init(SdeRegistry::with_canonical_seed)
+}
+
 pub fn check_world_invariants(
     snap: &WorldStateSnapshot,
     sde: Option<&SdeRegistry>,
 ) -> Vec<WorldInvariantViolation> {
-    let fallback_sde = SdeRegistry::with_canonical_seed();
+    let fallback_sde = fallback_sde_registry();
     let mut violations = Vec::new();
 
     for item in snap.items.values() {
@@ -313,7 +340,9 @@ pub fn check_world_invariants(
                     ),
                 });
             }
-        } else if !location_resolves(item.location_id, snap, sde) {
+        } else if !location_resolves(item.location_id, snap, sde)
+            && !item_is_hypernet_escrow(item, snap)
+        {
             violations.push(WorldInvariantViolation::UnresolvedItemLocation {
                 item_id: item.item_id,
                 type_id: item.type_id,
@@ -389,6 +418,16 @@ pub fn assert_world_and_pre_guards(
 mod tests {
     use super::*;
     use eve_db::{InventoryFlag, InventoryItemRecord};
+
+    #[test]
+    fn pre_check_enabled_defaults_to_true_and_allows_explicit_opt_out() {
+        assert!(pre_check_enabled_from_opt(None));
+        assert!(pre_check_enabled_from_opt(Some("1")));
+        assert!(pre_check_enabled_from_opt(Some("true")));
+        assert!(!pre_check_enabled_from_opt(Some("0")));
+        assert!(!pre_check_enabled_from_opt(Some("false")));
+        assert!(!pre_check_enabled_from_opt(Some("FALSE")));
+    }
 
     #[test]
     fn pre_check_catches_unpersisted_mutation_and_identifies_table_and_key() {

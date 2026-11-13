@@ -74,6 +74,12 @@ pub enum ShadowDivergence {
     BallparkStaleBall { ball_id: i64 },
     BallparkFieldMismatch { ball_id: i64, field: &'static str, shadow_value: String, world_value: String },
     SessionFieldMismatch { field: &'static str, shadow_value: String, world_value: String },
+    MissingOnItemChangeOldValues { item_id: i64, detail: String },
+    MissingPrimeQuantityAttribute { location_id: i64, flag_id: u16, type_id: u32 },
+    UnprimedGodmaShipEffect { item_id: i64, effect_id: i64, detail: String },
+    InvalidGodmaShipEffectEnvironment { item_id: i64, effect_id: i64, detail: String },
+    InvalidAccountChangeKey { owner_id: i64, key_repr: String },
+    MissingGetAllInfoShipInfo { ship_id: i64 },
 }
 
 impl fmt::Display for ShadowDivergence {
@@ -203,6 +209,9 @@ pub struct ShadowModuleStates {
     pub active_modules: BTreeSet<i64>,
     pub active_effects_by_module: BTreeMap<i64, BTreeSet<i64>>,
     pub online_states: BTreeMap<i64, bool>,
+    pub primed_effects_by_item: BTreeMap<i64, BTreeSet<i64>>,
+    pub known_effect_names: BTreeMap<i64, String>,
+    pub known_type_effects: BTreeMap<u32, BTreeSet<i64>>,
 }
 
 /// Replicated movement mode in [`ShadowBallpark`].
@@ -350,6 +359,27 @@ impl ShadowClient {
         client
     }
 
+    /// Seeds type-effect and effect-name metadata from `sde` so `GetAllInfo`,
+    /// `OnGodmaPrimeItem`, `OnGodmaEffectInfo`, and `OnGodmaShipEffect` validate
+    /// against client-known SDE dogma definitions (`G-05`).
+    pub fn seed_sde(&mut self, sde: &SdeRegistry) {
+        self.module_states.known_effect_names.clear();
+        for (&eff_id, eff) in &sde.effects {
+            self.module_states
+                .known_effect_names
+                .insert(i64::from(eff_id), eff.name.clone());
+        }
+        self.module_states.known_type_effects.clear();
+        for (&type_id, rec) in &sde.types {
+            if !rec.effect_ids.is_empty() {
+                self.module_states.known_type_effects.insert(
+                    type_id,
+                    rec.effect_ids.iter().map(|&id| i64::from(id)).collect(),
+                );
+            }
+        }
+    }
+
     pub fn sync_from_world(&mut self, db: &WorldRepository, sde: Option<&SdeRegistry>) {
         db.with_snapshot(|snap| self.sync_from_snapshot(snap, sde));
     }
@@ -360,6 +390,9 @@ impl ShadowClient {
         self.inventory.sublocations_by_ship_flag.clear();
         self.inventory.primed_ships.clear();
         self.inventory.full_world_synced = true;
+        if let Some(sde) = sde {
+            self.seed_sde(sde);
+        }
 
         let active_ship_id = snap.characters.get(&self.char_id).map(|c| c.active_ship_id);
         if let Some(ship_id) = active_ship_id.filter(|&id| id > 0) {
@@ -431,6 +464,7 @@ impl ShadowClient {
         self.module_states.active_modules.clear();
         self.module_states.active_effects_by_module.clear();
         self.module_states.online_states.clear();
+        self.module_states.primed_effects_by_item.clear();
         for item in snap.items.values() {
             if Some(item.location_id) == active_ship_id
                 && is_fitting_slot_flag(item.flag as u16)
@@ -438,6 +472,15 @@ impl ShadowClient {
             {
                 let is_online = snap.module_online_states.get(&item.item_id).copied().unwrap_or(true);
                 self.module_states.online_states.insert(item.item_id, is_online);
+                let primed = self
+                    .module_states
+                    .primed_effects_by_item
+                    .entry(item.item_id)
+                    .or_default();
+                primed.insert(16);
+                if let Some(type_effs) = self.module_states.known_type_effects.get(&item.type_id) {
+                    primed.extend(type_effs.iter().copied());
+                }
                 if snap.module_active_states.contains(&item.item_id) {
                     self.module_states.active_modules.insert(item.item_id);
                     self.module_states.active_effects_by_module.entry(item.item_id).or_default().insert(-1);
@@ -454,8 +497,15 @@ impl ShadowClient {
             self.session.char_id = Some(char_id);
         }
         self.session.ship_id = Some(ship_id);
-        if let Some(ship_info) = all_info.dict_get("shipInfo").filter(|v| !matches!(v, PyRep::None)) {
-            self.prime_ship_from_ship_info_dict(ship_id, ship_info);
+        match all_info.dict_get("shipInfo") {
+            Some(ship_info @ PyRep::Dict(_)) => {
+                self.prime_ship_from_ship_info_dict(ship_id, ship_info);
+            }
+            _ => {
+                self.recorded_divergences
+                    .push(ShadowDivergence::MissingGetAllInfoShipInfo { ship_id });
+                return;
+            }
         }
         if let Some(PyRep::Tuple(ship_state)) = all_info.dict_get("shipState") {
             if let Some(PyRep::Dict(ship_flag_cache)) = ship_state.get(1) {
@@ -480,13 +530,15 @@ impl ShadowClient {
                                 if flag_id > 0 && type_id > 0 && quantity > 0 {
                                     self.inventory
                                         .sublocations_by_ship_flag
-                                        .entry((ship_id, flag_id))
-                                        .or_insert(ShadowChargeSublocation {
-                                            location_id: ship_id,
-                                            flag_id,
-                                            type_id,
-                                            quantity,
-                                        });
+                                        .insert(
+                                            (ship_id, flag_id),
+                                            ShadowChargeSublocation {
+                                                location_id: ship_id,
+                                                flag_id,
+                                                type_id,
+                                                quantity,
+                                            },
+                                        );
                                 }
                             }
                         }
@@ -542,6 +594,7 @@ impl ShadowClient {
             "OnModuleAttributeChanges" => self.apply_on_module_attribute_changes(args),
             "OnModuleAttributeChange" => self.apply_single_module_attribute_change(args),
             "OnGodmaShipEffect" => self.apply_on_godma_ship_effect(args),
+            "OnGodmaEffectInfo" => self.apply_on_godma_effect_info(args),
             "OnGodmaPrimeItem" => self.apply_on_godma_prime_item(args),
             "ProcessGodmaPrimeLocation" => self.apply_process_godma_prime_location(args),
             "DoDestinyUpdate" => self.apply_do_destiny_update(args),
@@ -576,17 +629,45 @@ impl ShadowClient {
     pub fn apply_on_item_change(&mut self, args: &[PyRep]) {
         let Some(new_item) = args.first().and_then(ShadowItem::from_pyrep) else { return };
         let change_dict = args.get(1);
-        let old_location_id = Some(
-            extract_change_dict_i64(change_dict, 3)
-                .or_else(|| self.inventory.items.get(&new_item.item_id).map(|i| i.location_id))
-                .unwrap_or(new_item.location_id),
-        );
-        let old_flag_id = Some(
-            extract_change_dict_i64(change_dict, 4)
-                .and_then(|v| u16::try_from(v.max(0)).ok())
-                .or_else(|| self.inventory.items.get(&new_item.item_id).map(|i| i.flag_id))
-                .unwrap_or(new_item.flag_id),
-        );
+        let old_cached = self.inventory.items.get(&new_item.item_id).cloned();
+        let dict_old_loc = extract_change_dict_i64(change_dict, 3);
+        let dict_old_flag =
+            extract_change_dict_i64(change_dict, 4).and_then(|v| u16::try_from(v.max(0)).ok());
+
+        // Loophole #1 guard (G-05): real client (`invCache.py`) reads old locationID/flagID strictly
+        // from the `change` dict (falling back to the new row's fields, NEVER an internal cached copy).
+        // If our cached item changed location/flag (or was tombstoned) without the matching key in `change`,
+        // record a divergence so broken emitters fail visibly instead of silently self-healing.
+        if let Some(ref cached) = old_cached {
+            if cached.location_id != new_item.location_id && dict_old_loc.is_none() {
+                self.recorded_divergences.push(ShadowDivergence::MissingOnItemChangeOldValues {
+                    item_id: new_item.item_id,
+                    detail: format!(
+                        "OnItemChange changed locationID ({} -> {}) without ixLocationID (3) in change dict",
+                        cached.location_id, new_item.location_id
+                    ),
+                });
+            }
+            if cached.flag_id != new_item.flag_id && dict_old_flag.is_none() {
+                self.recorded_divergences.push(ShadowDivergence::MissingOnItemChangeOldValues {
+                    item_id: new_item.item_id,
+                    detail: format!(
+                        "OnItemChange changed flagID ({} -> {}) without ixFlag (4) in change dict",
+                        cached.flag_id, new_item.flag_id
+                    ),
+                });
+            }
+        } else if is_tombstone_location_or_flag(new_item.location_id, new_item.flag_id, new_item.quantity)
+            && dict_old_loc.is_none()
+        {
+            self.recorded_divergences.push(ShadowDivergence::MissingOnItemChangeOldValues {
+                item_id: new_item.item_id,
+                detail: "Tombstone OnItemChange missing ixLocationID (3) in change dict".to_string(),
+            });
+        }
+
+        let old_location_id = Some(dict_old_loc.unwrap_or(new_item.location_id));
+        let old_flag_id = Some(dict_old_flag.unwrap_or(new_item.flag_id));
 
         if let (Some(old_loc), Some(old_flag)) = (old_location_id, old_flag_id) {
             if self.inventory.primed_ships.contains(&old_loc)
@@ -650,13 +731,31 @@ impl ShadowClient {
         if args.len() < 3 {
             return;
         }
-        let account_key = args[0].as_str().unwrap_or("cash");
         let (Some(owner_id), Some(new_balance)) = (args[1].as_i64(), args[2].as_f64()) else { return };
-        if owner_id == self.char_id && (account_key == "cash" || account_key == "1000") {
+        let Some(account_key) = args[0].as_str() else {
+            self.recorded_divergences.push(ShadowDivergence::InvalidAccountChangeKey {
+                owner_id,
+                key_repr: format!("{:?}", args[0]),
+            });
+            return;
+        };
+        if owner_id == self.char_id && account_key == "cash" {
             self.wallet.personal_balance_isk = Some(new_balance);
-        } else if let Some(div_key) = parse_corp_account_key(account_key) {
-            self.corp_id.get_or_insert(owner_id);
-            self.wallet.corp_division_balances_isk.insert((owner_id, div_key), new_balance);
+        } else if owner_id != self.char_id {
+            if let Some(div_key) = parse_corp_account_key(account_key) {
+                self.corp_id.get_or_insert(owner_id);
+                self.wallet.corp_division_balances_isk.insert((owner_id, div_key), new_balance);
+            } else {
+                self.recorded_divergences.push(ShadowDivergence::InvalidAccountChangeKey {
+                    owner_id,
+                    key_repr: account_key.to_string(),
+                });
+            }
+        } else {
+            self.recorded_divergences.push(ShadowDivergence::InvalidAccountChangeKey {
+                owner_id,
+                key_repr: account_key.to_string(),
+            });
         }
     }
 
@@ -686,7 +785,7 @@ impl ShadowClient {
                 if let (Some(ship_id), Some(flag_i64), Some(type_i64)) =
                     (subloc[0].as_i64(), subloc[1].as_i64(), subloc[2].as_i64())
                 {
-                    if attr_id == i64::from(attr_ids::QUANTITY) || attr_id == 80 {
+                    if attr_id == i64::from(attr_ids::QUANTITY) {
                         let flag_id = flag_i64.max(0) as u16;
                         let type_id = type_i64.max(0) as u32;
                         let qty = new_val.round() as i32;
@@ -714,16 +813,91 @@ impl ShadowClient {
     }
 
     pub fn apply_on_godma_ship_effect(&mut self, args: &[PyRep]) {
-        if args.len() >= 5 {
-            let Some(item_id) = args[0].as_i64() else { return };
-            let effect_id = args[1].as_i64().unwrap_or(0);
-            let active = pyrep_as_truthy(&args[3]) && pyrep_as_truthy(&args[4]);
-            self.set_module_effect_state(item_id, effect_id, active);
-        } else if args.len() == 3 {
-            let Some(item_id) = args[0].as_i64() else { return };
-            let effect_id = args[1].as_i64().unwrap_or(-1);
-            let active = pyrep_as_truthy(&args[2]);
-            self.set_module_effect_state(item_id, effect_id, active);
+        if args.len() < 6 {
+            let item_id = args.first().and_then(|v| v.as_i64()).unwrap_or(0);
+            let effect_id = args.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
+            self.recorded_divergences.push(ShadowDivergence::InvalidGodmaShipEffectEnvironment {
+                item_id,
+                effect_id,
+                detail: format!(
+                    "OnGodmaShipEffect requires >= 6 args (itemID, effectID, time, start, active, environment), got {}",
+                    args.len()
+                ),
+            });
+            return;
+        }
+        let Some(item_id) = args[0].as_i64() else { return };
+        let Some(effect_id) = args[1].as_i64() else {
+            self.recorded_divergences.push(ShadowDivergence::UnprimedGodmaShipEffect {
+                item_id,
+                effect_id: 0,
+                detail: format!("OnGodmaShipEffect missing integer effectID: {:?}", args[1]),
+            });
+            return;
+        };
+        let env_valid = match &args[5] {
+            PyRep::Tuple(env) | PyRep::List(env) if env.len() >= 4 => {
+                matches!(env.get(3), Some(PyRep::None | PyRep::Integer(_)))
+            }
+            _ => false,
+        };
+        if !env_valid {
+            self.recorded_divergences.push(ShadowDivergence::InvalidGodmaShipEffectEnvironment {
+                item_id,
+                effect_id,
+                detail: format!(
+                    "OnGodmaShipEffect environment (args[5]) must be Tuple/List with len >= 4 and integer/None targetID at index 3, got {:?}",
+                    args[5]
+                ),
+            });
+            return;
+        }
+        if !self.module_states.known_effect_names.contains_key(&effect_id) {
+            self.recorded_divergences.push(ShadowDivergence::UnprimedGodmaShipEffect {
+                item_id,
+                effect_id,
+                detail: format!("OnGodmaShipEffect effectID {effect_id} has no known effectName in SDE"),
+            });
+            return;
+        }
+        let is_primed = self
+            .module_states
+            .primed_effects_by_item
+            .get(&item_id)
+            .is_some_and(|effs| effs.contains(&effect_id));
+        if !is_primed {
+            self.recorded_divergences.push(ShadowDivergence::UnprimedGodmaShipEffect {
+                item_id,
+                effect_id,
+                detail: format!(
+                    "OnGodmaShipEffect fired for unprimed (item_id={item_id}, effect_id={effect_id}) missing from effectsByItemEffect"
+                ),
+            });
+            return;
+        }
+        let active = pyrep_as_truthy(&args[4]);
+        self.set_module_effect_state(item_id, effect_id, active);
+    }
+
+    pub fn apply_on_godma_effect_info(&mut self, args: &[PyRep]) {
+        if args.len() < 3 {
+            return;
+        }
+        let Some(item_id) = args[0].as_i64() else { return };
+        let type_id = args[1].as_i64().and_then(|v| u32::try_from(v).ok());
+        let primed = self.module_states.primed_effects_by_item.entry(item_id).or_default();
+        primed.insert(16);
+        if let Some(tid) = type_id {
+            if let Some(type_effs) = self.module_states.known_type_effects.get(&tid) {
+                primed.extend(type_effs.iter().copied());
+            }
+        }
+        if let PyRep::Dict(entries) = &args[2] {
+            for (eff_k, _) in entries {
+                if let Some(eff_id) = eff_k.as_i64() {
+                    primed.insert(eff_id);
+                }
+            }
         }
     }
 
@@ -782,6 +956,7 @@ impl ShadowClient {
             self.module_states.active_modules.remove(&mid);
             self.module_states.active_effects_by_module.remove(&mid);
             self.module_states.online_states.remove(&mid);
+            self.module_states.primed_effects_by_item.remove(&mid);
         }
         for (key, kv) in entries {
             self.apply_primed_ship_entry(ship_id, Some(key), kv);
@@ -796,9 +971,17 @@ impl ShadowClient {
                     (parts[0].as_i64(), parts[1].as_i64(), parts[2].as_i64())
                 {
                     let (flag_id, type_id) = (flag_i64.max(0) as u16, type_i64.max(0) as u32);
-                    let qty = extract_attr_f64(kv.dict_get("attributes"), attr_ids::QUANTITY)
-                        .map(|v| v.round() as i32)
-                        .unwrap_or(1);
+                    let Some(qty_f64) = extract_attr_f64(kv.dict_get("attributes"), attr_ids::QUANTITY) else {
+                        self.recorded_divergences.push(
+                            ShadowDivergence::MissingPrimeQuantityAttribute {
+                                location_id: loc_id,
+                                flag_id,
+                                type_id,
+                            },
+                        );
+                        return;
+                    };
+                    let qty = qty_f64.round() as i32;
                     if flag_id > 0 && type_id > 0 && qty > 0 {
                         self.inventory.sublocations_by_ship_flag.insert(
                             (loc_id, flag_id),
@@ -811,6 +994,7 @@ impl ShadowClient {
         }
         let Some(shadow_item) = kv.dict_get("invItem").and_then(ShadowItem::from_pyrep) else { return };
         let item_id = shadow_item.item_id;
+        let type_id = shadow_item.type_id;
         let is_fitted_mod = shadow_item.location_id == ship_id
             && is_fitting_slot_flag(shadow_item.flag_id)
             && shadow_item.category_id != Some(8);
@@ -818,9 +1002,19 @@ impl ShadowClient {
         if is_fitted_mod {
             let mut is_online = extract_attr_f64(kv.dict_get("attributes"), 2).is_some_and(|v| v > 0.5);
             let mut active_effs = BTreeSet::new();
+            let primed = self
+                .module_states
+                .primed_effects_by_item
+                .entry(item_id)
+                .or_default();
+            primed.insert(16);
+            if let Some(type_effs) = self.module_states.known_type_effects.get(&type_id) {
+                primed.extend(type_effs.iter().copied());
+            }
             if let Some(PyRep::Dict(eff_entries)) = kv.dict_get("activeEffects") {
                 for (eff_k, _) in eff_entries {
                     if let Some(eff_id) = eff_k.as_i64() {
+                        primed.insert(eff_id);
                         if eff_id == 16 {
                             is_online = true;
                         } else {
@@ -1619,13 +1813,13 @@ fn normalize_corp_division(div: u16) -> u16 {
 
 fn parse_corp_account_key(key: &str) -> Option<u16> {
     match key {
-        "cash" | "1000" => Some(1000),
-        "cash2" | "1001" => Some(1001),
-        "cash3" | "1002" => Some(1002),
-        "cash4" | "1003" => Some(1003),
-        "cash5" | "1004" => Some(1004),
-        "cash6" | "1005" => Some(1005),
-        "cash7" | "1006" => Some(1006),
+        "cash" | "cash1" => Some(1000),
+        "cash2" => Some(1001),
+        "cash3" => Some(1002),
+        "cash4" => Some(1003),
+        "cash5" => Some(1004),
+        "cash6" => Some(1005),
+        "cash7" => Some(1006),
         _ => None,
     }
 }
@@ -2056,8 +2250,22 @@ mod tests {
             );
         });
 
-        let mut shadow = ShadowClient::from_world(PILOT_ID, &db, None);
-        shadow.assert_converged_with_world(&db, None);
+        let mut sde = SdeRegistry::with_canonical_seed();
+        sde.effects.entry(101).or_insert(eve_sde::DogmaEffectType {
+            effect_id: 101,
+            name: "useMissiles".to_string(),
+            effect_category: 1,
+            is_warp_safe: true,
+            ..Default::default()
+        });
+        if let Some(t) = sde.types.get_mut(&17938) {
+            if !t.effect_ids.contains(&101) {
+                t.effect_ids.push(101);
+            }
+        }
+        let mut shadow = ShadowClient::from_world(PILOT_ID, &db, Some(&sde));
+        shadow.module_states.primed_effects_by_item.entry(launcher_id).or_default().insert(101);
+        shadow.assert_converged_with_world(&db, Some(&sde));
 
         let effect_args = |flag: i64| vec![
             PyRep::Integer(launcher_id),
@@ -2065,7 +2273,15 @@ mod tests {
             PyRep::Integer(133_000_000_000_000_000),
             PyRep::Integer(flag),
             PyRep::Integer(flag),
-            PyRep::Tuple(Vec::new()),
+            PyRep::Tuple(vec![
+                PyRep::Integer(launcher_id),
+                PyRep::Integer(PILOT_ID),
+                PyRep::Integer(SHIP_ID),
+                PyRep::None,
+                PyRep::None,
+                PyRep::List(Vec::new()),
+                PyRep::Integer(101),
+            ]),
             PyRep::Integer(133_000_000_000_000_000),
             PyRep::Integer(1000),
             PyRep::Integer(0),
@@ -2074,7 +2290,7 @@ mod tests {
         ];
         shadow.apply_notification("OnGodmaShipEffect", &effect_args(1));
         assert_eq!(
-            shadow.compare_active_modules_against_world(&db, None),
+            shadow.compare_active_modules_against_world(&db, Some(&sde)),
             vec![ShadowDivergence::ActiveModuleSetMismatch {
                 shadow_active: vec![launcher_id],
                 world_active: vec![],
@@ -2082,7 +2298,7 @@ mod tests {
         );
 
         shadow.apply_notification("OnGodmaShipEffect", &effect_args(0));
-        shadow.assert_converged_with_world(&db, None);
+        shadow.assert_converged_with_world(&db, Some(&sde));
     }
 
     #[test]
@@ -2193,5 +2409,217 @@ mod tests {
             ],
         );
         shadow.assert_converged_with_world(&db, None);
+    }
+
+    #[test]
+    fn g05_shadow_client_catches_all_six_real_client_divergence_loopholes() {
+        let db = WorldRepository::with_demo_seed();
+        let mut sde = SdeRegistry::with_canonical_seed();
+        sde.effects.entry(101).or_insert(eve_sde::DogmaEffectType {
+            effect_id: 101,
+            name: "useMissiles".to_string(),
+            effect_category: 1,
+            is_warp_safe: true,
+            ..Default::default()
+        });
+
+        // 1. OnItemChange moving cached item across locations/flags without change[3]/change[4] records divergence.
+        let item_id = 999_500_001;
+        db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                item_id,
+                InventoryItemRecord {
+                    item_id,
+                    type_id: 34,
+                    owner_id: PILOT_ID,
+                    location_id: STATION_ID,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 50,
+                    singleton: false,
+                    ..Default::default()
+                },
+            );
+        });
+        let mut sh1 = ShadowClient::from_world(PILOT_ID, &db, Some(&sde));
+        let moved_row = build_inv_row(item_id, 34, PILOT_ID, SHIP_ID, 5, 50, 18, 4);
+        sh1.apply_notification("OnItemChange", &[moved_row, PyRep::Dict(Vec::new())]);
+        assert!(
+            sh1.recorded_divergences
+                .iter()
+                .any(|d| matches!(d, ShadowDivergence::MissingOnItemChangeOldValues { item_id: id, .. } if *id == item_id)),
+            "OnItemChange without change[3]/change[4] must record MissingOnItemChangeOldValues"
+        );
+
+        // 2. OnModuleAttributeChange with attr_id == 80 (MAX_VELOCITY, not QUANTITY=805) is ignored.
+        let mut sh2 = ShadowClient::new(PILOT_ID);
+        sh2.apply_notification(
+            "OnModuleAttributeChange",
+            &[
+                PyRep::Integer(PILOT_ID),
+                PyRep::Tuple(vec![PyRep::Integer(SHIP_ID), PyRep::Integer(27), PyRep::Integer(179)]),
+                PyRep::Integer(80),
+                PyRep::Integer(0),
+                PyRep::Real(25.0),
+            ],
+        );
+        assert!(
+            !sh2.inventory.sublocations_by_ship_flag.contains_key(&(SHIP_ID, 27)),
+            "attr_id == 80 must NOT populate charge sublocations (only QUANTITY 805)"
+        );
+
+        // 3. OnGodmaPrimeItem for sublocation without attr 805 records divergence (no unwrap_or(1)).
+        let mut sh3 = ShadowClient::new(PILOT_ID);
+        sh3.apply_notification(
+            "OnGodmaPrimeItem",
+            &[
+                PyRep::Integer(SHIP_ID),
+                PyRep::keyval([
+                    ("itemID", PyRep::Tuple(vec![PyRep::Integer(SHIP_ID), PyRep::Integer(27), PyRep::Integer(179)])),
+                    ("attributes", PyRep::Dict(Vec::new())),
+                ]),
+            ],
+        );
+        assert!(
+            sh3.recorded_divergences
+                .iter()
+                .any(|d| matches!(d, ShadowDivergence::MissingPrimeQuantityAttribute { location_id: SHIP_ID, flag_id: 27, type_id: 179 })),
+            "OnGodmaPrimeItem missing attr 805 must record MissingPrimeQuantityAttribute"
+        );
+
+        // 4. OnGodmaShipEffect rejects unprimed item/effect, invalid empty environment tuple, and 3-arg fallback,
+        //    and respects active (args[4]) alone without requiring start (args[3]).
+        let mut sh4 = ShadowClient::new(PILOT_ID);
+        sh4.seed_sde(&sde);
+        let mod_id = 999_500_002;
+        sh4.apply_notification(
+            "OnGodmaShipEffect",
+            &[
+                PyRep::Integer(mod_id),
+                PyRep::Integer(101),
+                PyRep::Integer(1),
+                PyRep::Integer(1),
+                PyRep::Integer(1),
+                PyRep::Tuple(Vec::new()),
+            ],
+        );
+        assert!(sh4.recorded_divergences.iter().any(|d| matches!(
+            d,
+            ShadowDivergence::InvalidGodmaShipEffectEnvironment { item_id: id, .. } if *id == mod_id
+        )));
+        assert!(!sh4.module_states.active_modules.contains(&mod_id));
+
+        let valid_env = PyRep::Tuple(vec![
+            PyRep::Integer(mod_id),
+            PyRep::Integer(PILOT_ID),
+            PyRep::Integer(SHIP_ID),
+            PyRep::None,
+        ]);
+        sh4.recorded_divergences.clear();
+        sh4.apply_notification(
+            "OnGodmaShipEffect",
+            &[
+                PyRep::Integer(mod_id),
+                PyRep::Integer(101),
+                PyRep::Integer(1),
+                PyRep::Integer(1),
+                PyRep::Integer(1),
+                valid_env.clone(),
+            ],
+        );
+        assert!(sh4.recorded_divergences.iter().any(|d| matches!(
+            d,
+            ShadowDivergence::UnprimedGodmaShipEffect { item_id: id, effect_id: 101, .. } if *id == mod_id
+        )));
+        assert!(!sh4.module_states.active_modules.contains(&mod_id));
+
+        // Prime via OnGodmaEffectInfo -> start=0, active=1 activates cleanly.
+        sh4.recorded_divergences.clear();
+        sh4.apply_notification(
+            "OnGodmaEffectInfo",
+            &[
+                PyRep::Integer(mod_id),
+                PyRep::Integer(17938),
+                PyRep::Dict(vec![(PyRep::Integer(101), PyRep::List(Vec::new()))]),
+                PyRep::None,
+            ],
+        );
+        sh4.apply_notification(
+            "OnGodmaShipEffect",
+            &[
+                PyRep::Integer(mod_id),
+                PyRep::Integer(101),
+                PyRep::Integer(1),
+                PyRep::Integer(0),
+                PyRep::Integer(1),
+                valid_env,
+            ],
+        );
+        assert!(sh4.recorded_divergences.is_empty(), "{:?}", sh4.recorded_divergences);
+        assert!(sh4.module_states.active_modules.contains(&mod_id));
+
+        // 5. OnAccountChange rejects integer keys and "1000".."1006"; accepts "cash" / "cash1".."cash7".
+        let mut sh5 = ShadowClient::new(PILOT_ID);
+        sh5.apply_notification(
+            "OnAccountChange",
+            &[PyRep::Integer(1000), PyRep::Integer(PILOT_ID), PyRep::Real(500.0)],
+        );
+        sh5.apply_notification(
+            "OnAccountChange",
+            &[PyRep::String("1000".into()), PyRep::Integer(CORP_ID), PyRep::Real(900.0)],
+        );
+        assert_eq!(sh5.wallet.personal_balance_isk, None);
+        assert!(!sh5.wallet.corp_division_balances_isk.contains_key(&(CORP_ID, 1000)));
+        assert_eq!(sh5.recorded_divergences.len(), 2);
+        sh5.apply_notification(
+            "OnAccountChange",
+            &[PyRep::String("cash1".into()), PyRep::Integer(CORP_ID), PyRep::Real(950.0)],
+        );
+        assert_eq!(sh5.wallet.corp_division_balances_isk.get(&(CORP_ID, 1000)).copied(), Some(950.0));
+
+        // 6. GetAllInfo requires shipInfo Dict and overwrites stale shipState charge sublocations.
+        let mut sh6 = ShadowClient::new(PILOT_ID);
+        sh6.sync_from_get_all_info(&PyRep::keyval([
+            ("shipID", PyRep::Integer(SHIP_ID)),
+            ("charID", PyRep::Integer(PILOT_ID)),
+            ("shipInfo", PyRep::None),
+        ]));
+        assert!(sh6.recorded_divergences.iter().any(|d| matches!(
+            d,
+            ShadowDivergence::MissingGetAllInfoShipInfo { ship_id: SHIP_ID }
+        )));
+        let subloc_row = DBRowDescriptor::new([
+            ("locationID", DbColumnType::I8),
+            ("flagID", DbColumnType::I4),
+            ("typeID", DbColumnType::I4),
+            ("quantity", DbColumnType::I4),
+        ]);
+        let call_with_qty = |qty: i64| PyRep::keyval([
+            ("shipID", PyRep::Integer(SHIP_ID)),
+            ("charID", PyRep::Integer(PILOT_ID)),
+            ("shipInfo", PyRep::Dict(Vec::new())),
+            (
+                "shipState",
+                PyRep::Tuple(vec![
+                    PyRep::Dict(Vec::new()),
+                    PyRep::Dict(vec![(
+                        PyRep::Integer(SHIP_ID),
+                        PyRep::Dict(vec![(
+                            PyRep::Integer(27),
+                            subloc_row.build_dbrow(vec![
+                                PyRep::Integer(SHIP_ID),
+                                PyRep::Integer(27),
+                                PyRep::Integer(179),
+                                PyRep::Integer(qty),
+                            ]),
+                        )]),
+                    )]),
+                ]),
+            ),
+        ]);
+        sh6.recorded_divergences.clear();
+        sh6.sync_from_get_all_info(&call_with_qty(40));
+        assert_eq!(sh6.inventory.sublocations_by_ship_flag.get(&(SHIP_ID, 27)).map(|s| s.quantity), Some(40));
+        sh6.sync_from_get_all_info(&call_with_qty(15));
+        assert_eq!(sh6.inventory.sublocations_by_ship_flag.get(&(SHIP_ID, 27)).map(|s| s.quantity), Some(15));
     }
 }
