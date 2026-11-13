@@ -830,6 +830,7 @@ mod tests {
             db: eve_db::WorldRepository,
             sde: eve_sde::SdeRegistry,
             commits_to_run: u64,
+            commit_seq: u64,
         }
 
         impl ClientWireTransport for DbMockTransport {
@@ -841,10 +842,11 @@ mod tests {
                 _args: &'a [PyRep],
                 _kwargs: &'a HashMap<String, PyRep>,
             ) -> Pin<Box<dyn Future<Output = ClientWireExchange> + Send + 'a>> {
-                for idx in 0..self.commits_to_run {
+                for _idx in 0..self.commits_to_run {
+                    self.commit_seq += 1;
+                    let key = format!("harness_commit_{}", self.commit_seq);
                     self.db.with_mut_snapshot(|snap| {
-                        snap.service_state_blobs
-                            .insert(format!("harness_commit_{idx}"), "ok".into());
+                        snap.service_state_blobs.insert(key, "ok".into());
                     });
                 }
                 let ok_rep = PyRep::Dict(Vec::new());
@@ -876,6 +878,7 @@ mod tests {
             db: eve_db::WorldRepository::with_demo_seed(),
             sde: eve_sde::SdeRegistry::with_canonical_seed(),
             commits_to_run: 1,
+            commit_seq: 0,
         };
         let mut harness = ClientHarness::new(transport);
         let _ = harness
@@ -900,6 +903,10 @@ mod tests {
         let _ = harness
             .call("stationSvc", None, "GetAllianceSystems", &[], &HashMap::new())
             .await;
+        assert_eq!(
+            harness.recorded_commits().last(),
+            Some(&("stationSvc.GetAllianceSystems".to_string(), 2))
+        );
         let err = harness
             .check_multi_commit_ratchet(&ratchet)
             .expect_err("2-commit unratcheted RPC must fail ratchet");

@@ -652,6 +652,8 @@ pub(in crate::services) fn handle_stack_ops(
                             tgt_mut.version += 1;
                             tgt_mut.clone()
                         };
+                        guard.mark_item_dirty(src_id);
+                        guard.mark_item_dirty(dst_id);
                         events.push(MergeChangeEvent::Partial {
                             updated_src,
                             old_src_qty,
@@ -660,12 +662,14 @@ pub(in crate::services) fn handle_stack_ops(
                         });
                     } else {
                         guard.remove_system_cleanup_item(src_id);
+                        guard.mark_item_deleted(src_id);
                         let updated_dst = {
                             let tgt_mut = guard.items.get_mut(&dst_id).unwrap();
                             tgt_mut.quantity = new_tgt_qty;
                             tgt_mut.version += 1;
                             tgt_mut.clone()
                         };
+                        guard.mark_item_dirty(dst_id);
                         events.push(MergeChangeEvent::Full {
                             deleted_src: src,
                             updated_dst,

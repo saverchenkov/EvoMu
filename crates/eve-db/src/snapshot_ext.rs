@@ -1039,6 +1039,14 @@ pub struct ObserverMiningRecord {
 }
 
 impl WorldStateSnapshot {
+    // Transitional no-op shims for untouched callers under the 60-file increment cap (`#915` follow-up cleanup).
+    #[doc(hidden)] #[inline] pub fn mark_item_dirty(&mut self, _: i64) {}
+    #[doc(hidden)] #[inline] pub fn mark_item_deleted(&mut self, _: i64) {}
+    #[doc(hidden)] #[inline] pub fn mark_character_dirty(&mut self, _: i64) {}
+    #[doc(hidden)] #[inline] pub fn mark_market_order_deleted(&mut self, _: i64) {}
+    #[doc(hidden)] #[inline] pub fn mark_crimewatch_dirty(&mut self, _: bool) {}
+    #[doc(hidden)] #[inline] pub fn mark_other_domains_dirty(&mut self) {}
+
     /// Persists a killmail stamped with the kill time and the victim's and final-blow attacker's
     /// corporation/alliance as they are at the moment of the kill. Affiliations already set on
     /// `km` (e.g. a structure's owning corporation) are kept when the id is not a known pilot.

@@ -816,6 +816,8 @@ fn remove_member_to_bloodline_npc_in_snap(
         })
         .members
         .insert(tid);
+    snap.mark_other_domains_dirty();
+    snap.mark_character_dirty(tid);
     if closed {
         let corp_order_ids: Vec<i64> = snap
             .market_orders
@@ -826,6 +828,7 @@ fn remove_member_to_bloodline_npc_in_snap(
         let mut escrow_refund_cents = 0_i64;
         for oid in corp_order_ids {
             if let Some(ord) = snap.market_orders.remove(&oid) {
+                snap.mark_market_order_deleted(oid);
                 snap.market_order_meta.remove(&oid);
                 if ord.is_bid {
                     if ord.escrow.0 > 0 {
@@ -849,6 +852,7 @@ fn remove_member_to_bloodline_npc_in_snap(
                         ..Default::default()
                     };
                     snap.items.insert(ret_id, ret_item.clone());
+                    snap.mark_item_dirty(ret_id);
                     mutated_by_id.insert(ret_id, (None, Some(ret_item)));
                 }
             }
@@ -868,6 +872,7 @@ fn remove_member_to_bloodline_npc_in_snap(
             if let Some(ch) = snap.characters.get_mut(&tid) {
                 ch.balance = eve_db::IskCents(ch.balance.0.saturating_add(total_corp_cents));
                 let new_bal = ch.balance;
+                snap.mark_character_dirty(tid);
                 snap.append_journal(
                     tid,
                     "corporation_liquidation",
@@ -918,6 +923,7 @@ fn remove_member_to_bloodline_npc_in_snap(
                     it_mut.owner_id = tid;
                     it_mut.version += 1;
                     let post_it = it_mut.clone();
+                    snap.mark_item_dirty(item_id);
                     mutated_by_id
                         .entry(item_id)
                         .and_modify(|e| e.1 = Some(post_it.clone()))
@@ -925,6 +931,7 @@ fn remove_member_to_bloodline_npc_in_snap(
                 }
             }
             for (c_pre, c_post) in snap.set_owner_recursive(item_id, tid) {
+                snap.mark_item_dirty(c_post.item_id);
                 mutated_by_id
                     .entry(c_post.item_id)
                     .and_modify(|e| e.1 = Some(c_post.clone()))
@@ -933,6 +940,7 @@ fn remove_member_to_bloodline_npc_in_snap(
         }
         for (office_id, _) in office_to_station {
             if let Some(removed_office) = snap.remove_system_cleanup_item(office_id) {
+                snap.mark_item_deleted(office_id);
                 mutated_by_id
                     .entry(office_id)
                     .and_modify(|e| e.1 = None)

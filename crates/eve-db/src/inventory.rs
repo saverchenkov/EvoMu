@@ -620,6 +620,7 @@ impl WorldRepository {
                     existing.version += 1;
                     existing.clone()
                 };
+                guard.mark_item_dirty(existing_id);
                 return Ok(updated);
             }
 
@@ -644,6 +645,7 @@ impl WorldRepository {
                 blueprint_runs_remaining: None,
             };
             guard.items.insert(item_id, item.clone());
+            guard.mark_item_dirty(item_id);
             Ok(item)
         })
     }

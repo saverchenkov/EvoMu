@@ -586,6 +586,7 @@ fn issue_886_closing_player_corp_liquidates_wallets_orders_and_office_items() {
     let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), String> {
         if let Some(ch) = snap.characters.get_mut(&ceo_id) {
             ch.balance = eve_db::IskCents(0);
+            snap.mark_character_dirty(ceo_id);
         }
         Err("forced rollback after corp closure".to_string())
     });
