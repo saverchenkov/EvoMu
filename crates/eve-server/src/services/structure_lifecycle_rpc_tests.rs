@@ -544,8 +544,10 @@ async fn handle_anchor_10arg_treats_xz_offsets_as_relative_to_ship_gh995() {
     let ship_pos = DVec3::new(1.0e11, 2.0e10, -3.0e11);
     spawn_ship_ball(&ctx, sys_id, ship_id, ship_pos).await;
     let mut sess = make_session(char_id, corp_id, sys_id, Some(ship_id), 1);
+    let user_id = ctx.db.with_snapshot(|snap| snap.characters[&char_id].user_id);
+    sess.user_id = Some(user_id);
     ctx.db
-        .acquire_online_lock(sess.session_id, char_id as u64, Some(char_id), true, ctx.now_unix())
+        .acquire_online_lock(user_id, sess.session_id, Some(char_id), true, ctx.now_unix())
         .expect("register online session for OnItemChange delivery");
 
     let item_ok = 99_500_001_i64;
@@ -603,9 +605,9 @@ async fn handle_anchor_10arg_treats_xz_offsets_as_relative_to_ship_gh995() {
             n.event == "OnItemChange"
                 && matches!(
                     n.args.as_slice(),
-                    [PyRep::Tuple(row), PyRep::Dict(_)]
-                        if row.first().and_then(PyRep::as_i64) == Some(item_ok)
-                            && row.get(3).and_then(PyRep::as_i64) == Some(6)
+                    [PyRep::DBRow { columns, .. }, PyRep::Dict(_)]
+                        if columns.iter().any(|(k, v)| k == "itemID" && v.as_i64() == Some(item_ok))
+                            && columns.iter().any(|(k, v)| k == "locationID" && v.as_i64() == Some(6))
                 )
         }),
         "Anchor must emit OnItemChange moving consumed structure item {item_ok} to locJunkyard (6) (#1012), got {anchor_notifs:?}"
