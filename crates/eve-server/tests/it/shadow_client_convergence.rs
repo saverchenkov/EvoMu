@@ -435,3 +435,51 @@ async fn test_shadow_client_941_948_loaded_charges_across_login_undock_jump_and_
         }
     }
 }
+
+#[tokio::test]
+async fn wire_harness_auto_attaches_and_converges_shadow_client_without_from_world() {
+    let ctx = ServerContext::new();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(acct) = snap.accounts.get_mut("demo") {
+            acct.role = u64::MAX;
+        }
+    });
+    let _guard = common::teardown_guard(&ctx);
+    let kw = HashMap::new();
+    let mut harness = common::new_wire_harness(&ctx, 77_905).with_shadow_enforcement(true);
+    assert!(harness.shadow().is_none());
+
+    harness
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())],
+            &kw,
+        )
+        .await;
+    harness
+        .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(PILOT)], &kw)
+        .await;
+    assert_eq!(harness.shadow().map(|s| s.char_id), Some(PILOT));
+
+    let _ = harness
+        .call_ok("account", None, "GetCashBalance", &[], &kw)
+        .await;
+    let _ = harness
+        .call_ok("dogmaIM", None, "GetAllInfo", &[], &kw)
+        .await;
+    let _ = harness
+        .call_ok(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/giveisk 1000000".into())],
+            &kw,
+        )
+        .await;
+    let _ = harness
+        .call_ok("stationSvc", None, "Undock", &[], &kw)
+        .await;
+    harness.assert_shadow_converged();
+}

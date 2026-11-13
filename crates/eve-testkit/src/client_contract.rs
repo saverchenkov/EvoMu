@@ -96,6 +96,8 @@ pub struct ClientContractRatchet {
     pub expectations_version: String,
     pub expectations_sha256: String,
     pub min_validated_rpcs: usize,
+    #[serde(default)]
+    pub expected_validated_rpcs: BTreeSet<String>,
     pub allowed_shape_violations: BTreeSet<String>,
     pub allowed_notify_violations: BTreeSet<String>,
 }
@@ -197,6 +199,28 @@ impl ClientContractRatchet {
                 report.validated.len(),
                 self.min_validated_rpcs
             ));
+        }
+        if !self.expected_validated_rpcs.is_empty() {
+            let missing_from_validated: Vec<String> = self
+                .expected_validated_rpcs
+                .iter()
+                .filter(|rpc| !report.validated.contains_key(*rpc))
+                .map(|rpc| {
+                    if report.vacuous.contains(rpc) {
+                        format!("{rpc} (became Vacuous)")
+                    } else if report.domain_rejected.contains(rpc) {
+                        format!("{rpc} (became DomainRejected)")
+                    } else {
+                        format!("{rpc} (missing from sweep)")
+                    }
+                })
+                .collect();
+            if !missing_from_validated.is_empty() {
+                return Err(format!(
+                    "Non-vacuous Validated RPC set regressed ({} expected RPC(s) no longer Validated): {missing_from_validated:#?}",
+                    missing_from_validated.len()
+                ));
+            }
         }
         let normalized_allowed_shape: BTreeSet<String> = self
             .allowed_shape_violations
@@ -2379,5 +2403,41 @@ mod tests {
             count, UNTYPED_USER_ERROR_RATCHET_CEILING,
             "if you migrated more BridgeRpcError::user_error call sites, lower UNTYPED_USER_ERROR_RATCHET_CEILING to {count}"
         );
+    }
+
+    #[test]
+    fn k3_ratchet_rejects_silent_swap_where_validated_rpc_becomes_vacuous() {
+        let mut ratchet = ClientContractRatchet {
+            version: 1,
+            expectations_version: "test".to_string(),
+            expectations_sha256: "deadbeef".to_string(),
+            min_validated_rpcs: 2,
+            expected_validated_rpcs: ["svc.Alpha", "svc.Beta"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            allowed_shape_violations: BTreeSet::new(),
+            allowed_notify_violations: BTreeSet::new(),
+        };
+        let mut report = ContractSweepReport {
+            expectations_version: "test".to_string(),
+            expectations_sha256: "deadbeef".to_string(),
+            ..Default::default()
+        };
+        report.validated.insert("svc.Beta".to_string(), 1);
+        report.validated.insert("svc.Gamma".to_string(), 1);
+        report.vacuous.insert("svc.Alpha".to_string());
+
+        // Scalar count is 2 == min_validated_rpcs, yet svc.Alpha became Vacuous -> must fail!
+        let err = ratchet
+            .assert_sweep_report(&report)
+            .expect_err("expected K-3 set regression check to reject vacuous swap");
+        assert!(err.contains("svc.Alpha (became Vacuous)"), "{err}");
+
+        ratchet.expected_validated_rpcs.remove("svc.Alpha");
+        ratchet.expected_validated_rpcs.insert("svc.Gamma".to_string());
+        ratchet
+            .assert_sweep_report(&report)
+            .expect("matching validated set must pass");
     }
 }

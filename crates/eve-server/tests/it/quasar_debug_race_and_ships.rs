@@ -44,6 +44,7 @@ fn quasar_call(
     type_name: &str,
     value: Vec<u8>,
 ) -> eve_proto::quasar::EvePublicResponse {
+    crate::common::ensure_quasar_tap_hook_installed();
     let now = ctx.now_unix();
     let req = EvePublicRequest {
         issued: Some(GoogleTimestamp {

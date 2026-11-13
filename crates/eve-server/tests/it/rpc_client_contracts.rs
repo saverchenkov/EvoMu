@@ -27,6 +27,7 @@ fn shared_sde() -> Arc<eve_sde::SdeRegistry> {
 }
 
 async fn shared_comprehensive_ctx() -> Arc<ServerContext> {
+    common::ensure_quasar_tap_hook_installed();
     static BASE: tokio::sync::OnceCell<(Arc<eve_sde::SdeRegistry>, WorldStateSnapshot)> =
         tokio::sync::OnceCell::const_new();
     let (sde, snap) = BASE
@@ -1725,6 +1726,13 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
                         }
                         shape_violations.extend(outcome.violations);
                         if sig.destructive {
+                            let inv_snap = ctx.db.with_snapshot(|s| s.clone());
+                            let inv = eve_testkit::pre_check::check_world_invariants(&inv_snap, Some(&ctx.sde));
+                            assert!(
+                                inv.is_empty(),
+                                "Destructive RPC `{}` violated world invariants before snapshot reset: {inv:#?}",
+                                sig.rpc_key
+                            );
                             ctx.db.with_mut_snapshot(|snap| *snap = base_snapshot.clone());
                         }
                         break;
@@ -2041,7 +2049,9 @@ async fn test_destiny_ballpark_and_slim_item_client_contracts() {
 #[tokio::test]
 async fn test_quasar_public_gateway_client_contracts() {
     use eve_proto::quasar::{EvePublicRequest, GoogleAny, TYPE_GOOGLEAPIS_PREFIX};
+    use eve_server::quasar_gateway::PublicGatewayRouter;
 
+    common::ensure_quasar_tap_hook_installed();
     let ctx = shared_comprehensive_ctx().await;
 
     let mut sess = SessionState::new(77_201);
@@ -2138,6 +2148,34 @@ async fn test_quasar_public_gateway_client_contracts() {
     );
     eve_testkit::quasar_tap::assert_quasar_tap_ratchet(&tap_violations, &tap_ratchet)
         .expect("Quasar Public Gateway tap must satisfy ratchet");
+
+    let tapped_endpoints = PublicGatewayRouter::tapped_quasar_endpoints();
+    let untapped_endpoints = PublicGatewayRouter::untapped_quasar_endpoints();
+    let uncovered_handlers: Vec<&String> = handler_names
+        .iter()
+        .filter(|h| !tapped_endpoints.contains_key(*h))
+        .collect();
+    println!(
+        "=== G-06 QUASAR LIVE TAP FLOOR: tapped_unique={}, handler_count={}, uncovered={}, untapped={} ===",
+        tapped_endpoints.len(),
+        handler_names.len(),
+        uncovered_handlers.len(),
+        untapped_endpoints.len()
+    );
+    assert!(
+        tapped_endpoints.len() >= 100 && tapped_endpoints.len() >= handler_names.len(),
+        "Expected >= max(100, {}) live-tapped Quasar endpoints, got {}",
+        handler_names.len(),
+        tapped_endpoints.len()
+    );
+    assert!(
+        uncovered_handlers.is_empty(),
+        "Registered Quasar handlers bypassed live tap hook: {uncovered_handlers:#?}"
+    );
+    assert!(
+        untapped_endpoints.is_empty(),
+        "handle_public_request executed without tap hook installed: {untapped_endpoints:#?}"
+    );
 }
 
 #[tokio::test]
@@ -2147,6 +2185,30 @@ async fn test_world_invariants_and_persist_reload_equivalence_guard_908() {
     eve_testkit::pre_check::assert_world_and_pre_guards(&demo_repo, Some(&sde), true);
 
     let comp_ctx = shared_comprehensive_ctx().await;
+    {
+        let _guard = common::teardown_guard(&comp_ctx);
+    }
+    {
+        let corrupted = shared_comprehensive_ctx().await;
+        let _opt_out_guard = common::teardown_guard(&corrupted).opt_out_for_intentional_corruption();
+        corrupted.db.inject_unpersisted_mutation_for_test(|snap| {
+            if let Some(ch) = snap.characters.values_mut().next() {
+                ch.security_status = 9.99;
+            }
+        });
+    }
+    let panic_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let corrupted_sync = eve_db::WorldRepository::with_demo_seed();
+        let ctx_p = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::new(corrupted_sync));
+        let _guard = common::teardown_guard(&ctx_p);
+        ctx_p.db.inject_unpersisted_mutation_for_test(|snap| {
+            if let Some(ch) = snap.characters.values_mut().next() {
+                ch.security_status = 9.99;
+            }
+        });
+        panic!("simulated test failure");
+    }));
+    assert!(panic_res.is_err());
     common::assert_teardown_invariants(&comp_ctx);
 }
 

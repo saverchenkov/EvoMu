@@ -403,6 +403,14 @@ pub fn tap_exchange(
             validate_request_response_pairing(registry, request_type, rsp_any, &mut violations);
             let ctx = format!("response({request_type})");
             validate_any_strict(registry, &ctx, rsp_any, &mut violations);
+        } else if let Some(expected_rsp) = expected_paired_response_type(registry, request_type) {
+            if expected_rsp.trim_start_matches('.') != "google.protobuf.Empty" {
+                violations.push(QuasarTapViolation::MismatchedResponseType {
+                    request_type: request_type.to_string(),
+                    expected_response_type: expected_rsp,
+                    actual_response_type: "<none>".to_string(),
+                });
+            }
         }
     }
     for (idx, notice) in emitted_notices.iter().enumerate() {
@@ -443,13 +451,16 @@ mod tests {
 
     #[test]
     fn tap_rejects_bug_893_wrong_plex_transaction_attributes_fields_and_accepts_fixed() {
-        let reg = QuasarDescriptorRegistry::open_default_or_empty();
-        if reg
-            .get_message("eve_public.plex.vault.api.BalanceChangedNotice")
-            .is_none()
-        {
-            return;
-        }
+        let reg = QuasarDescriptorRegistry::open_default().unwrap_or_else(|e| {
+            panic!(
+                "missing quasar_descriptors.sqlite (set EVOMU_QUASAR_DESCRIPTORS_PATH): {e}"
+            )
+        });
+        assert!(
+            reg.get_message("eve_public.plex.vault.api.BalanceChangedNotice")
+                .is_some(),
+            "quasar_descriptors.sqlite missing eve_public.plex.vault.api.BalanceChangedNotice"
+        );
 
         // Construct the pre-#893 broken BalanceChangedNotice payload (encoding internal `eve.*`
         // fields 2=user_owner, 4=amount_transferred, 5=resulting_balance, 6=description):
@@ -519,13 +530,16 @@ mod tests {
 
     #[test]
     fn tap_rejects_bug_936_skill_plan_empty_responses_and_accepts_paired_responses() {
-        let reg = QuasarDescriptorRegistry::open_default_or_empty();
-        if reg
-            .get_message("eve_public.skill.plan.DeleteResponse")
-            .is_none()
-        {
-            return;
-        }
+        let reg = QuasarDescriptorRegistry::open_default().unwrap_or_else(|e| {
+            panic!(
+                "missing quasar_descriptors.sqlite (set EVOMU_QUASAR_DESCRIPTORS_PATH): {e}"
+            )
+        });
+        assert!(
+            reg.get_message("eve_public.skill.plan.DeleteResponse")
+                .is_some(),
+            "quasar_descriptors.sqlite missing eve_public.skill.plan.DeleteResponse"
+        );
 
         let nine_endpoints = [
             (
@@ -588,5 +602,23 @@ mod tests {
                 "#936: returning `{expected_rsp_type}` for `{req_type}` must pass PB-4 and wire validation, got {good_v:#?}"
             );
         }
+    }
+
+    #[test]
+    fn tap_exchange_rejects_none_payload_when_paired_response_exists() {
+        let reg = QuasarDescriptorRegistry::open_default().unwrap_or_else(|e| {
+            panic!(
+                "missing quasar_descriptors.sqlite (set EVOMU_QUASAR_DESCRIPTORS_PATH): {e}"
+            )
+        });
+        let v = tap_exchange(&reg, "eve_public.skill.plan.DeleteRequest", 200, None, &[]);
+        assert_eq!(
+            v,
+            vec![QuasarTapViolation::MismatchedResponseType {
+                request_type: "eve_public.skill.plan.DeleteRequest".to_string(),
+                expected_response_type: "eve_public.skill.plan.DeleteResponse".to_string(),
+                actual_response_type: "<none>".to_string(),
+            }]
+        );
     }
 }

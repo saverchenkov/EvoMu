@@ -14,6 +14,7 @@ use crate::client_contract::{
     validate_notification_contract, validate_rpc_reply_for_call, ClientContractRatchet,
     LoadedClientContracts, SemanticLookupContext,
 };
+use crate::shadow_client::{ShadowClient, ShadowDivergence};
 use eve_proto::PyRep;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -127,6 +128,9 @@ pub struct ClientHarness<T> {
     buffered_frames: Vec<ClientWireFrame>,
     recorded_commits: Vec<(String, u64)>,
     multi_commit_ratchet: Option<MultiCommitRpcRatchet>,
+    shadow: Option<ShadowClient>,
+    shadow_enforce: bool,
+    bound_inv_containers: HashMap<u64, i64>,
 }
 
 impl<T: ClientWireTransport> ClientHarness<T> {
@@ -140,7 +144,82 @@ impl<T: ClientWireTransport> ClientHarness<T> {
             buffered_frames: Vec::new(),
             recorded_commits: Vec::new(),
             multi_commit_ratchet: None,
+            shadow: None,
+            shadow_enforce: false,
+            bound_inv_containers: HashMap::new(),
         }
+    }
+
+    /// Enables or disables automatic [`ShadowClient`] convergence checks after every wire call (`G-05`).
+    pub fn with_shadow_enforcement(mut self, enabled: bool) -> Self {
+        self.shadow_enforce = enabled;
+        self
+    }
+
+    /// Toggles automatic [`ShadowClient`] convergence enforcement after every wire call.
+    pub fn set_shadow_enforcement(&mut self, enabled: bool) {
+        self.shadow_enforce = enabled;
+    }
+
+    /// Attaches a fresh wire-only [`ShadowClient`] for `char_id` (seeded with SDE metadata if available).
+    pub fn attach_shadow(&mut self, char_id: i64) {
+        let mut sc = ShadowClient::new(char_id);
+        if let Some(lookup) = self.transport.semantic_lookup() {
+            sc.seed_sde(lookup.sde);
+        }
+        self.shadow = Some(sc);
+    }
+
+    /// Returns a shared reference to the attached [`ShadowClient`], if initialized.
+    pub fn shadow(&self) -> Option<&ShadowClient> {
+        self.shadow.as_ref()
+    }
+
+    /// Returns a mutable reference to the attached [`ShadowClient`], if initialized.
+    pub fn shadow_mut(&mut self) -> Option<&mut ShadowClient> {
+        self.shadow.as_mut()
+    }
+
+    /// Feeds out-of-band server simulation tick notifications into the attached [`ShadowClient`]
+    /// and verifies convergence when shadow enforcement is enabled (`G-05`).
+    pub fn apply_shadow_tick_notifications<'a, I>(&mut self, notifications: I)
+    where
+        I: IntoIterator<Item = (&'a str, &'a [PyRep])>,
+    {
+        if let Some(ref mut shadow) = self.shadow {
+            shadow.apply_notifications(notifications);
+        }
+        if self.shadow_enforce {
+            self.assert_shadow_converged();
+        }
+    }
+
+    /// Asserts that the attached [`ShadowClient`] has no recorded divergences and matches world state.
+    pub fn assert_shadow_converged(&self) {
+        let Some(ref shadow) = self.shadow else {
+            return;
+        };
+        assert!(
+            shadow.recorded_divergences.is_empty(),
+            "ShadowClient recorded divergences for char {}: {:?}",
+            shadow.char_id,
+            shadow.recorded_divergences
+        );
+        if let Some(lookup) = self.transport.semantic_lookup() {
+            shadow.assert_converged_with_world(lookup.db, Some(lookup.sde));
+        }
+    }
+
+    /// Returns all currently detected [`ShadowDivergence`]s (recorded + world diff).
+    pub fn shadow_divergences(&self) -> Vec<ShadowDivergence> {
+        let Some(ref shadow) = self.shadow else {
+            return Vec::new();
+        };
+        let mut out = shadow.recorded_divergences.clone();
+        if let Some(lookup) = self.transport.semantic_lookup() {
+            out.extend(shadow.compare_all_against_world(lookup.db, Some(lookup.sde)));
+        }
+        out
     }
 
     /// Enables live enforcement of a falling [`MultiCommitRpcRatchet`] after every RPC call.
@@ -301,6 +380,88 @@ impl<T: ClientWireTransport> ClientHarness<T> {
 
         self.buffered_notifications.extend(notifications.iter().cloned());
         self.buffered_frames.extend(exchange.frames.iter().cloned());
+
+        if service == "charUnboundMgr"
+            && method == "SelectCharacterID"
+            && exchange.rpc_result.is_ok()
+        {
+            if let Some(cid) = args.first().and_then(|v| v.as_i64()) {
+                let mut sc = ShadowClient::new(cid);
+                if let Some(ref l) = lookup {
+                    sc.seed_sde(l.sde);
+                }
+                self.shadow = Some(sc);
+            }
+        }
+        if service == "invbroker" && method == "MachoBindObject" {
+            if let Ok(ref reply) = exchange.rpc_result {
+                if let Some(bid) = extract_bound_id_from_wire_rep(reply) {
+                    if let Some(cid) = args.first().and_then(|v| v.as_i64()) {
+                        self.bound_inv_containers.insert(bid, cid);
+                    }
+                }
+            }
+        }
+        if let Some(ref mut shadow) = self.shadow {
+            if let Some(ref l) = lookup {
+                if shadow.module_states.known_effect_names.is_empty() {
+                    shadow.seed_sde(l.sde);
+                }
+            }
+            for frame in &exchange.frames {
+                match &frame.kind {
+                    ClientWireFrameKind::Notification { event, args: n_args } => {
+                        shadow.apply_notification(event, n_args);
+                    }
+                    ClientWireFrameKind::SessionChange { packet } => {
+                        shadow.apply_notification(
+                            "SessionChangeNotification",
+                            std::slice::from_ref(packet),
+                        );
+                    }
+                    ClientWireFrameKind::DoDestinyUpdate { updates, .. } => {
+                        shadow.apply_notification(
+                            "DoDestinyUpdate",
+                            std::slice::from_ref(updates),
+                        );
+                    }
+                    ClientWireFrameKind::CallRsp { .. }
+                    | ClientWireFrameKind::ErrorResponse { .. } => {}
+                }
+            }
+            if let Ok(ref reply) = exchange.rpc_result {
+                if service == "dogmaIM" && method == "GetAllInfo" {
+                    shadow.sync_from_get_all_info(reply);
+                } else if service == "account" && method == "GetCashBalance" && args.is_empty() {
+                    shadow.sync_from_wallet_balance(reply);
+                } else if service == "invbroker" && method == "List" {
+                    let container_id = bound_id
+                        .and_then(|bid| self.bound_inv_containers.get(&bid).copied())
+                        .or_else(|| {
+                            let rows = match reply {
+                                PyRep::ObjectEx { list, .. } | PyRep::List(list) => list.as_slice(),
+                                _ => &[],
+                            };
+                            rows.iter()
+                                .find_map(crate::shadow_client::ShadowItem::from_pyrep)
+                                .map(|i| i.location_id)
+                        });
+                    if let Some(cid) = container_id {
+                        shadow.sync_from_inventory_list(cid, reply);
+                    }
+                }
+            }
+            if self.shadow_enforce {
+                for div in &shadow.recorded_divergences {
+                    violations.push(format!("shadow:recorded:{div}"));
+                }
+                if let Some(ref l) = lookup {
+                    for div in shadow.compare_all_against_world(l.db, Some(l.sde)) {
+                        violations.push(format!("shadow:world_diff:{div}"));
+                    }
+                }
+            }
+        }
 
         if !violations.is_empty() && self.mode != ContractValidationMode::ReportOnly {
             panic!(
@@ -623,18 +784,26 @@ pub(crate) fn strip_rust_comments_and_literals(src: &str) -> String {
     String::from_utf8(out).expect("ASCII comment/literal masking preserves UTF-8")
 }
 
-/// Scans `.rs` files in `dir` for `.dispatch_rpc(..., <caller_trace>)` invocations.
-pub fn scan_raw_dispatch_calls_in_dir(dir: &Path) -> Result<RawDispatchScanReport, String> {
+/// Recursively collects `.rs` file paths under `dir`.
+fn collect_rust_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
     let entries = std::fs::read_dir(dir)
         .map_err(|e| format!("failed to read {}: {e}", dir.display()))?;
-    let mut paths = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|e| format!("failed reading dir entry: {e}"))?;
         let p = entry.path();
-        if p.extension().and_then(|e| e.to_str()) == Some("rs") {
-            paths.push(p);
+        if p.is_dir() {
+            collect_rust_files_recursive(&p, out)?;
+        } else if p.extension().and_then(|e| e.to_str()) == Some("rs") {
+            out.push(p);
         }
     }
+    Ok(())
+}
+
+/// Recursively scans `.rs` files in `dir` for `.dispatch_rpc(..., <caller_trace>)` invocations.
+pub fn scan_raw_dispatch_calls_in_dir(dir: &Path) -> Result<RawDispatchScanReport, String> {
+    let mut paths = Vec::new();
+    collect_rust_files_recursive(dir, &mut paths)?;
     paths.sort();
 
     let mut report = RawDispatchScanReport::default();
@@ -697,9 +866,12 @@ pub fn scan_raw_dispatch_calls_in_dir(dir: &Path) -> Result<RawDispatchScanRepor
 
         if file_none > 0 {
             report.files_with_raw_none += 1;
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                report.per_file_raw_none.insert(name.to_string(), file_none);
-            }
+            let rel_key = path
+                .strip_prefix(dir)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            report.per_file_raw_none.insert(rel_key, file_none);
         }
     }
 
@@ -824,6 +996,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn raw_dispatch_scanner_recurses_into_subdirectories() {
+        let tmp = std::env::temp_dir().join(format!(
+            "evomu_raw_dispatch_scan_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let nested = tmp.join("nested").join("deep");
+        std::fs::create_dir_all(&nested).expect("create temp nested dir");
+        std::fs::write(
+            tmp.join("top.rs"),
+            "fn a() { ctx.dispatch_rpc(&mut s, \"svc\", None, \"M\", &[], &m, None); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            nested.join("inner.rs"),
+            "fn b() {\n  ctx.dispatch_rpc(&mut s, \"svc\", None, \"M\", &[], &m, None);\n  ctx.dispatch_rpc(&mut s, \"svc\", None, \"M\", &[], &m, None);\n}\n",
+        )
+        .unwrap();
+
+        let report = scan_raw_dispatch_calls_in_dir(&tmp).expect("recursive scan");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert_eq!(report.raw_none_calls, 3);
+        assert_eq!(report.files_with_raw_none, 2);
+        assert_eq!(report.per_file_raw_none.get("top.rs").copied(), Some(1));
+        assert_eq!(
+            report.per_file_raw_none.get("nested/deep/inner.rs").copied(),
+            Some(2)
+        );
+    }
+
     #[tokio::test]
     async fn harness_records_tx_commits_and_enforces_multi_commit_ratchet() {
         struct DbMockTransport {
@@ -919,5 +1123,92 @@ mod tests {
         harness
             .check_multi_commit_ratchet(&allowlisted)
             .expect("allowlisted 2-commit RPC within ceiling passes");
+    }
+
+    #[tokio::test]
+    async fn harness_wires_shadow_client_from_select_char_and_tick_hook() {
+        struct ShadowWireMock {
+            db: eve_db::WorldRepository,
+            sde: eve_sde::SdeRegistry,
+        }
+
+        impl ClientWireTransport for ShadowWireMock {
+            fn send_wire_call<'a>(
+                &'a mut self,
+                service: &'a str,
+                _bound_id: Option<u64>,
+                method: &'a str,
+                args: &'a [PyRep],
+                _kwargs: &'a HashMap<String, PyRep>,
+            ) -> Pin<Box<dyn Future<Output = ClientWireExchange> + Send + 'a>> {
+                let rep = if service == "charUnboundMgr" && method == "SelectCharacterID" {
+                    PyRep::None
+                } else if service == "account" && method == "GetCashBalance" {
+                    let bal = self.db.with_snapshot(|s| {
+                        s.characters.get(&2119000001).map(|c| c.balance.to_wire_f64()).unwrap_or(0.0)
+                    });
+                    PyRep::Real(bal)
+                } else {
+                    let _ = args;
+                    PyRep::Dict(Vec::new())
+                };
+                Box::pin(async move {
+                    ClientWireExchange {
+                        rpc_result: Ok(rep.clone()),
+                        frames: vec![ClientWireFrame {
+                            kind: ClientWireFrameKind::CallRsp {
+                                call_id: 1,
+                                reply: rep,
+                            },
+                            wire_packet: PyRep::None,
+                        }],
+                        marshal_errors: Vec::new(),
+                    }
+                })
+            }
+
+            fn semantic_lookup(&self) -> Option<SemanticLookupContext<'_>> {
+                Some(SemanticLookupContext {
+                    sde: &self.sde,
+                    db: &self.db,
+                })
+            }
+        }
+
+        let db = eve_db::WorldRepository::with_demo_seed();
+        let pilot_id = db.with_snapshot(|s| *s.characters.keys().next().unwrap());
+        let sde = eve_sde::SdeRegistry::with_canonical_seed();
+        let mut harness = ClientHarness::new(ShadowWireMock { db, sde })
+            .with_mode(ContractValidationMode::ReportOnly)
+            .with_shadow_enforcement(false);
+        assert!(harness.shadow().is_none());
+
+        let _ = harness
+            .call(
+                "charUnboundMgr",
+                None,
+                "SelectCharacterID",
+                &[PyRep::Integer(pilot_id)],
+                &HashMap::new(),
+            )
+            .await;
+        assert_eq!(harness.shadow().map(|s| s.char_id), Some(pilot_id));
+
+        let _ = harness
+            .call("account", None, "GetCashBalance", &[], &HashMap::new())
+            .await;
+        assert!(harness.shadow().unwrap().wallet.personal_balance_isk.is_some());
+
+        // Out-of-band tick notification updates shadow wallet too.
+        let tick_args = [
+            PyRep::String("cash".into()),
+            PyRep::Integer(pilot_id),
+            PyRep::Real(12_345_678.0),
+        ];
+        harness.apply_shadow_tick_notifications([("OnAccountChange", tick_args.as_slice())]);
+        assert_eq!(
+            harness.shadow().unwrap().wallet.personal_balance_isk,
+            Some(12_345_678.0)
+        );
     }
 }

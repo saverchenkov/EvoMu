@@ -351,6 +351,28 @@ pub type QuasarHandlerFn = Arc<
 pub type MachoNotifySink =
     Arc<dyn Fn(crate::router::NotificationTarget, &str, &str, Vec<PyRep>) + Send + Sync>;
 
+#[cfg(any(test, feature = "demo-seed"))]
+pub type QuasarTapHookFn = fn(
+    descriptors: &QuasarDescriptorRegistry,
+    request_type: &str,
+    status_code: u32,
+    response_payload: Option<&GoogleAny>,
+    emitted_notices: &[GoogleAny],
+);
+
+#[cfg(any(test, feature = "demo-seed"))]
+static QUASAR_TAP_HOOK: RwLock<Option<QuasarTapHookFn>> = RwLock::new(None);
+
+#[cfg(any(test, feature = "demo-seed"))]
+static TAPPED_QUASAR_ENDPOINTS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::BTreeMap<String, usize>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(any(test, feature = "demo-seed"))]
+static UNTAPPED_QUASAR_ENDPOINTS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::BTreeMap<String, usize>>,
+> = std::sync::OnceLock::new();
+
 pub struct PublicGatewayRouter {
     pub descriptors: Arc<QuasarDescriptorRegistry>,
     pub db: Arc<WorldRepository>,
@@ -377,6 +399,63 @@ pub struct PublicGatewayRouter {
 }
 
 impl PublicGatewayRouter {
+    #[cfg(any(test, feature = "demo-seed"))]
+    pub fn install_quasar_tap_hook(hook: QuasarTapHookFn) {
+        let mut guard = QUASAR_TAP_HOOK.write().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(hook);
+    }
+
+    #[cfg(any(test, feature = "demo-seed"))]
+    pub fn tapped_quasar_endpoints() -> std::collections::BTreeMap<String, usize> {
+        TAPPED_QUASAR_ENDPOINTS
+            .get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    #[cfg(any(test, feature = "demo-seed"))]
+    pub fn untapped_quasar_endpoints() -> std::collections::BTreeMap<String, usize> {
+        UNTAPPED_QUASAR_ENDPOINTS
+            .get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    #[cfg(any(test, feature = "demo-seed"))]
+    fn run_quasar_tap_hook(
+        &self,
+        request_type: &str,
+        status_code: u32,
+        response_payload: Option<&GoogleAny>,
+        emitted_notices: &[GoogleAny],
+    ) {
+        let hook_opt = *QUASAR_TAP_HOOK.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(hook) = hook_opt {
+            {
+                let mut map = TAPPED_QUASAR_ENDPOINTS
+                    .get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                *map.entry(request_type.to_string()).or_insert(0) += 1;
+            }
+            hook(
+                &self.descriptors,
+                request_type,
+                status_code,
+                response_payload,
+                emitted_notices,
+            );
+        } else {
+            let mut map = UNTAPPED_QUASAR_ENDPOINTS
+                .get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *map.entry(request_type.to_string()).or_insert(0) += 1;
+        }
+    }
+
     pub fn new(
         descriptors: Arc<QuasarDescriptorRegistry>,
         db: Arc<WorldRepository>,
@@ -1198,11 +1277,17 @@ impl PublicGatewayRouter {
             ),
         };
 
+        #[cfg(any(test, feature = "demo-seed"))]
+        let mut tapped_notices: Vec<GoogleAny> = Vec::new();
         // Drain any notices queued by Quasar social service handlers and fan out to subscribers
         for (scope, payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
+            #[cfg(any(test, feature = "demo-seed"))]
+            tapped_notices.push(payload.clone());
             let _ = self.publish_notice(scope, payload, ts);
         }
 
+        #[cfg(any(test, feature = "demo-seed"))]
+        let tapped_req_type = norm_type.clone();
         if let Some(ikey) = idem_key {
             let cache_tuple = (session_uid, cid_key, norm_type, ikey);
             self.idempotency_cache.write().unwrap_or_else(|e| e.into_inner()).insert(
@@ -1225,10 +1310,20 @@ impl PublicGatewayRouter {
         let queued: Vec<_> = guard.drain(..).collect();
         drop(guard);
         for (scope, payload) in queued {
+            #[cfg(any(test, feature = "demo-seed"))]
+            tapped_notices.push(payload.clone());
             let _ = self.publish_notice(scope, payload, now_unix);
         }
 
-        build_response(status_code, status_message, rsp_payload)
+        let final_rsp = build_response(status_code, status_message, rsp_payload);
+        #[cfg(any(test, feature = "demo-seed"))]
+        self.run_quasar_tap_hook(
+            &tapped_req_type,
+            final_rsp.status_code,
+            final_rsp.payload.as_ref(),
+            &tapped_notices,
+        );
+        final_rsp
     }
 
     /// Server-only handler for an `eve_public.internal_gateway.Request` envelope (`R-Q2-P1-3`).
