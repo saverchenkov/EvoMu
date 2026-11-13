@@ -835,7 +835,7 @@ impl CombatState {
 }
 
 /// Physical & kinematic state of a single entity ("Ball") inside a solar system's `Ballpark`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Ball {
     pub id: BallId,
     pub type_id: u32,
@@ -871,7 +871,7 @@ impl Ball {
 }
 
 /// High-level state synchronization events emitted by the `Ballpark` each 1 Hz server tick.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action")]
 pub enum DestinyEvent {
     SetState {
@@ -1357,6 +1357,13 @@ pub struct Ballpark {
     pub active_wubble_multipliers: BTreeMap<BallId, f64>,
     #[serde(default)]
     pub sim_unix_secs: u64,
+    /// When `Some`, only balls in this set accumulate per-observer event queues (`#868`).
+    /// When `None`, every dynamic grid member accumulates an observer queue (default compatibility).
+    #[serde(default)]
+    pub registered_observers: Option<BTreeSet<BallId>>,
+    /// Monotonically incremented whenever static balls are added, removed, or repositioned.
+    #[serde(skip, default)]
+    pub(crate) static_epoch: u64,
 }
 
 /// Converts Unix epoch seconds to Windows FILETIME (`100ns` ticks since 1601-01-01 UTC).
@@ -1708,6 +1715,12 @@ impl Ballpark {
         } else {
             current_system_unix_secs()
         }
+    }
+
+    /// Monotonic counter incremented when static balls are added, removed, or moved.
+    #[inline]
+    pub fn static_epoch(&self) -> u64 {
+        self.static_epoch
     }
 
     /// Applies or updates a Breacher Pod DoT on `ball_id` and emits [`DestinyEvent::OnDotVictimUpdated`] (`destiny:OnDotVictimUpdated`).

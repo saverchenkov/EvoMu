@@ -82,6 +82,8 @@ impl Ballpark {
             ball_wormhole_stages: BTreeMap::new(),
             active_wubble_multipliers: BTreeMap::new(),
             sim_unix_secs: 0,
+            registered_observers: None,
+            static_epoch: 0,
         }
     }
 
@@ -115,6 +117,7 @@ impl Ballpark {
         self.ball_group_ids.insert(ball_id, meta.group_id);
         self.ball_slim_meta.insert(ball_id, meta);
         self.balls.insert(ball_id, ball);
+        self.static_epoch = self.static_epoch.wrapping_add(1);
         true
     }
 
@@ -357,20 +360,71 @@ impl Ballpark {
         }
     }
 
+    /// Enables or disables registered-observer filtering (`#868`).
+    /// When enabled, only registered observer balls (e.g. active client sessions) accumulate
+    /// per-observer `DestinyEvent` queues; NPCs, drones, and wrecks skip queue allocation.
+    pub fn set_observer_filtering(&mut self, enabled: bool) {
+        if enabled {
+            self.registered_observers.get_or_insert_with(BTreeSet::new);
+        } else {
+            self.registered_observers = None;
+        }
+    }
+
+    /// Registers `ball_id` as an active observer and enables registered-observer filtering.
+    pub fn register_observer(&mut self, ball_id: BallId) {
+        self.registered_observers
+            .get_or_insert_with(BTreeSet::new)
+            .insert(ball_id);
+    }
+
+    /// Unregisters `ball_id` from active observer filtering (if enabled).
+    pub fn unregister_observer(&mut self, ball_id: BallId) {
+        if let Some(ref mut set) = self.registered_observers {
+            set.remove(&ball_id);
+        }
+    }
+
+    /// Returns `true` when `ball_id` should accumulate per-observer `DestinyEvent` queues.
+    #[inline]
+    pub fn is_registered_observer(&self, ball_id: BallId) -> bool {
+        self.registered_observers
+            .as_ref()
+            .is_none_or(|set| set.contains(&ball_id))
+    }
+
+    #[inline]
+    pub(crate) fn push_observer_event(&mut self, observer_ball_id: BallId, event: DestinyEvent) {
+        if self.is_registered_observer(observer_ball_id) {
+            self.observer_events
+                .entry(observer_ball_id)
+                .or_default()
+                .push(event);
+        }
+    }
+
     pub(crate) fn queue_event_for_grid_observers(
         &mut self,
         grid_id: u64,
         exclude_ball_id: Option<BallId>,
         event: &DestinyEvent,
     ) {
-        let Some(members) = self.grids.get(&grid_id).map(|g| g.members.clone()) else {
+        let Some(grid) = self.grids.get(&grid_id) else {
             return;
         };
-        for obs_id in members {
+        let observer_events = &mut self.observer_events;
+        let registered_observers = &self.registered_observers;
+        for &obs_id in &grid.members {
             if Some(obs_id) == exclude_ball_id {
                 continue;
             }
-            self.observer_events
+            if !registered_observers
+                .as_ref()
+                .is_none_or(|set| set.contains(&obs_id))
+            {
+                continue;
+            }
+            observer_events
                 .entry(obs_id)
                 .or_default()
                 .push(event.clone());
@@ -413,7 +467,9 @@ impl Ballpark {
             self.pending_events
                 .push(DestinyEvent::AddBall { ball: ball.clone() });
         }
-        self.observer_events.insert(ball_id, Vec::new());
+        if self.is_registered_observer(ball_id) {
+            self.observer_events.insert(ball_id, Vec::new());
+        }
         let grid_id = self.find_or_create_grid_for_position(ball_pos);
         if let Some(g) = self.grids.get_mut(&grid_id) {
             g.members.insert(ball_id);
@@ -439,6 +495,9 @@ impl Ballpark {
         if !self.balls.contains_key(&observer_ball_id) {
             return false;
         }
+        if let Some(ref mut set) = self.registered_observers {
+            set.insert(observer_ball_id);
+        }
         let events = self.observer_events.entry(observer_ball_id).or_default();
         events.retain(|e| {
             !matches!(
@@ -461,6 +520,12 @@ impl Ballpark {
         let old_grid_id = self.ball_grid_ids.remove(&ball_id);
         let was_static = self.static_ball_ids.remove(&ball_id)
             || matches!(removed.mode, MovementMode::Rigid);
+        if was_static {
+            self.static_epoch = self.static_epoch.wrapping_add(1);
+        }
+        if let Some(ref mut set) = self.registered_observers {
+            set.remove(&ball_id);
+        }
         self.non_free_ball_ids.remove(&ball_id);
         self.ball_group_ids.remove(&ball_id);
         self.ball_slim_meta.remove(&ball_id);
@@ -1130,15 +1195,15 @@ impl Ballpark {
                 position: new_position.to_array(),
             };
             self.pending_events.push(pos_ev.clone());
+            if self.is_static_ball(ball_id) {
+                self.static_epoch = self.static_epoch.wrapping_add(1);
+            }
             if stay_in_old {
                 if let Some(gid) = old_gid {
                     self.queue_event_for_grid_observers(gid, None, &pos_ev);
                 }
             } else {
-                self.observer_events
-                    .entry(ball_id)
-                    .or_default()
-                    .push(pos_ev);
+                self.push_observer_event(ball_id, pos_ev);
                 let old_members: Vec<BallId> = old_gid
                     .and_then(|gid| self.grids.get(&gid))
                     .map(|g| {
@@ -1179,30 +1244,30 @@ impl Ballpark {
                         .is_some_and(|c| c.is_cloaked);
                     if !old_members.is_empty() {
                         for &other_id in &old_members {
-                            self.observer_events
-                                .entry(other_id)
-                                .or_default()
-                                .push(DestinyEvent::RemoveBalls {
+                            self.push_observer_event(
+                                other_id,
+                                DestinyEvent::RemoveBalls {
                                     ball_ids: vec![ball_id],
-                                });
+                                },
+                            );
                         }
-                        self.observer_events
-                            .entry(ball_id)
-                            .or_default()
-                            .push(DestinyEvent::RemoveBalls {
+                        self.push_observer_event(
+                            ball_id,
+                            DestinyEvent::RemoveBalls {
                                 ball_ids: old_members,
-                            });
+                            },
+                        );
                     }
                     if !new_members.is_empty() {
                         if !is_cloaked {
                             if let Some(moved_ball) = self.balls.get(&ball_id).cloned() {
                                 for &other_id in &new_members {
-                                    self.observer_events
-                                        .entry(other_id)
-                                        .or_default()
-                                        .push(DestinyEvent::AddBalls2 {
+                                    self.push_observer_event(
+                                        other_id,
+                                        DestinyEvent::AddBalls2 {
                                             balls: vec![moved_ball.clone()],
-                                        });
+                                        },
+                                    );
                                 }
                             }
                         }
@@ -1219,12 +1284,12 @@ impl Ballpark {
                             }
                         }
                         if !entered_for_mover.is_empty() {
-                            self.observer_events
-                                .entry(ball_id)
-                                .or_default()
-                                .push(DestinyEvent::AddBalls {
+                            self.push_observer_event(
+                                ball_id,
+                                DestinyEvent::AddBalls {
                                     balls: entered_for_mover,
-                                });
+                                },
+                            );
                         }
                     }
                 }

@@ -612,20 +612,26 @@ async fn test_parity_misc_plan_t10_and_t11_client_oracle_and_destiny_diff() {
     // T-11: Destiny differential physics step + wire encoding
     let mut ballpark = Ballpark::new(SYS_PERIMETER);
     let _ = populate_asteroid_belt_entities(&mut ballpark, SYS_PERIMETER, &ctx.sde);
-    let ball_id = *ballpark.balls.keys().next().expect("seeded ball");
-    let start_x = ballpark.balls[&ball_id].position.x;
-    if let Some(ball) = ballpark.balls.get_mut(&ball_id) {
-        ball.velocity = DVec3::new(100.0, 0.0, 0.0);
-        ball.mass = 1_067_000.0;
-        ball.max_velocity = 365.0;
-        ball.inertia = 2.9;
-        ball.mode = MovementMode::GotoDirection {
+    let seeded_id = *ballpark.balls.keys().next().expect("seeded ball");
+    let start_pos = ballpark.balls[&seeded_id].position + DVec3::new(10_000.0, 0.0, 0.0);
+    let ship_id = 990_000_001;
+    ballpark.add_ball(eve_destiny::Ball {
+        id: ship_id,
+        type_id: 587,
+        position: start_pos,
+        velocity: DVec3::new(100.0, 0.0, 0.0),
+        max_velocity: 365.0,
+        inertia: 2.9,
+        mass: 1_067_000.0,
+        radius: 40.0,
+        speed_fraction: 1.0,
+        mode: MovementMode::GotoDirection {
             direction: DVec3::X,
-        };
-    }
+        },
+    });
     ballpark.step(1.0);
-    let moved = ballpark.balls.get(&ball_id).expect("moved ball");
-    assert!(moved.position.x > start_x + 50.0, "expected forward X displacement");
+    let moved = ballpark.balls.get(&ship_id).expect("moved ball");
+    assert!(moved.position.x > start_pos.x + 50.0, "expected forward X displacement");
 }
 
 }

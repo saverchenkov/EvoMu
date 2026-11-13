@@ -5,13 +5,17 @@
 use super::{
     AsteroidState, MiningExtractionResult, TickBroadcast, next_downtime_unix_secs,
 };
-use eve_destiny::wire::encode_destiny_updates;
+use eve_destiny::wire::encode_destiny_event;
 use eve_destiny::{
     Ball, BallId, Ballpark, DestinyEvent, MovementMode, SlimItemMeta,
 };
+use eve_proto::PyRep;
 use eve_sde::{SdeRegistry, SolarSystemId};
 use glam::DVec3;
+use serde::Serialize;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap};
+use std::hash::Hasher;
 use std::sync::Arc;
 
 /// Populates a solar system's `Ballpark` with its real SDE stars, planets, moons, asteroid belts,
@@ -386,6 +390,278 @@ pub(super) fn ensure_default_slim_meta(
     );
 }
 
+#[derive(Debug)]
+struct SerHashErr;
+
+impl std::fmt::Display for SerHashErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("hash error")
+    }
+}
+
+impl std::error::Error for SerHashErr {}
+
+impl serde::ser::Error for SerHashErr {
+    fn custom<T: std::fmt::Display>(_msg: T) -> Self {
+        Self
+    }
+}
+
+struct HashSerializer<'a, H: Hasher>(&'a mut H);
+
+impl<'a, H: Hasher> serde::Serializer for &mut HashSerializer<'a, H> {
+    type Ok = ();
+    type Error = SerHashErr;
+    type SerializeSeq = Self;
+    type SerializeTuple = Self;
+    type SerializeTupleStruct = Self;
+    type SerializeTupleVariant = Self;
+    type SerializeMap = Self;
+    type SerializeStruct = Self;
+    type SerializeStructVariant = Self;
+
+    fn serialize_bool(self, v: bool) -> Result<(), Self::Error> {
+        self.0.write_u8(v as u8);
+        Ok(())
+    }
+    fn serialize_i8(self, v: i8) -> Result<(), Self::Error> {
+        self.0.write_i8(v);
+        Ok(())
+    }
+    fn serialize_i16(self, v: i16) -> Result<(), Self::Error> {
+        self.0.write_i16(v);
+        Ok(())
+    }
+    fn serialize_i32(self, v: i32) -> Result<(), Self::Error> {
+        self.0.write_i32(v);
+        Ok(())
+    }
+    fn serialize_i64(self, v: i64) -> Result<(), Self::Error> {
+        self.0.write_i64(v);
+        Ok(())
+    }
+    fn serialize_u8(self, v: u8) -> Result<(), Self::Error> {
+        self.0.write_u8(v);
+        Ok(())
+    }
+    fn serialize_u16(self, v: u16) -> Result<(), Self::Error> {
+        self.0.write_u16(v);
+        Ok(())
+    }
+    fn serialize_u32(self, v: u32) -> Result<(), Self::Error> {
+        self.0.write_u32(v);
+        Ok(())
+    }
+    fn serialize_u64(self, v: u64) -> Result<(), Self::Error> {
+        self.0.write_u64(v);
+        Ok(())
+    }
+    fn serialize_f32(self, v: f32) -> Result<(), Self::Error> {
+        self.0.write_u32(if v == 0.0 { 0 } else { v.to_bits() });
+        Ok(())
+    }
+    fn serialize_f64(self, v: f64) -> Result<(), Self::Error> {
+        self.0.write_u64(if v == 0.0 { 0 } else { v.to_bits() });
+        Ok(())
+    }
+    fn serialize_char(self, v: char) -> Result<(), Self::Error> {
+        self.0.write_u32(v as u32);
+        Ok(())
+    }
+    fn serialize_str(self, v: &str) -> Result<(), Self::Error> {
+        self.0.write_usize(v.len());
+        self.0.write(v.as_bytes());
+        Ok(())
+    }
+    fn serialize_bytes(self, v: &[u8]) -> Result<(), Self::Error> {
+        self.0.write_usize(v.len());
+        self.0.write(v);
+        Ok(())
+    }
+    fn serialize_none(self) -> Result<(), Self::Error> {
+        self.0.write_u8(0);
+        Ok(())
+    }
+    fn serialize_some<T: ?Sized + Serialize>(self, value: &T) -> Result<(), Self::Error> {
+        self.0.write_u8(1);
+        value.serialize(self)
+    }
+    fn serialize_unit(self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+    fn serialize_unit_struct(self, _name: &'static str) -> Result<(), Self::Error> {
+        Ok(())
+    }
+    fn serialize_unit_variant(
+        self,
+        _name: &'static str,
+        variant_index: u32,
+        _variant: &'static str,
+    ) -> Result<(), Self::Error> {
+        self.0.write_u32(variant_index);
+        Ok(())
+    }
+    fn serialize_newtype_struct<T: ?Sized + Serialize>(
+        self,
+        _name: &'static str,
+        value: &T,
+    ) -> Result<(), Self::Error> {
+        value.serialize(self)
+    }
+    fn serialize_newtype_variant<T: ?Sized + Serialize>(
+        self,
+        _name: &'static str,
+        variant_index: u32,
+        _variant: &'static str,
+        value: &T,
+    ) -> Result<(), Self::Error> {
+        self.0.write_u32(variant_index);
+        value.serialize(self)
+    }
+    fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
+        if let Some(n) = len {
+            self.0.write_usize(n);
+        }
+        Ok(self)
+    }
+    fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple, Self::Error> {
+        self.0.write_usize(len);
+        Ok(self)
+    }
+    fn serialize_tuple_struct(
+        self,
+        _name: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeTupleStruct, Self::Error> {
+        self.0.write_usize(len);
+        Ok(self)
+    }
+    fn serialize_tuple_variant(
+        self,
+        _name: &'static str,
+        variant_index: u32,
+        _variant: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeTupleVariant, Self::Error> {
+        self.0.write_u32(variant_index);
+        self.0.write_usize(len);
+        Ok(self)
+    }
+    fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
+        if let Some(n) = len {
+            self.0.write_usize(n);
+        }
+        Ok(self)
+    }
+    fn serialize_struct(
+        self,
+        _name: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeStruct, Self::Error> {
+        self.0.write_usize(len);
+        Ok(self)
+    }
+    fn serialize_struct_variant(
+        self,
+        _name: &'static str,
+        variant_index: u32,
+        _variant: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeStructVariant, Self::Error> {
+        self.0.write_u32(variant_index);
+        self.0.write_usize(len);
+        Ok(self)
+    }
+}
+
+impl<'a, H: Hasher> serde::ser::SerializeSeq for &mut HashSerializer<'a, H> {
+    type Ok = ();
+    type Error = SerHashErr;
+    fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
+        value.serialize(&mut **self)
+    }
+    fn end(self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+impl<'a, H: Hasher> serde::ser::SerializeTuple for &mut HashSerializer<'a, H> {
+    type Ok = ();
+    type Error = SerHashErr;
+    fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
+        value.serialize(&mut **self)
+    }
+    fn end(self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+impl<'a, H: Hasher> serde::ser::SerializeTupleStruct for &mut HashSerializer<'a, H> {
+    type Ok = ();
+    type Error = SerHashErr;
+    fn serialize_field<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
+        value.serialize(&mut **self)
+    }
+    fn end(self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+impl<'a, H: Hasher> serde::ser::SerializeTupleVariant for &mut HashSerializer<'a, H> {
+    type Ok = ();
+    type Error = SerHashErr;
+    fn serialize_field<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
+        value.serialize(&mut **self)
+    }
+    fn end(self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+impl<'a, H: Hasher> serde::ser::SerializeMap for &mut HashSerializer<'a, H> {
+    type Ok = ();
+    type Error = SerHashErr;
+    fn serialize_key<T: ?Sized + Serialize>(&mut self, key: &T) -> Result<(), Self::Error> {
+        key.serialize(&mut **self)
+    }
+    fn serialize_value<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
+        value.serialize(&mut **self)
+    }
+    fn end(self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+impl<'a, H: Hasher> serde::ser::SerializeStruct for &mut HashSerializer<'a, H> {
+    type Ok = ();
+    type Error = SerHashErr;
+    fn serialize_field<T: ?Sized + Serialize>(
+        &mut self,
+        _key: &'static str,
+        value: &T,
+    ) -> Result<(), Self::Error> {
+        value.serialize(&mut **self)
+    }
+    fn end(self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+impl<'a, H: Hasher> serde::ser::SerializeStructVariant for &mut HashSerializer<'a, H> {
+    type Ok = ();
+    type Error = SerHashErr;
+    fn serialize_field<T: ?Sized + Serialize>(
+        &mut self,
+        _key: &'static str,
+        value: &T,
+    ) -> Result<(), Self::Error> {
+        value.serialize(&mut **self)
+    }
+    fn end(self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+fn hash_destiny_event(ev: &DestinyEvent) -> u64 {
+    let mut h = DefaultHasher::new();
+    let _ = ev.serialize(&mut HashSerializer(&mut h));
+    h.finish()
+}
+
 pub(super) fn drain_tick_events_without_encode(ballpark: &mut Ballpark) {
     ballpark.pending_events.clear();
     let ready_obs_ids: Vec<BallId> = ballpark
@@ -406,6 +682,10 @@ pub(super) fn drain_tick_events_without_encode(ballpark: &mut Ballpark) {
     for obs_id in ready_obs_ids {
         let _ = ballpark.drain_observer_events(obs_id);
     }
+    let balls = &ballpark.balls;
+    ballpark
+        .observer_events
+        .retain(|id, evs| !evs.is_empty() || balls.contains_key(id));
 }
 
 pub(super) fn build_tick_broadcast(
@@ -436,13 +716,62 @@ pub(super) fn build_tick_broadcast(
             observer_events.insert(obs_id, obs_evs);
         }
     }
+    let balls = &ballpark.balls;
+    ballpark
+        .observer_events
+        .retain(|id, evs| !evs.is_empty() || balls.contains_key(id));
     let stamp = ballpark.current_tick as u32;
     let mut observer_updates_pyrep = BTreeMap::new();
+    let mut event_cache: HashMap<u64, Vec<(&DestinyEvent, PyRep)>> = HashMap::new();
+    let mut batch_cache: HashMap<u64, Vec<(&[DestinyEvent], PyRep)>> = HashMap::new();
     for (&obs_id, obs_evs) in &observer_events {
-        observer_updates_pyrep.insert(
-            obs_id,
-            encode_destiny_updates(stamp, obs_evs, Some(ballpark)),
-        );
+        let mut batch_hasher = DefaultHasher::new();
+        batch_hasher.write_usize(obs_evs.len());
+        let mut ev_hashes = Vec::with_capacity(obs_evs.len());
+        for ev in obs_evs {
+            let eh = hash_destiny_event(ev);
+            batch_hasher.write_u64(eh);
+            ev_hashes.push(eh);
+        }
+        let bh = batch_hasher.finish();
+        if let Some(cached) = batch_cache
+            .get(&bh)
+            .and_then(|bucket| bucket.iter().find(|(s, _)| *s == obs_evs.as_slice()))
+        {
+            observer_updates_pyrep.insert(obs_id, cached.1.clone());
+            continue;
+        }
+        let mut encoded = Vec::with_capacity(obs_evs.len());
+        for (idx, ev) in obs_evs
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| matches!(e, DestinyEvent::SetState { .. }))
+            .chain(
+                obs_evs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| !matches!(e, DestinyEvent::SetState { .. })),
+            )
+        {
+            let eh = ev_hashes[idx];
+            let pyrep = if let Some(hit) = event_cache
+                .get(&eh)
+                .and_then(|bucket| bucket.iter().find(|(c_ev, _)| *c_ev == ev))
+            {
+                hit.1.clone()
+            } else {
+                let rep = encode_destiny_event(stamp, ev, Some(ballpark));
+                event_cache.entry(eh).or_default().push((ev, rep.clone()));
+                rep
+            };
+            encoded.push(pyrep);
+        }
+        let list_rep = PyRep::List(encoded);
+        batch_cache
+            .entry(bh)
+            .or_default()
+            .push((obs_evs.as_slice(), list_rep.clone()));
+        observer_updates_pyrep.insert(obs_id, list_rep);
     }
     TickBroadcast {
         solar_system_id,

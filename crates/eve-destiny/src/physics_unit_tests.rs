@@ -595,8 +595,8 @@ fn is_warp_finishing_within_1s_matches_deceleration_dropout_equation() {
         assert!(!is_warp_finishing_within_1s(&b));
     }
 
-    // Decelerating at 15.0 AU/s (k_d = 5.0), max_velocity = 300.0 (stop_thresh = 100.0):
-    // 1.0s dropout limit is rem_plus_1 < 100.0 / (5.0 * e^{-5.0}) ~= 2,968.26 m.
+    // Decelerating at 15.0 AU/s (k_d = min(15.0 / 3.0, 2.0) = 2.0), max_velocity = 300.0 (stop_thresh = 100.0):
+    // 1.0s dropout limit is rem_plus_1 < 100.0 / (2.0 * e^{-2.0}) ~= 369.45 m.
     let mut decel_far = make_ball(
         4,
         dest - DVec3::new(5_000.0, 0.0, 0.0),
@@ -612,7 +612,10 @@ fn is_warp_finishing_within_1s_matches_deceleration_dropout_equation() {
     );
     assert!(!is_warp_finishing_within_1s(&decel_far));
 
-    decel_far.position = dest - DVec3::new(2_800.0, 0.0, 0.0);
+    decel_far.position = dest - DVec3::new(380.0, 0.0, 0.0);
+    assert!(!is_warp_finishing_within_1s(&decel_far));
+
+    decel_far.position = dest - DVec3::new(360.0, 0.0, 0.0);
     assert!(is_warp_finishing_within_1s(&decel_far));
 
     // Real 1 Hz Ballpark trajectory: is_warp_finishing_within_1s turns true strictly on the tick before Stop
@@ -652,6 +655,72 @@ fn is_warp_finishing_within_1s_matches_deceleration_dropout_equation() {
         );
     }
     assert!(saw_gt_1s && saw_le_1s);
+}
+
+#[test]
+fn warp_deceleration_rate_capped_above_six_au_per_s() {
+    let origin = DVec3::ZERO;
+    let dest = DVec3::new(20.0 * AU_METERS, 0.0, 0.0);
+    // For warp_speed = 15.0 AU/s (> 6.0 AU/s), k_d is capped at 2.0 (rather than 15/3 = 5.0),
+    // so during Decelerating, speed == k_d * (rem + 1) and successive 1s ratios equal e^{-2.0}.
+    let mut park = Ballpark::new(30_000_142);
+    let warper = make_ball(
+        102,
+        origin,
+        DVec3::new(250.0, 0.0, 0.0),
+        MovementMode::Warp {
+            origin,
+            destination: dest,
+            warp_speed_au_s: 15.0,
+            total_distance: dest.length(),
+            phase: WarpPhase::Aligning,
+            elapsed_warp_time: 0.0,
+        },
+    );
+    park.add_ball(warper);
+
+    let mut decel_samples = Vec::new();
+    for _ in 0..40 {
+        let prev_in_decel = matches!(
+            park.balls[&102].mode,
+            MovementMode::Warp {
+                phase: WarpPhase::Decelerating,
+                ..
+            }
+        );
+        park.step(1.0);
+        let b = &park.balls[&102];
+        if prev_in_decel
+            && matches!(
+                b.mode,
+                MovementMode::Warp {
+                    phase: WarpPhase::Decelerating,
+                    ..
+                }
+            )
+        {
+            let rem_plus_1 = b.position.distance(dest) + 1.0;
+            let implied_kd = b.velocity.length() / rem_plus_1;
+            assert!(
+                (implied_kd - 2.0).abs() < 1e-6,
+                "deceleration factor k_d at 15 AU/s must be capped at 2.0, got {implied_kd}"
+            );
+            decel_samples.push(rem_plus_1);
+        } else if matches!(b.mode, MovementMode::Stop) {
+            break;
+        }
+    }
+    assert!(
+        decel_samples.len() >= 2,
+        "expected at least 2 deceleration ticks at 15 AU/s, got {}",
+        decel_samples.len()
+    );
+    let ratio = decel_samples[1] / decel_samples[0];
+    let expected_ratio = (-2.0_f64).exp();
+    assert!(
+        (ratio - expected_ratio).abs() < 1e-6,
+        "1s deceleration decay ratio must equal e^-2 ({expected_ratio}), got {ratio}"
+    );
 }
 
 #[test]

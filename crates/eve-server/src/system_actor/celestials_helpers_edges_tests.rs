@@ -557,3 +557,102 @@ fn persist_ball_positions_and_landed_warps_kill_all_mutants() {
     assert!(ball_pos_map.read().unwrap().get(&id_subwarp_far).is_some());
 }
 
+#[test]
+fn incremental_sync_ball_positions_tracks_dynamic_moves_and_static_changes() {
+    let mut bp = Ballpark::new(30_000_142);
+    bp.add_static_ball(
+        Ball {
+            id: 40_000_001,
+            type_id: 1230,
+            position: DVec3::new(10_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e9,
+            radius: 100.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Rigid,
+        },
+        25,
+    );
+    bp.add_ball(Ball {
+        id: 500_001,
+        type_id: 587,
+        position: DVec3::new(0.0, 100.0, 0.0),
+        velocity: DVec3::X * 200.0,
+        max_velocity: 300.0,
+        inertia: 3.0,
+        mass: 1e6,
+        radius: 40.0,
+        speed_fraction: 1.0,
+        mode: MovementMode::GotoDirection {
+            direction: DVec3::X,
+        },
+    });
+
+    let cache = Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new()));
+    let scram = Arc::new(eve_db::lock_rank::RankedRwLock::new(HashSet::new()));
+    let warps = Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new()));
+    register_committed_warp_cache(&cache, &warps);
+
+    // 1. Initial populate
+    sync_ball_positions(&bp, &cache, &scram);
+    assert_eq!(cache.read().unwrap().len(), 2);
+    assert_eq!(cache.read().unwrap()[&40_000_001], DVec3::new(10_000.0, 0.0, 0.0));
+
+    // 2. Dynamic movement + swap without static change
+    let _ = bp.step(1.0);
+    sync_ball_positions(&bp, &cache, &scram);
+    assert_eq!(
+        cache.read().unwrap()[&500_001],
+        bp.balls[&500_001].position
+    );
+
+    // 3. Remove dynamic 500_001 and add dynamic 500_002 in the same tick (same total len!)
+    bp.remove_ball(500_001);
+    bp.add_ball(Ball {
+        id: 500_002,
+        type_id: 587,
+        position: DVec3::new(50.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 3.0,
+        mass: 1e6,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Warp {
+            origin: DVec3::ZERO,
+            destination: DVec3::new(1e11, 0.0, 0.0),
+            warp_speed_au_s: 3.0,
+            total_distance: 1e11,
+            phase: eve_destiny::WarpPhase::Cruising,
+            elapsed_warp_time: 2.0,
+        },
+    });
+    sync_ball_positions(&bp, &cache, &scram);
+    assert!(!cache.read().unwrap().contains_key(&500_001));
+    assert_eq!(cache.read().unwrap()[&500_002], DVec3::new(50.0, 0.0, 0.0));
+    assert_eq!(warps.read().unwrap().get(&500_002), Some(&DVec3::new(1e11, 0.0, 0.0)));
+
+    // 4. Static removal + addition updates cache cleanly via static_epoch
+    bp.remove_ball(40_000_001);
+    bp.add_static_ball(
+        Ball {
+            id: 40_000_002,
+            type_id: 1230,
+            position: DVec3::new(20_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e9,
+            radius: 100.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Rigid,
+        },
+        25,
+    );
+    sync_ball_positions(&bp, &cache, &scram);
+    assert!(!cache.read().unwrap().contains_key(&40_000_001));
+    assert_eq!(cache.read().unwrap()[&40_000_002], DVec3::new(20_000.0, 0.0, 0.0));
+}
+

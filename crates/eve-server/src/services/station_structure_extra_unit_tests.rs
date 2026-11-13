@@ -483,7 +483,7 @@ async fn station_dock_at_warp_destination_succeeds_while_mid_warp_still_rejects(
         .filter(|&r| r > 0.0)
         .unwrap_or(st_radius);
     let origin = st_pos + DVec3::new(1_000_000_000.0, 0.0, 0.0);
-    let landing = st_pos + DVec3::new(eff_radius, 0.0, 0.0);
+    let landing = st_pos + DVec3::new(eff_radius + 2_300.0, 0.0, 0.0);
     // 1. Decelerating with > 1.0s remaining (5,000m from landing at 15.0 AU/s) -> ShipInWarp even with non-empty session.address
     let mut warp_mode = MovementMode::new_warp(origin, landing, 15.0);
     if let MovementMode::Warp { ref mut phase, .. } = warp_mode {
@@ -523,8 +523,8 @@ async fn station_dock_at_warp_destination_succeeds_while_mid_warp_still_rejects(
     assert_eq!(sess.station_id, None);
     assert!(ctx.active_warps.lock().unwrap().contains_key(&ship_id));
 
-    // 2. Decelerating with <= 1.0s remaining (2,800m from landing at 15.0 AU/s) -> succeeds and terminates warp
-    assert!(sys_h.set_ball_position(ship_id, landing + DVec3::new(2_800.0, 0.0, 0.0)).await);
+    // 2. Decelerating with <= 1.0s remaining (300m from landing at capped k_d = 2.0, outside 2,500m perimeter) -> succeeds and terminates warp
+    assert!(sys_h.set_ball_position(ship_id, landing + DVec3::new(300.0, 0.0, 0.0)).await);
     let dock_res = handle(&ctx, &mut sess, "stationSvc", "Dock", &[PyRep::Integer(jita_station)], &kw)
         .await
         .unwrap()

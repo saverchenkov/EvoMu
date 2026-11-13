@@ -542,7 +542,9 @@ async fn cmd_dock_warp_deceleration_1s_tolerance_and_mid_warp_rejection() {
     let (_, st_ball) = sys_handle.get_ball_snapshot(st_id).await.unwrap().unwrap();
     let st_radius = st_ball.radius;
     let origin = st_pos + DVec3::new(100_000_000.0, 0.0, 0.0);
-    let landing = st_pos + DVec3::new(st_radius, 0.0, 0.0);
+    // Landing point inside the 2,500m docking perimeter so a ship 300m short of landing is outside
+    // the static perimeter (`> st_radius + 2,500m`) while still within <= 1.0s under capped `k_d = 2.0`.
+    let landing = st_pos + DVec3::new(st_radius + 2_300.0, 0.0, 0.0);
 
     // Direct evaluate_dock_perimeter unit coverage across non-warp and warp boundaries
     let mut probe = Ball {
@@ -650,8 +652,8 @@ async fn cmd_dock_warp_deceleration_1s_tolerance_and_mid_warp_rejection() {
     assert_eq!(sess.station_id, None);
     assert!(ctx.active_warps.lock().unwrap().contains_key(&ship_id));
 
-    // Decelerating with <= 1.0s remaining (2,800m from landing at 15 AU/s, outside 2,500m static perimeter) -> Ok & warp stopped
-    sys_handle.try_set_ball_position(ship_id, landing + DVec3::new(2_800.0, 0.0, 0.0));
+    // Decelerating with <= 1.0s remaining (300m from landing at capped k_d = 2.0, outside 2,500m static perimeter) -> Ok & warp stopped
+    sys_handle.try_set_ball_position(ship_id, landing + DVec3::new(300.0, 0.0, 0.0));
     let dock_ok = handle(
         &ctx,
         &mut sess,
