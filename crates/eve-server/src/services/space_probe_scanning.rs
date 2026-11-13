@@ -353,14 +353,14 @@ pub async fn activate_scan_probe_launcher(
     let scan_range_m = base_scan_range_au * (2.0_f64.powi(range_step - 1)) * AU_IN_METERS;
 
     let formation_offsets: [[f64; 3]; 8] = [
-        [1_000.0, 0.0, 0.0],
-        [-1_000.0, 0.0, 0.0],
-        [0.0, 1_000.0, 0.0],
-        [0.0, -1_000.0, 0.0],
-        [0.0, 0.0, 1_000.0],
-        [0.0, 0.0, -1_000.0],
-        [707.0, 707.0, 0.0],
-        [-707.0, -707.0, 0.0],
+        [2_500.0, 0.0, 0.0],
+        [-2_500.0, 0.0, 0.0],
+        [0.0, 2_500.0, 0.0],
+        [0.0, -2_500.0, 0.0],
+        [0.0, 0.0, 2_500.0],
+        [0.0, 0.0, -2_500.0],
+        [1_800.0, 1_800.0, 0.0],
+        [-1_800.0, -1_800.0, 0.0],
     ];
 
     let mut spawned_probe_positions: Vec<(i64, DVec3)> = Vec::with_capacity(allocated_probe_ids.len());
@@ -567,6 +567,8 @@ async fn handle_get_full_state(
         caller_sys
     };
     let (sigs, anomalies) = ensure_system_signatures_and_anomalies(ctx, sys_id).await;
+    let anom_ids: std::collections::HashSet<String> =
+        anomalies.iter().map(|a| a.anomaly_id.clone()).collect();
     let anom_entries: Vec<(PyRep, PyRep)> = anomalies
         .into_iter()
         .map(|a| {
@@ -576,6 +578,7 @@ async fn handle_get_full_state(
         .collect();
     let sig_entries: Vec<(PyRep, PyRep)> = sigs
         .into_iter()
+        .filter(|s| s.sig_group != "SovOre" && !anom_ids.contains(&s.signature_id))
         .map(|mut s| {
             let eff_strength = if is_gm {
                 1.0
@@ -834,9 +837,17 @@ async fn handle_get_system_scan_mgr(
     };
     let (wh_class, is_thera, is_shattered, env_effect) = system_wormhole_profile(sys_id);
 
+    let anom_ids: std::collections::HashSet<String> =
+        anomalies.iter().map(|a| a.anomaly_id.clone()).collect();
     let sig_items: Vec<PyRep> = sigs
         .into_iter()
-        .filter(|s| !s.collapsed && (s.lifetime_seconds == 0 || now_unix < s.created_unix.saturating_add(s.lifetime_seconds)))
+        .filter(|s| {
+            !s.collapsed
+                && s.sig_group != "SovOre"
+                && !anom_ids.contains(&s.signature_id)
+                && (s.lifetime_seconds == 0
+                    || now_unix < s.created_unix.saturating_add(s.lifetime_seconds))
+        })
         .map(|s| {
             let eff_strength = ctx.effective_signature_signal_strength(char_id, sys_id, &s);
             let resolved = eff_strength >= 1.0;
@@ -991,7 +1002,7 @@ async fn handle_request_scans(
                         _ => None,
                     }
                 };
-                if let Some(PyRep::Tuple(c) | PyRep::List(c)) = find_in_v("pos").or_else(|| find_in_v("destination")) {
+                if let Some(PyRep::Tuple(c) | PyRep::List(c)) = find_in_v("destination").or_else(|| find_in_v("pos")) {
                     if c.len() >= 3 {
                         let (x, y, z) = (
                             c[0].as_f64().unwrap_or(probe.position[0]),
@@ -1312,9 +1323,17 @@ async fn handle_request_scans(
 
     let scan_results = ctx.db.with_snapshot(|snap| {
         let mut out = Vec::new();
+        let anom_ids: std::collections::HashSet<&str> = snap
+            .cosmic_anomalies
+            .get(&sys_id)
+            .map(|list| list.iter().map(|a| a.anomaly_id.as_str()).collect())
+            .unwrap_or_default();
         if let Some(sigs) = snap.cosmic_signatures.get(&sys_id) {
             for sig in sigs {
-                if sig.collapsed {
+                if sig.collapsed
+                    || sig.sig_group == "SovOre"
+                    || anom_ids.contains(sig.signature_id.as_str())
+                {
                     continue;
                 }
                 let (diff_level, req_min_strength) = signature_difficulty_level_and_min_strength(&ctx.sde, sys_id, sig);
@@ -1394,6 +1413,8 @@ async fn handle_request_scans(
             ("itemID", PyRep::Integer(wh_item_id)),
             ("targetID", PyRep::Integer(wh_item_id)),
             ("targetClass", PyRep::String("CosmicSignature".into())),
+            ("scanGroupID", PyRep::Integer(3)),
+            ("groupID", PyRep::Integer(502)),
             ("group", PyRep::String(if show_group { sig.sig_group.clone() } else { "Unknown".into() })),
             ("groupName", if show_group { PyRep::String(sig.sig_group.clone()) } else { PyRep::None }),
             ("type", PyRep::String(if show_name { sig.type_name.clone() } else { "Unidentified Signature".into() })),
@@ -1515,7 +1536,7 @@ async fn handle_request_scans(
             let mut covering = 0usize;
             let mut total_s = 0.0;
             for probe in &combat_probes {
-                let p_pos = DVec3::from_array(probe.position);
+                let p_pos = DVec3::from_array(probe.destination);
                 let dist = p_pos.distance(ball.position);
                 let base_au = probe_base_scan_range_au(&ctx.sde, probe.probe_type_id);
                 let radius = probe.scan_range_m.max(base_au * AU_IN_METERS);
@@ -1548,12 +1569,20 @@ async fn handle_request_scans(
             let show_group = sig_str >= 0.25;
             let show_name = sig_str >= 0.75;
             let cmb_id = format!("CMB-{}", ball.id);
+            let cmb_scan_group_id = match target_class {
+                "Ship" => 4,
+                "Structure" => 5,
+                "Drone" => 6,
+                "AbyssalTrace" => 14,
+                _ => 3,
+            };
             let mut cmb_kv = vec![
                 ("id", PyRep::String(cmb_id.clone())),
                 ("signatureID", PyRep::String(cmb_id)),
                 ("itemID", PyRep::Integer(ball.id)),
                 ("targetID", PyRep::Integer(ball.id)),
                 ("targetClass", PyRep::String(if show_group { target_class.into() } else { "Unknown".into() })),
+                ("scanGroupID", PyRep::Integer(cmb_scan_group_id)),
                 ("group", PyRep::String(if show_group { target_class.into() } else { "Unknown".into() })),
                 ("type", PyRep::String(if show_name { type_rec.name.clone() } else { "Unidentified Target".into() })),
                 ("signalStrength", PyRep::Real(sig_str)),
@@ -1915,6 +1944,7 @@ pub fn tick_probe_warp_end(ctx: &ServerContext) {
         if let Ok(mut probe_map) = ctx.active_scanner_probes.write() {
             for pid in &p_ids {
                 if let Some(p) = probe_map.get_mut(pid) {
+                    p.position = p.destination;
                     if matches!(p.state, PROBE_STATE_SCANNING | PROBE_STATE_WARPING | PROBE_STATE_MOVING) {
                         p.state = PROBE_STATE_IDLE;
                     }

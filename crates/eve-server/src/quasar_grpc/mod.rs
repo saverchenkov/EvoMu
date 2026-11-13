@@ -521,6 +521,72 @@ fn session_scope_tuple(s: &SessionState) -> (Option<u64>, Option<i64>, Option<i6
     )
 }
 
+fn verify_live_session_sso_bearer_token(
+    ctx: &ServerContext,
+    token: &str,
+    now_unix: u64,
+) -> Option<eve_db::QuasarVerifiedToken> {
+    let mut parts = token.split('.');
+    let (Some(_), Some(payload_b64), Some(_), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    let payload_bytes = eve_db::accounts::base64url_decode_no_pad(payload_b64).ok()?;
+    let payload_val: serde_json::Value = serde_json::from_slice(&payload_bytes).ok()?;
+    let iat = payload_val.get("iat")?.as_u64()?;
+    let exp = payload_val.get("exp")?.as_u64()?;
+    if iat > now_unix || exp <= iat {
+        return None;
+    }
+    let claims = ctx.db.verify_sso_access_token(token, iat).ok()?;
+    let launcher_client_ok = match payload_val.get("azp") {
+        Some(v) => v
+            .as_str()
+            .is_some_and(|a| matches!(a, "eveLauncherTQ" | "evomu-launcher")),
+        None => claims
+            .aud
+            .iter()
+            .any(|a| matches!(a.as_str(), "eveLauncherTQ" | "evomu-launcher")),
+    };
+    if !launcher_client_ok {
+        return None;
+    }
+    lookup_active_account_role(ctx, claims.user_id, now_unix)?;
+    let os = ctx.db.get_online_session(claims.user_id)?;
+    if claims.exp < os.connected_at_unix {
+        return None;
+    }
+    if ctx
+        .db
+        .check_session_revoked(claims.user_id, os.session_id, now_unix)
+        .is_some()
+    {
+        return None;
+    }
+    let character_id = if claims.character_id > 0 {
+        if os.character_id != Some(claims.character_id) {
+            return None;
+        }
+        let valid = ctx.db.with_snapshot(|snap| {
+            snap.characters
+                .get(&claims.character_id)
+                .is_some_and(|c| c.user_id == claims.user_id)
+        });
+        if !valid {
+            return None;
+        }
+        Some(claims.character_id)
+    } else {
+        None
+    };
+    Some(eve_db::QuasarVerifiedToken {
+        user_id: claims.user_id,
+        character_id,
+        is_full_sso: true,
+    })
+}
+
 fn verify_gateway_bearer_token(
     ctx: &ServerContext,
     token: &str,
@@ -529,17 +595,23 @@ fn verify_gateway_bearer_token(
 ) -> Result<eve_db::QuasarVerifiedToken, String> {
     match ctx.db.verify_quasar_bearer_jwt(token, now_unix) {
         Ok(v) => Ok(v),
-        Err(bearer_err) if ctx.feature_flags.allow_local_dev_gateway_jwt => {
-            let Some(ip) = peer_ip else {
-                return Err("missing_peer_ip_for_local_dev_jwt".to_string());
-            };
-            ctx.db
-                .verify_local_dev_client_jwt(token, ip, now_unix)
-                .map_err(|local_err| {
-                    format!("bearer_and_local_dev_jwt_rejected ({bearer_err:?} / {local_err:?})")
-                })
+        Err(bearer_err) => {
+            if let Some(v) = verify_live_session_sso_bearer_token(ctx, token, now_unix) {
+                return Ok(v);
+            }
+            if ctx.feature_flags.allow_local_dev_gateway_jwt {
+                let Some(ip) = peer_ip else {
+                    return Err("missing_peer_ip_for_local_dev_jwt".to_string());
+                };
+                ctx.db
+                    .verify_local_dev_client_jwt(token, ip, now_unix)
+                    .map_err(|local_err| {
+                        format!("bearer_and_local_dev_jwt_rejected ({bearer_err:?} / {local_err:?})")
+                    })
+            } else {
+                Err(format!("bearer_jwt_rejected ({bearer_err:?})"))
+            }
         }
-        Err(bearer_err) => Err(format!("bearer_jwt_rejected ({bearer_err:?})")),
     }
 }
 

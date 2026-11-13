@@ -1607,6 +1607,73 @@ async fn deactivate_repeating_cycle_after_action(
 /// cycle-start pulses queued by `step_ballpark_and_cycles` (`R-AOE-SALVAGE-CYCLE-01`).
 pub(crate) async fn execute_pending_cycle_actions(ctx: &ServerContext, sys_id: u32) {
     let actions = ctx.systems.take_pending_cycle_actions(sys_id);
+    execute_pending_cycle_actions_list(ctx, sys_id, actions).await;
+}
+
+pub(crate) fn emit_ship_charge_item_diffs(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    diffs: &[(
+        Option<eve_db::InventoryItemRecord>,
+        Option<eve_db::InventoryItemRecord>,
+    )],
+) {
+    let is_fitted_slot = |f: InventoryFlag| matches!(f as u16, 11..=34 | 125..=132);
+    for (pre, post) in diffs {
+        ctx.notify_item_mutation(char_id, pre.as_ref(), post.as_ref());
+        match (pre, post) {
+            (Some(old_it), Some(new_it)) if is_fitted_slot(new_it.flag) => {
+                let old_qty = if old_it.flag == new_it.flag {
+                    old_it.quantity
+                } else {
+                    0
+                };
+                if old_qty != new_it.quantity {
+                    emit_charge_sublocation_quantity_change(
+                        ctx,
+                        char_id,
+                        ship_id,
+                        new_it.flag,
+                        new_it.type_id,
+                        old_qty,
+                        new_it.quantity,
+                    );
+                }
+            }
+            (None, Some(new_it)) if is_fitted_slot(new_it.flag) => {
+                emit_godma_charge_sublocation_prime(ctx, char_id, ship_id, new_it);
+                emit_charge_sublocation_quantity_change(
+                    ctx,
+                    char_id,
+                    ship_id,
+                    new_it.flag,
+                    new_it.type_id,
+                    0,
+                    new_it.quantity,
+                );
+            }
+            (Some(old_it), None) if is_fitted_slot(old_it.flag) => {
+                emit_charge_sublocation_quantity_change(
+                    ctx,
+                    char_id,
+                    ship_id,
+                    old_it.flag,
+                    old_it.type_id,
+                    old_it.quantity,
+                    0,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+pub(crate) async fn execute_pending_cycle_actions_list(
+    ctx: &ServerContext,
+    sys_id: u32,
+    actions: Vec<crate::system_actor::PendingCycleAction>,
+) {
     if actions.is_empty() {
         return;
     }
@@ -1955,6 +2022,13 @@ pub(crate) async fn execute_pending_cycle_actions(ctx: &ServerContext, sys_id: u
                     let _ = ctx.get_or_rebuild_ship_fitting(cid, ship_id);
                     crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, cid, sys_id, ship_id).await;
                 }
+            }
+            crate::system_actor::PendingCycleAction::CycleChargeItemMutations {
+                char_id,
+                ship_id,
+                diffs,
+            } => {
+                emit_ship_charge_item_diffs(ctx, char_id, ship_id, &diffs);
             }
         }
     }

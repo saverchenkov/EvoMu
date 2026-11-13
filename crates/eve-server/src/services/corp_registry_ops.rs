@@ -263,56 +263,16 @@ pub fn handle(
 
         "GetRecentKills" => {
             let corp_id = session.corporation_id.unwrap_or(0);
-            let columns = vec![
-                "killID".into(),
-                "victimCharacterID".into(),
-                "victimCorporationID".into(),
-                "victimShipTypeID".into(),
-                "solarSystemID".into(),
-                "killTime".into(),
-            ];
-            let rows = ctx.db.with_snapshot(|snap| {
-                snap.killmails
-                    .values()
-                    .filter(|km| km.attacker_corp_id == corp_id)
-                    .map(|km| vec![
-                        PyRep::Integer(km.kill_id),
-                        PyRep::Integer(km.victim_character_id),
-                        PyRep::Integer(km.victim_corp_id),
-                        PyRep::Integer(km.ship_type_id as i64),
-                        PyRep::Integer(km.solar_system_id as i64),
-                        PyRep::Integer(km.killed_unix as i64),
-                    ])
-                    .collect()
-            });
-            Some(Ok(PyRep::Rowset { columns, rows }))
+            Some(Ok(build_corp_combat_log_rowset(ctx, |km| {
+                km.attacker_corp_id == corp_id
+            })))
         }
 
         "GetRecentLosses" => {
             let corp_id = session.corporation_id.unwrap_or(0);
-            let columns = vec![
-                "killID".into(),
-                "victimCharacterID".into(),
-                "victimCorporationID".into(),
-                "victimShipTypeID".into(),
-                "solarSystemID".into(),
-                "killTime".into(),
-            ];
-            let rows = ctx.db.with_snapshot(|snap| {
-                snap.killmails
-                    .values()
-                    .filter(|km| km.victim_corp_id == corp_id)
-                    .map(|km| vec![
-                        PyRep::Integer(km.kill_id),
-                        PyRep::Integer(km.victim_character_id),
-                        PyRep::Integer(km.victim_corp_id),
-                        PyRep::Integer(km.ship_type_id as i64),
-                        PyRep::Integer(km.solar_system_id as i64),
-                        PyRep::Integer(km.killed_unix as i64),
-                    ])
-                    .collect()
-            });
-            Some(Ok(PyRep::Rowset { columns, rows }))
+            Some(Ok(build_corp_combat_log_rowset(ctx, |km| {
+                km.victim_corp_id == corp_id
+            })))
         }
 
         "GetSuggestedAllianceShortNames" => {
@@ -1489,5 +1449,67 @@ mod corp_registry_ops_tests;
 #[cfg(test)]
 #[path = "corp_registry_ops_edges2_tests.rs"]
 mod corp_registry_ops_edges2_tests;
+
+fn build_corp_combat_log_rowset(
+    ctx: &ServerContext,
+    filter: impl Fn(&eve_db::KillmailRecord) -> bool,
+) -> PyRep {
+    let rows = crate::services::character_lifecycle::resolve_combat_log_entries(ctx, filter)
+        .into_iter()
+        .map(|e| {
+            vec![
+                PyRep::Integer(e.kill_id),
+                PyRep::Integer(e.victim_character_id),
+                PyRep::Integer(e.victim_corp_id),
+                PyRep::Integer(e.victim_ship_type_id as i64),
+                PyRep::Integer(e.solar_system_id as i64),
+                PyRep::Integer(e.killed_unix as i64),
+                PyRep::None,
+                PyRep::Integer(e.victim_character_id),
+                e.victim_alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                PyRep::None,
+                PyRep::Integer(e.victim_damage_taken),
+                PyRep::Integer(e.final_character_id),
+                PyRep::Integer(e.final_corp_id),
+                e.final_alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                PyRep::None,
+                e.final_ship_type_id
+                    .map(|t| PyRep::Integer(t as i64))
+                    .unwrap_or(PyRep::None),
+                e.final_weapon_type_id
+                    .map(|t| PyRep::Integer(t as i64))
+                    .unwrap_or(PyRep::None),
+                PyRep::Real(e.final_security_status),
+                PyRep::Integer(e.final_damage_done),
+                PyRep::String(String::new()),
+            ]
+        })
+        .collect();
+    PyRep::Rowset {
+        columns: vec![
+            "killID".into(),
+            "victimCharacterID".into(),
+            "victimCorporationID".into(),
+            "victimShipTypeID".into(),
+            "solarSystemID".into(),
+            "killTime".into(),
+            "moonID".into(),
+            "victimID".into(),
+            "victimAllianceID".into(),
+            "victimFactionID".into(),
+            "victimDamageTaken".into(),
+            "finalCharacterID".into(),
+            "finalCorporationID".into(),
+            "finalAllianceID".into(),
+            "finalFactionID".into(),
+            "finalShipTypeID".into(),
+            "finalWeaponTypeID".into(),
+            "finalSecurityStatus".into(),
+            "finalDamageDone".into(),
+            "killBlob".into(),
+        ],
+        rows,
+    }
+}
 
 

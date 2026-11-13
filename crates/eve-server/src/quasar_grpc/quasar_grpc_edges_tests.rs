@@ -205,6 +205,116 @@ fn authenticate_grpc_headers_and_build_session_edges() {
     let sso_sess = build_session_for_identity(&raw_ctx, 9_000_110, &mut id_sso, None).unwrap();
     assert_ne!(sso_sess.role & service_roles::ROLE_GM_MASK, 0);
 
+    // 3b. #894 / GH-985: Launcher SSO token past its 20-minute `exp` stays valid on Quasar gRPC while the
+    // matching `:26000` OnlineSession (connected before `exp` on the same character) is active and non-revoked,
+    // and rejects historical pre-connect tokens, cross-character tokens, third-party ESI app tokens, and logout.
+    let past_mint_u = now_u.saturating_sub(2_400);
+    let past_code = raw_ctx
+        .db
+        .authorize_pkce(
+            "demo",
+            "demo-secret",
+            90_000_001,
+            "eveLauncherTQ",
+            "http://127.0.0.1/cb",
+            Vec::new(),
+            &challenge,
+            "S256",
+            past_mint_u,
+        )
+        .unwrap();
+    let expired_sso = raw_ctx
+        .db
+        .exchange_pkce_code(&past_code, "eveLauncherTQ", verifier, past_mint_u)
+        .unwrap()
+        .access_token;
+    assert!(verify_gateway_bearer_token(&raw_ctx, &expired_sso, loopback, now_u).is_err());
+
+    // Historical token whose `exp` (past_mint_u + 1200) predates `os.connected_at_unix` (now_u) is rejected.
+    raw_ctx
+        .db
+        .acquire_online_lock(1, 77_000, Some(90_000_001), true, now_u)
+        .unwrap();
+    assert!(
+        verify_gateway_bearer_token(&raw_ctx, &expired_sso, loopback, now_u).is_err(),
+        "historical SSO token expired before session connected_at_unix must be rejected"
+    );
+    raw_ctx.db.release_online_lock(1, 77_000);
+
+    // Session connected while token was valid (past_mint_u + 10 <= exp) on matching character keeps token valid.
+    raw_ctx
+        .db
+        .acquire_online_lock(1, 77_000, Some(90_000_001), true, past_mint_u + 10)
+        .unwrap();
+    let live_sso = verify_gateway_bearer_token(&raw_ctx, &expired_sso, loopback, now_u)
+        .expect("expired launcher SSO token with active :26000 OnlineSession must stay valid on :26005");
+    assert_eq!(live_sso.user_id, 1);
+    assert_eq!(live_sso.character_id, Some(90_000_001));
+    assert!(live_sso.is_full_sso);
+
+    // Third-party ESI app token (client_id != eveLauncherTQ / evomu-launcher) is rejected even while online.
+    let third_party_code = raw_ctx
+        .db
+        .authorize_pkce(
+            "demo",
+            "demo-secret",
+            90_000_001,
+            "third-party-esi-app",
+            "http://127.0.0.1/cb",
+            Vec::new(),
+            &challenge,
+            "S256",
+            past_mint_u,
+        )
+        .unwrap();
+    let third_party_sso = raw_ctx
+        .db
+        .exchange_pkce_code(&third_party_code, "third-party-esi-app", verifier, past_mint_u)
+        .unwrap()
+        .access_token;
+    assert!(
+        verify_gateway_bearer_token(&raw_ctx, &third_party_sso, loopback, now_u).is_err(),
+        "third-party ESI SSO token must be rejected by verify_live_session_sso_bearer_token"
+    );
+
+    // Cross-character SSO token (minted for char 90_000_002 while user 1 is online on 90_000_001) is rejected.
+    raw_ctx.db.with_mut_snapshot(|snap| {
+        if let Some(mut alt) = snap.characters.get(&90_000_001).cloned() {
+            alt.character_id = 90_000_002;
+            alt.name = "Demo Alt".into();
+            snap.characters.insert(90_000_002, alt);
+        }
+    });
+    let alt_code = raw_ctx
+        .db
+        .authorize_pkce(
+            "demo",
+            "demo-secret",
+            90_000_002,
+            "eveLauncherTQ",
+            "http://127.0.0.1/cb",
+            Vec::new(),
+            &challenge,
+            "S256",
+            past_mint_u,
+        )
+        .unwrap();
+    let alt_sso = raw_ctx
+        .db
+        .exchange_pkce_code(&alt_code, "eveLauncherTQ", verifier, past_mint_u)
+        .unwrap()
+        .access_token;
+    assert!(
+        verify_gateway_bearer_token(&raw_ctx, &alt_sso, loopback, now_u).is_err(),
+        "cross-character SSO token must be rejected when OnlineSession is bound to another character"
+    );
+
+    raw_ctx.db.release_online_lock(1, 77_000);
+    assert!(verify_gateway_bearer_token(&raw_ctx, &expired_sso, loopback, now_u).is_err());
+    raw_ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.remove(&90_000_002);
+    });
+
     // 4. Local-dev JWT fallback: disabled when flag false, fails when peer_ip None, fails on bad JWT, succeeds when enabled + online IP bound
     let local_jwt = sign_hs256(
         r#"{"alg":"HS256","typ":"JWT"}"#,

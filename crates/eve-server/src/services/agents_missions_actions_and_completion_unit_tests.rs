@@ -452,4 +452,148 @@ async fn mission_completion_expiry_penalty_and_courier_delivery_branches() {
         remote_accepted_greet.dict_get("missionState"),
         Some(&PyRep::Integer(2))
     );
+
+    // 5. Issues #791 & #979: Calling GetMissionBriefingInfo / GetMissionObjectiveInfo on a different
+    //    agent when an active mission exists for `ag.agent_id` returns MissionNotActive instead of
+    //    leaking `ag.agent_id`'s mission into another agent's dialogue window.
+    let other_agent_id = ctx
+        .sde
+        .agents
+        .keys()
+        .copied()
+        .find(|&aid| aid != ag.agent_id)
+        .unwrap_or(ag.agent_id + 1);
+    assert_eq!(
+        call_agent_mgr(
+            &ctx,
+            &mut remote_sess,
+            "GetMissionBriefingInfo",
+            &[PyRep::Integer(other_agent_id)],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "MissionNotActive"
+    );
+    assert_eq!(
+        call_agent_mgr(
+            &ctx,
+            &mut remote_sess,
+            "GetMissionObjectiveInfo",
+            &[PyRep::Integer(other_agent_id)],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "MissionNotActive"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unbound_briefing_and_objective_info_reject_completed_and_declined_missions() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let ag = find_standard_agent(&ctx, 1);
+    let sys_id = ag.solar_system_id.unwrap();
+    let st_id = ag.station_id.unwrap();
+    let mut sess = char_session(char_id, Some(sys_id), Some(st_id));
+    let kw = HashMap::new();
+
+    for (state, mid) in [("Completed", 10_201_u32), ("Declined", 10_202_u32)] {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.active_missions.clear();
+            snap.active_missions.insert(
+                (char_id, mid),
+                make_active_mission(mid, char_id, ag.agent_id, sys_id, state, None),
+            );
+        });
+        assert_eq!(
+            call_agent_mgr(
+                &ctx,
+                &mut sess,
+                "GetMissionBriefingInfo",
+                &[PyRep::Integer(ag.agent_id)],
+                &kw,
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "MissionNotActive",
+            "unbound GetMissionBriefingInfo(agent_id) must reject {state} missions"
+        );
+        assert_eq!(
+            call_agent_mgr(
+                &ctx,
+                &mut sess,
+                "GetMissionObjectiveInfo",
+                &[PyRep::Integer(ag.agent_id)],
+                &kw,
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "MissionNotActive",
+            "unbound GetMissionObjectiveInfo(agent_id) must reject {state} missions"
+        );
+        assert_eq!(
+            call_agent_mgr(
+                &ctx,
+                &mut sess,
+                "GetMissionBriefingInfo",
+                &[],
+                &kw,
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "MissionNotActive",
+            "unbound GetMissionBriefingInfo() with no args must reject {state} missions"
+        );
+    }
+
+    // Regression check: explicit (agent_id, mission_id) still works for completed/declined history lookup
+    let ok_obj = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "GetMissionObjectiveInfo",
+        &[PyRep::Integer(ag.agent_id), PyRep::Integer(10_202)],
+        &kw,
+    )
+    .await
+    .expect("explicit mission_id lookup remains valid");
+    assert!(ok_obj.dict_get("objectives").is_some());
+
+    // Unbound Offered mission remains accessible when co-located and blocked when remote
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.insert(
+            (char_id, 10_203),
+            make_active_mission(10_203, char_id, ag.agent_id, sys_id, "Offered", None),
+        );
+    });
+    assert!(call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "GetMissionBriefingInfo",
+        &[PyRep::Integer(ag.agent_id)],
+        &kw,
+    )
+    .await
+    .is_ok());
+
+    let mut remote_sess = char_session(char_id, Some(sys_id + 1), None);
+    assert_eq!(
+        call_agent_mgr(
+            &ctx,
+            &mut remote_sess,
+            "GetMissionBriefingInfo",
+            &[PyRep::Integer(ag.agent_id)],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "MissionNotActive"
+    );
 }

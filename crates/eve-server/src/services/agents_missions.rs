@@ -407,15 +407,52 @@ pub async fn handle_with_bound(
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
             };
-            let (agent_id, _) =
+            let (agent_id, explicit_agent) =
                 resolve_target_agent_id_with_bound(ctx, session, bound_entry, char_id, sys_id, args, _kwargs);
+            let lookup_agent_id = if explicit_agent { agent_id } else { 0 };
             let mission_id =
-                match resolve_target_mission_id(ctx, char_id, agent_id, None, args, _kwargs) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+                match resolve_target_mission_id(ctx, char_id, lookup_agent_id, None, args, _kwargs) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some((m, meta)) = ctx.db.with_snapshot(|snap| {
                 snap.active_missions.get(&(char_id, mission_id)).cloned().map(|m| (m, load_mission_meta(snap, char_id, mission_id)))
             }) else {
                 return Some(Err(BridgeRpcError { code: "MissionNotActive".into(), message: format!("Mission {mission_id} is not active for character {char_id}") }));
             };
+            let has_explicit_mission_id = args.get(1).and_then(|a| a.as_i64()).is_some()
+                || args.first().and_then(|a| a.as_i64()).is_some_and(|v| {
+                    v > 19
+                        && !ctx.sde.agents.contains_key(&v)
+                        && u32::try_from(v).is_ok_and(|mid| {
+                            ctx.sde.missions.contains_key(&mid)
+                                || ctx.db.with_snapshot(|snap| {
+                                    snap.active_missions.contains_key(&(char_id, mid))
+                                })
+                        })
+                });
+            if method != "GetMissionJournalInfo" && !has_explicit_mission_id {
+                if (explicit_agent && m.agent_id != agent_id)
+                    || !matches!(m.state.as_str(), "Offered" | "Accepted")
+                {
+                    return Some(Err(BridgeRpcError {
+                        code: "MissionNotActive".into(),
+                        message: format!(
+                            "No active Offered/Accepted mission for character {char_id} with agent {agent_id}"
+                        ),
+                    }));
+                }
+                if m.state == "Offered" {
+                    if let Some(ref agent_info) = ctx.sde.agents.get(&m.agent_id).cloned() {
+                        if !is_agent_colocated(ctx, session, sys_id, agent_info).await {
+                            return Some(Err(BridgeRpcError {
+                                code: "MissionNotActive".into(),
+                                message: format!(
+                                    "Offered mission {mission_id} with agent {} is not accessible remotely",
+                                    m.agent_id
+                                ),
+                            }));
+                        }
+                    }
+                }
+            }
             let tmpl = ctx.sde.missions.get(&mission_id);
             let title = tmpl.map(|t| t.title.clone())
                 .unwrap_or_else(|| format!("Mission {mission_id}"));
@@ -986,7 +1023,8 @@ pub async fn handle_with_bound(
 
                 // 3 = Accept, 4 = AcceptChoice, 5 = AcceptRemotely
                 3..=5 => {
-                    let mission_id = match resolve_target_mission_id(ctx, char_id, agent_id, Some("Offered"), args, _kwargs) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+                    let lookup_agent_id = if explicit_agent { agent_id } else { 0 };
+                    let mission_id = match resolve_target_mission_id(ctx, char_id, lookup_agent_id, Some("Offered"), args, _kwargs) { Ok(v) => v, Err(e) => return Some(Err(e)) };
                     let (is_alpha, agent_lvl, actual_agent_id) = ctx.db.with_snapshot(|snap| {
                         let alpha = snap.characters.get(&char_id).is_some_and(|c| c.clone_grade <= 1);
                         let mid_agent = snap.active_missions.get(&(char_id, mission_id)).map(|m| m.agent_id).unwrap_or(agent_id);
@@ -1252,7 +1290,8 @@ pub async fn handle_with_bound(
 
                 // 6 = Complete, 7 = CompleteRemotely
                 6 | 7 => {
-                    let mission_id = match resolve_target_mission_id(ctx, char_id, agent_id, Some("Accepted"), args, _kwargs) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+                    let lookup_agent_id = if explicit_agent { agent_id } else { 0 };
+                    let mission_id = match resolve_target_mission_id(ctx, char_id, lookup_agent_id, Some("Accepted"), args, _kwargs) { Ok(v) => v, Err(e) => return Some(Err(e)) };
                     let Some(tmpl) = ctx.sde.missions.get(&mission_id).cloned() else {
                         return Some(Err(BridgeRpcError { code: "UnknownMission".into(), message: format!("Mission {mission_id} does not exist in SDE") }));
                     };
@@ -1703,7 +1742,8 @@ pub async fn handle_with_bound(
                 // 9 = Decline, 10 = Defer, 11 = Quit
                 9..=11 => {
                     let expected_state = if action_id == 11 { Some("Accepted") } else { Some("Offered") };
-                    let mission_id = match resolve_target_mission_id(ctx, char_id, agent_id, expected_state, args, _kwargs) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+                    let lookup_agent_id = if explicit_agent { agent_id } else { 0 };
+                    let mission_id = match resolve_target_mission_id(ctx, char_id, lookup_agent_id, expected_state, args, _kwargs) { Ok(v) => v, Err(e) => return Some(Err(e)) };
                     let active_agent_id = ctx.db.with_snapshot(|snap| {
                         snap.active_missions.get(&(char_id, mission_id)).map_or(agent_id, |m| m.agent_id)
                     });
@@ -1752,10 +1792,11 @@ pub async fn handle_with_bound(
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
             };
-            let (agent_id, _) =
+            let (agent_id, explicit_agent) =
                 resolve_target_agent_id_with_bound(ctx, session, bound_entry, char_id, sys_id, args, _kwargs);
+            let lookup_agent_id = if explicit_agent { agent_id } else { 0 };
             let mission_id = match parse_mission_id(args).or_else(|_| {
-                resolve_target_mission_id(ctx, char_id, agent_id, None, args, _kwargs)
+                resolve_target_mission_id(ctx, char_id, lookup_agent_id, None, args, _kwargs)
             }) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),

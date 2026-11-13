@@ -159,6 +159,7 @@ fn normalize_structure_jump_xmpp_beyonce_blueprint_and_char_branches() {
         Some(&PyRep::String("N:Mining".into()))
     );
 
+    // Issue #895: charMgr.GetRecentShipKillsAndLosses preserves moonID and V24.01 combat log columns
     let kills = normalize_macho_rpc_reply(
         "charMgr",
         "GetRecentShipKillsAndLosses",
@@ -173,7 +174,18 @@ fn normalize_structure_jump_xmpp_beyonce_blueprint_and_char_branches() {
         }])),
     )
     .expect("kills");
-    assert!(matches!(kills, PyRep::Rowset { .. }));
+    let PyRep::Rowset {
+        ref columns,
+        ref rows,
+    } = kills
+    else {
+        panic!("expected Rowset");
+    };
+    assert!(columns.iter().any(|c| c == "moonID"));
+    assert!(columns.iter().any(|c| c == "victimShipTypeID"));
+    assert!(columns.iter().any(|c| c == "finalShipTypeID"));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].len(), columns.len());
 
     // 6. charUnboundMgr.GetCharacterInfo (KeyVal + non-KeyVal fallback)
     let cinfo = normalize_macho_rpc_reply(

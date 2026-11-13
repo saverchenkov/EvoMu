@@ -1197,6 +1197,7 @@ pub(crate) fn emit_signal_tracker_signature_delta(
     let added_dict = PyRep::Dict(
         added
             .iter()
+            .filter(|sig| sig.sig_group != "SovOre")
             .map(|sig| {
                 (
                     PyRep::String(sig.signature_id.clone()),
@@ -1205,6 +1206,9 @@ pub(crate) fn emit_signal_tracker_signature_delta(
             })
             .collect(),
     );
+    if matches!(&added_dict, PyRep::Dict(entries) if entries.is_empty()) && removed_ids.is_empty() {
+        return;
+    }
     let removed_list = PyRep::List(removed_ids.iter().cloned().map(PyRep::String).collect());
     let args = vec![PyRep::Integer(i64::from(sys_id)), added_dict, removed_list];
     for cid in subs {

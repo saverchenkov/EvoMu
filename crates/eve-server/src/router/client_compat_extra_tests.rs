@@ -114,14 +114,17 @@ fn inv_keyval_scan_result_and_anomaly_normalizers() {
     assert_eq!(ensure_scan_result_data(PyRep::Integer(1)), PyRep::Integer(1));
 
     for (target_class, expected_sg) in [
-        ("CosmicAnomaly", 2),
-        ("Anomaly", 2),
-        ("Ship", 8),
-        ("Structure", 8),
-        ("AbyssalTrace", 8),
-        ("Drone", 16),
-        ("Probe", 16),
-        ("Unknown", 4),
+        ("CosmicAnomaly", 8),
+        ("Anomaly", 8),
+        ("Ship", 4),
+        ("Structure", 5),
+        ("Drone", 6),
+        ("Probe", 9),
+        ("Deployable", 12),
+        ("Sovereignty", 13),
+        ("AbyssalTrace", 14),
+        ("CosmicSignature", 3),
+        ("Unknown", 3),
     ] {
         let out = ensure_scan_result_data(PyRep::keyval([
             ("targetClass", PyRep::String(target_class.into())),
@@ -131,7 +134,7 @@ fn inv_keyval_scan_result_and_anomaly_normalizers() {
         ]));
         assert_eq!(out.dict_get("scanGroupID"), Some(&PyRep::Integer(expected_sg)));
         assert_eq!(out.dict_get("groupID"), Some(&PyRep::Integer(502)));
-        assert_eq!(out.dict_get("typeID"), Some(&PyRep::Integer(502)));
+        assert_eq!(out.dict_get("typeID"), Some(&PyRep::None));
         assert_eq!(
             out.dict_get("data"),
             Some(&PyRep::Tuple(vec![
@@ -601,7 +604,8 @@ fn destiny_and_notification_normalizers_and_suppression_branches() {
         ],
     );
     let PyRep::List(scan_rows) = &scan_stop[1] else { panic!() };
-    assert_eq!(scan_rows[0].dict_get("scanGroupID"), Some(&PyRep::Integer(8)));
+    assert_eq!(scan_rows[0].dict_get("scanGroupID"), Some(&PyRep::Integer(4)));
+    assert_eq!(scan_rows[0].dict_get("typeID"), Some(&PyRep::None));
 
     // OnSignalTrackerAnomalyUpdate
     let anom_upd = normalize_macho_notification(

@@ -1058,10 +1058,17 @@ fn wave4_rewards_edge_branches_security_encounters_and_target_mission_id() {
             .unwrap(),
         701
     );
-    // Fallback to state match on different agent (701 Accepted on 4_200_002 when querying 4_200_001)
+    // Fallback to state match on different agent only when unbound (agent_id <= 0);
+    // bound agent_id > 0 must NOT leak another agent's mission (#791, #979).
     assert_eq!(
-        resolve_target_mission_id(&ctx, char_id, 4_200_001, Some("Accepted"), &[], &kw).unwrap(),
+        resolve_target_mission_id(&ctx, char_id, 0, Some("Accepted"), &[], &kw).unwrap(),
         701
+    );
+    assert_eq!(
+        resolve_target_mission_id(&ctx, char_id, 4_200_999, None, &[], &kw)
+            .unwrap_err()
+            .code,
+        "MissionNotActive"
     );
     // Fallback to agent match with different state (702 Completed on 4_200_001 when querying "Offered")
     assert_eq!(

@@ -40,11 +40,13 @@ pub struct AncillaryRepairPrep {
     pub aar_base_armor_repair: f64,
     pub armor_repair_amount: f64,
     pub remote_armor_amount: f64,
+    pub pending_charge_consume: Option<(i64, i32)>,
 }
 
-/// Evaluates ancillary module requirements without charge to maintain hull, skill, and rig modifiers
-/// (`P1-ANCILLARY-RAW-SDE-FALLBACK`).
-pub fn prepare_ancillary_module(
+/// Evaluates ancillary module requirements without mutating inventory so charge consumption can
+/// be deferred until module cycle insertion and aggression/safety checks succeed.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_ancillary_module(
     ctx: &ServerContext,
     ship_id: i64,
     module_id: i64,
@@ -76,12 +78,11 @@ pub fn prepare_ancillary_module(
         0.0
     };
 
+    let mut pending_charge_consume: Option<(i64, i32)> = None;
     let mut cap_need = initial_cap_need;
     if is_asb {
-        let mut consumed_charge = false;
-        ctx.db.with_mut_snapshot(|snap| {
-            if let Some(cid) = snap
-                .items
+        let cid_opt = ctx.db.with_snapshot(|snap| {
+            snap.items
                 .values()
                 .find(|i| {
                     i.location_id == ship_id
@@ -90,17 +91,9 @@ pub fn prepare_ancillary_module(
                         && i.quantity > 0
                 })
                 .map(|i| i.item_id)
-            {
-                if let Some(c_owner) = snap.items.get(&cid).map(|ci| ci.owner_id) {
-                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, c_owner);
-                    opts.reject_fitted = false;
-                    if snap.consume_exact_item_quantity(cid, 1, opts).is_ok() {
-                        consumed_charge = true;
-                    }
-                }
-            }
         });
-        if consumed_charge {
+        if let Some(cid) = cid_opt {
+            pending_charge_consume = Some((cid, 1));
             cap_need = 0.0;
         } else {
             cap_need = asb_fallback_cap_need;
@@ -126,10 +119,8 @@ pub fn prepare_ancillary_module(
     let mut armor_repair_amount = initial_armor_repair;
     let mut remote_armor_amount = initial_remote_armor;
     if is_aar {
-        let mut fueled = false;
-        ctx.db.with_mut_snapshot(|snap| {
-            if let Some(cid) = snap
-                .items
+        let cid_opt = ctx.db.with_snapshot(|snap| {
+            snap.items
                 .values()
                 .find(|i| {
                     i.location_id == ship_id
@@ -139,16 +130,13 @@ pub fn prepare_ancillary_module(
                         && i.quantity >= aar_paste_rate
                 })
                 .map(|i| i.item_id)
-            {
-                if let Some(c_owner) = snap.items.get(&cid).map(|ci| ci.owner_id) {
-                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, c_owner);
-                    opts.reject_fitted = false;
-                    if snap.consume_exact_item_quantity(cid, aar_paste_rate, opts).is_ok() {
-                        fueled = true;
-                    }
-                }
-            }
         });
+        let fueled = if let Some(cid) = cid_opt {
+            pending_charge_consume = Some((cid, aar_paste_rate));
+            true
+        } else {
+            false
+        };
         if mod_type.group_id == 1698 {
             remote_armor_amount = if fueled {
                 aar_base_armor_repair * 3.0
@@ -173,7 +161,60 @@ pub fn prepare_ancillary_module(
         aar_base_armor_repair,
         armor_repair_amount,
         remote_armor_amount,
+        pending_charge_consume,
     }
+}
+
+/// Evaluates ancillary module requirements and immediately consumes charge/paste (legacy helper for direct unit tests).
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_ancillary_module(
+    ctx: &ServerContext,
+    ship_id: i64,
+    module_id: i64,
+    flag_id: u16,
+    mod_type: &InvType,
+    fit: &ShipFittingEngine,
+    is_overloaded: bool,
+    initial_cap_need: f64,
+    initial_armor_repair: f64,
+    initial_remote_armor: f64,
+    overload_mult: f64,
+) -> AncillaryRepairPrep {
+    let mut prep = plan_ancillary_module(
+        ctx,
+        ship_id,
+        module_id,
+        flag_id,
+        mod_type,
+        fit,
+        is_overloaded,
+        initial_cap_need,
+        initial_armor_repair,
+        initial_remote_armor,
+        overload_mult,
+    );
+    if let Some((cid, qty)) = prep.pending_charge_consume.take() {
+        let consumed = ctx.db.with_mut_snapshot(|snap| {
+            let pre = snap.items.get(&cid).cloned()?;
+            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
+            opts.reject_fitted = false;
+            let post = snap.consume_exact_item_quantity(cid, qty, opts).ok()?;
+            Some((pre, post))
+        });
+        if let Some((pre, post)) = consumed {
+            ctx.notify_item_mutation(pre.owner_id, Some(&pre), post.as_ref());
+            crate::services::inventory_fitting::fitting_module_cycles::emit_charge_sublocation_quantity_change(
+                ctx,
+                pre.owner_id,
+                pre.location_id,
+                pre.flag,
+                pre.type_id,
+                pre.quantity,
+                post.as_ref().map_or(0, |p| p.quantity),
+            );
+        }
+    }
+    prep
 }
 
 /// Handles toggling overload on a module that is already cycling, or pre-overloading an inactive targeted module.

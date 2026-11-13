@@ -937,3 +937,171 @@ fn mutants_cov_notification_seq_flag_module_fx_tombstone_and_target_edges() {
     assert_eq!(w_corp2.len(), 2);
     assert!(w_corp2.iter().all(|n| n.args[0] == PyRep::String("cash2".into())));
 }
+
+#[test]
+fn notify_item_mutation_emits_on_blueprints_updated_for_char_corp_and_in_place_updates() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let other_char = 90_000_002_i64;
+    let corp_id = 1_000_299_i64;
+    let (u1, u2) = ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "BP Notify Corp".into();
+        corp.ceo_id = char_id;
+        corp.members.insert(char_id);
+        corp.members.insert(other_char);
+        snap.corporations.insert(corp_id, corp);
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_id;
+        }
+        if let Some(ch) = snap.characters.get_mut(&other_char) {
+            ch.corporation_id = corp_id;
+        }
+        (
+            snap.characters[&char_id].user_id,
+            snap.characters[&other_char].user_id,
+        )
+    });
+    let _ = ctx.db.acquire_online_lock(u1, 412, Some(char_id), false, ctx.now_unix());
+    let _ = ctx.db.acquire_online_lock(u2, 413, Some(other_char), false, ctx.now_unix());
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let _ = ctx.drain_notifications_for_char(other_char);
+
+    let bp_type_id = ctx
+        .sde
+        .blueprints
+        .keys()
+        .copied()
+        .next()
+        .expect("SDE must contain at least one blueprint type");
+
+    // 1. Character-owned blueprint creation, in-place ME/TE/runs update, and deletion
+    let char_bp = InventoryItemRecord {
+        item_id: 885_001,
+        type_id: bp_type_id,
+        owner_id: char_id,
+        location_id: 60_003_760,
+        flag: InventoryFlag::Hangar,
+        quantity: 1,
+        singleton: true,
+        is_blueprint_copy: false,
+        blueprint_runs_remaining: None,
+        ..Default::default()
+    };
+    ctx.notify_item_mutation(char_id, None, Some(&char_bp));
+    let n1 = ctx.drain_notifications_for_char(char_id);
+    assert!(n1.iter().any(|n| n.event == "OnItemChange"));
+    assert!(n1.iter().any(|n| {
+        n.event == "OnBlueprintsUpdated"
+            && n.id_type == "ownerID"
+            && n.args == vec![PyRep::Integer(char_id)]
+    }));
+    assert!(ctx.drain_notifications_for_char(other_char).is_empty());
+
+    // In-place ME/TE/runs/BPC change without changing owner/location/flag/qty/singleton
+    let mut char_bp_researched = char_bp.clone();
+    char_bp_researched.dynamic_attributes.insert(1813, 10.0);
+    char_bp_researched.is_blueprint_copy = true;
+    char_bp_researched.blueprint_runs_remaining = Some(5);
+    ctx.notify_item_mutation(char_id, Some(&char_bp), Some(&char_bp_researched));
+    let n_inplace = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        n_inplace.iter().all(|n| n.event != "OnItemChange"),
+        "in-place blueprint research must not emit empty-dict OnItemChange"
+    );
+    assert!(n_inplace.iter().any(|n| {
+        n.event == "OnBlueprintsUpdated"
+            && n.id_type == "ownerID"
+            && n.args == vec![PyRep::Integer(char_id)]
+    }));
+
+    // Identical blueprint (no-op) emits nothing
+    ctx.notify_item_mutation(char_id, Some(&char_bp_researched), Some(&char_bp_researched));
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+
+    // 2. Corporation-owned blueprint in non-corp-hangar flags (Locked = 63, Unlocked = 64, Hangar = 4)
+    //    must still emit OnBlueprintsUpdated(corp_id) to all online corporation members!
+    for flag in [
+        InventoryFlag::Locked,
+        InventoryFlag::Unlocked,
+        InventoryFlag::Hangar,
+        InventoryFlag::CorpSAG1,
+    ] {
+        let corp_bp = InventoryItemRecord {
+            item_id: 885_010 + (flag as i64),
+            type_id: bp_type_id,
+            owner_id: corp_id,
+            location_id: 60_003_760,
+            flag,
+            quantity: 1,
+            singleton: true,
+            ..Default::default()
+        };
+        let mut corp_bp_me = corp_bp.clone();
+        corp_bp_me.dynamic_attributes.insert(1813, 8.0);
+        ctx.notify_item_mutation(char_id, Some(&corp_bp), Some(&corp_bp_me));
+        let n_c1 = ctx.drain_notifications_for_char(char_id);
+        let n_c2 = ctx.drain_notifications_for_char(other_char);
+        assert!(
+            n_c1.iter().any(|n| {
+                n.event == "OnBlueprintsUpdated"
+                    && n.id_type == "ownerID"
+                    && n.args == vec![PyRep::Integer(corp_id)]
+            }),
+            "actor corp member must receive OnBlueprintsUpdated(corp_id) for flag {:?}",
+            flag
+        );
+        assert!(
+            n_c2.iter().any(|n| {
+                n.event == "OnBlueprintsUpdated"
+                    && n.id_type == "ownerID"
+                    && n.args == vec![PyRep::Integer(corp_id)]
+            }),
+            "peer corp member must receive OnBlueprintsUpdated(corp_id) for flag {:?}",
+            flag
+        );
+    }
+
+    // 3. Ownership transfer char -> corp notifies both old and new owners
+    let corp_bp_transferred = InventoryItemRecord {
+        owner_id: corp_id,
+        flag: InventoryFlag::Locked,
+        ..char_bp_researched.clone()
+    };
+    ctx.notify_item_mutation(char_id, Some(&char_bp_researched), Some(&corp_bp_transferred));
+    let n_tr1 = ctx.drain_notifications_for_char(char_id);
+    let n_tr2 = ctx.drain_notifications_for_char(other_char);
+    assert!(n_tr1.iter().any(|n| n.event == "OnBlueprintsUpdated" && n.args == vec![PyRep::Integer(char_id)]));
+    assert!(n_tr2.iter().any(|n| n.event == "OnBlueprintsUpdated" && n.args == vec![PyRep::Integer(corp_id)]));
+
+    // 4. Deletion of corp blueprint in Locked flag notifies corp members
+    ctx.notify_item_mutation(char_id, Some(&corp_bp_transferred), None);
+    let n_del1 = ctx.drain_notifications_for_char(char_id);
+    let n_del2 = ctx.drain_notifications_for_char(other_char);
+    assert!(n_del1.iter().any(|n| {
+        n.event == "OnBlueprintsUpdated"
+            && n.id_type == "ownerID"
+            && n.args == vec![PyRep::Integer(corp_id)]
+    }));
+    assert!(n_del2.iter().any(|n| {
+        n.event == "OnBlueprintsUpdated"
+            && n.id_type == "ownerID"
+            && n.args == vec![PyRep::Integer(corp_id)]
+    }));
+
+    // 5. Non-blueprint item mutation never emits OnBlueprintsUpdated
+    let tritanium = InventoryItemRecord {
+        item_id: 885_099,
+        type_id: 34,
+        owner_id: char_id,
+        location_id: 60_003_760,
+        flag: InventoryFlag::Hangar,
+        quantity: 50,
+        singleton: false,
+        ..Default::default()
+    };
+    ctx.notify_item_mutation(char_id, None, Some(&tritanium));
+    let n_non_bp = ctx.drain_notifications_for_char(char_id);
+    assert!(n_non_bp.iter().all(|n| n.event != "OnBlueprintsUpdated"));
+}

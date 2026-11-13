@@ -486,25 +486,33 @@ pub fn resolve_target_mission_id(
             .values()
             .filter(|m| {
                 m.character_id == char_id
-                    && (agent_id == 0 || m.agent_id == agent_id)
-                    && expected_state.is_none_or(|st| m.state == st)
+                    && (agent_id <= 0 || m.agent_id == agent_id)
+                    && expected_state
+                        .map_or(matches!(m.state.as_str(), "Offered" | "Accepted"), |st| {
+                            m.state == st
+                        })
             })
             .map(|m| m.mission_id)
             .min()
             .or_else(|| {
-                snap.active_missions
-                    .values()
-                    .filter(|m| {
-                        m.character_id == char_id && expected_state.is_none_or(|st| m.state == st)
+                (agent_id <= 0)
+                    .then(|| {
+                        snap.active_missions
+                            .values()
+                            .filter(|m| {
+                                m.character_id == char_id
+                                    && expected_state.is_none_or(|st| m.state == st)
+                            })
+                            .map(|m| m.mission_id)
+                            .min()
                     })
-                    .map(|m| m.mission_id)
-                    .min()
+                    .flatten()
             })
             .or_else(|| {
                 snap.active_missions
                     .values()
                     .filter(|m| {
-                        m.character_id == char_id && (agent_id == 0 || m.agent_id == agent_id)
+                        m.character_id == char_id && (agent_id <= 0 || m.agent_id == agent_id)
                     })
                     .map(|m| m.mission_id)
                     .min()

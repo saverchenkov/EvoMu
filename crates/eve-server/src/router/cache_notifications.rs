@@ -1689,42 +1689,90 @@ impl ServerContext {
     }
 
     /// Emits `OnItemChange` by diffing `pre` and `post` item states, routing to both old and new targets
-    /// if ownership/corp-hangar scope changed.
+    /// if ownership/corp-hangar scope changed, and emits `OnBlueprintsUpdated(ownerID)` for blueprint
+    /// mutations (including corp-owned blueprints in non-hangar flags and in-place ME/TE/runs updates).
     pub fn notify_item_mutation(
         &self,
         fallback_char_id: i64,
         pre: Option<&eve_db::InventoryItemRecord>,
         post: Option<&eve_db::InventoryItemRecord>,
     ) {
+        let is_bp = |it: &eve_db::InventoryItemRecord| {
+            self.sde.blueprints.contains_key(&it.type_id)
+                || self.sde.types.get(&it.type_id).is_some_and(|t| t.category_id == 9)
+        };
+        let emit_bp_update = |it: &eve_db::InventoryItemRecord| {
+            let owner_id = if it.owner_id > 0 {
+                it.owner_id
+            } else {
+                fallback_char_id
+            };
+            let is_corp = self.db.with_snapshot(|s| {
+                s.corporations.contains_key(&owner_id)
+                    || (!s.characters.contains_key(&owner_id)
+                        && (1_000_000..=2_000_000).contains(&owner_id))
+            });
+            let target = if is_corp {
+                NotificationTarget::Corporation(owner_id)
+            } else {
+                NotificationTarget::Character(owner_id)
+            };
+            self.notify(
+                target,
+                "OnBlueprintsUpdated",
+                "ownerID",
+                vec![PyRep::Integer(owner_id)],
+            );
+        };
         match (pre, post) {
             (None, Some(new_item)) => {
                 self.emit_item_change_routed(fallback_char_id, new_item, Vec::new());
+                if is_bp(new_item) {
+                    emit_bp_update(new_item);
+                }
             }
             (Some(old_item), None) => {
                 self.emit_item_deleted_routed(fallback_char_id, old_item);
+                if is_bp(old_item) {
+                    emit_bp_update(old_item);
+                }
             }
             (Some(old_item), Some(new_item)) => {
                 let changes = Self::compute_item_change_dict(old_item, new_item);
-                if changes.is_empty() {
+                let bp_involved = is_bp(new_item) || is_bp(old_item);
+                let bp_in_place_changed = bp_involved
+                    && (old_item.type_id != new_item.type_id
+                        || old_item.is_blueprint_copy != new_item.is_blueprint_copy
+                        || old_item.blueprint_runs_remaining != new_item.blueprint_runs_remaining
+                        || old_item.dynamic_attributes != new_item.dynamic_attributes);
+                if changes.is_empty() && !bp_in_place_changed {
                     return;
                 }
-                let (old_target, old_id_type) =
-                    self.resolve_item_notification_target(fallback_char_id, old_item);
-                let (new_target, new_id_type) =
-                    self.resolve_item_notification_target(fallback_char_id, new_item);
-                self.notify_item_record_change_with_target(
-                    new_target.clone(),
-                    new_id_type,
-                    new_item,
-                    changes.clone(),
-                );
-                if old_target != new_target {
+                if !changes.is_empty() {
+                    let (old_target, old_id_type) =
+                        self.resolve_item_notification_target(fallback_char_id, old_item);
+                    let (new_target, new_id_type) =
+                        self.resolve_item_notification_target(fallback_char_id, new_item);
                     self.notify_item_record_change_with_target(
-                        old_target,
-                        old_id_type,
+                        new_target.clone(),
+                        new_id_type,
                         new_item,
-                        changes,
+                        changes.clone(),
                     );
+                    if old_target != new_target {
+                        self.notify_item_record_change_with_target(
+                            old_target,
+                            old_id_type,
+                            new_item,
+                            changes,
+                        );
+                    }
+                }
+                if bp_involved {
+                    emit_bp_update(new_item);
+                    if old_item.owner_id != new_item.owner_id {
+                        emit_bp_update(old_item);
+                    }
                 }
             }
             (None, None) => {}
