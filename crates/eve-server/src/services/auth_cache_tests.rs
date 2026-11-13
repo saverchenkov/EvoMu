@@ -419,7 +419,7 @@ async fn gm_slash_commands_giveisk_ban_suspend_role_giveitem_setskill_teleport_a
     }
     assert_eq!(
         item_change.args.get(1),
-        Some(&PyRep::Dict(Vec::new()))
+        Some(&PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))]))
     );
 }
 
