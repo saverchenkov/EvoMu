@@ -821,6 +821,28 @@ async fn gm_fit_enforces_hull_slots_and_hardpoints_and_spawn_asteroid_uses_syste
         hull_meta.char_id, None,
         "/spawn hull must be unpiloted (char_id == None) so menusvc shows Board Ship (#983)"
     );
+    {
+        let bp = handle.ballpark.read().unwrap();
+        assert_eq!(
+            bp.ball_interactive_overrides.get(&hull_id),
+            Some(&false),
+            "/spawn unpiloted ship must record ball_interactive_overrides[hull_id] = false (#983)"
+        );
+        let hull_ball = bp.balls.get(&hull_id).expect("spawned hull ball in ballpark");
+        let mut raw_hull = Vec::new();
+        eve_destiny::wire::encode_single_ball_with_park(
+            &mut raw_hull,
+            hull_ball,
+            bp.current_tick as u32,
+            Some(&hull_meta),
+            Some(&bp),
+        );
+        assert_eq!(
+            raw_hull[37] & eve_destiny::wire::BALL_FLAG_IS_INTERACTIVE,
+            0,
+            "encoded unpiloted hull must clear BALL_FLAG_IS_INTERACTIVE (#983)"
+        );
+    }
     let _ = handle_gm_slash_ext(&ctx, &mut sess, char_id, &format!("/unspawn {hull_id}"))
         .await
         .expect("handled")

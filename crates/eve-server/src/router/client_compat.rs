@@ -2269,6 +2269,13 @@ fn normalize_agent_mission_objective_rep(rep: PyRep) -> PyRep {
         }
     };
     let default_dun_loc = make_loc_dict(origin_sid, "dungeon");
+    let default_dungeon_owner_id = rep
+        .dict_get("dungeonOwnerID")
+        .or_else(|| rep.dict_get("factionID"))
+        .or_else(|| rep.dict_get("corporationID"))
+        .and_then(PyRep::as_i64)
+        .filter(|&v| is_corp_or_faction_owner_id(v))
+        .unwrap_or(1_000_002);
     let dungeons = match rep.dict_get("dungeons") {
         Some(PyRep::List(items)) if !items.is_empty() => PyRep::List(
             items
@@ -2280,7 +2287,7 @@ fn normalize_agent_mission_objective_rep(rep: PyRep) -> PyRep {
                         content_id.as_i64().unwrap_or(1).max(1),
                         sys_id,
                         origin_sid,
-                        agent_id,
+                        default_dungeon_owner_id,
                         completion_status,
                         &default_dun_loc,
                     )
@@ -2294,7 +2301,7 @@ fn normalize_agent_mission_objective_rep(rep: PyRep) -> PyRep {
                 mid_i64,
                 sys_id,
                 origin_sid,
-                agent_id,
+                default_dungeon_owner_id,
                 completion_status,
                 &default_dun_loc,
             )])
@@ -2431,6 +2438,10 @@ fn normalize_mission_objective_entry(entry: PyRep, default_owner_id: i64) -> PyR
     PyRep::Tuple(outer)
 }
 
+fn is_corp_or_faction_owner_id(v: i64) -> bool {
+    (500_000..3_000_000).contains(&v) || (98_000_000..100_000_000).contains(&v)
+}
+
 fn normalize_mission_dungeon_dict(
     dun: PyRep,
     default_dungeon_id: i64,
@@ -2465,7 +2476,7 @@ fn normalize_mission_dungeon_dict(
     let owner_id = dun
         .dict_get("ownerID")
         .and_then(PyRep::as_i64)
-        .filter(|&v| v >= 1_000_000)
+        .filter(|&v| is_corp_or_faction_owner_id(v))
         .unwrap_or(default_owner_id);
     let optional = dun
         .dict_get("optional")
@@ -2553,14 +2564,73 @@ fn strip_none_location_coords_recursive(rep: PyRep) -> PyRep {
     }
 }
 
+fn normalize_mission_journal_bookmark(
+    bm: PyRep,
+    default_loc_id: i64,
+    default_hint: &str,
+    idx: i64,
+) -> PyRep {
+    let bm = strip_none_location_coords_recursive(bm);
+    let mut map: std::collections::HashMap<String, PyRep> = match bm {
+        PyRep::KeyVal(m) => m,
+        PyRep::Dict(entries) => entries
+            .into_iter()
+            .filter_map(|(k, v)| k.as_str().map(|s| (s.to_string(), v)))
+            .collect(),
+        other => return other,
+    };
+    let loc_id = map
+        .get("locationID")
+        .or_else(|| map.get("solarSystemID"))
+        .or_else(|| map.get("solarsystemID"))
+        .or_else(|| map.get("stationID"))
+        .and_then(PyRep::as_i64)
+        .filter(|&v| v > 0)
+        .unwrap_or(default_loc_id);
+    map.insert("locationID".into(), PyRep::Integer(loc_id));
+    let has_loc_num = map
+        .get("locationNumber")
+        .and_then(PyRep::as_i64)
+        .is_some_and(|v| v >= 0);
+    if !has_loc_num {
+        map.insert("locationNumber".into(), PyRep::Integer(idx));
+    }
+    let has_hint = map
+        .get("hint")
+        .and_then(PyRep::as_str)
+        .is_some_and(|s| !s.trim().is_empty());
+    if !has_hint {
+        map.insert("hint".into(), PyRep::String(default_hint.to_string()));
+    }
+    PyRep::KeyVal(map)
+}
+
 fn normalize_agent_journal_details_rep(rep: PyRep) -> PyRep {
     let PyRep::Tuple(mut parts) = rep else {
         return rep;
     };
     if let Some(PyRep::List(missions)) = parts.first_mut() {
         for m in missions.iter_mut() {
-            if matches!(m, PyRep::Tuple(ref t) if t.len() == 10) {
-                continue;
+            if let PyRep::Tuple(ref mut t) = m {
+                if t.len() == 10 {
+                    let hint = t[2]
+                        .as_str()
+                        .filter(|s| s.starts_with("UI/"))
+                        .unwrap_or("UI/Agents/MissionTypes/Encounter")
+                        .to_string();
+                    if let PyRep::List(ref mut bms) = t[6] {
+                        for (idx, bm) in bms.iter_mut().enumerate() {
+                            let cur = std::mem::replace(bm, PyRep::None);
+                            *bm = normalize_mission_journal_bookmark(
+                                cur,
+                                30_000_142,
+                                &hint,
+                                idx as i64,
+                            );
+                        }
+                    }
+                    continue;
+                }
             }
             if !matches!(m, PyRep::KeyVal(_) | PyRep::Dict(_)) {
                 continue;
@@ -2616,11 +2686,25 @@ fn normalize_agent_journal_details_rep(rep: PyRep) -> PyRep {
                 }
                 _ => PyRep::None,
             };
+            let default_bm_loc = m
+                .dict_get("solarSystemID")
+                .or_else(|| m.dict_get("solarsystemID"))
+                .and_then(PyRep::as_i64)
+                .filter(|&v| v > 0)
+                .unwrap_or(30_000_142);
             let bookmarks = match m.dict_get("bookmarks") {
                 Some(PyRep::List(bms)) => PyRep::List(
                     bms.iter()
                         .cloned()
-                        .map(strip_none_location_coords_recursive)
+                        .enumerate()
+                        .map(|(idx, bm)| {
+                            normalize_mission_journal_bookmark(
+                                bm,
+                                default_bm_loc,
+                                &type_label,
+                                idx as i64,
+                            )
+                        })
                         .collect(),
                 ),
                 _ => PyRep::List(Vec::new()),
@@ -3112,12 +3196,13 @@ fn destiny_entry_func_name(item: &PyRep) -> Option<&str> {
 fn normalize_destiny_payload_arg(rep: PyRep) -> PyRep {
     match rep {
         PyRep::List(items) => {
-            let has_ball_add = items.iter().any(|it| {
-                matches!(
-                    destiny_entry_func_name(it),
-                    Some("SetState" | "AddBalls" | "AddBalls2")
-                )
-            });
+            let has_set_state = items
+                .iter()
+                .any(|it| destiny_entry_func_name(it) == Some("SetState"));
+            let has_ball_add = has_set_state
+                || items.iter().any(|it| {
+                    matches!(destiny_entry_func_name(it), Some("AddBalls" | "AddBalls2"))
+                });
             PyRep::List(
                 items
                     .into_iter()
@@ -3127,6 +3212,11 @@ fn normalize_destiny_payload_arg(rep: PyRep) -> PyRep {
                             && fname != Some("OnClientControllerEvent")
                             && fname != Some("OnDroneActivityChange")
                             && !(has_ball_add && fname == Some("OnSlimItemChange"))
+                            && !(has_set_state
+                                && matches!(
+                                    fname,
+                                    Some("SetBallInteractive" | "PackagedAction")
+                                ))
                     })
                     .map(normalize_destiny_payload_arg)
                     .collect(),

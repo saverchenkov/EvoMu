@@ -143,7 +143,21 @@ pub fn decode_add_balls(bytes: &[u8]) -> Result<(u8, u32, Vec<DecodedBall>), Str
                 let dx = read_f64(bytes, &mut offset)?;
                 let dy = read_f64(bytes, &mut offset)?;
                 let dz = read_f64(bytes, &mut offset)?;
-                direction = Some(DVec3::new(dx, dy, dz));
+                let raw_goto = DVec3::new(dx, dy, dz);
+                let pos = DVec3::new(px, py, pz);
+                // World-space `GOTO_Struct` (`gotoPoint = ball.position + dir * 1e16`, `#989`) has
+                // `raw_goto.length() >> 2.0`; legacy unit-vector test fixtures (`length() <= 2.0`)
+                // are preserved directly.
+                direction = Some(
+                    if raw_goto.is_finite()
+                        && pos.is_finite()
+                        && (raw_goto.abs().max_element() > 2.0 || raw_goto.length() > 2.0)
+                    {
+                        (raw_goto - pos).normalize_or_zero()
+                    } else {
+                        raw_goto
+                    },
+                );
             }
             DST_BALL_FOLLOW => {
                 let tid = read_i64(bytes, &mut offset)?;

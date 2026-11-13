@@ -829,6 +829,15 @@ pub fn validate_npc_station_docking_gate(ctx: &ServerContext, char_id: i64, stat
     Ok(())
 }
 
+fn paired_station_service_ids(service_id: u32) -> &'static [u32] {
+    match service_id {
+        1..=3 => &[1, 2, 3],
+        5 | 6 => &[5, 6],
+        14 | 15 => &[14, 15],
+        _ => &[],
+    }
+}
+
 pub fn evaluate_station_service_standing_gate(
     ctx: &ServerContext,
     char_id: i64,
@@ -841,7 +850,18 @@ pub fn evaluate_station_service_standing_gate(
         raw_service_id
     };
     let (owner_corp, owner_fac) = if let Some(st) = ctx.sde.stations.get(&station_id) {
-        if !crate::services::station_structure::npc_station_offers_service(&ctx.sde, station_id, service_id as i64) {
+        let offered = crate::services::station_structure::npc_station_offers_service(
+            &ctx.sde,
+            station_id,
+            service_id as i64,
+        ) || paired_station_service_ids(service_id).iter().any(|&alt| {
+            crate::services::station_structure::npc_station_offers_service(
+                &ctx.sde,
+                station_id,
+                alt as i64,
+            )
+        });
+        if !offered {
             return Err(err(
                 "StationServiceUnavailable",
                 format!("Station {station_id} does not offer service {service_id}"),

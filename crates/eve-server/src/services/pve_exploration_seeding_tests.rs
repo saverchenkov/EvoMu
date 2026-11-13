@@ -72,7 +72,12 @@ fn test_faction_and_site_catalog_tables_across_security_bands() {
                     ghost_site_dungeon_for_system(&sde, sys.solar_system_id, sec, None);
                 assert!(gid > 0 && !gname.is_empty());
             }
-            assert!(pirate_npc_type_for_system(&sde, sys.solar_system_id) > 0);
+            let npc_tid = pirate_npc_type_for_system(&sde, sys.solar_system_id);
+            assert!(!(10_959..=10_963).contains(&npc_tid), "legacy non-existent NPC type_id {npc_tid} (#991)");
+            assert!(
+                sde.types.get(&npc_tid).is_some_and(|t| t.category_id == 11),
+                "pirate NPC type_id {npc_tid} must exist in SDE with category_id == 11 (#991)"
+            );
             let (loot_tid, faction_name) =
                 pirate_commander_loot_for_system(&sde, sys.solar_system_id);
             assert!(loot_tid > 0 && !faction_name.is_empty());

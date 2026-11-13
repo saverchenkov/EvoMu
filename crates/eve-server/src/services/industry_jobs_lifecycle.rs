@@ -172,9 +172,17 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            fn extract_job_id(v: &PyRep) -> Option<i64> {
+                match v {
+                    PyRep::Tuple(items) | PyRep::List(items) => {
+                        items.first().and_then(|x| x.as_i64())
+                    }
+                    other => other.as_i64(),
+                }
+            }
             let mut job_ids: Vec<i64> = match args.first() {
                 Some(PyRep::List(ids) | PyRep::Tuple(ids)) => {
-                    ids.iter().filter_map(|v| v.as_i64()).collect()
+                    ids.iter().filter_map(extract_job_id).collect()
                 }
                 Some(v) => v.as_i64().into_iter().collect(),
                 None => Vec::new(),

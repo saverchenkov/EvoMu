@@ -5,7 +5,7 @@
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::with_combat_runtime;
 use crate::services::fw_services::{
-    compute_all_frontline_statuses, STATUS_REARGUARD,
+    compute_all_frontline_statuses, frontline_status_to_adjacency_state, STATUS_REARGUARD,
 };
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -23,6 +23,10 @@ fn build_warzone_occupation_state(
         ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
         ("ownerFactionID", PyRep::Integer(owner_fac)),
         ("occupierFactionID", PyRep::Integer(occupier_fac)),
+        (
+            "adjacencyState",
+            PyRep::String(frontline_status_to_adjacency_state(frontline).into()),
+        ),
         ("frontlineStatus", PyRep::Integer(frontline)),
         ("contestedPercentage", PyRep::Real(contested)),
     ])

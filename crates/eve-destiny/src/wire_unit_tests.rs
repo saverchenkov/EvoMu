@@ -77,7 +77,9 @@ fn encode_and_decode_all_thirteen_movement_modes_roundtrip() {
     );
     assert!(decoded[0].mass.is_some());
     assert_eq!(decoded[0].formation_id, 0xFF);
-    assert_eq!(decoded[0].direction, Some(DVec3::new(100.0, 200.0, -300.0)));
+    let expected_goto_dir = DVec3::new(100.0, 200.0, -300.0).normalize();
+    let actual_goto_dir = decoded[0].direction.expect("decoded GotoDirection unit vector");
+    assert!((actual_goto_dir - expected_goto_dir).length() < 1e-12);
 
     // 1: Follow
     assert_eq!(decoded[1].id, 101);
@@ -1295,4 +1297,162 @@ fn mutant_killers_ball_flags_stargate_owner_gt_1_and_set_state_static_damage() {
     assert!(dmg_ids.contains(&701));
     assert!(!dmg_ids.contains(&702), "static without combat must NOT appear in damageState");
     assert!(dmg_ids.contains(&703), "static WITH combat MUST appear in damageState");
+}
+
+#[test]
+fn unpiloted_ship_clears_interactive_flag_and_goto_encodes_world_space_point() {
+    // 1. Issue #983: Unpiloted ship (`category_id == 6 && char_id == None`) without an explicit
+    //    `ball_interactive_overrides` entry clears `BALL_FLAG_IS_INTERACTIVE` so V24.01
+    //    `CelestialChecker.OfferBoardShip` offers 'Board Ship', whereas piloted ships, non-ship
+    //    categories, and explicit `ball_interactive_overrides` preserve their expected flag state.
+    let mut park = Ballpark::new(30_000_142);
+    let ship_ball = sample_ball(9_830_001, MovementMode::Stop);
+    park.add_ball(ship_ball.clone());
+
+    let unpiloted_ship_meta = SlimItemMeta {
+        group_id: 25,
+        category_id: 6,
+        owner_id: 90_000_001,
+        char_id: None,
+        corp_id: 1_000_125,
+        ..SlimItemMeta::default()
+    };
+    let mut buf_unpiloted = Vec::new();
+    encode_single_ball_with_park(
+        &mut buf_unpiloted,
+        &ship_ball,
+        10,
+        Some(&unpiloted_ship_meta),
+        Some(&park),
+    );
+    assert_eq!(
+        buf_unpiloted[37],
+        BALL_FLAG_IS_FREE | BALL_FLAG_IS_MASSIVE,
+        "unpiloted ship without override must clear BALL_FLAG_IS_INTERACTIVE"
+    );
+
+    let piloted_ship_meta = SlimItemMeta {
+        char_id: Some(90_000_001),
+        ..unpiloted_ship_meta.clone()
+    };
+    let mut buf_piloted = Vec::new();
+    encode_single_ball_with_park(
+        &mut buf_piloted,
+        &ship_ball,
+        10,
+        Some(&piloted_ship_meta),
+        Some(&park),
+    );
+    assert_eq!(
+        buf_piloted[37],
+        BALL_FLAG_IS_FREE | BALL_FLAG_IS_MASSIVE | BALL_FLAG_IS_INTERACTIVE,
+        "piloted ship must advertise BALL_FLAG_IS_INTERACTIVE"
+    );
+
+    let deployable_meta = SlimItemMeta {
+        category_id: 22, // Deployable (non-ship) with char_id == None
+        char_id: None,
+        ..unpiloted_ship_meta.clone()
+    };
+    let mut buf_deployable = Vec::new();
+    encode_single_ball_with_park(
+        &mut buf_deployable,
+        &ship_ball,
+        10,
+        Some(&deployable_meta),
+        Some(&park),
+    );
+    assert_eq!(
+        buf_deployable[37],
+        BALL_FLAG_IS_FREE | BALL_FLAG_IS_MASSIVE | BALL_FLAG_IS_INTERACTIVE,
+        "non-ship category with char_id == None keeps default interactive flag"
+    );
+
+    // Explicit `ball_interactive_overrides` takes precedence in both directions
+    park.ball_interactive_overrides.insert(ship_ball.id, true);
+    let mut buf_override_true = Vec::new();
+    encode_single_ball_with_park(
+        &mut buf_override_true,
+        &ship_ball,
+        10,
+        Some(&unpiloted_ship_meta),
+        Some(&park),
+    );
+    assert_eq!(
+        buf_override_true[37],
+        BALL_FLAG_IS_FREE | BALL_FLAG_IS_MASSIVE | BALL_FLAG_IS_INTERACTIVE
+    );
+
+    park.ball_interactive_overrides.insert(ship_ball.id, false);
+    let mut buf_override_false = Vec::new();
+    encode_single_ball_with_park(
+        &mut buf_override_false,
+        &ship_ball,
+        10,
+        Some(&piloted_ship_meta),
+        Some(&park),
+    );
+    assert_eq!(
+        buf_override_false[37],
+        BALL_FLAG_IS_FREE | BALL_FLAG_IS_MASSIVE
+    );
+
+    // 2. Issue #989: `DST_BALL_GOTO` (`GOTO_Struct`) encodes world-space `gotoPoint = position + dir * 1e16`
+    //    so `_destiny.so` `normalize(gotoPoint - position)` matches `+undock_dir` at 1e11..1e12 m solar-system
+    //    coordinates, while `decode_add_balls` recovers unit `direction` from both world-space `gotoPoint`
+    //    and legacy unit-vector test fixtures (`length() <= 2.0`).
+    let jita_pos = DVec3::new(-1.073e11, -1.874e10, 4.365e11);
+    let undock_dir = DVec3::new(-0.24, -0.04, 0.97).normalize();
+    let mut undock_ball = sample_ball(
+        9_890_001,
+        MovementMode::GotoDirection {
+            direction: undock_dir,
+        },
+    );
+    undock_ball.position = jita_pos;
+
+    let wire_bytes = encode_add_balls(55, &[&undock_ball]);
+    // Header(5) + BallHeader(38) + MassSector(25) + DataSector(36) + formationID(1) = offset 105..129
+    assert_eq!(wire_bytes.len(), 5 + 124);
+    assert_eq!(wire_bytes[104], 0xFF);
+    let gx = f64::from_le_bytes(wire_bytes[105..113].try_into().unwrap());
+    let gy = f64::from_le_bytes(wire_bytes[113..121].try_into().unwrap());
+    let gz = f64::from_le_bytes(wire_bytes[121..129].try_into().unwrap());
+    let raw_goto = DVec3::new(gx, gy, gz);
+    assert!(
+        raw_goto.length() > 1.0e15,
+        "GOTO_Struct must store world-space gotoPoint rather than unit direction"
+    );
+    let client_heading = (raw_goto - jita_pos).normalize();
+    assert!(
+        (client_heading - undock_dir).length() < 1e-12,
+        "client _destiny.so heading normalize(gotoPoint - position) must align with undock_dir"
+    );
+
+    let (_, _, dec_world) = decode_add_balls(&wire_bytes).expect("decode world-space GOTO_Struct");
+    assert!(
+        (dec_world[0].direction.unwrap() - undock_dir).length() < 1e-12,
+        "decode_add_balls must recover unit direction from world-space gotoPoint"
+    );
+
+    // Legacy unit-vector fixture (`length() <= 2.0`) also decodes cleanly without subtracting position
+    let mut legacy_wire = wire_bytes.clone();
+    legacy_wire[105..113].copy_from_slice(&0.6_f64.to_le_bytes());
+    legacy_wire[113..121].copy_from_slice(&0.8_f64.to_le_bytes());
+    legacy_wire[121..129].copy_from_slice(&0.0_f64.to_le_bytes());
+    let (_, _, dec_legacy) = decode_add_balls(&legacy_wire).expect("decode legacy unit-vector GOTO_Struct");
+    assert_eq!(dec_legacy[0].direction, Some(DVec3::new(0.6, 0.8, 0.0)));
+
+    // Negative / edge cases: zero direction vector and truncated GOTO_Struct buffer
+    let mut zero_dir_ball = undock_ball.clone();
+    zero_dir_ball.mode = MovementMode::GotoDirection {
+        direction: DVec3::ZERO,
+    };
+    let zero_wire = encode_add_balls(56, &[&zero_dir_ball]);
+    let (_, _, dec_zero) = decode_add_balls(&zero_wire).expect("decode zero-direction GOTO_Struct");
+    assert_eq!(dec_zero[0].direction, Some(DVec3::ZERO));
+    assert!(
+        decode_add_balls(&wire_bytes[..wire_bytes.len() - 4]).is_err(),
+        "truncated GOTO_Struct must return Err"
+    );
 }

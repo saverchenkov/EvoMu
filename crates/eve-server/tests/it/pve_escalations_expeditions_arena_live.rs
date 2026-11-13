@@ -314,7 +314,8 @@ async fn warp_to_stuff_and_clear_site(
             for _ in 0..60 {
                 let Some(cs) = sys.get_combat_state(nid).await.unwrap() else { break; };
                 let hp = cs.shield_hp + cs.armor_hp + cs.structure_hp;
-                if is_last && !seed_applied && hp < *start_hp.get_or_insert(hp) * 0.85 {
+                let base_hp = *start_hp.get_or_insert(hp);
+                if is_last && (!seed_applied || hp < base_hp * 0.85) {
                     if let Some(s) = final_shot_seed { ctx.set_mechanic_rng_seed(Some(s)); seed_applied = true; }
                 }
                 for &gid in guns { let _ = rpc(ctx, pilot, "dogmaIM", "Activate", &[PyRep::Integer(gid), PyRep::String("targetAttack".into()), PyRep::Integer(nid)]).await; }
@@ -341,6 +342,7 @@ async fn test_live_escalations_and_multi_step_expeditions() {
     assert!(extract_rowset_rows(&ok(&ctx, &mut pilot, "dungeonExplorationMgr", "GetMyEscalatingPathDetails", &[]).await).1.is_empty());
 
     let no_esc_seed = (10_u64..10_000).find(|&s| { let r = MechanicRng::seeded(s); (0..25).all(|_| !r.roll(0.20)) }).unwrap();
+    let esc_seed = (1_u64..500_000).find(|&s| { let r = MechanicRng::seeded(s); (0..6).all(|_| r.roll(0.20)) }).unwrap();
 
     let PyRep::List(anoms) = ok(&ctx, &mut pilot, "scanSvc", "GetCombatAnomalyInstances", &[]).await else { panic!("anoms") };
     let site_id_of = |r: &PyRep| r.dict_get("siteID").or_else(|| r.dict_get("id")).and_then(|v| v.as_str()).unwrap().to_string();
@@ -356,8 +358,8 @@ async fn test_live_escalations_and_multi_step_expeditions() {
     assert!(extract_rowset_rows(&ok(&ctx, &mut pilot, "dungeonExplorationMgr", "GetMyEscalatingPathDetails", &[]).await).1.is_empty());
     let _ = drain(&ctx, &mut pilot);
 
-    // 2. Positive RNG roll (seed 3): triggers multi-step escalation & expedition with journal entry, destination, 24h expiry, & bookmark.
-    warp_to_stuff_and_clear_site(&ctx, &mut pilot, JITA_SYS, "dungeon", PyRep::String(site2.clone()), &site2, &guns, Some(3)).await;
+    // 2. Positive RNG roll (`esc_seed`): triggers multi-step escalation & expedition with journal entry, destination, 24h expiry, & bookmark.
+    warp_to_stuff_and_clear_site(&ctx, &mut pilot, JITA_SYS, "dungeon", PyRep::String(site2.clone()), &site2, &guns, Some(esc_seed)).await;
     let esc_notifs = drain(&ctx, &mut pilot);
     assert!(esc_notifs.iter().any(|(e, _)| e == "OnEscalatingPathChange"));
     assert!(esc_notifs.iter().any(|(e, _)| e == "OnEscalatingPathMessage" || e == "OnFleetEscalatingPathMessage"));
@@ -432,7 +434,7 @@ async fn test_live_escalations_and_multi_step_expeditions() {
     gm.beyonce = bind_oid(&ctx, &mut gm, "beyonce", PyRep::Integer(i64::from(step4_sys))).await;
     let PyRep::List(more_anoms) = ok(&ctx, &mut gm, "scanSvc", "GetCombatAnomalyInstances", &[]).await else { panic!("more anoms") };
     let a_id = site_id_of(&more_anoms[0]);
-    warp_to_stuff_and_clear_site(&ctx, &mut gm, step4_sys, "dungeon", PyRep::String(a_id.clone()), &a_id, &gm_guns, Some(3)).await;
+    warp_to_stuff_and_clear_site(&ctx, &mut gm, step4_sys, "dungeon", PyRep::String(a_id.clone()), &a_id, &gm_guns, Some(esc_seed)).await;
     assert_eq!(extract_rowset_rows(&ok(&ctx, &mut gm, "dungeonExplorationMgr", "GetMyEscalatingPathDetails", &[]).await).1.len(), 1);
     ctx.advance_secs(86_405);
     assert!(extract_rowset_rows(&ok(&ctx, &mut gm, "dungeonExplorationMgr", "GetMyEscalatingPathDetails", &[]).await).1.is_empty());

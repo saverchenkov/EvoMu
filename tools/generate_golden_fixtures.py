@@ -188,9 +188,10 @@ def encode_destiny_ball(mode, pos, vel, max_vel, mass=1067000.0, radius=37.0, in
     buf.extend(struct.pack("<ff", inertia, speed_frac))
     # Mode sector
     buf.append(0xFF)  # formationID
-    if mode == 0:  # Goto
+    if mode == 0:  # Goto (world-space gotoPoint = pos + dir.normalize() * 1e16, #989)
         d = extra["direction"]
-        buf.extend(struct.pack("<ddd", d.x, d.y, d.z))
+        gp = pos + d.normalize() * 1.0e16
+        buf.extend(struct.pack("<ddd", gp.x, gp.y, gp.z))
     elif mode == 1:  # Follow
         buf.extend(struct.pack("<qf", extra["target_id"], extra["range"]))
     elif mode == 2:  # Stop

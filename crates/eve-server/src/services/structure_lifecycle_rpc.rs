@@ -132,7 +132,7 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
                     let (Some(x), Some(z)) = (ax.as_f64(), az.as_f64()) else {
                         return Err(err("InvalidAnchorCoordinates", "Anchoring coordinates must be valid numbers"));
                     };
-                    Some(DVec3::new(x, ship_ball.position.y, z))
+                    Some(ship_ball.position + DVec3::new(x, 0.0, z))
                 }
                 _ => return Err(err("InvalidAnchorCoordinates", "Anchoring coordinates must be valid numbers")),
             };

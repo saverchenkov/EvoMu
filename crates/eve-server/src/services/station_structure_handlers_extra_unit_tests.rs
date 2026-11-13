@@ -509,6 +509,29 @@ fn get_structures_directory_info_standing_gates_and_fulcrum_timers() {
             .code,
         "StationServiceUnavailable"
     );
+    // GH-997: Paired multi-ID UI station services (e.g. Industry (14 Factory, 15 Laboratory))
+    // must allow standing check for 15 at Jita 4-4 CNAP (which offers 14), while still rejecting
+    // 15 at NPC stations that offer neither 14 nor 15.
+    assert!(
+        !crate::services::station_structure::npc_station_offers_service(&ctx.sde, 60_003_760, 15)
+            && crate::services::station_structure::npc_station_offers_service(&ctx.sde, 60_003_760, 14)
+    );
+    assert_eq!(
+        evaluate_station_service_standing_gate(&ctx, char_id, 60_003_760, 15)
+            .expect("Jita 4-4 offers Factory (14) so standing check for paired Laboratory (15) succeeds"),
+        PyRep::Bool(true)
+    );
+    if let Some(&no_ind_st) = ctx.sde.stations.keys().find(|&&sid| {
+        !crate::services::station_structure::npc_station_offers_service(&ctx.sde, sid, 14)
+            && !crate::services::station_structure::npc_station_offers_service(&ctx.sde, sid, 15)
+    }) {
+        assert_eq!(
+            evaluate_station_service_standing_gate(&ctx, char_id, no_ind_st, 15)
+                .unwrap_err()
+                .code,
+            "StationServiceUnavailable"
+        );
+    }
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.fw_runtime

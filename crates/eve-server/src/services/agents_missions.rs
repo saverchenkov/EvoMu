@@ -344,14 +344,41 @@ pub async fn handle_with_bound(
                             .as_ref().and_then(|mt| {
                                 if m.state == "Accepted" { mt.accept_expiry_unix } else { Some(mt.offer_expiry_unix) }
                             }).unwrap_or(now + 86_400);
-                        let bms: Vec<PyRep> = snap.bookmarks.values().filter(|b| {
+                        let ct = tmpl.and_then(|t| t.content_template.as_deref()).unwrap_or_default();
+                        let bm_hint = if ct.contains("Trade") {
+                            "UI/Agents/MissionTypes/Trade"
+                        } else if tmpl.is_some_and(|t| t.is_courier)
+                            || ct.contains("Courier")
+                            || meta.as_ref().and_then(|mt| mt.destination_station_id).is_some()
+                        {
+                            "UI/Agents/MissionTypes/Courier"
+                        } else if tmpl.is_some_and(|t| t.title.to_lowercase().contains("mining"))
+                            || ct.contains("Mining")
+                        {
+                            "UI/Agents/MissionTypes/Mining"
+                        } else {
+                            "UI/Agents/MissionTypes/Encounter"
+                        };
+                        let mut matching_bms: Vec<&eve_db::BookmarkRecord> = snap
+                            .bookmarks
+                            .values()
+                            .filter(|b| {
                                 b.owner_id == char_id
                                     && b.solar_system_id == m.solar_system_id
                                     && b.memo.contains("Mission Pocket")
-                            }).map(|b| {
+                            })
+                            .collect();
+                        matching_bms.sort_by_key(|b| b.bookmark_id);
+                        let bms: Vec<PyRep> = matching_bms
+                            .into_iter()
+                            .enumerate()
+                            .map(|(idx, b)| {
                                 PyRep::keyval([
                                     ("bookmarkID", PyRep::Integer(b.bookmark_id)),
                                     ("solarSystemID", PyRep::Integer(b.solar_system_id as i64)),
+                                    ("locationID", PyRep::Integer(b.solar_system_id as i64)),
+                                    ("locationNumber", PyRep::Integer(idx as i64)),
+                                    ("hint", PyRep::String(bm_hint.into())),
                                     ("label", PyRep::String(b.label.clone())),
                                     ("x", PyRep::Real(b.x)),
                                     ("y", PyRep::Real(b.y)),
@@ -565,6 +592,20 @@ pub async fn handle_with_bound(
                             .then_some(mission_id)
                     })
                     .unwrap_or(213) as i64;
+                let dungeon_owner_id = u32::try_from(sde_dungeon_id)
+                    .ok()
+                    .and_then(|did| ctx.sde.dungeons.get(&did))
+                    .and_then(|d| d.faction_id)
+                    .map(i64::from)
+                    .filter(|&v| v > 0)
+                    .or_else(|| {
+                        ctx.sde
+                            .agents
+                            .get(&m.agent_id)
+                            .map(|a| a.corporation_id)
+                            .filter(|&v| v > 0)
+                    })
+                    .unwrap_or(1_000_002);
                 let mut dun_entries = vec![
                     (PyRep::String("dungeonID".into()), PyRep::Integer(sde_dungeon_id)),
                     (PyRep::String("solarsystemID".into()), PyRep::Integer(m.solar_system_id as i64)),
@@ -573,7 +614,7 @@ pub async fn handle_with_bound(
                     (PyRep::String("stationID".into()), PyRep::Integer(origin_sid)),
                     (PyRep::String("typeID".into()), PyRep::Integer(1529)),
                     (PyRep::String("location".into()), make_loc(origin_sid, "dungeon")),
-                    (PyRep::String("ownerID".into()), PyRep::Integer(m.agent_id)),
+                    (PyRep::String("ownerID".into()), PyRep::Integer(dungeon_owner_id)),
                     (PyRep::String("optional".into()), PyRep::Bool(false)),
                     (
                         PyRep::String("objectiveCompleted".into()),
@@ -739,10 +780,29 @@ pub async fn handle_with_bound(
                             && agent_info.station_id.is_some()
                             && agent_info.station_id != session.station_id)
                     {
+                        let sys_label = agent_info
+                            .solar_system_id
+                            .map(|sid| {
+                                ctx.sde
+                                    .solar_systems
+                                    .get(&sid)
+                                    .map(|s| s.name.clone())
+                                    .unwrap_or_else(|| sid.to_string())
+                            })
+                            .unwrap_or_else(|| "unknown system".to_string());
+                        let station_label = agent_info
+                            .station_id
+                            .map(|stid| {
+                                ctx.sde
+                                    .stations
+                                    .get(&stid)
+                                    .map(|s| s.name.clone())
+                                    .unwrap_or_else(|| stid.to_string())
+                            })
+                            .unwrap_or_else(|| "space".to_string());
                         if is_implicit_greeting {
                             let msg = format!(
-                                "Please dock at my station in system {:?} (station {:?}) if you wish to request a new assignment.",
-                                agent_info.solar_system_id, agent_info.station_id
+                                "Please dock at my station in {sys_label} ({station_label}) if you wish to request a new assignment."
                             );
                             return Some(Ok(PyRep::keyval([
                                 ("agentID", PyRep::Integer(agent_id)),
@@ -753,7 +813,7 @@ pub async fn handle_with_bound(
                                 ("dialogue", PyRep::List(Vec::new())),
                             ])));
                         }
-                        return Some(Err(BridgeRpcError { code: "AgentNotCoLocated".into(), message: format!("Agent {agent_id} is in system {:?} / station {:?}, not character's current location (system {sys_id}, station {:?})", agent_info.solar_system_id, agent_info.station_id, session.station_id), client_error: None }));
+                        return Some(Err(BridgeRpcError { code: "AgentNotCoLocated".into(), message: format!("Agent {agent_id} is in system {sys_label} / station {station_label}, not character's current location (system {sys_id}, station {:?})", session.station_id), client_error: None }));
                     }
                     if is_storyline_agent_type(agent_info.agent_type_id) {
                         return Some(Err(BridgeRpcError { code: "StorylineAgentRequiresReferral".into(), message: format!("Storyline agent {agent_id} (agentType {}) cannot be requested directly without a 16-mission referral", agent_info.agent_type_id), client_error: None }));
@@ -1185,6 +1245,7 @@ pub async fn handle_with_bound(
                             snap.sp6_lifecycle.mission_initial_npc_counts.insert(format!("{char_id}:{mission_id}"), count as u32);
                             snap.sp6_lifecycle.mission_initial_npc_types.insert(format!("{char_id}:{mission_id}"), wave_tids);
                         }
+                        let mut granted_courier_item: Option<InventoryItemRecord> = None;
                         if let Some(mut meta) = load_mission_meta(snap, char_id, mission_id) {
                             meta.accepted_at_unix = Some(now);
                             meta.accept_expiry_unix = Some(now + accept_dur);
@@ -1200,19 +1261,21 @@ pub async fn handle_with_bound(
                                     .ok_or_else(|| BridgeRpcError { code: "InvalidMissionLocation".into(), message: "Agent has no valid station location".into(), client_error: None })?;
                                 snap.next_entity_id += 1;
                                 let cid = snap.next_entity_id;
-                                snap.items.insert(
-                                    cid,
-                                    InventoryItemRecord { item_id: cid, type_id: cargo_tid, owner_id: char_id, location_id: agent_station, flag: InventoryFlag::Hangar, quantity: cargo_qty, singleton: false, version: 1, ..Default::default() },
-                                );
+                                let item = InventoryItemRecord { item_id: cid, type_id: cargo_tid, owner_id: char_id, location_id: agent_station, flag: InventoryFlag::Hangar, quantity: cargo_qty, singleton: false, version: 1, ..Default::default() };
+                                snap.items.insert(cid, item.clone());
                                 snap.item_custom_names.insert(cid, format!("courier_cargo:{char_id}:{mission_id}"));
                                 meta.granted_courier_item_id = Some(cid);
                                 meta.granted_courier_qty = cargo_qty;
+                                granted_courier_item = Some(item);
                             }
                             save_mission_meta(snap, char_id, &meta);
                         }
-                        Ok(spawned_npcs)
+                        Ok((spawned_npcs, granted_courier_item))
                     });
-                    let spawned_npcs = match res { Ok(v) => v, Err(e) => return Some(Err(e)) };
+                    let (spawned_npcs, granted_courier_item) = match res { Ok(v) => v, Err(e) => return Some(Err(e)) };
+                    if let Some(ref courier_item) = granted_courier_item {
+                        ctx.notify_item_mutation(char_id, None, Some(courier_item));
+                    }
                     let first_npc_id = spawned_npcs.first().map(|(id, _)| *id);
 
                     let site_origin = deterministic_mission_site_origin(ctx, mission_sys_id, mission_id);

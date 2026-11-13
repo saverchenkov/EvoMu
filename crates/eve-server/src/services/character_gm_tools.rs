@@ -1128,6 +1128,20 @@ pub async fn handle_gm_slash_ext(
                 let mut meta = ctx.build_ship_slim_meta(cid, type_id);
                 meta.char_id = None;
                 let _ = handle.spawn_ball_with_meta(ball, combat, meta).await;
+                if inv_type.category_id == 6 {
+                    // Record `isInteractive = false` on the ballpark for unpiloted spawned ship hulls
+                    // so subsequent `SetState` / `AddBalls2` / `SetBallInteractive` frames keep
+                    // `ball.isInteractive == False` until boarded (`#983`).
+                    let _ = handle
+                        .emit_destiny_event(
+                            entity_id,
+                            eve_destiny::DestinyEvent::SetBallInteractive {
+                                ball_id: entity_id,
+                                is_interactive: false,
+                            },
+                        )
+                        .await;
+                }
             }
             spawned_ids.push(entity_id);
         }

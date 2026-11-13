@@ -1226,11 +1226,9 @@ pub async fn handle(
                 match res {
                     Ok((item, loc_id)) => {
                         let item_id = item.item_id;
-                        let item_row = eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(
-                            crate::services::inventory_bound::item_to_packed_cells(ctx, &item),
-                        );
-                        // ixLocationID (3) = 0 signals newly created item arrival to client `invCache`
-                        let _ = ctx.notify_item_change(cid, item_row, vec![(3, PyRep::Integer(0))]);
+                        // Issue #988: route newly created items through `notify_item_mutation`
+                        // so `OnItemChange` and blueprint `OnBlueprintsUpdated(ownerID)` stay consistent.
+                        ctx.notify_item_mutation(cid, None, Some(&item));
                         Some(Ok(PyRep::keyval([
                             ("command", PyRep::String(cmd.to_string())),
                             ("itemID", PyRep::Integer(item_id)),
@@ -1661,6 +1659,33 @@ async fn handle_slash_teleport(
                 DVec3::new(10_000.0, 0.0, 0.0)
             }
         };
+
+        if was_in_space && old_sys_id > 0 {
+            let removed_active = ctx
+                .active_warps
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&ship_id)
+                .is_some();
+            let removed_return = ctx
+                .return_warps
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&ship_id);
+            let pre_handle = ctx.systems.get_or_spawn(old_sys_id);
+            let ball_warping = pre_handle
+                .get_ball_snapshot(ship_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|(_, b)| matches!(b.mode, MovementMode::Warp { .. }));
+            if removed_active || removed_return || ball_warping {
+                // #994: Emit and flush Stop + effects.Warping(0) in a preceding DoDestinyUpdate
+                // before SetState / SessionChangeNotification tears down the client shipModel.
+                let _ = pre_handle.force_stop_warp(ship_id);
+                let _ = pre_handle.flush_peer_observer_updates(None).await;
+            }
+        }
 
         let persisted_pos;
         if old_sys_id != dest_sys_id {

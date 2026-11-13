@@ -1559,12 +1559,18 @@ pub(crate) async fn handle_dogma_im(
                     item_ids.push(1);
                 }
             }
-            let now_ft = ctx.now_blueos_filetime_ticks();
+            // Issue #990: V24.01 `eveDrones/droneDamageTracker.pyj` & `eveInflight/damageStateValue.pyj`
+            // unpack `shieldInfo` as `(shieldRatio, tauMs = rechargeMs / 5.0, simTimeFt)` and evaluate
+            // `exp((time - blue.os.GetSimTime()) / 10000.0 / tau)`. Anchor `sim_ft` to real OS wallclock
+            // FILETIME ticks (`host_wall_unix_secs_and_nanos`) so GM virtual-clock advances without
+            // `DoSimClockRebase` never push `time` into the client's future and overflow `math.exp`.
+            let (secs, nanos) = eve_db::clock::host_wall_unix_secs_and_nanos();
+            let sim_ft = (secs as i64 + 11_644_473_600) * 10_000_000 + (nanos as i64 / 100);
             let entries: Vec<(PyRep, PyRep)> = ctx.db.with_snapshot(|snap| {
                 item_ids
                     .into_iter()
                     .map(|iid| {
-                        let (armor_dmg, hull_dmg, shield_cur, shield_cap) = snap
+                        let (armor_dmg, hull_dmg, shield_cur, shield_cap, recharge_ms) = snap
                             .items
                             .get(&iid)
                             .filter(|it| it.owner_id == char_id || session.has_gm_role())
@@ -1576,16 +1582,36 @@ pub(crate) async fn handle_dogma_im(
                                     it.type_id,
                                     None,
                                 );
-                                (state.armor_damage, state.hull_damage, state.shield_hp, state.max_shield)
+                                let recharge = it
+                                    .dynamic_attributes
+                                    .get(&479)
+                                    .copied()
+                                    .or_else(|| {
+                                        ctx.sde
+                                            .types
+                                            .get(&it.type_id)
+                                            .and_then(|t| t.default_attributes.get(&479).copied())
+                                    })
+                                    .filter(|&v| v > 0.0)
+                                    .unwrap_or(100_000.0);
+                                (
+                                    state.armor_damage,
+                                    state.hull_damage,
+                                    state.shield_hp,
+                                    state.max_shield,
+                                    recharge,
+                                )
                             })
-                            .unwrap_or((0.0, 0.0, 400.0, 400.0));
+                            .unwrap_or((0.0, 0.0, 400.0, 400.0, 100_000.0));
+                        let shield_ratio = (shield_cur / shield_cap.max(1.0)).clamp(0.0, 1.0);
+                        let tau_ms = (recharge_ms / 5.0).max(1.0);
                         let kv = PyRep::keyval([
                             (
                                 "shieldInfo",
                                 PyRep::Tuple(vec![
-                                    PyRep::Real(shield_cur),
-                                    PyRep::Real(shield_cap),
-                                    PyRep::Integer(now_ft),
+                                    PyRep::Real(shield_ratio),
+                                    PyRep::Real(tau_ms),
+                                    PyRep::Integer(sim_ft),
                                 ]),
                             ),
                             ("armorDamage", PyRep::Real(armor_dmg)),

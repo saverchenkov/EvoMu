@@ -214,7 +214,8 @@ async fn test_set_state_full_state_buffer_for_observer() {
     let b_ball = park.balls[&SHIP_B].clone();
     assert_free_ball_prefix(&mut c, &b_ball, DST_BALL_GOTO, 1_000_171, 0);
     assert_eq!(c.u8(), 0xFF, "GOTO_Struct.formationID");
-    assert_eq!([c.f64(), c.f64(), c.f64()], [1.0, 0.0, 0.0], "GOTO_Struct direction");
+    let expected_goto = (b_ball.position + DVec3::X * 1.0e16).to_array();
+    assert_eq!([c.f64(), c.f64(), c.f64()], expected_goto, "GOTO_Struct world-space gotoPoint");
     assert_eq!(c.1, state.len(), "no trailing bytes: 5 + 100 + 124");
     assert_eq!(state.len(), 229);
 }

@@ -529,3 +529,89 @@ async fn anchor_ansiblex_with_v24_extra_vars_auto_links_reciprocal_gates() {
         assert_eq!(ext.jump_bridge_links.get(&jb_b), Some(&jb_a));
     });
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn handle_anchor_10arg_treats_xz_offsets_as_relative_to_ship_gh995() {
+    let mut ctx = test_ctx();
+    let tid = 995_001u32;
+    seed_astrahus_type(&mut ctx, tid, false);
+
+    let sys_id = 30_000_144_u32;
+    let char_id = 99_500_010_i64;
+    let corp_id = 98_995_010_i64;
+    let ship_id = 99_500_020_i64;
+    seed_char_corp_ship(&ctx, char_id, corp_id, sys_id, ship_id, true);
+    let ship_pos = DVec3::new(1.0e11, 2.0e10, -3.0e11);
+    spawn_ship_ball(&ctx, sys_id, ship_id, ship_pos).await;
+    let mut sess = make_session(char_id, corp_id, sys_id, Some(ship_id), 1);
+
+    let item_ok = 99_500_001_i64;
+    let item_too_close = 99_500_002_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        for iid in [item_ok, item_too_close] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::Cargo,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    // Relative offset (60_000, 0) from ship at (1e11, 2e10, -3e11) succeeds and anchors at ship + offset.
+    let res = handle_anchor(
+        &ctx,
+        &mut sess,
+        &[
+            PyRep::Integer(item_ok),
+            PyRep::Real(60_000.0),
+            PyRep::Real(0.0),
+            PyRep::Real(0.0),
+            PyRep::Integer(0),
+            PyRep::String("GH995 Astrahus".into()),
+            PyRep::String("".into()),
+            PyRep::Integer(1),
+            PyRep::Integer(12),
+            PyRep::None,
+        ],
+    )
+    .await
+    .expect("10-arg anchor with valid relative (dx, dz) offset should succeed");
+    let struct_id = match res {
+        PyRep::KeyVal(kv) => kv.get("structureID").and_then(|v| v.as_i64()).unwrap(),
+        _ => panic!("expected KeyVal"),
+    };
+    ctx.db.with_snapshot(|snap| {
+        let st = snap.structures.get(&struct_id).expect("anchored structure");
+        assert_eq!(st.position, [ship_pos.x + 60_000.0, ship_pos.y, ship_pos.z]);
+    });
+
+    // Negative: relative offset (10_000, 0) is < 50 km from ship and must fail distance validation.
+    let err = handle_anchor(
+        &ctx,
+        &mut sess,
+        &[
+            PyRep::Integer(item_too_close),
+            PyRep::Real(10_000.0),
+            PyRep::Real(0.0),
+            PyRep::Real(0.0),
+            PyRep::Integer(0),
+            PyRep::String("Too Close".into()),
+            PyRep::String("".into()),
+            PyRep::Integer(1),
+            PyRep::Integer(12),
+            PyRep::None,
+        ],
+    )
+    .await
+    .expect_err("10 km offset from ship must fail minimum 50 km distance check");
+    assert_eq!(err.code, "InvalidAnchorDistanceFromShip");
+}
