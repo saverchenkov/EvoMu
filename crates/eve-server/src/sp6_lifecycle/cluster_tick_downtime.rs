@@ -150,7 +150,7 @@ pub fn recover_scanner_probes_on_downtime(ctx: &ServerContext) -> (usize, usize)
         ctx.db.with_mut_snapshot(|snap| {
             let mut rec = Vec::new();
             let mut unrec = Vec::new();
-            let add_stack = |items: &mut HashMap<i64, eve_db::InventoryItemRecord>,
+            let add_stack = |items: &mut eve_db::CowMap<i64, eve_db::InventoryItemRecord>,
                              next_id: &mut i64,
                              owner_id: i64,
                              ship_id: i64,
@@ -158,13 +158,17 @@ pub fn recover_scanner_probes_on_downtime(ctx: &ServerContext) -> (usize, usize)
                              p_type_id: u32,
                              qty: i32,
                              exclude_id: i64| {
-                if let Some(st) = items.values_mut().find(|i| {
-                    i.owner_id == owner_id
-                        && i.location_id == ship_id
-                        && i.flag == flag
-                        && i.item_id != exclude_id
-                        && i.type_id == p_type_id
-                }) {
+                let existing_id = items
+                    .values()
+                    .find(|i| {
+                        i.owner_id == owner_id
+                            && i.location_id == ship_id
+                            && i.flag == flag
+                            && i.item_id != exclude_id
+                            && i.type_id == p_type_id
+                    })
+                    .map(|i| i.item_id);
+                if let Some(st) = existing_id.and_then(|id| items.get_mut(&id)) {
                     st.quantity += qty;
                     st.version += 1;
                 } else {

@@ -1,5 +1,6 @@
 //! `WorldStateSnapshot` container and dynamic world/ESI event and campaign records (`ESI-3`).
 
+pub use crate::cow::*;
 pub use crate::durable_domain_types::*;
 use crate::types::*;
 use eve_sde::{SolarSystemId, TypeId};
@@ -631,15 +632,15 @@ pub struct WorldStateSnapshot {
     #[serde(skip, default)]
     pub sessions: HashMap<u64, OnlineSessionRecord>,
     pub accounts: HashMap<String, AccountRecord>,
-    pub characters: HashMap<i64, CharacterRecord>,
-    pub skills: HashMap<i64, HashMap<TypeId, TrainedSkillRecord>>,
-    pub skill_queues: HashMap<i64, Vec<SkillQueueEntry>>,
+    pub characters: CowMap<i64, CharacterRecord>,
+    pub skills: CowMap<i64, HashMap<TypeId, TrainedSkillRecord>>,
+    pub skill_queues: CowMap<i64, Vec<SkillQueueEntry>>,
     pub jump_clones: HashMap<i64, Vec<JumpCloneRecord>>,
     pub active_implants: HashMap<i64, Vec<TypeId>>,
-    pub items: HashMap<i64, InventoryItemRecord>,
+    pub items: CowMap<i64, InventoryItemRecord>,
     #[serde(skip, default)] pub transient_item_attributes: HashMap<i64, HashMap<AttributeId, f64>>,
     pub saved_fittings: HashMap<i64, SavedFittingRecord>,
-    pub market_orders: HashMap<i64, MarketOrderRecord>,
+    pub market_orders: CowMap<i64, MarketOrderRecord>,
     pub wallet_journal: Vec<WalletJournalEntry>,
     pub contracts: HashMap<i64, ContractRecord>,
     pub industry_jobs: HashMap<i64, IndustryJobRecord>,

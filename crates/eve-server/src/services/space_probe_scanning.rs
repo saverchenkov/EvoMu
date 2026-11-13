@@ -1669,8 +1669,12 @@ async fn handle_recover_probes(
             let (mut in_launcher, mut in_cargo) = (0i32, 0i32);
             let (mut rec, mut unrec) = (Vec::new(), Vec::new());
             let mut touched_pre: HashMap<i64, Option<eve_db::InventoryItemRecord>> = HashMap::new();
-            let mut add_stack = |items: &mut HashMap<i64, eve_db::InventoryItemRecord>, next_id: &mut i64, ship_id: i64, flag: InventoryFlag, p_type_id: u32, qty: i32, exclude_id: i64| {
-                if let Some(st) = items.values_mut().find(|i| i.owner_id == char_id && i.location_id == ship_id && i.flag == flag && i.item_id != exclude_id && i.type_id == p_type_id) {
+            let mut add_stack = |items: &mut eve_db::CowMap<i64, eve_db::InventoryItemRecord>, next_id: &mut i64, ship_id: i64, flag: InventoryFlag, p_type_id: u32, qty: i32, exclude_id: i64| {
+                let existing_id = items
+                    .values()
+                    .find(|i| i.owner_id == char_id && i.location_id == ship_id && i.flag == flag && i.item_id != exclude_id && i.type_id == p_type_id)
+                    .map(|i| i.item_id);
+                if let Some(st) = existing_id.and_then(|id| items.get_mut(&id)) {
                     touched_pre.entry(st.item_id).or_insert_with(|| Some(st.clone()));
                     st.quantity += qty;
                     st.version += 1;

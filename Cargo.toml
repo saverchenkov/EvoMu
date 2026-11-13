@@ -36,6 +36,7 @@ toml = "0.8"
 proptest = "1.5"
 h2 = "0.4"
 http = "1"
+imbl = { version = "7.0.2", features = ["serde"] }
 
 [profile.release]
 overflow-checks = true

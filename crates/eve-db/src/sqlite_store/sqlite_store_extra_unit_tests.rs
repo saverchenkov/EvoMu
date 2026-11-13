@@ -136,7 +136,7 @@ fn fp_market_contract_system_structure_and_slices_detect_mutations() {
     assert_ne!(fp_market_order(&MarketOrderRecord { is_npc: true, ..base_ord.clone() }), ord_fp);
     assert_ne!(fp_market_order(&MarketOrderRecord { escrow: IskCents(1001), ..base_ord.clone() }), ord_fp);
 
-    let mut orders = HashMap::new();
+    let mut orders = crate::CowMap::new();
     let d0 = fp_market_orders_digest(&orders);
     orders.insert(1, base_ord.clone());
     assert_ne!(fp_market_orders_digest(&orders), d0);

@@ -11,6 +11,7 @@
 pub mod accounts;
 pub mod characters;
 pub mod clock;
+pub mod cow;
 pub mod durable_domain_types;
 pub use durable_domain_types as d6_types;
 pub mod fw_seed;
@@ -53,6 +54,11 @@ mod sqlite_error_and_wal_delta_tests;
 pub use accounts::service_roles;
 pub use accounts::{base64url_decode_no_pad, base64url_encode_no_pad};
 pub use clock::{ServerClock, VirtualServerClock};
+pub use cow::{
+    cow_full_touch_by_site, cow_full_touch_total, reset_cow_full_touch_for_test, CowCell,
+    CowDiffItem, CowDiffIter, CowInlineDiffItem, CowInlineDiffIter, CowMap, CowMapInline,
+    IMBL_ORD_CHUNK_SIZE,
+};
 pub use fw_seed::DEFAULT_FW_WARZONE_SYSTEMS;
 pub use gateway_tokens::QuasarVerifiedToken;
 pub use inventory::{ConsumeExactOptions, TransferItemSpec};
