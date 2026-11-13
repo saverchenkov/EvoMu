@@ -221,12 +221,16 @@ fn gameplay_events_and_handler_rpc_edges() {
 
     let user_ctx = make_ctx(Some(cid), 0, now);
     let goals = mgr.get_or_init_goals_at(cid, now);
-    let reg = goals.iter().find(|g| g.template.category == 1).unwrap();
-    let cat1_uuid = reg.uuid;
+    let reg = goals
+        .iter()
+        .find(|g| (1..=5).contains(&g.template.category))
+        .expect("active rotating regular daily goal");
+    let reg_cat = reg.template.category;
+    let reg_uuid = reg.uuid;
     let target = reg.template.target;
 
     // eve.dailygoal.api.GetProgressRequest before completion -> field 3 set (not_completed = 1)
-    let prog_req = make_uuid_req("eve.dailygoal.api.GetProgressRequest", &cat1_uuid);
+    let prog_req = make_uuid_req("eve.dailygoal.api.GetProgressRequest", &reg_uuid);
     let prog_incomplete = dispatch(&router, &user_ctx, &prog_req).unwrap();
     let wm_inc = WireMessage::decode(&prog_incomplete.value).unwrap();
     assert!(wm_inc.fields.iter().any(|f| f.field_number == 3));
@@ -248,7 +252,7 @@ fn gameplay_events_and_handler_rpc_edges() {
     assert_eq!(dispatch(&router, &user_ctx, &empty_req).unwrap_err().0, STATUS_BAD_REQUEST);
 
     // on_gameplay_event increments matching category & marks completed when reaching target
-    mgr.on_gameplay_event(cid, 1, target, &router);
+    mgr.on_gameplay_event(cid, reg_cat, target, &router);
     let prog_done = dispatch(&router, &user_ctx, &prog_req).unwrap();
     let wm_done = WireMessage::decode(&prog_done.value).unwrap();
     assert!(wm_done.fields.iter().any(|f| f.field_number == 4));
@@ -282,7 +286,7 @@ fn gameplay_events_and_handler_rpc_edges() {
     };
     assert!(dispatch(&router, &user_ctx, &redeem_all_req).is_ok());
     let final_goals = mgr.get_or_init_goals_at(cid, now);
-    assert!(final_goals.iter().find(|g| g.uuid == cat1_uuid).unwrap().claimed);
+    assert!(final_goals.iter().find(|g| g.uuid == reg_uuid).unwrap().claimed);
     assert_eq!(final_goals.iter().filter(|g| g.claimed).count(), 1);
 
     // Direct helper assertions: daily_goal_window_unix, is_sde_rotating_regular_template,
@@ -301,9 +305,9 @@ fn gameplay_events_and_handler_rpc_edges() {
     assert!(!super::is_sde_rotating_regular_template(&reg_sde_tpl));
 
     let mut id_out = Vec::new();
-    encode_goal_identifier(&cat1_uuid, &mut id_out);
+    encode_goal_identifier(&reg_uuid, &mut id_out);
     assert_eq!(id_out.len(), 18);
-    assert_eq!(&id_out[2..], &cat1_uuid);
+    assert_eq!(&id_out[2..], &reg_uuid);
 
     let loc_bytes = super::encode_loc_message_id(500_123);
     assert!(!loc_bytes.is_empty());
