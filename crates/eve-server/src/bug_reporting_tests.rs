@@ -131,6 +131,7 @@ fn test_runtime_queue_dir_and_disk_lookup_fallback() {
 
 #[test]
 fn test_client_global_config_host_normalization_and_extras() {
+    let _env_guard = crate::lock_test_env_read();
     let ctx = ServerContext::new();
     ctx.set_esi_port(26_001);
     if let Ok(mut extra) = ctx.global_config_values.write() {
