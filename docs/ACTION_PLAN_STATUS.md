@@ -4,7 +4,7 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 6215 / 6320 ledger rows closed (98.34%)**, 2377 NA, 1621 tagged tests, 6923 passing tests. Flagged fake by the gap auditor: 106.
+**Parity: 6215 / 6328 ledger rows closed (98.21%)**, 2377 NA, 1621 tagged tests, 6952 passing tests. Flagged fake by the gap auditor: 106.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
@@ -13,7 +13,7 @@ The canonical plan is `.agents/skills/evomu-adversarial-review/references/action
 | esi | 197 | 197 | 0 | 0 |
 | feat | 1604 | 1489 | 94 | 21 |
 | notify | 1311 | 492 | 816 | 3 |
-| plan | 114 | 109 | 0 | 5 |
+| plan | 122 | 109 | 0 | 13 |
 | quasar | 1455 | 88 | 1328 | 39 |
 | rpc | 1373 | 1246 | 90 | 37 |
 | sde | 213 | 171 | 42 | 0 |
@@ -246,3 +246,16 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Z-6 | Pass every journey: row on the real client through tools/client-harness/run_jour… | SUPERVISOR_OWNED | 0/0 | — | NOT STARTED | Real-client journeys require execution via the V24 client journey harness. | bb5c2427e 2026-11-09 |
 | Z-7 | Reach workspace line coverage ≥ 90%. | SUPERVISOR_OWNED | 0/0 | — | PARTIAL | Coverage and mutation QA harness present; full workspace >=90% coverage and >=85% mutation gate pending. | bb5c2427e 2026-11-09 |
 | Z-8 | Final acceptance. The claims review is PASS and the gap audit is CLEAN on the fi… | BLOCKED_BY_FEATURES | 0/0 | test_parity_plan_z6_z7_z8_journeys_coverage_and_acceptance_gate, test_plan_z7_z8_test_thresholds_and_final_acceptance_ga | PARTIAL | Full canonical ledger, preflight static invariants, and final acceptance gate verification wired; awaits gap-audit clearance of remaining flagged rows. | bb5c2427e 2026-11-09 |
+
+## Phase LW: Living Universe v2 (post-Phase-Z; scheduled after current workstreams complete)
+
+| Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
+|---|---|---|---|---|---|---|---|
+| LW-1 | Config, FittedNpcRuntime, 50% Wreck Loot & FX (M1). [living_world] numeric confi… | UNTAGGED | 0/0 | — | NOT STARTED | Scheduled post-Phase-Z: numeric living_world TOML config, DoctrineTemplate and FittedNpcRuntime engine, wreck module drops, and OnSpecialFX moduleTypeID. | 234064427 2026-11-13 |
+| LW-2 | Hostility Matrix, NPC-vs-NPC Dogma & Wing AI (M1). Canonical Faction Hostility M… | UNTAGGED | 0/0 | — | NOT STARTED | Scheduled post-Phase-Z: canonical faction hostility matrix, NPC-vs-NPC Dogma combat parity, SlimItemMeta NPC corp rules, and WingGroup formation kinematics. | — |
+| LW-3 | Trade-Hub Undock/Dock, Escorted Caravans & Gate Ambushes (M2). 25s trade-hub und… | UNTAGGED | 0/0 | — | NOT STARTED | Scheduled post-Phase-Z: trade-hub undock and dock heartbeat, escorted freighter caravans, jump-freighter cyno runs, gate ambushes, and market depth loop. | — |
+| LW-4 | Fitted Orca/Porpoise/Rorqual Mining Fleets (MN-17) & Belt Raids (M3). Fitted Orc… | UNTAGGED | 0/0 | — | NOT STARTED | Scheduled post-Phase-Z: fitted Orca, Porpoise, and Rorqual multi-barge mining fleets, pirate belt raids, distress beacons, shared bursts, and ore buyback. | — |
+| LW-5 | Roaming Doctrines, Capital Armadas & 25v25 Grand Battles (M4). 600s roaming subc… | UNTAGGED | 0/0 | — | NOT STARTED | Scheduled post-Phase-Z: roaming subcap doctrines, cyno-in Titan and Carrier armadas, JumpPortal bridging, Grand Faction Battles, and Noctis salvage crews. | — |
+| LW-6 | Seeded NPC Moon Starbases & Lethal Upwell Structure Sieges (M5). seed_npc_moon_s… | UNTAGGED | 0/0 | — | NOT STARTED | Scheduled post-Phase-Z: bootstrap seeded NPC moon POS starbases and forward Citadels, NPC structure auto-defense, TakeControl gunnery, and lethal sieges. | — |
+| LW-7 | 3-Stage System-Wide Invasions & /livingworld GM Commands (M5). 3600s 3-stage Sys… | UNTAGGED | 0/0 | — | NOT STARTED | Scheduled post-Phase-Z: three-stage system-wide invasions across Triglavian, Drifter, Sansha, Pirate, and Rogue Drone archetypes plus livingworld GM command. | — |
+| LW-8 | Joinable NPC Fleet Finder Wings, Allied Cyno Hot-Drops & Nemesis (M6). Joinable … | UNTAGGED | 0/0 | — | NOT STARTED | Scheduled post-Phase-Z: joinable NPC open fleets in Fleet Finder, high-standing allied capital cyno hot-drops, tactical radio comms, and corp vendetta hunters. | 234064427 2026-11-13 |

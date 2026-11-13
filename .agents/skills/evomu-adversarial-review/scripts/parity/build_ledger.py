@@ -132,8 +132,8 @@ def main():
 
     with open(os.path.join(SKILL, "references", "action_plan.md")) as f:
         plan = f.read()
-    ids = sorted(set(re.findall(r"\*\*`?((?:S|D|P|SP|DG|C|MN|CH|E|SO|T|Q|ESI|Z)-\d+)`?\*\*", plan)) |
-                 set(re.findall(r"^\|\s*`?((?:S|D|P|SP|DG|C|MN|CH|E|SO|T|Q|ESI|Z)-\d+)`?\s*\|", plan, re.M)))
+    ids = sorted(set(re.findall(r"\*\*`?((?:S|D|P|SP|DG|C|MN|CH|E|SO|T|Q|ESI|Z|LW)-\d+)`?\*\*", plan)) |
+                 set(re.findall(r"^\|\s*`?((?:S|D|P|SP|DG|C|MN|CH|E|SO|T|Q|ESI|Z|LW)-\d+)`?\s*\|", plan, re.M)))
     for tid in ids:
         rows.append(row("plan:%s" % tid, "plan", tid,
                         "Canonical task %s meets every 'Done when' criterion in action_plan.md." % tid,

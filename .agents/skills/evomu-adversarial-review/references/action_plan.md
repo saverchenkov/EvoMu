@@ -412,6 +412,25 @@ Pinned spec: `references/parity/sources/esi_openapi.json` (197 operations, 182 p
 
 ---
 
+## Phase LW: Living Universe v2 (post-Phase-Z; scheduled after current workstreams complete)
+
+**Reference:** [`docs/spec/06_living_world_v2_prd.md`](../../../../docs/spec/06_living_world_v2_prd.md)
+
+| ID | Task | Done when |
+|---|---|---|
+| LW-1 | **Config, `FittedNpcRuntime`, 50% Wreck Loot & FX (`M1`).** `[living_world]` numeric config (`config.rs`, `evomu.toml`), `OnceLock<DoctrineTemplate>` + in-memory `FittedNpcRuntime`, bound `dogmaIM` info support, `death_pipeline.rs` `50%` module/charge/cargo wreck materialization, and 14-arg `OnSpecialFX` (`arg[2]` `moduleTypeID` + gate/cyno/mining FX). | `LW-1` tests pass (`< 0.3 ms/tick` baseline); fitted NPC wrecks drop 50% fitted modules/charges; 14-arg `OnSpecialFX` verified on wire. |
+| LW-2 | **Hostility Matrix, NPC-vs-NPC Dogma & Wing AI (`M1`).** Canonical Faction Hostility Matrix (Empires, Pirates, Triglavians `500026`, EDENCOM `500027`, Drifters `500024`, Rogue Drones `500025`, Sleepers `500021`), `SlimItemMeta` (`char_id = None` + real SDE NPC corp IDs), 3-phase lock-rank `npc_ai.rs` `1.0x` turret/missile/EWAR/rep evaluation, and `WingGroup` formation kinematics. | `LW-2` 12v12 NPC-vs-NPC combat test passes (`< 0.3 ms/tick`) with full Dogma weapon/EWAR/rep evaluation and overview hostility brackets. |
+| LW-3 | **Trade-Hub Undock/Dock, Escorted Caravans & Gate Ambushes (`M2`).** `25s` trade-hub undock/dock choreography (`cluster_tick.rs`), escorted multi-ship Freighter/DST caravans (`living_world_haulers.rs`), `420s` Jump-Freighter cyno runs, `900s` pirate gate ambushes, closed-loop market depth feedback & Escort Contracts. | `LW-3` tests pass; trade hubs undock/dock every `25s` by default; intercepted haulers drop 50% cargo and adjust market depth. |
+| LW-4 | **Fitted Orca/Porpoise/Rorqual Mining Fleets (`MN-17`) & Belt Raids (`M3`).** Fitted `Orca`/`Porpoise`/`Rorqual` + multi-barge ops via `mining_cycle::resolve_cycle` (`MN-17`), `720s` pirate/Rogue Drone belt raids, `Industrial Distress Beacon` + Navy relief spawn, shared Foreman bursts & on-grid ore buyback (`standing >= +2.0`). | `LW-4` tests pass; NPC mining fleets deplete real asteroid qty via `MN-17`, emit `effects.Mining`, and trigger belt raid + Navy relief choreography. |
+| LW-5 | **Roaming Doctrines, Capital Armadas & 25v25 Grand Battles (`M4`).** `600s` roaming subcap doctrines, `1500s` cyno-in fitted Titan/Supercarrier/Carrier/Dread/FAX armadas + `JumpPortal` bridging, `1800s` `25v25` Grand Faction Battles with fitted Doomsdays (`4489..=4492`), `1800s` capital wreckage fields & `Noctis` tractor/salvage crews. | `LW-5` 25v25 Grand Battle benchmark passes (`< 0.5 ms/tick`); Titan Doomsday FX (`effects.SuperWeapon*`) and `1800s` capital wreck fields verified. |
+| LW-6 | **Seeded NPC Moon Starbases & Lethal Upwell Structure Sieges (`M5`).** `seed_npc_moon_starbases = true` server-bootstrap seeder (`S-5` preserved), generalized `HostileTargetInfo` (`pilot_id: Option<i64>`) in `structure_control_ops.rs` for NPC auto-defense + `structureControl.TakeControl` gunnery, and `player_structure_siege_mode = "lethal"` full reinforcement/destruction + FOB Siege Anchor counterplay. | `LW-6` tests pass; seeded NPC POS auto-defend via `HostileTargetInfo`; lethal siege drives shield -> armor -> hull -> `AssetSafety` wrap unless FOB Siege Anchor is destroyed. |
+| LW-7 | **3-Stage System-Wide Invasions & `/livingworld` GM Commands (`M5`).** `3600s` 3-stage System-Wide Invasions (`Reconnaissance -> Starbase & Structure Siege -> Flagship Climax` with `World Ark` `52361`, `Revenant` `3514`, Drifter `Tyrannos` vs Empire Navy Titan taskforce) wired to `OnTaleData` / `OnInsurgencyCampaignUpdatedForLocation` HUD + `/livingworld` GM slash commands. | `LW-7` tests pass; 3-stage invasion state machine, HUD notifications, and `/livingworld status|spawn|stage|clear` verified. |
+| LW-8 | **Joinable NPC Fleet Finder Wings, Allied Cyno Hot-Drops & Nemesis (`M6`).** Joinable NPC Open Fleets in Fleet Finder (`fleetProxy.GetAvailableFleetAds` / `fleetProxy.ApplyToJoinFleet` using real SDE Agent `character_id`s `3_008_416..3_019_999`), `>= +5.0` standing Allied Capital Cyno Hot-Drop, `90s`-gated Local/Fleet tactical callouts, and NPC Corp Vendetta / Bounty Hunter squads. | `LW-8` tests pass; players can join NPC fleets via Fleet Finder, trigger allied capital hot-drops via cyno, and encounter Nemesis bounty squads. |
+
+**Exit gate:** `LW-1`..`LW-8` closed; 25v25 Grand Battle tick budget `< 0.5 ms/tick`; review non-FAIL.
+
+---
+
 ## Out of scope / obsolete in V24
 POS towers and reactions at POS (use Upwell refineries) · medical clone grades · LSC protocol (use XMPP) · XML API server · live updates · the pre-2013 certificate system · 2010 factional warfare.
 
@@ -452,3 +471,4 @@ Fleet warp · jump clone rules · invention details · implants · notification 
 | **Phase Q: Quasar backends** | **Partial (1/9)** | 1,328 client-internal protos NA; ~60 `quasar:` rows reopened by gap audits for SQLite persistence and live semantics. |
 | **Phase ESI: ESI + SSO** | **Partial (3/7)** | 197 ESI routes implemented; SSO launcher login (`ESI-1`) and shared SQLite state with MachoNet (`D-6`) open. |
 | **Phase Z: Ledger closure** | **74.83% Overall Parity** | **4,750 / 6,349 total ledger rows closed**, 352 `fake_done` rows under active remediation, 0 Santa blocks. |
+| **Phase LW: Living Universe v2** | **Not started (0/8)** | Post-Phase-Z (`docs/spec/06_living_world_v2_prd.md`); scheduled after current parity and remediation workstreams complete (`LW-1`..`LW-8`). |

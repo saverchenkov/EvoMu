@@ -1,6 +1,6 @@
 {
  "version": 1,
- "row_count": 5748,
+ "row_count": 5756,
  "rows": [
   {
    "id": "rpc:FastCheckoutService.BuyOffer",
@@ -72354,6 +72354,70 @@
    "category": "plan",
    "title": "ESI-7",
    "acceptance": "Canonical task ESI-7 meets every 'Done when' criterion in action_plan.md.",
+   "na_allowed": false,
+   "attest_ok": false
+  },
+  {
+   "id": "plan:LW-1",
+   "category": "plan",
+   "title": "LW-1",
+   "acceptance": "Canonical task LW-1 meets every 'Done when' criterion in action_plan.md.",
+   "na_allowed": false,
+   "attest_ok": false
+  },
+  {
+   "id": "plan:LW-2",
+   "category": "plan",
+   "title": "LW-2",
+   "acceptance": "Canonical task LW-2 meets every 'Done when' criterion in action_plan.md.",
+   "na_allowed": false,
+   "attest_ok": false
+  },
+  {
+   "id": "plan:LW-3",
+   "category": "plan",
+   "title": "LW-3",
+   "acceptance": "Canonical task LW-3 meets every 'Done when' criterion in action_plan.md.",
+   "na_allowed": false,
+   "attest_ok": false
+  },
+  {
+   "id": "plan:LW-4",
+   "category": "plan",
+   "title": "LW-4",
+   "acceptance": "Canonical task LW-4 meets every 'Done when' criterion in action_plan.md.",
+   "na_allowed": false,
+   "attest_ok": false
+  },
+  {
+   "id": "plan:LW-5",
+   "category": "plan",
+   "title": "LW-5",
+   "acceptance": "Canonical task LW-5 meets every 'Done when' criterion in action_plan.md.",
+   "na_allowed": false,
+   "attest_ok": false
+  },
+  {
+   "id": "plan:LW-6",
+   "category": "plan",
+   "title": "LW-6",
+   "acceptance": "Canonical task LW-6 meets every 'Done when' criterion in action_plan.md.",
+   "na_allowed": false,
+   "attest_ok": false
+  },
+  {
+   "id": "plan:LW-7",
+   "category": "plan",
+   "title": "LW-7",
+   "acceptance": "Canonical task LW-7 meets every 'Done when' criterion in action_plan.md.",
+   "na_allowed": false,
+   "attest_ok": false
+  },
+  {
+   "id": "plan:LW-8",
+   "category": "plan",
+   "title": "LW-8",
+   "acceptance": "Canonical task LW-8 meets every 'Done when' criterion in action_plan.md.",
    "na_allowed": false,
    "attest_ok": false
   },

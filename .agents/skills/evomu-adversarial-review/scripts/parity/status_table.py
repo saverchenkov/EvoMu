@@ -25,7 +25,7 @@ SKILL = os.path.dirname(os.path.dirname(HERE))
 PLAN = os.path.join(SKILL, "references", "action_plan.md")
 LEDGER = os.path.join(SKILL, "references", "parity", "ledger.json")
 AUDITOR = os.path.join(SKILL, "references", "parity", "auditor_rows.json")
-ID_RE = r"(?:S|D|P|SP|DG|C|MN|CH|E|SO|T|Q|ESI|Z)-\d+"
+ID_RE = r"(?:S|D|P|SP|DG|C|MN|CH|E|SO|T|Q|ESI|Z|LW)-\d+"
 CITE_RE = re.compile(r"[A-Za-z0-9_./\-]+\.(?:rs|py|md|toml|json|sql|c|sh|txt):\d+")
 
 
