@@ -18,8 +18,8 @@ fn shared_sde() -> Arc<SdeRegistry> {
     Arc::clone(SDE.get_or_init(|| Arc::new(SdeRegistry::with_canonical_seed())))
 }
 
-#[test]
-fn dungeon_id_parser_fnv_hash_and_ice_belt_eligibility() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dungeon_id_parser_fnv_hash_and_ice_belt_eligibility() {
     assert_eq!(parse_dng_site_id("DNG-2045-987654"), Some((2045, 987_654)));
     assert_eq!(parse_dng_site_id("ANOM-1"), None);
 
