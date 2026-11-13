@@ -1882,6 +1882,8 @@ mod tests {
         let (launcher_id, charge_id, flag_hi0) = (999_000_201, 999_000_202, InventoryFlag::HiSlot0 as u16);
 
         db.with_mut_snapshot(|snap| {
+            snap.items
+                .retain(|&id, it| id == SHIP_ID || it.location_id != SHIP_ID);
             snap.items.insert(
                 launcher_id,
                 InventoryItemRecord {
@@ -2009,6 +2011,8 @@ mod tests {
         let db = WorldRepository::with_demo_seed();
         let launcher_id = 999_000_301;
         db.with_mut_snapshot(|snap| {
+            snap.items
+                .retain(|&id, it| id == SHIP_ID || it.location_id != SHIP_ID);
             snap.items.insert(
                 launcher_id,
                 InventoryItemRecord {
