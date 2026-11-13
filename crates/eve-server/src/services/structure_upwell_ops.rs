@@ -331,12 +331,31 @@ fn handle_structure_unanchor(ctx: &ServerContext, session: &mut SessionState, ar
         }
         Ok((st, until, moved))
     })?;
-    ctx.notify(crate::router::NotificationTarget::Corporation(st.owner_corp_id), "OnCorporationStructuresUpdated", "corpid", vec![]);
-    let state_args = vec![PyRep::Integer(i64::from(st.solar_system_id)), PyRep::Integer(structure_id), PyRep::String("Unanchoring".into())];
-    ctx.notify(crate::router::NotificationTarget::SolarSystem(st.solar_system_id), "OnStructureStateChanged", "solarsystemid", state_args.clone());
-    ctx.notify(crate::router::NotificationTarget::SolarSystem(st.solar_system_id), "OnCurrentStructureStateChanged", "solarsystemid", state_args);
+    ctx.emit_typed(
+        crate::router::NotificationTarget::Corporation(st.owner_corp_id),
+        crate::router::notify_registry::OnCorporationStructuresUpdated {},
+    );
+    ctx.emit_typed(
+        crate::router::NotificationTarget::SolarSystem(st.solar_system_id),
+        crate::router::notify_registry::OnStructureStateChanged {
+            solar_system_id: i64::from(st.solar_system_id),
+            structure_id,
+            state: "Unanchoring".into(),
+        },
+    );
+    ctx.emit_typed(
+        crate::router::NotificationTarget::SolarSystem(st.solar_system_id),
+        crate::router::notify_registry::OnCurrentStructureStateChanged {
+            solar_system_id: i64::from(st.solar_system_id),
+            structure_id,
+            state: "Unanchoring".into(),
+        },
+    );
     for cid in if home_moved_chars.is_empty() { vec![char_id] } else { home_moved_chars } {
-        ctx.notify(crate::router::NotificationTarget::Character(cid), "OnHomeStationMovedFromStructure", "charid", vec![]);
+        ctx.emit_typed(
+            crate::router::NotificationTarget::Character(cid),
+            crate::router::notify_registry::OnHomeStationMovedFromStructure {},
+        );
     }
     Ok(PyRep::keyval([("structureID", PyRep::Integer(structure_id)), ("state", PyRep::String("Unanchoring".into())), ("unanchorCompleteUnix", PyRep::Integer(until as i64))]))
 }
@@ -366,9 +385,18 @@ fn handle_structure_rename(ctx: &ServerContext, session: &mut SessionState, args
         snap.item_custom_names.insert(structure_id, new_name.clone());
         Ok(st)
     })?;
-    ctx.notify(crate::router::NotificationTarget::Corporation(st.owner_corp_id), "OnCorporationStructuresUpdated", "corpid", vec![]);
+    ctx.emit_typed(
+        crate::router::NotificationTarget::Corporation(st.owner_corp_id),
+        crate::router::notify_registry::OnCorporationStructuresUpdated {},
+    );
     let slim_kv = PyRep::keyval([("itemID", PyRep::Integer(structure_id)), ("typeID", PyRep::Integer(i64::from(st.type_id))), ("ownerID", PyRep::Integer(st.owner_corp_id)), ("name", PyRep::String(new_name.clone()))]);
-    ctx.notify(crate::router::NotificationTarget::SolarSystem(st.solar_system_id), "OnSlimItemChange", "solarsystemid", vec![PyRep::Integer(structure_id), slim_kv]);
+    ctx.emit_typed(
+        crate::router::NotificationTarget::SolarSystem(st.solar_system_id),
+        crate::router::notify_registry::OnSlimItemChange {
+            old_slim: PyRep::Integer(structure_id),
+            new_slim: slim_kv,
+        },
+    );
     crate::services::notify_emitters_skills_trade_godma::emit_structure_cfg_data_changed(ctx, st.solar_system_id, structure_id, &new_name, st.position);
     crate::services::notify_emitters_character_services::emit_facilities_updated(ctx, Some(st.solar_system_id), char_id, structure_id);
     Ok(PyRep::keyval([("structureID", PyRep::Integer(structure_id)), ("name", PyRep::String(new_name))]))
@@ -401,9 +429,22 @@ fn handle_update_reinforce_times(ctx: &ServerContext, session: &mut SessionState
         Ok((st, ch as i64, cd as i64, apply_after, hacked_chars))
     })?;
     let hack_tuple = PyRep::Tuple(vec![PyRep::Integer(cur_day), PyRep::Integer(cur_hour), PyRep::Integer(weekday), PyRep::Integer(hour), PyRep::Integer(apply_after as i64)]);
-    ctx.notify(crate::router::NotificationTarget::Corporation(st.owner_corp_id), "OnStructureHacked", "corpid", vec![PyRep::Integer(structure_id), hack_tuple.clone()]);
+    ctx.emit_typed(
+        crate::router::NotificationTarget::Corporation(st.owner_corp_id),
+        crate::router::notify_registry::OnStructureHacked {
+            structure_id,
+            reinforce_timing: hack_tuple.clone(),
+        },
+    );
     for hc in hacked_chars {
-        ctx.notify(crate::router::NotificationTarget::Character(hc), "OnStructureHacked", "charid", vec![PyRep::Integer(structure_id), hack_tuple.clone()]);
+        ctx.emit_typed_with_id_type(
+            crate::router::NotificationTarget::Character(hc),
+            "charid",
+            crate::router::notify_registry::OnStructureHacked {
+                structure_id,
+                reinforce_timing: hack_tuple.clone(),
+            },
+        );
     }
     Ok(PyRep::keyval([("structureID", PyRep::Integer(structure_id)), ("nextReinforceHour", PyRep::Integer(hour)), ("nextReinforceWeekday", PyRep::Integer(weekday)), ("applyAfterUnix", PyRep::Integer(apply_after as i64))]))
 }
@@ -500,9 +541,25 @@ fn handle_move_assets_to_safety(ctx: &ServerContext, session: &mut SessionState,
         save_ext_state(snap, &ext);
         Ok((wrap_id, owner_id, st.solar_system_id, item_ids.len()))
     })?;
-    let as_args = vec![PyRep::Integer(owner_id), PyRep::Integer(i64::from(sys_id)), PyRep::Integer(structure_id)];
-    ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnAssetSafetyCreated", "charid", as_args.clone());
-    if is_corp { ctx.notify(crate::router::NotificationTarget::Corporation(owner_id), "OnAssetSafetyCreated", "corpid", as_args); }
+    ctx.emit_typed(
+        crate::router::NotificationTarget::Character(char_id),
+        crate::router::notify_registry::OnAssetSafetyCreated {
+            owner_id,
+            solar_system_id: i64::from(sys_id),
+            location_id: structure_id,
+        },
+    );
+    if is_corp {
+        ctx.emit_typed_with_id_type(
+            crate::router::NotificationTarget::Corporation(owner_id),
+            "corpid",
+            crate::router::notify_registry::OnAssetSafetyCreated {
+                owner_id,
+                solar_system_id: i64::from(sys_id),
+                location_id: structure_id,
+            },
+        );
+    }
     Ok(PyRep::keyval([("wrapID", PyRep::Integer(wrap_id)), ("structureID", PyRep::Integer(structure_id)), ("ownerID", PyRep::Integer(owner_id)), ("itemCount", PyRep::Integer(count as i64)), ("deliverableAfterUnix", PyRep::Integer((now_unix + ASSET_SAFETY_DELIVERY_DELAY_SECS) as i64))]))
 }
 
@@ -723,10 +780,25 @@ fn handle_move_safety_wrap_to_structure(ctx: &ServerContext, session: &mut Sessi
             ("autoDelivered", PyRep::Bool(wrap.auto_delivered)),
         ])))
     })?;
-    ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnAssetSafetyDelivered", "charid", vec![PyRep::Integer(owner_id)]);
+    ctx.emit_typed(
+        crate::router::NotificationTarget::Character(char_id),
+        crate::router::notify_registry::OnAssetSafetyDelivered { owner_id },
+    );
     if is_corp {
-        ctx.notify(crate::router::NotificationTarget::Corporation(owner_id), "OnAssetSafetyDelivered", "corpid", vec![PyRep::Integer(owner_id)]);
-        ctx.notify(crate::router::NotificationTarget::Corporation(owner_id), "OnAccountChange", "corpid", vec![PyRep::String("cash".into()), PyRep::Integer(owner_id), PyRep::Real(bal_f64)]);
+        ctx.emit_typed_with_id_type(
+            crate::router::NotificationTarget::Corporation(owner_id),
+            "corpid",
+            crate::router::notify_registry::OnAssetSafetyDelivered { owner_id },
+        );
+        ctx.emit_typed_with_id_type(
+            crate::router::NotificationTarget::Corporation(owner_id),
+            "corpid",
+            crate::router::notify_registry::OnAccountChange {
+                account_key: "cash".into(),
+                owner_id,
+                balance: bal_f64,
+            },
+        );
     } else {
         ctx.notify_account_change(char_id, "cash", owner_id, bal_f64);
     }
@@ -809,9 +881,14 @@ pub(crate) fn emit_ship_session_change(ctx: &ServerContext, session: &mut Sessio
         ("structureid", session.structure_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
         ("solarsystemid2", session.solar_system_id.map(|s| PyRep::Integer(i64::from(s))).unwrap_or(PyRep::None)),
     ]);
-    let args = vec![PyRep::Bool(false), sess_rep, PyRep::Dict(vec![(PyRep::String("shipid".into()), PyRep::Tuple(vec![old_py, new_py]))])];
-    session.push_notification("OnSessionChanged", args.clone());
-    ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnSessionChanged", "charid", args);
+    let change_rep = PyRep::Dict(vec![(PyRep::String("shipid".into()), PyRep::Tuple(vec![old_py, new_py]))]);
+    let notif = crate::router::notify_registry::OnSessionChanged {
+        is_remote: false,
+        session: sess_rep,
+        change: change_rep,
+    };
+    crate::router::notify_registry::push_typed_session_notification(session, notif.clone());
+    ctx.emit_typed(crate::router::NotificationTarget::Character(char_id), notif);
 }
 
 fn handle_set_structure_description(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
@@ -825,9 +902,22 @@ fn handle_set_structure_description(ctx: &ServerContext, session: &mut SessionSt
         save_ext_state(snap, &ext);
         Ok(st)
     })?;
-    ctx.notify(crate::router::NotificationTarget::Corporation(st.owner_corp_id), "OnProfileSettingsChange", "corpid", vec![PyRep::List(vec![PyRep::Integer(structure_id)])]);
-    ctx.notify(crate::router::NotificationTarget::Corporation(st.owner_corp_id), "OnOwnerGroupsUpdated", "corpid", vec![PyRep::Dict(vec![(PyRep::Integer(st.owner_corp_id), PyRep::Integer(structure_id))])]);
-    ctx.notify(crate::router::NotificationTarget::SolarSystem(st.solar_system_id), "OnDockingAccessChangedForCurrentSolarSystem", "solarsystemid", vec![]);
+    ctx.emit_typed(
+        crate::router::NotificationTarget::Corporation(st.owner_corp_id),
+        crate::router::notify_registry::OnProfileSettingsChange {
+            profile_ids: vec![structure_id],
+        },
+    );
+    ctx.emit_typed(
+        crate::router::NotificationTarget::Corporation(st.owner_corp_id),
+        crate::router::notify_registry::OnOwnerGroupsUpdated {
+            changed_groups: PyRep::Dict(vec![(PyRep::Integer(st.owner_corp_id), PyRep::Integer(structure_id))]),
+        },
+    );
+    ctx.emit_typed(
+        crate::router::NotificationTarget::SolarSystem(st.solar_system_id),
+        crate::router::notify_registry::OnDockingAccessChangedForCurrentSolarSystem {},
+    );
     Ok(PyRep::None)
 }
 

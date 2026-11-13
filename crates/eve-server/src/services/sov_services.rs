@@ -50,14 +50,12 @@ pub fn scale_entosis_capture_seconds(base_seconds: u64, adm: f64) -> u64 {
 /// to all sessions and queues destiny event for the solar system.
 pub fn emit_sovereignty_changed(ctx: &ServerContext, sys_id: u32, alliance_id: Option<i64>, _corp_id: Option<i64>) {
     ctx.invalidate_cached_method("stationSvc", "GetAllianceSystems");
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::All,
-        "OnSovereigntyChanged",
-        "solarsystemid",
-        vec![
-            PyRep::Integer(i64::from(sys_id)),
-            alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-        ],
+        crate::router::notify_registry::OnSovereigntyChanged {
+            solar_system_id: i64::from(sys_id),
+            alliance_id,
+        },
     );
     let handle = ctx.systems.get_or_spawn(sys_id);
     let aid = alliance_id.unwrap_or(0);
@@ -184,15 +182,13 @@ pub fn emit_sov_structures_updated_with_snap(
             .map(|id| (PyRep::Integer(id), PyRep::List(vec![PyRep::Integer(0)])))
             .collect(),
     );
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::All,
-        "OnSolarSystemSovStructuresUpdated",
-        "solarsystemid",
-        vec![
-            PyRep::Integer(i64::from(sys_id)),
-            PyRep::List(structs),
+        crate::router::notify_registry::OnSolarSystemSovStructuresUpdated {
+            solar_system_id: i64::from(sys_id),
+            solar_system_structures_info: PyRep::List(structs),
             changes,
-        ],
+        },
     );
 }
 
@@ -207,24 +203,22 @@ pub fn emit_sov_structures_updated(ctx: &ServerContext, sys_id: u32, changed_ids
 
 /// Broadcasts `OnSolarSystemDevIndexChanged` notification (single solarsystemID payload matching V24 client expectation).
 pub fn emit_dev_index_changed(ctx: &ServerContext, sys_id: u32) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnSolarSystemDevIndexChanged",
-        "solarsystemid",
-        vec![PyRep::Integer(i64::from(sys_id))],
+        crate::router::notify_registry::OnSolarSystemDevIndexChanged {
+            solar_system_id: i64::from(sys_id),
+        },
     );
 }
 
 /// Marks a Skyhook as hackable and emits `OnSkyhookCanBeHacked`.
 pub fn emit_skyhook_can_be_hacked(ctx: &ServerContext, sys_id: u32, skyhook_id: i64) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnSkyhookCanBeHacked",
-        "solarsystemid",
-        vec![
-            PyRep::Integer(i64::from(sys_id)),
-            PyRep::Integer(skyhook_id),
-        ],
+        crate::router::notify_registry::OnSkyhookCanBeHacked {
+            solar_system_id: i64::from(sys_id),
+            skyhook_id,
+        },
     );
 }
 
@@ -283,14 +277,12 @@ pub fn record_hub_hack(ctx: &ServerContext, sys_id: u32, hub_id: i64, disruption
             .map(|h| h.upgrades.iter().map(|u| PyRep::Integer(u.type_id as i64)).collect())
             .unwrap_or_default()
     });
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnSovHubHacked",
-        "solarsystemid",
-        vec![
-            PyRep::Integer(hub_id),
-            PyRep::List(upg_reps),
-        ],
+        crate::router::notify_registry::OnSovHubHacked {
+            sov_hub_id: hub_id,
+            upgrades: upg_reps,
+        },
     );
 }
 
@@ -336,40 +328,37 @@ pub fn claim_system_sovereignty(
 
     emit_sovereignty_changed(ctx, sys_id, Some(alliance_id), Some(corp_id));
     emit_sov_structures_updated(ctx, sys_id, &[hub_id]);
-    ctx.notify(
+    ctx.emit_typed_with_id_type(
         NotificationTarget::SolarSystem(sys_id),
-        "OnCapitalSystemChanged",
         "solarsystemid",
-        vec![PyRep::Tuple(vec![
-            PyRep::Integer(alliance_id),
-            PyRep::None,
-            PyRep::Integer(i64::from(sys_id)),
-        ])],
+        crate::router::notify_registry::OnCapitalSystemChanged {
+            change: PyRep::Tuple(vec![
+                PyRep::Integer(alliance_id),
+                PyRep::None,
+                PyRep::Integer(i64::from(sys_id)),
+            ]),
+        },
     );
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnSovereigntyAudioEvent",
-        "solarsystemid",
-        vec![
-            PyRep::Integer(1),
-            PyRep::Dict(vec![
+        crate::router::notify_registry::OnSovereigntyAudioEvent {
+            event_id: 1,
+            text_params: PyRep::Dict(vec![
                 (PyRep::String("solarSystemID".into()), PyRep::Integer(i64::from(sys_id))),
                 (PyRep::String("allianceID".into()), PyRep::Integer(alliance_id)),
             ]),
-        ],
+        },
     );
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "ProcessSovStatusChanged",
-        "solarsystemid",
-        vec![
-            PyRep::Integer(i64::from(sys_id)),
-            PyRep::keyval([
+        crate::router::notify_registry::ProcessSovStatusChanged {
+            solar_system_id: i64::from(sys_id),
+            sov_info: PyRep::keyval([
                 ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
                 ("allianceID", PyRep::Integer(alliance_id)),
                 ("corporationID", PyRep::Integer(corp_id)),
             ]),
-        ],
+        },
     );
     Ok(())
 }
@@ -936,11 +925,9 @@ pub fn handle_reset_last_clone_jump_time(
         ch.version += 1;
         Ok(())
     })?;
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
-        "OnCloneJumpUpdate",
-        "charid",
-        vec![],
+        crate::router::notify_registry::OnCloneJumpUpdate {},
     );
     Ok(PyRep::Integer(0))
 }

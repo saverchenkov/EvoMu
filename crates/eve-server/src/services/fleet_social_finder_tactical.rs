@@ -246,11 +246,13 @@ pub async fn handle_fleet_watchlist_ops(
             return Some(Err(BridgeRpcError { code: "TargetNotInSystem".into(), message: "Broadcast target is not in your solar system".into(), client_error: None }));
         }
         let (ship_opt, sr, ar, hr) = resolve_ship_hp_ratios(ctx, target_id).await;
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnTarget",
-            "charid",
-            vec![PyRep::String("add".into()), PyRep::Integer(ship_opt.unwrap_or(target_id))],
+            crate::router::notify_registry::OnTarget {
+                arg0: PyRep::String("add".into()),
+                arg1: PyRep::Integer(ship_opt.unwrap_or(target_id)),
+                reason: None,
+            },
         );
         return Some(Ok(PyRep::keyval([
             ("targetID", PyRep::Integer(target_id)),
@@ -300,7 +302,10 @@ pub async fn handle_fleet_watchlist_ops(
                 let _ = ctx.notify_damage_state_change(NotificationTarget::Character(char_id), ship_id, sr, ar, hr);
             }
             let fleet_state = notify::build_fleet_state_keyval(ctx, Some(fleet_id), tid, sr, ar, hr);
-            ctx.notify(NotificationTarget::Character(char_id), "OnFleetStateChange", "charid", vec![fleet_state]);
+            ctx.emit_typed(
+                NotificationTarget::Character(char_id),
+                crate::router::notify_registry::OnFleetStateChange { fleet_state },
+            );
         }
         return Some(Ok(PyRep::keyval([
             ("characterID", PyRep::Integer(char_id)),
@@ -366,7 +371,10 @@ pub async fn handle_fleet_watchlist_ops(
                 let _ = ctx.notify_damage_state_change(NotificationTarget::Character(char_id), ship_id, s_ratio, a_ratio, h_ratio);
             }
             let fleet_state = notify::build_fleet_state_keyval(ctx, Some(fleet_id), tid, s_ratio, a_ratio, h_ratio);
-            ctx.notify(NotificationTarget::Character(char_id), "OnFleetStateChange", "charid", vec![fleet_state]);
+            ctx.emit_typed(
+                NotificationTarget::Character(char_id),
+                crate::router::notify_registry::OnFleetStateChange { fleet_state },
+            );
         }
     }
     let primary_id = target_ids.first().copied().unwrap_or(char_id);
@@ -492,11 +500,9 @@ fn handle_delete_fleet_setup(ctx: &ServerContext, char_id: i64, setup_name: &str
         .unwrap_or(false);
     sync_fleet_setups_to_db(ctx);
     if removed {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnFleetSetupChanged",
-            "charid",
-            vec![],
+            crate::router::notify_registry::OnFleetSetupChanged {},
         );
     }
     PyRep::keyval([
@@ -571,11 +577,9 @@ fn handle_update_advert_info(
         (nm, lm)
     });
     sync_fleet_advert_snapshot_to_db(ctx, fleet_id);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Fleet(fleet_id),
-        "OnFleetFinderAdvertChanged",
-        "fleetid",
-        vec![],
+        crate::router::notify_registry::OnFleetFinderAdvertChanged {},
     );
     Ok(advert_to_dict(&ad_snapshot, num_members, leader_meta))
 }
@@ -667,11 +671,9 @@ fn handle_set_fleet_formation_settings(
         .stored_formations
         .insert(char_id, (formation_id, spacing, size));
     sync_fleet_formations_to_db(ctx);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnFleetFormationWndChanged",
-        "charid",
-        vec![],
+        crate::router::notify_registry::OnFleetFormationWndChanged {},
     );
     PyRep::keyval([
         ("formationID", PyRep::Integer(formation_id)),
@@ -773,7 +775,10 @@ pub(super) async fn handle_finder_and_tactical(
             };
             ctx.fleet_extras.lock().unwrap().saved_setups.entry(char_id).or_default().insert(setup_name.clone(), rec);
             sync_fleet_setups_to_db(ctx);
-            ctx.notify(NotificationTarget::Character(char_id), "OnFleetSetupChanged", "charid", vec![]);
+            ctx.emit_typed(
+                NotificationTarget::Character(char_id),
+                crate::router::notify_registry::OnFleetSetupChanged {},
+            );
             Some(Ok(PyRep::keyval([
                 ("setupName", PyRep::String(setup_name)),
                 ("motd", PyRep::String(motd)),
@@ -867,10 +872,19 @@ pub(super) async fn handle_finder_and_tactical(
                         }
                     }
                     for wid in added_wings {
-                        ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetWingAdded", "fleetid", vec![PyRep::Integer(wid)]);
+                        ctx.emit_typed(
+                            NotificationTarget::Fleet(fleet_id),
+                            crate::router::notify_registry::OnFleetWingAdded { wing_id: wid },
+                        );
                     }
                     for (wid, sid) in added_squads {
-                        ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetSquadAdded", "fleetid", vec![PyRep::Integer(wid), PyRep::Integer(sid)]);
+                        ctx.emit_typed(
+                            NotificationTarget::Fleet(fleet_id),
+                            crate::router::notify_registry::OnFleetSquadAdded {
+                                wing_id: wid,
+                                squad_id: sid,
+                            },
+                        );
                     }
                     notify::emit_motd(ctx, NotificationTarget::Fleet(fleet_id), &new_motd, true);
                     let auto = ctx.fleet_extras.lock().unwrap().auto_join_squads.get(&fleet_id).copied().flatten();
@@ -955,7 +969,10 @@ pub(super) async fn handle_finder_and_tactical(
                     notify::options_keyval(free_move, true, auto_join_squad),
                 );
             }
-            ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetFinderAdvertChanged", "fleetid", vec![]);
+            ctx.emit_typed(
+                NotificationTarget::Fleet(fleet_id),
+                crate::router::notify_registry::OnFleetFinderAdvertChanged {},
+            );
             Some(Ok(advert_to_dict(&ad_state, num_members, leader_meta)))
         }
 
@@ -985,7 +1002,10 @@ pub(super) async fn handle_finder_and_tactical(
                 ad.leader_id = new_leader;
             }
             sync_fleet_advert_snapshot_to_db(ctx, fleet_id);
-            ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetFinderAdvertChanged", "fleetid", vec![]);
+            ctx.emit_typed(
+                NotificationTarget::Fleet(fleet_id),
+                crate::router::notify_registry::OnFleetFinderAdvertChanged {},
+            );
             Some(Ok(PyRep::Dict(vec![
                 (PyRep::String("fleetID".into()), PyRep::Integer(fleet_id)),
                 (PyRep::String("leaderID".into()), PyRep::Integer(new_leader)),
@@ -1090,7 +1110,10 @@ pub(super) async fn handle_finder_and_tactical(
                             notify::options_keyval(free_move, false, auto_join_squad),
                         );
                     }
-                    ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetFinderAdvertChanged", "fleetid", vec![]);
+                    ctx.emit_typed(
+                        NotificationTarget::Fleet(fleet_id),
+                        crate::router::notify_registry::OnFleetFinderAdvertChanged {},
+                    );
                     Some(Ok(PyRep::Dict(vec![
                         (PyRep::String("fleetID".into()), PyRep::Integer(fleet_id)),
                         (PyRep::String("removed".into()), PyRep::Bool(true)),
@@ -1205,7 +1228,10 @@ pub(super) async fn handle_finder_and_tactical(
                         notify::sync_fleet_join_requests_to_db(ctx);
                         let corp_id = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id));
                         let info = PyRep::keyval([("charID", PyRep::Integer(char_id)), ("corpID", corp_id.map(PyRep::Integer).unwrap_or(PyRep::None))]);
-                        ctx.notify(NotificationTarget::Character(boss_id), "OnFleetJoinRequest", "charid", vec![info]);
+                        ctx.emit_typed(
+                            NotificationTarget::Character(boss_id),
+                            crate::router::notify_registry::OnFleetJoinRequest { info },
+                        );
                     }
                     Some(Ok(PyRep::keyval([
                         ("fleetID", PyRep::Integer(fleet_id)),
@@ -1335,7 +1361,12 @@ pub(super) async fn handle_finder_and_tactical(
                     if !motd.is_empty() {
                         notify::emit_motd(ctx, NotificationTarget::Character(applicant_id), &motd, false);
                     }
-                    ctx.notify(NotificationTarget::Character(char_id), "OnJoinRequestUpdate", "charid", vec![PyRep::Dict(remaining_requests)]);
+                    ctx.emit_typed(
+                        NotificationTarget::Character(char_id),
+                        crate::router::notify_registry::OnJoinRequestUpdate {
+                            join_requests: PyRep::Dict(remaining_requests),
+                        },
+                    );
                     Some(Ok(PyRep::keyval([
                         ("fleetID", PyRep::Integer(fleet_id)),
                         ("characterID", PyRep::Integer(applicant_id)),
@@ -1375,14 +1406,22 @@ pub(super) async fn handle_finder_and_tactical(
                 ex.invite_timestamps.remove(&(fleet_id, applicant_id));
             }
             notify::sync_fleet_join_requests_to_db(ctx);
-            ctx.notify(NotificationTarget::Character(applicant_id), "OnFleetJoinRejected", "charid", vec![PyRep::Integer(char_id)]);
+            ctx.emit_typed(
+                NotificationTarget::Character(applicant_id),
+                crate::router::notify_registry::OnFleetJoinRejected { char_id },
+            );
             let remaining_requests = {
                 let ex = ctx.fleet_extras.lock().unwrap();
                 ex.join_requests.get(&fleet_id).map(|set| {
                     set.iter().map(|&cid| (PyRep::Integer(cid), PyRep::keyval([("charID", PyRep::Integer(cid))]))).collect::<Vec<_>>()
                 }).unwrap_or_default()
             };
-            ctx.notify(NotificationTarget::Character(char_id), "OnJoinRequestUpdate", "charid", vec![PyRep::Dict(remaining_requests)]);
+            ctx.emit_typed(
+                NotificationTarget::Character(char_id),
+                crate::router::notify_registry::OnJoinRequestUpdate {
+                    join_requests: PyRep::Dict(remaining_requests),
+                },
+            );
             Some(Ok(PyRep::keyval([("characterID", PyRep::Integer(applicant_id)), ("rejected", PyRep::Bool(true))])))
         }
 
@@ -1459,11 +1498,10 @@ pub fn clear_destroyed_target_tag(ctx: &ServerContext, target_id: i64) {
     };
     for (fleet_id, boss_id) in affected_fleets {
         let fleet_state = notify::build_fleet_state_keyval(ctx, Some(fleet_id), boss_id, 1.0, 1.0, 1.0);
-        ctx.notify(
+        ctx.emit_typed_with_id_type(
             NotificationTarget::Fleet(fleet_id),
-            "OnFleetStateChange",
             "fleetid",
-            vec![fleet_state],
+            crate::router::notify_registry::OnFleetStateChange { fleet_state },
         );
     }
 }

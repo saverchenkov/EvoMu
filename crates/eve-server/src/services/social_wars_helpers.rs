@@ -236,26 +236,21 @@ pub(super) fn emit_mutual_wars_updated(
     corp_a: i64,
     corp_b: i64,
 ) {
-    let mut sent = ctx.notify(
+    let mut sent = ctx.emit_typed(
         NotificationTarget::Corporation(corp_a),
-        "OnMutualWarsUpdated_Remote",
-        "corpid",
-        vec![],
+        crate::router::notify_registry::OnMutualWarsUpdatedRemote {},
     );
     if corp_b != corp_a {
-        sent.extend(ctx.notify(
+        sent.extend(ctx.emit_typed(
             NotificationTarget::Corporation(corp_b),
-            "OnMutualWarsUpdated_Remote",
-            "corpid",
-            vec![],
+            crate::router::notify_registry::OnMutualWarsUpdatedRemote {},
         ));
     }
     if !sent.iter().any(|n| n.recipient_char_id == actor_char_id) {
-        ctx.notify(
+        ctx.emit_typed_with_id_type(
             NotificationTarget::Character(actor_char_id),
-            "OnMutualWarsUpdated_Remote",
             "charid",
-            vec![],
+            crate::router::notify_registry::OnMutualWarsUpdatedRemote {},
         );
     }
 }
@@ -284,20 +279,14 @@ pub(super) fn emit_war_changed(
             .map(|(k, old_v, new_v)| (PyRep::String(k.into()), PyRep::Tuple(vec![old_v, new_v])))
             .collect(),
     );
-    let args = vec![war_kv, owner_ids, change];
-    ctx.notify(
-        NotificationTarget::Corporation(w.aggressor_corp_id),
-        "OnWarChanged",
-        "corpid",
-        args.clone(),
-    );
+    let war_notif = crate::router::notify_registry::OnWarChanged {
+        war: war_kv,
+        owner_ids,
+        change,
+    };
+    ctx.emit_typed(NotificationTarget::Corporation(w.aggressor_corp_id), war_notif.clone());
     if w.defender_corp_id != w.aggressor_corp_id {
-        ctx.notify(
-            NotificationTarget::Corporation(w.defender_corp_id),
-            "OnWarChanged",
-            "corpid",
-            args,
-        );
+        ctx.emit_typed(NotificationTarget::Corporation(w.defender_corp_id), war_notif);
     }
 }
 

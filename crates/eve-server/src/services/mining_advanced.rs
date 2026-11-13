@@ -382,11 +382,11 @@ pub async fn tick_all_moon_extractions(ctx: &ServerContext) {
     }
     for (structure_id, sys_id, owner_corp, update_rep, spawned_specs) in auto_fractures {
         let _ = spawn_moon_asteroid_balls(ctx, sys_id, structure_id, spawned_specs).await;
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Corporation(owner_corp),
-            "OnMoonExtractionUpdate",
-            "corpid",
-            vec![update_rep],
+            crate::router::notify_registry::OnMoonExtractionUpdate {
+                extraction: Some(update_rep),
+            },
         );
     }
 }
@@ -617,15 +617,18 @@ pub async fn handle(
                         );
                     }
                     crate::services::fleet_social::persist_social_state(ctx);
-                    ctx.notify(
+                    ctx.emit_typed(
                         NotificationTarget::Corporation(st_corp),
-                        "OnNewCalendarEvent",
-                        "corpid",
-                        vec![
-                            PyRep::Integer(ev_id), PyRep::Integer(st_corp), PyRep::Integer(arrival_ft),
-                            PyRep::Integer(decay_mins), PyRep::String(ev_title), PyRep::Integer(1),
-                            PyRep::Integer(1), PyRep::Bool(true),
-                        ],
+                        crate::router::notify_registry::OnNewCalendarEvent {
+                            event_id: ev_id,
+                            owner_id: st_corp,
+                            event_date_time: arrival_ft,
+                            event_duration: decay_mins,
+                            event_title: ev_title.clone(),
+                            importance: 1,
+                            auto_event_type: 1,
+                            do_blink: true,
+                        },
                     );
                     let chunk_vol_m3 = ((arr.saturating_sub(st)) as f64 / 3600.0) * 30_000.0;
                     let ore_list: Vec<PyRep> = ores
@@ -651,7 +654,12 @@ pub async fn handle(
                         ("readyToFracture", PyRep::Bool(false)),
                         ("moonOres", PyRep::List(ore_list)),
                     ]);
-                    ctx.notify(NotificationTarget::Corporation(st_corp), "OnMoonExtractionUpdate", "corpid", vec![reply.clone()]);
+                    ctx.emit_typed(
+                        NotificationTarget::Corporation(st_corp),
+                        crate::router::notify_registry::OnMoonExtractionUpdate {
+                            extraction: Some(reply.clone()),
+                        },
+                    );
                     Some(Ok(reply))
                 }
                 Err(e) => Some(Err(e)),
@@ -719,13 +727,18 @@ pub async fn handle(
                         cev.is_deleted = true;
                     }
                     crate::services::fleet_social::persist_social_state(ctx);
-                    ctx.notify(
+                    ctx.emit_typed(
                         NotificationTarget::Corporation(caller_corp),
-                        "OnRemoveCalendarEvent",
-                        "corpid",
-                        vec![PyRep::Integer(ev_id), PyRep::Integer(arrival_ft), PyRep::Bool(true)],
+                        crate::router::notify_registry::OnRemoveCalendarEvent {
+                            event_id: ev_id,
+                            event_date_time: arrival_ft,
+                            is_deleted: true,
+                        },
                     );
-                    ctx.notify(NotificationTarget::Corporation(caller_corp), "OnMoonExtractionUpdate", "corpid", vec![PyRep::None]);
+                    ctx.emit_typed(
+                        NotificationTarget::Corporation(caller_corp),
+                        crate::router::notify_registry::OnMoonExtractionUpdate { extraction: None },
+                    );
                     Some(Ok(PyRep::Bool(true)))
                 }
                 Err(e) => Some(Err(e)),
@@ -864,7 +877,12 @@ pub async fn handle(
                         ("isJackpot", PyRep::Bool(is_jackpot)),
                         ("jackpotBonus", PyRep::Real(if is_jackpot { 2.0 } else { 1.0 })),
                     ]);
-                    ctx.notify(NotificationTarget::Corporation(owner_corp_id), "OnMoonExtractionUpdate", "corpid", vec![reply.clone()]);
+                    ctx.emit_typed(
+                        NotificationTarget::Corporation(owner_corp_id),
+                        crate::router::notify_registry::OnMoonExtractionUpdate {
+                            extraction: Some(reply.clone()),
+                        },
+                    );
                     Some(Ok(reply))
                 }
                 Err(e) => Some(Err(e)),

@@ -823,26 +823,22 @@ fn handle_take_offer(
             }
             if is_corp_take {
                 let corp_id = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0));
-                ctx.notify(
+                ctx.emit_typed(
                     crate::router::NotificationTarget::Corporation(corp_id),
-                    "OnCorpLPChange",
-                    "corpid",
-                    vec![
-                        PyRep::String("take_offer".into()),
-                        PyRep::Integer(offer.corp_id),
-                    ],
+                    crate::router::notify_registry::OnCorpLPChange {
+                        reason: "take_offer".into(),
+                        issuer_corp_id: offer.corp_id,
+                    },
                 );
             } else {
-                ctx.notify(
+                ctx.emit_typed(
                     crate::router::NotificationTarget::Character(char_id),
-                    "OnLPChange",
-                    "charid",
-                    vec![
-                        PyRep::String("take_offer".into()),
-                        PyRep::Integer(offer.corp_id),
-                        PyRep::Integer(lp_before),
-                        PyRep::Integer(rem_lp),
-                    ],
+                    crate::router::notify_registry::OnLPChange {
+                        change_type: "take_offer".into(),
+                        issuer_corp_id: offer.corp_id,
+                        lp_before,
+                        lp_after: rem_lp,
+                    },
                 );
             }
             if total_ak_cost > 0 {
@@ -1018,36 +1014,30 @@ fn handle_transfer_lp(
         Ok((sender_rem, dest_lp, lp_before)) => {
             if is_from_corp {
                 let sender_corp_id = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0));
-                ctx.notify(
+                ctx.emit_typed(
                     crate::router::NotificationTarget::Corporation(sender_corp_id),
-                    "OnCorpLPChange",
-                    "corpid",
-                    vec![
-                        PyRep::String("transfer".into()),
-                        PyRep::Integer(npc_corp_id),
-                    ],
+                    crate::router::notify_registry::OnCorpLPChange {
+                        reason: "transfer".into(),
+                        issuer_corp_id: npc_corp_id,
+                    },
                 );
             } else {
-                ctx.notify(
+                ctx.emit_typed(
                     crate::router::NotificationTarget::Character(char_id),
-                    "OnLPChange",
-                    "charid",
-                    vec![
-                        PyRep::String("transfer".into()),
-                        PyRep::Integer(npc_corp_id),
-                        PyRep::Integer(lp_before),
-                        PyRep::Integer(sender_rem),
-                    ],
+                    crate::router::notify_registry::OnLPChange {
+                        change_type: "transfer".into(),
+                        issuer_corp_id: npc_corp_id,
+                        lp_before,
+                        lp_after: sender_rem,
+                    },
                 );
             }
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Corporation(target_corp_id),
-                "OnCorpLPChange",
-                "corpid",
-                vec![
-                    PyRep::String("transfer".into()),
-                    PyRep::Integer(npc_corp_id),
-                ],
+                crate::router::notify_registry::OnCorpLPChange {
+                    reason: "transfer".into(),
+                    issuer_corp_id: npc_corp_id,
+                },
             );
             Some(Ok(PyRep::keyval([
                 ("targetCorpID", PyRep::Integer(target_corp_id)),

@@ -134,11 +134,12 @@ pub fn sweep_expired_raffles(ctx: &ServerContext) -> usize {
         crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &returned_items);
     }
     for (rid, creator_id) in &expired_ids {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(*creator_id),
-            "OnRaffleFinishedServer",
-            "charid",
-            vec![PyRep::Integer(*rid), PyRep::None],
+            crate::router::notify_registry::OnRaffleFinishedServer {
+                raffle_id: *rid,
+                winning_ticket: None,
+            },
         );
     }
     expired_ids.len()
@@ -633,11 +634,12 @@ pub fn handle(
                     targets.sort_unstable();
                     targets.dedup();
                     for t in targets {
-                        ctx.notify(
+                        ctx.emit_typed(
                             NotificationTarget::Character(t),
-                            "OnRaffleCreatedServer",
-                            "charid",
-                            vec![PyRep::Integer(rec.raffle_id), kv.clone()],
+                            crate::router::notify_registry::OnRaffleCreatedServer {
+                                raffle_id: rec.raffle_id,
+                                raffle_data: kv.clone(),
+                            },
                         );
                     }
                     Some(Ok(kv))
@@ -800,36 +802,37 @@ pub fn handle(
                     ticket_targets.dedup();
 
                     for &t in &raffle_targets {
-                        ctx.notify(
+                        ctx.emit_typed(
                             NotificationTarget::Character(t),
-                            "OnRaffleUpdatedServer",
-                            "charid",
-                            vec![PyRep::Integer(r.raffle_id), kv.clone()],
+                            crate::router::notify_registry::OnRaffleUpdatedServer {
+                                raffle_id: r.raffle_id,
+                                raffle_data: kv.clone(),
+                            },
                         );
                     }
                     for &t in &ticket_targets {
-                        ctx.notify(
+                        ctx.emit_typed(
                             NotificationTarget::Character(t),
-                            "OnTicketsUpdatedServer",
-                            "charid",
-                            vec![sold_dict.clone()],
+                            crate::router::notify_registry::OnTicketsUpdatedServer {
+                                ticket_updates: sold_dict.clone(),
+                            },
                         );
                     }
                     if let Some(winner_id) = r.winner_id {
                         let win_ticket_rep = r
                             .winning_ticket
-                            .map(|t| PyRep::Integer(i64::from(t)))
-                            .unwrap_or(PyRep::None);
+                            .map(|t| PyRep::Integer(i64::from(t)));
                         let mut finish_targets = raffle_targets;
                         finish_targets.push(winner_id);
                         finish_targets.sort_unstable();
                         finish_targets.dedup();
                         for t in finish_targets {
-                            ctx.notify(
+                            ctx.emit_typed(
                                 NotificationTarget::Character(t),
-                                "OnRaffleFinishedServer",
-                                "charid",
-                                vec![PyRep::Integer(r.raffle_id), win_ticket_rep.clone()],
+                                crate::router::notify_registry::OnRaffleFinishedServer {
+                                    raffle_id: r.raffle_id,
+                                    winning_ticket: win_ticket_rep.clone(),
+                                },
                             );
                         }
                     }
@@ -1074,11 +1077,12 @@ pub fn handle_qa_seed_raffles(
     let mut seeded = Vec::with_capacity(records.len());
     for rec in &records {
         let kv = raffle_to_keyval(rec);
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnRaffleCreatedServer",
-            "charid",
-            vec![PyRep::Integer(rec.raffle_id), kv.clone()],
+            crate::router::notify_registry::OnRaffleCreatedServer {
+                raffle_id: rec.raffle_id,
+                raffle_data: kv.clone(),
+            },
         );
         seeded.push(kv);
     }
@@ -1337,11 +1341,12 @@ pub fn handle_character_seeding(
         for rec in &records {
             let kv = raffle_to_keyval(rec);
             for &t in &targets {
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Character(t),
-                    "OnRaffleCreatedServer",
-                    "charid",
-                    vec![PyRep::Integer(rec.raffle_id), kv.clone()],
+                    crate::router::notify_registry::OnRaffleCreatedServer {
+                        raffle_id: rec.raffle_id,
+                        raffle_data: kv.clone(),
+                    },
                 );
             }
             seeded.push(kv);
@@ -1451,11 +1456,12 @@ pub fn handle_character_seeding(
     let mut seeded = Vec::with_capacity(records.len());
     for rec in &records {
         let kv = raffle_to_keyval(rec);
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(target_char_id),
-            "OnRaffleCreatedServer",
-            "charid",
-            vec![PyRep::Integer(rec.raffle_id), kv.clone()],
+            crate::router::notify_registry::OnRaffleCreatedServer {
+                raffle_id: rec.raffle_id,
+                raffle_data: kv.clone(),
+            },
         );
         seeded.push(kv);
     }

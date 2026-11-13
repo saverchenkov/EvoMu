@@ -149,17 +149,15 @@ fn handle_petitioner(
                 );
                 id
             });
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(cid),
-                "OnPetitionCreated",
-                "charid",
-                vec![PyRep::Integer(pet_id)],
+                crate::router::notify_registry::OnPetitionCreated {
+                    petition_id: Some(pet_id),
+                },
             );
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(cid),
-                "OnNewPetition",
-                "charid",
-                vec![PyRep::Integer(pet_id)],
+                crate::router::notify_registry::OnNewPetition { petition_id: pet_id },
             );
             Ok(Some(PyRep::keyval([
                 ("petitionID", PyRep::Integer(pet_id)),
@@ -311,15 +309,15 @@ fn handle_petitioner(
                 }
                 Ok((pet.messages.len(), mid, pet.petitioner_cid, pet.claimed_by))
             })?;
-            let msg_args = vec![
-                PyRep::Integer(pet_id),
-                PyRep::Integer(cid),
-                PyRep::String(msg),
-                PyRep::Integer(mid),
-            ];
-            ctx.notify(NotificationTarget::Character(petitioner_cid), "OnPetitionMessage", "charid", msg_args.clone());
+            let msg_notif = crate::router::notify_registry::OnPetitionMessage {
+                petition_id: pet_id,
+                char_id: cid,
+                message_text: msg,
+                message_id: mid,
+            };
+            ctx.emit_typed(NotificationTarget::Character(petitioner_cid), msg_notif.clone());
             if let Some(gm_cid) = claimed_by.filter(|&g| g != petitioner_cid) {
-                ctx.notify(NotificationTarget::Character(gm_cid), "OnPetitionMessage", "charid", msg_args);
+                ctx.emit_typed(NotificationTarget::Character(gm_cid), msg_notif);
             }
             Ok(Some(PyRep::keyval([
                 ("petitionID", PyRep::Integer(pet_id)),
@@ -383,10 +381,13 @@ fn handle_petitioner(
                 pet.logs.push(("Claimed".into(), cid, now_unix));
                 Ok(pet.petitioner_cid)
             })?;
-            let assign_args = vec![PyRep::Integer(pet_id), PyRep::Integer(cid)];
-            ctx.notify(NotificationTarget::Character(petitioner_cid), "OnAssignPetition", "charid", assign_args.clone());
+            let assign_notif = crate::router::notify_registry::OnAssignPetition {
+                petition_id: pet_id,
+                assignee_id: Some(cid),
+            };
+            ctx.emit_typed(NotificationTarget::Character(petitioner_cid), assign_notif.clone());
             if cid != petitioner_cid {
-                ctx.notify(NotificationTarget::Character(cid), "OnAssignPetition", "charid", assign_args);
+                ctx.emit_typed(NotificationTarget::Character(cid), assign_notif);
             }
             Ok(Some(PyRep::Integer(1)))
         }
@@ -457,19 +458,24 @@ fn handle_petitioner(
                 Ok((pet.status.clone(), pet.petitioner_cid, prev_gm))
             })?;
             if method == "UnClaimPetition" {
-                let unassign_args = vec![PyRep::Integer(pet_id), PyRep::None];
-                ctx.notify(NotificationTarget::Character(petitioner_cid), "OnAssignPetition", "charid", unassign_args.clone());
+                let unassign_notif = crate::router::notify_registry::OnAssignPetition {
+                    petition_id: pet_id,
+                    assignee_id: None,
+                };
+                ctx.emit_typed(NotificationTarget::Character(petitioner_cid), unassign_notif.clone());
                 if cid != petitioner_cid {
-                    ctx.notify(NotificationTarget::Character(cid), "OnAssignPetition", "charid", unassign_args);
+                    ctx.emit_typed(NotificationTarget::Character(cid), unassign_notif);
                 }
             } else if method == "ClosePetition" {
-                let close_args = vec![PyRep::Integer(pet_id)];
-                ctx.notify(NotificationTarget::Character(petitioner_cid), "OnClosePetition", "charid", close_args.clone());
+                let close_notif = crate::router::notify_registry::OnClosePetition {
+                    petition_id: Some(pet_id),
+                };
+                ctx.emit_typed(NotificationTarget::Character(petitioner_cid), close_notif.clone());
                 if cid != petitioner_cid {
-                    ctx.notify(NotificationTarget::Character(cid), "OnClosePetition", "charid", close_args.clone());
+                    ctx.emit_typed(NotificationTarget::Character(cid), close_notif.clone());
                 }
                 if let Some(gm_cid) = prev_claimed.filter(|&g| g != petitioner_cid && g != cid) {
-                    ctx.notify(NotificationTarget::Character(gm_cid), "OnClosePetition", "charid", close_args);
+                    ctx.emit_typed(NotificationTarget::Character(gm_cid), close_notif);
                 }
             }
             Ok(Some(PyRep::keyval([

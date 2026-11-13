@@ -524,26 +524,30 @@ pub fn handle_project_discovery(
                 }
             });
             if granted {
-                let xp_args = vec![PyRep::Real(new_xp)];
-                session.push_notification("OnProjectDiscoveryExperience", xp_args.clone());
-                let _ = ctx.notify(
+                let xp_notif = crate::router::notify_registry::OnProjectDiscoveryExperience {
+                    experience: new_xp,
+                };
+                crate::router::notify_registry::push_typed_session_notification(
+                    session,
+                    xp_notif.clone(),
+                );
+                let _ = ctx.emit_typed(
                     crate::router::NotificationTarget::Character(char_id),
-                    "OnProjectDiscoveryExperience",
-                    "charid",
-                    xp_args,
+                    xp_notif,
                 );
                 if new_rank > old_rank {
-                    let lvl_args = vec![
-                        PyRep::Integer(new_rank),
-                        PyRep::Real(xp_for_new_rank),
-                        PyRep::Real(xp_for_next_rank),
-                    ];
-                    session.push_notification("OnProjectDiscoveryLevelUp", lvl_args.clone());
-                    let _ = ctx.notify(
+                    let lvl_notif = crate::router::notify_registry::OnProjectDiscoveryLevelUp {
+                        new_rank,
+                        xp_for_new_rank,
+                        xp_for_next_rank,
+                    };
+                    crate::router::notify_registry::push_typed_session_notification(
+                        session,
+                        lvl_notif.clone(),
+                    );
+                    let _ = ctx.emit_typed(
                         crate::router::NotificationTarget::Character(char_id),
-                        "OnProjectDiscoveryLevelUp",
-                        "charid",
-                        lvl_args,
+                        lvl_notif,
                     );
                 }
             }
@@ -707,29 +711,36 @@ pub fn handle_project_discovery(
                         out.player_state_rep,
                     );
                     if out.ak_gain > 0 {
-                        session.push_notification("OnAnalysisKreditsChange", vec![]);
+                        crate::router::notify_registry::push_typed_session_notification(
+                            session,
+                            crate::router::notify_registry::OnAnalysisKreditsChange {},
+                        );
                         crate::services::notify_emitters_tournaments_anomalies::emit_analysis_kredits_change(ctx, char_id);
                     }
-                    let xp_args = vec![PyRep::Real(out.total_xp)];
-                    session.push_notification("OnProjectDiscoveryExperience", xp_args.clone());
-                    let _ = ctx.notify(
+                    let xp_notif = crate::router::notify_registry::OnProjectDiscoveryExperience {
+                        experience: out.total_xp,
+                    };
+                    crate::router::notify_registry::push_typed_session_notification(
+                        session,
+                        xp_notif.clone(),
+                    );
+                    let _ = ctx.emit_typed(
                         crate::router::NotificationTarget::Character(char_id),
-                        "OnProjectDiscoveryExperience",
-                        "charid",
-                        xp_args,
+                        xp_notif,
                     );
                     if out.new_rank > out.prev_rank {
-                        let lvl_args = vec![
-                            PyRep::Integer(out.new_rank),
-                            PyRep::Real(out.xp_for_new_rank),
-                            PyRep::Real(out.xp_for_next_rank),
-                        ];
-                        session.push_notification("OnProjectDiscoveryLevelUp", lvl_args.clone());
-                        let _ = ctx.notify(
+                        let lvl_notif = crate::router::notify_registry::OnProjectDiscoveryLevelUp {
+                            new_rank: out.new_rank,
+                            xp_for_new_rank: out.xp_for_new_rank,
+                            xp_for_next_rank: out.xp_for_next_rank,
+                        };
+                        crate::router::notify_registry::push_typed_session_notification(
+                            session,
+                            lvl_notif.clone(),
+                        );
+                        let _ = ctx.emit_typed(
                             crate::router::NotificationTarget::Character(char_id),
-                            "OnProjectDiscoveryLevelUp",
-                            "charid",
-                            lvl_args,
+                            lvl_notif,
                         );
                     }
                     Some(Ok(out.rep))

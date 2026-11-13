@@ -300,11 +300,14 @@ pub(super) fn handle_add_corporation(
             if let Some(prev_ally) = old_alliance_id {
                 sess_changes.push((PyRep::String("allianceid".into()), PyRep::Tuple(vec![PyRep::Integer(prev_ally), PyRep::None])));
             }
-            ctx.notify(
+            ctx.emit_typed_with_id_type(
                 NotificationTarget::Character(char_id),
-                "OnSessionChanged",
                 "clientID",
-                vec![PyRep::Bool(false), PyRep::Integer(session.session_id as i64), PyRep::Dict(sess_changes)],
+                crate::router::notify_registry::OnSessionChanged {
+                    is_remote: false,
+                    session: PyRep::Integer(session.session_id as i64),
+                    change: PyRep::Dict(sess_changes),
+                },
             );
             let change = PyRep::Dict(vec![
                 (PyRep::String(("corporationID").into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(corp_id)])),
@@ -312,11 +315,9 @@ pub(super) fn handle_add_corporation(
                 (PyRep::String(("tickerName").into()), PyRep::Tuple(vec![PyRep::None, PyRep::String(ticker.to_string())])),
                 (PyRep::String(("ceoID").into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(char_id)])),
             ]);
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Corporation(corp_id),
-                "OnCorporationChanged",
-                "corpid",
-                vec![PyRep::Integer(corp_id), change],
+                crate::router::notify_registry::OnCorporationChanged { corp_id, change },
             );
             let _ = crate::services::quasar_social_chat::on_character_local_chat_membership_refreshed(
                 &ctx.quasar_gateway, &ctx.db, char_id as u32, now_unix,
@@ -498,24 +499,30 @@ pub(super) fn handle_corp_gov(
                     PyRep::String(("shares").into()),
                     PyRep::Tuple(vec![PyRep::Integer(old_from), PyRep::Integer(new_from)]),
                 )]);
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Corporation(corp_id),
-                    "OnShareChange",
-                    "corpid",
-                    vec![PyRep::Integer(from_holder_id), PyRep::Integer(corp_id), from_change],
+                    crate::router::notify_registry::OnShareChange {
+                        shareholder_id: from_holder_id,
+                        corporation_id: corp_id,
+                        change: from_change,
+                    },
                 );
             }
             let to_change = PyRep::Dict(vec![(
                 PyRep::String(("shares").into()),
                 PyRep::Tuple(vec![PyRep::Integer(old_to), PyRep::Integer(new_to)]),
             )]);
-            let to_args = vec![PyRep::Integer(target_id), PyRep::Integer(corp_id), to_change];
-            ctx.notify(NotificationTarget::Corporation(corp_id), "OnShareChange", "corpid", to_args.clone());
+            let to_notif = crate::router::notify_registry::OnShareChange {
+                shareholder_id: target_id,
+                corporation_id: corp_id,
+                change: to_change,
+            };
+            ctx.emit_typed(NotificationTarget::Corporation(corp_id), to_notif.clone());
             let target_in_corp = ctx.db.with_snapshot(|snap| {
                 snap.corporations.get(&corp_id).is_some_and(|c| c.members.contains(&target_id))
             });
             if !target_in_corp {
-                ctx.notify(NotificationTarget::Character(target_id), "OnShareChange", "charid", to_args);
+                ctx.emit_typed_with_id_type(NotificationTarget::Character(target_id), "charid", to_notif);
             }
             Some(Ok(PyRep::keyval([("corporationID", PyRep::Integer(corp_id)), ("toShareholderID", PyRep::Integer(target_id)), ("sharesTransferred", PyRep::Integer(qty))])))
         }
@@ -580,16 +587,27 @@ pub(super) fn handle_corp_gov(
             };
             if target_id != char_id {
                 let from_change = PyRep::Dict(vec![(PyRep::String("shares".into()), PyRep::Tuple(vec![PyRep::Integer(old_from), PyRep::Integer(new_from)]))]);
-                ctx.notify(NotificationTarget::Corporation(target_corp_id), "OnShareChange", "corpid", vec![PyRep::Integer(char_id), PyRep::Integer(target_corp_id), from_change]);
+                ctx.emit_typed(
+                    NotificationTarget::Corporation(target_corp_id),
+                    crate::router::notify_registry::OnShareChange {
+                        shareholder_id: char_id,
+                        corporation_id: target_corp_id,
+                        change: from_change,
+                    },
+                );
             }
             let to_change = PyRep::Dict(vec![(PyRep::String("shares".into()), PyRep::Tuple(vec![PyRep::Integer(old_to), PyRep::Integer(new_to)]))]);
-            let to_args = vec![PyRep::Integer(target_id), PyRep::Integer(target_corp_id), to_change];
-            ctx.notify(NotificationTarget::Corporation(target_corp_id), "OnShareChange", "corpid", to_args.clone());
+            let to_notif = crate::router::notify_registry::OnShareChange {
+                shareholder_id: target_id,
+                corporation_id: target_corp_id,
+                change: to_change,
+            };
+            ctx.emit_typed(NotificationTarget::Corporation(target_corp_id), to_notif.clone());
             let target_in_corp = ctx.db.with_snapshot(|snap| {
                 snap.corporations.get(&target_corp_id).is_some_and(|c| c.members.contains(&target_id))
             });
             if !target_in_corp {
-                ctx.notify(NotificationTarget::Character(target_id), "OnShareChange", "charid", to_args);
+                ctx.emit_typed_with_id_type(NotificationTarget::Character(target_id), "charid", to_notif);
             }
             Some(Ok(PyRep::keyval([("corporationID", PyRep::Integer(target_corp_id)), ("toShareholderID", PyRep::Integer(target_id)), ("sharesTransferred", PyRep::Integer(qty))])))
         }
@@ -865,7 +883,14 @@ pub(super) fn handle_corp_gov(
                 (PyRep::String(("titleName").into()), PyRep::Tuple(vec![old_name, PyRep::String(title_name.to_string())])),
                 (PyRep::String(("roles").into()), PyRep::Tuple(vec![old_roles, PyRep::Integer(roles_mask as i64)])),
             ]);
-            ctx.notify(NotificationTarget::Corporation(corp_id), "OnTitleChanged", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(title_id), change]);
+            ctx.emit_typed(
+                NotificationTarget::Corporation(corp_id),
+                crate::router::notify_registry::OnTitleChanged {
+                    corp_id,
+                    title_id,
+                    change,
+                },
+            );
                 last_ret = (title_id, title_name, roles_mask);
             }
             Some(Ok(PyRep::keyval([
@@ -930,7 +955,14 @@ pub(super) fn handle_corp_gov(
                 (PyRep::String(("titleName").into()), PyRep::Tuple(vec![old_name, PyRep::String(("").into())])),
                 (PyRep::String(("roles").into()), PyRep::Tuple(vec![old_roles, PyRep::Integer(0)])),
             ]);
-            ctx.notify(NotificationTarget::Corporation(corp_id), "OnTitleChanged", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(title_id), change]);
+            ctx.emit_typed(
+                NotificationTarget::Corporation(corp_id),
+                crate::router::notify_registry::OnTitleChanged {
+                    corp_id,
+                    title_id,
+                    change,
+                },
+            );
             Some(Ok(PyRep::keyval([("titleID", PyRep::Integer(title_id)), ("deleted", PyRep::Bool(true))])))
         }
 
@@ -979,7 +1011,10 @@ pub(super) fn handle_corp_gov(
                         PyRep::String(("ceoID").into()),
                         PyRep::Tuple(vec![PyRep::Integer(char_id), PyRep::Integer(next_ceo)]),
                     )]);
-                    ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationChanged", "corpid", vec![PyRep::Integer(corp_id), change]);
+                    ctx.emit_typed(
+                        NotificationTarget::Corporation(corp_id),
+                        crate::router::notify_registry::OnCorporationChanged { corp_id, change },
+                    );
                     Some(Ok(PyRep::keyval([("corporationID", PyRep::Integer(corp_id)), ("newCeoID", PyRep::Integer(next_ceo))])))
                 }
                 Err(e) => Some(Err(e)),
@@ -1067,7 +1102,13 @@ pub(super) fn handle_corp_gov(
                 Ok(w) => w,
                 Err(e) => return Some(Err(e)),
             };
-            ctx.notify(NotificationTarget::Corporation(corp_id), "OnVoteCast", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(case_id)]);
+            ctx.emit_typed(
+                NotificationTarget::Corporation(corp_id),
+                crate::router::notify_registry::OnVoteCast {
+                    corporation_id: corp_id,
+                    vote_case_id: case_id,
+                },
+            );
             Some(Ok(PyRep::keyval([("voteCaseID", PyRep::Integer(case_id)), ("optionID", PyRep::Integer(option_id)), ("weight", PyRep::Integer(weight))])))
         }
 
@@ -1295,14 +1336,30 @@ pub(super) fn handle_corp_gov(
                             session.corp_role = u64::MAX;
                         }
                     }
-                    ctx.notify(NotificationTarget::Corporation(corp_id), "OnSanctionedActionChanged", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(case_id)]);
+                    ctx.emit_typed(
+                        NotificationTarget::Corporation(corp_id),
+                        crate::router::notify_registry::OnSanctionedActionChanged {
+                            corporation_id: corp_id,
+                            vote_case_id: case_id,
+                        },
+                    );
                     if let Some((holder_id, old_s, new_s)) = share_delta {
                         let s_change = PyRep::Dict(vec![(PyRep::String(("shares").into()), PyRep::Tuple(vec![PyRep::Integer(old_s), PyRep::Integer(new_s)]))]);
-                        ctx.notify(NotificationTarget::Corporation(corp_id), "OnShareChange", "corpid", vec![PyRep::Integer(holder_id), PyRep::Integer(corp_id), s_change]);
+                        ctx.emit_typed(
+                            NotificationTarget::Corporation(corp_id),
+                            crate::router::notify_registry::OnShareChange {
+                                shareholder_id: holder_id,
+                                corporation_id: corp_id,
+                                change: s_change,
+                            },
+                        );
                     }
                     if is_ceo_vote {
                         let change = PyRep::Dict(vec![(PyRep::String(("ceoID").into()), PyRep::Tuple(vec![PyRep::Integer(old_ceo_id), PyRep::Integer(new_ceo_id)]))]);
-                        ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationChanged", "corpid", vec![PyRep::Integer(corp_id), change]);
+                        ctx.emit_typed(
+                            NotificationTarget::Corporation(corp_id),
+                            crate::router::notify_registry::OnCorporationChanged { corp_id, change },
+                        );
                     }
                     Some(Ok(PyRep::keyval([("voteCaseID", PyRep::Integer(case_id)), ("activated", PyRep::Bool(true))])))
                 }
@@ -1432,11 +1489,12 @@ pub(super) fn handle_corp_gov(
                 id
             };
             save_corp_rec_ads(ctx, &ads);
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Corporation(corp_id),
-                "OnCorporationRecruitmentAdChanged",
-                "corpid",
-                vec![PyRep::Integer(corp_id), PyRep::Integer(ad_id)],
+                crate::router::notify_registry::OnCorporationRecruitmentAdChanged {
+                    corp_id: Some(corp_id),
+                    ad_id: Some(ad_id),
+                },
             );
             Some(Ok(PyRep::keyval([
                 ("adID", PyRep::Integer(ad_id)),
@@ -1481,11 +1539,12 @@ pub(super) fn handle_corp_gov(
                     s.recruitment_ads.retain(|a| a.0 != ad_id);
                 }
             });
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Corporation(corp_id),
-                "OnCorporationRecruitmentAdChanged",
-                "corpid",
-                vec![PyRep::Integer(corp_id), PyRep::Integer(ad_id)],
+                crate::router::notify_registry::OnCorporationRecruitmentAdChanged {
+                    corp_id: Some(corp_id),
+                    ad_id: Some(ad_id),
+                },
             );
             Some(Ok(PyRep::keyval([("adID", PyRep::Integer(ad_id)), ("deleted", PyRep::Bool(true))])))
         }

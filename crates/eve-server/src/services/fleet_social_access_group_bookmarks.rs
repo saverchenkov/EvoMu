@@ -221,16 +221,24 @@ pub(crate) const SUBFOLDER_ADDED: i64 = 6;
 pub(crate) const SUBFOLDER_UPDATED: i64 = 7;
 pub(crate) const SUBFOLDER_REMOVED: i64 = 8;
 
-pub(crate) fn acl_folder_updates_arg(
+pub(crate) fn acl_folder_updates_rep(
     folder_id: i64,
     _update_type: i64,
     update_args: PyRep,
-) -> Vec<PyRep> {
-    vec![PyRep::List(vec![PyRep::Tuple(vec![
+) -> PyRep {
+    PyRep::List(vec![PyRep::Tuple(vec![
         PyRep::Tuple(vec![PyRep::Integer(folder_id)]),
         PyRep::String("FolderChanged".into()),
         update_args,
-    ])])]
+    ])])
+}
+
+pub(crate) fn acl_folder_updates_arg(
+    folder_id: i64,
+    update_type: i64,
+    update_args: PyRep,
+) -> Vec<PyRep> {
+    vec![acl_folder_updates_rep(folder_id, update_type, update_args)]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -434,18 +442,19 @@ async fn handle_add_folder(
         })?;
 
         if let Some(cid) = corp_id {
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Corporation(cid),
-                "OnSharedBookmarksFolderUpdated",
-                "corpid",
-                acl_folder_updates_arg(folder_id, FOLDER_UPDATED, PyRep::Integer(cid)),
+                crate::router::notify_registry::OnSharedBookmarksFolderUpdated {
+                    updates: acl_folder_updates_rep(folder_id, FOLDER_UPDATED, PyRep::Integer(cid)),
+                },
             );
         }
-        ctx.notify(
+        ctx.emit_typed_with_id_type(
             NotificationTarget::Character(char_id),
-            "OnSharedBookmarksFolderUpdated",
             "charid",
-            acl_folder_updates_arg(folder_id, FOLDER_UPDATED, PyRep::Integer(folder_id)),
+            crate::router::notify_registry::OnSharedBookmarksFolderUpdated {
+                updates: acl_folder_updates_rep(folder_id, FOLDER_UPDATED, PyRep::Integer(folder_id)),
+            },
         );
 
         return Ok(PyRep::keyval([
@@ -601,18 +610,19 @@ async fn handle_update_folder(
 
     if is_shared {
         if let Some(cid) = corp_id_opt {
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Corporation(cid),
-                "OnSharedBookmarksFolderUpdated",
-                "corpid",
-                acl_folder_updates_arg(folder_id, FOLDER_UPDATED, PyRep::Integer(folder_id)),
+                crate::router::notify_registry::OnSharedBookmarksFolderUpdated {
+                    updates: acl_folder_updates_rep(folder_id, FOLDER_UPDATED, PyRep::Integer(folder_id)),
+                },
             );
         }
-        ctx.notify(
+        ctx.emit_typed_with_id_type(
             NotificationTarget::Character(char_id),
-            "OnSharedBookmarksFolderUpdated",
             "charid",
-            acl_folder_updates_arg(folder_id, FOLDER_UPDATED, PyRep::Integer(folder_id)),
+            crate::router::notify_registry::OnSharedBookmarksFolderUpdated {
+                updates: acl_folder_updates_rep(folder_id, FOLDER_UPDATED, PyRep::Integer(folder_id)),
+            },
         );
     }
 
@@ -704,11 +714,9 @@ async fn handle_delete_folder(
     })?;
 
     if let Some(cid) = corp_id_opt {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Corporation(cid),
-            "OnSharedBookmarksFolderDeleted",
-            "corpid",
-            vec![PyRep::Integer(folder_id)],
+            crate::router::notify_registry::OnSharedBookmarksFolderDeleted { folder_id },
         );
     }
     Ok(PyRep::keyval([
@@ -793,11 +801,11 @@ async fn handle_create_subfolder(
 
     if is_shared {
         if let Some(cid) = corp_id_opt {
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Corporation(cid),
-                "OnSharedBookmarksFolderUpdated",
-                "corpid",
-                acl_folder_updates_arg(parent_folder_id, SUBFOLDER_ADDED, PyRep::Integer(id)),
+                crate::router::notify_registry::OnSharedBookmarksFolderUpdated {
+                    updates: acl_folder_updates_rep(parent_folder_id, SUBFOLDER_ADDED, PyRep::Integer(id)),
+                },
             );
         }
     }
@@ -889,11 +897,11 @@ async fn handle_update_subfolder(
 
     if is_shared {
         if let Some(cid) = corp_id_opt {
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Corporation(cid),
-                "OnSharedBookmarksFolderUpdated",
-                "corpid",
-                acl_folder_updates_arg(pfid, SUBFOLDER_UPDATED, PyRep::Integer(sfid)),
+                crate::router::notify_registry::OnSharedBookmarksFolderUpdated {
+                    updates: acl_folder_updates_rep(pfid, SUBFOLDER_UPDATED, PyRep::Integer(sfid)),
+                },
             );
         }
     }
@@ -975,11 +983,11 @@ async fn handle_delete_subfolder(
 
     if is_shared {
         if let Some(cid) = corp_id_opt {
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Corporation(cid),
-                "OnSharedBookmarksFolderUpdated",
-                "corpid",
-                acl_folder_updates_arg(pfid, SUBFOLDER_REMOVED, PyRep::Integer(sfid)),
+                crate::router::notify_registry::OnSharedBookmarksFolderUpdated {
+                    updates: acl_folder_updates_rep(pfid, SUBFOLDER_REMOVED, PyRep::Integer(sfid)),
+                },
             );
         }
     }
@@ -1060,27 +1068,28 @@ async fn handle_known_folders_state(
         Ok(())
     })?;
 
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnSharedBookmarksFoldersAccessChanged",
-        "charid",
-        vec![PyRep::Dict(vec![(
-            PyRep::Integer(folder_id),
-            PyRep::Integer(if active { 1 } else { 0 }),
-        )])],
+        crate::router::notify_registry::OnSharedBookmarksFoldersAccessChanged {
+            access_changed: PyRep::Dict(vec![(
+                PyRep::Integer(folder_id),
+                PyRep::Integer(if active { 1 } else { 0 }),
+            )]),
+        },
     );
-    ctx.notify(
+    ctx.emit_typed_with_id_type(
         NotificationTarget::Character(char_id),
-        "OnSharedBookmarksFolderUpdated",
         "charid",
-        acl_folder_updates_arg(folder_id, FOLDER_UPDATED, PyRep::Bool(active)),
+        crate::router::notify_registry::OnSharedBookmarksFolderUpdated {
+            updates: acl_folder_updates_rep(folder_id, FOLDER_UPDATED, PyRep::Bool(active)),
+        },
     );
     if let Some(corp_id) = folder_rec.corporation_id {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Corporation(corp_id),
-            "OnSharedBookmarksFolderUpdated",
-            "corpid",
-            acl_folder_updates_arg(folder_id, FOLDER_UPDATED, PyRep::Integer(corp_id)),
+            crate::router::notify_registry::OnSharedBookmarksFolderUpdated {
+                updates: acl_folder_updates_rep(folder_id, FOLDER_UPDATED, PyRep::Integer(corp_id)),
+            },
         );
     }
 
@@ -1231,17 +1240,18 @@ async fn handle_remove_from_known_folders(
     ctx.db.with_mut_snapshot(|snap| {
         snap.bookmark_folder_known_by.remove(&(folder_id, char_id));
     });
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnSharedBookmarksFoldersAccessLost",
-        "charid",
-        vec![PyRep::List(vec![PyRep::Integer(folder_id)])],
+        crate::router::notify_registry::OnSharedBookmarksFoldersAccessLost {
+            folder_ids: vec![folder_id],
+        },
     );
-    ctx.notify(
+    ctx.emit_typed_with_id_type(
         NotificationTarget::Character(char_id),
-        "OnSharedBookmarksFolderUpdated",
         "charid",
-        acl_folder_updates_arg(folder_id, FOLDER_UPDATED, PyRep::Bool(false)),
+        crate::router::notify_registry::OnSharedBookmarksFolderUpdated {
+            updates: acl_folder_updates_rep(folder_id, FOLDER_UPDATED, PyRep::Bool(false)),
+        },
     );
     Ok(PyRep::keyval([
         ("folderID", PyRep::Integer(folder_id)),

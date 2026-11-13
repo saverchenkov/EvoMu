@@ -440,18 +440,19 @@ pub fn create_bill(
         ("externalID2", PyRep::Integer(external_id2)),
     ]);
     if is_corp_debtor {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Corporation(debtor_id),
-            "OnBillReceived",
-            "corpid",
-            vec![bill_kv],
+            crate::router::notify_registry::OnBillReceived {
+                bill: Some(bill_kv),
+            },
         );
     } else {
-        ctx.notify(
+        ctx.emit_typed_with_id_type(
             NotificationTarget::Character(debtor_id),
-            "OnBillReceived",
             "charid",
-            vec![bill_kv],
+            crate::router::notify_registry::OnBillReceived {
+                bill: Some(bill_kv),
+            },
         );
     }
     bill_id
@@ -730,7 +731,13 @@ pub fn handle(
                 Ok(())
             });
             if let Err(e) = res { return Some(Err(e)); }
-            ctx.notify(NotificationTarget::Character(char_id), "OnAssumeStructureControl", "charid", vec![PyRep::Integer(char_id), PyRep::Integer(item_id)]);
+            ctx.emit_typed(
+                NotificationTarget::Character(char_id),
+                crate::router::notify_registry::OnAssumeStructureControl {
+                    char_id: Some(char_id),
+                    item_id: Some(item_id),
+                },
+            );
             Some(Ok(PyRep::None))
         }
 
@@ -745,18 +752,22 @@ pub fn handle(
                 Ok(())
             });
             if let Err(e) = res { return Some(Err(e)); }
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(char_id),
-                "OnTargetOBO",
-                "charid",
-                vec![
-                    PyRep::String("clear".into()),
-                    PyRep::Integer(item_id),
-                    PyRep::None,
-                    PyRep::None,
-                ],
+                crate::router::notify_registry::OnTargetOBO {
+                    what: "clear".into(),
+                    sid: item_id,
+                    tid: None,
+                    reason: None,
+                },
             );
-            ctx.notify(NotificationTarget::Character(char_id), "OnRelinquishStructureControl", "charid", vec![PyRep::Integer(char_id), PyRep::Integer(item_id)]);
+            ctx.emit_typed(
+                NotificationTarget::Character(char_id),
+                crate::router::notify_registry::OnRelinquishStructureControl {
+                    char_id: Some(char_id),
+                    item_id: Some(item_id),
+                },
+            );
             Some(Ok(PyRep::None))
         }
 

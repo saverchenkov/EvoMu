@@ -80,11 +80,11 @@ pub fn emit_campaign_started(ctx: &ServerContext, sys_id: u32, campaign_id: i64)
         })
     });
     if let Some(snapshot) = snap_opt {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::SolarSystem(sys_id),
-            "OnInsurgencyCampaignStartedForLocation",
-            "solarsystemid",
-            vec![snapshot],
+            crate::router::notify_registry::OnInsurgencyCampaignStartedForLocation {
+                campaign_snapshot: snapshot,
+            },
         );
     }
 }
@@ -140,11 +140,11 @@ pub fn emit_campaign_updated(ctx: &ServerContext, sys_id: u32, campaign_id: i64,
         rt.campaigns.get(&campaign_id).map(|c| build_campaign_snapshot_for_system(c, sys_id, now, rt.empire_ambition_modifier.get(&c.pirate_faction_id).copied().unwrap_or(0)))
     });
     if let Some(snap) = snap {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::SolarSystem(sys_id),
-            "OnInsurgencyCampaignUpdatedForLocation",
-            "solarsystemid",
-            vec![snap],
+            crate::router::notify_registry::OnInsurgencyCampaignUpdatedForLocation {
+                campaign_snapshot: snap,
+            },
         );
     }
 }
@@ -203,15 +203,13 @@ pub fn init_insurgency_campaign(
     };
     for sys in &systems {
         emit_campaign_started(ctx, *sys, campaign_id);
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::SolarSystem(*sys),
-            "OnInsurgencyStateChangedForFaction",
-            "solarsystemid",
-            vec![
-                PyRep::Integer(initial_campaign_state),
-                PyRep::Integer(pirate_faction),
-                PyRep::Integer(i64::from(fob_system)),
-            ],
+            crate::router::notify_registry::OnInsurgencyStateChangedForFaction {
+                campaign_state: initial_campaign_state,
+                pirate_faction_id: pirate_faction,
+                origin_solar_system_id: i64::from(fob_system),
+            },
         );
     }
 }
@@ -288,21 +286,19 @@ pub fn end_insurgency_campaign(ctx: &ServerContext, campaign_id: i64) {
             });
             ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).system_corruption_stages.insert(*sys, 0);
             crate::services::security_mgr::sync_corruption_security_status_change(ctx, *sys, prev_c, 0);
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::SolarSystem(*sys),
-                "OnInsurgencyCampaignEndingForLocation",
-                "solarsystemid",
-                vec![PyRep::Integer(i64::from(*sys))],
+                crate::router::notify_registry::OnInsurgencyCampaignEndingForLocation {
+                    solar_system_id: i64::from(*sys),
+                },
             );
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::SolarSystem(*sys),
-                "OnInsurgencyStateChangedForFaction",
-                "solarsystemid",
-                vec![
-                    PyRep::Integer(outcome_state),
-                    PyRep::Integer(c.pirate_faction_id),
-                    PyRep::Integer(i64::from(c.fob_solar_system_id)),
-                ],
+                crate::router::notify_registry::OnInsurgencyStateChangedForFaction {
+                    campaign_state: outcome_state,
+                    pirate_faction_id: c.pirate_faction_id,
+                    origin_solar_system_id: i64::from(c.fob_solar_system_id),
+                },
             );
             let reset_payload = encode_pirate_progress_notice(*sys, 0, 1000);
             for notice_type in [
@@ -434,11 +430,14 @@ pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32,
         );
     }
     if stage >= 5 {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::SolarSystem(sys_id),
-            "OnSystemFullyCorruptedForFaction",
-            "solarsystemid",
-            vec![PyRep::Integer(i64::from(sys_id)), PyRep::Integer(pirate_faction), PyRep::Integer(pts), PyRep::Integer(1000)],
+            crate::router::notify_registry::OnSystemFullyCorruptedForFaction {
+                solar_system_id: i64::from(sys_id),
+                pirate_faction_id: pirate_faction,
+                pirate_points: pts,
+                points_required: 1000,
+            },
         );
         let should_resolve = with_insurgency_runtime(ctx, |rt| {
             let Some(camp) = rt.campaigns.get(&campaign_id) else { return false; };
@@ -503,15 +502,13 @@ pub fn add_system_suppression(ctx: &ServerContext, campaign_id: i64, sys_id: u32
         );
     }
     if stage >= 5 {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::SolarSystem(sys_id),
-            "OnSystemFullySuppressedForFaction",
-            "solarsystemid",
-            vec![
-                PyRep::Integer(i64::from(sys_id)),
-                PyRep::Integer(pts),
-                PyRep::Integer(1000),
-            ],
+            crate::router::notify_registry::OnSystemFullySuppressedForFaction {
+                solar_system_id: i64::from(sys_id),
+                antipirate_points: pts,
+                points_required: 1000,
+            },
         );
     }
     (pts, stage)
@@ -823,49 +820,38 @@ pub fn notify_stronghold_destruction(
             ("systems", PyRep::List(sys_reps)),
         ])
     });
-    let update_args = vec![snap_rep];
-
-    let full_supp_args = if info.new_suppression_stage >= 5 {
-        Some(vec![
-            PyRep::Integer(i64::from(info.solar_system_id)),
-            PyRep::Integer(info.new_suppression),
-            PyRep::Integer(1000),
-        ])
-    } else {
-        None
+    let update_notif = crate::router::notify_registry::OnInsurgencyCampaignUpdatedForLocation {
+        campaign_snapshot: snap_rep,
     };
 
+    let full_supp_notif = (info.new_suppression_stage >= 5).then_some(
+        crate::router::notify_registry::OnSystemFullySuppressedForFaction {
+            solar_system_id: i64::from(info.solar_system_id),
+            antipirate_points: info.new_suppression,
+            points_required: 1000,
+        },
+    );
+
     for cid in system_chars {
-        let (packet, marshaled_packet) = crate::router::ServerContext::build_macho_notification_packet(
+        crate::router::notify_registry::emit_typed_target_to_char_with_id_type(
+            pending_notifications,
+            notify_tx,
             cid,
             None,
-            "OnInsurgencyCampaignUpdatedForLocation",
             "solarsystemid",
-            update_args.clone(),
+            now_ft,
+            update_notif.clone(),
         );
-        let notif = crate::router::cache_notifications::PendingMachoNotification {
-            seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-            recipient_char_id: cid, event: "OnInsurgencyCampaignUpdatedForLocation".into(),
-            id_type: "solarsystemid".into(), args: update_args.clone(), packet, marshaled_packet, created_filetime: now_ft,
-        };
-        if let Some(pend) = pending_notifications {
-            if let Ok(mut map) = pend.write() { map.entry(cid).or_default().push(notif.clone()); }
-        }
-        if let Some(tx) = notify_tx { let _ = tx.send((cid, notif)); }
-
-        if let Some(ref fs_args) = full_supp_args {
-            let (packet_fs, marshaled_packet_fs) = crate::router::ServerContext::build_macho_notification_packet(
-                cid, None, "OnSystemFullySuppressedForFaction", "solarsystemid", fs_args.clone(),
+        if let Some(ref fs_notif) = full_supp_notif {
+            crate::router::notify_registry::emit_typed_target_to_char_with_id_type(
+                pending_notifications,
+                notify_tx,
+                cid,
+                None,
+                "solarsystemid",
+                now_ft,
+                fs_notif.clone(),
             );
-            let notif_fs = crate::router::cache_notifications::PendingMachoNotification {
-                seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-                recipient_char_id: cid, event: "OnSystemFullySuppressedForFaction".into(),
-                id_type: "solarsystemid".into(), args: fs_args.clone(), packet: packet_fs, marshaled_packet: marshaled_packet_fs, created_filetime: now_ft,
-            };
-            if let Some(pend) = pending_notifications {
-                if let Ok(mut map) = pend.write() { map.entry(cid).or_default().push(notif_fs.clone()); }
-            }
-            if let Some(tx) = notify_tx { let _ = tx.send((cid, notif_fs)); }
         }
     }
 }

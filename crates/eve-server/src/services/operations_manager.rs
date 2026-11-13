@@ -513,11 +513,11 @@ pub fn handle(
             };
             emit_operation_reward_notifications(ctx, target_cid, &outcome);
             crate::services::character_expert_systems::stop_active_operation_node_graph(ctx, target_cid, cat_id);
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(target_cid),
-                "OnOperationCategoryCompleted",
-                "charid",
-                vec![PyRep::Integer(cat_id)],
+                crate::router::notify_registry::OnOperationCategoryCompleted {
+                    category_id: cat_id,
+                },
             );
             Some(Ok(PyRep::Bool(true)))
         }
@@ -738,17 +738,27 @@ pub fn handle(
             };
             emit_operation_reward_notifications(ctx, char_id, &outcome);
             if prev_op.is_some() {
-                ctx.notify(NotificationTarget::Character(char_id), "OnOperationDeactivated", "charid", vec![]);
+                ctx.emit_typed(
+                    NotificationTarget::Character(char_id),
+                    crate::router::notify_registry::OnOperationDeactivated {},
+                );
             }
             if is_replay {
-                ctx.notify(NotificationTarget::Character(char_id), "OnOperationReplayed", "charid", vec![PyRep::Integer(cat_id), PyRep::Integer(op_id)]);
+                ctx.emit_typed(
+                    NotificationTarget::Character(char_id),
+                    crate::router::notify_registry::OnOperationReplayed {
+                        category_id: cat_id,
+                        operation_id: op_id,
+                    },
+                );
             }
             crate::services::character_expert_systems::start_client_node_graph_for_operation(ctx, char_id, op_id, cat_id, op_sys);
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(char_id),
-                "OnOperationCategoryChanged",
-                "charid",
-                vec![PyRep::Integer(cat_id), PyRep::Integer(op_id)],
+                crate::router::notify_registry::OnOperationCategoryChanged {
+                    new_category_id: cat_id,
+                    new_operation_id: op_id,
+                },
             );
             Some(Ok(PyRep::Bool(true)))
         }
@@ -907,15 +917,13 @@ pub fn handle(
             };
             emit_operation_reward_notifications(ctx, char_id, &rw_outcome);
             crate::services::notify_emitters_operations_nodegraph::emit_operation_task_skipped(ctx, char_id, &op_defs, cat_id, op_id, task_id);
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(char_id),
-                "OnOperationTaskCompleted",
-                "charid",
-                vec![
-                    PyRep::Integer(cat_id),
-                    PyRep::Integer(op_id),
-                    PyRep::Integer(task_id),
-                ],
+                crate::router::notify_registry::OnOperationTaskCompleted {
+                    category_id: cat_id,
+                    operation_id: op_id,
+                    task_id,
+                },
             );
             Some(Ok(PyRep::Bool(true)))
         }
@@ -1225,11 +1233,12 @@ pub fn handle(
                     push_operation_event(rec, event_name, cat_id);
                     save_store(snap, &store, now);
                 });
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Character(char_id),
-                    "OnOperationCategoryChanged",
-                    "charid",
-                    vec![PyRep::Integer(cat_id), PyRep::Integer(0)],
+                    crate::router::notify_registry::OnOperationCategoryChanged {
+                        new_category_id: cat_id,
+                        new_operation_id: 0,
+                    },
                 );
                 return Some(Ok(PyRep::Bool(true)));
             }
