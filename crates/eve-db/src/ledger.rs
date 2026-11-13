@@ -175,7 +175,7 @@ impl WorldStateSnapshot {
                 });
             }
         }
-        if let Some(t) = self.market_transactions.iter_mut().rev().find(|t| t.transaction_id == tx_id) {
+        if let Some(t) = self.market_transactions.get_mut(&tx_id) {
             t.journal_ref_id = journal_ref;
         }
         let qty = f.quantity.max(1);
@@ -366,19 +366,22 @@ impl WorldStateSnapshot {
     ) -> i64 {
         self.next_entity_id += 1;
         let transaction_id = self.next_entity_id;
-        self.market_transactions.push(MarketTransactionRecord {
+        self.market_transactions.insert(
             transaction_id,
-            date_unix,
-            type_id,
-            quantity,
-            price,
-            location_id,
-            buyer_id,
-            seller_id,
-            buyer_account_key: ACCOUNTING_KEY_CASH,
-            seller_account_key: ACCOUNTING_KEY_CASH,
-            journal_ref_id,
-        });
+            MarketTransactionRecord {
+                transaction_id,
+                date_unix,
+                type_id,
+                quantity,
+                price,
+                location_id,
+                buyer_id,
+                seller_id,
+                buyer_account_key: ACCOUNTING_KEY_CASH,
+                seller_account_key: ACCOUNTING_KEY_CASH,
+                journal_ref_id,
+            },
+        );
         transaction_id
     }
 

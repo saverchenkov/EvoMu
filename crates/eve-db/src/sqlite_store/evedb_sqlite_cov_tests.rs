@@ -733,7 +733,7 @@ fn schema_and_cold_stores_dropped_table_and_corrupt_paths() {
     c_ro.execute_batch("PRAGMA query_only = ON;").unwrap();
     assert!(apply_migrations(&c_ro).is_err());
     assert!(crate::sqlite_store::auth_store::apply_auth_migration(&c_ro).is_err());
-    assert!(crate::sqlite_store::ledger_store::apply_ledger_migration(&c_ro).is_err());
+    assert!(crate::sqlite_store::domain_rows::apply_domain_rows_migration(&c_ro).is_err());
     assert!(crate::sqlite_store::notes_lp_sequence_store::apply_d6_migration(&c_ro).is_err());
     assert!(crate::sqlite_store::social_store::apply_d6_social_migration(&c_ro).is_err());
     assert!(crate::sqlite_store::corp_crimewatch_store::apply_d6_corp_crimewatch_migration(&c_ro).is_err());

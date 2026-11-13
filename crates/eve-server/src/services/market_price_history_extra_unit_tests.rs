@@ -263,32 +263,38 @@ fn build_price_history_fallback_from_transactions_and_corp_transactions_rpc() {
         // Two transactions on the same day (1_700_000_000):
         // Fill 1: qty 2 @ 10.0 ISK (1_000 cents), corp is buyer on account 1002
         // Fill 2: qty 6 @ 30.0 ISK (3_000 cents), corp is seller on account 1003
-        snap.market_transactions.push(MarketTransactionRecord {
-            transaction_id: 7001,
-            date_unix: 1_700_000_000,
-            type_id: custom_type_id,
-            quantity: 2,
-            price: IskCents(1_000),
-            buyer_id: corp_id,
-            seller_id: ceo_id,
-            buyer_account_key: 1002,
-            seller_account_key: 1000,
-            location_id: station_id,
-            journal_ref_id: 5001,
-        });
-        snap.market_transactions.push(MarketTransactionRecord {
-            transaction_id: 7002,
-            date_unix: 1_700_000_010,
-            type_id: custom_type_id,
-            quantity: 6,
-            price: IskCents(3_000),
-            buyer_id: ceo_id,
-            seller_id: corp_id,
-            buyer_account_key: 1000,
-            seller_account_key: 1003,
-            location_id: station_id,
-            journal_ref_id: 5002,
-        });
+        snap.market_transactions.insert(
+            7001,
+            MarketTransactionRecord {
+                transaction_id: 7001,
+                date_unix: 1_700_000_000,
+                type_id: custom_type_id,
+                quantity: 2,
+                price: IskCents(1_000),
+                buyer_id: corp_id,
+                seller_id: ceo_id,
+                buyer_account_key: 1002,
+                seller_account_key: 1000,
+                location_id: station_id,
+                journal_ref_id: 5001,
+            },
+        );
+        snap.market_transactions.insert(
+            7002,
+            MarketTransactionRecord {
+                transaction_id: 7002,
+                date_unix: 1_700_000_010,
+                type_id: custom_type_id,
+                quantity: 6,
+                price: IskCents(3_000),
+                buyer_id: ceo_id,
+                seller_id: corp_id,
+                buyer_account_key: 1000,
+                seller_account_key: 1003,
+                location_id: station_id,
+                journal_ref_id: 5002,
+            },
+        );
     });
 
     // 1. Fallback OHLC aggregation from market_transactions:
@@ -513,32 +519,38 @@ fn mutant_kill_matched_orders_npc_filter_history_and_ceo_char_tx_rpcs() {
         assert_eq!(sell_cross.matched_orders, vec![(9_203, player_buyer)]);
 
         // 3. build_price_history_rows: persisted market_history + mixed-type tx fallback filtering
-        snap.market_transactions.push(MarketTransactionRecord {
-            transaction_id: 8_101,
-            date_unix: now_unix,
-            type_id: other_tid,
-            quantity: 5,
-            price: IskCents(2_000),
-            buyer_id: corp_id,
-            seller_id: player_seller,
-            buyer_account_key: 1000,
-            seller_account_key: 1000,
-            location_id: station_id,
-            journal_ref_id: 8_101,
-        });
-        snap.market_transactions.push(MarketTransactionRecord {
-            transaction_id: 8_102,
-            date_unix: now_unix,
-            type_id: test_tid,
-            quantity: 3,
-            price: IskCents(1_200),
-            buyer_id: player_buyer,
-            seller_id: corp_id,
-            buyer_account_key: 1000,
-            seller_account_key: 1000,
-            location_id: station_id,
-            journal_ref_id: 8_102,
-        });
+        snap.market_transactions.insert(
+            8_101,
+            MarketTransactionRecord {
+                transaction_id: 8_101,
+                date_unix: now_unix,
+                type_id: other_tid,
+                quantity: 5,
+                price: IskCents(2_000),
+                buyer_id: corp_id,
+                seller_id: player_seller,
+                buyer_account_key: 1000,
+                seller_account_key: 1000,
+                location_id: station_id,
+                journal_ref_id: 8_101,
+            },
+        );
+        snap.market_transactions.insert(
+            8_102,
+            MarketTransactionRecord {
+                transaction_id: 8_102,
+                date_unix: now_unix,
+                type_id: test_tid,
+                quantity: 3,
+                price: IskCents(1_200),
+                buyer_id: player_buyer,
+                seller_id: corp_id,
+                buyer_account_key: 1000,
+                seller_account_key: 1000,
+                location_id: station_id,
+                journal_ref_id: 8_102,
+            },
+        );
 
         let tx_rows = build_price_history_rows(snap, other_tid, region_id);
         assert_eq!(tx_rows.len(), 1);

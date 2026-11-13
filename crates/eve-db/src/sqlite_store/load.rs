@@ -1375,7 +1375,8 @@ pub fn load_snapshot_from_sqlite_with_options(
         }
     }
 
-    super::ledger_store::load_ledger_checked(conn, &mut snap, &mut ctx)?;
+    let had_legacy_ledger =
+        super::domain_rows::load_ledger_domain_rows(conn, &mut snap, &mut ctx)?;
     super::notes_lp_sequence_store::load_d6_checked(conn, &mut snap, &mut ctx)?;
     super::social_store::load_d6_social_into_snapshot_with_ctx(conn, &mut snap, &mut ctx)?;
     super::corp_crimewatch_store::load_d6_corp_crimewatch_checked(conn, &mut snap, &mut ctx)?;
@@ -1394,10 +1395,16 @@ pub fn load_snapshot_from_sqlite_with_options(
     for (&sid, st) in &mut snap.system_states {
         st.solar_system_id = sid;
     }
-    if conn.is_autocommit() {
+    if conn.is_autocommit() && !conn.is_readonly(rusqlite::DatabaseName::Main).unwrap_or(false) {
+        if had_legacy_ledger {
+            super::domain_rows::apply_domain_rows_migration(conn)?;
+        }
         let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
         let delta = super::sync::sync_dirty_to_sqlite(&tx, &snap, &mut pre_migration_fp, false)?;
-        if delta.dirty {
+        if had_legacy_ledger {
+            super::domain_rows::drop_legacy_ledger_tables(&tx)?;
+        }
+        if delta.dirty || had_legacy_ledger {
             tx.commit().map_err(|e| e.to_string())?;
         }
     }

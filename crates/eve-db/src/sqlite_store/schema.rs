@@ -479,7 +479,7 @@ pub fn apply_migrations(conn: &Connection) -> Result<(), String> {
         let _ = conn.execute(&format!("ALTER TABLE industry_jobs ADD COLUMN {col}"), []);
     }
     super::auth_store::apply_auth_migration(conn)?;
-    super::ledger_store::apply_ledger_migration(conn)?;
+    super::domain_rows::apply_domain_rows_migration(conn)?;
     super::notes_lp_sequence_store::apply_d6_migration(conn)?;
     super::social_store::apply_d6_social_migration(conn)?;
     super::corp_crimewatch_store::apply_d6_corp_crimewatch_migration(conn)?;

@@ -475,32 +475,38 @@ async fn test_daily_maintenance_jobs_mutate_belts_ice_market_history_sci_sov_mis
     let sov_hub_id: i64 = 950_777;
     let expired_oid = 889_001_i64;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.market_transactions.push(MarketTransactionRecord {
-            transaction_id: 770_001,
-            date_unix: now - 7_200,
-            type_id: 34,
-            quantity: 1_000,
-            price: IskCents::from_f64_isk(5.0),
-            location_id: JITA_STATION_ID,
-            buyer_id: P1,
-            seller_id: P2,
-            buyer_account_key: 1000,
-            seller_account_key: 1000,
-            journal_ref_id: 1,
-        });
-        snap.market_transactions.push(MarketTransactionRecord {
-            transaction_id: 770_002,
-            date_unix: now - 1_800,
-            type_id: 34,
-            quantity: 3_000,
-            price: IskCents::from_f64_isk(7.0),
-            location_id: JITA_STATION_ID,
-            buyer_id: P1,
-            seller_id: P2,
-            buyer_account_key: 1000,
-            seller_account_key: 1000,
-            journal_ref_id: 2,
-        });
+        snap.market_transactions.insert(
+            770_001,
+            MarketTransactionRecord {
+                transaction_id: 770_001,
+                date_unix: now - 7_200,
+                type_id: 34,
+                quantity: 1_000,
+                price: IskCents::from_f64_isk(5.0),
+                location_id: JITA_STATION_ID,
+                buyer_id: P1,
+                seller_id: P2,
+                buyer_account_key: 1000,
+                seller_account_key: 1000,
+                journal_ref_id: 1,
+            },
+        );
+        snap.market_transactions.insert(
+            770_002,
+            MarketTransactionRecord {
+                transaction_id: 770_002,
+                date_unix: now - 1_800,
+                type_id: 34,
+                quantity: 3_000,
+                price: IskCents::from_f64_isk(7.0),
+                location_id: JITA_STATION_ID,
+                buyer_id: P1,
+                seller_id: P2,
+                buyer_account_key: 1000,
+                seller_account_key: 1000,
+                journal_ref_id: 2,
+            },
+        );
 
         snap.industry_jobs.insert(
             660_001,

@@ -272,19 +272,22 @@ fn journal_and_market_transactions_filter_and_enforce_corp_roles() {
             reason: "corp journal".into(),
             meta: JournalMeta::new(37, corp_id, ceo_id, now).with_account_key(1000),
         });
-        snap.market_transactions.push(MarketTransactionRecord {
-            transaction_id: 1,
-            date_unix: now,
-            type_id: 34,
-            quantity: 100,
-            price: IskCents(5_00),
-            location_id: 60_003_760,
-            buyer_id: ceo_id,
-            seller_id: corp_id,
-            buyer_account_key: 1000,
-            seller_account_key: 1000,
-            journal_ref_id: 1,
-        });
+        snap.market_transactions.insert(
+            1,
+            MarketTransactionRecord {
+                transaction_id: 1,
+                date_unix: now,
+                type_id: 34,
+                quantity: 100,
+                price: IskCents(5_00),
+                location_id: 60_003_760,
+                buyer_id: ceo_id,
+                seller_id: corp_id,
+                buyer_account_key: 1000,
+                seller_account_key: 1000,
+                journal_ref_id: 1,
+            },
+        );
     });
 
     let mut ceo_sess = char_session(ceo_id, corp_id);
@@ -557,19 +560,22 @@ fn issue_550_wallet_rbac_trader_accountant_and_pending_stasis() {
             ch.corporation_id = corp_id;
             ch.balance = IskCents::from_isk(1_000);
         }
-        snap.market_transactions.push(MarketTransactionRecord {
-            transaction_id: 9_000_001,
-            date_unix: now,
-            type_id: 34,
-            quantity: 100,
-            price: IskCents::from_isk(5),
-            buyer_id: corp_id,
-            seller_id: ceo_id,
-            location_id: 60_003_760,
-            buyer_account_key: 1000,
-            seller_account_key: 1000,
-            journal_ref_id: 1,
-        });
+        snap.market_transactions.insert(
+            9_000_001,
+            MarketTransactionRecord {
+                transaction_id: 9_000_001,
+                date_unix: now,
+                type_id: 34,
+                quantity: 100,
+                price: IskCents::from_isk(5),
+                buyer_id: corp_id,
+                seller_id: ceo_id,
+                location_id: 60_003_760,
+                buyer_account_key: 1000,
+                seller_account_key: 1000,
+                journal_ref_id: 1,
+            },
+        );
     });
 
     let mut mem_sess = char_session(mem_id, corp_id);

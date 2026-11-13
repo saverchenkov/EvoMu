@@ -524,7 +524,7 @@ async fn test_ledger_tables_persist_across_sqlite_restart_and_migrate_legacy_ple
             (
                 s.plex_vault_balance(P2),
                 m.first_party_id == P1 && m.second_party_id == P2 && m.context_id == P1 && m.date_unix == 1_700_000_000,
-                s.market_transactions.iter().any(|t| t.buyer_id == P2 && t.quantity == 5 && t.price == IskCents::from_isk(7)),
+                s.market_transactions.values().any(|t| t.buyer_id == P2 && t.quantity == 5 && t.price == IskCents::from_isk(7)),
                 s.characters[&P2].plex_balance == 0,
             )
         });

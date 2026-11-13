@@ -109,7 +109,6 @@ pub struct ColdDomainDiff {
     pub part3_social_corp: bool,
     pub part4_world_tail: bool,
     pub extension_tables: bool,
-    pub ledger: bool,
     pub d6_notes_lp_seq: bool,
     pub d6_social: bool,
     pub d6_corp_crimewatch: bool,
@@ -127,7 +126,6 @@ impl ColdDomainDiff {
             || self.part3_social_corp
             || self.part4_world_tail
             || self.extension_tables
-            || self.ledger
             || self.d6_notes_lp_seq
             || self.d6_social
             || self.d6_corp_crimewatch
@@ -152,12 +150,13 @@ pub struct ChangeSet {
     pub skills: Vec<RowChange<i64, HashMap<TypeId, TrainedSkillRecord>>>,
     pub skill_queues: Vec<RowChange<i64, Vec<SkillQueueEntry>>>,
     pub market_orders: Vec<RowChange<i64, MarketOrderRecord>>,
+    pub domain_rows: Vec<crate::sqlite_store::domain_rows::DomainRowChange>,
     pub cold_changed: bool,
     pub cold_domains: ColdDomainDiff,
 }
 
 impl ChangeSet {
-    /// Returns `true` when zero metadata, hot-table, or cold-domain changes occurred.
+    /// Returns `true` when zero metadata, hot-table, `domain_rows`, or cold-domain changes occurred.
     #[inline]
     pub fn is_empty(&self) -> bool {
         !self.meta_changed
@@ -166,11 +165,17 @@ impl ChangeSet {
             && self.skills.is_empty()
             && self.skill_queues.is_empty()
             && self.market_orders.is_empty()
+            && self.domain_rows.is_empty()
             && !self.cold_changed
     }
 
     /// Computes a `ChangeSet` between `before` and `after` snapshots (`O(k log N)` for `CowMap`s).
     pub fn diff(seq: u64, before: &WorldStateSnapshot, after: &WorldStateSnapshot) -> Self {
+        use crate::sqlite_store::domain_rows::{
+            Persist, DOMAIN_ACCOUNT_PLEX_VAULT, DOMAIN_MARKET_TRANSACTIONS,
+            DOMAIN_WALLET_JOURNAL_META,
+        };
+
         let meta_changed = before.next_entity_id != after.next_entity_id
             || before.wal_seq != after.wal_seq
             || before.markets_seeded != after.markets_seeded;
@@ -180,6 +185,23 @@ impl ChangeSet {
         let skills = diff_cow_map(&before.skills, &after.skills);
         let skill_queues = diff_cow_map(&before.skill_queues, &after.skill_queues);
         let market_orders = diff_cow_map(&before.market_orders, &after.market_orders);
+
+        let mut domain_rows = Vec::new();
+        before.wallet_journal_meta.collect_diff_ops(
+            &after.wallet_journal_meta,
+            DOMAIN_WALLET_JOURNAL_META,
+            &mut domain_rows,
+        );
+        before.market_transactions.collect_diff_ops(
+            &after.market_transactions,
+            DOMAIN_MARKET_TRANSACTIONS,
+            &mut domain_rows,
+        );
+        before.account_plex_vault.collect_diff_ops(
+            &after.account_plex_vault,
+            DOMAIN_ACCOUNT_PLEX_VAULT,
+            &mut domain_rows,
+        );
 
         let cold_domains = compute_cold_domain_diff(before, after);
         let cold_changed = cold_domains.any()
@@ -201,6 +223,7 @@ impl ChangeSet {
             skills,
             skill_queues,
             market_orders,
+            domain_rows,
             cold_changed,
             cold_domains,
         }
@@ -281,10 +304,6 @@ fn compute_cold_domain_diff(before: &WorldStateSnapshot, after: &WorldStateSnaps
         || before.structure_vulnerability_windows != after.structure_vulnerability_windows
         || before.skill_history != after.skill_history
         || before.character_doll_info != after.character_doll_info;
-
-    let ledger = before.wallet_journal_meta != after.wallet_journal_meta
-        || before.market_transactions != after.market_transactions
-        || before.account_plex_vault != after.account_plex_vault;
 
     let d6_notes_lp_seq = before.owner_notes != after.owner_notes
         || before.corp_lp_balances != after.corp_lp_balances
@@ -421,7 +440,6 @@ fn compute_cold_domain_diff(before: &WorldStateSnapshot, after: &WorldStateSnaps
         part3_social_corp,
         part4_world_tail,
         extension_tables,
-        ledger,
         d6_notes_lp_seq,
         d6_social,
         d6_corp_crimewatch,
@@ -484,6 +502,10 @@ pub fn validate_changeset(
             validate_row("market_orders", c.key.to_string(), &**o, max_row_bytes)?;
         }
     }
+    crate::sqlite_store::domain_rows::validate_domain_row_changes(
+        &changes.domain_rows,
+        max_row_bytes,
+    )?;
 
     let cd = &changes.cold_domains;
     if cd.part1_cold {
@@ -752,9 +774,17 @@ impl<'a> WorldTx<'a> {
     /// Aborting or panicking after calling this method still burns the allocated ID and keeps the
     /// persisted `world_meta.next_entity_block` high-water mark so IDs are never reissued.
     pub fn alloc_entity_id(&mut self) -> Result<i64, TxError> {
-        self.entity_ids
+        if self.snap.next_entity_id > self.entity_ids.current() {
+            self.entity_ids
+                .advance_to(self.conn, self.snap.next_entity_id)
+                .map_err(TxError::Persist)?;
+        }
+        let id = self
+            .entity_ids
             .alloc_with_conn(self.conn)
-            .map_err(TxError::Persist)
+            .map_err(TxError::Persist)?;
+        self.snap.next_entity_id = self.snap.next_entity_id.max(id);
+        Ok(id)
     }
 }
 
@@ -1169,6 +1199,10 @@ pub(crate) fn apply_changeset_to_sqlite(
         hot_fp.next_market_orders_digest = Some(digest);
     }
 
+    if !changes.domain_rows.is_empty() {
+        crate::sqlite_store::domain_rows::apply_domain_row_changes(exec, &changes.domain_rows)?;
+    }
+
     // Selective cold domain SQL sync: never scans the 5 hot CowMap tables!
     let cd = &changes.cold_domains;
     if cd.any() {
@@ -1184,7 +1218,7 @@ pub(crate) fn apply_changeset_to_sqlite(
     }
 
     delta.dirty = !changes.is_empty();
-    if need_wal_delta && changes.cold_changed {
+    if need_wal_delta && (changes.cold_changed || !changes.domain_rows.is_empty()) {
         delta.full_snapshot = Some(Box::new(snap.clone()));
     }
     Ok((*delta, hot_fp))
@@ -1514,5 +1548,77 @@ mod tests {
             large_avg < std::time::Duration::from_millis(50),
             "1M-item single-row commit took {large_avg:?} (expected O(log N) << 50ms; 1k avg was {small_avg:?})"
         );
+    }
+
+    #[test]
+    fn entity_id_alloc_interleaved_wtx_and_snap_across_aborts_is_strictly_monotonic() {
+        let dir = TestTempDir::new("bf01_monotonic");
+        let db_path = dir.0.join("bf01_monotonic.db");
+        let repo = WorldRepository::open_sqlite(&db_path).expect("open_sqlite");
+
+        let mut seen = Vec::new();
+
+        // 1. Committed tx allocating via `wtx.alloc_entity_id()` then `snap.alloc_entity_id()`.
+        let (a1, a2) = repo
+            .tx("commit_wtx_then_snap", |wtx| -> Result<(i64, i64), TxError> {
+                let id1 = wtx.alloc_entity_id()?;
+                let id2 = wtx.snap.alloc_entity_id();
+                Ok((id1, id2))
+            })
+            .expect("commit_wtx_then_snap");
+        seen.extend([a1, a2]);
+
+        // 2. Aborted tx allocating via both `wtx.alloc_entity_id()` and `wtx.snap.alloc_entity_id()`.
+        let abort1: Result<(), TxError> = repo.tx("abort_both", |wtx| {
+            let id1 = wtx.alloc_entity_id()?;
+            let id2 = wtx.snap.alloc_entity_id();
+            assert!(id2 > id1);
+            Err(TxError::Persist("intentional abort".into()))
+        });
+        assert!(abort1.is_err());
+
+        // 3. Committed tx allocating via `wtx.snap.alloc_entity_id()` first, then `wtx.alloc_entity_id()`.
+        let (b1, b2) = repo
+            .tx("commit_snap_then_wtx", |wtx| -> Result<(i64, i64), TxError> {
+                let id1 = wtx.snap.alloc_entity_id();
+                let id2 = wtx.alloc_entity_id()?;
+                Ok((id1, id2))
+            })
+            .expect("commit_snap_then_wtx");
+        seen.extend([b1, b2]);
+
+        // 4. Aborted tx allocating only via `wtx.snap.alloc_entity_id()` (must still burn/advance).
+        let abort2: Result<(), TxError> = repo.tx("abort_snap_only", |wtx| {
+            let _ = wtx.snap.alloc_entity_id();
+            Err(TxError::Persist("intentional abort 2".into()))
+        });
+        assert!(abort2.is_err());
+
+        // 5. Committed tx allocating via `wtx.alloc_entity_id()` after snap-only abort.
+        let c1 = repo
+            .tx("commit_after_snap_abort", |wtx| wtx.alloc_entity_id())
+            .expect("commit_after_snap_abort");
+        seen.push(c1);
+
+        // 6. Also check read_state snapshot has synced next_entity_id, and restart stays monotonic.
+        assert!(repo.read_state().next_entity_id >= c1);
+        drop(repo);
+
+        let reopened = WorldRepository::open_sqlite(&db_path).expect("reopen_sqlite");
+        let (d1, d2) = reopened
+            .tx("post_restart_both", |wtx| -> Result<(i64, i64), TxError> {
+                let id1 = wtx.snap.alloc_entity_id();
+                let id2 = wtx.alloc_entity_id()?;
+                Ok((id1, id2))
+            })
+            .expect("post_restart_both");
+        seen.extend([d1, d2]);
+
+        for w in seen.windows(2) {
+            assert!(
+                w[1] > w[0],
+                "entity IDs must be strictly monotonic across wtx/snap interleaving & aborts: {seen:?}"
+            );
+        }
     }
 }

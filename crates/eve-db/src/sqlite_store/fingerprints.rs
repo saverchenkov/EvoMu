@@ -864,7 +864,6 @@ pub struct TableFingerprints {
     pub structure_vulnerability_windows: HashMap<i64, (u64, u64)>,
     pub skill_history: HashMap<i64, u64>,
     pub character_doll_info: HashMap<i64, u64>,
-    pub ledger: super::ledger_store::LedgerFingerprints,
     pub d6: super::notes_lp_sequence_store::D6Fingerprints,
     pub d6_social: super::social_store::D6SocialFingerprints,
     pub d6_corp_crimewatch: super::corp_crimewatch_store::D6CorpCrimewatchFingerprints,
@@ -1003,7 +1002,6 @@ pub fn compute_fingerprints(snap: &WorldStateSnapshot) -> TableFingerprints {
     for (&cid, v) in &snap.character_doll_info {
         fp.character_doll_info.insert(cid, fp_json(v));
     }
-    fp.ledger = super::ledger_store::compute_ledger_fingerprints(snap);
     fp.d6 = super::notes_lp_sequence_store::compute_d6_fingerprints(snap);
     fp.d6_social = super::social_store::compute_d6_social_fp(snap);
     fp.d6_corp_crimewatch =

@@ -108,8 +108,8 @@ fn journal_meta_corporate_divisions_and_market_fill_accounting() {
     assert!(snap.char_wallet_transactions[&90_001][0].is_buy);
     assert_eq!(snap.char_wallet_transactions[&90_002].len(), 1);
     assert!(!snap.char_wallet_transactions[&90_002][0].is_buy);
-    assert_eq!(snap.market_transactions.last().unwrap().transaction_id, tx1);
-    assert!(snap.market_transactions.last().unwrap().journal_ref_id > 0);
+    assert!(snap.market_transactions.contains_key(&tx1));
+    assert!(snap.market_transactions[&tx1].journal_ref_id > 0);
 
     // MarketFill with corp buyer & seller + region_id fallback from market_orders
     snap.market_orders.insert(
@@ -272,7 +272,7 @@ fn journal_clamping_market_fill_fallbacks_daily_summary_edges_and_unified_plex()
         tax_collector_id: 1_000_132,
         region_id: None,
     });
-    let tx_rec = snap.market_transactions.iter().find(|t| t.transaction_id == tx_npc).unwrap();
+    let tx_rec = snap.market_transactions.get(&tx_npc).unwrap();
     assert_eq!(tx_rec.journal_ref_id, 0);
     assert_eq!(snap.market_history[&(10_000_002, 35)][0].date, "2024-02-29");
     assert_eq!(snap.market_history[&(10_000_002, 35)][0].volume, 1);

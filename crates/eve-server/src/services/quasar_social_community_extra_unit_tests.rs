@@ -190,20 +190,20 @@ fn ccp_send_mail_validates_auth_admin_recipients_and_default_fields() {
         STATUS_BAD_REQUEST
     );
 
-    // Force next_entity_id to 0 to test `.max(1)` floor, and send with single scalar recipient and default subject/body
-    db.with_mut_snapshot(|snap| {
-        snap.next_entity_id = 0;
+    // EntityIdAllocator keeps next_entity_id monotonic (>= 200_000_000); verify single scalar recipient and default subject/body
+    let expected_mail_id = db.with_mut_snapshot(|snap| {
         snap.mails.clear();
+        snap.next_entity_id.max(1) as u64
     });
     let mut single_rcpt = DynamicQuasarMessage::new("Mail");
     single_rcpt.set(1, DynamicValue::Uint32(90_000_002));
     let rsp = invoke_quasar(&router, "eve.mail.CCPSendMailRequest", &admin_ctx, &single_rcpt).unwrap();
-    assert_eq!(decode_sub_varint(&rsp.value, 1, 1), Some(1));
+    assert_eq!(decode_sub_varint(&rsp.value, 1, 1), Some(expected_mail_id));
 
     db.with_snapshot(|snap| {
-        assert_eq!(snap.next_entity_id, 2);
+        assert_eq!(snap.next_entity_id, expected_mail_id as i64 + 1);
         assert_eq!(snap.mails.len(), 1);
-        assert_eq!(snap.mails[0].message_id, 1);
+        assert_eq!(snap.mails[0].message_id, expected_mail_id as i64);
         assert_eq!(snap.mails[0].sender_id, 90_000_001);
         assert_eq!(snap.mails[0].recipient_id, 90_000_002);
         assert_eq!(snap.mails[0].subject, "Fleet Notification");

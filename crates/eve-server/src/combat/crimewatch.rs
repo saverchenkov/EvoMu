@@ -181,7 +181,6 @@ impl<'a> CrimeWatchRestoreGuard<'a> {
 
 impl<'a> Drop for CrimeWatchRestoreGuard<'a> {
     fn drop(&mut self) {
-        let stages_changed = self.dir.system_corruption_stages != self.orig_stages;
         self.snap.crimewatch_states = std::mem::take(&mut self.dir.states);
         self.snap.crimewatch_aggressions = std::mem::take(&mut self.dir.aggression_mgr.records);
         persist_corruption_stage_diffs(
@@ -189,7 +188,6 @@ impl<'a> Drop for CrimeWatchRestoreGuard<'a> {
             &self.orig_stages,
             &self.dir.system_corruption_stages,
         );
-        self.snap.mark_crimewatch_dirty(stages_changed);
     }
 }
 
@@ -409,7 +407,6 @@ impl<'a> Drop for CrimeWatchWriteGuard<'a> {
                 snap.crimewatch_states = states;
                 snap.crimewatch_aggressions = aggs;
                 persist_corruption_stage_diffs(snap, orig_stages, &stages);
-                snap.mark_crimewatch_dirty(stages_changed);
             });
         }
         if self.director.pending_concord_despawns != self.orig_pending_despawns {

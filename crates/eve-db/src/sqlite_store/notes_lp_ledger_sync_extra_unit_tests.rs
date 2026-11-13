@@ -1,15 +1,13 @@
 //! Deep branch-coverage and mutation-killing unit tests for `notes_lp_sequence_store`,
 //! `ledger_store`, and `sync_ext`.
 
+use super::domain_rows::{load_ledger_domain_rows, sync_ledger_domain_rows};
 use super::fingerprints::TableFingerprints;
-use super::ledger_store::{
-    apply_ledger_migration, compute_ledger_fingerprints, load_ledger, rollback_ledger,
-    sync_ledger, LEDGER_SCHEMA_VERSION,
-};
 use super::load::load_snapshot_from_sqlite;
 use super::notes_lp_sequence_store::{
     apply_d6_migration, compute_d6_fingerprints, load_d6, rollback_d6, sync_d6, D6_SCHEMA_VERSION,
 };
+use super::quarantine::LoadContext;
 use super::schema::apply_migrations;
 use super::sync_ext::sync_extension_tables;
 use crate::ledger::{JournalContext, JournalMeta, MarketTransactionRecord};
@@ -148,10 +146,8 @@ fn notes_lp_sequence_store_granular_mutations_deletions_and_selective_rollbacks(
 
 #[test]
 fn ledger_store_and_sync_ext_in_place_updates_order_and_selective_rollbacks() {
-    assert_eq!(LEDGER_SCHEMA_VERSION, 2);
     let mut conn = Connection::open_in_memory().unwrap();
     apply_migrations(&conn).unwrap();
-    apply_ledger_migration(&conn).unwrap();
 
     let mut snap = WorldStateSnapshot::default();
     snap.wallet_journal_meta.insert(
@@ -163,58 +159,63 @@ fn ledger_store_and_sync_ext_in_place_updates_order_and_selective_rollbacks() {
         2,
         JournalMeta::new(85, 1_000_125, 90_000_001, 2_000),
     );
-    // Insert market_transactions out of order (id 200 then id 100) to verify ORDER BY transaction_id ASC on load
-    snap.market_transactions.push(MarketTransactionRecord {
-        transaction_id: 200,
-        date_unix: 2_000,
-        type_id: 34,
-        quantity: 50,
-        price: IskCents(600),
-        location_id: 60_003_760,
-        buyer_id: 90_000_001,
-        seller_id: 90_000_002,
-        buyer_account_key: 1000,
-        seller_account_key: 1000,
-        journal_ref_id: 2,
-    });
-    snap.market_transactions.push(MarketTransactionRecord {
-        transaction_id: 100,
-        date_unix: 1_000,
-        type_id: 35,
-        quantity: 25,
-        price: IskCents(1_200),
-        location_id: 60_003_760,
-        buyer_id: 90_000_002,
-        seller_id: 90_000_001,
-        buyer_account_key: 1000,
-        seller_account_key: 1000,
-        journal_ref_id: 1,
-    });
+    // Insert market_transactions out of order (id 200 then id 100) to verify sorted CowMap iteration on load
+    snap.market_transactions.insert(
+        200,
+        MarketTransactionRecord {
+            transaction_id: 200,
+            date_unix: 2_000,
+            type_id: 34,
+            quantity: 50,
+            price: IskCents(600),
+            location_id: 60_003_760,
+            buyer_id: 90_000_001,
+            seller_id: 90_000_002,
+            buyer_account_key: 1000,
+            seller_account_key: 1000,
+            journal_ref_id: 2,
+        },
+    );
+    snap.market_transactions.insert(
+        100,
+        MarketTransactionRecord {
+            transaction_id: 100,
+            date_unix: 1_000,
+            type_id: 35,
+            quantity: 25,
+            price: IskCents(1_200),
+            location_id: 60_003_760,
+            buyer_id: 90_000_002,
+            seller_id: 90_000_001,
+            buyer_account_key: 1000,
+            seller_account_key: 1000,
+            journal_ref_id: 1,
+        },
+    );
     snap.account_plex_vault.insert(1, 500);
     snap.account_plex_vault.insert(2, 1_000);
 
-    let mut fp = TableFingerprints::default();
     {
         let tx = conn.transaction().unwrap();
-        assert!(sync_ledger(&tx, &snap, &mut fp).unwrap());
+        assert!(sync_ledger_domain_rows(&tx, &snap).unwrap());
+        assert!(!sync_ledger_domain_rows(&tx, &snap).unwrap());
         tx.commit().unwrap();
     }
-    assert_eq!(fp.ledger, compute_ledger_fingerprints(&snap));
 
-    // Verify load_ledger sorts market_transactions by transaction_id ASC (100 then 200)
+    // Verify load_ledger_domain_rows preserves sorted CowMap order (100 then 200)
     let mut loaded_ledger = WorldStateSnapshot::default();
-    load_ledger(&conn, &mut loaded_ledger);
-    assert_eq!(loaded_ledger.market_transactions[0].transaction_id, 100);
-    assert_eq!(loaded_ledger.market_transactions[1].transaction_id, 200);
-
-    // Selective rollback when same len but modified value in wallet_journal_meta or market_transactions
-    loaded_ledger.wallet_journal_meta.get_mut(&1).unwrap().date_unix = 9_999;
-    rollback_ledger(&conn, &mut loaded_ledger, &fp);
+    let _ = load_ledger_domain_rows(
+        &conn,
+        &mut loaded_ledger,
+        &mut LoadContext::quarantine_in_memory(),
+    )
+    .unwrap();
+    let keys: Vec<i64> = loaded_ledger.market_transactions.keys().copied().collect();
+    assert_eq!(keys, vec![100, 200]);
     assert_eq!(loaded_ledger.wallet_journal_meta[&1].date_unix, 1_000);
+    assert_eq!(loaded_ledger.market_transactions[&100].quantity, 25);
 
-    loaded_ledger.market_transactions[0].quantity = 9_999;
-    rollback_ledger(&conn, &mut loaded_ledger, &fp);
-    assert_eq!(loaded_ledger.market_transactions[0].quantity, 25);
+    let mut fp = TableFingerprints::default();
 
     // Sync extension tables: insert 2 entries per table, update 1 in place, delete 1, and reload from SQLite
     snap.character_last_jump_unix.insert(1, 100);

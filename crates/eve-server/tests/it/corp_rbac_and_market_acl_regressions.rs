@@ -108,19 +108,22 @@ async fn issue_550_corp_wallet_rbac_audit_withdraw_and_stasis() {
                 ..Default::default()
             },
         });
-        snap.market_transactions.push(MarketTransactionRecord {
-            transaction_id: 9_550_001,
-            date_unix: now,
-            type_id: 34,
-            quantity: 50,
-            price: IskCents::from_isk(10),
-            buyer_id: corp_id,
-            seller_id: P1,
-            location_id: JITA_44,
-            buyer_account_key: 1001,
-            seller_account_key: 1000,
-            journal_ref_id: 1,
-        });
+        snap.market_transactions.insert(
+            9_550_001,
+            MarketTransactionRecord {
+                transaction_id: 9_550_001,
+                date_unix: now,
+                type_id: 34,
+                quantity: 50,
+                price: IskCents::from_isk(10),
+                buyer_id: corp_id,
+                seller_id: P1,
+                location_id: JITA_44,
+                buyer_account_key: 1001,
+                seller_account_key: 1000,
+                journal_ref_id: 1,
+            },
+        );
     });
 
     // 1. Accountant alone can inspect journal/transactions, but CANNOT withdraw or move ISK

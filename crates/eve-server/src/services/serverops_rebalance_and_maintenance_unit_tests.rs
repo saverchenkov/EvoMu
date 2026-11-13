@@ -170,19 +170,22 @@ fn daily_maintenance_jobs_asteroids_market_ohlcv_contracts_sov_ess_and_declines(
             (8007, dt_base - 90_000, 10, 999, 60_003_760_i64), // skipped (outside 24h window)
             (8008, dt_base - 100, 10, 999, 99_999_999_i64),   // skipped (unknown location)
         ] {
-            snap.market_transactions.push(MarketTransactionRecord {
-                transaction_id: tid_tx,
-                date_unix: ts,
-                type_id: 34,
-                quantity: qty,
-                price: IskCents::from_isk(isk),
-                buyer_id: 90_000_001,
-                seller_id: 90_000_002,
-                location_id: loc,
-                buyer_account_key: 1000,
-                seller_account_key: 1000,
-                journal_ref_id: tid_tx,
-            });
+            snap.market_transactions.insert(
+                tid_tx,
+                MarketTransactionRecord {
+                    transaction_id: tid_tx,
+                    date_unix: ts,
+                    type_id: 34,
+                    quantity: qty,
+                    price: IskCents::from_isk(isk),
+                    buyer_id: 90_000_001,
+                    seller_id: 90_000_002,
+                    location_id: loc,
+                    buyer_account_key: 1000,
+                    seller_account_key: 1000,
+                    journal_ref_id: tid_tx,
+                },
+            );
         }
 
         // 3. Expired Outstanding contract

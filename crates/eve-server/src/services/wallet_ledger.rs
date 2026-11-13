@@ -400,7 +400,7 @@ fn market_transactions(
         };
         Ok(snap
             .market_transactions
-            .iter()
+            .values()
             .rev()
             .filter(|t| t.date_unix >= from_unix)
             .filter(|t| {

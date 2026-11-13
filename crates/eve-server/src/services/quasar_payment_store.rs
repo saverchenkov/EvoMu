@@ -845,7 +845,6 @@ fn register_payment_token_and_purchase_handlers(
                             format!("{STATUS_BAD_REQUEST}:Stack quantity overflow")
                         })?;
                         existing.version += 1;
-                        snap.mark_item_dirty(existing_id);
                     } else {
                         let mut item_id = snap.alloc_entity_id();
                         while snap.items.contains_key(&item_id) {
@@ -865,7 +864,6 @@ fn register_payment_token_and_purchase_handlers(
                                 ..Default::default()
                             },
                         );
-                        snap.mark_item_dirty(item_id);
                     }
                     Ok(())
                 })

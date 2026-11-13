@@ -70,19 +70,22 @@ async fn test_serverops_cluster_tidi_node_balancing_and_downtime_jobs() {
     // 6. Seed market transaction & sov state and run daily downtime window + restart
     let now = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
-        snap.market_transactions.push(eve_db::ledger::MarketTransactionRecord {
-            transaction_id: 9001,
-            date_unix: now,
-            type_id: 34,
-            quantity: 100,
-            price: eve_db::IskCents::from_isk(5),
-            buyer_id: 90_000_001,
-            seller_id: 90_000_002,
-            location_id: 60_003_760,
-            buyer_account_key: 1000,
-            seller_account_key: 1000,
-            journal_ref_id: 1,
-        });
+        snap.market_transactions.insert(
+            9001,
+            eve_db::ledger::MarketTransactionRecord {
+                transaction_id: 9001,
+                date_unix: now,
+                type_id: 34,
+                quantity: 100,
+                price: eve_db::IskCents::from_isk(5),
+                buyer_id: 90_000_001,
+                seller_id: 90_000_002,
+                location_id: 60_003_760,
+                buyer_account_key: 1000,
+                seller_account_key: 1000,
+                journal_ref_id: 1,
+            },
+        );
         snap.system_states.insert(
             30_004_759,
             eve_db::SystemDynamicState {

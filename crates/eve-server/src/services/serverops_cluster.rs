@@ -768,7 +768,7 @@ fn rollup_24h_market_history(ctx: &ServerContext, snap: &mut WorldStateSnapshot,
         orders: i64,
     }
     let mut aggs: HashMap<(u32, u32), DayAgg> = HashMap::new();
-    for tx in &snap.market_transactions {
+    for tx in snap.market_transactions.values() {
         if tx.quantity <= 0 || tx.date_unix <= window_start || tx.date_unix > now {
             continue;
         }

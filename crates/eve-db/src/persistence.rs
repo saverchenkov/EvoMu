@@ -1064,6 +1064,8 @@ impl WorldRepository {
         let writer: &mut WorldWriter = &mut *writer_guard;
         let _write_depth_guard = DbWriteLockDepthGuard::enter();
 
+        writer.working.next_entity_id =
+            writer.working.next_entity_id.max(self.entity_ids.current());
         let before = writer.working.clone();
         let pre_alloc_snap_id = writer.working.next_entity_id;
 
@@ -1083,32 +1085,45 @@ impl WorldRepository {
                 let msg = panic_payload_message(&*panic_payload);
                 PERSIST_TX_PANICS_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 tracing::error!("WorldRepository::tx `{label}` panicked (restoring pre-tx snapshot): {msg}");
-                if writer.working.next_entity_id > pre_alloc_snap_id {
-                    let _ = self.entity_ids.advance_to(&writer.conn, writer.working.next_entity_id);
+                    if writer.working.next_entity_id > pre_alloc_snap_id {
+                        let _ = self
+                            .entity_ids
+                            .advance_to(&writer.conn, writer.working.next_entity_id);
+                    }
+                    writer.working = before;
+                    writer.working.next_entity_id =
+                        writer.working.next_entity_id.max(self.entity_ids.current());
+                    drop(effects);
+                    return Err(E::from_tx_error(TxError::Panicked { label, msg }));
                 }
-                writer.working = before;
-                drop(effects);
-                return Err(E::from_tx_error(TxError::Panicked { label, msg }));
-            }
-            Ok(Err(err)) => {
-                if writer.working.next_entity_id > pre_alloc_snap_id {
-                    let _ = self.entity_ids.advance_to(&writer.conn, writer.working.next_entity_id);
+                Ok(Err(err)) => {
+                    if writer.working.next_entity_id > pre_alloc_snap_id {
+                        let _ = self
+                            .entity_ids
+                            .advance_to(&writer.conn, writer.working.next_entity_id);
+                    }
+                    writer.working = before;
+                    writer.working.next_entity_id =
+                        writer.working.next_entity_id.max(self.entity_ids.current());
+                    drop(effects);
+                    return Err(err);
                 }
-                writer.working = before;
-                drop(effects);
-                return Err(err);
-            }
-            Ok(Ok(val)) => val,
-        };
+                Ok(Ok(val)) => val,
+            };
 
-        if writer.working.next_entity_id > pre_alloc_snap_id {
-            if let Err(err) = self.entity_ids.advance_to(&writer.conn, writer.working.next_entity_id) {
-                PERSIST_FAILURES_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                writer.working = before;
-                drop(effects);
-                return Err(E::from_tx_error(TxError::Persist(err)));
+            if writer.working.next_entity_id > pre_alloc_snap_id {
+                if let Err(err) = self
+                    .entity_ids
+                    .advance_to(&writer.conn, writer.working.next_entity_id)
+                {
+                    PERSIST_FAILURES_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    writer.working = before;
+                    writer.working.next_entity_id =
+                        writer.working.next_entity_id.max(self.entity_ids.current());
+                    drop(effects);
+                    return Err(E::from_tx_error(TxError::Persist(err)));
+                }
             }
-        }
 
         for (&sid, st) in &mut writer.working.system_states {
             st.solar_system_id = sid;
@@ -1125,6 +1140,8 @@ impl WorldRepository {
                 validate_changeset(&changes, &before, &writer.working, DEFAULT_MAX_ROW_JSON_BYTES)
             {
                 writer.working = before;
+                writer.working.next_entity_id =
+                    writer.working.next_entity_id.max(self.entity_ids.current());
                 drop(effects);
                 return Err(E::from_tx_error(val_err));
             }
@@ -1221,6 +1238,8 @@ impl WorldRepository {
                         "WorldRepository::tx `{label}` SQLite commit aborted (restoring pre-tx snapshot): {persist_err}"
                     );
                     writer.working = before;
+                    writer.working.next_entity_id =
+                        writer.working.next_entity_id.max(self.entity_ids.current());
                     drop(effects);
                     return Err(E::from_tx_error(persist_err));
                 }
