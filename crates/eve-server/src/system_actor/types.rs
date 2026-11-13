@@ -209,6 +209,14 @@ pub enum PendingCycleAction {
         applied_dmg: f64,
         notified: bool,
     },
+    CycleChargeItemMutations {
+        char_id: CharacterId,
+        ship_id: BallId,
+        diffs: Vec<(
+            Option<eve_db::InventoryItemRecord>,
+            Option<eve_db::InventoryItemRecord>,
+        )>,
+    },
 }
 
 #[derive(Default)]

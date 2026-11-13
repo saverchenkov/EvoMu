@@ -540,8 +540,23 @@ fn verify_live_session_sso_bearer_token(
         return None;
     }
     let claims = ctx.db.verify_sso_access_token(token, iat).ok()?;
+    let launcher_client_ok = match payload_val.get("azp") {
+        Some(v) => v
+            .as_str()
+            .is_some_and(|a| matches!(a, "eveLauncherTQ" | "evomu-launcher")),
+        None => claims
+            .aud
+            .iter()
+            .any(|a| matches!(a.as_str(), "eveLauncherTQ" | "evomu-launcher")),
+    };
+    if !launcher_client_ok {
+        return None;
+    }
     lookup_active_account_role(ctx, claims.user_id, now_unix)?;
     let os = ctx.db.get_online_session(claims.user_id)?;
+    if claims.exp < os.connected_at_unix {
+        return None;
+    }
     if ctx
         .db
         .check_session_revoked(claims.user_id, os.session_id, now_unix)
@@ -550,6 +565,9 @@ fn verify_live_session_sso_bearer_token(
         return None;
     }
     let character_id = if claims.character_id > 0 {
+        if os.character_id != Some(claims.character_id) {
+            return None;
+        }
         let valid = ctx.db.with_snapshot(|snap| {
             snap.characters
                 .get(&claims.character_id)

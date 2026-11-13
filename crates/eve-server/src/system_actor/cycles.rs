@@ -756,6 +756,10 @@ pub(crate) fn step_cycles_and_capacitor(
                         .is_some_and(|cs| cs.structure_hp <= 0.0)
             });
             let mut crystal_shattered_empty = false;
+            let mut cycle_item_diffs: Vec<(
+                Option<eve_db::InventoryItemRecord>,
+                Option<eve_db::InventoryItemRecord>,
+            )> = Vec::new();
             if let Some(db_ref) = db_opt {
                 let ammo_is_non_volatile_crystal = cycle
                     .ammo_type_id
@@ -767,6 +771,8 @@ pub(crate) fn step_cycles_and_capacitor(
                     && !ammo_is_non_volatile_crystal
                 {
                     db_ref.with_mut_snapshot(|snap| {
+                        let mut pre_items: HashMap<i64, Option<eve_db::InventoryItemRecord>> =
+                            HashMap::new();
                         for &turret_id in &cycle.linked_turrets {
                             let turret_flag = snap.items.get(&turret_id).map(|i| i.flag);
                             if let Some(t_flag) = turret_flag {
@@ -783,6 +789,9 @@ pub(crate) fn step_cycles_and_capacitor(
                                     })
                                     .map(|i| i.item_id);
                                 if let Some(cid) = charge_id_opt {
+                                    pre_items
+                                        .entry(cid)
+                                        .or_insert_with(|| snap.items.get(&cid).cloned());
                                     if cycle.crystal_volatility_chance > 0.0
                                         && cycle.crystal_volatility_damage > 0.0
                                     {
@@ -882,6 +891,9 @@ pub(crate) fn step_cycles_and_capacitor(
                                 let num_mods = cycle.linked_turrets.len().max(1) as i32;
                                 if let Some((stack_id, owner_id, avail_qty)) = cargo_stack_opt {
                                     if avail_qty >= num_mods {
+                                        pre_items
+                                            .entry(stack_id)
+                                            .or_insert_with(|| snap.items.get(&stack_id).cloned());
                                         let charge_vol = sde_opt
                                             .as_ref()
                                             .and_then(|sde| sde.types.get(&ammo_tid))
@@ -921,6 +933,7 @@ pub(crate) fn step_cycles_and_capacitor(
                                                 while snap.items.contains_key(&new_cid) {
                                                     new_cid = snap.alloc_entity_id();
                                                 }
+                                                pre_items.insert(new_cid, None);
                                                 snap.items.insert(
                                                     new_cid,
                                                     eve_db::InventoryItemRecord {
@@ -957,6 +970,20 @@ pub(crate) fn step_cycles_and_capacitor(
                                 }
                             }
                         }
+                        let mut keys: Vec<i64> = pre_items.keys().copied().collect();
+                        keys.sort_by_key(|id| {
+                            (
+                                pre_items.get(id).and_then(|o| o.as_ref()).is_none(),
+                                *id,
+                            )
+                        });
+                        for id in keys {
+                            let pre = pre_items.remove(&id).flatten();
+                            let post = snap.items.get(&id).cloned();
+                            if pre != post {
+                                cycle_item_diffs.push((pre, post));
+                            }
+                        }
                     });
                 }
             }
@@ -987,6 +1014,7 @@ pub(crate) fn step_cycles_and_capacitor(
                                     .map(|i| i.item_id)
                                 {
                                     consumed_charge = true;
+                                    let pre = snap.items.get(&cid).cloned();
                                     let mut rem = 0;
                                     if let Some(ci) = snap.items.get_mut(&cid) {
                                         ci.quantity = ci.quantity.saturating_sub(1);
@@ -994,6 +1022,10 @@ pub(crate) fn step_cycles_and_capacitor(
                                     }
                                     if rem == 0 {
                                         snap.items.remove(&cid);
+                                    }
+                                    let post = snap.items.get(&cid).cloned();
+                                    if pre != post {
+                                        cycle_item_diffs.push((pre, post));
                                     }
                                 }
                             }
@@ -1022,6 +1054,7 @@ pub(crate) fn step_cycles_and_capacitor(
                                     .map(|i| i.item_id)
                                 {
                                     fueled = true;
+                                    let pre = snap.items.get(&cid).cloned();
                                     let mut rem = 0;
                                     if let Some(ci) = snap.items.get_mut(&cid) {
                                         ci.quantity -= cycle.aar_paste_rate.max(1);
@@ -1029,6 +1062,10 @@ pub(crate) fn step_cycles_and_capacitor(
                                     }
                                     if rem == 0 {
                                         snap.items.remove(&cid);
+                                    }
+                                    let post = snap.items.get(&cid).cloned();
+                                    if pre != post {
+                                        cycle_item_diffs.push((pre, post));
                                     }
                                 }
                             }
@@ -1061,6 +1098,7 @@ pub(crate) fn step_cycles_and_capacitor(
                                     .map(|i| i.item_id)
                                 {
                                     consumed_charge = true;
+                                    let pre = snap.items.get(&cid).cloned();
                                     let mut rem = 0;
                                     if let Some(ci) = snap.items.get_mut(&cid) {
                                         ci.quantity = ci.quantity.saturating_sub(1);
@@ -1068,6 +1106,10 @@ pub(crate) fn step_cycles_and_capacitor(
                                     }
                                     if rem == 0 {
                                         snap.items.remove(&cid);
+                                    }
+                                    let post = snap.items.get(&cid).cloned();
+                                    if pre != post {
+                                        cycle_item_diffs.push((pre, post));
                                     }
                                 }
                             }
@@ -1175,6 +1217,33 @@ pub(crate) fn step_cycles_and_capacitor(
                             }
                         }
                     }
+                }
+            }
+            if !cycle_item_diffs.is_empty() {
+                let eff_char_id = cycle
+                    .owner_char_id
+                    .filter(|&c| c > 0)
+                    .or_else(|| {
+                        ballpark
+                            .ball_slim_meta
+                            .get(&cycle.ship_id)
+                            .map(|m| m.owner_id)
+                            .filter(|&c| c > 0)
+                    })
+                    .or_else(|| {
+                        cycle_item_diffs
+                            .iter()
+                            .find_map(|(pre, post)| {
+                                pre.as_ref().or(post.as_ref()).map(|r| r.owner_id)
+                            })
+                            .filter(|&c| c > 0)
+                    });
+                if let Some(cid) = eff_char_id {
+                    pending_cycle_actions.push(PendingCycleAction::CycleChargeItemMutations {
+                        char_id: cid,
+                        ship_id: cycle.ship_id,
+                        diffs: cycle_item_diffs,
+                    });
                 }
             }
             if mod_grp == 1122 {

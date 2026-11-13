@@ -417,8 +417,21 @@ pub async fn handle_with_bound(
             }) else {
                 return Some(Err(BridgeRpcError { code: "MissionNotActive".into(), message: format!("Mission {mission_id} is not active for character {char_id}") }));
             };
-            if bound_entry.is_some() && args.is_empty() && method != "GetMissionJournalInfo" {
-                if m.agent_id != agent_id || !matches!(m.state.as_str(), "Offered" | "Accepted") {
+            let has_explicit_mission_id = args.get(1).and_then(|a| a.as_i64()).is_some()
+                || args.first().and_then(|a| a.as_i64()).is_some_and(|v| {
+                    v > 19
+                        && !ctx.sde.agents.contains_key(&v)
+                        && u32::try_from(v).is_ok_and(|mid| {
+                            ctx.sde.missions.contains_key(&mid)
+                                || ctx.db.with_snapshot(|snap| {
+                                    snap.active_missions.contains_key(&(char_id, mid))
+                                })
+                        })
+                });
+            if method != "GetMissionJournalInfo" && !has_explicit_mission_id {
+                if (explicit_agent && m.agent_id != agent_id)
+                    || !matches!(m.state.as_str(), "Offered" | "Accepted")
+                {
                     return Some(Err(BridgeRpcError {
                         code: "MissionNotActive".into(),
                         message: format!(
@@ -427,12 +440,13 @@ pub async fn handle_with_bound(
                     }));
                 }
                 if m.state == "Offered" {
-                    if let Some(ref agent_info) = ctx.sde.agents.get(&agent_id).cloned() {
+                    if let Some(ref agent_info) = ctx.sde.agents.get(&m.agent_id).cloned() {
                         if !is_agent_colocated(ctx, session, sys_id, agent_info).await {
                             return Some(Err(BridgeRpcError {
                                 code: "MissionNotActive".into(),
                                 message: format!(
-                                    "Offered mission {mission_id} with agent {agent_id} is not accessible remotely"
+                                    "Offered mission {mission_id} with agent {} is not accessible remotely",
+                                    m.agent_id
                                 ),
                             }));
                         }

@@ -1197,3 +1197,282 @@ async fn probe_launcher_emits_effect_stop_and_charge_item_mutations_on_launch_an
         "RecoverProbes must emit OnItemChange for restored launcher charge stack (#937), got {rec_notifs:?}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn combat_probe_destination_scanning_launch_offset_and_sov_ore_exclusion_gh987() {
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let (ctx, mut sess) = make_ctx_and_session(char_id, sys_id);
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let kw = HashMap::new();
+    let ship_id = 100_000_001_i64;
+    let target_ship_id = 100_000_777_i64;
+    let launcher_id = 96_709_870_i64;
+    let charge_id = 96_709_871_i64;
+
+    let remote_pos = DVec3::new(5.0 * AU_IN_METERS, 0.0, 0.0);
+    // Seed launcher + 8 Combat Scanner Probes, a cosmic signature at remote_pos, a SovOre signature,
+    // an anomaly-colliding signature, and a target ship at remote_pos (5 AU away from launch ship at origin).
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items
+            .retain(|_, i| !(i.location_id == ship_id && i.flag == InventoryFlag::HiSlot0));
+        snap.items.insert(
+            launcher_id,
+            InventoryItemRecord {
+                item_id: launcher_id,
+                type_id: 17_901, // Expanded Probe Launcher I
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            charge_id,
+            InventoryItemRecord {
+                item_id: charge_id,
+                type_id: 30_028, // Combat Scanner Probe I
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 8,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(launcher_id, true);
+        let sigs = snap.cosmic_signatures.entry(sys_id).or_default();
+        sigs.clear();
+        sigs.push(CosmicSignatureRecord {
+            signature_id: "SIG-REAL-1".into(),
+            solar_system_id: sys_id,
+            sig_group: "Wormhole".into(),
+            type_name: "Unstable Wormhole".into(),
+            wormhole_type_id: None,
+            destination_system_id: None,
+            position: [remote_pos.x, remote_pos.y, remote_pos.z],
+            signal_strength: 0.0,
+            created_unix: ctx.now_unix_secs(),
+            lifetime_seconds: 86_400,
+            max_mass_kg: 1_000_000.0,
+            remaining_mass_kg: 1_000_000.0,
+            max_jump_mass_kg: 500_000.0,
+            collapsed: false,
+        });
+        sigs.push(CosmicSignatureRecord {
+            signature_id: "SOV-ORE-1".into(),
+            solar_system_id: sys_id,
+            sig_group: "SovOre".into(),
+            type_name: "Sov Ore Deposit".into(),
+            wormhole_type_id: None,
+            destination_system_id: None,
+            position: [remote_pos.x, remote_pos.y, remote_pos.z],
+            signal_strength: 0.0,
+            created_unix: ctx.now_unix_secs(),
+            lifetime_seconds: 86_400,
+            max_mass_kg: 0.0,
+            remaining_mass_kg: 0.0,
+            max_jump_mass_kg: 0.0,
+            collapsed: false,
+        });
+        sigs.push(CosmicSignatureRecord {
+            signature_id: "ANOM-COLL-1".into(),
+            solar_system_id: sys_id,
+            sig_group: "Combat".into(),
+            type_name: "Colliding Anomaly".into(),
+            wormhole_type_id: None,
+            destination_system_id: None,
+            position: [remote_pos.x, remote_pos.y, remote_pos.z],
+            signal_strength: 0.0,
+            created_unix: ctx.now_unix_secs(),
+            lifetime_seconds: 86_400,
+            max_mass_kg: 0.0,
+            remaining_mass_kg: 0.0,
+            max_jump_mass_kg: 0.0,
+            collapsed: false,
+        });
+        let anoms = snap.cosmic_anomalies.entry(sys_id).or_default();
+        anoms.clear();
+        anoms.push(CosmicAnomalyRecord {
+            anomaly_id: "ANOM-COLL-1".into(),
+            solar_system_id: sys_id,
+            anomaly_type: "Combat".into(),
+            name: "Colliding Anomaly".into(),
+            position: [remote_pos.x, remote_pos.y, remote_pos.z],
+            signal_strength: 1.0,
+            ore_types: Vec::new(),
+            remaining_volume: 0.0,
+            created_unix: ctx.now_unix_secs(),
+            lifetime_seconds: 86_400,
+            cleared: false,
+        });
+    });
+    let target_ball = eve_destiny::Ball {
+        id: target_ship_id,
+        type_id: 587,
+        position: remote_pos,
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 1.0,
+        mass: 1_000_000.0,
+        radius: 45.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    };
+    sys.spawn_ball(target_ball).await.expect("spawn target ship");
+
+    // 1. GetSystemScanMgr excludes SovOre and anomaly-colliding signatures
+    let scan_mgr = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        None,
+        "scanMgr",
+        "GetSystemScanMgr",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("GetSystemScanMgr ok");
+    let PyRep::List(mgr_sigs) = scan_mgr.dict_get("signatures").unwrap() else {
+        panic!("expected signatures list");
+    };
+    let mgr_sig_ids: Vec<&str> = mgr_sigs
+        .iter()
+        .filter_map(|s| s.dict_get("id").and_then(|v| v.as_str()))
+        .collect();
+    assert!(mgr_sig_ids.contains(&"SIG-REAL-1"));
+    assert!(!mgr_sig_ids.contains(&"SOV-ORE-1"), "GetSystemScanMgr must exclude SovOre");
+    assert!(!mgr_sig_ids.contains(&"ANOM-COLL-1"), "GetSystemScanMgr must exclude anomaly-colliding sigs");
+
+    // 2. Launch 8 combat probes and verify spawn offset >= 2000m (no ProbesTooCloseToRecover)
+    let launch_rep = activate_scan_probe_launcher(
+        &ctx,
+        &sess,
+        &sys,
+        char_id,
+        ship_id,
+        sys_id,
+        launcher_id,
+        17_901,
+        InventoryFlag::HiSlot0 as u16,
+        "launchForSelf",
+        None,
+        &kw,
+    )
+    .await
+    .expect("launch 8 combat probes");
+    let PyRep::List(probe_id_reps) = launch_rep.dict_get("probeIDs").unwrap() else {
+        panic!("expected probeIDs");
+    };
+    assert_eq!(probe_id_reps.len(), 8);
+    let pids: Vec<i64> = probe_id_reps.iter().filter_map(|r| r.as_i64()).collect();
+    {
+        let pm = ctx.active_scanner_probes.read().unwrap();
+        for &pid in &pids {
+            let p = pm.get(&pid).expect("active probe");
+            let d = DVec3::from_array(p.position).length();
+            assert!(
+                d >= 2_000.0,
+                "launched probe {pid} distance from ship ({d}m) must be >= 2000m"
+            );
+        }
+    }
+
+    // 3. RequestScans with BOTH `pos` (near origin) and `destination` (at 5 AU remote_pos)
+    //    must prefer `destination` for BOTH cosmic signatures and combat targets, while excluding SovOre.
+    let probe_dict = PyRep::Dict(
+        pids.iter()
+            .map(|&pid| {
+                (
+                    PyRep::Integer(pid),
+                    PyRep::keyval([
+                        (
+                            "pos",
+                            PyRep::Tuple(vec![PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+                        ),
+                        (
+                            "destination",
+                            PyRep::Tuple(vec![
+                                PyRep::Real(remote_pos.x),
+                                PyRep::Real(remote_pos.y),
+                                PyRep::Real(remote_pos.z),
+                            ]),
+                        ),
+                        ("rangeStep", PyRep::Integer(2)), // 1 AU scan radius (cannot reach 5 AU from origin)
+                    ]),
+                )
+            })
+            .collect(),
+    );
+    let scan_rows = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        None,
+        "scanMgr",
+        "RequestScans",
+        &[probe_dict],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("RequestScans ok");
+    let PyRep::List(rows) = scan_rows else {
+        panic!("expected scan rows list");
+    };
+    let row_ids: Vec<String> = rows
+        .iter()
+        .filter_map(|r| r.dict_get("id").and_then(|v| v.as_str()).map(str::to_string))
+        .collect();
+    assert!(
+        row_ids.iter().any(|id| id == "SIG-REAL-1"),
+        "expected SIG-REAL-1 at destination, got {row_ids:?}"
+    );
+    assert!(
+        !row_ids.iter().any(|id| id == "SOV-ORE-1" || id == "ANOM-COLL-1"),
+        "RequestScans must exclude SovOre and anomaly-colliding sigs, got {row_ids:?}"
+    );
+    let combat_target_row = rows
+        .iter()
+        .find(|r| r.dict_get("targetID").and_then(|v| v.as_i64()) == Some(target_ship_id))
+        .expect("combat probe RequestScans must detect target ship at destination (not launch position)");
+    assert_eq!(
+        combat_target_row.dict_get("scanGroupID").and_then(|v| v.as_i64()),
+        Some(4)
+    );
+    let sig_strength = combat_target_row
+        .dict_get("signalStrength")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    assert!(
+        sig_strength > 0.5,
+        "combat target at probe destination must have strong signal, got {sig_strength}"
+    );
+
+    // 4. Advance clock past scan completion and verify probe.position advances to probe.destination
+    ctx.db.with_mut_snapshot(|snap| {
+        for (_, _, _, _, _, end_ft) in &mut snap.fleet_and_social_ops.pending_probe_scans {
+            *end_ft = 1;
+        }
+    });
+    if let Ok(mut pm) = ctx.active_scanner_probes.write() {
+        for &pid in &pids {
+            if let Some(p) = pm.get_mut(&pid) {
+                p.warp_end_ft = Some(1);
+            }
+        }
+    }
+    tick_probe_warp_end(&ctx);
+    {
+        let pm = ctx.active_scanner_probes.read().unwrap();
+        for &pid in &pids {
+            let p = pm.get(&pid).expect("probe");
+            assert_eq!(p.position, [remote_pos.x, remote_pos.y, remote_pos.z]);
+            assert_eq!(p.state, PROBE_STATE_IDLE);
+        }
+    }
+}

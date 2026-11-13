@@ -614,50 +614,7 @@ pub(crate) async fn handle_module_cycles(
                     return Some(Err(BridgeRpcError { code: "NoProbesLoaded".into(), message: "Survey probe launcher has no survey probes loaded".into() }));
                 };
                 ctx.invalidate_ship_fitting(ship_id);
-                for (pre, post) in &item_diffs {
-                    ctx.notify_item_mutation(char_id, pre.as_ref(), post.as_ref());
-                    match (pre, post) {
-                        (Some(old_it), Some(new_it)) if new_it.flag == slot_flag => {
-                            emit_charge_sublocation_quantity_change(
-                                ctx,
-                                char_id,
-                                ship_id,
-                                slot_flag,
-                                new_it.type_id,
-                                if old_it.flag == slot_flag {
-                                    old_it.quantity
-                                } else {
-                                    0
-                                },
-                                new_it.quantity,
-                            );
-                        }
-                        (None, Some(new_it)) if new_it.flag == slot_flag => {
-                            emit_godma_charge_sublocation_prime(ctx, char_id, ship_id, new_it);
-                            emit_charge_sublocation_quantity_change(
-                                ctx,
-                                char_id,
-                                ship_id,
-                                slot_flag,
-                                new_it.type_id,
-                                0,
-                                new_it.quantity,
-                            );
-                        }
-                        (Some(old_it), None) if old_it.flag == slot_flag => {
-                            emit_charge_sublocation_quantity_change(
-                                ctx,
-                                char_id,
-                                ship_id,
-                                slot_flag,
-                                old_it.type_id,
-                                old_it.quantity,
-                                0,
-                            );
-                        }
-                        _ => {}
-                    }
-                }
+                emit_ship_charge_item_diffs(ctx, char_id, ship_id, &item_diffs);
 
                 let probe_sde = ctx.sde.types.get(&probe_type_id);
                 let base_delay_ms = probe_sde
@@ -1032,7 +989,8 @@ pub(crate) async fn handle_module_cycles(
                 aar_base_armor_repair,
                 armor_repair_amount,
                 remote_armor_amount: anc_remote_armor,
-            } = crate::services::fitting_cycles_overheat::prepare_ancillary_module(
+                pending_charge_consume,
+            } = crate::services::fitting_cycles_overheat::plan_ancillary_module(
                 ctx,
                 ship_id,
                 module_id,
@@ -1047,6 +1005,7 @@ pub(crate) async fn handle_module_cycles(
             );
             cap_need = anc_cap_need;
             remote_armor_amount = anc_remote_armor;
+            deferred_post_cycle.ancillary_charge_to_consume = pending_charge_consume;
 
             // Capacitor Booster (`group_id == 76`, `feat:modules.cap-booster`)
             let mut cap_booster_inject_amount = 0.0;
@@ -1125,15 +1084,22 @@ pub(crate) async fn handle_module_cycles(
                 if hd > 0.0 { hd } else { 3.4 }
             };
 
-            let linked_turrets: Vec<i64> = ctx.db.with_snapshot(|snap| {
-                if let Some(bank) = snap.weapon_banks.get(&ship_id).and_then(|b| b.get(&module_id)) {
-                    bank.clone()
-                } else if matches!(m.flag_id, 27..=34) {
-                    vec![module_id]
-                } else {
-                    Vec::new()
-                }
-            });
+            let linked_turrets: Vec<i64> = if is_asb
+                || is_aar
+                || matches!(mod_type.group_id, 41 | 67 | 76 | 325 | 585 | 899 | 2018)
+            {
+                Vec::new()
+            } else {
+                ctx.db.with_snapshot(|snap| {
+                    if let Some(bank) = snap.weapon_banks.get(&ship_id).and_then(|b| b.get(&module_id)) {
+                        bank.clone()
+                    } else if matches!(m.flag_id, 27..=34) {
+                        vec![module_id]
+                    } else {
+                        Vec::new()
+                    }
+                })
+            };
 
             let mut active_burst_charge_tid = m.charge_type_id;
             let mut crystal_volatility_chance = 0.0;

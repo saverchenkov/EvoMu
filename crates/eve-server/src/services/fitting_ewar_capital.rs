@@ -13,6 +13,7 @@ pub(crate) struct DeferredPostCycleEffects {
     pub bastion_weapon_timer: bool,
     pub passive_targeter_lock: Option<eve_destiny::TargetLock>,
     pub cap_booster_charge_id: Option<i64>,
+    pub ancillary_charge_to_consume: Option<(i64, i32)>,
     pub turret_charge_consumptions: Vec<(i64, i64)>,
 }
 
@@ -1094,6 +1095,7 @@ pub(crate) async fn commit_post_cycle_activation_effects(
 ) -> Result<(), BridgeRpcError> {
     if deferred.fuel_to_deduct.is_some()
         || deferred.cap_booster_charge_id.is_some()
+        || deferred.ancillary_charge_to_consume.is_some()
         || !deferred.turret_charge_consumptions.is_empty()
     {
         let item_diffs = ctx.db.with_mut_snapshot(|snap| {
@@ -1131,6 +1133,15 @@ pub(crate) async fn commit_post_cycle_activation_effects(
                     let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
                     opts.reject_fitted = false;
                     if let Ok(post) = snap.consume_exact_item_quantity(cid, 1, opts) {
+                        diffs.push((pre, post));
+                    }
+                }
+            }
+            if let Some((cid, qty)) = deferred.ancillary_charge_to_consume {
+                if let Some(pre) = snap.items.get(&cid).cloned() {
+                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
+                    opts.reject_fitted = false;
+                    if let Ok(post) = snap.consume_exact_item_quantity(cid, qty, opts) {
                         diffs.push((pre, post));
                     }
                 }

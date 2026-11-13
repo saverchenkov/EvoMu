@@ -562,8 +562,8 @@ async fn activate_auth_offline_burnout_nanite_reactivation_and_overload_edges() 
         "CannotCloakInAbyssalSpace"
     );
 
-    // 11. #896: Weapon charge consumption in `apply_deferred_post_cycle_actions` and repeating
-    // `PendingCycleAction::CycleWeaponDamage` emit both `OnItemChange` and `OnModuleAttributeChanges` (805).
+    // 11. GH-896: Weapon charge consumption on real `step_manual` -> `execute_pending_cycle_actions`
+    // emits `CycleChargeItemMutations`, producing both `OnItemChange` and `OnModuleAttributeChanges` (805).
     let charge_id = 96_800_401_i64;
     let seed_uid = ctx.db.with_snapshot(|snap| {
         snap.accounts.values().next().expect("seed account").user_id
@@ -572,11 +572,6 @@ async fn activate_auth_offline_burnout_nanite_reactivation_and_overload_edges() 
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.user_id = seed_uid;
         }
-    });
-    let _ = ctx
-        .db
-        .acquire_online_lock(seed_uid, 9850, Some(char_id), true, 1_000);
-    ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.insert(gun_id);
         snap.items.insert(
             charge_id,
@@ -593,22 +588,31 @@ async fn activate_auth_offline_burnout_nanite_reactivation_and_overload_edges() 
             },
         );
     });
-    let _ = ctx.drain_notifications(char_id);
-    crate::services::inventory_fitting::fitting_module_cycles::execute_pending_cycle_actions_list(
-        &ctx,
-        sys_id,
-        vec![crate::system_actor::PendingCycleAction::CycleWeaponDamage {
-            attacker_char_id: Some(char_id),
-            attacker_ship_id: ship_id,
-            attacker_ship_type_id: 587,
-            target_id,
-            target_char_id: None,
+    let _ = ctx
+        .db
+        .acquire_online_lock(seed_uid, 9850, Some(char_id), true, 1_000);
+    let _ = sys
+        .add_module_cycle(crate::system_actor::ActiveModuleCycle {
+            ship_id,
+            owner_char_id: Some(char_id),
+            module_id: gun_id,
             module_type_id: custom_gun_tid,
-            applied_dmg: 25.0,
-            notified: true,
-        }],
-    )
-    .await;
+            target_id: Some(target_id),
+            effect_name: "projectileFired".into(),
+            duration_s: 2.0,
+            elapsed_s: 0.0,
+            repeat: 1,
+            linked_turrets: vec![gun_id],
+            ammo_type_id: Some(999_108),
+            crystal_volatility_chance: 0.0,
+            crystal_volatility_damage: 0.0,
+            weapon_is_turret: true,
+            ..Default::default()
+        })
+        .await;
+    let _ = ctx.drain_notifications(char_id);
+    sys.step_manual(2.1).await.unwrap();
+    execute_pending_cycle_actions(&ctx, sys_id).await;
     let notifs = ctx.drain_notifications(char_id);
     assert!(
         notifs.iter().any(|n| n.event == "OnItemChange"),
@@ -618,4 +622,433 @@ async fn activate_auth_offline_burnout_nanite_reactivation_and_overload_edges() 
         notifs.iter().any(|n| n.event == "OnModuleAttributeChanges"),
         "expected OnModuleAttributeChanges (805) on weapon charge cycle consumption"
     );
+}
+
+fn count_attr805_changes_for_flag(
+    notifs: &[crate::router::PendingMachoNotification],
+    ship_id: i64,
+    flag: InventoryFlag,
+) -> Vec<(f64, f64)> {
+    let mut out = Vec::new();
+    for n in notifs {
+        if n.event != "OnModuleAttributeChanges" {
+            continue;
+        }
+        if let Some(PyRep::List(entries)) = n.args.first() {
+            for entry in entries {
+                let (PyRep::Tuple(tup) | PyRep::List(tup)) = entry else {
+                    continue;
+                };
+                let Some(PyRep::Tuple(subloc)) = tup.get(2) else {
+                    continue;
+                };
+                if subloc.first().and_then(|v| v.as_i64()) == Some(ship_id)
+                    && subloc.get(1).and_then(|v| v.as_i64()) == Some(i64::from(flag as u16))
+                    && tup.get(3).and_then(|v| v.as_i64()) == Some(i64::from(eve_sde::attr_ids::QUANTITY))
+                {
+                    let new_v = tup.get(5).and_then(|v| v.as_f64()).unwrap_or(-1.0);
+                    let old_v = tup.get(6).and_then(|v| v.as_f64()).unwrap_or(-1.0);
+                    out.push((old_v, new_v));
+                }
+            }
+        }
+    }
+    out
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf02_ancillary_transactionality_and_repeating_cycle_charge_notifications() {
+    let custom_gun_tid = 999_201_u32;
+    let custom_ammo_tid = 999_202_u32;
+    let custom_asb_tid = 999_203_u32;
+    let custom_cap_charge_tid = 999_204_u32;
+    let custom_aar_tid = 999_205_u32;
+    let custom_raar_tid = 999_206_u32;
+    let custom_cap_booster_tid = 999_207_u32;
+
+    let ctx = test_ctx_with_custom(|sde| {
+        let mut custom_hull = sde.types.get(&587).expect("seed type").clone();
+        custom_hull.type_id = 999_100;
+        custom_hull.name = "BF02 Frigate Hull".into();
+        custom_hull.default_attributes.insert(eve_sde::attr_ids::HI_SLOTS, 6.0);
+        custom_hull.default_attributes.insert(eve_sde::attr_ids::MED_SLOTS, 4.0);
+        custom_hull.default_attributes.insert(eve_sde::attr_ids::LOW_SLOTS, 4.0);
+        sde.types.insert(999_100, custom_hull);
+
+        let mut gun = custom_inv_type(
+            sde,
+            custom_gun_tid,
+            55,
+            7,
+            "BF02 Autocannon",
+            &[(6, 0.0), (51, 2000.0), (1795, 5000.0), (eve_sde::attr_ids::HP_STRUCT, 40.0)],
+            &[12],
+        );
+        gun.capacity = 1.0;
+        sde.types.insert(custom_gun_tid, gun);
+
+        let mut ammo = custom_inv_type(
+            sde,
+            custom_ammo_tid,
+            83,
+            8,
+            "BF02 Projectile Ammo",
+            &[],
+            &[],
+        );
+        ammo.volume = 0.01;
+        sde.types.insert(custom_ammo_tid, ammo);
+
+        sde.types.insert(
+            custom_asb_tid,
+            custom_inv_type(
+                sde,
+                custom_asb_tid,
+                1156,
+                7,
+                "BF02 Ancillary Shield Booster",
+                &[(6, 120.0), (51, 2000.0), (68, 150.0), (eve_sde::attr_ids::HP_STRUCT, 40.0)],
+                &[13],
+            ),
+        );
+        sde.types.insert(
+            custom_cap_charge_tid,
+            custom_inv_type(
+                sde,
+                custom_cap_charge_tid,
+                87,
+                8,
+                "BF02 Cap Booster Charge",
+                &[(67, 100.0)],
+                &[],
+            ),
+        );
+        sde.types.insert(
+            custom_aar_tid,
+            custom_inv_type(
+                sde,
+                custom_aar_tid,
+                1199,
+                7,
+                "BF02 Ancillary Armor Repairer",
+                &[(6, 50.0), (51, 2000.0), (56, 4.0), (84, 100.0), (eve_sde::attr_ids::HP_STRUCT, 40.0)],
+                &[11],
+            ),
+        );
+        sde.types.insert(
+            custom_raar_tid,
+            custom_inv_type(
+                sde,
+                custom_raar_tid,
+                1698,
+                7,
+                "BF02 Remote Ancillary Armor Repairer",
+                &[(6, 10.0), (51, 2000.0), (56, 4.0), (84, 100.0), (54, 10_000.0), (eve_sde::attr_ids::HP_STRUCT, 40.0)],
+                &[11],
+            ),
+        );
+        sde.types.insert(
+            custom_cap_booster_tid,
+            custom_inv_type(
+                sde,
+                custom_cap_booster_tid,
+                76,
+                7,
+                "BF02 Capacitor Booster",
+                &[(6, 0.0), (51, 2000.0), (eve_sde::attr_ids::HP_STRUCT, 40.0)],
+                &[13],
+            ),
+        );
+    });
+
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let ship_id = 97_900_100_i64;
+    let crim_char_id = 90_000_002_i64;
+    let crim_ship_id = 97_900_200_i64;
+    let mut sess = setup_pilot_and_ship(&ctx, char_id, sys_id, ship_id);
+    let _ = setup_pilot_and_ship(&ctx, crim_char_id, sys_id, crim_ship_id);
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    insert_ship_ball(&ctx, sys_id, ship_id, DVec3::ZERO).await;
+    insert_ship_ball(&ctx, sys_id, crim_ship_id, DVec3::new(1000.0, 0.0, 0.0)).await;
+    let _ = sys
+        .add_target_lock(
+            ship_id,
+            eve_destiny::TargetLock {
+                target_id: crim_ship_id,
+                lock_time_ms: 1_000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await;
+    let seed_uid = ctx.db.with_snapshot(|s| s.accounts.values().next().expect("seed account").user_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.user_id = seed_uid;
+        }
+    });
+    sess.user_id = Some(seed_uid);
+    ctx.db
+        .acquire_online_lock(seed_uid, 9850, Some(char_id), true, 1_000)
+        .expect("online lock");
+    {
+        let now_u = ctx.now_unix();
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.get_or_create(crim_char_id).criminal_flag_until_unix = now_u + 900;
+    }
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Green);
+    });
+
+    let mod_gun0 = 97_900_301_i64;
+    let mod_gun1 = 97_900_302_i64;
+    let chg_gun0 = 97_900_311_i64;
+    let chg_gun1 = 97_900_312_i64;
+    let cargo_ammo = 97_900_313_i64;
+    let mod_asb = 97_900_303_i64;
+    let chg_asb = 97_900_314_i64;
+    let mod_capb = 97_900_304_i64;
+    let chg_capb = 97_900_315_i64;
+    let mod_aar = 97_900_305_i64;
+    let paste_aar = 97_900_316_i64;
+    let mod_raar = 97_900_306_i64;
+    let paste_raar = 97_900_317_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (id, tid, flag, qty, singleton) in [
+            (mod_gun0, custom_gun_tid, InventoryFlag::HiSlot0, 1, true),
+            (mod_gun1, custom_gun_tid, InventoryFlag::HiSlot1, 1, true),
+            (mod_raar, custom_raar_tid, InventoryFlag::HiSlot2, 1, true),
+            (mod_asb, custom_asb_tid, InventoryFlag::MedSlot0, 1, true),
+            (mod_capb, custom_cap_booster_tid, InventoryFlag::MedSlot1, 1, true),
+            (mod_aar, custom_aar_tid, InventoryFlag::LoSlot0, 1, true),
+            (chg_gun0, custom_ammo_tid, InventoryFlag::HiSlot0, 2, false),
+            (chg_gun1, custom_ammo_tid, InventoryFlag::HiSlot1, 2, false),
+            (cargo_ammo, custom_ammo_tid, InventoryFlag::Cargo, 50, false),
+            (chg_asb, custom_cap_charge_tid, InventoryFlag::MedSlot0, 3, false),
+            (chg_capb, custom_cap_charge_tid, InventoryFlag::MedSlot1, 2, false),
+            (paste_aar, 28668, InventoryFlag::LoSlot0, 8, false),
+            (paste_raar, 28668, InventoryFlag::HiSlot2, 8, false),
+        ] {
+            if singleton {
+                snap.module_online_states.insert(id, true);
+            }
+            snap.items.insert(
+                id,
+                InventoryItemRecord {
+                    item_id: id,
+                    type_id: tid,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag,
+                    quantity: qty,
+                    singleton,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    // Part A1: Local AAR activation fails with NotEnoughCapacitor -> paste stays 8 and 0 notifications emit
+    let _ = sys.set_capacitor(ship_id, 5.0).await;
+    let kw = HashMap::new();
+    let _ = ctx.drain_notifications(char_id);
+    let err_cap = handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(mod_aar), PyRep::String("activate".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_cap.code, "NotEnoughCapacitor");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&paste_aar].quantity), 8);
+    assert!(ctx.drain_notifications(char_id).is_empty());
+
+    // Part A2: Remote AAR activation fails Safety Green (CantDoInCurrentSafetyLevel) -> paste stays 8 and 0 notifications
+    let _ = sys.set_capacitor(ship_id, 1000.0).await;
+    let err_safety = handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(mod_raar),
+            PyRep::String("activate".into()),
+            PyRep::Integer(crim_ship_id),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_safety.code, "CantDoInCurrentSafetyLevel");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&paste_raar].quantity), 8);
+    assert!(ctx.drain_notifications(char_id).is_empty());
+
+    // Switching to Safety Red allows remote AAR activation -> consumes paste 8 -> 4 & emits notifications
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
+    });
+    handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(mod_raar),
+            PyRep::String("activate".into()),
+            PyRep::Integer(crim_ship_id),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&paste_raar].quantity), 4);
+    let raar_notifs = ctx.drain_notifications(char_id);
+    assert!(raar_notifs.iter().any(|n| n.event == "OnItemChange"));
+    assert_eq!(
+        count_attr805_changes_for_flag(&raar_notifs, ship_id, InventoryFlag::HiSlot2),
+        vec![(8.0, 4.0)]
+    );
+
+    // Part B: Repeating cycles via real `step_manual` + `execute_pending_cycle_actions`
+    // Queue 2 linked turrets (missing zero-damage shot), repeating ASB, repeating AAR, repeating Cap Booster
+    let _ = sys.remove_module_cycle(ship_id, mod_raar).await;
+    for cycle in [
+        crate::system_actor::ActiveModuleCycle {
+            ship_id,
+            owner_char_id: Some(char_id),
+            module_id: mod_gun0,
+            module_type_id: custom_gun_tid,
+            target_id: Some(crim_ship_id),
+            effect_name: "projectileFired".into(),
+            duration_s: 2.0,
+            elapsed_s: 0.0,
+            repeat: 2,
+            linked_turrets: vec![mod_gun0, mod_gun1],
+            ammo_type_id: Some(custom_ammo_tid),
+            crystal_volatility_chance: 0.0,
+            crystal_volatility_damage: 0.0,
+            weapon_is_turret: true,
+            // zero damage_vector tests miss case (no CycleWeaponDamage damage > 0 emitted, yet charges still notify)
+            damage_vector: eve_destiny::DamageVector::default(),
+            ..Default::default()
+        },
+        crate::system_actor::ActiveModuleCycle {
+            ship_id,
+            owner_char_id: Some(char_id),
+            module_id: mod_asb,
+            module_type_id: custom_asb_tid,
+            effect_name: "shieldBoosting".into(),
+            duration_s: 2.0,
+            elapsed_s: 0.0,
+            repeat: 2,
+            is_asb: true,
+            asb_fallback_cap_need: 120.0,
+            cap_need_per_cycle: 0.0,
+            ..Default::default()
+        },
+        crate::system_actor::ActiveModuleCycle {
+            ship_id,
+            owner_char_id: Some(char_id),
+            module_id: mod_aar,
+            module_type_id: custom_aar_tid,
+            effect_name: "armorRepair".into(),
+            duration_s: 2.0,
+            elapsed_s: 0.0,
+            repeat: 2,
+            is_aar: true,
+            aar_paste_rate: 4,
+            aar_base_armor_repair: 100.0,
+            armor_repair_amount: 300.0,
+            ..Default::default()
+        },
+        crate::system_actor::ActiveModuleCycle {
+            ship_id,
+            owner_char_id: Some(char_id),
+            module_id: mod_capb,
+            module_type_id: custom_cap_booster_tid,
+            effect_name: "capacitorBooster".into(),
+            duration_s: 2.0,
+            elapsed_s: 0.0,
+            repeat: 2,
+            cap_booster_inject_amount: 100.0,
+            ..Default::default()
+        },
+    ] {
+        sys.add_module_cycle(cycle).await.unwrap();
+    }
+    let _ = ctx.drain_notifications(char_id);
+
+    // Tick 1: linked turrets 2 -> 1 (miss), ASB 3 -> 2, AAR 8 -> 4, Cap Booster 2 -> 1
+    sys.step_manual(2.1).await.unwrap();
+    execute_pending_cycle_actions(&ctx, sys_id).await;
+    let t1_notifs = ctx.drain_notifications(char_id);
+    assert_eq!(
+        count_attr805_changes_for_flag(&t1_notifs, ship_id, InventoryFlag::HiSlot0),
+        vec![(2.0, 1.0)]
+    );
+    assert_eq!(
+        count_attr805_changes_for_flag(&t1_notifs, ship_id, InventoryFlag::HiSlot1),
+        vec![(2.0, 1.0)],
+        "second linked turret must also receive OnModuleAttributeChanges (805)"
+    );
+    assert_eq!(
+        count_attr805_changes_for_flag(&t1_notifs, ship_id, InventoryFlag::MedSlot0),
+        vec![(3.0, 2.0)]
+    );
+    assert_eq!(
+        count_attr805_changes_for_flag(&t1_notifs, ship_id, InventoryFlag::MedSlot1),
+        vec![(2.0, 1.0)]
+    );
+    assert_eq!(
+        count_attr805_changes_for_flag(&t1_notifs, ship_id, InventoryFlag::LoSlot0),
+        vec![(8.0, 4.0)]
+    );
+    assert!(t1_notifs.iter().filter(|n| n.event == "OnItemChange").count() >= 5);
+
+    // Tick 2: linked turrets 1 -> 0 + cargo auto-reload (both slots get 0 -> reloaded_qty + OnGodmaPrimeItem);
+    // ASB 2 -> 1, AAR 4 -> 0 (tombstone), Cap Booster 1 -> 0 (tombstone)
+    sys.step_manual(2.1).await.unwrap();
+    execute_pending_cycle_actions(&ctx, sys_id).await;
+    let t2_notifs = ctx.drain_notifications(char_id);
+    assert_eq!(
+        count_attr805_changes_for_flag(&t2_notifs, ship_id, InventoryFlag::HiSlot0),
+        vec![(1.0, 0.0), (0.0, 25.0)]
+    );
+    assert_eq!(
+        count_attr805_changes_for_flag(&t2_notifs, ship_id, InventoryFlag::HiSlot1),
+        vec![(1.0, 0.0), (0.0, 25.0)]
+    );
+    assert!(
+        t2_notifs.iter().filter(|n| n.event == "OnGodmaPrimeItem").count() >= 2,
+        "cargo auto-reload across two linked turrets must prime both reloaded charge stacks"
+    );
+    assert_eq!(
+        count_attr805_changes_for_flag(&t2_notifs, ship_id, InventoryFlag::MedSlot0),
+        vec![(2.0, 1.0)]
+    );
+    assert_eq!(
+        count_attr805_changes_for_flag(&t2_notifs, ship_id, InventoryFlag::MedSlot1),
+        vec![(1.0, 0.0)]
+    );
+    assert_eq!(
+        count_attr805_changes_for_flag(&t2_notifs, ship_id, InventoryFlag::LoSlot0),
+        vec![(4.0, 0.0)]
+    );
+    assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&paste_aar)));
+    assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&chg_capb)));
+    assert!(!ctx.db.with_snapshot(|s| s.items.contains_key(&cargo_ammo)));
 }

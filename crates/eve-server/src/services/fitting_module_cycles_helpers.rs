@@ -1610,6 +1610,65 @@ pub(crate) async fn execute_pending_cycle_actions(ctx: &ServerContext, sys_id: u
     execute_pending_cycle_actions_list(ctx, sys_id, actions).await;
 }
 
+pub(crate) fn emit_ship_charge_item_diffs(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    diffs: &[(
+        Option<eve_db::InventoryItemRecord>,
+        Option<eve_db::InventoryItemRecord>,
+    )],
+) {
+    let is_fitted_slot = |f: InventoryFlag| matches!(f as u16, 11..=34 | 125..=132);
+    for (pre, post) in diffs {
+        ctx.notify_item_mutation(char_id, pre.as_ref(), post.as_ref());
+        match (pre, post) {
+            (Some(old_it), Some(new_it)) if is_fitted_slot(new_it.flag) => {
+                let old_qty = if old_it.flag == new_it.flag {
+                    old_it.quantity
+                } else {
+                    0
+                };
+                if old_qty != new_it.quantity {
+                    emit_charge_sublocation_quantity_change(
+                        ctx,
+                        char_id,
+                        ship_id,
+                        new_it.flag,
+                        new_it.type_id,
+                        old_qty,
+                        new_it.quantity,
+                    );
+                }
+            }
+            (None, Some(new_it)) if is_fitted_slot(new_it.flag) => {
+                emit_godma_charge_sublocation_prime(ctx, char_id, ship_id, new_it);
+                emit_charge_sublocation_quantity_change(
+                    ctx,
+                    char_id,
+                    ship_id,
+                    new_it.flag,
+                    new_it.type_id,
+                    0,
+                    new_it.quantity,
+                );
+            }
+            (Some(old_it), None) if is_fitted_slot(old_it.flag) => {
+                emit_charge_sublocation_quantity_change(
+                    ctx,
+                    char_id,
+                    ship_id,
+                    old_it.flag,
+                    old_it.type_id,
+                    old_it.quantity,
+                    0,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
 pub(crate) async fn execute_pending_cycle_actions_list(
     ctx: &ServerContext,
     sys_id: u32,
@@ -1620,8 +1679,6 @@ pub(crate) async fn execute_pending_cycle_actions_list(
     }
     let sys = ctx.systems.get_or_spawn(sys_id);
     let empty_kw = HashMap::new();
-    let mut emitted_charge_slots: std::collections::HashSet<(i64, u16)> =
-        std::collections::HashSet::new();
     for action in actions {
         match action {
             crate::system_actor::PendingCycleAction::SalvageEnd {
@@ -1825,54 +1882,6 @@ pub(crate) async fn execute_pending_cycle_actions_list(
                         false,
                         ctx.now_unix_secs(),
                     );
-                    let active_slot_charges: Vec<eve_db::InventoryItemRecord> =
-                        ctx.db.with_snapshot(|snap| {
-                            let weapon_flags: Vec<InventoryFlag> = snap
-                                .items
-                                .values()
-                                .filter(|i| {
-                                    i.location_id == attacker_ship_id
-                                        && i.type_id == module_type_id
-                                        && snap.module_active_states.contains(&i.item_id)
-                                })
-                                .map(|i| i.flag)
-                                .collect();
-                            snap.items
-                                .values()
-                                .filter(|i| {
-                                    i.location_id == attacker_ship_id
-                                        && weapon_flags.contains(&i.flag)
-                                        && i.type_id != module_type_id
-                                        && i.quantity > 0
-                                        && ctx
-                                            .sde
-                                            .types
-                                            .get(&i.type_id)
-                                            .is_some_and(|t| t.category_id == 8)
-                                })
-                                .cloned()
-                                .collect()
-                        });
-                    for chg in active_slot_charges {
-                        if !emitted_charge_slots.insert((attacker_ship_id, chg.flag as u16)) {
-                            continue;
-                        }
-                        ctx.emit_item_change_routed(
-                            acid,
-                            &chg,
-                            vec![(9, PyRep::Integer(i64::from(chg.quantity.saturating_add(1))))],
-                        );
-                        emit_charge_sublocation_quantity_change(
-                            ctx,
-                            acid,
-                            attacker_ship_id,
-                            chg.flag,
-                            chg.type_id,
-                            chg.quantity.saturating_add(1),
-                            chg.quantity,
-                        );
-                        break;
-                    }
                 }
                 if !notified && applied_dmg > 0.0 {
                     let owner_cid = attacker_char_id.unwrap_or(0);
@@ -2013,6 +2022,13 @@ pub(crate) async fn execute_pending_cycle_actions_list(
                     let _ = ctx.get_or_rebuild_ship_fitting(cid, ship_id);
                     crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, cid, sys_id, ship_id).await;
                 }
+            }
+            crate::system_actor::PendingCycleAction::CycleChargeItemMutations {
+                char_id,
+                ship_id,
+                diffs,
+            } => {
+                emit_ship_charge_item_diffs(ctx, char_id, ship_id, &diffs);
             }
         }
     }

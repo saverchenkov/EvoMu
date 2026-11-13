@@ -490,6 +490,30 @@ async fn test_corp_registry_kills_naming_and_owners() {
                 attacker_alliance_id: None,
             },
         );
+        snap.combat_crimewatch_state.detailed_killmails.insert(
+            91_001,
+            eve_db::DetailedKillmail {
+                kill_id: 91_001,
+                solar_system_id: 30_000_142,
+                kill_time_unix: 1_700_000_000,
+                victim_character_id: PILOT_2,
+                victim_corporation_id: 98_000_099,
+                victim_alliance_id: None,
+                victim_ship_type_id: 587,
+                victim_damage_taken: 980.0,
+                attackers: vec![eve_db::KillmailAttackerEntry {
+                    character_id: PILOT_1,
+                    corporation_id: corp_id,
+                    alliance_id: None,
+                    ship_type_id: 620,
+                    weapon_type_id: 3170,
+                    damage_done: 980.0,
+                    security_status: 1.8,
+                    final_blow: true,
+                }],
+                ..Default::default()
+            },
+        );
     });
 
     // 5. GetRecentKills
@@ -513,7 +537,11 @@ async fn test_corp_registry_kills_naming_and_owners() {
     assert!(k_cols.contains(&"finalShipTypeID".to_string()));
     assert_eq!(k_rows.len(), 1);
     assert_eq!(k_rows[0][0], PyRep::Integer(91_001));
+    assert_eq!(k_rows[0][3], PyRep::Integer(587)); // victimShipTypeID
     assert_eq!(k_rows[0][6], PyRep::None); // moonID
+    assert_eq!(k_rows[0][10], PyRep::Integer(980)); // victimDamageTaken
+    assert_eq!(k_rows[0][15], PyRep::Integer(620)); // finalShipTypeID from detailed_killmails, not victim 587
+    assert_eq!(k_rows[0][16], PyRep::Integer(3170)); // finalWeaponTypeID
 
     // 6. GetRecentLosses
     let losses = rpc(&ctx, &mut sess, "corpRegistry", "GetRecentLosses", &[])
@@ -536,7 +564,9 @@ async fn test_corp_registry_kills_naming_and_owners() {
     assert!(l_cols.contains(&"finalShipTypeID".to_string()));
     assert_eq!(l_rows.len(), 1);
     assert_eq!(l_rows[0][0], PyRep::Integer(91_002));
+    assert_eq!(l_rows[0][3], PyRep::Integer(606)); // victimShipTypeID
     assert_eq!(l_rows[0][6], PyRep::None); // moonID
+    assert_eq!(l_rows[0][15], PyRep::None); // finalShipTypeID absent detailed_killmails -> None, not victim 606
 
     // 7. GetEveOwners: returns character member rows with SDE-resolved bloodline typeID and gender
     let owners = rpc(&ctx, &mut sess, "corpRegistry", "GetEveOwners", &[])

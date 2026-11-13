@@ -837,9 +837,17 @@ async fn handle_get_system_scan_mgr(
     };
     let (wh_class, is_thera, is_shattered, env_effect) = system_wormhole_profile(sys_id);
 
+    let anom_ids: std::collections::HashSet<String> =
+        anomalies.iter().map(|a| a.anomaly_id.clone()).collect();
     let sig_items: Vec<PyRep> = sigs
         .into_iter()
-        .filter(|s| !s.collapsed && (s.lifetime_seconds == 0 || now_unix < s.created_unix.saturating_add(s.lifetime_seconds)))
+        .filter(|s| {
+            !s.collapsed
+                && s.sig_group != "SovOre"
+                && !anom_ids.contains(&s.signature_id)
+                && (s.lifetime_seconds == 0
+                    || now_unix < s.created_unix.saturating_add(s.lifetime_seconds))
+        })
         .map(|s| {
             let eff_strength = ctx.effective_signature_signal_strength(char_id, sys_id, &s);
             let resolved = eff_strength >= 1.0;
@@ -1528,7 +1536,7 @@ async fn handle_request_scans(
             let mut covering = 0usize;
             let mut total_s = 0.0;
             for probe in &combat_probes {
-                let p_pos = DVec3::from_array(probe.position);
+                let p_pos = DVec3::from_array(probe.destination);
                 let dist = p_pos.distance(ball.position);
                 let base_au = probe_base_scan_range_au(&ctx.sde, probe.probe_type_id);
                 let radius = probe.scan_range_m.max(base_au * AU_IN_METERS);
@@ -1936,6 +1944,7 @@ pub fn tick_probe_warp_end(ctx: &ServerContext) {
         if let Ok(mut probe_map) = ctx.active_scanner_probes.write() {
             for pid in &p_ids {
                 if let Some(p) = probe_map.get_mut(pid) {
+                    p.position = p.destination;
                     if matches!(p.state, PROBE_STATE_SCANNING | PROBE_STATE_WARPING | PROBE_STATE_MOVING) {
                         p.state = PROBE_STATE_IDLE;
                     }

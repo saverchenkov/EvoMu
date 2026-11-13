@@ -204,7 +204,7 @@ async fn test_char_mgr_character_profile_info_and_lifecycle() {
     assert_eq!(pub_kv.get("characterName"), Some(&PyRep::String("Aura Capsuleer".into())));
     assert!(matches!(pub_kv.get("raceID"), Some(PyRep::Integer(r)) if *r > 0));
 
-    // 7. GetRecentShipKillsAndLosses (queries real killmails)
+    // 7. GetRecentShipKillsAndLosses (queries real killmails + detailed_killmails finalShipTypeID)
     ctx.db.with_mut_snapshot(|snap| {
         snap.killmails.insert(88001, eve_db::KillmailRecord {
             kill_id: 88001,
@@ -218,6 +218,52 @@ async fn test_char_mgr_character_profile_info_and_lifecycle() {
             victim_alliance_id: None,
             attacker_corp_id: 98_000_002,
             attacker_alliance_id: None,
+        });
+        snap.killmails.insert(88002, eve_db::KillmailRecord {
+            kill_id: 88002,
+            victim_character_id: 90_000_002,
+            attacker_character_id: 90_000_001,
+            solar_system_id: 30000142,
+            ship_type_id: 597,
+            total_value_isk: 3_400_000.0,
+            killed_unix: 1700000500,
+            victim_corp_id: 98_000_002,
+            victim_alliance_id: None,
+            attacker_corp_id: 98_000_001,
+            attacker_alliance_id: None,
+        });
+        snap.combat_crimewatch_state.detailed_killmails.insert(88002, eve_db::DetailedKillmail {
+            kill_id: 88002,
+            solar_system_id: 30000142,
+            kill_time_unix: 1700000500,
+            victim_character_id: 90_000_002,
+            victim_corporation_id: 98_000_002,
+            victim_alliance_id: None,
+            victim_ship_type_id: 597,
+            victim_damage_taken: 1450.0,
+            attackers: vec![
+                eve_db::KillmailAttackerEntry {
+                    character_id: 90_000_003,
+                    corporation_id: 98_000_003,
+                    alliance_id: None,
+                    ship_type_id: 606,
+                    weapon_type_id: 2488,
+                    damage_done: 300.0,
+                    security_status: -1.5,
+                    final_blow: false,
+                },
+                eve_db::KillmailAttackerEntry {
+                    character_id: 90_000_001,
+                    corporation_id: 98_000_001,
+                    alliance_id: None,
+                    ship_type_id: 620,
+                    weapon_type_id: 3170,
+                    damage_done: 1150.0,
+                    security_status: 2.3,
+                    final_blow: true,
+                },
+            ],
+            ..Default::default()
         });
     });
     let kills = ctx
@@ -250,12 +296,23 @@ async fn test_char_mgr_character_profile_info_and_lifecycle() {
             "killBlob",
         ]
     );
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0][0], PyRep::Integer(88001));
-    assert_eq!(rows[0][1], PyRep::Integer(90_000_001));
-    assert_eq!(rows[0][4], PyRep::None); // moonID
-    assert_eq!(rows[0][9], PyRep::Integer(587)); // victimShipTypeID
-    assert_eq!(rows[0][11], PyRep::Integer(90_000_002)); // finalCharacterID
+    assert_eq!(rows.len(), 2);
+    // Most recent first (88002): detailed_killmails final_blow attacker ship (620, Osprey), distinct from victim (597) and current ship.
+    assert_eq!(rows[0][0], PyRep::Integer(88002));
+    assert_eq!(rows[0][9], PyRep::Integer(597)); // victimShipTypeID
+    assert_eq!(rows[0][10], PyRep::Integer(1450)); // victimDamageTaken
+    assert_eq!(rows[0][11], PyRep::Integer(90_000_001)); // finalCharacterID
+    assert_eq!(rows[0][15], PyRep::Integer(620)); // finalShipTypeID
+    assert_eq!(rows[0][16], PyRep::Integer(3170)); // finalWeaponTypeID
+    assert_eq!(rows[0][17], PyRep::Real(2.3)); // finalSecurityStatus
+    assert_eq!(rows[0][18], PyRep::Integer(1150)); // finalDamageDone
+    // Legacy killmail without detailed_killmails (88001): finalShipTypeID must be None, never victim ship 587.
+    assert_eq!(rows[1][0], PyRep::Integer(88001));
+    assert_eq!(rows[1][1], PyRep::Integer(90_000_001));
+    assert_eq!(rows[1][4], PyRep::None); // moonID
+    assert_eq!(rows[1][9], PyRep::Integer(587)); // victimShipTypeID
+    assert_eq!(rows[1][11], PyRep::Integer(90_000_002)); // finalCharacterID
+    assert_eq!(rows[1][15], PyRep::None); // finalShipTypeID unknown -> None
 
     // 8. SetActivityStatus (persists to snapshot and across SQLite reload)
     let mut kw_act = HashMap::new();

@@ -1156,77 +1156,35 @@ fn handle_char_mgr(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let rows = ctx.db.with_snapshot(|snap| {
-                snap.killmails
-                    .values()
-                    .filter(|km| km.victim_character_id == char_id || km.attacker_character_id == char_id)
-                    .map(|km| {
-                        let victim_corp_id = if km.victim_corp_id > 0 {
-                            km.victim_corp_id
-                        } else {
-                            snap.characters
-                                .get(&km.victim_character_id)
-                                .map(|c| c.corporation_id)
-                                .unwrap_or(1_000_009)
-                        };
-                        let victim_alliance_rep = km
-                            .victim_alliance_id
-                            .or_else(|| {
-                                snap.characters
-                                    .get(&km.victim_character_id)
-                                    .and_then(|c| c.alliance_id)
-                            })
-                            .map(PyRep::Integer)
-                            .unwrap_or(PyRep::None);
-                        let attacker_corp_id = if km.attacker_corp_id > 0 {
-                            km.attacker_corp_id
-                        } else {
-                            snap.characters
-                                .get(&km.attacker_character_id)
-                                .map(|c| c.corporation_id)
-                                .unwrap_or(1_000_125)
-                        };
-                        let attacker_alliance_rep = km
-                            .attacker_alliance_id
-                            .or_else(|| {
-                                snap.characters
-                                    .get(&km.attacker_character_id)
-                                    .and_then(|c| c.alliance_id)
-                            })
-                            .map(PyRep::Integer)
-                            .unwrap_or(PyRep::None);
-                        let attacker_ship_type_id = snap
-                            .characters
-                            .get(&km.attacker_character_id)
-                            .map(|c| c.active_ship_id)
-                            .and_then(|sid| snap.items.get(&sid))
-                            .map(|it| it.type_id as i64)
-                            .unwrap_or(km.ship_type_id as i64);
-                        vec![
-                            PyRep::Integer(km.kill_id),
-                            PyRep::Integer(km.victim_character_id),
-                            PyRep::Integer(km.solar_system_id as i64),
-                            PyRep::Integer(km.killed_unix as i64),
-                            PyRep::None,
-                            PyRep::Integer(km.victim_character_id),
-                            PyRep::Integer(victim_corp_id),
-                            victim_alliance_rep,
-                            PyRep::None,
-                            PyRep::Integer(km.ship_type_id as i64),
-                            PyRep::Integer(0),
-                            PyRep::Integer(km.attacker_character_id),
-                            PyRep::Integer(attacker_corp_id),
-                            attacker_alliance_rep,
-                            PyRep::None,
-                            PyRep::Integer(attacker_ship_type_id),
-                            PyRep::None,
-                            PyRep::Real(0.0),
-                            PyRep::Integer(0),
-                            PyRep::String(String::new()),
-                        ]
-                    })
-                    .collect()
-            });
+            let rows = resolve_combat_log_entries(ctx, |km| {
+                km.victim_character_id == char_id || km.attacker_character_id == char_id
+            })
+            .into_iter()
+            .map(|e| {
+                vec![
+                    PyRep::Integer(e.kill_id),
+                    PyRep::Integer(e.victim_character_id),
+                    PyRep::Integer(e.solar_system_id as i64),
+                    PyRep::Integer(e.killed_unix as i64),
+                    PyRep::None,
+                    PyRep::Integer(e.victim_character_id),
+                    PyRep::Integer(e.victim_corp_id),
+                    e.victim_alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                    PyRep::None,
+                    PyRep::Integer(e.victim_ship_type_id as i64),
+                    PyRep::Integer(e.victim_damage_taken),
+                    PyRep::Integer(e.final_character_id),
+                    PyRep::Integer(e.final_corp_id),
+                    e.final_alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                    PyRep::None,
+                    e.final_ship_type_id.map(|t| PyRep::Integer(t as i64)).unwrap_or(PyRep::None),
+                    e.final_weapon_type_id.map(|t| PyRep::Integer(t as i64)).unwrap_or(PyRep::None),
+                    PyRep::Real(e.final_security_status),
+                    PyRep::Integer(e.final_damage_done),
+                    PyRep::String(String::new()),
+                ]
+            })
+            .collect();
             Some(Ok(PyRep::Rowset {
                 columns: vec![
                     "killID".into(),
@@ -1308,6 +1266,149 @@ fn handle_char_mgr(
         }
         _ => None,
     }
+}
+
+pub(crate) struct CombatLogResolvedEntry {
+    pub kill_id: i64,
+    pub victim_character_id: i64,
+    pub victim_corp_id: i64,
+    pub victim_alliance_id: Option<i64>,
+    pub victim_ship_type_id: u32,
+    pub victim_damage_taken: i64,
+    pub solar_system_id: u32,
+    pub killed_unix: u64,
+    pub final_character_id: i64,
+    pub final_corp_id: i64,
+    pub final_alliance_id: Option<i64>,
+    pub final_ship_type_id: Option<u32>,
+    pub final_weapon_type_id: Option<u32>,
+    pub final_security_status: f64,
+    pub final_damage_done: i64,
+}
+
+pub(crate) fn resolve_combat_log_entries(
+    ctx: &ServerContext,
+    filter: impl Fn(&eve_db::KillmailRecord) -> bool,
+) -> Vec<CombatLogResolvedEntry> {
+    let candidates: Vec<_> = ctx.db.with_snapshot(|snap| {
+        snap.killmails
+            .values()
+            .filter(|km| filter(km))
+            .map(|km| {
+                let snap_dkm = snap
+                    .combat_crimewatch_state
+                    .detailed_killmails
+                    .get(&km.kill_id)
+                    .cloned();
+                let victim_corp_id = if km.victim_corp_id > 0 {
+                    km.victim_corp_id
+                } else {
+                    snap.characters
+                        .get(&km.victim_character_id)
+                        .map(|c| c.corporation_id)
+                        .unwrap_or(0)
+                };
+                let victim_alliance_id = km.victim_alliance_id.or_else(|| {
+                    snap.corporations
+                        .get(&victim_corp_id)
+                        .and_then(|c| c.alliance_id)
+                });
+                let att_corp_id = if km.attacker_corp_id > 0 {
+                    km.attacker_corp_id
+                } else {
+                    snap.characters
+                        .get(&km.attacker_character_id)
+                        .map(|c| c.corporation_id)
+                        .unwrap_or(0)
+                };
+                let att_alliance_id = km.attacker_alliance_id.or_else(|| {
+                    snap.corporations
+                        .get(&att_corp_id)
+                        .and_then(|c| c.alliance_id)
+                });
+                (
+                    km.clone(),
+                    snap_dkm,
+                    victim_corp_id,
+                    victim_alliance_id,
+                    att_corp_id,
+                    att_alliance_id,
+                )
+            })
+            .collect()
+    });
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let live_dkms: std::collections::HashMap<i64, eve_db::DetailedKillmail> =
+        crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+            candidates
+                .iter()
+                .filter_map(|(km, _, _, _, _, _)| {
+                    rt.detailed_killmails
+                        .get(&km.kill_id)
+                        .cloned()
+                        .map(|d| (km.kill_id, d))
+                })
+                .collect()
+        });
+    let mut entries: Vec<CombatLogResolvedEntry> = candidates
+        .into_iter()
+        .map(
+            |(km, snap_dkm, victim_corp_id, victim_alliance_id, att_corp_id, att_alliance_id)| {
+                let dkm = live_dkms.get(&km.kill_id).cloned().or(snap_dkm);
+                let final_attacker = dkm.as_ref().and_then(|d| {
+                    d.attackers
+                        .iter()
+                        .find(|a| a.final_blow)
+                        .or_else(|| d.attackers.first())
+                });
+                let victim_damage_taken = dkm
+                    .as_ref()
+                    .map(|d| d.victim_damage_taken.max(0.0).round() as i64)
+                    .unwrap_or(0);
+                let final_character_id = final_attacker
+                    .map(|a| a.character_id)
+                    .filter(|&id| id > 0)
+                    .unwrap_or(km.attacker_character_id);
+                let final_corp_id = final_attacker
+                    .map(|a| a.corporation_id)
+                    .filter(|&id| id > 0)
+                    .unwrap_or(att_corp_id);
+                let final_alliance_id = final_attacker
+                    .and_then(|a| a.alliance_id)
+                    .or(att_alliance_id);
+                let final_ship_type_id =
+                    final_attacker.map(|a| a.ship_type_id).filter(|&t| t > 0);
+                let final_weapon_type_id =
+                    final_attacker.map(|a| a.weapon_type_id).filter(|&t| t > 0);
+                let final_security_status =
+                    final_attacker.map(|a| a.security_status).unwrap_or(0.0);
+                let final_damage_done = final_attacker
+                    .map(|a| a.damage_done.max(0.0).round() as i64)
+                    .unwrap_or(0);
+                CombatLogResolvedEntry {
+                    kill_id: km.kill_id,
+                    victim_character_id: km.victim_character_id,
+                    victim_corp_id,
+                    victim_alliance_id,
+                    victim_ship_type_id: km.ship_type_id,
+                    victim_damage_taken,
+                    solar_system_id: km.solar_system_id,
+                    killed_unix: km.killed_unix,
+                    final_character_id,
+                    final_corp_id,
+                    final_alliance_id,
+                    final_ship_type_id,
+                    final_weapon_type_id,
+                    final_security_status,
+                    final_damage_done,
+                }
+            },
+        )
+        .collect();
+    entries.sort_by_key(|e| (std::cmp::Reverse(e.killed_unix), std::cmp::Reverse(e.kill_id)));
+    entries
 }
 
 #[cfg(test)]
