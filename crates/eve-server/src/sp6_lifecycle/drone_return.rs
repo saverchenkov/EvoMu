@@ -81,7 +81,7 @@ pub async fn handle_cmd_return_bay(
             let _ = sys_handle.emit_destiny_event(
                 d.ball_id,
                 eve_destiny::DestinyEvent::OnDroneStateChange {
-                    drone_id: d.ball_id,
+                    drone_id: d.drone_item_id,
                     owner_id: char_id,
                     controller_id: ship_id,
                     activity_state: 4,
@@ -93,13 +93,13 @@ pub async fn handle_cmd_return_bay(
             let _ = sys_handle.emit_destiny_event(
                 d.ball_id,
                 eve_destiny::DestinyEvent::OnDroneActivityChange {
-                    drone_id: d.ball_id,
+                    drone_id: d.drone_item_id,
                     activity_state: 4,
                     activity: Some("returning".into()),
                 },
             ).await;
             let notif_args = vec![
-                PyRep::Integer(d.ball_id),
+                PyRep::Integer(d.drone_item_id),
                 PyRep::Integer(char_id),
                 PyRep::Integer(ship_id),
                 PyRep::Integer(4),
@@ -108,7 +108,7 @@ pub async fn handle_cmd_return_bay(
                 PyRep::Integer(ship_id),
             ];
             ctx.notify(NotificationTarget::Character(char_id), "OnDroneStateChange", "charid", notif_args);
-            crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(ctx, char_id, d.ball_id, 4, Some("returning"));
+            crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(ctx, char_id, d.drone_item_id, 4, Some("returning"));
             continue;
         }
 
@@ -186,9 +186,13 @@ async fn try_atomic_scoop_drone(
         it.flag = eve_db::InventoryFlag::DroneBay;
         it.version += 1;
         snap.item_positions.remove(&claimed_drone.ball_id);
+        snap.item_positions.remove(&claimed_drone.drone_item_id);
         snap.sp6_lifecycle
             .space_object_meta
             .remove(&claimed_drone.ball_id);
+        snap.sp6_lifecycle
+            .space_object_meta
+            .remove(&claimed_drone.drone_item_id);
         ScoopOutcome::Moved
     });
     match outcome {
@@ -212,7 +216,7 @@ async fn try_atomic_scoop_drone(
         .emit_destiny_event(
             claimed_drone.ball_id,
             eve_destiny::DestinyEvent::OnDroneStateChange {
-                drone_id: claimed_drone.ball_id,
+                drone_id: claimed_drone.drone_item_id,
                 owner_id: claimed_drone.owner_char_id,
                 controller_id: target_ship_id,
                 activity_state: 0,
@@ -223,7 +227,7 @@ async fn try_atomic_scoop_drone(
         )
         .await;
     let notif_args = vec![
-        PyRep::Integer(claimed_drone.ball_id),
+        PyRep::Integer(claimed_drone.drone_item_id),
         PyRep::Integer(claimed_drone.owner_char_id),
         PyRep::Integer(target_ship_id),
         PyRep::Integer(0),
@@ -240,7 +244,7 @@ async fn try_atomic_scoop_drone(
     crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(
         ctx,
         claimed_drone.owner_char_id,
-        claimed_drone.ball_id,
+        claimed_drone.drone_item_id,
         0,
         None,
     );

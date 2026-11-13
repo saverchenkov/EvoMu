@@ -348,9 +348,9 @@ fn structure_queries_upwell_dock_targets_and_station_standing_gates() {
         .expect("structure info");
     assert!(matches!(info_rep, PyRep::KeyVal(_)));
 
-    let err_missing = handle_get_structure_info(&ctx, &mut ceo_sess, &[PyRep::Integer(1_040_999_999_999)])
-        .expect_err("unknown structure");
-    assert_eq!(err_missing.code, "StructureNotFound");
+    let missing = handle_get_structure_info(&ctx, &mut ceo_sess, &[PyRep::Integer(1_040_999_999_999)])
+        .expect("unknown structure returns None");
+    assert!(matches!(missing, PyRep::None));
 
     // resolve_upwell_dock_target: hull class gate on Medium Astrahus (35832):
     // Dreadnought (group 485) is capital-sized -> blocked, while Freighter (513) is allowed

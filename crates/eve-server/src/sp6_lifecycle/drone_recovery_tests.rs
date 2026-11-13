@@ -68,13 +68,16 @@ async fn cmd_return_bay_and_step_returning_drones_cover_scoop_and_return() {
     let far_drone = 100_090_011;
     let sentry_drone = 100_090_012;
 
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(c) = snap.characters.get_mut(&char_id) {
+    let uid = ctx.db.with_mut_snapshot(|snap| {
+        let uid = if let Some(c) = snap.characters.get_mut(&char_id) {
             c.station_id = None;
             c.structure_id = None;
             c.solar_system_id = sys_id;
             c.active_ship_id = ship_id;
-        }
+            c.user_id
+        } else {
+            1
+        };
         snap.items.insert(
             ship_id,
             InventoryItemRecord {
@@ -113,7 +116,11 @@ async fn cmd_return_bay_and_step_returning_drones_cover_scoop_and_return() {
                 },
             );
         }
+        uid
     });
+    ctx.db
+        .acquire_online_lock_with_computer_hash(uid, 1, Some(char_id), None, true, ctx.now_unix())
+        .expect("register online");
 
     spawn_ball(&ctx, sys_id, ship_id, 587, DVec3::ZERO);
     spawn_ball(&ctx, sys_id, close_drone, 2454, DVec3::new(1_000.0, 0.0, 0.0));
@@ -186,11 +193,30 @@ async fn cmd_return_bay_and_step_returning_drones_cover_scoop_and_return() {
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items[&close_drone].flag, InventoryFlag::DroneBay);
         assert_eq!(snap.items[&close_drone].location_id, ship_id);
+        assert!(!snap.item_positions.contains_key(&close_drone));
+        assert!(!snap.sp6_lifecycle.space_object_meta.contains_key(&close_drone));
     });
     with_combat_runtime(&ctx, |rt| {
         assert!(!rt.active_drones_in_space.contains_key(&close_drone));
         assert_eq!(rt.active_drones_in_space[&far_drone].activity_state, 4);
     });
+    let recall_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        recall_notifs.iter().any(|n| {
+            n.event == "OnDroneStateChange"
+                && n.args.first().and_then(|v| v.as_i64()) == Some(close_drone)
+                && n.args.get(3).and_then(|v| v.as_i64()) == Some(0)
+        }),
+        "immediate scoop must emit OnDroneStateChange(0) with drone itemID (#1008)"
+    );
+    assert!(
+        recall_notifs.iter().any(|n| {
+            n.event == "OnDroneActivityChange"
+                && n.args.first().and_then(|v| v.as_i64()) == Some(far_drone)
+                && n.args.get(1).and_then(|v| v.as_i64()) == Some(4)
+        }),
+        "returning drone must emit OnDroneActivityChange(4) with drone itemID (#1008)"
+    );
 
     // Move far_drone within 2500m and run step_returning_drones
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -198,7 +224,26 @@ async fn cmd_return_bay_and_step_returning_drones_cover_scoop_and_return() {
     step_returning_drones(&ctx).await;
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items[&far_drone].flag, InventoryFlag::DroneBay);
+        assert!(!snap.item_positions.contains_key(&far_drone));
+        assert!(!snap.sp6_lifecycle.space_object_meta.contains_key(&far_drone));
     });
+    let scoop_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        scoop_notifs.iter().any(|n| {
+            n.event == "OnDroneStateChange"
+                && n.args.first().and_then(|v| v.as_i64()) == Some(far_drone)
+                && n.args.get(3).and_then(|v| v.as_i64()) == Some(0)
+        }),
+        "atomic scoop must emit OnDroneStateChange(0) with drone itemID (#1008)"
+    );
+    assert!(
+        scoop_notifs.iter().any(|n| {
+            n.event == "OnDroneActivityChange"
+                && n.args.first().and_then(|v| v.as_i64()) == Some(far_drone)
+                && n.args.get(1).and_then(|v| v.as_i64()) == Some(0)
+        }),
+        "atomic scoop must emit OnDroneActivityChange(0) with drone itemID (#1008)"
+    );
 }
 
 #[tokio::test]

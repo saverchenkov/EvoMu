@@ -461,11 +461,16 @@ async fn eject_in_space_sets_capsule_name_and_queues_set_state() {
 
     let (_tick, events, _rep) = sys.drain_observer_updates(cap_id).await.unwrap();
     assert!(
+        !events.iter().any(|e| matches!(e, eve_destiny::DestinyEvent::SetState { .. })),
+        "ship.Eject must NOT queue SetState for new capsule (#992); got {events:?}"
+    );
+    assert!(
         events.iter().any(|e| matches!(
             e,
-            eve_destiny::DestinyEvent::SetState { observer_ball_id } if *observer_ball_id == cap_id
+            eve_destiny::DestinyEvent::AddBalls2 { balls }
+                if balls.iter().any(|b| b.id == cap_id)
         )),
-        "ship.Eject must queue SetState for new capsule (#729)"
+        "ship.Eject must queue incremental AddBalls2 for new capsule (#992); got {events:?}"
     );
 }
 

@@ -1004,23 +1004,63 @@ pub async fn handle_pve_special_sites(
     }
 }
 
+const INTERFERENCE_DECAY_TICK_PERIOD_SECS: i64 = 3_600;
+const INTERFERENCE_DECAY_TICK_PERIOD_TICKS: i64 = INTERFERENCE_DECAY_TICK_PERIOD_SECS * 10_000_000;
+
+fn unix_secs_to_filetime(unix_secs: u64) -> i64 {
+    (unix_secs as i64 + 11_644_473_600).saturating_mul(10_000_000)
+}
+
 /// Builds the V24 `newInterferenceState` keyval shared by `GetLocalInterferenceState` and `OnSolarsystemInterferenceChanged`.
 pub(crate) fn build_interference_state_keyval(sys_id: SolarSystemId, level: f64, band: u8) -> PyRep {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(1_775_000_000);
+    build_interference_state_keyval_at(sys_id, level, band, now_secs)
+}
+
+pub(crate) fn build_interference_state_keyval_at(
+    sys_id: SolarSystemId,
+    level: f64,
+    band: u8,
+    last_updated_sec: u64,
+) -> PyRep {
+    let clamped_level = level.clamp(0.0, 1.0);
     let band_label = match band {
         1 => "Low",
         2 => "Medium",
         _ => "High",
     };
-    let crab_remaining = (((1.0 + 1e-6 - level).max(0.0))
+    let crab_remaining = (((1.0 + 1e-6 - clamped_level).max(0.0))
         / crate::services::pve_crab_beacons::CRAB_INTERFERENCE_DELTA)
         .floor() as i64;
+    let decrease_per_tick = (INTERFERENCE_DECAY_TICK_PERIOD_SECS as f64)
+        / crate::services::pve_crab_beacons::INTERFERENCE_DECAY_WINDOW_SECS;
+    let is_at_quiescent = clamped_level <= 1e-9;
     PyRep::keyval([
         ("solarSystemID", PyRep::Integer(sys_id as i64)),
-        ("interferenceLevel", PyRep::Real(level)),
-        ("interferencePct", PyRep::Real(level * 100.0)),
+        ("interferenceLevel", PyRep::Real(clamped_level)),
+        ("interferencePct", PyRep::Real(clamped_level * 100.0)),
         ("interferenceBand", PyRep::Integer(band as i64)),
         ("bandLabel", PyRep::String(band_label.into())),
         ("crabActivationsRemaining", PyRep::Integer(crab_remaining)),
+        ("isAtQuiescentLevel", PyRep::Bool(is_at_quiescent)),
+        ("quiescentInterferenceLevel", PyRep::Real(0.0)),
+        ("maxInterferenceLevel", PyRep::Real(1.0)),
+        ("normalisedInterferenceLevel", PyRep::Real(clamped_level)),
+        (
+            "lastDecayTickTimestamp",
+            PyRep::Integer(unix_secs_to_filetime(last_updated_sec)),
+        ),
+        (
+            "decayTickPeriod",
+            PyRep::Integer(INTERFERENCE_DECAY_TICK_PERIOD_TICKS),
+        ),
+        (
+            "interferenceDecreasePerDecayTick",
+            PyRep::Real(decrease_per_tick),
+        ),
     ])
 }
 
@@ -1056,7 +1096,7 @@ fn handle_solarsystem_interference_rpc(
         (entry.interference_level, entry.band, changed)
     });
 
-    let local_state = build_interference_state_keyval(sys_id, level, band);
+    let local_state = build_interference_state_keyval_at(sys_id, level, band, now_sec);
     if changed_from.is_some() {
         session.push_notification(
             "OnSolarsystemInterferenceChanged",

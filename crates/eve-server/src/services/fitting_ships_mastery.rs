@@ -289,7 +289,22 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     let _ = sys
                         .spawn_ball_with_meta(pod_ball, pod_cs, pod_slim)
                         .await;
-                    let _ = sys.push_set_state(capsule_id).await;
+                    // Register `capsule_id` as the live observer and queue incremental `AddBalls2`
+                    // (without `SetState`, `#992`) so `macho_listener` hands off in-space without
+                    // triggering `Park.SetState -> DoBallClear` on static/celestial overview items.
+                    {
+                        let mut bp = sys.ballpark.write().unwrap_or_else(|e| e.into_inner());
+                        if let Some(ref mut set) = bp.registered_observers {
+                            set.remove(&old_ship_id);
+                            set.insert(capsule_id);
+                        }
+                        if let Some(ball) = bp.balls.get(&capsule_id).cloned() {
+                            bp.observer_events
+                                .entry(capsule_id)
+                                .or_default()
+                                .push(eve_destiny::DestinyEvent::AddBalls2 { balls: vec![ball] });
+                        }
+                    }
                     let vacated_meta =
                         build_vacated_ship_slim_meta(ctx, &sys, char_id, old_ship_id);
                     let slim_changed = sys
@@ -649,6 +664,16 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                                     Some(sys_id),
                                     prev,
                                 );
+                                // Hand off observer registration to `sid` before `take_ball(prev)` so
+                                // `RemoveBall(prev)` and `OnSlimItemChange` flow incrementally (`#992`)
+                                // without emitting in-system `SetState`.
+                                {
+                                    let mut bp = sys.ballpark.write().unwrap_or_else(|e| e.into_inner());
+                                    if let Some(ref mut set) = bp.registered_observers {
+                                        set.remove(&prev);
+                                        set.insert(sid);
+                                    }
+                                }
                                 let mut pkg_events = Vec::new();
                                 if was_capsule {
                                     let _ = sys.take_ball(prev).await;

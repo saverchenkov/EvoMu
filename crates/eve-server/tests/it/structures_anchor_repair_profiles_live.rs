@@ -651,10 +651,8 @@ async fn test_structures_profiles_and_directory_live() {
     assert!(!after_dockable.iter().any(|v| v.as_i64() == Some(sid)), "destroyed structure must be removed from dockable directory");
     let PyRep::Dict(after_corp) = ok(&ctx, &mut pilot, "structureDirectory", "GetMyCorporationStructures", &[]).await else { panic!("expected dict") };
     assert!(!after_corp.iter().any(|(k, _)| k.as_i64() == Some(sid)), "destroyed structure must be removed from corp directory");
-    let err_gone = call(&ctx, &mut pilot, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(sid)])
-        .await
-        .expect_err("destroyed structure GetStructureInfo must fail");
-    assert_eq!(err_gone.code, "StructureNotFound");
+    let gone = ok(&ctx, &mut pilot, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(sid)]).await;
+    assert_eq!(gone, PyRep::None, "destroyed structure GetStructureInfo must return None (#1007)");
 
     let notifs_p = ctx.drain_notifications_for_char(pilot.char_id);
     let notifs_m = ctx.drain_notifications_for_char(member_id);
