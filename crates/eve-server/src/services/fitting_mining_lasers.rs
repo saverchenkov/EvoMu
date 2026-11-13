@@ -111,11 +111,7 @@ pub(crate) async fn handle_mining_and_deactivate(
             let is_paid_cycle_deferred = mod_type_opt
                 .and_then(|tid| ctx.sde.types.get(&tid))
                 .is_some_and(|t| {
-                    matches!(
-                        t.group_id,
-                        53 | 55 | 62 | 63 | 68 | 74 | 325 | 585 | 1199 | 1698
-                            | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807
-                    )
+                    matches!(t.group_id, 62 | 63 | 68 | 325 | 585 | 1199 | 1698)
                 });
             let mut removed_cycle_delay = None;
             if let Some(sys_id) = session.solar_system_id {

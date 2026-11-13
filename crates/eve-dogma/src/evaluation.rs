@@ -1128,6 +1128,16 @@ impl ShipFittingEngine {
                             if spec.domain == "itemID" {
                                 continue;
                             }
+                            if scope == EvalScope::ActorBaseline
+                                && is_active
+                                && matches!(mod_type.group_id, 515 | 1815)
+                                && matches!(
+                                    spec.modified_attribute_id,
+                                    attr_ids::MAX_VELOCITY | attr_ids::MASS
+                                )
+                            {
+                                continue;
+                            }
                             ctx.apply_modifier_spec_with_effect(
                                 m.item_id,
                                 Some(eid),
@@ -1432,7 +1442,7 @@ impl ShipFittingEngine {
             }
 
             let is_stasis_webifier = proj_type.is_some_and(|t| t.group_id == 65);
-            if is_stasis_webifier {
+            if scope == EvalScope::Full && is_stasis_webifier {
                 let speed_bonus =
                     proj.effective_module.get_attribute(20, sde) * att * stasis_webifier_resist;
                 if speed_bonus.abs() > 1e-9 {

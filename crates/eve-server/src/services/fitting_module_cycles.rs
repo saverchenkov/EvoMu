@@ -732,8 +732,13 @@ pub(crate) async fn handle_module_cycles(
             }
 
             {
-                let in_actor_cycle = sys.has_module_cycle(ship_id, module_id).await;
-                if is_weapon && !ctx.is_module_in_reactivation_delay(ship_id, module_id) && !in_actor_cycle {
+                let (actor_cycle_state, cleaned_stale) = sys
+                    .reconcile_module_cycle_before_activate(ship_id, module_id, ctx.now_unix_secs())
+                    .await;
+                let in_actor_cycle = actor_cycle_state.is_some();
+                if cleaned_stale
+                    || (is_weapon && !ctx.is_module_in_reactivation_delay(ship_id, module_id) && !in_actor_cycle)
+                {
                     ctx.db.with_mut_snapshot(|s| { s.module_active_states.remove(&module_id); });
                 }
                 let in_db_active = ctx.db.with_snapshot(|s| s.module_active_states.contains(&module_id));
@@ -775,16 +780,44 @@ pub(crate) async fn handle_module_cycles(
                     ).await;
                     return Some(Ok(rep));
                 }
+                if matches!(mod_type.group_id, 72 | 80 | 353 | 842) {
+                    let sys_sec = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| rt.modified_system_securities.get(&sys_id).copied())
+                        .unwrap_or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0));
+                    let safety = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                        rt.safety_levels.get(&char_id).copied().unwrap_or(crate::services::combat_crimewatch::SafetyLevel::Red)
+                    });
+                    if sys_sec > 0.0 && safety != crate::services::combat_crimewatch::SafetyLevel::Red {
+                        return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
+                    }
+                }
                 if ctx.is_module_in_reactivation_delay(ship_id, module_id) {
                     let code = if matches!(mod_type.group_id, 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807) { "ModuleAlreadyActive" } else { "ModuleReactivationDelay" };
                     return Some(Err(BridgeRpcError { code: code.into(), message: format!("Module {module_id} cannot reactivate before delay expires"), client_error: None }));
                 }
-                if method == "Activate" && already_active {
+                let allow_mutadaptive_retarget = mod_type.group_id == 2018
+                    && target_id_opt.is_some()
+                    && actor_cycle_state.is_some_and(|(_, cur_t)| cur_t != target_id_opt);
+                let allow_smartbomb_retrigger = mod_type.group_id == 72;
+                if method == "Activate" && already_active && !allow_mutadaptive_retarget && !allow_smartbomb_retrigger {
+                    if actor_cycle_state.is_some_and(|(rep, _)| rep == 0)
+                        && matches!(mod_type.group_id, 41 | 67 | 325 | 585 | 1697 | 1698 | 2018)
+                    {
+                        if let Some(tid) = target_id_opt {
+                            if let Err(e) = crate::services::combat_crimewatch::crimewatch_timers::can_perform_remote_assistance_in_safety(
+                                ctx, char_id, sys_id, tid,
+                            ) {
+                                return Some(Err(e));
+                            }
+                        }
+                    }
                     return Some(Err(BridgeRpcError {
                         code: "ModuleAlreadyActive".into(),
                         message: format!("Module {module_id} is already active in a cycle"),
                         client_error: None,
                     }));
+                }
+                if allow_smartbomb_retrigger && in_actor_cycle {
+                    let _ = sys.remove_module_cycle(ship_id, module_id).await;
                 }
                 if matches!(mod_type.group_id, 1122 | 650 | 82) && target_id_opt.is_none() {
                     return Some(Err(BridgeRpcError {
@@ -1702,8 +1735,12 @@ pub(crate) async fn handle_module_cycles(
                 }
             });
             let _ = fit.activate_module(module_id, is_overloaded, &ctx.sde);
+            let mut volley_destroyed_target = false;
             if (is_turret_group || is_missile_group || is_vorton_group) && target_id_opt.is_some() {
-                if let Ok(weapon_actions) = sys.fire_weapon_cycle_volley(ship_id, module_id).await {
+                if let Ok((destroyed, weapon_actions)) = sys.fire_weapon_cycle_volley(ship_id, module_id).await {
+                    if !destroyed.is_empty() {
+                        volley_destroyed_target = true;
+                    }
                     if !weapon_actions.is_empty() {
                         execute_pending_cycle_actions_list(ctx, sys_id, weapon_actions).await;
                     }
@@ -1803,7 +1840,22 @@ pub(crate) async fn handle_module_cycles(
             } else if is_auto_targeter {
                 Some(crate::router::box_fut(|| crate::services::tactical_modules::activate_auto_targeting_system(ctx, &sys, char_id, ship_id, module_id, mod_type, &mod_state, &fit)).await)
             } else if mod_type.group_id == 49 || mod_type.default_attributes.contains_key(&197) {
-                Some(Ok(crate::router::box_fut(|| handle_survey_scanner_activation(ctx, &sys, sys_id, char_id, ship_id, module_id, mod_type, &mod_state)).await))
+                let already_applied_dbuffs: Vec<u32> =
+                    fit.gang_bursts.iter().filter_map(|b| b.dbuff_id).collect();
+                Some(Ok(crate::router::box_fut(|| {
+                    handle_survey_scanner_activation_with_excluded_dbuffs(
+                        ctx,
+                        &sys,
+                        sys_id,
+                        char_id,
+                        ship_id,
+                        module_id,
+                        mod_type,
+                        &mod_state,
+                        &already_applied_dbuffs,
+                    )
+                })
+                .await))
             } else {
                 let max_vel = if mod_type.group_id == 330 {
                     sys.get_ball_snapshot(ship_id)
@@ -1815,11 +1867,17 @@ pub(crate) async fn handle_module_cycles(
                 } else {
                     fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde)
                 };
-                Some(Ok(PyRep::keyval([
-                    ("moduleID", PyRep::Integer(module_id)), ("active", PyRep::Bool(true)),
-                    ("overloaded", PyRep::Bool(false)), ("effectiveMaxVelocity", PyRep::Real(max_vel)),
+                let mut resp = vec![
+                    ("moduleID", PyRep::Integer(module_id)),
+                    ("active", PyRep::Bool(true)),
+                    ("overloaded", PyRep::Bool(false)),
+                    ("effectiveMaxVelocity", PyRep::Real(max_vel)),
                     ("duration", PyRep::Real(duration_s)),
-                ])))
+                ];
+                if volley_destroyed_target {
+                    resp.push(("destroyed", PyRep::Bool(true)));
+                }
+                Some(Ok(PyRep::keyval(resp)))
             }
             }
         }

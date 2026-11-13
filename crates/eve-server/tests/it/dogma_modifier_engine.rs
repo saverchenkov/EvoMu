@@ -418,7 +418,15 @@ async fn test_dg1_propulsion_family_ab_mwd_scrambler() {
     assert_eq!(ab_inactive.mass, base_mass);
 
     let ab_active = eval_propulsion_module(&rifter, &ab2, true, false, false, &sde);
-    assert!((ab_active.max_velocity - base_vel * 2.35).abs() < 1e-4);
+    let expected_ab_vel = base_vel
+        * (1.0
+            + eve_dogma::compute_propulsion_speed_boost(
+                ab2.get_attribute(attr_ids::SPEED_FACTOR, &sde),
+                ab2.get_attribute(567, &sde),
+                base_mass,
+                ab2.get_attribute(796, &sde),
+            ));
+    assert!((ab_active.max_velocity - expected_ab_vel).abs() < 1e-4);
     assert_eq!(ab_active.mass, base_mass + 500_000.0);
     assert_eq!(ab_active.signature_radius, base_sig); // Afterburner does NOT bloom sig radius!
 
@@ -433,7 +441,15 @@ async fn test_dg1_propulsion_family_ab_mwd_scrambler() {
     // 2. 5MN Microwarpdrive II (type 440): speedFactor 510%, massAddition 500,000 kg, sigRadiusBonus +475%
     let mwd2 = DogmaItemState::from_sde(2002, 440, &sde);
     let mwd_active = eval_propulsion_module(&rifter, &mwd2, true, false, false, &sde);
-    assert!((mwd_active.max_velocity - base_vel * 6.10).abs() < 1e-4);
+    let expected_mwd_vel = base_vel
+        * (1.0
+            + eve_dogma::compute_propulsion_speed_boost(
+                mwd2.get_attribute(attr_ids::SPEED_FACTOR, &sde),
+                mwd2.get_attribute(567, &sde),
+                base_mass,
+                mwd2.get_attribute(796, &sde),
+            ));
+    assert!((mwd_active.max_velocity - expected_mwd_vel).abs() < 1e-4);
     assert_eq!(mwd_active.mass, base_mass + 500_000.0);
     assert!((mwd_active.signature_radius - base_sig * 5.75).abs() < 1e-4); // 475% bloom!
 

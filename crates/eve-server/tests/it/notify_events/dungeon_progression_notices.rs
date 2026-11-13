@@ -394,6 +394,12 @@ async fn test_b36_progression_notifications() {
             }
             let _ = sys_h.step_manual(1.0).await;
         }
+        let _ = ctx
+            .dispatch_rpc(&mut s1, "dogmaIM", None, "Deactivate", &[PyRep::Integer(gun_p1)], &kw, None)
+            .await;
+        for _ in 0..15 {
+            let _ = sys_h.step_manual(1.0).await;
+        }
         ctx.set_invention_roll_override(None);
         assert!(sys_h.get_ball_snapshot(guard_npc_id).await.unwrap().is_none());
         if idx == 0 {

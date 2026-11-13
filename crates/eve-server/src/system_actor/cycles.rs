@@ -81,9 +81,18 @@ pub(crate) fn is_capital_remote_repair_module(
         })
 }
 
+#[cfg(test)]
 pub(crate) fn sync_cycle_from_fit_projection(
     cycle: &mut ActiveModuleCycle,
     fit_projections: &HashMap<BallId, eve_dogma::FitProjection>,
+) {
+    sync_cycle_from_fit_projection_with_shield_boost_mult(cycle, fit_projections, 1.0);
+}
+
+pub(crate) fn sync_cycle_from_fit_projection_with_shield_boost_mult(
+    cycle: &mut ActiveModuleCycle,
+    fit_projections: &HashMap<BallId, eve_dogma::FitProjection>,
+    shield_boost_multiplier: f64,
 ) {
     let Some(proj) = fit_projections.get(&cycle.ship_id) else {
         return;
@@ -94,8 +103,17 @@ pub(crate) fn sync_cycle_from_fit_projection(
     if cp.is_overloaded != cycle.is_overloaded {
         return;
     }
-    if cp.duration_ms > 0.0 && cp.duration_ms.is_finite() {
-        cycle.duration_s = (cp.duration_ms / 1000.0).max(0.05);
+    if !cycle.grants_interdiction_nullification && cp.duration_ms > 0.0 && cp.duration_ms.is_finite()
+    {
+        let mult = if cycle.shield_boost_amount > 0.0
+            && shield_boost_multiplier > 0.0
+            && shield_boost_multiplier.is_finite()
+        {
+            shield_boost_multiplier
+        } else {
+            1.0
+        };
+        cycle.duration_s = ((cp.duration_ms / 1000.0) * mult).max(0.05);
     }
     if !cycle.is_asb && cp.capacitor_need >= 0.0 && cp.capacitor_need.is_finite() {
         cycle.cap_need_per_cycle = cp.capacitor_need;
@@ -1313,7 +1331,16 @@ pub(crate) fn step_cycles_and_capacitor_with_epochs(
                             is_overloaded: next_ovl,
                         });
                     }
-                    sync_cycle_from_fit_projection(cycle, fit_projections);
+                    let shield_boost_mult = ballpark
+                        .combat_states
+                        .get(&cycle.ship_id)
+                        .map(|cs| cs.shield_boost_multiplier)
+                        .unwrap_or(1.0);
+                    sync_cycle_from_fit_projection_with_shield_boost_mult(
+                        cycle,
+                        fit_projections,
+                        shield_boost_mult,
+                    );
                     if weapon_cycle_start_modules.contains(&(cycle.ship_id, cycle.module_id))
                         && cycle.damage_vector.total() > 0.0
                     {

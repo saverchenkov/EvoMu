@@ -559,15 +559,34 @@ async fn test_wormhole_capital_escalations_sentries_drifter_relay_and_downtime_d
 
     // Warp Dreadnought to Arithmos's celestial grid via CmdWarpToStuff, destroy Arithmos via live weapons, and verify Blue Loot wreck!
     let bey_c6 = ctx.bind_object(&mut c6_sess, "beyonce", c6_sys as i64).unwrap();
-    let near_cel_id = ctx
-        .sde
-        .celestials_in_system(c6_sys)
-        .into_iter()
-        .min_by(|a, b| a.position.distance(pos_after_roam).partial_cmp(&b.position.distance(pos_after_roam)).unwrap())
-        .unwrap()
-        .celestial_id as i64;
-    ctx.dispatch_rpc(&mut c6_sess, "beyonce", Some(bey_c6), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(near_cel_id), PyRep::Real(30_000.0)], &kw, None).await.unwrap();
-    step_until_warp_done(&c6_handle, c6_dread_sid).await;
+    for _ in 0..4 {
+        for _ in 0..12 {
+            if let Ok(Some((_, b))) = c6_handle.get_ball_snapshot(arithmos_bid).await {
+                if !matches!(b.mode, MovementMode::Warp { .. }) {
+                    break;
+                }
+            }
+            let _ = c6_handle.step_manual(10.0).await;
+        }
+        let target_pos = c6_handle.get_ball_snapshot(arithmos_bid).await.unwrap().unwrap().1.position;
+        let near_cel_id = ctx
+            .sde
+            .celestials_in_system(c6_sys)
+            .into_iter()
+            .min_by(|a, b| a.position.distance(target_pos).partial_cmp(&b.position.distance(target_pos)).unwrap())
+            .unwrap()
+            .celestial_id as i64;
+        ctx.dispatch_rpc(&mut c6_sess, "beyonce", Some(bey_c6), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(near_cel_id), PyRep::Real(30_000.0)], &kw, None).await.unwrap();
+        step_until_warp_done(&c6_handle, c6_dread_sid).await;
+        let _ = c6_handle.step_manual(2.0).await;
+        let dread_pos = c6_handle.get_ball_snapshot(c6_dread_sid).await.unwrap().unwrap().1.position;
+        let arith_ball = c6_handle.get_ball_snapshot(arithmos_bid).await.unwrap().unwrap().1;
+        if !matches!(arith_ball.mode, MovementMode::Warp { .. })
+            && dread_pos.distance(arith_ball.position) <= 250_000.0
+        {
+            break;
+        }
+    }
     lock_and_fire_guns_until(&ctx, &mut c6_sess, c6_sys, c6_guns, arithmos_bid, false).await;
     let dropped_blue_loot = ctx.db.with_snapshot(|snap| {
         snap.items.values().any(|it| it.owner_id == c6_dread_cid && matches!(it.type_id, 30_744..=30_747))

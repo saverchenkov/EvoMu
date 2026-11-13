@@ -1627,6 +1627,22 @@ impl SystemRegistry {
                                     .any(|c| c.ship_id == ship_id && c.module_id == module_id);
                                 let _ = reply.send(exists);
                             }
+                            SystemCommand::ReconcileModuleCycleBeforeActivate { ship_id, module_id, now_unix, reply } => {
+                                let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
+                                let res = reconcile_module_cycle_before_activate_in_actor(
+                                    &mut ballpark,
+                                    active_module_cycles,
+                                    &base_scramble_strengths,
+                                    &base_core_strengths,
+                                    &sde_opt,
+                                    &db_opt,
+                                    deact_guard.as_ref(),
+                                    ship_id,
+                                    module_id,
+                                    now_unix,
+                                );
+                                let _ = reply.send(res);
+                            }
                             SystemCommand::UpdateModuleOverload { ship_id, module_id, is_overloaded, reply } => {
                                 let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
                                 let updated = handle_update_module_overload(
@@ -2202,41 +2218,136 @@ pub(crate) fn apply_fit_projection_in_actor(
     {
         return false;
     }
-    let prev_proj = fit_projections.get(&ship_id);
-    let hull_changed = prev_proj.is_some_and(|p| p.ship_type_id != projection.ship_type_id);
-    let prev_baseline_cap = prev_proj.map(|p| p.baseline.max_capacitor);
+    let prev_baseline = fit_projections.get(&ship_id).map(|p| p.baseline);
+    let hull_changed = fit_projections
+        .get(&ship_id)
+        .is_some_and(|p| p.ship_type_id != projection.ship_type_id);
     let baseline = projection.baseline;
     fit_projections.insert(ship_id, projection);
     let prev_max_vel = ballpark.balls.get(&ship_id).map(|b| b.max_velocity);
     let Some(cs) = ballpark.combat_states.get_mut(&ship_id) else {
         return false;
     };
-    let shield_regen_disabled = cs.shield_recharge_time_ms <= 0.0;
+    let shield_regen_disabled =
+        cs.shield_recharge_time_ms <= 0.0 || cs.shield_recharge_time_ms >= 1.0e12;
     let cap_regen_disabled = cs.capacitor_recharge_time_ms <= 0.0
-        || cs.base_capacitor_recharge_time_ms.is_some_and(|b| b <= 0.0);
-    cs.base_max_velocity = Some(baseline.max_velocity.max(0.0));
-    cs.base_mass = Some(baseline.mass.max(1.0));
-    cs.base_inertia = Some(baseline.agility.max(0.001));
-    cs.base_signature_radius = Some(baseline.signature_radius.max(0.0));
+        || cs.base_capacitor_recharge_time_ms.is_some_and(|b| b <= 0.0)
+        || cs.capacitor_recharge_time_ms >= 1.0e12;
+    let keep_prev_or_override = |cur_base: Option<f64>, prev_val: Option<f64>, new_val: f64| -> bool {
+        !hull_changed
+            && prev_val.is_some_and(|pv| {
+                (new_val - pv).abs() <= 1e-2
+                    && cur_base.is_some_and(|cb| (cb - pv).abs() > 1e-2)
+            })
+    };
+    if !keep_prev_or_override(
+        cs.base_max_velocity,
+        prev_baseline.map(|p| p.max_velocity),
+        baseline.max_velocity,
+    ) {
+        cs.base_max_velocity = Some(baseline.max_velocity.max(0.0));
+    }
+    if !keep_prev_or_override(cs.base_mass, prev_baseline.map(|p| p.mass), baseline.mass) {
+        cs.base_mass = Some(baseline.mass.max(1.0));
+    }
+    if !keep_prev_or_override(
+        cs.base_inertia,
+        prev_baseline.map(|p| p.agility),
+        baseline.agility,
+    ) {
+        cs.base_inertia = Some(baseline.agility.max(0.001));
+    }
+    if !keep_prev_or_override(
+        cs.base_signature_radius,
+        prev_baseline.map(|p| p.signature_radius),
+        baseline.signature_radius,
+    ) {
+        cs.base_signature_radius = Some(baseline.signature_radius.max(0.0));
+    }
     if !shield_regen_disabled {
-        cs.base_max_shield_hp = Some(baseline.max_shield_hp.max(0.0));
-        cs.base_max_armor_hp = Some(baseline.max_armor_hp.max(0.0));
-        cs.base_max_structure_hp = Some(baseline.max_structure_hp.max(0.0));
+        let env_s = cs.env_max_shield_multiplier.unwrap_or(1.0).max(1e-6);
+        let shield_overridden = prev_baseline.is_some_and(|pb| {
+            !hull_changed
+                && (baseline.max_shield_hp - pb.max_shield_hp).abs() <= 1e-2
+                && (cs.max_shield_hp / env_s - pb.max_shield_hp).abs() > 1e-2
+        });
+        if shield_overridden {
+            cs.base_max_shield_hp = Some((cs.max_shield_hp / env_s).max(0.0));
+        } else if !(prev_baseline.is_none()
+            && cs
+                .base_max_shield_hp
+                .is_some_and(|cb| cb > baseline.max_shield_hp + 1e-2))
+        {
+            cs.base_max_shield_hp = Some(baseline.max_shield_hp.max(0.0));
+        }
+        let env_a = cs.env_max_armor_multiplier.unwrap_or(1.0).max(1e-6);
+        let armor_overridden = prev_baseline.is_some_and(|pb| {
+            !hull_changed
+                && (baseline.max_armor_hp - pb.max_armor_hp).abs() <= 1e-2
+                && (cs.max_armor_hp / env_a - pb.max_armor_hp).abs() > 1e-2
+        });
+        if armor_overridden {
+            cs.base_max_armor_hp = Some((cs.max_armor_hp / env_a).max(0.0));
+        } else if !(prev_baseline.is_none()
+            && cs
+                .base_max_armor_hp
+                .is_some_and(|cb| cb > baseline.max_armor_hp + 1e-2))
+        {
+            cs.base_max_armor_hp = Some(baseline.max_armor_hp.max(0.0));
+        }
+        let struct_overridden = prev_baseline.is_some_and(|pb| {
+            !hull_changed
+                && (baseline.max_structure_hp - pb.max_structure_hp).abs() <= 1e-2
+                && (cs.max_structure_hp - pb.max_structure_hp).abs() > 1e-2
+        });
+        if struct_overridden {
+            cs.base_max_structure_hp = Some(cs.max_structure_hp.max(0.0));
+        } else if !(prev_baseline.is_none()
+            && cs
+                .base_max_structure_hp
+                .is_some_and(|cb| cb > baseline.max_structure_hp + 1e-2))
+        {
+            cs.base_max_structure_hp = Some(baseline.max_structure_hp.max(0.0));
+        }
         cs.shield_recharge_time_ms = baseline.shield_recharge_time_ms.max(1.0);
     }
     if !cap_regen_disabled {
-        let cap_manually_overridden = prev_baseline_cap.is_some_and(|prev_b| {
-            cs.base_max_capacitor
-                .is_some_and(|cur_b| (cur_b - prev_b).abs() > 1e-2)
-                && (baseline.max_capacitor - prev_b).abs() <= 1e-2
-        }) || (prev_baseline_cap.is_none()
-            && (baseline.max_capacitor - 250.0).abs() < 1e-2
-            && cs
-                .base_max_capacitor
-                .is_some_and(|cur_b| (cur_b - 250.0).abs() > 1e-2));
-        if !cap_manually_overridden {
-            let cap_floor = if hull_changed { cs.capacitor } else { 0.0 };
-            cs.base_max_capacitor = Some(baseline.max_capacitor.max(cap_floor).max(0.0));
+        let env_c = cs.env_max_cap_multiplier.unwrap_or(1.0).max(1e-6);
+        let prev_cap_overridden = prev_baseline.is_some_and(|pb| {
+            !hull_changed
+                && (baseline.max_capacitor - pb.max_capacitor).abs() <= 1e-2
+                && ((cs.max_capacitor / env_c - pb.max_capacitor).abs() > 1e-2
+                    || cs
+                        .base_max_capacitor
+                        .is_some_and(|cur_b| (cur_b - pb.max_capacitor).abs() > 1e-2))
+        });
+        if prev_cap_overridden {
+            if (cs.max_capacitor / env_c - prev_baseline.map(|p| p.max_capacitor).unwrap_or(0.0))
+                .abs()
+                > 1e-2
+            {
+                cs.base_max_capacitor = Some((cs.max_capacitor / env_c).max(0.0));
+            }
+        } else if prev_baseline.is_none()
+            && cs.base_max_capacitor.is_some_and(|cur_b| {
+                (cs.max_capacitor / env_c - cur_b).abs() > 1e-2
+                    && cs.max_capacitor / env_c > baseline.max_capacitor + 1e-2
+            })
+        {
+            cs.base_max_capacitor = Some((cs.max_capacitor / env_c).max(0.0));
+        } else {
+            let init_cap_overridden = prev_baseline.is_none()
+                && cs.base_max_capacitor.is_some_and(|cur_b| {
+                    (cur_b - baseline.max_capacitor).abs() > 1e-2
+                        && (cur_b > baseline.max_capacitor + 1e-2
+                            || ((cs.capacitor_recharge_time_ms - 120_000.0).abs() < 1e-2
+                                && (baseline.capacitor_recharge_time_ms - 120_000.0).abs() > 1e-2
+                                && (cur_b - 250.0).abs() > 1e-2))
+                });
+            if !init_cap_overridden {
+                let cap_floor = if hull_changed { cs.capacitor } else { 0.0 };
+                cs.base_max_capacitor = Some(baseline.max_capacitor.max(cap_floor).max(0.0));
+            }
         }
         cs.base_capacitor_recharge_time_ms = Some(baseline.capacitor_recharge_time_ms.max(1.0));
     }

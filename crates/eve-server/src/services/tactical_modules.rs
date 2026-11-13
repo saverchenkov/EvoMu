@@ -775,7 +775,7 @@ pub async fn handle_entosis_link_activation(
     };
 
     scanners_superweapons_state().write().unwrap_or_else(|e| e.into_inner()).entosis_contested_nodes.insert(target_id, ship_id);
-    ctx.invalidate_and_push_fit(ship_id);
+    ctx.invalidate_ship_fitting_cache_only(ship_id);
     ctx.persist_server_runtime_to_db();
 
     Ok(PyRep::keyval([

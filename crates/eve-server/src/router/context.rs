@@ -1877,6 +1877,9 @@ impl ServerContext {
         rev: eve_dogma::FitRev,
     ) -> Option<eve_dogma::FitProjection> {
         let fit = self.fit(char_id, ship_id).ok()?;
+        if fit.ship.type_id == 0 || !self.sde.types.contains_key(&fit.ship.type_id) {
+            return None;
+        }
         let mut proj = fit.to_projection(rev, &self.sde);
         use eve_sde::attr_ids as a;
         let b = &mut proj.baseline;
@@ -1913,7 +1916,7 @@ impl ServerContext {
         crate::services::inventory_fitting::fitting_scanners_superweapons::apply_active_dbuffs_and_system_effects_to_ship_attrs_excluding(
             self,
             ship_id,
-            &[],
+            &[2141],
             &mut eff_attrs,
         );
         b.max_shield_hp = eff_attrs[&a::SHIELD_CAPACITY].max(0.0);

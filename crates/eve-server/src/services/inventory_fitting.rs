@@ -1753,11 +1753,20 @@ async fn handle_invbroker_add(
                     if looted_foreign_jetcan {
                         super::inventory_stacking::apply_space_loot_suspect_flag(ctx, session, char_id);
                     }
+                    let affects_fitting = is_fitting_slot || src_is_fitted_module;
                     if let Some(ship_id) = session.ship_id {
-                        ctx.invalidate_ship_fitting(ship_id);
+                        if affects_fitting {
+                            ctx.invalidate_ship_fitting(ship_id);
+                        } else {
+                            ctx.invalidate_ship_fitting_cache_only(ship_id);
+                        }
                     }
                     crate::services::operations_manager_helpers::record_invbroker_add_operation_event(ctx, char_id, orig_source_loc_id, new_loc, flag, moved_tid, moved_qty);
-                    ctx.invalidate_ship_fitting(new_loc);
+                    if affects_fitting {
+                        ctx.invalidate_ship_fitting(new_loc);
+                    } else {
+                        ctx.invalidate_ship_fitting_cache_only(new_loc);
+                    }
                     if let Some((orig_id, sq)) = did_split {
                         if let Some(orig) = ctx.db.get_item(orig_id) {
                             let old_orig_qty = (orig.quantity + sq) as i64;
@@ -1862,11 +1871,20 @@ async fn handle_invbroker_add(
                     if looted_foreign_jetcan {
                         super::inventory_stacking::apply_space_loot_suspect_flag(ctx, session, char_id);
                     }
+                    let affects_fitting = is_fitting_slot || old_was_fitted;
                     if let Some(ship_id) = session.ship_id {
-                        ctx.invalidate_ship_fitting(ship_id);
+                        if affects_fitting {
+                            ctx.invalidate_ship_fitting(ship_id);
+                        } else {
+                            ctx.invalidate_ship_fitting_cache_only(ship_id);
+                        }
                     }
                     crate::services::operations_manager_helpers::record_invbroker_add_operation_event(ctx, char_id, orig_source_loc_id, new_loc, flag, updated.type_id, updated.quantity);
-                    ctx.invalidate_ship_fitting(new_loc);
+                    if affects_fitting {
+                        ctx.invalidate_ship_fitting(new_loc);
+                    } else {
+                        ctx.invalidate_ship_fitting_cache_only(new_loc);
+                    }
                     if let Some((orig_id, sq)) = did_split {
                         if let Some(orig) = ctx.db.get_item(orig_id) {
                             let old_orig_qty = (orig.quantity + sq) as i64;

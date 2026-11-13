@@ -111,6 +111,7 @@ pub(crate) fn check_module_reloading(
     Ok(())
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_survey_scanner_activation(
     ctx: &ServerContext,
@@ -122,6 +123,32 @@ pub(crate) async fn handle_survey_scanner_activation(
     mod_type: &InvType,
     mod_state: &DogmaItemState,
 ) -> PyRep {
+    handle_survey_scanner_activation_with_excluded_dbuffs(
+        ctx,
+        sys,
+        sys_id,
+        char_id,
+        ship_id,
+        module_id,
+        mod_type,
+        mod_state,
+        &[],
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_survey_scanner_activation_with_excluded_dbuffs(
+    ctx: &ServerContext,
+    sys: &SystemHandle,
+    sys_id: u32,
+    char_id: i64,
+    ship_id: i64,
+    module_id: i64,
+    mod_type: &InvType,
+    mod_state: &DogmaItemState,
+    excluded_dbuff_ids: &[u32],
+) -> PyRep {
     let mut scan_range = mod_state.get_attribute(197, &ctx.sde);
     let has_197_mod = mod_state
         .modifiers
@@ -131,8 +158,24 @@ pub(crate) async fn handle_survey_scanner_activation(
         scan_range = mod_type.default_attributes.get(&197).or_else(|| mod_type.default_attributes.get(&54)).copied().unwrap_or(15_000.0);
     }
     if !has_197_mod {
-        let m197 = crate::services::mining_cycle::dbuff_multiplier(ctx, ship_id, mod_type, 197);
-        scan_range *= if (m197 - 1.0).abs() > 1e-9 { m197 } else { crate::services::mining_cycle::dbuff_multiplier(ctx, ship_id, mod_type, 54) };
+        let m197 = crate::services::mining_cycle::dbuff_multiplier_excluding(
+            ctx,
+            ship_id,
+            mod_type,
+            197,
+            excluded_dbuff_ids,
+        );
+        scan_range *= if (m197 - 1.0).abs() > 1e-9 {
+            m197
+        } else {
+            crate::services::mining_cycle::dbuff_multiplier_excluding(
+                ctx,
+                ship_id,
+                mod_type,
+                54,
+                excluded_dbuff_ids,
+            )
+        };
     }
     let mut ship_pos = DVec3::ZERO;
     if let Ok(Some((_, ship_ball))) = sys.get_ball_snapshot(ship_id).await {

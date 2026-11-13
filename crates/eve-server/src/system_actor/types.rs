@@ -572,6 +572,12 @@ pub enum SystemCommand {
         module_id: i64,
         reply: oneshot::Sender<bool>,
     },
+    ReconcileModuleCycleBeforeActivate {
+        ship_id: BallId,
+        module_id: i64,
+        now_unix: u64,
+        reply: oneshot::Sender<(Option<(i32, Option<BallId>)>, bool)>,
+    },
     SetInterdictionNullified {
         ball_id: BallId,
         nullified: bool,
