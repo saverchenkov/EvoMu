@@ -126,8 +126,8 @@ async fn paragon_hub_cosmetic_market_fees_and_component_listings() {
     let rsp_buyer_fee = quasar_rpc(&ctx, &mut buyer, "eve_public.cosmetic.market.api.GetBuyerFeeRequest", req_buyer_fee).await;
     assert_eq!(rsp_buyer_fee.status_code, STATUS_OK);
     let lp_msg = sub(&sub(&decode(&rsp_buyer_fee), 1), 1);
-    assert_eq!(varint(&sub(&lp_msg, 1), 1), Some(PARAGON_CORP_ID));
-    assert!(varint(&lp_msg, 2).unwrap_or(0) >= 2_500);
+    assert!(varint(&lp_msg, 1).unwrap_or(0) >= 2_500);
+    assert_eq!(varint(&sub(&lp_msg, 2), 1), Some(PARAGON_CORP_ID));
 
     let rsp_defs = quasar_rpc(&ctx, &mut buyer, "eve_public.cosmetic.market.api.GetBuyerFeesDefinitionRequest", Vec::new()).await;
     assert_eq!(rsp_defs.status_code, STATUS_OK);

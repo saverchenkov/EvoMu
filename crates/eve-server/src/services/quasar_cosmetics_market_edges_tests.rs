@@ -10,39 +10,10 @@ use crate::services::quasar_cosmetics_skinr::{
 };
 use eve_db::{IskCents, TrainedSkillRecord};
 use eve_machonet::service_roles;
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, DynamicQuasarMessage,
-    DynamicValue, WireMessage,
+    DynamicQuasarMessage, DynamicValue, GoogleDuration, GoogleTimestamp, WireMessage,
 };
-
-fn encode_isk_units(field: u32, units: u64, out: &mut Vec<u8>) {
-    let mut sub = Vec::new();
-    encode_varint_field(1, units, &mut sub);
-    encode_bytes_field(field, &sub, out);
-}
-
-fn encode_uuid_msg(field: u32, uuid: &[u8; 16], out: &mut Vec<u8>) {
-    let mut sub = Vec::new();
-    encode_bytes_field(1, uuid, &mut sub);
-    encode_bytes_field(field, &sub, out);
-}
-
-fn encode_seconds_msg(field: u32, secs: u64, out: &mut Vec<u8>) {
-    let mut sub = Vec::new();
-    encode_varint_field(1, secs, &mut sub);
-    encode_bytes_field(field, &sub, out);
-}
-
-fn encode_license_ref(field: u32, owner_id: u64, skin_hex: &str, out: &mut Vec<u8>) {
-    let mut shex = Vec::new();
-    encode_string_field(1, skin_hex, &mut shex);
-    let mut char_sub = Vec::new();
-    encode_varint_field(1, owner_id, &mut char_sub);
-    let mut lic = Vec::new();
-    encode_bytes_field(1, &char_sub, &mut lic);
-    encode_bytes_field(2, &shex, &mut lic);
-    encode_bytes_field(field, &lic, out);
-}
 
 #[test]
 fn purge_revoked_skin_listings_clears_db_and_registered_live_state() {
@@ -223,16 +194,18 @@ fn skin_listing_fee_rollback_target_visibility_cancel_and_admin_edges() {
     }
 
     // Attempt to create listing with insufficient ISK for broker fee -> InitiateCreateListingResponse with rolled-back escrow/listing and failed tx
-    let mut create_req = Vec::new();
-    encode_isk_units(1, 500_000, &mut create_req);
-    encode_license_ref(3, seller as u64, skin_hex, &mut create_req);
-    encode_seconds_msg(4, 86_400, &mut create_req);
-    encode_varint_field(5, 2, &mut create_req);
+    let create_builder = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest")
+        .set("price_isk.units", 500_000i64)
+        .set("price_isk.nanos", 0i32)
+        .set("skin.character.sequential", seller as u32)
+        .set("skin.skin.hex", skin_hex)
+        .set("duration", GoogleDuration { seconds: 86_400, nanos: 0 })
+        .set("quantity", 2u32);
     let fail_create = call(
         &router,
         &seller_sess,
         "eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest",
-        create_req.clone(),
+        create_builder.clone().must_encode(),
         now,
     );
     assert_eq!(fail_create.status_code, STATUS_OK);
@@ -252,12 +225,9 @@ fn skin_listing_fee_rollback_target_visibility_cancel_and_admin_edges() {
     db.with_mut_snapshot(|s| {
         s.characters.get_mut(&seller).unwrap().balance = IskCents::from_isk(5_000_000);
     });
-    let mut corp_sub = Vec::new();
-    encode_varint_field(1, corp_id as u64, &mut corp_sub);
-    let mut corp_target_msg = Vec::new();
-    encode_bytes_field(2, &corp_sub, &mut corp_target_msg);
-    let mut corp_create_req = create_req.clone();
-    encode_bytes_field(6, &corp_target_msg, &mut corp_create_req);
+    let corp_create_req = create_builder
+        .set("target.corporation.sequential", corp_id as u32)
+        .must_encode();
     let ok_create = call(
         &router,
         &seller_sess,
@@ -272,8 +242,9 @@ fn skin_listing_fee_rollback_target_visibility_cancel_and_admin_edges() {
     };
 
     // Outsider cannot Get targeted listing (STATUS_FORBIDDEN), while admin CAN bypass, and corp mate CAN view
-    let mut get_req = Vec::new();
-    encode_uuid_msg(1, &listing_uuid, &mut get_req);
+    let get_req = pb::message("eve_public.cosmetic.market.skin.listing.api.GetRequest")
+        .set("listing.uuid", listing_uuid.to_vec())
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -330,8 +301,9 @@ fn skin_listing_fee_rollback_target_visibility_cancel_and_admin_edges() {
     assert_eq!(wm_corp.fields.iter().filter(|f| f.field_number == 1).count(), 1);
 
     // CancelListingRequest rejected for non-seller and missing UUID
-    let mut cancel_req = Vec::new();
-    encode_uuid_msg(1, &listing_uuid, &mut cancel_req);
+    let cancel_req = pb::message("eve_public.cosmetic.market.skin.listing.api.CancelListingRequest")
+        .set("listing.uuid", listing_uuid.to_vec())
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -343,8 +315,9 @@ fn skin_listing_fee_rollback_target_visibility_cancel_and_admin_edges() {
         .status_code,
         STATUS_FORBIDDEN
     );
-    let mut missing_cancel = Vec::new();
-    encode_uuid_msg(1, &[0xFF; 16], &mut missing_cancel);
+    let missing_cancel = pb::message("eve_public.cosmetic.market.skin.listing.api.CancelListingRequest")
+        .set("listing.uuid", vec![0xFFu8; 16])
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -358,9 +331,10 @@ fn skin_listing_fee_rollback_target_visibility_cancel_and_admin_edges() {
     );
 
     // Admin SetExpirationRequest non-admin -> FORBIDDEN, missing UUID -> NOT_FOUND, eve. alias succeeds
-    let mut exp_req = Vec::new();
-    encode_uuid_msg(1, &listing_uuid, &mut exp_req);
-    encode_seconds_msg(2, now + 3600, &mut exp_req);
+    let exp_req = pb::message("eve_public.cosmetic.market.skin.listing.api.admin.SetExpirationRequest")
+        .set("listing.uuid", listing_uuid.to_vec())
+        .set("expires", GoogleTimestamp { seconds: (now + 3600) as i64, nanos: 0 })
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -372,9 +346,10 @@ fn skin_listing_fee_rollback_target_visibility_cancel_and_admin_edges() {
         .status_code,
         STATUS_FORBIDDEN
     );
-    let mut exp_missing = Vec::new();
-    encode_uuid_msg(1, &[0xEE; 16], &mut exp_missing);
-    encode_seconds_msg(2, now + 3600, &mut exp_missing);
+    let exp_missing = pb::message("eve_public.cosmetic.market.skin.listing.api.admin.SetExpirationRequest")
+        .set("listing.uuid", vec![0xEEu8; 16])
+        .set("expires", GoogleTimestamp { seconds: (now + 3600) as i64, nanos: 0 })
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -511,10 +486,9 @@ fn state_save_rehydrate_and_register_with_state_kill_mutants() {
             branded: false,
         },
     );
-    let mut get_3_id = Vec::new();
-    encode_bytes_field(1, &uuid_3, &mut get_3_id);
-    let mut get_3_req = Vec::new();
-    encode_bytes_field(1, &get_3_id, &mut get_3_req);
+    let get_3_req = pb::message("eve_public.cosmetic.market.skin.listing.api.GetRequest")
+        .set("listing.uuid", uuid_3.to_vec())
+        .must_encode();
 
     let fresh_router = PublicGatewayRouter::new(
         Arc::new(QuasarDescriptorRegistry::empty_with_builtins()),

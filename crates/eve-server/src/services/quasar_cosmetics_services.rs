@@ -29,10 +29,8 @@ use crate::quasar_gateway::{
     STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
-use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, DynamicValue, GoogleAny,
-    QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
-};
+use eve_proto::pb;
+use eve_proto::quasar::{DynamicValue, GoogleAny, QuasarDescriptorRegistry};
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, RwLock};
 use std::collections::HashMap;
@@ -422,10 +420,10 @@ pub fn register_handlers(
     super::quasar_cosmetics_skinr_seq::register(router, skinr_state);
 }
 
-fn encode_id_field(field_num: u32, id: u64, out: &mut Vec<u8>) {
-    let mut id_buf = Vec::new();
-    encode_varint_field(1, id, &mut id_buf);
-    encode_bytes_field(field_num, &id_buf, out);
+fn id_to_uuid(id: u64) -> Vec<u8> {
+    let mut uuid = [0u8; 16];
+    uuid[8..].copy_from_slice(&id.to_be_bytes());
+    uuid.to_vec()
 }
 
 /// Helper for broadcasting `GrantedNotice` (`eve_public.cosmetic.character.title.api.GrantedNotice`).
@@ -435,12 +433,9 @@ pub fn publish_cosmetic_title_granted_notice(
     title_id: u64,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let mut payload = Vec::new();
-    encode_id_field(1, title_id, &mut payload);
-    let any = GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.GrantedNotice"),
-        value: payload,
-    };
+    let any = pb::message("eve_public.cosmetic.character.title.api.GrantedNotice")
+        .set("title.uuid", id_to_uuid(title_id))
+        .must_to_any();
     gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix).map(|(_, n)| n)
 }
 
@@ -451,12 +446,9 @@ pub fn publish_cosmetic_market_transaction_notice(
     transaction_id: u64,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let mut payload = Vec::new();
-    encode_id_field(1, transaction_id, &mut payload);
-    let any = GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.market.transaction.api.TransactionSucceededNotice"),
-        value: payload,
-    };
+    let any = pb::message("eve_public.cosmetic.market.transaction.api.TransactionSucceededNotice")
+        .set("transaction.uuid", id_to_uuid(transaction_id))
+        .must_to_any();
     gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix).map(|(_, n)| n)
 }
 

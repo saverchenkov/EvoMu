@@ -8,10 +8,10 @@ use crate::quasar_gateway::{
 };
 use eve_db::WorldRepository;
 use eve_machonet::{service_roles, SessionState};
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
-    DynamicQuasarMessage, DynamicValue, EvePublicRequest, EvePublicResponse, GoogleAny,
-    QuasarDescriptorRegistry, WireMessage, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, EvePublicRequest, EvePublicResponse,
+    GoogleAny, QuasarDescriptorRegistry, WireMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
@@ -86,9 +86,10 @@ fn extract_draft_id_and_design_parameters_all_dynamic_and_wire_branches() {
     assert_eq!(id_short, None);
 
     // Raw wire fallback when field 1 bytes are NOT a valid nested protobuf message
-    let mut raw_direct = Vec::new();
     let non_proto_uuid = [0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 99];
-    encode_bytes_field(1, &non_proto_uuid, &mut raw_direct);
+    let raw_direct = pb::message("eve_public.cosmetic.character.title.definition.Identifier")
+        .set("uuid", non_proto_uuid.to_vec())
+        .must_encode();
     let empty_d = DynamicQuasarMessage::new("empty");
     let (u_raw, id_raw) = extract_draft_id_or_uuid(&empty_d, &raw_direct);
     assert_eq!(u_raw, Some(non_proto_uuid.to_vec()));
@@ -240,16 +241,18 @@ fn extract_target_char_and_title_all_formats_and_error_cases() {
     );
 
     // 6. Wire fallback for 1-field varint and 2-field varint
-    let mut wire_1f = Vec::new();
-    encode_varint_field(1, 77, &mut wire_1f);
+    let wire_1f = pb::message("eve.character.Identifier")
+        .set("sequential", 77u64)
+        .must_encode();
     assert_eq!(
         extract_target_char_and_title(&ctx_with_char, &empty_d, &wire_1f).unwrap(),
         (90_000_001, 77)
     );
 
-    let mut wire_2f = Vec::new();
-    encode_varint_field(1, 90_000_009, &mut wire_2f);
-    encode_varint_field(2, 88, &mut wire_2f);
+    let wire_2f = pb::message("google.protobuf.Duration")
+        .set("seconds", 90_000_009i64)
+        .set("nanos", 88i32)
+        .must_encode();
     assert_eq!(
         extract_target_char_and_title(&ctx_anon, &empty_d, &wire_2f).unwrap(),
         (90_000_009, 88)
@@ -353,8 +356,9 @@ fn draft_legacy_migration_capacity_enforcement_and_unauthenticated_guards() {
     assert_eq!(save_over.status_code, STATUS_BAD_REQUEST);
 
     // Update non-existent draft -> STATUS_NOT_FOUND
-    let mut nf_id = Vec::new();
-    encode_bytes_field(1, &encode_draft_id_msg(&id_to_uuid_bytes(999_999)), &mut nf_id);
+    let nf_id = pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.UpdateRequest")
+        .set("id.uuid", id_to_uuid_bytes(999_999).to_vec())
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -366,12 +370,15 @@ fn draft_legacy_migration_capacity_enforcement_and_unauthenticated_guards() {
         .status_code,
         STATUS_NOT_FOUND
     );
+    let nf_get_id = pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetRequest")
+        .set("draft.uuid", id_to_uuid_bytes(999_999).to_vec())
+        .must_encode();
     assert_eq!(
         call(
             &router,
             &p1,
             "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetRequest",
-            nf_id,
+            nf_get_id,
             now
         )
         .status_code,
@@ -379,27 +386,21 @@ fn draft_legacy_migration_capacity_enforcement_and_unauthenticated_guards() {
     );
 
     // Update draft 5001 with full layout + editor_configurations
-    let mut slot_id_msg = Vec::new();
-    encode_varint_field(1, 7, &mut slot_id_msg);
-    let mut slot_msg = Vec::new();
-    encode_bytes_field(1, &slot_id_msg, &mut slot_msg);
-    let mut ship_msg = Vec::new();
-    encode_varint_field(1, 587, &mut ship_msg);
-    let mut layout = Vec::new();
-    encode_bytes_field(1, &slot_msg, &mut layout);
-    encode_bytes_field(2, &ship_msg, &mut layout);
-    encode_varint_field(3, 2, &mut layout);
-
-    let mut ed_entry = Vec::new();
-    encode_bytes_field(1, &slot_id_msg, &mut ed_entry);
-    encode_bytes_field(2, b"new-cfg", &mut ed_entry);
-
-    let mut upd_req = Vec::new();
-    encode_bytes_field(1, &encode_draft_id_msg(&id_to_uuid_bytes(5001)), &mut upd_req);
-    encode_string_field(2, "Renamed 5001", &mut upd_req);
-    encode_string_field(3, "Renamed Line", &mut upd_req);
-    encode_bytes_field(4, &layout, &mut upd_req);
-    encode_bytes_field(5, &ed_entry, &mut upd_req);
+    let upd_req = pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.UpdateRequest")
+        .set("id.uuid", id_to_uuid_bytes(5001).to_vec())
+        .set("name", "Renamed 5001")
+        .set("line_name", "Renamed Line")
+        .set(
+            "layout",
+            pb::message("eve_public.cosmetic.ship.skin.thirdparty.Layout")
+                .add_with("slots", |b| b.set("id.sequential", 7u64))
+                .set("ship_type.sequential", 587u64)
+                .set("pattern_blend_mode", pb::enum_name("BLEND_MODE_SUBTRACT")),
+        )
+        .add_with("editor_configurations", |b| {
+            b.set("id.sequential", 7u64).set("config.scaling", 2.0f32)
+        })
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -447,13 +448,10 @@ fn cosmetic_title_explicit_zero_uuid_clear_and_unequipped_revoke() {
 
     // 2. Grant titles 10 and 11, equip 10
     for tid in [10u64, 11u64] {
-        let mut char_msg = Vec::new();
-        encode_varint_field(1, cid as u64, &mut char_msg);
-        let mut title_msg = Vec::new();
-        encode_bytes_field(1, &id_to_uuid_bytes(tid), &mut title_msg);
-        let mut grant_req = Vec::new();
-        encode_bytes_field(1, &char_msg, &mut grant_req);
-        encode_bytes_field(2, &title_msg, &mut grant_req);
+        let grant_req =
+            pb::message("eve_public.cosmetic.character.title.api.admin.GrantRequest")
+                .set("id.uuid", id_to_uuid_bytes(tid).to_vec())
+                .must_encode();
         assert_eq!(
             call(
                 &router,
@@ -467,10 +465,9 @@ fn cosmetic_title_explicit_zero_uuid_clear_and_unequipped_revoke() {
         );
     }
 
-    let mut t10_msg = Vec::new();
-    encode_bytes_field(1, &id_to_uuid_bytes(10), &mut t10_msg);
-    let mut eq10 = Vec::new();
-    encode_bytes_field(1, &t10_msg, &mut eq10);
+    let eq10 = pb::message("eve_public.cosmetic.character.title.api.EquipRequest")
+        .set("title.uuid", id_to_uuid_bytes(10).to_vec())
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -484,13 +481,10 @@ fn cosmetic_title_explicit_zero_uuid_clear_and_unequipped_revoke() {
     );
 
     // 3. Revoke unequipped title 11 via eve.cosmetic.character.title.api.admin.RevokeRequest -> 10 stays equipped
-    let mut char_msg = Vec::new();
-    encode_varint_field(1, cid as u64, &mut char_msg);
-    let mut t11_msg = Vec::new();
-    encode_bytes_field(1, &id_to_uuid_bytes(11), &mut t11_msg);
-    let mut rev11 = Vec::new();
-    encode_bytes_field(1, &char_msg, &mut rev11);
-    encode_bytes_field(2, &t11_msg, &mut rev11);
+    let rev11 = pb::message("eve.cosmetic.character.title.api.admin.RevokeRequest")
+        .set("character.sequential", cid as u64)
+        .set("id.uuid", id_to_uuid_bytes(11).to_vec())
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -508,10 +502,9 @@ fn cosmetic_title_explicit_zero_uuid_clear_and_unequipped_revoke() {
     );
 
     // 4. EquipRequest with 16 zero bytes explicitly clears the equipped title!
-    let mut zero_msg = Vec::new();
-    encode_bytes_field(1, &[0u8; 16], &mut zero_msg);
-    let mut clear_eq = Vec::new();
-    encode_bytes_field(1, &zero_msg, &mut clear_eq);
+    let clear_eq = pb::message("eve_public.cosmetic.character.title.api.EquipRequest")
+        .set("title.uuid", vec![0u8; 16])
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -529,8 +522,9 @@ fn cosmetic_title_explicit_zero_uuid_clear_and_unequipped_revoke() {
     );
 
     // 5. GetEquippedForCharacterRequest with explicit character field 1 when no title is equipped -> field 2 = 1
-    let mut get_eq_req = Vec::new();
-    encode_bytes_field(1, &char_msg, &mut get_eq_req);
+    let get_eq_req = pb::message("eve_public.cosmetic.character.title.api.GetEquippedForCharacterRequest")
+        .set("character.sequential", cid as u64)
+        .must_encode();
     let eq_none_rsp = call(
         &router,
         &player,

@@ -4,7 +4,7 @@
 #![forbid(unsafe_code)]
 
 use super::super::*;
-use super::{call, encode_isk_msg, make_char, make_sess, new_market_harness, wm_bytes, wm_sub, wm_varint};
+use super::{call, make_char, make_sess, new_market_harness, wm_bytes, wm_sub, wm_varint};
 use crate::quasar_gateway::{
     STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_OK, STATUS_PRECONDITION_FAILED,
 };
@@ -13,9 +13,10 @@ use crate::services::quasar_cosmetics_skinr::{
 };
 use eve_db::IskCents;
 use eve_machonet::service_roles;
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
-    DynamicQuasarMessage, DynamicValue, WireMessage,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleDuration, GoogleTimestamp,
+    WireMessage,
 };
 
 #[test]
@@ -82,16 +83,14 @@ fn skin_listing_lifecycle_create_cancel_visibility_purchase_and_admin_expiration
         STATUS_BAD_REQUEST
     );
 
-    let mut req_foreign_owner = Vec::new();
-    encode_isk_msg(1, 500_000, &mut req_foreign_owner);
-    let mut bad_lic = Vec::new();
-    put_seq(1, 999_999, &mut bad_lic);
-    let mut shex_msg = Vec::new();
-    encode_string_field(1, skin_hex, &mut shex_msg);
-    encode_bytes_field(2, &shex_msg, &mut bad_lic);
-    encode_bytes_field(3, &bad_lic, &mut req_foreign_owner);
-    put_seconds(4, 86_400, &mut req_foreign_owner);
-    encode_varint_field(5, 1, &mut req_foreign_owner);
+    let req_foreign_owner = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest")
+        .set("price_isk.units", 500_000i64)
+        .set("price_isk.nanos", 0i32)
+        .set("skin.character.sequential", 999_999u32)
+        .set("skin.skin.hex", skin_hex)
+        .set("duration", GoogleDuration { seconds: 86_400, nanos: 0 })
+        .set("quantity", 1u32)
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -104,15 +103,14 @@ fn skin_listing_lifecycle_create_cancel_visibility_purchase_and_admin_expiration
         STATUS_FORBIDDEN
     );
 
-    let mut lic_ok = Vec::new();
-    put_seq(1, seller as u64, &mut lic_ok);
-    encode_bytes_field(2, &shex_msg, &mut lic_ok);
-
-    let mut req_over_isk = Vec::new();
-    encode_isk_msg(1, MAX_LISTING_PRICE_UNITS + 1, &mut req_over_isk);
-    encode_bytes_field(3, &lic_ok, &mut req_over_isk);
-    put_seconds(4, 86_400, &mut req_over_isk);
-    encode_varint_field(5, 1, &mut req_over_isk);
+    let req_over_isk = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest")
+        .set("price_isk.units", (MAX_LISTING_PRICE_UNITS + 1) as i64)
+        .set("price_isk.nanos", 0i32)
+        .set("skin.character.sequential", seller as u32)
+        .set("skin.skin.hex", skin_hex)
+        .set("duration", GoogleDuration { seconds: 86_400, nanos: 0 })
+        .set("quantity", 1u32)
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -125,11 +123,14 @@ fn skin_listing_lifecycle_create_cancel_visibility_purchase_and_admin_expiration
         STATUS_BAD_REQUEST
     );
 
-    let mut req_pub_create = Vec::new();
-    encode_isk_msg(1, 1_000_000, &mut req_pub_create);
-    encode_bytes_field(3, &lic_ok, &mut req_pub_create);
-    put_seconds(4, 86_400, &mut req_pub_create);
-    encode_varint_field(5, 3, &mut req_pub_create);
+    let req_pub_create = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest")
+        .set("price_isk.units", 1_000_000i64)
+        .set("price_isk.nanos", 0i32)
+        .set("skin.character.sequential", seller as u32)
+        .set("skin.skin.hex", skin_hex)
+        .set("duration", GoogleDuration { seconds: 86_400, nanos: 0 })
+        .set("quantity", 3u32)
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -142,14 +143,14 @@ fn skin_listing_lifecycle_create_cancel_visibility_purchase_and_admin_expiration
         STATUS_OK
     );
 
-    let mut req_corp_create = Vec::new();
-    encode_isk_msg(2, 2_500, &mut req_corp_create);
-    encode_bytes_field(3, &lic_ok, &mut req_corp_create);
-    put_seconds(4, 86_400, &mut req_corp_create);
-    encode_varint_field(5, 2, &mut req_corp_create);
-    let mut target_corp = Vec::new();
-    put_seq(2, corp_a as u64, &mut target_corp);
-    encode_bytes_field(6, &target_corp, &mut req_corp_create);
+    let req_corp_create = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest")
+        .set("price_plex.total_in_cents", 2_500i64)
+        .set("skin.character.sequential", seller as u32)
+        .set("skin.skin.hex", skin_hex)
+        .set("duration", GoogleDuration { seconds: 86_400, nanos: 0 })
+        .set("quantity", 2u32)
+        .set("target.corporation.sequential", corp_a as u32)
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -199,8 +200,9 @@ fn skin_listing_lifecycle_create_cancel_visibility_purchase_and_admin_expiration
     let pub_uuid = owned_entries.iter().find(|x| !x.1).unwrap().0;
     let corp_uuid = owned_entries.iter().find(|x| x.1).unwrap().0;
 
-    let mut get_corp_req = Vec::new();
-    put_uuid(1, &corp_uuid, &mut get_corp_req);
+    let get_corp_req = pb::message("eve_public.cosmetic.market.skin.listing.api.GetRequest")
+        .set("listing.uuid", corp_uuid.to_vec())
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -258,9 +260,10 @@ fn skin_listing_lifecycle_create_cancel_visibility_purchase_and_admin_expiration
         STATUS_NOT_FOUND
     );
 
-    let mut buy_self = Vec::new();
-    put_uuid(1, &pub_uuid, &mut buy_self);
-    encode_varint_field(2, 1, &mut buy_self);
+    let buy_self = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiatePurchaseListingRequest")
+        .set("listing.uuid", pub_uuid.to_vec())
+        .set("quantity", 1u32)
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -273,10 +276,11 @@ fn skin_listing_lifecycle_create_cancel_visibility_purchase_and_admin_expiration
         STATUS_BAD_REQUEST
     );
 
-    let mut buy_bad_ver = Vec::new();
-    put_uuid(1, &pub_uuid, &mut buy_bad_ver);
-    encode_varint_field(2, 1, &mut buy_bad_ver);
-    encode_string_field(3, "v0.0.0", &mut buy_bad_ver);
+    let buy_bad_ver = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiatePurchaseListingRequest")
+        .set("listing.uuid", pub_uuid.to_vec())
+        .set("quantity", 1u32)
+        .set("buyer_fees_version", "v0.0.0")
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -289,10 +293,11 @@ fn skin_listing_lifecycle_create_cancel_visibility_purchase_and_admin_expiration
         STATUS_BAD_REQUEST
     );
 
-    let mut buy_one = Vec::new();
-    put_uuid(1, &pub_uuid, &mut buy_one);
-    encode_varint_field(2, 1, &mut buy_one);
-    encode_string_field(3, BUYER_FEES_VERSION, &mut buy_one);
+    let buy_one = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiatePurchaseListingRequest")
+        .set("listing.uuid", pub_uuid.to_vec())
+        .set("quantity", 1u32)
+        .set("buyer_fees_version", BUYER_FEES_VERSION)
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -324,14 +329,14 @@ fn skin_listing_lifecycle_create_cancel_visibility_purchase_and_admin_expiration
         1
     );
 
-    let mut req_ally_plex = Vec::new();
-    encode_isk_msg(2, 2_500, &mut req_ally_plex);
-    encode_bytes_field(3, &lic_ok, &mut req_ally_plex);
-    put_seconds(4, 86_400, &mut req_ally_plex);
-    encode_varint_field(5, 1, &mut req_ally_plex);
-    let mut target_ally = Vec::new();
-    put_seq(3, ally_a as u64, &mut target_ally);
-    encode_bytes_field(6, &target_ally, &mut req_ally_plex);
+    let req_ally_plex = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest")
+        .set("price_plex.total_in_cents", 2_500i64)
+        .set("skin.character.sequential", seller as u32)
+        .set("skin.skin.hex", skin_hex)
+        .set("duration", GoogleDuration { seconds: 86_400, nanos: 0 })
+        .set("quantity", 1u32)
+        .set("target.alliance.sequential", ally_a as i32)
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -353,9 +358,10 @@ fn skin_listing_lifecycle_create_cancel_visibility_purchase_and_admin_expiration
         .unwrap()
         .uuid;
 
-    let mut buy_ally = Vec::new();
-    put_uuid(1, &ally_uuid, &mut buy_ally);
-    encode_varint_field(2, 1, &mut buy_ally);
+    let buy_ally = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiatePurchaseListingRequest")
+        .set("listing.uuid", ally_uuid.to_vec())
+        .set("quantity", 1u32)
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -409,9 +415,10 @@ fn skin_listing_lifecycle_create_cancel_visibility_purchase_and_admin_expiration
             .loyalty_points
             .insert(PARAGON_CORP_ID as i64, 100);
     });
-    let mut buy_no_lp = Vec::new();
-    put_uuid(1, &pub_uuid, &mut buy_no_lp);
-    encode_varint_field(2, 2, &mut buy_no_lp);
+    let buy_no_lp = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiatePurchaseListingRequest")
+        .set("listing.uuid", pub_uuid.to_vec())
+        .set("quantity", 2u32)
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -425,9 +432,10 @@ fn skin_listing_lifecycle_create_cancel_visibility_purchase_and_admin_expiration
     );
     assert_eq!(state.data.read().unwrap().skin_listings.get(&hex(&pub_uuid)).unwrap().quantity, 2);
 
-    let mut set_exp = Vec::new();
-    put_uuid(1, &pub_uuid, &mut set_exp);
-    put_seconds(2, now + 10, &mut set_exp);
+    let set_exp = pb::message("eve_public.cosmetic.market.skin.listing.api.admin.SetExpirationRequest")
+        .set("listing.uuid", pub_uuid.to_vec())
+        .set("expires", GoogleTimestamp { seconds: (now + 10) as i64, nanos: 0 })
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -470,9 +478,10 @@ fn skin_listing_lifecycle_create_cancel_visibility_purchase_and_admin_expiration
     admin_ctx.service_role_mask = service_roles::ROLE_GM_DEFAULT;
     assert!(skin_admin_set_expiration_eve(&state, &admin_ctx, &admin_dyn).is_ok());
 
-    let mut buy_expired = Vec::new();
-    put_uuid(1, &pub_uuid, &mut buy_expired);
-    encode_varint_field(2, 1, &mut buy_expired);
+    let buy_expired = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiatePurchaseListingRequest")
+        .set("listing.uuid", pub_uuid.to_vec())
+        .set("quantity", 1u32)
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -531,16 +540,14 @@ fn issue_545_initiate_create_listing_settles_matured_sequencing_job() {
     }
 
     let seller_sess = make_sess(seller, corp, None, 0);
-    let mut shex_msg = Vec::new();
-    encode_string_field(1, &skin_hex, &mut shex_msg);
-    let mut lic_ok = Vec::new();
-    put_seq(1, seller as u64, &mut lic_ok);
-    encode_bytes_field(2, &shex_msg, &mut lic_ok);
-    let mut req = Vec::new();
-    encode_isk_msg(1, 1_000_000, &mut req);
-    encode_bytes_field(3, &lic_ok, &mut req);
-    put_seconds(4, 86_400, &mut req);
-    encode_varint_field(5, 1, &mut req);
+    let req = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest")
+        .set("price_isk.units", 1_000_000i64)
+        .set("price_isk.nanos", 0i32)
+        .set("skin.character.sequential", seller as u32)
+        .set("skin.skin.hex", skin_hex.as_str())
+        .set("duration", GoogleDuration { seconds: 86_400, nanos: 0 })
+        .set("quantity", 1u32)
+        .must_encode();
 
     let rsp = call(
         &router,

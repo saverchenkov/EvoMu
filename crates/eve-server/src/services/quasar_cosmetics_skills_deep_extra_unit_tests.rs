@@ -18,9 +18,9 @@ use crate::quasar_gateway::{
 };
 use eve_db::{IskCents, WorldRepository};
 use eve_machonet::{service_roles, SessionState};
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, encode_zigzag64,
-    DynamicQuasarMessage, EvePublicRequest, GoogleAny, GoogleTimestamp,
+    DynamicQuasarMessage, EvePublicRequest, GoogleAny, GoogleDuration, GoogleTimestamp,
     QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
@@ -104,12 +104,6 @@ fn call_gw(
             now,
         )
         .status_code
-}
-
-fn put_uuid_msg(field: u32, uuid: &[u8; 16], out: &mut Vec<u8>) {
-    let mut b = Vec::new();
-    encode_bytes_field(1, uuid, &mut b);
-    encode_bytes_field(field, &b, out);
 }
 
 #[test]
@@ -200,10 +194,9 @@ fn cosmetics_market_fees_component_purchase_and_skin_listing_roundtrip() {
     ] {
         assert_eq!(call_gw(&router, &seller_sess, fee_req, Vec::new(), now), STATUS_OK);
     }
-    let mut buyer_fee_req = Vec::new();
-    let mut buyer_fee_skin = Vec::new();
-    encode_string_field(1, skin_hex, &mut buyer_fee_skin);
-    encode_bytes_field(2, &buyer_fee_skin, &mut buyer_fee_req);
+    let buyer_fee_req = pb::message("eve_public.cosmetic.market.api.GetBuyerFeeRequest")
+        .set("skin.hex", skin_hex)
+        .must_encode();
     assert_eq!(
         call_gw(
             &router,
@@ -227,9 +220,10 @@ fn cosmetics_market_fees_component_purchase_and_skin_listing_roundtrip() {
         STATUS_OK
     );
 
-    let mut bad_purchase = Vec::new();
-    put_uuid_msg(1, &[0x99; 16], &mut bad_purchase);
-    encode_varint_field(2, 1, &mut bad_purchase);
+    let bad_purchase = pb::message("eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingRequest")
+        .set("listing.uuid", vec![0x99u8; 16])
+        .set("quantity", 1u32)
+        .must_encode();
     assert_eq!(
         call_gw(
             &router,
@@ -250,9 +244,10 @@ fn cosmetics_market_fees_component_purchase_and_skin_listing_roundtrip() {
         .next()
         .cloned()
         .expect("seeded component listing exists");
-    let mut ok_purchase = Vec::new();
-    put_uuid_msg(1, &comp_entry.uuid, &mut ok_purchase);
-    encode_varint_field(2, 1, &mut ok_purchase);
+    let ok_purchase = pb::message("eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingRequest")
+        .set("listing.uuid", comp_entry.uuid.to_vec())
+        .set("quantity", 1u32)
+        .must_encode();
     assert_eq!(
         call_gw(
             &router,
@@ -265,26 +260,14 @@ fn cosmetics_market_fees_component_purchase_and_skin_listing_roundtrip() {
     );
 
     // 3. Create SKIN listing -> GetAll -> GetAllOwned -> Get -> admin.SetExpiration -> Cancel -> Re-list & Purchase
-    let mut lic_id = Vec::new();
-    let mut seq_b = Vec::new();
-    encode_varint_field(1, seller_cid as u64, &mut seq_b);
-    encode_bytes_field(1, &seq_b, &mut lic_id);
-    let mut hex_b = Vec::new();
-    encode_string_field(1, skin_hex, &mut hex_b);
-    encode_bytes_field(2, &hex_b, &mut lic_id);
-
-    let mut isk_price = Vec::new();
-    encode_varint_field(1, encode_zigzag64(100_000), &mut isk_price);
-    encode_varint_field(2, 0, &mut isk_price);
-
-    let mut dur_msg = Vec::new();
-    encode_varint_field(1, 86_400, &mut dur_msg);
-
-    let mut create_req = Vec::new();
-    encode_bytes_field(1, &isk_price, &mut create_req);
-    encode_bytes_field(3, &lic_id, &mut create_req);
-    encode_bytes_field(4, &dur_msg, &mut create_req);
-    encode_varint_field(5, 1, &mut create_req);
+    let create_req = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest")
+        .set("price_isk.units", 100_000i64)
+        .set("price_isk.nanos", 0i32)
+        .set("skin.character.sequential", seller_cid)
+        .set("skin.skin.hex", skin_hex)
+        .set("duration", GoogleDuration { seconds: 86_400, nanos: 0 })
+        .set("quantity", 1u32)
+        .must_encode();
 
     assert_eq!(
         call_gw(
@@ -321,8 +304,9 @@ fn cosmetics_market_fees_component_purchase_and_skin_listing_roundtrip() {
         *b = (hi << 4) | lo;
     }
 
-    let mut get_single = Vec::new();
-    put_uuid_msg(1, &listed_uuid, &mut get_single);
+    let get_single = pb::message("eve_public.cosmetic.market.skin.listing.api.GetRequest")
+        .set("listing.uuid", listed_uuid.to_vec())
+        .must_encode();
     assert_eq!(
         call_gw(
             &router,
@@ -334,11 +318,10 @@ fn cosmetics_market_fees_component_purchase_and_skin_listing_roundtrip() {
         STATUS_OK
     );
 
-    let mut set_exp = Vec::new();
-    put_uuid_msg(1, &listed_uuid, &mut set_exp);
-    let mut ts_msg = Vec::new();
-    encode_varint_field(1, now + 172_800, &mut ts_msg);
-    encode_bytes_field(2, &ts_msg, &mut set_exp);
+    let set_exp = pb::message("eve_public.cosmetic.market.skin.listing.api.admin.SetExpirationRequest")
+        .set("listing.uuid", listed_uuid.to_vec())
+        .set("expires", GoogleTimestamp { seconds: (now + 172_800) as i64, nanos: 0 })
+        .must_encode();
     assert_eq!(
         call_gw(
             &router,
@@ -386,9 +369,10 @@ fn cosmetics_market_fees_component_purchase_and_skin_listing_roundtrip() {
         let lo = char::from(hb2[i * 2 + 1]).to_digit(16).unwrap() as u8;
         *b = (hi << 4) | lo;
     }
-    let mut buy_skin = Vec::new();
-    put_uuid_msg(1, &uuid2, &mut buy_skin);
-    encode_varint_field(2, 1, &mut buy_skin);
+    let buy_skin = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiatePurchaseListingRequest")
+        .set("listing.uuid", uuid2.to_vec())
+        .set("quantity", 1u32)
+        .must_encode();
     assert_eq!(
         call_gw(
             &router,
@@ -443,8 +427,9 @@ fn skinr_licenses_title_defs_and_character_skill_plan_milestone_roundtrip() {
         .expect("seeded SKINR component");
     let first_comp_pat = first_comp.is_pattern();
     let comp_wire = encode_component_id(first_comp.component_id, first_comp_pat);
-    let mut comp_req = Vec::new();
-    encode_bytes_field(1, &comp_wire, &mut comp_req);
+    let comp_req = pb::message("eve_public.cosmetic.ship.skin.thirdparty.component.license.infinite.api.admin.GrantRequest")
+        .set_raw_message("component", &comp_wire)
+        .must_encode();
 
     assert_eq!(
         call_gw(
@@ -466,12 +451,9 @@ fn skinr_licenses_title_defs_and_character_skill_plan_milestone_roundtrip() {
         ),
         STATUS_OK
     );
-    let mut inf_lic_req = Vec::new();
-    encode_bytes_field(
-        1,
-        &encode_comp_license_id(cid, first_comp.component_id, first_comp_pat),
-        &mut inf_lic_req,
-    );
+    let inf_lic_req = pb::message("eve_public.cosmetic.ship.skin.thirdparty.component.license.infinite.api.GetRequest")
+        .set_raw_message("license", encode_comp_license_id(cid, first_comp.component_id, first_comp_pat))
+        .must_encode();
     assert_eq!(
         call_gw(
             &router,
@@ -522,10 +504,9 @@ fn skinr_licenses_title_defs_and_character_skill_plan_milestone_roundtrip() {
         STATUS_NOT_IMPLEMENTED
     );
 
-    let mut plan_attrs = Vec::new();
-    encode_string_field(1, "PvP Core", &mut plan_attrs);
-    let mut create_plan = Vec::new();
-    encode_bytes_field(1, &plan_attrs, &mut create_plan);
+    let create_plan = pb::message("eve_public.character.skill.plan.CreateRequest")
+        .set("skill_plan.name", "PvP Core")
+        .must_encode();
     assert_eq!(
         call_gw(
             &router,
@@ -552,15 +533,14 @@ fn skinr_licenses_title_defs_and_character_skill_plan_milestone_roundtrip() {
         STATUS_OK
     );
 
-    let mut sp_id_only = Vec::new();
-    put_uuid_msg(1, &sp_uuid, &mut sp_id_only);
-
     assert_eq!(
         call_gw(
             &router,
             &player_sess,
             "eve_public.character.skill.plan.SetActiveRequest",
-            sp_id_only.clone(),
+            pb::message("eve_public.character.skill.plan.SetActiveRequest")
+                .set("skill_plan.uuid", sp_uuid.to_vec())
+                .must_encode(),
             now,
         ),
         STATUS_OK
@@ -580,7 +560,9 @@ fn skinr_licenses_title_defs_and_character_skill_plan_milestone_roundtrip() {
             &router,
             &player_sess,
             "eve_public.character.skill.plan.DeleteRequest",
-            sp_id_only,
+            pb::message("eve_public.character.skill.plan.DeleteRequest")
+                .set("skill_plan.uuid", sp_uuid.to_vec())
+                .must_encode(),
             now,
         ),
         STATUS_OK

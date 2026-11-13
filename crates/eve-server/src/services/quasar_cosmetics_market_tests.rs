@@ -13,8 +13,8 @@ use crate::services::quasar_cosmetics_skinr::{
 };
 use eve_db::{IskCents, WorldRepository};
 use eve_machonet::SessionState;
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, encode_zigzag64,
     DynamicQuasarMessage, DynamicValue, EvePublicRequest, EvePublicResponse, GoogleAny,
     GoogleTimestamp, QuasarDescriptorRegistry, WireMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
@@ -160,13 +160,6 @@ pub(super) fn wm_varint(wm: &WireMessage, field: u32) -> u64 {
         .expect("varint field")
 }
 
-pub(super) fn encode_isk_msg(field: u32, units: u64, out: &mut Vec<u8>) {
-    let mut b = Vec::new();
-    encode_varint_field(1, encode_zigzag64(units as i64), &mut b);
-    encode_varint_field(2, 0, &mut b);
-    encode_bytes_field(field, &b, out);
-}
-
 #[test]
 fn pure_helpers_seed_fees_skills_taxes_and_value_extractors() {
     let mut empty_sde = SdeRegistry::default();
@@ -285,10 +278,9 @@ fn fee_tax_and_buyer_fee_rpcs_cover_skills_targets_and_db_skin_fallback() {
     let wm_pub = WireMessage::decode(&r_pub.payload.unwrap().value).unwrap();
     assert_eq!(wm_pub.fields.iter().filter(|f| f.field_number == 1).count(), 6);
 
-    let mut ally_t = Vec::new();
-    put_seq(3, 99_000_301, &mut ally_t);
-    let mut req_ally = Vec::new();
-    encode_bytes_field(1, &ally_t, &mut req_ally);
+    let req_ally = pb::message("eve_public.cosmetic.market.api.GetBrokerFeesRequest")
+        .set("target.alliance.sequential", 99_000_301i32)
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -301,28 +293,30 @@ fn fee_tax_and_buyer_fee_rpcs_cover_skills_targets_and_db_skin_fallback() {
         STATUS_OK
     );
 
-    let mut char_t = Vec::new();
-    put_seq(4, cid as u64, &mut char_t);
-    let mut req_char = Vec::new();
-    encode_bytes_field(1, &char_t, &mut req_char);
+    let req_char = pb::message("eve_public.cosmetic.market.api.GetBrokerFeesRequest")
+        .set("target.character.sequential", cid as u32)
+        .must_encode();
     assert_eq!(
         call(
             &router,
             &sess,
             "eve_public.cosmetic.market.api.GetBrokerFeesRequest",
-            req_char.clone(),
+            req_char,
             now,
         )
         .status_code,
         STATUS_OK
     );
 
+    let req_tax_char = pb::message("eve_public.cosmetic.market.api.GetTaxRateRequest")
+        .set("target.character.sequential", cid as u32)
+        .must_encode();
     assert_eq!(
         call(
             &router,
             &sess,
             "eve_public.cosmetic.market.api.GetTaxRateRequest",
-            req_char,
+            req_tax_char,
             now,
         )
         .status_code,
@@ -357,10 +351,10 @@ fn fee_tax_and_buyer_fee_rpcs_cover_skills_targets_and_db_skin_fallback() {
         STATUS_BAD_REQUEST
     );
 
-    let mut req_bf = req_ally;
-    let mut sid_buf = Vec::new();
-    encode_string_field(1, "deadbeef01", &mut sid_buf);
-    encode_bytes_field(2, &sid_buf, &mut req_bf);
+    let req_bf = pb::message("eve_public.cosmetic.market.api.GetBuyerFeeRequest")
+        .set("target.alliance.sequential", 99_000_301i32)
+        .set("skin.hex", "deadbeef01")
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -417,10 +411,11 @@ fn fee_tax_and_buyer_fee_rpcs_cover_skills_targets_and_db_skin_fallback() {
     );
     assert_eq!(r_bf_ok.status_code, STATUS_OK);
     let wm_bf = WireMessage::decode(&r_bf_ok.payload.unwrap().value).unwrap();
-    assert_eq!(wm_varint(&wm_sub(&wm_sub(&wm_bf, 1), 1), 2), 7_500);
+    assert_eq!(wm_varint(&wm_sub(&wm_sub(&wm_bf, 1), 1), 1), 7_500);
 
-    let mut req_pub_bf = Vec::new();
-    encode_bytes_field(2, &sid_buf, &mut req_pub_bf);
+    let req_pub_bf = pb::message("eve_public.cosmetic.market.api.GetBuyerFeeRequest")
+        .set("skin.hex", "deadbeef01")
+        .must_encode();
     let r_bf_pub = call(
         &router,
         &sess,
@@ -431,7 +426,7 @@ fn fee_tax_and_buyer_fee_rpcs_cover_skills_targets_and_db_skin_fallback() {
     assert_eq!(
         wm_varint(
             &wm_sub(&wm_sub(&WireMessage::decode(&r_bf_pub.payload.unwrap().value).unwrap(), 1), 1),
-            2
+            1
         ),
         3_000
     );

@@ -1176,7 +1176,7 @@ async fn paragon_hub_cosmetics_market_and_titles_grpc_lifecycle() {
             .and_then(dyn_msg)
             .expect("loyalty_points Currency");
         let buyer_fee_em = lp_msg
-            .get(2)
+            .get(1)
             .and_then(|v| dyn_u64(v).or_else(|| dyn_msg(v)?.get(1).and_then(dyn_u64)));
         assert_eq!(buyer_fee_em, Some(1_000), "Tier 1 public buyer EverMark fee must be 1,000");
 

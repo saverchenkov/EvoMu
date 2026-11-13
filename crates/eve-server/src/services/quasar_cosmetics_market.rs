@@ -32,9 +32,10 @@ use crate::quasar_gateway::{
 };
 use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WorldRepository};
+use eve_proto::pb::{self, ProtoBuilder};
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
-    DynamicQuasarMessage, DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleDuration,
+    GoogleTimestamp,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, RwLock};
@@ -309,21 +310,26 @@ pub fn seed_component_listings_if_empty(data: &mut CosmeticsMarketData, sde: &Sd
 }
 
 fn hex(u: &[u8]) -> String { u.iter().map(|b| format!("{b:02x}")).collect() }
-fn any(type_name: &str, value: Vec<u8>) -> GoogleAny { GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"), value } }
-fn put_seq(field: u32, id: u64, out: &mut Vec<u8>) { let mut b = Vec::new(); encode_varint_field(1, id, &mut b); encode_bytes_field(field, &b, out); }
-fn put_seconds(field: u32, secs: u64, out: &mut Vec<u8>) { let mut b = Vec::new(); encode_varint_field(1, secs, &mut b); encode_bytes_field(field, &b, out); }
-fn put_uuid(field: u32, uuid: &[u8; 16], out: &mut Vec<u8>) { let mut b = Vec::new(); encode_bytes_field(1, uuid, &mut b); encode_bytes_field(field, &b, out); }
-fn put_isk(field: u32, units: u64, out: &mut Vec<u8>) { let mut b = Vec::new(); encode_sint_field(1, i64::try_from(units).unwrap_or(i64::MAX), &mut b); encode_sint_field(2, 0, &mut b); encode_bytes_field(field, &b, out); }
-fn put_plex_cents(field: u32, cents: u64, out: &mut Vec<u8>) { let mut b = Vec::new(); encode_varint_field(1, cents, &mut b); encode_bytes_field(field, &b, out); }
-fn encode_sint_field(field: u32, v: i64, out: &mut Vec<u8>) { encode_varint_field(field, ((v << 1) ^ (v >> 63)) as u64, out); }
 
-fn put_buyer_fee(field: u32, lp_amount: u64, out: &mut Vec<u8>) {
-    let mut lp = Vec::new();
-    put_seq(1, PARAGON_CORP_ID, &mut lp);
-    encode_varint_field(2, lp_amount, &mut lp);
-    let mut fee = Vec::new();
-    encode_bytes_field(1, &lp, &mut fee);
-    encode_bytes_field(field, &fee, out);
+fn pb_ts(secs: u64) -> GoogleTimestamp {
+    GoogleTimestamp { seconds: i64::try_from(secs).unwrap_or(i64::MAX), nanos: 0 }
+}
+
+fn pb_dur(secs: u64) -> GoogleDuration {
+    GoogleDuration { seconds: i64::try_from(secs).unwrap_or(i64::MAX), nanos: 0 }
+}
+
+fn build_broker_fee(secs: u64, fee_isk: u64) -> ProtoBuilder {
+    pb::message("eve_public.cosmetic.market.BrokerFee")
+        .set("duration", pb_dur(secs))
+        .set("fee.units", i64::try_from(fee_isk).unwrap_or(i64::MAX))
+        .set("fee.nanos", 0i32)
+}
+
+fn build_buyer_fee(lp_amount: u64) -> ProtoBuilder {
+    pb::message("eve_public.cosmetic.market.BuyerFee")
+        .set("loyalty_points.amount", lp_amount)
+        .set("loyalty_points.associated_corporation.sequential", PARAGON_CORP_ID as u32)
 }
 
 fn as_u64(v: &DynamicValue) -> Option<u64> {
@@ -408,59 +414,54 @@ fn parse_listing_target(msg: Option<&DynamicQuasarMessage>) -> ListingTargetReco
     ListingTargetRecord::Public
 }
 
-fn encode_listing_target(target: &ListingTargetRecord, out: &mut Vec<u8>) {
+fn build_listing_target(target: &ListingTargetRecord) -> ProtoBuilder {
+    let b = pb::message("eve_public.cosmetic.market.skin.listing.ListingTarget");
     match target {
-        ListingTargetRecord::Public => encode_varint_field(1, 1, out),
-        ListingTargetRecord::Corporation(id) => put_seq(2, *id, out),
-        ListingTargetRecord::Alliance(id) => put_seq(3, *id, out),
-        ListingTargetRecord::Character(id) => put_seq(4, *id, out),
+        ListingTargetRecord::Public => b.set("public", true),
+        ListingTargetRecord::Corporation(id) => b.set("corporation.sequential", *id as u32),
+        ListingTargetRecord::Alliance(id) => b.set("alliance.sequential", *id as i32),
+        ListingTargetRecord::Character(id) => b.set("character.sequential", *id as u32),
     }
 }
 
-fn encode_component_entry(rec: &ComponentListingRecord) -> Vec<u8> {
-    let mut attrs = Vec::new();
-    put_seconds(2, rec.sale_end_unix, &mut attrs);
-    if let Some(isk) = rec.price_isk {
-        put_isk(3, isk, &mut attrs);
-    } else if let Some(plex_cents) = rec.price_plex_cents {
-        put_plex_cents(4, plex_cents, &mut attrs);
-    }
-    put_seq(5, rec.component_item_type_id as u64, &mut attrs);
-    encode_varint_field(6, rec.bundle_size, &mut attrs);
-    encode_varint_field(7, rec.discount_percent as u64, &mut attrs);
-
-    let mut entry = Vec::new();
-    put_uuid(1, &rec.uuid, &mut entry);
-    encode_bytes_field(2, &attrs, &mut entry);
-    entry
+fn build_component_entry(rec: &ComponentListingRecord) -> ProtoBuilder {
+    pb::message("eve_public.cosmetic.market.component.listing.Entry")
+        .set("id.uuid", rec.uuid.to_vec())
+        .set("attributes.sale_end", pb_ts(rec.sale_end_unix))
+        .when(rec.price_isk.is_some(), |b| {
+            let isk = rec.price_isk.unwrap_or(0);
+            b.set("attributes.isk.units", i64::try_from(isk).unwrap_or(i64::MAX))
+                .set("attributes.isk.nanos", 0i32)
+        })
+        .when(rec.price_isk.is_none() && rec.price_plex_cents.is_some(), |b| {
+            let cents = rec.price_plex_cents.unwrap_or(0);
+            b.set("attributes.plex.total_in_cents", i64::try_from(cents).unwrap_or(i64::MAX))
+        })
+        .set("attributes.component_item.sequential", rec.component_item_type_id as u64)
+        .set("attributes.bundle_size", rec.bundle_size)
+        .set("attributes.discount_percent", rec.discount_percent)
 }
 
-fn encode_skin_entry(rec: &SkinListingRecord) -> Vec<u8> {
-    let mut attrs = Vec::new();
-    put_seq(2, rec.seller_id as u64, &mut attrs);
-    put_seconds(3, rec.created_unix, &mut attrs);
-    put_seconds(4, rec.expires_unix, &mut attrs);
-    if let Some(isk) = rec.price_isk {
-        put_isk(5, isk, &mut attrs);
-    } else if let Some(plex_cents) = rec.price_plex_cents {
-        put_plex_cents(6, plex_cents, &mut attrs);
-    }
-    let mut skin_id = Vec::new();
-    encode_string_field(1, &rec.skin_hex, &mut skin_id);
-    let mut lic_id = Vec::new();
-    put_seq(1, rec.seller_id as u64, &mut lic_id);
-    encode_bytes_field(2, &skin_id, &mut lic_id);
-    encode_bytes_field(7, &lic_id, &mut attrs);
-    encode_varint_field(8, rec.quantity as u64, &mut attrs);
-    let mut target_buf = Vec::new();
-    encode_listing_target(&rec.target, &mut target_buf);
-    encode_bytes_field(9, &target_buf, &mut attrs);
-    encode_varint_field(10, u64::from(rec.branded), &mut attrs);
-
-    let mut entry = Vec::new();
-    put_uuid(1, &rec.uuid, &mut entry);
-    encode_bytes_field(2, &attrs, &mut entry);
-    entry
+fn build_skin_entry(rec: &SkinListingRecord) -> ProtoBuilder {
+    pb::message("eve_public.cosmetic.market.skin.listing.Entry")
+        .set("id.uuid", rec.uuid.to_vec())
+        .set("attributes.seller.sequential", rec.seller_id)
+        .set("attributes.created", pb_ts(rec.created_unix))
+        .set("attributes.expires", pb_ts(rec.expires_unix))
+        .when(rec.price_isk.is_some(), |b| {
+            let isk = rec.price_isk.unwrap_or(0);
+            b.set("attributes.isk.units", i64::try_from(isk).unwrap_or(i64::MAX))
+                .set("attributes.isk.nanos", 0i32)
+        })
+        .when(rec.price_isk.is_none() && rec.price_plex_cents.is_some(), |b| {
+            let cents = rec.price_plex_cents.unwrap_or(0);
+            b.set("attributes.plex.total_in_cents", i64::try_from(cents).unwrap_or(i64::MAX))
+        })
+        .set("attributes.skin.character.sequential", rec.seller_id)
+        .set("attributes.skin.skin.hex", rec.skin_hex.as_str())
+        .set("attributes.quantity", rec.quantity)
+        .set("attributes.target", build_listing_target(&rec.target))
+        .set("attributes.branded", rec.branded)
 }
 
 fn record_tx(
@@ -480,18 +481,15 @@ fn record_tx(
 }
 
 fn queue_transaction_notice(cid: u32, tx_uuid: &[u8; 16], succeeded: bool, now_unix: u64) {
-    let mut payload = Vec::new();
-    put_uuid(1, tx_uuid, &mut payload);
     let type_name = if succeeded {
         "eve_public.cosmetic.market.transaction.api.TransactionSucceededNotice"
     } else {
         "eve_public.cosmetic.market.transaction.api.TransactionFailedNotice"
     };
-    ctx_queue_notice(
-        NoticeScope::Character(cid),
-        any(type_name, payload),
-        now_unix,
-    );
+    let notice = pb::message(type_name)
+        .set("transaction.uuid", tx_uuid.to_vec())
+        .must_to_any();
+    ctx_queue_notice(NoticeScope::Character(cid), notice, now_unix);
 }
 
 fn next_uuid(data: &mut CosmeticsMarketData, prefix: &[u8; 8]) -> [u8; 16] {
@@ -533,19 +531,17 @@ fn market_get_broker_fees(_st: &CosmeticsMarketState, ctx: &AuthoritativeContext
         .and_then(as_u64)
         .or_else(|| sub(msg, 3).and_then(|m| m.get(1)).and_then(as_u64).map(|p| p.saturating_mul(50_000)))
         .unwrap_or(0);
-    let mut out = Vec::new();
+    let mut out = pb::message("eve_public.cosmetic.market.api.GetBrokerFeesResponse");
     for (secs, _) in LISTING_DURATIONS_SECS {
         let fee_isk = broker_fee_for_valuation(est_value_isk, secs, &target);
-        let mut bf = Vec::new();
-        put_seconds(1, secs, &mut bf);
-        put_isk(2, fee_isk, &mut bf);
-        encode_bytes_field(1, &bf, &mut out);
-        let mut fpd = Vec::new();
-        put_seconds(1, secs, &mut fpd);
-        encode_bytes_field(2, &bf, &mut fpd);
-        encode_bytes_field(2, &fpd, &mut out);
+        let bf = build_broker_fee(secs, fee_isk);
+        out = out
+            .add("broker_fees", bf.clone())
+            .add_with("broker_fees_per_duration", |fpd| {
+                fpd.set("duration", pb_dur(secs)).set("broker_fee", bf)
+            });
     }
-    Ok(any("eve_public.cosmetic.market.api.GetBrokerFeesResponse", out))
+    Ok(out.must_to_any())
 }
 
 fn paragon_hub_skill_reductions(st: &CosmeticsMarketState, cid: u32) -> (u64, usize) {
@@ -571,12 +567,10 @@ fn paragon_hub_tax_pct(st: &CosmeticsMarketState, cid: u32, target: &ListingTarg
 fn market_get_tax_rate(st: &CosmeticsMarketState, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> HandlerResult {
     let cid = require_char(ctx)?;
     let rate_units = paragon_hub_tax_pct(st, cid, &parse_listing_target(sub(msg, 1))) as i64;
-    let mut tr = Vec::new();
-    encode_sint_field(1, rate_units, &mut tr);
-    encode_sint_field(2, 0, &mut tr);
-    let mut out = Vec::new();
-    encode_bytes_field(1, &tr, &mut out);
-    Ok(any("eve_public.cosmetic.market.api.GetTaxRateResponse", out))
+    Ok(pb::message("eve_public.cosmetic.market.api.GetTaxRateResponse")
+        .set("tax_rate.units", rate_units)
+        .set("tax_rate.nanos", 0i32)
+        .must_to_any())
 }
 
 // V24 `skin_listing_buyer_fee.pyj`: EverMarks (Paragon corp 1000419 LP) buyer fee per SKIN tier (1,000 public / 2,500 branded).
@@ -592,23 +586,23 @@ fn market_get_buyer_fee(st: &CosmeticsMarketState, ctx: &AuthoritativeContext, m
     };
     let tier = u64::from(tier_u32);
     let lp_amount = if target.is_branded() { tier * 2_500 } else { tier * 1_000 };
-    let mut out = Vec::new();
-    put_buyer_fee(1, lp_amount, &mut out);
-    Ok(any("eve_public.cosmetic.market.api.GetBuyerFeeResponse", out))
+    Ok(pb::message("eve_public.cosmetic.market.api.GetBuyerFeeResponse")
+        .set("buyer_fee", build_buyer_fee(lp_amount))
+        .must_to_any())
 }
 
 fn market_get_buyer_fees_definition(_st: &CosmeticsMarketState, ctx: &AuthoritativeContext, _msg: &DynamicQuasarMessage) -> HandlerResult {
     let _cid = require_char(ctx)?;
-    let mut out = Vec::new();
+    let mut out = pb::message("eve_public.cosmetic.market.api.GetBuyerFeesDefinitionResponse")
+        .set("buyer_fees_version", BUYER_FEES_VERSION);
     for level in 1u64..=10 {
-        let mut fpt = Vec::new();
-        put_seq(1, level, &mut fpt);
-        put_buyer_fee(2, level * 1_000, &mut fpt);
-        put_buyer_fee(3, level * 2_500, &mut fpt);
-        encode_bytes_field(1, &fpt, &mut out);
+        out = out.add_with("buyer_fees", |fpt| {
+            fpt.set("skin_tier.level", level as u32)
+                .set("default_fee", build_buyer_fee(level * 1_000))
+                .set("branded_fee", build_buyer_fee(level * 2_500))
+        });
     }
-    encode_string_field(2, BUYER_FEES_VERSION, &mut out);
-    Ok(any("eve_public.cosmetic.market.api.GetBuyerFeesDefinitionResponse", out))
+    Ok(out.must_to_any())
 }
 
 fn component_get_all(
@@ -628,14 +622,11 @@ fn component_get_all(
         .filter(|l| l.sale_end_unix > now)
         .cloned()
         .collect();
-    let mut out = Vec::new();
+    let mut out = pb::message("eve_public.cosmetic.market.component.listing.api.GetAllResponse");
     for rec in &listings {
-        encode_bytes_field(1, &encode_component_entry(rec), &mut out);
+        out = out.add("listings", build_component_entry(rec));
     }
-    Ok(any(
-        "eve_public.cosmetic.market.component.listing.api.GetAllResponse",
-        out,
-    ))
+    Ok(out.must_to_any())
 }
 
 fn component_initiate_purchase(
@@ -764,10 +755,10 @@ fn component_initiate_purchase(
     }
     record_tx(st, tx_uuid, now, succeeded, Some(cid), None, CosmeticTransactionDetails::PurchasingComponent);
     queue_transaction_notice(cid, &tx_uuid, succeeded, now);
-    let mut out = Vec::new();
-    put_uuid(1, &tx_uuid, &mut out);
-    encode_varint_field(2, u64::from(immediately_activate), &mut out);
-    Ok(any("eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingResponse", out))
+    Ok(pb::message("eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingResponse")
+        .set("transaction.uuid", tx_uuid.to_vec())
+        .set("immediately_activate", immediately_activate)
+        .must_to_any())
 }
 
 fn skin_visible_to(
@@ -820,14 +811,11 @@ fn skin_get_all(
         })
         .cloned()
         .collect();
-    let mut out = Vec::new();
+    let mut out = pb::message("eve_public.cosmetic.market.skin.listing.api.GetAllResponse");
     for rec in &listings {
-        encode_bytes_field(1, &encode_skin_entry(rec), &mut out);
+        out = out.add("listings", build_skin_entry(rec));
     }
-    Ok(any(
-        "eve_public.cosmetic.market.skin.listing.api.GetAllResponse",
-        out,
-    ))
+    Ok(out.must_to_any())
 }
 
 fn skin_get_all_owned(
@@ -845,14 +833,11 @@ fn skin_get_all_owned(
         .filter(|l| l.seller_id == cid && l.quantity > 0)
         .cloned()
         .collect();
-    let mut out = Vec::new();
+    let mut out = pb::message("eve_public.cosmetic.market.skin.listing.api.GetAllOwnedResponse");
     for rec in &listings {
-        encode_bytes_field(1, &encode_skin_entry(rec), &mut out);
+        out = out.add("listings", build_skin_entry(rec));
     }
-    Ok(any(
-        "eve_public.cosmetic.market.skin.listing.api.GetAllOwnedResponse",
-        out,
-    ))
+    Ok(out.must_to_any())
 }
 
 fn skin_get(
@@ -893,12 +878,9 @@ fn skin_get(
             "Caller is not eligible for this targeted SKIN listing".to_string(),
         ));
     }
-    let mut out = Vec::new();
-    encode_bytes_field(1, &encode_skin_entry(&rec), &mut out);
-    Ok(any(
-        "eve_public.cosmetic.market.skin.listing.api.GetResponse",
-        out,
-    ))
+    Ok(pb::message("eve_public.cosmetic.market.skin.listing.api.GetResponse")
+        .set("listing", build_skin_entry(&rec))
+        .must_to_any())
 }
 
 fn extract_skin_hex(lic_msg: Option<&DynamicQuasarMessage>, cid: u32) -> Result<String, (u32, String)> {
@@ -1058,23 +1040,21 @@ fn skin_initiate_create(
         }
         record_tx(st, tx_uuid, now, false, None, Some(cid), CosmeticTransactionDetails::CreatingSkinListing);
         queue_transaction_notice(cid, &tx_uuid, false, now);
-        let mut out = Vec::new();
-        put_uuid(1, &tx_uuid, &mut out);
-        return Ok(any(
-            "eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingResponse",
-            out,
-        ));
+        return Ok(
+            pb::message("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingResponse")
+                .set("transaction.uuid", tx_uuid.to_vec())
+                .must_to_any(),
+        );
     };
     if broker_fee.0 > 0 { st.emit_account_change(cid as i64, new_bal); }
     st.skinr.save();
     record_tx(st, tx_uuid, now, true, None, Some(cid), CosmeticTransactionDetails::CreatingSkinListing);
     queue_transaction_notice(cid, &tx_uuid, true, now);
-    let mut out = Vec::new();
-    put_uuid(1, &tx_uuid, &mut out);
-    Ok(any(
-        "eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingResponse",
-        out,
-    ))
+    Ok(
+        pb::message("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingResponse")
+            .set("transaction.uuid", tx_uuid.to_vec())
+            .must_to_any(),
+    )
 }
 
 fn skin_cancel_listing(
@@ -1112,10 +1092,7 @@ fn skin_cancel_listing(
         st.skinr.save();
         st.save();
     }
-    Ok(any(
-        "eve_public.cosmetic.market.skin.listing.api.CancelListingResponse",
-        Vec::new(),
-    ))
+    Ok(pb::message("eve_public.cosmetic.market.skin.listing.api.CancelListingResponse").must_to_any())
 }
 
 fn skin_initiate_purchase(
@@ -1413,12 +1390,11 @@ fn skin_initiate_purchase(
         CosmeticTransactionDetails::PurchasingSkin,
     );
     queue_transaction_notice(cid, &tx_uuid, settled, now);
-    let mut out = Vec::new();
-    put_uuid(1, &tx_uuid, &mut out);
-    Ok(any(
-        "eve_public.cosmetic.market.skin.listing.api.InitiatePurchaseListingResponse",
-        out,
-    ))
+    Ok(
+        pb::message("eve_public.cosmetic.market.skin.listing.api.InitiatePurchaseListingResponse")
+            .set("transaction.uuid", tx_uuid.to_vec())
+            .must_to_any(),
+    )
 }
 
 fn skin_admin_set_expiration_with_resp(
@@ -1444,7 +1420,7 @@ fn skin_admin_set_expiration_with_resp(
         rec.expires_unix = expires_unix;
     }
     st.save();
-    Ok(any(resp_type, Vec::new()))
+    Ok(pb::message(resp_type).must_to_any())
 }
 
 fn skin_admin_set_expiration(st: &CosmeticsMarketState, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> HandlerResult {

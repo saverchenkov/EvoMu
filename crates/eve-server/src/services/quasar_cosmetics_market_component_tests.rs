@@ -6,7 +6,8 @@ use super::super::*;
 use super::{call, make_char, make_sess, new_market_harness, wm_bytes, wm_sub, wm_varint};
 use crate::quasar_gateway::{STATUS_BAD_REQUEST, STATUS_NOT_FOUND, STATUS_OK};
 use eve_db::IskCents;
-use eve_proto::quasar::{encode_varint_field, WireMessage};
+use eve_proto::pb;
+use eve_proto::quasar::WireMessage;
 
 #[test]
 fn component_listings_get_all_purchase_isk_plex_failures_and_overflow_bounds() {
@@ -85,8 +86,9 @@ fn component_listings_get_all_purchase_isk_plex_failures_and_overflow_bounds() {
         .status_code,
         STATUS_BAD_REQUEST
     );
-    let mut bad_qty = Vec::new();
-    put_uuid(1, &isk_uuid, &mut bad_qty);
+    let bad_qty = pb::message("eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingRequest")
+        .set("listing.uuid", isk_uuid.to_vec())
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -98,9 +100,10 @@ fn component_listings_get_all_purchase_isk_plex_failures_and_overflow_bounds() {
         .status_code,
         STATUS_BAD_REQUEST
     );
-    let mut unknown_req = Vec::new();
-    put_uuid(1, &[0xFF; 16], &mut unknown_req);
-    encode_varint_field(2, 1, &mut unknown_req);
+    let unknown_req = pb::message("eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingRequest")
+        .set("listing.uuid", vec![0xFFu8; 16])
+        .set("quantity", 1u32)
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -113,9 +116,10 @@ fn component_listings_get_all_purchase_isk_plex_failures_and_overflow_bounds() {
         STATUS_NOT_FOUND
     );
 
-    let mut buy_isk = Vec::new();
-    put_uuid(1, &isk_uuid, &mut buy_isk);
-    encode_varint_field(2, 2, &mut buy_isk);
+    let buy_isk = pb::message("eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingRequest")
+        .set("listing.uuid", isk_uuid.to_vec())
+        .set("quantity", 2u32)
+        .must_encode();
     assert_eq!(
         call(
             &router,
@@ -139,10 +143,11 @@ fn component_listings_get_all_purchase_isk_plex_failures_and_overflow_bounds() {
         );
     });
 
-    let mut buy_plex = Vec::new();
-    put_uuid(1, &plex_ok_uuid, &mut buy_plex);
-    encode_varint_field(2, 1, &mut buy_plex);
-    encode_varint_field(3, 1, &mut buy_plex);
+    let buy_plex = pb::message("eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingRequest")
+        .set("listing.uuid", plex_ok_uuid.to_vec())
+        .set("quantity", 1u32)
+        .set("immediately_activate", true)
+        .must_encode();
     let r_buy_plex = call(
         &router,
         &sess,
@@ -157,9 +162,10 @@ fn component_listings_get_all_purchase_isk_plex_failures_and_overflow_bounds() {
         assert_eq!(s.unified_plex_balance(cid), 50 - (plex_unit_cents / 100));
     });
 
-    let mut fail_plex = Vec::new();
-    put_uuid(1, &plex_ok_uuid, &mut fail_plex);
-    encode_varint_field(2, 60, &mut fail_plex);
+    let fail_plex = pb::message("eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingRequest")
+        .set("listing.uuid", plex_ok_uuid.to_vec())
+        .set("quantity", 60u32)
+        .must_encode();
     let r_fail_plex = call(
         &router,
         &sess,
@@ -239,14 +245,15 @@ fn component_listings_get_all_purchase_isk_plex_failures_and_overflow_bounds() {
     state.data.write().unwrap().component_listings.clear();
 
     for (u, qty) in [
-        (expired_uuid, 1u64),
-        (overflow_isk_uuid, 1u64),
-        (overflow_plex_uuid, 2u64),
-        (overflow_qty_uuid, 3u64),
+        (expired_uuid, 1u32),
+        (overflow_isk_uuid, 1u32),
+        (overflow_plex_uuid, 2u32),
+        (overflow_qty_uuid, 3u32),
     ] {
-        let mut req = Vec::new();
-        put_uuid(1, &u, &mut req);
-        encode_varint_field(2, qty, &mut req);
+        let req = pb::message("eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingRequest")
+            .set("listing.uuid", u.to_vec())
+            .set("quantity", qty)
+            .must_encode();
         assert_eq!(
             call(
                 &router,
