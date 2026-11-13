@@ -670,7 +670,7 @@ fn persist_ship_combat_hp_batch_inner_for_system<'a, I>(
     });
 }
 
-/// Applies a dirty-only condition checkpoint from [`crate::system_actor::types::StepOutput`] (`RFC-1 E-4`, `T-2`, `T-5`, `#919`).
+/// Applies a dirty-only condition checkpoint from [`crate::system_actor::StepOutput`] (`RFC-1 E-4`, `T-2`, `T-5`, `#919`).
 ///
 /// Only writes rows whose `solar_system_id` AND `space_entry_epoch` still match the snapshot (`T-2`)
 /// and whose persisted HP, capacitor, or position actually changed (`T-5`). Returns the number of
@@ -678,7 +678,7 @@ fn persist_ship_combat_hp_batch_inner_for_system<'a, I>(
 pub fn apply_condition_checkpoint_for_system_in_db(
     db: &Arc<WorldRepository>,
     solar_system_id: u32,
-    entries: &[crate::system_actor::types::ConditionCheckpointEntry],
+    entries: &[crate::system_actor::ConditionCheckpointEntry],
 ) -> usize {
     if entries.is_empty() {
         return 0;
