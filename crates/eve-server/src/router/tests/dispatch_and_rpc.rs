@@ -633,7 +633,7 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
     assert_eq!(unimpl_res.unwrap_err().code, "UnimplementedRPC");
 
     assert_eq!(ctx.quasar_domains.len(), 135);
-    for ns in &ctx.quasar_domains {
+    for ns in ctx.quasar_domains.iter() {
         let q_res = ctx
             .dispatch_rpc(
                 &mut session,

@@ -113,8 +113,8 @@ pub(super) fn encode_base64_std(input: &[u8]) -> String {
 
 #[test]
 fn test_sso_discovery_jwks_consent_html_and_helpers() {
-    let mut ctx = ServerContext::new();
-    ctx.esi_port = 26_002;
+    let ctx = ServerContext::new();
+    ctx.set_esi_port(26_002);
     let empty_hdrs = HashMap::new();
 
     // Discovery metadata with and without Host header

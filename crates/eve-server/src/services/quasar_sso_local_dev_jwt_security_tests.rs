@@ -436,8 +436,12 @@ async fn quasar_local_dev_client_jwt_requires_flag_active_macho_session_and_matc
         Some("16")
     );
 
-    let mut raw_ctx = ServerContext::new();
-    raw_ctx.feature_flags.allow_local_dev_gateway_jwt = true;
+    let raw_ctx = ServerContext::new();
+    raw_ctx
+        .feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .allow_local_dev_gateway_jwt = true;
     let ctx = Arc::new(raw_ctx);
     let uid = ctx.db.provision_player_account("dev_flag_on", "pass2");
     let cid = 92_200_001i64;
@@ -578,8 +582,12 @@ async fn evomu_toml_local_dev_jwt_and_persistent_bidi_requests_resolve_527_528_5
         .expect("load tracked evomu.toml");
     assert!(cfg.feature_flags.allow_local_dev_gateway_jwt);
 
-    let mut raw_ctx = ServerContext::new();
-    raw_ctx.feature_flags.allow_local_dev_gateway_jwt = cfg.feature_flags.allow_local_dev_gateway_jwt;
+    let raw_ctx = ServerContext::new();
+    raw_ctx
+        .feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .allow_local_dev_gateway_jwt = cfg.feature_flags.allow_local_dev_gateway_jwt;
     let ctx = Arc::new(raw_ctx);
     let now_u = ctx.now_unix();
     let uid = ctx.db.provision_player_account("live_v24_pilot", "pass123");
@@ -731,8 +739,12 @@ async fn evomu_toml_local_dev_jwt_and_persistent_bidi_requests_resolve_527_528_5
 
 #[tokio::test]
 async fn regression_532_local_dev_jwt_accepts_float_iat_nbf_within_skew_and_rejects_bad_bearer() {
-    let mut raw_ctx = ServerContext::new();
-    raw_ctx.feature_flags.allow_local_dev_gateway_jwt = true;
+    let raw_ctx = ServerContext::new();
+    raw_ctx
+        .feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .allow_local_dev_gateway_jwt = true;
     let ctx = Arc::new(raw_ctx);
     let now_u = ctx.now_unix();
     let uid = ctx.db.provision_player_account("skew_pilot", "pw123");

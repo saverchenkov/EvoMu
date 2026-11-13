@@ -175,6 +175,7 @@ pub(crate) fn persist_ball_positions_in_db(
     ballpark: &Ballpark,
     ball_ids: &[BallId],
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    ball_space_entry_epochs: &HashMap<BallId, u64>,
 ) {
     let Some(db) = db_opt
         .as_ref()
@@ -185,6 +186,7 @@ pub(crate) fn persist_ball_positions_in_db(
     if ball_ids.is_empty() {
         return;
     }
+    let solar_system_id = ballpark.solar_system_id;
     let updates: Vec<(BallId, [f64; 3])> = db.with_snapshot(|snap| {
         let mut out = Vec::new();
         for &bid in ball_ids {
@@ -194,6 +196,12 @@ pub(crate) fn persist_ball_positions_in_db(
                     .get(&bid)
                     .is_some_and(|m| m.category_id == 11)
                 || !snap.items.contains_key(&bid)
+                || crate::sp6_lifecycle::is_ship_stale_for_in_space_write_in_snap(
+                    snap,
+                    bid,
+                    Some(solar_system_id),
+                    ball_space_entry_epochs.get(&bid).copied(),
+                )
             {
                 continue;
             }
@@ -220,7 +228,10 @@ pub(crate) fn persist_ball_positions_in_db(
         for (bid, pos_arr) in updates {
             if snap.items.contains_key(&bid)
                 && !crate::sp6_lifecycle::is_ship_stale_for_in_space_write_in_snap(
-                    snap, bid, None, None,
+                    snap,
+                    bid,
+                    Some(solar_system_id),
+                    ball_space_entry_epochs.get(&bid).copied(),
                 )
             {
                 snap.item_positions.insert(bid, pos_arr);
@@ -237,6 +248,7 @@ pub(crate) fn persist_landed_warps_in_db(
     ballpark: &Ballpark,
     events: &[eve_destiny::DestinyEvent],
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    ball_space_entry_epochs: &HashMap<BallId, u64>,
 ) {
     let Some(db) = db_opt
         .as_ref()
@@ -244,6 +256,7 @@ pub(crate) fn persist_landed_warps_in_db(
     else {
         return;
     };
+    let solar_system_id = ballpark.solar_system_id;
     let mut immediate_ids = std::collections::BTreeSet::new();
     for ev in events {
         match ev {
@@ -268,7 +281,10 @@ pub(crate) fn persist_landed_warps_in_db(
                 || !snap.items.contains_key(&bid)
                 || !b.position.is_finite()
                 || crate::sp6_lifecycle::is_ship_stale_for_in_space_write_in_snap(
-                    snap, bid, None, None,
+                    snap,
+                    bid,
+                    Some(solar_system_id),
+                    ball_space_entry_epochs.get(&bid).copied(),
                 )
             {
                 continue;
@@ -315,7 +331,10 @@ pub(crate) fn persist_landed_warps_in_db(
         for (bid, pos_arr) in updates {
             if snap.items.contains_key(&bid)
                 && !crate::sp6_lifecycle::is_ship_stale_for_in_space_write_in_snap(
-                    snap, bid, None, None,
+                    snap,
+                    bid,
+                    Some(solar_system_id),
+                    ball_space_entry_epochs.get(&bid).copied(),
                 )
             {
                 snap.item_positions.insert(bid, pos_arr);
@@ -587,6 +606,7 @@ pub(crate) fn update_system_hibernation_flag(
 
 /// Fast-forwards physics ticks inside the system actor for `timeControl.AdvanceClock`
 /// without per-tick DB snapshot cloning or flooding intermediate `DoDestinyUpdate` broadcasts.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn fast_forward_clock_in_actor(
     solar_system_id: SolarSystemId,
@@ -595,6 +615,34 @@ pub(crate) fn fast_forward_clock_in_actor(
     secs: u64,
     sim_elapsed_secs: &mut f64,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    ball_positions_actor: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+    scrambled_balls_actor: &Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
+    event_tx_actor: &tokio::sync::broadcast::Sender<crate::system_actor::TickBroadcast>,
+) {
+    let empty_epochs = HashMap::new();
+    fast_forward_clock_in_actor_with_epochs(
+        solar_system_id,
+        ballpark,
+        ship_id,
+        secs,
+        sim_elapsed_secs,
+        db_opt,
+        &empty_epochs,
+        ball_positions_actor,
+        scrambled_balls_actor,
+        event_tx_actor,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fast_forward_clock_in_actor_with_epochs(
+    solar_system_id: SolarSystemId,
+    ballpark: &mut Ballpark,
+    ship_id: BallId,
+    secs: u64,
+    sim_elapsed_secs: &mut f64,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    ball_space_entry_epochs: &HashMap<BallId, u64>,
     ball_positions_actor: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
     scrambled_balls_actor: &Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     event_tx_actor: &tokio::sync::broadcast::Sender<crate::system_actor::TickBroadcast>,
@@ -621,7 +669,7 @@ pub(crate) fn fast_forward_clock_in_actor(
     for _ in 0..max_sim {
         *sim_elapsed_secs += 1.0;
         let evs = ballpark.step(1.0);
-        persist_landed_warps_in_db(ballpark, &evs, db_opt);
+        persist_landed_warps_in_db(ballpark, &evs, db_opt, ball_space_entry_epochs);
         let warp_exited = evs.iter().any(|e| {
             matches!(
                 e,
@@ -675,7 +723,7 @@ pub(crate) fn fast_forward_clock_in_actor(
             all_events.insert(0, pos_ev);
             all_events.insert(1, vel_ev);
         }
-        persist_ball_positions_in_db(ballpark, &[ship_id], db_opt);
+        persist_ball_positions_in_db(ballpark, &[ship_id], db_opt, ball_space_entry_epochs);
     }
     crate::system_actor::sync_ball_positions(ballpark, ball_positions_actor, scrambled_balls_actor);
     let broadcast = crate::system_actor::build_tick_broadcast(solar_system_id, ballpark, all_events);

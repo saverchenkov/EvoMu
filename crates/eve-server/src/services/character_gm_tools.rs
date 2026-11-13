@@ -359,8 +359,9 @@ pub fn handle_char_unbound(
                             }
                         }
                         if crate::starter_characters::should_grant_default_starter_plex() {
+                            let starter_plex_balance = ctx.feature_flags_snapshot().starter_plex_balance;
                             crate::starter_characters::grant_starter_plex_in_snapshot(
-                                snap, user_id, ch.character_id, ctx.feature_flags.starter_plex_balance, now_unix,
+                                snap, user_id, ch.character_id, starter_plex_balance, now_unix,
                             );
                         }
                     });

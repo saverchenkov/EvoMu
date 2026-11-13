@@ -131,8 +131,8 @@ fn test_runtime_queue_dir_and_disk_lookup_fallback() {
 
 #[test]
 fn test_client_global_config_host_normalization_and_extras() {
-    let mut ctx = ServerContext::new();
-    ctx.esi_port = 26_001;
+    let ctx = ServerContext::new();
+    ctx.set_esi_port(26_001);
     if let Ok(mut extra) = ctx.global_config_values.write() {
         extra.insert("customFlag".to_string(), PyRep::ascii_bytes("enabled"));
     }
@@ -178,8 +178,8 @@ fn test_client_global_config_host_normalization_and_extras() {
         );
     }
 
-    ctx.esi_port = 0;
-    ctx.xmpp_port = 25_232;
+    ctx.set_esi_port(0);
+    ctx.set_xmpp_port(25_232);
     let no_http_cfg = build_client_global_config(&ctx, Some("127.0.0.1"));
     assert!(!no_http_cfg.contains_key("bugReporting_BugReportServer"));
     assert!(!no_http_cfg.contains_key("bugReporting_ShowButton"));

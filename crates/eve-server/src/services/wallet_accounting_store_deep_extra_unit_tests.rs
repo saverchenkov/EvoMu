@@ -402,7 +402,7 @@ async fn plex_vault_and_nes_store_manager_purchases_kill_mutations() {
 
 #[tokio::test]
 async fn fast_checkout_activity_mgr_and_bounties_taxes_kill_mutations() {
-    let (mut ctx, _clock, char1, char2, corp1, corp2) = setup_wallet_world(1_710_504_000);
+    let (ctx, _clock, char1, char2, corp1, corp2) = setup_wallet_world(1_710_504_000);
     let ally1 = 99_600_001_i64;
     ctx.db.with_mut_snapshot(|snap| {
         snap.alliances.insert(ally1, AllianceRecord { alliance_id: ally1, name: "Bounty Test Alliance".into(), short_name: "BTAL".into(), executor_corp_id: corp1, member_corp_ids: [corp1].into_iter().collect() });
@@ -417,7 +417,10 @@ async fn fast_checkout_activity_mgr_and_bounties_taxes_kill_mutations() {
 
     // FastCheckout disabled by default -> FastCheckoutDisabled; enable via free_fast_checkout_plex
     assert_eq!(handle_fc_act(&ctx, &sess1, "FastCheckoutService", "BuyOffer", &[PyRep::Integer(1)], &kw).unwrap().unwrap_err().code, "FastCheckoutDisabled");
-    ctx.feature_flags.free_fast_checkout_plex = true;
+    ctx.feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .free_fast_checkout_plex = true;
     set_user_fast_checkout_enabled(&ctx, 1, true);
     let offers_rep = handle_fc_act(&ctx, &sess1, "FastCheckoutService", "GetOffersForUser", &[], &kw).unwrap().unwrap();
     let offer0 = &offers_rep.dict_get("plex").and_then(|v| v.as_list()).unwrap()[0];
@@ -430,7 +433,10 @@ async fn fast_checkout_activity_mgr_and_bounties_taxes_kill_mutations() {
     assert_eq!(fc_buy.dict_get("plexAmount"), Some(&PyRep::Integer(fc_plex_qty * 2)));
     assert_eq!(ctx.db.with_snapshot(|s| s.plex_vault_balance(char1)), fc_plex_qty * 2);
 
-    ctx.feature_flags.free_fast_checkout_plex = false;
+    ctx.feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .free_fast_checkout_plex = false;
     let paid_uid = ctx.db.provision_player_account("fc_paid_user", "secret123");
     set_user_fast_checkout_enabled(&ctx, paid_uid, true);
     let paid_sess = auth_session(paid_uid, char1, corp1, 30_000_142);

@@ -198,7 +198,7 @@ fn fast_checkout_mining_details_and_paid_omega_buy_offer_paths() {
         UpwellStructureRecord,
     };
 
-    let mut ctx = test_ctx();
+    let ctx = test_ctx();
     let uid = 1_u64;
     let cid = 90_000_001_i64;
     let corp_id = 98_000_001_i64;
@@ -401,7 +401,10 @@ fn fast_checkout_mining_details_and_paid_omega_buy_offer_paths() {
     );
 
     // 3. BuyOffer with paid USD offer, Omega offer (category 1), PLEX offer, password & token errors
-    ctx.feature_flags.free_fast_checkout_plex = false;
+    ctx.feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .free_fast_checkout_plex = false;
     set_user_fast_checkout_enabled(&ctx, uid, true);
     let usd_offer_id = 88_001_u32;
     let omega_offer_id = 88_002_u32;
@@ -691,11 +694,14 @@ fn fast_checkout_buy_offer_edge_errors_and_free_plex_delivery() {
         save_store_catalog, StoreCatalog, StoreCategory, StoreOffer, StoreProduct,
     };
 
-    let mut ctx = test_ctx();
+    let ctx = test_ctx();
     let mut sess = auth_session(1, 90_000_001, 98_000_001, 30_000_142);
     sess.station_id = Some(60_003_760);
     let kw = HashMap::new();
-    ctx.feature_flags.free_fast_checkout_plex = false;
+    ctx.feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .free_fast_checkout_plex = false;
     set_user_fast_checkout_enabled(&ctx, 1, true);
 
     assert_eq!(
@@ -881,7 +887,10 @@ fn fast_checkout_buy_offer_edge_errors_and_free_plex_delivery() {
         "ArithmeticOverflow"
     );
 
-    ctx.feature_flags.free_fast_checkout_plex = true;
+    ctx.feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .free_fast_checkout_plex = true;
     assert_eq!(
         handle(
             &ctx,
@@ -921,19 +930,25 @@ fn fast_checkout_buy_offer_edge_errors_and_free_plex_delivery() {
 
 #[test]
 fn fast_checkout_tutorial_activity_mgr_and_mining_edge_branches() {
-    let mut ctx = test_ctx();
+    let ctx = test_ctx();
     let sess = auth_session(1, 90_000_001, 98_000_001, 30_000_142);
     let kw = HashMap::new();
 
     // Project discovery feature flag + corrupt tutorial JSON reset + skip/reset roundtrip
-    ctx.feature_flags.enable_project_discovery = false;
+    ctx.feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .enable_project_discovery = false;
     assert_eq!(
         handle(&ctx, &sess, "FastCheckoutService", "is_enabled", &[], &kw)
             .unwrap()
             .unwrap(),
         PyRep::Bool(false)
     );
-    ctx.feature_flags.enable_project_discovery = true;
+    ctx.feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .enable_project_discovery = true;
     assert_eq!(
         handle(&ctx, &sess, "FastCheckoutService", "is_enabled", &[], &kw)
             .unwrap()

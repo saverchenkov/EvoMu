@@ -25,7 +25,7 @@ pub(super) fn test_ctx(free_fast_checkout_plex: bool, starter_plex_balance: i64)
     let db = Arc::new(WorldRepository::with_demo_seed());
     let mut ctx = ServerContext::with_sde_and_repository(shared_sde(), db);
     ctx.set_free_fast_checkout_plex(free_fast_checkout_plex);
-    ctx.feature_flags.starter_plex_balance = starter_plex_balance;
+    ctx.feature_flags.write().unwrap().starter_plex_balance = starter_plex_balance;
     ctx
 }
 

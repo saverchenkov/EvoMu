@@ -36,9 +36,12 @@ fn fresh_ctx_full_market() -> ServerContext {
     });
     let db = Arc::new(eve_db::WorldRepository::new_empty());
     db.with_mut_snapshot(|s| *s = snap.clone());
-    let mut ctx = ServerContext::with_sde_and_repository(Arc::clone(sde), db)
+    let ctx = ServerContext::with_sde_and_repository(Arc::clone(sde), db)
         .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED);
-    ctx.feature_flags.free_fast_checkout_plex = true;
+    ctx.feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .free_fast_checkout_plex = true;
     crate::common::pin_clock(&ctx);
     ctx
 }
@@ -509,7 +512,7 @@ async fn setup_pilot_in_full_market(
         warp_and_dock_at_station_fast(ctx, &mut sess, ch.active_ship_id, JITA_SYS, JITA_STATION).await;
     }
     // Fund ISK legitimately through PLEX sell order when free_fast_checkout_plex is enabled
-    if ctx.feature_flags.free_fast_checkout_plex {
+    if ctx.feature_flags_snapshot().free_fast_checkout_plex {
         fund_pilot_isk(ctx, &mut sess, 20).await;
     }
     (sess, char_id, ch.active_ship_id)
@@ -1477,8 +1480,12 @@ async fn fast_checkout_mining_details_and_plex_conservation_lifecycle() {
     assert_eq!(denied.code, "AccessDenied");
 
     // 3. FastCheckout GetOffersForUser & BuyOffer with production PLEX conservation (`free_fast_checkout_plex = false`)
-    let mut prod_ctx = reload_ctx_from_sqlite(&ctx);
-    prod_ctx.feature_flags.free_fast_checkout_plex = false;
+    let prod_ctx = reload_ctx_from_sqlite(&ctx);
+    prod_ctx
+        .feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .free_fast_checkout_plex = false;
     prod_ctx
         .global_config_values
         .write()

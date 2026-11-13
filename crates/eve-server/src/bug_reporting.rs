@@ -216,9 +216,11 @@ pub fn build_client_global_config(
         .map(|s| s.trim().trim_end_matches('/').to_string())
         .filter(|s| !s.is_empty());
 
+    let esi_port = ctx.esi_port();
+    let xmpp_port = ctx.xmpp_port();
     let bug_server_url = if let Some(url) = explicit_url {
         Some(url)
-    } else if ctx.esi_port > 0 {
+    } else if esi_port > 0 {
         let host = match local_host_hint.map(str::trim).filter(|h| !h.is_empty()) {
             Some("0.0.0.0")
             | Some("::")
@@ -236,7 +238,7 @@ pub fn build_client_global_config(
             Some(h) if h.contains(':') && !h.starts_with('[') => format!("[{h}]"),
             Some(h) => h.to_string(),
         };
-        Some(format!("http://{host}:{}/bugs/api", ctx.esi_port))
+        Some(format!("http://{host}:{esi_port}/bugs/api"))
     } else {
         None
     };
@@ -264,11 +266,11 @@ pub fn build_client_global_config(
     );
     cfg.insert(
         "ejabberdPort".to_string(),
-        PyRep::Integer(i64::from(ctx.xmpp_port)),
+        PyRep::Integer(i64::from(xmpp_port)),
     );
     cfg.insert(
         "ejabberd_client_port".to_string(),
-        PyRep::Integer(i64::from(ctx.xmpp_port)),
+        PyRep::Integer(i64::from(xmpp_port)),
     );
     cfg.insert(
         "chatserver_disable_tls".to_string(),

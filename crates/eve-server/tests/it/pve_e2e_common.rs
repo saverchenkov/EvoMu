@@ -52,9 +52,12 @@ pub fn fresh_player_ctx() -> ServerContext {
     let (sde, base_snap) = shared_base_world();
     let db = Arc::new(eve_db::WorldRepository::new_empty());
     db.with_mut_snapshot(|s| *s = base_snap.clone());
-    let mut ctx = ServerContext::with_sde_and_repository(sde.clone(), db)
+    let ctx = ServerContext::with_sde_and_repository(sde.clone(), db)
         .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED);
-    ctx.feature_flags.free_fast_checkout_plex = true;
+    ctx.feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .free_fast_checkout_plex = true;
     crate::common::pin_clock(&ctx);
     ctx
 }
@@ -74,8 +77,11 @@ fn reload_ctx_with_blob(ctx: &ServerContext, blob: Option<(&str, &str)>) -> Serv
     }
     let db2 = Arc::new(eve_db::WorldRepository::open_sqlite(&_g.0).expect("open_sqlite reload"));
     db2.set_clock(ctx.db.clock());
-    let mut ctx2 = ServerContext::with_sde_and_repository(ctx.sde.clone(), db2);
-    ctx2.feature_flags.free_fast_checkout_plex = true;
+    let ctx2 = ServerContext::with_sde_and_repository(ctx.sde.clone(), db2);
+    ctx2.feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .free_fast_checkout_plex = true;
     ctx2
 }
 pub fn reload_ctx_from_sqlite(ctx: &ServerContext) -> ServerContext { reload_ctx_with_blob(ctx, None) }

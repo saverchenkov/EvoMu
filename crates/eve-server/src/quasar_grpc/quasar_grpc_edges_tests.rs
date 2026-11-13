@@ -130,8 +130,8 @@ fn parse_app_instance_uuid_and_decompress_grpc_payload_edges() {
 
 #[test]
 fn authenticate_grpc_headers_and_build_session_edges() {
-    let mut raw_ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
-    raw_ctx.feature_flags.allow_local_dev_gateway_jwt = false;
+    let raw_ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    raw_ctx.feature_flags.write().unwrap().allow_local_dev_gateway_jwt = false;
     let now_u = raw_ctx.now_unix();
     let loopback = Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
 
@@ -328,7 +328,7 @@ fn authenticate_grpc_headers_and_build_session_edges() {
     );
     assert!(authenticate_grpc_headers(&raw_ctx, &hdrs, loopback).is_none());
 
-    raw_ctx.feature_flags.allow_local_dev_gateway_jwt = true;
+    raw_ctx.feature_flags.write().unwrap().allow_local_dev_gateway_jwt = true;
     assert!(authenticate_grpc_headers(&raw_ctx, &hdrs, None).is_none());
 
     raw_ctx

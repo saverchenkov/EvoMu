@@ -24,8 +24,8 @@ fn sso_wire_bytes_discovery_fallback_esi_delegation_and_bugs_routing() {
     assert!(!wire.contains("\r\nInjected: yes"));
 
     // 2. Discovery endpoint without Host header falls back to `http://127.0.0.1:{esi_port}`.
-    let mut ctx = ServerContext::new();
-    ctx.esi_port = 26444;
+    let ctx = ServerContext::new();
+    ctx.set_esi_port(26444);
     let empty_hdrs = HashMap::new();
     let disc = handle_http_request(
         &ctx,

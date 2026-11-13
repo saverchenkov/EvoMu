@@ -1984,7 +1984,8 @@ pub async fn tick_background_cluster_with_step(ctx: &ServerContext, explicit_ste
         let is_hibernated_empty = handle.is_hibernated() && !chars_in_system.contains(&sys_id);
         if is_hibernated_empty {
             let idle_count = handle.record_idle_tick();
-            if idle_count >= 60 && std::sync::Arc::strong_count(&handle.ballpark) <= 2 {
+            // Refcounts: SystemManager registry (1) + actor task (1) + this loop's `handle` (1) = 3.
+            if idle_count >= 60 && std::sync::Arc::strong_count(&handle.ballpark) <= 3 {
                 has_long_idle_candidate = true;
             }
         } else if !ctx
@@ -2012,7 +2013,7 @@ pub async fn tick_background_cluster_with_step(ctx: &ServerContext, explicit_ste
         }
     }
     if has_long_idle_candidate {
-        let _ = ctx.systems.evict_idle_systems(300);
+        let _ = ctx.systems.evict_idle_systems(300).await;
     }
 }
 

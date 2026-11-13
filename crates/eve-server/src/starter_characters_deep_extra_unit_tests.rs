@@ -53,8 +53,11 @@ async fn starter_characters_task_local_and_plex_snapshot_grants_cover_all_branch
 
 #[tokio::test]
 async fn provision_starter_characters_three_tier_plex_precedence_and_error_isolation() {
-    let mut ctx = fast_test_context(1_800_000_000);
-    Arc::get_mut(&mut ctx).unwrap().feature_flags.starter_plex_balance = 125;
+    let ctx = fast_test_context(1_800_000_000);
+    ctx.feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .starter_plex_balance = 125;
 
     let uid_none_cfg = ctx.db.provision_player_account("acct_no_starter", "pw1");
     let uid_existing = ctx.db.provision_player_account("acct_existing_char", "pw2");
@@ -167,8 +170,12 @@ async fn provision_starter_characters_three_tier_plex_precedence_and_error_isola
     });
 
     // Second pass with ctx.feature_flags.starter_plex_balance = 0 falls back to cfg.feature_flags.starter_plex_balance (50)
-    let mut ctx_cfg_fallback = fast_test_context(1_800_001_000);
-    Arc::get_mut(&mut ctx_cfg_fallback).unwrap().feature_flags.starter_plex_balance = 0;
+    let ctx_cfg_fallback = fast_test_context(1_800_001_000);
+    ctx_cfg_fallback
+        .feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .starter_plex_balance = 0;
     let uid_cfg_fallback = ctx_cfg_fallback.db.provision_player_account("acct_cfg_fallback", "pw_cfg");
     let uid_zero_plex = ctx_cfg_fallback.db.provision_player_account("acct_zero_plex", "pw_zero");
     let mut cfg2 = ServerConfig::default();

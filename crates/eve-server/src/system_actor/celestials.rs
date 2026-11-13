@@ -145,14 +145,9 @@ impl SystemHandle {
             ok
         };
         if updated {
-            let db_opt = self
-                .actor_state
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .db_opt
-                .clone();
             let bp = self.ballpark.read().unwrap_or_else(|e| e.into_inner());
-            persist_ball_positions_in_db(&bp, &[ball_id], &db_opt);
+            let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
+            persist_ball_positions_in_db(&bp, &[ball_id], &st.db_opt, &st.ball_space_entry_epochs);
         }
     }
 
@@ -1063,16 +1058,13 @@ impl SystemHandle {
         } else {
             dt
         };
-        let db_opt = {
-            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            if dt_sim > 0.0 && dt_sim.is_finite() {
-                st.sim_elapsed_secs += dt_sim;
-            }
-            st.db_opt.clone()
-        };
         let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+        if dt_sim > 0.0 && dt_sim.is_finite() {
+            st.sim_elapsed_secs += dt_sim;
+        }
         let events = bp.step(dt_sim);
-        persist_landed_warps_in_db(&bp, &events, &db_opt);
+        persist_landed_warps_in_db(&bp, &events, &st.db_opt, &st.ball_space_entry_epochs);
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
         let broadcast = build_tick_broadcast(self.solar_system_id, &mut bp, events);
         let _ = self.event_tx.send(broadcast);
@@ -1955,10 +1947,11 @@ mod celestials_helpers;
 pub use celestials_helpers::try_remove_ball_for_db;
 pub(crate) use celestials_helpers::{
     collect_dirty_condition_checkpoint_entries, collect_immediate_armor_hull_checkpoint_entries,
-    collect_landed_warp_positions, fast_forward_clock_in_actor, persist_ball_positions_in_db,
-    persist_landed_warps_in_db, record_spawned_ball_checkpoint_baseline,
-    register_committed_warp_cache, register_db_system_ballpark, remove_ball_checkpoint_tracking,
-    sync_ball_positions, update_system_hibernation_flag,
+    collect_landed_warp_positions, fast_forward_clock_in_actor_with_epochs,
+    persist_ball_positions_in_db, persist_landed_warps_in_db,
+    record_spawned_ball_checkpoint_baseline, register_committed_warp_cache,
+    register_db_system_ballpark, remove_ball_checkpoint_tracking, sync_ball_positions,
+    update_system_hibernation_flag,
 };
 
 #[cfg(test)] #[path = "celestials_unit_tests.rs"] mod celestials_unit_tests;

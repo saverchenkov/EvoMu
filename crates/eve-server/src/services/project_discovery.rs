@@ -297,11 +297,11 @@ pub fn is_project_discovery_enabled(ctx: &ServerContext) -> bool {
                 PyRep::Bool(b) => *b,
                 PyRep::Integer(i) => *i != 0,
                 PyRep::String(s) => s == "1" || s.eq_ignore_ascii_case("true"),
-                _ => ctx.feature_flags.enable_project_discovery,
+                _ => ctx.feature_flags_snapshot().enable_project_discovery,
             };
         }
     }
-    ctx.feature_flags.enable_project_discovery
+    ctx.feature_flags_snapshot().enable_project_discovery
 }
 
 fn read_player_state<F, R>(ctx: &ServerContext, char_id: i64, f: F) -> R

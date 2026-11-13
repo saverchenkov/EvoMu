@@ -599,7 +599,12 @@ fn verify_gateway_bearer_token(
             if let Some(v) = verify_live_session_sso_bearer_token(ctx, token, now_unix) {
                 return Ok(v);
             }
-            if ctx.feature_flags.allow_local_dev_gateway_jwt {
+            if ctx
+                .feature_flags
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .allow_local_dev_gateway_jwt
+            {
                 let Some(ip) = peer_ip else {
                     return Err("missing_peer_ip_for_local_dev_jwt".to_string());
                 };

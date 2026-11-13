@@ -399,7 +399,7 @@ pub fn handle(
                     method == "buy_offer",
                 ));
             }
-            if offer.price_plex <= 0 && !ctx.feature_flags.free_fast_checkout_plex {
+            if offer.price_plex <= 0 && !ctx.feature_flags_snapshot().free_fast_checkout_plex {
                 return Some(Err(rpc_err(
                     "InvalidOffer",
                     format!("Offer {offer_id} has invalid non-positive PLEX price"),

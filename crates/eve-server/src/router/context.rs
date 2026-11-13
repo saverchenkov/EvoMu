@@ -12,8 +12,8 @@ use eve_dogma::ShipFittingEngine;
 use eve_proto::BridgeRpcError;
 use eve_sde::SdeRegistry;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::sync::{Arc, LockResult, PoisonError, TryLockError, TryLockResult};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
+use std::sync::{Arc, LockResult, PoisonError, RwLock, TryLockError, TryLockResult};
 
 pub static NEXT_BOUND_ID: AtomicU64 = AtomicU64::new(10_000);
 
@@ -45,8 +45,8 @@ pub struct ServerContext {
     pub systems: Arc<SystemRegistry>,
     pub living_world: Arc<LivingWorldDirector>,
     pub quasar_gateway: Arc<crate::quasar_gateway::PublicGatewayRouter>,
-    pub cataloged_services: HashSet<String>,
-    pub quasar_domains: HashSet<String>,
+    pub cataloged_services: Arc<HashSet<String>>,
+    pub quasar_domains: Arc<HashSet<String>>,
     pub bound_objects: Arc<RankedRwLock<HashMap<u64, BoundObjectEntry>, RANK_LEAF>>,
     pub object_cache: Arc<RankedRwLock<HashMap<String, crate::router::cache_notifications::CachedObjectRecord>, RANK_LEAF>>,
     pub object_cache_timestamps: Arc<RankedRwLock<HashMap<String, i64>, RANK_LEAF>>,
@@ -83,9 +83,9 @@ pub struct ServerContext {
     pub active_warps: Arc<RankedMutex<HashMap<i64, i64>, RANK_LEAF>>,
     pub return_warps: Arc<RankedMutex<HashSet<i64>, RANK_LEAF>>,
     pub location_change_invuln: Arc<RankedMutex<HashMap<i64, u64>, RANK_LEAF>>,
-    pub feature_flags: crate::config::FeatureFlagsConfig,
-    pub esi_port: u16,
-    pub xmpp_port: u16,
+    pub feature_flags: Arc<RwLock<crate::config::FeatureFlagsConfig>>,
+    pub esi_port: Arc<AtomicU16>,
+    pub xmpp_port: Arc<AtomicU16>,
     pub esi_state: Arc<crate::esi::runtime_state::EsiRuntimeState>,
     /// Per-world fleet state not persisted in `WorldRepository` (names, invites, adverts, watchlists).
     pub(crate) fleet_extras: Arc<RankedMutex<crate::services::fleet_social::fleet_social_fleets::FleetExtrasState, RANK_LEAF>>,
@@ -120,6 +120,8 @@ pub(crate) struct ServerContextWeak {
     systems: std::sync::Weak<SystemRegistry>,
     living_world: std::sync::Weak<LivingWorldDirector>,
     quasar_gateway: std::sync::Weak<crate::quasar_gateway::PublicGatewayRouter>,
+    cataloged_services: std::sync::Weak<HashSet<String>>,
+    quasar_domains: std::sync::Weak<HashSet<String>>,
     bound_objects: std::sync::Weak<RankedRwLock<HashMap<u64, BoundObjectEntry>, RANK_LEAF>>,
     object_cache: std::sync::Weak<RankedRwLock<HashMap<String, crate::router::cache_notifications::CachedObjectRecord>, RANK_LEAF>>,
     object_cache_timestamps: std::sync::Weak<RankedRwLock<HashMap<String, i64>, RANK_LEAF>>,
@@ -150,9 +152,9 @@ pub(crate) struct ServerContextWeak {
     active_warps: std::sync::Weak<RankedMutex<HashMap<i64, i64>, RANK_LEAF>>,
     return_warps: std::sync::Weak<RankedMutex<HashSet<i64>, RANK_LEAF>>,
     location_change_invuln: std::sync::Weak<RankedMutex<HashMap<i64, u64>, RANK_LEAF>>,
-    feature_flags: crate::config::FeatureFlagsConfig,
-    esi_port: u16,
-    xmpp_port: u16,
+    feature_flags: std::sync::Weak<RwLock<crate::config::FeatureFlagsConfig>>,
+    esi_port: std::sync::Weak<AtomicU16>,
+    xmpp_port: std::sync::Weak<AtomicU16>,
     esi_state: std::sync::Weak<crate::esi::runtime_state::EsiRuntimeState>,
     fleet_extras: std::sync::Weak<RankedMutex<crate::services::fleet_social::fleet_social_fleets::FleetExtrasState, RANK_LEAF>>,
     social_extras: std::sync::Weak<RankedMutex<crate::services::fleet_social::fleet_social_chat::SocialExtrasState, RANK_LEAF>>,
@@ -183,8 +185,8 @@ impl ServerContextWeak {
             systems: self.systems.upgrade()?,
             living_world: self.living_world.upgrade()?,
             quasar_gateway: self.quasar_gateway.upgrade()?,
-            cataloged_services: ServerContext::default_cataloged_services().clone(),
-            quasar_domains: ServerContext::default_quasar_domains().clone(),
+            cataloged_services: self.cataloged_services.upgrade()?,
+            quasar_domains: self.quasar_domains.upgrade()?,
             bound_objects: self.bound_objects.upgrade()?,
             object_cache: self.object_cache.upgrade()?,
             object_cache_timestamps: self.object_cache_timestamps.upgrade()?,
@@ -219,9 +221,9 @@ impl ServerContextWeak {
             active_warps: self.active_warps.upgrade()?,
             return_warps: self.return_warps.upgrade()?,
             location_change_invuln: self.location_change_invuln.upgrade()?,
-            feature_flags: self.feature_flags.clone(),
-            esi_port: self.esi_port,
-            xmpp_port: self.xmpp_port,
+            feature_flags: self.feature_flags.upgrade()?,
+            esi_port: self.esi_port.upgrade()?,
+            xmpp_port: self.xmpp_port.upgrade()?,
             esi_state: self.esi_state.upgrade()?,
             fleet_extras: self.fleet_extras.upgrade()?,
             social_extras: self.social_extras.upgrade()?,
@@ -433,24 +435,52 @@ pub struct ActiveMoonSurveyProbe {
 impl Default for ServerContext { fn default() -> Self { Self::new() } }
 
 impl ServerContext {
-    pub(crate) fn default_cataloged_services() -> &'static HashSet<String> {
-        static CATALOGED_SERVICES: std::sync::OnceLock<HashSet<String>> =
+    pub(crate) fn default_cataloged_services() -> &'static Arc<HashSet<String>> {
+        static CATALOGED_SERVICES: std::sync::OnceLock<Arc<HashSet<String>>> =
             std::sync::OnceLock::new();
         CATALOGED_SERVICES.get_or_init(|| {
             let catalog_map: HashMap<String, serde_json::Value> =
                 serde_json::from_str(EMBEDDED_RPC_CATALOG_JSON).unwrap_or_default();
-            catalog_map.into_keys().collect()
+            Arc::new(catalog_map.into_keys().collect())
         })
     }
 
-    pub(crate) fn default_quasar_domains() -> &'static HashSet<String> {
-        static QUASAR_DOMAINS: std::sync::OnceLock<HashSet<String>> =
+    pub(crate) fn default_quasar_domains() -> &'static Arc<HashSet<String>> {
+        static QUASAR_DOMAINS: std::sync::OnceLock<Arc<HashSet<String>>> =
             std::sync::OnceLock::new();
         QUASAR_DOMAINS.get_or_init(|| {
             let quasar_map: HashMap<String, serde_json::Value> =
                 serde_json::from_str(EMBEDDED_QUASAR_CATALOG_JSON).unwrap_or_default();
-            quasar_map.into_keys().collect()
+            Arc::new(quasar_map.into_keys().collect())
         })
+    }
+
+    #[inline]
+    pub fn feature_flags_snapshot(&self) -> crate::config::FeatureFlagsConfig {
+        self.feature_flags
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    #[inline]
+    pub fn esi_port(&self) -> u16 {
+        self.esi_port.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn set_esi_port(&self, port: u16) {
+        self.esi_port.store(port, Ordering::Release);
+    }
+
+    #[inline]
+    pub fn xmpp_port(&self) -> u16 {
+        self.xmpp_port.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn set_xmpp_port(&self, port: u16) {
+        self.xmpp_port.store(port, Ordering::Release);
     }
 
     /// Creates a non-owning weak handle referencing all shared runtime state on this `ServerContext`
@@ -464,6 +494,8 @@ impl ServerContext {
             systems: Arc::downgrade(&self.systems),
             living_world: Arc::downgrade(&self.living_world),
             quasar_gateway: Arc::downgrade(&self.quasar_gateway),
+            cataloged_services: Arc::downgrade(&self.cataloged_services),
+            quasar_domains: Arc::downgrade(&self.quasar_domains),
             bound_objects: Arc::downgrade(&self.bound_objects),
             object_cache: Arc::downgrade(&self.object_cache),
             object_cache_timestamps: Arc::downgrade(&self.object_cache_timestamps),
@@ -494,9 +526,9 @@ impl ServerContext {
             active_warps: Arc::downgrade(&self.active_warps),
             return_warps: Arc::downgrade(&self.return_warps),
             location_change_invuln: Arc::downgrade(&self.location_change_invuln),
-            feature_flags: self.feature_flags.clone(),
-            esi_port: self.esi_port,
-            xmpp_port: self.xmpp_port,
+            feature_flags: Arc::downgrade(&self.feature_flags),
+            esi_port: Arc::downgrade(&self.esi_port),
+            xmpp_port: Arc::downgrade(&self.xmpp_port),
             esi_state: Arc::downgrade(&self.esi_state),
             fleet_extras: Arc::downgrade(&self.fleet_extras),
             social_extras: Arc::downgrade(&self.social_extras),
@@ -519,8 +551,8 @@ impl ServerContext {
     pub fn with_sde_and_repository(sde: Arc<SdeRegistry>, db: Arc<WorldRepository>) -> Self {
         let _ = world_seeder::seed_dual_anchor_markets(&db, &sde);
         let clock = db.clock();
-        let cataloged_services = Self::default_cataloged_services().clone();
-        let quasar_domains = Self::default_quasar_domains().clone();
+        let cataloged_services = Arc::clone(Self::default_cataloged_services());
+        let quasar_domains = Arc::clone(Self::default_quasar_domains());
         let (notify_tx, _) = tokio::sync::broadcast::channel(256);
         let instance_id = NEXT_CTX_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let pending_notifications = Arc::new(RankedRwLock::new(HashMap::new()));
@@ -635,9 +667,9 @@ impl ServerContext {
             active_warps: Arc::new(RankedMutex::new(HashMap::new())),
             return_warps: Arc::new(RankedMutex::new(HashSet::new())),
             location_change_invuln: Arc::new(RankedMutex::new(HashMap::new())),
-            feature_flags: crate::config::FeatureFlagsConfig::default(),
-            esi_port: 26_004,
-            xmpp_port: 5222,
+            feature_flags: Arc::new(RwLock::new(crate::config::FeatureFlagsConfig::default())),
+            esi_port: Arc::new(AtomicU16::new(26_004)),
+            xmpp_port: Arc::new(AtomicU16::new(5222)),
             esi_state: Arc::new(crate::esi::runtime_state::EsiRuntimeState::new()),
             fleet_extras: Arc::new(RankedMutex::new(Default::default())),
             social_extras: Arc::new(RankedMutex::new(crate::services::fleet_social::fleet_social_chat::SocialExtrasState::new())),
@@ -919,27 +951,30 @@ impl ServerContext {
                 db.provision_gm_account(a.username.trim(), a.password_token.trim(), a.character_id, a.character_name.trim());
             }
         }
-        let mut ctx = Self::with_sde_and_repository(sde, db);
+        let ctx = Self::with_sde_and_repository(sde, db);
         ctx.systems.set_belt_respawn_interval_secs(cfg.belt_respawn_interval_secs);
         ctx.systems.set_downtime_utc_secs_of_day(cfg.downtime_utc_secs_of_day);
-        ctx.feature_flags = cfg.feature_flags.clone();
+        *ctx.feature_flags.write().unwrap_or_else(|e| e.into_inner()) = cfg.feature_flags.clone();
         if !ctx
             .quasar_gateway
             .has_persisted_free_fast_checkout_plex
-            .load(std::sync::atomic::Ordering::Relaxed)
+            .load(Ordering::Relaxed)
         {
             ctx.quasar_gateway.free_fast_checkout_plex.store(
-                ctx.feature_flags.free_fast_checkout_plex,
-                std::sync::atomic::Ordering::Relaxed,
+                cfg.feature_flags.free_fast_checkout_plex,
+                Ordering::Relaxed,
             );
         } else {
-            ctx.feature_flags.free_fast_checkout_plex = ctx
+            ctx.feature_flags
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .free_fast_checkout_plex = ctx
                 .quasar_gateway
                 .free_fast_checkout_plex
-                .load(std::sync::atomic::Ordering::Relaxed);
+                .load(Ordering::Relaxed);
         }
-        ctx.esi_port = cfg.esi_port;
-        ctx.xmpp_port = cfg.xmpp_port;
+        ctx.set_esi_port(cfg.esi_port);
+        ctx.set_xmpp_port(cfg.xmpp_port);
         if cfg.feature_flags.seed_demo {
             ctx.seed_demo_world_fixtures();
             ctx.db.with_mut_snapshot(|snap| {
@@ -950,7 +985,10 @@ impl ServerContext {
     }
 
     pub fn set_free_fast_checkout_plex(&mut self, enabled: bool) {
-        self.feature_flags.free_fast_checkout_plex = enabled;
+        self.feature_flags
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .free_fast_checkout_plex = enabled;
         self.quasar_gateway
             .free_fast_checkout_plex
             .store(enabled, std::sync::atomic::Ordering::Relaxed);

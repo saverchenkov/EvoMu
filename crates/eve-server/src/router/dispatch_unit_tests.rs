@@ -55,9 +55,12 @@ async fn wal_error_hooks_and_format_pyrep_summary_variants() {
 
 #[tokio::test]
 async fn dispatch_rpc_feature_flags_role_gates_and_time_control() {
-    let mut ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
-    ctx.feature_flags.enable_living_world = false;
-    ctx.feature_flags.enable_quasar_gateway = false;
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    {
+        let mut flags = ctx.feature_flags.write().unwrap();
+        flags.enable_living_world = false;
+        flags.enable_quasar_gateway = false;
+    }
 
     let mut sess = SessionState::new(94_001);
     sess.user_id = Some(1);
@@ -79,8 +82,11 @@ async fn dispatch_rpc_feature_flags_role_gates_and_time_control() {
         .unwrap_err();
     assert_eq!(q_err.code, "FeatureDisabled");
 
-    ctx.feature_flags.enable_living_world = true;
-    ctx.feature_flags.enable_quasar_gateway = true;
+    {
+        let mut flags = ctx.feature_flags.write().unwrap();
+        flags.enable_living_world = true;
+        flags.enable_quasar_gateway = true;
+    }
 
     // 2. GM & QA role gates
     sess.role = 0;

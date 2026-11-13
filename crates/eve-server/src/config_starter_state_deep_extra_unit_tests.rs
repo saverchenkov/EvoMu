@@ -134,7 +134,7 @@ async fn starter_characters_plex_grants_feature_flag_fallback_and_error_paths() 
 
     // Enable starter_plex_balance via ctx.feature_flags so starter without explicit initial_balance_plex inherits it
     let ctx_mut = Arc::get_mut(&mut ctx).expect("unique Arc");
-    ctx_mut.feature_flags.starter_plex_balance = 125;
+    ctx_mut.feature_flags.write().unwrap().starter_plex_balance = 125;
 
     let uid_flag = ctx.db.provision_player_account("pilot_flag_plex", "pw_flag");
     let uid_override = ctx.db.provision_player_account("pilot_ovr_plex", "pw_ovr");

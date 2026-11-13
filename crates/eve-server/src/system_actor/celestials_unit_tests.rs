@@ -318,10 +318,12 @@ async fn module_cycle_queries_nanite_repairs_and_try_remove_ball_cleanup_work() 
     );
     {
         let bp = sys.ballpark.read().unwrap();
+        let st = sys.actor_state.read().unwrap();
         persist_landed_warps_in_db(
             &bp,
             &[DestinyEvent::OnDeactivatingWarp { ball_id: ship2 }],
             &Some(Arc::clone(&ctx.db)),
+            &st.ball_space_entry_epochs,
         );
     }
     let saved_pos = ctx.db.with_snapshot(|s| s.item_positions.get(&ship2).copied());

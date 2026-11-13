@@ -221,9 +221,15 @@ fn mining_details_cycle_output_and_activity_mgr_edges() {
 
 #[test]
 fn buy_offer_payment_tokens_plex_vault_products_omega_and_error_edges() {
-    let mut ctx = test_ctx();
-    ctx.feature_flags.free_fast_checkout_plex = false;
-    ctx.feature_flags.seed_demo = false;
+    let ctx = test_ctx();
+    {
+        let mut flags = ctx
+            .feature_flags
+            .write()
+            .expect("feature_flags lock poisoned");
+        flags.free_fast_checkout_plex = false;
+        flags.seed_demo = false;
+    }
     let sess = auth_session(1, 90_000_001, 98_000_001, 30_000_142);
     let kw = HashMap::new();
 

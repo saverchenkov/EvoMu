@@ -1620,27 +1620,252 @@ async fn system_hibernation_zero_idle_tick_work_and_eviction_919_866_869() {
     );
     assert!(ctx.systems.get_handle(idle_sys).is_none());
 
-    // 5. #869: npc_spawns entry for an active system is updated in place without remove->await->insert.
+    // 5. GH-869: npc_spawns entry for an active system is updated in place without remove->await->insert,
+    // including under concurrent handle_npc_destroyed / map mutations while planning/executing belt rats.
     let active_sys = 30_000_142_u32;
     let _ = ctx.systems.get_or_spawn(active_sys);
+    let concurrent_sys = 31_000_001_u32;
+    let _ = ctx.systems.get_or_spawn(concurrent_sys);
+    let now_unix = ctx.now_unix();
+    let concurrent_npc_ball_id = 9_990_001_i64;
+    let concurrent_spawn_group_id = 77_777_u32;
+    let concurrent_bounty_npc = crate::combat::npc_ai::NpcCombatEntity {
+        ball_id: concurrent_npc_ball_id,
+        type_id: 587,
+        faction_id: 500_001,
+        state: crate::combat::npc_ai::NpcAiState::Idle,
+        spawn_group_id: concurrent_spawn_group_id,
+        spawn_pos: glam::DVec3::ZERO,
+        target_id: None,
+        bounty_isk: 1_000.0,
+        optimal_range: 5_000.0,
+        orbit_range: 3_000.0,
+        base_dps: 10.0,
+        damage_vector: Default::default(),
+        last_attack_tick: 0,
+        has_shield_rep: false,
+        has_armor_rep: false,
+    };
+    {
+        let mut spawns = ctx.npc_spawns.write().unwrap();
+        let mgr_active = spawns
+            .entry(active_sys)
+            .or_insert_with(crate::combat::npc_ai::NpcSpawnManager::new);
+        mgr_active
+            .respawn_timers
+            .insert((active_sys, 42_424), 9_999_999_999);
+
+        let mgr_wh = spawns
+            .entry(concurrent_sys)
+            .or_insert_with(crate::combat::npc_ai::NpcSpawnManager::new);
+        mgr_wh
+            .respawn_timers
+            .insert((concurrent_sys, 42_424), 9_999_999_999);
+        mgr_wh
+            .entities
+            .insert(concurrent_npc_ball_id, concurrent_bounty_npc);
+    }
+
+    // Deterministically suspend execute_belt_rat_plan_detached_with_start_id across its actor await
+    // and inject a concurrent handle_npc_destroyed mutation on ctx.npc_spawns before merge.
+    let (mut planned_groups, special_specs) = {
+        let mut spawns = ctx.npc_spawns.write().unwrap();
+        spawns
+            .get_mut(&concurrent_sys)
+            .expect("concurrent_sys must remain present in npc_spawns")
+            .plan_belt_rats_for_system(&ctx, concurrent_sys, false, None, false, false, false)
+    };
+    if planned_groups.is_empty() {
+        let Some((&sg_id, sg)) = ctx.sde.npc_spawn_groups.iter().next() else {
+            panic!("SDE must contain at least one npc_spawn_group");
+        };
+        planned_groups.push((sg_id, sg.clone(), glam::DVec3::ZERO));
+    }
+    let mut built_specialized = Vec::new();
+    let mut concurrent_kill_injected = false;
+    let exec_fut =
+        crate::combat::npc_ai::NpcSpawnManager::execute_belt_rat_plan_detached_with_start_id(
+            &ctx,
+            concurrent_sys,
+            planned_groups,
+            special_specs,
+            88_000_100,
+            &mut built_specialized,
+        );
+    tokio::pin!(exec_fut);
+    let (_spawned_ids, spawned_entities) = loop {
+        tokio::select! {
+            biased;
+            res = &mut exec_fut => break res,
+            _ = std::future::ready(()), if !concurrent_kill_injected => {
+                concurrent_kill_injected = true;
+                let mut spawns = ctx.npc_spawns.write().unwrap();
+                let mgr = spawns
+                    .get_mut(&concurrent_sys)
+                    .expect("GH-869: concurrent_sys entry must still exist in npc_spawns mid-await");
+                mgr.handle_npc_destroyed(
+                    &ctx,
+                    concurrent_sys,
+                    concurrent_npc_ball_id,
+                    90_000_001,
+                    now_unix,
+                )
+                .expect("concurrent handle_npc_destroyed succeeds");
+            }
+        }
+    };
+    assert!(
+        concurrent_kill_injected,
+        "execute_belt_rat_plan_detached_with_start_id must yield across actor spawn await"
+    );
+    assert!(
+        !spawned_entities.is_empty(),
+        "detached belt rat execution must yield spawned entities to merge"
+    );
     {
         let mut spawns = ctx.npc_spawns.write().unwrap();
         let mgr = spawns
+            .entry(concurrent_sys)
+            .or_insert_with(crate::combat::npc_ai::NpcSpawnManager::new);
+        for (ball_id, entity) in &spawned_entities {
+            mgr.entities.insert(*ball_id, entity.clone());
+        }
+    }
+
+    // Also drive tick_background_cluster concurrently with a spawned writer task on npc_spawns.
+    ctx.clock().advance_secs(1);
+    let ctx_bg = ctx.clone();
+    let mut concurrent_writer = tokio::spawn(async move {
+        tokio::task::yield_now().await;
+        let mut spawns = ctx_bg.npc_spawns.write().unwrap();
+        let mgr = spawns
             .entry(active_sys)
             .or_insert_with(crate::combat::npc_ai::NpcSpawnManager::new);
-        mgr.respawn_timers.insert((active_sys, 42_424), 9_999_999_999);
-    }
-    ctx.clock().advance_secs(1);
-    tick_background_cluster(&ctx).await;
-    let preserved_timer = ctx
-        .npc_spawns
-        .read()
-        .unwrap()
+        mgr.respawn_timers.insert((active_sys, 55_555), 8_888_888_888);
+    });
+    tokio::join!(tick_background_cluster(&ctx), async {
+        let _ = (&mut concurrent_writer).await;
+    });
+
+    let spawns_guard = ctx.npc_spawns.read().unwrap();
+    let active_mgr = spawns_guard
         .get(&active_sys)
-        .and_then(|mgr| mgr.respawn_timers.get(&(active_sys, 42_424)).copied());
+        .expect("active_sys present in npc_spawns");
     assert_eq!(
-        preserved_timer,
+        active_mgr.respawn_timers.get(&(active_sys, 42_424)).copied(),
         Some(9_999_999_999),
-        "#869: npc_spawns state must never be dropped or overwritten across cluster tick awaits"
+        "GH-869: pre-existing respawn timer must not be dropped across cluster tick awaits"
     );
+    assert_eq!(
+        active_mgr.respawn_timers.get(&(active_sys, 55_555)).copied(),
+        Some(8_888_888_888),
+        "GH-869: concurrent mutation injected during cluster tick must survive"
+    );
+
+    let wh_mgr = spawns_guard
+        .get(&concurrent_sys)
+        .expect("concurrent_sys present in npc_spawns");
+    assert_eq!(
+        wh_mgr.respawn_timers.get(&(concurrent_sys, 42_424)).copied(),
+        Some(9_999_999_999),
+        "GH-869: existing respawn timer must survive mid-await mutation + merge"
+    );
+    assert_eq!(
+        wh_mgr
+            .respawn_timers
+            .get(&(concurrent_sys, concurrent_spawn_group_id))
+            .copied(),
+        Some(now_unix + 1_200),
+        "GH-869: concurrent handle_npc_destroyed cooldown must survive post-await merge"
+    );
+    assert!(
+        !wh_mgr.entities.contains_key(&concurrent_npc_ball_id),
+        "GH-869: concurrently destroyed NPC must remain removed after post-await merge"
+    );
+    for (ball_id, _) in &spawned_entities {
+        assert!(
+            wh_mgr.entities.contains_key(ball_id),
+            "GH-869: newly spawned belt rat {ball_id} must be merged after concurrent kill"
+        );
+    }
+}
+
+#[tokio::test]
+async fn tick_background_cluster_evicts_idle_system_after_60_idle_ticks_919_866() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let idle_sys = 30_002_187_u32; // Amarr (no characters in demo seed)
+    {
+        let idle_handle = ctx.systems.get_or_spawn(idle_sys);
+        assert!(idle_handle.is_hibernated());
+    }
+    // One idle physics tick marks `idle_ticks >= 1` so cluster_tick does not treat the newly
+    // spawned empty system as a cold-boot NPC spawn target on its very first pass.
+    crate::sp6_lifecycle::step_active_systems_physics_tick(&ctx, 1).await;
+
+    // Drive 60 idle background ticks with 1s steps (< 300s hibernation threshold):
+    // handle must stay loaded until both idle tick count and hibernation age are met.
+    for _ in 0..60 {
+        ctx.clock().advance_secs(1);
+        tick_background_cluster(&ctx).await;
+    }
+    let handle_before_age = ctx
+        .systems
+        .get_handle(idle_sys)
+        .expect("system must remain loaded before 300s hibernation timeout expires");
+    assert!(handle_before_age.is_hibernated());
+    assert!(handle_before_age.idle_ticks() >= 60);
+    drop(handle_before_age);
+
+    // Once hibernation age passes 300s and idle_ticks >= 60, tick_background_cluster itself evicts it.
+    ctx.clock().advance_secs(300);
+    tick_background_cluster(&ctx).await;
+    assert!(
+        ctx.systems.get_handle(idle_sys).is_none(),
+        "W5C3-02: tick_background_cluster must await evict_idle_systems(300) and drop idle system"
+    );
+}
+
+#[test]
+fn server_context_weak_upgrade_shares_live_config_and_catalog_arcs_without_clones_839() {
+    let mut cfg = crate::config::ServerConfig::default();
+    cfg.feature_flags.enable_living_world = false;
+    cfg.feature_flags.starter_plex_balance = 777;
+    cfg.feature_flags.free_fast_checkout_plex = true;
+    cfg.esi_port = 26_199;
+    cfg.xmpp_port = 25_199;
+
+    let ctx = ServerContext::from_config(&cfg).expect("from_config succeeds");
+    let weak = ctx.downgrade();
+
+    // Live updates to operator config must be observed immediately by subsequent Weak upgrades.
+    ctx.feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .starter_plex_balance = 888;
+    ctx.set_esi_port(26_299);
+    ctx.set_xmpp_port(25_299);
+
+    let upgraded1 = weak.upgrade().expect("weak upgrades while ServerContext lives");
+    let upgraded2 = weak.upgrade().expect("weak upgrades again");
+
+    assert!(Arc::ptr_eq(&ctx.cataloged_services, &upgraded1.cataloged_services));
+    assert!(Arc::ptr_eq(&ctx.quasar_domains, &upgraded1.quasar_domains));
+    assert!(Arc::ptr_eq(&ctx.feature_flags, &upgraded1.feature_flags));
+    assert!(Arc::ptr_eq(
+        &upgraded1.cataloged_services,
+        &upgraded2.cataloged_services
+    ));
+    assert!(Arc::ptr_eq(&upgraded1.quasar_domains, &upgraded2.quasar_domains));
+
+    let flags = upgraded1.feature_flags_snapshot();
+    assert!(!flags.enable_living_world);
+    assert!(flags.free_fast_checkout_plex);
+    assert_eq!(flags.starter_plex_balance, 888);
+    assert_eq!(upgraded1.esi_port(), 26_299);
+    assert_eq!(upgraded1.xmpp_port(), 25_299);
+
+    drop(upgraded1);
+    drop(upgraded2);
+    drop(ctx);
+    assert!(weak.upgrade().is_none());
 }

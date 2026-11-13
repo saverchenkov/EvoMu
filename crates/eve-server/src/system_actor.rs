@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod celestials;
-use celestials::fast_forward_clock_in_actor;
+use celestials::fast_forward_clock_in_actor_with_epochs;
 pub use celestials::*;
 mod belts;
 pub use belts::*;
@@ -558,6 +558,7 @@ impl SystemRegistry {
                     tactical_state,
                     pending_notifications_opt,
                     notify_tx_opt,
+                    ball_space_entry_epochs,
                     ..
                 } = &mut *actor_st;
                 {
@@ -1006,7 +1007,12 @@ impl SystemRegistry {
                                                 reconcile_tackle_and_bubbles(&mut ballpark, active_module_cycles, &base_scramble_strengths, &base_core_strengths, &db_opt, deact_guard.as_ref());
                                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                             }
-                                            persist_ball_positions_in_db(&ballpark, &[ball_id], &db_opt);
+                                            persist_ball_positions_in_db(
+                                                &ballpark,
+                                                &[ball_id],
+                                                &db_opt,
+                                                ball_space_entry_epochs,
+                                            );
                                             let _ = reply.send(Ok(ballpark.current_tick));
                                         }
                                         Err(e) => {
@@ -1079,7 +1085,12 @@ impl SystemRegistry {
                             } => {
                                 let updated = ballpark.set_ball_position(ball_id, position);
                                 if updated {
-                                    persist_ball_positions_in_db(&ballpark, &[ball_id], &db_opt);
+                                    persist_ball_positions_in_db(
+                                        &ballpark,
+                                        &[ball_id],
+                                        &db_opt,
+                                        ball_space_entry_epochs,
+                                    );
                                 }
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 let _ = reply.send(updated);
@@ -1112,7 +1123,12 @@ impl SystemRegistry {
                                     .goto_point(ball_id, point)
                                     .map(|()| ballpark.current_tick);
                                 if res.is_ok() {
-                                    persist_ball_positions_in_db(&ballpark, &[ball_id], &db_opt);
+                                    persist_ball_positions_in_db(
+                                        &ballpark,
+                                        &[ball_id],
+                                        &db_opt,
+                                        ball_space_entry_epochs,
+                                    );
                                 }
                                 let _ = reply.send(res);
                             }
@@ -1582,13 +1598,18 @@ impl SystemRegistry {
                                 let _ = reply.send(ballpark.set_interdiction_nullified(ball_id, nullified));
                             }
                             SystemCommand::FastForwardClock { ship_id, secs, reply } => {
-                                fast_forward_clock_in_actor(solar_system_id, &mut ballpark, ship_id, secs, sim_elapsed_secs, &db_opt, &ball_positions_actor, &scrambled_balls_actor, &event_tx_actor);
+                                fast_forward_clock_in_actor_with_epochs(solar_system_id, &mut ballpark, ship_id, secs, sim_elapsed_secs, &db_opt, ball_space_entry_epochs, &ball_positions_actor, &scrambled_balls_actor, &event_tx_actor);
                                 let _ = reply.send(());
                             }
                             SystemCommand::MicroJump { ball_id, distance_meters, reply } => {
                                 let res = ballpark.micro_jump(ball_id, distance_meters);
                                 if res.is_ok() {
-                                    persist_ball_positions_in_db(&ballpark, &[ball_id], &db_opt);
+                                    persist_ball_positions_in_db(
+                                        &ballpark,
+                                        &[ball_id],
+                                        &db_opt,
+                                        ball_space_entry_epochs,
+                                    );
                                 }
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 let _ = reply.send(res);
@@ -1596,7 +1617,12 @@ impl SystemRegistry {
                             SystemCommand::MicroJumpField { ball_id, distance_meters, field_radius_meters, max_jumped_ships, reply } => {
                                 let res = ballpark.micro_jump_field(ball_id, distance_meters, field_radius_meters, max_jumped_ships);
                                 if let Ok(ref jumped_ids) = res {
-                                    persist_ball_positions_in_db(&ballpark, jumped_ids, &db_opt);
+                                    persist_ball_positions_in_db(
+                                        &ballpark,
+                                        jumped_ids,
+                                        &db_opt,
+                                        ball_space_entry_epochs,
+                                    );
                                 }
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 let _ = reply.send(res);
@@ -1715,7 +1741,12 @@ impl SystemRegistry {
                             }
                             let events = ballpark.step(dt_sim);
                             let landed_warps = celestials::collect_landed_warp_positions(&ballpark, &events);
-                            persist_landed_warps_in_db(&ballpark, &events, &db_opt);
+                            persist_landed_warps_in_db(
+                                &ballpark,
+                                &events,
+                                &db_opt,
+                                ball_space_entry_epochs,
+                            );
                             cycles::flush_target_lost_notifications(
                                 &ballpark,
                                 &events,
@@ -1766,11 +1797,11 @@ impl SystemRegistry {
                                 }
                             }
                             let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
-                            let mut destroyed_balls = step_cycles_and_capacitor(
+                            let mut destroyed_balls = step_cycles_and_capacitor_with_epochs(
                                 &mut ballpark, active_module_cycles, pending_anchoring_disruptors,
                                 active_nanite_repairs, ship_rack_heat, rah_incoming_damage,
                                 &base_scramble_strengths, &base_core_strengths, &sde_opt, &db_opt,
-                                mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions, dt_sim, deact_guard.as_ref(),
+                                ball_space_entry_epochs, mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions, dt_sim, deact_guard.as_ref(),
                             );
                             cycles::flush_pending_cycle_damage_notifications(
                                 db_opt.as_ref(),

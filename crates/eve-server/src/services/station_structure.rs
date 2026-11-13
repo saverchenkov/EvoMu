@@ -538,7 +538,7 @@ pub async fn handle(
                     .insert(ship.item_id, spawn_pos.to_array());
                 crate::sp6_lifecycle::enter_space_in_snap(snap, ship.item_id, ch.solar_system_id);
             });
-            if ctx.feature_flags.enable_living_world {
+            if ctx.feature_flags_snapshot().enable_living_world {
                 let _ = ctx
                     .living_world
                     .materialize_system_lod2(ch.solar_system_id, &ctx.systems, &ctx.sde)

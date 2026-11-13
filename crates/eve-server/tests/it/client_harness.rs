@@ -254,9 +254,15 @@ async fn serve_harness_bridge_client(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_t6_client_harness_run_journeys_two_clients_and_log_hygiene() {
     // Task T-6: Real-client & dual-client bridge journey harness (`tools/client-harness/run_journeys`).
-    let mut ctx = ServerContext::new();
-    ctx.feature_flags.free_fast_checkout_plex = true;
-    ctx.feature_flags.starter_plex_balance = 50_000;
+    let ctx = ServerContext::new();
+    {
+        let mut flags = ctx
+            .feature_flags
+            .write()
+            .expect("feature_flags lock poisoned");
+        flags.free_fast_checkout_plex = true;
+        flags.starter_plex_balance = 50_000;
+    }
     let ctx = Arc::new(ctx);
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
