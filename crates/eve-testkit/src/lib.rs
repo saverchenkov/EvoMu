@@ -9,6 +9,7 @@ pub mod client_contract;
 pub mod client_harness;
 pub mod pre_check;
 pub mod quasar_tap;
+pub mod shadow_client;
 
 use std::fs::OpenOptions;
 use std::io::Write;
