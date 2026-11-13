@@ -7,11 +7,12 @@
 //! - `MoveBookmarksToFolderAndSubfolder` (2-tuple of list, folderID)
 
 use super::fleet_social_access_group_bookmarks::{
-    acl_folder_updates_arg, folder_access_level, AccessLevel, BOOKMARKS_ADDED,
-    BOOKMARKS_REMOVED, BOOKMARKS_UPDATED,
+    acl_folder_updates_rep, folder_access_level, AccessLevel, BOOKMARKS_ADDED, BOOKMARKS_REMOVED,
+    BOOKMARKS_UPDATED,
 };
 use super::fleet_social_chat::extract_id_list;
 use super::{is_bookmark_expired_in_snap, sweep_expired_bookmarks_and_notify};
+use crate::router::notify_registry::{OnRefreshBookmarks, OnSharedBookmarksFolderUpdated};
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::BookmarkRecord;
 use eve_machonet::SessionState;
@@ -471,15 +472,15 @@ pub(crate) async fn handle_bookmark_static_location(
 
     if is_shared_folder {
         if let Some(cid) = corp_id {
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Corporation(cid),
-                "OnSharedBookmarksFolderUpdated",
-                "corpid",
-                acl_folder_updates_arg(
-                    folder_id.unwrap_or(0),
-                    BOOKMARKS_ADDED,
-                    PyRep::List(vec![PyRep::Integer(bm_id)]),
-                ),
+                OnSharedBookmarksFolderUpdated {
+                    updates: acl_folder_updates_rep(
+                        folder_id.unwrap_or(0),
+                        BOOKMARKS_ADDED,
+                        PyRep::List(vec![PyRep::Integer(bm_id)]),
+                    ),
+                },
             );
         }
     }
@@ -733,23 +734,18 @@ pub(crate) async fn handle_update_bookmark(
         Ok((is_shared, fid, cid, exp_unix))
     })?;
 
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnRefreshBookmarks",
-        "charid",
-        vec![],
-    );
+    ctx.emit_typed(NotificationTarget::Character(char_id), OnRefreshBookmarks);
     if is_shared {
         if let Some(cid) = corp_id {
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Corporation(cid),
-                "OnSharedBookmarksFolderUpdated",
-                "corpid",
-                acl_folder_updates_arg(
-                    folder_id.unwrap_or(0),
-                    BOOKMARKS_UPDATED,
-                    PyRep::Integer(bm_id),
-                ),
+                OnSharedBookmarksFolderUpdated {
+                    updates: acl_folder_updates_rep(
+                        folder_id.unwrap_or(0),
+                        BOOKMARKS_UPDATED,
+                        PyRep::Integer(bm_id),
+                    ),
+                },
             );
         }
     }
@@ -841,15 +837,15 @@ pub(crate) async fn handle_delete_bookmarks(
 
     if let Some(cid) = corp_id {
         for (fid, bms) in shared_folder_bms {
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Corporation(cid),
-                "OnSharedBookmarksFolderUpdated",
-                "corpid",
-                acl_folder_updates_arg(
-                    fid,
-                    BOOKMARKS_REMOVED,
-                    PyRep::List(bms.iter().copied().map(PyRep::Integer).collect()),
-                ),
+                OnSharedBookmarksFolderUpdated {
+                    updates: acl_folder_updates_rep(
+                        fid,
+                        BOOKMARKS_REMOVED,
+                        PyRep::List(bms.iter().copied().map(PyRep::Integer).collect()),
+                    ),
+                },
             );
         }
     }

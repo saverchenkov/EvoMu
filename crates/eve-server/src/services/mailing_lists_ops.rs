@@ -22,6 +22,7 @@
 //!   - `SetMembersMuted`
 //!   - `SetMembersOperator`
 
+use crate::router::notify_registry::{OnMailCountersUpdate, OnMailTrashed};
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use crate::services::fleet_social::fleet_social_persistence::{sync_mailing_lists_to_db, MailingListState};
 use crate::services::mail_notify;
@@ -205,11 +206,11 @@ fn handle_mail_ops(
                 ctx.esi_state.set_mail_meta(char_id, mid, meta);
             }
 
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(char_id),
-                "OnMailCountersUpdate",
-                "charid",
-                vec![PyRep::Integer(char_id)],
+                OnMailCountersUpdate {
+                    char_id: Some(char_id),
+                },
             );
             if !mail_ids.is_empty() {
                 mail_notify::emit_mail_updated_by_external(ctx, char_id, &mail_ids, Some(mark_read), None);
@@ -273,17 +274,17 @@ fn handle_mail_ops(
             trashed_ids.sort_unstable();
             trashed_ids.dedup();
             if !trashed_ids.is_empty() {
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Character(char_id),
-                    "OnMailTrashed",
-                    "charid",
-                    vec![PyRep::List(trashed_ids.iter().copied().map(PyRep::Integer).collect())],
+                    OnMailTrashed {
+                        message_ids: trashed_ids.clone(),
+                    },
                 );
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Character(char_id),
-                    "OnMailCountersUpdate",
-                    "charid",
-                    vec![PyRep::Integer(char_id)],
+                    OnMailCountersUpdate {
+                        char_id: Some(char_id),
+                    },
                 );
             }
             Some(Ok(PyRep::keyval([

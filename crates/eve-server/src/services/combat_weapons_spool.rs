@@ -9,6 +9,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 use glam::DVec3;
+use crate::router::notify_registry::{
+    OnGodmaShipEffect, OnModulesDeactivating, OnWeaponBanksChanged, OnWeaponGroupDestroyed,
+};
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime, EntropicSpoolState};
 use eve_proto::{BridgeRpcError, PyRep};
@@ -75,17 +78,27 @@ pub fn stop_entropic_spool_and_deactivate(
             let _ = fit.deactivate_module(module_id, &ctx.sde);
         }
     }
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
-        "OnModulesDeactivating",
-        "charid",
-        vec![PyRep::List(vec![PyRep::Integer(module_id)])],
+        OnModulesDeactivating {
+            module_ids: vec![module_id],
+        },
     );
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
-        "OnGodmaShipEffect",
-        "charid",
-        vec![PyRep::Integer(module_id), PyRep::String("online".into()), PyRep::Bool(false)],
+        OnGodmaShipEffect {
+            item_id: module_id,
+            effect: PyRep::String("online".into()),
+            start_or_time: PyRep::Bool(false),
+            start: None,
+            active: None,
+            environment: None,
+            start_time: None,
+            duration: None,
+            repeat: None,
+            error: None,
+            actual_stop_time: None,
+        },
     );
 }
 
@@ -1330,18 +1343,20 @@ pub fn notify_weapon_banks_updated(
     info: &PyRep,
 ) {
     for &master_id in destroyed_masters {
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::Character(char_id),
-            "OnWeaponGroupDestroyed",
-            "charid",
-            vec![PyRep::Integer(ship_id), PyRep::Integer(master_id)],
+            OnWeaponGroupDestroyed {
+                ship_id,
+                item_id: master_id,
+            },
         );
     }
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
-        "OnWeaponBanksChanged",
-        "charid",
-        vec![PyRep::Integer(ship_id), info.clone()],
+        OnWeaponBanksChanged {
+            ship_id,
+            info: info.clone(),
+        },
     );
 }
 

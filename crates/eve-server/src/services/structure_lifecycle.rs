@@ -12,6 +12,11 @@
 //! `articles/Upwell_structure.md`, `articles/Quantum_Cores.md`); each constant cites its source.
 #![forbid(unsafe_code)]
 use super::structure_upwell_ops::{load_ext_state, save_ext_state, AssetSafetyWrapRecord, StructureExtendedState, StructureLifecycleState, ASSET_SAFETY_DELIVERY_DELAY_SECS};
+use crate::router::notify_registry::{
+    emit_typed_target_to_char_with_id_type, OnCharacterLeftStructure, OnSessionChanged,
+    OnSolarSystemSovStructuresUpdated, OnSovereigntyChanged, OnStructureHacked, OnStructureRemoved,
+    OnStructureRemovedFromSpace, OnStructureTargetRemoved, TypedNotification,
+};
 use crate::router::ServerContext;
 use eve_db::{InventoryFlag, InventoryItemRecord, KillmailRecord, UpwellStructureRecord, WorldStateSnapshot};
 use eve_proto::BridgeRpcError;
@@ -640,50 +645,36 @@ fn emit_structure_left_space_and_spawn_drops(ctx: &ServerContext, snap: &WorldSt
         .collect();
     corp_recips.sort_by_key(|(cid, _)| *cid);
     corp_recips.dedup_by_key(|(cid, _)| *cid);
-    let mut queues = ctx.pending_notifications.write().unwrap_or_else(|e| e.into_inner());
-    let sys_args = vec![eve_proto::PyRep::Integer(i64::from(st.solar_system_id)), eve_proto::PyRep::Integer(st.structure_id)];
     for (cid, uid) in &sys_recips {
-        let (packet, marshaled_packet) = ServerContext::build_macho_notification_packet(*cid, *uid, "OnStructureRemoved", "solarsystemid", sys_args.clone());
-        let notif = crate::router::PendingMachoNotification {
-            seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-            recipient_char_id: *cid,
-            event: "OnStructureRemoved".into(),
-            id_type: "solarsystemid".into(),
-            args: sys_args.clone(),
-            packet,
-            marshaled_packet,
-            created_filetime: now_ft,
-        };
-        crate::router::cache_notifications::push_pending_notification_capped(
-            queues.entry(*cid).or_default(),
-            notif.clone(),
+        emit_typed_target_to_char_with_id_type(
+            Some(&ctx.pending_notifications),
+            Some(&ctx.notify_tx),
+            *cid,
+            *uid,
+            "solarsystemid",
+            now_ft,
+            OnStructureRemoved {
+                solar_system_id: i64::from(st.solar_system_id),
+                structure_id: st.structure_id,
+            },
         );
-        let _ = ctx.notify_tx.send((*cid, notif));
     }
-    let corp_args = vec![eve_proto::PyRep::Integer(st.structure_id)];
     for (cid, uid) in corp_recips {
-        let (packet, marshaled_packet) = ServerContext::build_macho_notification_packet(cid, uid, "OnStructureRemovedFromSpace", "corpid", corp_args.clone());
-        let notif = crate::router::PendingMachoNotification {
-            seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-            recipient_char_id: cid,
-            event: "OnStructureRemovedFromSpace".into(),
-            id_type: "corpid".into(),
-            args: corp_args.clone(),
-            packet,
-            marshaled_packet,
-            created_filetime: now_ft,
-        };
-        crate::router::cache_notifications::push_pending_notification_capped(
-            queues.entry(cid).or_default(),
-            notif.clone(),
+        emit_typed_target_to_char_with_id_type(
+            Some(&ctx.pending_notifications),
+            Some(&ctx.notify_tx),
+            cid,
+            uid,
+            "corpid",
+            now_ft,
+            OnStructureRemovedFromSpace {
+                structure_id: st.structure_id,
+            },
         );
-        let _ = ctx.notify_tx.send((cid, notif));
     }
     if st.type_id == crate::services::sov_services::TYPE_SOVEREIGNTY_HUB {
-        let sov_args = vec![eve_proto::PyRep::Integer(i64::from(st.solar_system_id)), eve_proto::PyRep::None];
         let structs = crate::services::sov_services::collect_sov_structures_from_snap(snap, st.solar_system_id);
         let changes = eve_proto::PyRep::Dict(vec![(eve_proto::PyRep::Integer(st.structure_id), eve_proto::PyRep::List(vec![eve_proto::PyRep::Integer(0)]))]);
-        let structs_args = vec![eve_proto::PyRep::Integer(i64::from(st.solar_system_id)), eve_proto::PyRep::List(structs), changes];
         let mut all_recips: Vec<(i64, Option<u64>)> = snap
             .sessions
             .values()
@@ -692,18 +683,33 @@ fn emit_structure_left_space_and_spawn_drops(ctx: &ServerContext, snap: &WorldSt
         all_recips.sort_by_key(|(cid, _)| *cid);
         all_recips.dedup_by_key(|(cid, _)| *cid);
         for (cid, uid) in &all_recips {
-            for (ev, args) in [("OnSovereigntyChanged", sov_args.clone()), ("OnSolarSystemSovStructuresUpdated", structs_args.clone())] {
-                let (packet, marshaled_packet) = ServerContext::build_macho_notification_packet(*cid, *uid, ev, "solarsystemid", args.clone());
-                let notif = crate::router::PendingMachoNotification { seq_id: crate::router::cache_notifications::next_notification_seq_id(), recipient_char_id: *cid, event: ev.into(), id_type: "solarsystemid".into(), args, packet, marshaled_packet, created_filetime: now_ft };
-                crate::router::cache_notifications::push_pending_notification_capped(
-                    queues.entry(*cid).or_default(),
-                    notif.clone(),
-                );
-                let _ = ctx.notify_tx.send((*cid, notif));
-            }
+            emit_typed_target_to_char_with_id_type(
+                Some(&ctx.pending_notifications),
+                Some(&ctx.notify_tx),
+                *cid,
+                *uid,
+                "solarsystemid",
+                now_ft,
+                OnSovereigntyChanged {
+                    solar_system_id: i64::from(st.solar_system_id),
+                    alliance_id: None,
+                },
+            );
+            emit_typed_target_to_char_with_id_type(
+                Some(&ctx.pending_notifications),
+                Some(&ctx.notify_tx),
+                *cid,
+                *uid,
+                "solarsystemid",
+                now_ft,
+                OnSolarSystemSovStructuresUpdated {
+                    solar_system_id: i64::from(st.solar_system_id),
+                    solar_system_structures_info: eve_proto::PyRep::List(structs.clone()),
+                    changes: changes.clone(),
+                },
+            );
         }
     }
-    drop(queues);
     out.pending_signal_tracker_notifs.extend(crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_structure_removed_with_snap(ctx, snap, st.solar_system_id, st.structure_id));
 }
 
@@ -730,13 +736,12 @@ pub fn tether_range_m(ctx: &ServerContext, st_type_id: u32) -> f64 {
     radius + tether_extra
 }
 
-fn push_char_notification(
+fn push_char_notification<N: TypedNotification>(
     ctx: &ServerContext,
     snap: &WorldStateSnapshot,
     char_id: i64,
-    event: &str,
     id_type: &str,
-    args: Vec<eve_proto::PyRep>,
+    notif: N,
 ) {
     let Some(uid) = snap
         .characters
@@ -753,28 +758,15 @@ fn push_char_notification(
         return;
     };
     let now_ft = ctx.now_blueos_filetime_ticks();
-    let (packet, marshaled_packet) =
-        ServerContext::build_macho_notification_packet(char_id, Some(uid), event, id_type, args.clone());
-    let notif = crate::router::PendingMachoNotification {
-        seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-        recipient_char_id: char_id,
-        event: event.into(),
-        id_type: id_type.into(),
-        args,
-        packet,
-        marshaled_packet,
-        created_filetime: now_ft,
-    };
-    let mut queues = ctx
-        .pending_notifications
-        .write()
-        .unwrap_or_else(|e| e.into_inner());
-    crate::router::cache_notifications::push_pending_notification_capped(
-        queues.entry(char_id).or_default(),
-        notif.clone(),
+    emit_typed_target_to_char_with_id_type(
+        Some(&ctx.pending_notifications),
+        Some(&ctx.notify_tx),
+        char_id,
+        Some(uid),
+        id_type,
+        now_ft,
+        notif,
     );
-    drop(queues);
-    let _ = ctx.notify_tx.send((char_id, notif));
 }
 
 /// Disengages any active structure gunner, evacuates all docked characters into space aboard
@@ -813,24 +805,25 @@ fn evacuate_structure_on_leave_space(
             ctx,
             snap,
             pilot_id,
-            "OnSessionChanged",
             "charid",
-            vec![
-                eve_proto::PyRep::Bool(false),
-                sess_rep,
-                eve_proto::PyRep::Dict(vec![(
+            OnSessionChanged {
+                is_remote: false,
+                session: sess_rep,
+                change: eve_proto::PyRep::Dict(vec![(
                     eve_proto::PyRep::String("shipid".into()),
                     eve_proto::PyRep::Tuple(vec![eve_proto::PyRep::Integer(structure_id), new_py]),
                 )]),
-            ],
+            },
         );
         push_char_notification(
             ctx,
             snap,
             pilot_id,
-            "OnStructureTargetRemoved",
             "charid",
-            vec![eve_proto::PyRep::Integer(structure_id), eve_proto::PyRep::Integer(0)],
+            OnStructureTargetRemoved {
+                structure_id,
+                target_id: 0,
+            },
         );
     }
 
@@ -1049,21 +1042,19 @@ fn evacuate_structure_on_leave_space(
             ctx,
             snap,
             cid,
-            "OnSessionChanged",
             "charid",
-            vec![
-                eve_proto::PyRep::Bool(false),
-                sess_rep,
-                eve_proto::PyRep::Dict(diff),
-            ],
+            OnSessionChanged {
+                is_remote: false,
+                session: sess_rep,
+                change: eve_proto::PyRep::Dict(diff),
+            },
         );
         push_char_notification(
             ctx,
             snap,
             cid,
-            "OnCharacterLeftStructure",
             "charid",
-            vec![eve_proto::PyRep::Integer(cid)],
+            OnCharacterLeftStructure { character_id: cid },
         );
     }
 
@@ -1911,7 +1902,14 @@ pub fn record_structure_hack_reveal(ctx: &ServerContext, char_id: i64, structure
         Some((nh, nd, at)) => eve_proto::PyRep::Tuple(vec![eve_proto::PyRep::Integer(info.2 as i64), eve_proto::PyRep::Integer(info.1 as i64), eve_proto::PyRep::Integer(nd as i64), eve_proto::PyRep::Integer(nh as i64), eve_proto::PyRep::Integer(at as i64)]),
         None => eve_proto::PyRep::Tuple(vec![eve_proto::PyRep::Integer(info.2 as i64), eve_proto::PyRep::Integer(info.1 as i64), eve_proto::PyRep::None, eve_proto::PyRep::None, eve_proto::PyRep::None]),
     };
-    ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnStructureHacked", "charid", vec![eve_proto::PyRep::Integer(structure_id), hack_tuple]);
+    ctx.emit_typed_with_id_type(
+        crate::router::NotificationTarget::Character(char_id),
+        "charid",
+        OnStructureHacked {
+            structure_id,
+            reinforce_timing: hack_tuple,
+        },
+    );
     Some((info.1, info.2, info.3))
 }
 

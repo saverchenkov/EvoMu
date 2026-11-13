@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+use crate::router::notify_registry::OnExpertSystemsUpdated;
 use crate::router::{NotificationTarget, ServerContext};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -114,11 +115,13 @@ pub fn sweep_expired_expert_systems_all(ctx: &ServerContext, now_ft: i64) {
     });
     for (char_id, removed_tids, removed_skill_ids, es_dict, ship_id) in expired_events {
         for tid in removed_tids {
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(char_id),
-                "OnExpertSystemsUpdated",
-                "charid",
-                vec![es_dict.clone(), PyRep::Bool(false), PyRep::Integer(tid)],
+                OnExpertSystemsUpdated {
+                    expert_systems: es_dict.clone(),
+                    expert_system_added: false,
+                    expert_system_type_id: tid,
+                },
             );
         }
         crate::services::jump_clone_names::emit_server_skills_changed(
@@ -289,11 +292,13 @@ pub fn handle(
 
             match consume_res {
                 Ok((es_dict, added_type_id)) => {
-                    ctx.notify(
+                    ctx.emit_typed(
                         NotificationTarget::Character(char_id),
-                        "OnExpertSystemsUpdated",
-                        "charid",
-                        vec![es_dict, PyRep::Bool(true), PyRep::Integer(added_type_id)],
+                        OnExpertSystemsUpdated {
+                            expert_systems: es_dict,
+                            expert_system_added: true,
+                            expert_system_type_id: added_type_id,
+                        },
                     );
                     Some(Ok(PyRep::None))
                 }
@@ -324,11 +329,13 @@ pub fn handle(
                 (expert_systems_to_py_dict(&records), removed)
             });
             if was_removed {
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Character(char_id),
-                    "OnExpertSystemsUpdated",
-                    "charid",
-                    vec![es_dict, PyRep::Bool(false), PyRep::Integer(type_id)],
+                    OnExpertSystemsUpdated {
+                        expert_systems: es_dict,
+                        expert_system_added: false,
+                        expert_system_type_id: type_id,
+                    },
                 );
             }
             Some(Ok(PyRep::None))

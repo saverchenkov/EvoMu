@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 use crate::formulas::{apply_standing_decrease, apply_standing_increase};
+use crate::router::notify_registry::{OnMissionsUpdated, OnStandingSet, OnStandingsModified};
 use crate::router::{NotificationTarget, ServerContext};
 use eve_db::{IskCents, StandingTransactionRecord};
 use eve_machonet::SessionState;
@@ -820,22 +821,20 @@ pub fn notify_standing_changes(
         })
         .collect();
     if let Some(&(first_from, first_val, _)) = changes.first() {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnStandingSet",
-            "character",
-            vec![
-                PyRep::Integer(first_from),
-                PyRep::Integer(char_id),
-                PyRep::Real(first_val),
-            ],
+            OnStandingSet {
+                from_id: first_from,
+                to_id: char_id,
+                standing: first_val,
+            },
         );
     }
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnStandingsModified",
-        "character",
-        vec![PyRep::List(mods)],
+        OnStandingsModified {
+            modifications: mods,
+        },
     );
 }
 
@@ -1498,7 +1497,12 @@ pub(super) async fn handle_extended_with_bound(
                 list
             });
             if method == "UpdateAllMissions" {
-                ctx.notify(NotificationTarget::Character(char_id), "OnMissionsUpdated", "charid", vec![PyRep::List(items.clone())]);
+                ctx.emit_typed(
+                    NotificationTarget::Character(char_id),
+                    OnMissionsUpdated {
+                        missions: items.clone(),
+                    },
+                );
             }
             Some(Ok(PyRep::List(items)))
         }

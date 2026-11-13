@@ -3,6 +3,9 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+use crate::router::notify_registry::{
+    push_typed_session_notification, OnDroneSettingChanged, OnDroneStateChange, OnItemChange,
+};
 use eve_destiny::{Ball, MovementMode};
 
 impl DroneSpaceState {
@@ -794,12 +797,10 @@ pub async fn handle_npcs_drones(
                     .get(&type_id)
                     .map(|t| (t.group_id, t.category_id))
                     .unwrap_or((100, 18));
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Character(char_id),
-                    "OnItemChange",
-                    "charid",
-                    vec![
-                        PyRep::keyval([
+                    OnItemChange {
+                        item: PyRep::keyval([
                             ("itemID", PyRep::Integer(stack_id)),
                             ("typeID", PyRep::Integer(type_id as i64)),
                             ("ownerID", PyRep::Integer(owner_id)),
@@ -810,11 +811,12 @@ pub async fn handle_npcs_drones(
                             ("categoryID", PyRep::Integer(i64::from(category_id))),
                             ("singleton", PyRep::Bool(singleton)),
                         ]),
-                        PyRep::Dict(vec![
+                        change: PyRep::Dict(vec![
                             (PyRep::Integer(5), PyRep::Integer(old_qty as i64)),
                             (PyRep::Integer(9), PyRep::Integer(old_qty as i64)),
                         ]),
-                    ],
+                        location: PyRep::None,
+                    },
                 );
             }
             for &(_bid, launched_drone_item_id, type_id) in &committed_launches {
@@ -824,12 +826,10 @@ pub async fn handle_npcs_drones(
                     .get(&type_id)
                     .map(|t| (t.group_id, t.category_id))
                     .unwrap_or((100, 18));
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Character(char_id),
-                    "OnItemChange",
-                    "charid",
-                    vec![
-                        PyRep::keyval([
+                    OnItemChange {
+                        item: PyRep::keyval([
                             ("itemID", PyRep::Integer(launched_drone_item_id)),
                             ("typeID", PyRep::Integer(type_id as i64)),
                             ("ownerID", PyRep::Integer(char_id)),
@@ -840,11 +840,12 @@ pub async fn handle_npcs_drones(
                             ("categoryID", PyRep::Integer(i64::from(category_id))),
                             ("singleton", PyRep::Bool(true)),
                         ]),
-                        PyRep::Dict(vec![
+                        change: PyRep::Dict(vec![
                             (PyRep::Integer(3), PyRep::Integer(ship_id)),
                             (PyRep::Integer(4), PyRep::Integer(InventoryFlag::DroneBay as i64)),
                         ]),
-                    ],
+                        location: PyRep::None,
+                    },
                 );
             }
 
@@ -938,11 +939,18 @@ pub async fn handle_npcs_drones(
                     )
                     .await;
 
-                let notif_args = vec![
-                    PyRep::Integer(ball_id), PyRep::Integer(char_id), PyRep::Integer(ship_id),
-                    PyRep::Integer(0), PyRep::Integer(rec.type_id as i64), PyRep::Integer(char_id), PyRep::None,
-                ];
-                ctx.notify(NotificationTarget::Character(char_id), "OnDroneStateChange", "charid", notif_args);
+                ctx.emit_typed(
+                    NotificationTarget::Character(char_id),
+                    OnDroneStateChange {
+                        drone_id: ball_id,
+                        owner_id: char_id,
+                        controller_id: ship_id,
+                        activity_state: 0,
+                        drone_type_id: rec.type_id as i64,
+                        controller_owner_id: char_id,
+                        target_id: None,
+                    },
+                );
                 launched_ball_ids.push(ball_id);
             }
             if has_tuple_entries || args.len() >= 2 {
@@ -1039,12 +1047,18 @@ pub async fn handle_npcs_drones(
                     activity_state: 0,
                     activity: None,
                 }).await;
-                let notif_args = vec![
-                    PyRep::Integer(d.ball_id), PyRep::Integer(char_id), PyRep::Integer(ship_id),
-                    PyRep::Integer(0), PyRep::Integer(d.type_id as i64),
-                    PyRep::Integer(char_id), PyRep::None,
-                ];
-                ctx.notify(NotificationTarget::Character(char_id), "OnDroneStateChange", "charid", notif_args);
+                ctx.emit_typed(
+                    NotificationTarget::Character(char_id),
+                    OnDroneStateChange {
+                        drone_id: d.ball_id,
+                        owner_id: char_id,
+                        controller_id: ship_id,
+                        activity_state: 0,
+                        drone_type_id: d.type_id as i64,
+                        controller_owner_id: char_id,
+                        target_id: None,
+                    },
+                );
                 crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(ctx, char_id, d.ball_id, 0, None);
                 count += 1;
                 with_mut_combat_runtime(ctx, |rt| {
@@ -1223,12 +1237,18 @@ pub async fn handle_npcs_drones(
                     activity_state: 1,
                     activity: Some("attack".into()),
                 }).await;
-                let notif_args = vec![
-                    PyRep::Integer(d.ball_id), PyRep::Integer(char_id), PyRep::Integer(ship_id),
-                    PyRep::Integer(1), PyRep::Integer(d.type_id as i64),
-                    PyRep::Integer(char_id), PyRep::Integer(target_id),
-                ];
-                ctx.notify(NotificationTarget::Character(char_id), "OnDroneStateChange", "charid", notif_args);
+                ctx.emit_typed(
+                    NotificationTarget::Character(char_id),
+                    OnDroneStateChange {
+                        drone_id: d.ball_id,
+                        owner_id: char_id,
+                        controller_id: ship_id,
+                        activity_state: 1,
+                        drone_type_id: d.type_id as i64,
+                        controller_owner_id: char_id,
+                        target_id: Some(target_id),
+                    },
+                );
                 crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(ctx, char_id, d.ball_id, 1, Some("attack"));
 
                 let next_ready = with_combat_runtime(ctx, |rt| {
@@ -1487,14 +1507,20 @@ pub async fn handle_npcs_drones(
                     },
                 );
             });
-            let setting_args = vec![PyRep::Bool(aggressive), PyRep::Bool(focus_fire)];
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(char_id),
-                "OnDroneSettingChanged",
-                "charid",
-                setting_args.clone(),
+                OnDroneSettingChanged {
+                    aggressive,
+                    focus_fire,
+                },
             );
-            session.push_notification("OnDroneSettingChanged", setting_args);
+            push_typed_session_notification(
+                session,
+                OnDroneSettingChanged {
+                    aggressive,
+                    focus_fire,
+                },
+            );
             Some(Ok(PyRep::keyval([
                 ("aggressive", PyRep::Bool(aggressive)),
                 ("focusFire", PyRep::Bool(focus_fire)),

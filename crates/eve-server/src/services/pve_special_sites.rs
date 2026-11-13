@@ -7,6 +7,9 @@
 
 #![forbid(unsafe_code)]
 
+use crate::router::notify_registry::{
+    push_typed_session_notification, OnAccountChange, OnSolarsystemInterferenceChanged,
+};
 use crate::router::ServerContext;
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WorldRepository};
 use eve_machonet::SessionState;
@@ -776,13 +779,13 @@ pub async fn complete_special_dungeon_instance(
             }
         });
         let _ = ctx.notify_account_change(char_id, "cash", char_id, new_bal_isk);
-        session.push_notification(
-            "OnAccountChange",
-            vec![
-                PyRep::String("cash".into()),
-                PyRep::Integer(char_id),
-                PyRep::Real(new_bal_isk),
-            ],
+        push_typed_session_notification(
+            session,
+            OnAccountChange {
+                account_key: "cash".into(),
+                owner_id: char_id,
+                balance: new_bal_isk,
+            },
         );
         return Ok(PyRep::keyval([
             ("instanceID", PyRep::Integer(hf.instance_id)),
@@ -1098,15 +1101,19 @@ fn handle_solarsystem_interference_rpc(
 
     let local_state = build_interference_state_keyval_at(sys_id, level, band, now_sec);
     if changed_from.is_some() {
-        session.push_notification(
-            "OnSolarsystemInterferenceChanged",
-            vec![PyRep::Integer(sys_id as i64), local_state.clone()],
+        push_typed_session_notification(
+            session,
+            OnSolarsystemInterferenceChanged {
+                solar_system_id: sys_id as i64,
+                new_interference_state: local_state.clone(),
+            },
         );
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::SolarSystem(sys_id),
-            "OnSolarsystemInterferenceChanged",
-            "solarsystemid",
-            vec![PyRep::Integer(sys_id as i64), local_state.clone()],
+            OnSolarsystemInterferenceChanged {
+                solar_system_id: sys_id as i64,
+                new_interference_state: local_state.clone(),
+            },
         );
     }
     if method == "GetAllInterferenceBands" {

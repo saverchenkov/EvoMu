@@ -3,6 +3,9 @@
 #![forbid(unsafe_code)]
 
 use super::is_blocked_by;
+use crate::router::notify_registry::{
+    OnClientContactChange, OnCloneDestruction, OnContactLoggedOff, OnContactLoggedOn,
+};
 use crate::router::{NotificationTarget, ServerContext};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -69,23 +72,28 @@ pub fn notify_watchlist_presence(ctx: &ServerContext, logged_on_char_id: i64, on
         .unwrap_or_default();
 
     // parity: notify:OnContactLoggedOn, notify:OnContactLoggedOff
-    let presence_event = if online {
-        "OnContactLoggedOn"
-    } else {
-        "OnContactLoggedOff"
-    };
     for watcher_id in watchers {
-        ctx.notify(
+        if online {
+            ctx.emit_typed(
+                NotificationTarget::Character(watcher_id),
+                OnContactLoggedOn {
+                    char_id: logged_on_char_id,
+                },
+            );
+        } else {
+            ctx.emit_typed(
+                NotificationTarget::Character(watcher_id),
+                OnContactLoggedOff {
+                    char_id: logged_on_char_id,
+                },
+            );
+        }
+        ctx.emit_typed(
             NotificationTarget::Character(watcher_id),
-            presence_event,
-            "charid",
-            vec![PyRep::Integer(logged_on_char_id)],
-        );
-        ctx.notify(
-            NotificationTarget::Character(watcher_id),
-            "OnClientContactChange",
-            "charid",
-            vec![PyRep::Integer(logged_on_char_id), PyRep::Bool(online)],
+            OnClientContactChange {
+                char_id: logged_on_char_id,
+                online,
+            },
         );
     }
 }
@@ -211,12 +219,7 @@ pub(crate) fn handle_self_destruct_clone(
                 ch.station_id.or(ch.structure_id),
                 "self_destruct_clone",
             );
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnCloneDestruction",
-                "charid",
-                vec![],
-            );
+            ctx.emit_typed(NotificationTarget::Character(char_id), OnCloneDestruction);
             Ok(PyRep::Integer(ch.home_station_id))
         }
         Err(e) => Err(BridgeRpcError {
