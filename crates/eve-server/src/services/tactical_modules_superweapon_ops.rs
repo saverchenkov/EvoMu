@@ -864,13 +864,19 @@ pub async fn activate_superweapon_with_args(
         .weapon_timer_until_unix = now_unix + 60;
     ctx.record_module_reactivation_delay(ship_id, module_id, lock_secs as f64);
 
+    let godma_effect_id = crate::router::binding::effect_id_for_module_sde(
+        &ctx.sde,
+        mod_type_id,
+        None,
+    )
+    .unwrap_or(if is_slash { 6472 } else { 4489 });
     ctx.notify(
         NotificationTarget::Character(char_id),
         "OnGodmaShipEffect",
         "charid",
         vec![
             PyRep::Integer(module_id),
-            PyRep::String("superWeapon".into()),
+            PyRep::Integer(godma_effect_id),
             PyRep::Bool(true),
         ],
     );

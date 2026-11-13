@@ -495,7 +495,15 @@ async fn single_target_doomsday_invulnerability_range_cap_structure_and_destruct
     assert_eq!(dd_res.dict_get("totalDamageApplied").and_then(|v| v.as_f64()), Some(25_000.0));
     assert_eq!(dd_res.dict_get("immobilizeSeconds").and_then(|v| v.as_f64()), Some(30.0));
     let notes = ctx.drain_notifications_for_char(char_id);
-    assert!(notes.iter().any(|n| n.event == "OnGodmaShipEffect"));
+    let dd_effect_ids: Vec<i64> = notes
+        .iter()
+        .filter(|n| n.event == "OnGodmaShipEffect")
+        .filter_map(|n| n.args.get(1).and_then(|v| v.as_i64()))
+        .collect();
+    assert!(
+        !dd_effect_ids.is_empty() && dd_effect_ids.iter().all(|&id| id > 0),
+        "single-target doomsday OnGodmaShipEffect must carry real SDE effect ID > 0, got {dd_effect_ids:?} (#1019)"
+    );
     assert!(notes.iter().any(|n| n.event == "OnDamageMessage"));
     assert!(notes.iter().any(|n| n.event == "OnDamageMessages"));
 
@@ -522,7 +530,15 @@ async fn single_target_doomsday_invulnerability_range_cap_structure_and_destruct
     assert!(hit_list.contains(&hit_ship));
     assert!(!hit_list.contains(&miss_ship));
     let slash_notes = ctx.drain_notifications_for_char(char_id);
-    assert!(slash_notes.iter().any(|n| n.event == "OnGodmaShipEffect"));
+    let slash_effect_ids: Vec<i64> = slash_notes
+        .iter()
+        .filter(|n| n.event == "OnGodmaShipEffect")
+        .filter_map(|n| n.args.get(1).and_then(|v| v.as_i64()))
+        .collect();
+    assert!(
+        !slash_effect_ids.is_empty() && slash_effect_ids.iter().all(|&id| id > 0),
+        "lance/slash superweapon OnGodmaShipEffect must carry real SDE effect ID > 0, got {slash_effect_ids:?} (#1019)"
+    );
     assert!(!slash_notes.iter().any(|n| n.event == "OnDamageMessage"));
 }
 

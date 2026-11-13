@@ -474,3 +474,80 @@ async fn mercden_remote_shield_repair_validation_edges() {
     .unwrap_err();
     assert_eq!(err_range.code, "TargetOutOfRange");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deactivate_repeating_cycle_after_action_superweapon_emits_real_effect_ids() {
+    let ctx = test_ctx_with_sde(|_| {});
+    let sys_id = 30_000_142u32;
+    let char_id = 93_100_031i64;
+    let ship_id = 1_000_400_311i64;
+    let mod_amarr = 1_000_400_312i64;
+    let mod_lance = 1_000_400_313i64;
+    let mod_unknown = 1_000_400_314i64;
+
+    ensure_char(&ctx, char_id, sys_id, ship_id, SafetyLevel::Red);
+    let online_uid = ctx.db.with_mut_snapshot(|snap| {
+        let uid = snap
+            .accounts
+            .values()
+            .next()
+            .map(|a| a.user_id)
+            .unwrap_or(1);
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.user_id = uid;
+        }
+        uid
+    });
+    ctx.db
+        .acquire_online_lock(online_uid, 9_000_031, Some(char_id), true, ctx.now_unix_secs())
+        .expect("acquire online lock for cycle-stop superweapon test");
+    insert_item(&ctx, ship_id, 587, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    insert_item(&ctx, mod_amarr, 24550, char_id, ship_id, InventoryFlag::HiSlot0, 1, true);
+    insert_item(&ctx, mod_lance, 40631, char_id, ship_id, InventoryFlag::HiSlot1, 1, true);
+    insert_item(&ctx, mod_unknown, 999_999, char_id, ship_id, InventoryFlag::HiSlot2, 1, true);
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+
+    deactivate_repeating_cycle_after_action(
+        &ctx,
+        &sys_h,
+        Some(char_id),
+        ship_id,
+        mod_amarr,
+        "superWeaponImmobilize",
+    )
+    .await;
+    deactivate_repeating_cycle_after_action(
+        &ctx,
+        &sys_h,
+        Some(char_id),
+        ship_id,
+        mod_lance,
+        "superWeaponLanceBeam",
+    )
+    .await;
+    deactivate_repeating_cycle_after_action(
+        &ctx,
+        &sys_h,
+        Some(char_id),
+        ship_id,
+        mod_unknown,
+        "superWeapon",
+    )
+    .await;
+
+    let effects: Vec<(i64, i64)> = ctx
+        .drain_notifications_for_char(char_id)
+        .into_iter()
+        .filter(|n| n.event == "OnGodmaShipEffect")
+        .filter_map(|n| {
+            let mid = n.args.first()?.as_i64()?;
+            let eff = n.args.get(1)?.as_i64()?;
+            Some((mid, eff))
+        })
+        .collect();
+    assert_eq!(
+        effects,
+        vec![(mod_amarr, 4489), (mod_lance, 6472), (mod_unknown, 4489)],
+        "superweapon cycle-stop OnGodmaShipEffect must emit real SDE effect IDs, never 0 or synthetic strings (#1019)"
+    );
+}

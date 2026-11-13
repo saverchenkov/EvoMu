@@ -15,6 +15,7 @@ fn handoff_in_space_pilot_observer(
     ensure_add_to_ball: bool,
 ) {
     let mut bp = sys.ballpark.write().unwrap_or_else(|e| e.into_inner());
+    bp.pending_handoff_observers.insert(to_ball_id);
     if let Some(ref mut set) = bp.registered_observers {
         set.remove(&from_ball_id);
         set.insert(to_ball_id);

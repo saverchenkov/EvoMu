@@ -1,5 +1,38 @@
 //! Module effect ID resolution helpers for bound dogma objects.
 
+/// Fallback SDE effect IDs for superweapons / Doomsdays when synthetic tracker names
+/// (e.g. `"superWeapon"`, `"superWeaponLanceWarmup"`) or stripped test SDE types lack
+/// `default_effect_id` (`#1019`).
+pub(crate) fn fallback_superweapon_effect_id(
+    type_id: u32,
+    effect_name: Option<&str>,
+) -> Option<i64> {
+    match type_id {
+        24550 => return Some(4489),                         // superWeaponAmarr
+        24552 => return Some(4490),                         // superWeaponCaldari
+        24554 => return Some(4491),                         // superWeaponGallente
+        23674 => return Some(4492),                         // superWeaponMinmatar
+        40633 => return Some(6473),                         // doomsdayConeDOT
+        40634 => return Some(6474),                         // doomsdayHOG
+        37474 | 40632 | 41442..=41444 => return Some(6201), // doomsdaySlash
+        40631 | 41439..=41441 => return Some(6472),         // doomsdayBeamDOT
+        77398..=77401 => return Some(11691),                // debuffLance
+        _ => {}
+    }
+    match effect_name.unwrap_or("") {
+        "superWeapon" | "superWeaponImmobilize" | "superWeaponAmarr" => Some(4489),
+        "superWeaponCaldari" => Some(4490),
+        "superWeaponGallente" => Some(4491),
+        "superWeaponMinmatar" => Some(4492),
+        "superWeaponCone" | "doomsdayConeDOT" => Some(6473),
+        "superWeaponSpatial" | "doomsdayHOG" => Some(6474),
+        "superWeaponMultiPoint" | "doomsdaySlash" => Some(6201),
+        "superWeaponLanceWarmup" | "superWeaponLanceBeam" | "doomsdayBeamDOT" => Some(6472),
+        "debuffLance" | "doomsdayAOEBalance" => Some(11691),
+        _ => None,
+    }
+}
+
 /// Helper to determine the effect ID for a module given its type ID and optional effect name.
 pub fn effect_id_for_module_sde(
     sde: &eve_sde::SdeRegistry,
@@ -21,7 +54,9 @@ pub fn effect_id_for_module_sde(
             return Some(e.effect_id as i64);
         }
     }
-    ty.and_then(|t| t.default_effect_id).map(|e| e as i64)
+    ty.and_then(|t| t.default_effect_id)
+        .map(|e| e as i64)
+        .or_else(|| fallback_superweapon_effect_id(type_id, effect_name))
 }
 
 /// Resolves the `OnSpecialFX` `(guid, is_offensive)` tuple for an activated/deactivated space module

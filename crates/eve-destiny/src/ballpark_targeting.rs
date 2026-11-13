@@ -149,6 +149,7 @@ impl Ballpark {
     /// Drains and returns all bubble-scoped `DestinyEvent`s accumulated for `observer_ball_id`.
     /// Removes empty queue entries for balls no longer present in `self.balls` (`#868`).
     pub fn drain_observer_events(&mut self, observer_ball_id: BallId) -> Vec<DestinyEvent> {
+        self.pending_handoff_observers.remove(&observer_ball_id);
         if self.balls.contains_key(&observer_ball_id) {
             self.observer_events
                 .get_mut(&observer_ball_id)
@@ -164,6 +165,7 @@ impl Ballpark {
     /// Drains and returns the map of `observer_ball_id -> Vec<DestinyEvent>` for all dynamic observers.
     /// Drops empty queue entries for removed balls after draining (`#868`).
     pub fn drain_all_observer_events(&mut self) -> BTreeMap<BallId, Vec<DestinyEvent>> {
+        self.pending_handoff_observers.clear();
         let mut out = BTreeMap::new();
         for (&id, events) in &mut self.observer_events {
             if !events.is_empty() {

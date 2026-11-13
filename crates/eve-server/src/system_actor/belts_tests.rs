@@ -703,14 +703,21 @@ fn build_tick_broadcast_skips_empty_and_set_state_observers_and_drains_ready() {
     );
     bp.observer_events
         .insert(103, vec![DestinyEvent::Stop { ball_id: 103 }]);
+    bp.observer_events
+        .insert(104, vec![DestinyEvent::Stop { ball_id: 104 }]);
+    bp.pending_handoff_observers.insert(104);
 
     let bcast = build_tick_broadcast(30_000_142, &mut bp, Vec::new());
     assert_eq!(bcast.tick, 42);
     assert!(!bcast.observer_events.contains_key(&101));
     assert!(!bcast.observer_events.contains_key(&102));
     assert_eq!(bp.observer_events.get(&102).map(Vec::len), Some(2));
+    assert!(!bcast.observer_events.contains_key(&104));
+    assert_eq!(bp.observer_events.get(&104).map(Vec::len), Some(1));
     assert_eq!(bcast.observer_events.get(&103).map(Vec::len), Some(1));
     assert!(bcast.observer_updates_pyrep.contains_key(&103));
+    assert_eq!(bp.drain_observer_events(104).len(), 1);
+    assert!(!bp.pending_handoff_observers.contains(&104));
 }
 
 #[test]

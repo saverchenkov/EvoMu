@@ -1328,16 +1328,27 @@ fn in_space_ship_handoff_queues_incremental_events_without_set_state() {
     assert!(!bp.queue_in_space_ship_handoff(500, 999, &[501, 502]));
 
     assert!(bp.queue_in_space_ship_handoff(500, 502, &[501, 502]));
+    assert!(
+        bp.pending_handoff_observers.contains(&502),
+        "queue_in_space_ship_handoff must hold 502 against background tick theft until drained (#1018, H-2)"
+    );
     let events = bp.drain_observer_events(502);
+    assert!(
+        !bp.pending_handoff_observers.contains(&502),
+        "drain_observer_events(502) must clear pending_handoff_observers hold (#1018, H-2)"
+    );
     assert!(
         !events
             .iter()
             .any(|e| matches!(e, DestinyEvent::SetState { .. })),
         "in-system handoff must not emit SetState (#970)"
     );
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, DestinyEvent::RemoveBall { ball_id: 500 })));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, DestinyEvent::RemoveBall { .. })),
+        "in-system handoff must defer RemoveBall out of the immediate AddBalls2 batch (#1018)"
+    );
     assert!(events.iter().any(|e| match e {
         DestinyEvent::AddBalls2 { balls } => {
             let ids: Vec<i64> = balls.iter().map(|b| b.id).collect();
@@ -1345,5 +1356,42 @@ fn in_space_ship_handoff_queues_incremental_events_without_set_state() {
         }
         _ => false,
     }));
+
+    // Tick +1: RemoveBall(500) must remain deferred past godma.Prime/OnSessionChanged window (#1018).
+    let _ = bp.step(1.0);
+    let tick1_events = bp.drain_observer_events(502);
+    assert!(
+        !tick1_events
+            .iter()
+            .any(|e| matches!(e, DestinyEvent::RemoveBall { .. })),
+        "RemoveBall(500) must stay deferred on tick +1 (#1018)"
+    );
+
+    // Tick +2: RemoveBall(500) is delivered cleanly once client ego has flipped to capsule 502.
+    let _ = bp.step(1.0);
+    let tick2_events = bp.drain_observer_events(502);
+    assert!(
+        tick2_events
+            .iter()
+            .any(|e| matches!(e, DestinyEvent::RemoveBall { ball_id: 500 })),
+        "RemoveBall(500) must be delivered on tick +2 (#1018)"
+    );
+    assert!(
+        bp.scheduled_observer_events.is_empty(),
+        "scheduled_observer_events must drain cleanly once delivered (#1018)"
+    );
+
+    // If the new capsule observer is itself destroyed before +2 ticks, its scheduled RemoveBall is dropped.
+    assert!(bp.queue_in_space_ship_handoff(501, 502, &[502]));
+    let _ = bp.drain_observer_events(502);
+    let _ = bp.remove_ball(502);
+    assert!(
+        bp.scheduled_observer_events.is_empty(),
+        "remove_ball must prune scheduled_observer_events for removed observers (#1018)"
+    );
+    assert!(
+        !bp.pending_handoff_observers.contains(&502),
+        "remove_ball must clear pending_handoff_observers for removed observers (#1018, H-2)"
+    );
 }
 

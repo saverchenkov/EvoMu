@@ -4083,7 +4083,8 @@ fn resolve_effect_id_pyrep(rep: PyRep, sde: Option<&eve_sde::SdeRegistry>) -> Py
                 "loPower" => 11,
                 "hiPower" => 12,
                 "medPower" => 13,
-                _ => 0,
+                _ => super::binding_effects::fallback_superweapon_effect_id(0, Some(name.as_str()))
+                    .unwrap_or(0),
             };
             PyRep::Integer(fallback)
         }

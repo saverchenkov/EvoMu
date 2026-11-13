@@ -1342,6 +1342,14 @@ pub struct Ballpark {
     pub next_grid_id: u64,
     #[serde(default)]
     pub observer_events: BTreeMap<BallId, Vec<DestinyEvent>>,
+    /// Per-observer events deferred until `deliver_tick <= self.current_tick` (`#1018`).
+    #[serde(default)]
+    pub scheduled_observer_events: Vec<(u64, BallId, DestinyEvent)>,
+    /// Observer ball IDs currently completing an in-space ship handoff whose incremental
+    /// queue (`AddBalls2`) must be held for explicit `drain_observer_updates` rather than
+    /// drained prematurely by background ticks or peer flushes (`#1018`, `H-2`).
+    #[serde(default)]
+    pub pending_handoff_observers: BTreeSet<BallId>,
     #[serde(default)]
     pub target_locks: BTreeMap<BallId, Vec<TargetLock>>,
     #[serde(default)]
