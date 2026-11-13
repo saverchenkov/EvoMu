@@ -10,6 +10,12 @@
 
 #![forbid(unsafe_code)]
 
+use crate::router::notify_registry::{
+    OnAmmoInBankChanged, OnChallengeExpired, OnChargeBeingLoadedToModule, OnChargeLoadedToModule,
+    OnFleetEscalatingPathMessage, OnRestoringInvulnUpdated, OnSeasonEnded,
+    OnSeasonSelectionCleared, OnSeasonStarted, OnSeasonalGoalsReset, OnSeasonsFsdDataChanged,
+    TypedNotification,
+};
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::season_manager::{
     default_fsd_seasons, ensure_character_challenges, load_challenge_definitions,
@@ -31,16 +37,33 @@ fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     }
 }
 
+fn broadcast_typed_char_event<N: TypedNotification + Clone>(
+    ctx: &ServerContext,
+    notif: N,
+    fallback_char_id: Option<i64>,
+) {
+    let sent = ctx.emit_typed(NotificationTarget::All, notif.clone());
+    if let Some(cid) = fallback_char_id {
+        if cid > 0 && !sent.iter().any(|n| n.recipient_char_id == cid) {
+            ctx.emit_typed(NotificationTarget::Character(cid), notif);
+        }
+    }
+}
+
 pub(crate) fn broadcast_char_event(
     ctx: &ServerContext,
     event: &str,
-    args: Vec<PyRep>,
+    _args: Vec<PyRep>,
     fallback_char_id: Option<i64>,
 ) {
-    let sent = ctx.notify(NotificationTarget::All, event, "charid", args.clone());
-    if let Some(cid) = fallback_char_id {
-        if cid > 0 && !sent.iter().any(|n| n.recipient_char_id == cid) {
-            ctx.notify(NotificationTarget::Character(cid), event, "charid", args);
+    match event {
+        "OnSeasonStarted" => broadcast_typed_char_event(ctx, OnSeasonStarted {}, fallback_char_id),
+        "OnSeasonEnded" => broadcast_typed_char_event(ctx, OnSeasonEnded {}, fallback_char_id),
+        "OnSeasonsFsdDataChanged" => {
+            broadcast_typed_char_event(ctx, OnSeasonsFsdDataChanged {}, fallback_char_id);
+        }
+        other => {
+            debug_assert!(false, "unexpected broadcast_char_event: {other}");
         }
     }
 }
@@ -145,11 +168,9 @@ pub fn check_and_emit_season_transitions(ctx: &ServerContext) {
         broadcast_char_event(ctx, "OnSeasonEnded", vec![], None);
     }
     for cid in cleared_chars {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(cid),
-            "OnSeasonSelectionCleared",
-            "charid",
-            vec![],
+            OnSeasonSelectionCleared {},
         );
     }
 }
@@ -157,11 +178,12 @@ pub fn check_and_emit_season_transitions(ctx: &ServerContext) {
 /// Emits `OnChallengeExpired(challenge_id, new_challenge)` for each refreshed expired challenge.
 pub fn emit_expired_challenges(ctx: &ServerContext, char_id: i64, expired: Vec<(i64, PyRep)>) {
     for (expired_id, new_challenge_kv) in expired {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnChallengeExpired",
-            "charid",
-            vec![PyRep::Integer(expired_id), new_challenge_kv],
+            OnChallengeExpired {
+                challenge_id: expired_id,
+                new_challenge: new_challenge_kv,
+            },
         );
     }
 }
@@ -182,11 +204,9 @@ pub fn handle_select_season_clear_if_none_or_zero(
     });
     match res {
         Ok(()) => {
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(char_id),
-                "OnSeasonSelectionCleared",
-                "charid",
-                vec![],
+                OnSeasonSelectionCleared {},
             );
             Some(Ok(PyRep::Bool(true)))
         }
@@ -279,11 +299,9 @@ fn end_season_impl(
 
     broadcast_char_event(ctx, "OnSeasonEnded", vec![], Some(caller_char_id));
     for &cid in &cleared_chars {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(cid),
-            "OnSeasonSelectionCleared",
-            "charid",
-            vec![],
+            OnSeasonSelectionCleared {},
         );
     }
     Ok(PyRep::keyval([
@@ -316,11 +334,9 @@ fn reset_seasonal_goals_impl(ctx: &ServerContext, target_cid: i64) -> Result<PyR
         save_season_state_to_blobs(snap, target_cid, &st);
         Ok(())
     })?;
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(target_cid),
-        "OnSeasonalGoalsReset",
-        "charid",
-        vec![],
+        OnSeasonalGoalsReset {},
     );
     Ok(PyRep::keyval([
         ("characterID", PyRep::Integer(target_cid)),
@@ -435,15 +451,13 @@ pub fn emit_restoring_invuln_updated(
     duration_ft: i64,
 ) {
     let end_ft = ctx.now_blueos_filetime_ticks().saturating_add(duration_ft);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnRestoringInvulnUpdated",
-        "charid",
-        vec![
-            PyRep::Integer(ship_id),
-            PyRep::Integer(end_ft),
-            PyRep::Integer(duration_ft),
-        ],
+        OnRestoringInvulnUpdated {
+            ship_id,
+            end_time: end_ft,
+            duration: duration_ft,
+        },
     );
 }
 
@@ -481,11 +495,9 @@ pub fn emit_charge_and_bank_ammo_loaded(
     ship_id: i64,
     loaded_mod_ids: &[i64],
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnChargeLoadedToModule",
-        "charid",
-        vec![],
+        OnChargeLoadedToModule {},
     );
     emit_bank_ammo_changed_if_grouped(ctx, char_id, ship_id, loaded_mod_ids);
 }
@@ -515,11 +527,9 @@ pub fn emit_bank_ammo_changed_if_grouped(
     masters.sort_unstable();
     masters.dedup();
     for master_id in masters {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnAmmoInBankChanged",
-            "charid",
-            vec![PyRep::Integer(master_id)],
+            OnAmmoInBankChanged { master_id },
         );
     }
 }
@@ -587,14 +597,12 @@ pub fn emit_fleet_escalating_path_if_in_fleet(
     let Some(fleet_id) = char_fleet_id(ctx, char_id) else {
         return;
     };
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Fleet(fleet_id),
-        "OnFleetEscalatingPathMessage",
-        "fleetid",
-        vec![
-            PyRep::Integer(char_id),
-            PyRep::Integer(i64::from(dungeon_id)),
-        ],
+        OnFleetEscalatingPathMessage {
+            char_id,
+            journal_entry_template_id: i64::from(dungeon_id),
+        },
     );
 }
 
@@ -1100,15 +1108,13 @@ pub(crate) fn handle_load_ammo(
         );
     }
 
-    let _ = ctx.notify(
+    let _ = ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnChargeBeingLoadedToModule",
-        "charid",
-        vec![
-            PyRep::List(all_target_modules.iter().map(|&id| PyRep::Integer(id)).collect()),
-            PyRep::Integer(charge_type_id as i64),
-            PyRep::Real(reload_time_ms),
-        ],
+        OnChargeBeingLoadedToModule {
+            item_ids: all_target_modules.clone(),
+            charge_type_id: charge_type_id as i64,
+            time_ms: reload_time_ms,
+        },
     );
     emit_charge_and_bank_ammo_loaded(ctx, char_id, ship_id, &all_target_modules);
     if let (Some((old_cpu, old_pg)), Ok(new_fit)) =

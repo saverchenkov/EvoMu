@@ -3,6 +3,18 @@
 
 #![forbid(unsafe_code)]
 
+use crate::router::notify_registry::{
+    OnAchievementsReset, OnAirNpeStateChanged, OnAllowWarUpdated, OnAlphaInjectionAvailable,
+    OnCCPNotification, OnCampaignEnrollmentChanged, OnChallengeExpired,
+    OnCharacterPermanentlyBanned, OnCharacterTemporarilyBanned, OnCharacterUnbanned,
+    OnClusterShutdownCancelled, OnClusterShutdownInitiated, OnCommunityFittingsUpdated,
+    OnContextualOfferPurchased, OnCrateLootSpawned, OnCrimewatchEngagementEnded,
+    OnDatacoreBought, OnDestinationChange, OnEpicJournalChange, OnFacilitiesUpdated,
+    OnFastCheckoutEnabledChanged, OnFleetLootEvent, OnFleetRespawnPointsUpdate,
+    OnGlobalConfigUpdated, OnIncomingAgentMessage, OnIncomingTransmission, OnIndustryMaterials,
+    OnInvalidateCacheForLocations, OnLocationAttributeChange, OnLoginMilestoneAchieved,
+    OnLogonSkillsTrained, OnMilestoneTimerStarted, OnModuleAttributeChange,
+};
 use crate::router::{NotificationTarget, ServerContext};
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
@@ -21,35 +33,31 @@ pub fn emit_setattr_notifications(
     val: f64,
     old_val: f64,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(owner_id),
-        "OnModuleAttributeChange",
-        "charid",
-        vec![
-            PyRep::Integer(owner_id),
-            PyRep::Integer(item_id),
-            PyRep::Integer(i64::from(attr_id)),
-            PyRep::Integer(now_ft),
-            PyRep::Real(val),
-            PyRep::Real(old_val),
-            PyRep::Integer(now_ft),
-            PyRep::Bool(true),
-        ],
+        OnModuleAttributeChange {
+            owner_id,
+            item_id,
+            attribute_id: i64::from(attr_id),
+            time: now_ft,
+            new_value: val,
+            old_value: old_val,
+            effective_time: now_ft,
+            scatter: true,
+        },
     );
     if loc_id > 0 && loc_id != owner_id {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(owner_id),
-            "OnLocationAttributeChange",
-            "charid",
-            vec![
-                PyRep::Integer(owner_id),
-                PyRep::Integer(loc_id),
-                PyRep::Integer(item_id),
-                PyRep::Integer(i64::from(attr_id)),
-                PyRep::Integer(now_ft),
-                PyRep::Real(val),
-                PyRep::Real(old_val),
-            ],
+            OnLocationAttributeChange {
+                owner_id,
+                location_id: loc_id,
+                item_key: item_id,
+                attribute_id: i64::from(attr_id),
+                t: now_ft,
+                value: val,
+                old_value: old_val,
+            },
         );
     }
 }
@@ -61,45 +69,45 @@ pub fn emit_cluster_shutdown_cancelled(ctx: &ServerContext, explanation_label: &
     } else {
         explanation_label.trim()
     };
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::All,
-        "OnClusterShutdownCancelled",
-        "clientID",
-        vec![PyRep::String(label.to_string())],
+        OnClusterShutdownCancelled {
+            explanation_label: label.to_string(),
+        },
     );
 }
 
 /// Broadcasts `OnGlobalConfigUpdated(key, value)` to all online clients.
 pub fn emit_global_config_updated(ctx: &ServerContext, key: &str, val: &PyRep) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::All,
-        "OnGlobalConfigUpdated",
-        "clientID",
-        vec![PyRep::String(key.to_string()), val.clone()],
+        OnGlobalConfigUpdated {
+            key: key.to_string(),
+            val: val.clone(),
+        },
     );
 }
 
 /// Emits `OnAirNpeStateChanged(character_id, new_state_id)` (`AirNpeState.SKIPPED = 3`).
 pub fn emit_air_npe_skipped(ctx: &ServerContext, char_id: i64) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnAirNpeStateChanged",
-        "charid",
-        vec![PyRep::Integer(char_id), PyRep::Integer(3)],
+        OnAirNpeStateChanged {
+            character_id: char_id,
+            new_state_id: 3,
+        },
     );
 }
 
 /// Emits `OnDatacoreBought(characterID, agentID, balance)` upon R&D agent datacore purchase.
 pub fn emit_datacore_bought(ctx: &ServerContext, char_id: i64, agent_id: i64, balance_isk: f64) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnDatacoreBought",
-        "charid",
-        vec![
-            PyRep::Integer(char_id),
-            PyRep::Integer(agent_id),
-            PyRep::Real(balance_isk),
-        ],
+        OnDatacoreBought {
+            character_id: char_id,
+            agent_id,
+            balance: balance_isk,
+        },
     );
 }
 
@@ -130,13 +138,11 @@ pub fn emit_agent_mission_dialogue(
     } else {
         body.trim()
     };
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnIncomingAgentMessage",
-        "charid",
-        vec![
-            PyRep::Integer(agent_id),
-            PyRep::Tuple(vec![
+        OnIncomingAgentMessage {
+            agent_id,
+            message: PyRep::Tuple(vec![
                 PyRep::String(label.to_string()),
                 PyRep::Dict(vec![
                     (
@@ -146,14 +152,12 @@ pub fn emit_agent_mission_dialogue(
                     (PyRep::String("agentID".into()), PyRep::Integer(agent_id)),
                 ]),
             ]),
-        ],
+        },
     );
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnIncomingTransmission",
-        "charid",
-        vec![
-            PyRep::keyval([
+        OnIncomingTransmission {
+            transmission: PyRep::keyval([
                 ("header", PyRep::String(header_str.to_string())),
                 ("text", PyRep::String(text_str.to_string())),
                 (
@@ -162,16 +166,11 @@ pub fn emit_agent_mission_dialogue(
                 ),
                 ("agentID", PyRep::Integer(agent_id)),
             ]),
-            PyRep::Bool(true),
-        ],
+            is_agent_mission: true,
+        },
     );
     if agent_type_id == 10 {
-        ctx.notify(
-            NotificationTarget::Character(char_id),
-            "OnEpicJournalChange",
-            "charid",
-            vec![],
-        );
+        ctx.emit_typed(NotificationTarget::Character(char_id), OnEpicJournalChange {});
     }
 }
 
@@ -201,11 +200,9 @@ pub fn emit_allow_war_updated_for_alliance(
         }
     });
     for corp_id in member_corps {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Corporation(corp_id),
-            "OnAllowWarUpdated",
-            "corpid",
-            vec![PyRep::Integer(corp_id), PyRep::Bool(allow_war)],
+            OnAllowWarUpdated { corp_id, allow_war },
         );
     }
 }
@@ -219,32 +216,30 @@ pub fn emit_invalidate_cache_for_locations(
     if location_ids.is_empty() {
         return;
     }
-    let list = location_ids.iter().copied().map(PyRep::Integer).collect();
-    ctx.notify(
+    ctx.emit_typed(
         target,
-        "OnInvalidateCacheForLocations",
-        "charid",
-        vec![PyRep::List(list)],
+        OnInvalidateCacheForLocations {
+            location_ids: location_ids.to_vec(),
+        },
     );
 }
 
 /// Emits `OnCampaignEnrollmentChanged()` when a pilot enrolls in or starts a login campaign.
 pub fn emit_campaign_enrollment_changed(ctx: &ServerContext, char_id: i64) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnCampaignEnrollmentChanged",
-        "charid",
-        vec![],
+        OnCampaignEnrollmentChanged {},
     );
 }
 
 /// Emits `OnChallengeExpired(challenge_id, new_challenge)` for an expired seasonal challenge.
 pub fn emit_challenge_expired(ctx: &ServerContext, char_id: i64, challenge_id: i64, new_kv: PyRep) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnChallengeExpired",
-        "charid",
-        vec![PyRep::Integer(challenge_id), new_kv],
+        OnChallengeExpired {
+            challenge_id,
+            new_challenge: new_kv,
+        },
     );
 }
 
@@ -254,29 +249,22 @@ pub fn emit_contextual_offer_purchased(ctx: &ServerContext, char_id: i64, offer_
         return;
     }
     let now_ft = ctx.now_blueos_filetime_ticks();
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnContextualOfferPurchased",
-        "charid",
-        vec![
-            PyRep::Integer(offer_id),
-            PyRep::Dict(vec![
+        OnContextualOfferPurchased {
+            offer_id,
+            purchase_info: PyRep::Dict(vec![
                 (PyRep::String("offerID".into()), PyRep::Integer(offer_id)),
                 (PyRep::String("purchasedAt".into()), PyRep::Integer(now_ft)),
                 (PyRep::String("confirmed".into()), PyRep::Bool(true)),
             ]),
-        ],
+        },
     );
 }
 
 /// Emits `OnCrateLootSpawned()` when opening an inventory crate reveals its loot table.
 pub fn emit_crate_loot_spawned(ctx: &ServerContext, char_id: i64) {
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnCrateLootSpawned",
-        "charid",
-        vec![],
-    );
+    ctx.emit_typed(NotificationTarget::Character(char_id), OnCrateLootSpawned {});
 }
 
 /// Emits `OnFastCheckoutEnabledChanged(is_fast_checkout_enabled)` to characters on `user_id`.
@@ -292,11 +280,11 @@ pub fn emit_fast_checkout_enabled_changed(ctx: &ServerContext, user_id: u64, ena
         ids
     });
     for cid in char_ids {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(cid),
-            "OnFastCheckoutEnabledChanged",
-            "charid",
-            vec![PyRep::Bool(enabled)],
+            OnFastCheckoutEnabledChanged {
+                is_fast_checkout_enabled: enabled,
+            },
         );
     }
 }
@@ -308,20 +296,20 @@ pub fn emit_facilities_updated(
     char_id: i64,
     facility_id: i64,
 ) {
-    let args = vec![PyRep::List(vec![PyRep::Integer(facility_id)])];
     if let Some(sys_id) = solar_system_id {
-        ctx.notify(
+        ctx.emit_typed_with_id_type(
             NotificationTarget::SolarSystem(sys_id),
-            "OnFacilitiesUpdated",
             "solarsystemid",
-            args,
+            OnFacilitiesUpdated {
+                facility_ids: vec![facility_id],
+            },
         );
     } else {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnFacilitiesUpdated",
-            "charid",
-            args,
+            OnFacilitiesUpdated {
+                facility_ids: vec![facility_id],
+            },
         );
     }
 }
@@ -458,11 +446,12 @@ pub fn emit_industry_materials_consumed(
                 })
                 .collect()
         });
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(sub.char_id),
-            "OnIndustryMaterials",
-            "charid",
-            vec![PyRep::Integer(monitor_id), PyRep::Dict(entries)],
+            OnIndustryMaterials {
+                job_id: monitor_id,
+                materials: PyRep::Dict(entries),
+            },
         );
     }
 }
@@ -506,11 +495,12 @@ pub fn emit_logon_skills_trained(
     if entries.is_empty() {
         return;
     }
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnLogonSkillsTrained",
-        "charid",
-        vec![PyRep::Dict(entries), PyRep::Bool(can_train)],
+        OnLogonSkillsTrained {
+            skill_infos: PyRep::Dict(entries),
+            can_train,
+        },
     );
 }
 
@@ -522,15 +512,13 @@ pub fn emit_destination_change(
     clear_other_waypoints: bool,
     add_to_beginning: bool,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnDestinationChange",
-        "charid",
-        vec![
-            PyRep::Integer(destination_id),
-            PyRep::Bool(clear_other_waypoints),
-            PyRep::Bool(add_to_beginning),
-        ],
+        OnDestinationChange {
+            solar_system_id: destination_id,
+            clear_other_waypoints,
+            first: add_to_beginning,
+        },
     );
 }
 
@@ -586,11 +574,11 @@ pub fn emit_fleet_respawn_points_if_any(ctx: &ServerContext, fleet_id: i64) {
     if points.is_empty() {
         return;
     }
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Fleet(fleet_id),
-        "OnFleetRespawnPointsUpdate",
-        "fleetid",
-        vec![PyRep::List(points)],
+        OnFleetRespawnPointsUpdate {
+            respawn_points: PyRep::List(points),
+        },
     );
 }
 
@@ -627,21 +615,19 @@ pub fn emit_fleet_loot_event_if_in_fleet(
             )
         })
         .collect();
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Fleet(fleet_id),
-        "OnFleetLootEvent",
-        "fleetid",
-        vec![PyRep::Dict(entries)],
+        OnFleetLootEvent {
+            loot_events: PyRep::Dict(entries),
+        },
     );
 }
 
 /// Emits `OnAlphaInjectionAvailable()` when daily alpha injection becomes available for `char_id`.
 pub fn emit_alpha_injection_available(ctx: &ServerContext, char_id: i64) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnAlphaInjectionAvailable",
-        "charid",
-        vec![],
+        OnAlphaInjectionAvailable {},
     );
 }
 
@@ -655,29 +641,22 @@ pub fn emit_ccp_notification(
     notification_type_id: i64,
     reference_id: i64,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         target,
-        "OnCCPNotification",
-        "charid",
-        vec![
-            PyRep::String(title.to_string()),
-            PyRep::String(subtitle.to_string()),
-            PyRep::String(text.to_string()),
-            PyRep::Integer(notification_type_id),
-            PyRep::None,
-            PyRep::Integer(reference_id),
-        ],
+        OnCCPNotification {
+            title: title.to_string(),
+            subtitle: subtitle.to_string(),
+            text: text.to_string(),
+            notification_type_id,
+            language: None,
+            reference_id,
+        },
     );
 }
 
 /// Broadcasts `OnCommunityFittingsUpdated()` when community fittings are modified.
 pub fn emit_community_fittings_updated(ctx: &ServerContext) {
-    ctx.notify(
-        NotificationTarget::All,
-        "OnCommunityFittingsUpdated",
-        "clientID",
-        vec![],
-    );
+    ctx.emit_typed(NotificationTarget::All, OnCommunityFittingsUpdated {});
 }
 
 /// Emits `OnLoginMilestoneAchieved(milestoneID, iskAmount)`.
@@ -687,21 +666,20 @@ pub fn emit_login_milestone_achieved(
     milestone_id: i64,
     isk_amount: f64,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnLoginMilestoneAchieved",
-        "charid",
-        vec![PyRep::Integer(milestone_id), PyRep::Real(isk_amount)],
+        OnLoginMilestoneAchieved {
+            milestone_id,
+            isk_amount,
+        },
     );
 }
 
 /// Emits `OnMilestoneTimerStarted(timeLeft)`.
 pub fn emit_milestone_timer_started(ctx: &ServerContext, char_id: i64, time_left: i64) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnMilestoneTimerStarted",
-        "charid",
-        vec![PyRep::Integer(time_left)],
+        OnMilestoneTimerStarted { time_left },
     );
 }
 
@@ -730,11 +708,9 @@ pub fn handle_batch3_gm_slash_cmd(
                 ext.achievement_counters_by_char.remove(&target_cid);
                 crate::services::cosmetics_ui_ops::save_cosmetics_ui_state(snap, &ext);
             });
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(target_cid),
-                "OnAchievementsReset",
-                "charid",
-                vec![],
+                OnAchievementsReset {},
             );
             Some(Ok(PyRep::keyval([
                 ("command", PyRep::String(cmd.to_string())),
@@ -776,18 +752,16 @@ pub fn handle_batch3_gm_slash_cmd(
             };
             crate::services::quasar_social_chat::save_mutes_to_db(&ctx.db, &mutes_snapshot);
             if is_perm {
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Character(target_cid),
-                    "OnCharacterPermanentlyBanned",
-                    "charid",
-                    vec![],
+                    OnCharacterPermanentlyBanned {},
                 );
             } else {
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Character(target_cid),
-                    "OnCharacterTemporarilyBanned",
-                    "charid",
-                    vec![PyRep::Integer(expiry_ft)],
+                    OnCharacterTemporarilyBanned {
+                        ban_expiry: expiry_ft,
+                    },
                 );
             }
             Some(Ok(PyRep::keyval([
@@ -813,11 +787,9 @@ pub fn handle_batch3_gm_slash_cmd(
                 };
                 crate::services::quasar_social_chat::save_mutes_to_db(&ctx.db, &mutes_snapshot);
             }
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(target_cid),
-                "OnCharacterUnbanned",
-                "charid",
-                vec![],
+                OnCharacterUnbanned {},
             );
             Some(Ok(PyRep::keyval([
                 ("characterID", PyRep::Integer(target_cid)),
@@ -955,15 +927,13 @@ pub fn handle_batch3_gm_slash_cmd(
             } else {
                 "UI/Shared/ShutdownNotificationTitle"
             };
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::All,
-                "OnClusterShutdownInitiated",
-                "clientID",
-                vec![
-                    PyRep::String(explanation.into()),
-                    PyRep::Integer(target_ft),
-                    PyRep::Integer(secs as i64),
-                ],
+                OnClusterShutdownInitiated {
+                    explanation_label: explanation.into(),
+                    when: target_ft,
+                    duration: secs as i64,
+                },
             );
             Some(Ok(PyRep::keyval([
                 ("shutdownInitiated", PyRep::Bool(true)),
@@ -1291,11 +1261,11 @@ pub fn handle_batch3_gm_slash_cmd(
                 now_unix,
             );
             for target_id in cleared_engagements {
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Character(caller_cid),
-                    "OnCrimewatchEngagementEnded",
-                    "charid",
-                    vec![PyRep::Integer(target_id), PyRep::None],
+                    OnCrimewatchEngagementEnded {
+                        other_char_id: target_id,
+                    },
                 );
             }
             crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {

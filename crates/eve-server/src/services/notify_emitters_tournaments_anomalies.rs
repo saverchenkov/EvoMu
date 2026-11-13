@@ -8,6 +8,15 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::router::cache_notifications::PendingMachoNotification;
+use crate::router::notify_registry::{
+    emit_typed_target_to_char_with_id_type, DoSimClockRebase, OnAnalysisKreditsChange,
+    OnComponentRemovedSystemEnvironment, OnCosmicAnomalyAdded, OnDeathzoneStateUpdate,
+    OnDungeonInstanceAdded, OnDungeonInstanceRemoved, OnEnterTournamentSystem,
+    OnInfluenceUpdate, OnLeaveTournamentSystem, OnMatchMakingFailure, OnOreMinedByOther,
+    OnProbeWarpEnd, OnProgressionLeft, OnProvingGroundsMatchFound, OnSignalTrackerFullState,
+    OnSpaceWhiteOutStart, OnSystemActivityUpdated, OnSystemEffectStarted,
+    OnSystemWideEffectStop, OnTaleData, OnTaleRemove, OnTournamentMatchStateChange,
+};
 use crate::router::{NotificationTarget, ServerContext};
 use eve_db::lock_rank::AnyRwLock;
 use eve_proto::PyRep;
@@ -18,39 +27,30 @@ use glam::DVec3;
 // ---------------------------------------------------------------------------
 
 pub fn emit_proving_grounds_match_found(ctx: &ServerContext, char_id: i64) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnProvingGroundsMatchFound",
-        "charid",
-        vec![],
+        OnProvingGroundsMatchFound {},
     );
 }
 
 pub fn emit_pvp_matchmaking_failure(ctx: &ServerContext, char_id: i64, errors: Vec<String>) {
-    let err_list = errors.into_iter().map(PyRep::String).collect();
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnMatchMakingFailure",
-        "charid",
-        vec![PyRep::List(err_list)],
+        OnMatchMakingFailure { errors },
     );
 }
 
 pub fn emit_enter_tournament_system(ctx: &ServerContext, char_id: i64) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnEnterTournamentSystem",
-        "charid",
-        vec![],
+        OnEnterTournamentSystem {},
     );
 }
 
 pub fn emit_leave_tournament_system(ctx: &ServerContext, char_id: i64) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnLeaveTournamentSystem",
-        "charid",
-        vec![],
+        OnLeaveTournamentSystem {},
     );
 }
 
@@ -66,46 +66,40 @@ pub fn emit_tournament_match_state_change(
     let mut notified = HashSet::new();
     for &cid in red_pilots {
         if cid > 0 && notified.insert(cid) {
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(cid),
-                "OnTournamentMatchStateChange",
-                "charid",
-                vec![
-                    PyRep::Integer(red_points),
-                    PyRep::Integer(blue_points),
-                    PyRep::Integer(0),
-                    PyRep::Integer(match_status),
-                ],
+                OnTournamentMatchStateChange {
+                    red_points,
+                    blue_points,
+                    my_team: 0,
+                    match_status,
+                },
             );
         }
     }
     for &cid in blue_pilots {
         if cid > 0 && notified.insert(cid) {
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(cid),
-                "OnTournamentMatchStateChange",
-                "charid",
-                vec![
-                    PyRep::Integer(red_points),
-                    PyRep::Integer(blue_points),
-                    PyRep::Integer(1),
-                    PyRep::Integer(match_status),
-                ],
+                OnTournamentMatchStateChange {
+                    red_points,
+                    blue_points,
+                    my_team: 1,
+                    match_status,
+                },
             );
         }
     }
     for &cid in referees {
         if cid > 0 && notified.insert(cid) {
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(cid),
-                "OnTournamentMatchStateChange",
-                "charid",
-                vec![
-                    PyRep::Integer(red_points),
-                    PyRep::Integer(blue_points),
-                    PyRep::Integer(-1),
-                    PyRep::Integer(match_status),
-                ],
+                OnTournamentMatchStateChange {
+                    red_points,
+                    blue_points,
+                    my_team: -1,
+                    match_status,
+                },
             );
         }
     }
@@ -123,17 +117,16 @@ pub fn emit_cosmic_anomaly_added_for_system(
     dungeon_id: i64,
     dungeon_name: &str,
 ) {
-    ctx.notify(
+    let anomaly = PyRep::keyval([
+        ("targetID", PyRep::String(anomaly_id.into())),
+        ("instanceID", PyRep::Integer(instance_id)),
+        ("dungeonID", PyRep::Integer(dungeon_id)),
+        ("dungeonName", PyRep::String(dungeon_name.into())),
+        ("solarSystemID", PyRep::Integer(i64::from(solar_system_id))),
+    ]);
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(solar_system_id),
-        "OnCosmicAnomalyAdded",
-        "solarsystemid",
-        vec![PyRep::keyval([
-            ("targetID", PyRep::String(anomaly_id.into())),
-            ("instanceID", PyRep::Integer(instance_id)),
-            ("dungeonID", PyRep::Integer(dungeon_id)),
-            ("dungeonName", PyRep::String(dungeon_name.into())),
-            ("solarSystemID", PyRep::Integer(i64::from(solar_system_id))),
-        ])],
+        OnCosmicAnomalyAdded { anomaly },
     );
 }
 
@@ -151,11 +144,12 @@ pub fn emit_dungeon_instance_added(
         ("signatureID", PyRep::String(sig_id.into())),
         ("scanStrengthValue", PyRep::Real(scan_strength.max(0.01))),
     ]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(solar_system_id),
-        "OnDungeonInstanceAdded",
-        "solarsystemid",
-        vec![PyRep::Integer(i64::from(solar_system_id)), instance],
+        OnDungeonInstanceAdded {
+            solar_system_id: i64::from(solar_system_id),
+            instance,
+        },
     );
 }
 
@@ -166,25 +160,21 @@ pub fn emit_dungeon_instance_removed(
     sig_id: &str,
     dungeon_id: i64,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(solar_system_id),
-        "OnDungeonInstanceRemoved",
-        "solarsystemid",
-        vec![
-            PyRep::Integer(i64::from(solar_system_id)),
-            PyRep::Integer(instance_id),
-            PyRep::String(sig_id.into()),
-            PyRep::Integer(dungeon_id),
-        ],
+        OnDungeonInstanceRemoved {
+            solar_system_id: i64::from(solar_system_id),
+            instance_id,
+            signature_id: sig_id.into(),
+            dungeon_id,
+        },
     );
 }
 
 pub fn emit_probe_warp_end(ctx: &ServerContext, char_id: i64, probe_id: i64) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnProbeWarpEnd",
-        "charid",
-        vec![PyRep::Integer(probe_id)],
+        OnProbeWarpEnd { probe_id },
     );
 }
 
@@ -352,15 +342,13 @@ pub fn emit_signal_tracker_full_state_for_system(
         PyRep::Dict(static_sites),
         struct_dict,
     ]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnSignalTrackerFullState",
-        "charid",
-        vec![
-            PyRep::Integer(i64::from(sys_id)),
+        OnSignalTrackerFullState {
+            solar_system_id: i64::from(sys_id),
             full_state,
-            PyRep::Bool(true),
-        ],
+            should_remove_old_sites: true,
+        },
     );
 }
 
@@ -532,12 +520,7 @@ pub fn emit_dungeon_trigger_music_core(
 // ---------------------------------------------------------------------------
 
 pub fn emit_progression_left(ctx: &ServerContext, char_id: i64) {
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnProgressionLeft",
-        "charid",
-        vec![],
-    );
+    ctx.emit_typed(NotificationTarget::Character(char_id), OnProgressionLeft {});
 }
 
 // ---------------------------------------------------------------------------
@@ -551,11 +534,12 @@ pub fn emit_tale_data_for_system(
     tale_payload: PyRep,
 ) {
     let data = PyRep::Dict(vec![(PyRep::Integer(tale_id), tale_payload)]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(solar_system_id),
-        "OnTaleData",
-        "solarsystemid",
-        vec![PyRep::Integer(i64::from(solar_system_id)), data],
+        OnTaleData {
+            solar_system_id: i64::from(solar_system_id),
+            data,
+        },
     );
 }
 
@@ -572,11 +556,12 @@ pub fn emit_tale_influence_update(
     ]);
     for (&sys_id, sys_rec) in &ctx.sde.solar_systems {
         if sys_rec.constellation_id == constellation_id {
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::SolarSystem(sys_id),
-                "OnInfluenceUpdate",
-                "solarsystemid",
-                vec![PyRep::Integer(tale_id), payload.clone()],
+                OnInfluenceUpdate {
+                    tale_id,
+                    new_influence_data: payload.clone(),
+                },
             );
         }
     }
@@ -591,15 +576,13 @@ pub fn emit_tale_remove_for_constellation(
 ) {
     for (&sys_id, sys_rec) in &ctx.sde.solar_systems {
         if sys_rec.constellation_id == constellation_id {
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::SolarSystem(sys_id),
-                "OnTaleRemove",
-                "solarsystemid",
-                vec![
-                    PyRep::Integer(tale_id),
-                    PyRep::Integer(template_class_id),
-                    PyRep::Integer(template_id),
-                ],
+                OnTaleRemove {
+                    tale_id,
+                    template_class_id,
+                    template_id,
+                },
             );
         }
     }
@@ -625,7 +608,6 @@ pub fn emit_incursion_completion_combat_notifications(
         ("influence", PyRep::Real(result.influence)),
         ("lastUpdated", PyRep::Integer(now_ft)),
     ]);
-    let inf_args = vec![PyRep::Integer(tale_id), payload];
 
     let chars = db.with_snapshot(|snap| {
         snap.characters
@@ -644,69 +626,34 @@ pub fn emit_incursion_completion_combat_notifications(
     });
 
     for (target_char_id, target_user_id) in chars {
-        let (packet, marshaled_packet) = crate::router::ServerContext::build_macho_notification_packet(
+        emit_typed_target_to_char_with_id_type(
+            pending_notifications,
+            notify_tx,
             target_char_id,
             target_user_id,
-            "OnInfluenceUpdate",
             "solarsystemid",
-            inf_args.clone(),
+            now_ft,
+            OnInfluenceUpdate {
+                tale_id,
+                new_influence_data: payload.clone(),
+            },
         );
-        let notif = crate::router::cache_notifications::PendingMachoNotification {
-            seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-            recipient_char_id: target_char_id,
-            event: "OnInfluenceUpdate".into(),
-            id_type: "solarsystemid".into(),
-            args: inf_args.clone(),
-            packet,
-            marshaled_packet,
-            created_filetime: now_ft,
-        };
-        if let Some(pend) = pending_notifications {
-            if let Ok(mut map) = pend.write() {
-                crate::router::cache_notifications::push_pending_notification_capped(
-                    map.entry(target_char_id).or_default(),
-                    notif.clone(),
-                );
-            }
-        }
-        if let Some(tx) = notify_tx {
-            let _ = tx.send((target_char_id, notif));
-        }
 
         if result.incursion_ended {
-            let rem_args = vec![
-                PyRep::Integer(tale_id),
-                PyRep::Integer(1),
-                PyRep::Integer(crate::services::pve_incursion_sites::INCURSION_TALE_TEMPLATE_ID as i64),
-            ];
-            let (packet_rem, marshaled_packet_rem) = crate::router::ServerContext::build_macho_notification_packet(
+            emit_typed_target_to_char_with_id_type(
+                pending_notifications,
+                notify_tx,
                 target_char_id,
                 target_user_id,
-                "OnTaleRemove",
                 "solarsystemid",
-                rem_args.clone(),
+                now_ft,
+                OnTaleRemove {
+                    tale_id,
+                    template_class_id: 1,
+                    template_id: crate::services::pve_incursion_sites::INCURSION_TALE_TEMPLATE_ID
+                        as i64,
+                },
             );
-            let notif_rem = crate::router::cache_notifications::PendingMachoNotification {
-                seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-                recipient_char_id: target_char_id,
-                event: "OnTaleRemove".into(),
-                id_type: "solarsystemid".into(),
-                args: rem_args,
-                packet: packet_rem,
-                marshaled_packet: marshaled_packet_rem,
-                created_filetime: now_ft,
-            };
-            if let Some(pend) = pending_notifications {
-                if let Ok(mut map) = pend.write() {
-                    crate::router::cache_notifications::push_pending_notification_capped(
-                        map.entry(target_char_id).or_default(),
-                        notif_rem.clone(),
-                    );
-                }
-            }
-            if let Some(tx) = notify_tx {
-                let _ = tx.send((target_char_id, notif_rem));
-            }
         }
     }
 }
@@ -716,12 +663,9 @@ pub fn emit_incursion_completion_combat_notifications(
 // ---------------------------------------------------------------------------
 
 pub fn emit_system_effect_started(ctx: &ServerContext, solar_system_id: u32, type_ids: Vec<i64>) {
-    let list = type_ids.into_iter().map(PyRep::Integer).collect();
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(solar_system_id),
-        "OnSystemEffectStarted",
-        "solarsystemid",
-        vec![PyRep::List(list)],
+        OnSystemEffectStarted { type_ids },
     );
 }
 
@@ -732,24 +676,22 @@ pub fn emit_system_wide_effect_stop(
     source_item_id: i64,
     source_type_id: i64,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(solar_system_id),
-        "OnSystemWideEffectStop",
-        "solarsystemid",
-        vec![
-            PyRep::Integer(effect_id),
-            PyRep::Integer(source_item_id),
-            PyRep::Integer(source_type_id),
-        ],
+        OnSystemWideEffectStop {
+            effect_id,
+            source_item_id,
+            source_type_id,
+        },
     );
 }
 
 pub fn emit_component_removed_system_environment(ctx: &ServerContext, solar_system_id: u32) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(solar_system_id),
-        "OnComponentRemovedSystemEnvironment",
-        "solarsystemid",
-        vec![PyRep::Integer(i64::from(solar_system_id))],
+        OnComponentRemovedSystemEnvironment {
+            solar_system_id: i64::from(solar_system_id),
+        },
     );
 }
 
@@ -777,30 +719,27 @@ pub fn emit_ore_mined_by_other(
             .collect()
     });
     for cid in observer_char_ids {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(cid),
-            "OnOreMinedByOther",
-            "charid",
-            vec![PyRep::Integer(asteroid_id), PyRep::Integer(quantity)],
+            OnOreMinedByOther {
+                asteroid_id,
+                quantity,
+            },
         );
     }
 }
 
 pub fn emit_analysis_kredits_change(ctx: &ServerContext, char_id: i64) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnAnalysisKreditsChange",
-        "charid",
-        vec![],
+        OnAnalysisKreditsChange {},
     );
 }
 
 pub fn emit_system_activity_updated(ctx: &ServerContext, solar_system_id: u32) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(solar_system_id),
-        "OnSystemActivityUpdated",
-        "solarsystemid",
-        vec![],
+        OnSystemActivityUpdated {},
     );
 }
 
@@ -828,21 +767,21 @@ pub fn emit_sim_clock_rebase_if_advanced(ctx: &ServerContext, prev_unix: u64, se
     });
     let times = PyRep::Tuple(vec![PyRep::Integer(old_ft), PyRep::Integer(new_ft)]);
     for sys_id in systems {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::SolarSystem(sys_id),
-            "DoSimClockRebase",
-            "solarsystemid2",
-            vec![times.clone()],
+            DoSimClockRebase {
+                times: times.clone(),
+            },
         );
     }
 }
 
 pub fn emit_space_white_out_start(ctx: &ServerContext, char_id: i64, solar_system_id: u32) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnSpaceWhiteOutStart",
-        "charid",
-        vec![PyRep::Integer(i64::from(solar_system_id))],
+        OnSpaceWhiteOutStart {
+            solar_system_id: i64::from(solar_system_id),
+        },
     );
 }
 
@@ -919,15 +858,13 @@ pub fn sync_deathzone_state_notifications(ctx: &ServerContext, sys_id: u32) {
         } else {
             PyRep::None
         };
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(cid),
-            "OnDeathzoneStateUpdate",
-            "charid",
-            vec![
-                PyRep::Integer(i64::from(sys_id)),
-                PyRep::Integer(ship_id),
+            OnDeathzoneStateUpdate {
+                solar_system_id: i64::from(sys_id),
+                ship_id,
                 tracking_data,
-            ],
+            },
         );
     }
 }

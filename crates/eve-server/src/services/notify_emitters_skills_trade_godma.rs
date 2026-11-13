@@ -3,6 +3,14 @@
 
 #![forbid(unsafe_code)]
 
+use crate::router::notify_registry::{
+    OnAllowWarUpdated, OnCfgDataChanged, OnEffectMessage, OnModuleAttributeChanges,
+    OnMultipleCharactersTrainingUpdated, OnNesIntroStateChanged, OnNonDiminishingInjectionsAdded,
+    OnNonDiminishingInjectionsRemoved, OnPlayerStateUpdated, OnPlexDepositFailed,
+    OnPlexWithdrawFailed, OnPodOrCorvetteAssembly, OnPrimingNeededForTradeItems,
+    OnRedeemingQueueUpdated, OnSellRepackageErrors, OnServerMessage, OnSkillBundleInjected,
+    OnSkillForcedRefresh, OnSubscriptionChangedServer, OnSubscriptionTimeUpdateServer,
+};
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::notify_emitters_character_services::{
     emit_alpha_injection_available,
@@ -89,11 +97,11 @@ pub(crate) fn emit_ship_fitting_attr_changes(
         }
     }
     if !changes.is_empty() {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnModuleAttributeChanges",
-            "charid",
-            vec![PyRep::List(changes)],
+            OnModuleAttributeChanges {
+                changes: PyRep::List(changes),
+            },
         );
     }
 }
@@ -108,44 +116,36 @@ pub fn emit_non_diminishing_injections_added(ctx: &ServerContext, char_id: i64, 
     if added_qty <= 0 {
         return;
     }
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnNonDiminishingInjectionsAdded",
-        "charid",
-        vec![PyRep::Integer(added_qty)],
+        OnNonDiminishingInjectionsAdded { amount: added_qty },
     );
 }
 
 /// Emits `OnNonDiminishingInjectionsRemoved()` (`0` args, `id_type = "charid"`).
 // parity: notify:OnNonDiminishingInjectionsRemoved
 pub fn emit_non_diminishing_injections_removed(ctx: &ServerContext, char_id: i64) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnNonDiminishingInjectionsRemoved",
-        "charid",
-        vec![],
+        OnNonDiminishingInjectionsRemoved {},
     );
 }
 
 /// Emits `OnSkillBundleInjected(numberOfSkills, sp)` (`2` args, `id_type = "charid"`).
 pub fn emit_skill_bundle_injected(ctx: &ServerContext, char_id: i64, num_skills: i64, sp: i64) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnSkillBundleInjected",
-        "charid",
-        vec![PyRep::Integer(num_skills), PyRep::Integer(sp)],
+        OnSkillBundleInjected {
+            number_of_skills: num_skills,
+            sp,
+        },
     );
 }
 
 /// Emits `OnSkillForcedRefresh()` (`0` args, `id_type = "charid"`).
 // parity: notify:OnSkillForcedRefresh
 pub fn emit_skill_forced_refresh(ctx: &ServerContext, char_id: i64) {
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnSkillForcedRefresh",
-        "charid",
-        vec![],
-    );
+    ctx.emit_typed(NotificationTarget::Character(char_id), OnSkillForcedRefresh {});
 }
 
 /// Emits `OnMultipleCharactersTrainingUpdated()` (`0` args, `id_type = "charid"`) to all characters on `user_id`.
@@ -162,11 +162,9 @@ pub fn emit_multiple_characters_training_updated(ctx: &ServerContext, user_id: u
         ids
     });
     for cid in char_ids {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(cid),
-            "OnMultipleCharactersTrainingUpdated",
-            "charid",
-            vec![],
+            OnMultipleCharactersTrainingUpdated {},
         );
     }
 }
@@ -254,12 +252,7 @@ pub fn emit_redeeming_queue_updated_for_user(
         })
     };
     for cid in char_ids {
-        ctx.notify(
-            NotificationTarget::Character(cid),
-            "OnRedeemingQueueUpdated",
-            "charid",
-            vec![],
-        );
+        ctx.emit_typed(NotificationTarget::Character(cid), OnRedeemingQueueUpdated {});
     }
 }
 
@@ -271,33 +264,34 @@ pub fn emit_pod_or_corvette_assembly(
     item_id: i64,
     type_id: TypeId,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnPodOrCorvetteAssembly",
-        "charid",
-        vec![PyRep::Integer(item_id), PyRep::Integer(i64::from(type_id))],
+        OnPodOrCorvetteAssembly {
+            item_id,
+            type_id: i64::from(type_id),
+        },
     );
 }
 
 /// Emits `OnPlayerStateUpdated(playerState)` (`1` arg, `id_type = "charid"`).
 // parity: notify:OnPlayerStateUpdated
 pub fn emit_player_state_updated(ctx: &ServerContext, char_id: i64, player_state_rep: PyRep) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnPlayerStateUpdated",
-        "charid",
-        vec![player_state_rep],
+        OnPlayerStateUpdated {
+            player_state: player_state_rep,
+        },
     );
 }
 
 /// Emits `OnSubscriptionChangedServer(newState)` (`1` arg, `id_type = "charid"`).
 // parity: notify:OnSubscriptionChangedServer
 pub fn emit_subscription_changed_server(ctx: &ServerContext, char_id: i64, new_grade: u32) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnSubscriptionChangedServer",
-        "charid",
-        vec![PyRep::Integer(i64::from(new_grade))],
+        OnSubscriptionChangedServer {
+            new_state: i64::from(new_grade),
+        },
     );
 }
 
@@ -322,11 +316,11 @@ pub fn emit_subscription_time_update_server(ctx: &ServerContext, user_id: u64, u
         ids
     });
     for cid in char_ids {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(cid),
-            "OnSubscriptionTimeUpdateServer",
-            "charid",
-            vec![PyRep::Integer(omega_ft)],
+            OnSubscriptionTimeUpdateServer {
+                omega_time: omega_ft,
+            },
         );
     }
 }
@@ -337,22 +331,21 @@ pub fn emit_subscription_time_update_server(ctx: &ServerContext, user_id: u64, u
 /// Emits `OnAllowWarUpdated(corpID, allowWar)` to all online members of `corp_id`.
 // parity: notify:OnAllowWarUpdated
 pub fn emit_allow_war_updated(ctx: &ServerContext, corp_id: i64, allow_war: bool) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Corporation(corp_id),
-        "OnAllowWarUpdated",
-        "corpid",
-        vec![PyRep::Integer(corp_id), PyRep::Bool(allow_war)],
+        OnAllowWarUpdated { corp_id, allow_war },
     );
 }
 
 /// Emits `OnNesIntroStateChanged(character_id, new_state_id)` (`2` args, `id_type = "charid"`).
 // parity: notify:OnNesIntroStateChanged
 pub fn emit_nes_intro_state_changed(ctx: &ServerContext, char_id: i64, new_state_id: i64) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnNesIntroStateChanged",
-        "charid",
-        vec![PyRep::Integer(char_id), PyRep::Integer(new_state_id)],
+        OnNesIntroStateChanged {
+            character_id: char_id,
+            new_state_id,
+        },
     );
 }
 
@@ -492,12 +485,11 @@ pub fn emit_priming_needed_for_trade_items(
     if item_ids.is_empty() || partner_char_id <= 0 {
         return;
     }
-    let list = item_ids.iter().copied().map(PyRep::Integer).collect();
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(partner_char_id),
-        "OnPrimingNeededForTradeItems",
-        "charid",
-        vec![PyRep::List(list)],
+        OnPrimingNeededForTradeItems {
+            item_ids_to_prime: item_ids.to_vec(),
+        },
     );
 }
 
@@ -561,14 +553,14 @@ pub fn emit_sell_repackage_errors(
     if count <= 0 || error_code != "CantRepackageDamagedItem" {
         return;
     }
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnSellRepackageErrors",
-        "charid",
-        vec![PyRep::Dict(vec![(
-            PyRep::String("CantRepackageDamagedItem".into()),
-            PyRep::Integer(count),
-        )])],
+        OnSellRepackageErrors {
+            repackage_error_count: PyRep::Dict(vec![(
+                PyRep::String("CantRepackageDamagedItem".into()),
+                PyRep::Integer(count),
+            )]),
+        },
     );
 }
 
@@ -943,13 +935,11 @@ pub fn emit_structure_cfg_data_changed(
     new_name: &str,
     pos: [f64; 3],
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnCfgDataChanged",
-        "solarsystemid",
-        vec![
-            PyRep::String("evelocations".into()),
-            PyRep::List(vec![
+        OnCfgDataChanged {
+            what: "evelocations".into(),
+            data: PyRep::List(vec![
                 PyRep::Integer(structure_id),
                 PyRep::String(new_name.to_string()),
                 PyRep::Integer(i64::from(sys_id)),
@@ -958,7 +948,7 @@ pub fn emit_structure_cfg_data_changed(
                 PyRep::Real(pos[2]),
                 PyRep::None,
             ]),
-        ],
+        },
     );
 }
 
@@ -1153,11 +1143,11 @@ pub fn emit_server_message_broadcast(ctx: &ServerContext, message: &str) {
     if trimmed.is_empty() {
         return;
     }
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::All,
-        "OnServerMessage",
-        "clientID",
-        vec![PyRep::String(trimmed.to_string())],
+        OnServerMessage {
+            msg: trimmed.to_string(),
+        },
     );
 }
 
@@ -1263,11 +1253,12 @@ pub fn emit_effect_message(
         .iter()
         .map(|(k, v)| (PyRep::String((*k).to_string()), v.clone()))
         .collect();
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnEffectMessage",
-        "charid",
-        vec![PyRep::String(msg_key.to_string()), PyRep::Dict(args_dict)],
+        OnEffectMessage {
+            msgkey: msg_key.to_string(),
+            args: PyRep::Dict(args_dict),
+        },
     );
 }
 
@@ -1279,11 +1270,12 @@ pub fn emit_plex_deposit_failed(
     error_key: &str,
     reference: PyRep,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnPlexDepositFailed",
-        "charid",
-        vec![PyRep::String(error_key.to_string()), reference],
+        OnPlexDepositFailed {
+            error_key: error_key.to_string(),
+            reference,
+        },
     );
 }
 
@@ -1295,11 +1287,12 @@ pub fn emit_plex_withdraw_failed(
     error_key: &str,
     reference: PyRep,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnPlexWithdrawFailed",
-        "charid",
-        vec![PyRep::String(error_key.to_string()), reference],
+        OnPlexWithdrawFailed {
+            error_key: error_key.to_string(),
+            reference,
+        },
     );
 }
 

@@ -509,7 +509,7 @@ fn is_ident_byte(b: u8) -> bool {
 
 /// Replaces comments, strings, raw strings, and char literals with spaces while preserving
 /// newlines and all syntactic punctuation (`(`, `)`, `,`, `.dispatch_rpc`) outside literals.
-fn strip_rust_comments_and_literals(src: &str) -> String {
+pub(crate) fn strip_rust_comments_and_literals(src: &str) -> String {
     let b = src.as_bytes();
     let n = b.len();
     let mut out = Vec::with_capacity(n);
