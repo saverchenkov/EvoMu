@@ -467,7 +467,59 @@ async fn sov_rpcs_dev_indices_map_beyonce_and_hub_hacks_kill_mutations() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(jam_state.dict_get("isJammed"), Some(&PyRep::Bool(true)));
-    assert_eq!(jam_state.dict_get("spoolingUp"), Some(&PyRep::Bool(true)));
-    assert_eq!(jam_state.dict_get("structureInhibitor"), Some(&PyRep::Bool(true)));
+    let now_ticks = ctx.now_blueos_filetime_ticks();
+    assert!(
+        matches!(jam_state, PyRep::Integer(ts) if ts > 0 && ts <= now_ticks),
+        "active inhibitor must return online filetime <= {now_ticks}, got {jam_state:?}"
+    );
+
+    // Removing the item inhibitor with no Sov Hub Cynosural Suppression leaves jammer Off (None),
+    // and adding an online Cynosural Suppression hub surfaces the spooling Tenebrex as a future timestamp
+    // even when structure_vulnerability_windows is non-empty.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&880_501);
+        snap.structure_vulnerability_windows.insert(jammer_id, (1_000, 5_000));
+    });
+    assert_eq!(
+        call_sov_rpc(&ctx, &mut sess, "beyonce", "GetCynoJammerState", &[])
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::None
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            hub_id,
+            UpwellStructureRecord {
+                structure_id: hub_id,
+                type_id: TYPE_SOVEREIGNTY_HUB,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Sov Hub".into(),
+                state: "ShieldVulnerable".into(),
+                fuel_blocks: 100,
+                ..Default::default()
+            },
+        );
+        snap.sov_runtime.sov_hubs.insert(
+            hub_id,
+            PersistedSovHubData {
+                hub_id,
+                upgrades: vec![PersistedHubUpgrade {
+                    type_id: crate::services::sov_gameplay::UPGRADE_CYNOSURAL_SUPPRESSION,
+                    online: true,
+                    low_power: false,
+                }],
+                ..Default::default()
+            },
+        );
+    });
+    let spool_state = call_sov_rpc(&ctx, &mut sess, "beyonce", "GetCynoJammerState", &[])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(spool_state, PyRep::Integer(ts) if ts > now_ticks),
+        "spooling Tenebrex must return future pending timestamp > {now_ticks}, got {spool_state:?}"
+    );
 }

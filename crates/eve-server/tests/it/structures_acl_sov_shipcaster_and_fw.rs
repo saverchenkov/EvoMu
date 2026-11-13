@@ -737,12 +737,13 @@ async fn test_sov_hub_vuln_window_contested_entosis_decap_hacked_recovery_and_cy
     let mtu_id = create_item_as_gm(&ctx, &mut s1, "demo", P1, 33_700, 1).await;
     rpc(&ctx, &mut s1, "posMgr", "AnchorStructure", &[PyRep::Integer(mtu_id)]).await.expect("Anchor MTU");
     let jam_mtu = rpc(&ctx, &mut s1, "beyonce", "GetCynoJammerState", &[]).await.unwrap();
-    assert_eq!(jam_mtu.dict_get("isJammed"), Some(&PyRep::Bool(false)));
+    assert_eq!(jam_mtu, PyRep::None);
 
     let inhib_id = create_item_as_gm(&ctx, &mut s1, "demo", P1, 33_476, 1).await;
     rpc(&ctx, &mut s1, "posMgr", "AnchorStructure", &[PyRep::Integer(inhib_id)]).await.expect("Anchor Cyno Inhibitor");
     let jam_inhib = rpc(&ctx, &mut s1, "beyonce", "GetCynoJammerState", &[]).await.unwrap();
-    assert_eq!(jam_inhib.dict_get("isJammed"), Some(&PyRep::Bool(true)));
+    let now_ticks = ctx.now_blueos_filetime_ticks();
+    assert!(matches!(jam_inhib, PyRep::Integer(ts) if ts > 0 && ts <= now_ticks), "expected active inhibitor timestamp <= {now_ticks}, got {jam_inhib:?}");
 }
 
 #[tokio::test]

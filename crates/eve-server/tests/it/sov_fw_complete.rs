@@ -705,7 +705,7 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
     let jammer_state_no_upgrade = sov_call(&ctx, &mut sess, "beyonce", "GetCynoJammerState", &[])
         .await
         .expect("GetCynoJammerState before Cynosural Suppression upgrade online");
-    assert_eq!(jammer_state_no_upgrade.dict_get("isJammed"), Some(&PyRep::Bool(false)));
+    assert_eq!(jammer_state_no_upgrade, PyRep::None);
 
     // 2. Fuel Sov Hub (`AddRequest`) and install + online `UPGRADE_CYNOSURAL_SUPPRESSION` + `UPGRADE_MAJOR_THREAT_DETECTION`!
     for (fuel_iid, amt) in [(990_001u64, 5_000u64), (990_002u64, 5_000u64)] {
@@ -777,7 +777,8 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
     let jammer_state_fueled = sov_call(&ctx, &mut sess, "beyonce", "GetCynoJammerState", &[])
         .await
         .expect("GetCynoJammerState with Cynosural Suppression upgrade + Tenebrex online");
-    assert_eq!(jammer_state_fueled.dict_get("isJammed"), Some(&PyRep::Bool(true)));
+    let now_ticks = ctx.now_blueos_filetime_ticks();
+    assert!(matches!(jammer_state_fueled, PyRep::Integer(ts) if ts > 0 && ts <= now_ticks));
     ctx.db.with_mut_snapshot(|s| {
         s.fleets.insert(5001, eve_db::FleetRecord { fleet_id: 5001, boss_id: PILOT, members: vec![PILOT], ..Default::default() });
     });
@@ -857,14 +858,15 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
     let jammer_state_hacked = sov_call(&ctx, &mut sess, "beyonce", "GetCynoJammerState", &[])
         .await
         .expect("GetCynoJammerState after hub hack");
-    assert_eq!(jammer_state_hacked.dict_get("isJammed"), Some(&PyRep::Bool(false)));
+    assert_eq!(jammer_state_hacked, PyRep::None);
     assert!(sov_call(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(990_200), PyRep::String("cynosuralGeneration".into())]).await.is_ok());
 
     ctx.advance_virtual_clock(3_605);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert!(!sov_services::is_hub_hacked(&ctx, hub_id));
     let jammer_state_restored = sov_call(&ctx, &mut sess, "beyonce", "GetCynoJammerState", &[]).await.unwrap();
-    assert_eq!(jammer_state_restored.dict_get("isJammed"), Some(&PyRep::Bool(true)));
+    let restored_ticks = ctx.now_blueos_filetime_ticks();
+    assert!(matches!(jammer_state_restored, PyRep::Integer(ts) if ts > 0 && ts <= restored_ticks));
 }
 
 #[tokio::test]

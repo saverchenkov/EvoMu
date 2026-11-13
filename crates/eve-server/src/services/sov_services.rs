@@ -831,51 +831,11 @@ pub async fn handle(
                     client_error: None,
                 }));
             };
-            let now = ctx.now_unix();
-            let (is_jammed, cyno_suppressed, inhibitor_active, spooling_up) = ctx.db.with_snapshot(|snap| {
-                let tenebrex_active =
-                    crate::services::sov_gameplay::is_tenebrex_jammer_active_in_snap(snap, sys_id, now);
-                let spooling = snap.structures.values().any(|s| {
-                    s.solar_system_id == sys_id
-                        && s.type_id == TYPE_TENEBREX_CYNO_JAMMER
-                        && s.fuel_blocks > 0
-                        && matches!(s.state.as_str(), "ShieldVulnerable" | "Online")
-                        && snap
-                            .sov_runtime
-                            .tenebrex_spool_ready_unix
-                            .get(&s.structure_id)
-                            .is_some_and(|&ready| now < ready)
-                });
-                let other_structure_jammed = snap.structures.values().any(|s| {
-                    s.solar_system_id == sys_id
-                        && s.type_id != TYPE_TENEBREX_CYNO_JAMMER
-                        && (s.type_id == 81926
-                            || ctx.sde.types.get(&s.type_id).is_some_and(|t| {
-                                t.default_attributes.get(&3038).copied().unwrap_or(0.0) > 0.0
-                            }))
-                        && s.type_id != TYPE_PHAROLUX_CYNO_BEACON
-                        && s.type_id != 35841
-                        && matches!(s.state.as_str(), "ShieldVulnerable" | "Online")
-                        && s.fuel_blocks > 0
-                });
-                let structure_jammed = tenebrex_active || other_structure_jammed;
-                let item_inhibitor = snap.items.values().any(|i| {
-                    i.location_id == sys_id as i64
-                        && (i.type_id == 33_476
-                            || ctx.sde.types.get(&i.type_id).is_some_and(|t| {
-                                t.default_attributes.get(&3038).copied().unwrap_or(0.0) > 0.0
-                            }))
-                });
-                (structure_jammed || item_inhibitor, structure_jammed, item_inhibitor, spooling)
-            });
-            Some(Ok(PyRep::keyval([
-                ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
-                ("isJammed", PyRep::Bool(is_jammed)),
-                ("active", PyRep::Bool(is_jammed)),
-                ("spoolingUp", PyRep::Bool(spooling_up)),
-                ("cynoSuppression", PyRep::Bool(cyno_suppressed)),
-                ("structureInhibitor", PyRep::Bool(inhibitor_active)),
-            ])))
+            Some(Ok(
+                crate::services::inventory_fitting::fitting_cyno_portal::cyno_jammer_state_ticks(ctx, sys_id)
+                    .map(PyRep::Integer)
+                    .unwrap_or(PyRep::None),
+            ))
         }
 
         _ => None,

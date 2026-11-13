@@ -759,7 +759,7 @@ pub(crate) mod milestone_logon_browser_lockdown_policy {
         let stack_item_id = 990_000_777i64;
         ctx.db.with_mut_snapshot(|snap| {
             if let Some(ch) = snap.characters.get_mut(&90_000_001) {
-                ch.gender = 1; // male -> GetPaperDollData dna[0] == "male"
+                ch.gender = 1; // male -> GetPaperDollData genderLabel == "male"
             }
             snap.items.insert(
                 remote_item_id,
@@ -901,9 +901,15 @@ pub(crate) mod milestone_logon_browser_lockdown_policy {
         .await
         .expect("GetPaperDollData");
         assert_eq!(
-            public_doll,
-            PyRep::List(vec![PyRep::String("male".into())]),
-            "GetPaperDollData must return [gender_label] for Doll.MatchDNA without summary KeyVal"
+            dict_get(&public_doll, "genderLabel"),
+            Some(&PyRep::String("male".into())),
+            "GetPaperDollData must return KeyVal for V24 ApplyDBRowToDoll & StartDeathScene"
+        );
+        assert_eq!(dict_get(&public_doll, "modifiers"), Some(&PyRep::List(Vec::new())));
+        assert_eq!(dict_get(&public_doll, "colors"), Some(&PyRep::List(Vec::new())));
+        assert_eq!(
+            dict_get(&public_doll, "wornApparel"),
+            Some(&PyRep::List(vec![PyRep::Integer(i64::from(apparel_type_id))]))
         );
 
         // Unequip moves singleton back to docked station hangar (60_003_760, Hangar)

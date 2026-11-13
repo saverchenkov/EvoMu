@@ -1947,14 +1947,22 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
     ctx.invalidate_ship_fitting(PILOT_SHIP);
 
     let jam_during_spool = rpc_call(&ctx, &mut s_dir, "beyonce", "GetCynoJammerState", &[]).await.expect("GetCynoJammerState");
-    assert_eq!(jam_during_spool.dict_get("isJammed"), Some(&PyRep::Bool(false)));
+    let spool_now_ticks = ctx.now_blueos_filetime_ticks();
+    assert!(
+        matches!(jam_during_spool, PyRep::Integer(ts) if ts > spool_now_ticks),
+        "spooling Tenebrex must return future timestamp > {spool_now_ticks}, got {jam_during_spool:?}"
+    );
 
     let _ = drain_notif_events(&ctx, PILOT);
     ctx.advance_secs(TENEBREX_SPOOL_UP_SECS + 5);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert!(drain_notif_events(&ctx, PILOT).iter().any(|e| e == "OnCynoJammerChanged"));
     let jam_ready = rpc_call(&ctx, &mut s_dir, "beyonce", "GetCynoJammerState", &[]).await.expect("GetCynoJammerState");
-    assert_eq!(jam_ready.dict_get("isJammed"), Some(&PyRep::Bool(true)));
+    let ready_now_ticks = ctx.now_blueos_filetime_ticks();
+    assert!(
+        matches!(jam_ready, PyRep::Integer(ts) if ts > 0 && ts <= ready_now_ticks),
+        "active Tenebrex must return online timestamp <= {ready_now_ticks}, got {jam_ready:?}"
+    );
     ctx.db.with_mut_snapshot(|s| {
         s.fleets.insert(5001, eve_db::FleetRecord { fleet_id: 5001, boss_id: PILOT, members: vec![PILOT], ..Default::default() });
     });
@@ -1989,7 +1997,7 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
         }
     }
     let jam_reinf = rpc_call(&ctx, &mut s_dir, "beyonce", "GetCynoJammerState", &[]).await.expect("GetCynoJammerState");
-    assert_eq!(jam_reinf.dict_get("isJammed"), Some(&PyRep::Bool(false)));
+    assert_eq!(jam_reinf, PyRep::None);
     assert!(rpc_call(&ctx, &mut s_dir, "dogmaIM", "Activate", &[PyRep::Integer(995_200), PyRep::String("cynosuralGeneration".into())]).await.is_ok());
 
     let _ = drain_quasar(&mut rx);

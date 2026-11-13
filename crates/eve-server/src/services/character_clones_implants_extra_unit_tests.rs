@@ -412,15 +412,19 @@ fn sheet_omega_custom_ship_clone_state_rowset_paperdoll_resculpt_and_apparel_une
         .unwrap()
         .is_err());
 
-    // 5. PaperDoll DNA list (`[gender_label]` for `Doll.MatchDNA`) and empty-args batch fallback
+    // 5. PaperDoll DB row KeyVal (with `.modifiers`, `.colors`, `.sculpts`, `.appearance` for V24 StartDeathScene & ApplyDBRowToDoll; #1014) and empty-args batch fallback
     let pd = handle_clones_and_sheet(&ctx, &mut sess, "paperDollServer", "GetPaperDollData", &[], &kw)
         .unwrap()
         .unwrap();
-    assert_eq!(pd, PyRep::List(vec![PyRep::String("male".into())]));
+    assert_eq!(pd.dict_get("genderLabel").and_then(PyRep::as_str), Some("male"));
+    assert_eq!(pd.dict_get("modifiers"), Some(&PyRep::List(Vec::new())));
+    assert_eq!(pd.dict_get("colors"), Some(&PyRep::List(Vec::new())));
+    assert_eq!(pd.dict_get("sculpts"), Some(&PyRep::List(Vec::new())));
+    assert!(matches!(pd.dict_get("appearance"), Some(PyRep::KeyVal(_))));
     let batch = handle_clones_and_sheet(&ctx, &mut sess, "paperDollServer", "GetPaperDollDataBatch", &[], &kw)
         .unwrap()
         .unwrap();
-    assert!(matches!(batch, PyRep::Dict(d) if d.len() == 1 && d[0].1 == PyRep::List(vec![PyRep::String("male".into())])));
+    assert!(matches!(batch, PyRep::Dict(d) if d.len() == 1 && d[0].1.dict_get("genderLabel").and_then(PyRep::as_str) == Some("male") && d[0].1.dict_get("modifiers") == Some(&PyRep::List(Vec::new()))));
 
     // 6. UpdateExistingCharacterFull without resculpt token -> NoResculptAvailable; with account token -> succeeds
     let doll_kv = PyRep::keyval([("hairDarkness", PyRep::Real(0.5))]);
@@ -686,7 +690,7 @@ fn clone_fee_zero_vs_positive_notifications_female_paperdoll_tokens_and_apparel_
         "positive fee InstallCloneInStructure must emit OnAccountChange"
     );
 
-    // 3. GetPaperDollData & GetPaperDollDataBatch distinguish female (gender=0) vs male (L859, L887, L891, L906)
+    // 3. GetPaperDollData & GetPaperDollDataBatch distinguish female (gender=0) vs male (genderLabel, modifiers, colors)
     let fem_pd = handle_clones_and_sheet(
         &ctx,
         &mut sess,
@@ -697,7 +701,9 @@ fn clone_fee_zero_vs_positive_notifications_female_paperdoll_tokens_and_apparel_
     )
     .unwrap()
     .unwrap();
-    assert_eq!(fem_pd, PyRep::List(vec![PyRep::String("female".into())]));
+    assert_eq!(fem_pd.dict_get("gender").and_then(PyRep::as_i64), Some(0));
+    assert_eq!(fem_pd.dict_get("genderLabel").and_then(PyRep::as_str), Some("female"));
+    assert_eq!(fem_pd.dict_get("modifiers"), Some(&PyRep::List(Vec::new())));
     let batch_pd = handle_clones_and_sheet(
         &ctx,
         &mut sess,
@@ -711,8 +717,8 @@ fn clone_fee_zero_vs_positive_notifications_female_paperdoll_tokens_and_apparel_
     let PyRep::Dict(batch_entries) = batch_pd else {
         panic!("expected batch dict");
     };
-    assert!(batch_entries.iter().any(|(k, v)| *k == PyRep::Integer(female_cid) && *v == PyRep::List(vec![PyRep::String("female".into())])));
-    assert!(batch_entries.iter().any(|(k, v)| *k == PyRep::Integer(char_id) && *v == PyRep::List(vec![PyRep::String("male".into())])));
+    assert!(batch_entries.iter().any(|(k, v)| *k == PyRep::Integer(female_cid) && v.dict_get("genderLabel").and_then(PyRep::as_str) == Some("female") && v.dict_get("modifiers") == Some(&PyRep::List(Vec::new()))));
+    assert!(batch_entries.iter().any(|(k, v)| *k == PyRep::Integer(char_id) && v.dict_get("genderLabel").and_then(PyRep::as_str) == Some("male") && v.dict_get("modifiers") == Some(&PyRep::List(Vec::new()))));
 
     // 4. UpdateExistingCharacterFull: cluster_and_runtime.resculpt_pending ONLY (L1020) and tokens=2 -> 1 (L1034, L1037)
     let doll_kv = PyRep::keyval([("skinTone", PyRep::Real(0.25))]);

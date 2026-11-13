@@ -1611,6 +1611,40 @@ fn any_structure_or_industry_needs_sync(
     false
 }
 
+fn emit_structure_state_transition_notifs(
+    ctx: &ServerContext,
+    transitions: Vec<(u32, i64, i64, String)>,
+) {
+    let mut notified_corps = std::collections::HashSet::new();
+    for (sys_id, structure_id, corp_id, new_state) in transitions {
+        if notified_corps.insert(corp_id) {
+            ctx.notify(
+                crate::router::NotificationTarget::Corporation(corp_id),
+                "OnCorporationStructuresUpdated",
+                "corpid",
+                vec![],
+            );
+        }
+        let state_args = vec![
+            PyRep::Integer(i64::from(sys_id)),
+            PyRep::Integer(structure_id),
+            PyRep::String(new_state),
+        ];
+        ctx.notify(
+            crate::router::NotificationTarget::SolarSystem(sys_id),
+            "OnStructureStateChanged",
+            "solarsystemid",
+            state_args.clone(),
+        );
+        ctx.notify(
+            crate::router::NotificationTarget::SolarSystem(sys_id),
+            "OnCurrentStructureStateChanged",
+            "solarsystemid",
+            state_args,
+        );
+    }
+}
+
 /// Syncs every structure (called before structure RPCs and on cluster ticks). Returns structures that left space.
 pub fn sync_all_structures(ctx: &ServerContext) -> Vec<(i64, DisposalOutcome)> {
     super::structure_upwell_ops::sync_auto_delivered_asset_safety_wraps(ctx);
@@ -1622,13 +1656,18 @@ pub fn sync_all_structures(ctx: &ServerContext) -> Vec<(i64, DisposalOutcome)> {
         return Vec::new();
     }
     let mut sov_claims: Vec<(u32, i64, i64, i64)> = Vec::new();
-    let (gone, released) = ctx.db.with_mut_snapshot(|snap| {
+    let (gone, released, state_transitions) = ctx.db.with_mut_snapshot(|snap| {
         let mut ids: Vec<i64> = snap.structures.keys().copied().collect();
         ids.sort_unstable();
         let mut ext = load_ext_state(snap);
         let mut gone = Vec::new();
         let mut released = Vec::new();
+        let mut state_transitions = Vec::new();
         for id in ids {
+            let before = snap
+                .structures
+                .get(&id)
+                .map(|st| (st.solar_system_id, st.owner_corp_id, st.state.clone()));
             if let Some(st) = snap.structures.get(&id).cloned() {
                 if crate::services::fw_gameplay::is_fw_or_insurgency_structure_in_snap(snap, &ctx.sde, id, st.type_id)
                     || st.type_id == crate::services::sov_gameplay::TYPE_MERCENARY_DEN || st.type_id == crate::services::sov_services::TYPE_ORBITAL_SKYHOOK
@@ -1646,17 +1685,31 @@ pub fn sync_all_structures(ctx: &ServerContext) -> Vec<(i64, DisposalOutcome)> {
                     if let Some(aid) = snap.corporations.get(&st.owner_corp_id).and_then(|c| c.alliance_id) {
                         sov_claims.push((st.solar_system_id, aid, st.owner_corp_id, id));
                     }
+                    state_transitions.push((
+                        st.solar_system_id,
+                        id,
+                        st.owner_corp_id,
+                        STATE_SHIELD_VULNERABLE.into(),
+                    ));
                     continue;
                 }
             }
             if let Some(out) = sync_structure_with_released(ctx, snap, &mut ext, id, now, &mut released) {
                 gone.push((id, out));
             }
+            if let Some((sys_id, corp_id, old_state)) = before {
+                if let Some(after_state) = snap.structures.get(&id).map(|s| s.state.clone()) {
+                    if after_state != old_state {
+                        state_transitions.push((sys_id, id, corp_id, after_state));
+                    }
+                }
+            }
         }
         save_ext_state(snap, &ext);
         crate::services::industry_pi::industry_facilities_bps::sync_industry_job_pause_states(snap, now);
-        (gone, released)
+        (gone, released, state_transitions)
     });
+    emit_structure_state_transition_notifs(ctx, state_transitions);
     crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
     for (_, out) in &gone {
         crate::services::fleet_social::fleet_social_scanning::dispatch_signal_tracker_notifications(ctx, out.pending_signal_tracker_notifs.clone());

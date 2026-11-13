@@ -204,7 +204,7 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
         None
     };
     let now = ctx.now_unix();
-    let (structure_id, owner_corp_id) = ctx.db.try_with_mut_snapshot(|snap| {
+    let (structure_id, owner_corp_id, pre_item, post_item) = ctx.db.try_with_mut_snapshot(|snap| {
         if type_id == 40340 && snap.structures.values().any(|s| s.type_id == 40340 && s.state != "Destroyed") {
             return Err(err("PalatineKeepstarLimitReached", "Only one Upwell Palatine Keepstar (type 40340) can exist in the universe"));
         }
@@ -263,12 +263,15 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
                 .min()
                 .ok_or_else(|| err("MissingStructureItem", format!("Anchoring requires structure type {type_id} in active ship {ship_id} cargo")))?
         };
-        if let Some(item_owner) = snap.items.get(&item_id).map(|i| i.owner_id) {
-            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), item_owner);
+        let pre_item = snap.items.get(&item_id).cloned();
+        let post_item = if let Some(ref pre) = pre_item {
+            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), pre.owner_id);
             opts.active_ship_id = Some(ship_id);
             snap.consume_exact_item_quantity(item_id, 1, opts)
-                .map_err(|e| err("ItemLocked", e.to_string()))?;
-        }
+                .map_err(|e| err("ItemLocked", e.to_string()))?
+        } else {
+            None
+        };
         let has_prefit_core = ctx
             .sde
             .types
@@ -359,8 +362,9 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
             ds.structure_id = id;
             crate::services::structure_acl_defense_rules::save_defense_settings(snap, &ds);
         }
-        Ok((id, corp_id))
+        Ok((id, corp_id, pre_item, post_item))
     })?;
+    ctx.notify_item_mutation(char_id, pre_item.as_ref(), post_item.as_ref());
     ensure_structure_ball_in_space(ctx, sys_id, structure_id).await;
     if let Some(st_rec) = ctx.db.with_snapshot(|snap| snap.structures.get(&structure_id).cloned()) {
         crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_structure_delta(ctx, sys_id, &[st_rec], &[]);

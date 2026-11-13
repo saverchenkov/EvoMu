@@ -313,6 +313,102 @@ pub fn active_cyno_jammer(ctx: &ServerContext, sys_id: u32) -> Option<i64> {
     jammed.then(|| ctx.now_blueos_filetime_ticks())
 }
 
+#[inline]
+pub(crate) fn unix_to_blueos_filetime_ticks(unix_secs: u64) -> i64 {
+    (unix_secs as i64 + 11_644_473_600) * 10_000_000
+}
+
+/// Evaluates `beyonce.GetCynoJammerState` in the V24.01 `cynoJammerIcon.GetJamStatus` wire format:
+/// `None` when off, `Some(ts <= now_ticks)` when actively jammed, or `Some(ts > now_ticks)` while spooling.
+pub(crate) fn cyno_jammer_state_ticks(ctx: &ServerContext, sys_id: u32) -> Option<i64> {
+    if sys_id == 30_100_000 || is_pochven_system(sys_id) {
+        return Some(ctx.now_blueos_filetime_ticks());
+    }
+    let now = ctx.now_unix();
+    enum JamState {
+        Active,
+        SpoolingReadyUnix(u64),
+        Off,
+    }
+    let state = ctx.db.with_snapshot(|snap| {
+        let tenebrex_active =
+            crate::services::sov_gameplay::is_tenebrex_jammer_active_in_snap(snap, sys_id, now);
+        let other_structure_jam = snap.structures.values().any(|st| {
+            st.solar_system_id == sys_id
+                && st.type_id != crate::services::sov_services::TYPE_TENEBREX_CYNO_JAMMER
+                && st.type_id != crate::services::sov_services::TYPE_PHAROLUX_CYNO_BEACON
+                && st.type_id != 35841
+                && (st.type_id == 81926
+                    || ctx
+                        .sde
+                        .types
+                        .get(&st.type_id)
+                        .is_some_and(|t| type_attr(ctx, t, ATTR_IS_CYNO_JAMMER) > 0.0))
+                && st.fuel_blocks > 0
+                && matches!(st.state.as_str(), "ShieldVulnerable" | "Online")
+        });
+        let item_jam = snap.items.values().any(|i| {
+            i.location_id == sys_id as i64
+                && (i.type_id == 33_476
+                    || ctx
+                        .sde
+                        .types
+                        .get(&i.type_id)
+                        .is_some_and(|t| type_attr(ctx, t, ATTR_IS_CYNO_JAMMER) > 0.0))
+        });
+        if tenebrex_active || other_structure_jam || item_jam {
+            return JamState::Active;
+        }
+        let hub_suppression_ok = snap
+            .structures
+            .values()
+            .find(|s| {
+                s.solar_system_id == sys_id
+                    && s.type_id == crate::services::sov_services::TYPE_SOVEREIGNTY_HUB
+                    && s.state != "Destroyed"
+            })
+            .is_some_and(|hub| {
+                !snap
+                    .sov_runtime
+                    .hacked_hubs
+                    .get(&hub.structure_id)
+                    .is_some_and(|&u| now < u)
+                    && snap.sov_runtime.sov_hubs.get(&hub.structure_id).is_some_and(|cfg| {
+                        cfg.upgrades.iter().any(|u| {
+                            u.type_id == crate::services::sov_gameplay::UPGRADE_CYNOSURAL_SUPPRESSION
+                                && u.online
+                                && !u.low_power
+                        })
+                    })
+            });
+        if hub_suppression_ok {
+            if let Some(earliest_ready) = snap
+                .structures
+                .values()
+                .filter(|st| {
+                    st.solar_system_id == sys_id
+                        && st.type_id == crate::services::sov_services::TYPE_TENEBREX_CYNO_JAMMER
+                        && st.fuel_blocks > 0
+                        && matches!(st.state.as_str(), "ShieldVulnerable" | "Online")
+                })
+                .filter_map(|st| snap.sov_runtime.tenebrex_spool_ready_unix.get(&st.structure_id).copied())
+                .filter(|&ready| now < ready)
+                .min()
+            {
+                return JamState::SpoolingReadyUnix(earliest_ready);
+            }
+        }
+        JamState::Off
+    });
+    match state {
+        JamState::Active => Some(ctx.now_blueos_filetime_ticks()),
+        JamState::SpoolingReadyUnix(ready_unix) => {
+            Some(unix_to_blueos_filetime_ticks(ready_unix).max(ctx.now_blueos_filetime_ticks() + 1))
+        }
+        JamState::Off => None,
+    }
+}
+
 fn fleet_of(snap: &eve_db::WorldStateSnapshot, char_id: i64) -> Option<i64> {
     snap.fleets.values().find(|f| f.members.contains(&char_id)).map(|f| f.fleet_id)
 }
