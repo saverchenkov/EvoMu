@@ -81,6 +81,7 @@ pub(crate) fn is_capital_remote_repair_module(
         })
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn step_cycles_and_capacitor(
     ballpark: &mut Ballpark,
@@ -93,6 +94,46 @@ pub(crate) fn step_cycles_and_capacitor(
     base_core_strengths: &HashMap<BallId, i32>,
     sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    mechanic_rng_opt: &Option<Arc<crate::rng::MechanicRng>>,
+    tactical_state: &dyn AnyRwLock<crate::services::tactical_modules::TacticalModulesState>,
+    pending_cycle_actions: &mut Vec<PendingCycleAction>,
+    dt: f64,
+    deactivation_hook: Option<&ModuleDeactivationHook>,
+) -> Vec<(BallId, Option<CharacterId>)> {
+    let empty_epochs = HashMap::new();
+    step_cycles_and_capacitor_with_epochs(
+        ballpark,
+        active_module_cycles,
+        pending_anchoring_disruptors,
+        active_nanite_repairs,
+        ship_rack_heat,
+        rah_incoming_damage,
+        base_scramble_strengths,
+        base_core_strengths,
+        sde_opt,
+        db_opt,
+        &empty_epochs,
+        mechanic_rng_opt,
+        tactical_state,
+        pending_cycle_actions,
+        dt,
+        deactivation_hook,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn step_cycles_and_capacitor_with_epochs(
+    ballpark: &mut Ballpark,
+    active_module_cycles: &mut Vec<ActiveModuleCycle>,
+    pending_anchoring_disruptors: &mut Vec<PendingAnchoringDisruptor>,
+    active_nanite_repairs: &mut Vec<ActiveNaniteRepair>,
+    ship_rack_heat: &mut HashMap<BallId, [f64; 3]>,
+    rah_incoming_damage: &mut HashMap<BallId, [f64; 4]>,
+    base_scramble_strengths: &HashMap<BallId, i32>,
+    base_core_strengths: &HashMap<BallId, i32>,
+    sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    ball_space_entry_epochs: &HashMap<BallId, u64>,
     mechanic_rng_opt: &Option<Arc<crate::rng::MechanicRng>>,
     tactical_state: &dyn AnyRwLock<crate::services::tactical_modules::TacticalModulesState>,
     pending_cycle_actions: &mut Vec<PendingCycleAction>,
@@ -391,10 +432,20 @@ pub(crate) fn step_cycles_and_capacitor(
                             max_ships,
                             max_caps,
                         ) {
-                            super::persist_ball_positions_in_db(ballpark, &jumped_ids, db_opt);
+                            super::persist_ball_positions_in_db(
+                                ballpark,
+                                &jumped_ids,
+                                db_opt,
+                                ball_space_entry_epochs,
+                            );
                         }
                     } else if ballpark.micro_jump(cycle.ship_id, jump_dist).is_ok() {
-                        super::persist_ball_positions_in_db(ballpark, &[cycle.ship_id], db_opt);
+                        super::persist_ball_positions_in_db(
+                            ballpark,
+                            &[cycle.ship_id],
+                            db_opt,
+                            ball_space_entry_epochs,
+                        );
                     }
                 }
             }
@@ -1550,7 +1601,7 @@ impl SystemHandle {
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
             asteroids, asteroid_templates, sde_opt, db_opt, mechanic_rng_opt,
             sim_elapsed_secs, pending_cycle_actions, tactical_state,
-            pending_notifications_opt, notify_tx_opt,
+            pending_notifications_opt, notify_tx_opt, ball_space_entry_epochs, ..
         } = &mut *st;
         if dt > 0.0 && dt.is_finite() {
             *sim_elapsed_secs += dt;
@@ -1564,7 +1615,7 @@ impl SystemHandle {
             }
         }
         let events = bp.step(dt);
-        super::persist_landed_warps_in_db(&bp, &events, db_opt);
+        super::persist_landed_warps_in_db(&bp, &events, db_opt, ball_space_entry_epochs);
         flush_target_lost_notifications(
             &bp,
             &events,
@@ -1616,10 +1667,10 @@ impl SystemHandle {
             sde_opt.as_deref(), db_opt.as_ref(), mechanic_rng_opt.as_deref(), self.solar_system_id, dt, step_now_unix,
         );
         let hook_guard = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
-        let mut destroyed = step_cycles_and_capacitor(
+        let mut destroyed = step_cycles_and_capacitor_with_epochs(
             &mut bp, active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
-            sde_opt, db_opt, mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions, dt, deact_hook_guard.as_ref(),
+            sde_opt, db_opt, ball_space_entry_epochs, mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions, dt, deact_hook_guard.as_ref(),
         );
         flush_pending_cycle_damage_notifications(
             db_opt.as_ref(),

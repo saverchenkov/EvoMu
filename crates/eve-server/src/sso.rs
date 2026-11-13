@@ -323,7 +323,7 @@ fn handle_http_request_inner(
             let base = headers
                 .get("host")
                 .map(|h| format!("http://{h}"))
-                .unwrap_or_else(|| format!("http://127.0.0.1:{}", ctx.esi_port));
+                .unwrap_or_else(|| format!("http://127.0.0.1:{}", ctx.esi_port()));
             HttpResponse::json(
                 200,
                 "OK",

@@ -103,6 +103,7 @@ fn persist_landed_warps_skips_static_missing_items_and_missing_balls() {
         }
     });
 
+    let empty_epochs = HashMap::new();
     persist_landed_warps_in_db(
         &bp,
         &[
@@ -112,6 +113,7 @@ fn persist_landed_warps_skips_static_missing_items_and_missing_balls() {
             DestinyEvent::OnDeactivatingWarp { ball_id: missing_ball_id },
         ],
         &Some(Arc::clone(&db)),
+        &empty_epochs,
     );
 
     db.with_snapshot(|snap| {
@@ -368,9 +370,10 @@ fn persist_ball_positions_and_landed_warps_kill_all_mutants() {
     );
     add_b(&mut bp, id_nan, DVec3::new(f64::NAN, 200.0, 300.0), DVec3::ZERO, MovementMode::Stop);
 
+    let empty_epochs = HashMap::new();
     // 1. Inside write lock on current thread, persist_ball_positions_in_db returns immediately
     db.with_mut_snapshot(|_| {
-        persist_ball_positions_in_db(&bp, &[id_moved], &Some(db.clone()));
+        persist_ball_positions_in_db(&bp, &[id_moved], &Some(db.clone()), &empty_epochs);
     });
     db.with_snapshot(|snap| {
         assert_eq!(snap.item_positions[&id_moved], [100.0, 200.0, 300.0]);
@@ -381,6 +384,7 @@ fn persist_ball_positions_and_landed_warps_kill_all_mutants() {
         &bp,
         &[id_moved, id_tiny, id_cat11, id_nan],
         &Some(db.clone()),
+        &empty_epochs,
     );
     db.with_snapshot(|snap| {
         assert_eq!(snap.item_positions[&id_moved], [100.02, 200.0, 300.0]);
@@ -502,14 +506,14 @@ fn persist_ball_positions_and_landed_warps_kill_all_mutants() {
 
     // Write-locked skips completely
     db.with_mut_snapshot(|_| {
-        persist_landed_warps_in_db(&bp, &evs, &Some(db.clone()));
+        persist_landed_warps_in_db(&bp, &evs, &Some(db.clone()), &empty_epochs);
     });
     db.with_snapshot(|snap| {
         assert_eq!(snap.item_positions[&id_stop_imm_ok], [100.0, 200.0, 300.0]);
     });
 
     // Tick 1: immediate SetBallPosition/Stop + >= SUBWARP_FLUSH_DISPLACEMENT_SQ_M2 flush
-    persist_landed_warps_in_db(&bp, &evs, &Some(db.clone()));
+    persist_landed_warps_in_db(&bp, &evs, &Some(db.clone()), &empty_epochs);
     db.with_snapshot(|snap| {
         assert_eq!(snap.item_positions[&id_stop_imm_ok], [101.0, 200.0, 300.0]);
         assert_eq!(snap.item_positions[&id_stop_imm_fast], [100.0, 200.0, 300.0]);
@@ -526,7 +530,7 @@ fn persist_ball_positions_and_landed_warps_kill_all_mutants() {
 
     // Tick 5 (% 5 == 0): id_subwarp_near (<100m disp), id_warp_align flushes; id_warp_cruise stays skipped, id_stop_zero has no DB row
     bp.current_tick = 5;
-    persist_landed_warps_in_db(&bp, &[], &Some(db.clone()));
+    persist_landed_warps_in_db(&bp, &[], &Some(db.clone()), &empty_epochs);
     db.with_snapshot(|snap| {
         assert_eq!(snap.item_positions[&id_subwarp_near], [199.9, 200.0, 300.0]);
         assert_eq!(snap.item_positions[&id_warp_align], [900.0, 200.0, 300.0]);

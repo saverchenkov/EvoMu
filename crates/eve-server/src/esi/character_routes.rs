@@ -283,7 +283,7 @@ pub fn dispatch_character_routes(
                     );
                 };
                 let base_url = std::env::var("EVOMU_IMAGE_SERVER_URL")
-                    .unwrap_or_else(|_| format!("http://127.0.0.1:{}/images", ctx.esi_port));
+                    .unwrap_or_else(|_| format!("http://127.0.0.1:{}/images", ctx.esi_port()));
                 let base_url = base_url.trim_end_matches('/');
                 let doll_query = snap
                     .character_doll_info

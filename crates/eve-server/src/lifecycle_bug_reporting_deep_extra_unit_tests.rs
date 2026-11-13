@@ -490,7 +490,7 @@ async fn bug_reporting_http_zip_multipart_and_incident_edge_cases() {
     // Global config extra values
     ctx.global_config_values.write().unwrap().insert("customFlag".into(), PyRep::ascii_bytes("yes"));
     let gcfg = build_client_global_config(&ctx, Some("::ffff:10.0.0.5"));
-    assert_eq!(gcfg.get("bugReporting_BugReportServer"), Some(&PyRep::ascii_bytes(format!("http://10.0.0.5:{}/bugs/api", ctx.esi_port).as_bytes())));
+    assert_eq!(gcfg.get("bugReporting_BugReportServer"), Some(&PyRep::ascii_bytes(format!("http://10.0.0.5:{}/bugs/api", ctx.esi_port()).as_bytes())));
     assert_eq!(gcfg.get("customFlag"), Some(&PyRep::ascii_bytes("yes")));
 
     // ZIP extraction (stored + deflated + unsupported compression + corrupt EOCD)

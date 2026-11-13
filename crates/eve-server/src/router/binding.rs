@@ -1138,26 +1138,16 @@ impl ServerContext {
     /// (e.g. entering warp, target out of range, or target leaving the ballpark).
     /// Emits `OnGodmaShipEffect` (with `isActive = 0`) to the pilot and invalidates the cached ship fitting.
     pub fn wire_module_deactivation_hook(&self) {
-        let instance_id = self.instance_id;
-        let systems_w = Arc::downgrade(&self.systems);
-        let sde = Arc::clone(&self.sde);
-        let db = Arc::clone(&self.db);
-        let rng = Arc::clone(&self.mechanic_rng);
-        let pending = Arc::clone(&self.pending_notifications);
-        let notify_tx = self.notify_tx.clone();
-        let ship_fittings = Arc::clone(&self.ship_fittings);
-        let combat_ephemeral = Arc::clone(&self.combat_ephemeral);
-        let quasar_gateway = Arc::clone(&self.quasar_gateway);
-        let inv_roll = Arc::clone(&self.invention_roll_override);
-        let cd_map = Arc::clone(&self.module_reactivation_cooldowns);
-        let fighters = Arc::clone(&self.fighters);
-        let projected_ewar = Arc::clone(&self.projected_ewar);
-        let projected_ewar_sources = Arc::clone(&self.projected_ewar_sources);
-        let active_ewar_starts = Arc::clone(&self.active_ewar_starts);
-        let tactical_state = Arc::clone(&self.tactical_state);
+        let ctx_w = self.downgrade();
 
         self.systems.set_module_deactivation_hook(Arc::new(move |char_id, cycle| {
-            ship_fittings
+            let Some(step_ctx) = ctx_w.upgrade() else { return; };
+            let sde = &step_ctx.sde;
+            let db = &step_ctx.db;
+            let pending = &step_ctx.pending_notifications;
+            let notify_tx = &step_ctx.notify_tx;
+            step_ctx
+                .ship_fittings
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&cycle.ship_id);
@@ -1176,7 +1166,7 @@ impl ServerContext {
                 };
                 if reactiv_delay_s > 0.0 {
                     let now_s = db.clock().now_unix_secs() as f64;
-                    cd_map.write().unwrap_or_else(|e| e.into_inner()).insert(
+                    step_ctx.module_reactivation_cooldowns.write().unwrap_or_else(|e| e.into_inner()).insert(
                         (cycle.ship_id, cycle.module_id, cycle.module_type_id),
                         super::context::ModuleCooldownEntry {
                             recorded_unix_f64: now_s,
@@ -1194,41 +1184,20 @@ impl ServerContext {
                 snap.characters.get(&char_id).map(|c| c.solar_system_id)
             });
 
-            if let Some(sys_reg) = systems_w.upgrade() {
-                let step_ctx = ServerContext::from_step_components(
-                    instance_id,
-                    sys_reg,
-                    Arc::clone(&db),
-                    Arc::clone(&sde),
-                    Arc::clone(&rng),
-                    Arc::clone(&ship_fittings),
-                    Arc::clone(&pending),
-                    notify_tx.clone(),
-                    Arc::clone(&combat_ephemeral),
-                    Arc::clone(&quasar_gateway),
-                    Arc::clone(&inv_roll),
-                    Arc::clone(&cd_map),
-                    Arc::clone(&fighters),
-                    Arc::clone(&projected_ewar),
-                    Arc::clone(&projected_ewar_sources),
-                    Arc::clone(&active_ewar_starts),
-                    Arc::clone(&tactical_state),
-                );
-                let _ = crate::services::notify_emitters_space_dungeons::flush_module_ewar_end(
-                    &step_ctx,
-                    char_id,
-                    solar_system_id,
-                    cycle.ship_id,
-                    cycle.module_id,
-                );
-                crate::services::tactical_modules::remove_projected_remote_assistance(
-                    &step_ctx,
-                    cycle.ship_id,
-                    cycle.module_id,
-                );
-            }
+            let _ = crate::services::notify_emitters_space_dungeons::flush_module_ewar_end(
+                &step_ctx,
+                char_id,
+                solar_system_id,
+                cycle.ship_id,
+                cycle.module_id,
+            );
+            crate::services::tactical_modules::remove_projected_remote_assistance(
+                &step_ctx,
+                cycle.ship_id,
+                cycle.module_id,
+            );
 
-            let effect_id = effect_id_for_module_sde(&sde, cycle.module_type_id, Some(&cycle.effect_name)).unwrap_or(0);
+            let effect_id = effect_id_for_module_sde(sde, cycle.module_type_id, Some(&cycle.effect_name)).unwrap_or(0);
             let now = db.clock().now_blueos_filetime_ticks();
             let environment = PyRep::Tuple(vec![
                 PyRep::Integer(cycle.module_id),
@@ -1275,7 +1244,7 @@ impl ServerContext {
             let _ = notify_tx.send((char_id, notif));
 
             if let Some((sfx_guid, is_offensive)) = special_fx_guid_for_module_sde(
-                &sde,
+                sde,
                 cycle.module_type_id,
                 effect_id,
                 Some(&cycle.effect_name),
@@ -1359,10 +1328,13 @@ impl ServerContext {
             }
         }));
 
-        let db_lock = Arc::clone(&self.db);
-        let pending_lock = Arc::clone(&self.pending_notifications);
+        let db_lock = Arc::downgrade(&self.db);
+        let pending_lock = Arc::downgrade(&self.pending_notifications);
         let notify_tx_lock = self.notify_tx.clone();
         self.systems.set_target_lock_completed_hook(Arc::new(move |char_id, target_id| {
+            let (Some(db_lock), Some(pending_lock)) = (db_lock.upgrade(), pending_lock.upgrade()) else {
+                return;
+            };
             let now = db_lock.clock().now_blueos_filetime_ticks();
             let enqueue_target_ev = |rcpt_char: i64, rcpt_user: Option<u64>, sub_ev: &str, item_id: i64| {
                 let args = vec![PyRep::List(vec![PyRep::Tuple(vec![
@@ -1423,99 +1395,6 @@ impl ServerContext {
                 }
             }
         }));
-    }
-
-    /// Constructs a lightweight `ServerContext` handle referencing shared core components for system step execution.
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_step_components(
-        instance_id: u64,
-        systems: std::sync::Arc<crate::system_actor::SystemRegistry>,
-        db: std::sync::Arc<eve_db::WorldRepository>,
-        sde: std::sync::Arc<eve_sde::SdeRegistry>,
-        mechanic_rng: std::sync::Arc<crate::rng::MechanicRng>,
-        ship_fittings: std::sync::Arc<eve_db::lock_rank::RankedRwLock<std::collections::HashMap<i64, eve_dogma::ShipFittingEngine>, { eve_db::lock_rank::RANK_LEAF }>>,
-        pending_notifications: std::sync::Arc<eve_db::lock_rank::RankedRwLock<std::collections::HashMap<i64, Vec<super::cache_notifications::PendingMachoNotification>>, { eve_db::lock_rank::RANK_LEAF }>>,
-        notify_tx: tokio::sync::broadcast::Sender<(i64, super::cache_notifications::PendingMachoNotification)>,
-        combat_ephemeral: std::sync::Arc<eve_db::lock_rank::RankedRwLock<crate::services::combat_crimewatch::CombatRuntimeState, { eve_db::lock_rank::RANK_LEAF }>>,
-        quasar_gateway: std::sync::Arc<crate::quasar_gateway::PublicGatewayRouter>,
-        invention_roll_override: std::sync::Arc<eve_db::lock_rank::RankedRwLock<Option<f64>, { eve_db::lock_rank::RANK_LEAF }>>,
-        module_reactivation_cooldowns: std::sync::Arc<eve_db::lock_rank::RankedRwLock<std::collections::HashMap<(i64, i64, u32), super::context::ModuleCooldownEntry>, { eve_db::lock_rank::RANK_LEAF }>>,
-        fighters: std::sync::Arc<eve_db::lock_rank::RankedRwLock<super::context::FighterRuntimeState, { eve_db::lock_rank::RANK_LEAF }>>,
-        projected_ewar: std::sync::Arc<eve_db::lock_rank::RankedRwLock<std::collections::HashMap<i64, Vec<eve_dogma::ProjectedEwarEffect>>, { eve_db::lock_rank::RANK_LEAF }>>,
-        projected_ewar_sources: std::sync::Arc<eve_db::lock_rank::RankedRwLock<std::collections::HashMap<i64, i64>, { eve_db::lock_rank::RANK_LEAF }>>,
-        active_ewar_starts: std::sync::Arc<eve_db::lock_rank::RankedRwLock<std::collections::HashMap<(i64, i64), Vec<(i64, &'static str)>>, { eve_db::lock_rank::RANK_LEAF }>>,
-        tactical_state: std::sync::Arc<eve_db::lock_rank::RankedRwLock<crate::services::tactical_modules::TacticalModulesState, { eve_db::lock_rank::RANK_LEAF }>>,
-    ) -> Self {
-        let crimewatch = crate::combat::crimewatch::CrimeWatchLock::new(std::sync::Arc::clone(&db));
-        let clock = eve_db::lock_rank::RankedRwLock::new(db.clock());
-        let living_world = std::sync::Arc::new(crate::living_world::LivingWorldDirector::new());
-        let esi_state = std::sync::Arc::new(crate::esi::runtime_state::EsiRuntimeState::new());
-        let cluster_state = std::sync::Arc::new(eve_db::lock_rank::RankedRwLock::new(crate::services::macho_cluster_mgmt::MachoClusterState::default()));
-        let (fighter_cooldown_state, fighter_charge_state, active_fighters, fighter_tube_loads) =
-            super::context::make_fighter_lenses(&fighters);
-        Self {
-            instance_id,
-            sde,
-            db,
-            clock,
-            systems,
-            living_world,
-            quasar_gateway,
-            cataloged_services: std::collections::HashSet::new(),
-            quasar_domains: std::collections::HashSet::new(),
-            bound_objects: eve_db::lock_rank::RankedRwLock::new(std::collections::HashMap::new()),
-            object_cache: eve_db::lock_rank::RankedRwLock::new(std::collections::HashMap::new()),
-            object_cache_timestamps: eve_db::lock_rank::RankedRwLock::new(std::collections::HashMap::new()),
-            notification_records: eve_db::lock_rank::RankedRwLock::new(Vec::new()),
-            pending_notifications,
-            notify_tx,
-            map_landmarks: eve_db::lock_rank::RankedRwLock::new(Vec::new()),
-            session_closers: eve_db::lock_rank::RankedRwLock::new(std::collections::HashMap::new()),
-            ship_fittings,
-            projected_ewar,
-            projected_ewar_sources,
-            active_ewar_starts,
-            weapon_cycle_state: eve_db::lock_rank::RankedRwLock::new(std::collections::HashMap::new()),
-            fighters,
-            fighter_cooldown_state,
-            fighter_charge_state,
-            active_fighters,
-            fighter_tube_loads,
-            active_scanner_probes: eve_db::lock_rank::RankedRwLock::new(std::collections::HashMap::new()),
-            active_moon_probes: eve_db::lock_rank::RankedRwLock::new(Vec::new()),
-            scanned_signatures: eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new()),
-            character_scan_progress: eve_db::lock_rank::RankedRwLock::new(std::collections::HashMap::new()),
-            invention_roll_override,
-            mechanic_rng,
-            module_reactivation_cooldowns,
-            mining_cycles: eve_db::lock_rank::RankedRwLock::new(std::collections::HashMap::new()),
-            phased_asteroid_fields: eve_db::lock_rank::RankedRwLock::new(std::collections::HashMap::new()),
-            crimewatch,
-            combat_ephemeral,
-            tactical_state,
-            session_change_timers: eve_db::lock_rank::RankedMutex::new(std::collections::HashMap::new()),
-            active_warps: eve_db::lock_rank::RankedMutex::new(std::collections::HashMap::new()),
-            return_warps: eve_db::lock_rank::RankedMutex::new(std::collections::HashSet::new()),
-            location_change_invuln: eve_db::lock_rank::RankedMutex::new(std::collections::HashMap::new()),
-            feature_flags: crate::config::FeatureFlagsConfig::default(),
-            esi_port: 0,
-            xmpp_port: 5222,
-            esi_state,
-            fleet_extras: eve_db::lock_rank::RankedMutex::new(Default::default()),
-            social_extras: eve_db::lock_rank::RankedMutex::new(Default::default()),
-            cluster_misc_state: std::sync::Arc::new(eve_db::lock_rank::RankedMutex::new(Default::default())),
-            cluster_state,
-            global_config_values: eve_db::lock_rank::RankedRwLock::new(std::collections::HashMap::new()),
-            alert_telemetry: eve_db::lock_rank::RankedMutex::new(Default::default()),
-            flight_recorder: std::sync::Arc::new(crate::flight_recorder::FlightRecorder::new()),
-            bug_reporting: std::sync::Arc::new(crate::bug_reporting::BugReportingRuntime::new()),
-            npc_spawns: eve_db::lock_rank::RankedRwLock::new(std::collections::HashMap::new()),
-            combat_rng_seq: std::sync::atomic::AtomicU64::new(0),
-            cluster_tick_last_unix: std::sync::atomic::AtomicU64::new(0),
-            cluster_tick_persisted_unix: std::sync::atomic::AtomicU64::new(0),
-            dedicated_physics_ticker_active: std::sync::atomic::AtomicBool::new(false),
-            fw_idle_last_step_unix: eve_db::lock_rank::RankedRwLock::new(std::collections::HashMap::new()),
-        }
     }
 
     pub fn upsert_projected_ewar_on_ship(

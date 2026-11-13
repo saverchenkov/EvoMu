@@ -33,6 +33,10 @@ pub struct SystemHandle {
     pub(crate) actor_state: Arc<RankedRwLock<super::SystemActorState, RANK_ACTOR_STATE>>,
     pub(crate) last_auto_stepped_unix: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) tidi_factor_bits: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) hibernated: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) hibernated_since_unix: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) idle_ticks: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) dynamic_ball_count: Arc<std::sync::atomic::AtomicUsize>,
     pub command_panics: Arc<std::sync::atomic::AtomicU64>,
     #[cfg(test)]
     pub(crate) panic_next_command_for_test: Arc<std::sync::atomic::AtomicBool>,
@@ -49,7 +53,52 @@ impl SystemHandle {
         &self.cmd_tx
     }
     pub fn subscribe(&self) -> broadcast::Receiver<TickBroadcast> {
+        self.hibernated
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.hibernated_since_unix
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.idle_ticks
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         self.event_tx.subscribe()
+    }
+
+    /// Returns `true` when this solar system has no active session subscribers, no dynamic balls,
+    /// and no active module/repair/anchoring timers (`#919`, `#866`).
+    pub fn is_hibernated(&self) -> bool {
+        if self.event_tx.receiver_count() > 0 {
+            return false;
+        }
+        if self
+            .dynamic_ball_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > 0
+        {
+            return false;
+        }
+        if !self.hibernated.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+        if let Ok(bp) = self.ballpark.try_read() {
+            if bp.balls.keys().any(|&bid| !bp.is_static_ball(bid)) {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub fn hibernated_since_unix(&self) -> u64 {
+        self.hibernated_since_unix
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn idle_ticks(&self) -> u64 {
+        self.idle_ticks.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn record_idle_tick(&self) -> u64 {
+        self.idle_ticks
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1
     }
 
     pub fn get_ball_position_sync(&self, ball_id: BallId) -> Option<DVec3> {
@@ -96,14 +145,9 @@ impl SystemHandle {
             ok
         };
         if updated {
-            let db_opt = self
-                .actor_state
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .db_opt
-                .clone();
             let bp = self.ballpark.read().unwrap_or_else(|e| e.into_inner());
-            persist_ball_positions_in_db(&bp, &[ball_id], &db_opt);
+            let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
+            persist_ball_positions_in_db(&bp, &[ball_id], &st.db_opt, &st.ball_space_entry_epochs);
         }
     }
 
@@ -480,31 +524,40 @@ impl SystemHandle {
                         .unwrap_or_else(|e| e.into_inner())
                         .clone()
                 };
-                let super::SystemActorState {
-                    active_module_cycles,
-                    base_scramble_strengths,
-                    base_core_strengths,
-                    db_opt,
-                    ..
-                } = st;
-                let removed_cycles = super::cycles::remove_all_ship_module_cycles(
+                let (removed_cycles, fallback_slim_owner, db_opt_cloned) = {
+                    let super::SystemActorState {
+                        active_module_cycles,
+                        base_scramble_strengths,
+                        base_core_strengths,
+                        db_opt,
+                        ..
+                    } = &mut *st;
+                    let removed_cycles = super::cycles::remove_all_ship_module_cycles(
+                        bp,
+                        active_module_cycles,
+                        base_scramble_strengths,
+                        base_core_strengths,
+                        &None,
+                        ball_id,
+                        None,
+                    );
+                    let fallback_slim_owner = bp
+                        .ball_slim_meta
+                        .get(&ball_id)
+                        .and_then(|m| (m.owner_id > 0).then_some(m.owner_id));
+                    base_scramble_strengths.remove(&ball_id);
+                    base_core_strengths.remove(&ball_id);
+                    let _ = bp.remove_ball(ball_id);
+                    (removed_cycles, fallback_slim_owner, db_opt.clone())
+                };
+                celestials_helpers::remove_ball_checkpoint_tracking(st, ball_id);
+                celestials_helpers::update_system_hibernation_flag(
+                    st,
                     bp,
-                    active_module_cycles,
-                    base_scramble_strengths,
-                    base_core_strengths,
-                    &None,
-                    ball_id,
-                    None,
+                    self.event_tx.receiver_count(),
                 );
-                let fallback_slim_owner = bp
-                    .ball_slim_meta
-                    .get(&ball_id)
-                    .and_then(|m| (m.owner_id > 0).then_some(m.owner_id));
-                base_scramble_strengths.remove(&ball_id);
-                base_core_strengths.remove(&ball_id);
-                let _ = bp.remove_ball(ball_id);
                 super::sync_ball_positions(bp, &self.ball_positions, &self.scrambled_balls);
-                (removed_cycles, fallback_slim_owner, db_opt.clone(), deact_guard)
+                (removed_cycles, fallback_slim_owner, db_opt_cloned, deact_guard)
             };
         let (removed_cycles, fallback_slim_owner, db_opt, deact_guard) =
             if eve_db::lock_rank::held_lock_ranks()
@@ -791,6 +844,17 @@ impl SystemHandle {
                 bp.combat_states.insert(ball_id, combat_state);
             }
             super::sync_ball_positions(bp, &self.ball_positions, &self.scrambled_balls);
+            let dyn_count = bp.balls.keys().filter(|&&bid| !bp.is_static_ball(bid)).count();
+            self.dynamic_ball_count
+                .store(dyn_count, std::sync::atomic::Ordering::Relaxed);
+            if dyn_count > 0 {
+                self.hibernated
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                self.hibernated_since_unix
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                self.idle_ticks
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+            }
         };
         if eve_db::lock_rank::held_lock_ranks()
             .iter()
@@ -836,6 +900,17 @@ impl SystemHandle {
         bp.add_ball(ball);
         bp.combat_states.insert(ball_id, combat_state);
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+        let dyn_count = bp.balls.keys().filter(|&&bid| !bp.is_static_ball(bid)).count();
+        self.dynamic_ball_count
+            .store(dyn_count, std::sync::atomic::Ordering::Relaxed);
+        if dyn_count > 0 {
+            self.hibernated
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            self.hibernated_since_unix
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.idle_ticks
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     pub fn try_update_combat_state<F: FnOnce(&mut CombatState)>(&self, ball_id: BallId, f: F) -> bool {
@@ -983,16 +1058,13 @@ impl SystemHandle {
         } else {
             dt
         };
-        let db_opt = {
-            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            if dt_sim > 0.0 && dt_sim.is_finite() {
-                st.sim_elapsed_secs += dt_sim;
-            }
-            st.db_opt.clone()
-        };
         let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+        if dt_sim > 0.0 && dt_sim.is_finite() {
+            st.sim_elapsed_secs += dt_sim;
+        }
         let events = bp.step(dt_sim);
-        persist_landed_warps_in_db(&bp, &events, &db_opt);
+        persist_landed_warps_in_db(&bp, &events, &st.db_opt, &st.ball_space_entry_epochs);
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
         let broadcast = build_tick_broadcast(self.solar_system_id, &mut bp, events);
         let _ = self.event_tx.send(broadcast);
@@ -1348,38 +1420,128 @@ impl SystemHandle {
         Ok(res)
     }
 
-    pub async fn step_manual(&self, dt: f64) -> Result<TickBroadcast, String> {
+    /// Synchronously collects dirty condition checkpoint entries and updates the checkpoint baseline (`#919` `T-5`).
+    pub fn collect_dirty_condition_checkpoint_sync(&self) -> Vec<super::ConditionCheckpointEntry> {
+        let bp = self.ballpark.read().unwrap_or_else(|e| e.into_inner());
+        let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+        celestials_helpers::collect_dirty_condition_checkpoint_entries(&mut st, &bp)
+    }
+
+    /// Asks the actor to flush all dirty condition checkpoint entries and commits them to `WorldRepository` (`#919` `T-2`, `T-5`).
+    pub async fn flush_condition_checkpoint(&self) -> Result<usize, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_sender().send(SystemCommand::StepManual { dt, reply: tx }).await.map_err(|_| "Solar system actor stopped".to_string())?;
-        let (broadcast, destroyed_balls) = rx.await.map_err(|_| "Solar system reply dropped".to_string())?;
-        let hook = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
-        for &(target_ball_id, owner_char_id) in &destroyed_balls {
-            if let Some(fut) = super::on_ball_destroyed_by_damage(self.solar_system_id, target_ball_id, owner_char_id, hook.as_ref()) {
+        self.cmd_sender()
+            .send(SystemCommand::FlushConditionCheckpoint { reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        let entries = rx
+            .await
+            .map_err(|_| "Solar system reply dropped".to_string())?;
+        let db_opt = self
+            .actor_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .db_opt
+            .clone();
+        if let Some(ref db) = db_opt {
+            Ok(crate::sp6_lifecycle::apply_condition_checkpoint_for_system_in_db(
+                db,
+                self.solar_system_id,
+                &entries,
+            ))
+        } else {
+            Ok(0)
+        }
+    }
+
+    /// Commits a [`super::StepOutput`] produced by this system's actor (`#919` E-4, `#839` B1):
+    /// applies any staggered dirty-only condition checkpoint (`T-2`, `T-5`), invokes `npc_death_hook`
+    /// for destroyed balls, and executes `system_step_hook` (`T-4` inventory-visible step outputs
+    /// and player ship destruction).
+    pub async fn apply_step_output(&self, output: &super::StepOutput) {
+        if let Some(ref entries) = output.condition_checkpoint {
+            if !entries.is_empty() {
+                let db_opt = self
+                    .actor_state
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .db_opt
+                    .clone();
+                if let Some(ref db) = db_opt {
+                    let _ = crate::sp6_lifecycle::apply_condition_checkpoint_for_system_in_db(
+                        db,
+                        self.solar_system_id,
+                        entries,
+                    );
+                }
+            }
+        }
+        let hook = self
+            .npc_death_hook
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        for &(target_ball_id, owner_char_id) in &output.destroyed_balls {
+            if let Some(fut) = super::on_ball_destroyed_by_damage(
+                self.solar_system_id,
+                target_ball_id,
+                owner_char_id,
+                hook.as_ref(),
+            ) {
                 fut.await;
             }
         }
-        let step_hook = self.system_step_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let step_hook = self
+            .system_step_hook
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         if let Some(hook) = step_hook {
-            hook(self.solar_system_id, dt * self.tidi_factor(), destroyed_balls).await;
+            hook(
+                self.solar_system_id,
+                output.dt_sim,
+                output.destroyed_balls.clone(),
+            )
+            .await;
         }
-        Ok(broadcast)
+    }
+
+    /// Steps this system by `dt` seconds and returns the full [`super::StepOutput`] after driver commit (`#919` E-4).
+    pub async fn step_with_output(&self, dt: f64) -> Result<super::StepOutput, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_sender()
+            .send(SystemCommand::StepManual { dt, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        let output = rx
+            .await
+            .map_err(|_| "Solar system reply dropped".to_string())?;
+        self.apply_step_output(&output).await;
+        Ok(output)
+    }
+
+    pub async fn step_manual(&self, dt: f64) -> Result<TickBroadcast, String> {
+        let output = self.step_with_output(dt).await?;
+        Ok(output.broadcast.unwrap_or_else(|| TickBroadcast {
+            solar_system_id: self.solar_system_id,
+            tick: output.tick,
+            events: Vec::new(),
+            observer_events: std::collections::BTreeMap::new(),
+            observer_updates_pyrep: std::collections::BTreeMap::new(),
+        }))
     }
 
     pub(crate) async fn step_manual_tick_only(&self, dt: f64) -> Result<u64, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_sender().send(SystemCommand::StepManualTickOnly { dt, reply: tx }).await.map_err(|_| "Solar system actor stopped".to_string())?;
-        let (tick, destroyed_balls) = rx.await.map_err(|_| "Solar system reply dropped".to_string())?;
-        let hook = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
-        for &(target_ball_id, owner_char_id) in &destroyed_balls {
-            if let Some(fut) = super::on_ball_destroyed_by_damage(self.solar_system_id, target_ball_id, owner_char_id, hook.as_ref()) {
-                fut.await;
-            }
-        }
-        let step_hook = self.system_step_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
-        if let Some(hook) = step_hook {
-            hook(self.solar_system_id, dt * self.tidi_factor(), destroyed_balls).await;
-        }
-        Ok(tick)
+        self.cmd_sender()
+            .send(SystemCommand::StepManualTickOnly { dt, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        let output = rx
+            .await
+            .map_err(|_| "Solar system reply dropped".to_string())?;
+        self.apply_step_output(&output).await;
+        Ok(output.tick)
     }
 
     pub async fn fast_forward_clock(&self, ship_id: BallId, secs: u64) -> Result<(), String> {
@@ -1784,8 +1946,12 @@ impl SystemHandle {
 mod celestials_helpers;
 pub use celestials_helpers::try_remove_ball_for_db;
 pub(crate) use celestials_helpers::{
-    fast_forward_clock_in_actor, persist_ball_positions_in_db, persist_landed_warps_in_db,
-    register_committed_warp_cache, register_db_system_ballpark, sync_ball_positions,
+    collect_dirty_condition_checkpoint_entries, collect_immediate_armor_hull_checkpoint_entries,
+    collect_landed_warp_positions, fast_forward_clock_in_actor_with_epochs,
+    persist_ball_positions_in_db, persist_landed_warps_in_db,
+    record_spawned_ball_checkpoint_baseline, register_committed_warp_cache,
+    register_db_system_ballpark, remove_ball_checkpoint_tracking, sync_ball_positions,
+    update_system_hibernation_flag,
 };
 
 #[cfg(test)] #[path = "celestials_unit_tests.rs"] mod celestials_unit_tests;

@@ -331,9 +331,15 @@ async fn test_sqlite_context_charges_skill_queue_and_dispatch_edges() {
     ctx.advance_secs(60);
 
     // Feature flag disabled dispatch checks + MachoBindObject piggyback
-    let mut cfg_ctx = test_ctx();
-    cfg_ctx.feature_flags.enable_living_world = false;
-    cfg_ctx.feature_flags.enable_quasar_gateway = false;
+    let cfg_ctx = test_ctx();
+    {
+        let mut flags = cfg_ctx
+            .feature_flags
+            .write()
+            .expect("feature_flags lock poisoned");
+        flags.enable_living_world = false;
+        flags.enable_quasar_gateway = false;
+    }
 
     let mut session = SessionState::new(202);
     session.user_id = Some(1001);

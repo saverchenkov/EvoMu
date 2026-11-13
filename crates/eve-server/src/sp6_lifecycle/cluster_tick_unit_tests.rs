@@ -1298,3 +1298,591 @@ fn social_extras_leaf_lock_and_no_nested_world_snapshots_825_838_891_909() {
         .unwrap();
     assert!(resolved.0 > 0);
 }
+
+#[tokio::test]
+async fn step_output_condition_checkpoint_epoch_guard_and_dirty_only_919_839_866() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let sys_id = 30_000_142_u32;
+
+    let init_cs = eve_destiny::CombatState {
+        shield_hp: 500.0,
+        max_shield_hp: 500.0,
+        shield_recharge_time_ms: 0.0,
+        armor_hp: 400.0,
+        max_armor_hp: 400.0,
+        structure_hp: 350.0,
+        max_structure_hp: 350.0,
+        capacitor: 250.0,
+        max_capacitor: 250.0,
+        capacitor_recharge_time_ms: 0.0,
+        ..Default::default()
+    };
+    let epoch_1 = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        if let Some(item) = snap.items.get_mut(&ship_id) {
+            item.location_id = sys_id as i64;
+        }
+        crate::sp6_lifecycle::leave_space_in_snap(
+            snap,
+            ship_id,
+            Some(&init_cs),
+            Some(sys_id),
+            Some([1_000.0, 2_000.0, 3_000.0]),
+        )
+    });
+
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    handle
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: glam::DVec3::new(1_000.0, 2_000.0, 3_000.0),
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 2.5,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            init_cs.clone(),
+        )
+        .await
+        .unwrap();
+
+    // 1. T-5: Step through 10 ticks with zero HP/cap/position changes; the staggered checkpoint tick
+    // must emit `Some(vec![])` (0 dirty rows).
+    let mut saw_checkpoint_tick = false;
+    for _ in 0..10 {
+        let out = handle.step_with_output(1.0).await.unwrap();
+        if crate::system_actor::is_condition_checkpoint_tick(sys_id, out.tick) {
+            saw_checkpoint_tick = true;
+            assert_eq!(
+                out.condition_checkpoint.as_ref().map(Vec::len),
+                Some(0),
+                "T-5: unchanged ball must produce 0 dirty checkpoint entries on checkpoint tick"
+            );
+        } else {
+            assert!(
+                out.condition_checkpoint.is_none(),
+                "non-checkpoint tick without armor/hull change must not emit condition_checkpoint"
+            );
+        }
+    }
+    assert!(saw_checkpoint_tick);
+
+    // 2. T-4: Armor damage on a non-10-tick step commits immediately via StepOutput.
+    handle
+        .modify_combat_state(ship_id, |cs| {
+            cs.armor_hp = 275.0;
+        })
+        .await
+        .unwrap();
+    let out_armor = handle.step_with_output(1.0).await.unwrap();
+    assert!(
+        out_armor
+            .condition_checkpoint
+            .as_ref()
+            .is_some_and(|v| v.len() == 1 && v[0].ball_id == ship_id),
+        "T-4: armor HP change must emit immediate condition_checkpoint entry"
+    );
+    let persisted_armor = ctx
+        .db
+        .with_snapshot(|snap| crate::sp6_lifecycle::read_ship_condition_in_snap(snap, ship_id))
+        .unwrap();
+    assert!((persisted_armor.armor_hp - 275.0).abs() < 1e-6);
+
+    // 3. T-2: Stale space_entry_epoch or wrong solar_system_id is rejected by apply_condition_checkpoint_for_system_in_db.
+    let epoch_2 = ctx.db.with_mut_snapshot(|snap| {
+        crate::sp6_lifecycle::leave_space_in_snap(
+            snap,
+            ship_id,
+            Some(&init_cs),
+            Some(sys_id),
+            Some([1_000.0, 2_000.0, 3_000.0]),
+        )
+    });
+    assert!(epoch_2 > epoch_1);
+
+    let stale_entry = crate::system_actor::ConditionCheckpointEntry {
+        ball_id: ship_id,
+        space_entry_epoch: epoch_1, // Stale epoch!
+        combat_state: Some(eve_destiny::CombatState {
+            shield_hp: 10.0,
+            armor_hp: 10.0,
+            structure_hp: 10.0,
+            capacitor: 10.0,
+            ..Default::default()
+        }),
+        position: [99_999.0, 0.0, 0.0],
+    };
+    let written_stale = crate::sp6_lifecycle::apply_condition_checkpoint_for_system_in_db(
+        &ctx.db,
+        sys_id,
+        &[stale_entry.clone()],
+    );
+    assert_eq!(
+        written_stale, 0,
+        "T-2: checkpoint entry with stale space_entry_epoch must be rejected"
+    );
+    let written_wrong_sys = crate::sp6_lifecycle::apply_condition_checkpoint_for_system_in_db(
+        &ctx.db,
+        30_002_187,
+        &[crate::system_actor::ConditionCheckpointEntry {
+            space_entry_epoch: epoch_2,
+            ..stale_entry
+        }],
+    );
+    assert_eq!(
+        written_wrong_sys, 0,
+        "T-2: checkpoint entry for wrong solar_system_id must be rejected"
+    );
+    let cond_after = ctx
+        .db
+        .with_snapshot(|snap| crate::sp6_lifecycle::read_ship_condition_in_snap(snap, ship_id))
+        .unwrap();
+    assert!((cond_after.armor_hp - 400.0).abs() < 1e-6);
+}
+
+#[tokio::test]
+async fn system_step_hook_and_npc_death_hook_use_live_server_context_839() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let probe_id = 990_001_111_i64;
+    let npc_ball_id = -88_001_i64;
+    let spawn_group_id = 777_u32;
+
+    // 1. Seed a live scanner probe in `ctx.active_scanner_probes` and `sp6_lifecycle.active_scanner_probes`.
+    let probe = eve_db::PersistedScannerProbe {
+        probe_id,
+        probe_type_id: 30013,
+        owner_char_id: char_id,
+        ship_id: 100_000_001,
+        launcher_module_id: 100_000_002,
+        solar_system_id: sys_id,
+        position: [1_000.0, 0.0, 0.0],
+        destination: [1_000.0, 0.0, 0.0],
+        range_step: 4,
+        scan_range_m: 4.0 * 149_597_870_700.0,
+        base_sensor_strength: 40.0,
+        max_flight_time_s: 3_600.0,
+        launched_at_unix: 1_700_000_000,
+        state: 1,
+        warp_end_ft: None,
+    };
+    ctx.active_scanner_probes
+        .write()
+        .unwrap()
+        .insert(probe_id, probe.clone());
+    with_mut_sp6_state(&ctx.db, |st, _| {
+        st.active_scanner_probes.insert(probe_id, probe);
+    });
+
+    // 2. Seed an NPC entity in `ctx.npc_spawns` for `sys_id`.
+    {
+        let mut spawns = ctx.npc_spawns.write().unwrap();
+        let mgr = spawns
+            .entry(sys_id)
+            .or_insert_with(crate::combat::npc_ai::NpcSpawnManager::new);
+        mgr.entities.insert(
+            npc_ball_id,
+            crate::combat::npc_ai::NpcCombatEntity {
+                ball_id: npc_ball_id,
+                type_id: 10001,
+                faction_id: 500010,
+                state: crate::combat::npc_ai::NpcAiState::Idle,
+                spawn_group_id,
+                spawn_pos: glam::DVec3::ZERO,
+                target_id: None,
+                bounty_isk: 1_500.0,
+                optimal_range: 5_000.0,
+                orbit_range: 2_500.0,
+                base_dps: 10.0,
+                damage_vector: eve_destiny::DamageVector::new(2.5, 2.5, 2.5, 2.5),
+                last_attack_tick: 0,
+                has_shield_rep: false,
+                has_armor_rep: false,
+            },
+        );
+    }
+
+    // 3. Apply a StepOutput that destroys `npc_ball_id` and runs `npc_death_hook` + `system_step_hook`.
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    let step_out = crate::system_actor::StepOutput {
+        solar_system_id: sys_id,
+        tick: 1,
+        dt_sim: 1.0,
+        landed_warps: Vec::new(),
+        destroyed_balls: vec![(npc_ball_id, Some(char_id))],
+        lock_completed_events: Vec::new(),
+        target_lost_events: Vec::new(),
+        cycle_actions: Vec::new(),
+        condition_checkpoint: None,
+        broadcast: None,
+    };
+    handle.apply_step_output(&step_out).await;
+
+    // 4. Verify `ctx.npc_spawns` recorded the respawn timer on the real `ServerContext` (#839)
+    // and `active_scanner_probes` in `ctx.db` was NOT wiped by a throwaway shadow ServerContext (#839).
+    {
+        let spawns = ctx.npc_spawns.read().unwrap();
+        let mgr = spawns.get(&sys_id).expect("npc_spawns entry exists");
+        assert!(
+            !mgr.entities.contains_key(&npc_ball_id),
+            "#839: destroyed NPC ball must be removed from live ctx.npc_spawns"
+        );
+        assert!(
+            mgr.respawn_timers.contains_key(&(sys_id, spawn_group_id)),
+            "#839: live ctx.npc_spawns must record respawn timer when NPC dies in step hook"
+        );
+    }
+    ctx.persist_server_runtime_to_db();
+    let probe_still_persisted =
+        super::super::with_sp6_state(&ctx.db, |st| st.active_scanner_probes.contains_key(&probe_id));
+    assert!(
+        probe_still_persisted,
+        "#839: persisted scanner probes must not be clobbered after system_step_hook"
+    );
+}
+
+#[tokio::test]
+async fn system_hibernation_zero_idle_tick_work_and_eviction_919_866_869() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let idle_sys = 30_002_187_u32; // Amarr (no characters in demo seed)
+    let idle_handle = ctx.systems.get_or_spawn(idle_sys);
+
+    // 1. Empty system with no characters, no dynamic balls, and no subscribers starts hibernated (#919, #866).
+    assert!(
+        idle_handle.is_hibernated(),
+        "empty system with no dynamic balls or sessions must hibernate"
+    );
+    assert!(idle_handle.hibernated_since_unix() > 0);
+    let tick_before = idle_handle.ballpark.read().unwrap().current_tick;
+
+    // 2. Physics tick skips hibernated empty systems (0 per-tick physics work) and records idle ticks.
+    crate::sp6_lifecycle::step_active_systems_physics_tick(&ctx, 1).await;
+    assert_eq!(
+        idle_handle.ballpark.read().unwrap().current_tick,
+        tick_before,
+        "#919: hibernated empty system must do zero per-tick physics work"
+    );
+    assert!(idle_handle.idle_ticks() >= 1);
+
+    // 3. Spawning a dynamic ball wakes the system out of hibernation immediately.
+    let temp_ball_id = 777_888_999_i64;
+    idle_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: temp_ball_id,
+            type_id: 587,
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 2.5,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+    assert!(
+        !idle_handle.is_hibernated(),
+        "#919: spawning a dynamic ball must wake the system from hibernation"
+    );
+    crate::sp6_lifecycle::step_active_systems_physics_tick(&ctx, 1).await;
+    assert_eq!(
+        idle_handle.ballpark.read().unwrap().current_tick,
+        tick_before + 1,
+        "awake system must advance physics tick"
+    );
+
+    // 4. Removing the last dynamic ball returns the system to hibernation, and evict_idle_systems evicts it.
+    idle_handle.remove_ball(temp_ball_id).await.unwrap();
+    assert!(
+        idle_handle.is_hibernated(),
+        "removing the last dynamic ball must return empty system to hibernation"
+    );
+    drop(idle_handle);
+    ctx.clock().advance_secs(600);
+    let evicted = ctx.systems.evict_idle_systems(300).await;
+    assert!(
+        evicted.contains(&idle_sys),
+        "#919/#866: evict_idle_systems must evict hibernated empty system past threshold"
+    );
+    assert!(ctx.systems.get_handle(idle_sys).is_none());
+
+    // 5. GH-869: npc_spawns entry for an active system is updated in place without remove->await->insert,
+    // including under concurrent handle_npc_destroyed / map mutations while planning/executing belt rats.
+    let active_sys = 30_000_142_u32;
+    let _ = ctx.systems.get_or_spawn(active_sys);
+    let concurrent_sys = 31_000_001_u32;
+    let _ = ctx.systems.get_or_spawn(concurrent_sys);
+    let now_unix = ctx.now_unix();
+    let concurrent_npc_ball_id = 9_990_001_i64;
+    let concurrent_spawn_group_id = 77_777_u32;
+    let concurrent_bounty_npc = crate::combat::npc_ai::NpcCombatEntity {
+        ball_id: concurrent_npc_ball_id,
+        type_id: 587,
+        faction_id: 500_001,
+        state: crate::combat::npc_ai::NpcAiState::Idle,
+        spawn_group_id: concurrent_spawn_group_id,
+        spawn_pos: glam::DVec3::ZERO,
+        target_id: None,
+        bounty_isk: 1_000.0,
+        optimal_range: 5_000.0,
+        orbit_range: 3_000.0,
+        base_dps: 10.0,
+        damage_vector: Default::default(),
+        last_attack_tick: 0,
+        has_shield_rep: false,
+        has_armor_rep: false,
+    };
+    {
+        let mut spawns = ctx.npc_spawns.write().unwrap();
+        let mgr_active = spawns
+            .entry(active_sys)
+            .or_insert_with(crate::combat::npc_ai::NpcSpawnManager::new);
+        mgr_active
+            .respawn_timers
+            .insert((active_sys, 42_424), 9_999_999_999);
+
+        let mgr_wh = spawns
+            .entry(concurrent_sys)
+            .or_insert_with(crate::combat::npc_ai::NpcSpawnManager::new);
+        mgr_wh
+            .respawn_timers
+            .insert((concurrent_sys, 42_424), 9_999_999_999);
+        mgr_wh
+            .entities
+            .insert(concurrent_npc_ball_id, concurrent_bounty_npc);
+    }
+
+    // Deterministically suspend execute_belt_rat_plan_detached_with_start_id across its actor await
+    // and inject a concurrent handle_npc_destroyed mutation on ctx.npc_spawns before merge.
+    let (mut planned_groups, special_specs) = {
+        let mut spawns = ctx.npc_spawns.write().unwrap();
+        spawns
+            .get_mut(&concurrent_sys)
+            .expect("concurrent_sys must remain present in npc_spawns")
+            .plan_belt_rats_for_system(&ctx, concurrent_sys, false, None, false, false, false)
+    };
+    if planned_groups.is_empty() {
+        let Some((&sg_id, sg)) = ctx.sde.npc_spawn_groups.iter().next() else {
+            panic!("SDE must contain at least one npc_spawn_group");
+        };
+        planned_groups.push((sg_id, sg.clone(), glam::DVec3::ZERO));
+    }
+    let mut built_specialized = Vec::new();
+    let mut concurrent_kill_injected = false;
+    let exec_fut =
+        crate::combat::npc_ai::NpcSpawnManager::execute_belt_rat_plan_detached_with_start_id(
+            &ctx,
+            concurrent_sys,
+            planned_groups,
+            special_specs,
+            88_000_100,
+            &mut built_specialized,
+        );
+    tokio::pin!(exec_fut);
+    let (_spawned_ids, spawned_entities) = loop {
+        tokio::select! {
+            biased;
+            res = &mut exec_fut => break res,
+            _ = std::future::ready(()), if !concurrent_kill_injected => {
+                concurrent_kill_injected = true;
+                let mut spawns = ctx.npc_spawns.write().unwrap();
+                let mgr = spawns
+                    .get_mut(&concurrent_sys)
+                    .expect("GH-869: concurrent_sys entry must still exist in npc_spawns mid-await");
+                mgr.handle_npc_destroyed(
+                    &ctx,
+                    concurrent_sys,
+                    concurrent_npc_ball_id,
+                    90_000_001,
+                    now_unix,
+                )
+                .expect("concurrent handle_npc_destroyed succeeds");
+            }
+        }
+    };
+    assert!(
+        concurrent_kill_injected,
+        "execute_belt_rat_plan_detached_with_start_id must yield across actor spawn await"
+    );
+    assert!(
+        !spawned_entities.is_empty(),
+        "detached belt rat execution must yield spawned entities to merge"
+    );
+    {
+        let mut spawns = ctx.npc_spawns.write().unwrap();
+        let mgr = spawns
+            .entry(concurrent_sys)
+            .or_insert_with(crate::combat::npc_ai::NpcSpawnManager::new);
+        for (ball_id, entity) in &spawned_entities {
+            mgr.entities.insert(*ball_id, entity.clone());
+        }
+    }
+
+    // Also drive tick_background_cluster concurrently with a spawned writer task on npc_spawns.
+    ctx.clock().advance_secs(1);
+    let ctx_bg = ctx.clone();
+    let mut concurrent_writer = tokio::spawn(async move {
+        tokio::task::yield_now().await;
+        let mut spawns = ctx_bg.npc_spawns.write().unwrap();
+        let mgr = spawns
+            .entry(active_sys)
+            .or_insert_with(crate::combat::npc_ai::NpcSpawnManager::new);
+        mgr.respawn_timers.insert((active_sys, 55_555), 8_888_888_888);
+    });
+    tokio::join!(tick_background_cluster(&ctx), async {
+        let _ = (&mut concurrent_writer).await;
+    });
+
+    let spawns_guard = ctx.npc_spawns.read().unwrap();
+    let active_mgr = spawns_guard
+        .get(&active_sys)
+        .expect("active_sys present in npc_spawns");
+    assert_eq!(
+        active_mgr.respawn_timers.get(&(active_sys, 42_424)).copied(),
+        Some(9_999_999_999),
+        "GH-869: pre-existing respawn timer must not be dropped across cluster tick awaits"
+    );
+    assert_eq!(
+        active_mgr.respawn_timers.get(&(active_sys, 55_555)).copied(),
+        Some(8_888_888_888),
+        "GH-869: concurrent mutation injected during cluster tick must survive"
+    );
+
+    let wh_mgr = spawns_guard
+        .get(&concurrent_sys)
+        .expect("concurrent_sys present in npc_spawns");
+    assert_eq!(
+        wh_mgr.respawn_timers.get(&(concurrent_sys, 42_424)).copied(),
+        Some(9_999_999_999),
+        "GH-869: existing respawn timer must survive mid-await mutation + merge"
+    );
+    assert_eq!(
+        wh_mgr
+            .respawn_timers
+            .get(&(concurrent_sys, concurrent_spawn_group_id))
+            .copied(),
+        Some(now_unix + 1_200),
+        "GH-869: concurrent handle_npc_destroyed cooldown must survive post-await merge"
+    );
+    assert!(
+        !wh_mgr.entities.contains_key(&concurrent_npc_ball_id),
+        "GH-869: concurrently destroyed NPC must remain removed after post-await merge"
+    );
+    for (ball_id, _) in &spawned_entities {
+        assert!(
+            wh_mgr.entities.contains_key(ball_id),
+            "GH-869: newly spawned belt rat {ball_id} must be merged after concurrent kill"
+        );
+    }
+}
+
+#[tokio::test]
+async fn tick_background_cluster_evicts_idle_system_after_60_idle_ticks_919_866() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let idle_sys = 30_002_187_u32; // Amarr (no characters in demo seed)
+    let held_sys = 30_002_659_u32; // Dodixie (no demo chars; externally held handle)
+    let held_handle = ctx.systems.get_or_spawn(held_sys);
+    assert!(held_handle.is_hibernated());
+    {
+        let idle_handle = ctx.systems.get_or_spawn(idle_sys);
+        assert!(idle_handle.is_hibernated());
+    }
+    // One idle physics tick marks `idle_ticks >= 1` so cluster_tick does not treat the newly
+    // spawned empty system as a cold-boot NPC spawn target on its very first pass.
+    crate::sp6_lifecycle::step_active_systems_physics_tick(&ctx, 1).await;
+
+    // Drive 60 idle background ticks with 1s steps (< 300s hibernation threshold):
+    // handle must stay loaded until both idle tick count and hibernation age are met.
+    for _ in 0..60 {
+        ctx.clock().advance_secs(1);
+        tick_background_cluster(&ctx).await;
+    }
+    let handle_before_age = ctx
+        .systems
+        .get_handle(idle_sys)
+        .expect("system must remain loaded before 300s hibernation timeout expires");
+    assert!(handle_before_age.is_hibernated());
+    assert!(handle_before_age.idle_ticks() >= 60);
+    drop(handle_before_age);
+
+    // Once hibernation age passes 300s and idle_ticks >= 60, tick_background_cluster itself evicts it,
+    // while keeping another hibernated system that has < 60 idle_ticks or an externally held SystemHandle.
+    let young_sys = 30_002_510_u32; // Rens
+    drop(ctx.systems.get_or_spawn(young_sys));
+
+    ctx.clock().advance_secs(300);
+    tick_background_cluster(&ctx).await;
+    assert!(
+        ctx.systems.get_handle(idle_sys).is_none(),
+        "W5C3-02: tick_background_cluster must await evict_idle_systems_with_min_ticks(300, 60) and drop idle system"
+    );
+    assert!(
+        ctx.systems.get_handle(held_sys).is_some(),
+        "W5C3R-02: system with externally held SystemHandle (strong_count > 3) must not be evicted"
+    );
+    assert!(
+        ctx.systems.get_handle(young_sys).is_some(),
+        "W5C3R-02: system with < 60 idle_ticks must not be evicted when another system triggers eviction"
+    );
+    drop(held_handle);
+}
+
+#[test]
+fn server_context_weak_upgrade_shares_live_config_and_catalog_arcs_without_clones_839() {
+    let mut cfg = crate::config::ServerConfig::default();
+    cfg.storage.backend = "memory".to_string();
+    cfg.feature_flags.enable_living_world = false;
+    cfg.feature_flags.starter_plex_balance = 777;
+    cfg.feature_flags.free_fast_checkout_plex = true;
+    cfg.esi_port = 26_199;
+    cfg.xmpp_port = 25_199;
+
+    let ctx = ServerContext::from_config(&cfg).expect("from_config succeeds");
+    let weak = ctx.downgrade();
+
+    // Live updates to operator config must be observed immediately by subsequent Weak upgrades.
+    ctx.feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .starter_plex_balance = 888;
+    ctx.set_esi_port(26_299);
+    ctx.set_xmpp_port(25_299);
+
+    let upgraded1 = weak.upgrade().expect("weak upgrades while ServerContext lives");
+    let upgraded2 = weak.upgrade().expect("weak upgrades again");
+
+    assert!(Arc::ptr_eq(&ctx.cataloged_services, &upgraded1.cataloged_services));
+    assert!(Arc::ptr_eq(&ctx.quasar_domains, &upgraded1.quasar_domains));
+    assert!(Arc::ptr_eq(&ctx.feature_flags, &upgraded1.feature_flags));
+    assert!(Arc::ptr_eq(
+        &upgraded1.cataloged_services,
+        &upgraded2.cataloged_services
+    ));
+    assert!(Arc::ptr_eq(&upgraded1.quasar_domains, &upgraded2.quasar_domains));
+
+    let flags = upgraded1.feature_flags_snapshot();
+    assert!(!flags.enable_living_world);
+    assert!(flags.free_fast_checkout_plex);
+    assert_eq!(flags.starter_plex_balance, 888);
+    assert_eq!(upgraded1.esi_port(), 26_299);
+    assert_eq!(upgraded1.xmpp_port(), 25_299);
+
+    drop(upgraded1);
+    drop(upgraded2);
+    drop(ctx);
+    assert!(weak.upgrade().is_none());
+}

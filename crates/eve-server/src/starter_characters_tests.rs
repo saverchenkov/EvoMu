@@ -159,8 +159,11 @@ async fn provision_starter_characters_creates_overrides_and_skips_invalid_or_exi
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn starter_plex_grant_is_one_time_per_account_across_creations_and_deletions() {
-    let mut ctx = fast_test_context();
-    ctx.feature_flags.starter_plex_balance = 500;
+    let ctx = fast_test_context();
+    ctx.feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .starter_plex_balance = 500;
     let uid = ctx.db.provision_player_account("plex_pilot", "plex_pass");
 
     let (bloodline_id, ancestry_id, school_id) = ctx

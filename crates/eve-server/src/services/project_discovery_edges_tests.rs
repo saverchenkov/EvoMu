@@ -90,7 +90,10 @@ fn project_discovery_payload_validation_bounded_tasks_and_config_edges() {
         let mut g = ctx.global_config_values.write().unwrap();
         g.insert(PROJECT_DISCOVERY_ENABLED_CONFIG_KEY.into(), PyRep::None);
     }
-    assert_eq!(is_project_discovery_enabled(&ctx), ctx.feature_flags.enable_project_discovery);
+    assert_eq!(
+        is_project_discovery_enabled(&ctx),
+        ctx.feature_flags_snapshot().enable_project_discovery
+    );
 }
 
 #[test]

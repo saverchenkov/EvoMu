@@ -247,17 +247,17 @@ impl NpcSpawnManager {
             .await)
     }
 
-    async fn spawn_group_with_start_id(
-        &mut self,
+    async fn spawn_group_detached_with_start_id(
         ctx: &ServerContext,
         sys_id: u32,
         spawn_group_id: u32,
         spawn_group: &eve_sde::NpcSpawnGroupInfo,
         spawn_pos: DVec3,
         start_ball_id: i64,
-    ) -> Vec<i64> {
+    ) -> (Vec<i64>, Vec<(i64, NpcCombatEntity)>) {
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
         let mut spawned_ball_ids = Vec::with_capacity(spawn_group.npc_type_ids.len());
+        let mut spawned_entities = Vec::with_capacity(spawn_group.npc_type_ids.len());
 
         for (idx, &npc_type_id) in spawn_group.npc_type_ids.iter().enumerate() {
             let ball_id = start_ball_id + idx as i64;
@@ -344,10 +344,34 @@ impl NpcSpawnManager {
                 has_armor_rep: true,
             };
 
-            self.entities.insert(ball_id, entity);
+            spawned_entities.push((ball_id, entity));
             spawned_ball_ids.push(ball_id);
         }
 
+        (spawned_ball_ids, spawned_entities)
+    }
+
+    async fn spawn_group_with_start_id(
+        &mut self,
+        ctx: &ServerContext,
+        sys_id: u32,
+        spawn_group_id: u32,
+        spawn_group: &eve_sde::NpcSpawnGroupInfo,
+        spawn_pos: DVec3,
+        start_ball_id: i64,
+    ) -> Vec<i64> {
+        let (spawned_ball_ids, spawned_entities) = Self::spawn_group_detached_with_start_id(
+            ctx,
+            sys_id,
+            spawn_group_id,
+            spawn_group,
+            spawn_pos,
+            start_ball_id,
+        )
+        .await;
+        for (ball_id, entity) in spawned_entities {
+            self.entities.insert(ball_id, entity);
+        }
         spawned_ball_ids
     }
 
@@ -675,22 +699,29 @@ impl NpcSpawnManager {
         (planned_groups, special_specs)
     }
 
-    pub(crate) async fn execute_belt_rat_plan_with_start_id(
-        &mut self,
+    pub(crate) async fn execute_belt_rat_plan_detached_with_start_id(
         ctx: &ServerContext,
         sys_id: u32,
         planned_groups: Vec<(u32, eve_sde::NpcSpawnGroupInfo, DVec3)>,
         special_specs: Vec<(u32, &'static str, u32, DVec3)>,
         mut next_start_id: i64,
         out_entities: &mut Vec<(i64, crate::services::combat_crimewatch::ExtendedNpcEntity)>,
-    ) -> Vec<i64> {
+    ) -> (Vec<i64>, Vec<(i64, NpcCombatEntity)>) {
         let mut all_spawned = Vec::new();
+        let mut all_entities = Vec::new();
         for (group_id, sg, spawn_pos) in planned_groups {
             let count = sg.npc_type_ids.len() as i64;
-            let spawned = self
-                .spawn_group_with_start_id(ctx, sys_id, group_id, &sg, spawn_pos, next_start_id)
-                .await;
+            let (spawned, entities) = Self::spawn_group_detached_with_start_id(
+                ctx,
+                sys_id,
+                group_id,
+                &sg,
+                spawn_pos,
+                next_start_id,
+            )
+            .await;
             all_spawned.extend(spawned);
+            all_entities.extend(entities);
             next_start_id += count;
         }
         if !special_specs.is_empty() {
@@ -704,6 +735,30 @@ impl NpcSpawnManager {
             )
             .await;
             all_spawned.extend(special_ids);
+        }
+        (all_spawned, all_entities)
+    }
+
+    pub(crate) async fn execute_belt_rat_plan_with_start_id(
+        &mut self,
+        ctx: &ServerContext,
+        sys_id: u32,
+        planned_groups: Vec<(u32, eve_sde::NpcSpawnGroupInfo, DVec3)>,
+        special_specs: Vec<(u32, &'static str, u32, DVec3)>,
+        next_start_id: i64,
+        out_entities: &mut Vec<(i64, crate::services::combat_crimewatch::ExtendedNpcEntity)>,
+    ) -> Vec<i64> {
+        let (all_spawned, all_entities) = Self::execute_belt_rat_plan_detached_with_start_id(
+            ctx,
+            sys_id,
+            planned_groups,
+            special_specs,
+            next_start_id,
+            out_entities,
+        )
+        .await;
+        for (ball_id, entity) in all_entities {
+            self.entities.insert(ball_id, entity);
         }
         all_spawned
     }

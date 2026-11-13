@@ -219,6 +219,51 @@ pub enum PendingCycleAction {
     },
 }
 
+/// Staggered 10-tick cadence for per-system condition checkpoints (`RFC-1 E-4`, `T-5`, `#919`).
+pub const CONDITION_CHECKPOINT_CADENCE_TICKS: u64 = 10;
+
+/// Returns `true` when `tick` is a staggered condition-checkpoint tick for `solar_system_id`
+/// (`(tick + solar_system_id) % 10 == 0`).
+#[inline]
+pub const fn is_condition_checkpoint_tick(solar_system_id: SolarSystemId, tick: u64) -> bool {
+    tick.wrapping_add(solar_system_id as u64) % CONDITION_CHECKPOINT_CADENCE_TICKS == 0
+}
+
+/// Dirty-only in-space ship condition checkpoint entry emitted in [`StepOutput`] (`RFC-1 E-4`, `T-2`, `T-5`).
+#[derive(Debug, Clone)]
+pub struct ConditionCheckpointEntry {
+    pub ball_id: BallId,
+    pub space_entry_epoch: u64,
+    pub combat_state: Option<CombatState>,
+    pub position: [f64; 3],
+}
+
+/// Cached last-checkpointed ball state inside [`SystemActorState`] for dirty-only filtering (`T-5`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LastCheckpointedBallState {
+    pub space_entry_epoch: u64,
+    pub shield_hp: f64,
+    pub armor_hp: f64,
+    pub structure_hp: f64,
+    pub capacitor: f64,
+    pub position: [f64; 3],
+}
+
+/// Structured actor outbox produced by a single [`SystemActor`] step (`RFC-1 E-4`, `#919`).
+#[derive(Debug, Clone, Default)]
+pub struct StepOutput {
+    pub solar_system_id: SolarSystemId,
+    pub tick: u64,
+    pub dt_sim: f64,
+    pub landed_warps: Vec<(BallId, [f64; 3])>,
+    pub destroyed_balls: Vec<(BallId, Option<CharacterId>)>,
+    pub lock_completed_events: Vec<(CharacterId, BallId)>,
+    pub target_lost_events: Vec<(CharacterId, BallId)>,
+    pub cycle_actions: Vec<PendingCycleAction>,
+    pub condition_checkpoint: Option<Vec<ConditionCheckpointEntry>>,
+    pub broadcast: Option<TickBroadcast>,
+}
+
 #[derive(Default)]
 pub(crate) struct SystemActorState {
     pub active_module_cycles: Vec<ActiveModuleCycle>,
@@ -238,6 +283,12 @@ pub(crate) struct SystemActorState {
     pub tactical_state: Arc<RankedRwLock<crate::services::tactical_modules::TacticalModulesState, RANK_LEAF>>,
     pub pending_notifications_opt: Option<Arc<RankedRwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>, RANK_LEAF>>>,
     pub notify_tx_opt: Option<tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
+    pub ball_space_entry_epochs: HashMap<BallId, u64>,
+    pub last_checkpointed_balls: HashMap<BallId, LastCheckpointedBallState>,
+    pub hibernated: Arc<std::sync::atomic::AtomicBool>,
+    pub hibernated_since_unix: Arc<std::sync::atomic::AtomicU64>,
+    pub idle_ticks: Arc<std::sync::atomic::AtomicU64>,
+    pub dynamic_ball_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Atomic snapshot of a ball removed from a solar system (`#842`, `#917` E-2).
@@ -432,11 +483,14 @@ pub enum SystemCommand {
     },
     StepManual {
         dt: f64,
-        reply: oneshot::Sender<(TickBroadcast, Vec<(BallId, Option<CharacterId>)>)>,
+        reply: oneshot::Sender<StepOutput>,
     },
     StepManualTickOnly {
         dt: f64,
-        reply: oneshot::Sender<(u64, Vec<(BallId, Option<CharacterId>)>)>,
+        reply: oneshot::Sender<StepOutput>,
+    },
+    FlushConditionCheckpoint {
+        reply: oneshot::Sender<Vec<ConditionCheckpointEntry>>,
     },
     FastForwardClock {
         ship_id: BallId,

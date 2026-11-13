@@ -119,8 +119,8 @@ fn runtime_storage_limits_fifo_eviction_disk_enforcement_and_lookup() {
 
 #[test]
 fn build_client_global_config_handles_ipv4_ipv6_loopback_and_esi_port_branches() {
-    let mut ctx = build_bug_test_ctx();
-    ctx.esi_port = 8443;
+    let ctx = build_bug_test_ctx();
+    ctx.set_esi_port(8443);
 
     for (hint, expected_url_host, expected_ejab) in [
         ("0.0.0.0", "127.0.0.1", "127.0.0.1"),
@@ -144,7 +144,7 @@ fn build_client_global_config_handles_ipv4_ipv6_loopback_and_esi_port_branches()
         assert_eq!(ejab, expected_ejab);
     }
 
-    ctx.esi_port = 0;
+    ctx.set_esi_port(0);
     let cfg_no_port = build_client_global_config(&ctx, None);
     assert!(cfg_no_port.contains_key("ejabberdAddress"));
 }

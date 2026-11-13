@@ -961,8 +961,9 @@ pub const INFO_GATHERING_ENABLED_CONFIG_KEY: &str = "infoGatheringEnabled";
 pub const INFO_GATHERING_INTERVAL_CONFIG_KEY: &str = "infoGatheringClientWorkerInterval";
 
 fn info_gathering_config(ctx: &ServerContext) -> (bool, i64) {
-    let mut enabled = ctx.feature_flags.enable_info_gathering;
-    let mut interval = (ctx.feature_flags.info_gathering_interval_secs as i64).max(1);
+    let flags = ctx.feature_flags_snapshot();
+    let mut enabled = flags.enable_info_gathering;
+    let mut interval = (flags.info_gathering_interval_secs as i64).max(1);
     if let Ok(guard) = ctx.global_config_values.read() {
         if let Some(val) = guard.get(INFO_GATHERING_ENABLED_CONFIG_KEY) {
             enabled = match val {

@@ -528,13 +528,18 @@ pub fn populate_persisted_space_objects(
     });
 
     if !expired_item_ids.is_empty() || !expired_disconnected_chars.is_empty() {
+        let expired_set: std::collections::HashSet<i64> =
+            expired_item_ids.iter().copied().collect();
         with_mut_sp6_state(db, |st, snap| {
             for iid in &expired_item_ids {
                 snap.items.remove(iid);
                 snap.item_positions.remove(iid);
                 st.space_object_meta.remove(iid);
                 st.ship_combat_hp.remove(iid);
-                snap.items.retain(|_, child| child.location_id != *iid);
+            }
+            if !expired_set.is_empty() {
+                snap.items
+                    .retain(|_, child| !expired_set.contains(&child.location_id));
             }
             for (cid, sid, final_pos) in expired_disconnected_chars {
                 snap.item_positions.insert(sid, final_pos);
@@ -1291,7 +1296,9 @@ pub fn on_advance_secs_internal(
         Vec::new()
     };
     for (origin_sys, tid) in expired_traces {
-        ctx.systems.get_or_spawn(origin_sys).try_remove_ball(tid);
+        if let Some(h) = ctx.systems.get_handle(origin_sys) {
+            h.try_remove_ball(tid);
+        }
     }
     let expired_zarzakh_locks: Vec<(i64, i64)> = if ctx
         .db
@@ -1441,14 +1448,17 @@ pub fn on_advance_secs_internal(
             }
 
             if !expired_ids.is_empty() {
+                let mut expired_set = std::collections::HashSet::with_capacity(expired_ids.len());
                 for (iid, sys_id, is_bubble) in &expired_ids {
                     snap.items.remove(iid);
                     snap.item_positions.remove(iid);
                     st.space_object_meta.remove(iid);
                     st.ship_combat_hp.remove(iid);
-                    snap.items.retain(|_, child| child.location_id != *iid);
+                    expired_set.insert(*iid);
                     balls_to_remove.push((*sys_id, *iid, *is_bubble));
                 }
+                snap.items
+                    .retain(|_, child| !expired_set.contains(&child.location_id));
                 crate::services::mobile_deployables::write_deployable_state_snap(snap, |dst| {
                     for (iid, _, _) in &expired_ids {
                         dst.deployables.remove(iid);
@@ -1466,11 +1476,12 @@ pub fn on_advance_secs_internal(
         });
     }
     for (sys_id, iid, is_bubble) in balls_to_remove {
-        let handle = ctx.systems.get_or_spawn(sys_id);
-        if is_bubble {
-            handle.try_remove_warp_bubble(iid);
+        if let Some(handle) = ctx.systems.get_handle(sys_id) {
+            if is_bubble {
+                handle.try_remove_warp_bubble(iid);
+            }
+            handle.try_remove_ball(iid);
         }
-        handle.try_remove_ball(iid);
     }
     for (sys_id, iid, pos, radius) in bubbles_to_activate {
         let handle = ctx.systems.get_or_spawn(sys_id);
@@ -1726,16 +1737,39 @@ pub async fn tick_background_cluster_with_step(ctx: &ServerContext, explicit_ste
     let _ = crate::sp6_lifecycle::step_returning_drones(ctx).await;
     crate::services::combat_crimewatch::combat_npcs_drones::step_engaged_drones(ctx, now_unix).await;
     let active_handles = ctx.systems.active_system_handles();
-    for &(sys_id, _) in &active_handles {
-        if (30_000_000..31_000_000).contains(&sys_id) {
-            let has_piloted_ship_in_space = ctx.db.with_snapshot(|s| {
-                s.characters.values().any(|c| {
-                    c.solar_system_id == sys_id
-                        && c.station_id.is_none()
+    let active_sys_set: std::collections::HashSet<u32> =
+        active_handles.iter().map(|&(sys_id, _)| sys_id).collect();
+    let (chars_in_system, piloted_ships_by_sys): (
+        std::collections::HashSet<u32>,
+        std::collections::HashMap<u32, i64>,
+    ) = if active_handles.is_empty() {
+        (
+            std::collections::HashSet::new(),
+            std::collections::HashMap::new(),
+        )
+    } else {
+        ctx.db.with_snapshot(|snap| {
+            let mut chars_sys = std::collections::HashSet::new();
+            let mut piloted_map = std::collections::HashMap::new();
+            for c in snap.characters.values() {
+                if active_sys_set.contains(&c.solar_system_id) {
+                    chars_sys.insert(c.solar_system_id);
+                    if c.station_id.is_none()
                         && c.structure_id.is_none()
                         && c.active_ship_id > 0
-                })
-            });
+                    {
+                        piloted_map
+                            .entry(c.solar_system_id)
+                            .or_insert(c.active_ship_id);
+                    }
+                }
+            }
+            (chars_sys, piloted_map)
+        })
+    };
+    for &(sys_id, _) in &active_handles {
+        if (30_000_000..31_000_000).contains(&sys_id) {
+            let has_piloted_ship_in_space = piloted_ships_by_sys.contains_key(&sys_id);
             if has_piloted_ship_in_space {
                 let has_belt = ctx
                     .sde
@@ -1775,12 +1809,13 @@ pub async fn tick_background_cluster_with_step(ctx: &ServerContext, explicit_ste
         .await;
     crate::services::pve_fob_observatory::step_living_world_fob_and_observatory_spawns(ctx).await;
 
-    for &(sys_id, _) in &active_handles {
+    for &(sys_id, ref handle) in &active_handles {
+        if handle.is_hibernated() && !chars_in_system.contains(&sys_id) && handle.idle_ticks() > 0 {
+            continue;
+        }
         let _ = crate::services::combat_npc_police::check_and_spawn_faction_police(ctx, sys_id).await;
     }
     if !active_handles.is_empty() {
-        let active_sys_set: std::collections::HashSet<u32> =
-            active_handles.iter().map(|&(sys_id, _)| sys_id).collect();
         let (
             navy_present,
             drifter_present,
@@ -1824,20 +1859,14 @@ pub async fn tick_background_cluster_with_step(ctx: &ServerContext, explicit_ste
                 rt.clone_soldier_cooldown_until.clone(),
             )
         });
-        let piloted_ships_by_sys: std::collections::HashMap<u32, i64> = ctx.db.with_snapshot(|snap| {
-            let mut map = std::collections::HashMap::new();
-            for c in snap.characters.values() {
-                if active_sys_set.contains(&c.solar_system_id)
-                    && c.station_id.is_none()
-                    && c.active_ship_id > 0
-                {
-                    map.entry(c.solar_system_id).or_insert(c.active_ship_id);
-                }
-            }
-            map
-        });
         let mut navy_plans = Vec::new();
-        for &(sys_id, _) in &active_handles {
+        for &(sys_id, ref handle) in &active_handles {
+            if handle.is_hibernated()
+                && !chars_in_system.contains(&sys_id)
+                && handle.idle_ticks() > 0
+            {
+                continue;
+            }
             if let Some(plan) =
                 crate::services::combat_npc_police::plan_empire_navy_patrol_with_preloaded(
                     ctx,
@@ -1850,34 +1879,48 @@ pub async fn tick_background_cluster_with_step(ctx: &ServerContext, explicit_ste
                 navy_plans.push(plan);
             }
         }
-        let mut managers: Vec<(u32, crate::combat::npc_ai::NpcSpawnManager)> = {
-            let mut guard = ctx.npc_spawns.write().unwrap_or_else(|e| e.into_inner());
-            active_handles
-                .iter()
-                .map(|&(sys_id, _)| (sys_id, guard.remove(&sys_id).unwrap_or_default()))
-                .collect()
-        };
+        // Plan belt rats in-place under `ctx.npc_spawns` without removing `NpcSpawnManager`
+        // across `.await` points (`#869`).
         let mut belt_plans = Vec::new();
         let mut belt_id_total: i64 = 0;
-        for (idx, (sys_id, mgr)) in managers.iter_mut().enumerate() {
-            let s = *sys_id;
-            let (planned_groups, special_specs) = mgr.plan_belt_rats_for_system(
-                ctx,
-                s,
-                drifter_present.contains(&s),
-                cs_cooldowns.get(&s).copied(),
-                cs_alive_set.contains(&s),
-                mordu_alive_set.contains(&s),
-                officer_alive_set.contains(&s),
-            );
-            let group_npcs: i64 = planned_groups
-                .iter()
-                .map(|(_, sg, _)| sg.npc_type_ids.len() as i64)
-                .sum();
-            let count = group_npcs + special_specs.len() as i64;
-            if count > 0 {
-                belt_id_total += count;
-                belt_plans.push((idx, s, planned_groups, special_specs, count));
+        {
+            let mut guard = ctx.npc_spawns.write().unwrap_or_else(|e| e.into_inner());
+            for &(sys_id, ref handle) in &active_handles {
+                let mgr = guard.entry(sys_id).or_default();
+                if handle.is_hibernated()
+                    && !chars_in_system.contains(&sys_id)
+                    && handle.idle_ticks() > 0
+                {
+                    let has_due_timer = mgr
+                        .clone_soldier_respawn_timers
+                        .get(&sys_id)
+                        .is_some_and(|&until| now_unix >= until)
+                        || mgr
+                            .respawn_timers
+                            .iter()
+                            .any(|(&(s, _), &until)| s == sys_id && now_unix >= until);
+                    if !has_due_timer {
+                        continue;
+                    }
+                }
+                let (planned_groups, special_specs) = mgr.plan_belt_rats_for_system(
+                    ctx,
+                    sys_id,
+                    drifter_present.contains(&sys_id),
+                    cs_cooldowns.get(&sys_id).copied(),
+                    cs_alive_set.contains(&sys_id),
+                    mordu_alive_set.contains(&sys_id),
+                    officer_alive_set.contains(&sys_id),
+                );
+                let group_npcs: i64 = planned_groups
+                    .iter()
+                    .map(|(_, sg, _)| sg.npc_type_ids.len() as i64)
+                    .sum();
+                let count = group_npcs + special_specs.len() as i64;
+                if count > 0 {
+                    belt_id_total += count;
+                    belt_plans.push((sys_id, planned_groups, special_specs, count));
+                }
             }
         }
         let navy_id_total: i64 = navy_plans.iter().map(|p| p.specs.len() as i64).sum();
@@ -1889,6 +1932,7 @@ pub async fn tick_background_cluster_with_step(ctx: &ServerContext, explicit_ste
                 start
             });
             let mut built_specialized = Vec::new();
+            let mut spawned_belt_entities_by_sys = Vec::new();
             for plan in navy_plans {
                 let count = plan.specs.len() as i64;
                 let _ = crate::services::combat_npc_police::execute_navy_patrol_plan_with_start_id(
@@ -1900,10 +1944,9 @@ pub async fn tick_background_cluster_with_step(ctx: &ServerContext, explicit_ste
                 .await;
                 next_start_id += count;
             }
-            for (mgr_idx, sys_id, planned_groups, special_specs, count) in belt_plans {
-                let _ = managers[mgr_idx]
-                    .1
-                    .execute_belt_rat_plan_with_start_id(
+            for (sys_id, planned_groups, special_specs, count) in belt_plans {
+                let (_spawned_ids, entities) =
+                    crate::combat::npc_ai::NpcSpawnManager::execute_belt_rat_plan_detached_with_start_id(
                         ctx,
                         sys_id,
                         planned_groups,
@@ -1912,7 +1955,19 @@ pub async fn tick_background_cluster_with_step(ctx: &ServerContext, explicit_ste
                         &mut built_specialized,
                     )
                     .await;
+                if !entities.is_empty() {
+                    spawned_belt_entities_by_sys.push((sys_id, entities));
+                }
                 next_start_id += count;
+            }
+            if !spawned_belt_entities_by_sys.is_empty() {
+                let mut guard = ctx.npc_spawns.write().unwrap_or_else(|e| e.into_inner());
+                for (sys_id, entities) in spawned_belt_entities_by_sys {
+                    let mgr = guard.entry(sys_id).or_default();
+                    for (ball_id, entity) in entities {
+                        mgr.entities.insert(ball_id, entity);
+                    }
+                }
             }
             if !built_specialized.is_empty() {
                 crate::services::combat_crimewatch::with_mut_combat_ephemeral(ctx, |rt| {
@@ -1922,16 +1977,18 @@ pub async fn tick_background_cluster_with_step(ctx: &ServerContext, explicit_ste
                 });
             }
         }
-        {
-            let mut guard = ctx.npc_spawns.write().unwrap_or_else(|e| e.into_inner());
-            for (sys_id, mgr) in managers {
-                guard.insert(sys_id, mgr);
-            }
-        }
     }
 
+    let mut has_long_idle_candidate = false;
     for (sys_id, handle) in active_handles {
-        if !ctx
+        let is_hibernated_empty = handle.is_hibernated() && !chars_in_system.contains(&sys_id);
+        if is_hibernated_empty {
+            let idle_count = handle.record_idle_tick();
+            // Refcounts: SystemManager registry (1) + actor task (1) + this loop's `handle` (1) = 3.
+            if idle_count >= 60 && std::sync::Arc::strong_count(&handle.ballpark) <= 3 {
+                has_long_idle_candidate = true;
+            }
+        } else if !ctx
             .dedicated_physics_ticker_active
             .load(std::sync::atomic::Ordering::Acquire)
         {
@@ -1947,11 +2004,16 @@ pub async fn tick_background_cluster_with_step(ctx: &ServerContext, explicit_ste
             crate::services::pve_special_sites_abyssal::prune_out_of_bounds_abyssal_probes(ctx, sys_id);
             crate::services::notify_emitters_tournaments_anomalies::sync_deathzone_state_notifications(ctx, sys_id);
         }
-        let _ = crate::services::insurgency_services::step_system_insurgency_tick(ctx, sys_id).await;
-        let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::step_wreck_and_jetcan_decay(
-            ctx, sys_id, now_unix,
-        )
-        .await;
+        if !is_hibernated_empty {
+            let _ = crate::services::insurgency_services::step_system_insurgency_tick(ctx, sys_id).await;
+            let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::step_wreck_and_jetcan_decay(
+                ctx, sys_id, now_unix,
+            )
+            .await;
+        }
+    }
+    if has_long_idle_candidate {
+        let _ = ctx.systems.evict_idle_systems_with_min_ticks(300, 60).await;
     }
 }
 
@@ -1997,39 +2059,50 @@ async fn step_single_system_physics_step(
     sys_id: u32,
     handle: &crate::system_actor::SystemHandle,
 ) {
-    match tokio::time::timeout(SYSTEM_STEP_ASK_TIMEOUT, handle.step_manual_tick_only(1.0)).await {
-        Ok(Ok(_tick)) => {}
-        Ok(Err(err)) => {
-            tracing::warn!(
-                solar_system_id = sys_id,
-                error = %err,
-                "SystemActor step_manual_tick_only returned error"
-            );
-            return;
+    let step_res = catch_unwind_future(async {
+        match tokio::time::timeout(SYSTEM_STEP_ASK_TIMEOUT, handle.step_manual_tick_only(1.0)).await
+        {
+            Ok(Ok(_tick)) => {}
+            Ok(Err(err)) => {
+                tracing::warn!(
+                    solar_system_id = sys_id,
+                    error = %err,
+                    "SystemActor step_manual_tick_only returned error"
+                );
+                return;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    solar_system_id = sys_id,
+                    timeout_ms = SYSTEM_STEP_ASK_TIMEOUT.as_millis() as u64,
+                    "SystemActor step_manual_tick_only timed out; skipping stuck system step"
+                );
+                return;
+            }
         }
-        Err(_) => {
-            tracing::warn!(
-                solar_system_id = sys_id,
-                timeout_ms = SYSTEM_STEP_ASK_TIMEOUT.as_millis() as u64,
-                "SystemActor step_manual_tick_only timed out; skipping stuck system step"
-            );
-            return;
+        let _ = tokio::time::timeout(
+            SYSTEM_STEP_ASK_TIMEOUT,
+            crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai(ctx, sys_id),
+        )
+        .await;
+        if let Some(mgr) = ctx
+            .npc_spawns
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(&sys_id)
+        {
+            let tick = handle.ballpark.try_read().map(|b| b.current_tick).unwrap_or(0);
+            let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, sys_id);
+            mgr.step_ai_sync(ctx, sys_id, tick, 1.0 * tidi);
         }
-    }
-    let _ = tokio::time::timeout(
-        SYSTEM_STEP_ASK_TIMEOUT,
-        crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai(ctx, sys_id),
-    )
+    })
     .await;
-    if let Some(mgr) = ctx
-        .npc_spawns
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .get_mut(&sys_id)
-    {
-        let tick = handle.ballpark.try_read().map(|b| b.current_tick).unwrap_or(0);
-        let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, sys_id);
-        mgr.step_ai_sync(ctx, sys_id, tick, 1.0 * tidi);
+    if let Err(panic_msg) = step_res {
+        tracing::error!(
+            solar_system_id = sys_id,
+            panic = %panic_msg,
+            "Per-system driver caught panic during physics step (#919)"
+        );
     }
 }
 
@@ -2037,6 +2110,8 @@ async fn step_single_system_physics_step(
 /// Runs on a dedicated wall-clock ticker in production so slow mining or
 /// SQLite persistence in `tick_background_cluster` cannot delay warp completion.
 /// Capped at [`MAX_PHYSICS_BACKLOG_STEPS`] (`3`) steps per wake (`#870`).
+/// Hibernated empty systems perform zero per-tick work, and active systems are driven
+/// concurrently under per-system supervision (`#919`, `#866`).
 pub async fn step_active_systems_physics_tick(ctx: &ServerContext, elapsed_secs: u64) {
     let now_unix = ctx.now_unix();
     let mult = ctx.time_acceleration_multiplier();
@@ -2044,13 +2119,46 @@ pub async fn step_active_systems_physics_tick(ctx: &ServerContext, elapsed_secs:
         .saturating_mul(mult)
         .clamp(1, MAX_PHYSICS_BACKLOG_STEPS);
     let active_handles = ctx.systems.active_system_handles();
+    if active_handles.is_empty() {
+        return;
+    }
+    let chars_in_system: std::collections::HashSet<u32> = ctx.db.with_snapshot(|snap| {
+        snap.characters
+            .values()
+            .map(|c| c.solar_system_id)
+            .collect()
+    });
+    let mut active_to_step = Vec::with_capacity(active_handles.len());
     for (sys_id, handle) in active_handles {
-        for step_idx in 0..steps {
-            if step_idx == 0 && handle.take_auto_stepped_at(now_unix) {
-                continue;
-            }
-            step_single_system_physics_step(ctx, sys_id, &handle).await;
+        if handle.is_hibernated() && !chars_in_system.contains(&sys_id) {
+            handle.record_idle_tick();
+            continue;
         }
+        active_to_step.push((sys_id, handle));
+    }
+    if active_to_step.len() <= 1 {
+        for (sys_id, handle) in active_to_step {
+            for step_idx in 0..steps {
+                if step_idx == 0 && handle.take_auto_stepped_at(now_unix) {
+                    continue;
+                }
+                step_single_system_physics_step(ctx, sys_id, &handle).await;
+            }
+        }
+    } else {
+        let mut join_set = tokio::task::JoinSet::new();
+        for (sys_id, handle) in active_to_step {
+            let ctx_cloned = ctx.clone();
+            join_set.spawn(async move {
+                for step_idx in 0..steps {
+                    if step_idx == 0 && handle.take_auto_stepped_at(now_unix) {
+                        continue;
+                    }
+                    step_single_system_physics_step(&ctx_cloned, sys_id, &handle).await;
+                }
+            });
+        }
+        while join_set.join_next().await.is_some() {}
     }
 }
 

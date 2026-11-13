@@ -318,10 +318,12 @@ async fn module_cycle_queries_nanite_repairs_and_try_remove_ball_cleanup_work() 
     );
     {
         let bp = sys.ballpark.read().unwrap();
+        let st = sys.actor_state.read().unwrap();
         persist_landed_warps_in_db(
             &bp,
             &[DestinyEvent::OnDeactivatingWarp { ball_id: ship2 }],
             &Some(Arc::clone(&ctx.db)),
+            &st.ball_space_entry_epochs,
         );
     }
     let saved_pos = ctx.db.with_snapshot(|s| s.item_positions.get(&ship2).copied());
@@ -691,6 +693,10 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
         actor_state: Arc::new(eve_db::lock_rank::RankedRwLock::new(super::super::SystemActorState::default())),
         last_auto_stepped_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         tidi_factor_bits: Arc::new(std::sync::atomic::AtomicU64::new(1.0_f64.to_bits())),
+        hibernated: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        hibernated_since_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        idle_ticks: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        dynamic_ball_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         command_panics: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         panic_next_command_for_test: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         npc_death_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
@@ -870,6 +876,10 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
         actor_state: Arc::new(eve_db::lock_rank::RankedRwLock::new(super::super::SystemActorState::default())),
         last_auto_stepped_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         tidi_factor_bits: Arc::new(std::sync::atomic::AtomicU64::new(1.0_f64.to_bits())),
+        hibernated: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        hibernated_since_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        idle_ticks: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        dynamic_ball_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         command_panics: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         panic_next_command_for_test: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         npc_death_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
@@ -1335,6 +1345,10 @@ async fn system_handle_stopped_actor_returns_error_or_false_on_all_commands() {
         actor_state: Arc::new(eve_db::lock_rank::RankedRwLock::new(super::super::SystemActorState::default())),
         last_auto_stepped_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         tidi_factor_bits: Arc::new(std::sync::atomic::AtomicU64::new(1.0_f64.to_bits())),
+        hibernated: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        hibernated_since_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        idle_ticks: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        dynamic_ball_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         command_panics: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         panic_next_command_for_test: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         npc_death_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),

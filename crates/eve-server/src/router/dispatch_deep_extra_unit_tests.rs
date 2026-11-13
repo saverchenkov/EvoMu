@@ -153,15 +153,18 @@ async fn session_revocation_multilogin_blocked_exemptions_and_kick_ban_state_wip
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn feature_flags_time_control_and_gm_qa_role_bitmask_enforcement_matrix() {
-    let mut ctx = test_ctx();
+    let ctx = test_ctx();
     let now = 1_800_000_000u64;
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now)));
     let char_id = 90_000_001i64;
     let kw = HashMap::new();
 
     // 1) Feature flag gates: taleMgr (enable_living_world) and publicGatewaySvc (enable_quasar_gateway)
-    ctx.feature_flags.enable_living_world = false;
-    ctx.feature_flags.enable_quasar_gateway = false;
+    {
+        let mut flags = ctx.feature_flags.write().unwrap();
+        flags.enable_living_world = false;
+        flags.enable_quasar_gateway = false;
+    }
     let mut gm_sess = make_authed_session(101, 1, char_id, ROLE_GML);
 
     let tale_err = ctx
@@ -176,8 +179,11 @@ async fn feature_flags_time_control_and_gm_qa_role_bitmask_enforcement_matrix() 
         .unwrap_err();
     assert_eq!(q_err.code, "FeatureDisabled"); // rpc-lint: allow error code assertion
 
-    ctx.feature_flags.enable_living_world = true;
-    ctx.feature_flags.enable_quasar_gateway = true;
+    {
+        let mut flags = ctx.feature_flags.write().unwrap();
+        flags.enable_living_world = true;
+        flags.enable_quasar_gateway = true;
+    }
 
     // 2) timeControl.AdvanceClock: non-GM rejected, negative secs rejected, default +12s & explicit +5s + warp tick
     let mut player_sess = make_authed_session(102, 1, char_id, ROLE_PLAYER);

@@ -36,9 +36,12 @@ fn fresh_ctx_full_market() -> ServerContext {
     });
     let db = Arc::new(eve_db::WorldRepository::new_empty());
     db.with_mut_snapshot(|s| *s = snap.clone());
-    let mut ctx = ServerContext::with_sde_and_repository(Arc::clone(sde), db)
+    let ctx = ServerContext::with_sde_and_repository(Arc::clone(sde), db)
         .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED);
-    ctx.feature_flags.free_fast_checkout_plex = true;
+    ctx.feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .free_fast_checkout_plex = true;
     crate::common::pin_clock(&ctx);
     ctx
 }
@@ -509,7 +512,7 @@ async fn setup_pilot_in_full_market(
         warp_and_dock_at_station_fast(ctx, &mut sess, ch.active_ship_id, JITA_SYS, JITA_STATION).await;
     }
     // Fund ISK legitimately through PLEX sell order when free_fast_checkout_plex is enabled
-    if ctx.feature_flags.free_fast_checkout_plex {
+    if ctx.feature_flags_snapshot().free_fast_checkout_plex {
         fund_pilot_isk(ctx, &mut sess, 20).await;
     }
     (sess, char_id, ch.active_ship_id)
@@ -712,7 +715,7 @@ async fn send_h2c_quasar_request(
             )
         })
     };
-    let (mut client, conn) = h2::client::handshake(tcp).await.expect("h2 handshake");
+    let (client, conn) = h2::client::handshake(tcp).await.expect("h2 handshake");
     tokio::spawn(async move {
         let _ = conn.await;
     });
@@ -726,23 +729,32 @@ async fn send_h2c_quasar_request(
         http_req = http_req.header("authorization", format!("Bearer {tok}"));
     }
     let http_req = http_req.body(()).expect("build h2 request");
-    let (resp_fut, mut send_stream) = client.send_request(http_req, false).expect("send h2 headers");
-
     let body = req.encode_proto();
     let mut frame = BytesMut::with_capacity(5 + body.len());
     frame.put_u8(0);
     frame.put_u32(body.len() as u32);
     frame.extend_from_slice(&body);
-    send_stream
-        .send_data(frame.freeze(), true)
-        .expect("send gRPC frame");
 
-    let resp = resp_fut.await.expect("await h2 response headers");
+    let mut client = client.ready().await.expect("h2 client ready");
+    let (resp_fut, mut send_stream) = client.send_request(http_req, false).expect("send h2 headers");
+    // An h2c server rejecting at header auth (`send_trailers_only`) drops `RecvStream` and sends
+    // `RST_STREAM(NO_ERROR)` immediately, which can race ahead of `send_data` under CPU load and
+    // surface as `User(InactiveStreamId)`. Preserve any send error unless header status arrived.
+    let send_err = send_stream.send_data(frame.freeze(), true).err();
+
+    let resp = resp_fut
+        .await
+        .unwrap_or_else(|e| panic!("await h2 response headers (send_err={send_err:?}): {e}"));
     let header_status = resp
         .headers()
         .get("grpc-status")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
+    if let Some(err) = send_err {
+        if header_status.is_none() {
+            panic!("send gRPC frame: {err}");
+        }
+    }
     let mut recv = resp.into_body();
     let mut data_buf = BytesMut::new();
     while let Some(chunk) = recv.data().await {
@@ -750,15 +762,18 @@ async fn send_h2c_quasar_request(
         let _ = recv.flow_control().release_capacity(bytes.len());
         data_buf.extend_from_slice(&bytes);
     }
-    let trailer_status = recv
-        .trailers()
-        .await
-        .expect("read h2 trailers")
-        .and_then(|t| {
-            t.get("grpc-status")
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_string)
-        });
+    let trailer_status = if header_status.is_some() && recv.is_end_stream() {
+        None
+    } else {
+        recv.trailers()
+            .await
+            .expect("read h2 trailers")
+            .and_then(|t| {
+                t.get("grpc-status")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string)
+            })
+    };
     let grpc_status = trailer_status.or(header_status);
 
     let decoded = if data_buf.len() >= 5 {
@@ -1477,8 +1492,12 @@ async fn fast_checkout_mining_details_and_plex_conservation_lifecycle() {
     assert_eq!(denied.code, "AccessDenied");
 
     // 3. FastCheckout GetOffersForUser & BuyOffer with production PLEX conservation (`free_fast_checkout_plex = false`)
-    let mut prod_ctx = reload_ctx_from_sqlite(&ctx);
-    prod_ctx.feature_flags.free_fast_checkout_plex = false;
+    let prod_ctx = reload_ctx_from_sqlite(&ctx);
+    prod_ctx
+        .feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .free_fast_checkout_plex = false;
     prod_ctx
         .global_config_values
         .write()

@@ -170,7 +170,7 @@ async fn context_constructors_production_accounts_and_demo_world_fixtures() {
     }];
 
     let ctx = ServerContext::from_config(&cfg).expect("from_config succeeds");
-    assert_eq!(ctx.esi_port, 26_111);
+    assert_eq!(ctx.esi_port(), 26_111);
     assert!(ctx.db.authenticate("spaced_user", "pw_user").is_ok());
     assert!(ctx.db.authenticate("adm_user", "adm_pw").is_ok());
     ctx.db.with_snapshot(|snap| {

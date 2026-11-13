@@ -19,7 +19,7 @@ mod activity_mgr_and_mining_details_unit_tests;
 
 #[test]
 fn fast_checkout_enabled_config_overrides_and_testing_configuration() {
-    let mut ctx = test_ctx();
+    let ctx = test_ctx();
     let uid = 77_001u64;
     set_user_fast_checkout_enabled(&ctx, uid, false);
     assert!(!is_fast_checkout_enabled_for_user(&ctx, uid));
@@ -46,14 +46,23 @@ fn fast_checkout_enabled_config_overrides_and_testing_configuration() {
         .remove("fastCheckoutEnabled");
 
     // Default user without saved state falls back to ctx.feature_flags.free_fast_checkout_plex
-    ctx.feature_flags.free_fast_checkout_plex = false;
+    ctx.feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .free_fast_checkout_plex = false;
     assert!(!is_fast_checkout_enabled_for_user(&ctx, 88_888));
-    ctx.feature_flags.free_fast_checkout_plex = true;
+    ctx.feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .free_fast_checkout_plex = true;
     assert!(is_fast_checkout_enabled_for_user(&ctx, 88_888));
 
     let sess = auth_session(1, 90_000_001, 98_000_001, 30_000_142);
     let kw = HashMap::new();
-    ctx.feature_flags.seed_demo = true;
+    ctx.feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .seed_demo = true;
     let PyRep::Tuple(t_demo) = handle(
         &ctx,
         &sess,
@@ -68,7 +77,10 @@ fn fast_checkout_enabled_config_overrides_and_testing_configuration() {
     };
     assert_eq!(t_demo[0], PyRep::Bool(true));
 
-    ctx.feature_flags.seed_demo = false;
+    ctx.feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .seed_demo = false;
     let PyRep::Tuple(t_prod) = handle(
         &ctx,
         &sess,
@@ -86,12 +98,15 @@ fn fast_checkout_enabled_config_overrides_and_testing_configuration() {
 
 #[test]
 fn fast_checkout_custom_catalog_offers_and_paid_vs_plex_buy_offer_flows() {
-    let mut ctx = test_ctx();
+    let ctx = test_ctx();
     let sess = auth_session(1, 90_000_001, 98_000_001, 30_000_142);
     let kw = HashMap::new();
 
     // Disabled user gets empty list and BuyOffer fails with FastCheckoutDisabled
-    ctx.feature_flags.free_fast_checkout_plex = false;
+    ctx.feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .free_fast_checkout_plex = false;
     set_user_fast_checkout_enabled(&ctx, 1, false);
     let disabled_offers = handle(
         &ctx,
@@ -392,7 +407,7 @@ fn fast_checkout_custom_catalog_offers_and_paid_vs_plex_buy_offer_flows() {
 
 #[test]
 fn fast_checkout_activity_overflow_pop_keyval_buy_validation_and_free_mode() {
-    let mut ctx = test_ctx();
+    let ctx = test_ctx();
     let sess = auth_session(1, 90_000_001, 98_000_001, 30_000_142);
     let kw = HashMap::new();
 
@@ -462,7 +477,10 @@ fn fast_checkout_activity_overflow_pop_keyval_buy_validation_and_free_mode() {
     }
 
     // 3. BuyOffer negative/zero validation + free PLEX mode COMPLETED branch without password
-    ctx.feature_flags.free_fast_checkout_plex = false;
+    ctx.feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .free_fast_checkout_plex = false;
     set_user_fast_checkout_enabled(&ctx, 1, true);
     assert_eq!(
         handle(&ctx, &sess, "FastCheckoutService", "BuyOffer", &[PyRep::Integer(-5)], &kw)
@@ -501,7 +519,10 @@ fn fast_checkout_activity_overflow_pop_keyval_buy_validation_and_free_mode() {
     );
 
     // Free mode buys offer without password and returns COMPLETED
-    ctx.feature_flags.free_fast_checkout_plex = true;
+    ctx.feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .free_fast_checkout_plex = true;
     ctx.db.with_mut_snapshot(|snap| {
         let catalog = StoreCatalog {
             categories: vec![],
@@ -544,7 +565,7 @@ fn fast_checkout_activity_overflow_pop_keyval_buy_validation_and_free_mode() {
 
 #[test]
 fn fast_checkout_state_tutorial_activity_and_buy_offer_exact_mutants() {
-    let mut ctx = test_ctx();
+    let ctx = test_ctx();
     let uid = 78_001_u64;
     let sess = auth_session(1, 90_000_001, 98_000_001, 30_000_142);
     let kw = HashMap::new();
@@ -640,7 +661,10 @@ fn fast_checkout_state_tutorial_activity_and_buy_offer_exact_mutants() {
     assert_eq!(pop.dict_get("banner"), Some(&PyRep::Bool(true)));
 
     // 3. BuyOffer non-free mode: PLEX-priced non-PLEX item vs Fiat-priced PLEX pack
-    ctx.feature_flags.free_fast_checkout_plex = false;
+    ctx.feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .free_fast_checkout_plex = false;
     set_user_fast_checkout_enabled(&ctx, 1, true);
     ctx.db.with_mut_snapshot(|snap| {
         for ch in snap.characters.values_mut().filter(|c| c.user_id == 1) {

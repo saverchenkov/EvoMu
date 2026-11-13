@@ -519,12 +519,26 @@ pub async fn handle(
 
             let slim_meta = ctx.build_ship_slim_meta(char_id, ship.type_id);
             let sys_handle = ctx.systems.get_or_spawn(ch.solar_system_id);
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.item_positions
+                    .insert(ship.item_id, spawn_pos.to_array());
+                crate::sp6_lifecycle::enter_space_in_snap(snap, ship.item_id, ch.solar_system_id);
+            });
             let tick = match sys_handle
                 .spawn_ball_with_meta(ball, combat_state, slim_meta)
                 .await
             {
                 Ok(t) => t,
                 Err(e) => {
+                    ctx.db.with_mut_snapshot(|snap| {
+                        crate::sp6_lifecycle::leave_space_in_snap(
+                            snap,
+                            ship.item_id,
+                            None,
+                            None,
+                            None,
+                        );
+                    });
                     ctx.db.rollback_undock(char_id, station_id, ship.item_id);
                     return Some(Err(BridgeRpcError {
                         code: "SystemActorError".into(),
@@ -533,12 +547,7 @@ pub async fn handle(
                     }));
                 }
             };
-            ctx.db.with_mut_snapshot(|snap| {
-                snap.item_positions
-                    .insert(ship.item_id, spawn_pos.to_array());
-                crate::sp6_lifecycle::enter_space_in_snap(snap, ship.item_id, ch.solar_system_id);
-            });
-            if ctx.feature_flags.enable_living_world {
+            if ctx.feature_flags_snapshot().enable_living_world {
                 let _ = ctx
                     .living_world
                     .materialize_system_lod2(ch.solar_system_id, &ctx.systems, &ctx.sde)

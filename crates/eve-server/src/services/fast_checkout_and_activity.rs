@@ -755,7 +755,7 @@ pub fn is_fast_checkout_enabled_for_user(ctx: &ServerContext, user_id: u64) -> b
             };
         }
     }
-    ctx.feature_flags.free_fast_checkout_plex
+    ctx.feature_flags_snapshot().free_fast_checkout_plex
 }
 
 fn handle_is_fast_checkout_enabled_for_user(
@@ -774,7 +774,7 @@ fn handle_get_offers_for_user(
     if !is_fast_checkout_enabled_for_user(ctx, user_id) {
         return Ok(PyRep::List(Vec::new()));
     }
-    let free_plex_mode = ctx.feature_flags.free_fast_checkout_plex;
+    let free_plex_mode = ctx.feature_flags_snapshot().free_fast_checkout_plex;
     let mut st = get_user_fast_checkout_state(ctx, user_id);
     let offers = match st.cached_offers.clone() {
         Some(cached)
@@ -941,7 +941,7 @@ fn handle_buy_offer(
         });
     }
 
-    let free_plex_mode = ctx.feature_flags.free_fast_checkout_plex;
+    let free_plex_mode = ctx.feature_flags_snapshot().free_fast_checkout_plex;
     let password = password_opt
         .or_else(|| kwargs.get("password").and_then(|a| a.as_str()))
         .unwrap_or("");
@@ -1252,9 +1252,9 @@ fn handle_buy_offer(
 fn handle_get_testing_configuration(
     ctx: &ServerContext,
 ) -> Result<PyRep, BridgeRpcError> {
-    let is_test = ctx.feature_flags.seed_demo;
+    let is_test = ctx.feature_flags_snapshot().seed_demo;
     let fake_url = if is_test {
-        format!("http://127.0.0.1:{}/fastcheckout/test_buy_plex", ctx.esi_port)
+        format!("http://127.0.0.1:{}/fastcheckout/test_buy_plex", ctx.esi_port())
     } else {
         String::new()
     };

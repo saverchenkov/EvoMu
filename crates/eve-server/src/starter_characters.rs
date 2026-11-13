@@ -173,8 +173,9 @@ pub async fn provision_starter_characters(ctx: &ServerContext, cfg: &ServerConfi
                         }
                     });
                 }
-                let default_plex = if ctx.feature_flags.starter_plex_balance > 0 {
-                    ctx.feature_flags.starter_plex_balance
+                let ctx_starter_plex = ctx.feature_flags_snapshot().starter_plex_balance;
+                let default_plex = if ctx_starter_plex > 0 {
+                    ctx_starter_plex
                 } else {
                     cfg.feature_flags.starter_plex_balance
                 };

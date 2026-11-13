@@ -31,7 +31,7 @@ fn test_ctx() -> ServerContext {
 
 #[tokio::test]
 async fn dispatch_gates_timecontrol_macho_bind_and_quasar_domains() {
-    let mut ctx = test_ctx();
+    let ctx = test_ctx();
     let mut session = SessionState::default();
     session.session_id = 777;
     session.user_id = Some(1);
@@ -39,15 +39,24 @@ async fn dispatch_gates_timecontrol_macho_bind_and_quasar_domains() {
     session.solar_system_id = Some(30_000_142);
 
     // Feature flag disabled gates
-    ctx.feature_flags.enable_living_world = false;
+    ctx.feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .enable_living_world = false;
     let tale_err = ctx
         .dispatch_rpc(&mut session, "taleMgr", None, "", &[], &HashMap::new(), None)
         .await
         .unwrap_err();
     assert!(tale_err.message.contains("disabled"));
-    ctx.feature_flags.enable_living_world = true;
+    ctx.feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .enable_living_world = true;
 
-    ctx.feature_flags.enable_quasar_gateway = false;
+    ctx.feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .enable_quasar_gateway = false;
     let err = ctx
         .dispatch_rpc(
             &mut session,
@@ -61,7 +70,10 @@ async fn dispatch_gates_timecontrol_macho_bind_and_quasar_domains() {
         .await
         .unwrap_err();
     assert_eq!(err.code, "FeatureDisabled");
-    ctx.feature_flags.enable_quasar_gateway = true;
+    ctx.feature_flags
+        .write()
+        .expect("feature_flags lock poisoned")
+        .enable_quasar_gateway = true;
 
     // Non-GM denied on timeControl & slash
     let err = ctx

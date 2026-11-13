@@ -790,6 +790,7 @@ impl ServerContext {
     /// Flushes all gameplay-affecting runtime state across `ServerContext`, `CombatRuntimeState`,
     /// social extras, and `QuasarGateway` into SQLite (`#592`).
     pub fn sync_runtime_to_db(&self) {
+        self.systems.flush_all_condition_checkpoints_to_db();
         self.persist_server_runtime_to_db();
         flush_combat_runtime_to_db(self);
         let _ = persist_social_state(self);
