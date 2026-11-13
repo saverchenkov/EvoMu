@@ -1812,7 +1812,13 @@ impl ServerContext {
         };
         match (pre, post) {
             (None, Some(new_item)) => {
-                self.emit_item_change_routed(fallback_char_id, new_item, Vec::new());
+                // Signal prior locationID = 0 (`ixLocationID` = 3) so V24 `invCache` / open `InvCont`
+                // windows insert the newly created row immediately instead of only updating capacity (#1026).
+                self.emit_item_change_routed(
+                    fallback_char_id,
+                    new_item,
+                    vec![(3, PyRep::Integer(0))],
+                );
                 if is_bp(new_item) {
                     emit_bp_update(new_item);
                 }

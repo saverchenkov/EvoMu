@@ -646,7 +646,10 @@ fn compute_item_change_dict_and_mutation_router_v24_parity() {
     let created_other = ctx.drain_notifications_for_char(other_char);
     assert_eq!(created_other.len(), 1);
     assert_eq!(created_other[0].event, "OnItemChange");
-    assert_eq!(created_other[0].args[1], PyRep::Dict(Vec::new()));
+    assert_eq!(
+        created_other[0].args[1],
+        PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))])
+    );
 }
 
 #[test]
@@ -1104,4 +1107,84 @@ fn notify_item_mutation_emits_on_blueprints_updated_for_char_corp_and_in_place_u
     ctx.notify_item_mutation(char_id, None, Some(&tritanium));
     let n_non_bp = ctx.drain_notifications_for_char(char_id);
     assert!(n_non_bp.iter().all(|n| n.event != "OnBlueprintsUpdated"));
+}
+
+#[test]
+fn notify_item_mutation_creation_emits_ix_location_zero_for_ship_cargo_and_station_hangar_gh1026() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let ship_id = 98_000_001_i64;
+    let station_id = 60_003_760_i64;
+    let uid = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.user_id))
+        .unwrap_or(1);
+    let _ = ctx
+        .db
+        .acquire_online_lock(uid, 414, Some(char_id), false, ctx.now_unix());
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let cargo_item = InventoryItemRecord {
+        item_id: 886_001,
+        type_id: 34,
+        owner_id: char_id,
+        location_id: ship_id,
+        flag: InventoryFlag::Cargo,
+        quantity: 250,
+        singleton: false,
+        ..Default::default()
+    };
+    ctx.notify_item_mutation(char_id, None, Some(&cargo_item));
+    let cargo_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(cargo_notifs.len(), 1);
+    assert_eq!(cargo_notifs[0].event, "OnItemChange");
+    assert_eq!(cargo_notifs[0].id_type, "charid");
+    assert_eq!(
+        cargo_notifs[0].args[0].dbrow_get("itemID"),
+        Some(&PyRep::Integer(cargo_item.item_id))
+    );
+    assert_eq!(
+        cargo_notifs[0].args[0].dbrow_get("locationID"),
+        Some(&PyRep::Integer(ship_id))
+    );
+    assert_eq!(
+        cargo_notifs[0].args[0].dbrow_get("flagID"),
+        Some(&PyRep::Integer(InventoryFlag::Cargo as i64))
+    );
+    assert_eq!(
+        cargo_notifs[0].args[1],
+        PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))])
+    );
+
+    let hangar_item = InventoryItemRecord {
+        item_id: 886_002,
+        type_id: 34,
+        owner_id: char_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 100,
+        singleton: false,
+        ..Default::default()
+    };
+    ctx.notify_item_mutation(char_id, None, Some(&hangar_item));
+    let hangar_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(hangar_notifs.len(), 1);
+    assert_eq!(hangar_notifs[0].event, "OnItemChange");
+    assert_eq!(hangar_notifs[0].id_type, "charid");
+    assert_eq!(
+        hangar_notifs[0].args[0].dbrow_get("itemID"),
+        Some(&PyRep::Integer(hangar_item.item_id))
+    );
+    assert_eq!(
+        hangar_notifs[0].args[0].dbrow_get("locationID"),
+        Some(&PyRep::Integer(station_id))
+    );
+    assert_eq!(
+        hangar_notifs[0].args[0].dbrow_get("flagID"),
+        Some(&PyRep::Integer(InventoryFlag::Hangar as i64))
+    );
+    assert_eq!(
+        hangar_notifs[0].args[1],
+        PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))])
+    );
 }
