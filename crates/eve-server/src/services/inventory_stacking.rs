@@ -1447,14 +1447,36 @@ fn handle_list_impl(
                     );
                 });
             }
-            if flags.iter().any(|f| !(116..=122).contains(f)) {
+            if flags.iter().any(|&f| matches!(f, 62 | 187)) {
+                let corp_id = session
+                    .corporation_id
+                    .or_else(|| {
+                        ctx.db
+                            .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id))
+                    })
+                    .unwrap_or(0);
+                ctx.db.with_snapshot(|snap| {
+                    out_rows.extend(
+                        snap.items
+                            .values()
+                            .filter(|i| {
+                                i.location_id == bound_loc_id
+                                    && (i.owner_id == char_id || (corp_id > 0 && i.owner_id == corp_id))
+                                    && matches!(i.flag as i64, 62 | 187)
+                                    && flags.contains(&(i.flag as i64))
+                            })
+                            .map(|i| item_to_packed_cells(ctx, i)),
+                    );
+                });
+            }
+            if flags.iter().any(|f| !matches!(f, 62 | 116..=122 | 187)) {
                 out_rows.extend(
                     ctx.db
                         .get_items_for_character(char_id)
                         .into_iter()
                         .filter(|i| {
                             i.location_id == bound_loc_id
-                                && !(116..=122).contains(&(i.flag as i64))
+                                && !matches!(i.flag as i64, 62 | 116..=122 | 187)
                                 && flags.contains(&(i.flag as i64))
                         })
                         .map(|i| item_to_packed_cells(ctx, &i)),

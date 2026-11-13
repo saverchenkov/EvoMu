@@ -263,9 +263,9 @@ pub struct NotificationRecord {
     pub interacted: bool,
 }
 
-/// Returns true if `flag` represents a corporation hangar (`CorpSAG1..7` = `116..=122`) or `CorpDeliveries` (`62`).
+/// Returns true if `flag` represents a corporation hangar (`CorpSAG1..7` = `116..=122`), `CorpDeliveries` (`62`), or `CapsuleerDeliveries` (`187`).
 pub fn is_corp_hangar_flag(flag: eve_db::InventoryFlag) -> bool {
-    matches!(flag as i64, 62 | 116..=122)
+    matches!(flag as i64, 62 | 116..=122 | 187)
 }
 
 impl ServerContext {

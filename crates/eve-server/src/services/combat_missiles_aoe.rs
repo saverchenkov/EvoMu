@@ -57,8 +57,8 @@ pub(crate) async fn cleanup_destroyed_non_ship_ball(
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let _ = sys_handle.remove_ball(ball_id).await;
     crate::services::fleet_social::fleet_social_finder_tactical::clear_destroyed_target_tag(ctx, ball_id);
+    let _ = crate::combat::death_pipeline::cleanup_destroyed_player_drone_sync(ctx, &sys_handle, ball_id);
     with_mut_combat_runtime(ctx, |rt| {
-        rt.active_drones_in_space.remove(&ball_id);
         rt.active_drone_miners.remove(&ball_id);
         rt.container_lifetimes.remove(&ball_id);
     });
@@ -599,7 +599,6 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                                     destroyed_probe_ids.push(b.id);
                                 }
                                 if is_drone_b {
-                                    with_mut_combat_runtime(ctx, |rt| { rt.active_drones_in_space.remove(&b.id); });
                                     destroyed_drone_ids.push(b.id);
                                 }
                             }

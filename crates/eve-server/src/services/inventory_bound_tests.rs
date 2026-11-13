@@ -1346,3 +1346,222 @@ async fn issue_885_rejects_ex_corp_container_personal_withdrawal_other_corp_depo
     assert_eq!(moved_rec.flag, InventoryFlag::CorpSAG1);
     assert_eq!(moved_rec.owner_id, new_corp);
 }
+
+#[tokio::test]
+async fn issue_1021_1022_capsuleer_deliveries_get_inventory_list_and_rbacs() {
+    let ctx = test_ctx();
+    let station_id = 60_003_760_i64;
+    let other_station = 60_008_494_i64;
+    let corp_id = 98_100_001_i64;
+    let other_corp_id = 98_100_099_i64;
+    let ceo_id = 90_000_001_i64;
+    let member_id = 90_000_002_i64;
+    let deliv_item_id = 92_100_001_i64;
+    let other_corp_deliv_item_id = 92_100_002_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "Test Corp".into();
+        corp.ticker = "TSTC".into();
+        corp.ceo_id = ceo_id;
+        corp.hq_station_id = Some(station_id);
+        corp.members.insert(ceo_id);
+        corp.members.insert(member_id);
+        corp.member_roles.insert(member_id, 0);
+        snap.corporations.insert(corp_id, corp);
+        if let Some(ch) = snap.characters.get_mut(&ceo_id) {
+            ch.corporation_id = corp_id;
+            ch.station_id = Some(station_id);
+            ch.structure_id = None;
+        }
+        if let Some(ch) = snap.characters.get_mut(&member_id) {
+            ch.corporation_id = corp_id;
+            ch.station_id = Some(station_id);
+            ch.structure_id = None;
+        }
+        snap.corp_role_assignments.insert(
+            (corp_id, member_id),
+            CorpMemberRoleAssignment {
+                character_id: member_id,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            deliv_item_id,
+            eve_db::InventoryItemRecord {
+                item_id: deliv_item_id,
+                type_id: 34,
+                owner_id: corp_id,
+                location_id: station_id,
+                flag: InventoryFlag::CapsuleerDeliveries,
+                quantity: 500,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            other_corp_deliv_item_id,
+            eve_db::InventoryItemRecord {
+                item_id: other_corp_deliv_item_id,
+                type_id: 34,
+                owner_id: other_corp_id,
+                location_id: station_id,
+                flag: InventoryFlag::CapsuleerDeliveries,
+                quantity: 999,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut ceo_sess = SessionState {
+        session_id: 1,
+        user_id: Some(ceo_id as u64),
+        character_id: Some(ceo_id),
+        corporation_id: Some(corp_id),
+        station_id: Some(station_id),
+        ship_id: Some(100_000_001),
+        ..Default::default()
+    };
+    let mut mem_sess = SessionState {
+        session_id: 2,
+        user_id: Some(member_id as u64),
+        character_id: Some(member_id),
+        corporation_id: Some(corp_id),
+        station_id: Some(station_id),
+        ship_id: Some(100_000_002),
+        ..Default::default()
+    };
+    let b_station = bound_invbroker(ceo_id, station_id);
+    let b_mem = bound_invbroker(member_id, station_id);
+    let b_wrong = bound_invbroker(ceo_id, other_station);
+
+    // 1. GetInventory(10015, corp_id) at docked station succeeds (containerCapsuleerDeliveries).
+    let inv_rep = handle(
+        &ctx,
+        &ceo_sess,
+        Some(&b_station),
+        "invbroker",
+        "GetInventory",
+        &[PyRep::Integer(10_015), PyRep::Integer(corp_id)],
+        None,
+    )
+    .expect("GetInventory(10015) handled")
+    .expect("GetInventory(10015) succeeds");
+    assert!(inv_rep.as_i64().is_some());
+
+    // 2. Bound List(flag=187) returns own corp's CapsuleerDeliveries items and excludes other corp's items.
+    let mut kw = HashMap::new();
+    kw.insert("flag".to_string(), PyRep::Integer(187));
+    let listed = crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut mem_sess,
+        Some(&b_mem),
+        "invbroker",
+        "List",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("List handled")
+    .expect("List(flag=187) succeeds");
+    let PyRep::ObjectEx { list: rows, .. } = listed else {
+        panic!("expected CRowset ObjectEx from invbroker.List");
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].dbrow_get("itemID"), Some(&PyRep::Integer(deliv_item_id)));
+
+    // 3. Negative checks: cross-corp request, wrong station, and missing corporation are rejected.
+    let cross_corp_err = handle(
+        &ctx,
+        &ceo_sess,
+        Some(&b_station),
+        "invbroker",
+        "GetInventory",
+        &[PyRep::Integer(10_015), PyRep::Integer(other_corp_id)],
+        None,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(cross_corp_err.code, "InventoryNotAccessible");
+
+    let wrong_station_err = handle(
+        &ctx,
+        &ceo_sess,
+        Some(&b_wrong),
+        "invbroker",
+        "GetInventory",
+        &[PyRep::Integer(10_015), PyRep::Integer(corp_id)],
+        None,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(wrong_station_err.code, "CharacterNotAtStation");
+
+    ceo_sess.corporation_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&ceo_id).unwrap().corporation_id = 0;
+    });
+    let no_corp_err = handle(
+        &ctx,
+        &ceo_sess,
+        Some(&b_station),
+        "invbroker",
+        "GetInventory",
+        &[PyRep::Integer(10_015)],
+        None,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(no_corp_err.code, "InventoryNotAccessible");
+
+    // 4. Taking out of CapsuleerDeliveries (flag 187) via Add enforces deliveries take role.
+    let mut take_kw = HashMap::new();
+    take_kw.insert("qty".to_string(), PyRep::Integer(50));
+    let denied = crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut mem_sess,
+        Some(&b_mem),
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(deliv_item_id),
+            PyRep::Integer(station_id),
+            PyRep::Integer(InventoryFlag::Hangar as i64),
+        ],
+        &take_kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(denied.code, "CorpRoleDenied");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations
+            .get_mut(&corp_id)
+            .unwrap()
+            .member_roles
+            .insert(member_id, eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_TAKE);
+        snap.corp_role_assignments
+            .get_mut(&(corp_id, member_id))
+            .unwrap()
+            .roles_at_hq = eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_TAKE;
+    });
+    let ok_take = crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut mem_sess,
+        Some(&b_mem),
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(deliv_item_id),
+            PyRep::Integer(station_id),
+            PyRep::Integer(InventoryFlag::Hangar as i64),
+        ],
+        &take_kw,
+    )
+    .await
+    .unwrap();
+    assert!(ok_take.is_ok(), "member with ROLE_DELIVERIES_HANGAR_TAKE should take from CapsuleerDeliveries");
+}

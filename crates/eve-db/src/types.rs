@@ -244,6 +244,8 @@ pub enum InventoryFlag {
     SpecializedIceHold = 181,
     SpecializedAsteroidHold = 182,
     SpecializedInfrastructureHold = 185,
+    /// `invFlags`: 187 = CapsuleerDeliveries (`containerCapsuleerDeliveries = 10015`).
+    CapsuleerDeliveries = 187,
 }
 
 impl InventoryFlag {
@@ -338,6 +340,7 @@ impl InventoryFlag {
             181 => Self::SpecializedIceHold,
             182 => Self::SpecializedAsteroidHold,
             185 => Self::SpecializedInfrastructureHold,
+            187 => Self::CapsuleerDeliveries,
             _ => Self::None,
         }
     }

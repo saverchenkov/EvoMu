@@ -69,7 +69,9 @@ pub async fn handle_cmd_return_bay(
             continue;
         }
         if dist > 2_500.0 {
-            // Mobile drone returning from > 2500m: set follow and emit returning (activity_state = 4)
+            // Mobile drone returning from > 2500m: restore full speed fraction (e.g. if previously Stopped)
+            // before Follow so the drone does not remain stuck at 0.0 m/s.
+            let _ = sys_handle.set_speed_fraction(d.ball_id, 1.0).await;
             let _ = sys_handle.set_movement_mode(d.ball_id, eve_destiny::MovementMode::Follow { target_id: ship_id, range: 0.0 }).await;
             with_mut_combat_runtime(ctx, |rt| {
                 if let Some(st) = rt.active_drones_in_space.get_mut(&d.ball_id) {
@@ -77,6 +79,7 @@ pub async fn handle_cmd_return_bay(
                     st.target_id = Some(ship_id);
                     st.activity_state = 4;
                 }
+                rt.active_drone_miners.remove(&d.ball_id);
             });
             let _ = sys_handle.emit_destiny_event(
                 d.ball_id,
