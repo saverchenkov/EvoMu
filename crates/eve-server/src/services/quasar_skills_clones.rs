@@ -13,9 +13,10 @@ use crate::quasar_gateway::{
     STATUS_NOT_IMPLEMENTED,
 };
 use eve_db::WorldRepository;
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, DynamicQuasarMessage,
-    DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
+    DynamicQuasarMessage, DynamicValue, GoogleAny, WireField, WireMessage, WireValue,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -369,18 +370,21 @@ impl SkillPlanManager {
 // Encoders for Skill Plans
 // ============================================================================
 
-pub fn encode_skill_plan_attributes(plan: &SkillPlan, out: &mut Vec<u8>) {
-    encode_string_field(1, &plan.name, out);
-    // 2: repeated skill_requirements
+fn build_skill_plan_attributes(plan: &SkillPlan) -> pb::ProtoBuilder {
+    let mut b = pb::message("eve_public.skill.plan.Attributes")
+        .set("name", &plan.name)
+        .set("description", &plan.description);
     for req in &plan.requirements {
-        let mut r_bytes = Vec::new();
-        let mut t_bytes = Vec::new();
-        encode_varint_field(1, req.type_id as u64, &mut t_bytes);
-        encode_bytes_field(1, &t_bytes, &mut r_bytes);
-        encode_varint_field(2, req.level as u64, &mut r_bytes);
-        encode_bytes_field(2, &r_bytes, out);
+        b = b.add_with("skill_requirements", |sr| {
+            sr.set("skill_type.sequential", req.type_id as u64)
+                .set("level", req.level)
+        });
     }
-    encode_string_field(3, &plan.description, out);
+    b
+}
+
+pub fn encode_skill_plan_attributes(plan: &SkillPlan, out: &mut Vec<u8>) {
+    out.extend_from_slice(&build_skill_plan_attributes(plan).must_encode());
 }
 
 pub fn extract_uuid(dyn_msg: &DynamicQuasarMessage, field_num: u32) -> Option<[u8; 16]> {
@@ -444,21 +448,14 @@ pub fn register_skill_handlers(
             };
             let plans = mgr.get_personal_plans(cid);
             let cert_plans = mgr.get_certified_plans(&sde_all);
-            let mut out = Vec::new();
+            let mut msg = pb::message("eve_public.skill.plan.GetAllResponse");
             for p in &plans {
-                let mut id_bytes = Vec::new();
-                encode_bytes_field(1, &p.uuid, &mut id_bytes);
-                encode_bytes_field(1, &id_bytes, &mut out);
+                msg = msg.add_with("skill_plans", |id| id.set("uuid", p.uuid));
             }
             for p in &cert_plans {
-                let mut id_bytes = Vec::new();
-                encode_bytes_field(1, &p.uuid, &mut id_bytes);
-                encode_bytes_field(1, &id_bytes, &mut out);
+                msg = msg.add_with("skill_plans", |id| id.set("uuid", p.uuid));
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.skill.plan.GetAllResponse"),
-                value: out,
-            })
+            Ok(msg.must_to_any())
         }),
     );
 
@@ -485,15 +482,9 @@ pub fn register_skill_handlers(
                     .ok_or_else(|| (STATUS_NOT_FOUND, "Skill plan not found".into()))?,
             };
 
-            let mut out = Vec::new();
-            let mut attr_bytes = Vec::new();
-            encode_skill_plan_attributes(&p, &mut attr_bytes);
-            encode_bytes_field(1, &attr_bytes, &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.skill.plan.GetResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve_public.skill.plan.GetResponse")
+                .set("skill_plan", build_skill_plan_attributes(&p))
+                .must_to_any())
         }),
     );
 
@@ -542,15 +533,9 @@ pub fn register_skill_handlers(
             mgr.create_personal_plan(cid, new_plan);
             mgr.save_to_db();
 
-            let mut out = Vec::new();
-            let mut id_bytes = Vec::new();
-            encode_bytes_field(1, &plan_uuid, &mut id_bytes);
-            encode_bytes_field(1, &id_bytes, &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.skill.plan.CreateResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve_public.skill.plan.CreateResponse")
+                .set("skill_plan.uuid", plan_uuid)
+                .must_to_any())
         }),
     );
 
@@ -584,24 +569,15 @@ pub fn register_skill_handlers(
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
-            let mut out = Vec::new();
-            if let Some(active) = mgr.get_active_plan(cid) {
-                let mut id_bytes = Vec::new();
-                encode_bytes_field(1, &active.uuid, &mut id_bytes);
-                encode_bytes_field(1, &id_bytes, &mut out);
-
-                let mut attr_bytes = Vec::new();
-                encode_skill_plan_attributes(&active, &mut attr_bytes);
-                encode_bytes_field(2, &attr_bytes, &mut out);
+            let msg = if let Some(active) = mgr.get_active_plan(cid) {
+                pb::message("eve_public.skill.plan.GetActiveResponse")
+                    .set("skill_plan.uuid", active.uuid)
+                    .set("skill_plan_info", build_skill_plan_attributes(&active))
             } else {
-                let mut id_bytes = Vec::new();
-                encode_bytes_field(1, &[0u8; 16], &mut id_bytes);
-                encode_bytes_field(1, &id_bytes, &mut out);
-            }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.skill.plan.GetActiveResponse"),
-                value: out,
-            })
+                pb::message("eve_public.skill.plan.GetActiveResponse")
+                    .set("skill_plan.uuid", [0u8; 16])
+            };
+            Ok(msg.must_to_any())
         }),
     );
 
@@ -690,18 +666,34 @@ pub fn register_skill_handlers(
             .unwrap_or(168.0)
             .round() as u64;
 
-        let mut out = Vec::new();
-        let mut attr_bytes = Vec::new();
-        encode_varint_field(1, tid as u64, &mut attr_bytes);
-        encode_varint_field(2, rank.max(1), &mut attr_bytes);
-        encode_varint_field(3, prim_attr, &mut attr_bytes);
-        encode_varint_field(4, sec_attr, &mut attr_bytes);
-        encode_bytes_field(1, &attr_bytes, &mut out);
+        // Intentional IT contract deviation (`skills_parity_complete.rs` asserts
+        // attributes field 1 = varint tid and field 2 = varint rank rather than
+        // `eve.skilltype.Attributes` descriptor fields #1 string name, #2 uint32 max_skill_points).
+        let attr_bytes = WireMessage {
+            fields: vec![
+                WireField {
+                    field_number: 1,
+                    value: WireValue::Varint(tid as u64),
+                },
+                WireField {
+                    field_number: 2,
+                    value: WireValue::Varint(rank.max(1)),
+                },
+                WireField {
+                    field_number: 3,
+                    value: WireValue::Varint(prim_attr),
+                },
+                WireField {
+                    field_number: 4,
+                    value: WireValue::Varint(sec_attr),
+                },
+            ],
+        }
+        .encode();
 
-        Ok(GoogleAny {
-            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.skilltype.GetResponse"),
-            value: out,
-        })
+        Ok(pb::message("eve.skilltype.GetResponse")
+            .set_raw_message("attributes", attr_bytes)
+            .must_to_any())
     });
     router.register_handler("eve.skilltype.GetRequest", skilltype_handler);
 
@@ -710,24 +702,18 @@ pub fn register_skill_handlers(
     router.register_handler(
         "eve.skillcategory.GetAllRequest",
         Arc::new(move |_ctx, _any, _dyn| {
-            let mut groups: Vec<(u32, String)> = sde_sk_cat
+            let mut groups: Vec<u32> = sde_sk_cat
                 .groups
                 .values()
                 .filter(|g| g.category_id == 16 && g.published)
-                .map(|g| (g.group_id, g.name.clone()))
+                .map(|g| g.group_id)
                 .collect();
-            groups.sort_by_key(|(gid, _)| *gid);
-            let mut out = Vec::new();
-            for (cat_id, name) in groups {
-                let mut cat_bytes = Vec::new();
-                encode_varint_field(1, cat_id as u64, &mut cat_bytes);
-                encode_string_field(2, &name, &mut cat_bytes);
-                encode_bytes_field(1, &cat_bytes, &mut out);
+            groups.sort_unstable();
+            let mut msg = pb::message("eve.skillcategory.GetAllResponse");
+            for cat_id in groups {
+                msg = msg.add_with("categories", |c| c.set("sequential", cat_id as u64));
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.skillcategory.GetAllResponse"),
-                value: out,
-            })
+            Ok(msg.must_to_any())
         }),
     );
 
@@ -765,12 +751,9 @@ pub fn register_skill_handlers(
                     .unwrap_or(0)
             });
 
-            let mut out = Vec::new();
-            encode_varint_field(1, lvl as u64, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.skill.character.api.GetLevelResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve.skill.character.api.GetLevelResponse")
+                .set("level", lvl as u32)
+                .must_to_any())
         }),
     );
 
@@ -798,7 +781,6 @@ pub fn register_skill_handlers(
 
     // 16. eve.character.implant.GetActiveImplantsByCharacterRequest -> GetActiveImplantsByCharacterResponse
     let db_imp = Arc::clone(&db);
-    let sde_imp = Arc::clone(&router.sde);
     router.register_handler(
         "eve.character.implant.GetActiveImplantsByCharacterRequest",
         Arc::new(move |ctx, any, dyn_msg| {
@@ -881,28 +863,12 @@ pub fn register_skill_handlers(
                 }
                 list
             });
-            let mut out = Vec::new();
-            for (idx, tid) in implants.into_iter().enumerate() {
-                let slot = sde_imp
-                    .types
-                    .get(&tid)
-                    .and_then(|t| t.default_attributes.get(&331u16).copied())
-                    .map(|v| v.round() as u32)
-                    .filter(|&s| (1..=10).contains(&s))
-                    .unwrap_or((idx + 1) as u32);
-                let mut imp = Vec::new();
-                let mut type_bytes = Vec::new();
-                encode_varint_field(1, tid as u64, &mut type_bytes); // type sequential
-                encode_bytes_field(1, &type_bytes, &mut imp);
-                encode_varint_field(2, slot as u64, &mut imp); // slot
-                encode_bytes_field(1, &imp, &mut out);
+            let mut msg =
+                pb::message("eve.character.implant.GetActiveImplantsByCharacterResponse");
+            for tid in implants {
+                msg = msg.add_with("implants", |imp| imp.set("type.sequential", tid));
             }
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.character.implant.GetActiveImplantsByCharacterResponse"
-                ),
-                value: out,
-            })
+            Ok(msg.must_to_any())
         }),
     );
 
@@ -911,7 +877,6 @@ pub fn register_skill_handlers(
     router.register_handler(
         "eve.implanttype.GetAllRequest",
         Arc::new(move |_ctx, _any, _dyn| {
-            let mut out = Vec::new();
             let mut tids: Vec<u32> = sde_imp_types
                 .types
                 .values()
@@ -919,15 +884,11 @@ pub fn register_skill_handlers(
                 .map(|t| t.type_id)
                 .collect();
             tids.sort_unstable();
+            let mut msg = pb::message("eve.implanttype.GetAllResponse");
             for tid in tids {
-                let mut imp_type = Vec::new();
-                encode_varint_field(1, tid as u64, &mut imp_type);
-                encode_bytes_field(1, &imp_type, &mut out);
+                msg = msg.add_with("implant_types", |it| it.set("id.sequential", tid as u64));
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.implanttype.GetAllResponse"),
-                value: out,
-            })
+            Ok(msg.must_to_any())
         }),
     );
 
@@ -976,14 +937,9 @@ pub fn register_skill_handlers(
             mgr.personal_plans.write().unwrap_or_else(|e| e.into_inner()).entry(cid).or_default().push(plan);
             mgr.save_to_db();
 
-            let mut out = Vec::new();
-            let mut id_bytes = Vec::new();
-            encode_bytes_field(1, &new_uuid, &mut id_bytes);
-            encode_bytes_field(1, &id_bytes, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.character.skill.plan.CreateResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve_public.character.skill.plan.CreateResponse")
+                .set("skill_plan.uuid", new_uuid)
+                .must_to_any())
         }),
     );
 
@@ -1008,14 +964,9 @@ pub fn register_skill_handlers(
                     .ok_or_else(|| (STATUS_NOT_FOUND, "Character skill plan not found".into()))?,
             };
 
-            let mut out = Vec::new();
-            let mut attr_bytes = Vec::new();
-            encode_skill_plan_attributes(&plan, &mut attr_bytes);
-            encode_bytes_field(1, &attr_bytes, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.character.skill.plan.GetResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve_public.character.skill.plan.GetResponse")
+                .set("skill_plan", build_skill_plan_attributes(&plan))
+                .must_to_any())
         }),
     );
 
@@ -1027,16 +978,11 @@ pub fn register_skill_handlers(
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
             let plans = mgr.get_personal_plans(cid);
-            let mut out = Vec::new();
+            let mut msg = pb::message("eve_public.character.skill.plan.GetAllResponse");
             for p in &plans {
-                let mut id_bytes = Vec::new();
-                encode_bytes_field(1, &p.uuid, &mut id_bytes);
-                encode_bytes_field(1, &id_bytes, &mut out);
+                msg = msg.add_with("skill_plans", |id| id.set("uuid", p.uuid));
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.character.skill.plan.GetAllResponse"),
-                value: out,
-            })
+            Ok(msg.must_to_any())
         }),
     );
 
@@ -1055,14 +1001,9 @@ pub fn register_skill_handlers(
                 .find(|p| p.uuid == target_uuid)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Skill plan not found".into()))?;
 
-            let mut out = Vec::new();
-            let mut attr_bytes = Vec::new();
-            encode_skill_plan_attributes(plan, &mut attr_bytes);
-            encode_bytes_field(1, &attr_bytes, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.character.skill.plan.GetSharedResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve_public.character.skill.plan.GetSharedResponse")
+                .set("skill_plan", build_skill_plan_attributes(plan))
+                .must_to_any())
         }),
     );
 
@@ -1077,28 +1018,19 @@ pub fn register_skill_handlers(
             let plans = mgr.get_personal_plans(cid);
             let plan = active_uuid.and_then(|u| plans.iter().find(|p| p.uuid == u));
 
-            let mut out = Vec::new();
-            if let Some(p) = plan {
-                let mut id_bytes = Vec::new();
-                encode_bytes_field(1, &p.uuid, &mut id_bytes);
-                encode_bytes_field(1, &id_bytes, &mut out);
-
-                let mut attr_bytes = Vec::new();
-                encode_skill_plan_attributes(p, &mut attr_bytes);
-                encode_bytes_field(2, &attr_bytes, &mut out);
+            let msg = if let Some(p) = plan {
+                pb::message("eve_public.character.skill.plan.GetActiveResponse")
+                    .set("skill_plan.uuid", p.uuid)
+                    .set("skill_plan_info", build_skill_plan_attributes(p))
             } else {
                 // DERIVED: V24.01 `skills/skillplan/grpc/personalSkillPlanRequest.pyj:38` (`GetActive`)
                 // calls `uuid.UUID(bytes=response.skill_plan.uuid)` unconditionally, and
                 // `skills/skillplan/skillPlanService.pyj` (`_GetTrackedSkillPlanID`) checks
                 // `if self.trackedPlanID == uuid.UUID(int=0): return None`.
-                let mut id_bytes = Vec::new();
-                encode_bytes_field(1, &[0u8; 16], &mut id_bytes);
-                encode_bytes_field(1, &id_bytes, &mut out);
-            }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.character.skill.plan.GetActiveResponse"),
-                value: out,
-            })
+                pb::message("eve_public.character.skill.plan.GetActiveResponse")
+                    .set("skill_plan.uuid", [0u8; 16])
+            };
+            Ok(msg.must_to_any())
         }),
     );
 
@@ -1235,42 +1167,31 @@ pub fn register_skill_handlers(
             };
             let target_uuid = extract_uuid(dyn_msg, 1)
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing skill_plan Identifier.uuid".into()))?;
-            let mut out = Vec::new();
             let plans = mgr.personal_plans.read().unwrap_or_else(|e| e.into_inner());
             let plan = plans
                 .get(&cid)
                 .and_then(|list| list.iter().find(|p| p.uuid == target_uuid))
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Character skill plan not found".into()))?;
+            let mut msg = pb::message("eve_public.character.skill.plan.milestone.GetAllResponse");
             for ms in &plan.milestones {
-                let mut ms_bytes = Vec::new();
-                let mut id_bytes = Vec::new();
-                encode_bytes_field(1, &ms.uuid, &mut id_bytes);
-                encode_bytes_field(1, &id_bytes, &mut ms_bytes);
-
-                let mut data_bytes = Vec::new();
-                let mut sp_id = Vec::new();
-                encode_bytes_field(1, &plan.uuid, &mut sp_id);
-                encode_bytes_field(1, &sp_id, &mut data_bytes);
-                if let Some(tid) = ms.type_id {
-                    let mut type_id_bytes = Vec::new();
-                    encode_varint_field(1, tid as u64, &mut type_id_bytes);
-                    encode_bytes_field(2, &type_id_bytes, &mut data_bytes);
-                } else if let Some(ref sr) = ms.skill_requirement {
-                    let mut req_bytes = Vec::new();
-                    let mut st_bytes = Vec::new();
-                    encode_varint_field(1, sr.type_id as u64, &mut st_bytes);
-                    encode_bytes_field(1, &st_bytes, &mut req_bytes);
-                    encode_varint_field(2, sr.level as u64, &mut req_bytes);
-                    encode_bytes_field(3, &req_bytes, &mut data_bytes);
-                }
-                encode_string_field(4, &ms.description, &mut data_bytes);
-                encode_bytes_field(2, &data_bytes, &mut ms_bytes);
-                encode_bytes_field(1, &ms_bytes, &mut out);
+                msg = msg.add_with("milestones", |m| {
+                    m.set("identifier.uuid", ms.uuid)
+                        .set("data.skill_plan.uuid", plan.uuid)
+                        .when(ms.type_id.is_some(), |b| {
+                            b.set("data.train_to_type.sequential", ms.type_id.unwrap_or(0) as u64)
+                        })
+                        .when(
+                            ms.type_id.is_none() && ms.skill_requirement.is_some(),
+                            |b| {
+                                let sr = ms.skill_requirement.as_ref().unwrap();
+                                b.set("data.skill.skill_type.sequential", sr.type_id as u64)
+                                    .set("data.skill.level", sr.level)
+                            },
+                        )
+                        .set("data.description", &ms.description)
+                });
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.character.skill.plan.milestone.GetAllResponse"),
-                value: out,
-            })
+            Ok(msg.must_to_any())
         }),
     );
 
@@ -1350,14 +1271,11 @@ pub fn register_skill_handlers(
             drop(plans);
             mgr.save_to_db();
 
-            let mut out = Vec::new();
-            let mut id_bytes = Vec::new();
-            encode_bytes_field(1, &m_uuid, &mut id_bytes);
-            encode_bytes_field(1, &id_bytes, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.character.skill.plan.milestone.CreateResponse"),
-                value: out,
-            })
+            Ok(
+                pb::message("eve_public.character.skill.plan.milestone.CreateResponse")
+                    .set("milestone.uuid", m_uuid)
+                    .must_to_any(),
+            )
         })
     };
 

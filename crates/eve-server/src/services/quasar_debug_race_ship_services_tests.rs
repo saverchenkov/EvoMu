@@ -7,7 +7,8 @@ use crate::quasar_gateway::{PublicGatewayRouter, STATUS_OK};
 use eve_db::WorldRepository;
 use eve_machonet::{service_roles, SessionState};
 use eve_proto::quasar::{
-    EvePublicRequest, EvePublicResponse, GoogleAny, QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
+    EvePublicRequest, EvePublicResponse, GoogleAny, QuasarDescriptorRegistry, WireField, WireValue,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
@@ -54,8 +55,13 @@ fn debug_admin_races_notices_and_wire_encoders() {
     gm.role = service_roles::ROLE_GM_DEFAULT;
 
     // 1. eve_public.debug.Request echoes field 1 bytes
-    let mut dbg_req = Vec::new();
-    encode_bytes_field(1, b"ping-payload", &mut dbg_req);
+    let dbg_req = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(b"ping-payload".to_vec()),
+        }],
+    }
+    .encode();
     let dbg_rsp = dispatch(&router, &player, "eve_public.debug.Request", dbg_req, now);
     assert_eq!(dbg_rsp.status_code, STATUS_OK);
     assert!(dbg_rsp.payload.as_ref().unwrap().value.ends_with(b"ping-payload"));
@@ -69,8 +75,13 @@ fn debug_admin_races_notices_and_wire_encoders() {
     // 3. eve.race.GetAllRequest supports both playable_only = false and true
     let all_rsp = dispatch(&router, &player, "eve.race.GetAllRequest", Vec::new(), now);
     assert_eq!(all_rsp.status_code, STATUS_OK);
-    let mut play_req = Vec::new();
-    encode_varint_field(1, 1, &mut play_req);
+    let play_req = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(1),
+        }],
+    }
+    .encode();
     let play_rsp = dispatch(&router, &player, "eve.race.GetAllRequest", play_req, now);
     assert_eq!(play_rsp.status_code, STATUS_OK);
 
@@ -155,8 +166,13 @@ fn debug_race_auth_notice_failures_and_wire_codec_edges() {
     // 3. eve.race.GetAllRequest verifies playable vs all races decoded structure
     let all_rsp = dispatch(&router, &player, "eve.race.GetAllRequest", Vec::new(), now);
     let all_wm = WireMessage::decode(&all_rsp.payload.unwrap().value).unwrap();
-    let mut play_req = Vec::new();
-    encode_varint_field(1, 1, &mut play_req);
+    let play_req = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(1),
+        }],
+    }
+    .encode();
     let play_rsp = dispatch(&router, &player, "eve.race.GetAllRequest", play_req, now);
     let play_wm = WireMessage::decode(&play_rsp.payload.unwrap().value).unwrap();
     assert!(all_wm.fields.len() >= play_wm.fields.len());
@@ -191,8 +207,8 @@ fn debug_race_auth_notice_failures_and_wire_codec_edges() {
     let created_notice = rx.try_recv().unwrap();
     let created_wm = WireMessage::decode(&created_notice.payload.unwrap().value).unwrap();
     assert_eq!(
-        created_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()),
-        Some(44)
+        created_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_bytes()),
+        Some(b"44".as_slice())
     );
     assert_eq!(
         created_wm.fields.iter().find(|f| f.field_number == 7).and_then(|f| f.value.as_varint()),

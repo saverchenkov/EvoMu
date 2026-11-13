@@ -7,21 +7,13 @@ use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter,
 };
 use eve_db::WorldRepository;
+use eve_proto::pb;
 use eve_proto::quasar::{
-    decode_zigzag32, decode_zigzag64, encode_bytes_field, encode_string_field, encode_varint_field,
-    encode_zigzag32, encode_zigzag64, DynamicValue, GoogleAny, QuasarError, TYPE_GOOGLEAPIS_PREFIX,
-    WireMessage,
+    decode_zigzag32, decode_zigzag64, DynamicValue, QuasarError, WireMessage,
 };
 use eve_proto::BridgeRpcError;
 use eve_sde::SdeRegistry;
 use std::sync::Arc;
-
-fn any(type_name: &str, value: Vec<u8>) -> GoogleAny {
-    GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"),
-        value,
-    }
-}
 
 /// Registers Quasar gateway RPC handlers for debug, quasar admin, and race services.
 pub fn register_handlers(
@@ -37,9 +29,9 @@ pub fn register_handlers(
                 Some(DynamicValue::Bytes(b)) => b.clone(),
                 _ => Vec::new(),
             };
-            let mut out = Vec::new();
-            encode_bytes_field(1, &req_data, &mut out);
-            Ok(any("eve_public.debug.Response", out))
+            Ok(pb::message("eve_public.debug.Response")
+                .set("data", req_data)
+                .must_to_any())
         }),
     );
 
@@ -48,9 +40,9 @@ pub fn register_handlers(
         "eve.quasar.admin.IsAuthorizedRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
             let is_authorized = require_admin_role(ctx).is_ok() || ctx.effective_user_id().is_some();
-            let mut out = Vec::new();
-            encode_varint_field(1, if is_authorized { 1 } else { 0 }, &mut out);
-            Ok(any("eve.quasar.admin.IsAuthorizedResponse", out))
+            Ok(pb::message("eve.quasar.admin.IsAuthorizedResponse")
+                .set("authorized", is_authorized)
+                .must_to_any())
         }),
     );
 
@@ -63,32 +55,26 @@ pub fn register_handlers(
                 Some(DynamicValue::Bool(b)) => *b,
                 _ => false,
             };
-            let mut out = Vec::new();
+            let mut out = pb::message("eve.race.GetAllResponse");
             let mut races: Vec<_> = sde_race.races.values().collect();
             races.sort_by_key(|r| r.race_id);
             for race in races {
                 if playable_only && !matches!(race.race_id, 1 | 2 | 4 | 8) {
                     continue;
                 }
-                let mut id_sub = Vec::new();
-                encode_varint_field(1, race.race_id as u64, &mut id_sub);
-
-                let mut attr_sub = Vec::new();
-                encode_string_field(1, &race.name, &mut attr_sub);
-                encode_string_field(2, &race.description, &mut attr_sub);
-                if let Some(corvette) = race.corvette_type_id {
-                    let mut ship_id_sub = Vec::new();
-                    encode_varint_field(1, corvette as u64, &mut ship_id_sub);
-                    encode_bytes_field(3, &ship_id_sub, &mut attr_sub);
-                }
-
-                let mut race_sub = Vec::new();
-                encode_bytes_field(1, &id_sub, &mut race_sub);
-                encode_bytes_field(2, &attr_sub, &mut race_sub);
-
-                encode_bytes_field(1, &race_sub, &mut out);
+                out = out.add_with("races", |r| {
+                    r.set("identifier.sequential", race.race_id as u32)
+                        .set("attributes.name", &race.name)
+                        .set("attributes.description", &race.description)
+                        .when(race.corvette_type_id.is_some(), |r| {
+                            r.set(
+                                "attributes.ship_type.sequential",
+                                race.corvette_type_id.unwrap_or_default() as u64,
+                            )
+                        })
+                });
             }
-            Ok(any("eve.race.GetAllResponse", out))
+            Ok(out.must_to_any())
         }),
     );
 }
@@ -99,14 +85,15 @@ pub fn publish_debug_notice(
     scope: NoticeScope,
     uuid: &[u8],
 ) -> Result<usize, BridgeRpcError> {
-    let mut out = Vec::new();
-    encode_bytes_field(1, uuid, &mut out);
+    let notice = pb::message("eve_public.debug.Notice")
+        .set("uuid", uuid)
+        .must_to_any();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     gateway
-        .publish_notice(scope, any("eve_public.debug.Notice", out), now)
+        .publish_notice(scope, notice, now)
         .map(|(_, count)| count)
 }
 
@@ -116,14 +103,15 @@ pub fn publish_monolith_event_notice(
     scope: NoticeScope,
     tracer: &[u8],
 ) -> Result<usize, BridgeRpcError> {
-    let mut out = Vec::new();
-    encode_bytes_field(1, tracer, &mut out);
+    let notice = pb::message("eve.debug.monolith.event.EventEmitted")
+        .set("tracer", String::from_utf8_lossy(tracer).into_owned())
+        .must_to_any();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     gateway
-        .publish_notice(scope, any("eve.debug.monolith.event.EventEmitted", out), now)
+        .publish_notice(scope, notice, now)
         .map(|(_, count)| count)
 }
 
@@ -133,16 +121,15 @@ pub fn publish_character_route_established(
     scope: NoticeScope,
     character_id: u64,
 ) -> Result<usize, BridgeRpcError> {
-    let mut id_sub = Vec::new();
-    encode_varint_field(1, character_id, &mut id_sub);
-    let mut out = Vec::new();
-    encode_bytes_field(1, &id_sub, &mut out);
+    let notice = pb::message("eve.quasar.CharacterRouteEstablished")
+        .set("character.sequential", character_id as u32)
+        .must_to_any();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     gateway
-        .publish_notice(scope, any("eve.quasar.CharacterRouteEstablished", out), now)
+        .publish_notice(scope, notice, now)
         .map(|(_, count)| count)
 }
 
@@ -158,28 +145,25 @@ pub fn publish_raffle_created_notice(
     station_id: u64,
     is_private: bool,
 ) -> Result<usize, BridgeRpcError> {
-    let mut char_sub = Vec::new();
-    encode_varint_field(1, char_id, &mut char_sub);
-    let mut item_sub = Vec::new();
-    encode_varint_field(1, item_id, &mut item_sub);
-    let mut st_sub = Vec::new();
-    encode_varint_field(1, station_id, &mut st_sub);
-
-    let mut out = Vec::new();
-    encode_bytes_field(1, &char_sub, &mut out);
-    encode_varint_field(2, raffle_id, &mut out);
-    encode_varint_field(3, ticket_count, &mut out);
-    encode_varint_field(4, ticket_price_cents, &mut out);
-    encode_bytes_field(5, &item_sub, &mut out);
-    encode_bytes_field(6, &st_sub, &mut out);
-    encode_varint_field(7, if is_private { 1 } else { 0 }, &mut out);
+    let units = (ticket_price_cents / 100) as i64;
+    let nanos = ((ticket_price_cents % 100) * 10_000_000) as i32;
+    let notice = pb::message("eve.raffle.ItemRaffleCreated")
+        .set("character.sequential", char_id as u32)
+        .set("raffle_id", raffle_id.to_string())
+        .set("ticket_count", ticket_count as i32)
+        .set("ticket_price.units", units)
+        .when(nanos != 0, |m| m.set("ticket_price.nanos", nanos))
+        .set("item.sequential", item_id)
+        .set("station.sequential", station_id)
+        .set("is_private", is_private)
+        .must_to_any();
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     gateway
-        .publish_notice(scope, any("eve.raffle.ItemRaffleCreated", out), now)
+        .publish_notice(scope, notice, now)
         .map(|(_, count)| count)
 }
 
@@ -191,18 +175,17 @@ pub fn publish_raffle_ticket_bought_notice(
     ticket_number: u64,
     char_id: u64,
 ) -> Result<usize, BridgeRpcError> {
-    let mut id_sub = Vec::new();
-    encode_varint_field(1, char_id, &mut id_sub);
-    let mut out = Vec::new();
-    encode_varint_field(1, raffle_id, &mut out);
-    encode_varint_field(2, ticket_number, &mut out);
-    encode_bytes_field(3, &id_sub, &mut out);
+    let notice = pb::message("eve.raffle.TicketBought")
+        .set("raffle_id", raffle_id.to_string())
+        .set("ticket_number", ticket_number.to_string())
+        .set("character.sequential", char_id as u32)
+        .must_to_any();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     gateway
-        .publish_notice(scope, any("eve.raffle.TicketBought", out), now)
+        .publish_notice(scope, notice, now)
         .map(|(_, count)| count)
 }
 
@@ -213,17 +196,16 @@ pub fn publish_raffle_finished_notice(
     raffle_id: u64,
     winner_char_id: u64,
 ) -> Result<usize, BridgeRpcError> {
-    let mut winner_sub = Vec::new();
-    encode_varint_field(1, winner_char_id, &mut winner_sub);
-    let mut out = Vec::new();
-    encode_varint_field(1, raffle_id, &mut out);
-    encode_bytes_field(2, &winner_sub, &mut out);
+    let notice = pb::message("eve.raffle.Finished")
+        .set("raffle_id", raffle_id.to_string())
+        .set("winner.sequential", winner_char_id as u32)
+        .must_to_any();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     gateway
-        .publish_notice(scope, any("eve.raffle.Finished", out), now)
+        .publish_notice(scope, notice, now)
         .map(|(_, count)| count)
 }
 
@@ -233,14 +215,15 @@ pub fn publish_raffle_expired_notice(
     scope: NoticeScope,
     raffle_id: u64,
 ) -> Result<usize, BridgeRpcError> {
-    let mut out = Vec::new();
-    encode_varint_field(1, raffle_id, &mut out);
+    let notice = pb::message("eve.raffle.Expired")
+        .set("raffle_id", raffle_id.to_string())
+        .must_to_any();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     gateway
-        .publish_notice(scope, any("eve.raffle.Expired", out), now)
+        .publish_notice(scope, notice, now)
         .map(|(_, count)| count)
 }
 
@@ -252,30 +235,18 @@ pub fn publish_challenge_progressed_notice(
     challenge_id: u64,
     amount: u64,
 ) -> Result<usize, BridgeRpcError> {
-    let mut char_sub = Vec::new();
-    encode_varint_field(1, char_id, &mut char_sub);
-
-    let mut chal_id = Vec::new();
-    encode_varint_field(1, challenge_id, &mut chal_id);
-
-    let mut prog_sub = Vec::new();
-    encode_bytes_field(1, &chal_id, &mut prog_sub);
-    encode_varint_field(2, amount, &mut prog_sub);
-
-    let mut out = Vec::new();
-    encode_bytes_field(1, &char_sub, &mut out);
-    encode_bytes_field(2, &prog_sub, &mut out);
+    let notice = pb::message("eve.seasonalevent.challenge.ChallengeProgressed")
+        .set("character.sequential", char_id as u32)
+        .set("progress.challenge.sequential", challenge_id)
+        .set("progress.amount", amount)
+        .must_to_any();
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     gateway
-        .publish_notice(
-            scope,
-            any("eve.seasonalevent.challenge.ChallengeProgressed", out),
-            now,
-        )
+        .publish_notice(scope, notice, now)
         .map(|(_, count)| count)
 }
 
@@ -284,12 +255,10 @@ pub fn encode_security_status_value(sec_status: f64) -> Vec<u8> {
     let units = sec_status.trunc() as i64;
     let fract = sec_status.fract();
     let nanos = (fract * 1_000_000_000.0).round() as i32;
-    let mut out = Vec::new();
-    encode_varint_field(1, encode_zigzag64(units), &mut out);
-    if nanos != 0 {
-        encode_varint_field(2, encode_zigzag32(nanos) as u64, &mut out);
-    }
-    out
+    pb::message("eve_public.securitystatus.Value")
+        .set("units", units)
+        .when(nanos != 0, |m| m.set("nanos", nanos))
+        .must_encode()
 }
 
 /// Decodes an `eve_public.securitystatus.Value` / `eve.securitystatus.Value` wire message.
@@ -317,57 +286,41 @@ pub fn decode_security_status_value(bytes: &[u8]) -> Result<f64, QuasarError> {
 
 /// Encodes an `eve.school.Identifier` (`uint32 sequential = 1`).
 pub fn encode_school_identifier(school_id: u64) -> Vec<u8> {
-    let mut out = Vec::new();
-    encode_varint_field(1, school_id, &mut out);
-    out
+    pb::message("eve.school.Identifier")
+        .set("sequential", school_id as u32)
+        .must_encode()
 }
 
 /// Encodes a localized `eve.search.Tag` (`LocalizedKeyValue localized = 1`).
 pub fn encode_localized_search_tag(key: &str, lang: u32, val: &str) -> Vec<u8> {
-    let mut lkv = Vec::new();
-    encode_string_field(1, key, &mut lkv);
-    encode_varint_field(2, lang as u64, &mut lkv);
-    encode_string_field(3, val, &mut lkv);
-    let mut out = Vec::new();
-    encode_bytes_field(1, &lkv, &mut out);
-    out
+    pb::message("eve.search.Tag")
+        .set("localized.key", key)
+        .set("localized.language", lang as i32)
+        .set("localized.value", val)
+        .must_encode()
 }
 
 /// Encodes an unlocalized `eve.search.Tag` (`KeyValue unlocalized = 2`).
 pub fn encode_unlocalized_search_tag(key: &str, val: &str) -> Vec<u8> {
-    let mut ukv = Vec::new();
-    encode_string_field(1, key, &mut ukv);
-    encode_string_field(5, val, &mut ukv); // string_value = 5
-    let mut out = Vec::new();
-    encode_bytes_field(2, &ukv, &mut out);
-    out
+    pb::message("eve.search.Tag")
+        .set("unlocalized.key", key)
+        .set("unlocalized.string_value", val)
+        .must_encode()
 }
 
 /// Encodes an `eve_public.ship.Identifier` or `eve.ship.Identifier` (`uint32 sequential = 1`).
 pub fn encode_ship_identifier(ship_id: u64) -> Vec<u8> {
-    let mut out = Vec::new();
-    encode_varint_field(1, ship_id, &mut out);
-    out
+    pb::message("eve.ship.Identifier")
+        .set("sequential", ship_id)
+        .must_encode()
 }
 
 /// Encodes an `eve.ship.Attributes` message (`type = 1`, `owner = 4`).
 pub fn encode_ship_attributes(type_id: u64, owner_id: u64) -> Vec<u8> {
-    let mut type_sub = Vec::new();
-    encode_varint_field(1, type_id, &mut type_sub);
-
-    let mut char_id_sub = Vec::new();
-    encode_varint_field(1, owner_id, &mut char_id_sub);
-
-    let mut player_sub = Vec::new();
-    encode_bytes_field(1, &char_id_sub, &mut player_sub);
-
-    let mut owner_sub = Vec::new();
-    encode_bytes_field(1, &player_sub, &mut owner_sub);
-
-    let mut out = Vec::new();
-    encode_bytes_field(1, &type_sub, &mut out);
-    encode_bytes_field(4, &owner_sub, &mut out);
-    out
+    pb::message("eve.ship.Attributes")
+        .set("type.sequential", type_id)
+        .set("owner.player.character.sequential", owner_id as u32)
+        .must_encode()
 }
 
 #[cfg(test)]

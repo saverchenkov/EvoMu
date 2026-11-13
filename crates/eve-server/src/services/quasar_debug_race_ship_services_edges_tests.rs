@@ -8,8 +8,8 @@ use crate::quasar_gateway::{PublicGatewayRouter, STATUS_OK};
 use eve_db::WorldRepository;
 use eve_machonet::{service_roles, SessionState};
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, DescriptorProto, EvePublicRequest, EvePublicResponse,
-    FieldDescriptorProto, FieldLabel, FieldType, GoogleAny, QuasarDescriptorRegistry, WireMessage,
+    DescriptorProto, EvePublicRequest, EvePublicResponse, FieldDescriptorProto, FieldLabel,
+    FieldType, GoogleAny, QuasarDescriptorRegistry, WireField, WireMessage, WireValue,
     TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::{RaceInfo, SdeRegistry};
@@ -88,8 +88,13 @@ fn debug_empty_payload_non_gm_admin_and_non_playable_race_filtering() {
     assert_eq!(wm_dbg.fields.len(), 1);
     assert_eq!(wm_dbg.fields[0].field_number, 1);
 
-    let mut dbg_wrong_type = Vec::new();
-    encode_varint_field(1, 999, &mut dbg_wrong_type);
+    let dbg_wrong_type = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(999),
+        }],
+    }
+    .encode();
     let dbg_wrong_rsp = call_gw(&router, &player, "eve_public.debug.Request", dbg_wrong_type);
     assert_eq!(dbg_wrong_rsp.status_code, STATUS_OK);
 
@@ -107,8 +112,13 @@ fn debug_empty_payload_non_gm_admin_and_non_playable_race_filtering() {
     assert_eq!(all_rsp.status_code, STATUS_OK);
     let all_wm = WireMessage::decode(&all_rsp.payload.as_ref().unwrap().value).unwrap();
 
-    let mut play_only_req = Vec::new();
-    encode_varint_field(1, 1, &mut play_only_req);
+    let play_only_req = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(1),
+        }],
+    }
+    .encode();
     let play_rsp = call_gw(&router, &player, "eve.race.GetAllRequest", play_only_req);
     assert_eq!(play_rsp.status_code, STATUS_OK);
     let play_wm = WireMessage::decode(&play_rsp.payload.as_ref().unwrap().value).unwrap();
@@ -166,10 +176,23 @@ fn notices_zero_subscribers_wire_decoding_and_security_status_edges() {
     assert!((decode_security_status_value(&exact_neg).unwrap() - (-10.0)).abs() < 1e-9);
 
     // Decode with unknown field 99 and non-varint fields 1 and 2 falls back to 0.0
-    let mut non_varint = Vec::new();
-    encode_bytes_field(1, b"not_varint", &mut non_varint);
-    encode_bytes_field(2, b"not_varint", &mut non_varint);
-    encode_varint_field(99, 123, &mut non_varint);
+    let non_varint = WireMessage {
+        fields: vec![
+            WireField {
+                field_number: 1,
+                value: WireValue::LengthDelimited(b"not_varint".to_vec()),
+            },
+            WireField {
+                field_number: 2,
+                value: WireValue::LengthDelimited(b"not_varint".to_vec()),
+            },
+            WireField {
+                field_number: 99,
+                value: WireValue::Varint(123),
+            },
+        ],
+    }
+    .encode();
     assert!((decode_security_status_value(&non_varint).unwrap() - 0.0).abs() < 1e-9);
 
     // Invalid wire bytes fail to decode

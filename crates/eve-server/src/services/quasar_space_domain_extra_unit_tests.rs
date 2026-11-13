@@ -8,8 +8,8 @@ use crate::quasar_gateway::{
 };
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
-    encode_bytes_field, AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny,
-    QuasarDescriptorRegistry, WireMessage, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, QuasarDescriptorRegistry,
+    WireField, WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::{SdeRegistry, StationInfo};
 use std::sync::{Arc, OnceLock};
@@ -271,10 +271,20 @@ fn measurements_validation_capacity_eviction_and_location_filtered_query() {
 
     // Record a new measurement name "z_new_metric" -> evicts first key "m_0000"
     let loc_jita = encode_space_location(10_000_002, Some(20_000_020), Some(30_000_142));
-    let mut raw_at = Vec::new();
-    encode_bytes_field(1, &loc_jita, &mut raw_at);
-    let mut raw_req = Vec::new();
-    encode_bytes_field(2, &raw_at, &mut raw_req);
+    let raw_at = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(loc_jita.clone()),
+        }],
+    }
+    .encode();
+    let raw_req = WireMessage {
+        fields: vec![WireField {
+            field_number: 2,
+            value: WireValue::LengthDelimited(raw_at),
+        }],
+    }
+    .encode();
 
     let mut new_id = DynamicQuasarMessage::new("Id");
     new_id.set(1, DynamicValue::String("z_new_metric".into()));
@@ -306,8 +316,13 @@ fn measurements_validation_capacity_eviction_and_location_filtered_query() {
     .unwrap();
 
     // Query "rat_kills" filtered by Jita location in raw_any field 2
-    let mut raw_query = Vec::new();
-    encode_bytes_field(2, &loc_jita, &mut raw_query);
+    let raw_query = WireMessage {
+        fields: vec![WireField {
+            field_number: 2,
+            value: WireValue::LengthDelimited(loc_jita),
+        }],
+    }
+    .encode();
     let mut q_req = DynamicQuasarMessage::new("Query");
     q_req.set(1, DynamicValue::Message(Box::new(valid_id)));
     let q_rsp = call_space_domain(
@@ -410,8 +425,13 @@ fn space_tags_auth_validation_dedup_capacity_and_region_constellation_resolution
     };
 
     // Apply existing tag "t_255" and new tag "forge_tag" to region 10_000_002, and "kimotoro_tag" to constellation 20_000_020
-    let mut raw_reg = Vec::new();
-    encode_bytes_field(2, &reg_loc, &mut raw_reg);
+    let raw_reg = WireMessage {
+        fields: vec![WireField {
+            field_number: 2,
+            value: WireValue::LengthDelimited(reg_loc),
+        }],
+    }
+    .encode();
     let mut apply_reg = DynamicQuasarMessage::new("Apply");
     apply_reg.set(
         3,
@@ -426,8 +446,13 @@ fn space_tags_auth_validation_dedup_capacity_and_region_constellation_resolution
     )
     .unwrap();
 
-    let mut raw_con = Vec::new();
-    encode_bytes_field(2, &con_loc, &mut raw_con);
+    let raw_con = WireMessage {
+        fields: vec![WireField {
+            field_number: 2,
+            value: WireValue::LengthDelimited(con_loc),
+        }],
+    }
+    .encode();
     let mut apply_con = DynamicQuasarMessage::new("Apply");
     apply_con.set(3, DynamicValue::Repeated(vec![make_spec("kimotoro_tag")]));
     call_space_domain(

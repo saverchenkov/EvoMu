@@ -1,6 +1,7 @@
 use super::*;
 use crate::quasar_gateway::{STATUS_BAD_REQUEST, STATUS_NOT_FOUND};
-use eve_proto::quasar::{QuasarDescriptorRegistry, WireMessage};
+use eve_proto::pb;
+use eve_proto::quasar::{QuasarDescriptorRegistry, WireField, WireMessage, WireValue};
 use std::sync::OnceLock;
 
 #[cfg(test)]
@@ -62,8 +63,9 @@ fn unit_helpers_and_encode_space_location() {
     assert_eq!(hex_decode("00abff"), vec![0x00, 0xab, 0xff]);
     assert!(hex_decode("zz").is_empty());
 
-    let mut d_buf = Vec::new();
-    encode_double_field(2, 42.5, &mut d_buf);
+    let d_buf = pb::message("eve.space.measurement.Attributes")
+        .set("value", 42.5)
+        .must_encode();
     let wm = WireMessage::decode(&d_buf).unwrap();
     assert_eq!(wm.fields[0].field_number, 2);
     assert_eq!(wm.fields[0].value.as_fixed64(), Some(42.5f64.to_bits()));
@@ -306,11 +308,26 @@ fn space_measurements_record_update_and_query_top_and_bottom() {
     // Helper to record a measurement at a location
     let record = |endpoint: &str, name: &str, sys_id: u32, val: f64| {
         let loc_bytes = encode_space_location(10_000_002, Some(20_000_020), Some(sys_id));
-        let mut raw_at = Vec::new();
-        encode_bytes_field(1, &loc_bytes, &mut raw_at);
-        encode_double_field(2, val, &mut raw_at);
-        let mut raw_req = Vec::new();
-        encode_bytes_field(2, &raw_at, &mut raw_req);
+        let raw_at = WireMessage {
+            fields: vec![
+                WireField {
+                    field_number: 1,
+                    value: WireValue::LengthDelimited(loc_bytes),
+                },
+                WireField {
+                    field_number: 2,
+                    value: WireValue::Fixed64(val.to_bits()),
+                },
+            ],
+        }
+        .encode();
+        let raw_req = WireMessage {
+            fields: vec![WireField {
+                field_number: 2,
+                value: WireValue::LengthDelimited(raw_at),
+            }],
+        }
+        .encode();
 
         let mut id_m = DynamicQuasarMessage::new("Id");
         id_m.set(1, DynamicValue::String(name.to_string()));
@@ -372,8 +389,13 @@ fn space_tags_apply_query_get_tags_get_locations_and_remove() {
     let admin = admin_ctx(90_000_001);
 
     let jita_loc = encode_space_location(10_000_002, Some(20_000_020), Some(30_000_142));
-    let mut raw_apply = Vec::new();
-    encode_bytes_field(2, &jita_loc, &mut raw_apply);
+    let raw_apply = WireMessage {
+        fields: vec![WireField {
+            field_number: 2,
+            value: WireValue::LengthDelimited(jita_loc),
+        }],
+    }
+    .encode();
 
     // Missing tags -> BAD_REQUEST
     let empty_apply = DynamicQuasarMessage::new("eve.space.tag.admin.api.ApplyRequest");

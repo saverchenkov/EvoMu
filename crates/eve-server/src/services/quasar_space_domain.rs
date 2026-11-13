@@ -10,18 +10,14 @@ use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_NOT_FOUND,
 };
 use eve_db::WorldRepository;
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
-    DynamicQuasarMessage, DynamicValue, GoogleAny, WireMessage, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, WireMessage,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-
-fn encode_double_field(field_number: u32, v: f64, out: &mut Vec<u8>) {
-    out.push(((field_number as u8) << 3) | 1);
-    out.extend_from_slice(&v.to_le_bytes());
-}
 
 const BLOB_KEY: &str = "quasar_space_domain";
 
@@ -109,10 +105,23 @@ fn as_f64(v: &DynamicValue) -> Option<f64> {
     }
 }
 
-fn seq_id(id: u32) -> Vec<u8> {
-    let mut b = Vec::new();
-    encode_varint_field(1, id as u64, &mut b);
-    b
+fn build_space_location(
+    region_id: u32,
+    constellation_id: Option<u32>,
+    solar_system_id: Option<u32>,
+) -> pb::ProtoBuilder {
+    let msg = pb::message("eve.space.location.Identifier")
+        .set("region.sequential", region_id as u64);
+    if let Some(cid) = constellation_id {
+        let msg = msg.set("constellation.constellation.sequential", cid as u64);
+        if let Some(sid) = solar_system_id {
+            msg.set("constellation.solar_system.sequential", sid as u64)
+        } else {
+            msg.set("constellation.any_solar_system", true)
+        }
+    } else {
+        msg.set("any_constellation", true)
+    }
 }
 
 /// Encodes `.eve.space.location.Identifier`.
@@ -121,21 +130,7 @@ pub fn encode_space_location(
     constellation_id: Option<u32>,
     solar_system_id: Option<u32>,
 ) -> Vec<u8> {
-    let mut out = Vec::new();
-    encode_bytes_field(1, &seq_id(region_id), &mut out);
-    if let Some(cid) = constellation_id {
-        let mut c_msg = Vec::new();
-        encode_bytes_field(1, &seq_id(cid), &mut c_msg);
-        if let Some(sid) = solar_system_id {
-            encode_bytes_field(2, &seq_id(sid), &mut c_msg);
-        } else {
-            encode_varint_field(3, 1, &mut c_msg);
-        }
-        encode_bytes_field(2, &c_msg, &mut out);
-    } else {
-        encode_varint_field(3, 1, &mut out);
-    }
-    out
+    build_space_location(region_id, constellation_id, solar_system_id).must_encode()
 }
 
 fn raw_field_bytes(raw: &[u8], field_number: u32) -> Option<Vec<u8>> {
@@ -183,13 +178,13 @@ pub fn register_handlers(
                 for loc in repeated(msg, 1) {
                     if let Some(cid) = sub(loc, 1).and_then(|c| c.get(1)).and_then(as_u32) {
                         if let Some(c) = sde_res.constellations.get(&cid) {
-                            resolved.push(encode_space_location(c.region_id, Some(cid), None));
+                            resolved.push(build_space_location(c.region_id, Some(cid), None));
                         } else {
                             missing_con.push(cid);
                         }
                     } else if let Some(sid) = sub(loc, 2).and_then(|s| s.get(1)).and_then(as_u32) {
                         if let Some(s) = sde_res.solar_systems.get(&sid) {
-                            resolved.push(encode_space_location(
+                            resolved.push(build_space_location(
                                 s.region_id,
                                 Some(s.constellation_id),
                                 Some(sid),
@@ -199,24 +194,31 @@ pub fn register_handlers(
                         }
                     }
                 }
-                let mut out = Vec::new();
-                if !missing_sys.is_empty() || !missing_con.is_empty() {
-                    let mut nf = Vec::new();
-                    for sid in missing_sys {
-                        encode_bytes_field(1, &seq_id(sid), &mut nf);
-                    }
-                    for cid in missing_con {
-                        encode_bytes_field(2, &seq_id(cid), &mut nf);
-                    }
-                    encode_bytes_field(3, &nf, &mut out);
+                let rsp = if !missing_sys.is_empty() || !missing_con.is_empty() {
+                    pb::message("eve.space.location.api.ResolveLocationsResponse")
+                        .set_with("locations_not_found", |mut nf| {
+                            for sid in missing_sys {
+                                nf = nf.add_with("missing_solar_systems", |s| {
+                                    s.set("sequential", sid as u64)
+                                });
+                            }
+                            for cid in missing_con {
+                                nf = nf.add_with("missing_constellations", |c| {
+                                    c.set("sequential", cid as u64)
+                                });
+                            }
+                            nf
+                        })
                 } else {
-                    let mut locs = Vec::new();
-                    for r in resolved {
-                        encode_bytes_field(1, &r, &mut locs);
-                    }
-                    encode_bytes_field(1, &locs, &mut out);
-                }
-                Ok(any("eve.space.location.api.ResolveLocationsResponse", out))
+                    pb::message("eve.space.location.api.ResolveLocationsResponse")
+                        .set_with("locations", |mut locs| {
+                            for r in resolved {
+                                locs = locs.add("locations", r);
+                            }
+                            locs
+                        })
+                };
+                Ok(rsp.must_to_any())
             }),
         );
     }
@@ -229,11 +231,11 @@ pub fn register_handlers(
             Arc::new(move |_ctx, _any, _msg| {
                 let mut ids: Vec<u32> = sde_all.solar_systems.keys().copied().collect();
                 ids.sort_unstable();
-                let mut out = Vec::new();
+                let mut out = pb::message("eve.space.location.api.GetAllSolarSystemsResponse");
                 for sid in ids {
-                    encode_bytes_field(1, &seq_id(sid), &mut out);
+                    out = out.add_with("solar_systems", |s| s.set("sequential", sid as u64));
                 }
-                Ok(any("eve.space.location.api.GetAllSolarSystemsResponse", out))
+                Ok(out.must_to_any())
             }),
         );
     }
@@ -256,16 +258,15 @@ pub fn register_handlers(
                     .map(|s| s.solar_system_id)
                     .collect();
                 sys_ids.sort_unstable();
-                let mut out = Vec::new();
+                let mut out = pb::message("eve.space.api.GetLocationsWithinSecurityResponse");
                 for sid in sys_ids {
                     let s = &sde_sec.solar_systems[&sid];
-                    encode_bytes_field(
-                        1,
-                        &encode_space_location(s.region_id, Some(s.constellation_id), Some(sid)),
-                        &mut out,
+                    out = out.add(
+                        "locations",
+                        build_space_location(s.region_id, Some(s.constellation_id), Some(sid)),
                     );
                 }
-                Ok(any("eve.space.api.GetLocationsWithinSecurityResponse", out))
+                Ok(out.must_to_any())
             }),
         );
     }
@@ -287,18 +288,17 @@ pub fn register_handlers(
                 let sys = sde_st.solar_systems.get(&st.solar_system_id).ok_or_else(|| {
                     (STATUS_NOT_FOUND, format!("Solar system {} not found", st.solar_system_id))
                 })?;
-                let mut out = Vec::new();
-                encode_bytes_field(
-                    1,
-                    &encode_space_location(
-                        sys.region_id,
-                        Some(sys.constellation_id),
-                        Some(sys.solar_system_id),
-                    ),
-                    &mut out,
-                );
-                encode_bytes_field(2, &seq_id(st.owner_corporation_id as u32), &mut out);
-                Ok(any("eve.space.npcstation.api.GetResponse", out))
+                Ok(pb::message("eve.space.npcstation.api.GetResponse")
+                    .set(
+                        "location",
+                        build_space_location(
+                            sys.region_id,
+                            Some(sys.constellation_id),
+                            Some(sys.solar_system_id),
+                        ),
+                    )
+                    .set("owner.sequential", st.owner_corporation_id as u32)
+                    .must_to_any())
             }),
         );
     }
@@ -318,11 +318,9 @@ pub fn register_handlers(
                     .stations
                     .get(&(st_id as i64))
                     .ok_or_else(|| (STATUS_NOT_FOUND, format!("Station {st_id} not found")))?;
-                let mut attrs = Vec::new();
-                encode_string_field(1, &st.name, &mut attrs);
-                let mut out = Vec::new();
-                encode_bytes_field(1, &attrs, &mut out);
-                Ok(any("eve_public.station.api.GetResponse", out))
+                Ok(pb::message("eve_public.station.api.GetResponse")
+                    .set("station.name", &st.name)
+                    .must_to_any())
             }),
         );
     }
@@ -342,14 +340,12 @@ pub fn register_handlers(
                     .stations
                     .get(&(st_id as i64))
                     .ok_or_else(|| (STATUS_NOT_FOUND, format!("Station {st_id} not found")))?;
-                let mut attrs = Vec::new();
-                encode_string_field(1, &st.name, &mut attrs);
-                encode_bytes_field(2, &seq_id(st.solar_system_id), &mut attrs);
-                encode_bytes_field(3, &seq_id(st.station_type_id), &mut attrs);
-                encode_bytes_field(10, &seq_id(st.owner_corporation_id as u32), &mut attrs);
-                let mut out = Vec::new();
-                encode_bytes_field(1, &attrs, &mut out);
-                Ok(any("eve.station.GetResponse", out))
+                Ok(pb::message("eve.station.GetResponse")
+                    .set("attributes.name", &st.name)
+                    .set("attributes.solar_system.sequential", st.solar_system_id as u64)
+                    .set("attributes.type.sequential", st.station_type_id as u64)
+                    .set("attributes.owner.sequential", st.owner_corporation_id as u32)
+                    .must_to_any())
             }),
         );
     }
@@ -369,9 +365,9 @@ pub fn register_handlers(
                     .stations
                     .get(&(st_id as i64))
                     .ok_or_else(|| (STATUS_NOT_FOUND, format!("Station {st_id} not found")))?;
-                let mut out = Vec::new();
-                encode_string_field(1, &st.name, &mut out);
-                Ok(any("eve.station.GetNameResponse", out))
+                Ok(pb::message("eve.station.GetNameResponse")
+                    .set("name", &st.name)
+                    .must_to_any())
             }),
         );
     }
@@ -387,13 +383,13 @@ pub fn register_handlers(
                     .and_then(as_u32)
                     .or_else(|| msg.get(1).and_then(as_u32))
                     .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing solar system identifier".into()))?;
-                let mut out = Vec::new();
+                let mut out = pb::message("eve.station.GetStationsInSolarSystemResponse");
                 for st in sde_st.stations.values() {
                     if st.solar_system_id == sys_id {
-                        encode_bytes_field(1, &seq_id(st.station_id as u32), &mut out);
+                        out = out.add_with("stations", |s| s.set("sequential", st.station_id as u64));
                     }
                 }
-                Ok(any("eve.station.GetStationsInSolarSystemResponse", out))
+                Ok(out.must_to_any())
             }),
         );
     }
@@ -445,19 +441,14 @@ pub fn register_handlers(
                 }
                 save(&db_m, &state);
 
-                let (mut id_b, mut at_b, mut not_b) = (Vec::new(), Vec::new(), Vec::new());
-                encode_string_field(1, &name, &mut id_b);
-                if !loc_bytes.is_empty() {
-                    encode_bytes_field(1, &loc_bytes, &mut at_b);
-                }
-                encode_double_field(2, val, &mut at_b);
-                encode_bytes_field(1, &id_b, &mut not_b);
-                encode_bytes_field(2, &at_b, &mut not_b);
-                ctx_queue_notice(
-                    NoticeScope::Broadcast,
-                    any("eve.space.measurement.api.Recorded", not_b),
-                    ctx.now_unix(),
-                );
+                let not_msg = pb::message("eve.space.measurement.api.Recorded")
+                    .set("identifier.name", &name)
+                    .when(!loc_bytes.is_empty(), |m| {
+                        m.set_raw_message("measurement.location", &loc_bytes)
+                    })
+                    .set("measurement.value", val)
+                    .must_to_any();
+                ctx_queue_notice(NoticeScope::Broadcast, not_msg, ctx.now_unix());
                 Ok(any(rsp_name, Vec::new()))
             }),
         );
@@ -489,17 +480,15 @@ pub fn register_handlers(
                     rows.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
                     rows.truncate(bot_n as usize);
                 }
-                let mut out = Vec::new();
+                let mut out = pb::message("eve.space.measurement.api.QueryResponse");
                 for (lh, v) in rows {
-                    let mut at_b = Vec::new();
                     let lb = hex_decode(&lh);
-                    if !lb.is_empty() {
-                        encode_bytes_field(1, &lb, &mut at_b);
-                    }
-                    encode_double_field(2, v, &mut at_b);
-                    encode_bytes_field(1, &at_b, &mut out);
+                    out = out.add_with("results", |r| {
+                        r.when(!lb.is_empty(), |r| r.set_raw_message("location", &lb))
+                            .set("value", v)
+                    });
                 }
-                Ok(any("eve.space.measurement.api.QueryResponse", out))
+                Ok(out.must_to_any())
             }),
         );
     }
@@ -541,18 +530,12 @@ pub fn register_handlers(
                     }
                 }
                 save(&db_ap, &state);
-                let mut not_b = Vec::new();
-                encode_bytes_field(1, &loc_bytes, &mut not_b);
+                let mut not =
+                    pb::message("eve.space.tag.api.Applied").set_raw_message("location", &loc_bytes);
                 for t in &tags {
-                    let mut tb = Vec::new();
-                    encode_string_field(1, t, &mut tb);
-                    encode_bytes_field(2, &tb, &mut not_b);
+                    not = not.add_with("tags", |tb| tb.set("name", t));
                 }
-                ctx_queue_notice(
-                    NoticeScope::Broadcast,
-                    any("eve.space.tag.api.Applied", not_b),
-                    ctx.now_unix(),
-                );
+                ctx_queue_notice(NoticeScope::Broadcast, not.must_to_any(), ctx.now_unix());
                 Ok(any("eve.space.tag.admin.api.ApplyResponse", Vec::new()))
             }),
         );
@@ -577,18 +560,12 @@ pub fn register_handlers(
                     entry.retain(|x| !tags.contains(x));
                 }
                 save(&db_rm, &state);
-                let mut not_b = Vec::new();
-                encode_bytes_field(1, &loc_bytes, &mut not_b);
+                let mut not =
+                    pb::message("eve.space.tag.api.Removed").set_raw_message("location", &loc_bytes);
                 for t in &tags {
-                    let mut tb = Vec::new();
-                    encode_string_field(1, t, &mut tb);
-                    encode_bytes_field(2, &tb, &mut not_b);
+                    not = not.add_with("tags", |tb| tb.set("name", t));
                 }
-                ctx_queue_notice(
-                    NoticeScope::Broadcast,
-                    any("eve.space.tag.api.Removed", not_b),
-                    ctx.now_unix(),
-                );
+                ctx_queue_notice(NoticeScope::Broadcast, not.must_to_any(), ctx.now_unix());
                 Ok(any("eve.space.tag.admin.api.RemoveResponse", Vec::new()))
             }),
         );
@@ -600,27 +577,27 @@ pub fn register_handlers(
             "eve.space.location.api.GetTagsRequest",
             Arc::new(move |_ctx, _any, msg| {
                 let state = load(&db_gt);
-                let mut locs_msg = Vec::new();
-                for req_loc in repeated(msg, 1) {
-                    if let Some(loc_bytes) = resolve_location_from_req(&sde_gt, req_loc) {
-                        let tags = state
-                            .location_tags
-                            .get(&hex_encode(&loc_bytes))
-                            .cloned()
-                            .unwrap_or_default();
-                        let mut tl = Vec::new();
-                        encode_bytes_field(1, &loc_bytes, &mut tl);
-                        for t in tags {
-                            let mut tb = Vec::new();
-                            encode_string_field(1, &t, &mut tb);
-                            encode_bytes_field(2, &tb, &mut tl);
+                Ok(pb::message("eve.space.location.api.GetTagsResponse")
+                    .set_with("locations", |mut locs| {
+                        for req_loc in repeated(msg, 1) {
+                            if let Some(loc_bytes) = resolve_location_from_req(&sde_gt, req_loc) {
+                                let tags = state
+                                    .location_tags
+                                    .get(&hex_encode(&loc_bytes))
+                                    .cloned()
+                                    .unwrap_or_default();
+                                locs = locs.add_with("tagged_locations", |mut tl| {
+                                    tl = tl.set_raw_message("location", &loc_bytes);
+                                    for t in tags {
+                                        tl = tl.add_with("tags", |tb| tb.set("name", t));
+                                    }
+                                    tl
+                                });
+                            }
                         }
-                        encode_bytes_field(1, &tl, &mut locs_msg);
-                    }
-                }
-                let mut out = Vec::new();
-                encode_bytes_field(1, &locs_msg, &mut out);
-                Ok(any("eve.space.location.api.GetTagsResponse", out))
+                        locs
+                    })
+                    .must_to_any())
             }),
         );
     }
@@ -631,22 +608,21 @@ pub fn register_handlers(
             "eve.space.tag.api.GetLocationsRequest",
             Arc::new(move |_ctx, _any, msg| {
                 let state = load(&db_gl);
-                let mut out = Vec::new();
+                let mut out = pb::message("eve.space.tag.api.GetLocationsResponse");
                 for ti in repeated(msg, 1) {
                     if let Some(DynamicValue::String(tag_name)) = ti.get(1) {
-                        let mut res = Vec::new();
-                        let mut tb = Vec::new();
-                        encode_string_field(1, tag_name, &mut tb);
-                        encode_bytes_field(1, &tb, &mut res);
-                        for (lh, tlist) in &state.location_tags {
-                            if tlist.contains(tag_name) {
-                                encode_bytes_field(2, &hex_decode(lh), &mut res);
+                        out = out.add_with("results", |mut res| {
+                            res = res.set("tag.name", tag_name);
+                            for (lh, tlist) in &state.location_tags {
+                                if tlist.contains(tag_name) {
+                                    res = res.add("locations", pb::raw_message(hex_decode(lh)));
+                                }
                             }
-                        }
-                        encode_bytes_field(1, &res, &mut out);
+                            res
+                        });
                     }
                 }
-                Ok(any("eve.space.tag.api.GetLocationsResponse", out))
+                Ok(out.must_to_any())
             }),
         );
     }
@@ -664,13 +640,13 @@ pub fn register_handlers(
                         _ => None,
                     })
                     .unwrap_or_default();
-                let mut out = Vec::new();
+                let mut out = pb::message("eve.space.tag.api.QueryResponse");
                 for (lh, tlist) in &state.location_tags {
                     if tlist.contains(&tag_name) {
-                        encode_bytes_field(1, &hex_decode(lh), &mut out);
+                        out = out.add("locations", pb::raw_message(hex_decode(lh)));
                     }
                 }
-                Ok(any("eve.space.tag.api.QueryResponse", out))
+                Ok(out.must_to_any())
             }),
         );
     }

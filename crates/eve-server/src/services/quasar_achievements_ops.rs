@@ -8,15 +8,21 @@ use crate::quasar_gateway::{
     STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_PRECONDITION_FAILED, STATUS_SERVICE_UNAVAILABLE,
 };
 use super::quasar_achievements::{
-    emit_achievement_notices, encode_uuid_ident, extract_u32_ident, extract_u64_val,
-    AchievementManager, RewardClaimFilter,
+    emit_achievement_notices, extract_u32_ident, extract_u64_val, AchievementManager,
+    RewardClaimFilter,
 };
 use eve_db::WorldRepository;
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, sha256_hex, DynamicValue,
-    GoogleAny, GoogleEmpty, GoogleTimestamp, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
+    sha256_hex, DynamicValue, GoogleAny, GoogleEmpty, GoogleTimestamp, QuasarMessage,
 };
 use std::sync::Arc;
+
+fn id_to_uuid(id: u32) -> [u8; 16] {
+    let mut uuid = [0u8; 16];
+    uuid[12..16].copy_from_slice(&id.to_be_bytes());
+    uuid
+}
 
 pub fn publish_achievement_milestone_reached_notice(
     gateway: &crate::quasar_gateway::PublicGatewayRouter,
@@ -24,20 +30,15 @@ pub fn publish_achievement_milestone_reached_notice(
     aid: u32,
     milestone_id: u32,
 ) {
-    let mut ms_bytes = Vec::new();
-    encode_uuid_ident(1, aid, &mut ms_bytes);
-    encode_uuid_ident(2, milestone_id, &mut ms_bytes);
+    let notice = pb::message("eve_public.achievement.milestone.api.ReachedNotice")
+        .set("achievement.uuid", id_to_uuid(aid))
+        .set("milestone.uuid", id_to_uuid(milestone_id))
+        .must_to_any();
     gateway
         .pending_notices
         .write()
         .unwrap_or_else(|e| e.into_inner())
-        .push((
-            crate::quasar_gateway::NoticeScope::Character(cid),
-            GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.milestone.api.ReachedNotice"),
-                value: ms_bytes,
-            },
-        ));
+        .push((crate::quasar_gateway::NoticeScope::Character(cid), notice));
 }
 
 pub fn publish_achievement_version_check_notice(
@@ -46,24 +47,17 @@ pub fn publish_achievement_version_check_notice(
     minor: u64,
     patch: u64,
 ) {
-    let mut ver_data = Vec::new();
-    let mut spec_data = Vec::new();
-    encode_varint_field(1, major, &mut spec_data);
-    encode_varint_field(2, minor, &mut spec_data);
-    encode_varint_field(3, patch, &mut spec_data);
-    encode_bytes_field(1, &spec_data, &mut ver_data);
+    let notice = pb::message("eve_public.achievement.definition.version.api.CheckVersionNotice")
+        .set("version.major", major as u32)
+        .set("version.minor", minor as u32)
+        .set("version.patch", patch as u32)
+        .must_to_any();
 
     gateway
         .pending_notices
         .write()
         .unwrap_or_else(|e| e.into_inner())
-        .push((
-            crate::quasar_gateway::NoticeScope::Broadcast,
-            GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.definition.version.api.CheckVersionNotice"),
-                value: ver_data,
-            },
-        ));
+        .push((crate::quasar_gateway::NoticeScope::Broadcast, notice));
 }
 
 pub fn publish_achievement_category_progress_notice(
@@ -72,20 +66,15 @@ pub fn publish_achievement_category_progress_notice(
     category_id: u32,
     score: u32,
 ) {
-    let mut cat_prog = Vec::new();
-    encode_uuid_ident(1, category_id, &mut cat_prog);
-    encode_varint_field(2, score as u64, &mut cat_prog);
+    let notice = pb::message("eve_public.achievement.category.api.ProgressedNotice")
+        .set("category.uuid", id_to_uuid(category_id))
+        .set("score", score)
+        .must_to_any();
     gateway
         .pending_notices
         .write()
         .unwrap_or_else(|e| e.into_inner())
-        .push((
-            crate::quasar_gateway::NoticeScope::Character(cid),
-            GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.category.api.ProgressedNotice"),
-                value: cat_prog,
-            },
-        ));
+        .push((crate::quasar_gateway::NoticeScope::Character(cid), notice));
 }
 
 pub fn publish_achievement_category_milestone_notice(
@@ -94,20 +83,15 @@ pub fn publish_achievement_category_milestone_notice(
     category_id: u32,
     milestone_id: u32,
 ) {
-    let mut ms_data = Vec::new();
-    encode_uuid_ident(1, category_id, &mut ms_data);
-    encode_uuid_ident(2, milestone_id, &mut ms_data);
+    let notice = pb::message("eve_public.achievement.category.milestone.api.ReachedNotice")
+        .set("category.uuid", id_to_uuid(category_id))
+        .set("milestone.uuid", id_to_uuid(milestone_id))
+        .must_to_any();
     gateway
         .pending_notices
         .write()
         .unwrap_or_else(|e| e.into_inner())
-        .push((
-            crate::quasar_gateway::NoticeScope::Character(cid),
-            GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.category.milestone.api.ReachedNotice"),
-                value: ms_data,
-            },
-        ));
+        .push((crate::quasar_gateway::NoticeScope::Character(cid), notice));
 }
 
 /// Registers all admin handlers for achievement progress, completion, reset, and version control.
@@ -250,15 +234,13 @@ pub fn register_achievement_admin_handlers(
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing category identifier".into()))?;
             mgr_cat_reset.reset_category(cid, cat_id);
 
-            let mut cat_prog = Vec::new();
-            encode_uuid_ident(1, cat_id, &mut cat_prog);
-            encode_varint_field(2, 0, &mut cat_prog);
+            let cat_prog = pb::message("eve_public.achievement.category.api.ProgressedNotice")
+                .set("category.uuid", id_to_uuid(cat_id))
+                .set("score", 0u32)
+                .must_to_any();
             super::quasar_social_chat::ctx_queue_notice(
                 crate::quasar_gateway::NoticeScope::Character(cid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.category.api.ProgressedNotice"),
-                    value: cat_prog,
-                },
+                cat_prog,
                 ctx.now_unix(),
             );
 
@@ -271,19 +253,16 @@ pub fn register_achievement_admin_handlers(
         "eve.achievement.definition.version.api.admin.SetDefaultVersionRequest",
         Arc::new(move |ctx, _any, _dyn| {
             require_admin_role(ctx)?;
-            let mut ver_data = Vec::new();
-            let mut spec_data = Vec::new();
-            encode_varint_field(1, 24, &mut spec_data);
-            encode_varint_field(2, 1, &mut spec_data);
-            encode_varint_field(3, 0, &mut spec_data);
-            encode_bytes_field(1, &spec_data, &mut ver_data);
+            let ver_notice =
+                pb::message("eve_public.achievement.definition.version.api.CheckVersionNotice")
+                    .set("version.major", 24u32)
+                    .set("version.minor", 1u32)
+                    .set("version.patch", 0u32)
+                    .must_to_any();
 
             super::quasar_social_chat::ctx_queue_notice(
                 crate::quasar_gateway::NoticeScope::Broadcast,
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.definition.version.api.CheckVersionNotice"),
-                    value: ver_data,
-                },
+                ver_notice,
                 ctx.now_unix(),
             );
             Ok(GoogleEmpty.to_any())
@@ -322,36 +301,27 @@ pub fn register_achievement_handlers(
                 .find(|x| x.def.id == aid)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Achievement not found".into()))?;
 
-            let mut out = Vec::new();
-            if a.completed {
-                let ts_proto = GoogleTimestamp {
-                    seconds: a.completed_date.unwrap_or(1_700_000_000) as i64,
-                    nanos: 0,
-                };
-                encode_bytes_field(1, &ts_proto.encode_proto(), &mut out);
-            } else {
-                encode_varint_field(2, 1, &mut out); // not_completed = true (mutually exclusive oneof with completed_date)
-            }
-            encode_varint_field(3, a.progress, &mut out); // progress_value
-
             let ts_proto = GoogleTimestamp {
                 seconds: a.completed_date.unwrap_or(1_700_000_000) as i64,
                 nanos: 0,
             };
-            let ts_bytes = ts_proto.encode_proto();
             let pts_per_ms = a.def.score / (a.def.milestone_targets.len().max(1) as u32);
+            let mut msg = pb::message("eve_public.achievement.api.GetResponse");
+            if a.completed {
+                msg = msg.set("completed_date", ts_proto.clone());
+            } else {
+                msg = msg.set("not_completed", true);
+            }
+            msg = msg.set("progress_value", a.progress);
             for m_id in &a.reached_milestones {
-                let mut rm = Vec::new();
-                encode_uuid_ident(1, *m_id, &mut rm);
-                encode_bytes_field(2, &ts_bytes, &mut rm);
-                encode_varint_field(3, pts_per_ms as u64, &mut rm);
-                encode_bytes_field(5, &rm, &mut out);
+                msg = msg.add_with("reached_milestones", |rm| {
+                    rm.set("milestone.uuid", id_to_uuid(*m_id))
+                        .set("reached_date", ts_proto.clone())
+                        .set("category_points_awarded", pts_per_ms)
+                });
             }
 
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.api.GetResponse"),
-                value: out,
-            })
+            Ok(msg.must_to_any())
         }),
     );
 
@@ -369,14 +339,9 @@ pub fn register_achievement_handlers(
                 .filter(|&id| id > 0)
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing category identifier".into()))?;
             let score = mgr.category_score(cid, cat_id);
-            let mut out = Vec::new();
-            encode_varint_field(1, score as u64, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.category.api.GetResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve_public.achievement.category.api.GetResponse")
+                .set("score", score)
+                .must_to_any())
         }),
     );
 
@@ -397,14 +362,9 @@ pub fn register_achievement_handlers(
             };
 
             let score = mgr_sc.total_character_score(target_cid);
-            let mut out = Vec::new();
-            encode_varint_field(1, score as u64, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.showcase.api.GetCharacterScoreResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve_public.achievement.showcase.api.GetCharacterScoreResponse")
+                .set("score", score)
+                .must_to_any())
         }),
     );
 
@@ -417,7 +377,7 @@ pub fn register_achievement_handlers(
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
             let achievements = mgr.get_or_init_achievements(cid);
-            let mut out = Vec::new();
+            let mut msg = pb::message("eve_public.achievement.reward.api.GetUnclaimedResponse");
             for a in &achievements {
                 if a.unclaimed_reward_count > 0 {
                     let ms_ids: Vec<u32> = if !a.reached_milestones.is_empty() {
@@ -426,27 +386,16 @@ pub fn register_achievement_handlers(
                         (1..=a.unclaimed_reward_count).collect()
                     };
                     for m_id in ms_ids {
-                        let mut src = Vec::new();
-                        encode_uuid_ident(1, a.def.id, &mut src);
-                        encode_uuid_ident(2, m_id, &mut src);
-
                         let rew_uuid = super::quasar_achievements::achievement_reward_uuid(a.def.id, m_id);
-                        let mut rew_ident = Vec::new();
-                        encode_bytes_field(1, &rew_uuid, &mut rew_ident);
-
-                        let mut rew = Vec::new();
-                        encode_bytes_field(1, &src, &mut rew);
-                        encode_bytes_field(3, &rew_ident, &mut rew);
-                        encode_bytes_field(1, &rew, &mut out);
+                        msg = msg.add_with("rewards", |rew| {
+                            rew.set("achievement_source.achievement.uuid", id_to_uuid(a.def.id))
+                                .set("achievement_source.milestone.uuid", id_to_uuid(m_id))
+                                .add_with("unclaimed_rewards", |ident| ident.set("uuid", rew_uuid))
+                        });
                     }
                 }
             }
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.reward.api.GetUnclaimedResponse"
-                ),
-                value: out,
-            })
+            Ok(msg.must_to_any())
         }),
     );
 
@@ -548,54 +497,59 @@ pub fn register_achievement_handlers(
                 .unwrap_or_else(|| "http://127.0.0.1:26004/cdn".to_string());
             let url = format!("{cdn_base}/achievements/v24.1.{count}/{hash}.json");
 
-            let mut checkpoint = Vec::new();
-            encode_string_field(1, &url, &mut checkpoint);
-
-            let spec = if let Some(DynamicValue::Message(client_ver)) = dyn_msg.get(1) {
-                let mut s = Vec::new();
-                for fno in 1..=3 {
-                    if let Some(v) = client_ver.get(fno).and_then(extract_u64_val) {
-                        encode_varint_field(fno, v, &mut s);
-                    }
-                }
-                for fno in 4..=5 {
-                    match client_ver.get(fno) {
-                        Some(DynamicValue::String(tag)) => encode_string_field(fno, tag, &mut s),
-                        Some(DynamicValue::Repeated(tags)) => {
-                            for t in tags {
-                                if let DynamicValue::String(tag) = t {
-                                    encode_string_field(fno, tag, &mut s);
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                s
-            } else {
-                let mut s = Vec::new();
-                encode_varint_field(1, 24, &mut s);
-                encode_varint_field(2, 1, &mut s);
-                encode_varint_field(3, count as u64, &mut s);
-                s
-            };
-            encode_bytes_field(2, &spec, &mut checkpoint);
-
             let crc_val =
                 crate::router::cache_notifications::crc32_ieee(&mgr_cdn.sde_definitions_json) as u32;
-            let mut crc_msg = Vec::new();
-            encode_varint_field(1, crc_val as u64, &mut crc_msg);
-            encode_bytes_field(3, &crc_msg, &mut checkpoint);
+            let msg = pb::message("eve_public.achievement.definition.api.cdn.GetLatestResponse")
+                .set("checkpoint.url", &url)
+                .set("checkpoint.crc.crc", crc_val)
+                .set_with("checkpoint.version", |ver| {
+                    if let Some(DynamicValue::Message(client_ver)) = dyn_msg.get(1) {
+                        let mut v = ver
+                            .set_opt(
+                                "major",
+                                client_ver
+                                    .get(1)
+                                    .and_then(extract_u64_val)
+                                    .and_then(|n| u32::try_from(n).ok()),
+                            )
+                            .set_opt(
+                                "minor",
+                                client_ver
+                                    .get(2)
+                                    .and_then(extract_u64_val)
+                                    .and_then(|n| u32::try_from(n).ok()),
+                            )
+                            .set_opt(
+                                "patch",
+                                client_ver
+                                    .get(3)
+                                    .and_then(extract_u64_val)
+                                    .and_then(|n| u32::try_from(n).ok()),
+                            );
+                        for (fno, field_name) in [(4, "prerelease_tags"), (5, "build_tags")] {
+                            match client_ver.get(fno) {
+                                Some(DynamicValue::String(tag)) => {
+                                    v = v.add(field_name, tag.as_str());
+                                }
+                                Some(DynamicValue::Repeated(tags)) => {
+                                    for t in tags {
+                                        if let DynamicValue::String(tag) = t {
+                                            v = v.add(field_name, tag.as_str());
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        v
+                    } else {
+                        ver.set("major", 24u32)
+                            .set("minor", 1u32)
+                            .set("patch", count as u32)
+                    }
+                });
 
-            let mut out = Vec::new();
-            encode_bytes_field(1, &checkpoint, &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.definition.api.cdn.GetLatestResponse"
-                ),
-                value: out,
-            })
+            Ok(msg.must_to_any())
         }),
     );
 
@@ -611,12 +565,10 @@ pub fn register_achievement_handlers(
                 .effective_character_id()
                 .map(|cid| mgr.total_character_score(cid))
                 .unwrap_or(0);
-            let mut out = Vec::new();
-            encode_varint_field(1, score as u64, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.achievement.api.GetResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve.achievement.api.GetResponse")
+                .set("not_completed", true)
+                .set("progress_value", score as u64)
+                .must_to_any())
         }),
     );
 
@@ -634,12 +586,9 @@ pub fn register_achievement_handlers(
                 .effective_character_id()
                 .map(|cid| mgr.category_score(cid, cat_id))
                 .unwrap_or(0);
-            let mut out = Vec::new();
-            encode_varint_field(1, score as u64, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.achievement.category.api.GetResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve.achievement.category.api.GetResponse")
+                .set("score", score)
+                .must_to_any())
         }),
     );
 
@@ -650,14 +599,9 @@ pub fn register_achievement_handlers(
         Arc::new(move |_ctx, _any, _dyn| {
             let json_bytes = serde_json::to_vec(&mgr_cdn_eve.definitions).unwrap_or_default();
             let hash = sha256_hex(&json_bytes);
-            let mut out = Vec::new();
-            encode_string_field(1, &hash, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.achievement.definition.api.GetLatestResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve.achievement.definition.api.GetLatestResponse")
+                .set("checkpoint.url", &hash)
+                .must_to_any())
         }),
     );
 
@@ -665,14 +609,14 @@ pub fn register_achievement_handlers(
     router.register_handler(
         "eve.achievement.definition.version.api.ListRequest",
         Arc::new(move |_ctx, _any, _dyn| {
-            let mut out = Vec::new();
-            encode_string_field(1, "v24.01.01-air-achievements", &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.achievement.definition.version.api.ListResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve.achievement.definition.version.api.ListResponse")
+                .add_with("versions", |v| {
+                    v.set("major", 24u32)
+                        .set("minor", 1u32)
+                        .set("patch", 1u32)
+                        .add("build_tags", "air-achievements")
+                })
+                .must_to_any())
         }),
     );
 
@@ -680,14 +624,14 @@ pub fn register_achievement_handlers(
     router.register_handler(
         "eve.achievement.definition.version.api.GetDefaultVersionRequest",
         Arc::new(move |_ctx, _any, _dyn| {
-            let mut out = Vec::new();
-            encode_string_field(1, "v24.01.01-air-achievements", &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.achievement.definition.version.api.GetDefaultVersionResponse"
-                ),
-                value: out,
-            })
+            Ok(
+                pb::message("eve.achievement.definition.version.api.GetDefaultVersionResponse")
+                    .set("version.major", 24u32)
+                    .set("version.minor", 1u32)
+                    .set("version.patch", 1u32)
+                    .add("version.build_tags", "air-achievements")
+                    .must_to_any(),
+            )
         }),
     );
 
@@ -700,7 +644,7 @@ pub fn register_achievement_handlers(
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
             let achievements = mgr.get_or_init_achievements(cid);
-            let mut out = Vec::new();
+            let mut msg = pb::message("eve.achievement.reward.api.GetUnclaimedResponse");
             for a in &achievements {
                 if a.unclaimed_reward_count > 0 {
                     let ms_ids: Vec<u32> = if !a.reached_milestones.is_empty() {
@@ -709,24 +653,17 @@ pub fn register_achievement_handlers(
                         (1..=a.unclaimed_reward_count).collect()
                     };
                     for m_id in ms_ids {
-                        let mut src = Vec::new();
-                        encode_uuid_ident(1, a.def.id, &mut src);
-                        encode_uuid_ident(2, m_id, &mut src);
-                        let mut rew_ident = Vec::new();
-                        encode_bytes_field(1, &super::quasar_achievements::achievement_reward_uuid(a.def.id, m_id), &mut rew_ident);
-                        let mut rew = Vec::new();
-                        encode_bytes_field(1, &src, &mut rew);
-                        encode_bytes_field(3, &rew_ident, &mut rew);
-                        encode_bytes_field(1, &rew, &mut out);
+                        let rew_uuid =
+                            super::quasar_achievements::achievement_reward_uuid(a.def.id, m_id);
+                        msg = msg.add_with("rewards", |rew| {
+                            rew.set("achievement_source.achievement.uuid", id_to_uuid(a.def.id))
+                                .set("achievement_source.milestone.uuid", id_to_uuid(m_id))
+                                .add_with("unclaimed_rewards", |ident| ident.set("uuid", rew_uuid))
+                        });
                     }
                 }
             }
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.achievement.reward.api.GetUnclaimedResponse"
-                ),
-                value: out,
-            })
+            Ok(msg.must_to_any())
         }),
     );
 
@@ -746,14 +683,9 @@ pub fn register_achievement_handlers(
                     .ok_or_else(|| (STATUS_BAD_REQUEST, "Invalid character identifier".into()))?,
             };
             let score = mgr.total_character_score(target_cid);
-            let mut out = Vec::new();
-            encode_varint_field(1, score as u64, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.achievement.showcase.api.GetCharacterScoreResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve.achievement.showcase.api.GetCharacterScoreResponse")
+                .set("score", score)
+                .must_to_any())
         }),
     );
 }

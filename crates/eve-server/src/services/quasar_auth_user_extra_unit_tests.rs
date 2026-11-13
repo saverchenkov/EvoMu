@@ -10,8 +10,8 @@ use crate::services::quasar_auth_user::{
 };
 use eve_db::{AccountRecord, ContractRecord, IndustryJobRecord, IskCents, MarketOrderRecord};
 use eve_proto::quasar::{
-    encode_string_field, encode_varint_field, AuthoritativeContext, DynamicQuasarMessage,
-    DynamicValue, GoogleAny, WireMessage,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, WireField, WireMessage,
+    WireValue,
 };
 use std::sync::Arc;
 
@@ -196,9 +196,19 @@ fn federated_steam_epic_twitch_and_legal_agreement_branches() {
     );
 
     // Link steam_u1 to user 10 via wire-encoded bytes
-    let mut link_wire = Vec::new();
-    encode_string_field(1, "steam_u1", &mut link_wire);
-    encode_varint_field(2, 10, &mut link_wire);
+    let link_wire = WireMessage {
+        fields: vec![
+            WireField {
+                field_number: 1,
+                value: WireValue::LengthDelimited(b"steam_u1".to_vec()),
+            },
+            WireField {
+                field_number: 2,
+                value: WireValue::Varint(10),
+            },
+        ],
+    }
+    .encode();
     let link_any = GoogleAny { type_url: String::new(), value: link_wire };
     assert!(handlers["eve.vendors.steam.user.api.admin.LinkRequest"](
         &admin,
@@ -285,7 +295,9 @@ fn federated_steam_epic_twitch_and_legal_agreement_branches() {
     )
     .unwrap();
     let wm = WireMessage::decode(&get_empty.value).unwrap();
-    assert_eq!(wm.fields[0].value.as_varint(), Some(10));
+    let ident = WireMessage::decode(wm.fields[0].value.as_bytes().unwrap()).unwrap();
+    let uuid = ident.fields[0].value.as_bytes().unwrap();
+    assert_eq!(&uuid[8..16], &10u64.to_be_bytes());
 
     let mut drop_msg = DynamicQuasarMessage::new("Drop");
     drop_msg.fields.insert(1, DynamicValue::String("tw_u1".into()));
