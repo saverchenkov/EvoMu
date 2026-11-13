@@ -58,6 +58,56 @@ def last_commit(root, tid):
     return out or "—"
 
 
+def feature_area_lines(areas, prow):
+    """areas: [{"name": str, "domains": [str]}]; prow: parity.json["rows"] (id -> {"status": ...}).
+
+    A feature is counted as done only when its row status is DONE. Rows triaged NA are left out of the
+    denominator. Everything else (FLAGGED_FAKE, TESTED_NO_IMPL, open) is listed by id.
+    """
+    by_domain = {}
+    for rid, row in prow.items():
+        if rid.startswith("feat:"):
+            domain = rid[5:].split(".", 1)[0]
+            by_domain.setdefault(domain, []).append((rid, (row or {}).get("status", "MISSING")))
+    listed = set()
+    groups = []
+    for area in areas:
+        rows = []
+        for domain in area["domains"]:
+            rows += by_domain.get(domain, [])
+            listed.add(domain)
+        groups.append((area["name"], rows))
+    rest = [r for d in sorted(set(by_domain) - listed) for r in by_domain[d]]
+    if rest:
+        groups.append(("Unassigned (add the domain to docs/parity/feature_areas.json)", rest))
+
+    out = ["", "## Feature progress by area", "",
+           "Game features (`feat:` rows) grouped as in `README.md`. **Done** counts rows whose tagged test passes; "
+           "rows triaged as not applicable are left out of the total.", "",
+           "| Area | Done | Total | Percent | Not applicable |", "|---|---|---|---|---|"]
+    all_done = all_total = all_na = 0
+    open_lists = []
+    for name, rows in groups:
+        na = sum(1 for _, st in rows if st == "NA")
+        done = sum(1 for _, st in rows if st == "DONE")
+        total = len(rows) - na
+        pct = (100.0 * done / total) if total else 100.0
+        out.append("| %s | %d | %d | %.0f%% | %d |" % (name, done, total, pct, na))
+        all_done += done
+        all_total += total
+        all_na += na
+        not_done = sorted("%s (%s)" % (rid, st) for rid, st in rows if st not in ("DONE", "NA"))
+        if not_done:
+            open_lists.append((name, not_done))
+    pct = (100.0 * all_done / all_total) if all_total else 100.0
+    out.append("| **All areas** | **%d** | **%d** | **%.0f%%** | %d |" % (all_done, all_total, pct, all_na))
+    if open_lists:
+        out += ["", "Features not yet done, by area:"]
+        for name, ids in open_lists:
+            out += ["", "- **%s:** %s" % (name, ", ".join("`%s`" % i for i in ids))]
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--parity", required=True)
@@ -95,6 +145,9 @@ def main():
          "| Category | Total | DONE | NA | Open |", "|---|---|---|---|---|"]
     for k, c in sorted(summ["categories"].items()):
         L.append("| %s | %d | %d | %d | %d |" % (k, c["total"], c["DONE"], c["NA"], c["open"]))
+    areas_path = os.path.join(root, "docs", "parity", "feature_areas.json")
+    if os.path.exists(areas_path):
+        L += feature_area_lines(json.load(open(areas_path, encoding="utf-8"))["areas"], prow)
     L += ["", "Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = mapped `feat:` rows "
           "closed/total; **Assessment** = the agent's own judgement from `docs/parity/task_notes.json` (DONE is "
           "accepted only when the ledger row is DONE)."]
