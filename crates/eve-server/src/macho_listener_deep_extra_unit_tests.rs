@@ -1228,7 +1228,7 @@ fn pyrep_contains_ascii(rep: &PyRep, needle: &str) -> bool {
     match rep {
         PyRep::String(s) => s.contains(needle),
         PyRep::Bytes(b) => String::from_utf8_lossy(b).contains(needle),
-        PyRep::Tuple(xs) | PyRep::List(xs) | PyRep::PySet(xs) | PyRep::PyOrderedReadOnlyList(xs) => {
+        PyRep::Tuple(xs) | PyRep::List(xs) | PyRep::PySet(xs) => {
             xs.iter().any(|x| pyrep_contains_ascii(x, needle))
         }
         PyRep::Dict(entries) => entries
@@ -1237,12 +1237,16 @@ fn pyrep_contains_ascii(rep: &PyRep, needle: &str) -> bool {
         PyRep::KeyVal(map) => map
             .iter()
             .any(|(k, v)| k.contains(needle) || pyrep_contains_ascii(v, needle)),
-        PyRep::Object { name, args } => {
-            name.contains(needle) || pyrep_contains_ascii(args, needle)
+        PyRep::Object { type_name, args } => {
+            type_name.contains(needle) || pyrep_contains_ascii(args, needle)
         }
-        PyRep::PackedRow { fields, .. } => fields
-            .iter()
-            .any(|(k, v)| k.contains(needle) || pyrep_contains_ascii(v, needle)),
+        PyRep::ObjectEx { header, list, dict, .. } => {
+            pyrep_contains_ascii(header, needle)
+                || list.iter().any(|x| pyrep_contains_ascii(x, needle))
+                || dict
+                    .iter()
+                    .any(|(k, v)| pyrep_contains_ascii(k, needle) || pyrep_contains_ascii(v, needle))
+        }
         PyRep::SubStruct(inner) => pyrep_contains_ascii(inner, needle),
         _ => false,
     }
@@ -1250,7 +1254,7 @@ fn pyrep_contains_ascii(rep: &PyRep, needle: &str) -> bool {
 
 #[tokio::test]
 async fn pod_ejection_handoff_in_space_emits_incremental_destiny_without_set_state_970() {
-    let ctx = Arc::new(ServerContext::with_demo_seed());
+    let ctx = Arc::new(ServerContext::new());
     let clock = Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000));
     ctx.set_clock(Arc::clone(&clock) as Arc<dyn ServerClock>);
     let addr = spawn_listener(Arc::clone(&ctx)).await;
@@ -1341,14 +1345,17 @@ async fn pod_ejection_handoff_in_space_emits_incremental_destiny_without_set_sta
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             capsule_id,
-            eve_db::InventoryItemRecord::new(
-                capsule_id,
-                670,
-                char_id,
-                i64::from(sys_id),
-                eve_db::InventoryFlag::Cargo,
-                1,
-            ),
+            eve_db::InventoryItemRecord {
+                item_id: capsule_id,
+                type_id: 670,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: eve_db::InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
         );
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.active_ship_id = capsule_id;
@@ -1362,7 +1369,7 @@ async fn pod_ejection_handoff_in_space_emits_incremental_destiny_without_set_sta
     let mut saw_add_balls2 = false;
     let mut saw_remove_ball = false;
     for idx in 0..8 {
-        let Ok(Ok(raw)) = tokio::time::timeout(std::time::Duration::from_millis(500), read_pkt(&mut s)).await else {
+        let Ok(Some(raw)) = tokio::time::timeout(std::time::Duration::from_millis(500), read_pkt(&mut s)).await else {
             break;
         };
         let pkt = MachoPacket::from_pyrep(&raw).unwrap();

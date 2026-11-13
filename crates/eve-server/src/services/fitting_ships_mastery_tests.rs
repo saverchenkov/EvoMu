@@ -791,7 +791,10 @@ async fn in_space_eject_and_ship_to_ship_board_lifecycle_and_guards() {
 
 #[tokio::test]
 async fn ship_board_uses_surface_distance_for_large_titan_hull() {
-    let mut ctx = build_ctx();
+    let mut ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
     let sde_mut = Arc::make_mut(&mut ctx.sde);
     let titan_tid = 11_567_u32;
     let mut titan_t = sde_mut.types.get(&587).expect("seed type").clone();

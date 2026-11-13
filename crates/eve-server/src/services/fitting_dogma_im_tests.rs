@@ -1418,12 +1418,34 @@ async fn item_get_info_active_module_uses_attr51_speed_and_repeat_1000_819() {
         ch.station_id = None;
         ch.active_ship_id = ship_id;
         snap.characters.insert(char_id, ch);
-        let mut ship = InventoryItemRecord::new(ship_id, 587, char_id, sys_id as i64, InventoryFlag::Cargo, 1);
-        ship.singleton = true;
-        snap.items.insert(ship_id, ship);
-        let mut module = InventoryItemRecord::new(mod_id, sb_type, char_id, ship_id, InventoryFlag::MedSlot0, 1);
-        module.singleton = true;
-        snap.items.insert(mod_id, module);
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mod_id,
+            InventoryItemRecord {
+                item_id: mod_id,
+                type_id: sb_type,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::MedSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
         snap.module_active_states.insert(mod_id);
     });
 

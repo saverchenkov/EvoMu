@@ -834,11 +834,16 @@ fn tick_capacitor_deltas_emit_attr_18_and_repair_unhydrated_cap() {
         effective_max_capacitor: Some(400.0),
         ..Default::default()
     };
-    crate::system_actor::cycles_tackle::add_module_cycle_in_ballpark(
+    let zero_i32_map: HashMap<BallId, i32> = HashMap::new();
+    crate::system_actor::cycles_tackle::handle_add_module_cycle(
         &mut bp,
         &mut active_cycles,
-        cycle,
+        &zero_i32_map,
+        &zero_i32_map,
+        &None,
         &Some(db.clone()),
+        None,
+        cycle,
     )
     .expect("repaired cap 400 >= 100 GJ");
     assert_eq!(bp.combat_states[&ship_id].max_capacitor, 400.0);

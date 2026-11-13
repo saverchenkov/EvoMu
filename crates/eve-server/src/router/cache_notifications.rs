@@ -1490,7 +1490,7 @@ impl ServerContext {
                 environment,
                 PyRep::Integer(now),
                 PyRep::Real(duration_ms),
-                PyRep::Integer(repeat),
+                PyRep::Integer(i64::from(repeat)),
                 PyRep::None,
             ],
         );
@@ -1608,7 +1608,7 @@ impl ServerContext {
             PyRep::String("OnModuleAttributeChange".into()),
             PyRep::Integer(char_id),
             PyRep::Integer(ship_id),
-            PyRep::Integer(i64::from(eve_sde::attr_ids::CHARGE)),
+            PyRep::Integer(18), // dogma attribute 18 (`charge` / current capacitor GJ)
             PyRep::Integer(now_filetime),
             PyRep::Real(new_cap),
             PyRep::Real(old_cap),

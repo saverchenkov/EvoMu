@@ -1115,9 +1115,20 @@ async fn cehe_duration_fallbacks_crystal_volatility_and_survey_cycle_completion(
             (mod_ab, ab_type, eve_db::InventoryFlag::MedSlot0),
             (mod_web, web_type, eve_db::InventoryFlag::MedSlot1),
         ] {
-            let mut it = eve_db::InventoryItemRecord::new(mid, tid, char_id, ship_id, flag, 1);
-            it.singleton = true;
-            snap.items.insert(mid, it);
+            snap.items.insert(
+                mid,
+                eve_db::InventoryItemRecord {
+                    item_id: mid,
+                    type_id: tid,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
         }
     });
     assert!(
