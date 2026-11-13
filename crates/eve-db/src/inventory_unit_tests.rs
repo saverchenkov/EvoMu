@@ -1660,6 +1660,63 @@ fn structure_acl_corp_roles_and_corp_take_access() {
     assert!(snap.validate_corp_take_access(outsider_char, owner_corp, deliv_nested).is_ok());
     assert!(snap.validate_corp_take_access(outsider_char, owner_corp, non_corp_flag_item).is_err());
 
+    // CapsuleerDeliveries (187) & nested CapsuleerDeliveries checks
+    let cap_deliv_box = 600_007_i64;
+    let cap_deliv_nested = 600_008_i64;
+    snap.items.insert(
+        cap_deliv_box,
+        InventoryItemRecord {
+            item_id: cap_deliv_box,
+            owner_id: owner_corp,
+            location_id: base_st,
+            flag: InventoryFlag::CapsuleerDeliveries,
+            quantity: 1,
+            ..InventoryItemRecord::default()
+        },
+    );
+    snap.items.insert(
+        cap_deliv_nested,
+        InventoryItemRecord {
+            item_id: cap_deliv_nested,
+            owner_id: owner_corp,
+            location_id: cap_deliv_box,
+            flag: InventoryFlag::Cargo,
+            quantity: 1,
+            ..InventoryItemRecord::default()
+        },
+    );
+    snap.corporations
+        .get_mut(&owner_corp)
+        .unwrap()
+        .member_roles
+        .insert(outsider_char, 0);
+    assert!(snap
+        .validate_corp_take_access(outsider_char, owner_corp, cap_deliv_box)
+        .is_err());
+    snap.corporations
+        .get_mut(&owner_corp)
+        .unwrap()
+        .member_roles
+        .insert(outsider_char, corp_roles::ROLE_DELIVERIES_HANGAR_TAKE);
+    assert!(snap
+        .validate_corp_take_access(outsider_char, owner_corp, cap_deliv_box)
+        .is_ok());
+    assert!(snap
+        .validate_corp_take_access(outsider_char, owner_corp, cap_deliv_nested)
+        .is_err());
+    snap.corporations
+        .get_mut(&owner_corp)
+        .unwrap()
+        .member_roles
+        .insert(
+            outsider_char,
+            corp_roles::ROLE_DELIVERIES_HANGAR_TAKE
+                | corp_roles::ROLE_DELIVERIES_HANGAR_CONTAINER_TAKE,
+        );
+    assert!(snap
+        .validate_corp_take_access(outsider_char, owner_corp, cap_deliv_nested)
+        .is_ok());
+
     // Director bypasses flag check; structure ACL denial still blocks CEO/Director
     assert!(snap.validate_corp_take_access(ceo_id, owner_corp, non_corp_flag_item).is_ok());
     snap.corporations
