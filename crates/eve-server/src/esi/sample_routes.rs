@@ -204,6 +204,7 @@ pub(crate) fn asset_location_flag_str(flag: InventoryFlag) -> Option<&'static st
         InventoryFlag::FighterBay => Some("FighterBay"),
         InventoryFlag::Deliveries => Some("Deliveries"),
         InventoryFlag::CorpDeliveries => Some("CorpDeliveries"),
+        InventoryFlag::CapsuleerDeliveries => Some("CapsuleerDeliveries"),
         InventoryFlag::StructureDeedBay => Some("QuantumCoreRoom"),
         InventoryFlag::SpecializedFuelBay => Some("SpecializedFuelBay"),
         InventoryFlag::StructureFuel => Some("StructureFuel"),

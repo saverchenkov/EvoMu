@@ -1027,6 +1027,7 @@ pub async fn handle_npcs_drones(
                 if d.is_sentry {
                     let _ = sys_handle.set_movement_mode(d.ball_id, MovementMode::Stop).await;
                 } else {
+                    let _ = sys_handle.set_speed_fraction(d.ball_id, 1.0).await;
                     let _ = sys_handle.set_movement_mode(d.ball_id, MovementMode::Orbit { target_id: ship_id, range: 1_000.0 }).await;
                 }
                 let _ = sys_handle.emit_destiny_event(d.ball_id, eve_destiny::DestinyEvent::OnDroneStateChange {
@@ -1210,6 +1211,7 @@ pub async fn handle_npcs_drones(
                 d.target_id = Some(target_id);
                 d.activity_state = 1;
                 if !d.is_sentry {
+                    let _ = sys_handle.set_speed_fraction(d.ball_id, 1.0).await;
                     let _ = sys_handle.set_movement_mode(d.ball_id, MovementMode::Orbit { target_id, range: 1_500.0 }).await;
                 }
                 let _ = sys_handle.emit_destiny_event(d.ball_id, eve_destiny::DestinyEvent::OnDroneStateChange {

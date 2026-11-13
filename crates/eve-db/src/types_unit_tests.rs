@@ -169,6 +169,7 @@ fn inventory_flag_aliases_from_u16_and_is_service_slot() {
         (181, InventoryFlag::SpecializedIceHold),
         (182, InventoryFlag::SpecializedAsteroidHold),
         (185, InventoryFlag::SpecializedInfrastructureHold),
+        (187, InventoryFlag::CapsuleerDeliveries),
     ];
 
     for &(raw, expected) in all_known {

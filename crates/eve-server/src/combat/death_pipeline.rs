@@ -3,9 +3,10 @@
 #![forbid(unsafe_code)]
 
 use crate::formulas::compute_insurance_quote;
-use crate::router::ServerContext;
+use crate::router::{NotificationTarget, ServerContext};
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, KillmailRecord};
 use eve_destiny::{Ball, MovementMode, SlimItemMeta};
+use eve_proto::PyRep;
 use glam::DVec3;
 use std::collections::HashMap;
 
@@ -1372,27 +1373,7 @@ pub fn on_ball_destroyed_sync(
         .unwrap_or(fallback_pos);
 
     // 1. Active player drone in space
-    let removed_drone = if crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-        rt.active_drones_in_space.contains_key(&ball_id)
-    }) {
-        crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-            let d = rt.active_drones_in_space.remove(&ball_id);
-            if d.is_some() {
-                rt.active_drone_miners.remove(&ball_id);
-                rt.drone_next_ready_unix.remove(&ball_id);
-            }
-            d
-        })
-    } else {
-        None
-    };
-    if let Some(d) = removed_drone {
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.items.remove(&d.drone_item_id);
-            snap.item_positions.remove(&d.ball_id);
-            snap.sp6_lifecycle.space_object_meta.remove(&d.ball_id);
-        });
-        sys_handle.try_remove_ball(ball_id);
+    if cleanup_destroyed_player_drone_sync(ctx, &sys_handle, ball_id) {
         return Ok(None);
     }
 
@@ -1521,9 +1502,16 @@ pub async fn on_ball_destroyed(
 }
 
 /// Synchronous cleanup of a destroyed non-ship ball (fighter, wreck, jetcan, deployable, POCO).
-pub fn cleanup_destroyed_non_ship_ball_sync(ctx: &ServerContext, sys_id: u32, ball_id: i64) {
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-
+/// Cleans up a destroyed player drone from runtime combat state, inventory, and the
+/// solar system `Ballpark`, and emits V24 destruction notifications (`OnItemChange`
+/// tombstone, `OnDroneStateChange(0, 0, 0, ...)`, `OnDroneActivityChange(0, None)`,
+/// and `OnDroneControlLost`) so the client removes the drone from `michelle.stateByDroneID`,
+/// `DronesWindow`, and `TargetInBar` (`#1008`, `#1020`).
+pub(crate) fn cleanup_destroyed_player_drone_sync(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
+    ball_id: i64,
+) -> bool {
     let removed_drone = crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
         let d = rt.active_drones_in_space.remove(&ball_id);
         if d.is_some() {
@@ -1532,13 +1520,55 @@ pub fn cleanup_destroyed_non_ship_ball_sync(ctx: &ServerContext, sys_id: u32, ba
         }
         d
     });
-    if let Some(d) = removed_drone {
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.items.remove(&d.drone_item_id);
-            snap.item_positions.remove(&d.ball_id);
-            snap.sp6_lifecycle.space_object_meta.remove(&d.ball_id);
-        });
-        sys_handle.try_remove_ball(ball_id);
+    let Some(d) = removed_drone else {
+        return false;
+    };
+    let removed_item = ctx.db.with_mut_snapshot(|snap| {
+        let item = snap.items.remove(&d.drone_item_id);
+        snap.item_positions.remove(&d.ball_id);
+        snap.sp6_lifecycle.space_object_meta.remove(&d.ball_id);
+        item
+    });
+    sys_handle.try_remove_ball(ball_id);
+    if d.owner_char_id > 0 {
+        if let Some(ref old_item) = removed_item {
+            ctx.emit_item_deleted_routed(d.owner_char_id, old_item);
+        }
+        ctx.notify(
+            NotificationTarget::Character(d.owner_char_id),
+            "OnDroneStateChange",
+            "charid",
+            vec![
+                PyRep::Integer(d.drone_item_id),
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::Integer(d.type_id as i64),
+                PyRep::Integer(0),
+                PyRep::None,
+            ],
+        );
+        crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(
+            ctx,
+            d.owner_char_id,
+            d.drone_item_id,
+            0,
+            None,
+        );
+        ctx.notify(
+            NotificationTarget::Character(d.owner_char_id),
+            "OnDroneControlLost",
+            "charid",
+            vec![PyRep::Integer(d.drone_item_id)],
+        );
+    }
+    true
+}
+
+pub fn cleanup_destroyed_non_ship_ball_sync(ctx: &ServerContext, sys_id: u32, ball_id: i64) {
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+
+    if cleanup_destroyed_player_drone_sync(ctx, &sys_handle, ball_id) {
         return;
     }
 

@@ -30,6 +30,8 @@ const CONTAINER_GLOBAL: i64 = 10_002;
 const CONTAINER_HANGAR: i64 = 10_004;
 /// `inventorycommon/const.pyj: containerCorpMarket` — corporation deliveries at the docked station.
 const CONTAINER_CORP_MARKET: i64 = 10_012;
+/// `inventorycommon/const.pyj: containerCapsuleerDeliveries` — corporation item deliveries at the docked station.
+const CONTAINER_CAPSULEER_DELIVERIES: i64 = 10_015;
 
 /// Error code for calls that arrive without the location-bound moniker.
 const ERR_NOT_BOUND: &str = "InvalidBoundObject";
@@ -254,7 +256,10 @@ pub fn handle(
             let container_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             if !matches!(
                 container_id,
-                CONTAINER_HANGAR | CONTAINER_CORP_MARKET | CONTAINER_GLOBAL
+                CONTAINER_HANGAR
+                    | CONTAINER_CORP_MARKET
+                    | CONTAINER_GLOBAL
+                    | CONTAINER_CAPSULEER_DELIVERIES
             ) {
                 return err(
                     "UnimplementedRPC",
@@ -267,6 +272,30 @@ pub fn handle(
                     "CharacterNotAtStation",
                     format!("character {char_id} is not docked at {location_id}"),
                 );
+            }
+            if matches!(container_id, CONTAINER_CORP_MARKET | CONTAINER_CAPSULEER_DELIVERIES) {
+                let caller_corp_id = session
+                    .corporation_id
+                    .or_else(|| {
+                        ctx.db
+                            .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id))
+                    })
+                    .unwrap_or(0);
+                let requested_owner = args.get(1).and_then(|a| a.as_i64()).filter(|&id| id > 0);
+                if container_id == CONTAINER_CAPSULEER_DELIVERIES && caller_corp_id <= 0 {
+                    return err(
+                        "InventoryNotAccessible",
+                        format!("character {char_id} has no corporation for capsuleer deliveries"),
+                    );
+                }
+                if let Some(req_corp_id) = requested_owner {
+                    if req_corp_id != caller_corp_id && !session.has_gm_role() {
+                        return err(
+                            "InventoryNotAccessible",
+                            format!("character {char_id} cannot access deliveries for corporation {req_corp_id}"),
+                        );
+                    }
+                }
             }
             Some(ctx.bind_verified_sub_object(session, "invbroker", location_id).map(|bid| ctx.bound_object_rep(bid, caller_trace)))
         }
@@ -682,7 +711,9 @@ pub(crate) fn validate_corp_source_item_take_access_in_snap(
 
     if matches!(
         root_flag,
-        eve_db::InventoryFlag::Deliveries | eve_db::InventoryFlag::CorpDeliveries
+        eve_db::InventoryFlag::Deliveries
+            | eve_db::InventoryFlag::CorpDeliveries
+            | eve_db::InventoryFlag::CapsuleerDeliveries
     ) {
         let deliveries_roles = eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_TAKE
             | eve_db::corp_roles::ROLE_FACTORY_MANAGER

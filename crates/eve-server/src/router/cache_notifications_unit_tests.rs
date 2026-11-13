@@ -299,8 +299,9 @@ fn ship_fitting_load_changes_corp_hangar_flags_and_trashed_quantity_boundaries()
         .acquire_online_lock(uid, 501, Some(char_id), false, ctx.now_unix());
     let _ = ctx.drain_notifications_for_char(char_id);
 
-    // 1. `is_corp_hangar_flag` exact boundaries: `CorpDeliveries` (62) and `CorpSAG1..7` (116..=122)
+    // 1. `is_corp_hangar_flag` exact boundaries: `CorpDeliveries` (62), `CorpSAG1..7` (116..=122), and `CapsuleerDeliveries` (187)
     assert!(is_corp_hangar_flag(eve_db::InventoryFlag::CorpDeliveries));
+    assert!(is_corp_hangar_flag(eve_db::InventoryFlag::CapsuleerDeliveries));
     assert!(ServerContext::is_corp_hangar_flag(eve_db::InventoryFlag::CorpSAG1));
     assert!(is_corp_hangar_flag(eve_db::InventoryFlag::CorpSAG7));
     assert!(!is_corp_hangar_flag(eve_db::InventoryFlag::Hangar));

@@ -665,3 +665,263 @@ async fn test_shipping_storage_proximity_and_fleetmate_transfer() {
     ).await.expect_err("GetInventoryFromId after leaving fleet must fail");
     assert_eq!(inv_leave_err.code, "InventoryNotAccessible");
 }
+
+#[tokio::test]
+async fn issue_1008_1020_fighting_drones_return_bay_and_destroyed_drone_clear_it() {
+    let ctx = new_ctx();
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let npc_id = 1_897_065_293_i64;
+    let d_close = 893_001_i64;
+    let d_far = 893_002_i64;
+    let d_dead = 893_003_i64;
+
+    let mut sess = SessionState::new(7201);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    let kw = HashMap::new();
+    ctx.dispatch_rpc(
+        &mut sess, "charUnboundMgr", None, "SelectCharacterID",
+        &[PyRep::Integer(char_id)], &kw, None,
+    ).await.expect("SelectCharacterID");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(ship_id, InventoryItemRecord {
+            item_id: ship_id, type_id: 32_880, owner_id: char_id,
+            location_id: sys_id as i64, flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
+        });
+    });
+    for did in [d_close, d_far] {
+        seed_item(&ctx, did, 2_454, char_id, ship_id, InventoryFlag::DroneBay, 1, true);
+    }
+    seed_item(&ctx, d_dead, 2_454, char_id, ship_id, InventoryFlag::Cargo, 1, true);
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_id);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle.spawn_ball(Ball {
+        id: ship_id, type_id: 32_880, position: DVec3::ZERO, velocity: DVec3::ZERO,
+        max_velocity: 372.0, inertia: 2.0, mass: 1_500_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+    }).await;
+    let npc_ball = Ball {
+        id: npc_id, type_id: 10_035, position: DVec3::new(5_000.0, 0.0, 0.0), velocity: DVec3::ZERO,
+        max_velocity: 300.0, inertia: 2.0, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+    };
+    let _ = sys_handle.spawn_ball(npc_ball).await;
+    let _ = sys_handle.set_combat_state(npc_id, eve_destiny::CombatState {
+        shield_hp: 5_000.0, max_shield_hp: 5_000.0, armor_hp: 5_000.0, max_armor_hp: 5_000.0,
+        structure_hp: 5_000.0, max_structure_hp: 5_000.0, capacitor: 1_000.0, max_capacitor: 1_000.0,
+        ..Default::default()
+    }).await;
+
+    // 1. Launch 2 Hobgoblin I (10 Mbit/s max bandwidth on Venture) and engage NPC target
+    ctx.dispatch_rpc(
+        &mut sess, "ship", None, "LaunchDrones",
+        &[PyRep::List(vec![
+            PyRep::Tuple(vec![PyRep::Integer(d_close), PyRep::Integer(1)]),
+            PyRep::Tuple(vec![PyRep::Integer(d_far), PyRep::Integer(1)]),
+        ])],
+        &kw, None,
+    ).await.expect("LaunchDrones succeeds");
+    // Place d_close <= 2500m and d_far > 2500m (5000m) while fighting
+    let _ = sys_handle.set_ball_position(d_close, DVec3::new(1_200.0, 0.0, 0.0)).await;
+    let _ = sys_handle.set_ball_position(d_far, DVec3::new(5_000.0, 0.0, 0.0)).await;
+
+    let _ = sys_handle.add_target_lock(ship_id, eve_destiny::TargetLock {
+        target_id: npc_id,
+        lock_time_ms: 1_000.0,
+        remaining_lock_ms: 0.0,
+        locked: true,
+        max_range_m: None,
+    }).await;
+
+    ctx.dispatch_rpc(
+        &mut sess, "entity", None, "CmdEngage",
+        &[PyRep::List(vec![PyRep::Integer(d_close), PyRep::Integer(d_far)]), PyRep::Integer(npc_id)],
+        &kw, None,
+    ).await.expect("CmdEngage succeeds");
+    with_combat_runtime(&ctx, |rt| {
+        for did in [d_close, d_far] {
+            let d = rt.active_drones_in_space.get(&did).expect("drone active");
+            assert_eq!(d.activity_state, 1);
+            assert_eq!(d.target_id, Some(npc_id));
+        }
+    });
+
+    // 2. CmdReturnBay on fighting drones: even if speed_fraction dropped to 0.0, close scoops immediately,
+    //    far enters returning (4) with speed_fraction=1.0, auto-aggression does not hijack it, and it flies back to bay.
+    let _ = sys_handle.set_speed_fraction(d_far, 0.0).await;
+    ctx.dispatch_rpc(
+        &mut sess, "entity", None, "CmdReturnBay",
+        &[PyRep::List(vec![PyRep::Integer(d_close), PyRep::Integer(d_far)])],
+        &kw, None,
+    ).await.expect("CmdReturnBay succeeds");
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&d_close].flag, InventoryFlag::DroneBay);
+        assert_eq!(snap.items[&d_close].location_id, ship_id);
+    });
+    with_mut_combat_runtime(&ctx, |rt| {
+        assert!(!rt.active_drones_in_space.contains_key(&d_close));
+        let far = rt.active_drones_in_space.get(&d_far).expect("far drone returning");
+        assert_eq!(far.activity_state, 4);
+        assert_eq!(far.target_id, Some(ship_id));
+        rt.drone_settings.entry(char_id).or_default().aggressive = true;
+    });
+    let hijacked = eve_server::services::combat_crimewatch::combat_npcs_drones::step_drone_auto_aggression_and_assist(
+        &ctx, sys_id, char_id, Some(npc_id), None, None,
+    ).await;
+    assert!(hijacked.is_empty(), "returning drone must not be re-engaged by auto-aggression");
+
+    for _ in 0..15 {
+        let _ = sys_handle.step_manual(1.0).await;
+        eve_server::sp6_lifecycle::step_returning_drones(&ctx).await;
+        if with_combat_runtime(&ctx, |rt| !rt.active_drones_in_space.contains_key(&d_far)) {
+            break;
+        }
+    }
+    with_combat_runtime(&ctx, |rt| {
+        assert!(!rt.active_drones_in_space.contains_key(&d_far), "returning drone must fly into 2500m scoop range and return to bay");
+    });
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&d_far].flag, InventoryFlag::DroneBay);
+        assert_eq!(snap.items[&d_far].location_id, ship_id);
+    });
+
+    // 3. Move d_dead into DroneBay (keeping within Venture 10 m3 DroneBay cap), Launch -> CmdEngage -> destroy -> must emit clear notifications and CmdReturnBay stays clean
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(it) = snap.items.get_mut(&d_close) {
+            it.flag = InventoryFlag::Cargo;
+        }
+        if let Some(it) = snap.items.get_mut(&d_dead) {
+            it.flag = InventoryFlag::DroneBay;
+        }
+    });
+    ctx.dispatch_rpc(
+        &mut sess, "ship", None, "LaunchDrones",
+        &[PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(d_dead), PyRep::Integer(1)])])],
+        &kw, None,
+    ).await.expect("LaunchDrones d_dead succeeds");
+    let _ = sys_handle.set_ball_position(d_dead, DVec3::new(3_500.0, 0.0, 0.0)).await;
+    let _ = sys_handle.add_target_lock(ship_id, eve_destiny::TargetLock {
+        target_id: npc_id,
+        lock_time_ms: 1_000.0,
+        remaining_lock_ms: 0.0,
+        locked: true,
+        max_range_m: None,
+    }).await;
+
+    ctx.dispatch_rpc(
+        &mut sess, "entity", None, "CmdEngage",
+        &[PyRep::List(vec![PyRep::Integer(d_dead)]), PyRep::Integer(npc_id)],
+        &kw, None,
+    ).await.expect("CmdEngage d_dead succeeds");
+    let _ = ctx.drain_notifications_for_char(char_id);
+    eve_server::combat::death_pipeline::on_ball_destroyed_sync(
+        &ctx, sys_id, d_dead, Some(npc_id), DVec3::new(3_500.0, 0.0, 0.0),
+    ).expect("on_ball_destroyed_sync succeeds");
+    let dead_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(dead_notifs.iter().any(|n| {
+        n.event == "OnDroneStateChange"
+            && n.args.first().and_then(|v| v.as_i64()) == Some(d_dead)
+            && n.args.get(1).and_then(|v| v.as_i64()) == Some(0)
+            && n.args.get(2).and_then(|v| v.as_i64()) == Some(0)
+            && n.args.get(3).and_then(|v| v.as_i64()) == Some(0)
+    }));
+    assert!(dead_notifs.iter().any(|n| n.event == "OnDroneControlLost" && n.args.first().and_then(|v| v.as_i64()) == Some(d_dead)));
+    assert!(dead_notifs.iter().any(|n| n.event == "OnItemChange"));
+    ctx.db.with_snapshot(|snap| assert!(!snap.items.contains_key(&d_dead)));
+    ctx.dispatch_rpc(
+        &mut sess, "entity", None, "CmdReturnBay",
+        &[PyRep::List(vec![PyRep::Integer(d_dead)])],
+        &kw, None,
+    ).await.expect("CmdReturnBay on destroyed drone returns Ok");
+}
+
+#[tokio::test]
+async fn issue_1021_1022_capsuleer_deliveries_get_inventory_and_list_it() {
+    let ctx = new_ctx();
+    let station_id = 60_003_760_i64;
+    let corp_id = 98_100_001_i64;
+    let other_corp_id = 98_100_077_i64;
+    let char_id = 90_000_001_i64;
+    let deliv_item = 893_101_i64;
+
+    let mut sess = SessionState::new(7202);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    let kw = HashMap::new();
+    ctx.dispatch_rpc(
+        &mut sess, "charUnboundMgr", None, "SelectCharacterID",
+        &[PyRep::Integer(char_id)], &kw, None,
+    ).await.expect("SelectCharacterID");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_id;
+            ch.station_id = Some(station_id);
+            ch.structure_id = None;
+        }
+        snap.items.insert(deliv_item, InventoryItemRecord {
+            item_id: deliv_item, type_id: 34, owner_id: corp_id,
+            location_id: station_id, flag: InventoryFlag::CapsuleerDeliveries, quantity: 250, singleton: false, ..Default::default()
+        });
+    });
+    sess.corporation_id = Some(corp_id);
+    sess.station_id = Some(station_id);
+    sess.structure_id = None;
+
+    let bind = ctx.dispatch_rpc(
+        &mut sess, "invbroker", None, "MachoBindObject",
+        &[PyRep::Tuple(vec![PyRep::Integer(station_id), PyRep::Integer(15)]), PyRep::None], &kw, None,
+    ).await.expect("bind station invbroker");
+    let mgr = match bind {
+        PyRep::Tuple(parts) => parts[0].as_i64().unwrap() as u64,
+        PyRep::Integer(i) => i as u64,
+        _ => panic!("unexpected bind rep"),
+    };
+
+    let bound_deliv = ctx.dispatch_rpc(
+        &mut sess, "invbroker", Some(mgr), "GetInventory",
+        &[PyRep::Integer(10_015), PyRep::Integer(corp_id)], &kw, None,
+    ).await.expect("GetInventory(10015, corp_id) succeeds");
+    let deliv_oid = bound_deliv.as_i64().expect("bound object id");
+
+    let mut list_kw = HashMap::new();
+    list_kw.insert("flag".to_string(), PyRep::Integer(187));
+    let listed = ctx.dispatch_rpc(
+        &mut sess, "invbroker", Some(deliv_oid as u64), "List", &[], &list_kw, None,
+    ).await.expect("List(flag=187) succeeds");
+    let PyRep::ObjectEx { list: rows, .. } = listed else { panic!("expected CRowset ObjectEx"); };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].dbrow_get("itemID"), Some(&PyRep::Integer(deliv_item)));
+
+    // Negative: requesting another corp's CapsuleerDeliveries fails
+    let cross_err = ctx.dispatch_rpc(
+        &mut sess, "invbroker", Some(mgr), "GetInventory",
+        &[PyRep::Integer(10_015), PyRep::Integer(other_corp_id)], &kw, None,
+    ).await.expect_err("cross-corp GetInventory(10015) must fail");
+    assert_eq!(cross_err.code, "InventoryNotAccessible");
+
+    // Negative: undocked GetInventory(10015) fails
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.solar_system_id = 30_000_142;
+        }
+    });
+    sess.station_id = None;
+    sess.solar_system_id = Some(30_000_142);
+    let undocked_err = ctx.dispatch_rpc(
+        &mut sess, "invbroker", Some(mgr), "GetInventory",
+        &[PyRep::Integer(10_015), PyRep::Integer(corp_id)], &kw, None,
+    ).await.expect_err("undocked GetInventory(10015) must fail");
+    assert_eq!(undocked_err.code, "CharacterNotAtStation");
+}

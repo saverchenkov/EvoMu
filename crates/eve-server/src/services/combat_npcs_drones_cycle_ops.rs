@@ -405,6 +405,7 @@ pub async fn step_drone_auto_aggression_and_assist(
                 d.solar_system_id == solar_system_id
                     && d.owner_char_id == owner_char_id
                     && !d.is_abandoned
+                    && d.activity_state != 4
             })
             .cloned()
             .collect()
@@ -462,6 +463,7 @@ pub async fn step_drone_auto_aggression_and_assist(
             d.target_id = Some(tid);
             d.activity_state = 1;
             if !d.is_sentry {
+                let _ = sys_handle.set_speed_fraction(d.ball_id, 1.0).await;
                 let _ = sys_handle
                     .set_movement_mode(
                         d.ball_id,

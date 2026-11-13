@@ -1467,3 +1467,132 @@ async fn b3_destruction_pipeline_idempotency_unpiloted_hull_kills_and_sqlite_rel
     });
     let _ = std::fs::remove_file(&db_path);
 }
+
+#[tokio::test]
+async fn issue_1008_1020_destroyed_player_drone_emits_clear_notifications() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let drone_id = 1_897_065_269_i64;
+    let drone_type = 2_454_u32; // Hobgoblin I
+
+    let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    let _ = ctx
+        .db
+        .acquire_online_lock(uid, 501, Some(char_id), false, ctx.now_unix());
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            drone_id,
+            InventoryItemRecord {
+                item_id: drone_id,
+                type_id: drone_type,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let drone_ball = Ball {
+        id: drone_id,
+        type_id: drone_type,
+        position: DVec3::new(3_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 2_600.0,
+        inertia: 0.4,
+        mass: 5_000.0,
+        radius: 5.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    let _ = sys_handle.spawn_ball(drone_ball.clone()).await;
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.active_drones_in_space.insert(
+            drone_id,
+            crate::services::combat_crimewatch::DroneSpaceState {
+                ball_id: drone_id,
+                drone_item_id: drone_id,
+                type_id: drone_type,
+                group_id: 100,
+                owner_char_id: char_id,
+                original_owner_char_id: char_id,
+                parent_ship_id: ship_id,
+                solar_system_id: sys_id,
+                target_id: Some(1_897_065_293),
+                activity_state: 1,
+                assist_char_id: None,
+                guard_char_id: None,
+                is_abandoned: false,
+                is_sentry: false,
+                bandwidth_used: 5.0,
+                max_velocity: 2_600.0,
+                optimal_range: 1_500.0,
+                damage_vector: eve_destiny::DamageVector::default(),
+                shield_repair_amount: 0.0,
+                armor_repair_amount: 0.0,
+                hull_repair_amount: 0.0,
+                web_speed_factor: 0.0,
+                neut_amount: 0.0,
+                ecm_strength: 0.0,
+                tp_sig_bonus_pct: 0.0,
+            },
+        );
+    });
+
+    crate::combat::npc_ai::handle_npc_ai_ball_destructions(
+        &ctx,
+        sys_id,
+        vec![(1_897_065_293, drone_id, drone_ball)],
+    );
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            !snap.items.contains_key(&drone_id),
+            "destroyed drone item must be removed from snapshot"
+        );
+    });
+    crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        assert!(!rt.active_drones_in_space.contains_key(&drone_id));
+    });
+    assert!(
+        sys_handle.get_ball_snapshot(drone_id).await.unwrap().is_none(),
+        "destroyed drone ball must be removed from Ballpark"
+    );
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs.iter().any(|n| {
+            n.event == "OnDroneStateChange"
+                && n.args.first().and_then(|v| v.as_i64()) == Some(drone_id)
+                && n.args.get(1).and_then(|v| v.as_i64()) == Some(0)
+                && n.args.get(2).and_then(|v| v.as_i64()) == Some(0)
+                && n.args.get(3).and_then(|v| v.as_i64()) == Some(0)
+        }),
+        "destroyed drone must emit OnDroneStateChange(0, 0, 0) to clear michelle.stateByDroneID"
+    );
+    assert!(
+        notifs.iter().any(|n| {
+            n.event == "OnDroneControlLost"
+                && n.args.first().and_then(|v| v.as_i64()) == Some(drone_id)
+        }),
+        "destroyed drone must emit OnDroneControlLost"
+    );
+    assert!(
+        notifs.iter().any(|n| {
+            n.event == "OnDroneActivityChange"
+                && n.args.first().and_then(|v| v.as_i64()) == Some(drone_id)
+                && n.args.get(1).and_then(|v| v.as_i64()) == Some(0)
+        }),
+        "destroyed drone must clear activity via OnDroneActivityChange"
+    );
+    assert!(
+        notifs.iter().any(|n| n.event == "OnItemChange"),
+        "destroyed drone must emit tombstone OnItemChange"
+    );
+}
