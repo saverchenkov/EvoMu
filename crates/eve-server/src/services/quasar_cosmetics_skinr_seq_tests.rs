@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::quasar_gateway::{PublicGatewayRouter, STATUS_OK};
-use crate::services::quasar_cosmetics_skinr::SkinrStaticCatalog;
+use crate::services::quasar_cosmetics_skinr::{build_layout_slot, SkinrStaticCatalog};
 use eve_db::{TrainedSkillRecord, WorldRepository};
 use eve_machonet::{service_roles, SessionState};
 use eve_proto::pb;
