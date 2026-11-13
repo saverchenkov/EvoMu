@@ -856,3 +856,63 @@ fn belt_asteroid_base_id_restore_and_reconcile_spawned_belt_asteroids() {
     assert_eq!(asteroids[&750_852_011].remaining_units, 4_321);
     assert!(bp.balls.contains_key(&750_852_011));
 }
+
+#[test]
+fn build_tick_broadcast_evicts_dead_queues_and_matches_direct_encode() {
+    let mut bp = Ballpark::new(30_000_142);
+    bp.current_tick = 77;
+    let shared_evs = vec![
+        DestinyEvent::GotoDirection {
+            ball_id: 201,
+            direction: [1.0, 0.0, 0.0],
+        },
+        DestinyEvent::SetBallPosition {
+            ball_id: 201,
+            position: [125.0, -40.0, 12.5],
+        },
+    ];
+    for id in [201_i64, 202, 203] {
+        bp.add_ball(Ball {
+            id,
+            type_id: 587,
+            position: DVec3::new(id as f64 * 100.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 3.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        });
+    }
+    bp.drain_all_observer_events();
+
+    // Observers 201 & 202 share identical queue; 203 shares event 0 + has an extra event;
+    // 999 is a dead ball not in `bp.balls` whose queue must be evicted after draining.
+    bp.observer_events.insert(201, shared_evs.clone());
+    bp.observer_events.insert(202, shared_evs.clone());
+    bp.observer_events.insert(
+        203,
+        vec![shared_evs[0].clone(), DestinyEvent::Stop { ball_id: 203 }],
+    );
+    bp.observer_events
+        .insert(999, vec![DestinyEvent::Stop { ball_id: 999 }]);
+
+    let expected_201 = eve_destiny::wire::encode_destiny_updates(77, &shared_evs, Some(&bp));
+    let expected_203 = eve_destiny::wire::encode_destiny_updates(
+        77,
+        &[shared_evs[0].clone(), DestinyEvent::Stop { ball_id: 203 }],
+        Some(&bp),
+    );
+
+    let bcast = build_tick_broadcast(30_000_142, &mut bp, Vec::new());
+    assert_eq!(bcast.observer_updates_pyrep.get(&201), Some(&expected_201));
+    assert_eq!(bcast.observer_updates_pyrep.get(&202), Some(&expected_201));
+    assert_eq!(bcast.observer_updates_pyrep.get(&203), Some(&expected_203));
+    assert!(bcast.observer_events.contains_key(&999));
+    assert!(
+        !bp.observer_events.contains_key(&999),
+        "dead ball observer queue must be evicted after one broadcast drain"
+    );
+    assert!(bp.observer_events.contains_key(&201));
+}

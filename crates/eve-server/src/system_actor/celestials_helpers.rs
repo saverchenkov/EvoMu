@@ -81,46 +81,126 @@ pub(crate) fn register_committed_warp_cache(
     g.insert(key, Arc::downgrade(committed_warps));
 }
 
+fn static_position_sync_state(
+) -> &'static std::sync::Mutex<HashMap<usize, (u64, usize)>> {
+    static MAP: std::sync::OnceLock<std::sync::Mutex<HashMap<usize, (u64, usize)>>> =
+        std::sync::OnceLock::new();
+    MAP.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
 pub(crate) fn sync_ball_positions(
     ballpark: &Ballpark,
     cache: &RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>,
     scrambled: &RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>,
 ) {
-    let mut positions = HashMap::with_capacity(ballpark.balls.len());
-    let mut scram = std::collections::HashSet::new();
-    let mut warps = HashMap::new();
-    for (&id, ball) in &ballpark.balls {
-        positions.insert(id, ball.position);
-        if ballpark.is_ball_scrambled(id) {
-            scram.insert(id);
-        }
-        if let eve_destiny::MovementMode::Warp {
-            destination, phase, ..
-        } = ball.mode
-        {
-            if phase != eve_destiny::WarpPhase::Aligning {
-                warps.insert(id, destination);
-            }
-        }
-    }
+    let cache_key = cache as *const RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF> as usize;
+    let cur_static_epoch = ballpark.static_epoch();
+    let cur_static_count = ballpark.static_ball_ids.len();
+    let prev_static = static_position_sync_state()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&cache_key)
+        .copied();
+    let statics_unchanged = prev_static == Some((cur_static_epoch, cur_static_count));
+
     let leaf_held = eve_db::lock_rank::held_lock_ranks()
         .iter()
         .any(|&r| r >= RANK_LEAF);
+
+    let update_cache = |guard: &mut HashMap<BallId, DVec3>| {
+        if guard.is_empty() || !statics_unchanged {
+            guard.clear();
+            guard.reserve(ballpark.balls.len());
+            for (&id, ball) in &ballpark.balls {
+                guard.insert(id, ball.position);
+            }
+        } else {
+            let mut inserted_new = false;
+            if ballpark.balls.len() != cur_static_count {
+                for (&id, ball) in &ballpark.balls {
+                    if !ballpark.is_static_ball(id) && guard.insert(id, ball.position).is_none() {
+                        inserted_new = true;
+                    }
+                }
+            }
+            if inserted_new || guard.len() != ballpark.balls.len() {
+                guard.retain(|id, _| ballpark.balls.contains_key(id));
+                if guard.len() < ballpark.balls.len() {
+                    for (&id, ball) in &ballpark.balls {
+                        guard.entry(id).or_insert(ball.position);
+                    }
+                }
+            }
+        }
+    };
+
+    let mut cache_updated = false;
     if leaf_held {
         if let Ok(mut g) = cache.try_write_unranked() {
-            *g = positions;
+            update_cache(&mut g);
+            cache_updated = true;
         }
+    } else {
+        let mut g = cache.write().unwrap_or_else(|e| e.into_inner());
+        update_cache(&mut g);
+        cache_updated = true;
+    }
+    if cache_updated {
+        let mut meta = static_position_sync_state()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if meta.len() > 512 {
+            meta.clear();
+        }
+        meta.insert(cache_key, (cur_static_epoch, cur_static_count));
+    }
+
+    let mut scram = std::collections::HashSet::new();
+    if ballpark.warp_bubble_mgr.bubbles.is_empty() {
+        for (&id, cs) in &ballpark.combat_states {
+            if cs.is_warp_scrambled() && ballpark.balls.contains_key(&id) {
+                scram.insert(id);
+            }
+        }
+    } else {
+        for (&id, ball) in &ballpark.balls {
+            if !ballpark.is_static_ball(id)
+                && (ballpark.combat_states.get(&id).is_some_and(|cs| cs.is_warp_scrambled())
+                    || (!ballpark.is_ball_bubble_immune(id)
+                        && ballpark.warp_bubble_mgr.is_scrambled_at(ball.position)))
+            {
+                scram.insert(id);
+            }
+        }
+    }
+
+    let mut warps = HashMap::new();
+    if ballpark.balls.len() > cur_static_count {
+        for (&id, ball) in &ballpark.balls {
+            if !ballpark.is_static_ball(id) {
+                if let eve_destiny::MovementMode::Warp {
+                    destination, phase, ..
+                } = ball.mode
+                {
+                    if phase != eve_destiny::WarpPhase::Aligning {
+                        warps.insert(id, destination);
+                    }
+                }
+            }
+        }
+    }
+
+    if leaf_held {
         if let Ok(mut g) = scrambled.try_write_unranked() {
             *g = scram;
         }
     } else {
-        *cache.write().unwrap_or_else(|e| e.into_inner()) = positions;
         *scrambled.write().unwrap_or_else(|e| e.into_inner()) = scram;
     }
     let warp_arc_opt = committed_warp_cache_map()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .get(&(cache as *const RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF> as usize))
+        .get(&cache_key)
         .and_then(|w| w.upgrade());
     if let Some(warp_arc) = warp_arc_opt {
         if leaf_held {

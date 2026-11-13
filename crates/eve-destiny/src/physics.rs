@@ -5,7 +5,52 @@ use crate::{
     BUBBLE_TRANSITION_THRESHOLD_METERS, DECLOAK_DISTANCE_METERS,
 };
 use glam::DVec3;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+const PROXIMITY_CELL_SIZE_METERS: f64 = 4_000.0;
+const MAX_PROXIMITY_CELLS_PER_BALL: i128 = 64;
+
+#[inline]
+pub(crate) fn aabb_overlaps(min_a: DVec3, max_a: DVec3, min_b: DVec3, max_b: DVec3) -> bool {
+    !(max_a.x < min_b.x
+        || max_b.x < min_a.x
+        || max_a.y < min_b.y
+        || max_b.y < min_a.y
+        || max_a.z < min_b.z
+        || max_b.z < min_a.z)
+}
+
+#[inline]
+pub(crate) fn spatial_cell_range(
+    min_b: DVec3,
+    max_b: DVec3,
+    cell_size: f64,
+    max_cells: i128,
+) -> Option<((i64, i64, i64), (i64, i64, i64))> {
+    if !min_b.is_finite() || !max_b.is_finite() {
+        return None;
+    }
+    let inv = 1.0 / cell_size;
+    let c0 = (
+        (min_b.x * inv).floor() as i64,
+        (min_b.y * inv).floor() as i64,
+        (min_b.z * inv).floor() as i64,
+    );
+    let c1 = (
+        (max_b.x * inv).floor() as i64,
+        (max_b.y * inv).floor() as i64,
+        (max_b.z * inv).floor() as i64,
+    );
+    let sx = (c1.0 as i128 - c0.0 as i128) + 1;
+    let sy = (c1.1 as i128 - c0.1 as i128) + 1;
+    let sz = (c1.2 as i128 - c0.2 as i128) + 1;
+    let total = sx.checked_mul(sy).and_then(|v| v.checked_mul(sz))?;
+    if total > max_cells {
+        None
+    } else {
+        Some((c0, c1))
+    }
+}
 
 impl Ballpark {
     /// Advances the entire solar system simulation by `dt` seconds (standard EVE server tick `dt = 1.0`).
@@ -28,18 +73,45 @@ impl Ballpark {
             .filter(|&id| !self.is_static_ball(id))
             .collect();
 
+        if dynamic_ids.is_empty()
+            && self.combat_states.is_empty()
+            && self.target_locks.is_empty()
+            && self.mushroom_states.is_empty()
+            && self.troll_states.is_empty()
+            && self.miniball_states.is_empty()
+            && self.formation_states.is_empty()
+            && self.grids.is_empty()
+        {
+            return std::mem::take(&mut self.pending_events);
+        }
+
         // Snapshot grid membership before stepping
         let grids_before: BTreeMap<BallId, u64> = dynamic_ids
             .iter()
             .filter_map(|&id| self.ball_grid_ids.get(&id).copied().map(|g| (id, g)))
             .collect();
 
-        let positions: BTreeMap<BallId, (DVec3, DVec3, f64)> = self
-            .balls
-            .iter()
-            .map(|(&id, b)| (id, (b.position, b.velocity, b.radius)))
-            .collect();
-        let pre_step_balls = self.balls.clone();
+        let mut positions: BTreeMap<BallId, (DVec3, DVec3, f64)> = BTreeMap::new();
+        let mut pre_step_dynamic_balls: BTreeMap<BallId, Ball> = BTreeMap::new();
+        for &id in &dynamic_ids {
+            if let Some(b) = self.balls.get(&id) {
+                positions.insert(id, (b.position, b.velocity, b.radius));
+                pre_step_dynamic_balls.insert(id, b.clone());
+                let target_id = match b.mode {
+                    MovementMode::Follow { target_id, .. }
+                    | MovementMode::Orbit { target_id, .. }
+                    | MovementMode::Missile { target_id } => Some(target_id),
+                    _ => None,
+                };
+                if let Some(tid) = target_id {
+                    if !positions.contains_key(&tid) {
+                        if let Some(tb) = self.balls.get(&tid) {
+                            positions.insert(tid, (tb.position, tb.velocity, tb.radius));
+                        }
+                    }
+                }
+            }
+        }
 
         let leader_frames: BTreeMap<BallId, (DVec3, DVec3, DVec3, DVec3)> = self
             .formation_states
@@ -59,7 +131,10 @@ impl Ballpark {
         let mut frozen_trolls = Vec::new();
         let non_free_ball_ids = self.non_free_ball_ids.clone();
 
-        for ball in self.balls.values_mut() {
+        for &ball_id in &dynamic_ids {
+            let Some(ball) = self.balls.get_mut(&ball_id) else {
+                continue;
+            };
             if matches!(
                 ball.mode,
                 MovementMode::Rigid | MovementMode::Field | MovementMode::Miniball
@@ -223,6 +298,7 @@ impl Ballpark {
         for id in frozen_trolls {
             self.troll_states.remove(&id);
             self.static_ball_ids.insert(id);
+            self.static_epoch = self.static_epoch.wrapping_add(1);
         }
         for (mb_id, ms) in self.miniball_states.clone() {
             if let Some((ppos, pvel)) = self
@@ -240,7 +316,7 @@ impl Ballpark {
         }
 
         // Collision bounce physics (`Destiny::Ball::DoCollision`, `SP-4`, `feat:navigation.collision-bumping`)
-        self.step_collision_bumping(&pre_step_balls, &positions, dt);
+        self.step_collision_bumping_with_dynamics(&dynamic_ids, &pre_step_dynamic_balls, &positions, dt);
 
         // Gate cloak, post-warp invulnerability, and undock invulnerability decay and break on active movement (`SP-3`, `SP-4`, `SP-5`)
         let elapsed_ticks = (dt.floor() as u32).max(1);
@@ -305,31 +381,93 @@ impl Ballpark {
         }
 
         // Check 2,000m surface-to-surface proximity decloak and active Breacher Pod DoT
-        let any_cloaked = self
-            .combat_states
-            .values()
-            .any(|cs| cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0);
-        let updated_positions: Vec<(BallId, DVec3, f64)> = if any_cloaked {
-            self.balls
+        let mut cloaked_aabb_min = DVec3::splat(f64::INFINITY);
+        let mut cloaked_aabb_max = DVec3::splat(f64::NEG_INFINITY);
+        let mut any_cloaked = false;
+        for (&cid, cs) in &self.combat_states {
+            if cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0 {
+                if let Some(cb) = self.balls.get(&cid) {
+                    if !matches!(cb.mode, MovementMode::Warp { phase, .. } if phase != WarpPhase::Aligning)
+                    {
+                        any_cloaked = true;
+                        let start_c = positions.get(&cid).map(|&(p, _, _)| p).unwrap_or(cb.position);
+                        let pad = DVec3::splat(cb.radius.max(0.0) + DECLOAK_DISTANCE_METERS);
+                        cloaked_aabb_min = cloaked_aabb_min.min(start_c.min(cb.position) - pad);
+                        cloaked_aabb_max = cloaked_aabb_max.max(start_c.max(cb.position) + pad);
+                    }
+                }
+            }
+        }
+        let mut dyn_decloak_cells: HashMap<(i64, i64, i64), Vec<(BallId, DVec3, f64)>> =
+            HashMap::new();
+        let mut large_decloak_entries: Vec<(BallId, DVec3, f64)> = Vec::new();
+        let mut updated_dyn_positions: Vec<(BallId, DVec3, f64)> = Vec::new();
+        if any_cloaked {
+            updated_dyn_positions.reserve(dynamic_ids.len());
+            for &id in &dynamic_ids {
+                if let Some(b) = self.balls.get(&id) {
+                    let entry = (b.id, b.position, b.radius);
+                    updated_dyn_positions.push(entry);
+                    let start_b = positions.get(&id).map(|&(p, _, _)| p).unwrap_or(b.position);
+                    let rad_b = DVec3::splat(b.radius.max(0.0));
+                    let b_min = start_b.min(b.position) - rad_b;
+                    let b_max = start_b.max(b.position) + rad_b;
+                    if let Some((c0, c1)) = spatial_cell_range(
+                        b_min,
+                        b_max,
+                        PROXIMITY_CELL_SIZE_METERS,
+                        MAX_PROXIMITY_CELLS_PER_BALL,
+                    ) {
+                        for cx in c0.0..=c1.0 {
+                            for cy in c0.1..=c1.1 {
+                                for cz in c0.2..=c1.2 {
+                                    dyn_decloak_cells.entry((cx, cy, cz)).or_default().push(entry);
+                                }
+                            }
+                        }
+                    } else {
+                        large_decloak_entries.push(entry);
+                    }
+                }
+            }
+            let static_grid_decloak_ids = self
+                .grids
                 .values()
-                .map(|b| (b.id, b.position, b.radius))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let cloaked_snapshot: std::collections::HashSet<BallId> = if any_cloaked {
+                .flat_map(|g| g.members.iter().copied())
+                .filter(|id| !self.static_ball_ids.contains(id) && self.is_static_ball(*id));
+            for id in self
+                .static_ball_ids
+                .iter()
+                .copied()
+                .chain(static_grid_decloak_ids)
+            {
+                if let Some(b) = self.balls.get(&id) {
+                    let rad_b = DVec3::splat(b.radius.max(0.0));
+                    if aabb_overlaps(
+                        b.position - rad_b,
+                        b.position + rad_b,
+                        cloaked_aabb_min,
+                        cloaked_aabb_max,
+                    ) {
+                        large_decloak_entries.push((b.id, b.position, b.radius));
+                    }
+                }
+            }
+        }
+        let cloaked_snapshot: HashSet<BallId> = if any_cloaked {
             self.combat_states
                 .iter()
                 .filter_map(|(&id, c)| if c.is_cloaked { Some(id) } else { None })
                 .collect()
         } else {
-            std::collections::HashSet::new()
+            HashSet::new()
         };
         let combat_ball_ids: Vec<BallId> = self.combat_states.keys().copied().collect();
         let mut proximity_decloaked = Vec::new();
         let mut mjfg_recompute_ids = Vec::new();
         let mut mjfg_completed_ids = Vec::new();
         let mut dot_updates = Vec::new();
+        let mut seen_decloak_peers: HashSet<BallId> = HashSet::new();
         for id_a in combat_ball_ids {
             let Some((pos_a, rad_a, type_a, mode_a)) = self
                 .balls
@@ -401,32 +539,88 @@ impl Ballpark {
                 }
                 if cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0 && !is_in_warp_tunnel_a {
                     let start_a = positions.get(&id_a).map(|&(p, _, _)| p).unwrap_or(pos_a);
-                    for &(id_b, pos_b, rad_b) in &updated_positions {
-                        if id_a != id_b && !is_field_or_bubble_b(id_b) {
-                            let start_b = positions.get(&id_b).map(|&(p, _, _)| p).unwrap_or(pos_b);
-                            let p0 = start_a - start_b;
-                            let dp = (pos_a - start_a) - (pos_b - start_b);
-                            let dp_len2 = dp.length_squared();
-                            let t_min = if dp_len2 > 1e-9 {
-                                (-p0.dot(dp) / dp_len2).clamp(0.0, 1.0)
-                            } else {
-                                1.0
-                            };
-                            let min_center_dist =
-                                (p0 + dp * t_min).length().min((pos_a - pos_b).length());
-                            let surface_dist = min_center_dist - rad_a - rad_b;
-                            if surface_dist <= DECLOAK_DISTANCE_METERS {
-                                cs.is_cloaked = false;
-                                cs.is_covert_cloak = false;
-                                cs.cloak_stabilization_remaining_s = 0.0;
-                                if cs.cloak_configured_targeting_delay_s > 0.0 {
-                                    cs.decloak_targeting_delay_remaining_s =
-                                        cs.cloak_configured_targeting_delay_s;
+                    let pad = DVec3::splat(rad_a.max(0.0) + DECLOAK_DISTANCE_METERS);
+                    let q_min = start_a.min(pos_a) - pad;
+                    let q_max = start_a.max(pos_a) + pad;
+                    let mut triggered_decloak = false;
+                    let check_peer = |id_b: BallId, pos_b: DVec3, rad_b: f64| -> bool {
+                        if id_a == id_b || is_field_or_bubble_b(id_b) {
+                            return false;
+                        }
+                        let start_b = positions.get(&id_b).map(|&(p, _, _)| p).unwrap_or(pos_b);
+                        let p0 = start_a - start_b;
+                        let dp = (pos_a - start_a) - (pos_b - start_b);
+                        let dp_len2 = dp.length_squared();
+                        let t_min = if dp_len2 > 1e-9 {
+                            (-p0.dot(dp) / dp_len2).clamp(0.0, 1.0)
+                        } else {
+                            1.0
+                        };
+                        let min_center_dist =
+                            (p0 + dp * t_min).length().min((pos_a - pos_b).length());
+                        let surface_dist = min_center_dist - rad_a - rad_b;
+                        surface_dist <= DECLOAK_DISTANCE_METERS
+                    };
+
+                    if let Some((c0, c1)) = spatial_cell_range(
+                        q_min,
+                        q_max,
+                        PROXIMITY_CELL_SIZE_METERS,
+                        MAX_PROXIMITY_CELLS_PER_BALL,
+                    ) {
+                        seen_decloak_peers.clear();
+                        'cell_decloak: for cx in c0.0..=c1.0 {
+                            for cy in c0.1..=c1.1 {
+                                for cz in c0.2..=c1.2 {
+                                    if let Some(bucket) = dyn_decloak_cells.get(&(cx, cy, cz)) {
+                                        for &(id_b, pos_b, rad_b) in bucket {
+                                            if seen_decloak_peers.insert(id_b)
+                                                && check_peer(id_b, pos_b, rad_b)
+                                            {
+                                                triggered_decloak = true;
+                                                break 'cell_decloak;
+                                            }
+                                        }
+                                    }
                                 }
-                                proximity_decloaked.push(id_a);
+                            }
+                        }
+                        if !triggered_decloak {
+                            for &(id_b, pos_b, rad_b) in &large_decloak_entries {
+                                if seen_decloak_peers.insert(id_b)
+                                    && check_peer(id_b, pos_b, rad_b)
+                                {
+                                    triggered_decloak = true;
+                                    break;
+                                }
+                            }
+                        }
+                    } else {
+                        for &(id_b, pos_b, rad_b) in &updated_dyn_positions {
+                            if check_peer(id_b, pos_b, rad_b) {
+                                triggered_decloak = true;
                                 break;
                             }
                         }
+                        if !triggered_decloak {
+                            for &(id_b, pos_b, rad_b) in &large_decloak_entries {
+                                if check_peer(id_b, pos_b, rad_b) {
+                                    triggered_decloak = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if triggered_decloak {
+                        cs.is_cloaked = false;
+                        cs.is_covert_cloak = false;
+                        cs.cloak_stabilization_remaining_s = 0.0;
+                        if cs.cloak_configured_targeting_delay_s > 0.0 {
+                            cs.decloak_targeting_delay_remaining_s =
+                                cs.cloak_configured_targeting_delay_s;
+                        }
+                        proximity_decloaked.push(id_a);
                     }
                 }
                 if let Some((flat_dps, pct_dps, rem_ticks)) = cs.active_breacher_dot {
@@ -702,7 +896,6 @@ impl Ballpark {
         }
 
         // Emit AddBalls2 and RemoveBalls for grid wall crossings and cloak transitions (`SP-2`, `#871`).
-        let mut any_changed_or_cloaked = false;
         let dyn_grid_info: Vec<(BallId, u64, u64, bool, bool)> = dynamic_ids
             .iter()
             .filter_map(|&id| {
@@ -713,30 +906,78 @@ impl Ballpark {
                     .get(&id)
                     .map(|c| (c.is_cloaked, c.was_cloaked_last_tick))
                     .unwrap_or((false, false));
-                if before != after || cloaked != was_cloaked {
-                    any_changed_or_cloaked = true;
-                }
                 Some((id, before, after, cloaked, was_cloaked))
             })
             .collect();
+        let mut before_by_grid: HashMap<u64, Vec<usize>> = HashMap::new();
+        let mut after_by_grid: HashMap<u64, Vec<usize>> = HashMap::new();
+        let mut changed_in_grid: HashMap<u64, Vec<usize>> = HashMap::new();
+        let mut any_changed_or_cloaked = false;
+        for (idx, &(_id, before, after, cloaked, was_cloaked)) in dyn_grid_info.iter().enumerate() {
+            before_by_grid.entry(before).or_default().push(idx);
+            after_by_grid.entry(after).or_default().push(idx);
+            if before != after || cloaked != was_cloaked {
+                any_changed_or_cloaked = true;
+                changed_in_grid.entry(before).or_default().push(idx);
+                if after != before {
+                    changed_in_grid.entry(after).or_default().push(idx);
+                }
+            }
+        }
         if any_changed_or_cloaked {
             for &(obs_id, obs_before, obs_after, _, _) in &dyn_grid_info {
+                if !self.is_registered_observer(obs_id) {
+                    continue;
+                }
                 let mut entered = Vec::new();
                 let mut left = Vec::new();
-                for &(other_id, other_before, other_after, other_cloaked, other_was_cloaked) in
-                    &dyn_grid_info
-                {
-                    if obs_id == other_id {
-                        continue;
-                    }
-                    let was_same = obs_before == other_before && !other_was_cloaked;
-                    let now_same = obs_after == other_after && !other_cloaked;
-                    if !was_same && now_same {
-                        if let Some(other_ball) = self.balls.get(&other_id) {
-                            entered.push(other_ball.clone());
+                if obs_before != obs_after {
+                    if let Some(after_list) = after_by_grid.get(&obs_after) {
+                        for &other_idx in after_list {
+                            let (other_id, other_before, other_after, other_cloaked, other_was_cloaked) =
+                                dyn_grid_info[other_idx];
+                            if obs_id == other_id {
+                                continue;
+                            }
+                            let was_same = obs_before == other_before && !other_was_cloaked;
+                            let now_same = obs_after == other_after && !other_cloaked;
+                            if !was_same && now_same {
+                                if let Some(other_ball) = self.balls.get(&other_id) {
+                                    entered.push(other_ball.clone());
+                                }
+                            }
                         }
-                    } else if was_same && !now_same {
-                        left.push(other_id);
+                    }
+                    if let Some(before_list) = before_by_grid.get(&obs_before) {
+                        for &other_idx in before_list {
+                            let (other_id, other_before, other_after, other_cloaked, other_was_cloaked) =
+                                dyn_grid_info[other_idx];
+                            if obs_id == other_id {
+                                continue;
+                            }
+                            let was_same = obs_before == other_before && !other_was_cloaked;
+                            let now_same = obs_after == other_after && !other_cloaked;
+                            if was_same && !now_same {
+                                left.push(other_id);
+                            }
+                        }
+                    }
+                } else if let Some(changed_list) = changed_in_grid.get(&obs_before) {
+                    for &other_idx in changed_list {
+                        let (other_id, other_before, other_after, other_cloaked, other_was_cloaked) =
+                            dyn_grid_info[other_idx];
+                        if obs_id == other_id {
+                            continue;
+                        }
+                        let was_same = obs_before == other_before && !other_was_cloaked;
+                        let now_same = obs_after == other_after && !other_cloaked;
+                        if !was_same && now_same {
+                            if let Some(other_ball) = self.balls.get(&other_id) {
+                                entered.push(other_ball.clone());
+                            }
+                        } else if was_same && !now_same {
+                            left.push(other_id);
+                        }
                     }
                 }
                 if !entered.is_empty() {
@@ -1318,7 +1559,7 @@ pub(crate) fn step_warp_ball(
     }
 
     let k_a = warp_speed_au_s.max(1e-4);
-    let k_d = k_a / 3.0;
+    let k_d = (k_a / 3.0).min(2.0);
     let v_cruise = warp_speed_au_s * AU_METERS;
     let raw_dist = total_distance.max((destination - origin).length());
     let eff_total = raw_dist + 1.0;
@@ -1410,7 +1651,7 @@ pub fn is_warp_finishing_within_1s(ball: &Ball) -> bool {
     if phase != WarpPhase::Decelerating || !warp_speed_au_s.is_finite() {
         return false;
     }
-    let k_d = warp_speed_au_s.max(1e-4) / 3.0;
+    let k_d = (warp_speed_au_s.max(1e-4) / 3.0).min(2.0);
     let rem_plus_1 = ball.position.distance(destination) + 1.0;
     let stop_thresh = (0.5 * ball.max_velocity).min(100.0).max(1.0);
     rem_plus_1 * (-k_d).exp() * k_d < stop_thresh
@@ -1468,9 +1709,10 @@ impl Ballpark {
         &mut self,
         ball_id: BallId,
     ) -> Option<Ball> {
+        let was_registered = self.is_registered_observer(ball_id);
         let saved_obs = self.observer_events.remove(&ball_id).unwrap_or_default();
         let removed = self.remove_ball(ball_id);
-        if !saved_obs.is_empty() {
+        if was_registered && !saved_obs.is_empty() {
             self.observer_events
                 .entry(ball_id)
                 .or_default()

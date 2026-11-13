@@ -1,8 +1,12 @@
 //! Target-lock management, ECM jam/burst application, and grid bubble observer queries for [`Ballpark`].
 
+use crate::physics::{aabb_overlaps, spatial_cell_range};
 use crate::{Ball, BallId, Ballpark, DestinyEvent, MovementMode, TargetLock, WarpPhase};
 use glam::DVec3;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+const COLLISION_CELL_SIZE_METERS: f64 = 4_000.0;
+const MAX_CELLS_PER_BALL: i128 = 27;
 
 impl Ballpark {
     pub fn add_target_lock(&mut self, source_id: BallId, lock: TargetLock) -> bool {
@@ -143,14 +147,22 @@ impl Ballpark {
     }
 
     /// Drains and returns all bubble-scoped `DestinyEvent`s accumulated for `observer_ball_id`.
+    /// Removes empty queue entries for balls no longer present in `self.balls` (`#868`).
     pub fn drain_observer_events(&mut self, observer_ball_id: BallId) -> Vec<DestinyEvent> {
-        self.observer_events
-            .get_mut(&observer_ball_id)
-            .map(std::mem::take)
-            .unwrap_or_default()
+        if self.balls.contains_key(&observer_ball_id) {
+            self.observer_events
+                .get_mut(&observer_ball_id)
+                .map(std::mem::take)
+                .unwrap_or_default()
+        } else {
+            self.observer_events
+                .remove(&observer_ball_id)
+                .unwrap_or_default()
+        }
     }
 
     /// Drains and returns the map of `observer_ball_id -> Vec<DestinyEvent>` for all dynamic observers.
+    /// Drops empty queue entries for removed balls after draining (`#868`).
     pub fn drain_all_observer_events(&mut self) -> BTreeMap<BallId, Vec<DestinyEvent>> {
         let mut out = BTreeMap::new();
         for (&id, events) in &mut self.observer_events {
@@ -158,6 +170,9 @@ impl Ballpark {
                 out.insert(id, std::mem::take(events));
             }
         }
+        let balls = &self.balls;
+        self.observer_events
+            .retain(|id, events| !events.is_empty() || balls.contains_key(id));
         out
     }
 
@@ -253,17 +268,96 @@ fn subwarp_step_state(
 }
 
 impl Ballpark {
+    fn is_collision_exempt(
+        &self,
+        id: BallId,
+        ball: &Ball,
+        pre_ball_opt: Option<&Ball>,
+    ) -> bool {
+        let group_id = self.ball_group_ids.get(&id).copied().unwrap_or(0);
+        // Asteroid Belt (`group 9`), Mobile Warp Disruptor (`group 361`),
+        // Abyssal Spatial Hazard Clouds (`group 1971`), and
+        // Abyssal Automated Pylons (`group 1973`/`1981`, whose `radius` encodes their
+        // 5-40 km bubble/aura range) are volumetric/non-solid markers that must not eject ships;
+        // solid celestial hulls (Star `group 6`, Planet `group 7`, Moon `group 8`),
+        // stations, structures, stargates, and asteroids collide normally.
+        if matches!(group_id, 9 | 361 | 1971 | 1973 | 1981)
+            || matches!(
+                ball.type_id,
+                47_437
+                    | 47_438
+                    | 47_439
+                    | 47_440
+                    | 47_441
+                    | 47_469
+                    | 47_470
+                    | 47_472
+                    | 47_473
+                    | 47_620
+                    | 48_254
+                    | 64_896
+                    | 80_876
+            )
+            || matches!(ball.mode, MovementMode::Field | MovementMode::Mushroom)
+            || matches!(ball.mode, MovementMode::Warp { phase, .. } if phase != WarpPhase::Aligning)
+            || matches!(
+                pre_ball_opt.map(|b| &b.mode),
+                Some(MovementMode::Warp { phase, .. }) if *phase != WarpPhase::Aligning
+            )
+        {
+            return true;
+        }
+        self.combat_states.get(&id).is_some_and(|cs| {
+            let action_broken =
+                cs.sync_invuln_with_undock_timer && cs.undock_invulnerable_remaining_ticks == 0;
+            let gate_cloak = if action_broken {
+                0
+            } else {
+                cs.gate_cloak_remaining_ticks
+            };
+            let is_cloaked = if action_broken && cs.gate_cloak_remaining_ticks > 0 {
+                false
+            } else {
+                cs.is_cloaked
+            };
+            gate_cloak > 0 || cs.undock_invulnerable_remaining_ticks > 0 || is_cloaked
+        })
+    }
+
     /// Resolves momentum-conserving collision deflection physics (`Destiny::Ball::DoCollision`, `SP-4`,
     /// `feat:navigation.collision-bumping`, restitution `0.85`) across dynamic ships and static hulls
     /// (stations, stargates, Upwell structures, celestials, asteroids), separates overlapping spheres
     /// with zero interpenetration, resets aligning ships to `WarpPhase::Aligning`, and broadcasts
     /// `SetBallPosition`/`SetBallVelocity`.
+    /// Uses spatial-cell bucketing for dynamic balls and filters static balls by active dynamic
+    /// bounding volumes so idle system statics cost O(1) collision pair checks per tick (`#867`).
+    #[cfg(test)]
     pub(crate) fn step_collision_bumping(
         &mut self,
         pre_step_balls: &BTreeMap<BallId, crate::Ball>,
         pre_positions: &BTreeMap<BallId, (DVec3, DVec3, f64)>,
         dt: f64,
     ) {
+        let dynamic_ids: Vec<BallId> = self
+            .balls
+            .keys()
+            .copied()
+            .filter(|&id| !self.is_static_ball(id))
+            .collect();
+        self.step_collision_bumping_with_dynamics(&dynamic_ids, pre_step_balls, pre_positions, dt);
+    }
+
+    pub(crate) fn step_collision_bumping_with_dynamics(
+        &mut self,
+        dynamic_ids: &[BallId],
+        pre_step_dynamic_balls: &BTreeMap<BallId, crate::Ball>,
+        pre_positions: &BTreeMap<BallId, (DVec3, DVec3, f64)>,
+        dt: f64,
+    ) {
+        if dynamic_ids.is_empty() {
+            return;
+        }
+
         struct BumpEntry<'a> {
             id: BallId,
             uncol: &'a crate::Ball,
@@ -280,69 +374,13 @@ impl Ballpark {
             modified: bool,
         }
 
-        let mut entries: Vec<BumpEntry<'_>> = Vec::with_capacity(self.balls.len());
-        let mut dyn_indices: Vec<usize> = Vec::new();
-
-        for (&id, ball) in &self.balls {
-            let group_id = self.ball_group_ids.get(&id).copied().unwrap_or(0);
-            // Asteroid Belt (`group 9`), Mobile Warp Disruptor (`group 361`),
-            // Abyssal Spatial Hazard Clouds (`group 1971`), and
-            // Abyssal Automated Pylons (`group 1973`/`1981`, whose `radius` encodes their
-            // 5-40 km bubble/aura range) are volumetric/non-solid markers that must not eject ships;
-            // solid celestial hulls (Star `group 6`, Planet `group 7`, Moon `group 8`),
-            // stations, structures, stargates, and asteroids collide normally.
-            if matches!(group_id, 9 | 361 | 1971 | 1973 | 1981)
-                || matches!(
-                    ball.type_id,
-                    47_437
-                        | 47_438
-                        | 47_439
-                        | 47_440
-                        | 47_441
-                        | 47_469
-                        | 47_470
-                        | 47_472
-                        | 47_473
-                        | 47_620
-                        | 48_254
-                        | 64_896
-                        | 80_876
-                )
-                || matches!(ball.mode, MovementMode::Field | MovementMode::Mushroom)
-                || matches!(ball.mode, MovementMode::Warp { phase, .. } if phase != WarpPhase::Aligning)
-            {
-                continue;
-            }
-            let pre_ball_opt = pre_step_balls.get(&id);
-            if matches!(
-                pre_ball_opt.map(|b| &b.mode),
-                Some(MovementMode::Warp { phase, .. }) if *phase != WarpPhase::Aligning
-            ) || self.combat_states.get(&id).is_some_and(|cs| {
-                let action_broken =
-                    cs.sync_invuln_with_undock_timer && cs.undock_invulnerable_remaining_ticks == 0;
-                let gate_cloak = if action_broken {
-                    0
-                } else {
-                    cs.gate_cloak_remaining_ticks
-                };
-                let is_cloaked = if action_broken && cs.gate_cloak_remaining_ticks > 0 {
-                    false
-                } else {
-                    cs.is_cloaked
-                };
-                gate_cloak > 0 || cs.undock_invulnerable_remaining_ticks > 0 || is_cloaked
-            }) {
-                continue;
-            }
-            let slim_cat = self.ball_slim_meta.get(&id).map(|m| m.category_id).unwrap_or(0);
-            let is_station_or_struct =
-                matches!(group_id, 6 | 7 | 8 | 15 | 1404..=1410 | 1657 | 2016 | 2017)
-                    || slim_cat == 65;
-            let is_static = self.is_static_ball(id)
-                || self.non_free_ball_ids.contains(&id)
-                || matches!(ball.mode, MovementMode::Miniball)
-                || is_station_or_struct
-                || matches!(slim_cat, 2 | 3 | 22 | 23 | 25 | 40 | 46 | 65);
+        fn build_entry<'a>(
+            id: BallId,
+            ball: &'a crate::Ball,
+            pre_ball_opt: Option<&crate::Ball>,
+            mb_parent: Option<BallId>,
+            is_static: bool,
+        ) -> BumpEntry<'a> {
             let pre_pos = pre_ball_opt.map_or(ball.position, |b| b.position);
             let is_aligning = matches!(
                 ball.mode,
@@ -360,12 +398,7 @@ impl Ballpark {
             let rad_vec = DVec3::splat(ball.radius.max(0.0));
             let aabb_min = pre_pos.min(ball.position) - rad_vec;
             let aabb_max = pre_pos.max(ball.position) + rad_vec;
-            let mb_parent = self.miniball_states.get(&id).map(|m| m.parent_id);
-            let idx = entries.len();
-            if !is_static {
-                dyn_indices.push(idx);
-            }
-            entries.push(BumpEntry {
+            BumpEntry {
                 id,
                 uncol: ball,
                 pre_pos,
@@ -379,37 +412,200 @@ impl Ballpark {
                 is_aligning,
                 mb_parent,
                 modified: false,
-            });
+            }
         }
 
-        if dyn_indices.is_empty() {
+        let mut entries: Vec<BumpEntry<'_>> = Vec::with_capacity(dynamic_ids.len());
+        let mut seen_entry_ids: HashSet<BallId> = HashSet::with_capacity(dynamic_ids.len());
+        let mut dyn_aabb_min = DVec3::splat(f64::INFINITY);
+        let mut dyn_aabb_max = DVec3::splat(f64::NEG_INFINITY);
+        let mut dyn_cells: HashSet<(i64, i64, i64)> = HashSet::new();
+        let mut has_large_dyn = false;
+        let mut has_non_static = false;
+
+        for &id in dynamic_ids {
+            if !seen_entry_ids.insert(id) {
+                continue;
+            }
+            let Some(ball) = self.balls.get(&id) else {
+                continue;
+            };
+            let pre_ball_opt = pre_step_dynamic_balls.get(&id);
+            if self.is_collision_exempt(id, ball, pre_ball_opt) {
+                continue;
+            }
+            let group_id = self.ball_group_ids.get(&id).copied().unwrap_or(0);
+            let slim_cat = self.ball_slim_meta.get(&id).map(|m| m.category_id).unwrap_or(0);
+            let is_station_or_struct =
+                matches!(group_id, 6 | 7 | 8 | 15 | 1404..=1410 | 1657 | 2016 | 2017)
+                    || slim_cat == 65;
+            let is_static = self.is_static_ball(id)
+                || self.non_free_ball_ids.contains(&id)
+                || matches!(ball.mode, MovementMode::Miniball)
+                || is_station_or_struct
+                || matches!(slim_cat, 2 | 3 | 22 | 23 | 25 | 40 | 46 | 65);
+            let mb_parent = self.miniball_states.get(&id).map(|m| m.parent_id);
+            let entry = build_entry(id, ball, pre_ball_opt, mb_parent, is_static);
+            if !is_static {
+                has_non_static = true;
+                dyn_aabb_min = dyn_aabb_min.min(entry.aabb_min);
+                dyn_aabb_max = dyn_aabb_max.max(entry.aabb_max);
+                if let Some((c0, c1)) = spatial_cell_range(
+                    entry.aabb_min,
+                    entry.aabb_max,
+                    COLLISION_CELL_SIZE_METERS,
+                    MAX_CELLS_PER_BALL,
+                ) {
+                    for cx in c0.0..=c1.0 {
+                        for cy in c0.1..=c1.1 {
+                            for cz in c0.2..=c1.2 {
+                                dyn_cells.insert((cx, cy, cz));
+                            }
+                        }
+                    }
+                } else {
+                    has_large_dyn = true;
+                }
+            }
+            entries.push(entry);
+        }
+
+        if !has_non_static {
             return;
+        }
+
+        let static_grid_ids = self.grids.values().flat_map(|g| g.members.iter().copied()).filter(|id| {
+            !self.static_ball_ids.contains(id) && self.is_static_ball(*id)
+        });
+        for id in self.static_ball_ids.iter().copied().chain(static_grid_ids) {
+            if !seen_entry_ids.insert(id) {
+                continue;
+            }
+            let Some(ball) = self.balls.get(&id) else {
+                continue;
+            };
+            let pre_ball_opt = pre_step_dynamic_balls.get(&id);
+            let pre_pos = pre_ball_opt.map_or(ball.position, |b| b.position);
+            let rad_vec = DVec3::splat(ball.radius.max(0.0));
+            let s_min = pre_pos.min(ball.position) - rad_vec;
+            let s_max = pre_pos.max(ball.position) + rad_vec;
+            if !aabb_overlaps(s_min, s_max, dyn_aabb_min, dyn_aabb_max) {
+                continue;
+            }
+            if !has_large_dyn {
+                if let Some((c0, c1)) = spatial_cell_range(
+                    s_min,
+                    s_max,
+                    COLLISION_CELL_SIZE_METERS,
+                    MAX_CELLS_PER_BALL,
+                ) {
+                    let mut hits_cell = false;
+                    'cell_probe: for cx in c0.0..=c1.0 {
+                        for cy in c0.1..=c1.1 {
+                            for cz in c0.2..=c1.2 {
+                                if dyn_cells.contains(&(cx, cy, cz)) {
+                                    hits_cell = true;
+                                    break 'cell_probe;
+                                }
+                            }
+                        }
+                    }
+                    if !hits_cell {
+                        continue;
+                    }
+                }
+            }
+            if self.is_collision_exempt(id, ball, pre_ball_opt) {
+                continue;
+            }
+            let mb_parent = self.miniball_states.get(&id).map(|m| m.parent_id);
+            entries.push(build_entry(id, ball, pre_ball_opt, mb_parent, true));
+        }
+
+        entries.sort_unstable_by_key(|e| e.id);
+
+        let mut dyn_indices: Vec<usize> = Vec::with_capacity(dynamic_ids.len());
+        let mut cell_map: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
+        let mut large_indices: Vec<usize> = Vec::new();
+        let mut entry_cells: Vec<Option<((i64, i64, i64), (i64, i64, i64))>> =
+            Vec::with_capacity(entries.len());
+
+        for (idx, e) in entries.iter().enumerate() {
+            if !e.is_static {
+                dyn_indices.push(idx);
+            }
+            let range = spatial_cell_range(
+                e.aabb_min,
+                e.aabb_max,
+                COLLISION_CELL_SIZE_METERS,
+                MAX_CELLS_PER_BALL,
+            );
+            if let Some((c0, c1)) = range {
+                for cx in c0.0..=c1.0 {
+                    for cy in c0.1..=c1.1 {
+                        for cz in c0.2..=c1.2 {
+                            cell_map.entry((cx, cy, cz)).or_default().push(idx);
+                        }
+                    }
+                }
+            } else {
+                large_indices.push(idx);
+            }
+            entry_cells.push(range);
         }
 
         let mut best_swept: BTreeMap<BallId, (f64, DVec3, DVec3)> = BTreeMap::new();
         let mut collision_events = Vec::new();
         let mut bumped_dynamic_ids = BTreeSet::new();
         let restitution = 0.8;
+        let mut seen_stamp: Vec<usize> = vec![0; entries.len()];
+        let mut candidates: Vec<usize> = Vec::new();
 
         for i in 0..entries.len() {
             let is_static_a = entries[i].is_static;
-            let start_dyn = if is_static_a {
-                dyn_indices.partition_point(|&j| j <= i)
-            } else {
-                0
-            };
-            let j_count = if is_static_a {
-                dyn_indices.len() - start_dyn
-            } else {
-                entries.len().saturating_sub(i + 1)
-            };
+            let token = i + 1;
+            candidates.clear();
+            match entry_cells[i] {
+                Some((c0, c1)) => {
+                    for cx in c0.0..=c1.0 {
+                        for cy in c0.1..=c1.1 {
+                            for cz in c0.2..=c1.2 {
+                                if let Some(bucket) = cell_map.get(&(cx, cy, cz)) {
+                                    for &j in bucket {
+                                        if j > i
+                                            && (!is_static_a || !entries[j].is_static)
+                                            && seen_stamp[j] != token
+                                        {
+                                            seen_stamp[j] = token;
+                                            candidates.push(j);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    for &j in &large_indices {
+                        if j > i
+                            && (!is_static_a || !entries[j].is_static)
+                            && seen_stamp[j] != token
+                        {
+                            seen_stamp[j] = token;
+                            candidates.push(j);
+                        }
+                    }
+                    candidates.sort_unstable();
+                }
+                None => {
+                    if is_static_a {
+                        let start = dyn_indices.partition_point(|&j| j <= i);
+                        candidates.extend_from_slice(&dyn_indices[start..]);
+                    } else {
+                        candidates.extend((i + 1)..entries.len());
+                    }
+                }
+            }
 
-            for step in 0..j_count {
-                let j = if is_static_a {
-                    dyn_indices[start_dyn + step]
-                } else {
-                    i + 1 + step
-                };
+            for &j in &candidates {
                 let (left, right) = entries.split_at_mut(j);
                 let a = &mut left[i];
                 let b = &mut right[0];
@@ -424,13 +620,7 @@ impl Ballpark {
                     continue;
                 }
 
-                if a.aabb_max.x < b.aabb_min.x
-                    || b.aabb_max.x < a.aabb_min.x
-                    || a.aabb_max.y < b.aabb_min.y
-                    || b.aabb_max.y < a.aabb_min.y
-                    || a.aabb_max.z < b.aabb_min.z
-                    || b.aabb_max.z < a.aabb_min.z
-                {
+                if !aabb_overlaps(a.aabb_min, a.aabb_max, b.aabb_min, b.aabb_max) {
                     continue;
                 }
 
@@ -463,8 +653,8 @@ impl Ballpark {
                     if disc >= 0.0 {
                         let t_col = (-b_coef - disc.sqrt()) / (2.0 * a_coef);
                         if (0.0..=1.0).contains(&t_col) {
-                            let pre_a = pre_step_balls.get(&id_a).unwrap_or(uncol_a);
-                            let pre_b = pre_step_balls.get(&id_b).unwrap_or(uncol_b);
+                            let pre_a = pre_step_dynamic_balls.get(&id_a).unwrap_or(uncol_a);
+                            let pre_b = pre_step_dynamic_balls.get(&id_b).unwrap_or(uncol_b);
                             let dt1 = t_col * dt;
                             let dt2 = (1.0 - t_col) * dt;
                             let goal_a = crate::physics::compute_subwarp_goal_velocity(

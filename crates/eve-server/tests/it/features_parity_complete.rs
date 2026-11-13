@@ -4261,20 +4261,26 @@ async fn test_canonical_plan_t8_t9_t10_t11_harnesses_and_oracles() {
     // T-11: Destiny differential physics harness & golden vector kinematics
     let mut ballpark = Ballpark::new(30_000_144);
     let _ = populate_asteroid_belt_entities(&mut ballpark, 30_000_144, &ctx.sde);
-    let ball_id = *ballpark.balls.keys().next().expect("seeded ball in ballpark");
-    let start_x = ballpark.balls[&ball_id].position.x;
-    if let Some(ball) = ballpark.balls.get_mut(&ball_id) {
-        ball.velocity = DVec3::new(100.0, 0.0, 0.0);
-        ball.mass = 1_067_000.0;
-        ball.max_velocity = 365.0;
-        ball.inertia = 2.9;
-        ball.mode = MovementMode::GotoDirection {
+    let seeded_id = *ballpark.balls.keys().next().expect("seeded ball in ballpark");
+    let start_pos = ballpark.balls[&seeded_id].position + DVec3::new(10_000.0, 0.0, 0.0);
+    let ship_id = 990_000_002;
+    ballpark.add_ball(eve_destiny::Ball {
+        id: ship_id,
+        type_id: 587,
+        position: start_pos,
+        velocity: DVec3::new(100.0, 0.0, 0.0),
+        max_velocity: 365.0,
+        inertia: 2.9,
+        mass: 1_067_000.0,
+        radius: 40.0,
+        speed_fraction: 1.0,
+        mode: MovementMode::GotoDirection {
             direction: DVec3::X,
-        };
-    }
+        },
+    });
     ballpark.step(1.0);
-    let moved = ballpark.balls.get(&ball_id).expect("moved ball in ballpark");
-    assert!(moved.position.x > start_x + 50.0, "kinematic step must advance X position");
+    let moved = ballpark.balls.get(&ship_id).expect("moved ball in ballpark");
+    assert!(moved.position.x > start_pos.x + 50.0, "kinematic step must advance X position");
 }
 
 // =========================================================================
