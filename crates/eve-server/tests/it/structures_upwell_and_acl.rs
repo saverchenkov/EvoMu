@@ -5148,7 +5148,7 @@ fn new_test_ctx() -> Arc<ServerContext> {
 }
 
 async fn pilot_in_space(ctx: &ServerContext, sess_id: u64) -> SessionState {
-    let perim_station = ctx.sde.stations.values().find(|s| s.solar_system_id == JITA).map(|s| s.station_id).expect("Perimeter station");
+    let perim_station = ctx.sde.stations.values().filter(|s| s.solar_system_id == JITA).map(|s| s.station_id).min().expect("Perimeter station");
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&OWNER) {
             let ship_id = ch.active_ship_id;
@@ -5170,11 +5170,14 @@ async fn pilot_in_space(ctx: &ServerContext, sess_id: u64) -> SessionState {
 }
 
 async fn move_ship(ctx: &ServerContext, sess: &SessionState, pos: DVec3) {
-    assert!(ctx.systems.get_or_spawn(sess.solar_system_id.expect("sys")).set_ball_position(sess.ship_id.expect("ship"), pos).await);
+    let sys = ctx.systems.get_or_spawn(sess.solar_system_id.expect("sys"));
+    let ship_id = sess.ship_id.expect("ship");
+    assert!(sys.set_ball_position(ship_id, pos).await);
+    let _ = sys.set_movement_mode(ship_id, eve_destiny::MovementMode::Stop).await;
 }
 
 fn open_space(ctx: &ServerContext, sys_id: u32, k: f64) -> DVec3 {
-    let base = ctx.sde.stations.values().find(|s| s.solar_system_id == sys_id).map(|s| s.position).unwrap_or(DVec3::ZERO);
+    let base = ctx.sde.stations.values().filter(|s| s.solar_system_id == sys_id).min_by_key(|s| s.station_id).map(|s| s.position).unwrap_or(DVec3::ZERO);
     base + DVec3::new(0.0, 5.0e9 + k * 3.0e9, 0.0)
 }
 
@@ -5516,7 +5519,8 @@ async fn test_upwell_reinforcement_durations_exit_hack_and_repair() {
     kw_on.insert("online".into(), PyRep::Bool(true));
     ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(svc_item), PyRep::Integer(fort_id), PyRep::Integer(InventoryFlag::ServiceSlot0 as i64)], &kw_on, None).await.expect("online service");
     rpc(&ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock fort");
-    move_ship(&ctx, &sess, pos_fort).await;
+    let fort_pos = DVec3::from_array(ctx.db.with_snapshot(|s| s.structures[&fort_id].position));
+    move_ship(&ctx, &sess, fort_pos).await;
 
     // Align clock to exact 00:00 UTC with reinforce_hour = 18 so armor unjittered exit = t0 + 42h (18:00 Day 1)
     // and multi-timer hull unjittered exit = next_reinforce_exit(t0 + (24 + 108)*3600, 18) = t0 + 138h (18:00 Day 5, NOT Day 6!).
@@ -5786,11 +5790,14 @@ async fn pilot_in_space(ctx: &ServerContext, sess_id: u64) -> SessionState {
 }
 
 async fn move_ship(ctx: &ServerContext, sess: &SessionState, pos: DVec3) {
-    assert!(ctx.systems.get_or_spawn(sess.solar_system_id.expect("sys")).set_ball_position(sess.ship_id.expect("ship"), pos).await);
+    let sys = ctx.systems.get_or_spawn(sess.solar_system_id.expect("sys"));
+    let ship_id = sess.ship_id.expect("ship");
+    assert!(sys.set_ball_position(ship_id, pos).await);
+    let _ = sys.set_movement_mode(ship_id, eve_destiny::MovementMode::Stop).await;
 }
 
 fn open_space(ctx: &ServerContext, sys_id: u32, k: f64) -> DVec3 {
-    let base = ctx.sde.stations.values().find(|s| s.solar_system_id == sys_id).map(|s| s.position).unwrap_or(DVec3::ZERO);
+    let base = ctx.sde.stations.values().filter(|s| s.solar_system_id == sys_id).min_by_key(|s| s.station_id).map(|s| s.position).unwrap_or(DVec3::ZERO);
     base + DVec3::new(0.0, 5.0e9 + k * 3.0e9, 0.0)
 }
 
@@ -6406,7 +6413,7 @@ fn new_test_ctx() -> ServerContext {
 }
 
 async fn pilot_in_space(ctx: &ServerContext, sess_id: u64) -> SessionState {
-    let perim_station = ctx.sde.stations.values().find(|s| s.solar_system_id == JITA).map(|s| s.station_id).expect("Perimeter station");
+    let perim_station = ctx.sde.stations.values().filter(|s| s.solar_system_id == JITA).map(|s| s.station_id).min().expect("Perimeter station");
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&OWNER) {
             let ship_id = ch.active_ship_id;
@@ -6428,11 +6435,14 @@ async fn pilot_in_space(ctx: &ServerContext, sess_id: u64) -> SessionState {
 }
 
 async fn move_ship(ctx: &ServerContext, sess: &SessionState, pos: DVec3) {
-    assert!(ctx.systems.get_or_spawn(sess.solar_system_id.expect("sys")).set_ball_position(sess.ship_id.expect("ship"), pos).await);
+    let sys = ctx.systems.get_or_spawn(sess.solar_system_id.expect("sys"));
+    let ship_id = sess.ship_id.expect("ship");
+    assert!(sys.set_ball_position(ship_id, pos).await);
+    let _ = sys.set_movement_mode(ship_id, eve_destiny::MovementMode::Stop).await;
 }
 
 fn open_space(ctx: &ServerContext, sys_id: u32, k: f64) -> DVec3 {
-    let base = ctx.sde.stations.values().find(|s| s.solar_system_id == sys_id).map(|s| s.position).unwrap_or(DVec3::ZERO);
+    let base = ctx.sde.stations.values().filter(|s| s.solar_system_id == sys_id).min_by_key(|s| s.station_id).map(|s| s.position).unwrap_or(DVec3::ZERO);
     base + DVec3::new(0.0, 5.0e9 + k * 3.0e9, 0.0)
 }
 
