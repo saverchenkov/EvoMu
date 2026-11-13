@@ -72,6 +72,7 @@ impl FromTxError for eve_proto::BridgeRpcError {
         eve_proto::BridgeRpcError {
             code: code.into(),
             message: err.to_string(),
+            client_error: None,
         }
     }
 }
