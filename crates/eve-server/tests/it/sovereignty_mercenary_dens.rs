@@ -1149,7 +1149,7 @@ async fn test_quasar_sovereignty_all_seven_protos_parity() {
     let lava_reagent_wrapper = field(lava_def, 4).expect("Lava reagent_definition");
     let lava_reagent_inner = field(&lava_reagent_wrapper, 2).expect("Lava inner ReagentDefinition");
     assert_eq!(varint(&lava_reagent_inner, 1), Some(1_000));
-    assert_eq!(varint(&lava_reagent_inner, 2), Some(3_600));
+    assert_eq!(varint(&field(&lava_reagent_inner, 2).expect("cycle_period Duration"), 1), Some(3_600));
     assert_eq!(varint(&lava_reagent_inner, 3), Some(1_000));
     assert_eq!(varint(&lava_reagent_inner, 4), Some(25_000));
     assert_eq!(varint(&lava_reagent_inner, 5), Some(25_000));
