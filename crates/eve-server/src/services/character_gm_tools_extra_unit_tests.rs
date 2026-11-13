@@ -468,6 +468,22 @@ async fn gm_slash_kill_contact_cluster_energy_secstatus_and_qa_rpcs() {
     };
 
     let npc_ball_id = 950_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.insert(
+            (char_id, 892),
+            eve_db::ActiveMissionRecord {
+                character_id: char_id,
+                mission_id: 892,
+                agent_id: 3_011_918,
+                state: "Accepted".into(),
+                solar_system_id: sys_id,
+                current_room_id: 0,
+                npcs_remaining: 1,
+                spawned_npc_ball_ids: vec![npc_ball_id],
+                bookmark_id: None,
+            },
+        );
+    });
     let handle = ctx.systems.get_or_spawn(sys_id);
     let _ = handle
         .spawn_ball_with_combat(
@@ -488,6 +504,17 @@ async fn gm_slash_kill_contact_cluster_energy_secstatus_and_qa_rpcs() {
         .await;
     let kill_ball = handle_gm_slash_ext(&ctx, &mut sess, char_id, &format!("/kill {npc_ball_id}")).await.unwrap().unwrap();
     assert_eq!(kill_ball.dict_get("destroyed"), Some(&PyRep::Bool(true)));
+    ctx.db.with_snapshot(|snap| {
+        let m = snap
+            .active_missions
+            .get(&(char_id, 892))
+            .expect("mission 892 tracked");
+        assert_eq!(
+            m.npcs_remaining, 0,
+            "/kill <npc_ball_id> must invoke on_mission_npc_destroyed_core (#1003)"
+        );
+        assert!(m.spawned_npc_ball_ids.is_empty());
+    });
     assert_eq!(
         handle_gm_slash_ext(&ctx, &mut sess, char_id, "/kill 999999999").await.unwrap().unwrap_err().code,
         "TargetNotFound"

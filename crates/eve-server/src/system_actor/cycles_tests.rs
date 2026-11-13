@@ -799,3 +799,82 @@ fn resolve_ball_pilot_char_id_covers_slim_meta_active_ship_item_owner_and_non_po
         None
     );
 }
+
+#[test]
+fn tick_capacitor_deltas_emit_attr_18_and_repair_unhydrated_cap() {
+    let mut bp = Ballpark::new(30_000_142);
+    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let char_id = 90_000_001_i64;
+    let ship_id = db.with_snapshot(|s| s.characters[&char_id].active_ship_id);
+
+    bp.add_ball(make_ship(ship_id, 587, DVec3::ZERO));
+    bp.combat_states.insert(
+        ship_id,
+        CombatState {
+            capacitor: 250.0,
+            max_capacitor: 250.0,
+            capacitor_recharge_time_ms: 100_000.0,
+            ..Default::default()
+        },
+    );
+
+    // 1. Unhydrated (250.0, 250.0) CombatState repairs cleanly to effective_max_capacitor (400.0).
+    let mut active_cycles = Vec::new();
+    let cycle = ActiveModuleCycle {
+        ship_id,
+        owner_char_id: Some(char_id),
+        module_id: 901_001,
+        module_type_id: 484,
+        target_id: None,
+        effect_name: "shieldBoosting".to_string(),
+        duration_s: 4.0,
+        elapsed_s: 0.0,
+        repeat: 1,
+        cap_need_per_cycle: 100.0,
+        effective_max_capacitor: Some(400.0),
+        ..Default::default()
+    };
+    crate::system_actor::cycles_tackle::add_module_cycle_in_ballpark(
+        &mut bp,
+        &mut active_cycles,
+        cycle,
+        &Some(db.clone()),
+    )
+    .expect("repaired cap 400 >= 100 GJ");
+    assert_eq!(bp.combat_states[&ship_id].max_capacitor, 400.0);
+    assert_eq!(bp.combat_states[&ship_id].capacitor, 300.0);
+
+    // 2. Passive recharge across bp.step(1.0) emits PendingCycleAction::ShipCapacitorChanged ->
+    //    flush_pending_cycle_damage_notifications enqueues both OnCapacitorChange & OnModuleAttributeChanges (attr 18).
+    let pre = super::snapshot_player_ship_capacitors(&bp, Some(&db));
+    let _ = bp.step(1.0);
+    let mut pending_actions = Vec::new();
+    super::record_player_ship_capacitor_deltas(&bp, &pre, &mut pending_actions);
+    assert!(pending_actions.iter().any(|a| matches!(
+        a,
+        PendingCycleAction::ShipCapacitorChanged {
+            char_id: c,
+            ship_id: s,
+            new_cap,
+            old_cap,
+            notified: false,
+            ..
+        } if *c == char_id && *s == ship_id && *new_cap > *old_cap
+    )));
+
+    let q_p: RwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>> =
+        RwLock::new(HashMap::new());
+    flush_pending_cycle_damage_notifications(Some(&db), Some(&q_p), None, &mut pending_actions);
+    assert!(matches!(
+        pending_actions.first(),
+        Some(PendingCycleAction::ShipCapacitorChanged { notified: true, .. })
+    ));
+    let notifs = &q_p.read().unwrap()[&char_id];
+    assert!(notifs.iter().any(|n| n.event == "OnCapacitorChange"));
+    assert!(notifs.iter().any(|n| {
+        n.event == "OnModuleAttributeChanges"
+            && matches!(n.args.first(), Some(eve_proto::PyRep::List(entries)) if entries.iter().any(|e| {
+                matches!(e, eve_proto::PyRep::Tuple(t) if t.len() >= 6 && t[2].as_i64() == Some(ship_id) && t[3].as_i64() == Some(18))
+            }))
+    }));
+}

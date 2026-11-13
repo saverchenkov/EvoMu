@@ -2568,6 +2568,8 @@ fn normalize_mission_journal_bookmark(
     bm: PyRep,
     default_loc_id: i64,
     default_hint: &str,
+    default_agent_id: i64,
+    default_loc_type: &str,
     idx: i64,
 ) -> PyRep {
     let bm = strip_none_location_coords_recursive(bm);
@@ -2602,7 +2604,35 @@ fn normalize_mission_journal_bookmark(
     if !has_hint {
         map.insert("hint".into(), PyRep::String(default_hint.to_string()));
     }
+    let has_agent_id = map
+        .get("agentID")
+        .and_then(PyRep::as_i64)
+        .is_some_and(|v| v > 0);
+    if !has_agent_id {
+        map.insert("agentID".into(), PyRep::Integer(default_agent_id));
+    }
+    let has_loc_type = map
+        .get("locationType")
+        .and_then(PyRep::as_str)
+        .is_some_and(|s| !s.trim().is_empty());
+    if !has_loc_type {
+        map.insert(
+            "locationType".into(),
+            PyRep::String(default_loc_type.to_string()),
+        );
+    }
     PyRep::KeyVal(map)
+}
+
+fn mission_bookmark_default_location_type(hint: &str) -> &'static str {
+    if matches!(
+        hint,
+        "UI/Agents/MissionTypes/Courier" | "UI/Agents/MissionTypes/Trade"
+    ) {
+        "objective.destination"
+    } else {
+        "dungeon"
+    }
 }
 
 fn normalize_agent_journal_details_rep(rep: PyRep) -> PyRep {
@@ -2618,6 +2648,11 @@ fn normalize_agent_journal_details_rep(rep: PyRep) -> PyRep {
                         .filter(|s| s.starts_with("UI/"))
                         .unwrap_or("UI/Agents/MissionTypes/Encounter")
                         .to_string();
+                    let default_agent_id = t[4]
+                        .as_i64()
+                        .filter(|&v| v > 0)
+                        .unwrap_or(3_008_416);
+                    let default_loc_type = mission_bookmark_default_location_type(&hint);
                     if let PyRep::List(ref mut bms) = t[6] {
                         for (idx, bm) in bms.iter_mut().enumerate() {
                             let cur = std::mem::replace(bm, PyRep::None);
@@ -2625,6 +2660,8 @@ fn normalize_agent_journal_details_rep(rep: PyRep) -> PyRep {
                                 cur,
                                 30_000_142,
                                 &hint,
+                                default_agent_id,
+                                default_loc_type,
                                 idx as i64,
                             );
                         }
@@ -2692,6 +2729,8 @@ fn normalize_agent_journal_details_rep(rep: PyRep) -> PyRep {
                 .and_then(PyRep::as_i64)
                 .filter(|&v| v > 0)
                 .unwrap_or(30_000_142);
+            let default_agent_id = agent_id.as_i64().filter(|&v| v > 0).unwrap_or(3_008_416);
+            let default_loc_type = mission_bookmark_default_location_type(&type_label);
             let bookmarks = match m.dict_get("bookmarks") {
                 Some(PyRep::List(bms)) => PyRep::List(
                     bms.iter()
@@ -2702,6 +2741,8 @@ fn normalize_agent_journal_details_rep(rep: PyRep) -> PyRep {
                                 bm,
                                 default_bm_loc,
                                 &type_label,
+                                default_agent_id,
+                                default_loc_type,
                                 idx as i64,
                             )
                         })

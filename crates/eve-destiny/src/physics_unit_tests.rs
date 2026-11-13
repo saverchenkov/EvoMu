@@ -658,6 +658,32 @@ fn is_warp_finishing_within_1s_matches_deceleration_dropout_equation() {
 }
 
 #[test]
+fn is_warp_finishing_within_horizon_covers_client_decel_lead() {
+    // 5.0 AU/s (k_decel=3.0) crosses ~6,069 m over ~2.8 s on V24 client DSTBALL_WARP exit (#1001).
+    let mut b = Ball::new(1, 0, Vec3::ZERO, 100.0, 1000.0);
+    b.max_velocity = 200.0;
+    b.mode = BallMode::Warp(crate::types::WarpState {
+        target: Vec3::new(100_000_000.0, 0.0, 0.0),
+        warp_speed_au_per_s: 5.0,
+        stop_distance: 0.0,
+        phase: crate::types::WarpPhase::Decelerating { remaining_dist: 6_069.0 },
+    });
+    assert!(!is_warp_finishing_within_1s(&b));
+    assert!(is_warp_finishing_within(&b, 4.0));
+    assert!(!is_warp_finishing_within(&b, f64::NAN));
+    assert!(!is_warp_finishing_within(&b, -1.0));
+
+    // At 15.0 AU/s (k_decel=6.0), 1,000,000 m takes ~4.95 s, which is outside the 4.0 s window.
+    b.mode = BallMode::Warp(crate::types::WarpState {
+        target: Vec3::new(100_000_000.0, 0.0, 0.0),
+        warp_speed_au_per_s: 15.0,
+        stop_distance: 0.0,
+        phase: crate::types::WarpPhase::Decelerating { remaining_dist: 1_000_000.0 },
+    });
+    assert!(!is_warp_finishing_within(&b, 4.0));
+}
+
+#[test]
 fn warp_deceleration_rate_capped_above_six_au_per_s() {
     let origin = DVec3::ZERO;
     let dest = DVec3::new(20.0 * AU_METERS, 0.0, 0.0);

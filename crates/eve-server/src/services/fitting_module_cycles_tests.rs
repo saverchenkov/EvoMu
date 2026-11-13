@@ -1005,11 +1005,46 @@ async fn cehe_duration_fallbacks_crystal_volatility_and_survey_cycle_completion(
     assert_eq!(cehe_rep.dict_get("duration").and_then(|v| v.as_f64()), Some(25.0));
 
     // 2. Shield booster reads attr 51 SPEED (4s) * shield_boost_multiplier (1.5) = 6.0s
+    //    and emits OnCapacitorChange + OnModuleAttributeChanges (CHARGE attr 18) (#1002).
+    let _ = ctx.drain_notifications_for_char(char_id);
     let sb_rep = handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &[PyRep::Integer(mod_sb)], &kw)
         .await
         .unwrap()
         .expect("shield booster ok");
     assert_eq!(sb_rep.dict_get("duration").and_then(|v| v.as_f64()), Some(6.0));
+    let sb_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        sb_notifs.iter().any(|n| {
+            n.event == "OnGodmaShipEffect"
+                && n.args.first().and_then(|v| v.as_i64()) == Some(mod_sb)
+                && n.args.get(3).and_then(|v| v.as_i64()) == Some(1)
+                && n.args.get(7).and_then(|v| v.as_f64()) == Some(6_000.0)
+                && n.args.get(8).and_then(|v| v.as_i64()) == Some(1000)
+        }),
+        "expected OnGodmaShipEffect with evaluated 6000ms duration and repeat=1000 (#819)"
+    );
+    assert!(
+        sb_notifs.iter().any(|n| {
+            n.event == "OnCapacitorChange"
+                && n.args.first().and_then(|v| v.as_i64()) == Some(ship_id)
+                && n.args.get(1).and_then(|v| v.as_f64()) == Some(4980.0)
+        }),
+        "expected OnCapacitorChange for 20 GJ shield booster activation (#1002)"
+    );
+    assert!(
+        sb_notifs.iter().any(|n| {
+            n.event == "OnModuleAttributeChanges"
+                && matches!(n.args.first(), Some(PyRep::List(entries)) if entries.iter().any(|e| {
+                    matches!(e, PyRep::Tuple(t)
+                        if t.len() >= 7
+                        && t[2].as_i64() == Some(ship_id)
+                        && t[3].as_i64() == Some(18)
+                        && t[5].as_f64() == Some(4980.0)
+                        && t[6].as_f64() == Some(5000.0))
+                }))
+        }),
+        "expected OnModuleAttributeChanges (attr 18 CHARGE) on activation (#1002)"
+    );
 
     // 3. Generic zero-duration module falls back to 1.0s
     let fb_rep = handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &[PyRep::Integer(mod_fallback)], &kw)
@@ -1057,5 +1092,72 @@ async fn cehe_duration_fallbacks_crystal_volatility_and_survey_cycle_completion(
     .unwrap()
     .expect("non-volatile crystal turret ok");
     assert_eq!(nonvol_rep.dict_get("duration").and_then(|v| v.as_f64()), Some(2.0));
+
+    // 6. Propulsion (group 46) & Stasis Webifier (group 65) reject duplicate Activate while active (#819).
+    let ab_type = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 46 && t.published)
+        .map(|t| t.type_id)
+        .expect("propulsion module type");
+    let web_type = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 65 && t.published)
+        .map(|t| t.type_id)
+        .expect("stasis webifier type");
+    let mod_ab = 992_020_i64;
+    let mod_web = 992_021_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        for (mid, tid, flag) in [
+            (mod_ab, ab_type, eve_db::InventoryFlag::MedSlot0),
+            (mod_web, web_type, eve_db::InventoryFlag::MedSlot1),
+        ] {
+            let mut it = eve_db::InventoryItemRecord::new(mid, tid, char_id, ship_id, flag, 1);
+            it.singleton = true;
+            snap.items.insert(mid, it);
+        }
+    });
+    assert!(
+        handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &[PyRep::Integer(mod_ab)], &kw)
+            .await
+            .unwrap()
+            .is_ok()
+    );
+    let dup_ab = handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &[PyRep::Integer(mod_ab)], &kw)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(dup_ab.code, "ModuleAlreadyActive");
+
+    assert!(
+        handle_module_cycles(
+            &ctx,
+            &mut sess,
+            None,
+            "dogmaIM",
+            "Activate",
+            &[PyRep::Integer(mod_web), PyRep::Integer(target_ship_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .is_ok()
+    );
+    let dup_web = handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(mod_web), PyRep::Integer(target_ship_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(dup_web.code, "ModuleAlreadyActive");
 }
 

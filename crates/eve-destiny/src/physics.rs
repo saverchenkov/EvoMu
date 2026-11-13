@@ -1634,11 +1634,14 @@ pub(crate) fn step_warp_ball(
 }
 
 /// Returns `true` iff `ball` is in `WarpPhase::Decelerating` and will drop below the sub-warp
-/// dropout threshold within the next `1.0 s` simulation tick (`rem_plus_1 * e^{-k_d} * k_d < stop_thresh`).
+/// dropout threshold within the next `horizon_s` seconds (`rem_plus_1 * e^{-k_d * horizon_s} * k_d < stop_thresh`).
 ///
 /// Mirrors the exact `WarpPhase::Decelerating` dropout condition in `integrate_warp` so docking
-/// RPCs can bound 1 Hz client/server warp-arrival tolerance strictly to `<= 1.0 s`.
-pub fn is_warp_finishing_within_1s(ball: &Ball) -> bool {
+/// and gate-jump RPCs can absorb client/server deceleration lead (`#1001`).
+pub fn is_warp_finishing_within(ball: &Ball, horizon_s: f64) -> bool {
+    if !horizon_s.is_finite() || horizon_s < 0.0 {
+        return false;
+    }
     let MovementMode::Warp {
         destination,
         warp_speed_au_s,
@@ -1654,7 +1657,16 @@ pub fn is_warp_finishing_within_1s(ball: &Ball) -> bool {
     let k_d = (warp_speed_au_s.max(1e-4) / 3.0).min(2.0);
     let rem_plus_1 = ball.position.distance(destination) + 1.0;
     let stop_thresh = (0.5 * ball.max_velocity).min(100.0).max(1.0);
-    rem_plus_1 * (-k_d).exp() * k_d < stop_thresh
+    rem_plus_1 * (-k_d * horizon_s).exp() * k_d < stop_thresh
+}
+
+/// Returns `true` iff `ball` is in `WarpPhase::Decelerating` and will drop below the sub-warp
+/// dropout threshold within the next `1.0 s` simulation tick (`rem_plus_1 * e^{-k_d} * k_d < stop_thresh`).
+///
+/// Mirrors the exact `WarpPhase::Decelerating` dropout condition in `integrate_warp` so docking
+/// RPCs can bound 1 Hz client/server warp-arrival tolerance strictly to `<= 1.0 s`.
+pub fn is_warp_finishing_within_1s(ball: &Ball) -> bool {
+    is_warp_finishing_within(ball, 1.0)
 }
 
 impl Ballpark {

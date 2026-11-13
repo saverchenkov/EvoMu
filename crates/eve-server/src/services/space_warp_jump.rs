@@ -584,6 +584,7 @@ async fn handle_cmd_warp_to_stuff(
             cs.capacitor = sde_max_cap;
             repaired_max_cap = true;
         }
+        let old_cap = cs.capacitor;
         if cs.capacitor < req_cap {
             let affordable_dist_m = if cap_per_m > 0.0 {
                 cs.capacitor / cap_per_m
@@ -617,15 +618,12 @@ async fn handle_cmd_warp_to_stuff(
         } else {
             let _ = handle.set_capacitor(ship_id, cs.capacitor).await;
         }
-        ctx.notify(
-            crate::router::NotificationTarget::Character(char_id),
-            "OnCapacitorChange",
-            "charid",
-            vec![
-                PyRep::Integer(ship_id),
-                PyRep::Real(cs.capacitor),
-                PyRep::Real(cs.max_capacitor),
-            ],
+        let _ = ctx.notify_ship_capacitor_change(
+            char_id,
+            ship_id,
+            cs.capacitor,
+            cs.max_capacitor,
+            Some(old_cap),
         );
     }
 
@@ -1091,8 +1089,8 @@ async fn handle_cmd_stargate_jump(
 /// - When `ball.mode` is `MovementMode::Warp`, jumping is permitted (`Ok(true)`, signalling
 ///   that the active warp must be terminated on jump) only when `destination` lies inside
 ///   `gate_radius + 2,500 m` of `gate_pos` AND the ship is either already inside that range or
-///   within the final `<= 1.0 s` of `WarpPhase::Decelerating`; all other warp states return
-///   `ShipInWarp`.
+///   within the final `<= 4.0 s` of `WarpPhase::Decelerating` (`#1001`); all other warp states
+///   return `ShipInWarp`.
 /// - For non-warp movement modes, returns `OutsideStargateJumpRange` when `(dist - gate_radius).max(0.0) > 2_500.0`
 ///   and `Ok(false)` otherwise.
 pub(crate) fn evaluate_stargate_jump_perimeter(
@@ -1106,7 +1104,7 @@ pub(crate) fn evaluate_stargate_jump_perimeter(
         MovementMode::Warp { destination, .. } => {
             if destination.distance(gate_pos) <= max_jump_dist
                 && (dist <= max_jump_dist
-                    || eve_destiny::physics::is_warp_finishing_within_1s(ball))
+                    || eve_destiny::physics::is_warp_finishing_within(ball, 4.0))
             {
                 Ok(true)
             } else {
@@ -1141,7 +1139,7 @@ pub(crate) fn evaluate_stargate_jump_perimeter(
 /// - When `ball.mode` is `MovementMode::Warp`, docking is permitted (`Ok(true)`, signalling that
 ///   the active warp must be terminated) only when `destination` lies inside `target_radius + 2,500 m`
 ///   of `target_pos` AND the ship is either already inside `max_dock_dist` or within the final
-///   `<= 1.0 s` of `WarpPhase::Decelerating` (`eve_destiny::physics::is_warp_finishing_within_1s`);
+///   `<= 4.0 s` of `WarpPhase::Decelerating` (`eve_destiny::physics::is_warp_finishing_within`, `#1001`);
 ///   all other warp states return `ShipInWarp`.
 /// - For non-warp movement modes, returns `OutsideDockingPerimeter` when `dist > max_dock_dist`
 ///   and `Ok(false)` otherwise, regardless of `session.address`.
@@ -1156,7 +1154,7 @@ pub(crate) fn evaluate_dock_perimeter(
         MovementMode::Warp { destination, .. } => {
             if destination.distance(target_pos) <= max_dock_dist
                 && (dist <= max_dock_dist
-                    || eve_destiny::physics::is_warp_finishing_within_1s(ball))
+                    || eve_destiny::physics::is_warp_finishing_within(ball, 4.0))
             {
                 Ok(true)
             } else {

@@ -1413,31 +1413,60 @@ impl ServerContext {
         effect_name: Option<&str>,
         target_id: Option<i64>,
     ) -> Vec<PendingMachoNotification> {
+        self.notify_module_effect_started_with_cycle(
+            char_id,
+            ship_id,
+            module_id,
+            module_type_id,
+            effect_name,
+            target_id,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn notify_module_effect_started_with_cycle(
+        &self,
+        char_id: i64,
+        ship_id: i64,
+        module_id: i64,
+        module_type_id: u32,
+        effect_name: Option<&str>,
+        target_id: Option<i64>,
+        repeat_opt: Option<i32>,
+        duration_ms_opt: Option<f64>,
+    ) -> Vec<PendingMachoNotification> {
         let effect_id = self.effect_id_for_module(module_type_id, effect_name).unwrap_or(0);
-        let duration_ms = self
-            .ship_fittings
-            .read()
-            .ok()
-            .and_then(|map| map.get(&ship_id).cloned())
-            .filter(|fit| fit.modules.contains_key(&module_id))
-            .map(|fit| {
-                let d73 = fit.get_module_effective_attribute(module_id, 73, &self.sde);
-                if d73 > 0.0 {
-                    d73
-                } else {
-                    fit.get_module_effective_attribute(module_id, 51, &self.sde)
-                }
-            })
-            .or_else(|| {
-                self.sde.types.get(&module_type_id).and_then(|t| {
-                    t.default_attributes
-                        .get(&73)
-                        .or_else(|| t.default_attributes.get(&51))
-                        .copied()
+        let duration_ms = duration_ms_opt.unwrap_or_else(|| {
+            self.ship_fittings
+                .read()
+                .ok()
+                .and_then(|map| map.get(&ship_id).cloned())
+                .filter(|fit| fit.modules.contains_key(&module_id))
+                .map(|fit| {
+                    let d73 = fit.get_module_effective_attribute(module_id, 73, &self.sde);
+                    if d73 > 0.0 {
+                        d73
+                    } else {
+                        fit.get_module_effective_attribute(module_id, 51, &self.sde)
+                    }
                 })
-            })
-            .unwrap_or(0.0);
-        let repeat = if effect_id == 16 { 0 } else { 1000 };
+                .or_else(|| {
+                    self.sde.types.get(&module_type_id).and_then(|t| {
+                        t.default_attributes
+                            .get(&73)
+                            .or_else(|| t.default_attributes.get(&51))
+                            .copied()
+                    })
+                })
+                .unwrap_or(0.0)
+        });
+        let repeat = if effect_id == 16 {
+            0
+        } else {
+            repeat_opt.unwrap_or(1000)
+        };
         let now = self.now_blueos_filetime_ticks();
         let environment = PyRep::Tuple(vec![
             PyRep::Integer(module_id),
@@ -1564,6 +1593,63 @@ impl ServerContext {
             "charid",
             vec![PyRep::List(changes)],
         )
+    }
+
+    /// Builds a V24 `OnModuleAttributeChange` entry for `CHARGE` (attr 18 — current capacitor GJ)
+    /// matching `godma.StateManager.OnModuleAttributeChanges` (`#1002`).
+    pub(crate) fn build_ship_capacitor_attr_change_rep(
+        char_id: i64,
+        ship_id: i64,
+        now_filetime: i64,
+        new_cap: f64,
+        old_cap: f64,
+    ) -> PyRep {
+        PyRep::Tuple(vec![
+            PyRep::String("OnModuleAttributeChange".into()),
+            PyRep::Integer(char_id),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(i64::from(eve_sde::attr_ids::CHARGE)),
+            PyRep::Integer(now_filetime),
+            PyRep::Real(new_cap),
+            PyRep::Real(old_cap),
+            PyRep::None,
+        ])
+    }
+
+    /// Synchronizes both `OnCapacitorChange` (test/IT observers) and `OnModuleAttributeChanges`
+    /// (`CHARGE` attr 18, which drives V24 `godma` -> `CapacitorContainer` HUD updates) (`#1002`).
+    pub fn notify_ship_capacitor_change(
+        &self,
+        char_id: i64,
+        ship_id: i64,
+        new_cap: f64,
+        max_cap: f64,
+        old_cap: Option<f64>,
+    ) -> Vec<PendingMachoNotification> {
+        if char_id <= 0 || ship_id <= 0 || !new_cap.is_finite() || !max_cap.is_finite() {
+            return Vec::new();
+        }
+        let now = self.now_blueos_filetime_ticks();
+        let prev = old_cap.filter(|v| v.is_finite()).unwrap_or(new_cap);
+        let mut out = self.notify(
+            NotificationTarget::Character(char_id),
+            "OnCapacitorChange",
+            "charid",
+            vec![
+                PyRep::Integer(ship_id),
+                PyRep::Real(new_cap),
+                PyRep::Real(max_cap),
+            ],
+        );
+        out.extend(self.notify(
+            NotificationTarget::Character(char_id),
+            "OnModuleAttributeChanges",
+            "charid",
+            vec![PyRep::List(vec![Self::build_ship_capacitor_attr_change_rep(
+                char_id, ship_id, now, new_cap, prev,
+            )])],
+        ));
+        out
     }
 
     /// Emits a canonical `OnItemChange(row, changes)` notification using `DBRowDescriptor::inv_item_header`.

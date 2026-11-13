@@ -217,6 +217,14 @@ pub enum PendingCycleAction {
             Option<eve_db::InventoryItemRecord>,
         )>,
     },
+    ShipCapacitorChanged {
+        char_id: CharacterId,
+        ship_id: BallId,
+        new_cap: f64,
+        max_cap: f64,
+        old_cap: f64,
+        notified: bool,
+    },
 }
 
 /// Staggered 10-tick cadence for per-system condition checkpoints (`RFC-1 E-4`, `T-5`, `#919`).

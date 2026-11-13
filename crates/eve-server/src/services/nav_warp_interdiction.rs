@@ -586,6 +586,7 @@ pub(crate) async fn execute_agency_content_warp(
             cs.max_capacitor = sde_max_cap;
             cs.capacitor = sde_max_cap;
         }
+        let old_cap = cs.capacitor;
         if cs.capacitor < req_cap {
             let affordable_dist_m = if cap_per_m > 0.0 {
                 cs.capacitor / cap_per_m
@@ -608,15 +609,12 @@ pub(crate) async fn execute_agency_content_warp(
             cs.capacitor = (cs.capacitor - req_cap).max(0.0);
         }
         let _ = sys_handle.set_capacitor(ship_id, cs.capacitor).await;
-        ctx.notify(
-            NotificationTarget::Character(char_id),
-            "OnCapacitorChange",
-            "charid",
-            vec![
-                PyRep::Integer(ship_id),
-                PyRep::Real(cs.capacitor),
-                PyRep::Real(cs.max_capacitor),
-            ],
+        let _ = ctx.notify_ship_capacitor_change(
+            char_id,
+            ship_id,
+            cs.capacitor,
+            cs.max_capacitor,
+            Some(old_cap),
         );
     }
 

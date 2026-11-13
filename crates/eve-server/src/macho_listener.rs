@@ -707,8 +707,23 @@ pub async fn execute_call_req_wire(
                 let mut has_set_state = obs_evs
                     .iter()
                     .any(|ev| matches!(ev, eve_destiny::DestinyEvent::SetState { .. }));
+                let has_incremental_ship_handoff = obs_evs.iter().any(|ev| {
+                    matches!(
+                        ev,
+                        eve_destiny::DestinyEvent::AddBalls2 { .. }
+                            | eve_destiny::DestinyEvent::RemoveBall { .. }
+                    )
+                });
                 let ship_changed_in_space = is_in_space && session.ship_id != prev_session.ship_id;
-                if (!effective_was_live || ship_changed_in_space) && !has_set_state {
+                let same_system_live_ship_swap = ship_changed_in_space
+                    && effective_was_live
+                    && prev_session.solar_system_id == session.solar_system_id;
+                if (!effective_was_live
+                    || (ship_changed_in_space
+                        && !same_system_live_ship_swap
+                        && !has_incremental_ship_handoff))
+                    && !has_set_state
+                {
                     // Either this is a ballpark-init RPC, an in-space ship switch
                     // (e.g. pod ejection `#970`), a `Lagged` resync (`ORD-5`), or a
                     // concurrent 1Hz tick drained `SetState` between `MachoBindObject` and
@@ -1154,10 +1169,12 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             .to_session_change_pyrep(&session, vec![MACHO_PROXY_NODE_ID as i64])
                         {
                             // When an in-space ship switch occurs in the same solar system (e.g. pod
-                            // ejection on ship destruction `#970`), emit `DoDestinyUpdate(SetState)`
-                            // BEFORE `SessionChangeNotification(shipid)` so `michelle` has the new
-                            // capsule ball and `ballpark.ego == new_ship_id` before `OnSessionChanged`
-                            // handlers (`OverviewWindow`, `ActiveShipController`, `ShipUI`) run.
+                            // ejection on ship destruction `#970`), emit incremental `DoDestinyUpdate`
+                            // (`RemoveBall` + `AddBalls2` from `queue_in_space_ship_handoff`) BEFORE
+                            // `SessionChangeNotification(shipid)` when `wire_state.destiny` is already
+                            // `Live`, avoiding `SetState` (`Park.SetState` triggers `DoBallClear` and
+                            // breaks `OverviewWindow` weakrefs to celestial `Ball`s). Only synthesize
+                            // `SetState` if the destiny stream is still `AwaitingSetState`.
                             if session.station_id.is_none()
                                 && session.structure_id.is_none()
                                 && session.ship_id != prev_session.ship_id
@@ -1172,11 +1189,27 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                         let has_set_state = events.iter().any(|e| {
                                             matches!(e, eve_destiny::DestinyEvent::SetState { .. })
                                         });
-                                        if !matches!(
+                                        let is_live_same_system = matches!(
                                             wire_state.destiny,
-                                            crate::outbound_sequencer::DestinyStream::Detached
+                                            crate::outbound_sequencer::DestinyStream::Live { .. }
+                                        ) && prev_session.station_id.is_none()
+                                            && prev_session.structure_id.is_none()
+                                            && prev_session.solar_system_id
+                                                == session.solar_system_id;
+                                        let has_incremental_handoff = events.iter().any(|e| {
+                                            matches!(
+                                                e,
+                                                eve_destiny::DestinyEvent::AddBalls2 { .. }
+                                                    | eve_destiny::DestinyEvent::RemoveBall { .. }
+                                            )
+                                        });
+                                        if matches!(
+                                            wire_state.destiny,
+                                            crate::outbound_sequencer::DestinyStream::AwaitingSetState { .. }
                                         ) && !has_set_state
+                                            && !is_live_same_system
                                         {
+                                            let _ = has_incremental_handoff;
                                             if sys_handle.push_set_state(new_ship_id).await.is_ok() {
                                                 if let Ok((t2, ev2, up2)) =
                                                     sys_handle.drain_observer_updates(new_ship_id).await

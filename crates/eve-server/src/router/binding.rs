@@ -749,7 +749,7 @@ impl ServerContext {
                 let (Some((_, sb)), Some((_, cb))) = (ship_ball, cont_ball) else {
                     return Err(deny());
                 };
-                if sb.position.distance(cb.position) > 2_500.0 {
+                if sb.surface_distance(&cb) > 2_500.0 {
                     return Err(deny());
                 }
             }
@@ -780,7 +780,7 @@ impl ServerContext {
             let (Some((_, sb)), Some((_, cb))) = (ship_ball, cont_ball) else {
                 return Err(deny());
             };
-            if sb.position.distance(cb.position) > 2_500.0 {
+            if sb.surface_distance(&cb) > 2_500.0 {
                 return Err(deny());
             }
         }

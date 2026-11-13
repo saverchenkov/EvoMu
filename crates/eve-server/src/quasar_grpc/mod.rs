@@ -534,12 +534,10 @@ fn verify_live_session_sso_bearer_token(
     };
     let payload_bytes = eve_db::accounts::base64url_decode_no_pad(payload_b64).ok()?;
     let payload_val: serde_json::Value = serde_json::from_slice(&payload_bytes).ok()?;
-    let iat = payload_val.get("iat")?.as_u64()?;
-    let exp = payload_val.get("exp")?.as_u64()?;
-    if iat > now_unix || exp <= iat {
-        return None;
-    }
-    let claims = ctx.db.verify_sso_access_token(token, iat).ok()?;
+    let claims = ctx
+        .db
+        .verify_live_session_launcher_sso_access_token(token, now_unix)
+        .ok()?;
     let launcher_client_ok = match payload_val.get("azp") {
         Some(v) => v
             .as_str()
@@ -554,16 +552,6 @@ fn verify_live_session_sso_bearer_token(
     }
     lookup_active_account_role(ctx, claims.user_id, now_unix)?;
     let os = ctx.db.get_online_session(claims.user_id)?;
-    if claims.exp < os.connected_at_unix {
-        return None;
-    }
-    if ctx
-        .db
-        .check_session_revoked(claims.user_id, os.session_id, now_unix)
-        .is_some()
-    {
-        return None;
-    }
     let character_id = if claims.character_id > 0 {
         if os.character_id != Some(claims.character_id) {
             return None;

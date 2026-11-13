@@ -632,11 +632,26 @@ async fn death_pipeline_sets_wreck_and_capsule_names_queues_set_state_and_emits_
 
     let (_tick, events, _rep) = sys_handle.drain_observer_updates(cap_id).await.unwrap();
     assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, eve_destiny::DestinyEvent::SetState { .. })),
+        "in-system pod ejection must not queue SetState (DoBallClear wipes overview celestials #970)"
+    );
+    assert!(
         events.iter().any(|e| matches!(
             e,
-            eve_destiny::DestinyEvent::SetState { observer_ball_id } if *observer_ball_id == cap_id
+            eve_destiny::DestinyEvent::RemoveBall { ball_id } if *ball_id == ship_id
         )),
-        "death pipeline must queue SetState for ejected capsule (#729)"
+        "death pipeline must queue RemoveBall for destroyed ship on ejected capsule observer (#970)"
+    );
+    assert!(
+        events.iter().any(|e| match e {
+            eve_destiny::DestinyEvent::AddBalls2 { balls } => {
+                balls.iter().any(|b| b.id == res.wreck_item_id) && balls.iter().any(|b| b.id == cap_id)
+            }
+            _ => false,
+        }),
+        "death pipeline must queue AddBalls2 with wreck and ejected capsule (#729/#970)"
     );
 
     // #731 / #770: Insurance payout records ref_types::INSURANCE with ship typeID as context_id

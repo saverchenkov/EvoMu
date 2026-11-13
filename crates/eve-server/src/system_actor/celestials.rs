@@ -876,6 +876,16 @@ impl SystemHandle {
         bp.queue_set_state(observer_ball_id)
     }
 
+    pub fn try_handoff_in_space_observer(
+        &self,
+        old_ball_id: BallId,
+        new_ball_id: BallId,
+        added_ball_ids: &[BallId],
+    ) -> bool {
+        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        bp.queue_in_space_ship_handoff(old_ball_id, new_ball_id, added_ball_ids)
+    }
+
     pub fn try_spawn_ball_with_combat(&self, ball: Ball, combat_state: CombatState) {
         let sde_opt = self
             .actor_state

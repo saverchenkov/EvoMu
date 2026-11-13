@@ -1970,6 +1970,22 @@ pub async fn handle_gm_slash_ext(
                 }));
             };
             let _ = handle.remove_ball(victim_ship_id).await;
+            ctx.systems
+                .invoke_npc_death_hook(sys_id, victim_ship_id, Some(cid))
+                .await;
+            crate::services::fw_gameplay::on_space_entity_destroyed(
+                ctx,
+                sys_id,
+                Some(cid),
+                victim_ship_id,
+                0,
+            )
+            .await;
+            if let Ok(mut spawns) = ctx.npc_spawns.write() {
+                if let Some(mgr) = spawns.get_mut(&sys_id) {
+                    mgr.entities.remove(&victim_ship_id);
+                }
+            }
             let wreck_type_id = ctx.sde.resolve_wreck_type_id(ball.type_id, None).unwrap_or(26557);
             let (wreck_id, killmail_id) = ctx.db.with_mut_snapshot(|snap| {
                 snap.next_entity_id += 1;
