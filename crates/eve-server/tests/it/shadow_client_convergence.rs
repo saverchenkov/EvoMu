@@ -100,7 +100,7 @@ async fn test_shadow_client_catches_missing_deltas_and_converges_on_live_rpcs() 
         .with_snapshot(|snap| snap.characters.get(&PILOT).unwrap().balance);
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&PILOT).unwrap().balance =
-            old_balance + IskCents::from_whole_isk(777_000);
+            old_balance.checked_add(IskCents::from_isk(777_000)).unwrap();
     });
     let wallet_divs = shadow.compare_wallet_against_world(&ctx.db);
     assert!(

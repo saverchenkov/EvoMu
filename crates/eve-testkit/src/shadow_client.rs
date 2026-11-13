@@ -1850,9 +1850,9 @@ mod tests {
         shadow.assert_converged_with_world(&db, None);
 
         db.with_mut_snapshot(|snap| {
-            snap.characters.get_mut(&PILOT_ID).unwrap().balance = IskCents::from_whole_isk(2_500_000);
+            snap.characters.get_mut(&PILOT_ID).unwrap().balance = IskCents::from_isk(2_500_000);
             if let Some(corp) = snap.corporations.get_mut(&CORP_ID) {
-                corp.set_division_balance(1000, IskCents::from_whole_isk(9_000_000));
+                corp.set_division_balance(1, IskCents::from_isk(9_000_000));
             }
         });
         let wallet_divs = shadow.compare_wallet_against_world(&db);
@@ -2074,7 +2074,7 @@ mod tests {
         let set_state_kv = PyRep::keyval([
             ("stamp", PyRep::Integer(42)),
             ("ego", PyRep::Integer(SHIP_ID)),
-            ("state", PyRep::Buffer(encode_add_balls(42, &[ship_ball]))),
+            ("state", PyRep::Buffer(encode_add_balls(42, &[&ship_ball]))),
             ("slims", PyRep::List(vec![PyRep::keyval([("itemID", PyRep::Integer(SHIP_ID)), ("typeID", PyRep::Integer(606))])])),
             ("damageState", PyRep::Dict(Vec::new())),
         ]);
@@ -2088,7 +2088,7 @@ mod tests {
                 PyRep::Tuple(vec![
                     PyRep::String("AddBalls2".into()),
                     PyRep::Tuple(vec![PyRep::Tuple(vec![
-                        PyRep::Buffer(encode_add_balls(43, &[target_ball])),
+                        PyRep::Buffer(encode_add_balls(43, &[&target_ball])),
                         PyRep::List(vec![PyRep::keyval([("itemID", PyRep::Integer(target_ball_id)), ("typeID", PyRep::Integer(587))])]),
                         PyRep::Dict(Vec::new()),
                     ])]),
