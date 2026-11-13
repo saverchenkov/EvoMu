@@ -903,5 +903,8 @@ async fn ship_board_uses_surface_distance_for_large_titan_hull() {
         .unwrap()
         .expect("boarding Titan at 185 m surface distance must succeed (#1004)");
     assert_eq!(sess.ship_id, Some(titan_id));
-    assert_eq!(boarded, PyRep::Integer(titan_id));
+    assert!(
+        matches!(boarded, PyRep::Tuple(ref t) if t.len() == 4),
+        "expected 4-tuple ship_state from ship.Board, got {boarded:?}"
+    );
 }

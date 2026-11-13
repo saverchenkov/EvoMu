@@ -528,8 +528,12 @@ async fn station_dock_at_warp_destination_succeeds_while_mid_warp_still_rejects(
     if let MovementMode::Warp { ref mut phase, .. } = lead_warp {
         *phase = eve_destiny::WarpPhase::Decelerating;
     }
-    assert!(sys_h.set_ball_position(ship_id, landing + DVec3::new(6_069.0, 0.0, 0.0)).await);
-    sys_h.set_movement_mode(ship_id, lead_warp).await.unwrap();
+    {
+        let mut bp = sys_h.ballpark.write().unwrap();
+        let ball = bp.balls.get_mut(&ship_id).expect("ship ball");
+        ball.position = landing + DVec3::new(6_069.0, 0.0, 0.0);
+        ball.mode = lead_warp;
+    }
     let dock_res = handle(&ctx, &mut sess, "stationSvc", "Dock", &[PyRep::Integer(jita_station)], &kw)
         .await
         .unwrap()

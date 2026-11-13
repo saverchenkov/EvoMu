@@ -809,6 +809,18 @@ async fn e2_handoffs_b4_b8_c27_take_restore_absent_ball_and_capacitor_persistenc
     assert!(cond.space_entry_epoch >= 1);
 
     // 4. #889 (C27): Undock restores partial capacitor (92.5 GJ, not 250.0 GJ max) and bumps space_entry_epoch
+    let char_uid = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.user_id))
+        .unwrap_or(1);
+    sess.user_id = Some(char_uid);
+    let _ = ctx.db.acquire_online_lock(
+        char_uid,
+        sess.session_id,
+        Some(char_id),
+        true,
+        ctx.now_unix_secs(),
+    );
     let _ = ctx.drain_notifications_for_char(char_id);
     crate::services::station_structure::handle(
         &ctx,

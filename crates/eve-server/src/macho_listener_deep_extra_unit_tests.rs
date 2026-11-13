@@ -1247,7 +1247,7 @@ fn pyrep_contains_ascii(rep: &PyRep, needle: &str) -> bool {
                     .iter()
                     .any(|(k, v)| pyrep_contains_ascii(k, needle) || pyrep_contains_ascii(v, needle))
         }
-        PyRep::SubStruct(inner) => pyrep_contains_ascii(inner, needle),
+        PyRep::SubStruct(inner) | PyRep::SubStream(inner) => pyrep_contains_ascii(inner, needle),
         _ => false,
     }
 }
@@ -1297,7 +1297,23 @@ async fn pod_ejection_handoff_in_space_emits_incremental_destiny_without_set_sta
     )
     .await
     .unwrap();
-    let _ = read_until_call_reply(&mut s).await;
+    let bind_rsp = read_until_call_reply(&mut s).await;
+    let oid_val = bind_rsp
+        .named_payload
+        .get("OID+")
+        .map(as_dict)
+        .and_then(|e| e.first())
+        .and_then(|(k, _)| k.as_str())
+        .and_then(|s_oid| s_oid.split(':').nth(1))
+        .and_then(|n| n.parse::<u64>().ok())
+        .expect("beyonce bind OID+");
+    write_framed_pyrep(
+        &mut s,
+        &call(4, "beyonce", Some(oid_val), "UpdateStateRequest", vec![]).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(read_until_call_reply(&mut s).await.packet_type, MachoPacketType::CallRsp);
     while tokio::time::timeout(std::time::Duration::from_millis(20), read_pkt(&mut s))
         .await
         .is_ok()
@@ -1374,14 +1390,14 @@ async fn pod_ejection_handoff_in_space_emits_incremental_destiny_without_set_sta
         };
         let pkt = MachoPacket::from_pyrep(&raw).unwrap();
         if pkt.packet_type == MachoPacketType::Notification
-            && pyrep_contains_ascii(&pkt.payload, "DoDestinyUpdate")
+            && pyrep_contains_ascii(&raw, "DoDestinyUpdate")
         {
             if saw_destiny_pos.is_none() {
                 saw_destiny_pos = Some(idx);
             }
-            saw_set_state |= pyrep_contains_ascii(&pkt.payload, "SetState");
-            saw_add_balls2 |= pyrep_contains_ascii(&pkt.payload, "AddBalls2");
-            saw_remove_ball |= pyrep_contains_ascii(&pkt.payload, "RemoveBall");
+            saw_set_state |= pyrep_contains_ascii(&raw, "SetState");
+            saw_add_balls2 |= pyrep_contains_ascii(&raw, "AddBalls2");
+            saw_remove_ball |= pyrep_contains_ascii(&raw, "RemoveBall");
         }
         if pkt.packet_type == MachoPacketType::SessionChangeNotification {
             saw_sess_pos = Some(idx);
