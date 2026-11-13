@@ -51,7 +51,7 @@ pub fn sync_dirty_to_sqlite(
     cold_changed |= sync_part4_world_tail_tables(tx, snap, fp, &mut delta)?;
 
     cold_changed |= super::sync_ext::sync_extension_tables(tx, snap, fp)?;
-    cold_changed |= super::ledger_store::sync_ledger(tx, snap, fp)?;
+    cold_changed |= super::domain_rows::sync_ledger_domain_rows(tx, snap)?;
     cold_changed |= super::notes_lp_sequence_store::sync_d6(tx, snap, fp)?;
     cold_changed |= super::social_store::sync_d6_social(tx, snap, fp)?;
     cold_changed |= super::corp_crimewatch_store::sync_d6_corp_crimewatch(tx, snap, fp)?;
@@ -99,9 +99,6 @@ pub(crate) fn sync_selected_cold_domains_to_sqlite(
     }
     if cd.extension_tables {
         super::sync_ext::sync_extension_tables(tx, snap, fp)?;
-    }
-    if cd.ledger {
-        super::ledger_store::sync_ledger(tx, snap, fp)?;
     }
     if cd.d6_notes_lp_seq {
         super::notes_lp_sequence_store::sync_d6(tx, snap, fp)?;
@@ -1409,9 +1406,7 @@ pub fn replace_sqlite_from_snapshot(
          DELETE FROM structure_vulnerability_windows;
          DELETE FROM skill_history;
          DELETE FROM character_doll_info;
-         DELETE FROM wallet_journal_meta;
-         DELETE FROM market_transactions;
-         DELETE FROM account_plex_vault;
+         DELETE FROM domain_rows;
          DELETE FROM owner_notes;
          DELETE FROM corp_lp_balances;
          DELETE FROM char_lp_logs;

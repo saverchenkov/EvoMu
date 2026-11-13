@@ -12,7 +12,6 @@ use crate::sqlite_store::fingerprints::{
     fp_market_orders_digest, fp_system_state,
 };
 use crate::sqlite_store::industry_market_pve_store::compute_d6_batch4_fingerprints;
-use crate::sqlite_store::ledger_store::rollback_ledger;
 use crate::sqlite_store::load::load_snapshot_from_sqlite;
 use crate::sqlite_store::notes_lp_sequence_store::rollback_d6;
 use crate::sqlite_store::sync::{replace_sqlite_from_snapshot, sync_dirty_to_sqlite};
@@ -164,12 +163,11 @@ fn evedb_kills_all_remaining_sqlite_store_mutants() {
     assert_ne!(b4_a.blobs["weapon_banks"], b4_b.blobs["weapon_banks"]);
     assert_ne!(cw_a.crimewatch_fp, cw_b.crimewatch_fp);
 
-    // 4. Clean no-op rollback guards across rollback_d6 and rollback_ledger
+    // 4. Clean no-op rollback guards across rollback_d6
     let empty_conn = open_migrated_conn();
     let clean_fp = compute_fingerprints(&base);
     let mut clean_snap = base.clone();
     rollback_d6(&empty_conn, &mut clean_snap, &clean_fp);
-    rollback_ledger(&empty_conn, &mut clean_snap, &clean_fp);
     assert_eq!(clean_snap.accounts.len(), base.accounts.len());
     assert_eq!(clean_snap.characters.len(), base.characters.len());
     assert_eq!(clean_snap.skills.len(), base.skills.len());

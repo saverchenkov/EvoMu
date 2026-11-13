@@ -440,7 +440,7 @@ pub fn build_price_history_rows(
     } else {
         // Fallback: check if market_transactions have fills for this type in this region
         let mut daily_map: std::collections::BTreeMap<String, (f64, f64, i64, i64, f64)> = std::collections::BTreeMap::new();
-        for tx in &snap.market_transactions {
+        for tx in snap.market_transactions.values() {
             if tx.type_id == type_id {
                 let Some(tx_region) = snap
                     .market_orders
@@ -742,7 +742,7 @@ pub(crate) fn handle_market_transactions_rpc(
                 };
                 Ok(snap
                     .market_transactions
-                    .iter()
+                    .values()
                     .rev()
                     .filter(|tx| {
                         tx.date_unix >= min_unix

@@ -845,45 +845,54 @@ fn crossed_modify_fills_cover_corp_upwell_refund_shortfall_and_plex_vault_paths(
                 escrow: IskCents(0),
             },
         );
-        snap.market_transactions.push(MarketTransactionRecord {
-            transaction_id: 1,
-            date_unix: now,
-            type_id: 34,
-            quantity: 5,
-            price: IskCents(1_000),
-            location_id: 999_888_777,
-            buyer_id: char_buyer,
-            seller_id: char_seller,
-            buyer_account_key: 1000,
-            seller_account_key: 1004,
-            journal_ref_id: 1,
-        });
-        snap.market_transactions.push(MarketTransactionRecord {
-            transaction_id: 2,
-            date_unix: now,
-            type_id: 34,
-            quantity: 5,
-            price: IskCents(9_900),
-            location_id: non_forge_station,
-            buyer_id: char_buyer,
-            seller_id: char_seller,
-            buyer_account_key: 1000,
-            seller_account_key: 1004,
-            journal_ref_id: 2,
-        });
-        snap.market_transactions.push(MarketTransactionRecord {
-            transaction_id: 3,
-            date_unix: now,
-            type_id: 34,
-            quantity: 0,
-            price: IskCents(700),
-            location_id: JITA_STATION_ID,
-            buyer_id: char_buyer,
-            seller_id: char_seller,
-            buyer_account_key: 1000,
-            seller_account_key: 1000,
-            journal_ref_id: 3,
-        });
+        snap.market_transactions.insert(
+            1,
+            MarketTransactionRecord {
+                transaction_id: 1,
+                date_unix: now,
+                type_id: 34,
+                quantity: 5,
+                price: IskCents(1_000),
+                location_id: 999_888_777,
+                buyer_id: char_buyer,
+                seller_id: char_seller,
+                buyer_account_key: 1000,
+                seller_account_key: 1004,
+                journal_ref_id: 1,
+            },
+        );
+        snap.market_transactions.insert(
+            2,
+            MarketTransactionRecord {
+                transaction_id: 2,
+                date_unix: now,
+                type_id: 34,
+                quantity: 5,
+                price: IskCents(9_900),
+                location_id: non_forge_station,
+                buyer_id: char_buyer,
+                seller_id: char_seller,
+                buyer_account_key: 1000,
+                seller_account_key: 1004,
+                journal_ref_id: 2,
+            },
+        );
+        snap.market_transactions.insert(
+            3,
+            MarketTransactionRecord {
+                transaction_id: 3,
+                date_unix: now,
+                type_id: 34,
+                quantity: 0,
+                price: IskCents(700),
+                location_id: JITA_STATION_ID,
+                buyer_id: char_buyer,
+                seller_id: char_seller,
+                buyer_account_key: 1000,
+                seller_account_key: 1000,
+                journal_ref_id: 3,
+            },
+        );
     });
     let hist_rows = ctx
         .db
@@ -963,32 +972,38 @@ fn crossed_modify_fills_cover_corp_upwell_refund_shortfall_and_plex_vault_paths(
     // Non-zero seller transaction to kill sign-flip mutant (`credit = -gross` vs `+gross`)
     // plus corp seller div5 transaction to cover CorpGetTransactions explicit account filter
     ctx.db.with_mut_snapshot(|snap| {
-        snap.market_transactions.push(MarketTransactionRecord {
-            transaction_id: 4,
-            date_unix: now + 1,
-            type_id: 34,
-            quantity: 3,
-            price: IskCents(1_200),
-            location_id: JITA_STATION_ID,
-            buyer_id: char_buyer,
-            seller_id: char_seller,
-            buyer_account_key: 1000,
-            seller_account_key: 1000,
-            journal_ref_id: 4,
-        });
-        snap.market_transactions.push(MarketTransactionRecord {
-            transaction_id: 5,
-            date_unix: now + 1,
-            type_id: 34,
-            quantity: 4,
-            price: IskCents(1_500),
-            location_id: JITA_STATION_ID,
-            buyer_id: char_buyer,
-            seller_id: corp_seller_id,
-            buyer_account_key: 1000,
-            seller_account_key: 1004,
-            journal_ref_id: 5,
-        });
+        snap.market_transactions.insert(
+            4,
+            MarketTransactionRecord {
+                transaction_id: 4,
+                date_unix: now + 1,
+                type_id: 34,
+                quantity: 3,
+                price: IskCents(1_200),
+                location_id: JITA_STATION_ID,
+                buyer_id: char_buyer,
+                seller_id: char_seller,
+                buyer_account_key: 1000,
+                seller_account_key: 1000,
+                journal_ref_id: 4,
+            },
+        );
+        snap.market_transactions.insert(
+            5,
+            MarketTransactionRecord {
+                transaction_id: 5,
+                date_unix: now + 1,
+                type_id: 34,
+                quantity: 4,
+                price: IskCents(1_500),
+                location_id: JITA_STATION_ID,
+                buyer_id: char_buyer,
+                seller_id: corp_seller_id,
+                buyer_account_key: 1000,
+                seller_account_key: 1004,
+                journal_ref_id: 5,
+            },
+        );
     });
     let tx_list2 = handle_market_transactions_rpc(
         &ctx,

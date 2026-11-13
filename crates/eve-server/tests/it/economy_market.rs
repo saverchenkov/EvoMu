@@ -1908,7 +1908,7 @@ pub(crate) mod market_price_history_aggregates_empty {
         assert!((rows_bm[0].dbrow_get("avgPrice").unwrap().as_f64().unwrap() - 10.00).abs() < 1e-4);
 
         ctx.db.with_snapshot(|snap| {
-            let has_bm_tx = snap.market_transactions.iter().any(|t| t.type_id == PYERITE && t.quantity == 300 && t.price.0 == 1_000);
+            let has_bm_tx = snap.market_transactions.values().any(|t| t.type_id == PYERITE && t.quantity == 300 && t.price.0 == 1_000);
             assert!(has_bm_tx, "Market transactions must record BuyMultipleItems fill");
         });
 
@@ -1984,7 +1984,7 @@ pub(crate) mod market_price_history_aggregates_empty {
         assert_eq!(new_rows_mod[0].dbrow_get("orders").unwrap().as_i64().unwrap(), 2);
 
         ctx.db.with_snapshot(|snap| {
-            let has_mod_tx = snap.market_transactions.iter().any(|t| t.type_id == PYERITE && t.quantity == 500 && t.price.0 == 1_000);
+            let has_mod_tx = snap.market_transactions.values().any(|t| t.type_id == PYERITE && t.quantity == 500 && t.price.0 == 1_000);
             assert!(has_mod_tx, "Market transactions must record ModifyCharOrder crossed fill");
         });
     }

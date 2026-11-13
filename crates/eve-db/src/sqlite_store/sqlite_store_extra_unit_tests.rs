@@ -227,53 +227,56 @@ fn ledger_store_sync_load_and_selective_rollback() {
         JournalMeta::new(2, 90_000_001, 90_000_002, 1_700_000_000)
             .with_context(JournalContext::MarketTransaction, 500),
     );
-    snap.market_transactions.push(MarketTransactionRecord {
-        transaction_id: 500, date_unix: 1_700_000_000, type_id: 34, quantity: 100,
-        price: IskCents(500), location_id: 60_003_760, buyer_id: 90_000_001,
-        seller_id: 90_000_002, buyer_account_key: 1000, seller_account_key: 1000, journal_ref_id: 10,
-    });
+    snap.market_transactions.insert(
+        500,
+        MarketTransactionRecord {
+            transaction_id: 500, date_unix: 1_700_000_000, type_id: 34, quantity: 100,
+            price: IskCents(500), location_id: 60_003_760, buyer_id: 90_000_001,
+            seller_id: 90_000_002, buyer_account_key: 1000, seller_account_key: 1000, journal_ref_id: 10,
+        },
+    );
     snap.account_plex_vault.insert(1, 250);
 
-    let mut fp = TableFingerprints::default();
     {
         let tx = conn.transaction().unwrap();
-        assert!(ledger_store::sync_ledger(&tx, &snap, &mut fp).unwrap());
+        assert!(domain_rows::sync_ledger_domain_rows(&tx, &snap).unwrap());
         tx.commit().unwrap();
     }
     {
         let tx = conn.transaction().unwrap();
-        assert!(!ledger_store::sync_ledger(&tx, &snap, &mut fp).unwrap());
+        assert!(!domain_rows::sync_ledger_domain_rows(&tx, &snap).unwrap());
         tx.commit().unwrap();
     }
 
-    ledger_store::rollback_ledger(&conn, &mut snap, &fp);
-    assert_eq!(snap.account_plex_vault.get(&1), Some(&250));
-
-    snap.wallet_journal_meta.clear();
-    ledger_store::rollback_ledger(&conn, &mut snap, &fp);
-    assert_eq!(snap.wallet_journal_meta.len(), 1);
-
-    snap.market_transactions.clear();
-    ledger_store::rollback_ledger(&conn, &mut snap, &fp);
-    assert_eq!(snap.market_transactions.len(), 1);
-
-    snap.account_plex_vault.insert(1, 999);
-    ledger_store::rollback_ledger(&conn, &mut snap, &fp);
-    assert_eq!(snap.account_plex_vault.get(&1), Some(&250));
+    let mut loaded = WorldStateSnapshot::default();
+    domain_rows::load_ledger_domain_rows(
+        &conn,
+        &mut loaded,
+        &mut quarantine::LoadContext::quarantine_in_memory(),
+    )
+    .unwrap();
+    assert_eq!(loaded.wallet_journal_meta, snap.wallet_journal_meta);
+    assert_eq!(loaded.market_transactions, snap.market_transactions);
+    assert_eq!(loaded.account_plex_vault, snap.account_plex_vault);
 
     snap.wallet_journal_meta.clear();
     snap.market_transactions.clear();
     snap.account_plex_vault.clear();
     {
         let tx = conn.transaction().unwrap();
-        assert!(ledger_store::sync_ledger(&tx, &snap, &mut fp).unwrap());
+        assert!(domain_rows::sync_ledger_domain_rows(&tx, &snap).unwrap());
         tx.commit().unwrap();
     }
-    let mut loaded = WorldStateSnapshot::default();
-    ledger_store::load_ledger(&conn, &mut loaded);
-    assert!(loaded.wallet_journal_meta.is_empty());
-    assert!(loaded.market_transactions.is_empty());
-    assert!(loaded.account_plex_vault.is_empty());
+    let mut loaded_empty = WorldStateSnapshot::default();
+    domain_rows::load_ledger_domain_rows(
+        &conn,
+        &mut loaded_empty,
+        &mut quarantine::LoadContext::quarantine_in_memory(),
+    )
+    .unwrap();
+    assert!(loaded_empty.wallet_journal_meta.is_empty());
+    assert!(loaded_empty.market_transactions.is_empty());
+    assert!(loaded_empty.account_plex_vault.is_empty());
 }
 
 #[test]

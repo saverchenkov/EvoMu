@@ -814,13 +814,13 @@ pub struct WorldStateSnapshot {
     pub corp_customs_offices: HashMap<i64, Vec<CustomsOfficeRecord>>,
     /// Journal parties/context metadata keyed by journal entry ID (`crate::ledger`).
     #[serde(default)]
-    pub wallet_journal_meta: HashMap<i64, crate::ledger::JournalMeta>,
+    pub wallet_journal_meta: crate::cow::CowMap<i64, crate::ledger::JournalMeta>,
     /// Market fills recorded at fill time (`crate::ledger`).
-    #[serde(default)]
-    pub market_transactions: Vec<crate::ledger::MarketTransactionRecord>,
+    #[serde(default, with = "market_transactions_cow_serde")]
+    pub market_transactions: crate::cow::CowMap<i64, crate::ledger::MarketTransactionRecord>,
     /// Account-wide PLEX Vault balances keyed by `user_id`.
     #[serde(default)]
-    pub account_plex_vault: HashMap<u64, i64>,
+    pub account_plex_vault: crate::cow::CowMap<u64, i64>,
     #[serde(default)]
     pub corp_vote_cases: HashMap<i64, CorpVoteCaseRecord>,
     #[serde(default, with = "tuple_map_serde")]
@@ -1038,13 +1038,60 @@ pub struct ObserverMiningRecord {
     pub timestamp_unix: u64,
 }
 
+mod market_transactions_cow_serde {
+    use crate::cow::CowMap;
+    use crate::ledger::MarketTransactionRecord;
+    use serde::de::{MapAccess, SeqAccess, Visitor};
+    use serde::ser::SerializeSeq;
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
+
+    pub fn serialize<S: Serializer>(
+        map: &CowMap<i64, MarketTransactionRecord>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut seq = serializer.serialize_seq(Some(map.len()))?;
+        for rec in map.values() {
+            seq.serialize_element(rec)?;
+        }
+        seq.end()
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<CowMap<i64, MarketTransactionRecord>, D::Error> {
+        struct MarketTxVisitor;
+
+        impl<'de> Visitor<'de> for MarketTxVisitor {
+            type Value = CowMap<i64, MarketTransactionRecord>;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a sequence or map of MarketTransactionRecord")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let mut map = CowMap::new();
+                while let Some(rec) = seq.next_element::<MarketTransactionRecord>()? {
+                    map.insert(rec.transaction_id, rec);
+                }
+                Ok(map)
+            }
+
+            fn visit_map<M: MapAccess<'de>>(self, mut access: M) -> Result<Self::Value, M::Error> {
+                let mut map = CowMap::new();
+                while let Some((k, rec)) = access.next_entry::<i64, MarketTransactionRecord>()? {
+                    map.insert(k, rec);
+                }
+                Ok(map)
+            }
+        }
+
+        deserializer.deserialize_any(MarketTxVisitor)
+    }
+}
+
 impl WorldStateSnapshot {
-    // Transitional no-op shims for untouched callers under the 60-file increment cap (`#915` follow-up cleanup).
-    #[doc(hidden)] #[inline] pub fn mark_item_dirty(&mut self, _: i64) {}
-    #[doc(hidden)] #[inline] pub fn mark_item_deleted(&mut self, _: i64) {}
-    #[doc(hidden)] #[inline] pub fn mark_character_dirty(&mut self, _: i64) {}
-    #[doc(hidden)] #[inline] pub fn mark_market_order_deleted(&mut self, _: i64) {}
-    #[doc(hidden)] #[inline] pub fn mark_crimewatch_dirty(&mut self, _: bool) {}
+    // Transitional no-op shim for `sp6_lifecycle.rs` (owned by another track; `#915` follow-up cleanup).
     #[doc(hidden)] #[inline] pub fn mark_other_domains_dirty(&mut self) {}
 
     /// Persists a killmail stamped with the kill time and the victim's and final-blow attacker's
@@ -1807,7 +1854,7 @@ impl WorldStateSnapshot {
             .chain(self.corp_projects.keys().copied())
             .chain(self.killmails.keys().copied())
             .chain(self.kill_rights.keys().copied())
-            .chain(self.market_transactions.iter().map(|t| t.transaction_id))
+            .chain(self.market_transactions.keys().copied())
             .chain(self.char_lp_logs.values().flatten().map(|l| l.log_id))
             .chain(self.active_missions.values().flat_map(|m| m.spawned_npc_ball_ids.iter().copied()))
             .filter(|&id| id > 0 && id < 900_000_000)

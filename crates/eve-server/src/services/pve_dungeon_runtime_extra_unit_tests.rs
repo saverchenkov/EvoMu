@@ -862,7 +862,10 @@ async fn materialize_room_preserves_positive_ball_id_and_increments_next_entity_
     let sys_id: SolarSystemId = 30_000_142;
     let char_id = 90_030_301i64;
     let ctx = make_runtime_ctx(sys_id, char_id);
-    let base_id = 10_000_000i64;
+    let base_id = ctx
+        .db
+        .with_snapshot(|snap| snap.next_entity_id)
+        .max(250_000_000);
     ctx.db.with_mut_snapshot(|snap| {
         snap.next_entity_id = base_id;
     });

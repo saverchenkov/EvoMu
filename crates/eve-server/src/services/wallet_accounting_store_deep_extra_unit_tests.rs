@@ -228,32 +228,38 @@ async fn corp_wallet_divisions_journal_filters_market_txs_and_automatic_bills() 
     // Market transactions cutoff (exact timestamp included, 1s later cutoff excludes old tx)
     let tx_time = 1_710_504_000_u64;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.market_transactions.push(MarketTransactionRecord {
-            transaction_id: 5001,
-            type_id: 34,
-            quantity: 100,
-            price: IskCents::from_isk(5),
-            location_id: 60_003_760,
-            buyer_id: char1,
-            seller_id: char2,
-            buyer_account_key: 1000,
-            seller_account_key: 1000,
-            journal_ref_id: 77,
-            date_unix: tx_time,
-        });
-        snap.market_transactions.push(MarketTransactionRecord {
-            transaction_id: 5002,
-            type_id: 35,
-            quantity: 200,
-            price: IskCents::from_isk(10),
-            location_id: 60_003_760,
-            buyer_id: corp1,
-            seller_id: char2,
-            buyer_account_key: 1002,
-            seller_account_key: 1000,
-            journal_ref_id: 78,
-            date_unix: tx_time + 10,
-        });
+        snap.market_transactions.insert(
+            5001,
+            MarketTransactionRecord {
+                transaction_id: 5001,
+                type_id: 34,
+                quantity: 100,
+                price: IskCents::from_isk(5),
+                location_id: 60_003_760,
+                buyer_id: char1,
+                seller_id: char2,
+                buyer_account_key: 1000,
+                seller_account_key: 1000,
+                journal_ref_id: 77,
+                date_unix: tx_time,
+            },
+        );
+        snap.market_transactions.insert(
+            5002,
+            MarketTransactionRecord {
+                transaction_id: 5002,
+                type_id: 35,
+                quantity: 200,
+                price: IskCents::from_isk(10),
+                location_id: 60_003_760,
+                buyer_id: corp1,
+                seller_id: char2,
+                buyer_account_key: 1002,
+                seller_account_key: 1000,
+                journal_ref_id: 78,
+                date_unix: tx_time + 10,
+            },
+        );
     });
     let ft_at = ((tx_time as i64) + 11_644_473_600) * 10_000_000;
     let ft_after = (((tx_time + 1) as i64) + 11_644_473_600) * 10_000_000;

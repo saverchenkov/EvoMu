@@ -313,19 +313,22 @@ pub(super) fn populate_world_extended_state(snap: &mut WorldStateSnapshot) {
             state: Some("open".into()),
         },
     );
-    snap.market_transactions.push(MarketTransactionRecord {
-        transaction_id: 55,
-        date_unix: 1_700_000_000,
-        type_id: 34,
-        quantity: 10,
-        price: IskCents(600),
-        location_id: 60003760,
-        buyer_id: 2001,
-        seller_id: 2002,
-        buyer_account_key: 1000,
-        seller_account_key: 1000,
-        journal_ref_id: 9101,
-    });
+    snap.market_transactions.insert(
+        55,
+        MarketTransactionRecord {
+            transaction_id: 55,
+            date_unix: 1_700_000_000,
+            type_id: 34,
+            quantity: 10,
+            price: IskCents(600),
+            location_id: 60003760,
+            buyer_id: 2001,
+            seller_id: 2002,
+            buyer_account_key: 1000,
+            seller_account_key: 1000,
+            journal_ref_id: 9101,
+        },
+    );
     snap.account_plex_vault.insert(1001, 500);
     snap.market_history.insert(
         (10000002, 34),

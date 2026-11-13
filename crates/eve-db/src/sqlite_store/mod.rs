@@ -5,8 +5,8 @@ pub mod industry_market_pve_store;
 pub mod corp_crimewatch_store;
 pub mod social_store;
 pub mod notes_lp_sequence_store;
+pub mod domain_rows;
 pub mod fingerprints;
-pub mod ledger_store;
 pub mod load;
 pub mod quarantine;
 pub mod schema;
@@ -15,6 +15,7 @@ pub mod sync;
 pub mod sync_ext;
 
 pub use auth_store::*;
+pub use domain_rows::*;
 pub use fingerprints::*;
 pub use load::*;
 pub use quarantine::*;
@@ -41,8 +42,6 @@ mod evedb_sqlite_fingerprints_and_sync_tests;
 mod notes_lp_sequence_store_cov_unit_tests;
 #[cfg(test)]
 mod sync_ext_cov_unit_tests;
-#[cfg(test)]
-mod ledger_store_cov_unit_tests;
 #[cfg(test)]
 mod social_store_r8b_unit_tests;
 #[cfg(test)]
