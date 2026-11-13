@@ -627,9 +627,11 @@ async fn test_quasar_corporation_governance_complete() {
     // 5. Members, titles, role auditlog, logo, vote, starbase, market entries, NPC standings, and PI offices
     let mems = call("eve.corporation.members.GetRequest", Vec::new());
     assert_eq!(field_varint(&eve_proto::quasar::WireMessage::decode(field_ld(&mems, 1)).unwrap(), 1), 90_000_001);
-    assert_eq!(field_varint(&call("eve.corporation.members.GetLimitRequest", Vec::new()), 1), 640);
+    assert_eq!(field_varint(&call("eve.corporation.members.GetLimitRequest", Vec::new()), 2), 640);
     let roles = call("eve.corporation.members.roles.GetRequest", Vec::new());
-    assert_eq!(field_varint(&eve_proto::quasar::WireMessage::decode(field_ld(&roles, 1)).unwrap(), 2), 0x01);
+    let roles_entry = eve_proto::quasar::WireMessage::decode(field_ld(&roles, 1)).unwrap();
+    let roles_at_all = eve_proto::quasar::WireMessage::decode(field_ld(&roles_entry, 2)).unwrap();
+    assert_eq!(field_varint(&roles_at_all, 1), 0x01);
     assert!(!call("eve.corporation.members.titles.GetRequest", Vec::new()).fields.is_empty());
     assert!(!call("eve.corporation.title.GetAllRequest", Vec::new()).fields.is_empty());
     assert!(!call("eve.corporation.members.roles.auditlog.GetRequest", Vec::new()).fields.is_empty());

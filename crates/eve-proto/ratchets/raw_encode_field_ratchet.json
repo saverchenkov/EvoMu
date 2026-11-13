@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "max_raw_encode_field_calls": 3110,
-  "max_files_with_raw_encode_field": 133,
-  "notes": "RFC-3 C-9 (#933) falling ratchet for raw encode_{varint,bytes,string,fixed32,fixed64}_field(...) calls in crates/eve-server/src/. Tightened from 3,406 calls / 136 files (pre-migration of quasar_career_goals_wire.rs, quasar_goal_tale_notices.rs, quasar_payment_store_types.rs, quasar_daily_goals.rs; original #933 baseline 3,694) down to 3,110 calls / 133 files."
+  "max_raw_encode_field_calls": 2501,
+  "max_files_with_raw_encode_field": 121,
+  "notes": "RFC-3 C-9 (#933) falling ratchet for raw encode_{varint,bytes,string,fixed32,fixed64}_field(...) calls in crates/eve-server/src/. Tightened from 3,110 calls / 133 files (batch 1) down to 2,501 calls / 121 files (batch 2: quasar_corp_domain, quasar_campaign_handlers, quasar_vendors_and_war_services, quasar_char_skill_services, quasar_social_freelance, quasar_fleet_navigation_services + companion tests)."
 }

@@ -6,9 +6,10 @@ use crate::quasar_gateway::{
     STATUS_NOT_IMPLEMENTED, STATUS_PRECONDITION_FAILED,
 };
 use eve_db::{IskCents, WorldRepository};
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, AuthoritativeContext, DynamicQuasarMessage,
-    DynamicValue, GoogleAny, QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, QuasarDescriptorRegistry,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
@@ -91,25 +92,16 @@ fn make_ctx(char_id: Option<u32>, role: u64, now_unix: u64) -> AuthoritativeCont
 #[test]
 fn wire_helpers_and_ess_notice_emitters() {
     // parity: feat:pve.ess
-    assert_eq!(zigzag_encode_i64(0), 0);
-    assert_eq!(zigzag_encode_i64(-1), 1);
-    assert_eq!(zigzag_encode_i64(1), 2);
-    assert_eq!(zigzag_encode_i64(-2), 3);
-    assert_eq!(zigzag_encode_i32(0), 0);
-    assert_eq!(zigzag_encode_i32(-1), 1);
-    assert_eq!(zigzag_encode_i32(1), 2);
+    let isk_zero = build_isk_currency(pb::message("eve.isk.Currency"), IskCents(0)).must_encode();
+    assert!(isk_zero.is_empty());
+    let isk_nonzero =
+        build_isk_currency(pb::message("eve.isk.Currency"), IskCents(12_345)).must_encode();
+    assert!(!isk_nonzero.is_empty());
 
-    let mut isk_out = Vec::new();
-    encode_isk_currency(IskCents(0), &mut isk_out);
-    assert!(isk_out.is_empty());
-    encode_isk_currency(IskCents(12_345), &mut isk_out);
-    assert!(!isk_out.is_empty());
-
-    let mut seq_out = Vec::new();
-    encode_sequential_id(0, &mut seq_out);
-    assert!(seq_out.is_empty());
-    encode_sequential_id(42, &mut seq_out);
-    assert!(!seq_out.is_empty());
+    let seq_zero = build_u32_id(pb::message("eve.character.Identifier"), 0).must_encode();
+    assert!(seq_zero.is_empty());
+    let seq_nonzero = build_u32_id(pb::message("eve.character.Identifier"), 42).must_encode();
+    assert!(!seq_nonzero.is_empty());
 
     let reg1 = encode_period_regenerated(1, 1_000);
     let reg2 = encode_period_regenerated(2, 1_000);
@@ -242,13 +234,12 @@ fn admin_daily_goal_lifecycle_handlers() {
     assert_eq!(router.dispatch(&user, &empty_prog).unwrap_err().0, STATUS_FORBIDDEN);
     assert_eq!(router.dispatch(&admin, &empty_prog).unwrap_err().0, STATUS_BAD_REQUEST);
 
-    let mut id_bytes = Vec::new();
-    encode_bytes_field(1, &g1_uuid, &mut id_bytes);
-    let mut no_delta = Vec::new();
-    encode_bytes_field(1, &id_bytes, &mut no_delta);
+    let no_delta = pb::message("eve.dailygoal.api.admin.ProgressRequest")
+        .set("goal.uuid", g1_uuid.as_slice())
+        .must_encode();
     let no_delta_req = GoogleAny {
         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.dailygoal.api.admin.ProgressRequest"),
-        value: no_delta.clone(),
+        value: no_delta,
     };
     assert_eq!(
         router.dispatch(&admin_no_char, &no_delta_req).unwrap_err().0,
@@ -257,8 +248,10 @@ fn admin_daily_goal_lifecycle_handlers() {
     assert_eq!(router.dispatch(&admin, &no_delta_req).unwrap_err().0, STATUS_BAD_REQUEST);
 
     // Valid progress completing g1
-    let mut valid_prog = no_delta.clone();
-    encode_varint_field(3, 30, &mut valid_prog);
+    let valid_prog = pb::message("eve.dailygoal.api.admin.ProgressRequest")
+        .set("goal.uuid", g1_uuid.as_slice())
+        .set("progress", 30u64)
+        .must_encode();
     let prog_resp = router
         .dispatch(
             &admin,
@@ -271,10 +264,9 @@ fn admin_daily_goal_lifecycle_handlers() {
     assert!(prog_resp.type_url.ends_with("ProgressResponse"));
 
     // 4. eve.dailygoal.api.admin.ExpireRequest on g2
-    let mut id2_bytes = Vec::new();
-    encode_bytes_field(1, &g2_uuid, &mut id2_bytes);
-    let mut exp_bytes = Vec::new();
-    encode_bytes_field(1, &id2_bytes, &mut exp_bytes);
+    let exp_bytes = pb::message("eve.dailygoal.api.admin.ExpireRequest")
+        .set("goal.uuid", g2_uuid.as_slice())
+        .must_encode();
     let exp_req = GoogleAny {
         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.dailygoal.api.admin.ExpireRequest"),
         value: exp_bytes,
@@ -309,44 +301,14 @@ fn build_lp_op_bytes(
     amount: u64,
     context: &[u8],
 ) -> Vec<u8> {
-    let mut id_msg = Vec::new();
-    encode_bytes_field(1, op_uuid, &mut id_msg);
-
-    let mut wallet_msg = Vec::new();
-    if let Some(cid) = char_id {
-        let mut c_msg = Vec::new();
-        encode_varint_field(1, cid as u64, &mut c_msg);
-        encode_bytes_field(1, &c_msg, &mut wallet_msg);
-    }
-    if let Some(co) = corp_id {
-        let mut c_msg = Vec::new();
-        encode_varint_field(1, co as u64, &mut c_msg);
-        encode_bytes_field(2, &c_msg, &mut wallet_msg);
-    }
-    if issuer_corp_id > 0 {
-        let mut iss_msg = Vec::new();
-        encode_varint_field(1, issuer_corp_id as u64, &mut iss_msg);
-        encode_bytes_field(3, &iss_msg, &mut wallet_msg);
-    }
-
-    let mut curr_msg = Vec::new();
-    if amount > 0 {
-        encode_varint_field(1, amount, &mut curr_msg);
-    }
-
-    let mut attr_msg = Vec::new();
-    encode_bytes_field(1, &wallet_msg, &mut attr_msg);
-    encode_bytes_field(2, &curr_msg, &mut attr_msg);
-
-    let mut req = Vec::new();
-    encode_bytes_field(1, &id_msg, &mut req);
-    encode_bytes_field(2, &attr_msg, &mut req);
-    if !context.is_empty() {
-        let mut ctx_msg = Vec::new();
-        encode_varint_field(1, 1, &mut ctx_msg);
-        encode_bytes_field(3, &ctx_msg, &mut req);
-    }
-    req
+    pb::message("eve.loyaltypoints.assetholding.operation.api.DepositRequest")
+        .set("identifier.uuid", op_uuid.as_slice())
+        .set_opt("operation.wallet.character.sequential", char_id)
+        .set_opt("operation.wallet.corporation.sequential", corp_id)
+        .when(issuer_corp_id > 0, |b| b.set("operation.wallet.issuer.sequential", issuer_corp_id))
+        .when(amount > 0, |b| b.set("operation.amount.amount", amount))
+        .when(!context.is_empty(), |b| b.set("context.action", 1i32))
+        .must_encode()
 }
 
 #[test]
@@ -513,11 +475,10 @@ fn apply_bounty_multiplier_factor_handler() {
 
     // Valid percentage 155 -> 1.55x
     let sys_id = 30000142u32;
-    let mut sys_msg = Vec::new();
-    encode_varint_field(1, sys_id as u64, &mut sys_msg);
-    let mut req1 = Vec::new();
-    encode_bytes_field(1, &sys_msg, &mut req1);
-    encode_varint_field(2, 155, &mut req1);
+    let req1 = pb::message("eve.solarsystem.bounty.npc.ApplyMultiplierFactorRequest")
+        .set("solar_system.sequential", u64::from(sys_id))
+        .set("input_multiplier_percentage_value", 155u32)
+        .must_encode();
     let resp1 = router
         .dispatch(&admin, &GoogleAny { type_url: rpc.clone(), value: req1 })
         .expect("ApplyMultiplierFactor pct 155");
@@ -526,12 +487,11 @@ fn apply_bounty_multiplier_factor_handler() {
     assert!((mult1 - 1.55).abs() < 1e-6);
 
     // Explicit detail message (units=2, nanos=500_000_000 -> 2.5x)
-    let mut det = Vec::new();
-    encode_varint_field(1, 2, &mut det);
-    encode_varint_field(2, 500_000_000, &mut det);
-    let mut req2 = Vec::new();
-    encode_bytes_field(1, &sys_msg, &mut req2);
-    encode_bytes_field(3, &det, &mut req2);
+    let req2 = pb::message("eve.solarsystem.bounty.npc.ApplyMultiplierFactorRequest")
+        .set("solar_system.sequential", u64::from(sys_id))
+        .set("calculated_multiplier.units", 2u64)
+        .set("calculated_multiplier.nanos", 500_000_000u32)
+        .must_encode();
     router
         .dispatch(&admin, &GoogleAny { type_url: rpc.clone(), value: req2 })
         .expect("ApplyMultiplierFactor explicit 2.5");
@@ -539,11 +499,10 @@ fn apply_bounty_multiplier_factor_handler() {
     assert!((mult2 - 2.5).abs() < 1e-6);
 
     // Out-of-range multiplier (units=11 > 10.0) -> BAD_REQUEST
-    let mut bad_det = Vec::new();
-    encode_varint_field(1, 11, &mut bad_det);
-    let mut req_bad = Vec::new();
-    encode_bytes_field(1, &sys_msg, &mut req_bad);
-    encode_bytes_field(3, &bad_det, &mut req_bad);
+    let req_bad = pb::message("eve.solarsystem.bounty.npc.ApplyMultiplierFactorRequest")
+        .set("solar_system.sequential", u64::from(sys_id))
+        .set("calculated_multiplier.units", 11u64)
+        .must_encode();
     assert_eq!(
         router
             .dispatch(&admin, &GoogleAny { type_url: rpc, value: req_bad })
@@ -553,6 +512,213 @@ fn apply_bounty_multiplier_factor_handler() {
     );
     let _ = DynamicQuasarMessage::new("test.Msg");
     let _ = DynamicValue::Bool(true);
+}
+
+#[test]
+fn fleet_navigation_builders_decode_strictly_with_descriptors() {
+    let reg = QuasarDescriptorRegistry::open_default().expect("descriptor registry");
+    let roundtrip = |type_name: &str, wire: &[u8]| {
+        let decoded = reg
+            .decode_dynamic(type_name, wire)
+            .unwrap_or_else(|e| panic!("decode {type_name}: {e}"));
+        let reencoded = reg
+            .encode_dynamic(&decoded)
+            .unwrap_or_else(|e| panic!("encode {type_name}: {e}"));
+        let decoded2 = reg
+            .decode_dynamic(type_name, &reencoded)
+            .unwrap_or_else(|e| panic!("redecode {type_name}: {e}"));
+        assert_eq!(decoded, decoded2, "roundtrip mismatch for {type_name}");
+    };
+
+    let (router, db) = make_router_and_db();
+    let cid = 211_200_777_u32;
+    let corp_id = 98_000_777_u32;
+    let sys_id = 30_000_142_u32;
+    let paragon = crate::services::lp_store::PARAGON_CORP_ID as u32;
+    seed_char(&db, cid as i64, corp_id as i64, 5_000_000, 1_000);
+    let admin = make_ctx(Some(cid), ROLE_PROGRAMMER, 200_000);
+
+    // 1. Standalone DailyGoal event helpers
+    let goals = router.progression.daily_goals.get_or_init_goals_at(cid, 200_000);
+    roundtrip("eve.dailygoal.api.Created", &encode_daily_goal_created(&goals[0]));
+    roundtrip(
+        "eve.dailygoal.api.PrematurelyDeactivated",
+        &encode_daily_goal_prematurely_deactivated(&goals[0].uuid, 200_000),
+    );
+    roundtrip("eve.dailygoal.api.Removed", &encode_daily_goal_removed(&goals[0].uuid));
+    roundtrip(
+        "eve.dailygoal.api.Progressed",
+        &encode_daily_goal_progressed(cid, &goals[0].uuid, 0, 5, 200_000),
+    );
+    roundtrip("eve.dailygoal.api.Completed", &encode_daily_goal_completed(cid, &goals[0], true));
+    roundtrip("eve.dailygoal.api.Redeemed", &encode_daily_goal_redeemed(cid, &goals[0], false));
+    roundtrip("eve.dailygoal.api.PeriodRegenerated", &encode_period_regenerated(1, 200_000));
+
+    // 2. ESS notice emitters
+    let mut sess = eve_machonet::SessionState::new(1);
+    sess.character_id = Some(cid.into());
+    sess.solar_system_id = Some(sys_id);
+    let mut rx = router.subscribe_session(&sess, Vec::new(), 200_000);
+
+    emit_ess_main_bank_primed(&router, sys_id, IskCents::from_isk(1_000_000), 200_000);
+    emit_ess_reserve_bank_primed(&router, sys_id, IskCents::from_isk(2_000_000), 200_001);
+    emit_ess_main_bank_link_established(
+        &router,
+        cid,
+        sys_id,
+        0,
+        IskCents::from_isk(1_000_000),
+        IskCents::from_isk(2_000_000),
+        200_002,
+    );
+    emit_ess_main_bank_link_established(
+        &router,
+        cid,
+        sys_id,
+        1_000_000_001_234,
+        IskCents::from_isk(1_000_000),
+        IskCents::from_isk(2_000_000),
+        200_003,
+    );
+    emit_ess_main_bank_theft_completed(
+        &router,
+        cid,
+        sys_id,
+        IskCents::from_isk(2_000_000),
+        IskCents::from_isk(900_000),
+        IskCents::from_isk(100_000),
+        200_004,
+    );
+    emit_ess_solar_system_persisted(
+        &router,
+        sys_id,
+        IskCents::from_isk(500_000),
+        IskCents::from_isk(1_500_000),
+        200_005,
+    );
+    let mut ess_seen = 0usize;
+    while let Ok(notice) = rx.try_recv() {
+        let payload = notice.payload.as_ref().expect("notice payload");
+        let short_type = payload
+            .type_url
+            .rsplit('/')
+            .next()
+            .unwrap_or(&payload.type_url);
+        roundtrip(short_type, &payload.value);
+        ess_seen += 1;
+    }
+    assert_eq!(ess_seen, 6);
+
+    // 3. Registered RPC handlers + queued notices
+    let _ = crate::services::quasar_social_chat::drain_local_notices();
+
+    let regen_resp = router
+        .dispatch(
+            &admin,
+            &GoogleAny {
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve.dailygoal.api.admin.RegenerateCurrentGoalsRequest"
+                ),
+                value: Vec::new(),
+            },
+        )
+        .unwrap();
+    roundtrip("eve.dailygoal.api.admin.RegenerateCurrentGoalsResponse", &regen_resp.value);
+
+    let after = router.progression.daily_goals.get_or_init_goals_at(cid, 200_000);
+    let prog_req = pb::message("eve.dailygoal.api.admin.ProgressRequest")
+        .set("goal.uuid", after[0].uuid.as_slice())
+        .set("progress", after[0].template.target)
+        .must_encode();
+    let prog_resp = router
+        .dispatch(
+            &admin,
+            &GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.dailygoal.api.admin.ProgressRequest"),
+                value: prog_req,
+            },
+        )
+        .unwrap();
+    roundtrip("eve.dailygoal.api.admin.ProgressResponse", &prog_resp.value);
+
+    let auto_resp = router
+        .dispatch(
+            &admin,
+            &GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.dailygoal.api.admin.AutoRedeemRequest"),
+                value: Vec::new(),
+            },
+        )
+        .unwrap();
+    roundtrip("eve.dailygoal.api.admin.AutoRedeemResponse", &auto_resp.value);
+
+    let exp_req = pb::message("eve.dailygoal.api.admin.ExpireRequest")
+        .set("goal.uuid", after[1].uuid.as_slice())
+        .must_encode();
+    let exp_resp = router
+        .dispatch(
+            &admin,
+            &GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.dailygoal.api.admin.ExpireRequest"),
+                value: exp_req,
+            },
+        )
+        .unwrap();
+    roundtrip("eve.dailygoal.api.admin.ExpireResponse", &exp_resp.value);
+
+    let dep_resp = router
+        .dispatch(
+            &admin,
+            &GoogleAny {
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.assetholding.operation.api.DepositRequest"
+                ),
+                value: build_lp_op_bytes(&[0x55; 16], Some(cid), None, paragon, 500, b"ctx"),
+            },
+        )
+        .unwrap();
+    roundtrip("eve.loyaltypoints.assetholding.operation.api.DepositResponse", &dep_resp.value);
+
+    let wd_resp = router
+        .dispatch(
+            &admin,
+            &GoogleAny {
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.assetholding.operation.api.WithdrawRequest"
+                ),
+                value: build_lp_op_bytes(&[0x66; 16], Some(cid), None, paragon, 200, b"ctx"),
+            },
+        )
+        .unwrap();
+    roundtrip("eve.loyaltypoints.assetholding.operation.api.WithdrawResponse", &wd_resp.value);
+
+    let bounty_req = pb::message("eve.solarsystem.bounty.npc.ApplyMultiplierFactorRequest")
+        .set("solar_system.sequential", u64::from(sys_id))
+        .set("input_multiplier_percentage_value", 150u32)
+        .must_encode();
+    let bounty_resp = router
+        .dispatch(
+            &admin,
+            &GoogleAny {
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve.solarsystem.bounty.npc.ApplyMultiplierFactorRequest"
+                ),
+                value: bounty_req,
+            },
+        )
+        .unwrap();
+    roundtrip("eve.solarsystem.bounty.npc.ApplyMultiplierFactorResponse", &bounty_resp.value);
+
+    let notices = crate::services::quasar_social_chat::drain_local_notices();
+    assert!(notices.len() >= 12);
+    for (_, any_msg, _) in &notices {
+        let short_type = any_msg
+            .type_url
+            .rsplit('/')
+            .next()
+            .unwrap_or(&any_msg.type_url);
+        roundtrip(short_type, &any_msg.value);
+    }
 }
 
 #[cfg(test)]

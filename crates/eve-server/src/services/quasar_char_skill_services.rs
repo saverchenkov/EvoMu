@@ -12,10 +12,10 @@ use crate::quasar_gateway::{
     STATUS_NOT_FOUND, STATUS_NOT_IMPLEMENTED, STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
+use eve_proto::pb::{self, ProtoBuilder};
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, encode_zigzag32,
-    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, WireMessage, WireValue,
-    TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleDuration,
+    GoogleTimestamp, WireField, WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::Arc;
@@ -61,24 +61,14 @@ fn any(type_name: &str, value: Vec<u8>) -> GoogleAny {
     }
 }
 
-fn encode_id_msg(field_num: u32, id: u64, out: &mut Vec<u8>) {
-    let mut sub = Vec::new();
-    encode_varint_field(1, id, &mut sub);
-    encode_bytes_field(field_num, &sub, out);
+fn ts_unix(seconds: u64) -> GoogleTimestamp {
+    GoogleTimestamp::from_unix(seconds as i64, 0)
 }
 
-fn encode_semver(field_num: u32, major: u32, minor: u32, patch: u32, out: &mut Vec<u8>) {
-    let mut sub = Vec::new();
-    encode_varint_field(1, major as u64, &mut sub);
-    encode_varint_field(2, minor as u64, &mut sub);
-    encode_varint_field(3, patch as u64, &mut sub);
-    encode_bytes_field(field_num, &sub, out);
-}
-
-fn encode_timestamp(field_num: u32, seconds: u64, out: &mut Vec<u8>) {
-    let mut sub = Vec::new();
-    encode_varint_field(1, seconds, &mut sub);
-    encode_bytes_field(field_num, &sub, out);
+fn dbs_setting_value_builder(units: i64, nanos: i32) -> ProtoBuilder {
+    pb::message("eve.dynamicbountysystem.SettingValue")
+        .set("units", units)
+        .set("nanos", nanos)
 }
 
 fn extract_u64_checked(msg: &DynamicQuasarMessage, field_num: u32) -> Result<Option<u64>, (u32, String)> {
@@ -224,9 +214,9 @@ pub fn register_handlers(
         "eve.ship.api.CanJumpStarterSpaceShipCasterRequest",
         Arc::new(move |ctx, _any, msg| {
             let can_jump = can_jump_shipcaster(ctx, msg, &db_sc1, &sde_sc1, false)?;
-            let mut out = Vec::new();
-            encode_varint_field(1, if can_jump { 1 } else { 0 }, &mut out);
-            Ok(any("eve.ship.api.CanJumpStarterSpaceShipCasterResponse", out))
+            Ok(pb::message("eve.ship.api.CanJumpStarterSpaceShipCasterResponse")
+                .set("can_jump", can_jump)
+                .must_to_any())
         }),
     );
 
@@ -237,9 +227,9 @@ pub fn register_handlers(
         "eve.starterspace.api.CanJumpShipCasterRequest",
         Arc::new(move |ctx, _any, msg| {
             let can_jump = can_jump_shipcaster(ctx, msg, &db_ss1, &sde_ss1, true)?;
-            let mut out = Vec::new();
-            encode_varint_field(1, if can_jump { 1 } else { 0 }, &mut out);
-            Ok(any("eve.starterspace.api.CanJumpShipCasterResponse", out))
+            Ok(pb::message("eve.starterspace.api.CanJumpShipCasterResponse")
+                .set("can_jump", can_jump)
+                .must_to_any())
         }),
     );
 
@@ -274,14 +264,15 @@ pub fn register_handlers(
                     Some(st.clone())
                 })
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Structure not found".to_string()))?;
-            let mut attrs = Vec::new();
-            encode_id_msg(1, u64::from(rec.type_id), &mut attrs);
-            encode_id_msg(2, u64::from(rec.solar_system_id), &mut attrs);
-            encode_id_msg(3, rec.owner_corp_id as u64, &mut attrs);
-            encode_string_field(4, &rec.name, &mut attrs);
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attrs, &mut out);
-            Ok(any("eve.structure.api.GetResponse", out))
+            Ok(pb::message("eve.structure.api.GetResponse")
+                .set_with("attributes", |attrs| {
+                    attrs
+                        .set("type.sequential", u64::from(rec.type_id))
+                        .set("solarsystem_id.sequential", u64::from(rec.solar_system_id))
+                        .set("corporation_id.sequential", rec.owner_corp_id as u32)
+                        .set("name", &rec.name)
+                })
+                .must_to_any())
         }),
     );
 
@@ -322,19 +313,19 @@ pub fn register_handlers(
                         .filter(|&(_, exp)| exp > now)
                 })
                 .ok_or_else(|| (STATUS_NOT_FOUND, "No active stargate lock".to_string()))?;
-            let mut out = Vec::new();
-            encode_id_msg(1, gate_id as u64, &mut out);
-            encode_timestamp(2, expiry_unix, &mut out);
-            Ok(any("eve.stargate.lock.api.GetResponse", out))
+            Ok(pb::message("eve.stargate.lock.api.GetResponse")
+                .set("gate.sequential", gate_id as u64)
+                .set("expiry", ts_unix(expiry_unix))
+                .must_to_any())
         }),
     );
 
     router.register_handler(
         "eve.stargate.lock.api.GetRestrictedSystemsRequest",
         Arc::new(move |_ctx, _any, _msg| {
-            let mut out = Vec::new();
-            encode_id_msg(1, u64::from(ZARZAKH_SOLAR_SYSTEM_ID), &mut out);
-            Ok(any("eve.stargate.lock.api.GetRestrictedSystemsResponse", out))
+            Ok(pb::message("eve.stargate.lock.api.GetRestrictedSystemsResponse")
+                .add_with("solarsystems", |s| s.set("sequential", u64::from(ZARZAKH_SOLAR_SYSTEM_ID)))
+                .must_to_any())
         }),
     );
 
@@ -350,10 +341,10 @@ pub fn register_handlers(
             }
             let sys_id = extract_required_u32(msg, 2, "solarsystem")?;
             let gate_id = extract_required_u64(msg, 3, "gate")?;
-            let mut out = Vec::new();
             if sys_id != ZARZAKH_SOLAR_SYSTEM_ID {
-                encode_varint_field(1, 1, &mut out);
-                return Ok(any("eve.stargate.lock.api.ValidateJumpResponse", out));
+                return Ok(pb::message("eve.stargate.lock.api.ValidateJumpResponse")
+                    .set("allowed", true)
+                    .must_to_any());
             }
             let now = ctx.now_unix();
             let active_lock = db_gl3.with_snapshot(|snap| {
@@ -364,16 +355,17 @@ pub fn register_handlers(
             });
             if let Some((locked_gate_id, expiry_unix)) = active_lock {
                 if locked_gate_id as u64 != gate_id {
-                    encode_varint_field(1, 0, &mut out);
-                    let mut lock_buf = Vec::new();
-                    encode_id_msg(1, locked_gate_id as u64, &mut lock_buf);
-                    encode_timestamp(2, expiry_unix, &mut lock_buf);
-                    encode_bytes_field(2, &lock_buf, &mut out);
-                    return Ok(any("eve.stargate.lock.api.ValidateJumpResponse", out));
+                    return Ok(pb::message("eve.stargate.lock.api.ValidateJumpResponse")
+                        .set_with("gate_lock", |lk| {
+                            lk.set("gate.sequential", locked_gate_id as u64)
+                                .set("expiry", ts_unix(expiry_unix))
+                        })
+                        .must_to_any());
                 }
             }
-            encode_varint_field(1, 1, &mut out);
-            Ok(any("eve.stargate.lock.api.ValidateJumpResponse", out))
+            Ok(pb::message("eve.stargate.lock.api.ValidateJumpResponse")
+                .set("allowed", true)
+                .must_to_any())
         }),
     );
 
@@ -421,35 +413,38 @@ pub fn register_handlers(
                             .get(&sys_id)
                             .copied()
                             .unwrap_or(0);
-                        (alliance_id as u64, hub_id, corp_id, claimed_since)
+                        (alliance_id as i32, hub_id, corp_id as u32, claimed_since)
                     })
             });
-            let mut out = Vec::new();
+            let mut b = pb::message("eve.sovereignty.api.GetClaimResponse");
             if let Some((alliance_id, hub_id, corp_id, claimed_since)) = claim {
-                encode_varint_field(1, 0, &mut out);
-                let mut cbuf = Vec::new();
-                encode_id_msg(1, alliance_id, &mut cbuf);
-                encode_id_msg(3, hub_id, &mut cbuf);
-                encode_id_msg(4, corp_id, &mut cbuf);
-                encode_timestamp(5, claimed_since, &mut cbuf);
-                encode_bytes_field(2, &cbuf, &mut out);
+                b = b.set_with("claimed", |c| {
+                    c.set("alliance.sequential", alliance_id)
+                        .set("hub.sequential", hub_id)
+                        .set("corporation.sequential", corp_id)
+                        .set("claimed_at", ts_unix(claimed_since))
+                });
             } else {
-                encode_varint_field(1, 1, &mut out);
+                b = b.set("unclaimed", true);
             }
-            Ok(any("eve.sovereignty.api.GetClaimResponse", out))
+            Ok(b.must_to_any())
         }),
     );
 
     router.register_handler(
         "eve.sovereignty.api.GetVersionManifestRequest",
         Arc::new(move |_ctx, _any, _msg| {
-            let mut manifest = Vec::new();
-            for field_num in 1..=6 {
-                encode_semver(field_num, 1, 0, 0, &mut manifest);
-            }
-            let mut out = Vec::new();
-            encode_bytes_field(1, &manifest, &mut out);
-            Ok(any("eve.sovereignty.api.GetVersionManifestResponse", out))
+            let semver = || pb::message("eve.semanticversion.Specification").set("major", 1u32).set("minor", 0u32).set("patch", 0u32);
+            Ok(pb::message("eve.sovereignty.api.GetVersionManifestResponse")
+                .set_with("version_manifest", |m| {
+                    m.set("planet_resources", semver())
+                        .set("mercenary_den_activities", semver())
+                        .set("skills", semver())
+                        .set("star_resources", semver())
+                        .set("upgrades", semver())
+                        .set("skyhooks", semver())
+                })
+                .must_to_any())
         }),
     );
 
@@ -457,7 +452,7 @@ pub fn register_handlers(
     router.register_handler(
         "eve.sovereignty.api.GetAllClaimsRequest",
         Arc::new(move |_ctx, _any, _msg| {
-            let claims: Vec<(u64, u64, u64, u64)> = db_sov2.with_snapshot(|snap| {
+            let claims: Vec<(u64, i32, u32, u64)> = db_sov2.with_snapshot(|snap| {
                 snap.system_states
                     .values()
                     .filter_map(|st| {
@@ -469,7 +464,7 @@ pub fn register_handlers(
                                     s.solar_system_id == st.solar_system_id
                                         && snap.sov_runtime.sov_hubs.contains_key(&s.structure_id)
                                 })
-                                .map(|s| s.owner_corp_id as u64)
+                                .map(|s| s.owner_corp_id as u32)
                                 .unwrap_or(0);
                             let claimed_since = snap
                                 .sov_runtime
@@ -477,24 +472,24 @@ pub fn register_handlers(
                                 .get(&st.solar_system_id)
                                 .copied()
                                 .unwrap_or(0);
-                            (u64::from(st.solar_system_id), alliance_id as u64, corp_id, claimed_since)
+                            (u64::from(st.solar_system_id), alliance_id as i32, corp_id, claimed_since)
                         })
                     })
                     .collect()
             });
-            let mut out = Vec::new();
+            let mut b = pb::message("eve.sovereignty.api.GetAllClaimsResponse");
             for (sys_id, alliance_id, corp_id, claimed_since) in claims {
-                let mut sc = Vec::new();
-                encode_id_msg(1, sys_id, &mut sc);
-                let mut ac = Vec::new();
-                encode_id_msg(1, alliance_id, &mut ac);
-                encode_id_msg(2, corp_id, &mut ac);
-                encode_timestamp(3, claimed_since, &mut ac);
-                encode_varint_field(5, 1, &mut ac);
-                encode_bytes_field(3, &ac, &mut sc);
-                encode_bytes_field(1, &sc, &mut out);
+                b = b.add_with("solar_systems", |sc| {
+                    sc.set("solar_system.sequential", sys_id)
+                        .set_with("alliance_claimed", |ac| {
+                            ac.set("alliance.sequential", alliance_id)
+                                .set("corporation.sequential", corp_id)
+                                .set("claimed_since", ts_unix(claimed_since))
+                                .set("is_capital_system", true)
+                        })
+                });
             }
-            Ok(any("eve.sovereignty.api.GetAllClaimsResponse", out))
+            Ok(b.must_to_any())
         }),
     );
 
@@ -521,12 +516,9 @@ pub fn register_handlers(
                     })
                     .unwrap_or(10)
             });
-            let mut out = Vec::new();
-            encode_varint_field(1, level, &mut out);
-            Ok(any(
-                "eve.sovereignty.activitydefensemodifier.api.GetLevelResponse",
-                out,
-            ))
+            Ok(pb::message("eve.sovereignty.activitydefensemodifier.api.GetLevelResponse")
+                .set("level", level)
+                .must_to_any())
         }),
     );
 
@@ -557,21 +549,20 @@ pub fn register_handlers(
             let mut ancestries: Vec<_> = sde_anc.ancestries.values().collect();
             ancestries.sort_by_key(|a| a.ancestry_id);
 
-            let mut out = Vec::new();
+            let mut b = pb::message("eve.ancestry.GetAllResponse");
             for anc in ancestries {
-                let mut item = Vec::new();
-                encode_id_msg(1, anc.ancestry_id as u64, &mut item);
-
-                let mut attrs = Vec::new();
-                encode_string_field(1, &anc.name, &mut attrs);
-                encode_string_field(2, &anc.description, &mut attrs);
-                encode_string_field(3, &anc.short_description, &mut attrs);
-                encode_id_msg(4, anc.bloodline_id as u64, &mut attrs);
-
-                encode_bytes_field(2, &attrs, &mut item);
-                encode_bytes_field(1, &item, &mut out);
+                b = b.add_with("ancestries", |item| {
+                    item.set("identifier.sequential", anc.ancestry_id as u32)
+                        .set_with("attributes", |attrs| {
+                            attrs
+                                .set("name", &anc.name)
+                                .set("description", &anc.description)
+                                .set("short_description", &anc.short_description)
+                                .set("bloodline.sequential", anc.bloodline_id as u32)
+                        })
+                });
             }
-            Ok(any("eve.ancestry.GetAllResponse", out))
+            Ok(b.must_to_any())
         }),
     );
 
@@ -584,12 +575,9 @@ pub fn register_handlers(
             let ag = sde_ag_get
                 .agent(agent_id)
                 .ok_or_else(|| (STATUS_NOT_FOUND, format!("Agent {agent_id} not found")))?;
-
-            let mut attrs = Vec::new();
-            encode_string_field(1, &ag.name, &mut attrs);
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attrs, &mut out);
-            Ok(any("eve.agent.GetResponse", out))
+            Ok(pb::message("eve.agent.GetResponse")
+                .set("agent.name", &ag.name)
+                .must_to_any())
         }),
     );
 
@@ -631,11 +619,11 @@ pub fn register_handlers(
                 .collect();
             matched.sort_by_key(|ag| ag.agent_id);
 
-            let mut out = Vec::new();
+            let mut b = pb::message("eve.agent.SearchResponse");
             for ag in matched.into_iter().take(100) {
-                encode_id_msg(1, ag.agent_id as u64, &mut out);
+                b = b.add_with("agents", |a| a.set("sequential", ag.agent_id as u32));
             }
-            Ok(any("eve.agent.SearchResponse", out))
+            Ok(b.must_to_any())
         }),
     );
 
@@ -651,41 +639,32 @@ pub fn register_handlers(
                 .find(|r| r.acl_id == acl_id)
                 .ok_or_else(|| (STATUS_NOT_FOUND, format!("ACL {acl_id} not found")))?;
 
-            let mut membership = Vec::new();
-            for (cid, ctrl) in record.characters {
-                let mut char_sub = Vec::new();
-                encode_id_msg(1, cid, &mut char_sub);
-                encode_varint_field(2, ctrl as u64, &mut char_sub);
-                encode_bytes_field(1, &char_sub, &mut membership);
-            }
-            for (corp_id, ctrl) in record.corporations {
-                let mut corp_sub = Vec::new();
-                encode_id_msg(1, corp_id, &mut corp_sub);
-                encode_varint_field(2, ctrl as u64, &mut corp_sub);
-                encode_bytes_field(2, &corp_sub, &mut membership);
-            }
-            for (all_id, ctrl) in record.alliances {
-                let mut all_sub = Vec::new();
-                encode_id_msg(1, all_id, &mut all_sub);
-                encode_varint_field(2, ctrl as u64, &mut all_sub);
-                encode_bytes_field(3, &all_sub, &mut membership);
-            }
-            if record.everyone {
-                encode_varint_field(4, 1, &mut membership);
-            }
-
-            let mut attrs = Vec::new();
-            encode_string_field(1, &record.name, &mut attrs);
-            encode_string_field(2, &record.description, &mut attrs);
-            encode_bytes_field(3, &membership, &mut attrs);
-
-            let mut ver = Vec::new();
-            encode_varint_field(1, record.version as u64, &mut ver);
-            encode_bytes_field(4, &ver, &mut attrs);
-
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attrs, &mut out);
-            Ok(any("eve.acl.api.GetResponse", out))
+            Ok(pb::message("eve.acl.api.GetResponse")
+                .set_with("acl", |attrs| {
+                    attrs
+                        .set("name", &record.name)
+                        .set("description", &record.description)
+                        .set_with("membership", |mut m| {
+                            for (cid, ctrl) in &record.characters {
+                                m = m.add_with("characters", |ch| {
+                                    ch.set("character.sequential", *cid as u32).set("control", *ctrl as i32)
+                                });
+                            }
+                            for (corp_id, ctrl) in &record.corporations {
+                                m = m.add_with("corporations", |co| {
+                                    co.set("corporation.sequential", *corp_id as u32).set("control", *ctrl as i32)
+                                });
+                            }
+                            for (all_id, ctrl) in &record.alliances {
+                                m = m.add_with("alliances", |al| {
+                                    al.set("alliance.sequential", *all_id as i32).set("control", *ctrl as i32)
+                                });
+                            }
+                            m.when(record.everyone, |m| m.set("everyone", true))
+                        })
+                        .set("version.version", record.version)
+                })
+                .must_to_any())
         }),
     );
 
@@ -707,9 +686,9 @@ pub fn register_handlers(
                 .iter()
                 .any(|(c, ctrl)| *c == char_id && (*ctrl == 3 || *ctrl == 4));
 
-            let mut out = Vec::new();
-            encode_varint_field(1, if can_manage { 1 } else { 0 }, &mut out);
-            Ok(any("eve.acl.api.CanManageResponse", out))
+            Ok(pb::message("eve.acl.api.CanManageResponse")
+                .set("can_manage", can_manage)
+                .must_to_any())
         }),
     );
 
@@ -720,17 +699,17 @@ pub fn register_handlers(
         Arc::new(move |_ctx, _any, msg| {
             let char_id = extract_required_u64(msg, 1, "character")?;
             let acls = load_or_seed_acls(&db_get_managed);
-            let mut out = Vec::new();
+            let mut b = pb::message("eve.acl.api.GetManagedResponse");
             for record in acls {
                 if record
                     .characters
                     .iter()
                     .any(|(c, ctrl)| *c == char_id && (*ctrl == 3 || *ctrl == 4))
                 {
-                    encode_id_msg(1, record.acl_id as u64, &mut out);
+                    b = b.add_with("acls", |a| a.set("sequential", record.acl_id));
                 }
             }
-            Ok(any("eve.acl.api.GetManagedResponse", out))
+            Ok(b.must_to_any())
         }),
     );
 
@@ -739,12 +718,12 @@ pub fn register_handlers(
         "eve.factionwarfare.stats.corporation.GetRequest",
         Arc::new(move |_ctx, _any, msg| {
             let _corp_id = extract_required_u64(msg, 1, "corporation")?;
-            let mut out = Vec::new();
-            encode_id_msg(1, 500_001, &mut out);
-            encode_timestamp(2, 1_700_000_000, &mut out);
-            encode_varint_field(3, 42, &mut out);
-            encode_varint_field(6, 1, &mut out);
-            Ok(any("eve.factionwarfare.stats.corporation.GetResponse", out))
+            Ok(pb::message("eve.factionwarfare.stats.corporation.GetResponse")
+                .set("faction_id.sequential", 500_001u64)
+                .set("enlisting_datetime", ts_unix(1_700_000_000))
+                .set("pilots_count", 42u32)
+                .set("enlisted", true)
+                .must_to_any())
         }),
     );
 
@@ -752,18 +731,15 @@ pub fn register_handlers(
     router.register_handler(
         "eve.factionwarfare.stats.factions.GetRequest",
         Arc::new(move |_ctx, _any, _msg| {
-            let mut fstat = Vec::new();
-            encode_id_msg(1, 500_001, &mut fstat);
-            encode_varint_field(2, 150, &mut fstat);
-            encode_varint_field(3, 24, &mut fstat);
-            let mut kills = Vec::new();
-            encode_varint_field(1, 12, &mut kills);
-            encode_varint_field(2, 85, &mut kills);
-            encode_varint_field(3, 8500, &mut kills);
-            encode_bytes_field(4, &kills, &mut fstat);
-            let mut out = Vec::new();
-            encode_bytes_field(1, &fstat, &mut out);
-            Ok(any("eve.factionwarfare.stats.factions.GetResponse", out))
+            Ok(pb::message("eve.factionwarfare.stats.factions.GetResponse")
+                .add_with("faction_stats", |fstat| {
+                    fstat
+                        .set("faction_id.sequential", 500_001u64)
+                        .set("pilots_count", 150u32)
+                        .set("systems_controlled", 24u32)
+                        .set_with("kills", |k| k.set("yesterday", 12u64).set("last_week", 85u64).set("total", 8500u64))
+                })
+                .must_to_any())
         }),
     );
 
@@ -772,12 +748,10 @@ pub fn register_handlers(
         "eve.fulfillment.offer.api.GetRequest",
         Arc::new(move |_ctx, _any, msg| {
             let offer_id = extract_required_u64(msg, 1, "offer")?;
-            let mut attrs = Vec::new();
-            encode_string_field(1, "Standard PLEX Offer", &mut attrs);
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attrs, &mut out);
-            encode_id_msg(2, offer_id, &mut out);
-            Ok(any("eve.fulfillment.offer.api.GetResponse", out))
+            Ok(pb::message("eve.fulfillment.offer.api.GetResponse")
+                .set("offer_attributes.name", "Standard PLEX Offer")
+                .add_with("products", |p| p.set("product.sequential", offer_id as u32))
+                .must_to_any())
         }),
     );
 
@@ -787,12 +761,12 @@ pub fn register_handlers(
         Arc::new(move |ctx, _any, msg| {
             let user_id = extract_u64_checked(msg, 1)?.unwrap_or_else(|| ctx.effective_user_id().unwrap_or(1001) as u64);
             let offer_id = extract_u64_checked(msg, 2)?.unwrap_or(501);
-            let mut out = Vec::new();
-            encode_id_msg(1, user_id, &mut out);
-            encode_id_msg(2, offer_id, &mut out);
-            encode_id_msg(3, 777_001, &mut out);
-            encode_varint_field(4, 0, &mut out);
-            Ok(any("eve.fulfillment.RewardDeliveryResponse", out))
+            Ok(pb::message("eve.fulfillment.RewardDeliveryResponse")
+                .set("user.sequential", user_id as i32)
+                .set("offer.sequential", offer_id as u32)
+                .set("sale.sequential", 777_001u32)
+                .set("reward_result", 0i32)
+                .must_to_any())
         }),
     );
 
@@ -814,11 +788,11 @@ pub fn register_handlers(
                 }
             };
             let completed_count = db_mission.with_snapshot(|snap| {
-                snap.characters.get(&cid).map(|_| 15u64).unwrap_or(0)
+                snap.characters.get(&cid).map(|_| 15u32).unwrap_or(0)
             });
-            let mut out = Vec::new();
-            encode_varint_field(1, completed_count, &mut out);
-            Ok(any("eve.mission.api.GetCompletedCountResponse", out))
+            Ok(pb::message("eve.mission.api.GetCompletedCountResponse")
+                .set("lifetime_missions_completed", completed_count)
+                .must_to_any())
         }),
     );
 
@@ -826,21 +800,24 @@ pub fn register_handlers(
     router.register_handler(
         "eve.monolith.GetClusterInfoRequest",
         Arc::new(move |_ctx, _any, _msg| {
-            let mut cluster = Vec::new();
-            encode_string_field(1, "macho.tranquility", &mut cluster);
-            encode_string_field(2, "release/v24.01", &mut cluster);
-            encode_varint_field(3, 1024, &mut cluster);
-            encode_varint_field(5, 1, &mut cluster);
-            encode_string_field(6, "24.01", &mut cluster);
-            let mut node = Vec::new();
-            for (fnr, val) in [(1, 1), (3, 1), (12, 1), (13, 1), (14, 0x7FFF), (15, 1)] {
-                encode_varint_field(fnr, val, &mut node);
-            }
-            encode_string_field(2, "esp://127.0.0.1:26001", &mut node);
-            let mut out = Vec::new();
-            encode_bytes_field(1, &cluster, &mut out);
-            encode_bytes_field(2, &node, &mut out);
-            Ok(any("eve.monolith.GetClusterInfoResponse", out))
+            Ok(pb::message("eve.monolith.GetClusterInfoResponse")
+                .set_with("cluster", |c| {
+                    c.set("cluster_name", "macho.tranquility")
+                        .set("branch", "release/v24.01")
+                        .set("build", "1024")
+                        .set("sync", "1")
+                        .set("version", "24.01")
+                })
+                .add_with("nodes", |n| {
+                    n.set("node_id", 1i32)
+                        .set("esp_address", "esp://127.0.0.1:26001")
+                        .set("role", "1")
+                        .set("machine_id", 1i32)
+                        .set("node_index", 1i32)
+                        .set("service_mask", 0x7FFFu64)
+                        .set("cluster_group", 1i32)
+                })
+                .must_to_any())
         }),
     );
 
@@ -853,18 +830,23 @@ pub fn register_handlers(
                 .map(|v| v as i64)
                 .or_else(|| ctx.effective_character_id().map(|c| c as i64))
                 .unwrap_or(0);
-            let (sys_id, station_id) = db_mono_loc.with_snapshot(|snap| {
+            let (sys_id, station_id, structure_id) = db_mono_loc.with_snapshot(|snap| {
                 if let Some(ch) = snap.characters.get(&cid) {
-                    (ch.solar_system_id as u64, ch.station_id.or(ch.structure_id).unwrap_or(0) as u64)
+                    (ch.solar_system_id as u64, ch.station_id, ch.structure_id)
                 } else {
-                    (0, 0)
+                    (0, None, None)
                 }
             });
-            let mut out = Vec::new();
-            encode_id_msg(1, sys_id, &mut out);
-            encode_varint_field(2, 0, &mut out);
-            encode_id_msg(3, station_id, &mut out);
-            Ok(any("eve.monolith.character.location.GetResponse", out))
+            let mut b = pb::message("eve.monolith.character.location.GetResponse")
+                .set("solar_system.sequential", sys_id);
+            if let Some(stid) = station_id.filter(|&id| id > 0) {
+                b = b.set("station.sequential", stid as u64);
+            } else if let Some(struct_id) = structure_id.filter(|&id| id > 0) {
+                b = b.set("structure.sequential", struct_id as u64);
+            } else {
+                b = b.set("in_space", true);
+            }
+            Ok(b.must_to_any())
         }),
     );
 
@@ -872,9 +854,9 @@ pub fn register_handlers(
     router.register_handler(
         "eve.monolith.character.logonstatus.GetRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
-            encode_varint_field(1, 1, &mut out);
-            Ok(any("eve.monolith.character.logonstatus.GetResponse", out))
+            Ok(pb::message("eve.monolith.character.logonstatus.GetResponse")
+                .set("is_online", true)
+                .must_to_any())
         }),
     );
 
@@ -882,19 +864,19 @@ pub fn register_handlers(
     router.register_handler(
         "eve.monolith.legacy.json.Request",
         Arc::new(move |_ctx, _any, dyn_msg| {
-            let mut headers = Vec::new();
-            encode_string_field(3, "corr-legacy-dispatch", &mut headers);
-            encode_string_field(13, "monolith.dispatch", &mut headers);
-            encode_varint_field(17, 0, &mut headers);
-            encode_string_field(18, "success", &mut headers);
             let body_str = match dyn_msg.get(3) {
                 Some(DynamicValue::String(s)) => format!(r#"{{"echo":"{}", "status":"ok", "dispatched":true}}"#, s),
                 _ => r#"{"status":"ok", "dispatched":true}"#.to_string(),
             };
-            let mut out = Vec::new();
-            encode_bytes_field(1, &headers, &mut out);
-            encode_string_field(3, &body_str, &mut out);
-            Ok(any("eve.monolith.legacy.json.Response", out))
+            Ok(pb::message("eve.monolith.legacy.json.Response")
+                .set_with("headers", |h| {
+                    h.set("correlation_uuid", "corr-legacy-dispatch")
+                        .set("action", "monolith.dispatch")
+                        .set("error_code", "0")
+                        .set("error_msg", "success")
+                })
+                .set("body", body_str.into_bytes())
+                .must_to_any())
         }),
     );
 }
@@ -908,11 +890,11 @@ pub fn publish_academy_borrowed_notice(
     ship_id: u64,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let mut payload = Vec::new();
-    encode_id_msg(1, char_id, &mut payload);
-    encode_id_msg(2, ship_type_id, &mut payload);
-    encode_id_msg(3, ship_id, &mut payload);
-    let any_msg = any("eve.academy.ships.events.Borrowed", payload);
+    let any_msg = pb::message("eve.academy.ships.events.Borrowed")
+        .set("character.sequential", char_id as u32)
+        .set("ship_type.sequential", ship_type_id)
+        .set("ship.sequential", ship_id)
+        .must_to_any();
     let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
     Ok(delivered)
 }
@@ -925,12 +907,10 @@ pub fn publish_acl_membership_updated_notice(
     version: u32,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let mut payload = Vec::new();
-    encode_id_msg(1, acl_id as u64, &mut payload);
-    let mut ver = Vec::new();
-    encode_varint_field(1, version as u64, &mut ver);
-    encode_bytes_field(3, &ver, &mut payload);
-    let any_msg = any("eve.acl.api.MembershipUpdated", payload);
+    let any_msg = pb::message("eve.acl.api.MembershipUpdated")
+        .set("acl.sequential", acl_id)
+        .set("version.version", version)
+        .must_to_any();
     let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
     Ok(delivered)
 }
@@ -945,14 +925,12 @@ pub fn publish_system_wide_dbuff_applied(
     nanos: i32,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let mut payload = Vec::new();
-    encode_id_msg(1, system_id, &mut payload);
-    encode_id_msg(2, dbuff_id, &mut payload);
-    let mut mag = Vec::new();
-    encode_varint_field(1, encode_zigzag32(units as i32) as u64, &mut mag);
-    encode_varint_field(2, encode_zigzag32(nanos) as u64, &mut mag);
-    encode_bytes_field(3, &mag, &mut payload);
-    let any_msg = any("eve.dogma.modifier.system_wide.api.Applied", payload);
+    let any_msg = pb::message("eve.dogma.modifier.system_wide.api.Applied")
+        .set("identifier.sequential", system_id)
+        .set("dbuff.sequential", dbuff_id)
+        .set("magnitude.units", units as i32)
+        .set("magnitude.nanos", nanos)
+        .must_to_any();
     let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
     Ok(delivered)
 }
@@ -965,10 +943,10 @@ pub fn publish_system_wide_dbuff_removed(
     dbuff_id: u64,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let mut payload = Vec::new();
-    encode_id_msg(1, system_id, &mut payload);
-    encode_id_msg(2, dbuff_id, &mut payload);
-    let any_msg = any("eve.dogma.modifier.system_wide.api.Removed", payload);
+    let any_msg = pb::message("eve.dogma.modifier.system_wide.api.Removed")
+        .set("identifier.sequential", system_id)
+        .set("dbuff.sequential", dbuff_id)
+        .must_to_any();
     let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
     Ok(delivered)
 }
@@ -994,14 +972,13 @@ pub fn publish_warp_scrambling_applied_notice(
     gateway: &PublicGatewayRouter, scope: crate::quasar_gateway::NoticeScope,
     scrambler_id: u64, scrambled_id: u64, module_type_id: u64, now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let mut payload = Vec::new();
-    encode_id_msg(1, scrambler_id, &mut payload);
-    encode_id_msg(2, scrambled_id, &mut payload);
-    let mut dur = Vec::new();
-    encode_varint_field(1, 10, &mut dur);
-    encode_bytes_field(3, &dur, &mut payload);
-    encode_id_msg(4, module_type_id, &mut payload);
-    gateway.publish_notice(scope, any("eve.effect.combat.electronic.pvp.WarpScramblingApplied", payload), now_unix).map(|(_, d)| d)
+    let any_msg = pb::message("eve.effect.combat.electronic.pvp.WarpScramblingApplied")
+        .set("scrambler.sequential", scrambler_id as u32)
+        .set("scrambled_pilot.sequential", scrambled_id as u32)
+        .set("duration_scrambled", GoogleDuration { seconds: 10, nanos: 0 })
+        .set("module_type.sequential", module_type_id)
+        .must_to_any();
+    gateway.publish_notice(scope, any_msg, now_unix).map(|(_, d)| d)
 }
 
 /// Helper to publish `eve.mission.epicarc.event.CharacterCompleted` notice.
@@ -1009,10 +986,11 @@ pub fn publish_epicarc_character_completed_notice(
     gateway: &PublicGatewayRouter, scope: crate::quasar_gateway::NoticeScope,
     char_id: u64, faction_id: u64, now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let mut payload = Vec::new();
-    encode_id_msg(1, char_id, &mut payload);
-    encode_id_msg(2, faction_id, &mut payload);
-    gateway.publish_notice(scope, any("eve.mission.epicarc.event.CharacterCompleted", payload), now_unix).map(|(_, d)| d)
+    let any_msg = pb::message("eve.mission.epicarc.event.CharacterCompleted")
+        .set("character.sequential", char_id as u32)
+        .set("faction.sequential", faction_id)
+        .must_to_any();
+    gateway.publish_notice(scope, any_msg, now_unix).map(|(_, d)| d)
 }
 
 /// Helper to publish `eve.fleet.api.AdvertCreated` notice.
@@ -1020,11 +998,12 @@ pub fn publish_fleet_advert_created_notice(
     gateway: &PublicGatewayRouter, scope: crate::quasar_gateway::NoticeScope,
     fleet_id: u64, char_id: u64, solar_system_id: u64, now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let mut payload = Vec::new();
-    encode_id_msg(1, fleet_id, &mut payload);
-    encode_id_msg(2, char_id, &mut payload);
-    encode_id_msg(3, solar_system_id, &mut payload);
-    gateway.publish_notice(scope, any("eve.fleet.api.AdvertCreated", payload), now_unix).map(|(_, d)| d)
+    let any_msg = pb::message("eve.fleet.api.AdvertCreated")
+        .set("fleet_id.sequential", fleet_id)
+        .set("character_id.sequential", char_id as u32)
+        .set("solar_system_id.sequential", solar_system_id)
+        .must_to_any();
+    gateway.publish_notice(scope, any_msg, now_unix).map(|(_, d)| d)
 }
 
 /// Helper to publish `eve.fleet.member.Joined` notice.
@@ -1032,88 +1011,94 @@ pub fn publish_fleet_member_joined_notice(
     gateway: &PublicGatewayRouter, scope: crate::quasar_gateway::NoticeScope,
     fleet_id: u64, member_id: u64, now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let mut payload = Vec::new();
-    encode_id_msg(1, fleet_id, &mut payload);
-    encode_id_msg(2, member_id, &mut payload);
-    gateway.publish_notice(scope, any("eve.fleet.member.Joined", payload), now_unix).map(|(_, d)| d)
+    let any_msg = pb::message("eve.fleet.member.Joined")
+        .set("fleet.sequential", fleet_id)
+        .set("member.sequential", member_id as u32)
+        .must_to_any();
+    gateway.publish_notice(scope, any_msg, now_unix).map(|(_, d)| d)
 }
 
 /// Helper to encode duel ChallengeIssued message payload.
 pub fn encode_duel_challenge_issued(challenger_id: u64, recipient_id: u64) -> Vec<u8> {
-    let mut payload = Vec::new();
-    encode_id_msg(1, challenger_id, &mut payload);
-    encode_id_msg(2, recipient_id, &mut payload);
-    payload
+    pb::message("eve.duel.ChallengeIssued")
+        .set("challenger.sequential", challenger_id as u32)
+        .set("recipient.sequential", recipient_id as u32)
+        .must_encode()
 }
 
 /// Helper to encode duel ChallengeAccepted message payload.
 pub fn encode_duel_challenge_accepted(challenger_id: u64, recipient_id: u64) -> Vec<u8> {
-    let mut payload = Vec::new();
-    encode_id_msg(1, challenger_id, &mut payload);
-    encode_id_msg(2, recipient_id, &mut payload);
-    payload
+    pb::message("eve.duel.ChallengeAccepted")
+        .set("challenger.sequential", challenger_id as u32)
+        .set("recipient.sequential", recipient_id as u32)
+        .must_encode()
 }
 
 /// Helper to encode DBS SettingValue.
 pub fn encode_dbs_setting_value(units: i64, nanos: i32) -> Vec<u8> {
-    let mut out = Vec::new();
-    encode_varint_field(1, units as u64, &mut out);
-    encode_varint_field(2, nanos as u64, &mut out);
-    out
+    dbs_setting_value_builder(units, nanos).must_encode()
 }
 
 /// Helper to encode DBS Settings with min, max, and equilibrium multiplier fields.
 pub fn encode_dbs_settings(
     min_units: i64, min_nanos: i32, max_units: i64, max_nanos: i32, eq_units: i64, eq_nanos: i32,
 ) -> Vec<u8> {
-    let mut out = Vec::new();
-    encode_bytes_field(6, &encode_dbs_setting_value(min_units, min_nanos), &mut out);
-    encode_bytes_field(7, &encode_dbs_setting_value(max_units, max_nanos), &mut out);
-    encode_bytes_field(9, &encode_dbs_setting_value(eq_units, eq_nanos), &mut out);
-    out
+    pb::message("eve.dynamicbountysystem.Settings")
+        .set("min_output", dbs_setting_value_builder(min_units, min_nanos))
+        .set("max_output", dbs_setting_value_builder(max_units, max_nanos))
+        .set("equilibrium_value", dbs_setting_value_builder(eq_units, eq_nanos))
+        .must_encode()
 }
 
 /// Helper to encode DBS SolarSystemDetails.
 pub fn encode_dbs_solar_system_details(solar_system_id: u64, sec_units: i64, sec_nanos: i32) -> Vec<u8> {
-    let mut out = Vec::new();
-    encode_id_msg(1, solar_system_id, &mut out);
-    encode_bytes_field(2, &encode_dbs_setting_value(sec_units, sec_nanos), &mut out);
-    out
+    pb::message("eve.dynamicbountysystem.SolarSystemDetails")
+        .set("solar_system.sequential", solar_system_id)
+        .set("security.units", sec_units)
+        .set("security.nanos", sec_nanos)
+        .must_encode()
 }
 
 /// Helper to encode fighter type identifier.
 pub fn encode_fighter_type_identifier(type_id: u32) -> Vec<u8> {
-    let mut out = Vec::new();
-    encode_varint_field(1, type_id as u64, &mut out);
-    out
+    pb::message("eve.fighter.fightertype.Identifier")
+        .set("sequential", u64::from(type_id))
+        .must_encode()
 }
 
-/// Helper to encode fighter squad state with squad ID and ability slots.
+/// Synthetic helper to encode fighter squad state (no `fighter.SquadState` message in descriptors).
 pub fn encode_fighter_squad_state(
     squad_id: u32,
     fighter_type_id: u32,
     unit_count: u32,
     ability_slots: &[u32],
 ) -> Vec<u8> {
-    let mut out = Vec::new();
-    encode_varint_field(1, squad_id as u64, &mut out);
-    let mut ft = Vec::new();
-    encode_varint_field(1, fighter_type_id as u64, &mut ft);
-    encode_bytes_field(2, &ft, &mut out);
-    encode_varint_field(3, unit_count as u64, &mut out);
+    let mut fields = vec![
+        WireField { field_number: 1, value: WireValue::Varint(u64::from(squad_id)) },
+        WireField { field_number: 2, value: WireValue::LengthDelimited(encode_fighter_type_identifier(fighter_type_id)) },
+        WireField { field_number: 3, value: WireValue::Varint(u64::from(unit_count)) },
+    ];
     for &slot in ability_slots {
-        encode_varint_field(4, slot as u64, &mut out);
+        fields.push(WireField { field_number: 4, value: WireValue::Varint(u64::from(slot)) });
     }
-    out
+    WireMessage { fields }.encode()
 }
 
-/// Helper to encode epic arc progress stages.
+/// Synthetic helper to encode epic arc progress stages (no `epicarc.Progress` message in descriptors).
 pub fn encode_epicarc_progress(arc_id: u32, branch_stage: u32, completed: bool) -> Vec<u8> {
-    let mut out = Vec::new();
-    encode_id_msg(1, arc_id as u64, &mut out);
-    encode_varint_field(2, branch_stage as u64, &mut out);
-    encode_varint_field(3, if completed { 1 } else { 0 }, &mut out);
-    out
+    WireMessage {
+        fields: vec![
+            WireField {
+                field_number: 1,
+                value: WireValue::LengthDelimited(
+                    pb::message("eve_public.epicarc.Identifier").set("sequential", u64::from(arc_id)).must_encode(),
+                ),
+            },
+            WireField { field_number: 2, value: WireValue::Varint(u64::from(branch_stage)) },
+            WireField { field_number: 3, value: WireValue::Varint(u64::from(completed)) },
+        ],
+    }
+    .encode()
 }
 
 /// Fallback wire decoder for registered request handlers whose proto schemas are not in the SQLite catalog.

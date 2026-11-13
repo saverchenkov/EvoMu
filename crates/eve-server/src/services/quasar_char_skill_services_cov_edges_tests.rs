@@ -293,8 +293,8 @@ fn stargate_locks_sov_acls_agents_and_monolith_edges() {
 
     let blocked = val_jump(&player_ctx, &dummy_any, &lock_msg).unwrap();
     let b_fields = decode_wire_fields(&blocked.value);
-    assert_eq!(b_fields[0], (1, WireValue::Varint(0)));
-    assert_eq!(b_fields[1].0, 2);
+    assert_eq!(b_fields.len(), 1);
+    assert_eq!(b_fields[0].0, 2);
 
     // 2. Sovereignty unclaimed system & ADM fallback to 10 when no system_states entry
     let unclaimed_sys = sde
@@ -396,8 +396,9 @@ fn stargate_locks_sov_acls_agents_and_monolith_edges() {
     )
     .unwrap();
     let loc_fields = decode_wire_fields(&loc_res.value);
-    assert_eq!(loc_fields.len(), 3);
-    if let WireValue::LengthDelimited(ref b) = loc_fields[2].1 {
+    assert_eq!(loc_fields.len(), 2);
+    assert_eq!(loc_fields[1].0, 4);
+    if let WireValue::LengthDelimited(ref b) = loc_fields[1].1 {
         assert_eq!(decode_wire_fields(b)[0], (1, WireValue::Varint(1_000_000_991)));
     } else {
         panic!("expected structure_id submessage");

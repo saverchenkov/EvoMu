@@ -4,9 +4,10 @@ use crate::quasar_gateway::{
     PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_NOT_FOUND,
 };
 use eve_db::{IskCents, WorldRepository};
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, AuthoritativeContext, DynamicQuasarMessage,
-    DynamicValue, GoogleAny, QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, QuasarDescriptorRegistry,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
@@ -350,13 +351,36 @@ fn lp_operation_parser_edge_cases_npc_corp_and_overflow_guards() {
     );
 
     // 4. Default owner fallback (no char_id/corp_id in wallet_id -> uses admin's cid) + NPC corp does NOT duplicate Paragon LP
+    // Malformed non-protobuf context bytes are rejected cleanly with STATUS_BAD_REQUEST
+    let bad_ctx_op = make_op_dyn(
+        &[0x7A; 16],
+        None,
+        None,
+        paragon,
+        Some(DynamicValue::Int32(250)),
+        b"ctx_bytes".to_vec(),
+    );
+    assert_eq!(
+        dispatch_dyn(
+            &router,
+            &admin,
+            "eve.loyaltypoints.assetholding.operation.api.DepositRequest",
+            &bad_ctx_op,
+        )
+        .unwrap_err()
+        .0,
+        STATUS_BAD_REQUEST
+    );
+    let valid_ctx_bytes = eve_proto::pb::message("eve.assetholding.Context")
+        .set("action", 1i32)
+        .must_encode();
     let def_owner_op = make_op_dyn(
         &[7; 16],
         None,
         None,
         paragon,
         Some(DynamicValue::Int32(250)),
-        b"ctx_bytes".to_vec(),
+        valid_ctx_bytes,
     );
     dispatch_dyn(
         &router,
@@ -493,11 +517,10 @@ fn bounty_multiplier_zero_sys_id_default_pct_and_exact_boundaries() {
         STATUS_BAD_REQUEST
     );
 
-    let mut wire_req = Vec::new();
-    let mut s_msg = Vec::new();
-    encode_varint_field(1, sys_id as u64, &mut s_msg);
-    encode_bytes_field(1, &s_msg, &mut wire_req);
-    encode_varint_field(2, 100, &mut wire_req);
+    let wire_req = pb::message("eve.solarsystem.bounty.npc.ApplyMultiplierFactorRequest")
+        .set("solar_system.sequential", u64::from(sys_id))
+        .set("input_multiplier_percentage_value", 100u32)
+        .must_encode();
     assert!(dispatch(
         &router,
         &admin,

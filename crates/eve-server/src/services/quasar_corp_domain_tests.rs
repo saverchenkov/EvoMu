@@ -6,7 +6,7 @@ use super::*;
 use crate::quasar_gateway::PublicGatewayRouter;
 use eve_db::corp_roles;
 use eve_db::{AllianceRecord, CorporationRecord};
-use eve_proto::quasar::{AuthoritativeContext, DynamicQuasarMessage, DynamicValue, QuasarDescriptorRegistry};
+use eve_proto::quasar::{AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, QuasarDescriptorRegistry};
 use eve_sde::SdeRegistry;
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
@@ -56,12 +56,11 @@ fn helper_parsers_role_masks_and_corp_authorization() {
     assert_ne!(mask & corp_roles::ROLE_ACCOUNTANT, 0);
     assert_ne!(mask & corp_roles::ROLE_TRADER, 0);
 
-    let mut role_buf = Vec::new();
-    encode_role_collection(1, mask, &mut role_buf);
+    let role_buf = build_role_collection(mask).must_encode();
     assert!(!role_buf.is_empty());
 
-    assert!(!encode_isk_currency(-12_345).is_empty());
-    assert!(!encode_standing_value(5.75).is_empty());
+    assert!(!build_isk_currency(-12_345).must_encode().is_empty());
+    assert!(!build_standing_value(5.75).must_encode().is_empty());
 
     let db = WorldRepository::with_demo_seed();
     let cid = 980_001_i64;
@@ -366,6 +365,251 @@ fn registered_quasar_alliance_and_corporation_handlers() {
         assert!(
             resp.type_url.ends_with(expected_resp),
             "{req_name} produced unexpected type_url {}",
+            resp.type_url
+        );
+    }
+}
+
+#[test]
+fn corp_domain_builders_decode_strictly_with_descriptors() {
+    let reg = Arc::new(
+        QuasarDescriptorRegistry::open_default().expect("open default descriptor DB"),
+    );
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let router = PublicGatewayRouter::new(Arc::clone(&reg), Arc::clone(&db), Arc::clone(&sde));
+    register(&router, Arc::clone(&db));
+
+    let cid = 980_020_i64;
+    let corp_id = 98_800_020_i64;
+    let ally_id = 99_800_020_i64;
+    db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().unwrap().clone();
+        ch.character_id = cid;
+        ch.corporation_id = corp_id;
+        ch.alliance_id = Some(ally_id);
+        ch.station_id = Some(60_003_760);
+        snap.characters.insert(cid, ch);
+
+        let mut c = CorporationRecord::default();
+        c.corporation_id = corp_id;
+        c.ceo_id = cid;
+        c.hq_station_id = Some(60_003_760);
+        c.alliance_id = Some(ally_id);
+        c.name = "StrictCorp".into();
+        c.ticker = "STRC".into();
+        c.members.insert(cid);
+        snap.corporations.insert(corp_id, c);
+
+        let mut ally_corps = HashSet::new();
+        ally_corps.insert(corp_id);
+        snap.alliances.insert(
+            ally_id,
+            AllianceRecord {
+                alliance_id: ally_id,
+                name: "StrictAlliance".into(),
+                short_name: "STRA".into(),
+                executor_corp_id: corp_id,
+                member_corp_ids: ally_corps,
+                ..Default::default()
+            },
+        );
+        snap.corp_alliance_history.insert(
+            corp_id,
+            vec![eve_db::snapshot_ext::CorpAllianceHistoryEntry {
+                record_id: 1,
+                alliance_id: Some(ally_id),
+                start_date_unix: 1_700_000_000,
+                is_deleted: Some(false),
+            }],
+        );
+        snap.corp_container_logs.insert(
+            corp_id,
+            vec![eve_db::snapshot_ext::CorpContainerLogEntry {
+                logged_at_unix: 1_700_000_100,
+                container_id: 1_000_000_001,
+                container_type_id: 17366,
+                location_id: 60_003_760,
+                location_flag: "CorpSAG1".into(),
+                action: "configure".into(),
+                character_id: cid,
+                old_config_bitmask: Some(1),
+                new_config_bitmask: Some(3),
+                ..Default::default()
+            }],
+        );
+        snap.industry_jobs.insert(
+            5001,
+            eve_db::IndustryJobRecord {
+                job_id: 5001,
+                installer_id: cid,
+                facility_id: 60_003_760,
+                activity_id: 1,
+                blueprint_item_id: 9_001,
+                blueprint_type_id: 687,
+                product_type_id: 587,
+                runs: 2,
+                duration_seconds: 600,
+                status: "Active".into(),
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            88_000_020,
+            eve_db::UpwellStructureRecord {
+                structure_id: 88_000_020,
+                type_id: 35832,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_142,
+                name: "Strict Fortizar".into(),
+                state: "ShieldVulnerable".into(),
+                fuel_blocks: 500,
+                ..Default::default()
+            },
+        );
+        snap.observer_mining_ledger.insert(88_000_020, Default::default());
+        snap.starbase_settings.insert(88_000_020, Default::default());
+        snap.corp_role_history.insert(
+            corp_id,
+            vec![eve_db::snapshot_ext::CorpRoleHistoryEntry {
+                changed_at_unix: 1_700_000_200,
+                character_id: cid,
+                issuer_id: cid,
+                role_type: "roles".into(),
+                old_roles: vec!["Accountant".into()],
+                new_roles: vec!["Director".into()],
+            }],
+        );
+        snap.corp_titles.insert(
+            corp_id,
+            vec![eve_db::snapshot_ext::CorpTitleEntry {
+                title_id: 1,
+                name: "Officer".into(),
+                roles: vec!["Director".into()],
+                ..Default::default()
+            }],
+        );
+        snap.corp_member_titles.insert((corp_id, cid), vec![1]);
+        snap.corp_vote_cases.insert(
+            902,
+            eve_db::snapshot_ext::CorpVoteCaseRecord {
+                case_id: 902,
+                corporation_id: corp_id,
+                ..Default::default()
+            },
+        );
+        snap.corp_medals.insert(
+            corp_id,
+            vec![eve_db::snapshot_ext::CorpMedalEntry {
+                medal_id: 10,
+                title: "Medal".into(),
+                description: "Desc".into(),
+                ..Default::default()
+            }],
+        );
+        snap.corp_issued_medals.insert(
+            corp_id,
+            vec![eve_db::snapshot_ext::CorpIssuedMedalEntry {
+                medal_id: 10,
+                character_id: cid,
+                reason: "Valor".into(),
+                ..Default::default()
+            }],
+        );
+        snap.corp_wallet_transactions.insert(
+            (corp_id, 1),
+            vec![eve_db::snapshot_ext::WalletTransactionRecord {
+                transaction_id: 77,
+                date_unix: 1_700_000_300,
+                unit_price: 12.5,
+                quantity: 4,
+                location_id: 60_003_760,
+                client_id: cid,
+                journal_ref_id: 88,
+                type_id: 34,
+                is_buy: true,
+                is_personal: false,
+            }],
+        );
+        snap.corp_customs_offices.insert(
+            corp_id,
+            vec![eve_db::snapshot_ext::CustomsOfficeRecord {
+                office_id: 77_000_001,
+                system_id: 30_000_142,
+                corporation_tax_rate: Some(0.05),
+                allow_alliance_access: true,
+                alliance_tax_rate: Some(0.02),
+                allow_access_with_standings: true,
+                ..Default::default()
+            }],
+        );
+    });
+
+    let auth_ctx = AuthoritativeContext::for_session(
+        Some(1),
+        Some(cid as u32),
+        Some(corp_id as u32),
+        corp_roles::ROLE_DIRECTOR,
+        "tranquility",
+        vec![1],
+    );
+    let dummy_any = GoogleAny::default();
+    let handlers = router.handlers.read().unwrap();
+
+    let mut corp_msg = seq_id_msg(1, corp_id as u32);
+    let mut sb_id_inner = DynamicQuasarMessage::new("SequentialIdentifier");
+    sb_id_inner.fields.insert(1, DynamicValue::Uint64(88_000_020));
+    corp_msg
+        .fields
+        .insert(3, DynamicValue::Message(Box::new(sb_id_inner)));
+
+    let cases: Vec<(&str, DynamicQuasarMessage)> = vec![
+        ("eve.alliance.GetRequest", seq_id_msg(1, ally_id as u32)),
+        ("eve.alliance.GetAllRequest", DynamicQuasarMessage::new("Req")),
+        ("eve.alliance.SearchRequest", DynamicQuasarMessage::new("Req")),
+        ("eve.alliance.corporation.GetMembersRequest", seq_id_msg(1, ally_id as u32)),
+        ("eve.corporation.accounting.wallet.GetAllDivisionBalanceRequest", corp_msg.clone()),
+        ("eve.corporation.divisions.GetRequest", corp_msg.clone()),
+        ("eve.corporation.homestation.GetRequest", corp_msg.clone()),
+        ("eve.corporation.alliance.api.GetCurrentMembershipRequest", corp_msg.clone()),
+        ("eve.corporation.alliancemembershiprecord.GetAllRequest", corp_msg.clone()),
+        ("eve.corporation.alsclogs.GetRequest", corp_msg.clone()),
+        ("eve.corporation.industry.job.GetActiveRequest", corp_msg.clone()),
+        ("eve.corporation.industry.blueprints.GetRequest", corp_msg.clone()),
+        ("eve.corporation.industry.facilties.GetRequest", corp_msg.clone()),
+        ("eve.corporation.industry.observer.GetAllDetailsRequest", corp_msg.clone()),
+        ("eve.corporation.members.GetRequest", corp_msg.clone()),
+        ("eve.corporation.members.GetLimitRequest", corp_msg.clone()),
+        ("eve.corporation.members.roles.GetRequest", corp_msg.clone()),
+        ("eve.corporation.members.titles.GetRequest", corp_msg.clone()),
+        ("eve.corporation.members.tracking.GetRequest", corp_msg.clone()),
+        ("eve.corporation.members.roles.auditlog.GetRequest", corp_msg.clone()),
+        ("eve.corporation.npc.GetAllRequest", DynamicQuasarMessage::new("Req")),
+        ("eve.corporation.npc.IsNPCCorporationRequest", seq_id_msg(1, 1_000_009)),
+        ("eve.corporation.logo.api.GetRequest", corp_msg.clone()),
+        ("eve.corporation.office.api.GetSolarSystemsRequest", corp_msg.clone()),
+        ("eve.corporation.structure.GetAllWithDetailsRequest", corp_msg.clone()),
+        ("eve.corporation.title.GetAllRequest", corp_msg.clone()),
+        ("eve.corporation.vote.GetRequest", seq_id_msg(1, 902)),
+        ("eve.corporation.starbase.GetAllRequest", corp_msg.clone()),
+        ("eve.corporation.starbase.GetSettingsAndFuelsRequest", corp_msg.clone()),
+        ("eve.corporation.medals.GetRequest", corp_msg.clone()),
+        ("eve.corporation.medals.issued.GetRequest", corp_msg.clone()),
+        ("eve.corporation.market.entry.GetEntriesRequest", corp_msg.clone()),
+        ("eve.corporation.standing.npc.GetAllRequest", corp_msg.clone()),
+        ("eve.corporation.planetinteraction.office.GetRequest", corp_msg),
+    ];
+
+    for (req_name, req_msg) in cases {
+        let resp = handlers[req_name](&auth_ctx, &dummy_any, &req_msg)
+            .unwrap_or_else(|e| panic!("handler {req_name} failed: {e:?}"));
+        let decoded = reg
+            .decode_dynamic(&resp.type_url, &resp.value)
+            .unwrap_or_else(|e| panic!("strict decode failed for {}: {e}", resp.type_url));
+        assert_eq!(
+            reg.encode_dynamic(&decoded).unwrap(),
+            resp.value,
+            "roundtrip mismatch for {}",
             resp.type_url
         );
     }

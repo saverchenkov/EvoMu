@@ -104,12 +104,17 @@ fn isk_currency_zigzag_and_partial_field_encoders_kill_mutations() {
     assert_eq!(wm_neg.fields.len(), 2);
     assert_eq!(wm_neg.fields[0].value.as_varint(), Some(1)); // zigzag(-1) == 1
 
-    // 2. ThirdPartyApi negative char_id zigzag & selective fields
+    // 2. ThirdPartyApi negative char_id (proto int32 two's complement) & selective fields
     let tpa_neg = encode_thirdpartyapi_request_received(-1, "", "", 0, "", 1_700_000_000);
     let wm_tpa = WireMessage::decode(&tpa_neg).unwrap();
     assert_eq!(wm_tpa.fields.len(), 2);
     assert_eq!(wm_tpa.fields[1].field_number, 2);
-    assert_eq!(wm_tpa.fields[1].value.as_varint(), Some(1));
+    assert_eq!(wm_tpa.fields[1].value.as_varint(), Some((-1_i64) as u64));
+    let reg = QuasarDescriptorRegistry::open_default().expect("descriptor registry");
+    let dyn_tpa = reg
+        .decode_dynamic("eve.thirdpartyapi.RequestReceived", &tpa_neg)
+        .expect("RequestReceived must decode strictly");
+    assert_eq!(dyn_tpa.get(2), Some(&DynamicValue::Int32(-1)));
 
     // 3. Tournament arena, layout, and ruleset boundary combinations (0/empty vs >0)
     let arena_min = encode_tournament_arena(b"a", "", 0, 0, b"", b"");

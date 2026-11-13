@@ -15,9 +15,10 @@ use crate::services::quasar_daily_goals::{
 };
 use crate::services::quasar_social_chat::ctx_queue_notice;
 use eve_db::{IskCents, WorldRepository};
+use eve_proto::pb::{self, ProtoBuilder};
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, DynamicQuasarMessage, DynamicValue,
-    GoogleAny, GoogleTimestamp, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
+    DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleTimestamp, WireMessage, WireValue,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use std::sync::Arc;
 
@@ -25,29 +26,19 @@ use std::sync::Arc;
 // Wire Encoding & Decoding Helpers
 // ============================================================================
 
-fn zigzag_encode_i64(v: i64) -> u64 {
-    ((v << 1) ^ (v >> 63)) as u64
-}
-
-fn zigzag_encode_i32(v: i32) -> u64 {
-    ((v << 1) ^ (v >> 31)) as u64
-}
-
-fn encode_isk_currency(cents: IskCents, out: &mut Vec<u8>) {
+fn build_isk_currency(b: ProtoBuilder, cents: IskCents) -> ProtoBuilder {
     let units = cents.0 / 100;
     let nanos = ((cents.0 % 100) * 10_000_000) as i32;
-    if units != 0 {
-        encode_varint_field(1, zigzag_encode_i64(units), out);
-    }
-    if nanos != 0 {
-        encode_varint_field(2, zigzag_encode_i32(nanos), out);
-    }
+    b.when(units != 0, |b| b.set("units", units))
+        .when(nanos != 0, |b| b.set("nanos", nanos))
 }
 
-fn encode_sequential_id(id: u32, out: &mut Vec<u8>) {
-    if id != 0 {
-        encode_varint_field(1, u64::from(id), out);
-    }
+fn build_u32_id(b: ProtoBuilder, id: u32) -> ProtoBuilder {
+    b.when(id != 0, |b| b.set("sequential", id))
+}
+
+fn build_u64_id(b: ProtoBuilder, id: u32) -> ProtoBuilder {
+    b.when(id != 0, |b| b.set("sequential", u64::from(id)))
 }
 
 fn extract_u32_field(msg: &DynamicQuasarMessage, field_num: u32) -> Option<u32> {
@@ -78,12 +69,28 @@ fn extract_nested_u32(msg: &DynamicQuasarMessage, field_num: u32, sub_field: u32
     }
 }
 
-fn encode_timestamp(unix_secs: u64, out: &mut Vec<u8>) {
-    let ts = GoogleTimestamp {
-        seconds: unix_secs as i64,
-        nanos: 0,
-    };
-    out.extend_from_slice(&ts.encode_proto());
+fn goal_id_and_attrs(goal: &CharacterDailyGoal) -> (Vec<u8>, Vec<u8>) {
+    let mut id_bytes = Vec::new();
+    encode_goal_identifier(&goal.uuid, &mut id_bytes);
+    let mut attr_bytes = Vec::new();
+    encode_goal_attributes_for_day_bucket(&goal.template, goal.day_bucket, &mut attr_bytes);
+    (id_bytes, attr_bytes)
+}
+
+fn goal_earning_items(goal: &CharacterDailyGoal) -> Vec<Vec<u8>> {
+    let mut raw = Vec::new();
+    encode_goal_earnings(&goal.template, 1, &mut raw);
+    WireMessage::decode(&raw)
+        .map(|m| {
+            m.fields
+                .into_iter()
+                .filter_map(|f| match f.value {
+                    WireValue::LengthDelimited(bytes) => Some(bytes),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 // ============================================================================
@@ -91,33 +98,28 @@ fn encode_timestamp(unix_secs: u64, out: &mut Vec<u8>) {
 // ============================================================================
 
 fn encode_daily_goal_created(goal: &CharacterDailyGoal) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut id_bytes = Vec::new();
-    encode_goal_identifier(&goal.uuid, &mut id_bytes);
-    encode_bytes_field(1, &id_bytes, &mut out);
-    let mut attr_bytes = Vec::new();
-    encode_goal_attributes_for_day_bucket(&goal.template, goal.day_bucket, &mut attr_bytes);
-    encode_bytes_field(2, &attr_bytes, &mut out);
-    out
+    let (id_bytes, attr_bytes) = goal_id_and_attrs(goal);
+    pb::message("eve.dailygoal.api.Created")
+        .set_raw_message("id", &id_bytes)
+        .set_raw_message("goal", &attr_bytes)
+        .must_encode()
 }
 
 fn encode_daily_goal_prematurely_deactivated(uuid: &[u8; 16], now_unix: u64) -> Vec<u8> {
-    let mut out = Vec::new();
     let mut id_bytes = Vec::new();
     encode_goal_identifier(uuid, &mut id_bytes);
-    encode_bytes_field(1, &id_bytes, &mut out);
-    let mut ts_bytes = Vec::new();
-    encode_timestamp(now_unix, &mut ts_bytes);
-    encode_bytes_field(2, &ts_bytes, &mut out);
-    out
+    pb::message("eve.dailygoal.api.PrematurelyDeactivated")
+        .set_raw_message("id", &id_bytes)
+        .set("deactivated", GoogleTimestamp { seconds: now_unix as i64, nanos: 0 })
+        .must_encode()
 }
 
 fn encode_daily_goal_removed(uuid: &[u8; 16]) -> Vec<u8> {
-    let mut out = Vec::new();
     let mut id_bytes = Vec::new();
     encode_goal_identifier(uuid, &mut id_bytes);
-    encode_bytes_field(1, &id_bytes, &mut out);
-    out
+    pb::message("eve.dailygoal.api.Removed")
+        .set_raw_message("id", &id_bytes)
+        .must_encode()
 }
 
 fn encode_daily_goal_progressed(
@@ -127,67 +129,58 @@ fn encode_daily_goal_progressed(
     curr: u64,
     now_unix: u64,
 ) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut ts_bytes = Vec::new();
-    encode_timestamp(now_unix, &mut ts_bytes);
-    encode_bytes_field(1, &ts_bytes, &mut out);
-    let mut char_bytes = Vec::new();
-    encode_sequential_id(cid, &mut char_bytes);
-    encode_bytes_field(2, &char_bytes, &mut out);
     let mut id_bytes = Vec::new();
     encode_goal_identifier(uuid, &mut id_bytes);
-    encode_bytes_field(3, &id_bytes, &mut out);
-    encode_varint_field(4, prev, &mut out);
-    encode_varint_field(5, curr, &mut out);
-    out
+    pb::message("eve.dailygoal.api.Progressed")
+        .set("timestamp", GoogleTimestamp { seconds: now_unix as i64, nanos: 0 })
+        .set_with("character", |b| build_u32_id(b, cid))
+        .set_raw_message("goal", &id_bytes)
+        .set("previous_progress", prev)
+        .set("current_progress", curr)
+        .must_encode()
 }
 
 fn encode_daily_goal_completed(cid: u32, goal: &CharacterDailyGoal, paid: bool) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut char_bytes = Vec::new();
-    encode_sequential_id(cid, &mut char_bytes);
-    encode_bytes_field(1, &char_bytes, &mut out);
     let mut id_bytes = Vec::new();
     encode_goal_identifier(&goal.uuid, &mut id_bytes);
-    encode_bytes_field(2, &id_bytes, &mut out);
-    encode_varint_field(4, 1, &mut out); // CATEGORY_DAILY = 1
-    encode_goal_earnings(&goal.template, 5, &mut out);
-    if paid {
-        encode_varint_field(6, 1, &mut out);
+    let mut b = pb::message("eve.dailygoal.api.Completed")
+        .set_with("character", |b| build_u32_id(b, cid))
+        .set_raw_message("goal", &id_bytes)
+        .set("category", 1i32) // CATEGORY_DAILY = 1
+        .when(paid, |b| b.set("paid_completion", true));
+    for item in goal_earning_items(goal) {
+        b = b.add("earnings", pb::raw_message(item));
     }
-    out
+    b.must_encode()
 }
 
 fn encode_daily_goal_redeemed(cid: u32, goal: &CharacterDailyGoal, autoredeemed: bool) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut char_bytes = Vec::new();
-    encode_sequential_id(cid, &mut char_bytes);
-    encode_bytes_field(1, &char_bytes, &mut out);
     let mut id_bytes = Vec::new();
     encode_goal_identifier(&goal.uuid, &mut id_bytes);
-    encode_bytes_field(2, &id_bytes, &mut out);
-    encode_goal_earnings(&goal.template, 3, &mut out);
-    if autoredeemed {
-        encode_varint_field(4, 1, &mut out);
+    let mut b = pb::message("eve.dailygoal.api.Redeemed")
+        .set_with("character", |b| build_u32_id(b, cid))
+        .set_raw_message("goal", &id_bytes)
+        .when(autoredeemed, |b| b.set("autoredeemed", true));
+    for item in goal_earning_items(goal) {
+        b = b.add("earnings", pb::raw_message(item));
     }
-    out
+    b.must_encode()
 }
 
 fn encode_period_regenerated(category: u64, now_unix: u64) -> Vec<u8> {
-    let mut period_bytes = Vec::new();
-    let mut start_ts = Vec::new();
-    encode_timestamp(now_unix, &mut start_ts);
-    encode_bytes_field(1, &start_ts, &mut period_bytes);
-    let mut end_ts = Vec::new();
     let duration = if category == 2 { 30 * 86_400 } else { 86_400 };
-    encode_timestamp(now_unix.saturating_add(duration), &mut end_ts);
-    encode_bytes_field(2, &end_ts, &mut period_bytes);
-    encode_varint_field(3, category, &mut period_bytes);
-
-    let mut out = Vec::new();
-    encode_bytes_field(1, &period_bytes, &mut out);
-    encode_bytes_field(2, &start_ts, &mut out);
-    out
+    pb::message("eve.dailygoal.api.PeriodRegenerated")
+        .set("period.start", GoogleTimestamp { seconds: now_unix as i64, nanos: 0 })
+        .set(
+            "period.end",
+            GoogleTimestamp {
+                seconds: now_unix.saturating_add(duration) as i64,
+                nanos: 0,
+            },
+        )
+        .set("period.category", category as i32)
+        .set("timestamp", GoogleTimestamp { seconds: now_unix as i64, nanos: 0 })
+        .must_encode()
 }
 
 // ============================================================================
@@ -255,9 +248,26 @@ fn parse_lp_operation_request(
         .ok_or_else(|| (STATUS_BAD_REQUEST, "LP amount out of range".into()))?;
 
     let context_bytes = match dyn_msg.get(3) {
+        Some(DynamicValue::Message(m)) => {
+            static CTX_REG: std::sync::OnceLock<Arc<eve_proto::quasar::QuasarDescriptorRegistry>> =
+                std::sync::OnceLock::new();
+            let reg = CTX_REG.get_or_init(eve_proto::quasar::QuasarDescriptorRegistry::open_default_or_empty);
+            let mut ctx_msg = (**m).clone();
+            if ctx_msg.full_name.is_empty() {
+                ctx_msg.full_name = "eve.assetholding.Context".to_string();
+            }
+            reg.encode_dynamic(&ctx_msg)
+                .map_err(|e| (STATUS_BAD_REQUEST, format!("Invalid LP operation context: {e}")))?
+        }
         Some(DynamicValue::Bytes(b)) => b.clone(),
         _ => Vec::new(),
     };
+    if !context_bytes.is_empty() {
+        pb::message("eve.loyaltypoints.assetholding.operation.api.Deposited")
+            .set_raw_message("context", &context_bytes)
+            .encode()
+            .map_err(|e| (STATUS_BAD_REQUEST, format!("Invalid LP operation context: {e}")))?;
+    }
 
     Ok(ParsedLpOperation {
         op_uuid,
@@ -268,53 +278,33 @@ fn parse_lp_operation_request(
     })
 }
 
-fn encode_lp_wallet_id(owner: LpWalletOwner, issuer_corp_id: u32, out: &mut Vec<u8>) {
-    match owner {
-        LpWalletOwner::Character(cid) => {
-            let mut c_bytes = Vec::new();
-            encode_sequential_id(cid, &mut c_bytes);
-            encode_bytes_field(1, &c_bytes, out);
-        }
-        LpWalletOwner::Corporation(corp_id) => {
-            let mut c_bytes = Vec::new();
-            encode_sequential_id(corp_id, &mut c_bytes);
-            encode_bytes_field(2, &c_bytes, out);
-        }
-    }
-    let mut issuer_bytes = Vec::new();
-    encode_sequential_id(issuer_corp_id, &mut issuer_bytes);
-    encode_bytes_field(3, &issuer_bytes, out);
+fn build_lp_wallet_id(b: ProtoBuilder, owner: LpWalletOwner, issuer_corp_id: u32) -> ProtoBuilder {
+    let b = match owner {
+        LpWalletOwner::Character(cid) => b.set_with("character", |c| build_u32_id(c, cid)),
+        LpWalletOwner::Corporation(corp_id) => b.set_with("corporation", |c| build_u32_id(c, corp_id)),
+    };
+    b.set_with("issuer", |c| build_u32_id(c, issuer_corp_id))
 }
 
-fn encode_lp_op_attributes(op: &ParsedLpOperation, out: &mut Vec<u8>) {
-    let mut w_bytes = Vec::new();
-    encode_lp_wallet_id(op.owner, op.issuer_corp_id, &mut w_bytes);
-    encode_bytes_field(1, &w_bytes, out);
-    let mut curr_bytes = Vec::new();
-    encode_varint_field(1, op.amount as u64, &mut curr_bytes);
-    encode_bytes_field(2, &curr_bytes, out);
-}
-
-fn encode_lp_op_event(op: &ParsedLpOperation) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut id_bytes = Vec::new();
-    encode_bytes_field(1, &op.op_uuid, &mut id_bytes);
-    encode_bytes_field(1, &id_bytes, &mut out);
-    let mut attr_bytes = Vec::new();
-    encode_lp_op_attributes(op, &mut attr_bytes);
-    encode_bytes_field(2, &attr_bytes, &mut out);
-    if !op.context_bytes.is_empty() {
-        encode_bytes_field(3, &op.context_bytes, &mut out);
-    }
-    out
+fn encode_lp_op_event(type_name: &str, op: &ParsedLpOperation) -> Vec<u8> {
+    pb::message(type_name)
+        .set("identifier.uuid", op.op_uuid.as_slice())
+        .set_with("operation", |b| {
+            b.set_with("wallet", |w| build_lp_wallet_id(w, op.owner, op.issuer_corp_id))
+                .set_with("amount", |a| {
+                    a.when(op.amount != 0, |a| a.set("amount", op.amount as u64))
+                })
+        })
+        .when(!op.context_bytes.is_empty(), |b| {
+            b.set_raw_message("context", &op.context_bytes)
+        })
+        .must_encode()
 }
 
 fn encode_lp_op_ended(op_uuid: &[u8; 16]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut id_bytes = Vec::new();
-    encode_bytes_field(1, op_uuid, &mut id_bytes);
-    encode_bytes_field(1, &id_bytes, &mut out);
-    out
+    pb::message("eve.loyaltypoints.assetholding.operation.api.Ended")
+        .set("operation.uuid", op_uuid.as_slice())
+        .must_encode()
 }
 
 fn op_uuid_hex(uuid: &[u8; 16]) -> String {
@@ -331,21 +321,11 @@ pub fn emit_ess_main_bank_primed(
     main_cents: IskCents,
     now_unix: u64,
 ) {
-    let mut out = Vec::new();
-    let mut sys_bytes = Vec::new();
-    encode_sequential_id(sys_id, &mut sys_bytes);
-    encode_bytes_field(1, &sys_bytes, &mut out);
-    let mut main_bytes = Vec::new();
-    encode_isk_currency(main_cents, &mut main_bytes);
-    encode_bytes_field(2, &main_bytes, &mut out);
-    let _ = router.publish_notice(
-        NoticeScope::SolarSystem(sys_id),
-        GoogleAny {
-            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.solarsystem.bounty.bank.main.MainBankPrimed"),
-            value: out,
-        },
-        now_unix,
-    );
+    let any_msg = pb::message("eve.solarsystem.bounty.bank.main.MainBankPrimed")
+        .set_with("solar_system", |b| build_u64_id(b, sys_id))
+        .set_with("ess_main_value", |b| build_isk_currency(b, main_cents))
+        .must_to_any();
+    let _ = router.publish_notice(NoticeScope::SolarSystem(sys_id), any_msg, now_unix);
 }
 
 pub fn emit_ess_reserve_bank_primed(
@@ -354,21 +334,11 @@ pub fn emit_ess_reserve_bank_primed(
     reserve_cents: IskCents,
     now_unix: u64,
 ) {
-    let mut out = Vec::new();
-    let mut sys_bytes = Vec::new();
-    encode_sequential_id(sys_id, &mut sys_bytes);
-    encode_bytes_field(1, &sys_bytes, &mut out);
-    let mut res_bytes = Vec::new();
-    encode_isk_currency(reserve_cents, &mut res_bytes);
-    encode_bytes_field(2, &res_bytes, &mut out);
-    let _ = router.publish_notice(
-        NoticeScope::SolarSystem(sys_id),
-        GoogleAny {
-            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.solarsystem.bounty.bank.reserve.ReserveBankPrimed"),
-            value: out,
-        },
-        now_unix,
-    );
+    let any_msg = pb::message("eve.solarsystem.bounty.bank.reserve.ReserveBankPrimed")
+        .set_with("solar_system", |b| build_u64_id(b, sys_id))
+        .set_with("ess_reserve_value", |b| build_isk_currency(b, reserve_cents))
+        .must_to_any();
+    let _ = router.publish_notice(NoticeScope::SolarSystem(sys_id), any_msg, now_unix);
 }
 
 pub fn emit_ess_main_bank_link_established(
@@ -380,32 +350,14 @@ pub fn emit_ess_main_bank_link_established(
     reserve_cents: IskCents,
     now_unix: u64,
 ) {
-    let mut out = Vec::new();
-    let mut c_bytes = Vec::new();
-    encode_sequential_id(char_id, &mut c_bytes);
-    encode_bytes_field(1, &c_bytes, &mut out);
-    let mut s_bytes = Vec::new();
-    encode_sequential_id(sys_id, &mut s_bytes);
-    encode_bytes_field(2, &s_bytes, &mut out);
-    let mut m_bytes = Vec::new();
-    encode_isk_currency(main_cents, &mut m_bytes);
-    encode_bytes_field(3, &m_bytes, &mut out);
-    let mut r_bytes = Vec::new();
-    encode_isk_currency(reserve_cents, &mut r_bytes);
-    encode_bytes_field(4, &r_bytes, &mut out);
-    if ship_id != 0 {
-        let mut sh_bytes = Vec::new();
-        encode_varint_field(1, ship_id, &mut sh_bytes);
-        encode_bytes_field(5, &sh_bytes, &mut out);
-    }
-    let _ = router.publish_notice(
-        NoticeScope::SolarSystem(sys_id),
-        GoogleAny {
-            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.solarsystem.bounty.bank.main.MainBankLinkEstablished"),
-            value: out,
-        },
-        now_unix,
-    );
+    let any_msg = pb::message("eve.solarsystem.bounty.bank.main.MainBankLinkEstablished")
+        .set_with("linked_character", |b| build_u32_id(b, char_id))
+        .set_with("solar_system", |b| build_u64_id(b, sys_id))
+        .set_with("ess_main_value", |b| build_isk_currency(b, main_cents))
+        .set_with("ess_reserve_value", |b| build_isk_currency(b, reserve_cents))
+        .when(ship_id != 0, |b| b.set("ship.sequential", ship_id))
+        .must_to_any();
+    let _ = router.publish_notice(NoticeScope::SolarSystem(sys_id), any_msg, now_unix);
 }
 
 pub fn emit_ess_main_bank_theft_completed(
@@ -417,30 +369,14 @@ pub fn emit_ess_main_bank_theft_completed(
     destroyed_cents: IskCents,
     now_unix: u64,
 ) {
-    let mut out = Vec::new();
-    let mut c_bytes = Vec::new();
-    encode_sequential_id(char_id, &mut c_bytes);
-    encode_bytes_field(1, &c_bytes, &mut out);
-    let mut s_bytes = Vec::new();
-    encode_sequential_id(sys_id, &mut s_bytes);
-    encode_bytes_field(2, &s_bytes, &mut out);
-    let mut r_bytes = Vec::new();
-    encode_isk_currency(reserve_cents, &mut r_bytes);
-    encode_bytes_field(3, &r_bytes, &mut out);
-    let mut st_bytes = Vec::new();
-    encode_isk_currency(stolen_cents, &mut st_bytes);
-    encode_bytes_field(4, &st_bytes, &mut out);
-    let mut d_bytes = Vec::new();
-    encode_isk_currency(destroyed_cents, &mut d_bytes);
-    encode_bytes_field(5, &d_bytes, &mut out);
-    let _ = router.publish_notice(
-        NoticeScope::SolarSystem(sys_id),
-        GoogleAny {
-            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.solarsystem.bounty.bank.main.MainBankTheftCompleted"),
-            value: out,
-        },
-        now_unix,
-    );
+    let any_msg = pb::message("eve.solarsystem.bounty.bank.main.MainBankTheftCompleted")
+        .set_with("paid_character", |b| build_u32_id(b, char_id))
+        .set_with("solar_system", |b| build_u64_id(b, sys_id))
+        .set_with("ess_reserve_value", |b| build_isk_currency(b, reserve_cents))
+        .set_with("amount_stolen", |b| build_isk_currency(b, stolen_cents))
+        .set_with("amount_destroyed", |b| build_isk_currency(b, destroyed_cents))
+        .must_to_any();
+    let _ = router.publish_notice(NoticeScope::SolarSystem(sys_id), any_msg, now_unix);
 }
 
 pub fn emit_ess_solar_system_persisted(
@@ -450,24 +386,12 @@ pub fn emit_ess_solar_system_persisted(
     reserve_cents: IskCents,
     now_unix: u64,
 ) {
-    let mut out = Vec::new();
-    let mut s_bytes = Vec::new();
-    encode_sequential_id(sys_id, &mut s_bytes);
-    encode_bytes_field(1, &s_bytes, &mut out);
-    let mut m_bytes = Vec::new();
-    encode_isk_currency(main_cents, &mut m_bytes);
-    encode_bytes_field(2, &m_bytes, &mut out);
-    let mut r_bytes = Vec::new();
-    encode_isk_currency(reserve_cents, &mut r_bytes);
-    encode_bytes_field(3, &r_bytes, &mut out);
-    let _ = router.publish_notice(
-        NoticeScope::SolarSystem(sys_id),
-        GoogleAny {
-            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.solarsystem.bounty.bank.SolarSystemPersisted"),
-            value: out,
-        },
-        now_unix,
-    );
+    let any_msg = pb::message("eve.solarsystem.bounty.bank.SolarSystemPersisted")
+        .set_with("solar_system", |b| build_u64_id(b, sys_id))
+        .set_with("ess_main_value", |b| build_isk_currency(b, main_cents))
+        .set_with("ess_reserve_value", |b| build_isk_currency(b, reserve_cents))
+        .must_to_any();
+    let _ = router.publish_notice(NoticeScope::SolarSystem(sys_id), any_msg, now_unix);
 }
 
 // ============================================================================
@@ -523,26 +447,25 @@ pub fn register_handlers(
                 now_unix,
             );
 
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve.dailygoal.api.admin.RegenerateCurrentGoalsResponse");
             for g in &new_goals {
+                let (id_bytes, attr_bytes) = goal_id_and_attrs(g);
                 let created_bytes = encode_daily_goal_created(g);
                 ctx_queue_notice(
                     NoticeScope::Character(cid),
                     GoogleAny {
                         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.dailygoal.api.Created"),
-                        value: created_bytes.clone(),
+                        value: created_bytes,
                     },
                     now_unix,
                 );
-                encode_bytes_field(1, &created_bytes, &mut out);
+                resp = resp.add_with("goals", |b| {
+                    b.set_raw_message("id", &id_bytes)
+                        .set_raw_message("goal", &attr_bytes)
+                });
             }
 
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.dailygoal.api.admin.RegenerateCurrentGoalsResponse"
-                ),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -793,19 +716,14 @@ pub fn register_handlers(
                     LpWalletOwner::Corporation(corp_id) => NoticeScope::Corporation(corp_id),
                 };
 
-                let mut added_bytes = Vec::new();
-                let mut w_bytes = Vec::new();
-                encode_lp_wallet_id(op.owner, op.issuer_corp_id, &mut w_bytes);
-                encode_bytes_field(1, &w_bytes, &mut added_bytes);
-                encode_varint_field(2, op.amount as u64, &mut added_bytes);
-                encode_varint_field(3, new_balance, &mut added_bytes);
-                encode_varint_field(4, 0, &mut added_bytes);
                 ctx_queue_notice(
                     scope.clone(),
-                    GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.wallet.api.BalanceAdded"),
-                        value: added_bytes,
-                    },
+                    pb::message("eve.loyaltypoints.wallet.api.BalanceAdded")
+                        .set_with("wallet", |w| build_lp_wallet_id(w, op.owner, op.issuer_corp_id))
+                        .set("increase", op.amount as u64)
+                        .set("new_balance", new_balance)
+                        .set("taxed_amount", 0u64)
+                        .must_to_any(),
                     now_unix,
                 );
 
@@ -815,7 +733,10 @@ pub fn register_handlers(
                         type_url: format!(
                             "{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.assetholding.operation.api.Deposited"
                         ),
-                        value: encode_lp_op_event(&op),
+                        value: encode_lp_op_event(
+                            "eve.loyaltypoints.assetholding.operation.api.Deposited",
+                            &op,
+                        ),
                     },
                     now_unix,
                 );
@@ -832,12 +753,8 @@ pub fn register_handlers(
                 );
             }
 
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.assetholding.operation.api.DepositResponse"
-                ),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve.loyaltypoints.assetholding.operation.api.DepositResponse")
+                .must_to_any())
         }),
     );
 
@@ -917,18 +834,13 @@ pub fn register_handlers(
                     LpWalletOwner::Corporation(corp_id) => NoticeScope::Corporation(corp_id),
                 };
 
-                let mut rem_bytes = Vec::new();
-                let mut w_bytes = Vec::new();
-                encode_lp_wallet_id(op.owner, op.issuer_corp_id, &mut w_bytes);
-                encode_bytes_field(1, &w_bytes, &mut rem_bytes);
-                encode_varint_field(2, op.amount as u64, &mut rem_bytes);
-                encode_varint_field(3, new_balance, &mut rem_bytes);
                 ctx_queue_notice(
                     scope.clone(),
-                    GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.wallet.api.BalanceRemoved"),
-                        value: rem_bytes,
-                    },
+                    pb::message("eve.loyaltypoints.wallet.api.BalanceRemoved")
+                        .set_with("wallet", |w| build_lp_wallet_id(w, op.owner, op.issuer_corp_id))
+                        .set("decrease", op.amount as u64)
+                        .set("new_balance", new_balance)
+                        .must_to_any(),
                     now_unix,
                 );
 
@@ -938,7 +850,10 @@ pub fn register_handlers(
                         type_url: format!(
                             "{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.assetholding.operation.api.Withdrawn"
                         ),
-                        value: encode_lp_op_event(&op),
+                        value: encode_lp_op_event(
+                            "eve.loyaltypoints.assetholding.operation.api.Withdrawn",
+                            &op,
+                        ),
                     },
                     now_unix,
                 );
@@ -955,12 +870,8 @@ pub fn register_handlers(
                 );
             }
 
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.assetholding.operation.api.WithdrawResponse"
-                ),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve.loyaltypoints.assetholding.operation.api.WithdrawResponse")
+                .must_to_any())
         }),
     );
 
@@ -1006,56 +917,31 @@ pub fn register_handlers(
                     Ok((st.ess_main_bank, st.ess_reserve_bank))
                 })?;
 
-            let mut calc_bytes = Vec::new();
-            let mut s_bytes = Vec::new();
-            encode_sequential_id(sys_id, &mut s_bytes);
-            encode_bytes_field(1, &s_bytes, &mut calc_bytes);
-            encode_varint_field(2, u64::from(input_pct), &mut calc_bytes);
-            let mut det_bytes = Vec::new();
-            if units != 0 {
-                encode_varint_field(1, units, &mut det_bytes);
-            }
-            if nanos != 0 {
-                encode_varint_field(2, u64::from(nanos), &mut det_bytes);
-            }
-            encode_bytes_field(3, &det_bytes, &mut calc_bytes);
-
             ctx_queue_notice(
                 NoticeScope::SolarSystem(sys_id),
-                GoogleAny {
-                    type_url: format!(
-                        "{TYPE_GOOGLEAPIS_PREFIX}eve.solarsystem.bounty.npc.MultiplierFactorCalculated"
-                    ),
-                    value: calc_bytes,
-                },
+                pb::message("eve.solarsystem.bounty.npc.MultiplierFactorCalculated")
+                    .set_with("solar_system", |b| build_u64_id(b, sys_id))
+                    .set("input_multiplier_percentage_value", input_pct)
+                    .set_with("calculated_multiplier", |b| {
+                        b.when(units != 0, |b| b.set("units", units))
+                            .when(nanos != 0, |b| b.set("nanos", nanos))
+                    })
+                    .must_to_any(),
                 now_unix,
             );
 
-            let mut pers_bytes = Vec::new();
-            encode_bytes_field(1, &s_bytes, &mut pers_bytes);
-            let mut m_bytes = Vec::new();
-            encode_isk_currency(main_cents, &mut m_bytes);
-            encode_bytes_field(2, &m_bytes, &mut pers_bytes);
-            let mut r_bytes = Vec::new();
-            encode_isk_currency(reserve_cents, &mut r_bytes);
-            encode_bytes_field(3, &r_bytes, &mut pers_bytes);
             ctx_queue_notice(
                 NoticeScope::SolarSystem(sys_id),
-                GoogleAny {
-                    type_url: format!(
-                        "{TYPE_GOOGLEAPIS_PREFIX}eve.solarsystem.bounty.bank.SolarSystemPersisted"
-                    ),
-                    value: pers_bytes,
-                },
+                pb::message("eve.solarsystem.bounty.bank.SolarSystemPersisted")
+                    .set_with("solar_system", |b| build_u64_id(b, sys_id))
+                    .set_with("ess_main_value", |b| build_isk_currency(b, main_cents))
+                    .set_with("ess_reserve_value", |b| build_isk_currency(b, reserve_cents))
+                    .must_to_any(),
                 now_unix,
             );
 
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.solarsystem.bounty.npc.ApplyMultiplierFactorResponse"
-                ),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve.solarsystem.bounty.npc.ApplyMultiplierFactorResponse")
+                .must_to_any())
         }),
     );
 }

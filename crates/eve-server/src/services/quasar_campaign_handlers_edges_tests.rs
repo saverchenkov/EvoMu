@@ -9,9 +9,8 @@ use crate::services::quasar_campaign_state::{
     ObjectiveParameter, TickingContribution, TickingEvaluation, CAMPAIGN_STATE_EXPIRED,
     OBJECTIVE_STATE_COMPLETED, TRACK_STATE_STOPPED,
 };
-use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, AuthoritativeContext, DynamicQuasarMessage,
-};
+use eve_proto::pb;
+use eve_proto::quasar::{AuthoritativeContext, DynamicQuasarMessage};
 
 fn id_dyn_msg(uuid: [u8; 16]) -> DynamicQuasarMessage {
     let mut inner = DynamicQuasarMessage::new("Identifier");
@@ -61,8 +60,9 @@ fn extract_campaign_id_and_namespace_all_variants() {
     }
 
     // Wire-encoded Identifier in DynamicValue::Bytes
-    let mut wire = Vec::new();
-    encode_bytes_field(1, &campaign_uuid(77), &mut wire);
+    let wire = pb::message("eve_public.campaign.Identifier")
+        .set("uuid", campaign_uuid(77))
+        .must_encode();
     assert_eq!(
         extract_campaign_id(Some(&DynamicValue::Bytes(wire))),
         Some(77)
@@ -96,8 +96,9 @@ fn extract_campaign_id_and_namespace_all_variants() {
     msg_non_str.set(1, DynamicValue::Message(Box::new(inner_non_str)));
     assert_eq!(namespace_of(&msg_non_str), Some(String::new()));
 
-    let mut ns_wire = Vec::new();
-    encode_string_field(1, "pirate_ns", &mut ns_wire);
+    let ns_wire = pb::message("eve_public.campaign.Namespace")
+        .set("namespace", "pirate_ns")
+        .must_encode();
     let mut msg_bytes = DynamicQuasarMessage::new("Req");
     msg_bytes.set(1, DynamicValue::Bytes(ns_wire));
     assert_eq!(namespace_of(&msg_bytes), Some("pirate_ns".to_string()));

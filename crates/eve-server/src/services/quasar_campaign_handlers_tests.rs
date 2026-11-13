@@ -3,6 +3,7 @@ use crate::services::fleet_social::fleet_social_fleet_ops::fleet_social_fleet_op
 use crate::services::quasar_campaign_state::{
     ObjectiveParameter, TickingContribution, TickingEvaluation,
 };
+use eve_proto::pb;
 use eve_proto::quasar::{AuthoritativeContext, DynamicQuasarMessage};
 
 fn id_dyn_msg(uuid: [u8; 16]) -> DynamicQuasarMessage {
@@ -191,8 +192,9 @@ fn id_from_uuid_extract_id_and_namespace_of_edge_cases() {
         Some(55)
     );
 
-    let mut wire_wrapped = Vec::new();
-    encode_bytes_field(1, &u55, &mut wire_wrapped);
+    let wire_wrapped = pb::message("eve_public.campaign.Identifier")
+        .set("uuid", u55)
+        .must_encode();
     assert_eq!(
         extract_campaign_id(Some(&DynamicValue::Bytes(wire_wrapped.clone()))),
         Some(55)
@@ -237,14 +239,20 @@ fn id_from_uuid_extract_id_and_namespace_of_edge_cases() {
     assert_eq!(namespace_of(&ns_msg).as_deref(), Some("insurgency"));
     assert_eq!(namespace_of(&DynamicQuasarMessage::new("Empty")), None);
 
-    let mut wire_ns = Vec::new();
-    encode_bytes_field(1, b"crimson", &mut wire_ns);
+    let wire_ns = pb::message("eve_public.campaign.Namespace")
+        .set("namespace", "crimson")
+        .must_encode();
     let mut wire_ns_msg = DynamicQuasarMessage::new("Req");
     wire_ns_msg.set(1, DynamicValue::Bytes(wire_ns));
     assert_eq!(namespace_of(&wire_ns_msg).as_deref(), Some("crimson"));
 
-    let mut invalid_utf8_wire = Vec::new();
-    encode_bytes_field(1, &[0xFF, 0xFE], &mut invalid_utf8_wire);
+    let invalid_utf8_wire = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(vec![0xFF, 0xFE]),
+        }],
+    }
+    .encode();
     let mut bad_ns_msg = DynamicQuasarMessage::new("Req");
     bad_ns_msg.set(1, DynamicValue::Bytes(invalid_utf8_wire));
     assert_eq!(namespace_of(&bad_ns_msg), None);
@@ -640,5 +648,129 @@ fn campaign_handlers_cover_filtering_auth_not_found_and_rewards() {
 
     // queue_notices executes cleanly on empty notices
     queue_notices(Vec::new(), 1_700_000_000);
+}
+
+#[test]
+fn campaign_builders_decode_strictly_with_descriptors() {
+    let reg = eve_proto::quasar::QuasarDescriptorRegistry::open_default()
+        .expect("descriptor registry");
+    let roundtrip = |type_name: &str, wire: &[u8]| {
+        let decoded = reg.decode_dynamic(type_name, wire).unwrap_or_else(|e| panic!("decode {type_name}: {e}"));
+        let reencoded = reg.encode_dynamic(&decoded).unwrap_or_else(|e| panic!("encode {type_name}: {e}"));
+        let decoded2 = reg.decode_dynamic(type_name, &reencoded).unwrap_or_else(|e| panic!("redecode {type_name}: {e}"));
+        assert_eq!(decoded2, decoded, "roundtrip mismatch for {type_name}");
+    };
+
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let cid = 501_u64;
+    let oid = 601_u64;
+    let tid = 701_u64;
+    let char_id = 100_000_001_u32;
+
+    let camp = CampaignRecord {
+        id: cid,
+        name: "caldari insurgency".into(),
+        description: "desc".into(),
+        namespace: "pirate_insurgency".into(),
+        scheduled_start_unix: 1_699_000_000,
+        scheduled_expiry_unix: 1_710_000_000,
+        state: CAMPAIGN_STATE_ACTIVE,
+        transition_unix: 1_699_000_100,
+        etag: 1,
+        version_notice_pending: false,
+        objectives: vec![oid],
+    };
+    let camp_upcoming = CampaignRecord {
+        id: cid + 1,
+        state: 0,
+        ..camp.clone()
+    };
+    let obj = CampaignObjectiveRecord {
+        id: oid,
+        campaign_id: cid,
+        name: "mine asteroid".into(),
+        target_progress: 100,
+        current_progress: 25,
+        committed_participants: vec![char_id],
+        resigned_participants: Vec::new(),
+        contributors: HashMap::from([(char_id, (25, 2))]),
+        contribution_method: "MineAsteroid".into(),
+        max_progress_per_participant: 50,
+        isk_reward_per_interval: 10_000,
+        isk_reward_progress_interval: 10,
+        state: OBJECTIVE_STATE_ACTIVE,
+        transition_unix: 1_699_000_100,
+        parameters: vec![ObjectiveParameter {
+            key: "solar_system".into(),
+            values: vec!["30000142".into()],
+        }],
+    };
+    let trk = CampaignTrackRecord {
+        id: tid,
+        campaign_id: cid,
+        key: "suppression".into(),
+        target_progress_value: 500,
+        current_progress: 40,
+        participants: HashMap::from([(char_id, 40)]),
+        max_participant_contribution: 100,
+        isk_reward_per_interval: 25_000,
+        isk_reward_progress_interval: 20,
+        redeemed_intervals: HashMap::new(),
+        ticking: vec![TickingContribution {
+            key: "passive".into(),
+            interval_secs: 60,
+            evaluations: vec![
+                TickingEvaluation { key: "base".into(), constant: Some(5), per_unit_value: None },
+                TickingEvaluation { key: "per_pilot".into(), constant: None, per_unit_value: Some(2) },
+            ],
+            last_tick_unix: 1_699_000_000,
+        }],
+        state: TRACK_STATE_STARTED,
+        transition_unix: 1_699_000_100,
+    };
+
+    roundtrip("eve_public.campaign.Stats", &encode_campaign_stats(&[&obj]));
+    roundtrip("eve_public.campaign.Attributes", &encode_campaign_attributes(&camp, &[&obj]));
+    roundtrip("eve_public.campaign.objective.Stats", &encode_objective_stats(&obj));
+    roundtrip("eve_public.campaign.objective.Attributes", &encode_objective_attributes(&obj));
+    roundtrip("eve_public.campaign.track.Attributes", &encode_track_attributes(&trk));
+    roundtrip("eve_public.campaign.track.Stats", &encode_track_stats(&trk));
+    roundtrip("eve_public.campaign.track.ParticipantStats", &encode_track_participant_stats(&trk, char_id));
+    roundtrip("eve_public.campaign.track.ParticipantStats", &encode_track_participant_stats(&trk, 999_999));
+    roundtrip("eve_public.campaign.api.GetStatusResponse.Track", &encode_status_track(&trk));
+    roundtrip(
+        "eve_public.campaign.track.api.GetTickingContributionsPredictionResponse",
+        &encode_ticking_prediction(&trk, 3),
+    );
+
+    let mgr = Arc::new(ProgressionExtraManager::new(Some(Arc::clone(&ctx.db))));
+    register_campaign_handlers(&ctx.quasar_gateway, Arc::clone(&mgr));
+    mgr.register_campaign(camp, vec![obj], vec![trk]).expect("register active");
+    mgr.register_campaign(camp_upcoming, vec![], vec![]).expect("register upcoming");
+
+    let auth = AuthoritativeContext::for_session(Some(1), Some(char_id), Some(1_000_009), u64::MAX, "tranquility", vec![]);
+    let any = GoogleAny::default();
+    let empty = DynamicQuasarMessage::new("Req");
+    let id_msg = id_dyn_msg(campaign_uuid(cid));
+    let mut ns_sub = DynamicQuasarMessage::new("Namespace");
+    ns_sub.set(1, DynamicValue::String("pirate_insurgency".into()));
+    let mut ns_req = DynamicQuasarMessage::new("Req");
+    ns_req.set(1, DynamicValue::Message(Box::new(ns_sub)));
+    let handlers = ctx.quasar_gateway.handlers.read().unwrap().clone();
+
+    for (req_name, req) in [
+        ("eve_public.campaign.api.GetAllRequest", &empty),
+        ("eve_public.campaign.api.GetAllForNamespaceRequest", &ns_req),
+        ("eve_public.campaign.api.GetRequest", &id_msg),
+        ("eve_public.campaign.api.GetStatusRequest", &id_msg),
+        ("eve_public.campaign.api.GetStatsRequest", &id_msg),
+        ("eve_public.campaign.api.GetParticipantStatsRequest", &id_msg),
+        ("eve_public.campaign.api.GetLimitsRequest", &empty),
+        ("eve_public.campaign.api.GetAllUnredeemedRewardsRequest", &empty),
+        ("eve_public.campaign.api.GetAllUnredeemedParticipantRewardsRequest", &ns_req),
+    ] {
+        let resp = handlers[req_name](&auth, &any, req).unwrap_or_else(|e| panic!("{req_name}: {e:?}"));
+        roundtrip(&resp.type_url, &resp.value);
+    }
 }
 

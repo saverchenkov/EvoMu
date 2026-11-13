@@ -271,3 +271,120 @@ fn registered_handlers_for_tournament_universe_vanguard_vendors_and_war() {
         assert!(invoke(&router, endpoint, &ctx, &req).is_ok(), "{endpoint}");
     }
 }
+
+#[test]
+fn vendors_and_war_builders_decode_strictly_with_descriptors() {
+    let reg = QuasarDescriptorRegistry::open_default().expect("descriptor registry");
+    let roundtrip = |type_name: &str, wire: &[u8]| {
+        let decoded = reg.decode_dynamic(type_name, wire).unwrap_or_else(|e| panic!("decode {type_name}: {e}"));
+        let reencoded = reg.encode_dynamic(&decoded).unwrap_or_else(|e| panic!("encode {type_name}: {e}"));
+        let decoded2 = reg.decode_dynamic(type_name, &reencoded).unwrap_or_else(|e| panic!("redecode {type_name}: {e}"));
+        assert_eq!(decoded2, decoded, "roundtrip mismatch for {type_name}");
+    };
+
+    // Helper encoders
+    roundtrip(
+        "eve.thirdpartyapi.RequestReceived",
+        &encode_thirdpartyapi_request_received(90_000_001, "tranquility", "/v1/status", 1, "EvoMu", 1_700_000_000),
+    );
+    roundtrip("eve.tournament.arena.Identifier", &encode_tournament_identifier(b"t-1"));
+    roundtrip(
+        "eve.tournament.arena.api.GetAllResponse.Arena",
+        &encode_tournament_arena(b"a-1", "Arena", 30_000_142, 100_000, b"t-1", b"r-1"),
+    );
+    roundtrip(
+        "eve.tournament.arena.layout.Attributes",
+        &encode_tournament_layout(b"l-1", "Layout", 2, 150_000),
+    );
+    roundtrip(
+        "eve.tournament.ruleset.Attributes",
+        &encode_tournament_ruleset(b"r-1", "Ruleset", 100, 10),
+    );
+    roundtrip("eve.ui.Annotation", &encode_ui_annotation("k", "v"));
+    roundtrip("eve.ui.contenttag.Identifier", &encode_ui_contenttag("tag1"));
+    roundtrip("eve.ui.icon.Identifier", &encode_ui_icon("icon1"));
+    roundtrip("eve.ui.image.Attributes", &encode_ui_image_attributes(64, 64));
+    roundtrip("eve.vanguard.commission.Identifier", &encode_vanguard_commission(b"comm-1"));
+    roundtrip("eve.vanguard.commission.assignment.Identifier", &encode_vanguard_assignment(b"comm-1", "eliminate"));
+    roundtrip("eve.vendors.epic.user.Identifier", &encode_epic_user("epic-1"));
+    roundtrip(
+        "eve.vendors.epic.api.GetEntitlementsResponse.Entitlement",
+        &encode_epic_entitlement("ent-1", "Omega", "active", 1_700_000_000),
+    );
+    roundtrip("eve.vendors.steam.user.api.GetByEveUserResponse", &encode_steam_user("765611", "Pilot", "IS"));
+    roundtrip("eve.vendors.contentful.asset.Identifier", &encode_contentful_asset("asset-1"));
+    roundtrip("eve.vendors.payletter.IdentityVerificationReceipt", &encode_payletter_receipt("tx-1", "AUTH"));
+    roundtrip("eve.war.Identifier", &encode_war_identifier(10));
+    roundtrip("eve.war.entity.Identifier", &encode_war_entity_identifier(Some(99_000_001), None));
+    roundtrip("eve.war.entity.Identifier", &encode_war_entity_identifier(None, Some(1_000_170)));
+    roundtrip("eve.war.Attributes", &encode_war_attributes(1_000_170, 1_000_171, true, false, 1_700_000_000));
+    roundtrip("eve.war.DestructionStatistics", &encode_war_destruction_statistics(5, 100_000_000));
+    roundtrip("eve.wormhole.Identifier", &encode_wormhole_identifier(999));
+
+    // All registered handlers
+    let (router, _db, _sde) = setup_router();
+    let ctx = AuthoritativeContext::for_session(Some(1), Some(90_000_001), Some(1_000_009), 0, "tranquility", vec![1])
+        .with_service_roles(eve_machonet::service_roles::ROLE_ADMIN);
+    let mut id_req = DynamicQuasarMessage::new("Req");
+    id_req.set(1, DynamicValue::Uint64(1001));
+    let mut uuid_req = DynamicQuasarMessage::new("Req");
+    uuid_req.set(1, DynamicValue::Bytes(b"uuid-test".to_vec()));
+    let mut nav_req = DynamicQuasarMessage::new("Req");
+    nav_req.set(1, DynamicValue::Uint32(30_000_142));
+    nav_req.set(2, DynamicValue::Uint32(30_000_144));
+    let mut region_req = DynamicQuasarMessage::new("Req");
+    region_req.set(1, DynamicValue::Uint32(10_000_002));
+    let mut tpa_req = DynamicQuasarMessage::new("Req");
+    tpa_req.set(2, DynamicValue::Int32(90_000_001));
+
+    for (ep, req) in [
+        ("eve.thirdpartyapi.RequestReceived", &tpa_req),
+        ("eve.tournament.arena.api.GetAllRequest", &uuid_req),
+        ("eve.tournament.arena.api.GetSettingsRequest", &uuid_req),
+        ("eve.tournament.arena.layout.api.GetRequest", &uuid_req),
+        ("eve.tournament.ruleset.api.GetAllRequest", &uuid_req),
+        ("eve.tournament.ruleset.api.GetRequest", &uuid_req),
+        ("eve.tournament.arena.api.CreateRequest", &uuid_req),
+        ("eve.tournament.arena.api.DeleteRequest", &uuid_req),
+        ("eve.universe.navigation.GetShortestGateJumpCountRequest", &nav_req),
+        ("eve.universe.navigation.GetShortestSystemJumpCountRequest", &nav_req),
+        ("eve.universe.constellation.GetAllInRegionRequest", &region_req),
+        ("eve.vanguard.commission.assignment.admin.api.TriggerCompletedEventRequest", &id_req),
+        ("eve.vendors.epic.api.GetUserByEveUserIDRequest", &id_req),
+        ("eve.vendors.epic.api.GetEntitlementsRequest", &id_req),
+        ("eve.vendors.steam.user.api.GetRequest", &id_req),
+        ("eve.vendors.steam.user.api.GetByEveUserRequest", &id_req),
+        ("eve.vendors.steam.user.api.CreateRequest", &id_req),
+        ("eve.vendors.fusionauth.api.LinkUserRequest", &id_req),
+        ("eve.vendors.payletter.GetUserIdentityVerificationReceiptRequest", &id_req),
+        ("eve.war.GetRequest", &id_req),
+        ("eve.war.GetAllRequest", &id_req),
+        ("eve.war.GetDestructionStatisticsRequest", &id_req),
+        ("eve.war.GetAlliesRequest", &id_req),
+    ] {
+        let rsp = invoke(&router, ep, &ctx, req).unwrap_or_else(|e| panic!("{ep}: {e:?}"));
+        roundtrip(&rsp.type_url, &rsp.value);
+    }
+
+    // Notice publishers
+    let mut sess = eve_machonet::SessionState::new(1);
+    sess.user_id = Some(1);
+    let mut rx = router.subscribe_session(&sess, Vec::new(), 1_700_000_000);
+    let now = 1_700_000_000;
+    publish_thirdpartyapi_request_received(&router, NoticeScope::Broadcast, 90_000_001, "tranquility", "/v1/vars", 1, "Agent", now).unwrap();
+    publish_vanguard_commission_completed(&router, NoticeScope::User(1), 1, b"comm-1", "assault", "daily", 500_001, now).unwrap();
+    publish_vanguard_skirmish_completed(&router, NoticeScope::Broadcast, 1, 2, now).unwrap();
+    publish_vanguard_contract_completed(&router, NoticeScope::Broadcast, true, now).unwrap();
+    publish_twitch_drop_received(&router, NoticeScope::User(1), 1, b"tw-1", 55, now).unwrap();
+    publish_fusionauth_user_linked(&router, NoticeScope::User(1), b"fa-1", 1, now).unwrap();
+    publish_war_declared_notice(&router, NoticeScope::Broadcast, 1, 100, 200, now).unwrap();
+    publish_war_end_scheduled_notice(&router, NoticeScope::Broadcast, 1, now + 3600, now).unwrap();
+    let mut seen = 0;
+    while let Ok(n) = rx.try_recv() {
+        if let Some(p) = n.payload {
+            roundtrip(&p.type_url, &p.value);
+            seen += 1;
+        }
+    }
+    assert_eq!(seen, 8);
+}
