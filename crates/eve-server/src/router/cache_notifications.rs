@@ -1696,12 +1696,36 @@ impl ServerContext {
         pre: Option<&eve_db::InventoryItemRecord>,
         post: Option<&eve_db::InventoryItemRecord>,
     ) {
+        let is_bp = |it: &eve_db::InventoryItemRecord| {
+            self.sde.blueprints.contains_key(&it.type_id)
+                || self.sde.types.get(&it.type_id).is_some_and(|t| t.category_id == 9)
+        };
+        let emit_bp_update = |it: &eve_db::InventoryItemRecord| {
+            let (target, _) = self.resolve_item_notification_target(fallback_char_id, it);
+            let owner_id = if it.owner_id > 0 {
+                it.owner_id
+            } else {
+                fallback_char_id
+            };
+            self.notify(
+                target,
+                "OnBlueprintsUpdated",
+                "ownerID",
+                vec![PyRep::Integer(owner_id)],
+            );
+        };
         match (pre, post) {
             (None, Some(new_item)) => {
                 self.emit_item_change_routed(fallback_char_id, new_item, Vec::new());
+                if is_bp(new_item) {
+                    emit_bp_update(new_item);
+                }
             }
             (Some(old_item), None) => {
                 self.emit_item_deleted_routed(fallback_char_id, old_item);
+                if is_bp(old_item) {
+                    emit_bp_update(old_item);
+                }
             }
             (Some(old_item), Some(new_item)) => {
                 let changes = Self::compute_item_change_dict(old_item, new_item);
@@ -1725,6 +1749,12 @@ impl ServerContext {
                         new_item,
                         changes,
                     );
+                }
+                if is_bp(new_item) || is_bp(old_item) {
+                    emit_bp_update(new_item);
+                    if old_item.owner_id != new_item.owner_id {
+                        emit_bp_update(old_item);
+                    }
                 }
             }
             (None, None) => {}
