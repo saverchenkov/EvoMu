@@ -225,16 +225,22 @@ fn deliver_request_error_rejection_and_completion_paths() {
     let build_deliver = |del_loc: Option<(u32, i64)>, item_id: Option<i64>, item_loc: Option<(i64, i64)>, qty: u64| {
         pb::message(deliver_ty)
             .set("project.uuid", uuid_item.clone())
-            .when_some(del_loc, |b, (f, loc_id)| match f {
-                1 => b.set("delivery_location.station.sequential", loc_id as u64),
-                2 => b.set("delivery_location.structure.sequential", loc_id as u64),
-                other => panic!("unsupported delivery_location field {other}"),
+            .with(|b| match del_loc {
+                Some((1, loc_id)) => b.set("delivery_location.station.sequential", loc_id as u64),
+                Some((2, loc_id)) => b.set("delivery_location.structure.sequential", loc_id as u64),
+                Some((other, _)) => panic!("unsupported delivery_location field {other}"),
+                None => b,
             })
-            .when_some(item_id, |b, iid| b.set("item.sequential", iid as u64))
+            .with(|b| match item_id {
+                Some(iid) => b.set("item.sequential", iid as u64),
+                None => b,
+            })
             .set("quantity", qty as u32)
-            .when_some(item_loc, |b, (cont, flg)| {
-                b.set("item_location.item.sequential", cont as u64)
-                    .set("item_location.flag.value", flg as u64)
+            .with(|b| match item_loc {
+                Some((cont, flg)) => b
+                    .set("item_location.item.sequential", cont as u64)
+                    .set("item_location.flag.value", flg as u64),
+                None => b,
             })
             .must_encode()
     };
@@ -505,7 +511,10 @@ fn mutants_cov_locked_explicit_autoselect_distractors_and_batch_math() {
     let build_req = |item_id: Option<i64>, qty: u64| {
         pb::message(deliver_ty)
             .set("project.uuid", uuid.clone())
-            .when_some(item_id, |b, iid| b.set("item.sequential", iid as u64))
+            .with(|b| match item_id {
+                Some(iid) => b.set("item.sequential", iid as u64),
+                None => b,
+            })
             .set("quantity", qty as u32)
             .must_encode()
     };

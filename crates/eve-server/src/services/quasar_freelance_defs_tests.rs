@@ -439,14 +439,23 @@ fn freelance_helpers_and_item_delivery_rejections_and_completion() {
             "eve_public.freelance.contributionmethod.itemdelivery.api.DeliverRequest",
         )
         .set("project.uuid", uuid.clone())
-        .when_some(station, |b, st| {
-            b.set("delivery_location.station.sequential", st as u64)
+        .with(|b| match station {
+            Some(st) => b.set("delivery_location.station.sequential", st as u64),
+            None => b,
         })
-        .when_some(iid, |b, id| b.set("item.sequential", id as u64))
-        .when_some(qty, |b, q| b.set("quantity", q as u32))
-        .when_some(cont_flag, |b, (c, fl)| {
-            b.set("item_location.item.sequential", c as u64)
-                .set("item_location.flag.value", u64::from(fl))
+        .with(|b| match iid {
+            Some(id) => b.set("item.sequential", id as u64),
+            None => b,
+        })
+        .with(|b| match qty {
+            Some(q) => b.set("quantity", q as u32),
+            None => b,
+        })
+        .with(|b| match cont_flag {
+            Some((c, fl)) => b
+                .set("item_location.item.sequential", c as u64)
+                .set("item_location.flag.value", u64::from(fl)),
+            None => b,
         })
         .must_encode()
     };

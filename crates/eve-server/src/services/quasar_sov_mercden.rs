@@ -703,8 +703,9 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                         })
                     })
                     .set("cargo_extraction_enabled", den.cargo_extraction_enabled)
-                    .when_some(skyhook_owner, |b, corp| {
-                        b.set("skyhook_owner.sequential", corp as u64)
+                    .with(|b| match skyhook_owner {
+                        Some(corp) => b.set("skyhook_owner.sequential", corp as u64),
+                        None => b,
                     })
                     .must_to_any())
             }),

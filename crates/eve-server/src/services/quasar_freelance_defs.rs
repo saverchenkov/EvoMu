@@ -591,7 +591,10 @@ fn set_loc_id(b: ProtoBuilder, field: &str, val: &serde_json::Value, key: &str) 
         .and_then(|v| v.as_u64())
         .and_then(|v| u32::try_from(v).ok())
         .filter(|v| *v > 0);
-    b.when_some(id, |b, seq| b.set(&format!("{field}.sequential"), seq))
+    match id {
+        Some(seq) => b.set(&format!("{field}.sequential"), seq),
+        None => b,
+    }
 }
 
 fn set_name_id(b: ProtoBuilder, field: &str, name: &str) -> ProtoBuilder {
@@ -650,7 +653,10 @@ fn fill_single_freelance_def(
                         .set("type", ptype)
                         .set("optional", !required);
                     let m = set_name_id(m, "icon", picon);
-                    m.when_some(max_entries, |m, max| m.set("max_entries", max))
+                    match max_entries {
+                        Some(max) => m.set("max_entries", max),
+                        None => m,
+                    }
                 })
             });
         }

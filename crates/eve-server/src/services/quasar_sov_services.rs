@@ -75,7 +75,10 @@ pub fn register_handlers(
 
                 let notice = pb::message("eve_public.sovereignty.skyhook.api.ActivationNotice")
                     .set("solar_system.sequential", sys_id)
-                    .when_some(planet_id, |b, pid| b.set("planet.sequential", pid as u64))
+                    .with(|b| match planet_id {
+                        Some(pid) => b.set("planet.sequential", pid as u64),
+                        None => b,
+                    })
                     .set("skyhook.sequential", structure_id as u64)
                     .set("active", true)
                     .must_to_any();
@@ -108,7 +111,10 @@ pub fn register_handlers(
 
                 let notice = pb::message("eve_public.sovereignty.skyhook.api.ActivationNotice")
                     .set("solar_system.sequential", sys_id)
-                    .when_some(planet_id, |b, pid| b.set("planet.sequential", pid as u64))
+                    .with(|b| match planet_id {
+                        Some(pid) => b.set("planet.sequential", pid as u64),
+                        None => b,
+                    })
                     .set("skyhook.sequential", structure_id as u64)
                     .set("active", false)
                     .must_to_any();
