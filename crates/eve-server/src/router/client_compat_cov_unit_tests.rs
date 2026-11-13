@@ -912,8 +912,8 @@ fn issue_771_and_776_get_members_paged_crowset_and_reprocess_list_compat() {
     assert_eq!(owner_bps[0].dict_get("itemID"), Some(&PyRep::Integer(9_002)));
     assert_eq!(owner_bps[0].dict_get("jobID"), Some(&PyRep::None));
 
-    // #957: agentMgr.GetMissionObjectiveInfo omits None coords and referringAgentID from location dicts,
-    // uses real NPC ownerID (>= 1_000_000) on transport pickup/dropoff, and populates dungeon optional/location keys.
+    // #957 + #1023: agentMgr.GetMissionObjectiveInfo omits None coords and referringAgentID from location dicts,
+    // uses corp/faction ownerIDs (never character/agent IDs) on transport pickup/dropoff, and populates dungeon optional/location keys.
     let obj_info = normalize_macho_rpc_reply(
         "agentMgr",
         "GetMissionObjectiveInfo",
@@ -940,6 +940,10 @@ fn issue_771_and_776_get_members_paged_crowset_and_reprocess_list_compat() {
         panic!("expected agent objective tuple");
     };
     assert_eq!(obj0[0], PyRep::String("agent".into()));
+    let PyRep::Tuple(agent_vals) = &obj0[1] else {
+        panic!("expected agent 2-tuple");
+    };
+    assert_eq!(agent_vals[0], PyRep::Integer(3_008_416));
     let PyRep::Tuple(obj1) = &objs[1] else {
         panic!("expected transport objective tuple");
     };
@@ -947,8 +951,8 @@ fn issue_771_and_776_get_members_paged_crowset_and_reprocess_list_compat() {
     let PyRep::Tuple(transport_vals) = &obj1[1] else {
         panic!("expected transport 5-tuple");
     };
-    assert_eq!(transport_vals[0], PyRep::Integer(3_008_416));
-    assert_eq!(transport_vals[2], PyRep::Integer(3_008_416));
+    assert_eq!(transport_vals[0], PyRep::Integer(1_000_002));
+    assert_eq!(transport_vals[2], PyRep::Integer(1_000_002));
 
     let dungeon_obj_info = normalize_macho_rpc_reply(
         "agentMgr",
@@ -1019,6 +1023,9 @@ fn issue_771_and_776_get_members_paged_crowset_and_reprocess_list_compat() {
         panic!("expected bookmarks list");
     };
     assert!(bm_list[0].dict_get("coords").is_none());
+    assert_eq!(bm_list[0].dict_get("locationID"), Some(&PyRep::Integer(60_003_760)));
+    assert_eq!(bm_list[0].dict_get("solarsystemID"), Some(&PyRep::Integer(30_000_142)));
+    assert_eq!(bm_list[0].dict_get("solarSystemID"), Some(&PyRep::Integer(30_000_142)));
 
     // #972: fwVictoryPointMgr.GetAllVictoryPointStates and GetLocalVictoryPointState populate VictoryPointState fields
     let vp_local = normalize_macho_rpc_reply(
