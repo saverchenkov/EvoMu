@@ -435,20 +435,16 @@ pub(crate) fn handle_change_profiles(
         Ok((prof.owner_corp_id, sys_ids, released))
     })?;
     crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Corporation(owner_corp),
-        "OnProfileSettingsChange",
-        "corpid",
-        vec![PyRep::List(
-            structure_ids.into_iter().map(PyRep::Integer).collect(),
-        )],
+        crate::router::notify_registry::OnProfileSettingsChange {
+            profile_ids: structure_ids,
+        },
     );
     for sys_id in sys_ids {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::SolarSystem(sys_id),
-            "OnDockingAccessChangedForCurrentSolarSystem",
-            "solarsystemid",
-            vec![],
+            crate::router::notify_registry::OnDockingAccessChangedForCurrentSolarSystem,
         );
     }
     Ok(PyRep::Bool(true))

@@ -602,11 +602,11 @@ fn deposit_plex(
             }
         };
     ctx.notify_item_mutation(char_id, pre_item.as_ref(), post_item.as_ref());
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnPlexDeposited",
-        "charid",
-        vec![PyRep::Integer(entity_id)],
+        crate::router::notify_registry::OnPlexDeposited {
+            reference: entity_id,
+        },
     );
     crate::services::quasar_payment_store::emit_balance_changed_notice(
         &ctx.quasar_gateway.pending_notices,
@@ -850,11 +850,12 @@ fn withdraw_plex(
             }
         };
     ctx.notify_item_mutation(char_id, pre_item.as_ref(), post_item.as_ref());
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnPlexItemAddedToInventory",
-        "charid",
-        vec![PyRep::Integer(final_item_id), PyRep::Integer(tx_id as i64)],
+        crate::router::notify_registry::OnPlexItemAddedToInventory {
+            item_id: final_item_id,
+            reference: tx_id as i64,
+        },
     );
     crate::services::quasar_payment_store::emit_balance_changed_notice(
         &ctx.quasar_gateway.pending_notices,

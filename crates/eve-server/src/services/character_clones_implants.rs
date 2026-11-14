@@ -1313,8 +1313,8 @@ pub fn handle_clones_and_sheet(
                             .get(&it.type_id)
                             .map(|t| (t.group_id, t.category_id))
                             .unwrap_or((0, 0));
-                        let notif_args = vec![
-                            PyRep::keyval([
+                        let notif = crate::router::notify_registry::OnItemChange {
+                            item: PyRep::keyval([
                                 ("itemID", PyRep::Integer(it.item_id)),
                                 ("typeID", PyRep::Integer(i64::from(it.type_id))),
                                 ("ownerID", PyRep::Integer(it.owner_id)),
@@ -1332,16 +1332,18 @@ pub fn handle_clones_and_sheet(
                                 ("categoryID", PyRep::Integer(i64::from(category_id))),
                                 ("singleton", PyRep::Integer(if it.singleton { 1 } else { 0 })),
                             ]),
-                            PyRep::Dict(change_entries),
-                        ];
+                            change: PyRep::Dict(change_entries),
+                            location: PyRep::None,
+                        };
                         if !session.live_notify_listener {
-                            session.push_notification("OnItemChange", notif_args.clone());
+                            crate::router::notify_registry::push_typed_session_notification(
+                                session,
+                                notif.clone(),
+                            );
                         }
-                        ctx.notify(
+                        ctx.emit_typed(
                             crate::router::NotificationTarget::Character(char_id),
-                            "OnItemChange",
-                            "charid",
-                            notif_args,
+                            notif,
                         );
                     }
                     Some(Ok(PyRep::keyval([

@@ -805,24 +805,20 @@ pub(crate) fn emit_industry_job(
 ) {
     use crate::router::NotificationTarget;
     let eff_owner = if owner_id > 0 { owner_id } else { char_id };
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnIndustryJob",
-        "character",
-        vec![
-            PyRep::Integer(job_id),
-            PyRep::Integer(eff_owner),
-            PyRep::Integer(bp_iid),
-            PyRep::Integer(char_id),
-            PyRep::Integer(status),
-            PyRep::Integer(runs),
-        ],
+        crate::router::notify_registry::OnIndustryJob {
+            job_id,
+            owner_id: eff_owner,
+            blueprint_id: bp_iid,
+            installer_id: char_id,
+            status,
+            successful_runs: runs,
+        },
     );
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnBlueprintsUpdated",
-        "ownerID",
-        vec![PyRep::Integer(eff_owner)],
+        crate::router::notify_registry::OnBlueprintsUpdated { owner_id: eff_owner },
     );
     if status == 1 {
         let fac_sys = ctx.db.with_snapshot(|snap| {

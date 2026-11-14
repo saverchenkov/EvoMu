@@ -583,14 +583,12 @@ pub(crate) fn try_cleanup_npe_pocket_and_restore_ui(
         for bid in balls_to_remove {
             sys_handle.try_remove_ball(bid);
         }
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnDungeonExited",
-            "charid",
-            vec![
-                PyRep::Integer(i64::from(dungeon_id)),
-                PyRep::Integer(inst_id),
-            ],
+            crate::router::notify_registry::OnDungeonExited {
+                dungeon_id: i64::from(dungeon_id),
+                instance_id: inst_id,
+            },
         );
     }
 
@@ -661,11 +659,13 @@ pub(crate) fn try_cleanup_npe_pocket_and_restore_ui(
                 ]),
             ));
         }
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnSessionChanged",
-            "charid",
-            vec![PyRep::Bool(false), sess_rep, PyRep::Dict(changes)],
+            crate::router::notify_registry::OnSessionChanged {
+                is_remote: false,
+                session: sess_rep,
+                change: PyRep::Dict(changes),
+            },
         );
     }
 

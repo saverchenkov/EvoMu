@@ -253,6 +253,63 @@ pub fn emit_typed_to_fleet_members_core<N: TypedNotification>(
     }
 }
 
+/// Broadcasts one typed notification to all in-space characters currently in `solar_system_id`
+/// outside [`ServerContext`] (used by expedition destruction hooks, retaining the 512-entry FIFO bound).
+pub fn emit_typed_to_solar_system_in_space_core<N: TypedNotification>(
+    db: &eve_db::WorldRepository,
+    pending_notifications: &dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
+    notify_tx: &broadcast::Sender<(i64, PendingMachoNotification)>,
+    solar_system_id: u32,
+    notif: N,
+) {
+    let now_ft = db.clock().now_blueos_filetime_ticks();
+    let recips: Vec<(i64, Option<u64>)> = db.with_snapshot(|snap| {
+        snap.characters
+            .values()
+            .filter(|c| {
+                c.station_id.is_none()
+                    && c.structure_id.is_none()
+                    && c.solar_system_id == solar_system_id
+            })
+            .map(|c| (c.character_id, Some(c.user_id)))
+            .collect()
+    });
+    let args = notif.into_args();
+    for (cid, uid) in recips {
+        if cid <= 0 {
+            continue;
+        }
+        let (packet, marshaled_packet) = ServerContext::build_macho_notification_packet(
+            cid,
+            uid,
+            N::EVENT,
+            N::DEFAULT_ID_TYPE,
+            args.clone(),
+        );
+        let pending = PendingMachoNotification {
+            seq_id: next_notification_seq_id(),
+            recipient_char_id: cid,
+            event: N::EVENT.to_string(),
+            id_type: N::DEFAULT_ID_TYPE.to_string(),
+            args: args.clone(),
+            packet,
+            marshaled_packet,
+            created_filetime: now_ft,
+        };
+        {
+            let mut q_guard = pending_notifications
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            let q = q_guard.entry(cid).or_default();
+            while q.len() >= 512 {
+                q.remove(0);
+            }
+            q.push(pending.clone());
+        }
+        let _ = notify_tx.send((cid, pending));
+    }
+}
+
 /// Pushes a typed notification onto an active [`eve_machonet::SessionState`].
 pub fn push_typed_session_notification<N: TypedNotification>(
     session: &mut eve_machonet::SessionState,
@@ -3643,6 +3700,136 @@ define_notifications! {
             PyRep::Integer(100_000_010),
             PyRep::Integer(100_000_020),
         ]],
+    },
+    // === Batch 5 Events ===
+    OnAttributes => "OnAttributes" ("charid") {
+        fields: { changes: PyRep },
+        samples: || vec![vec![PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::String("mass".into()),
+            PyRep::keyval([("itemID", PyRep::Integer(100_000_001))]),
+            PyRep::Real(1.0),
+        ])])]],
+    },
+    OnAutopilotUpdated => "OnAutopilotUpdated" ("charid") {
+        samples: || vec![vec![]],
+    },
+    OnBlueprintsUpdated => "OnBlueprintsUpdated" ("ownerID") {
+        fields: { owner_id: i64 },
+        samples: || vec![vec![PyRep::Integer(90_000_001)]],
+    },
+    OnCharacterEnergyChanged => "OnCharacterEnergyChanged" ("charid") {
+        fields: { character_id: i64, new_energy_state: PyRep },
+        samples: || vec![vec![
+            PyRep::Integer(90_000_001),
+            PyRep::keyval([("currentEnergy", PyRep::Integer(100))]),
+        ]],
+    },
+    OnContractAccepted => "OnContractAccepted" ("charid") {
+        fields: { contract_id: i64 },
+        samples: || vec![vec![PyRep::Integer(1)]],
+    },
+    OnContractAssigned => "OnContractAssigned" ("charid") {
+        fields: { contract_id: i64 },
+        samples: || vec![vec![PyRep::Integer(1)]],
+    },
+    OnContractBuyout => "OnContractBuyout" ("charid") {
+        fields: { contract_id: i64 },
+        samples: || vec![vec![PyRep::Integer(1)]],
+    },
+    OnContractCacheCleared => "OnContractCacheCleared" ("charid") {
+        samples: || vec![vec![]],
+    },
+    OnContractCompleted => "OnContractCompleted" ("charid") {
+        fields: { contract_id: i64 },
+        samples: || vec![vec![PyRep::Integer(1)]],
+    },
+    OnContractCreated => "OnContractCreated" ("charid") {
+        samples: || vec![vec![]],
+    },
+    OnContractFailed => "OnContractFailed" ("charid") {
+        fields: { contract_id: i64 },
+        samples: || vec![vec![PyRep::Integer(1)]],
+    },
+    OnContractOutbid => "OnContractOutbid" ("charid") {
+        fields: { contract_id: i64 },
+        samples: || vec![vec![PyRep::Integer(1)]],
+    },
+    OnContractRejected => "OnContractRejected" ("charid") {
+        fields: { contract_id: i64 },
+        samples: || vec![vec![PyRep::Integer(1)]],
+    },
+    OnDungeonExited => "OnDungeonExited" ("charid") {
+        fields: { dungeon_id: i64, instance_id: i64 },
+        samples: || vec![vec![PyRep::Integer(55_001), PyRep::Integer(1)]],
+    },
+    OnHackingTurnComplete => "OnHackingTurnComplete" ("charid") {
+        fields: { events: Vec<PyRep> },
+        samples: || vec![vec![PyRep::List(vec![PyRep::keyval([(
+            "eventID",
+            PyRep::Integer(1),
+        )])])]],
+    },
+    OnIndustryJob => "OnIndustryJob" ("character") {
+        fields: {
+            job_id: i64,
+            owner_id: i64,
+            blueprint_id: i64,
+            installer_id: i64,
+            status: i64,
+            successful_runs: i64,
+        },
+        samples: || vec![vec![
+            PyRep::Integer(1),
+            PyRep::Integer(90_000_001),
+            PyRep::Integer(100_000_001),
+            PyRep::Integer(90_000_001),
+            PyRep::Integer(1),
+            PyRep::Integer(1),
+        ]],
+    },
+    OnLockedItemChange => "OnLockedItemChange" ("charid") {
+        fields: { item_id: i64, owner_id: i64, location_id: i64, is_locked: bool },
+        samples: || vec![vec![
+            PyRep::Integer(100_000_001),
+            PyRep::Integer(90_000_001),
+            PyRep::Integer(100_000_010),
+            PyRep::Bool(true),
+        ]],
+    },
+    OnMajorPlanetStateUpdate => "OnMajorPlanetStateUpdate" ("charid") {
+        fields: { planet_id: i64, num_command_centers_changed: bool },
+        samples: || vec![vec![PyRep::Integer(40_000_001), PyRep::Bool(false)]],
+    },
+    OnModuleRepaired => "OnModuleRepaired" ("charid") {
+        fields: { item_id: i64 },
+        samples: || vec![vec![PyRep::Integer(100_000_001)]],
+    },
+    OnPILaunchesChange => "OnPILaunchesChange" ("charid") {
+        samples: || vec![vec![]],
+    },
+    OnPlexDeposited => "OnPlexDeposited" ("charid") {
+        fields: { reference: i64 },
+        samples: || vec![vec![PyRep::Integer(1)]],
+    },
+    OnPlexItemAddedToInventory => "OnPlexItemAddedToInventory" ("charid") {
+        fields: { item_id: i64, reference: i64 },
+        samples: || vec![vec![PyRep::Integer(100_000_001), PyRep::Integer(1)]],
+    },
+    OnRemoteMessage => "OnRemoteMessage" ("charid") {
+        fields: { msg_id: String },
+        optional: { dict: Option<PyRep>, kw: Option<PyRep> },
+        samples: || vec![vec![
+            PyRep::String("ParamCustomsNotification".into()),
+            PyRep::Dict(Vec::new()),
+            PyRep::None,
+        ]],
+    },
+    OnSafeLogoffAborted => "OnSafeLogoffAborted" ("charid") {
+        fields: { reason_code: String },
+        samples: || vec![vec![PyRep::String("UI/Inflight/SafeLogoff/Aborted".into())]],
+    },
+    OnSafeLogoffActivated => "OnSafeLogoffActivated" ("charid") {
+        samples: || vec![vec![]],
     },
 }
 

@@ -853,7 +853,10 @@ pub fn handle_pi_orbitals(
             match res {
                 Ok((routed, export_tax_isk, import_tax_isk, orbital_tid, created_launch_id, col_sys_id, launch_pos)) => {
                     if created_launch_id > 0 && destination != "Hangar" {
-                        ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnPILaunchesChange", "charid", vec![]);
+                        ctx.emit_typed(
+                            crate::router::NotificationTarget::Character(char_id),
+                            crate::router::notify_registry::OnPILaunchesChange,
+                        );
                         let sys_handle = ctx.systems.get_or_spawn(col_sys_id);
                         let (group_id, category_id, radius, mass) = ctx
                             .sde
@@ -1038,7 +1041,10 @@ pub fn handle_pi_orbitals(
             });
             match res {
                 Ok(sys_id_opt) => {
-                    ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnPILaunchesChange", "charid", vec![]);
+                    ctx.emit_typed(
+                        crate::router::NotificationTarget::Character(char_id),
+                        crate::router::notify_registry::OnPILaunchesChange,
+                    );
                     if let Some(sys_id) = sys_id_opt {
                         ctx.systems.get_or_spawn(sys_id).try_remove_ball(launch_id);
                     }

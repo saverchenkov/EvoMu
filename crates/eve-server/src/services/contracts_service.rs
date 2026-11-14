@@ -17,7 +17,71 @@ use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
 
 pub fn notify_contract(ctx: &ServerContext, char_id: i64, event: &str, cid: i64) {
-    ctx.notify(NotificationTarget::Character(char_id), event, "charid", vec![PyRep::Integer(cid)]);
+    match event {
+        "OnContractCreated" => {
+            ctx.emit_typed(
+                NotificationTarget::Character(char_id),
+                crate::router::notify_registry::OnContractCreated,
+            );
+        }
+        "OnContractAssigned" => {
+            ctx.emit_typed(
+                NotificationTarget::Character(char_id),
+                crate::router::notify_registry::OnContractAssigned { contract_id: cid },
+            );
+        }
+        "OnContractAccepted" => {
+            ctx.emit_typed(
+                NotificationTarget::Character(char_id),
+                crate::router::notify_registry::OnContractAccepted { contract_id: cid },
+            );
+        }
+        "OnContractCompleted" => {
+            ctx.emit_typed(
+                NotificationTarget::Character(char_id),
+                crate::router::notify_registry::OnContractCompleted { contract_id: cid },
+            );
+        }
+        "OnContractOutbid" => {
+            ctx.emit_typed(
+                NotificationTarget::Character(char_id),
+                crate::router::notify_registry::OnContractOutbid { contract_id: cid },
+            );
+        }
+        "OnContractBuyout" => {
+            ctx.emit_typed(
+                NotificationTarget::Character(char_id),
+                crate::router::notify_registry::OnContractBuyout { contract_id: cid },
+            );
+        }
+        "OnContractFailed" => {
+            ctx.emit_typed(
+                NotificationTarget::Character(char_id),
+                crate::router::notify_registry::OnContractFailed { contract_id: cid },
+            );
+        }
+        "OnContractRejected" => {
+            ctx.emit_typed(
+                NotificationTarget::Character(char_id),
+                crate::router::notify_registry::OnContractRejected { contract_id: cid },
+            );
+        }
+        "OnShowContract" => {
+            ctx.emit_typed(
+                NotificationTarget::Character(char_id),
+                crate::router::notify_registry::OnShowContract { contract_id: cid },
+            );
+        }
+        "OnContractCacheCleared" => {
+            ctx.emit_typed(
+                NotificationTarget::Character(char_id),
+                crate::router::notify_registry::OnContractCacheCleared,
+            );
+        }
+        other => {
+            debug_assert!(false, "unhandled contract notification event: {other}");
+        }
+    }
 }
 
 struct ContractResolvedNotifications {
@@ -2330,11 +2394,9 @@ pub fn sweep_expired_contracts_and_notify(ctx: &ServerContext, now_unix: u64) ->
 
     for (target_char, event_name, cid) in batch.contract_events {
         if event_name == "OnContractCacheCleared" {
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(target_char),
-                event_name,
-                "charid",
-                vec![],
+                crate::router::notify_registry::OnContractCacheCleared,
             );
         } else {
             notify_contract(ctx, target_char, event_name, cid);

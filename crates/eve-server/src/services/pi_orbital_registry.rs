@@ -256,11 +256,12 @@ pub fn handle_pi_orbital_registry(
                 Err(e) => return Some(Err(e)),
             };
             // `planetSvc.OnMajorPlanetStateUpdate(planetID, numCommandCentersChanged)`.
-            let _ = ctx.notify(
+            let _ = ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnMajorPlanetStateUpdate",
-                "charid",
-                vec![PyRep::Integer(planet_id), PyRep::Bool(false)],
+                crate::router::notify_registry::OnMajorPlanetStateUpdate {
+                    planet_id,
+                    num_command_centers_changed: false,
+                },
             );
             Some(Ok(PyRep::keyval([
                 ("orbitalID", PyRep::Integer(office_id)),
@@ -352,11 +353,12 @@ pub fn handle_pi_orbital_registry(
                 return Some(Err(e));
             }
             // `planetSvc.OnMajorPlanetStateUpdate(planetID, numCommandCentersChanged)`.
-            let _ = ctx.notify(
+            let _ = ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnMajorPlanetStateUpdate",
-                "charid",
-                vec![PyRep::Integer(planet_id), PyRep::Bool(false)],
+                crate::router::notify_registry::OnMajorPlanetStateUpdate {
+                    planet_id,
+                    num_command_centers_changed: false,
+                },
             );
             Some(Ok(PyRep::keyval([
                 ("planetID", PyRep::Integer(planet_id)),

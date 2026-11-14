@@ -520,12 +520,10 @@ pub fn scan_and_enforce_highsec_contraband(
                 .get(&removed_item.type_id)
                 .map(|t| (t.group_id, t.category_id))
                 .unwrap_or((0, 0));
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnItemChange",
-                "charid",
-                vec![
-                    eve_proto::PyRep::keyval([
+                crate::router::notify_registry::OnItemChange {
+                    item: eve_proto::PyRep::keyval([
                         ("itemID", eve_proto::PyRep::Integer(removed_item.item_id)),
                         ("typeID", eve_proto::PyRep::Integer(removed_item.type_id as i64)),
                         ("ownerID", eve_proto::PyRep::Integer(removed_item.owner_id)),
@@ -543,25 +541,25 @@ pub fn scan_and_enforce_highsec_contraband(
                         ("categoryID", eve_proto::PyRep::Integer(i64::from(category_id))),
                         ("singleton", eve_proto::PyRep::Bool(removed_item.singleton)),
                     ]),
-                    eve_proto::PyRep::Dict(vec![
+                    change: eve_proto::PyRep::Dict(vec![
                         (eve_proto::PyRep::Integer(3), eve_proto::PyRep::Integer(old_loc)),
                         (eve_proto::PyRep::Integer(4), eve_proto::PyRep::Integer(old_flag as i64)),
                     ]),
-                ],
+                    location: eve_proto::PyRep::None,
+                },
             );
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnRemoteMessage",
-                "charid",
-                vec![
-                    eve_proto::PyRep::String("ParamCustomsNotification".into()),
-                    eve_proto::PyRep::Dict(vec![
+                crate::router::notify_registry::OnRemoteMessage {
+                    msg_id: "ParamCustomsNotification".into(),
+                    dict: Some(eve_proto::PyRep::Dict(vec![
                         (eve_proto::PyRep::String("typeID".into()), eve_proto::PyRep::Integer(removed_item.type_id as i64)),
                         (eve_proto::PyRep::String("quantity".into()), eve_proto::PyRep::Integer(removed_item.quantity as i64)),
                         (eve_proto::PyRep::String("fineISK".into()), eve_proto::PyRep::Real(fine_isk)),
                         (eve_proto::PyRep::String("factionID".into()), eve_proto::PyRep::Integer(sys_faction as i64)),
-                    ]),
-                ],
+                    ])),
+                    kw: None,
+                },
             );
         }
     }

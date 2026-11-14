@@ -52,16 +52,14 @@ pub(crate) fn emit_structure_dock_notifications(
     st_type_id: u32,
     ship_id: i64,
 ) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Station(dock_id),
-        "OnCharacterEnteredStructure",
-        "stationid",
-        vec![
-            PyRep::Integer(char_id),
-            PyRep::Integer(corp_id),
-            ally_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-            fac_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-        ],
+        crate::router::notify_registry::OnCharacterEnteredStructure {
+            character_id: char_id,
+            corporation_id: corp_id,
+            alliance_id: ally_id,
+            faction_id: fac_id,
+        },
     );
     let hv_state = PyRep::keyval([
         ("characterID", PyRep::Integer(char_id)),
@@ -69,11 +67,12 @@ pub(crate) fn emit_structure_dock_notifications(
         ("structureTypeID", PyRep::Integer(i64::from(st_type_id))),
         ("shipID", PyRep::Integer(ship_id)),
     ]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnHangarViewStateUpdated",
-        "charid",
-        vec![PyRep::Integer(dock_id), hv_state],
+        crate::router::notify_registry::OnHangarViewStateUpdated {
+            structure_id: dock_id,
+            hangar_view_state: hv_state,
+        },
     );
 }
 

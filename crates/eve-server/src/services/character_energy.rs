@@ -120,11 +120,12 @@ pub fn get_character_energy(ctx: &ServerContext, char_id: i64) -> CharacterEnerg
         crate::services::cluster_macho_misc_services::persist_misc_state(ctx);
     }
     if regenerated {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnCharacterEnergyChanged",
-            "charid",
-            vec![PyRep::Integer(char_id), energy_to_keyval(&entry_clone)],
+            crate::router::notify_registry::OnCharacterEnergyChanged {
+                character_id: char_id,
+                new_energy_state: energy_to_keyval(&entry_clone),
+            },
         );
     }
     entry_clone
@@ -158,14 +159,12 @@ pub fn set_character_energy(
 
     crate::services::cluster_macho_misc_services::persist_misc_state(ctx);
 
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnCharacterEnergyChanged",
-        "charid",
-        vec![
-            PyRep::Integer(char_id),
-            energy_to_keyval(&updated_state),
-        ],
+        crate::router::notify_registry::OnCharacterEnergyChanged {
+            character_id: char_id,
+            new_energy_state: energy_to_keyval(&updated_state),
+        },
     );
 
     updated_state

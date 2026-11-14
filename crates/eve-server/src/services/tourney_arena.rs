@@ -231,14 +231,12 @@ pub async fn handle(
                     ("solarsystemid2", PyRep::Integer(arena_sys)),
                     ("solarsystemid", PyRep::Integer(arena_sys)),
                 ]);
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Character(caller_cid),
-                    "OnSessionChanged",
-                    "charid",
-                    vec![
-                        PyRep::Bool(false),
-                        sess_rep,
-                        PyRep::Dict(vec![
+                    crate::router::notify_registry::OnSessionChanged {
+                        is_remote: false,
+                        session: sess_rep,
+                        change: PyRep::Dict(vec![
                             (
                                 PyRep::String("stationid".into()),
                                 PyRep::Tuple(vec![old_st.map(PyRep::Integer).unwrap_or(PyRep::None), PyRep::None]),
@@ -248,7 +246,7 @@ pub async fn handle(
                                 PyRep::Tuple(vec![PyRep::Integer(i64::from(old_sys)), PyRep::Integer(arena_sys)]),
                             ),
                         ]),
-                    ],
+                    },
                 );
                 crate::services::notify_emitters_tournaments_anomalies::emit_enter_tournament_system(ctx, caller_cid);
             }
@@ -340,14 +338,12 @@ pub async fn handle(
                         ("solarsystemid2", PyRep::Integer(home_sys as i64)),
                         ("solarsystemid", PyRep::None),
                     ]);
-                    ctx.notify(
+                    ctx.emit_typed(
                         NotificationTarget::Character(caller_cid),
-                        "OnSessionChanged",
-                        "charid",
-                        vec![
-                            PyRep::Bool(false),
-                            sess_rep,
-                            PyRep::Dict(vec![
+                        crate::router::notify_registry::OnSessionChanged {
+                            is_remote: false,
+                            session: sess_rep,
+                            change: PyRep::Dict(vec![
                                 (
                                     PyRep::String("stationid".into()),
                                     PyRep::Tuple(vec![old_st.map(PyRep::Integer).unwrap_or(PyRep::None), PyRep::Integer(home_st_id)]),
@@ -361,7 +357,7 @@ pub async fn handle(
                                     PyRep::Tuple(vec![PyRep::Integer(i64::from(old_sys)), PyRep::Integer(i64::from(home_sys))]),
                                 ),
                             ]),
-                        ],
+                        },
                     );
                     crate::services::notify_emitters_tournaments_anomalies::emit_leave_tournament_system(ctx, caller_cid);
                 }

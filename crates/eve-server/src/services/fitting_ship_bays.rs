@@ -400,12 +400,10 @@ pub(crate) async fn board_stored_ship(
         .get(&stored.type_id)
         .map(|t| (t.group_id, t.category_id))
         .unwrap_or((0, 0));
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
-        "OnItemChange",
-        "charid",
-        vec![
-            PyRep::keyval([
+        crate::router::notify_registry::OnItemChange {
+            item: PyRep::keyval([
                 ("itemID", PyRep::Integer(stored_id)),
                 ("typeID", PyRep::Integer(stored.type_id as i64)),
                 ("ownerID", PyRep::Integer(stored.owner_id)),
@@ -416,25 +414,25 @@ pub(crate) async fn board_stored_ship(
                 ("categoryID", PyRep::Integer(i64::from(category_id))),
                 ("singleton", PyRep::Bool(stored.singleton)),
             ]),
-            PyRep::Dict(vec![
+            change: PyRep::Dict(vec![
                 (PyRep::Integer(3), PyRep::Integer(stored.location_id)),
                 (PyRep::Integer(4), PyRep::Integer(stored.flag as i64)),
             ]),
-        ],
+            location: PyRep::None,
+        },
     );
     let changes = vec![(
         PyRep::String("shipid".into()),
         PyRep::Tuple(vec![PyRep::Integer(old_ship), PyRep::Integer(stored_id)]),
     )];
-    ctx.notify(
+    ctx.emit_typed_with_id_type(
         crate::router::NotificationTarget::Character(char_id),
-        "OnSessionChanged",
         "clientID",
-        vec![
-            PyRep::Bool(false),
-            PyRep::Integer(session.session_id as i64),
-            PyRep::Dict(changes),
-        ],
+        crate::router::notify_registry::OnSessionChanged {
+            is_remote: false,
+            session: PyRep::Integer(session.session_id as i64),
+            change: PyRep::Dict(changes),
+        },
     );
     crate::sp6_lifecycle::clear_safe_logoff(&ctx.db, char_id);
     Ok(PyRep::keyval([

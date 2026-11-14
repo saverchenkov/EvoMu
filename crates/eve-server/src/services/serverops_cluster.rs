@@ -70,14 +70,14 @@ fn emit_sim_clock_rebase(ctx: &ServerContext, solar_system_id: SolarSystemId, ol
         (old_ft, new_ft)
     };
     // parity: notify:DoSimClockRebase
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(solar_system_id),
-        "DoSimClockRebase",
-        "solarsystemid2",
-        vec![PyRep::Tuple(vec![
-            PyRep::Integer(old_sim_ft),
-            PyRep::Integer(new_sim_ft),
-        ])],
+        crate::router::notify_registry::DoSimClockRebase {
+            times: PyRep::Tuple(vec![
+                PyRep::Integer(old_sim_ft),
+                PyRep::Integer(new_sim_ft),
+            ]),
+        },
     );
 }
 
@@ -504,15 +504,13 @@ fn emit_cluster_shutdown_initiated(
     // V24 client `OnClusterShutdownInitiated(explanationLabel, when, duration)` takes 3 arguments
     // and requires `when > blue.os.GetWallclockTime()` for `FormatTimeIntervalWritten`.
     let effective_when_unix = shutdown_when_unix.max(ctx.now_unix().saturating_add(60));
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::All,
-        "OnClusterShutdownInitiated",
-        "clientID",
-        vec![
-            PyRep::String("UI/Shared/ShutdownNotificationTitle".into()),
-            PyRep::Integer(unix_to_filetime(effective_when_unix)),
-            PyRep::Integer(duration_minutes),
-        ],
+        crate::router::notify_registry::OnClusterShutdownInitiated {
+            explanation_label: "UI/Shared/ShutdownNotificationTitle".into(),
+            when: unix_to_filetime(effective_when_unix),
+            duration: duration_minutes,
+        },
     )
 }
 

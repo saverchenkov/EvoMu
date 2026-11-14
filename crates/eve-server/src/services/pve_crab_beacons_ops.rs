@@ -5,7 +5,6 @@
 #![forbid(unsafe_code)]
 
 use crate::router::{NotificationTarget, ServerContext};
-use eve_proto::PyRep;
 use eve_sde::{SdeRegistry, SolarSystemId, TypeId};
 
 /// Resolves Rogue Drone NPC wave `TypeId`s for `wave_num` (`1..=3`) from V24 `sde.types`.
@@ -134,11 +133,12 @@ pub fn emit_interference_changed_clusterwide(
 ) {
     let local_state =
         crate::services::pve_special_sites::build_interference_state_keyval(sys_id, level, band);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnSolarsystemInterferenceChanged",
-        "solarsystemid",
-        vec![PyRep::Integer(sys_id as i64), local_state.clone()],
+        crate::router::notify_registry::OnSolarsystemInterferenceChanged {
+            solar_system_id: sys_id as i64,
+            new_interference_state: local_state.clone(),
+        },
     );
     let extra_chars: Vec<i64> = ctx.db.with_snapshot(|snap| {
         snap.characters
@@ -151,11 +151,12 @@ pub fn emit_interference_changed_clusterwide(
             .collect()
     });
     for cid in extra_chars {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(cid),
-            "OnSolarsystemInterferenceChanged",
-            "solarsystemid",
-            vec![PyRep::Integer(sys_id as i64), local_state.clone()],
+            crate::router::notify_registry::OnSolarsystemInterferenceChanged {
+                solar_system_id: sys_id as i64,
+                new_interference_state: local_state.clone(),
+            },
         );
     }
 }

@@ -701,23 +701,19 @@ pub fn handle_repair_items_in_location(
         }
     }
     if total_cost > 0.0 {
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::Character(char_id),
-            "OnAccountChange",
-            "charid",
-            vec![
-                PyRep::String("cash".into()),
-                PyRep::Integer(char_id),
-                PyRep::Real(new_bal),
-            ],
+            crate::router::notify_registry::OnAccountChange {
+                account_key: "cash".into(),
+                owner_id: char_id,
+                balance: new_bal,
+            },
         );
     }
     for iid in &repaired_ids {
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::Character(char_id),
-            "OnModuleRepaired",
-            "charid",
-            vec![PyRep::Integer(*iid)],
+            crate::router::notify_registry::OnModuleRepaired { item_id: *iid },
         );
     }
     Ok(PyRep::keyval([

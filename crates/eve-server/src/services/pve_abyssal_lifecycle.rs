@@ -660,21 +660,19 @@ pub fn evacuate_void_space_session_sync(
         ("solarsystemid2", PyRep::Integer(origin_sys as i64)),
         ("solarsystemid", PyRep::Integer(origin_sys as i64)),
     ]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnSessionChanged",
-        "charid",
-        vec![
-            PyRep::Bool(false),
-            sess_rep,
-            PyRep::Dict(vec![(
+        crate::router::notify_registry::OnSessionChanged {
+            is_remote: false,
+            session: sess_rep,
+            change: PyRep::Dict(vec![(
                 PyRep::String("solarsystemid".into()),
                 PyRep::Tuple(vec![
                     PyRep::Integer(VOID_SPACE_SYSTEM_ID as i64),
                     PyRep::Integer(origin_sys as i64),
                 ]),
             )]),
-        ],
+        },
     );
     crate::services::notify_emitters_tournaments_anomalies::emit_space_white_out_start(
         ctx,
@@ -682,14 +680,12 @@ pub fn evacuate_void_space_session_sync(
         VOID_SPACE_SYSTEM_ID,
     );
     // V24 `crimewatchTimers.pyj::TimerType::VoidSpaceContentExpiration = 16` (`voidSpaceContentService.pyj:109`).
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnVoidSpaceContentFinished",
-        "charid",
-        vec![
-            PyRep::Integer(finished_content_id),
-            PyRep::Integer(crate::services::abyssal_void_mgr::TIMER_TYPE_VOID_SPACE_CONTENT_EXPIRATION),
-        ],
+        crate::router::notify_registry::OnVoidSpaceContentFinished {
+            content_id: finished_content_id,
+            timer_type: crate::services::abyssal_void_mgr::TIMER_TYPE_VOID_SPACE_CONTENT_EXPIRATION,
+        },
     );
     origin_sys
 }

@@ -284,11 +284,9 @@ async fn handle_wormhole_jump(
     let (dest_sys_id, dest_sig_pos) = match prep_res {
         Ok(v) => v,
         Err(e) => {
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnWormholeJumpCancel",
-                "charid",
-                vec![],
+                crate::router::notify_registry::OnWormholeJumpCancel,
             );
             return Err(e);
         }
@@ -822,7 +820,14 @@ async fn handle_random_jump_filament(
                 (PyRep::String("constellationid".into()), PyRep::Tuple(vec![PyRep::Integer(old_const as i64), PyRep::Integer(dest_sys.constellation_id as i64)])),
                 (PyRep::String("regionid".into()), PyRep::Tuple(vec![PyRep::Integer(old_reg as i64), PyRep::Integer(dest_sys.region_id as i64)])),
             ]);
-            ctx.notify(crate::router::NotificationTarget::Character(p_char), "OnSessionChanged", "charid", vec![PyRep::Bool(false), sess_rep, change_dict]);
+            ctx.emit_typed(
+                crate::router::NotificationTarget::Character(p_char),
+                crate::router::notify_registry::OnSessionChanged {
+                    is_remote: false,
+                    session: sess_rep,
+                    change: change_dict,
+                },
+            );
         }
     }
 

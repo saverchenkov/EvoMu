@@ -1500,17 +1500,13 @@ async fn handle_dock(
             crate::services::nav_warp_interdiction::advance_waypoints_on_arrival(
                 ctx, char_id, dock_id,
             );
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnDockingAccepted",
-                "charid",
-                vec![PyRep::Integer(dock_id)],
+                crate::router::notify_registry::OnDockingAccepted { item_id: dock_id },
             );
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnDockingFinished",
-                "charid",
-                vec![PyRep::Integer(dock_id)],
+                crate::router::notify_registry::OnDockingFinished { item_id: dock_id },
             );
             if is_structure {
                 let (corp_id, ally_id, fac_id, st_type_id) = ctx.db.with_snapshot(|snap| {
