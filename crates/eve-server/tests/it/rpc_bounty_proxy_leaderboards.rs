@@ -1,10 +1,11 @@
 //! Integration tests covering bountyProxy leaderboard RPC parity rows.
 
-use crate::common;
+use crate::common::{self, SessionBorrowWireTransport};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::with_mut_combat_runtime;
+use eve_testkit::client_harness::{ClientHarness, ContractValidationMode};
 use std::collections::HashMap;
 
 const P1: i64 = 90_000_001;
@@ -22,17 +23,15 @@ async fn setup_pilot(
     let kw = HashMap::new();
     let mut sess = SessionState::new(session_id);
     common::login_pilot(ctx, &mut sess, username, password).await;
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
+    common::borrow_wire_harness(ctx, &mut sess)
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_id)],
+            &kw,
+        )
+        .await;
     sess
 }
 
@@ -108,18 +107,15 @@ async fn test_bounty_proxy_leaderboards() {
     });
 
     // 1. GetTopPilotBounties (page=1, returns List sorted desc: P2 first with 25M, P1 second with 10M)
-    let top_pilots = ctx
-        .dispatch_rpc(
-            &mut s1,
+    let top_pilots = common::borrow_wire_harness(&ctx, &mut s1)
+        .call_ok(
             "bountyProxy",
             None,
             "GetTopPilotBounties",
             &[PyRep::Integer(1)],
             &empty_kw,
-            None,
         )
-        .await
-        .expect("GetTopPilotBounties");
+        .await;
     let PyRep::List(tp_list) = top_pilots else {
         panic!("expected list")
     };
@@ -129,18 +125,15 @@ async fn test_bounty_proxy_leaderboards() {
     assert_eq!(tp0.get("bountyISK"), Some(&PyRep::Real(25_000_000.0)));
 
     // 2. GetTopCorpBounties (page=1, returns List)
-    let top_corps = ctx
-        .dispatch_rpc(
-            &mut s1,
+    let top_corps = common::borrow_wire_harness(&ctx, &mut s1)
+        .call_ok(
             "bountyProxy",
             None,
             "GetTopCorpBounties",
             &[PyRep::Integer(1)],
             &empty_kw,
-            None,
         )
-        .await
-        .expect("GetTopCorpBounties");
+        .await;
     let PyRep::List(tc_list) = top_corps else {
         panic!("expected list")
     };
@@ -150,18 +143,15 @@ async fn test_bounty_proxy_leaderboards() {
         .any(|k| k.get("targetID") == Some(&PyRep::Integer(CORP_ID))));
 
     // 3. GetTopAllianceBounties (page=1, returns List)
-    let top_alliances = ctx
-        .dispatch_rpc(
-            &mut s1,
+    let top_alliances = common::borrow_wire_harness(&ctx, &mut s1)
+        .call_ok(
             "bountyProxy",
             None,
             "GetTopAllianceBounties",
             &[PyRep::Integer(1)],
             &empty_kw,
-            None,
         )
-        .await
-        .expect("GetTopAllianceBounties");
+        .await;
     let PyRep::List(ta_list) = top_alliances else {
         panic!("expected list")
     };
@@ -171,18 +161,15 @@ async fn test_bounty_proxy_leaderboards() {
         .any(|k| k.get("targetID") == Some(&PyRep::Integer(ALLIANCE_ID))));
 
     // 4. GetTopPilotBountyHunters (page=1, V24 wire: 2-tuple `(rows, timestamp)`, client subscripts `result[0]`)
-    let top_hunters = ctx
-        .dispatch_rpc(
-            &mut s1,
+    let top_hunters = common::borrow_wire_harness(&ctx, &mut s1)
+        .call_ok(
             "bountyProxy",
             None,
             "GetTopPilotBountyHunters",
             &[PyRep::Integer(1)],
             &empty_kw,
-            None,
         )
-        .await
-        .expect("GetTopPilotBountyHunters");
+        .await;
     let PyRep::Tuple(th_tuple) = top_hunters else {
         panic!("expected 2-tuple")
     };
@@ -197,18 +184,15 @@ async fn test_bounty_proxy_leaderboards() {
     assert!(th_tuple[1].as_i64().unwrap_or(0) > 0);
 
     // 5. GetTopCorporationBountyHunters (page=1, V24 wire: 2-tuple `(rows, timestamp)`)
-    let top_corp_hunters = ctx
-        .dispatch_rpc(
-            &mut s1,
+    let top_corp_hunters = common::borrow_wire_harness(&ctx, &mut s1)
+        .call_ok(
             "bountyProxy",
             None,
             "GetTopCorporationBountyHunters",
             &[PyRep::Integer(1)],
             &empty_kw,
-            None,
         )
-        .await
-        .expect("GetTopCorporationBountyHunters");
+        .await;
     let PyRep::Tuple(tch_tuple) = top_corp_hunters else {
         panic!("expected 2-tuple")
     };
@@ -222,18 +206,24 @@ async fn test_bounty_proxy_leaderboards() {
         .any(|k| k.get("targetID") == Some(&PyRep::Integer(CORP_ID))));
 
     // 6. GetTopAllianceBountyHunters (page=1, V24 wire: 2-tuple `(rows, timestamp)`)
-    let top_alli_hunters = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "bountyProxy",
-            None,
-            "GetTopAllianceBountyHunters",
-            &[PyRep::Integer(1)],
-            &empty_kw,
-            None,
-        )
-        .await
-        .expect("GetTopAllianceBountyHunters");
+    // Server wire-shape bug (`crimewatch_bounty::handle_get_top_bounties`): returns
+    // `KeyVal { targetID, bountyISK }` rows, whereas V24 `bountySvc.pyj` /
+    // `BountyWindow.GetTopBountyHunters` dereferences `.bountyHunterID` (unguarded)
+    // plus `bountiesClaimed`, `numberOfKills`, `rowNumber`, `corporationID`, `allianceID`.
+    let top_alli_hunters = ClientHarness::new(SessionBorrowWireTransport {
+        ctx: &ctx,
+        session: &mut s1,
+        preserve_char_notifications: false,
+    })
+    .with_mode(ContractValidationMode::ReportOnly)
+    .call_ok(
+        "bountyProxy",
+        None,
+        "GetTopAllianceBountyHunters",
+        &[PyRep::Integer(1)],
+        &empty_kw,
+    )
+    .await;
     let PyRep::Tuple(tah_tuple) = top_alli_hunters else {
         panic!("expected 2-tuple")
     };

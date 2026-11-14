@@ -2,7 +2,7 @@
 //! Hacking, Time Dilation, System-Wide Interference, Planetary Orbitals,
 //! Scanning & Moon Survey, AIR Operations, Surveys, Market, and ESI UI Windows.
 
-use crate::common;
+use crate::common::{self, SessionBorrowWireTransport};
 
 use eve_db::{
     ContractRecord, InventoryFlag, InventoryItemRecord, IskCents, SystemDynamicState,
@@ -12,6 +12,7 @@ use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::esi::{EsiHttpRequest, EsiRouter};
 use eve_server::router::ServerContext;
+use eve_testkit::client_harness::ClientHarness;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -25,6 +26,7 @@ fn new_ctx() -> Arc<ServerContext> {
     );
     let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
     let ctx = Arc::new(ServerContext::with_sde_and_repository(sde, db));
+    common::pin_clock(&ctx);
     ctx.set_clock_paused(true);
     ctx
 }
@@ -38,17 +40,15 @@ async fn login_pilot_char(
 ) -> SessionState {
     let mut s = SessionState::new(sid);
     common::login_pilot(ctx, &mut s, user, pass).await;
-    ctx.dispatch_rpc(
-        &mut s,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &HashMap::new(),
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
+    common::borrow_wire_harness(ctx, &mut s)
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_id)],
+            &HashMap::new(),
+        )
+        .await;
     let _ = s.drain_notifications();
     let _ = ctx.drain_notifications_for_char(char_id);
     s
@@ -61,9 +61,13 @@ async fn call(
     method: &str,
     args: &[PyRep],
 ) -> PyRep {
-    ctx.dispatch_rpc(s, svc, None, method, args, &HashMap::new(), None)
-        .await
-        .unwrap_or_else(|e| panic!("{svc}.{method} failed: {} {}", e.code, e.message))
+    ClientHarness::new(SessionBorrowWireTransport {
+        ctx,
+        session: s,
+        preserve_char_notifications: true,
+    })
+    .call_ok(svc, None, method, args, &HashMap::new())
+    .await
 }
 
 fn collect_notifs(
@@ -250,7 +254,19 @@ async fn test_notify_sweep_operations_survey_and_market() {
     call(&ctx, &mut sess, "ship", "Board", &[PyRep::Integer(ship_id)]).await;
     let mut ed_346 = HashMap::new();
     ed_346.insert("extra_data".into(), PyRep::Dict(vec![(PyRep::String("contentPieceType".into()), PyRep::Integer(18))]));
-    let _ = ctx.dispatch_rpc(&mut sess, "operationsManager", None, "process_client_event", &[PyRep::String("client_agencyContentExpanded".into())], &ed_346, None).await;
+    let _ = ClientHarness::new(SessionBorrowWireTransport {
+        ctx: &ctx,
+        session: &mut sess,
+        preserve_char_notifications: true,
+    })
+    .call(
+        "operationsManager",
+        None,
+        "process_client_event",
+        &[PyRep::String("client_agencyContentExpanded".into())],
+        &ed_346,
+    )
+    .await;
     call(&ctx, &mut sess, "operationsManager", "complete_category_for_character", &[PyRep::Integer(P1), PyRep::Integer(31)]).await;
     assert_eq!(take_notif(&ctx, &mut sess, P1, &mut seen, "OnOperationCategoryCompleted").first(), Some(&PyRep::Integer(31)));
 

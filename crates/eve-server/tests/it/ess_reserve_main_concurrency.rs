@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::common;
 use eve_destiny::{Ball, MovementMode};
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
@@ -38,6 +39,7 @@ fn kv_map(rep: &PyRep) -> HashMap<String, PyRep> {
 #[tokio::test]
 async fn test_ess_concurrent_main_and_reserve_links() {
     let ctx = Arc::new(ServerContext::new());
+    common::pin_clock(&ctx);
     let sys_handle = ctx.systems.get_or_spawn(NULLSEC_SYS_ID);
 
     let mut sess_a = eve_machonet::SessionState::new(3101);
@@ -169,7 +171,7 @@ async fn test_ess_concurrent_main_and_reserve_links() {
             ctx.build_type_combat_state(ESS_BEACON_TYPE_ID),
         )
         .await
-        .unwrap();
+        .expect("spawn ESS ball");
 
     for (sid, pos_x) in [(SHIP_A, 1_000.0), (SHIP_B, 2_000.0)] {
         sys_handle
@@ -189,24 +191,21 @@ async fn test_ess_concurrent_main_and_reserve_links() {
                 ctx.build_type_combat_state(RIFTER_TYPE_ID),
             )
             .await
-            .unwrap();
+            .expect("spawn ship ball");
     }
 
     let kw = HashMap::new();
 
     // 1. Pilot A links to Main Bank
-    let link_a_rep = ctx
-        .dispatch_rpc(
-            &mut sess_a,
+    let link_a_rep = common::borrow_wire_harness(&ctx, &mut sess_a)
+        .call_ok(
             "essMgr",
             None,
             "AttemptLinkToMainBank",
             &[PyRep::Integer(ESS_BALL_ID)],
             &kw,
-            None,
         )
-        .await
-        .expect("Pilot A AttemptLinkToMainBank start");
+        .await;
     let kv_a = kv_map(&link_a_rep);
     assert_eq!(kv_a.get("linkStartedOnly"), Some(&PyRep::Bool(true)));
 
@@ -217,18 +216,15 @@ async fn test_ess_concurrent_main_and_reserve_links() {
     assert_eq!(main_linked_char, Some(PILOT_A));
 
     // 2. Pilot B links to Reserve Bank concurrently
-    let link_b_rep = ctx
-        .dispatch_rpc(
-            &mut sess_b,
+    let link_b_rep = common::borrow_wire_harness(&ctx, &mut sess_b)
+        .call_ok(
             "essMgr",
             None,
             "AttemptLinkToReserveBank",
             &[PyRep::Integer(ESS_BALL_ID)],
             &kw,
-            None,
         )
-        .await
-        .expect("Pilot B AttemptLinkToReserveBank start");
+        .await;
     let kv_b = kv_map(&link_b_rep);
     assert_eq!(kv_b.get("linkStartedOnly"), Some(&PyRep::Bool(true)));
 
@@ -243,39 +239,33 @@ async fn test_ess_concurrent_main_and_reserve_links() {
 
     // 3. Step 5 ticks
     for _ in 0..5 {
-        sys_handle.step_manual(1.0).await.unwrap();
+        sys_handle.step_manual(1.0).await.expect("step_manual");
     }
 
     // 4. Pilot A completes Main Bank payout
-    let complete_a = ctx
-        .dispatch_rpc(
-            &mut sess_a,
+    let complete_a = common::borrow_wire_harness(&ctx, &mut sess_a)
+        .call_ok(
             "essMgr",
             None,
             "AttemptLinkToMainBank",
             &[PyRep::Integer(ESS_BALL_ID)],
             &kw,
-            None,
         )
-        .await
-        .expect("Pilot A AttemptLinkToMainBank complete");
+        .await;
     let kv_comp_a = kv_map(&complete_a);
     assert_eq!(kv_comp_a.get("linkStartedOnly"), Some(&PyRep::Bool(false)));
     assert!(kv_comp_a.get("stolenISK").or_else(|| kv_comp_a.get("amount")).and_then(PyRep::as_f64).unwrap_or(0.0) > 0.0);
 
     // 5. Pilot B completes Reserve Bank payout
-    let complete_b = ctx
-        .dispatch_rpc(
-            &mut sess_b,
+    let complete_b = common::borrow_wire_harness(&ctx, &mut sess_b)
+        .call_ok(
             "essMgr",
             None,
             "AttemptLinkToReserveBank",
             &[PyRep::Integer(ESS_BALL_ID)],
             &kw,
-            None,
         )
-        .await
-        .expect("Pilot B AttemptLinkToReserveBank complete");
+        .await;
     let kv_comp_b = kv_map(&complete_b);
     assert_eq!(kv_comp_b.get("linkStartedOnly"), Some(&PyRep::Bool(false)));
     let stolen_b = kv_comp_b.get("stolenISK").or_else(|| kv_comp_b.get("amount")).and_then(PyRep::as_f64).unwrap_or(0.0);
