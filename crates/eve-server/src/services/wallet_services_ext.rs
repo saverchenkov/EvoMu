@@ -655,6 +655,43 @@ fn handle_trade_list(
     handle_trade_action(ctx, session, "List", args)
 }
 
+/// Serializes a transferred station trade item into the V24 KeyVal shape expected by `OnTradeComplete`.
+fn trade_item_to_keyval(ctx: &ServerContext, item: &eve_db::InventoryItemRecord) -> PyRep {
+    let (group_id, category_id) = ctx
+        .sde
+        .types
+        .get(&item.type_id)
+        .map(|t| (i64::from(t.group_id), i64::from(t.category_id)))
+        .unwrap_or((0, 0));
+    let singleton_val = if item.is_blueprint_copy {
+        2
+    } else if item.singleton {
+        1
+    } else {
+        0
+    };
+    let qty_val = if item.is_blueprint_copy {
+        -2
+    } else if item.singleton {
+        -1
+    } else {
+        i64::from(item.quantity)
+    };
+    PyRep::keyval([
+        ("itemID", PyRep::Integer(item.item_id)),
+        ("typeID", PyRep::Integer(i64::from(item.type_id))),
+        ("ownerID", PyRep::Integer(item.owner_id)),
+        ("locationID", PyRep::Integer(item.location_id)),
+        ("flagID", PyRep::Integer(item.flag as i64)),
+        ("quantity", PyRep::Integer(qty_val)),
+        ("stacksize", PyRep::Integer(i64::from(item.quantity))),
+        ("singleton", PyRep::Integer(singleton_val)),
+        ("groupID", PyRep::Integer(group_id)),
+        ("categoryID", PyRep::Integer(category_id)),
+        ("customInfo", PyRep::String(String::new())),
+    ])
+}
+
 fn handle_trade_action(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -1039,8 +1076,14 @@ fn handle_trade_action(
             )))
         }
         Ok(TradeActionOutcome::Ok(tr)) => {
+            let mut completed_trade_items: Vec<PyRep> = Vec::new();
             if tr.completed {
                 for (fallback_char, pre, post) in item_diffs {
+                    if let Some(ref p) = post {
+                        if pre.as_ref().is_none_or(|pr| pr.owner_id != p.owner_id) {
+                            completed_trade_items.push(trade_item_to_keyval(ctx, p));
+                        }
+                    }
                     ctx.notify_item_mutation(fallback_char, pre.as_ref(), post.as_ref());
                 }
                 for (party_id, bal) in bal_updates {
@@ -1070,7 +1113,7 @@ fn handle_trade_action(
                             NotificationTarget::Character(party),
                             crate::router::notify_registry::OnTradeOfferReset {
                                 container_id: tr.trade_id,
-                                manifest_error: None,
+                                manifest_error: false,
                             },
                         );
                         ctx.emit_typed(
@@ -1087,7 +1130,7 @@ fn handle_trade_action(
                             NotificationTarget::Character(party),
                             crate::router::notify_registry::OnTradeOfferReset {
                                 container_id: tr.trade_id,
-                                manifest_error: None,
+                                manifest_error: false,
                             },
                         );
                         ctx.emit_typed(
@@ -1122,7 +1165,7 @@ fn handle_trade_action(
                                 NotificationTarget::Character(party),
                                 crate::router::notify_registry::OnTradeComplete {
                                     container_id: tr.trade_id,
-                                    items: None,
+                                    items: PyRep::List(completed_trade_items.clone()),
                                 },
                             );
                         }

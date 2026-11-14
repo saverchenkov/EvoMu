@@ -2971,8 +2971,7 @@ define_notifications! {
         samples: || vec![vec![PyRep::Integer(1)]],
     },
     OnTradeComplete => "OnTradeComplete" ("charid") {
-        fields: { container_id: i64 },
-        optional: { items: Option<PyRep> },
+        fields: { container_id: i64, items: PyRep },
         samples: || vec![vec![
             PyRep::Integer(1),
             PyRep::List(vec![sample_keyval_item()]),
@@ -3000,8 +2999,7 @@ define_notifications! {
         samples: || vec![vec![PyRep::Integer(1), PyRep::Bool(true)]],
     },
     OnTradeOfferReset => "OnTradeOfferReset" ("charid") {
-        fields: { container_id: i64 },
-        optional: { manifest_error: Option<bool> },
+        fields: { container_id: i64, manifest_error: bool },
         samples: || vec![vec![PyRep::Integer(1), PyRep::Bool(false)]],
     },
     OnVoidSpaceContentFinished => "OnVoidSpaceContentFinished" ("charid") {

@@ -3305,7 +3305,7 @@ async fn test_wallet_bills_lp_trade_market_and_industry_notifications() {
     call(&ctx, &mut s1, "trademgr", "AddItem", &[PyRep::Integer(trade_id), PyRep::Integer(trade_item_id)]).await;
     let n_to2 = ctx.drain_notifications_for_char(P2);
     assert_eq!(events_from(&n_to2, "OnTradeOffer"), vec![vec![PyRep::Integer(trade_id), PyRep::Bool(false), PyRep::Bool(false),]]);
-    assert_eq!(events_from(&n_to2, "OnTradeOfferReset"), vec![vec![PyRep::Integer(trade_id)]]);
+    assert_eq!(events_from(&n_to2, "OnTradeOfferReset"), vec![vec![PyRep::Integer(trade_id), PyRep::Bool(false)]]);
     ctx.drain_notifications_for_char(P1);
 
     call(&ctx, &mut s2, "trademgr", "OfferMoney", &[PyRep::Integer(trade_id), PyRep::Real(5_000.0)]).await;
@@ -3319,8 +3319,13 @@ async fn test_wallet_bills_lp_trade_market_and_industry_notifications() {
     call(&ctx, &mut s2, "trademgr", "MakeOffer", &[PyRep::Integer(trade_id), PyRep::Bool(true)]).await;
     let n_tc1 = ctx.drain_notifications_for_char(P1);
     let n_tc2 = ctx.drain_notifications_for_char(P2);
-    assert_eq!(events_from(&n_tc1, "OnTradeComplete"), vec![vec![PyRep::Integer(trade_id)]]);
-    assert_eq!(events_from(&n_tc2, "OnTradeComplete"), vec![vec![PyRep::Integer(trade_id)]]);
+    let tc1 = events_from(&n_tc1, "OnTradeComplete");
+    let tc2 = events_from(&n_tc2, "OnTradeComplete");
+    assert_eq!(tc1.len(), 1);
+    assert_eq!(tc1[0].len(), 2);
+    assert_eq!(tc1[0][0], PyRep::Integer(trade_id));
+    assert!(matches!(&tc1[0][1], PyRep::List(items) if !items.is_empty()));
+    assert_eq!(tc2, tc1);
 
     let init2 = call(&ctx, &mut s1, "trademgr", "InitiateTrade", &[PyRep::Integer(P2)]).await;
     let trade_id2 = init2.dict_get("tradeContainerID").and_then(|v| v.as_i64()).expect("tradeContainerID");
