@@ -382,23 +382,11 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
             .unwrap()
             .keys()
             .any(|&(s, m, _)| s == ship_id && m == mod_id));
-        assert_eq!(
-            ctx2.mining_cycles
-                .read()
-                .unwrap()
-                .get(&mod_id)
-                .map(|m| m.duration_ms),
-            Some(60_000)
-        );
+        // Crash-lost runtime kinds must remain cleared across restart (`#920`, `#875`).
+        assert!(ctx2.mining_cycles.read().unwrap().is_empty());
         assert!(ctx2.session_change_timers.lock().unwrap().contains_key(&cid));
-        assert_eq!(
-            ctx2.active_warps.lock().unwrap().get(&ship_id),
-            Some(&60_003_760)
-        );
-        assert_eq!(
-            ctx2.weapon_cycle_state.read().unwrap().get(&mod_id),
-            Some(&(Some(99_999), 3, Some(88_888)))
-        );
+        assert!(ctx2.active_warps.lock().unwrap().is_empty());
+        assert!(ctx2.weapon_cycle_state.read().unwrap().is_empty());
         assert!(ctx2
             .map_landmarks
             .read()
@@ -853,7 +841,7 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
         (db, ctx)
     };
 
-    // 1. All 11 `intern_ewar_kind` strings + unknown fallback -> `"electronic"`
+    // 1. Crash-lost `active_ewar_starts` is NOT persisted into `system_checkpoint` and clears on hydrate
     {
         let (db, ctx) = fresh_ctx("ewar_kinds.sqlite");
         assert!(db.with_snapshot(|s| s.cluster_and_runtime.server_runtime_json.is_none()));
@@ -862,35 +850,18 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
             .unwrap()
             .insert((101, 202), vec![(303, "warpScramblerMWD")]);
         ctx.persist_server_runtime_to_db();
-        let base_json = db
-            .with_snapshot(|s| s.cluster_and_runtime.server_runtime_json.clone())
-            .expect("base json");
-        for (input_kind, expected_static) in [
-            ("warpScramblerMWD", "warpScramblerMWD"),
-            ("warpScrambler", "warpScrambler"),
-            ("focusedWarpScrambler", "focusedWarpScrambler"),
-            ("webify", "webify"),
-            ("ewTargetPaint", "ewTargetPaint"),
-            ("ewRemoteSensorDamp", "ewRemoteSensorDamp"),
-            ("ewTrackingDisrupt", "ewTrackingDisrupt"),
-            ("ewGuidanceDisrupt", "ewGuidanceDisrupt"),
-            ("electronic", "electronic"),
-            ("ewEnergyNeut", "ewEnergyNeut"),
-            ("ewEnergyVampire", "ewEnergyVampire"),
-            ("custom_unknown_ewar", "electronic"),
-        ] {
-            let mutated_json = base_json.replace("\"warpScramblerMWD\"", &format!("\"{input_kind}\""));
-            db.with_mut_snapshot(|s| {
-                s.cluster_and_runtime.server_runtime_json = Some(mutated_json);
-            });
-            ctx.active_ewar_starts.write().unwrap().clear();
-            ctx.hydrate_server_runtime_from_db();
-            let got = ctx.active_ewar_starts.read().unwrap()[&(101, 202)][0].1;
-            assert_eq!(got, expected_static, "ewar kind {input_kind}");
-        }
+        assert!(db.with_snapshot(|s| s.cluster_and_runtime.server_runtime_json.is_none()));
+        assert!(!db
+            .with_sqlite_conn(|conn| eve_db::sqlite_store::system_checkpoint::has_any_system_checkpoints(conn))
+            .expect("check checkpoints empty"));
+        assert!(!db
+            .with_sqlite_conn(|conn| eve_db::sqlite_store::system_checkpoint::has_any_system_checkpoints(conn))
+            .expect("check checkpoints"));
+        ctx.hydrate_server_runtime_from_db();
+        assert!(ctx.active_ewar_starts.read().unwrap().is_empty());
     }
 
-    // 2. Every field of `PersistedTacticalModulesPayload` (all 12 fields + foreign tag ignore + roundtrip)
+    // 2. Durable vs Crash-lost fields of `TacticalModulesState` (foreign tag ignore + roundtrip)
     {
         let (db, ctx) = fresh_ctx("tactical_fields.sqlite");
         let dk = crate::services::tactical_modules::db_ptr_key(&ctx.db);
@@ -903,7 +874,8 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
             .insert((999_888_777, 1), 100);
         ctx.persist_server_runtime_to_db();
         assert!(
-            db.with_snapshot(|s| s.cluster_and_runtime.server_runtime_json.is_none()),
+            !db.with_sqlite_conn(|conn| eve_db::sqlite_store::system_checkpoint::has_any_system_checkpoints(conn))
+                .expect("check checkpoints"),
             "foreign tag must not persist"
         );
         ctx.tactical_state.write().unwrap().lance_caster_lock_until.clear();
@@ -915,21 +887,51 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
             }
             ctx.persist_server_runtime_to_db();
             assert!(
-                db.with_snapshot(|s| s.cluster_and_runtime.server_runtime_json.is_some()),
-                "tactical field `{label}` must make payload non-empty"
+                db.with_sqlite_conn(|conn| eve_db::sqlite_store::system_checkpoint::has_any_system_checkpoints(conn))
+                    .expect("check checkpoints"),
+                "tactical field `{label}` must persist into system_checkpoint"
             );
-            // Verify hydration into fresh context tagged with db_ptr_key or inst
             let ctx2 = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db));
             ctx2.hydrate_server_runtime_from_db();
             *ctx.tactical_state.write().unwrap() = Default::default();
             ctx.persist_server_runtime_to_db();
             assert!(
-                db.with_snapshot(|s| s.cluster_and_runtime.server_runtime_json.is_none()),
-                "clearing `{label}` must clear server_runtime_json"
+                !db.with_sqlite_conn(|conn| eve_db::sqlite_store::system_checkpoint::has_any_system_checkpoints(conn))
+                    .expect("check checkpoints"),
+                "clearing `{label}` must clear system_checkpoint rows"
             );
         };
 
-        assert_tac_persists("remote_assistance", &|ts, k| {
+        assert_tac_persists("lance_caster_lock_until_inst", &|ts, _| {
+            ts.lance_caster_lock_until.insert((inst, 11), 500);
+        });
+        assert_tac_persists("lance_victim_debuff_until", &|ts, k| {
+            ts.lance_victim_debuff_until.insert((k, 12), 600);
+        });
+        assert_tac_persists("tsb_self_penalty_until", &|ts, k| {
+            ts.tsb_self_penalty_until.insert((k, 18), 700);
+        });
+        assert_tac_persists("clone_vat_bay_activated_ships", &|ts, k| {
+            ts.clone_vat_bay_activated_ships.insert((k, 19));
+        });
+        assert_tac_persists("system_sim_time_s", &|ts, k| {
+            ts.system_sim_time_s.insert((k, 30_000_142), 12.5);
+        });
+
+        let assert_tac_crash_lost = |label: &str, set: &dyn Fn(&mut crate::services::tactical_modules::TacticalModulesState, usize)| {
+            {
+                let mut ts = ctx.tactical_state.write().unwrap();
+                set(&mut ts, dk);
+            }
+            ctx.persist_server_runtime_to_db();
+            assert!(
+                !db.with_sqlite_conn(|conn| eve_db::sqlite_store::system_checkpoint::has_any_system_checkpoints(conn))
+                    .expect("check checkpoints"),
+                "crash-lost tactical field `{label}` must NOT persist into system_checkpoint"
+            );
+            *ctx.tactical_state.write().unwrap() = Default::default();
+        };
+        assert_tac_crash_lost("remote_assistance", &|ts, k| {
             ts.remote_assistance.insert(
                 (k, 10),
                 vec![ProjectedRemoteAssistance {
@@ -945,13 +947,7 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
                 }],
             );
         });
-        assert_tac_persists("lance_caster_lock_until_inst", &|ts, _| {
-            ts.lance_caster_lock_until.insert((inst, 11), 500);
-        });
-        assert_tac_persists("lance_victim_debuff_until", &|ts, k| {
-            ts.lance_victim_debuff_until.insert((k, 12), 600);
-        });
-        assert_tac_persists("entosis_active_links", &|ts, k| {
+        assert_tac_crash_lost("entosis_active_links", &|ts, k| {
             ts.entosis_active_links.insert(
                 (k, 13),
                 ActiveEntosisLinkState {
@@ -968,10 +964,10 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
                 },
             );
         });
-        assert_tac_persists("entosis_target_cycles", &|ts, k| {
+        assert_tac_crash_lost("entosis_target_cycles", &|ts, k| {
             ts.entosis_target_cycles.insert((k, 14, 15), 2);
         });
-        assert_tac_persists("pending_wubble_probes", &|ts, k| {
+        assert_tac_crash_lost("pending_wubble_probes", &|ts, k| {
             ts.pending_wubble_probes.push((
                 k,
                 PendingWubbleProbe {
@@ -986,7 +982,7 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
                 },
             ));
         });
-        assert_tac_persists("active_wubble_debuffs", &|ts, k| {
+        assert_tac_crash_lost("active_wubble_debuffs", &|ts, k| {
             ts.active_wubble_debuffs.insert(
                 (k, 17),
                 ActiveWubbleDebuff {
@@ -995,13 +991,7 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
                 },
             );
         });
-        assert_tac_persists("tsb_self_penalty_until", &|ts, k| {
-            ts.tsb_self_penalty_until.insert((k, 18), 700);
-        });
-        assert_tac_persists("clone_vat_bay_activated_ships", &|ts, k| {
-            ts.clone_vat_bay_activated_ships.insert((k, 19));
-        });
-        assert_tac_persists("active_interdiction_probes", &|ts, k| {
+        assert_tac_crash_lost("active_interdiction_probes", &|ts, k| {
             ts.active_interdiction_probes.insert(
                 (k, 20),
                 ActiveInterdictionProbe {
@@ -1013,7 +1003,7 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
                 },
             );
         });
-        assert_tac_persists("launcher_last_fire", &|ts, k| {
+        assert_tac_crash_lost("launcher_last_fire", &|ts, k| {
             ts.launcher_last_fire.insert(
                 (k, 21),
                 LauncherFireStamp {
@@ -1023,27 +1013,36 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
                 },
             );
         });
-        assert_tac_persists("system_sim_time_s", &|ts, k| {
-            ts.system_sim_time_s.insert((k, 30_000_142), 12.5);
-        });
     }
 
-    // 3. Every clause in `PersistedServerRuntimeState::is_empty()` (`&& -> ||` killers)
+    // 3. Every Checkpointed vs CrashLost field in `collect_checkpoint_batch_from_ctx`
     {
         let (db, ctx) = fresh_ctx("runtime_is_empty.sqlite");
         let check_one = |label: &str, set: &dyn Fn(&ServerContext), clear: &dyn Fn(&ServerContext)| {
             set(&ctx);
             ctx.persist_server_runtime_to_db();
             assert!(
-                db.with_snapshot(|s| s.cluster_and_runtime.server_runtime_json.is_some()),
-                "field `{label}` must persist server_runtime_json = Some"
+                db.with_sqlite_conn(|conn| eve_db::sqlite_store::system_checkpoint::has_any_system_checkpoints(conn))
+                    .expect("check checkpoints"),
+                "field `{label}` must write rows into system_checkpoint"
             );
             clear(&ctx);
             ctx.persist_server_runtime_to_db();
             assert!(
-                db.with_snapshot(|s| s.cluster_and_runtime.server_runtime_json.is_none()),
-                "clearing `{label}` must clear server_runtime_json = None"
+                !db.with_sqlite_conn(|conn| eve_db::sqlite_store::system_checkpoint::has_any_system_checkpoints(conn))
+                    .expect("check checkpoints"),
+                "clearing `{label}` must leave system_checkpoint empty"
             );
+        };
+        let check_crash_lost = |label: &str, set: &dyn Fn(&ServerContext), clear: &dyn Fn(&ServerContext)| {
+            set(&ctx);
+            ctx.persist_server_runtime_to_db();
+            assert!(
+                !db.with_sqlite_conn(|conn| eve_db::sqlite_store::system_checkpoint::has_any_system_checkpoints(conn))
+                    .expect("check checkpoints"),
+                "crash-lost field `{label}` must NOT write rows into system_checkpoint"
+            );
+            clear(&ctx);
         };
 
         check_one(
@@ -1134,7 +1133,7 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
             },
             &|c| c.module_reactivation_cooldowns.write().unwrap().clear(),
         );
-        check_one(
+        check_crash_lost(
             "mining_cycles",
             &|c| {
                 c.mining_cycles.write().unwrap().insert(
@@ -1180,7 +1179,7 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
             },
             &|c| c.session_change_timers.lock().unwrap().clear(),
         );
-        check_one(
+        check_crash_lost(
             "active_warps",
             &|c| {
                 c.active_warps.lock().unwrap().insert(1, 2);
@@ -1194,7 +1193,7 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
             },
             &|c| c.location_change_invuln.lock().unwrap().clear(),
         );
-        check_one(
+        check_crash_lost(
             "weapon_cycle_state",
             &|c| {
                 c.weapon_cycle_state
@@ -1204,7 +1203,7 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
             },
             &|c| c.weapon_cycle_state.write().unwrap().clear(),
         );
-        check_one(
+        check_crash_lost(
             "projected_ewar",
             &|c| {
                 c.projected_ewar.write().unwrap().insert(
@@ -1221,14 +1220,14 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
             },
             &|c| c.projected_ewar.write().unwrap().clear(),
         );
-        check_one(
+        check_crash_lost(
             "projected_ewar_sources",
             &|c| {
                 c.projected_ewar_sources.write().unwrap().insert(10, 20);
             },
             &|c| c.projected_ewar_sources.write().unwrap().clear(),
         );
-        check_one(
+        check_crash_lost(
             "active_ewar_starts",
             &|c| {
                 c.active_ewar_starts
@@ -1386,6 +1385,9 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
         }
         ctx.persist_server_runtime_to_db();
         assert!(db.with_snapshot(|s| s.cluster_and_runtime.server_runtime_json.is_none()));
+        assert!(!db
+            .with_sqlite_conn(|conn| eve_db::sqlite_store::system_checkpoint::has_any_system_checkpoints(conn))
+            .expect("check checkpoints empty"));
         *ctx.cluster_state.write().unwrap() = Default::default();
         *ctx.alert_telemetry.lock().unwrap() = Default::default();
         ctx.global_config_values.write().unwrap().clear();

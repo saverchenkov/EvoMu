@@ -554,26 +554,38 @@ async fn advance_secs_sim_clock_rebase_suppress_vs_emit_and_abyssal_trace_zarzak
 
 #[test]
 fn downtime_cleanup_syncs_runtime_to_db() {
+    use eve_db::sqlite_store::system_checkpoint::{
+        load_all_checkpoints_for_kind, KIND_FLEET_EXTRAS,
+    };
+
     let ctx = test_ctx();
     {
         let mut ex = ctx.fleet_extras.lock().unwrap_or_else(|e| e.into_inner());
         ex.fleet_names.insert(999_001, "DowntimeSyncFleet".into());
     }
-    assert!(
-        !ctx.db.with_snapshot(|s| s
-            .cluster_and_runtime
-            .server_runtime_json
-            .as_deref()
-            .is_some_and(|j| j.contains("DowntimeSyncFleet")))
-    );
+    let before_rows = ctx
+        .db
+        .with_sqlite_conn(|conn| {
+            load_all_checkpoints_for_kind::<serde_json::Value>(conn, KIND_FLEET_EXTRAS)
+        })
+        .unwrap_or_default();
+    assert!(before_rows.is_empty());
 
     let _ = crate::sp6_lifecycle::cluster_tick_downtime::cleanup_npc_wrecks_and_reset_missions_on_downtime(&ctx);
+    assert!(ctx
+        .db
+        .with_snapshot(|s| s.cluster_and_runtime.server_runtime_json.is_none()));
+    let after_rows = ctx
+        .db
+        .with_sqlite_conn(|conn| {
+            load_all_checkpoints_for_kind::<serde_json::Value>(conn, KIND_FLEET_EXTRAS)
+        })
+        .expect("load fleet_extras checkpoints");
     assert!(
-        ctx.db.with_snapshot(|s| s
-            .cluster_and_runtime
-            .server_runtime_json
-            .as_deref()
-            .is_some_and(|j| j.contains("DowntimeSyncFleet")))
+        after_rows
+            .iter()
+            .any(|(_, _, v)| v.to_string().contains("DowntimeSyncFleet")),
+        "downtime cleanup must sync checkpointed fleet_extras to SQLite system_checkpoint"
     );
 }
 

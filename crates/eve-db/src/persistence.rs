@@ -642,14 +642,17 @@ impl WorldRepository {
         let jwt_secret =
             sqlite_store::load_or_init_jwt_secret(&conn, Self::generate_random_secret_32)?;
         let auth_runtime = sqlite_store::load_auth_runtime_from_sqlite(&conn, jwt_secret)?;
-        Ok(Self::from_parts(
+        let clock_offset_secs = sqlite_store::system_checkpoint::load_clock_offset_secs(&conn)?;
+        let repo = Self::from_parts(
             snap,
             conn,
             fp,
             entity_block,
             Some(target.to_path_buf()),
             auth_runtime,
-        ))
+        );
+        repo.clock().restore_offset_secs(clock_offset_secs);
+        Ok(repo)
     }
 
     /// Returns all rows quarantined into `quarantine_rows` in the backing SQLite database (`#906`).
@@ -669,9 +672,11 @@ impl WorldRepository {
     pub fn save_to_sqlite(&self, path: impl AsRef<Path>) -> Result<(), String> {
         let repo = Self::open_sqlite(path)?;
         let snap = self.read_state();
+        let offset_secs = self.clock().offset_secs();
         let auth_rt = self.auth_runtime.read().unwrap_or_else(|e| e.into_inner()).clone();
         let mut writer = repo.writer.lock().unwrap_or_else(|e| e.into_inner());
         sqlite_store::replace_sqlite_from_snapshot(&mut writer.conn, &snap)?;
+        sqlite_store::system_checkpoint::persist_clock_offset_secs(&writer.conn, offset_secs)?;
         sqlite_store::save_jwt_secret(&writer.conn, &auth_rt.jwt_signing_secret)?;
         sqlite_store::replace_auth_runtime_in_sqlite(&mut writer.conn, &auth_rt)?;
         Ok(())
@@ -1078,11 +1083,12 @@ impl WorldRepository {
                 effects: &mut effects,
                 entity_ids: &self.entity_ids,
                 conn: &writer.conn,
+                clock_offset_secs: None,
             };
-            f(&mut wtx)
+            f(&mut wtx).map(|v| (v, wtx.clock_offset_secs))
         }));
 
-        let val = match closure_res {
+        let (val, clock_offset_secs) = match closure_res {
             Err(panic_payload) => {
                 let msg = panic_payload_message(&*panic_payload);
                 PERSIST_TX_PANICS_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1133,52 +1139,58 @@ impl WorldRepository {
 
         let mut changes = ChangeSet::diff(writer.seq.saturating_add(1), &before, &writer.working);
         let did_mutate = !changes.is_empty();
+        let has_clock_offset = clock_offset_secs.is_some();
         let ephemeral_changed =
             before.transient_item_attributes != writer.working.transient_item_attributes
                 || before.sessions != writer.working.sessions;
 
-        if did_mutate {
-            if let Err(val_err) =
-                validate_changeset(&changes, &before, &writer.working, DEFAULT_MAX_ROW_JSON_BYTES)
-            {
-                writer.working = before;
-                writer.working.next_entity_id =
-                    writer.working.next_entity_id.max(self.entity_ids.current());
-                drop(effects);
-                return Err(E::from_tx_error(val_err));
-            }
+        if did_mutate || has_clock_offset {
+            let mut staged_cold_fp = None;
+            let mut need_wal_delta = false;
 
-            let prev_wal_seq = writer.fp.wal_seq;
-            if writer.working.wal_seq <= prev_wal_seq {
-                writer.working.wal_seq = prev_wal_seq.saturating_add(1);
-                changes.wal_seq = writer.working.wal_seq;
-                changes.meta_changed = true;
-            }
+            if did_mutate {
+                if let Err(val_err) =
+                    validate_changeset(&changes, &before, &writer.working, DEFAULT_MAX_ROW_JSON_BYTES)
+                {
+                    writer.working = before;
+                    writer.working.next_entity_id =
+                        writer.working.next_entity_id.max(self.entity_ids.current());
+                    drop(effects);
+                    return Err(E::from_tx_error(val_err));
+                }
 
+                let prev_wal_seq = writer.fp.wal_seq;
+                if writer.working.wal_seq <= prev_wal_seq {
+                    writer.working.wal_seq = prev_wal_seq.saturating_add(1);
+                    changes.wal_seq = writer.working.wal_seq;
+                    changes.meta_changed = true;
+                }
+
+                need_wal_delta = self.snapshot_path.is_some() && self.sqlite_path.is_none();
+                let has_cold_or_meta = changes.meta_changed || changes.cold_domains.any();
+
+                // Stage cold fingerprints without cloning O(N) hot CowMap fingerprint HashMaps.
+                staged_cold_fp = if has_cold_or_meta {
+                    let hot_items = std::mem::take(&mut writer.fp.items);
+                    let hot_chars = std::mem::take(&mut writer.fp.characters);
+                    let hot_skills = std::mem::take(&mut writer.fp.skills);
+                    let hot_queues = std::mem::take(&mut writer.fp.skill_queues);
+                    let hot_orders = std::mem::take(&mut writer.fp.market_orders);
+                    let cloned = writer.fp.clone();
+                    writer.fp.items = hot_items;
+                    writer.fp.characters = hot_chars;
+                    writer.fp.skills = hot_skills;
+                    writer.fp.skill_queues = hot_queues;
+                    writer.fp.market_orders = hot_orders;
+                    Some(cloned)
+                } else {
+                    None
+                };
+            }
             let fault_plan =
                 TxFaultPlan::decode(self.fault_plan.swap(0, std::sync::atomic::Ordering::SeqCst));
-            let need_wal_delta = self.snapshot_path.is_some() && self.sqlite_path.is_none();
-            let has_cold_or_meta = changes.meta_changed || changes.cold_domains.any();
 
-            // Stage cold fingerprints without cloning O(N) hot CowMap fingerprint HashMaps.
-            let mut staged_cold_fp = if has_cold_or_meta {
-                let hot_items = std::mem::take(&mut writer.fp.items);
-                let hot_chars = std::mem::take(&mut writer.fp.characters);
-                let hot_skills = std::mem::take(&mut writer.fp.skills);
-                let hot_queues = std::mem::take(&mut writer.fp.skill_queues);
-                let hot_orders = std::mem::take(&mut writer.fp.market_orders);
-                let cloned = writer.fp.clone();
-                writer.fp.items = hot_items;
-                writer.fp.characters = hot_chars;
-                writer.fp.skills = hot_skills;
-                writer.fp.skill_queues = hot_queues;
-                writer.fp.market_orders = hot_orders;
-                Some(cloned)
-            } else {
-                None
-            };
-
-            let persist_res = (|| -> Result<(crate::tx_engine::HotFpDelta, Option<WorldStateWalDelta>), TxError> {
+            let persist_res = (|| -> Result<(Option<crate::tx_engine::HotFpDelta>, Option<WorldStateWalDelta>), TxError> {
                 let WorldWriter {
                     ref working,
                     ref mut conn,
@@ -1191,47 +1203,74 @@ impl WorldRepository {
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                     .map_err(|e| TxError::Persist(e.to_string()))?;
                 let mut exec = TxSqlExecutor::new(&sql_tx, fault_plan);
-                let (mut delta, hot_fp) = apply_changeset_to_sqlite(
-                    &mut exec,
-                    working,
-                    &changes,
-                    fp,
-                    cold_fp_ref,
-                    need_wal_delta,
-                )?;
-                exec.check_commit_fault()?;
-                if need_wal_delta {
-                    if let Some(ref p) = self.snapshot_path {
-                        let _wal_guard = self.wal_lock.lock().unwrap_or_else(|e| e.into_inner());
-                        delta.seq = working.wal_seq;
-                        self.append_wal_delta_locked(p, working, &delta)
-                            .map_err(TxError::Persist)?;
+                let (hot_fp_opt, wal_delta_opt) = if did_mutate {
+                    let (mut delta, hot_fp) = apply_changeset_to_sqlite(
+                        &mut exec,
+                        working,
+                        &changes,
+                        fp,
+                        cold_fp_ref,
+                        need_wal_delta,
+                    )?;
+                    if let Some(offset_secs) = clock_offset_secs {
+                        sqlite_store::system_checkpoint::persist_clock_offset_secs_in_tx(
+                            &sql_tx,
+                            offset_secs,
+                        )
+                        .map_err(TxError::Persist)?;
                     }
-                }
+                    exec.check_commit_fault()?;
+                    if need_wal_delta {
+                        if let Some(ref p) = self.snapshot_path {
+                            let _wal_guard = self.wal_lock.lock().unwrap_or_else(|e| e.into_inner());
+                            delta.seq = working.wal_seq;
+                            self.append_wal_delta_locked(p, working, &delta)
+                                .map_err(TxError::Persist)?;
+                        }
+                    }
+                    (Some(hot_fp), if need_wal_delta { Some(delta) } else { None })
+                } else {
+                    if let Some(offset_secs) = clock_offset_secs {
+                        sqlite_store::system_checkpoint::persist_clock_offset_secs_in_tx(
+                            &sql_tx,
+                            offset_secs,
+                        )
+                        .map_err(TxError::Persist)?;
+                    }
+                    exec.check_commit_fault()?;
+                    (None, None)
+                };
                 sql_tx.commit().map_err(|e| TxError::Persist(e.to_string()))?;
-                Ok((hot_fp, if need_wal_delta { Some(delta) } else { None }))
+                Ok((hot_fp_opt, wal_delta_opt))
             })();
 
             match persist_res {
-                Ok((hot_fp, _wal_delta)) => {
-                    if let Some(mut next_fp) = staged_cold_fp {
-                        next_fp.items = std::mem::take(&mut writer.fp.items);
-                        next_fp.characters = std::mem::take(&mut writer.fp.characters);
-                        next_fp.skills = std::mem::take(&mut writer.fp.skills);
-                        next_fp.skill_queues = std::mem::take(&mut writer.fp.skill_queues);
-                        next_fp.market_orders = std::mem::take(&mut writer.fp.market_orders);
-                        next_fp.market_orders_digest = writer.fp.market_orders_digest;
-                        writer.fp = next_fp;
-                    }
-                    hot_fp.apply_to(&mut writer.fp);
-                    writer.seq = changes.seq;
-                    *self.published.write().unwrap_or_else(|e| e.into_inner()) =
-                        std::sync::Arc::new(writer.working.clone());
-                    self.tx_commit_count
-                        .fetch_add(1, std::sync::atomic::Ordering::Release);
-                    self.bump_state_epoch();
-                    if changes.cold_domains.crimewatch_changed {
-                        self.bump_combat_state_epoch();
+                Ok((hot_fp_opt, _wal_delta)) => {
+                    if did_mutate {
+                        if let Some(mut next_fp) = staged_cold_fp {
+                            next_fp.items = std::mem::take(&mut writer.fp.items);
+                            next_fp.characters = std::mem::take(&mut writer.fp.characters);
+                            next_fp.skills = std::mem::take(&mut writer.fp.skills);
+                            next_fp.skill_queues = std::mem::take(&mut writer.fp.skill_queues);
+                            next_fp.market_orders = std::mem::take(&mut writer.fp.market_orders);
+                            next_fp.market_orders_digest = writer.fp.market_orders_digest;
+                            writer.fp = next_fp;
+                        }
+                        if let Some(hot_fp) = hot_fp_opt {
+                            hot_fp.apply_to(&mut writer.fp);
+                        }
+                        writer.seq = changes.seq;
+                        *self.published.write().unwrap_or_else(|e| e.into_inner()) =
+                            std::sync::Arc::new(writer.working.clone());
+                        self.tx_commit_count
+                            .fetch_add(1, std::sync::atomic::Ordering::Release);
+                        self.bump_state_epoch();
+                        if changes.cold_domains.crimewatch_changed {
+                            self.bump_combat_state_epoch();
+                        }
+                    } else if ephemeral_changed {
+                        *self.published.write().unwrap_or_else(|e| e.into_inner()) =
+                            std::sync::Arc::new(writer.working.clone());
                     }
                 }
                 Err(persist_err) => {

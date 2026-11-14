@@ -204,3 +204,89 @@ fn wall_anchored_clock_pause_accumulation_and_tick_wall_second() {
     assert_eq!(c.paused_at_wall_secs.load(Ordering::SeqCst), 0);
     assert!(c.paused_accum_wall_secs.load(Ordering::SeqCst) >= 25);
 }
+
+#[test]
+fn virtual_clock_offset_construct_restore_and_advance_helpers() {
+    let wall_with_off = VirtualServerClock::with_offset_secs(3_600);
+    assert_eq!(wall_with_off.offset_secs(), 3_600);
+    let trait_ref: &dyn ServerClock = &wall_with_off;
+    assert_eq!(trait_ref.offset_secs(), 3_600);
+
+    let fixed = VirtualServerClock::with_fixed_base_and_offset(1_760_000_000, 120);
+    assert_eq!(fixed.offset_secs(), 120);
+    assert_eq!(fixed.now_unix_secs(), 1_760_000_120);
+
+    let new_off = fixed.advance_secs_and_read_offset(480);
+    assert_eq!(new_off, 600);
+    assert_eq!(fixed.offset_secs(), 600);
+    assert_eq!(fixed.now_unix_secs(), 1_760_000_600);
+
+    let fixed_trait: &dyn ServerClock = &fixed;
+    fixed_trait.restore_offset_secs(86_400);
+    assert_eq!(fixed.offset_secs(), 86_400);
+    assert_eq!(fixed.now_unix_secs(), 1_760_086_400);
+
+    let dummy = DummyTraitClock {
+        secs: 1_700_000_000,
+        nanos: 0,
+        stepped: AtomicU64::new(0),
+    };
+    assert_eq!(dummy.offset_secs(), 0);
+    dummy.restore_offset_secs(999);
+    assert_eq!(dummy.offset_secs(), 0);
+}
+
+#[test]
+fn sqlite_tx_persists_rolls_back_and_restores_virtual_clock_offset() {
+    let dir = std::env::temp_dir().join(format!(
+        "evomu_clock_offset_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("world.sqlite");
+    let export_path = dir.join("export.sqlite");
+
+    {
+        let repo = crate::WorldRepository::open_sqlite(&db_path).expect("open_sqlite");
+        assert_eq!(repo.clock().offset_secs(), 0);
+
+        repo.tx("clock_offset_commit", |wtx| -> Result<(), crate::TxError> {
+            wtx.set_clock_offset_secs(12_345);
+            Ok(())
+        })
+        .expect("commit clock offset");
+
+        // Aborted transaction must roll back world_meta.clock_offset_secs cleanly.
+        let aborted: Result<(), crate::TxError> = repo.tx("clock_offset_abort", |wtx| {
+            wtx.set_clock_offset_secs(99_999);
+            Err(crate::TxError::Persist("simulated abort".into()))
+        });
+        assert!(aborted.is_err());
+
+        // Fault injection at commit must also roll back world_meta.clock_offset_secs atomically.
+        repo.set_fault_plan_for_test(crate::TxFaultPlan::FailAtCommit);
+        let faulted: Result<(), crate::TxError> = repo.tx("clock_offset_fault_commit", |wtx| {
+            wtx.snap.next_entity_id += 1;
+            wtx.set_clock_offset_secs(88_888);
+            Ok(())
+        });
+        assert!(faulted.is_err());
+    }
+
+    let reopened = crate::WorldRepository::open_sqlite(&db_path).expect("reopen_sqlite");
+    assert_eq!(reopened.clock().offset_secs(), 12_345);
+
+    reopened.clock().restore_offset_secs(54_321);
+    reopened.save_to_sqlite(&export_path).expect("save_to_sqlite");
+    let exported = crate::WorldRepository::open_sqlite(&export_path).expect("open exported");
+    assert_eq!(exported.clock().offset_secs(), 54_321);
+
+    drop(exported);
+    drop(reopened);
+    let _ = std::fs::remove_dir_all(&dir);
+}

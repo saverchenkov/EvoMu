@@ -1359,6 +1359,26 @@ impl ServerContext {
         self.advance_secs_inner(secs, false);
     }
 
+    fn persist_clock_advance_meta(&self, cur_unix: u64, offset_secs: u64) {
+        self.cluster_tick_last_unix
+            .fetch_max(cur_unix, Ordering::AcqRel);
+        self.cluster_tick_persisted_unix
+            .fetch_max(cur_unix, Ordering::AcqRel);
+        if self.db.is_write_locked_by_current_thread() {
+            return;
+        }
+        let _ = self.db.tx("clock_advance", |wtx| {
+            wtx.snap
+                .service_state_blobs
+                .insert("__server_now_unix".into(), cur_unix.to_string());
+            wtx.snap
+                .service_state_blobs
+                .insert("cluster_tick_last_unix".into(), cur_unix.to_string());
+            wtx.set_clock_offset_secs(offset_secs);
+            Ok::<_, eve_db::TxError>(())
+        });
+    }
+
     fn advance_secs_inner(&self, secs: u64, emit_sim_clock_rebase: bool) {
         let prev_unix = self.now_unix_secs();
         self.clock().advance_secs(secs);
@@ -1367,10 +1387,8 @@ impl ServerContext {
                 .fetch_add(secs, Ordering::AcqRel);
         }
         let cur_unix = self.now_unix_secs();
-        self.db.with_mut_snapshot(|snap| {
-            snap.service_state_blobs
-                .insert("__server_now_unix".into(), cur_unix.to_string());
-        });
+        let offset_secs = self.clock().offset_secs();
+        self.persist_clock_advance_meta(cur_unix, offset_secs);
         if secs > 0 {
             self.run_clock_advanced_sync_pipeline(prev_unix, secs, emit_sim_clock_rebase, true);
         }
@@ -1434,7 +1452,7 @@ impl ServerContext {
             self,
             self.now_blueos_filetime_ticks(),
         );
-        self.advance_skill_queues(secs as f64);
+        self.advance_skill_queues_for_clock(prev_unix, secs as f64);
         crate::services::fleet_social::fleet_social_notify::tick_fleet_lifecycle(self);
         crate::services::space_mining_harvest::tick_all_ice_belt_respawns_sync(self);
         let now = self.now_unix_secs();
@@ -1647,8 +1665,16 @@ impl ServerContext {
     /// running the unified synchronous tick pipeline (`#735`).
     pub fn step_clock_tick(&self, base_secs: u64) -> u64 {
         let prev_unix = self.now_unix_secs();
+        let prev_offset = self.clock().offset_secs();
         let advanced = self.clock().step_tick(base_secs);
         if advanced > 0 {
+            let cur_unix = self.now_unix_secs();
+            let cur_offset = self.clock().offset_secs();
+            self.cluster_tick_last_unix
+                .fetch_max(cur_unix, Ordering::AcqRel);
+            if cur_offset != prev_offset {
+                self.persist_clock_advance_meta(cur_unix, cur_offset);
+            }
             self.run_clock_advanced_sync_pipeline(prev_unix, advanced, false, true);
         }
         advanced
@@ -1657,8 +1683,16 @@ impl ServerContext {
     /// Steps a 1 Hz live server wall-clock tick, running the unified synchronous tick pipeline (`#735`).
     pub fn tick_wall_second(&self) -> u64 {
         let prev_unix = self.now_unix_secs();
+        let prev_offset = self.clock().offset_secs();
         let advanced = self.clock().tick_wall_second();
         if advanced > 0 {
+            let cur_unix = self.now_unix_secs();
+            let cur_offset = self.clock().offset_secs();
+            self.cluster_tick_last_unix
+                .fetch_max(cur_unix, Ordering::AcqRel);
+            if cur_offset != prev_offset {
+                self.persist_clock_advance_meta(cur_unix, cur_offset);
+            }
             self.run_clock_advanced_sync_pipeline(prev_unix, advanced, false, true);
         }
         advanced
@@ -1690,6 +1724,16 @@ impl ServerContext {
 
     /// Advances all active character skill queues by `elapsed_secs` of virtual time (`T-7`).
     pub fn advance_skill_queues(&self, elapsed_secs: f64) {
+        self.advance_skill_queues_inner(elapsed_secs, None);
+    }
+
+    /// Advances active character skill queues for a clock tick/jump, clamping against persisted
+    /// `skill_queue_last_applied_unix` so restart recovery and GM jumps never double-credit SP (`#863`).
+    pub(crate) fn advance_skill_queues_for_clock(&self, prev_unix: u64, elapsed_secs: f64) {
+        self.advance_skill_queues_inner(elapsed_secs, Some(prev_unix));
+    }
+
+    fn advance_skill_queues_inner(&self, elapsed_secs: f64, clock_prev_unix: Option<u64>) {
         if elapsed_secs <= 0.0 || !elapsed_secs.is_finite() {
             return;
         }
@@ -1700,6 +1744,28 @@ impl ServerContext {
         let now_ft = self.now_blueos_filetime_ticks();
         let now_unix = self.now_unix();
         let (invalidated_ships, completed_events, paused_chars) = self.db.with_mut_snapshot(|snap| {
+            let effective_elapsed = if let Some(clock_prev) = clock_prev_unix {
+                let last_applied = snap
+                    .service_state_blobs
+                    .get("skill_queue_last_applied_unix")
+                    .and_then(|s| s.parse::<u64>().ok());
+                let clamped = match last_applied {
+                    Some(last_ts) if now_unix <= last_ts => 0.0,
+                    Some(last_ts) => {
+                        let start_ts = last_ts.max(clock_prev);
+                        (now_unix.saturating_sub(start_ts) as f64).min(elapsed_secs)
+                    }
+                    None => elapsed_secs,
+                };
+                if clamped <= 0.0 {
+                    return (Vec::new(), Vec::new(), Vec::new());
+                }
+                snap.service_state_blobs
+                    .insert("skill_queue_last_applied_unix".into(), now_unix.to_string());
+                clamped
+            } else {
+                elapsed_secs
+            };
             let mut ships_to_invalidate = Vec::new();
             let mut completed_events = Vec::new();
             let mut paused_chars = Vec::new();
@@ -1721,11 +1787,11 @@ impl ServerContext {
                 let eff_attrs = crate::services::character_skills::effective_character_attributes(&sde, snap, char_id);
                 let queue = snap.skill_queues.get(&char_id).cloned().unwrap_or_default();
                 let mut rem_secs = if let Some(exp_t) = omega_lapsed_at {
-                    let prev_unix = now_unix.saturating_sub(elapsed_secs as u64);
+                    let prev_unix = now_unix.saturating_sub(effective_elapsed as u64);
                     let start_t = queue.first().and_then(|q| q.started_at_unix).unwrap_or(prev_unix).max(prev_unix);
                     exp_t.saturating_sub(start_t) as f64
                 } else {
-                    elapsed_secs
+                    effective_elapsed
                 };
                 let mut remaining_queue = Vec::new();
                 let mut total_sp_gained = 0.0;

@@ -145,9 +145,21 @@ async fn activate_auth_offline_burnout_nanite_reactivation_and_overload_edges() 
         let covert_eid = sde
             .effects
             .values()
-            .find(|e| e.name == "cloakingWarpSafe" || e.is_warp_safe)
+            .find(|e| e.name == "cloakingWarpSafe")
             .map(|e| e.effect_id)
-            .unwrap_or(5945);
+            .unwrap_or_else(|| {
+                let mut eff = sde
+                    .effects
+                    .values()
+                    .next()
+                    .cloned()
+                    .expect("seed effects");
+                eff.effect_id = 980;
+                eff.name = "cloakingWarpSafe".into();
+                eff.is_warp_safe = true;
+                sde.effects.insert(980, eff);
+                980
+            });
 
         sde.types.insert(
             custom_gun_tid,

@@ -500,6 +500,23 @@ pub(crate) fn collect_dirty_condition_checkpoint_entries(
     state: &mut crate::system_actor::types::SystemActorState,
     ballpark: &Ballpark,
 ) -> Vec<crate::system_actor::types::ConditionCheckpointEntry> {
+    collect_condition_checkpoint_entries_inner(state, ballpark, false)
+}
+
+/// Collects condition checkpoint entries for every non-static, non-NPC dynamic ball in `ballpark`,
+/// updating `last_checkpointed_balls` so shutdown/eviction flushes always persist a complete checkpoint (`#920`).
+pub(crate) fn collect_all_condition_checkpoint_entries(
+    state: &mut crate::system_actor::types::SystemActorState,
+    ballpark: &Ballpark,
+) -> Vec<crate::system_actor::types::ConditionCheckpointEntry> {
+    collect_condition_checkpoint_entries_inner(state, ballpark, true)
+}
+
+fn collect_condition_checkpoint_entries_inner(
+    state: &mut crate::system_actor::types::SystemActorState,
+    ballpark: &Ballpark,
+    force_all: bool,
+) -> Vec<crate::system_actor::types::ConditionCheckpointEntry> {
     state
         .last_checkpointed_balls
         .retain(|bid, _| ballpark.balls.contains_key(bid));
@@ -558,19 +575,20 @@ pub(crate) fn collect_dirty_condition_checkpoint_entries(
             capacitor,
             position: pos,
         };
-        let is_dirty = match state.last_checkpointed_balls.get(&bid) {
-            None => true,
-            Some(prev) => {
-                prev.space_entry_epoch != next_state.space_entry_epoch
-                    || (prev.shield_hp - next_state.shield_hp).abs() > 1e-6
-                    || (prev.armor_hp - next_state.armor_hp).abs() > 1e-6
-                    || (prev.structure_hp - next_state.structure_hp).abs() > 1e-6
-                    || (prev.capacitor - next_state.capacitor).abs() > 1e-6
-                    || (prev.position[0] - next_state.position[0]).abs() > 1e-3
-                    || (prev.position[1] - next_state.position[1]).abs() > 1e-3
-                    || (prev.position[2] - next_state.position[2]).abs() > 1e-3
-            }
-        };
+        let is_dirty = force_all
+            || match state.last_checkpointed_balls.get(&bid) {
+                None => true,
+                Some(prev) => {
+                    prev.space_entry_epoch != next_state.space_entry_epoch
+                        || (prev.shield_hp - next_state.shield_hp).abs() > 1e-6
+                        || (prev.armor_hp - next_state.armor_hp).abs() > 1e-6
+                        || (prev.structure_hp - next_state.structure_hp).abs() > 1e-6
+                        || (prev.capacitor - next_state.capacitor).abs() > 1e-6
+                        || (prev.position[0] - next_state.position[0]).abs() > 1e-3
+                        || (prev.position[1] - next_state.position[1]).abs() > 1e-3
+                        || (prev.position[2] - next_state.position[2]).abs() > 1e-3
+                }
+            };
         if is_dirty {
             state.last_checkpointed_balls.insert(bid, next_state);
             dirty.push(crate::system_actor::types::ConditionCheckpointEntry {
