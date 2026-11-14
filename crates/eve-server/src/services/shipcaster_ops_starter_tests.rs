@@ -162,6 +162,7 @@ async fn test_shipcaster_ops_starter_eligibility_vectors_proximity_and_jump() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_shipcaster_ops_starter_eligibility_negative_and_boundary_cases() {
     let ctx = test_ctx();
+    ctx.set_clock_paused(true);
     let mut sess = auth_session(1, 90_000_001, 98_000_001, 30_000_142);
     let cid = 90_000_001;
     let now = ctx.now_unix();
@@ -175,7 +176,8 @@ async fn test_shipcaster_ops_starter_eligibility_negative_and_boundary_cases() {
         .sde
         .types
         .values()
-        .find(|t| is_capital_or_freighter_group(t.group_id))
+        .filter(|t| is_capital_or_freighter_group(t.group_id))
+        .min_by_key(|t| t.type_id)
         .map(|t| t.type_id)
         .expect("capital/freighter type in SDE");
 

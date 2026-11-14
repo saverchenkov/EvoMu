@@ -7,7 +7,7 @@ use super::*;
 #[derive(Default)]
 pub(crate) struct DeferredPostCycleEffects {
     pub projected_assist_dist_m: Option<f64>,
-    pub fuel_to_deduct: Option<(u32, i32, bool)>,
+    pub fuel_to_deduct: Option<(u32, i32)>,
     pub phenomena_debuffs: Option<(Vec<i64>, Vec<(u32, f64)>, u64)>,
     pub burst_projector: Option<(DVec3, f64, Vec<i64>)>,
     pub bastion_weapon_timer: bool,
@@ -15,6 +15,31 @@ pub(crate) struct DeferredPostCycleEffects {
     pub cap_booster_charge_id: Option<i64>,
     pub ancillary_charge_to_consume: Option<(i64, i32)>,
     pub turret_charge_consumptions: Vec<(i64, i64)>,
+}
+
+/// Collects eligible ship fuel stacks for `fuel_type_id` in `SpecializedFuelBay` (`133`)
+/// and `Cargo` (`5`), sorted with `SpecializedFuelBay` prioritized before `Cargo`, then `item_id`.
+fn collect_ship_fuel_stacks(
+    snap: &eve_db::WorldStateSnapshot,
+    ship_id: i64,
+    fuel_type_id: u32,
+) -> Vec<(u8, i64, i32)> {
+    let mut stacks: Vec<(u8, i64, i32)> = snap
+        .items
+        .values()
+        .filter(|i| {
+            i.location_id == ship_id
+                && i.type_id == fuel_type_id
+                && matches!(i.flag as u16, 5 | 133)
+                && i.flag != eve_db::InventoryFlag::Locked
+                && !i.singleton
+                && i.quantity > 0
+                && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id)
+        })
+        .map(|i| (if (i.flag as u16) == 133 { 0 } else { 1 }, i.item_id, i.quantity))
+        .collect();
+    stacks.sort_by_key(|&(prio, iid, _)| (prio, iid));
+    stacks
 }
 
 pub(crate) struct EwarCapitalPrep {
@@ -409,19 +434,23 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                     if fuel_type_id > 0 && fuel_qty_needed > 0 {
                         let require_strict = is_siege || is_triage || is_phenomena;
                         let fuel_check = ctx.db.with_snapshot(|snap| {
-                            let avail = snap.items.values().find(|i| {
-                                i.location_id == ship_id && (i.type_id == fuel_type_id || (is_phenomena && i.type_id == 16275)) && i.quantity > 0
-                            }).map(|i| i.quantity);
-                            match avail {
-                                Some(avail) if avail >= fuel_qty_needed => Ok(true),
-                                Some(avail) => Err(format!("Insufficient fuel (type {fuel_type_id}): need {fuel_qty_needed}, have {avail}")),
-                                None if require_strict => Err(format!("Missing required fuel (type {fuel_type_id}, quantity {fuel_qty_needed})")),
-                                None => Ok(false),
+                            let total_avail: i64 = collect_ship_fuel_stacks(snap, ship_id, fuel_type_id)
+                                .into_iter()
+                                .map(|(_, _, q)| i64::from(q))
+                                .sum();
+                            if total_avail >= i64::from(fuel_qty_needed) {
+                                Ok(true)
+                            } else if total_avail > 0 {
+                                Err(format!("Insufficient fuel (type {fuel_type_id}): need {fuel_qty_needed}, have {total_avail}"))
+                            } else if require_strict {
+                                Err(format!("Missing required fuel (type {fuel_type_id}, quantity {fuel_qty_needed})"))
+                            } else {
+                                Ok(false)
                             }
                         });
                         match fuel_check {
                             Ok(true) => {
-                                deferred_post_cycle.fuel_to_deduct = Some((fuel_type_id, fuel_qty_needed, is_phenomena));
+                                deferred_post_cycle.fuel_to_deduct = Some((fuel_type_id, fuel_qty_needed));
                             }
                             Ok(false) => {}
                             Err(msg) => {
@@ -1136,27 +1165,27 @@ pub(crate) async fn commit_post_cycle_activation_effects(
                 eve_db::InventoryItemRecord,
                 Option<eve_db::InventoryItemRecord>,
             )> = Vec::new();
-            if let Some((fuel_type_id, fuel_qty_needed, is_phenomena)) = deferred.fuel_to_deduct {
-                if let Some((fid, avail)) = snap
-                    .items
-                    .values()
-                    .find(|i| {
-                        i.location_id == ship_id
-                            && (i.type_id == fuel_type_id
-                                || (is_phenomena && i.type_id == 16275))
-                            && i.quantity > 0
-                    })
-                    .map(|i| (i.item_id, i.quantity))
-                {
-                    if avail >= fuel_qty_needed {
-                        if let Some(pre) = snap.items.get(&fid).cloned() {
-                            let opts =
-                                eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
-                            if let Ok(post) =
-                                snap.consume_exact_item_quantity(fid, fuel_qty_needed, opts)
-                            {
-                                diffs.push((pre, post));
-                            }
+            if let Some((fuel_type_id, fuel_qty_needed)) = deferred.fuel_to_deduct {
+                let stacks = collect_ship_fuel_stacks(snap, ship_id, fuel_type_id);
+                let total_avail: i64 = stacks.iter().map(|&(_, _, q)| i64::from(q)).sum();
+                if total_avail >= i64::from(fuel_qty_needed) && fuel_qty_needed > 0 {
+                    let mut remaining = fuel_qty_needed;
+                    for (_, fid, _) in stacks {
+                        if remaining <= 0 {
+                            break;
+                        }
+                        let Some(pre) = snap.items.get(&fid).cloned() else {
+                            continue;
+                        };
+                        let take = remaining.min(pre.quantity);
+                        if take <= 0 {
+                            continue;
+                        }
+                        let opts =
+                            eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
+                        if let Ok(post) = snap.consume_exact_item_quantity(fid, take, opts) {
+                            remaining -= take;
+                            diffs.push((pre, post));
                         }
                     }
                 }

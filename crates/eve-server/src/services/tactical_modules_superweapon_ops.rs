@@ -91,6 +91,38 @@ fn parse_vec3_arg(args: &[PyRep], idx: usize) -> Result<Option<DVec3>, BridgeRpc
         })
 }
 
+/// Collects eligible superweapon fuel stacks of `fuel_tid` on `ship_id` in `SpecializedFuelBay` (`133`)
+/// or `Cargo` (`5`), ordered with `SpecializedFuelBay` prioritized over `Cargo`, then `item_id`.
+fn collect_superweapon_fuel_stacks(
+    snap: &eve_db::WorldStateSnapshot,
+    ship_id: i64,
+    fuel_tid: u32,
+) -> Vec<(u8, i64, eve_db::InventoryFlag, i32)> {
+    let mut stacks: Vec<(u8, i64, eve_db::InventoryFlag, i32)> = snap
+        .items
+        .values()
+        .filter(|i| {
+            i.location_id == ship_id
+                && i.type_id == fuel_tid
+                && matches!(i.flag as u16, 5 | 133)
+                && i.flag != eve_db::InventoryFlag::Locked
+                && !i.singleton
+                && i.quantity > 0
+                && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id)
+        })
+        .map(|i| {
+            (
+                if (i.flag as u16) == 133 { 0 } else { 1 },
+                i.item_id,
+                i.flag,
+                i.quantity,
+            )
+        })
+        .collect();
+    stacks.sort_by_key(|&(prio, iid, _, _)| (prio, iid));
+    stacks
+}
+
 fn check_superweapon_fuel_available(
     ctx: &ServerContext,
     ship_id: i64,
@@ -100,18 +132,9 @@ fn check_superweapon_fuel_available(
 ) -> Result<(), BridgeRpcError> {
     ctx.db
         .with_snapshot(|snap| {
-            let total_avail: i64 = snap
-                .items
-                .values()
-                .filter(|i| {
-                    i.location_id == ship_id
-                        && i.type_id == fuel_tid
-                        && matches!(i.flag as u16, 5 | 133)
-                        && i.flag != eve_db::InventoryFlag::Locked
-                        && i.quantity > 0
-                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
-                })
-                .map(|i| i64::from(i.quantity))
+            let total_avail: i64 = collect_superweapon_fuel_stacks(snap, ship_id, fuel_tid)
+                .into_iter()
+                .map(|(_, _, _, q)| i64::from(q))
                 .sum();
             if total_avail >= i64::from(fuel_qty) {
                 Ok(())
@@ -134,27 +157,16 @@ fn check_superweapon_fuel_available(
 
 fn deduct_superweapon_fuel(
     ctx: &ServerContext,
+    char_id: i64,
     ship_id: i64,
     fuel_tid: u32,
     fuel_qty: i32,
     kind: &str,
 ) -> Result<(i32, Vec<(eve_db::InventoryFlag, i32)>), BridgeRpcError> {
-    ctx.db
+    let (consumed_total, consumed_by_flag, item_diffs) = ctx
+        .db
         .try_with_mut_snapshot(|snap| {
-            let mut stacks: Vec<(u8, i64, eve_db::InventoryFlag, i32)> = snap
-                .items
-                .values()
-                .filter(|i| {
-                    i.location_id == ship_id
-                        && i.type_id == fuel_tid
-                        && matches!(i.flag as u16, 5 | 133)
-                        && i.flag != eve_db::InventoryFlag::Locked
-                        && i.quantity > 0
-                        && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id)
-                })
-                .map(|i| (if (i.flag as u16) == 133 { 0 } else { 1 }, i.item_id, i.flag, i.quantity))
-                .collect();
-            stacks.sort_by_key(|&(prio, iid, _, _)| (prio, iid));
+            let stacks = collect_superweapon_fuel_stacks(snap, ship_id, fuel_tid);
             let total_avail: i64 = stacks.iter().map(|&(_, _, _, q)| i64::from(q)).sum();
             if total_avail < i64::from(fuel_qty) {
                 return Err(if total_avail > 0 {
@@ -165,20 +177,26 @@ fn deduct_superweapon_fuel(
             }
             let mut remaining = fuel_qty;
             let mut consumed_by_flag: Vec<(eve_db::InventoryFlag, i32)> = Vec::new();
+            let mut item_diffs: Vec<(
+                eve_db::InventoryItemRecord,
+                Option<eve_db::InventoryItemRecord>,
+            )> = Vec::new();
             for (_, fid, flag, _) in stacks {
                 if remaining <= 0 {
                     break;
                 }
-                let Some((owner_id, avail)) = snap.items.get(&fid).map(|it| (it.owner_id, it.quantity)) else {
+                let Some(pre) = snap.items.get(&fid).cloned() else {
                     continue;
                 };
-                let took = remaining.min(avail);
+                let took = remaining.min(pre.quantity);
                 if took <= 0 {
                     continue;
                 }
-                let opts = eve_db::ConsumeExactOptions::for_owner_exact(None, owner_id);
-                snap.consume_exact_item_quantity(fid, took, opts)
+                let opts = eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
+                let post = snap
+                    .consume_exact_item_quantity(fid, took, opts)
                     .map_err(|e| e.to_string())?;
+                item_diffs.push((pre, post));
                 remaining -= took;
                 if let Some((_, q)) = consumed_by_flag.iter_mut().find(|(f, _)| *f == flag) {
                     *q += took;
@@ -186,13 +204,17 @@ fn deduct_superweapon_fuel(
                     consumed_by_flag.push((flag, took));
                 }
             }
-            Ok((fuel_qty, consumed_by_flag))
+            Ok((fuel_qty, consumed_by_flag, item_diffs))
         })
         .map_err(|message| BridgeRpcError {
             code: "InsufficientFuel".into(),
             message,
             client_error: None,
-        })
+        })?;
+    for (pre, post) in &item_diffs {
+        ctx.notify_item_mutation(char_id, Some(pre), post.as_ref());
+    }
+    Ok((consumed_total, consumed_by_flag))
 }
 
 fn refund_superweapon_fuel(
@@ -205,37 +227,56 @@ fn refund_superweapon_fuel(
     if consumed_by_flag.is_empty() {
         return;
     }
-    ctx.db.with_mut_snapshot(|snap| {
+    let item_diffs = ctx.db.with_mut_snapshot(|snap| {
+        let mut diffs: Vec<(
+            Option<eve_db::InventoryItemRecord>,
+            Option<eve_db::InventoryItemRecord>,
+        )> = Vec::new();
         for &(flag, qty) in consumed_by_flag {
             if qty <= 0 {
                 continue;
             }
-            if let Some(existing) = snap
+            let existing_id = snap
                 .items
-                .values_mut()
-                .find(|i| i.location_id == ship_id && i.type_id == fuel_tid && i.flag == flag && !i.singleton)
-            {
-                existing.quantity += qty;
-                existing.version += 1;
-                continue;
+                .values()
+                .find(|i| {
+                    i.location_id == ship_id
+                        && i.type_id == fuel_tid
+                        && i.flag == flag
+                        && !i.singleton
+                        && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id)
+                })
+                .map(|i| i.item_id);
+            if let Some(eid) = existing_id {
+                if let Some(existing) = snap.items.get_mut(&eid) {
+                    let pre = existing.clone();
+                    existing.quantity += qty;
+                    existing.version += 1;
+                    let post = existing.clone();
+                    diffs.push((Some(pre), Some(post)));
+                    continue;
+                }
             }
             snap.next_entity_id += 1;
             let new_id = snap.next_entity_id;
-            snap.items.insert(
-                new_id,
-                eve_db::InventoryItemRecord {
-                    item_id: new_id,
-                    type_id: fuel_tid,
-                    owner_id: owner_char_id,
-                    location_id: ship_id,
-                    flag,
-                    quantity: qty,
-                    singleton: false,
-                    ..eve_db::InventoryItemRecord::default()
-                },
-            );
+            let new_item = eve_db::InventoryItemRecord {
+                item_id: new_id,
+                type_id: fuel_tid,
+                owner_id: owner_char_id,
+                location_id: ship_id,
+                flag,
+                quantity: qty,
+                singleton: false,
+                ..eve_db::InventoryItemRecord::default()
+            };
+            snap.items.insert(new_id, new_item.clone());
+            diffs.push((None, Some(new_item)));
         }
+        diffs
     });
+    for (pre, post) in &item_diffs {
+        ctx.notify_item_mutation(owner_char_id, pre.as_ref(), post.as_ref());
+    }
 }
 
 fn precheck_doomsday_structure_target(
@@ -501,7 +542,7 @@ pub async fn activate_superweapon_with_args(
         .await?;
 
         let (consumed_fuel, consumed_stacks) =
-            deduct_superweapon_fuel(ctx, ship_id, lance_fuel_tid, lance_fuel_qty, "lance")?;
+            deduct_superweapon_fuel(ctx, char_id, ship_id, lance_fuel_tid, lance_fuel_qty, "lance")?;
         if let Some(cur_cap) = cur_cap_opt {
             let _ = sys.set_capacitor(ship_id, (cur_cap - cap_cost).max(0.0)).await;
         }
@@ -724,7 +765,7 @@ pub async fn activate_superweapon_with_args(
     };
     check_superweapon_fuel_available(ctx, ship_id, fuel_tid, fuel_qty, "superweapon")?;
     let (consumed_fuel, consumed_stacks) =
-        deduct_superweapon_fuel(ctx, ship_id, fuel_tid, fuel_qty, "superweapon")?;
+        deduct_superweapon_fuel(ctx, char_id, ship_id, fuel_tid, fuel_qty, "superweapon")?;
     if let Some(cur_cap) = dd_cur_cap_opt {
         let _ = sys.set_capacitor(ship_id, (cur_cap - dd_cap_cost).max(0.0)).await;
     }

@@ -189,28 +189,60 @@ fn parse_vec3_and_fuel_check_deduct_refund_and_target_eligibility() {
             },
         );
     });
+    let _ = ctx
+        .db
+        .acquire_online_lock(1, 1, Some(char_id), false, ctx.now_unix());
+    let _ = ctx.drain_notifications_for_char(char_id);
+
     let err_partial = check_superweapon_fuel_available(&ctx, ship_id, 16274, 100, "superweapon")
         .unwrap_err();
     assert_eq!(err_partial.code, "InsufficientFuel");
     assert!(err_partial.message.contains("Insufficient superweapon fuel"));
 
     assert_eq!(
-        deduct_superweapon_fuel(&ctx, ship_id, 16274, 100, "superweapon")
+        deduct_superweapon_fuel(&ctx, char_id, ship_id, 16274, 100, "superweapon")
             .unwrap_err()
             .code,
         "InsufficientFuel"
     );
+    assert!(
+        ctx.drain_notifications_for_char(char_id)
+            .iter()
+            .all(|n| n.event != "OnItemChange"),
+        "Failed deduct_superweapon_fuel must not emit OnItemChange"
+    );
 
     // Deduct 50 -> takes all 40 from FuelBay (removes stack 880_002) and 10 from Cargo (leaves 10)
-    let (taken, consumed) = deduct_superweapon_fuel(&ctx, ship_id, 16274, 50, "superweapon").unwrap();
+    let (taken, consumed) =
+        deduct_superweapon_fuel(&ctx, char_id, ship_id, 16274, 50, "superweapon").unwrap();
     assert_eq!(taken, 50);
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&880_002));
         assert_eq!(snap.items[&880_003].quantity, 10);
     });
+    let deduct_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        deduct_notifs.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args[0].dbrow_get("itemID") == Some(&PyRep::Integer(880_002))
+                && n.args[0].dbrow_get("locationID") == Some(&PyRep::Integer(6))
+                && n.args[0].dbrow_get("flagID") == Some(&PyRep::Integer(0))
+                && n.args[0].dbrow_get("quantity") == Some(&PyRep::Integer(0))
+        }),
+        "Deleted FuelBay stack 880_002 must emit OnItemChange tombstone"
+    );
+    assert!(
+        deduct_notifs.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args[0].dbrow_get("itemID") == Some(&PyRep::Integer(880_003))
+                && n.args[0].dbrow_get("quantity") == Some(&PyRep::Integer(10))
+        }),
+        "Updated Cargo stack 880_003 must emit OnItemChange quantity update"
+    );
 
     // Refund merges 10 back into existing Cargo stack and creates new FuelBay stack for 40
     refund_superweapon_fuel(&ctx, ship_id, char_id, 16274, &[]);
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
     refund_superweapon_fuel(&ctx, ship_id, char_id, 16274, &consumed);
     ctx.db.with_snapshot(|snap| {
         let total: i32 = snap
@@ -221,6 +253,25 @@ fn parse_vec3_and_fuel_check_deduct_refund_and_target_eligibility() {
             .sum();
         assert_eq!(total, 60);
     });
+    let refund_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        refund_notifs.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args[0].dbrow_get("itemID") == Some(&PyRep::Integer(880_003))
+                && n.args[0].dbrow_get("quantity") == Some(&PyRep::Integer(20))
+        }),
+        "Refund merging into Cargo stack 880_003 must emit OnItemChange quantity update"
+    );
+    assert!(
+        refund_notifs.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args[0].dbrow_get("flagID")
+                    == Some(&PyRep::Integer(InventoryFlag::SpecializedFuelBay as i64))
+                && n.args[0].dbrow_get("quantity") == Some(&PyRep::Integer(40))
+                && n.args[1] == PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))])
+        }),
+        "Refund creating new FuelBay stack must emit OnItemChange creation with ixLocationID=0"
+    );
 
     // is_eligible_single_target_doomsday_target
     let struct_id = 1_000_800_999;
@@ -836,4 +887,124 @@ async fn lancer_dreadnought_activation_and_fire_lance_warmup_in_ballpark() {
     );
     assert_eq!(pending.len(), 1);
     assert!(destroyed.contains(&(target_id_2, Some(char_id))));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn doomsday_activation_exact_fuel_deletion_emits_on_item_change_tombstone_gh1038() {
+    let mut ctx = test_ctx();
+    let null_sys = find_nullsec_sys(&ctx.sde);
+    let char_id = 90_000_001_i64;
+    let victim_char = 90_000_002_i64;
+    let titan_id = 100_830_001_i64;
+    let mod_id = 100_830_002_i64;
+    let tgt_id = 100_830_050_i64;
+    let fuel_stack_id = 1_897_129_274_i64;
+
+    let titan_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 30)
+        .map(|t| t.type_id)
+        .unwrap_or(11567);
+    let dd_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 588 && !matches!(t.type_id, 77398..=77401))
+        .map(|t| t.type_id)
+        .unwrap_or(24550);
+    let dread_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 485)
+        .map(|t| t.type_id)
+        .unwrap_or(19720);
+
+    {
+        let sde_mut = Arc::make_mut(&mut ctx.sde);
+        if let Some(m) = sde_mut.types.get_mut(&dd_tid) {
+            m.group_id = 588;
+            m.default_attributes.insert(713, 16274.0);
+            m.default_attributes.insert(714, 50_000.0);
+            m.default_attributes.insert(6, 1_000.0);
+            m.default_attributes.insert(114, 50_000.0);
+            m.default_attributes.insert(54, 250_000.0);
+        }
+    }
+
+    setup_ship_and_module(&ctx, null_sys, char_id, titan_id, titan_tid, mod_id, dd_tid, DVec3::ZERO);
+    setup_ship_and_module(
+        &ctx,
+        null_sys,
+        victim_char,
+        tgt_id,
+        dread_tid,
+        100_830_051,
+        519,
+        DVec3::new(10_000.0, 0.0, 0.0),
+    );
+    let sys = ctx.systems.get_or_spawn(null_sys);
+    let _ = sys
+        .add_target_lock(
+            titan_id,
+            TargetLock {
+                target_id: tgt_id,
+                lock_time_ms: 1_000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            fuel_stack_id,
+            InventoryItemRecord {
+                item_id: fuel_stack_id,
+                type_id: 16274,
+                owner_id: char_id,
+                location_id: titan_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 50_000,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    let _ = ctx
+        .db
+        .acquire_online_lock(1, 1, Some(char_id), false, ctx.now_unix());
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let rep = activate_superweapon_or_lance(
+        &ctx,
+        char_id,
+        titan_id,
+        null_sys,
+        mod_id,
+        "Activate",
+        Some(tgt_id),
+    )
+    .await
+    .expect("Doomsday activation with exact 50,000 Helium Isotopes must succeed");
+    assert_eq!(rep.dict_get("fuelConsumed").and_then(|v| v.as_i64()), Some(50_000));
+    assert!(
+        ctx.db.with_snapshot(|snap| !snap.items.contains_key(&fuel_stack_id)),
+        "Consumed fuel stack must be removed from WorldSnapshot"
+    );
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args[0].dbrow_get("itemID") == Some(&PyRep::Integer(fuel_stack_id))
+                && n.args[0].dbrow_get("locationID") == Some(&PyRep::Integer(6))
+                && n.args[0].dbrow_get("flagID") == Some(&PyRep::Integer(0))
+                && n.args[0].dbrow_get("quantity") == Some(&PyRep::Integer(0))
+        }),
+        "Doomsday exact fuel stack deletion must emit OnItemChange tombstone for client invCache"
+    );
 }

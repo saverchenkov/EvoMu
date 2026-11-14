@@ -357,7 +357,7 @@ async fn siege_triage_bastion_indy_core_phenomena_mwd_and_mjd_branches() {
     let wep_until = ctx.crimewatch.write().unwrap().get_or_create(char_id).weapon_timer_until_unix;
     assert!(wep_until >= before_secs + 60);
 
-    // Phenomena Generator (group 1815) hull check, partial fuel removal, and dbuff application
+    // Phenomena Generator (group 1815) hull check, isotope fuel consumption (never Strontium 16275), and dbuff application
     let (ph_fm, ph_st) = synth_module_and_state(mod_id, 43554, 27, None, &[(2468, 9901.0), (2469, 25.0)]);
     let ph_type = synth_type(43554, 1815, "Amarr Phenomena Generator", &[6753], &[(713, 16274.0), (714, 500.0)]);
     assert_eq!(
@@ -365,10 +365,28 @@ async fn siege_triage_bastion_indy_core_phenomena_mwd_and_mjd_branches() {
             .await.err().unwrap().code,
         "InvalidShipGroup"
     );
+    let stront_before_phen = ctx.db.with_snapshot(|s| s.items[&97_100_501].quantity);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            97_100_502,
+            InventoryItemRecord {
+                item_id: 97_100_502,
+                type_id: 16274,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 1000,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
     let ph_ok = run_prep(
         &ctx, &sys, sys_id, char_id, ship_id, 30, mod_id, &ph_fm, &ph_type, &ph_st, &fit, None, false, false, false,
     ).await.unwrap();
     assert!(ph_ok.immobilize_self);
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&97_100_501].quantity), stront_before_phen);
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&97_100_502].quantity), 500);
     assert!(ctx.db.with_snapshot(|s| !s.items[&victim_id].dynamic_attributes.contains_key(&37)));
     assert!(
         crate::services::inventory_fitting::fitting_scanners_superweapons::get_aggregated_ship_dbuffs(
@@ -725,7 +743,7 @@ async fn target_painter_threshold_group_guard_and_fuel_boundary_kill_mutants() {
         );
     });
     let mut def_short = DeferredPostCycleEffects::default();
-    def_short.fuel_to_deduct = Some((fuel_tid, 5, false));
+    def_short.fuel_to_deduct = Some((fuel_tid, 5));
     commit_post_cycle_activation_effects(&ctx, &sys, char_id, ship_id, mod_id, &tp_fm, &tp_type, &tp_st_25, None, def_short)
         .await
         .unwrap();
@@ -735,9 +753,165 @@ async fn target_painter_threshold_group_guard_and_fuel_boundary_kill_mutants() {
         snap.items.get_mut(&fuel_id).unwrap().quantity = 5;
     });
     let mut def_exact = DeferredPostCycleEffects::default();
-    def_exact.fuel_to_deduct = Some((fuel_tid, 5, false));
+    def_exact.fuel_to_deduct = Some((fuel_tid, 5));
     commit_post_cycle_activation_effects(&ctx, &sys, char_id, ship_id, mod_id, &tp_fm, &tp_type, &tp_st_25, None, def_exact)
         .await
         .unwrap();
     assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&fuel_id)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn phenomena_fuel_ignores_strontium_prioritizes_fuel_bay_sums_stacks_and_notifies_gh1037() {
+    use eve_proto::PyRep;
+
+    let ctx = new_ctx();
+    let sys_id = 30_000_142_u32;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let char_id = 90_000_001_i64;
+    let ship_id = 97_990_001_i64;
+    let mod_id = 97_990_010_i64;
+    let fit = ShipFittingEngine::from_sde(ship_id, 11567, &ctx.sde);
+    spawn_test_ball(&sys, ship_id, 11567, DVec3::ZERO, MovementMode::Stop, 50_000.0).await;
+    let _ = ctx.db.acquire_online_lock(1, 1, Some(char_id), false, ctx.now_unix());
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let (ph_fm, ph_st) = synth_module_and_state(mod_id, 43658, 27, None, &[]);
+    let ph_type = synth_type(
+        43658,
+        1815,
+        "Amarr Phenomena Generator",
+        &[6753],
+        &[(713, 16274.0), (714, 40_000.0)],
+    );
+
+    // 1. An earlier Cargo stack of Strontium Clathrates (16275) must NOT match or shadow Helium Isotopes (16274).
+    let stront_id = 1_897_129_275_i64;
+    let fuel_bay_id = 1_897_129_283_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            stront_id,
+            InventoryItemRecord {
+                item_id: stront_id,
+                type_id: 16275,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 5_000,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    let missing_err = run_prep(
+        &ctx, &sys, sys_id, char_id, ship_id, 30, mod_id, &ph_fm, &ph_type, &ph_st, &fit, None, false, false, false,
+    )
+    .await
+    .err()
+    .expect("Strontium 16275 must not satisfy Phenomena Generator needing 16274");
+    assert_eq!(missing_err.code, "InsufficientFuel");
+    assert!(missing_err.message.contains("Missing required fuel"));
+
+    // 2. Add 80,000 Helium Isotopes (16274) in SpecializedFuelBay (flag 133) with a higher item_id:
+    //    must ignore the earlier 5,000 Strontium stack, deduct 40,000 Helium, and emit OnItemChange.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            fuel_bay_id,
+            InventoryItemRecord {
+                item_id: fuel_bay_id,
+                type_id: 16274,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 80_000,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+    run_prep(
+        &ctx, &sys, sys_id, char_id, ship_id, 30, mod_id, &ph_fm, &ph_type, &ph_st, &fit, None, false, false, false,
+    )
+    .await
+    .expect("80,000 Helium in ShipFuelBay must satisfy Phenomena Generator despite earlier 5,000 Strontium");
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&stront_id].quantity, 5_000, "Strontium must stay untouched");
+        assert_eq!(snap.items[&fuel_bay_id].quantity, 40_000, "Helium in FuelBay must drop by 40,000");
+    });
+    let notifs_1 = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs_1.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args[0].dbrow_get("itemID") == Some(&PyRep::Integer(fuel_bay_id))
+                && n.args[0].dbrow_get("quantity") == Some(&PyRep::Integer(40_000))
+        }),
+        "OnItemChange must update the Helium FuelBay stack to 40,000"
+    );
+
+    // 3. Multi-stack summing & FuelBay-before-Cargo priority (DroneBay ignored):
+    //    FuelBay (higher item_id) = 25,000 + Cargo (lower item_id) = 20,000 -> total 45,000 >= 40,000.
+    //    Must consume all 25,000 from FuelBay first (deleting it) and 15,000 from Cargo (leaving 5,000),
+    //    leaving DroneBay untouched, and emitting OnItemChange for both deleted and updated stacks.
+    let cargo_iso_id = 1_897_129_276_i64;
+    let drone_bay_iso_id = 1_897_129_277_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&fuel_bay_id).unwrap().quantity = 25_000;
+        snap.items.insert(
+            cargo_iso_id,
+            InventoryItemRecord {
+                item_id: cargo_iso_id,
+                type_id: 16274,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 20_000,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            drone_bay_iso_id,
+            InventoryItemRecord {
+                item_id: drone_bay_iso_id,
+                type_id: 16274,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::DroneBay,
+                quantity: 50_000,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+    run_prep(
+        &ctx, &sys, sys_id, char_id, ship_id, 30, mod_id, &ph_fm, &ph_type, &ph_st, &fit, None, false, false, false,
+    )
+    .await
+    .expect("25,000 FuelBay + 20,000 Cargo must sum to 45,000 >= 40,000");
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&fuel_bay_id), "FuelBay stack must be consumed first and deleted");
+        assert_eq!(snap.items[&cargo_iso_id].quantity, 5_000, "Remaining 15,000 must come from Cargo");
+        assert_eq!(snap.items[&drone_bay_iso_id].quantity, 50_000, "DroneBay must be ignored");
+    });
+    let notifs_2 = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs_2.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args[0].dbrow_get("itemID") == Some(&PyRep::Integer(fuel_bay_id))
+                && n.args[0].dbrow_get("locationID") == Some(&PyRep::Integer(6))
+                && n.args[0].dbrow_get("quantity") == Some(&PyRep::Integer(0))
+        }),
+        "Deleted FuelBay stack must emit OnItemChange tombstone"
+    );
+    assert!(
+        notifs_2.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args[0].dbrow_get("itemID") == Some(&PyRep::Integer(cargo_iso_id))
+                && n.args[0].dbrow_get("quantity") == Some(&PyRep::Integer(5_000))
+        }),
+        "Partially consumed Cargo stack must emit OnItemChange quantity update"
+    );
 }
