@@ -794,3 +794,99 @@ fn propulsion_speed_boost_formula_and_tempest_undersized_mwd() {
     assert!((res.mass - 100_000_000.0).abs() < 1e-9);
     assert!((res.signature_radius - 360.0 * 6.0).abs() < 1e-9);
 }
+
+#[test]
+fn propulsion_matched_undersized_oversized_mwd_and_afterburner() {
+    let mut sde = SdeRegistry::default();
+    sde.types
+        .insert(434, make_inv_type(434, 46, "5MN MWD I", &[(796, 500_000.0)], &[6730]));
+    sde.types
+        .insert(5973, make_inv_type(5973, 46, "50MN MWD I", &[(796, 15_000_000.0)], &[6730]));
+    sde.types
+        .insert(3568, make_inv_type(3568, 46, "500MN MWD I", &[(796, 50_000_000.0)], &[6730]));
+    sde.types
+        .insert(12068, make_inv_type(12068, 46, "100MN AB I", &[(796, 50_000_000.0)], &[6731]));
+
+    let tempest = make_item(
+        100,
+        639,
+        &[
+            (attr_ids::MAX_VELOCITY, 127.0),
+            (attr_ids::MASS, 99_500_000.0),
+            (attr_ids::SIGNATURE_RADIUS, 360.0),
+        ],
+    );
+    let frigate = make_item(
+        101,
+        587,
+        &[
+            (attr_ids::MAX_VELOCITY, 365.0),
+            (attr_ids::MASS, 1_000_000.0),
+            (attr_ids::SIGNATURE_RADIUS, 35.0),
+        ],
+    );
+
+    // 1. Undersized 5MN MWD on Tempest -> 1.075x (NOT 6x)
+    let mwd_5mn = make_item(
+        201,
+        434,
+        &[
+            (attr_ids::SPEED_FACTOR, 500.0),
+            (567, 1_500_000.0),
+            (attr_ids::MASS_ADDITION, 500_000.0),
+            (554, 500.0),
+        ],
+    );
+    let undersized = eval_propulsion_module(&tempest, &mwd_5mn, true, false, false, &sde);
+    assert!((undersized.max_velocity - 127.0 * 1.075).abs() < 1e-9);
+    assert!((undersized.mass - 100_000_000.0).abs() < 1e-9);
+
+    // 2. Matched 500MN MWD on Tempest -> 1 + 5.0 * 50e6 / (99.5e6 + 50e6) (~2.67224x)
+    let mwd_500mn = make_item(
+        202,
+        3568,
+        &[
+            (attr_ids::SPEED_FACTOR, 500.0),
+            (567, 50_000_000.0),
+            (attr_ids::MASS_ADDITION, 50_000_000.0),
+            (554, 500.0),
+        ],
+    );
+    let matched = eval_propulsion_module(&tempest, &mwd_500mn, true, false, false, &sde);
+    let expected_matched_mult = 1.0 + (5.0 * 50_000_000.0 / 149_500_000.0);
+    assert!((matched.max_velocity - 127.0 * expected_matched_mult).abs() < 1e-9);
+    assert!((matched.mass - 149_500_000.0).abs() < 1e-9);
+    assert!((matched.signature_radius - 360.0 * 6.0).abs() < 1e-9);
+
+    // 3. Oversized 50MN MWD on Frigate -> 1 + 5.0 * 15e6 / (1e6 + 15e6) = 5.6875x
+    let mwd_50mn = make_item(
+        203,
+        5973,
+        &[
+            (attr_ids::SPEED_FACTOR, 500.0),
+            (567, 15_000_000.0),
+            (attr_ids::MASS_ADDITION, 15_000_000.0),
+            (554, 500.0),
+        ],
+    );
+    let oversized = eval_propulsion_module(&frigate, &mwd_50mn, true, false, false, &sde);
+    assert!((oversized.max_velocity - 365.0 * 5.6875).abs() < 1e-9);
+    assert!((oversized.mass - 16_000_000.0).abs() < 1e-9);
+
+    // 4. Matched 100MN Afterburner on Tempest -> no sig bloom, ignores warp scram
+    let ab_100mn = make_item(
+        204,
+        12068,
+        &[
+            (attr_ids::SPEED_FACTOR, 135.0),
+            (567, 50_000_000.0),
+            (attr_ids::MASS_ADDITION, 50_000_000.0),
+        ],
+    );
+    let ab_res = eval_propulsion_module(&tempest, &ab_100mn, true, false, true, &sde);
+    let expected_ab_mult = 1.0 + (1.35 * 50_000_000.0 / 149_500_000.0);
+    assert!(ab_res.can_activate);
+    assert!((ab_res.max_velocity - 127.0 * expected_ab_mult).abs() < 1e-9);
+    assert!((ab_res.mass - 149_500_000.0).abs() < 1e-9);
+    assert!((ab_res.signature_radius - 360.0).abs() < 1e-9);
+}

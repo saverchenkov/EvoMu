@@ -276,7 +276,21 @@ async fn space_stargate_jump_pochven_zarzakh_dock_and_undock() {
         .sde
         .stargates()
         .values()
-        .next()
+        .filter(|g| {
+            g.from_solar_system_id != 30_100_000
+                && g.to_solar_system_id != 30_100_000
+                && ctx
+                    .sde
+                    .solar_systems
+                    .get(&g.from_solar_system_id)
+                    .is_some_and(|s| s.region_id != 10_000_070 && s.region_id < 11_000_000)
+                && ctx
+                    .sde
+                    .solar_systems
+                    .get(&g.to_solar_system_id)
+                    .is_some_and(|s| s.region_id != 10_000_070 && s.region_id < 11_000_000)
+        })
+        .min_by_key(|g| g.stargate_id)
         .map(|g| (g.from_solar_system_id, g.to_solar_system_id, g.stargate_id, g.position.to_array()))
         .expect("seed stargate");
     let freighter_id = 1_700_001i64;

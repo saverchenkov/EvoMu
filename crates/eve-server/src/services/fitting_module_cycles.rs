@@ -754,6 +754,7 @@ pub(crate) async fn handle_module_cycles(
                     if let Some(fm) = fit.modules.get_mut(&module_id) {
                         fm.state = eve_dogma::ModuleState::Online;
                     }
+                    fit.recalculate_stats(&ctx.sde);
                     ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
                     ctx.invalidate_and_push_fit(ship_id);
                 }
@@ -965,8 +966,11 @@ pub(crate) async fn handle_module_cycles(
                 if is_covert_cloak || (vel_mod - 1.0).abs() < 1e-6 { 0.0 } else if vel_mod > 0.0 && vel_mod < 1.0 { vel_mod - 1.0 } else { 0.0 }
             } else if has_speed_factor_attr && speed_factor > 0.0 {
                 let speed_boost_attr = mod_state.get_attribute(567, &ctx.sde);
-                let ship_mass = fit.ship.get_attribute(4, &ctx.sde);
-                let mass_addition = mod_state.get_attribute(796, &ctx.sde);
+                let ship_mass = fit.ship.get_attribute(attr_ids::MASS, &ctx.sde);
+                let mass_addition = mod_state.get_attribute(
+                    eve_dogma::propulsion_mass_addition_attr_id(&mod_state, &ctx.sde),
+                    &ctx.sde,
+                );
                 eve_dogma::compute_propulsion_speed_boost(
                     speed_factor,
                     speed_boost_attr,
