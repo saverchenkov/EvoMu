@@ -42,6 +42,23 @@ fn err(code: &str, message: String) -> Option<Result<PyRep, BridgeRpcError>> {
     Some(Err(BridgeRpcError { code: code.into(), message, client_error: None }))
 }
 
+/// Extracts an inventory target `itemID` from a bare integer or an EVE item descriptor
+/// (`KeyVal`, `Dict`, `DBRow`, `Object`, or `ObjectEx` carrying an integer `"itemID"` field).
+fn extract_inventory_item_id(rep: &PyRep) -> Option<i64> {
+    match rep {
+        PyRep::Integer(id) => Some(*id),
+        PyRep::KeyVal(_)
+        | PyRep::Dict(_)
+        | PyRep::DBRow { .. }
+        | PyRep::Object { .. }
+        | PyRep::ObjectEx { .. } => match rep.dict_get("itemID") {
+            Some(PyRep::Integer(id)) => Some(*id),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 pub fn handle(
     ctx: &ServerContext,
     session: &SessionState,
@@ -144,8 +161,9 @@ pub fn handle(
         }
         "GetInventoryFromId" => {
             // `passive` (args[1]) only controls client-side lazy priming; the server hands out the
-            // same inventory either way.
-            let Some(item_id) = args.first().and_then(|a| a.as_i64()) else {
+            // same inventory either way. V24.01 callers (such as post-AssembleShip flows) may pass
+            // either a bare integer itemID or an item descriptor KeyVal/Dict/Row containing itemID.
+            let Some(item_id) = args.first().and_then(extract_inventory_item_id) else {
                 return err("InvalidArguments", "invbroker.GetInventoryFromId expects (itemID, passive)".into());
             };
             let docked = session.station_id.or(session.structure_id);

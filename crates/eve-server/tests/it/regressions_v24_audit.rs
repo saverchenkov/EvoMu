@@ -2454,4 +2454,147 @@ async fn live_client_hotfixes_1062_1063_structure_dock_invbroker_and_godma_wire_
         .expect_err("foreign-system structure GetInventoryFromId must fail");
     assert_eq!(bad_inv_err.code, "InventoryNotAccessible"); // rpc-lint: allow error code assertion
 }
+
+#[tokio::test]
+async fn live_client_hotfix_1065_assemble_ship_get_inventory_from_keyval_wire_harness() {
+    use eve_testkit::client_harness::{extract_bound_id_from_wire_rep, ContractValidationMode};
+
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let char_id = 90_000_001_i64;
+    let station_id = 60_003_760_i64;
+    let shuttle_id = 1_896_945_262_i64;
+    let ship_type_id = if ctx.sde.types.contains_key(&672) { 672 } else { 587 };
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            shuttle_id,
+            InventoryItemRecord {
+                item_id: shuttle_id,
+                type_id: ship_type_id,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                version: 3,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut harness =
+        common::new_wire_harness(&ctx, 77_995).with_mode(ContractValidationMode::Ratcheted);
+    harness
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[
+                PyRep::String("demo".into()),
+                PyRep::String("demo-secret".into()),
+            ],
+            &kw,
+        )
+        .await;
+    harness
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_id)],
+            &kw,
+        )
+        .await;
+
+    // 1. Assemble the unpacked ship via ship.AssembleShip([shuttle_id]), returning KeyVal {itemID, singleton, version}.
+    let asm_rep = harness
+        .call_ok(
+            "ship",
+            None,
+            "AssembleShip",
+            &[PyRep::List(vec![PyRep::Integer(shuttle_id)])],
+            &kw,
+        )
+        .await;
+    assert_eq!(
+        asm_rep.dict_get("itemID").and_then(PyRep::as_i64),
+        Some(shuttle_id)
+    );
+    assert_eq!(asm_rep.dict_get("singleton"), Some(&PyRep::Bool(true)));
+    assert_eq!(
+        asm_rep.dict_get("version").and_then(PyRep::as_i64),
+        Some(4)
+    );
+
+    // 2. Bind station invbroker and call GetInventoryFromId with the returned KeyVal descriptor.
+    let bind_rep = harness
+        .call_ok(
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[
+                PyRep::Tuple(vec![PyRep::Integer(station_id), PyRep::Integer(15)]),
+                PyRep::None,
+            ],
+            &kw,
+        )
+        .await;
+    let mgr_bid = extract_bound_id_from_wire_rep(&bind_rep).expect("invbroker mgr bound id");
+
+    let inv_rep = harness
+        .call_ok(
+            "invbroker",
+            Some(mgr_bid),
+            "GetInventoryFromId",
+            &[asm_rep, PyRep::Integer(0)],
+            &kw,
+        )
+        .await;
+    let ship_bid = extract_bound_id_from_wire_rep(&inv_rep).expect("ship inventory bound id");
+
+    let self_row = harness
+        .call_ok("invbroker", Some(ship_bid), "GetSelfInvItem", &[], &kw)
+        .await;
+    assert_eq!(self_row.dbrow_get("itemID"), Some(&PyRep::Integer(shuttle_id)));
+    assert_eq!(
+        self_row.dbrow_get("typeID"),
+        Some(&PyRep::Integer(i64::from(ship_type_id)))
+    );
+
+    // 3. Dict descriptor and bool passive flag also resolve, while malformed KeyVal still fails with InvalidArguments.
+    let dict_inv_rep = harness
+        .call_ok(
+            "invbroker",
+            Some(mgr_bid),
+            "GetInventoryFromId",
+            &[
+                PyRep::Dict(vec![
+                    (PyRep::String("itemID".into()), PyRep::Integer(shuttle_id)),
+                    (PyRep::String("singleton".into()), PyRep::Bool(true)),
+                    (PyRep::String("version".into()), PyRep::Integer(4)),
+                ]),
+                PyRep::Bool(false),
+            ],
+            &kw,
+        )
+        .await;
+    assert!(extract_bound_id_from_wire_rep(&dict_inv_rep).is_some());
+
+    let bad_err = harness
+        .call(
+            "invbroker",
+            Some(mgr_bid),
+            "GetInventoryFromId",
+            &[
+                PyRep::keyval([("singleton", PyRep::Bool(true))]),
+                PyRep::Integer(0),
+            ],
+            &kw,
+        )
+        .await
+        .expect_err("KeyVal missing itemID must fail with InvalidArguments");
+    assert_eq!(bad_err.code, "InvalidArguments");
+}
 }
