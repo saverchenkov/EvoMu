@@ -240,7 +240,11 @@ async fn jettison_explicit_ids_deliver_guards_and_dropoff_distance_and_specializ
     assert_eq!(handle_structure_deliver(&ctx, &mut sess, &[PyRep::Integer(sid), PyRep::Integer(72_002), PyRep::Integer(recip_id)]).unwrap_err().code, "CannotDeliverNonEmptyContainer");
 
     // 3. Cargo dropoff: docked rejected (`MustBeInSpace`), out of range rejected, within range in SpecializedOreHold succeeds
-    let drop_args = [PyRep::Integer(sid), PyRep::List(vec![PyRep::Integer(72_004)])];
+    let drop_args = [
+        PyRep::List(vec![PyRep::Integer(72_004)]),
+        PyRep::Integer(ship_id),
+        PyRep::Integer(sid),
+    ];
     assert_eq!(handle_cargo_dropoff(&ctx, &mut sess, &drop_args).await.unwrap_err().code, "MustBeInSpace");
     sess.structure_id = None;
     let sys_h = ctx.systems.get_or_spawn(sys_id);

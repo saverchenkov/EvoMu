@@ -470,7 +470,7 @@ async fn test_structure_jumpbridge_safety_and_deliveries() {
         &mut sess1,
         "structureCargoDelivery",
         "DropOffItems",
-        &[PyRep::Integer(gate_b_id), PyRep::List(vec![PyRep::Integer(drop_item)])],
+        &[PyRep::List(vec![PyRep::Integer(drop_item)]), PyRep::Integer(ship_id), PyRep::Integer(gate_b_id)],
     )
     .await
     .expect_err("FLEX DropOffItems must reject with StructureNotDockable");
@@ -508,11 +508,11 @@ async fn test_structure_jumpbridge_safety_and_deliveries() {
         &mut sess1,
         "structureCargoDelivery",
         "DropOffItems",
-        &[PyRep::Integer(astrahus_id), PyRep::List(vec![PyRep::Integer(drop_item)])],
+        &[PyRep::List(vec![PyRep::Integer(drop_item)]), PyRep::Integer(ship_id), PyRep::Integer(astrahus_id)],
     )
     .await
     .expect("DropOffItems");
-    assert_eq!(drop_rep, PyRep::None);
+    assert_eq!(drop_rep, PyRep::List(vec![PyRep::Integer(drop_item)]));
 
     ctx.db.with_snapshot(|snap| {
         let it = snap.items.get(&drop_item).expect("dropped off item");

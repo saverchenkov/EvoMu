@@ -478,7 +478,7 @@ async fn test_structure_combat_state_ansiblex_acl_and_fitting_dropoff() {
     let ore_item = create_item_as_gm(&ctx, &mut s2, "other", P2, 1230, 10).await;
     settle_warp(&ctx, PERIMETER_SYS, P2_SHIP).await;
     ctx.systems.get_or_spawn(PERIMETER_SYS).set_ball_position(P2_SHIP, st_pos + DVec3::new(500.0, 0.0, 0.0)).await;
-    assert!(rpc(&ctx, &mut s2, "structureCargoDelivery", "DropOffItems", &[PyRep::Integer(st_id), PyRep::List(vec![PyRep::Integer(ore_item)])]).await.is_err());
+    assert!(rpc(&ctx, &mut s2, "structureCargoDelivery", "DropOffItems", &[PyRep::List(vec![PyRep::Integer(ore_item)]), PyRep::Integer(P2_SHIP), PyRep::Integer(st_id)]).await.is_err());
 
     // P1 undocks from Jita, returns to Perimeter, docks in st_id, and jettisons fuel -> offlines Standup service module.
     rpc(&ctx, &mut s1, "stationSvc", "Undock", &[PyRep::Bool(false)]).await.expect("Undock P1");

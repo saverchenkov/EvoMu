@@ -2660,8 +2660,9 @@ async fn structure_fuel_jettison_delivery_and_cargo_dropoff_edge_guards() {
             "structureCargoDelivery",
             "DropOffItems",
             &[
+                PyRep::List(vec![PyRep::Integer(cargo_ore_id)]),
+                PyRep::Integer(ship_id),
                 PyRep::Integer(st_id),
-                PyRep::List(vec![PyRep::Integer(cargo_ore_id)])
             ],
             &kw,
         )
@@ -2692,8 +2693,9 @@ async fn structure_fuel_jettison_delivery_and_cargo_dropoff_edge_guards() {
             "structureCargoDelivery",
             "DropOffItems",
             &[
+                PyRep::List(vec![PyRep::Integer(99_999_999)]),
+                PyRep::Integer(ship_id),
                 PyRep::Integer(st_id),
-                PyRep::List(vec![PyRep::Integer(99_999_999)])
             ],
             &kw,
         )
@@ -2703,21 +2705,23 @@ async fn structure_fuel_jettison_delivery_and_cargo_dropoff_edge_guards() {
         .code,
         "ItemNotInShipCargo"
     );
-    assert!(
+    assert_eq!(
         station_structure::handle(
             &ctx,
             &mut sess,
             "structureCargoDelivery",
             "DropOffItems",
             &[
+                PyRep::List(vec![PyRep::Integer(cargo_ore_id)]),
+                PyRep::Integer(ship_id),
                 PyRep::Integer(st_id),
-                PyRep::List(vec![PyRep::Integer(cargo_ore_id)])
             ],
             &kw,
         )
         .await
         .unwrap()
-        .is_ok()
+        .unwrap(),
+        PyRep::List(vec![PyRep::Integer(cargo_ore_id)])
     );
 }
 

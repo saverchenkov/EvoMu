@@ -1228,6 +1228,42 @@ fn full_repair(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &Structu
     }
 }
 
+/// Estimates Unix timestamp when structure fuel blocks run dry at current online burn rate.
+pub(crate) fn estimated_fuel_expires_unix(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    st: &UpwellStructureRecord,
+    now: u64,
+) -> Option<u64> {
+    use crate::services::structure_acl_defense_rules as rules;
+    let online = online_service_modules(ctx, snap, st.structure_id);
+    let mut need: u64 = 0;
+    for &(_, mod_tid, per_hour, _, _) in &online {
+        let mod_mult = rules::service_module_fuel_multiplier(ctx, st.type_id, mod_tid);
+        let mod_burn = (f64::from(per_hour) * mod_mult).round().max(1.0) as u64;
+        need = need.saturating_add(mod_burn);
+    }
+    if need == 0 {
+        return None;
+    }
+    let bay_blocks: u64 = snap
+        .items
+        .values()
+        .filter(|i| {
+            i.location_id == st.structure_id
+                && rules::is_structure_fuel_flag(i.flag)
+                && i.quantity > 0
+                && rules::is_fuel_block_type(ctx, i.type_id)
+        })
+        .map(|i| i.quantity as u64)
+        .fold(0u64, u64::saturating_add);
+    let avail = if bay_blocks > 0 { bay_blocks } else { u64::from(st.fuel_blocks) };
+    if avail == 0 {
+        return None;
+    }
+    Some(now.saturating_add(avail.saturating_mul(SECS_PER_HOUR) / need))
+}
+
 /// Burns hourly service-module fuel up to `now`; modules go offline when the bay runs dry.
 fn burn_fuel(ctx: &ServerContext, snap: &mut WorldStateSnapshot, life: &mut StructureLifecycleState, structure_id: i64, now: u64) {
     use crate::services::structure_acl_defense_rules as rules;

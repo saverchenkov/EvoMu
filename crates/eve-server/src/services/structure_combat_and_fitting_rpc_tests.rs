@@ -250,13 +250,18 @@ async fn fitting_online_fuel_jettison_delivery_and_cargo_dropoff_work() {
         snap.corporations.get_mut(&98401).unwrap().member_roles.clear();
     });
     spawn_ship_ball(&ctx, 30000142, 40001, DVec3::new(2_000_005_500.0, 0.0, 0.0)).await;
-    let _ = handle_cargo_dropoff(
+    let drop_res = handle_cargo_dropoff(
         &ctx,
         &mut sess,
-        &[PyRep::Integer(sid), PyRep::List(vec![PyRep::Integer(70004)])],
+        &[
+            PyRep::List(vec![PyRep::Integer(70004)]),
+            PyRep::Integer(40001),
+            PyRep::Integer(sid),
+        ],
     )
     .await
     .expect("cargo dropoff");
+    assert_eq!(drop_res, PyRep::List(vec![PyRep::Integer(70004)]));
     assert_eq!(
         ctx.db.with_snapshot(|s| s.items[&70004].flag),
         InventoryFlag::Deliveries

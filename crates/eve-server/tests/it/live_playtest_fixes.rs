@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+use crate::common;
 use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
@@ -16,6 +17,7 @@ use eve_proto::PyRep;
 use eve_server::quasar_gateway::STATUS_OK;
 use eve_server::router::ServerContext;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 const PILOT: i64 = 90_000_001;
 const JITA: u32 = 30_000_142;
@@ -897,4 +899,207 @@ async fn test_954_789_machonet_market_orders_and_cached_objects_use_v24_object_c
         let inner = marshal::decode(inner_bytes).expect("decode CachedObject pickle");
         assert!(matches!(inner, PyRep::IndexRowset { .. }));
     }
+}
+
+/// Wire IT covering live-client Upwell bugs `#1055`, `#1056`, `#1057`, and `#1059`
+/// via `ClientHarness` (`ContractValidationMode::Ratcheted`, `common::pin_clock(&ctx)`).
+#[tokio::test]
+async fn test_live_playtest_upwell_1055_1056_1057_1059_wire_ratcheted() {
+    use eve_db::corp_roles;
+    use eve_destiny::{Ball, MovementMode};
+    use eve_server::services::station_structure::structure_upwell_ops::{load_ext_state, save_ext_state, AccessGroupRecord};
+    use eve_testkit::client_harness::ContractValidationMode;
+    use glam::DVec3;
+
+    let ctx = Arc::new(ServerContext::new());
+    common::pin_clock(&ctx);
+    let now = ctx.now_unix();
+    let char_id = PILOT;
+    let mut sess = login_session(&ctx, 9910).await;
+    let corp_id = sess.corporation_id.expect("corp_id");
+    let st_id = 1_055_000_000_001_i64;
+    let core_item_id = 1_896_954_471_i64;
+    let ship_id = sess.ship_id.expect("ship_id");
+    let group_id = 80_550_001_i64;
+    let st_pos = [15_000.0, 0.0, 0.0];
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = JITA;
+            ch.active_ship_id = ship_id;
+        }
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.ceo_id = char_id;
+            *corp.member_roles.entry(char_id).or_insert(0) |= corp_roles::ROLE_DIRECTOR;
+        }
+        snap.structures.insert(
+            st_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: st_id,
+                type_id: 35_832, // Astrahus
+                owner_corp_id: corp_id,
+                solar_system_id: JITA,
+                name: "Playtest Astrahus".into(),
+                position: st_pos,
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 120,
+                shield_hp: 100_000.0,
+                armor_hp: 100_000.0,
+                hull_hp: 100_000.0,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            core_item_id,
+            InventoryItemRecord {
+                item_id: core_item_id,
+                type_id: 56_201, // Astrahus Quantum Core
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        let mut ext = load_ext_state(snap);
+        ext.owner_groups.insert(
+            group_id,
+            AccessGroupRecord {
+                group_id,
+                creator_id: char_id,
+                owner_corp_id: corp_id,
+                name: "Playtest ACL".into(),
+                description: "Wire test group".into(),
+                members: HashMap::new(),
+            },
+        );
+        save_ext_state(snap, &ext);
+    });
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.solar_system_id = Some(JITA);
+    sess.corp_role |= corp_roles::ROLE_DIRECTOR;
+
+    let sys_h = ctx.systems.get_or_spawn(JITA);
+    let _ = sys_h
+        .spawn_ball(Ball {
+            id: st_id,
+            type_id: 35_832,
+            position: DVec3::from_array(st_pos),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1.0e9,
+            radius: 5_000.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Rigid,
+        })
+        .await;
+    let _ = sys_h
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 601,
+            position: DVec3::new(st_pos[0] + 1_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1.0e6,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+
+    let mut harness = common::wrap_wire_harness(&ctx, sess)
+        .with_mode(ContractValidationMode::Ratcheted);
+    let kw = HashMap::new();
+
+    // #1055: ownerGroupManager.GetMyGroups returns KeyVals with V24 attributes
+    let groups_rep = harness
+        .call_ok("ownerGroupManager", None, "GetMyGroups", &[], &kw)
+        .await;
+    let PyRep::List(groups) = groups_rep else {
+        panic!("expected List from ownerGroupManager.GetMyGroups");
+    };
+    let g_entry = groups
+        .iter()
+        .find(|g| g.dict_get("groupID") == Some(&PyRep::Integer(group_id)))
+        .expect("seeded access group present");
+    assert_eq!(g_entry.dict_get("membershipType"), Some(&PyRep::Integer(2)));
+    assert_eq!(
+        g_entry.dict_get("admins"),
+        Some(&PyRep::List(vec![PyRep::Integer(char_id)]))
+    );
+
+    // #1056: structureDirectory.GetMyCorporationStructures & GetMyCharacterStructures include
+    // V24 integer state, upkeepState, and wars fields
+    for method in ["GetMyCorporationStructures", "GetMyCharacterStructures"] {
+        let dir_rep = harness
+            .call_ok("structureDirectory", None, method, &[], &kw)
+            .await;
+        let PyRep::Dict(entries) = dir_rep else {
+            panic!("expected Dict from structureDirectory.{method}");
+        };
+        let (_, st_kv) = entries
+            .iter()
+            .find(|(k, _)| k.as_i64() == Some(st_id))
+            .expect("structure entry present");
+        assert_eq!(st_kv.dict_get("state"), Some(&PyRep::Integer(110)));
+        assert_eq!(st_kv.dict_get("upkeepState"), Some(&PyRep::Integer(2)));
+        assert_eq!(st_kv.dict_get("wars"), Some(&PyRep::List(vec![])));
+    }
+
+    // #1057: structureCargoDelivery.DropOffItems accepts V24 3-arg ([itemIDs], sourceLoc, structureID)
+    // and returns movedItemIDs list
+    let drop_rep = harness
+        .call_ok(
+            "structureCargoDelivery",
+            None,
+            "DropOffItems",
+            &[
+                PyRep::List(vec![PyRep::Integer(core_item_id)]),
+                PyRep::Integer(ship_id),
+                PyRep::Integer(st_id),
+            ],
+            &kw,
+        )
+        .await;
+    assert_eq!(drop_rep, PyRep::List(vec![PyRep::Integer(core_item_id)]));
+    ctx.db.with_snapshot(|snap| {
+        let core = snap.items.get(&core_item_id).expect("dropped item");
+        assert_eq!(core.location_id, st_id);
+        assert_eq!(core.flag, InventoryFlag::Deliveries);
+    });
+
+    // #1059: structureDirectory.GetStructureMapData returns 12-column CRowset.InsertNew sequences
+    let map_rep = harness
+        .call_ok(
+            "structureDirectory",
+            None,
+            "GetStructureMapData",
+            &[PyRep::Integer(i64::from(JITA))],
+            &kw,
+        )
+        .await;
+    let PyRep::List(map_rows) = map_rep else {
+        panic!("expected List from GetStructureMapData");
+    };
+    let row = map_rows
+        .iter()
+        .find_map(|r| match r {
+            PyRep::List(cols) if cols.get(2).and_then(PyRep::as_i64) == Some(st_id) => Some(cols),
+            _ => None,
+        })
+        .expect("Astrahus 12-column row present");
+    assert_eq!(row.len(), 12);
+    assert_eq!(row[1].as_i64(), Some(35_832));
+    assert_eq!(row[3].as_str(), Some("Playtest Astrahus"));
+    assert_eq!(row[4].as_i64(), Some(i64::from(JITA)));
+    assert_eq!(row[7], PyRep::Real(st_pos[0]));
+    let _ = now;
 }

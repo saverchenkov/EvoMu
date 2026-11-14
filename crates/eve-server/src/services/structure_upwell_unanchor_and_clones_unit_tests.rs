@@ -945,31 +945,32 @@ async fn structure_fuel_jettison_deliver_and_cargo_dropoff_branch_matrix() {
     let mut docked_sess = ceo_sess.clone();
     docked_sess.structure_id = Some(sid);
     assert_eq!(
-        call_upwell(&ctx, &mut docked_sess, "structureCargoDelivery", "DropOffItems", &[PyRep::Integer(sid), PyRep::List(vec![PyRep::Integer(cargo_drop_id)])]).await.unwrap().unwrap_err().code,
+        call_upwell(&ctx, &mut docked_sess, "structureCargoDelivery", "DropOffItems", &[PyRep::List(vec![PyRep::Integer(cargo_drop_id)]), PyRep::Integer(ceo_ship), PyRep::Integer(sid)]).await.unwrap().unwrap_err().code,
         "MustBeInSpace"
     );
     assert_eq!(
-        call_upwell(&ctx, &mut ceo_sess, "structureCargoDelivery", "DropOffItems", &[PyRep::Integer(sid), PyRep::List(vec![])]).await.unwrap().unwrap_err().code,
+        call_upwell(&ctx, &mut ceo_sess, "structureCargoDelivery", "DropOffItems", &[PyRep::List(vec![]), PyRep::Integer(ceo_ship), PyRep::Integer(sid)]).await.unwrap().unwrap_err().code,
         "NoItemsSpecified"
     );
     assert_eq!(
-        call_upwell(&ctx, &mut ceo_sess, "structureCargoDelivery", "DropOffItems", &[PyRep::Integer(flex_sid), PyRep::Integer(cargo_drop_id)]).await.unwrap().unwrap_err().code,
+        call_upwell(&ctx, &mut ceo_sess, "structureCargoDelivery", "DropOffItems", &[PyRep::Integer(cargo_drop_id), PyRep::Integer(ceo_ship), PyRep::Integer(flex_sid)]).await.unwrap().unwrap_err().code,
         "StructureNotDockable"
     );
     assert_eq!(
-        call_upwell(&ctx, &mut ceo_sess, "structureCargoDelivery", "DropOffItems", &[PyRep::Integer(offline_sid), PyRep::Integer(cargo_drop_id)]).await.unwrap().unwrap_err().code,
+        call_upwell(&ctx, &mut ceo_sess, "structureCargoDelivery", "DropOffItems", &[PyRep::Integer(cargo_drop_id), PyRep::Integer(ceo_ship), PyRep::Integer(offline_sid)]).await.unwrap().unwrap_err().code,
         "StructureNotOperational"
     );
     assert_eq!(
-        call_upwell(&ctx, &mut ceo_sess, "structureCargoDelivery", "DropOffItems", &[PyRep::Integer(sid), PyRep::Integer(bad_flag_drop_id)]).await.unwrap().unwrap_err().code,
+        call_upwell(&ctx, &mut ceo_sess, "structureCargoDelivery", "DropOffItems", &[PyRep::Integer(bad_flag_drop_id), PyRep::Integer(ceo_ship), PyRep::Integer(sid)]).await.unwrap().unwrap_err().code,
         "ItemNotInShipCargo"
     );
     assert_eq!(
-        call_upwell(&ctx, &mut ceo_sess, "structureCargoDelivery", "DropOffItems", &[PyRep::Integer(sid), PyRep::Integer(locked_drop_id)]).await.unwrap().unwrap_err().code,
+        call_upwell(&ctx, &mut ceo_sess, "structureCargoDelivery", "DropOffItems", &[PyRep::Integer(locked_drop_id), PyRep::Integer(ceo_ship), PyRep::Integer(sid)]).await.unwrap().unwrap_err().code,
         "ItemLocked"
     );
-    assert!(
-        call_upwell(&ctx, &mut ceo_sess, "structureCargoDelivery", "DropOffItems", &[PyRep::Integer(sid), PyRep::List(vec![PyRep::Integer(cargo_drop_id), PyRep::Integer(fuel_bay_drop_id)])]).await.unwrap().is_ok()
+    assert_eq!(
+        call_upwell(&ctx, &mut ceo_sess, "structureCargoDelivery", "DropOffItems", &[PyRep::List(vec![PyRep::Integer(cargo_drop_id), PyRep::Integer(fuel_bay_drop_id)]), PyRep::Integer(ceo_ship), PyRep::Integer(sid)]).await.unwrap().unwrap(),
+        PyRep::List(vec![PyRep::Integer(cargo_drop_id), PyRep::Integer(fuel_bay_drop_id)])
     );
     ctx.db.with_snapshot(|s| {
         assert_eq!(s.items[&cargo_drop_id].location_id, sid);
@@ -1241,7 +1242,7 @@ async fn structure_cargo_fuel_extra_acl_service_offline_and_ship_deliver_guards(
             &mut no_ball_sess,
             "structureCargoDelivery",
             "DropOffItems",
-            &[PyRep::Integer(sid), PyRep::List(vec![PyRep::Integer(cargo_drop_id)])],
+            &[PyRep::List(vec![PyRep::Integer(cargo_drop_id)]), PyRep::Integer(999_444), PyRep::Integer(sid)],
         )
         .await
         .unwrap()
@@ -1256,7 +1257,7 @@ async fn structure_cargo_fuel_extra_acl_service_offline_and_ship_deliver_guards(
             &mut ceo_sess,
             "structureCargoDelivery",
             "DropOffItems",
-            &[PyRep::Integer(offline_sid), PyRep::List(vec![PyRep::Integer(cargo_drop_id)])],
+            &[PyRep::List(vec![PyRep::Integer(cargo_drop_id)]), PyRep::Integer(ceo_ship), PyRep::Integer(offline_sid)],
         )
         .await
         .unwrap()
@@ -1277,7 +1278,7 @@ async fn structure_cargo_fuel_extra_acl_service_offline_and_ship_deliver_guards(
             &mut out_sess,
             "structureCargoDelivery",
             "DropOffItems",
-            &[PyRep::Integer(sid), PyRep::List(vec![PyRep::Integer(out_cargo_id)])],
+            &[PyRep::List(vec![PyRep::Integer(out_cargo_id)]), PyRep::Integer(out_ship), PyRep::Integer(sid)],
         )
         .await
         .unwrap()
