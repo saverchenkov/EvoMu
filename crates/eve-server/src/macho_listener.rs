@@ -92,6 +92,7 @@ fn drain_pending_tick_batches_for_sys(
                             tick_out.tick,
                             evs,
                             updates_pyrep.clone(),
+                            &[ship_id],
                         ) {
                             pending_tick_batches.push(batch);
                         }
@@ -285,16 +286,73 @@ async fn write_out_frames<W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
+fn is_suppressed_self_terminal_explosion(entry: &PyRep, suppressed_ship_ids: &[i64]) -> bool {
+    let PyRep::Tuple(outer) = entry else {
+        return false;
+    };
+    if outer.len() != 2 {
+        return false;
+    }
+    let PyRep::Tuple(action) = &outer[1] else {
+        return false;
+    };
+    if action.len() != 2 || action[0].as_str() != Some("TerminalPlayDestructionEffect") {
+        return false;
+    }
+    let args = match &action[1] {
+        PyRep::Tuple(items) | PyRep::List(items) => items,
+        _ => return false,
+    };
+    matches!(args.first(), Some(PyRep::Integer(ball_id)) if suppressed_ship_ids.contains(ball_id))
+}
+
+/// Suppresses `TerminalPlayDestructionEffect` targeting the observer's own ship (`#1039`).
+///
+/// Setting `destructionEffectId` on the observer client's own ship (the active `lookAtBall`)
+/// causes V24 `ShipOrbitCamera.OnBallRemoved` to activate `ExplosionCamera` during 1-arg
+/// `RemoveBall` or during `OnPrimaryViewChanged -> RemoveBallpark -> Release -> RemoveBalls`
+/// after a rapid ship -> pod -> station `DeathRespawn`, crashing `GetBallPosition(None)`.
+pub(crate) fn strip_self_terminal_explosions(
+    updates_pyrep: PyRep,
+    suppressed_ship_ids: &[i64],
+) -> PyRep {
+    if suppressed_ship_ids.is_empty() {
+        return updates_pyrep;
+    }
+    match updates_pyrep {
+        PyRep::List(items) => {
+            if !items
+                .iter()
+                .any(|entry| is_suppressed_self_terminal_explosion(entry, suppressed_ship_ids))
+            {
+                return PyRep::List(items);
+            }
+            PyRep::List(
+                items
+                    .into_iter()
+                    .filter(|entry| {
+                        !is_suppressed_self_terminal_explosion(entry, suppressed_ship_ids)
+                    })
+                    .collect(),
+            )
+        }
+        other => other,
+    }
+}
+
 fn build_destiny_batch(
     ctx: &ServerContext,
     epoch: u32,
     stamp: u64,
     events: &[eve_destiny::DestinyEvent],
     updates_pyrep: PyRep,
+    suppressed_explosion_ship_ids: &[i64],
 ) -> Option<crate::outbound_sequencer::DestinyBatch> {
     if events.is_empty() {
         return None;
     }
+    let updates_pyrep =
+        strip_self_terminal_explosions(updates_pyrep, suppressed_explosion_ship_ids);
     let has_set_state = events
         .iter()
         .any(|ev| matches!(ev, eve_destiny::DestinyEvent::SetState { .. }));
@@ -489,6 +547,7 @@ pub async fn execute_call_req_wire(
                             tick,
                             &obs_evs,
                             updates_pyrep,
+                            &[old_ship_id],
                         );
                     }
                 } else {
@@ -625,8 +684,14 @@ pub async fn execute_call_req_wire(
                 sys_handle.drain_observer_updates(ship_id).await
             {
                 let ep = wire.wire_state.current_epoch();
-                pre_dock_destiny =
-                    build_destiny_batch(ctx, ep, tick, &obs_evs, updates_pyrep);
+                pre_dock_destiny = build_destiny_batch(
+                    ctx,
+                    ep,
+                    tick,
+                    &obs_evs,
+                    updates_pyrep,
+                    &[ship_id],
+                );
             }
         }
     }
@@ -755,8 +820,15 @@ pub async fn execute_call_req_wire(
                     if !effective_was_live && has_set_state {
                         let _ = drain_sys_rx_discarding_lag(wire.sys_rx);
                     }
-                    post_rpc_direct_batch =
-                        build_destiny_batch(ctx, ep, tick, &obs_evs, updates_pyrep);
+                    let suppressed_ids = [ship_id, prev_session.ship_id.unwrap_or(ship_id)];
+                    post_rpc_direct_batch = build_destiny_batch(
+                        ctx,
+                        ep,
+                        tick,
+                        &obs_evs,
+                        updates_pyrep,
+                        &suppressed_ids,
+                    );
                 }
             }
         }
@@ -1058,7 +1130,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                     let _ = sys_handle.push_set_state(ship_id).await;
                                     if let Ok((tick, obs_evs, updates_pyrep)) = sys_handle.drain_observer_updates(ship_id).await {
                                         let ep = wire_state.current_epoch();
-                                        if let Some(batch) = build_destiny_batch(&ctx, ep, tick, &obs_evs, updates_pyrep) {
+                                        if let Some(batch) = build_destiny_batch(&ctx, ep, tick, &obs_evs, updates_pyrep, &[ship_id]) {
                                             if let Some(frame) = crate::outbound_sequencer::sequence_tick(
                                                 &mut wire_state,
                                                 batch,
@@ -1098,7 +1170,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                         .map(Vec::as_slice)
                                         .unwrap_or(&tick_msg.events);
                                     let ep = wire_state.current_epoch();
-                                    if let Some(batch) = build_destiny_batch(&ctx, ep, tick_msg.tick, evs, updates_pyrep.clone()) {
+                                    if let Some(batch) = build_destiny_batch(&ctx, ep, tick_msg.tick, evs, updates_pyrep.clone(), &[ship_id]) {
                                         if let Some(frame) = crate::outbound_sequencer::sequence_tick(
                                             &mut wire_state,
                                             batch,
@@ -1250,9 +1322,16 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                             }
                                         }
                                         let ep = wire_state.ensure_in_space(session.solar_system_id);
-                                        if let Some(batch) =
-                                            build_destiny_batch(&ctx, ep, tick, &events, updates_pyrep)
-                                        {
+                                        let suppressed_ids =
+                                            [new_ship_id, prev_session.ship_id.unwrap_or(new_ship_id)];
+                                        if let Some(batch) = build_destiny_batch(
+                                            &ctx,
+                                            ep,
+                                            tick,
+                                            &events,
+                                            updates_pyrep,
+                                            &suppressed_ids,
+                                        ) {
                                             if let Some(frame) = crate::outbound_sequencer::sequence_tick(
                                                 &mut wire_state,
                                                 batch,

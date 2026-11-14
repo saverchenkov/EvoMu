@@ -1694,3 +1694,252 @@ async fn death_respawn_from_space_to_station_detaches_without_stale_destiny_1010
         "DeathRespawn space -> station must NOT leak stale DoDestinyUpdate/TerminalPlayDestructionEffect (#1010)"
     );
 }
+
+#[test]
+fn strip_self_terminal_explosions_filters_only_matching_ship_ids_1039() {
+    use eve_destiny::{wire::encode_destiny_event, DestinyEvent};
+
+    let own_ship_id = 100_000_001_i64;
+    let peer_ship_id = 100_000_099_i64;
+    let dmg = encode_destiny_event(
+        10,
+        &DestinyEvent::OnDamageStateChange {
+            ball_id: own_ship_id,
+            shield_ratio: 0.0,
+            armor_ratio: 0.0,
+            structure_ratio: 0.0,
+        },
+        None,
+    );
+    let self_boom = encode_destiny_event(
+        10,
+        &DestinyEvent::TerminalExplosion {
+            ball_id: own_ship_id,
+            destruction_effect_id: None,
+        },
+        None,
+    );
+    let peer_boom = encode_destiny_event(
+        10,
+        &DestinyEvent::TerminalExplosion {
+            ball_id: peer_ship_id,
+            destruction_effect_id: None,
+        },
+        None,
+    );
+
+    let filtered = strip_self_terminal_explosions(
+        PyRep::List(vec![dmg.clone(), self_boom.clone(), peer_boom.clone()]),
+        &[own_ship_id],
+    );
+    let items = as_list(&filtered);
+    assert_eq!(items.len(), 2, "must strip only self TerminalPlayDestructionEffect (#1039)");
+    assert_eq!(items[0], dmg);
+    assert_eq!(items[1], peer_boom);
+
+    let solely_self = strip_self_terminal_explosions(PyRep::List(vec![self_boom]), &[own_ship_id]);
+    assert!(
+        as_list(&solely_self).is_empty(),
+        "batch containing solely self TerminalPlayDestructionEffect must drain to empty (#1039)"
+    );
+}
+
+#[tokio::test]
+async fn ship_destruction_and_rapid_pod_death_respawn_suppress_self_terminal_explosion_1039() {
+    use glam::DVec3;
+
+    let ctx = Arc::new(ServerContext::new());
+    let clock = Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000));
+    ctx.set_clock(Arc::clone(&clock) as Arc<dyn ServerClock>);
+    let addr = spawn_listener(Arc::clone(&ctx)).await;
+    let (mut s, client_id, user_id) = connect_login(addr, "demo", "demo-secret").await;
+    let (char_id, old_ship_id) = (90_000_001_i64, 100_000_001_i64);
+    let peer_ship_id = 100_000_099_i64;
+    let sys_id = 30_000_142_u32;
+
+    let call = |cid: u64, svc: &str, bid: Option<u64>, m: &str, args: Vec<PyRep>| {
+        build_call_pkt(
+            client_id,
+            user_id,
+            cid,
+            MachoAddress::Node {
+                node_id: MACHO_PROXY_NODE_ID,
+                service: Some(svc.into()),
+                call_id: 0,
+            },
+            bid,
+            m,
+            args,
+        )
+    };
+
+    write_framed_pyrep(
+        &mut s,
+        &call(1, "charUnboundMgr", None, "SelectCharacterID", vec![PyRep::Integer(char_id)]).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let _ = read_until_call_reply(&mut s).await;
+    write_framed_pyrep(&mut s, &call(2, "stationSvc", None, "Undock", vec![]).to_pyrep())
+        .await
+        .unwrap();
+    let _ = read_until_call_reply(&mut s).await;
+
+    let jita = ctx.systems.get_or_spawn(sys_id);
+    let ship_pos = {
+        let mut bp = jita.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        let mut peer_ball = bp.balls.get(&old_ship_id).expect("undocked ship ball").clone();
+        let pos = peer_ball.position;
+        peer_ball.id = peer_ship_id;
+        peer_ball.position += DVec3::new(1_000.0, 0.0, 0.0);
+        assert!(bp.add_ball(peer_ball));
+        bp.observer_events.entry(peer_ship_id).or_default();
+        pos
+    };
+    let _ = jita.step_manual(1.0).await.unwrap();
+
+    write_framed_pyrep(
+        &mut s,
+        &call(3, "beyonce", None, "MachoBindObject", vec![PyRep::Integer(sys_id as i64), PyRep::None]).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let bind_rsp = read_until_call_reply(&mut s).await;
+    let oid_val = bind_rsp
+        .named_payload
+        .get("OID+")
+        .map(as_dict)
+        .and_then(|e| e.first())
+        .and_then(|(k, _)| k.as_str())
+        .and_then(|s_oid| s_oid.split(':').nth(1))
+        .and_then(|n| n.parse::<u64>().ok())
+        .expect("beyonce bind OID+");
+    write_framed_pyrep(
+        &mut s,
+        &call(4, "beyonce", Some(oid_val), "UpdateStateRequest", vec![]).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(read_until_call_reply(&mut s).await.packet_type, MachoPacketType::CallRsp);
+    while tokio::time::timeout(std::time::Duration::from_millis(20), read_pkt(&mut s))
+        .await
+        .is_ok()
+    {}
+
+    // 1. Fatal ship damage broadcast BEFORE execute_death_pipeline updates DB (the cycles.rs race #1039).
+    {
+        let mut bp = jita.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        let grid_id = bp.ball_grid_ids.get(&old_ship_id).copied();
+        bp.observer_events.entry(peer_ship_id).or_default();
+        bp.emit_damage_and_destruction_events(old_ship_id, grid_id, 0.0, 0.0, 0.0, true);
+    }
+    let ship_tick = jita.step_manual(1.0).await.unwrap();
+    let peer_ship_pyrep = ship_tick
+        .observer_updates_pyrep
+        .get(&peer_ship_id)
+        .expect("peer observer must receive ship death broadcast");
+    assert!(
+        pyrep_contains_ascii(peer_ship_pyrep, "TerminalPlayDestructionEffect"),
+        "peer observer on grid must still receive TerminalPlayDestructionEffect (#1039)"
+    );
+
+    let mut saw_ship_damage_update = false;
+    for _ in 0..4 {
+        let Ok(Some(raw)) = tokio::time::timeout(std::time::Duration::from_millis(150), read_pkt(&mut s)).await else {
+            break;
+        };
+        assert!(
+            !pyrep_contains_ascii(&raw, "TerminalPlayDestructionEffect"),
+            "victim client must NOT receive TerminalPlayDestructionEffect on its own ship (#1039): {raw:?}"
+        );
+        if pyrep_contains_ascii(&raw, "OnDamageStateChange") {
+            saw_ship_damage_update = true;
+        }
+    }
+    assert!(saw_ship_damage_update, "victim must still receive OnDamageStateChange for fatal hit");
+
+    // 2. Eject into capsule (queues 2-tick deferred RemoveBall(old_ship_id) per #1018).
+    let ship_death = crate::combat::death_pipeline::execute_death_pipeline(
+        &ctx,
+        sys_id,
+        char_id,
+        old_ship_id,
+        0,
+        ship_pos,
+        1,
+    )
+    .await
+    .expect("ship death pipeline");
+    let pod_id = ship_death
+        .ejected_capsule_id
+        .expect("ship destruction must eject into capsule");
+    let mut saw_pod_sess = false;
+    for _ in 0..6 {
+        let Ok(Some(raw)) = tokio::time::timeout(std::time::Duration::from_millis(150), read_pkt(&mut s)).await else {
+            break;
+        };
+        assert!(
+            !pyrep_contains_ascii(&raw, "TerminalPlayDestructionEffect"),
+            "pod handoff must NOT deliver TerminalPlayDestructionEffect (#1039): {raw:?}"
+        );
+        let pkt = MachoPacket::from_pyrep(&raw).unwrap();
+        if pkt.packet_type == MachoPacketType::SessionChangeNotification {
+            saw_pod_sess = true;
+        }
+    }
+    assert!(saw_pod_sess, "pod ejection must emit SessionChangeNotification");
+
+    // 3. Rapid pod death within the 2-tick deferral window -> DeathRespawn to home station.
+    {
+        let mut bp = jita.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        let grid_id = bp.ball_grid_ids.get(&pod_id).copied();
+        bp.observer_events.entry(peer_ship_id).or_default();
+        bp.emit_damage_and_destruction_events(pod_id, grid_id, 0.0, 0.0, 0.0, true);
+    }
+    let pod_tick = jita.step_manual(1.0).await.unwrap();
+    let peer_pod_pyrep = pod_tick
+        .observer_updates_pyrep
+        .get(&peer_ship_id)
+        .expect("peer observer must receive pod death broadcast");
+    assert!(
+        pyrep_contains_ascii(peer_pod_pyrep, "TerminalPlayDestructionEffect"),
+        "peer observer on grid must still receive pod TerminalPlayDestructionEffect (#1039)"
+    );
+    crate::combat::death_pipeline::execute_death_pipeline(
+        &ctx,
+        sys_id,
+        char_id,
+        pod_id,
+        0,
+        ship_pos,
+        2,
+    )
+    .await
+    .expect("pod death pipeline");
+
+    let mut saw_respawn_sess: Option<usize> = None;
+    let mut saw_respawn_notif: Option<usize> = None;
+    for idx in 0..10 {
+        let Ok(Some(raw)) = tokio::time::timeout(std::time::Duration::from_millis(200), read_pkt(&mut s)).await else {
+            break;
+        };
+        assert!(
+            !pyrep_contains_ascii(&raw, "TerminalPlayDestructionEffect"),
+            "rapid pod DeathRespawn must NOT deliver TerminalPlayDestructionEffect (#1039): {raw:?}"
+        );
+        let pkt = MachoPacket::from_pyrep(&raw).unwrap();
+        if pkt.packet_type == MachoPacketType::SessionChangeNotification {
+            saw_respawn_sess.get_or_insert(idx);
+        } else if pkt.packet_type == MachoPacketType::Notification
+            && pyrep_contains_ascii(&raw, "OnPlayerPodRespawn")
+        {
+            saw_respawn_notif.get_or_insert(idx);
+        }
+    }
+    let sess_idx = saw_respawn_sess.expect("DeathRespawn must emit SessionChangeNotification (#1039)");
+    let resp_idx = saw_respawn_notif.expect("DeathRespawn must emit OnPlayerPodRespawn (#1039)");
+    assert!(
+        sess_idx < resp_idx,
+        "SessionChangeNotification ({sess_idx}) must precede OnPlayerPodRespawn ({resp_idx})"
+    );
+}
