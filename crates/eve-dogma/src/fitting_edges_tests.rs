@@ -541,6 +541,35 @@ fn overload_offline_enforcement_heat_abyssal_and_t3d_stance_edges() {
     assert!(ShipFittingEngine::t3d_stance_belongs_to_hull(35683, 35687));
     assert!(ShipFittingEngine::t3d_stance_belongs_to_hull(624, 34319));
 
+    // V24 1-based stance key resolution (1=Defense, 2=Propulsion, 3=Sharpshooter) & reverse key lookup
+    for (hull, def_tid, prop_tid, sharp_tid) in [
+        (34317_u32, 34319_u32, 34323_u32, 34321_u32),
+        (34562, 34564, 34566, 34570),
+        (34828, 35676, 35677, 35678),
+        (35683, 35686, 35687, 35688),
+    ] {
+        assert_eq!(ShipFittingEngine::resolve_t3d_stance_type_id(hull, 1), Some(def_tid));
+        assert_eq!(ShipFittingEngine::resolve_t3d_stance_type_id(hull, 2), Some(prop_tid));
+        assert_eq!(ShipFittingEngine::resolve_t3d_stance_type_id(hull, 3), Some(sharp_tid));
+        assert_eq!(ShipFittingEngine::resolve_t3d_stance_type_id(hull, def_tid as i64), Some(def_tid));
+        assert_eq!(ShipFittingEngine::resolve_t3d_stance_type_id(hull, prop_tid as i64), Some(prop_tid));
+        assert_eq!(ShipFittingEngine::resolve_t3d_stance_type_id(hull, sharp_tid as i64), Some(sharp_tid));
+        assert_eq!(ShipFittingEngine::t3d_stance_key(hull, def_tid), Some(1));
+        assert_eq!(ShipFittingEngine::t3d_stance_key(hull, prop_tid), Some(2));
+        assert_eq!(ShipFittingEngine::t3d_stance_key(hull, sharp_tid), Some(3));
+        assert_eq!(ShipFittingEngine::resolve_t3d_stance_type_id(hull, 0), None);
+        assert_eq!(ShipFittingEngine::resolve_t3d_stance_type_id(hull, -1), None);
+        assert_eq!(ShipFittingEngine::resolve_t3d_stance_type_id(hull, i64::from(u32::MAX) + 1), None);
+        // Index 4 falls through as candidate TypeId 4, which switch_ship_stance/set_ship_stance reject as non-1306
+        assert_eq!(ShipFittingEngine::resolve_t3d_stance_type_id(hull, 4), Some(4));
+        assert_eq!(ShipFittingEngine::t3d_stance_key(hull, 4), None);
+    }
+    // Non-T3D hulls must reject 1..=3 stance keys instead of treating them as SDE type IDs
+    assert_eq!(ShipFittingEngine::resolve_t3d_stance_type_id(624, 1), None);
+    assert_eq!(ShipFittingEngine::resolve_t3d_stance_type_id(624, 2), None);
+    assert_eq!(ShipFittingEngine::resolve_t3d_stance_type_id(624, 3), None);
+    assert_eq!(ShipFittingEngine::t3d_stance_key(624, 34319), None);
+
     // Non-1305 hull rejected for stance
     assert!(eng.set_ship_stance(34319, &sde).is_err());
     assert!(eng.switch_ship_stance(34319, 1_000, &sde).is_err());

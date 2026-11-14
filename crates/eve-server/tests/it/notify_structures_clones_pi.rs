@@ -312,7 +312,7 @@ async fn notify_batch7_weapons_fittings_drones_stances_jump_and_skills() {
         .await
         .expect("SetShipStance");
     let stance_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
-    assert_eq!(find_notif(&stance_notifs, "OnStanceActive"), &[PyRep::Integer(ship_a), PyRep::Integer(34319)]);
+    assert_eq!(find_notif(&stance_notifs, "OnStanceActive"), &[PyRep::Integer(ship_a), PyRep::Integer(1)]);
 
     // 8-9. OnGroupJumpAnchorActivated (2-arg) & OnGroupJumpedPassenger (2-arg)
     let (sys_origin, sys_dest) = {

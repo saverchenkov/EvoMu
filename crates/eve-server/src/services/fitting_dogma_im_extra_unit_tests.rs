@@ -2321,5 +2321,287 @@ async fn issue_830_get_layer_damage_values_and_load_ammo_accept_python_sets() {
     );
 }
 
+#[tokio::test]
+async fn test_issue_1047_ship_stance_mgr_resolves_v24_indices_all_hulls_and_rejects_invalid() {
+    let ctx = new_seeded_ctx();
+    let base_secs = 1_800_000_000_u64;
+    let char_id = 90_000_001_i64;
+    let corp_id = 1_000_009_i64;
+    let sys_id = 30_000_142_u32;
+    let station_id = 60_003_760_i64;
+
+    let hulls = [
+        (34317_u32, 34319_u32, 34323_u32, 34321_u32), // Confessor: 1=Def, 2=Prop, 3=Sharp
+        (34562_u32, 34564_u32, 34566_u32, 34570_u32), // Svipul
+        (34828_u32, 35676_u32, 35677_u32, 35678_u32), // Jackdaw
+        (35683_u32, 35686_u32, 35687_u32, 35688_u32), // Hecate
+    ];
+
+    for (idx, &(hull_tid, def_tid, prop_tid, sharp_tid)) in hulls.iter().enumerate() {
+        let mut clock_secs = base_secs + (idx as u64) * 100;
+        ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(clock_secs)));
+
+        let ship_id = 96_500_100_i64 + idx as i64;
+        let user_id = ctx.db.with_mut_snapshot(|snap| {
+            let mut ch = snap
+                .characters
+                .get(&char_id)
+                .cloned()
+                .expect("demo character seeded");
+            let uid = ch.user_id;
+            ch.active_ship_id = ship_id;
+            ch.station_id = Some(station_id);
+            ch.solar_system_id = sys_id;
+            snap.characters.insert(char_id, ch);
+            snap.items.insert(
+                ship_id,
+                InventoryItemRecord {
+                    item_id: ship_id,
+                    type_id: hull_tid,
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.ship_fit_inputs.remove(&ship_id);
+            uid
+        });
+        ctx.db
+            .acquire_online_lock(user_id, 1, Some(char_id), true, ctx.now_unix())
+            .expect("acquire online lock for stance notifications");
+        ctx.invalidate_ship_fitting(ship_id);
+        let mut session = make_session(char_id, corp_id, Some(sys_id), Some(station_id), Some(ship_id));
+
+        let base_fit = ctx.fit(char_id, ship_id).expect("seed hull fit");
+        let base_vel = base_fit.ship.get_attribute(eve_sde::attr_ids::MAX_VELOCITY, &ctx.sde);
+        let base_agility = base_fit.ship.get_attribute(eve_sde::attr_ids::AGILITY, &ctx.sde);
+        let base_lock = base_fit.ship.get_attribute(eve_sde::attr_ids::MAX_TARGET_RANGE, &ctx.sde);
+
+        // 1. V24 middle button sends key `3` (Sharpshooter / Sniper).
+        ctx.pending_notifications.write().unwrap().remove(&char_id);
+        let res_3 = call_ship_stance_mgr(
+            &ctx,
+            &mut session,
+            None,
+            "SetShipStance",
+            &[PyRep::Integer(ship_id), PyRep::Integer(3)],
+        )
+        .await
+        .expect("index 3 -> Sharpshooter must succeed");
+        assert_eq!(res_3, PyRep::Integer(i64::from(sharp_tid)));
+        let stance_notifs_3: Vec<Vec<PyRep>> = ctx
+            .pending_notifications
+            .read()
+            .unwrap()
+            .get(&char_id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|n| n.event == "OnStanceActive")
+            .map(|n| n.args)
+            .collect();
+        assert_eq!(
+            stance_notifs_3,
+            vec![vec![PyRep::Integer(ship_id), PyRep::Integer(3)]],
+            "OnStanceActive must carry V24 1-based stance key 3 for hull {hull_tid}"
+        );
+        ctx.invalidate_ship_fitting(ship_id);
+        let fit_3 = ctx.fit(char_id, ship_id).expect("rehydrated fit after index 3");
+        assert_eq!(fit_3.active_stance_type_id, Some(sharp_tid));
+        assert!(
+            fit_3.ship.get_attribute(eve_sde::attr_ids::MAX_TARGET_RANGE, &ctx.sde) > base_lock,
+            "Sharpshooter stance (3) should boost maxTargetRange on hull {hull_tid}"
+        );
+        let PyRep::KeyVal(kv_3) = call_dogma_im(&ctx, &mut session, None, "GetAllInfo", &[])
+            .await
+            .expect("GetAllInfo after index 3")
+        else {
+            panic!("expected KeyVal from GetAllInfo");
+        };
+        assert_eq!(kv_3.get("activeStance"), Some(&PyRep::Integer(i64::from(sharp_tid))));
+
+        // 2. Cooldown (< 10s) must reject index `2` without mutating state or emitting OnStanceActive.
+        ctx.pending_notifications.write().unwrap().remove(&char_id);
+        ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(clock_secs + 5)));
+        let cooldown_err = call_ship_stance_mgr(
+            &ctx,
+            &mut session,
+            None,
+            "SetShipStance",
+            &[PyRep::Integer(ship_id), PyRep::Integer(2)],
+        )
+        .await
+        .expect_err("switch within 10s cooldown must fail");
+        assert_eq!(cooldown_err.code, "StanceSwitchCooldown");
+        assert!(
+            !ctx.pending_notifications
+                .read()
+                .unwrap()
+                .get(&char_id)
+                .into_iter()
+                .flatten()
+                .any(|n| n.event == "OnStanceActive")
+        );
+
+        // 3. Advance clock >= 10s and switch via index `2` (Propulsion) and `1` (Defense).
+        for (key, expected_tid) in [(2_i64, prop_tid), (1_i64, def_tid)] {
+            clock_secs += 12;
+            ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(clock_secs)));
+            ctx.pending_notifications.write().unwrap().remove(&char_id);
+            let res = call_ship_stance_mgr(
+                &ctx,
+                &mut session,
+                None,
+                "SetShipStance",
+                &[PyRep::Integer(ship_id), PyRep::Integer(key)],
+            )
+            .await
+            .unwrap_or_else(|e| panic!("key {key} on hull {hull_tid} failed: {e:?}"));
+            assert_eq!(res, PyRep::Integer(i64::from(expected_tid)));
+            let stance_notifs: Vec<Vec<PyRep>> = ctx
+                .pending_notifications
+                .read()
+                .unwrap()
+                .get(&char_id)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|n| n.event == "OnStanceActive")
+                .map(|n| n.args)
+                .collect();
+            assert_eq!(
+                stance_notifs,
+                vec![vec![PyRep::Integer(ship_id), PyRep::Integer(key)]]
+            );
+            ctx.invalidate_ship_fitting(ship_id);
+            let fit = ctx.fit(char_id, ship_id).expect("rehydrated fit after switch");
+            assert_eq!(fit.active_stance_type_id, Some(expected_tid));
+            if key == 2 {
+                let vel = fit.ship.get_attribute(eve_sde::attr_ids::MAX_VELOCITY, &ctx.sde);
+                let agi = fit.ship.get_attribute(eve_sde::attr_ids::AGILITY, &ctx.sde);
+                assert!(
+                    vel > base_vel || agi < base_agility,
+                    "Propulsion stance (2) should improve velocity/agility on hull {hull_tid}"
+                );
+            }
+        }
+
+        // 4. Direct stance `type_id` compatibility: still accepted and still emits key 1..=3.
+        clock_secs += 12;
+        ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(clock_secs)));
+        ctx.pending_notifications.write().unwrap().remove(&char_id);
+        let res_direct = call_ship_stance_mgr(
+            &ctx,
+            &mut session,
+            None,
+            "SetShipStance",
+            &[PyRep::Integer(ship_id), PyRep::Integer(i64::from(sharp_tid))],
+        )
+        .await
+        .expect("direct stance type_id must remain compatible");
+        assert_eq!(res_direct, PyRep::Integer(i64::from(sharp_tid)));
+        let direct_notifs: Vec<Vec<PyRep>> = ctx
+            .pending_notifications
+            .read()
+            .unwrap()
+            .get(&char_id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|n| n.event == "OnStanceActive")
+            .map(|n| n.args)
+            .collect();
+        assert_eq!(
+            direct_notifs,
+            vec![vec![PyRep::Integer(ship_id), PyRep::Integer(3)]]
+        );
+
+        // 5. Invalid indices (`0`, `-1`, `4`) must fail cleanly without changing persisted stance.
+        clock_secs += 12;
+        ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(clock_secs)));
+        for bad_arg in [0_i64, -1, 4] {
+            ctx.pending_notifications.write().unwrap().remove(&char_id);
+            let err = call_ship_stance_mgr(
+                &ctx,
+                &mut session,
+                None,
+                "SetShipStance",
+                &[PyRep::Integer(ship_id), PyRep::Integer(bad_arg)],
+            )
+            .await
+            .expect_err("invalid stance index must fail");
+            assert_eq!(err.code, "InvalidShipStance");
+            assert!(
+                !ctx.pending_notifications
+                    .read()
+                    .unwrap()
+                    .get(&char_id)
+                    .into_iter()
+                    .flatten()
+                    .any(|n| n.event == "OnStanceActive")
+            );
+        }
+        ctx.db.with_snapshot(|snap| {
+            let rec = snap.ship_fit_inputs.get(&ship_id).expect("fit input persisted");
+            assert_eq!(rec.active_stance_type_id, Some(sharp_tid));
+        });
+    }
+
+    // 6. Non-T3D hull (Rifter 587) must reject V24 indices 1..=3 as well as stance type_ids.
+    let rifter_id = 96_500_200_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.get(&char_id).cloned().expect("demo character");
+        ch.active_ship_id = rifter_id;
+        snap.characters.insert(char_id, ch);
+        snap.items.insert(
+            rifter_id,
+            InventoryItemRecord {
+                item_id: rifter_id,
+                type_id: 587, // Rifter
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.ship_fit_inputs.remove(&rifter_id);
+    });
+    ctx.invalidate_ship_fitting(rifter_id);
+    let mut rifter_session =
+        make_session(char_id, corp_id, Some(sys_id), Some(station_id), Some(rifter_id));
+    for arg in [1_i64, 2, 3, 34319] {
+        ctx.pending_notifications.write().unwrap().remove(&char_id);
+        let err = call_ship_stance_mgr(
+            &ctx,
+            &mut rifter_session,
+            None,
+            "SetShipStance",
+            &[PyRep::Integer(rifter_id), PyRep::Integer(arg)],
+        )
+        .await
+        .expect_err("non-T3D must reject ship stances");
+        assert_eq!(err.code, "InvalidShipStance");
+        assert!(
+            !ctx.pending_notifications
+                .read()
+                .unwrap()
+                .get(&char_id)
+                .into_iter()
+                .flatten()
+                .any(|n| n.event == "OnStanceActive")
+        );
+    }
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.ship_fit_inputs.contains_key(&rifter_id));
+    });
+}
+
 
 

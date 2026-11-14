@@ -1205,26 +1205,67 @@ impl ShipFittingEngine {
         self.recalculate_stats(sde);
     }
 
+    /// V24.01 `shipmode/data.pyj` Tactical Destroyer stance mapping:
+    /// 1-based stance keys `1 = shipStanceDefense`, `2 = shipStanceSpeed` (Propulsion),
+    /// `3 = shipStanceSniper` (Sharpshooter) -> `(hull_type_id, [Defense, Propulsion, Sharpshooter])`.
+    const T3D_STANCE_TABLE: &'static [(TypeId, [TypeId; 3])] = &[
+        (34317, [34319, 34323, 34321]), // Confessor: Defense, Propulsion, Sharpshooter
+        (34562, [34564, 34566, 34570]), // Svipul: Defense, Propulsion, Sharpshooter
+        (34828, [35676, 35677, 35678]), // Jackdaw: Defense, Propulsion, Sharpshooter
+        (35683, [35686, 35687, 35688]), // Hecate: Defense, Propulsion, Sharpshooter
+    ];
+
     /// Returns the default Tactical Destroyer stance (`group_id == 1306`) for a given T3D hull (`group_id == 1305`) (`feat:ships.ship-stance`).
     pub fn default_t3d_stance_type_id(ship_type_id: TypeId) -> Option<TypeId> {
-        match ship_type_id {
-            34317 => Some(34319), // Confessor Defense Mode
-            34562 => Some(34564), // Svipul Defense Mode
-            34828 => Some(35676), // Jackdaw Defense Mode
-            35683 => Some(35686), // Hecate Defense Mode
-            _ => None,
-        }
+        Self::T3D_STANCE_TABLE
+            .iter()
+            .find(|(hull, _)| *hull == ship_type_id)
+            .map(|(_, stances)| stances[0])
     }
 
     /// Returns true if `stance_type_id` (`group_id == 1306`) belongs to the specified Tactical Destroyer `ship_type_id`.
     pub fn t3d_stance_belongs_to_hull(ship_type_id: TypeId, stance_type_id: TypeId) -> bool {
-        match ship_type_id {
-            34317 => matches!(stance_type_id, 34319 | 34321 | 34323),
-            34562 => matches!(stance_type_id, 34564 | 34566 | 34570),
-            34828 => matches!(stance_type_id, 35676 | 35677 | 35678),
-            35683 => matches!(stance_type_id, 35686 | 35687 | 35688),
-            _ => true,
+        match Self::T3D_STANCE_TABLE
+            .iter()
+            .find(|(hull, _)| *hull == ship_type_id)
+        {
+            Some((_, stances)) => stances.contains(&stance_type_id),
+            None => true,
         }
+    }
+
+    /// Resolves a V24 `shipStanceMgr.SetShipStance` argument (`1 | 2 | 3` stance key from
+    /// `shipmode/data.pyj`, or a direct group-1306 stance `type_id` for internal/compat callers)
+    /// into the hull-specific stance `TypeId`. Returns `None` for non-positive/out-of-range
+    /// values or when a `1..=3` stance key is requested for a non-T3D hull.
+    pub fn resolve_t3d_stance_type_id(
+        ship_type_id: TypeId,
+        stance_id_or_type_id: i64,
+    ) -> Option<TypeId> {
+        if stance_id_or_type_id <= 0 {
+            return None;
+        }
+        if (1..=3).contains(&stance_id_or_type_id) {
+            return Self::T3D_STANCE_TABLE
+                .iter()
+                .find(|(hull, _)| *hull == ship_type_id)
+                .map(|(_, stances)| stances[(stance_id_or_type_id - 1) as usize]);
+        }
+        u32::try_from(stance_id_or_type_id).ok()
+    }
+
+    /// Returns the V24 `shipmode/data.pyj` 1-based stance key (`1 = Defense`, `2 = Propulsion`,
+    /// `3 = Sharpshooter`) for `(ship_type_id, stance_type_id)`, as expected by `OnStanceActive`.
+    pub fn t3d_stance_key(ship_type_id: TypeId, stance_type_id: TypeId) -> Option<u8> {
+        Self::T3D_STANCE_TABLE
+            .iter()
+            .find(|(hull, _)| *hull == ship_type_id)
+            .and_then(|(_, stances)| {
+                stances
+                    .iter()
+                    .position(|&tid| tid == stance_type_id)
+                    .map(|idx| (idx + 1) as u8)
+            })
     }
 
     /// Sets the active Tactical Destroyer stance (`group_id == 1306`) without cooldown check and recalculates ship stats (`feat:ships.ship-stance`).
