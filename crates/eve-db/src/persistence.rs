@@ -406,6 +406,25 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+fn persist_tx_clock_offsets(
+    sql_tx: &rusqlite::Transaction<'_>,
+    clock_offset_secs: Option<u64>,
+    unrebased_clock_offset_secs: Option<u64>,
+) -> Result<(), TxError> {
+    if let Some(offset_secs) = clock_offset_secs {
+        sqlite_store::system_checkpoint::persist_clock_offset_secs_in_tx(sql_tx, offset_secs)
+            .map_err(TxError::Persist)?;
+    }
+    if let Some(unrebased_secs) = unrebased_clock_offset_secs {
+        sqlite_store::system_checkpoint::persist_unrebased_clock_offset_secs_in_tx(
+            sql_tx,
+            unrebased_secs,
+        )
+        .map_err(TxError::Persist)?;
+    }
+    Ok(())
+}
+
 pub(crate) struct WorldWriter {
     pub(crate) working: WorldStateSnapshot,
     pub(crate) conn: rusqlite::Connection,
@@ -666,6 +685,13 @@ impl WorldRepository {
         self.sqlite_path.as_deref()
     }
 
+    /// Returns the persisted `world_meta.unrebased_clock_offset_secs` from the backing SQLite database (`#1061`).
+    pub fn persisted_unrebased_clock_offset_secs(&self) -> Result<u64, String> {
+        self.with_sqlite_conn(|conn| {
+            sqlite_store::system_checkpoint::load_unrebased_clock_offset_secs(conn)
+        })
+    }
+
     /// Saves the current snapshot state directly into a SQLite database at `path`, including
     /// durable `AuthRuntimeState` (`jwt_signing_secret`, `revoked_jtis`, `kicked_users`, and
     /// SHA-256-digested `refresh_tokens`) (`#540`).
@@ -673,10 +699,15 @@ impl WorldRepository {
         let repo = Self::open_sqlite(path)?;
         let snap = self.read_state();
         let offset_secs = self.clock().offset_secs();
+        let unrebased_offset_secs = self.persisted_unrebased_clock_offset_secs()?;
         let auth_rt = self.auth_runtime.read().unwrap_or_else(|e| e.into_inner()).clone();
         let mut writer = repo.writer.lock().unwrap_or_else(|e| e.into_inner());
         sqlite_store::replace_sqlite_from_snapshot(&mut writer.conn, &snap)?;
         sqlite_store::system_checkpoint::persist_clock_offset_secs(&writer.conn, offset_secs)?;
+        sqlite_store::system_checkpoint::persist_unrebased_clock_offset_secs(
+            &writer.conn,
+            unrebased_offset_secs,
+        )?;
         sqlite_store::save_jwt_secret(&writer.conn, &auth_rt.jwt_signing_secret)?;
         sqlite_store::replace_auth_runtime_in_sqlite(&mut writer.conn, &auth_rt)?;
         Ok(())
@@ -1084,11 +1115,18 @@ impl WorldRepository {
                 entity_ids: &self.entity_ids,
                 conn: &writer.conn,
                 clock_offset_secs: None,
+                unrebased_clock_offset_secs: None,
             };
-            f(&mut wtx).map(|v| (v, wtx.clock_offset_secs))
+            f(&mut wtx).map(|v| {
+                (
+                    v,
+                    wtx.clock_offset_secs,
+                    wtx.unrebased_clock_offset_secs,
+                )
+            })
         }));
 
-        let (val, clock_offset_secs) = match closure_res {
+        let (val, clock_offset_secs, unrebased_clock_offset_secs) = match closure_res {
             Err(panic_payload) => {
                 let msg = panic_payload_message(&*panic_payload);
                 PERSIST_TX_PANICS_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1139,7 +1177,8 @@ impl WorldRepository {
 
         let mut changes = ChangeSet::diff(writer.seq.saturating_add(1), &before, &writer.working);
         let did_mutate = !changes.is_empty();
-        let has_clock_offset = clock_offset_secs.is_some();
+        let has_clock_offset =
+            clock_offset_secs.is_some() || unrebased_clock_offset_secs.is_some();
         let ephemeral_changed =
             before.transient_item_attributes != writer.working.transient_item_attributes
                 || before.sessions != writer.working.sessions;
@@ -1212,13 +1251,11 @@ impl WorldRepository {
                         cold_fp_ref,
                         need_wal_delta,
                     )?;
-                    if let Some(offset_secs) = clock_offset_secs {
-                        sqlite_store::system_checkpoint::persist_clock_offset_secs_in_tx(
-                            &sql_tx,
-                            offset_secs,
-                        )
-                        .map_err(TxError::Persist)?;
-                    }
+                    persist_tx_clock_offsets(
+                        &sql_tx,
+                        clock_offset_secs,
+                        unrebased_clock_offset_secs,
+                    )?;
                     exec.check_commit_fault()?;
                     if need_wal_delta {
                         if let Some(ref p) = self.snapshot_path {
@@ -1230,13 +1267,11 @@ impl WorldRepository {
                     }
                     (Some(hot_fp), if need_wal_delta { Some(delta) } else { None })
                 } else {
-                    if let Some(offset_secs) = clock_offset_secs {
-                        sqlite_store::system_checkpoint::persist_clock_offset_secs_in_tx(
-                            &sql_tx,
-                            offset_secs,
-                        )
-                        .map_err(TxError::Persist)?;
-                    }
+                    persist_tx_clock_offsets(
+                        &sql_tx,
+                        clock_offset_secs,
+                        unrebased_clock_offset_secs,
+                    )?;
                     exec.check_commit_fault()?;
                     (None, None)
                 };

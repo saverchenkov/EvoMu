@@ -14,6 +14,9 @@ pub const CLUSTER_SYSTEM_ID: u32 = 0;
 /// `world_meta` key storing the persisted virtual clock offset in seconds.
 pub const WORLD_META_CLOCK_OFFSET_SECS_KEY: &str = "clock_offset_secs";
 
+/// `world_meta` key storing the persisted unrebased virtual clock offset in seconds (`#1061`).
+pub const WORLD_META_UNREBASED_CLOCK_OFFSET_SECS_KEY: &str = "unrebased_clock_offset_secs";
+
 /// `world_meta` key recording whether the previous shutdown completed cleanly (`1`) or crashed (`0`).
 pub const WORLD_META_CLEAN_SHUTDOWN_KEY: &str = "clean_shutdown";
 
@@ -240,6 +243,17 @@ pub fn apply_system_checkpoint_migration(conn: &Connection) -> Result<(), String
             params![WORLD_META_CLOCK_OFFSET_SECS_KEY],
         )
         .map_err(|e| format!("seed world_meta.clock_offset_secs error: {e}"))?;
+        // Migrate existing DBs that already persisted `clock_offset_secs` from `/advancetime`
+        // before `unrebased_clock_offset_secs` existed so restarts stay anchored to wallclock (#1061).
+        conn.execute(
+            "INSERT OR IGNORE INTO world_meta (meta_key, meta_value)
+             SELECT ?1, MAX(0, COALESCE((SELECT meta_value FROM world_meta WHERE meta_key = ?2), 0))",
+            params![
+                WORLD_META_UNREBASED_CLOCK_OFFSET_SECS_KEY,
+                WORLD_META_CLOCK_OFFSET_SECS_KEY
+            ],
+        )
+        .map_err(|e| format!("seed world_meta.unrebased_clock_offset_secs error: {e}"))?;
         conn.execute(
             "INSERT OR IGNORE INTO world_meta (meta_key, meta_value) VALUES (?1, 0)",
             params![WORLD_META_CLEAN_SHUTDOWN_KEY],
@@ -607,20 +621,58 @@ pub fn has_any_system_checkpoints(conn: &Connection) -> Result<bool, String> {
     Ok(found.is_some())
 }
 
-/// Loads `world_meta.clock_offset_secs` from SQLite, returning `0` if missing or non-positive.
-pub fn load_clock_offset_secs(conn: &Connection) -> Result<u64, String> {
+fn load_world_meta_u64(conn: &Connection, meta_key: &str) -> Result<u64, String> {
     if !sqlite_table_exists(conn, "world_meta")? {
         return Ok(0);
     }
     let val: Option<i64> = conn
         .query_row(
             "SELECT meta_value FROM world_meta WHERE meta_key = ?1",
-            params![WORLD_META_CLOCK_OFFSET_SECS_KEY],
+            params![meta_key],
             |row| row.get(0),
         )
         .optional()
-        .map_err(|e| format!("load world_meta.clock_offset_secs: {e}"))?;
+        .map_err(|e| format!("load world_meta.{meta_key}: {e}"))?;
     Ok(val.and_then(|v| u64::try_from(v).ok()).unwrap_or(0))
+}
+
+fn persist_world_meta_u64_in_tx(
+    tx: &Transaction<'_>,
+    meta_key: &str,
+    value: u64,
+) -> Result<(), String> {
+    let clamped = i64::try_from(value).unwrap_or(i64::MAX);
+    tx.execute(
+        "INSERT INTO world_meta (meta_key, meta_value) VALUES (?1, ?2)
+         ON CONFLICT(meta_key) DO UPDATE SET meta_value = excluded.meta_value",
+        params![meta_key, clamped],
+    )
+    .map_err(|e| format!("persist world_meta.{meta_key} in tx: {e}"))?;
+    Ok(())
+}
+
+fn persist_world_meta_u64(conn: &Connection, meta_key: &str, value: u64) -> Result<(), String> {
+    if !sqlite_table_exists(conn, "world_meta")? {
+        return Ok(());
+    }
+    let clamped = i64::try_from(value).unwrap_or(i64::MAX);
+    conn.execute(
+        "INSERT INTO world_meta (meta_key, meta_value) VALUES (?1, ?2)
+         ON CONFLICT(meta_key) DO UPDATE SET meta_value = excluded.meta_value",
+        params![meta_key, clamped],
+    )
+    .map_err(|e| format!("persist world_meta.{meta_key}: {e}"))?;
+    Ok(())
+}
+
+/// Loads `world_meta.clock_offset_secs` from SQLite, returning `0` if missing or non-positive.
+pub fn load_clock_offset_secs(conn: &Connection) -> Result<u64, String> {
+    load_world_meta_u64(conn, WORLD_META_CLOCK_OFFSET_SECS_KEY)
+}
+
+/// Loads `world_meta.unrebased_clock_offset_secs` from SQLite, returning `0` if missing or non-positive (`#1061`).
+pub fn load_unrebased_clock_offset_secs(conn: &Connection) -> Result<u64, String> {
+    load_world_meta_u64(conn, WORLD_META_UNREBASED_CLOCK_OFFSET_SECS_KEY)
 }
 
 /// Persists `world_meta.clock_offset_secs` inside an active SQLite transaction (`#920`, `#899` §3.6).
@@ -628,29 +680,28 @@ pub fn persist_clock_offset_secs_in_tx(
     tx: &Transaction<'_>,
     offset_secs: u64,
 ) -> Result<(), String> {
-    let clamped = i64::try_from(offset_secs).unwrap_or(i64::MAX);
-    tx.execute(
-        "INSERT INTO world_meta (meta_key, meta_value) VALUES (?1, ?2)
-         ON CONFLICT(meta_key) DO UPDATE SET meta_value = excluded.meta_value",
-        params![WORLD_META_CLOCK_OFFSET_SECS_KEY, clamped],
-    )
-    .map_err(|e| format!("persist world_meta.clock_offset_secs in tx: {e}"))?;
-    Ok(())
+    persist_world_meta_u64_in_tx(tx, WORLD_META_CLOCK_OFFSET_SECS_KEY, offset_secs)
+}
+
+/// Persists `world_meta.unrebased_clock_offset_secs` inside an active SQLite transaction (`#1061`).
+pub fn persist_unrebased_clock_offset_secs_in_tx(
+    tx: &Transaction<'_>,
+    offset_secs: u64,
+) -> Result<(), String> {
+    persist_world_meta_u64_in_tx(tx, WORLD_META_UNREBASED_CLOCK_OFFSET_SECS_KEY, offset_secs)
 }
 
 /// Persists `world_meta.clock_offset_secs` directly on `conn`.
 pub fn persist_clock_offset_secs(conn: &Connection, offset_secs: u64) -> Result<(), String> {
-    if !sqlite_table_exists(conn, "world_meta")? {
-        return Ok(());
-    }
-    let clamped = i64::try_from(offset_secs).unwrap_or(i64::MAX);
-    conn.execute(
-        "INSERT INTO world_meta (meta_key, meta_value) VALUES (?1, ?2)
-         ON CONFLICT(meta_key) DO UPDATE SET meta_value = excluded.meta_value",
-        params![WORLD_META_CLOCK_OFFSET_SECS_KEY, clamped],
-    )
-    .map_err(|e| format!("persist world_meta.clock_offset_secs: {e}"))?;
-    Ok(())
+    persist_world_meta_u64(conn, WORLD_META_CLOCK_OFFSET_SECS_KEY, offset_secs)
+}
+
+/// Persists `world_meta.unrebased_clock_offset_secs` directly on `conn` (`#1061`).
+pub fn persist_unrebased_clock_offset_secs(
+    conn: &Connection,
+    offset_secs: u64,
+) -> Result<(), String> {
+    persist_world_meta_u64(conn, WORLD_META_UNREBASED_CLOCK_OFFSET_SECS_KEY, offset_secs)
 }
 
 /// Reads `world_meta.clean_shutdown` (`true` when the previous stop finished cleanly).
@@ -790,7 +841,39 @@ mod tests {
         let conn = open_test_db();
         apply_system_checkpoint_migration(&conn).expect("second migration succeeds");
         assert_eq!(load_clock_offset_secs(&conn).expect("load clock"), 0);
+        assert_eq!(
+            load_unrebased_clock_offset_secs(&conn).expect("load unrebased clock"),
+            0
+        );
         assert!(!load_clean_shutdown_marker(&conn).expect("load clean marker"));
+
+        // Legacy SQLite DB with persisted clock_offset_secs and missing unrebased_clock_offset_secs
+        // must migrate unrebased_clock_offset_secs = clock_offset_secs without clobbering later splits (#1061).
+        let legacy = Connection::open_in_memory().expect("open legacy in-memory sqlite");
+        legacy
+            .execute_batch(
+                "CREATE TABLE world_meta (
+                    meta_key TEXT PRIMARY KEY,
+                    meta_value INTEGER NOT NULL
+                );
+                INSERT INTO world_meta (meta_key, meta_value) VALUES ('clock_offset_secs', 791825);",
+            )
+            .expect("seed legacy world_meta");
+        apply_system_checkpoint_migration(&legacy).expect("migrate legacy db");
+        assert_eq!(load_clock_offset_secs(&legacy).expect("load clock"), 791_825);
+        assert_eq!(
+            load_unrebased_clock_offset_secs(&legacy).expect("load migrated unrebased"),
+            791_825
+        );
+
+        // Subsequent rebased clock advance leaves unrebased_clock_offset_secs intact across re-migration.
+        persist_clock_offset_secs(&legacy, 792_000).expect("update clock offset");
+        apply_system_checkpoint_migration(&legacy).expect("re-run migration");
+        assert_eq!(load_clock_offset_secs(&legacy).expect("load clock"), 792_000);
+        assert_eq!(
+            load_unrebased_clock_offset_secs(&legacy).expect("unrebased preserved"),
+            791_825
+        );
     }
 
     #[test]

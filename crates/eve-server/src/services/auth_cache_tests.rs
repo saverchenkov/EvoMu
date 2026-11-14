@@ -1377,3 +1377,119 @@ async fn machonet_get_time_stays_anchored_to_wallclock_across_advance_clock() {
         "advance_virtual_clock(60) should advance machoNet.GetTime by ~60s (before={t_after_slash}, after={t_after_rebased})"
     );
 }
+
+#[tokio::test]
+async fn machonet_get_time_stays_anchored_to_wallclock_across_sqlite_restart() {
+    let dir = std::env::temp_dir().join(format!(
+        "evomu_get_time_restart_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let db_path = dir.join("world.sqlite");
+    let sde = std::sync::Arc::clone(&test_ctx().sde);
+    let kw = HashMap::new();
+    let five_secs_ticks: i64 = 5 * 10_000_000;
+
+    // Boot 1: /advancetime (+791_825s unrebased) + rebased advance_virtual_clock (+120s) + clean shutdown.
+    {
+        let db1 = std::sync::Arc::new(
+            eve_db::WorldRepository::open_sqlite(&db_path).expect("open sqlite boot 1"),
+        );
+        let ctx1 = crate::router::ServerContext::with_sde_and_repository(
+            std::sync::Arc::clone(&sde),
+            db1,
+        );
+        ctx1.advance_secs_without_sim_clock_rebase(791_825);
+        ctx1.advance_virtual_clock(120);
+        assert_eq!(ctx1.clock().offset_secs(), 791_945);
+        assert_eq!(
+            ctx1.unrebased_clock_offset_secs
+                .load(std::sync::atomic::Ordering::Acquire),
+            791_825
+        );
+        crate::sp6_lifecycle::flush_all_systems_final_checkpoints(&ctx1).await;
+    }
+
+    // Boot 2: reopening SQLite restores both clock_offset_secs and unrebased_clock_offset_secs,
+    // keeping machoNet.GetTime anchored to host wallclock + 120s (not +791_945s / +9.16d).
+    {
+        let db2 = std::sync::Arc::new(
+            eve_db::WorldRepository::open_sqlite(&db_path).expect("open sqlite boot 2"),
+        );
+        assert_eq!(db2.clock().offset_secs(), 791_945);
+        assert_eq!(
+            db2.persisted_unrebased_clock_offset_secs()
+                .expect("persisted unrebased offset"),
+            791_825
+        );
+        let ctx2 = crate::router::ServerContext::with_sde_and_repository(
+            std::sync::Arc::clone(&sde),
+            db2,
+        );
+        assert_eq!(
+            ctx2.unrebased_clock_offset_secs
+                .load(std::sync::atomic::Ordering::Acquire),
+            791_825
+        );
+        let mut sess = auth_session(1, 90_000_001, 98_000_001, 30_000_142);
+        let wall_before = crate::router::context::host_wall_blueos_filetime_ticks();
+        let reply = handle(&ctx2, &mut sess, "machoNet", "GetTime", &[], &kw)
+            .await
+            .expect("GetTime handled")
+            .expect("GetTime succeeds");
+        let t_restarted = reply.as_i64().expect("GetTime integer");
+        let expected_ticks = wall_before + 120 * 10_000_000;
+        assert!(
+            (t_restarted - expected_ticks).abs() < five_secs_ticks,
+            "machoNet.GetTime ({t_restarted}) after restart must stay at wallclock+120s ({expected_ticks}), not jump +9.16d"
+        );
+        assert!(
+            ctx2.now_blueos_filetime_ticks() - t_restarted >= 791_800 * 10_000_000,
+            "ctx2.clock() must still preserve the full +791_825s unrebased offset for timers/queues"
+        );
+
+        // Simulate legacy SQLite DB from before #1061 (only clock_offset_secs persisted).
+        ctx2.db
+            .with_sqlite_conn(|conn| {
+                conn.execute(
+                    "DELETE FROM world_meta WHERE meta_key = 'unrebased_clock_offset_secs'",
+                    [],
+                )
+                .map_err(|e| e.to_string())?;
+                Ok::<_, String>(())
+            })
+            .expect("delete unrebased_clock_offset_secs row");
+    }
+
+    // Boot 3: migration seeds unrebased_clock_offset_secs = clock_offset_secs so legacy DBs do not jump.
+    {
+        let db3 = std::sync::Arc::new(
+            eve_db::WorldRepository::open_sqlite(&db_path).expect("open sqlite boot 3"),
+        );
+        assert_eq!(db3.clock().offset_secs(), 791_945);
+        assert_eq!(
+            db3.persisted_unrebased_clock_offset_secs()
+                .expect("migrated unrebased offset"),
+            791_945
+        );
+        let ctx3 = crate::router::ServerContext::with_sde_and_repository(sde, db3);
+        let mut sess = auth_session(1, 90_000_001, 98_000_001, 30_000_142);
+        let wall_before = crate::router::context::host_wall_blueos_filetime_ticks();
+        let reply = handle(&ctx3, &mut sess, "machoNet", "GetTime", &[], &kw)
+            .await
+            .expect("GetTime handled")
+            .expect("GetTime succeeds");
+        let t_migrated = reply.as_i64().expect("GetTime integer");
+        assert!(
+            (t_migrated - wall_before).abs() < five_secs_ticks,
+            "migrated legacy DB machoNet.GetTime ({t_migrated}) must stay anchored to host wallclock ({wall_before})"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -290,3 +290,74 @@ fn sqlite_tx_persists_rolls_back_and_restores_virtual_clock_offset() {
     drop(reopened);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn sqlite_tx_persists_rolls_back_and_exports_unrebased_clock_offset() {
+    let dir = std::env::temp_dir().join(format!(
+        "evomu_unrebased_clock_offset_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let db_path = dir.join("world.sqlite");
+    let export_path = dir.join("export.sqlite");
+
+    {
+        let repo = crate::WorldRepository::open_sqlite(&db_path).expect("open_sqlite");
+        assert_eq!(
+            repo.persisted_unrebased_clock_offset_secs()
+                .expect("read initial unrebased offset"),
+            0
+        );
+
+        repo.tx("unrebased_commit", |wtx| -> Result<(), crate::TxError> {
+            wtx.set_clock_offset_secs(12_345);
+            wtx.set_unrebased_clock_offset_secs(10_000);
+            Ok(())
+        })
+        .expect("commit clock offsets");
+
+        let aborted: Result<(), crate::TxError> = repo.tx("unrebased_abort", |wtx| {
+            wtx.set_clock_offset_secs(99_999);
+            wtx.set_unrebased_clock_offset_secs(88_888);
+            Err(crate::TxError::Persist("simulated abort".into()))
+        });
+        assert!(aborted.is_err());
+
+        repo.set_fault_plan_for_test(crate::TxFaultPlan::FailAtCommit);
+        let faulted: Result<(), crate::TxError> = repo.tx("unrebased_fault_commit", |wtx| {
+            wtx.snap.next_entity_id += 1;
+            wtx.set_clock_offset_secs(77_777);
+            wtx.set_unrebased_clock_offset_secs(66_666);
+            Ok(())
+        });
+        assert!(faulted.is_err());
+    }
+
+    let reopened = crate::WorldRepository::open_sqlite(&db_path).expect("reopen_sqlite");
+    assert_eq!(reopened.clock().offset_secs(), 12_345);
+    assert_eq!(
+        reopened
+            .persisted_unrebased_clock_offset_secs()
+            .expect("read persisted unrebased offset"),
+        10_000
+    );
+
+    reopened.save_to_sqlite(&export_path).expect("save_to_sqlite");
+    let exported = crate::WorldRepository::open_sqlite(&export_path).expect("open exported");
+    assert_eq!(exported.clock().offset_secs(), 12_345);
+    assert_eq!(
+        exported
+            .persisted_unrebased_clock_offset_secs()
+            .expect("read exported unrebased offset"),
+        10_000
+    );
+
+    drop(exported);
+    drop(reopened);
+    let _ = std::fs::remove_dir_all(&dir);
+}

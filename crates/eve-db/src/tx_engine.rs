@@ -768,12 +768,18 @@ pub struct WorldTx<'a> {
     pub(crate) entity_ids: &'a EntityIdAllocator,
     pub(crate) conn: &'a Connection,
     pub(crate) clock_offset_secs: Option<u64>,
+    pub(crate) unrebased_clock_offset_secs: Option<u64>,
 }
 
 impl<'a> WorldTx<'a> {
     /// Schedules `world_meta.clock_offset_secs` to be written in the same SQLite transaction (`#920`, `#864`).
     pub fn set_clock_offset_secs(&mut self, offset_secs: u64) {
         self.clock_offset_secs = Some(offset_secs);
+    }
+
+    /// Schedules `world_meta.unrebased_clock_offset_secs` to be written in the same SQLite transaction (`#1061`).
+    pub fn set_unrebased_clock_offset_secs(&mut self, offset_secs: u64) {
+        self.unrebased_clock_offset_secs = Some(offset_secs);
     }
 
     /// Allocates a strictly monotonic entity ID from the external [`EntityIdAllocator`].
