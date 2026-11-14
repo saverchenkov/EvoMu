@@ -3,8 +3,9 @@
 use crate::common;
 use eve_db::{VirtualServerClock, WorldRepository};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::PyRep;
 use eve_server::router::ServerContext;
+use eve_testkit::client_harness::ClientErrorResponse;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -18,9 +19,37 @@ async fn rpc(
     service: &str,
     method: &str,
     args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
+) -> Result<PyRep, ClientErrorResponse> {
     let kw = HashMap::new();
-    ctx.dispatch_rpc(sess, service, None, method, args, &kw, None)
+    common::borrow_wire_harness(ctx, sess)
+        .call(service, None, method, args, &kw)
+        .await
+}
+
+async fn rpc_bound(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    service: &str,
+    bound_id: u64,
+    method: &str,
+    args: &[PyRep],
+) -> Result<PyRep, ClientErrorResponse> {
+    let kw = HashMap::new();
+    common::borrow_wire_harness(ctx, sess)
+        .call(service, Some(bound_id), method, args, &kw)
+        .await
+}
+
+async fn rpc_kw(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, ClientErrorResponse> {
+    common::borrow_wire_harness(ctx, sess)
+        .call(service, None, method, args, kwargs)
         .await
 }
 
@@ -223,7 +252,7 @@ async fn test_fast_checkout_and_activity_complete() {
     );
 
     // Fly ship within 5,000 m of the anchored Metenox and load fuel + magmatic gas via invbroker.Add
-    let PyRep::Tuple(bound_bey) = rpc(
+    let bound_bey = rpc(
         &ctx,
         &mut sess1,
         "beyonce",
@@ -231,30 +260,26 @@ async fn test_fast_checkout_and_activity_complete() {
         &[PyRep::Integer(i64::from(SYSTEM_ID)), PyRep::None],
     )
     .await
-    .expect("bind beyonce") else {
-        panic!("MachoBindObject tuple expected");
-    };
-    let bey_bound_id = bound_bey[0].as_i64().unwrap() as u64;
-    let kw = HashMap::new();
-    ctx.dispatch_rpc(
+    .expect("bind beyonce");
+    let bey_bound_id = eve_testkit::client_harness::extract_bound_id_from_wire_rep(&bound_bey)
+        .expect("beyonce bound_id from MachoBindObject wire reply");
+    rpc_bound(
+        &ctx,
         &mut sess1,
         "beyonce",
-        Some(bey_bound_id),
+        bey_bound_id,
         "CmdFollowBall",
         &[PyRep::Integer(structure_id), PyRep::Real(0.0)],
-        &kw,
-        None,
     )
     .await
     .expect("CmdFollowBall toward Metenox");
-    ctx.dispatch_rpc(
+    rpc_bound(
+        &ctx,
         &mut sess1,
         "beyonce",
-        Some(bey_bound_id),
+        bey_bound_id,
         "CmdSetSpeedFraction",
         &[PyRep::Real(1.0)],
-        &kw,
-        None,
     )
     .await
     .expect("CmdSetSpeedFraction");
@@ -364,6 +389,15 @@ async fn test_fast_checkout_and_activity_complete() {
                 .as_i64()
                 .expect("moonID is integer");
             assert!(moon > 0, "Anchored Asabona Metenox must resolve a real moonID");
+            let is_asabona_moon = ctx
+                .sde
+                .celestials_in_system(SYSTEM_ID)
+                .into_iter()
+                .any(|c| c.group_id == 8 && c.celestial_id == moon);
+            assert!(
+                is_asabona_moon,
+                "Resolved moonID {moon} must be an actual moon in Asabona ({SYSTEM_ID})"
+            );
 
             let next_harvest = dict_get(&details_rep, "nextHarvestTime")
                 .expect("nextHarvestTime key")
@@ -384,7 +418,7 @@ async fn test_fast_checkout_and_activity_complete() {
 
             let mats_in_details = dict_get(&details_rep, "outputMaterials")
                 .expect("outputMaterials key");
-            assert_eq!(mats_in_details, &PyRep::List(materials_list));
+            assert_eq!(mats_in_details, &PyRep::List(materials_list.clone()));
 
             // Advance server clock by 1 hour to run a genuine live Metenox mining cycle
             ctx.advance_secs(3600);
@@ -405,6 +439,24 @@ async fn test_fast_checkout_and_activity_complete() {
             assert_eq!(
                 fuel_after, 195,
                 "Live 1h Metenox cycle must consume 5 fuel blocks from SpecializedFuelBay (200 -> 195)"
+            );
+            assert_eq!(
+                dict_get(&details_after, "moonID").and_then(|v| v.as_i64()),
+                Some(moon),
+                "moonID must remain consistent across mining cycles"
+            );
+            let next_harvest_after = dict_get(&details_after, "nextHarvestTime")
+                .expect("nextHarvestTime after 1h")
+                .as_i64()
+                .expect("nextHarvestTime integer");
+            assert!(
+                next_harvest_after > next_harvest,
+                "nextHarvestTime must advance after 1h cycle ({next_harvest} -> {next_harvest_after})"
+            );
+            assert_eq!(
+                dict_get(&details_after, "outputMaterials"),
+                Some(&PyRep::List(materials_list)),
+                "outputMaterials must remain consistent with RequestMiningCycleOutput"
             );
 
             let cap_after = match dict_get(&details_after, "remainingOutputBayCapacity").unwrap() {
@@ -777,7 +829,7 @@ async fn test_fast_checkout_buy_offer_payload_and_vault_reload() {
     kwargs.insert("journeyID".into(), PyRep::String("test-journey".into()));
     kwargs.insert("purchaseTraceID".into(), PyRep::String("test-trace".into()));
 
-    let buy_res = ctx.dispatch_rpc(&mut sess, "FastCheckoutService", None, "BuyOffer", &[], &kwargs, None).await.expect("BuyOffer with Dict payload");
+    let buy_res = rpc_kw(&ctx, &mut sess, "FastCheckoutService", "BuyOffer", &[], &kwargs).await.expect("BuyOffer with Dict payload");
     let PyRep::Dict(res_dict) = buy_res else { panic!("Expected dict"); };
     assert_eq!(res_dict.iter().find_map(|(k, v)| if k == &PyRep::String("status".into()) { v.as_str() } else { None }), Some("CONFIRMED"));
 
