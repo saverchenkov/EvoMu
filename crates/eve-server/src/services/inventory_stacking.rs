@@ -439,6 +439,13 @@ pub(crate) async fn handle_multi_add(
             .map(|r| r.item_id)
             .or_else(|| post_it.as_ref().map(|r| r.item_id))
             .unwrap_or(pre_item.item_id);
+        let transferred_to_corp = (116..=122).contains(&flag_u16)
+            || flag == InventoryFlag::CorpDeliveries
+            || post_it.as_ref().is_some_and(|u| u.owner_id != pre_item.owner_id && u.owner_id != char_id)
+            || fin_opt.as_ref().is_some_and(|u| u.owner_id != pre_item.owner_id && u.owner_id != char_id);
+        if transferred_to_corp {
+            let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::void_ship_insurance_contract(ctx, fin_id);
+        }
         fitting_containers_ships::record_container_add_log(ctx, char_id, fin_id, it_tid, it_qty, new_loc);
         if let Some(fin) = fin_opt {
             if fin.item_id != pre_item.item_id {

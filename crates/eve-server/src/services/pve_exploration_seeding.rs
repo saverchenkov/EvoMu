@@ -255,6 +255,15 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
     if crate::services::wormhole_pve_escalations::seed_special_wormhole_pve_sites(ctx, solar_system_id).await {
         return;
     }
+    if ctx
+        .sde
+        .solar_systems
+        .get(&solar_system_id)
+        .is_some_and(|s| s.region_id == 10_000_070)
+    {
+        seed_pochven_hypnosian_sites_and_celestials(ctx, solar_system_id).await;
+        return;
+    }
 
     let true_sec = ctx
         .sde
@@ -616,6 +625,143 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
         let existing = reg.sites_by_system.entry(solar_system_id).or_default();
         existing.retain(|s| s.site_category == "Expedition");
         existing.extend(sites);
+    });
+}
+
+async fn seed_pochven_hypnosian_sites_and_celestials(
+    ctx: &ServerContext,
+    solar_system_id: SolarSystemId,
+) {
+    const TORPID_SLEEPER_HIVE_DUNGEON_ID: u32 = 9006;
+    const HYPNOSIAN_TIER_TYPES: [TypeId; 3] = [56_337, 56_328, 56_319];
+    let now = ctx.now_unix();
+
+    let site_id = format!("PVE-POCHVEN-HIVE-{solar_system_id}");
+    let hive_pos = [32_000_000_000.0, 14_000_000_000.0, -9_000_000_000.0];
+    let hive_name = ctx
+        .sde
+        .dungeons
+        .get(&TORPID_SLEEPER_HIVE_DUNGEON_ID)
+        .map(|d| d.name.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "Torpid Sleeper Hive".to_string());
+
+    let already_cleared = ctx.db.with_snapshot(|snap| {
+        snap.cosmic_anomalies
+            .get(&solar_system_id)
+            .and_then(|list| list.iter().find(|a| a.anomaly_id == site_id))
+            .is_some_and(|a| a.cleared)
+    });
+
+    let mut npc_specs: Vec<(TypeId, &'static str, u32, glam::DVec3)> = Vec::new();
+    let mut hive_spawn_start_idx = None;
+
+    if !already_cleared {
+        hive_spawn_start_idx = Some(npc_specs.len());
+        let base = glam::DVec3::from_array(hive_pos);
+        for (i, &tid) in HYPNOSIAN_TIER_TYPES.iter().enumerate() {
+            let offset = glam::DVec3::new((i as f64 - 1.0) * 3_500.0, 800.0 * (i as f64), 0.0);
+            npc_specs.push((
+                tid,
+                "PochvenHypnosianSleeper",
+                TORPID_SLEEPER_HIVE_DUNGEON_ID,
+                base + offset,
+            ));
+        }
+    }
+
+    let mut celestials: Vec<_> = ctx
+        .sde
+        .celestials_in_system_slice(solar_system_id)
+        .iter()
+        .filter(|c| matches!(c.group_id, 7 | 8 | 10))
+        .collect();
+    if celestials.is_empty() {
+        celestials = ctx.sde.celestials_in_system_slice(solar_system_id).iter().collect();
+    }
+    celestials.sort_by_key(|c| c.celestial_id);
+    for cel in celestials.into_iter().take(2) {
+        let safe_clearance = cel.radius.max(5_000.0) + 15_000.0;
+        let anchor = cel.position + glam::DVec3::new(safe_clearance, 0.0, 0.0);
+        for (i, &tid) in HYPNOSIAN_TIER_TYPES.iter().enumerate() {
+            let offset = glam::DVec3::new((i as f64) * 2_500.0, (i as f64 - 1.0) * 1_500.0, 0.0);
+            npc_specs.push((tid, "PochvenHypnosianSleeper", 0, anchor + offset));
+        }
+    }
+
+    let spawned_ids = crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_batch(
+        ctx,
+        solar_system_id,
+        &npc_specs,
+        |_| {},
+    )
+    .await;
+
+    let hive_npc_ids = if hive_spawn_start_idx == Some(0) && spawned_ids.len() >= HYPNOSIAN_TIER_TYPES.len() {
+        spawned_ids[..HYPNOSIAN_TIER_TYPES.len()].to_vec()
+    } else {
+        Vec::new()
+    };
+
+    if !already_cleared {
+        let added_anoms = ctx.db.with_mut_snapshot(|snap| {
+            let sys_anoms = snap.cosmic_anomalies.entry(solar_system_id).or_default();
+            if sys_anoms.iter().any(|a| a.anomaly_id == site_id) {
+                return Vec::new();
+            }
+            let anom = CosmicAnomalyRecord {
+                anomaly_id: site_id.clone(),
+                solar_system_id,
+                anomaly_type: "Combat".into(),
+                name: hive_name.clone(),
+                position: hive_pos,
+                signal_strength: 1.0,
+                ore_types: Vec::new(),
+                remaining_volume: 0.0,
+                created_unix: now,
+                lifetime_seconds: 86_400,
+                cleared: false,
+            };
+            sys_anoms.push(anom.clone());
+            vec![anom]
+        });
+        if !added_anoms.is_empty() {
+            crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_anomaly_delta(
+                ctx,
+                solar_system_id,
+                &added_anoms,
+                &[],
+            );
+        }
+    }
+
+    let hive_site = PveSiteInstance {
+        site_id,
+        dungeon_id: TORPID_SLEEPER_HIVE_DUNGEON_ID,
+        dungeon_name: hive_name,
+        solar_system_id,
+        site_category: "Combat".into(),
+        wormhole_class: None,
+        position: hive_pos,
+        probe_required: false,
+        signal_strength: 1.0,
+        current_room: 1,
+        total_rooms: 1,
+        current_wave: 1,
+        total_waves: 1,
+        active_npc_ball_ids: hive_npc_ids,
+        npc_guards_spawned: true,
+        created_unix: now,
+        lifetime_seconds: 86_400,
+        ..Default::default()
+    };
+
+    with_pve_exploration_reg(ctx, |reg| {
+        reg.seeded_systems.insert(solar_system_id, true);
+        let existing = reg.sites_by_system.entry(solar_system_id).or_default();
+        if !already_cleared && !existing.iter().any(|s| s.site_id == hive_site.site_id) {
+            existing.push(hive_site);
+        }
     });
 }
 

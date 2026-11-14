@@ -260,7 +260,10 @@ fn handle_take_offer(
     };
 
     // Check Triglavian, EDENCOM, or FW/pirate militia standing/enlistment gates if applicable
-    let is_trig_or_edencom = matches!(offer.corp_id, 500_026 | 500_027 | 1_000_298 | 1_000_299);
+    let is_trig_or_edencom = matches!(
+        offer.corp_id,
+        500_026 | 500_027 | 1_000_292 | 1_000_293 | 1_000_294 | 1_000_298 | 1_000_299
+    );
     let is_fw_militia_corp = matches!(
         offer.corp_id,
         1_000_179 | 1_000_180 | 1_000_181 | 1_000_182 | 1_000_127 | 1_000_437 | 1_000_138 | 1_000_436
