@@ -587,6 +587,8 @@ async fn handle_get_full_state(
     let (sigs, anomalies) = ensure_system_signatures_and_anomalies(ctx, sys_id).await;
     let anom_ids: std::collections::HashSet<String> =
         anomalies.iter().map(|a| a.anomaly_id.clone()).collect();
+    let anom_id_refs: std::collections::HashSet<&str> =
+        anom_ids.iter().map(String::as_str).collect();
     let anom_entries: Vec<(PyRep, PyRep)> = anomalies
         .into_iter()
         .map(|a| {
@@ -596,7 +598,12 @@ async fn handle_get_full_state(
         .collect();
     let sig_entries: Vec<(PyRep, PyRep)> = sigs
         .into_iter()
-        .filter(|s| s.sig_group != "SovOre" && !anom_ids.contains(&s.signature_id))
+        .filter(|s| {
+            !crate::services::fleet_social::fleet_social_scanning::is_anomaly_colliding_signature(
+                s,
+                &anom_id_refs,
+            )
+        })
         .map(|mut s| {
             let eff_strength = if is_gm {
                 1.0
@@ -678,8 +685,20 @@ async fn handle_qa_scan_sites(
     };
     let (sigs, anomalies) = ensure_system_signatures_and_anomalies(ctx, sys_id).await;
     let now_unix = ctx.now_unix();
+    let anom_ids: std::collections::HashSet<String> =
+        anomalies.iter().map(|a| a.anomaly_id.clone()).collect();
+    let anom_id_refs: std::collections::HashSet<&str> =
+        anom_ids.iter().map(String::as_str).collect();
     let mut results = format_anomalies(anomalies, now_unix);
     for s in sigs {
+        if s.collapsed
+            || crate::services::fleet_social::fleet_social_scanning::is_anomaly_colliding_signature(
+                &s,
+                &anom_id_refs,
+            )
+        {
+            continue;
+        }
         results.push(PyRep::keyval([
             ("id", PyRep::String(s.signature_id.clone())),
             ("signatureID", PyRep::String(s.signature_id)),
@@ -862,14 +881,16 @@ async fn handle_get_system_scan_mgr(
     };
     let (wh_class, is_thera, is_shattered, env_effect) = system_wormhole_profile(sys_id);
 
-    let anom_ids: std::collections::HashSet<String> =
-        anomalies.iter().map(|a| a.anomaly_id.clone()).collect();
+    let anom_ids: std::collections::HashSet<&str> =
+        anomalies.iter().map(|a| a.anomaly_id.as_str()).collect();
     let sig_items: Vec<PyRep> = sigs
         .into_iter()
         .filter(|s| {
             !s.collapsed
-                && s.sig_group != "SovOre"
-                && !anom_ids.contains(&s.signature_id)
+                && !crate::services::fleet_social::fleet_social_scanning::is_anomaly_colliding_signature(
+                    s,
+                    &anom_ids,
+                )
                 && (s.lifetime_seconds == 0
                     || now_unix < s.created_unix.saturating_add(s.lifetime_seconds))
         })
@@ -1379,8 +1400,10 @@ async fn handle_request_scans(
         if let Some(sigs) = snap.cosmic_signatures.get(&sys_id) {
             for sig in sigs {
                 if sig.collapsed
-                    || sig.sig_group == "SovOre"
-                    || anom_ids.contains(sig.signature_id.as_str())
+                    || crate::services::fleet_social::fleet_social_scanning::is_anomaly_colliding_signature(
+                        sig,
+                        &anom_ids,
+                    )
                 {
                     continue;
                 }

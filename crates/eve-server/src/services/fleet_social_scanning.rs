@@ -35,7 +35,12 @@ pub(super) async fn handle_scanning_and_wormholes(
             let now_unix = ctx.now_unix();
             crate::services::pve_exploration::ensure_system_pve_sites_seeded(ctx, sys_id).await;
             let sigs = ensure_system_signatures(ctx, sys_id).await;
-            let (anom_count, anom_rows, struct_rows) = ctx.db.with_snapshot(|snap| {
+            let (anom_count, anom_rows, struct_rows, sig_count) = ctx.db.with_snapshot(|snap| {
+                let anom_ids: std::collections::HashSet<&str> = snap
+                    .cosmic_anomalies
+                    .get(&sys_id)
+                    .map(|l| l.iter().map(|a| a.anomaly_id.as_str()).collect())
+                    .unwrap_or_default();
                 let a_rows: Vec<Vec<PyRep>> = snap
                     .cosmic_anomalies
                     .get(&sys_id)
@@ -77,7 +82,11 @@ pub(super) async fn handle_scanning_and_wormholes(
                         ]
                     })
                     .collect();
-                (ac, a_rows, st_rows)
+                let sc = sigs
+                    .iter()
+                    .filter(|s| !s.collapsed && !is_anomaly_colliding_signature(s, &anom_ids))
+                    .count();
+                (ac, a_rows, st_rows, sc)
             });
             if method == "SignalTrackerRegister" {
                 register_signal_tracker_subscriber(ctx, sys_id, char_id);
@@ -89,7 +98,7 @@ pub(super) async fn handle_scanning_and_wormholes(
                 ("solarSystemID", PyRep::Integer(sys_id as i64)),
                 ("service", PyRep::String("scanMgr".into())),
                 ("registered", PyRep::Bool(true)),
-                ("signatureCount", PyRep::Integer(sigs.len() as i64)),
+                ("signatureCount", PyRep::Integer(sig_count as i64)),
                 ("anomalyCount", PyRep::Integer(anom_count as i64)),
                 ("structureCount", PyRep::Integer(struct_rows.len() as i64)),
                 (
@@ -136,17 +145,25 @@ pub(super) async fn handle_scanning_and_wormholes(
                 .unwrap_or(0);
             let now_unix = ctx.now_unix();
             let _ = ensure_system_signatures(ctx, sys_id).await;
-            let signatures = ctx.db.try_with_mut_snapshot(|snap| {
+            let (signatures, anom_ids_owned) = ctx.db.try_with_mut_snapshot(|snap| {
+                let anom_ids: Vec<String> = snap
+                    .cosmic_anomalies
+                    .get(&sys_id)
+                    .map(|l| l.iter().map(|a| a.anomaly_id.clone()).collect())
+                    .unwrap_or_default();
                 let sigs = snap.cosmic_signatures.entry(sys_id).or_default();
                 sigs.retain(|sig| {
                     !sig.collapsed
                         && (sig.lifetime_seconds == 0
                             || now_unix < sig.created_unix.saturating_add(sig.lifetime_seconds))
                 });
-                Ok::<_, BridgeRpcError>(sigs.clone())
+                Ok::<_, BridgeRpcError>((sigs.clone(), anom_ids))
             }).unwrap_or_default();
+            let anom_ids: std::collections::HashSet<&str> =
+                anom_ids_owned.iter().map(String::as_str).collect();
             let rows: Vec<Vec<PyRep>> = signatures
                 .into_iter()
+                .filter(|sig| !is_anomaly_colliding_signature(sig, &anom_ids))
                 .map(|sig| {
                     let group = if sig.signal_strength >= 0.25 {
                         sig.sig_group
@@ -267,6 +284,13 @@ pub(super) async fn handle_scanning_and_wormholes(
             );
 
             let updated_results = ctx.db.try_with_mut_snapshot(|snap| {
+                let anom_ids_owned: Vec<String> = snap
+                    .cosmic_anomalies
+                    .get(&sys_id)
+                    .map(|l| l.iter().map(|a| a.anomaly_id.clone()).collect())
+                    .unwrap_or_default();
+                let anom_ids: std::collections::HashSet<&str> =
+                    anom_ids_owned.iter().map(String::as_str).collect();
                 let Some(sigs) = snap.cosmic_signatures.get_mut(&sys_id) else {
                     return Err(BridgeRpcError {
                         code: "NoSignaturesInSystem".into(),
@@ -281,6 +305,9 @@ pub(super) async fn handle_scanning_and_wormholes(
                 });
                 let mut out = Vec::new();
                 for sig in sigs.iter_mut() {
+                    if is_anomaly_colliding_signature(sig, &anom_ids) {
+                        continue;
+                    }
                     let sig_pos = DVec3::new(sig.position[0], sig.position[1], sig.position[2]);
                     let mut probes_in_range = 0;
                     let mut total_probe_contrib = 0.0;
@@ -1195,6 +1222,17 @@ pub(crate) fn build_signal_tracker_structure_kv(
     ])
 }
 
+/// Returns `true` when `sig` represents or collides with a cosmic anomaly and
+/// must be excluded from client-facing signature maps/notifications so V24
+/// `SignatureSiteData` never shadows `AnomalyBracket` on `OnSystemScanDone` (#1034).
+pub(crate) fn is_anomaly_colliding_signature(
+    sig: &CosmicSignatureRecord,
+    anom_ids: &std::collections::HashSet<&str>,
+) -> bool {
+    matches!(sig.sig_group.as_str(), "SovOre" | "OreAnomaly" | "IceBelt")
+        || anom_ids.contains(sig.signature_id.as_str())
+}
+
 pub(crate) fn emit_signal_tracker_signature_delta(
     ctx: &ServerContext,
     sys_id: u32,
@@ -1204,14 +1242,24 @@ pub(crate) fn emit_signal_tracker_signature_delta(
     if added.is_empty() && removed_ids.is_empty() {
         return;
     }
-    let subs = ctx.db.with_snapshot(|snap| signal_tracker_subscribers_in_snap(snap, sys_id));
+    let (subs, anom_ids) = ctx.db.with_snapshot(|snap| {
+        let subs = signal_tracker_subscribers_in_snap(snap, sys_id);
+        let anom_ids: std::collections::HashSet<String> = snap
+            .cosmic_anomalies
+            .get(&sys_id)
+            .map(|list| list.iter().map(|a| a.anomaly_id.clone()).collect())
+            .unwrap_or_default();
+        (subs, anom_ids)
+    });
     if subs.is_empty() {
         return;
     }
+    let anom_id_refs: std::collections::HashSet<&str> =
+        anom_ids.iter().map(String::as_str).collect();
     let added_dict = PyRep::Dict(
         added
             .iter()
-            .filter(|sig| sig.sig_group != "SovOre")
+            .filter(|sig| !sig.collapsed && !is_anomaly_colliding_signature(sig, &anom_id_refs))
             .map(|sig| {
                 (
                     PyRep::String(sig.signature_id.clone()),

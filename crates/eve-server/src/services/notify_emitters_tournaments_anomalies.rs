@@ -185,7 +185,12 @@ pub fn emit_signal_tracker_full_state_for_system(
     sigs: &[eve_db::CosmicSignatureRecord],
 ) {
     let now_unix = ctx.now_unix();
-    let (anom_dict, struct_dict) = ctx.db.with_snapshot(|snap| {
+    let (anom_dict, struct_dict, anom_ids) = ctx.db.with_snapshot(|snap| {
+        let anom_ids: HashSet<String> = snap
+            .cosmic_anomalies
+            .get(&sys_id)
+            .map(|list| list.iter().map(|a| a.anomaly_id.clone()).collect())
+            .unwrap_or_default();
         let anoms: Vec<(PyRep, PyRep)> = snap
             .cosmic_anomalies
             .get(&sys_id)
@@ -271,12 +276,19 @@ pub fn emit_signal_tracker_full_state_for_system(
                 )
             })
             .collect();
-        (PyRep::Dict(anoms), PyRep::Dict(structs))
+        (PyRep::Dict(anoms), PyRep::Dict(structs), anom_ids)
     });
 
+    let anom_id_refs: HashSet<&str> = anom_ids.iter().map(String::as_str).collect();
     let sig_dict = PyRep::Dict(
         sigs.iter()
-            .filter(|s| !s.collapsed && s.sig_group != "SovOre")
+            .filter(|s| {
+                !s.collapsed
+                    && !crate::services::fleet_social::fleet_social_scanning::is_anomaly_colliding_signature(
+                        s,
+                        &anom_id_refs,
+                    )
+            })
             .map(|s| {
                 (
                     PyRep::String(s.signature_id.clone()),

@@ -716,3 +716,156 @@ async fn mutant_kill_deathzone_transitions_boundary_and_incursion_tale_remove() 
     assert!(inc_notifs.iter().any(|n| n.event == "OnInfluenceUpdate"));
     assert!(inc_notifs.iter().any(|n| n.event == "OnTaleRemove"));
 }
+
+#[test]
+fn signal_tracker_full_state_excludes_ore_anomaly_and_colliding_site_ids_gh1034() {
+    let (ctx, char_id) = make_ctx();
+    let sys_id = 30_000_119_u32;
+    let now = ctx.now_unix();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&char_id) {
+            c.station_id = None;
+            c.structure_id = None;
+            c.solar_system_id = sys_id;
+        }
+        snap.cosmic_anomalies.insert(
+            sys_id,
+            vec![
+                CosmicAnomalyRecord {
+                    anomaly_id: "DNG-1347-1897095014".into(),
+                    solar_system_id: sys_id,
+                    anomaly_type: "OreAnomaly".into(),
+                    name: "Ordinary Moon Ore Deposit".into(),
+                    signal_strength: 1.0,
+                    position: [1_000.0, 2_000.0, 3_000.0],
+                    ore_types: vec![45_490],
+                    remaining_volume: 100_000.0,
+                    created_unix: now,
+                    lifetime_seconds: 86_400,
+                    cleared: false,
+                },
+                CosmicAnomalyRecord {
+                    anomaly_id: "ANOM-COLLIDE-1".into(),
+                    solar_system_id: sys_id,
+                    anomaly_type: "Combat".into(),
+                    name: "Hideaway".into(),
+                    signal_strength: 1.0,
+                    position: [4_000.0, 5_000.0, 6_000.0],
+                    ore_types: vec![],
+                    remaining_volume: 0.0,
+                    created_unix: now,
+                    lifetime_seconds: 3_600,
+                    cleared: false,
+                },
+            ],
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let sigs = vec![
+        CosmicSignatureRecord {
+            signature_id: "DNG-1347-1897095014".into(),
+            solar_system_id: sys_id,
+            sig_group: "OreAnomaly".into(),
+            type_name: "Ordinary Moon Ore Deposit".into(),
+            signal_strength: 1.0,
+            position: [1_000.0, 2_000.0, 3_000.0],
+            wormhole_type_id: None,
+            destination_system_id: None,
+            max_jump_mass_kg: 0.0,
+            max_mass_kg: 0.0,
+            remaining_mass_kg: 0.0,
+            created_unix: now,
+            lifetime_seconds: 86_400,
+            collapsed: false,
+        },
+        CosmicSignatureRecord {
+            signature_id: "ICE-MIRROR-1".into(),
+            solar_system_id: sys_id,
+            sig_group: "IceBelt".into(),
+            type_name: "Ice Belt".into(),
+            signal_strength: 1.0,
+            position: [2_000.0, 3_000.0, 4_000.0],
+            wormhole_type_id: None,
+            destination_system_id: None,
+            max_jump_mass_kg: 0.0,
+            max_mass_kg: 0.0,
+            remaining_mass_kg: 0.0,
+            created_unix: now,
+            lifetime_seconds: 86_400,
+            collapsed: false,
+        },
+        CosmicSignatureRecord {
+            signature_id: "SOV-ORE-1".into(),
+            solar_system_id: sys_id,
+            sig_group: "SovOre".into(),
+            type_name: "Large Jaspet Deposit".into(),
+            signal_strength: 1.0,
+            position: [3_000.0, 4_000.0, 5_000.0],
+            wormhole_type_id: None,
+            destination_system_id: None,
+            max_jump_mass_kg: 0.0,
+            max_mass_kg: 0.0,
+            remaining_mass_kg: 0.0,
+            created_unix: now,
+            lifetime_seconds: 86_400,
+            collapsed: false,
+        },
+        CosmicSignatureRecord {
+            signature_id: "ANOM-COLLIDE-1".into(),
+            solar_system_id: sys_id,
+            sig_group: "Combat".into(),
+            type_name: "Hideaway".into(),
+            signal_strength: 1.0,
+            position: [4_000.0, 5_000.0, 6_000.0],
+            wormhole_type_id: None,
+            destination_system_id: None,
+            max_jump_mass_kg: 0.0,
+            max_mass_kg: 0.0,
+            remaining_mass_kg: 0.0,
+            created_unix: now,
+            lifetime_seconds: 3_600,
+            collapsed: false,
+        },
+        CosmicSignatureRecord {
+            signature_id: "REAL-SIG-1".into(),
+            solar_system_id: sys_id,
+            sig_group: "Relic Site".into(),
+            type_name: "Ruined Guristas Monument".into(),
+            signal_strength: 0.0,
+            position: [7_000.0, 8_000.0, 9_000.0],
+            wormhole_type_id: None,
+            destination_system_id: None,
+            max_jump_mass_kg: 0.0,
+            max_mass_kg: 0.0,
+            remaining_mass_kg: 0.0,
+            created_unix: now,
+            lifetime_seconds: 3_600,
+            collapsed: false,
+        },
+    ];
+
+    emit_signal_tracker_full_state_for_system(&ctx, char_id, sys_id, &sigs);
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(notifs.len(), 1);
+    assert_eq!(notifs[0].event, "OnSignalTrackerFullState");
+    let PyRep::Tuple(ref parts) = notifs[0].args[1] else {
+        panic!("expected 4-tuple fullState, got {:?}", notifs[0].args[1]);
+    };
+    let PyRep::Dict(ref anoms) = parts[0] else {
+        panic!("expected anom Dict, got {:?}", parts[0]);
+    };
+    let PyRep::Dict(ref out_sigs) = parts[1] else {
+        panic!("expected sig Dict, got {:?}", parts[1]);
+    };
+    let anom_keys: Vec<&str> = anoms.iter().filter_map(|(k, _)| k.as_str()).collect();
+    let sig_keys: Vec<&str> = out_sigs.iter().filter_map(|(k, _)| k.as_str()).collect();
+    assert!(anom_keys.contains(&"DNG-1347-1897095014"));
+    assert!(anom_keys.contains(&"ANOM-COLLIDE-1"));
+    assert_eq!(
+        sig_keys,
+        vec!["REAL-SIG-1"],
+        "anomaly-mirrored/colliding IDs must never appear in OnSignalTrackerFullState signatures (#1034)"
+    );
+}

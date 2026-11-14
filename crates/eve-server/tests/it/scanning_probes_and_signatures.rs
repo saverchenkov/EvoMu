@@ -989,3 +989,212 @@ async fn test_gh962_probe_launcher_sublocations_godma_and_ship_state() {
         "UnloadAmmo must expel sublocation with attr 805 -> 0.0: {unload_notes:?}"
     );
 }
+
+#[tokio::test]
+async fn test_gh1034_mining_anomaly_not_duplicated_in_signal_tracker_or_probe_scan() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let (char_id, sys_id, ship_id, launcher_id) =
+        (90_000_001_i64, 30_000_119_u32, 610_103_401_i64, 610_103_410_i64);
+    let mut sess = setup_pilot_in_space(&ctx, 71034, char_id, sys_id, ship_id, 606).await;
+
+    // Trigger real SDE mining-site seeding on sys 30000119 (the #1034 system),
+    // which inserts DNG-* OreAnomaly records into both cosmic_anomalies and cosmic_signatures.
+    common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok("dungeonInstanceCacheMgr", None, "GetOreAnomalyInstances", &[], &kw)
+        .await;
+
+    let sig_pos = [1.0e9_f64, 0.0, 0.0];
+    let now = ctx.now_unix();
+    let seeded_ore_ids: Vec<String> = ctx.db.with_mut_snapshot(|snap| {
+        let sk = snap.skills.entry(char_id).or_default();
+        for tid in [3412_u32, 3426, 25810, 25811] {
+            sk.insert(
+                tid,
+                TrainedSkillRecord {
+                    type_id: tid,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.dynamic_attributes.insert(48, 2_000.0);
+            sh.dynamic_attributes.insert(11, 2_000.0);
+        }
+        snap.items.insert(
+            launcher_id,
+            make_item(launcher_id, 17901, char_id, ship_id, InventoryFlag::HiSlot0, 1, true),
+        );
+        snap.module_online_states.insert(launcher_id, true);
+        snap.items.insert(
+            610_103_411,
+            make_item(610_103_411, 30013, char_id, ship_id, InventoryFlag::HiSlot0, 8, false),
+        );
+
+        {
+            let anoms = snap.cosmic_anomalies.entry(sys_id).or_default();
+            anoms.push(eve_db::types::CosmicAnomalyRecord {
+                anomaly_id: "ICE-1034".into(),
+                solar_system_id: sys_id,
+                anomaly_type: "IceBelt".into(),
+                name: "Ice Belt".into(),
+                signal_strength: 1.0,
+                position: [2.0e9, 0.0, 0.0],
+                ore_types: vec![16262],
+                remaining_volume: 100_000.0,
+                created_unix: now,
+                lifetime_seconds: 86_400,
+                cleared: false,
+            });
+        }
+        {
+            let sigs = snap.cosmic_signatures.entry(sys_id).or_default();
+            sigs.push(CosmicSignatureRecord {
+                signature_id: "ICE-1034".into(),
+                solar_system_id: sys_id,
+                sig_group: "IceBelt".into(),
+                type_name: "Ice Belt".into(),
+                signal_strength: 1.0,
+                position: [2.0e9, 0.0, 0.0],
+                wormhole_type_id: None,
+                destination_system_id: None,
+                created_unix: now,
+                lifetime_seconds: 86_400,
+                max_mass_kg: 0.0,
+                remaining_mass_kg: 0.0,
+                max_jump_mass_kg: 0.0,
+                collapsed: false,
+            });
+            sigs.push(CosmicSignatureRecord {
+                signature_id: "SIG-OK-1034".into(),
+                solar_system_id: sys_id,
+                sig_group: "Relic Site".into(),
+                type_name: "Ruined Guristas Monument".into(),
+                signal_strength: 0.0,
+                position: sig_pos,
+                wormhole_type_id: None,
+                destination_system_id: None,
+                created_unix: now,
+                lifetime_seconds: 3_600,
+                max_mass_kg: 0.0,
+                remaining_mass_kg: 0.0,
+                max_jump_mass_kg: 0.0,
+                collapsed: false,
+            });
+        }
+        snap.cosmic_anomalies
+            .get(&sys_id)
+            .map(|anoms| {
+                anoms
+                    .iter()
+                    .filter(|a| matches!(a.anomaly_type.as_str(), "OreAnomaly" | "IceBelt"))
+                    .map(|a| a.anomaly_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    assert!(
+        seeded_ore_ids.iter().any(|id| id.starts_with("DNG-")) && seeded_ore_ids.iter().any(|id| id == "ICE-1034"),
+        "expected seeded DNG-* OreAnomaly and ICE-1034 in sys {sys_id}, got {seeded_ore_ids:?}"
+    );
+    let _ = sess.drain_notifications();
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let mut harness = common::wrap_wire_harness(&ctx, sess);
+
+    // 1. SignalTrackerRegister -> OnSignalTrackerFullState must have zero overlap between anomalies and signatures.
+    harness
+        .call_ok("scanMgr", None, "SignalTrackerRegister", &[], &kw)
+        .await;
+    let notes = harness.drain_notifications();
+    let (_, st_args) = notes
+        .into_iter()
+        .find(|(ev, _)| ev == "OnSignalTrackerFullState")
+        .expect("OnSignalTrackerFullState notification");
+    let PyRep::Tuple(ref parts) = st_args[1] else {
+        panic!("expected 4-tuple fullState, got {:?}", st_args[1]);
+    };
+    let PyRep::Dict(ref anom_dict) = parts[0] else {
+        panic!("expected anom Dict");
+    };
+    let PyRep::Dict(ref sig_dict) = parts[1] else {
+        panic!("expected sig Dict");
+    };
+    let st_anom_ids: Vec<&str> = anom_dict.iter().filter_map(|(k, _)| k.as_str()).collect();
+    let st_sig_ids: Vec<&str> = sig_dict.iter().filter_map(|(k, _)| k.as_str()).collect();
+    for id in &seeded_ore_ids {
+        assert!(st_anom_ids.contains(&id.as_str()), "missing anomaly {id} in fullState[0]");
+        assert!(
+            !st_sig_ids.contains(&id.as_str()),
+            "anomaly {id} leaked into OnSignalTrackerFullState signatures dict (#1034): {st_sig_ids:?}"
+        );
+    }
+    assert!(st_sig_ids.contains(&"SIG-OK-1034"));
+
+    // 2. GetSystemScanMgr (wire SubStruct), GetFullState, GetSignatures, and RequestScans must never return anomaly-mirrored signatures.
+    let scan_mgr = harness
+        .call_ok("scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(i64::from(sys_id))], &kw)
+        .await;
+    let scan_mgr_oid = eve_testkit::client_harness::extract_bound_id_from_wire_rep(&scan_mgr)
+        .expect("GetSystemScanMgr must return bound SubStruct over wire");
+
+    let full_state = harness
+        .call_ok("scanMgr", Some(scan_mgr_oid), "GetFullState", &[], &kw)
+        .await;
+    let PyRep::Tuple(ref fs_parts) = full_state else {
+        panic!("expected GetFullState tuple");
+    };
+    let PyRep::Dict(ref fs_sigs) = fs_parts[1] else {
+        panic!("expected GetFullState sigs Dict");
+    };
+    for id in &seeded_ore_ids {
+        assert!(
+            !fs_sigs.iter().any(|(k, _)| k.as_str() == Some(id.as_str())),
+            "GetFullState leaked {id}"
+        );
+    }
+
+    let get_sigs = harness
+        .call_ok("scanMgr", None, "GetSignatures", &[], &kw)
+        .await;
+    let PyRep::Rowset { rows: sig_rows, .. } = get_sigs else {
+        panic!("expected Rowset from GetSignatures");
+    };
+    for id in &seeded_ore_ids {
+        assert!(
+            !sig_rows.iter().any(|r| r.first().and_then(|v| v.as_str()) == Some(id.as_str())),
+            "GetSignatures leaked {id}"
+        );
+    }
+
+    harness
+        .call_ok(
+            "dogmaIM",
+            None,
+            "Activate",
+            &[PyRep::Integer(launcher_id), PyRep::String("launchProbe".into())],
+            &kw,
+        )
+        .await;
+    let probe_coords = PyRep::List(
+        (0..8)
+            .map(|_| PyRep::List(vec![PyRep::Real(sig_pos[0]), PyRep::Real(sig_pos[1]), PyRep::Real(sig_pos[2]), PyRep::Integer(1)]))
+            .collect(),
+    );
+    let scan_res = harness
+        .call_ok("scanMgr", None, "RequestScans", &[probe_coords], &kw)
+        .await;
+    let PyRep::List(ref scan_rows) = scan_res else {
+        panic!("expected List from RequestScans");
+    };
+    let scanned_ids: Vec<&str> = scan_rows
+        .iter()
+        .filter_map(|r| r.dict_get("signatureID").and_then(|v| v.as_str()))
+        .collect();
+    for id in &seeded_ore_ids {
+        assert!(!scanned_ids.contains(&id.as_str()), "RequestScans leaked {id}");
+    }
+    assert!(scanned_ids.contains(&"SIG-OK-1034"));
+}
