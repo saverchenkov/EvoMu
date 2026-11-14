@@ -69,6 +69,42 @@ fn public_private_info_description_notes_and_respec_cover_branches() {
         .unwrap()
         .unwrap();
     assert_eq!(pub_info.dict_get("characterID"), Some(&PyRep::Integer(char_id)));
+    let create_dt = pub_info
+        .dict_get("createDateTime")
+        .and_then(|v| v.as_i64())
+        .expect("GetPublicInfo3 createDateTime integer");
+    assert!(
+        create_dt >= 116_444_736_000_000_000,
+        "GetPublicInfo3 createDateTime must be Win32 FILETIME ticks, got {create_dt}"
+    );
+    assert_eq!(
+        pub_info.dict_get("startDateTime"),
+        Some(&PyRep::Integer(create_dt))
+    );
+    assert_eq!(
+        pub_info.dict_get("militiaFactionID"),
+        pub_info.dict_get("warFactionID")
+    );
+    let prev_wf = ctx.db.with_snapshot(|snap| {
+        snap.characters.get(&char_id).and_then(|c| c.war_faction_id)
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.war_faction_id = Some(500_001);
+        }
+    });
+    let pub_fw = handle_contacts(&ctx, &mut sess, "charMgr", "GetPublicInfo3", &[], &kw)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        pub_fw.dict_get("militiaFactionID"),
+        Some(&PyRep::Integer(500_001))
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.war_faction_id = prev_wf;
+        }
+    });
     assert_eq!(
         handle_contacts(&ctx, &mut sess, "charMgr", "GetPublicInfo3", &[PyRep::Integer(999_999_999)], &kw)
             .unwrap()
@@ -81,6 +117,14 @@ fn public_private_info_description_notes_and_respec_cover_branches() {
         .unwrap()
         .unwrap();
     assert_eq!(priv_info.dict_get("characterID"), Some(&PyRep::Integer(char_id)));
+    let priv_create_dt = priv_info
+        .dict_get("createDateTime")
+        .and_then(|v| v.as_i64())
+        .expect("GetPrivateInfo createDateTime integer");
+    assert!(
+        priv_create_dt >= 116_444_736_000_000_000,
+        "GetPrivateInfo createDateTime must be Win32 FILETIME ticks, got {priv_create_dt}"
+    );
     assert_eq!(
         handle_contacts(&ctx, &mut sess, "charMgr", "GetPrivateInfo", &[PyRep::Integer(other_id)], &kw)
             .unwrap()
@@ -156,6 +200,17 @@ fn public_private_info_description_notes_and_respec_cover_branches() {
         .unwrap()
         .unwrap();
     assert_eq!(rowset_len(&notes), 1);
+    if let PyRep::Rowset { rows, .. } = &notes {
+        let note_ts = rows[0][4]
+            .as_i64()
+            .expect("GetOwnerNote timestamp FILETIME");
+        assert!(
+            note_ts >= 116_444_736_000_000_000,
+            "GetOwnerNote timestamp must be Win32 FILETIME ticks, got {note_ts}"
+        );
+    } else {
+        panic!("expected Rowset from GetOwnerNote");
+    }
 
     let labels = handle_contacts(&ctx, &mut sess, "charMgr", "GetOwnerNoteLabels", &[], &kw)
         .unwrap()

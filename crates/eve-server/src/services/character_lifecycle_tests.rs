@@ -407,6 +407,14 @@ fn char_mgr_queries_roles_kills_activity_and_cohorts() {
     .unwrap()
     .unwrap();
     assert_eq!(kills.row_count(), Some(1));
+    if let PyRep::Rowset { rows, .. } = &kills {
+        assert_eq!(
+            rows[0][3],
+            PyRep::Integer(unix_to_filetime(1_700_000_000))
+        );
+    } else {
+        panic!("expected Rowset from GetRecentShipKillsAndLosses");
+    }
 
     assert_eq!(
         handle(

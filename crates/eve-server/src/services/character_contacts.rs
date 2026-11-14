@@ -23,6 +23,15 @@ use character_contacts_helpers::{
 };
 
 
+/// Converts Unix epoch seconds (or pre-converted FILETIME ticks) to 64-bit Win32 FILETIME ticks.
+fn unix_to_filetime(ts: u64) -> i64 {
+    if ts > 100_000_000_000 {
+        ts as i64
+    } else {
+        ((ts as i64) + 11_644_473_600) * 10_000_000
+    }
+}
+
 pub fn handle_contacts(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -56,6 +65,8 @@ pub fn handle_contacts(
                 let st = c.standings.get(&wfid).copied().unwrap_or(0.0);
                 (Some(wfid), crate::services::fw_services::calculate_militia_rank(st))
             }).unwrap_or((None, 0));
+            let create_date_ft = unix_to_filetime(c.create_date_unix);
+            let war_fac_rep = war_fac.map(PyRep::Integer).unwrap_or(PyRep::None);
             Some(Ok(PyRep::keyval([
                 ("characterID", PyRep::Integer(c.character_id)), ("characterName", PyRep::String(c.name)),
                 ("corporationID", PyRep::Integer(c.corporation_id)), ("allianceID", c.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
@@ -63,8 +74,9 @@ pub fn handle_contacts(
                 ("ancestryID", PyRep::Integer(c.ancestry_id as i64)), ("schoolID", PyRep::Integer(c.school_id as i64)),
                 ("securityStatus", PyRep::Real(c.security_status)), ("description", PyRep::String(c.description)),
                 ("title", PyRep::String(c.title)), ("gender", PyRep::Integer(c.gender as i64)),
-                ("createDateTime", PyRep::Integer(c.create_date_unix as i64)), ("portraitInfo", PyRep::String(portrait_info)),
-                ("warFactionID", war_fac.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("createDateTime", PyRep::Integer(create_date_ft)), ("startDateTime", PyRep::Integer(create_date_ft)),
+                ("portraitInfo", PyRep::String(portrait_info)),
+                ("warFactionID", war_fac_rep.clone()), ("militiaFactionID", war_fac_rep),
                 ("militiaRank", PyRep::Integer(rank)), ("rank", PyRep::Integer(rank)),
             ])))
         }
@@ -127,7 +139,7 @@ pub fn handle_contacts(
             Some(Ok(PyRep::keyval([
                 ("characterID", PyRep::Integer(c.character_id)), ("charName", PyRep::String(c.name.clone())),
                 ("characterName", PyRep::String(c.name)), ("gender", PyRep::Integer(c.gender as i64)),
-                ("createDateTime", PyRep::Integer(c.create_date_unix as i64)), ("raceID", PyRep::Integer(c.race_id as i64)),
+                ("createDateTime", PyRep::Integer(unix_to_filetime(c.create_date_unix))), ("raceID", PyRep::Integer(c.race_id as i64)),
                 ("bloodlineID", PyRep::Integer(c.bloodline_id as i64)), ("ancestryID", PyRep::Integer(c.ancestry_id as i64)),
                 ("schoolID", PyRep::Integer(c.school_id as i64)), ("corporationID", PyRep::Integer(c.corporation_id)),
                 ("allianceID", c.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)), ("balance", PyRep::Real(c.balance.to_wire_f64())),
@@ -192,13 +204,6 @@ pub fn handle_contacts(
             // V24.01 `Info.GetEmploymentHistorySubContent` (`infosvc.pyj:3565-3605`) reads
             // `job.corporationID`, `job.deleted`, and `FmtDate(job.startDate, 'ls')` /
             // `(nextDateRaw - job.startDate) / const.DAY` (64-bit Win32 FILETIME ticks, `#750`).
-            let unix_to_filetime = |ts: u64| -> i64 {
-                if ts > 100_000_000_000 {
-                    ts as i64
-                } else {
-                    ((ts as i64) + 11_644_473_600) * 10_000_000
-                }
-            };
             let mut rows = Vec::new();
             ctx.db.with_snapshot(|snap| {
                 let is_corp_deleted = |corp_id: i64| -> i64 {
@@ -279,7 +284,7 @@ pub fn handle_contacts(
                             PyRep::Integer(n.item_id),
                             PyRep::String(n.label.clone()),
                             PyRep::String(n.note.clone()),
-                            PyRep::Integer(n.timestamp_unix as i64),
+                            PyRep::Integer(unix_to_filetime(n.timestamp_unix)),
                         ]
                     })
                     .collect()

@@ -1166,7 +1166,7 @@ fn handle_char_mgr(
                     PyRep::Integer(e.kill_id),
                     PyRep::Integer(e.victim_character_id),
                     PyRep::Integer(e.solar_system_id as i64),
-                    PyRep::Integer(e.killed_unix as i64),
+                    PyRep::Integer(unix_to_filetime(e.killed_unix)),
                     PyRep::None,
                     PyRep::Integer(e.victim_character_id),
                     PyRep::Integer(e.victim_corp_id),

@@ -197,3 +197,81 @@ fn get_character_selection_data_resculpt_or_branches_and_non_default() {
     });
     assert_eq!(paperdoll_for(&sess), Some(PyRep::Integer(1)));
 }
+
+#[test]
+fn get_character_selection_data_delete_prepare_datetime_and_corp_alliance_fallback() {
+    let ctx = test_ctx();
+    let uid = 1_u64;
+    let cid = 90_000_001_i64;
+    let corp_id = 98_000_001_i64;
+    let sess = auth_session(uid, cid, corp_id, 30_000_142);
+
+    let char_row_for = || {
+        let rep = get_character_selection_data(&ctx, &sess).expect("char selection data");
+        let PyRep::Tuple(parts) = rep else {
+            panic!("expected tuple");
+        };
+        parts[2]
+            .as_list()
+            .unwrap()
+            .iter()
+            .find(|r| r.dict_get("characterID") == Some(&PyRep::Integer(cid)))
+            .cloned()
+            .expect("character row")
+    };
+
+    // Baseline: no pending delete timer -> deletePrepareDateTime is None
+    assert_eq!(
+        char_row_for().dict_get("deletePrepareDateTime"),
+        Some(&PyRep::None)
+    );
+
+    // Prepare delete + corp alliance fallback when character.alliance_id is None
+    let prep_unix = 1_700_000_000_u64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut lc = crate::services::character_lifecycle::load_store(snap);
+        lc.delete_prepared_unix.insert(cid, prep_unix);
+        crate::services::character_lifecycle::save_store(snap, &lc);
+
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.corporation_id = corp_id;
+            ch.alliance_id = None;
+        }
+        let corp = snap.corporations.entry(corp_id).or_insert_with(|| {
+            let mut c = eve_db::CorporationRecord::default();
+            c.corporation_id = corp_id;
+            c
+        });
+        corp.alliance_id = Some(99_000_123);
+    });
+    let row = char_row_for();
+    assert_eq!(
+        row.dict_get("deletePrepareDateTime"),
+        Some(&PyRep::Integer(unix_to_filetime(
+            prep_unix + crate::services::character_lifecycle::BIOMASS_DELAY_SECS
+        )))
+    );
+    assert_eq!(
+        row.dict_get("allianceID"),
+        Some(&PyRep::Integer(99_000_123))
+    );
+
+    // Character alliance_id overrides corp alliance_id, and clearing delete timer restores None
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut lc = crate::services::character_lifecycle::load_store(snap);
+        lc.delete_prepared_unix.remove(&cid);
+        crate::services::character_lifecycle::save_store(snap, &lc);
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.alliance_id = Some(99_000_777);
+        }
+    });
+    let row_after = char_row_for();
+    assert_eq!(
+        row_after.dict_get("deletePrepareDateTime"),
+        Some(&PyRep::None)
+    );
+    assert_eq!(
+        row_after.dict_get("allianceID"),
+        Some(&PyRep::Integer(99_000_777))
+    );
+}
