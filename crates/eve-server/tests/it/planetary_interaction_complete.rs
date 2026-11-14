@@ -3,11 +3,12 @@
 //! Validates pin lookup, storage quantity availability, link path reachability,
 //! destination capacity bounds, atomic storage quantity updates, and transfer cooldowns.
 
-use crate::common;
+use crate::common::{self, SessionBorrowWireTransport};
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord, TypeId};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
+use eve_testkit::client_harness::{ClientErrorResponse, ClientHarness, ContractValidationMode};
 use std::collections::HashMap;
 
 const JITA_SOLAR_SYSTEM_ID: u32 = 30_000_142;
@@ -22,10 +23,23 @@ const STORAGE_PIN_TYPE_ID: TypeId = 2536; // Gas Storage Facility (capacity 12,0
 const LAUNCHPAD_PIN_TYPE_ID: TypeId = 2543; // Gas Launchpad (capacity 10,000 m3)
 const WATER_P1_TYPE_ID: TypeId = 2389; // unit volume 0.19 m3
 
+async fn rpc(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+) -> Result<PyRep, ClientErrorResponse> {
+    let kw = HashMap::new();
+    common::borrow_wire_harness(ctx, sess)
+        .call(service, None, method, args, &kw)
+        .await
+}
+
 async fn setup_pilot(ctx: &ServerContext, session_id: u64, username: &str, password: &str, char_id: i64) -> SessionState {
     let mut sess = SessionState::new(session_id);
     common::login_pilot(ctx, &mut sess, username, password).await;
-    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &HashMap::new(), None)
+    rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)])
         .await
         .expect("SelectCharacterID");
     sess
@@ -86,31 +100,27 @@ async fn test_planetary_interaction_expedited_transfer() {
     });
 
     // Deploy colony
-    let kw = HashMap::new();
-    let col_dep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "planetMgr",
-            None,
-            "UserUpdateNetwork",
-            &[
-                PyRep::Integer(JITA_PLANET_ID),
-                PyRep::List(vec![
-                    PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(1001), PyRep::Integer(CC_PIN_TYPE_ID as i64), PyRep::Real(0.10), PyRep::Real(0.10)]),
-                    PyRep::Tuple(vec![PyRep::Integer(9), PyRep::Integer(1001), PyRep::Integer(3)]),
-                    PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(1002), PyRep::Integer(LAUNCHPAD_PIN_TYPE_ID as i64), PyRep::Real(0.11), PyRep::Real(0.11)]),
-                    PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(1003), PyRep::Integer(STORAGE_PIN_TYPE_ID as i64), PyRep::Real(0.12), PyRep::Real(0.12)]),
-                    PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(1004), PyRep::Integer(EXTRACTOR_PIN_TYPE_ID as i64), PyRep::Real(0.13), PyRep::Real(0.13)]),
-                    // Link 1001 <-> 1002, and 1002 <-> 1003. Pin 1004 is left isolated (no link).
-                    PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(1001), PyRep::Integer(1002), PyRep::Integer(0)]),
-                    PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(1002), PyRep::Integer(1003), PyRep::Integer(0)]),
-                ]),
-            ],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Deploy colony network");
+    let col_dep = rpc(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserUpdateNetwork",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::List(vec![
+                PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(1001), PyRep::Integer(CC_PIN_TYPE_ID as i64), PyRep::Real(0.10), PyRep::Real(0.10)]),
+                PyRep::Tuple(vec![PyRep::Integer(9), PyRep::Integer(1001), PyRep::Integer(3)]),
+                PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(1002), PyRep::Integer(LAUNCHPAD_PIN_TYPE_ID as i64), PyRep::Real(0.11), PyRep::Real(0.11)]),
+                PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(1003), PyRep::Integer(STORAGE_PIN_TYPE_ID as i64), PyRep::Real(0.12), PyRep::Real(0.12)]),
+                PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(1004), PyRep::Integer(EXTRACTOR_PIN_TYPE_ID as i64), PyRep::Real(0.13), PyRep::Real(0.13)]),
+                // Link 1001 <-> 1002, and 1002 <-> 1003. Pin 1004 is left isolated (no link).
+                PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(1001), PyRep::Integer(1002), PyRep::Integer(0)]),
+                PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(1002), PyRep::Integer(1003), PyRep::Integer(0)]),
+            ]),
+        ],
+    )
+    .await
+    .expect("Deploy colony network");
 
     let PyRep::List(pins) = col_dep.dict_get("pins").expect("pins list") else { panic!("expected pins list"); };
     let cc_pin_id = pins.iter().find(|p| get_i64(p, "typeID") == Some(CC_PIN_TYPE_ID as i64)).and_then(|p| get_i64(p, "pinID")).expect("cc pin id");
@@ -119,10 +129,10 @@ async fn test_planetary_interaction_expedited_transfer() {
     let isolated_pin_id = pins.iter().find(|p| get_i64(p, "typeID") == Some(EXTRACTOR_PIN_TYPE_ID as i64)).and_then(|p| get_i64(p, "pinID")).expect("isolated pin id");
 
     // Negative check: ImportToColony fails when character does not hold the items
-    let imp_missing = ctx.dispatch_rpc(
+    let imp_missing = rpc(
+        &ctx,
         &mut sess,
         "planetMgr",
-        None,
         "UserLaunchCommodities",
         &[
             PyRep::Integer(JITA_PLANET_ID),
@@ -130,18 +140,16 @@ async fn test_planetary_interaction_expedited_transfer() {
             PyRep::Integer(500),
             PyRep::String("ImportToColony".into()),
         ],
-        &kw,
-        None,
     ).await.expect_err("Import without commodity must fail");
     assert_eq!(imp_missing.code, "ItemNotFound");
 
     ctx.db.with_mut_snapshot(|snap| {
         seed_cargo_item(snap, WATER_P1_TYPE_ID, char_id, ship_id, 200);
     });
-    let imp_insuf = ctx.dispatch_rpc(
+    let imp_insuf = rpc(
+        &ctx,
         &mut sess,
         "planetMgr",
-        None,
         "UserLaunchCommodities",
         &[
             PyRep::Integer(JITA_PLANET_ID),
@@ -149,8 +157,6 @@ async fn test_planetary_interaction_expedited_transfer() {
             PyRep::Integer(500),
             PyRep::String("ImportToColony".into()),
         ],
-        &kw,
-        None,
     ).await.expect_err("Import with insufficient quantity must fail");
     assert_eq!(imp_insuf.code, "InsufficientCommodityQuantity");
 
@@ -160,10 +166,10 @@ async fn test_planetary_interaction_expedited_transfer() {
     });
 
     // Import 500 units of Water P1 into Launchpad pin via UserLaunchCommodities (ImportToColony)
-    ctx.dispatch_rpc(
+    rpc(
+        &ctx,
         &mut sess,
         "planetMgr",
-        None,
         "UserLaunchCommodities",
         &[
             PyRep::Integer(JITA_PLANET_ID),
@@ -171,8 +177,6 @@ async fn test_planetary_interaction_expedited_transfer() {
             PyRep::Integer(500),
             PyRep::String("ImportToColony".into()),
         ],
-        &kw,
-        None,
     )
     .await
     .expect("ImportToColony");
@@ -182,58 +186,65 @@ async fn test_planetary_interaction_expedited_transfer() {
     };
 
     // 1. Error: Source pin not found
-    let err_src_missing = ctx.dispatch_rpc(
-        &mut sess, "planetMgr", None, "UserTransferCommodities",
+    let err_src_missing = rpc(
+        &ctx, &mut sess, "planetMgr", "UserTransferCommodities",
         &[PyRep::Integer(JITA_PLANET_ID), PyRep::List(vec![PyRep::Integer(999_999), PyRep::Integer(storage_pin_id)]), comms_map(WATER_P1_TYPE_ID, 50)],
-        &kw, None,
     ).await.expect_err("Source pin not found must fail");
     assert_eq!(err_src_missing.code, "PinNotFound");
 
     // 2. Error: Destination pin not found
-    let err_dst_missing = ctx.dispatch_rpc(
-        &mut sess, "planetMgr", None, "UserTransferCommodities",
+    let err_dst_missing = rpc(
+        &ctx, &mut sess, "planetMgr", "UserTransferCommodities",
         &[PyRep::Integer(JITA_PLANET_ID), PyRep::List(vec![PyRep::Integer(launch_pin_id), PyRep::Integer(999_999)]), comms_map(WATER_P1_TYPE_ID, 50)],
-        &kw, None,
     ).await.expect_err("Dest pin not found must fail");
     assert_eq!(err_dst_missing.code, "PinNotFound");
 
     // 3. Error: No link between pins
-    let err_no_link = ctx.dispatch_rpc(
-        &mut sess, "planetMgr", None, "UserTransferCommodities",
+    let err_no_link = rpc(
+        &ctx, &mut sess, "planetMgr", "UserTransferCommodities",
         &[PyRep::Integer(JITA_PLANET_ID), PyRep::List(vec![PyRep::Integer(launch_pin_id), PyRep::Integer(isolated_pin_id)]), comms_map(WATER_P1_TYPE_ID, 50)],
-        &kw, None,
     ).await.expect_err("No link path between pins must fail");
     assert_eq!(err_no_link.code, "NoLinkBetweenPins");
 
     // 4. Error: Insufficient commodity in source pin (source has 500, request 1000)
-    let err_insuf = ctx.dispatch_rpc(
-        &mut sess, "planetMgr", None, "UserTransferCommodities",
+    let err_insuf = rpc(
+        &ctx, &mut sess, "planetMgr", "UserTransferCommodities",
         &[PyRep::Integer(JITA_PLANET_ID), PyRep::List(vec![PyRep::Integer(launch_pin_id), PyRep::Integer(storage_pin_id)]), comms_map(WATER_P1_TYPE_ID, 1_000)],
-        &kw, None,
     ).await.expect_err("Insufficient commodity must fail");
     assert_eq!(err_insuf.code, "InsufficientCommodityStorage");
 
     // 5. Error: Destination pin storage capacity full
     // Command Center has 500 m3 capacity. Transferring 3,000 units of Water (3,000 * 0.19 m3 = 570 m3) exceeds 500 m3.
-    ctx.dispatch_rpc(
-        &mut sess, "planetMgr", None, "UserLaunchCommodities",
+    rpc(
+        &ctx, &mut sess, "planetMgr", "UserLaunchCommodities",
         &[PyRep::Integer(JITA_PLANET_ID), PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(3000), PyRep::String("ImportToColony".into())],
-        &kw, None,
     ).await.expect("ImportToColony 3000");
 
-    let err_cap = ctx.dispatch_rpc(
-        &mut sess, "planetMgr", None, "UserTransferCommodities",
+    let err_cap = rpc(
+        &ctx, &mut sess, "planetMgr", "UserTransferCommodities",
         &[PyRep::Integer(JITA_PLANET_ID), PyRep::List(vec![PyRep::Integer(launch_pin_id), PyRep::Integer(cc_pin_id)]), comms_map(WATER_P1_TYPE_ID, 3_000)],
-        &kw, None,
     ).await.expect_err("Destination full must fail");
     assert_eq!(err_cap.code, "PinStorageFull");
 
     // 6. Successful expedited transfer via V24 client signature: Launchpad -> Storage, transfer 150 units (28.5 m3)
-    let xfer_ok = ctx.dispatch_rpc(
-        &mut sess, "planetMgr", None, "UserTransferCommodities",
+    // Server wire-shape bug (`pi_helpers::user_transfer_commodities_logic`): returns a
+    // `PyRep::keyval` summary (`planetID`, `sourcePinID`, `destPinID`, `commodityTypeID`,
+    // `quantity`, `volumeM3`, `cooldownSeconds`), whereas V24 `ClientPlanet.TransferCommodities`
+    // (`clientPlanet.pyj:615`) unpacks a 2-tuple `(runSimUntil, lastRunTime)` (`unpack:2` at `$`).
+    let xfer_ok = ClientHarness::new(SessionBorrowWireTransport {
+        ctx: &ctx,
+        session: &mut sess,
+        preserve_char_notifications: false,
+    })
+    .with_mode(ContractValidationMode::ReportOnly)
+    .call_ok(
+        "planetMgr",
+        None,
+        "UserTransferCommodities",
         &[PyRep::Integer(JITA_PLANET_ID), PyRep::List(vec![PyRep::Integer(launch_pin_id), PyRep::Integer(storage_pin_id)]), comms_map(WATER_P1_TYPE_ID, 150)],
-        &kw, None,
-    ).await.expect("Expedited transfer should succeed");
+        &HashMap::new(),
+    )
+    .await;
 
     assert_eq!(get_i64(&xfer_ok, "planetID"), Some(JITA_PLANET_ID));
     assert_eq!(get_i64(&xfer_ok, "sourcePinID"), Some(launch_pin_id));
@@ -260,10 +271,9 @@ async fn test_planetary_interaction_expedited_transfer() {
     });
 
     // 7. Error: Expedited transfer on cooldown
-    let err_cd = ctx.dispatch_rpc(
-        &mut sess, "planetMgr", None, "UserTransferCommodities",
+    let err_cd = rpc(
+        &ctx, &mut sess, "planetMgr", "UserTransferCommodities",
         &[PyRep::Integer(JITA_PLANET_ID), PyRep::List(vec![PyRep::Integer(launch_pin_id), PyRep::Integer(storage_pin_id)]), comms_map(WATER_P1_TYPE_ID, 50)],
-        &kw, None,
     ).await.expect_err("Immediate repeat transfer must fail with cooldown");
     assert_eq!(err_cd.code, "ExpeditedTransferOnCooldown");
 }

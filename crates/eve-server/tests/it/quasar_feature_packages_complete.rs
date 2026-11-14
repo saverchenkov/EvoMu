@@ -67,18 +67,15 @@ async fn dispatch_and_verify_request(
 ) -> EvePublicResponse {
     let empty_kw = HashMap::new();
     let req = make_public_request(ctx, req_type, Vec::new(), corr);
-    let rep = ctx
-        .dispatch_rpc(
-            sess,
+    let rep = crate::common::borrow_wire_harness(ctx, sess)
+        .call_ok(
             "publicGatewaySvc",
             None,
             "SendRequest",
             &[PyRep::Bytes(req.encode_proto())],
             &empty_kw,
-            None,
         )
-        .await
-        .unwrap_or_else(|e| panic!("SendRequest failed for {req_type}: {e:?}"));
+        .await;
     let rsp = extract_response_proto(&rep);
     assert_eq!(
         rsp.status_code, STATUS_OK,
@@ -114,7 +111,7 @@ async fn test_quasar_campaign_definition_requests() {
         b"cmp-03",
     )
     .await;
-    let r3_payload = r3.payload.as_ref().unwrap();
+    let r3_payload = r3.payload.as_ref().expect("r3 payload");
     assert_eq!(
         r3_payload.normalized_type_name(),
         "eve_public.campaign.contributionmethod.definition.api.GetAllResponse"
@@ -133,7 +130,7 @@ async fn test_quasar_campaign_definition_requests() {
         b"cmp-07",
     )
     .await;
-    let r7_payload = r7.payload.as_ref().unwrap();
+    let r7_payload = r7.payload.as_ref().expect("r7 payload");
     assert!(!r7_payload.value.is_empty(), "Eventmatch trigger definitions must not be empty");
     let em_wm = WireMessage::decode(&r7_payload.value).expect("decode eventmatch definitions");
     let em_entries: Vec<_> = em_wm.fields.iter().filter(|f| f.field_number == 1).collect();
@@ -169,18 +166,15 @@ async fn test_quasar_sovereignty_resources_mercenaryden_stargate_and_admin_reque
         Vec::new(),
         b"ai-01",
     );
-    let ai_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let ai_rep = crate::common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok(
             "publicGatewaySvc",
             None,
             "SendRequest",
             &[PyRep::Bytes(ai_req.encode_proto())],
             &empty_kw,
-            None,
         )
-        .await
-        .expect("SendRequest QueryRequest");
+        .await;
     let r_ai = extract_response_proto(&ai_rep);
     assert_eq!(r_ai.status_code, 400);
     assert_eq!(r_ai.correlation_uuid, b"ai-01");
@@ -193,22 +187,19 @@ async fn test_quasar_sovereignty_resources_mercenaryden_stargate_and_admin_reque
         ai_valid_payload,
         b"ai-02",
     );
-    let ai_valid_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let ai_valid_rep = crate::common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok(
             "publicGatewaySvc",
             None,
             "SendRequest",
             &[PyRep::Bytes(ai_valid_req.encode_proto())],
             &empty_kw,
-            None,
         )
-        .await
-        .expect("SendRequest QueryRequest valid");
+        .await;
     let r_ai_valid = extract_response_proto(&ai_valid_rep);
     assert_eq!(r_ai_valid.status_code, STATUS_OK);
     assert_eq!(
-        r_ai_valid.payload.unwrap().normalized_type_name(),
+        r_ai_valid.payload.expect("ai valid payload").normalized_type_name(),
         "eve_public.ai.assistant.chat.api.QueryResponse"
     );
 
@@ -283,17 +274,14 @@ async fn test_quasar_sovereignty_resources_mercenaryden_stargate_and_admin_reque
         Vec::new(),
         b"adm-deny",
     );
-    let rep = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let rep = crate::common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok(
             "publicGatewaySvc",
             None,
             "SendRequest",
             &[PyRep::Bytes(unpriv_req.encode_proto())],
             &empty_kw,
-            None,
         )
-        .await
-        .expect("SendRequest");
+        .await;
     assert_eq!(extract_response_proto(&rep).status_code, STATUS_FORBIDDEN);
 }
