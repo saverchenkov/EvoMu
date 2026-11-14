@@ -510,22 +510,22 @@ fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical_rekey
 
     ctx1.persist_server_runtime_to_db();
 
-    let (exported_json, exported_sp6) = ctx1.db.with_snapshot(|snap| {
+    let exported_sp6 = ctx1.db.with_snapshot(|snap| {
         assert!(!snap
             .service_state_blobs
             .contains_key(SERVER_RUNTIME_STATE_BLOB_KEY));
+        assert!(snap.cluster_and_runtime.server_runtime_json.is_none());
         assert!(snap.sp6_lifecycle.server_runtime_json.is_none());
         assert!(snap.sp6_lifecycle.active_scanner_probes.contains_key(&probe_active));
-        (
-            snap.cluster_and_runtime
-                .server_runtime_json
-                .clone()
-                .expect("persisted json"),
-            snap.sp6_lifecycle.active_scanner_probes.clone(),
-        )
+        snap.sp6_lifecycle.active_scanner_probes.clone()
     });
+    assert!(ctx1
+        .db
+        .with_sqlite_conn(|conn| eve_db::sqlite_store::system_checkpoint::has_any_system_checkpoints(conn))
+        .expect("system_checkpoint rows written"));
 
-    // 3. Hydrate into a distinct ServerContext + WorldRepository and verify tactical re-keying,
+    // 3. Hydrate into a distinct ServerContext sharing the same SQLite checkpoints (and via a separate
+    // db2 to verify legacy monolith migration drops crash-lost `active_ewar_starts` / `entosis_target_cycles`),
     // probe state normalization (`state > 0 -> 0`, `state < 0` dropped, `warp_end_ft -> None`),
     // owner_notes `-79` notification filtering/sorting, and `macho_global_config`.
     let db2 = Arc::new(WorldRepository::with_demo_seed());
@@ -533,33 +533,59 @@ fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical_rekey
     assert_ne!(ctx1.instance_id, ctx2.instance_id);
     assert_ne!(db_ptr_key(&ctx1.db), db_ptr_key(&ctx2.db));
 
-    // Build all 11 canonical EWAR kind strings + two distinct unknown strings hitting `_ => "electronic"` fallback.
-    let ewar_cases: [(&str, &str); 13] = [
-        ("warpScramblerMWD", "warpScramblerMWD"),
-        ("warpScrambler", "warpScrambler"),
-        ("focusedWarpScrambler", "focusedWarpScrambler"),
-        ("webify", "webify"),
-        ("electronic", "electronic"),
-        ("ewRemoteSensorDamp", "ewRemoteSensorDamp"),
-        ("ewGuidanceDisrupt", "ewGuidanceDisrupt"),
-        ("ewTrackingDisrupt", "ewTrackingDisrupt"),
-        ("ewTargetPaint", "ewTargetPaint"),
-        ("ewEnergyNeut", "ewEnergyNeut"),
-        ("ewEnergyVampire", "ewEnergyVampire"),
-        ("unrecognizedCustomEwarA", "electronic"),
-        ("unrecognizedCustomEwarB", "electronic"),
-    ];
-    let mut ewar_json_val: serde_json::Value = serde_json::from_str(&exported_json).unwrap();
-    let ewar_entries: Vec<serde_json::Value> = ewar_cases
-        .iter()
-        .enumerate()
-        .map(|(i, &(raw, _))| serde_json::json!([i as i64 + 1, raw]))
-        .collect();
-    ewar_json_val["active_ewar_starts"] = serde_json::json!([[[ship_a, ship_b], ewar_entries]]);
-    let mutated_json = serde_json::to_string(&ewar_json_val).unwrap();
+    // Export durable tactical checkpoints from ctx1's SQLite into db2's SQLite `system_checkpoint`
+    // and also inject a legacy `SERVER_RUNTIME_STATE_BLOB_KEY` payload containing crash-lost EWAR
+    // to verify crash-lost entries are never resurrected.
+    let durable_rows = ctx1
+        .db
+        .with_sqlite_conn(|conn| {
+            eve_db::sqlite_store::system_checkpoint::load_all_checkpoints_for_kind::<serde_json::Value>(
+                conn,
+                eve_db::sqlite_store::system_checkpoint::KIND_TACTICAL_DURABLE,
+            )
+        })
+        .expect("load durable tactical rows");
+    let sim_rows = ctx1
+        .db
+        .with_sqlite_conn(|conn| {
+            eve_db::sqlite_store::system_checkpoint::load_all_checkpoints_for_kind::<serde_json::Value>(
+                conn,
+                eve_db::sqlite_store::system_checkpoint::KIND_SYSTEM_SIM_TIME,
+            )
+        })
+        .expect("load sim time rows");
+    ctx2.db
+        .with_sqlite_conn(|conn| -> Result<(), String> {
+            eve_db::sqlite_store::system_checkpoint::ensure_system_checkpoint_schema(conn)?;
+            for (sys_id, key, val) in &durable_rows {
+                eve_db::sqlite_store::system_checkpoint::upsert_system_checkpoint(
+                    conn,
+                    *sys_id,
+                    eve_db::sqlite_store::system_checkpoint::KIND_TACTICAL_DURABLE,
+                    key,
+                    val,
+                    1_700_000_000,
+                )?;
+            }
+            for (sys_id, key, val) in &sim_rows {
+                eve_db::sqlite_store::system_checkpoint::upsert_system_checkpoint(
+                    conn,
+                    *sys_id,
+                    eve_db::sqlite_store::system_checkpoint::KIND_SYSTEM_SIM_TIME,
+                    key,
+                    val,
+                    1_700_000_000,
+                )?;
+            }
+            Ok(())
+        })
+        .expect("seed db2 system checkpoints");
 
-    // Verify legacy fallback priority: first via service_state_blobs[SERVER_RUNTIME_STATE_BLOB_KEY]
-    // when both cluster_and_runtime.server_runtime_json and sp6_lifecycle.server_runtime_json are None.
+    let legacy_crash_lost_json = serde_json::json!({
+        "active_ewar_starts": [[[ship_a, ship_b], [[1, "warpScramblerMWD"]]]]
+    })
+    .to_string();
+
     let n_rec_10 = NotificationRecord {
         notification_id: 10,
         type_id: 5,
@@ -583,7 +609,7 @@ fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical_rekey
         snap.cluster_and_runtime.server_runtime_json = None;
         snap.sp6_lifecycle.server_runtime_json = None;
         snap.service_state_blobs
-            .insert(SERVER_RUNTIME_STATE_BLOB_KEY.into(), mutated_json.clone());
+            .insert(SERVER_RUNTIME_STATE_BLOB_KEY.into(), legacy_crash_lost_json.clone());
         snap.service_state_blobs.insert(
             "macho_global_config".into(),
             serde_json::to_string(&HashMap::from([("maxUsers".to_string(), PyRep::Integer(500))])).unwrap(),
@@ -636,19 +662,11 @@ fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical_rekey
     });
     ctx2.hydrate_server_runtime_from_db();
 
-    // Verify EWAR interning to canonical static slices
-    {
-        let ewar = ctx2.active_ewar_starts.read().unwrap();
-        let list = &ewar[&(ship_a, ship_b)];
-        assert_eq!(list.len(), ewar_cases.len());
-        for (idx, &(_, expected)) in ewar_cases.iter().enumerate() {
-            assert_eq!(list[idx].1, expected);
-        }
-        assert!(
-            std::ptr::eq(list[11].1, list[12].1),
-            "unknown EWAR kinds must intern to the same static fallback literal"
-        );
-    }
+    // Verify crash-lost active_ewar_starts remains empty and legacy monolith blob was retired
+    assert!(ctx2.active_ewar_starts.read().unwrap().is_empty());
+    assert!(ctx2
+        .db
+        .with_snapshot(|snap| !snap.service_state_blobs.contains_key(SERVER_RUNTIME_STATE_BLOB_KEY)));
 
     // Verify notifications sorted and `-80` / corrupt JSON excluded
     {
@@ -670,7 +688,7 @@ fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical_rekey
         assert_eq!(p.warp_end_ft, None);
     }
 
-    // Verify tactical_state cross-context key migration
+    // Verify tactical_state cross-context key migration (durable kinds kept, crash-lost entosis dropped)
     let inst2 = ctx2.instance_id as usize;
     let dbk2 = db_ptr_key(&ctx2.db);
     {
@@ -683,8 +701,7 @@ fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical_rekey
         assert_eq!(tac.tsb_self_penalty_until.get(&(dbk2, ship_b)), Some(&3_002));
         assert!(tac.clone_vat_bay_activated_ships.contains(&(inst2, ship_a)));
         assert!(tac.clone_vat_bay_activated_ships.contains(&(dbk2, ship_b)));
-        assert_eq!(tac.entosis_target_cycles.get(&(inst2, ship_a, 99)), Some(&4));
-        assert_eq!(tac.entosis_target_cycles.get(&(dbk2, ship_b, 98)), Some(&5));
+        assert!(tac.entosis_target_cycles.is_empty());
         assert_eq!(tac.system_sim_time_s.get(&(inst2, 30_000_142)), Some(&12.5));
         assert_eq!(tac.system_sim_time_s.get(&(dbk2, 30_000_144)), Some(&25.0));
     }
@@ -694,7 +711,21 @@ fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical_rekey
     ctx2.rehydrate_runtime_from_db();
     assert!(ctx2.scanned_signatures.read().unwrap().is_empty());
 
-    // 5. Corrupt JSON in server_runtime_json clears runtime state gracefully
+    // 5. Corrupt JSON in legacy `server_runtime_json` clears runtime state gracefully when no checkpoints exist
+    ctx2.db
+        .with_sqlite_conn(|conn| {
+            eve_db::sqlite_store::system_checkpoint::clear_system_checkpoints_for_system(conn, 0)?;
+            eve_db::sqlite_store::system_checkpoint::clear_system_checkpoints_for_system(
+                conn,
+                30_000_142,
+            )?;
+            eve_db::sqlite_store::system_checkpoint::clear_system_checkpoints_for_system(
+                conn,
+                30_000_144,
+            )?;
+            Ok::<_, String>(())
+        })
+        .expect("clear checkpoints");
     ctx2.db.with_mut_snapshot(|snap| {
         snap.cluster_and_runtime.server_runtime_json = Some("{invalid_json".into());
     });

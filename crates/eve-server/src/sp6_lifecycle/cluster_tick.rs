@@ -1605,7 +1605,7 @@ pub async fn tick_background_cluster_with_step(ctx: &ServerContext, explicit_ste
 
     let cached_prev = ctx
         .cluster_tick_last_unix
-        .swap(now_unix, std::sync::atomic::Ordering::Relaxed);
+        .load(std::sync::atomic::Ordering::Acquire);
     let db_prev = if cached_prev == 0 {
         ctx.db.with_snapshot(|snap| {
             snap.service_state_blobs
@@ -1615,11 +1615,70 @@ pub async fn tick_background_cluster_with_step(ctx: &ServerContext, explicit_ste
     } else {
         Some(cached_prev)
     };
-    let prev = db_prev.unwrap_or_else(|| now_unix.saturating_sub(explicit_step_secs.max(1)));
-    let tick_secs = now_unix
-        .saturating_sub(prev)
-        .max(explicit_step_secs)
-        .max(1);
+    let (prev, tick_secs) = match db_prev {
+        Some(prior) if now_unix <= prior => {
+            // Tick overrun (`now_unix == prior`) or backward wall-clock step (`now_unix < prior`):
+            // never move `cluster_tick_last_unix` backward and return a 0-second delta (`#863`).
+            ctx.cluster_tick_last_unix
+                .fetch_max(prior, std::sync::atomic::Ordering::AcqRel);
+            (prior, 0)
+        }
+        Some(prior) => {
+            let mut cur = cached_prev;
+            let claimed_prev = loop {
+                if cur >= now_unix {
+                    break None;
+                }
+                match ctx.cluster_tick_last_unix.compare_exchange_weak(
+                    cur,
+                    now_unix,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                ) {
+                    Ok(old) => break Some(if old == 0 { prior } else { old }),
+                    Err(actual) => cur = actual,
+                }
+            };
+            match claimed_prev {
+                Some(p) if now_unix > p => (p, now_unix.saturating_sub(p)),
+                Some(p) => (p, 0),
+                None => (now_unix, 0),
+            }
+        }
+        None => {
+            let initial_prev = now_unix.saturating_sub(explicit_step_secs.max(1));
+            let claimed_prev = match ctx.cluster_tick_last_unix.compare_exchange(
+                0,
+                now_unix,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            ) {
+                Ok(_) => Some(initial_prev),
+                Err(actual) if actual < now_unix => {
+                    let mut cur = actual;
+                    loop {
+                        if cur >= now_unix {
+                            break None;
+                        }
+                        match ctx.cluster_tick_last_unix.compare_exchange_weak(
+                            cur,
+                            now_unix,
+                            std::sync::atomic::Ordering::AcqRel,
+                            std::sync::atomic::Ordering::Acquire,
+                        ) {
+                            Ok(old) => break Some(old),
+                            Err(next) => cur = next,
+                        }
+                    }
+                }
+                Err(_) => None,
+            };
+            match claimed_prev {
+                Some(p) => (p, now_unix.saturating_sub(p)),
+                None => (now_unix, 0),
+            }
+        }
+    };
     let persisted = {
         let cur = ctx
             .cluster_tick_persisted_unix
@@ -1640,11 +1699,16 @@ pub async fn tick_background_cluster_with_step(ctx: &ServerContext, explicit_ste
         || (now_unix >= persisted.saturating_add(60)
             && ctx.db.with_snapshot(|s| s.pve_special_sites.initialized));
     if should_persist_tick {
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.service_state_blobs
+        let offset_secs = ctx.clock().offset_secs();
+        let _ = ctx.db.tx("cluster_tick_persist", |wtx| {
+            wtx.snap
+                .service_state_blobs
                 .insert("cluster_tick_last_unix".into(), now_unix.to_string());
-            snap.service_state_blobs
+            wtx.snap
+                .service_state_blobs
                 .insert("__server_now_unix".into(), now_unix.to_string());
+            wtx.set_clock_offset_secs(offset_secs);
+            Ok::<_, eve_db::TxError>(())
         });
         ctx.cluster_tick_persisted_unix
             .store(now_unix, std::sync::atomic::Ordering::Relaxed);
@@ -1663,7 +1727,9 @@ pub async fn tick_background_cluster_with_step(ctx: &ServerContext, explicit_ste
     // - `active_moon_probes` survey arrival notifications
     // - `sync_all_alliance_timers`
     // - `sync_all_structures`
-    ctx.run_clock_advanced_sync_pipeline(prev, tick_secs, false, false);
+    if tick_secs > 0 {
+        ctx.run_clock_advanced_sync_pipeline(prev, tick_secs, false, false);
+    }
     crate::services::industry_pi::pi_helpers::tick_all_colonies_background(ctx, now_unix);
 
     crate::services::mining_advanced::tick_all_moon_extractions(ctx).await;

@@ -2025,7 +2025,8 @@ impl SystemHandle {
 mod celestials_helpers;
 pub use celestials_helpers::try_remove_ball_for_db;
 pub(crate) use celestials_helpers::{
-    collect_dirty_condition_checkpoint_entries, collect_immediate_armor_hull_checkpoint_entries,
+    collect_all_condition_checkpoint_entries, collect_dirty_condition_checkpoint_entries,
+    collect_immediate_armor_hull_checkpoint_entries,
     collect_landed_warp_positions, fast_forward_clock_in_actor_with_epochs,
     persist_ball_positions_in_db, persist_landed_warps_in_db,
     record_spawned_ball_checkpoint_baseline, register_committed_warp_cache,

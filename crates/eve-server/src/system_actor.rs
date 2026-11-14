@@ -2121,7 +2121,7 @@ impl SystemRegistry {
                                 celestials::remove_ball_checkpoint_tracking(&mut actor_st, bid);
                             }
                             if let Some(reply) = flush_checkpoint_reply {
-                                let entries = celestials::collect_dirty_condition_checkpoint_entries(&mut actor_st, &ballpark);
+                                let entries = celestials::collect_all_condition_checkpoint_entries(&mut actor_st, &ballpark);
                                 let _ = reply.send(entries);
                             }
                             celestials::update_system_hibernation_flag(

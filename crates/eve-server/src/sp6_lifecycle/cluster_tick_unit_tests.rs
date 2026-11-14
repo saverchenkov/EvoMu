@@ -1886,3 +1886,231 @@ fn server_context_weak_upgrade_shares_live_config_and_catalog_arcs_without_clone
     drop(ctx);
     assert!(weak.upgrade().is_none());
 }
+
+#[tokio::test]
+async fn tick_delta_restart_gm_advance_overrun_and_backward_clock_avoid_double_skill_credit() {
+    let dir = std::env::temp_dir().join(format!(
+        "evomu_tick_delta_skill_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("world.sqlite");
+    let sde_path = std::env::var("EVOMU_SDE_PATH").unwrap_or_else(|_| "data/evomu_sde.sqlite".into());
+    let sde = Arc::new(eve_sde::SdeRegistry::open(&sde_path).unwrap_or_default());
+
+    let base_now = 1_800_000_000_u64;
+    let char_id = 90_000_001_i64;
+    let skill_tid = 3402_u32;
+
+    {
+        let db = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("open_sqlite"));
+        let ctx1 = ServerContext::with_sde_and_repository(Arc::clone(&sde), db);
+        ctx1.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(base_now)));
+        ctx1.seed_demo_world_fixtures();
+        ctx1.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.clone_grade = 2;
+                ch.skill_points = 0.0;
+            }
+            snap.skill_queues.insert(
+                char_id,
+                vec![eve_db::SkillQueueEntry {
+                    type_id: skill_tid,
+                    target_level: 1,
+                    start_sp: 0.0,
+                    end_sp: 250.0,
+                    duration_seconds: 500.0,
+                    started_at_unix: Some(base_now),
+                }],
+            );
+        });
+
+        // 1. Initial tick advances 1s -> 0.5 SP and persists cluster_tick_last_unix = base_now.
+        tick_background_cluster(&ctx1).await;
+        let sp_t0 = ctx1.db.with_snapshot(|s| s.skill_queues[&char_id][0].start_sp);
+        assert!((sp_t0 - 0.5).abs() < 1e-4, "expected 0.5 SP after init tick, got {sp_t0}");
+
+        // 2. Duplicate tick within same second (tick overrun -> 0s delta) adds 0 SP.
+        tick_background_cluster(&ctx1).await;
+        let sp_overrun = ctx1.db.with_snapshot(|s| s.skill_queues[&char_id][0].start_sp);
+        assert!(
+            (sp_overrun - sp_t0).abs() < 1e-6,
+            "same-second tick overrun must add 0 SP, got {sp_overrun}"
+        );
+
+        // 3. GM clock advance (+60s) updates offset & cluster_tick_last_unix atomically,
+        //    and a subsequent +1s wall tick adds only +0.5 SP (not +30.5 SP).
+        ctx1.advance_secs(60);
+        let sp_after_gm = ctx1.db.with_snapshot(|s| s.skill_queues[&char_id][0].start_sp);
+        assert!(
+            (sp_after_gm - 30.5).abs() < 1e-4,
+            "expected 30.5 SP after GM +60s, got {sp_after_gm}"
+        );
+        ctx1.clock().advance_secs(1);
+        tick_background_cluster(&ctx1).await;
+        let sp_after_wall1 = ctx1.db.with_snapshot(|s| s.skill_queues[&char_id][0].start_sp);
+        assert!(
+            (sp_after_wall1 - 31.0).abs() < 1e-4,
+            "wall tick after GM advance must add only 1s (0.5 SP), got {sp_after_wall1}"
+        );
+
+        // 4. Backward wall-clock jump + catching back up must not rewind or double-credit.
+        ctx1.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base_and_offset(
+            base_now, 30,
+        )));
+        tick_background_cluster(&ctx1).await;
+        assert!(
+            (ctx1.db.with_snapshot(|s| s.skill_queues[&char_id][0].start_sp) - 31.0).abs() < 1e-6
+        );
+        ctx1.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base_and_offset(
+            base_now, 61,
+        )));
+        tick_background_cluster(&ctx1).await;
+        assert!(
+            (ctx1.db.with_snapshot(|s| s.skill_queues[&char_id][0].start_sp) - 31.0).abs() < 1e-6
+        );
+
+        // 5. Advance 1s to +62 (< 60s flush interval since +60) so SQLite cluster_tick_last_unix
+        //    stays at base_now + 60, while skill_queue_last_applied_unix is persisted at base_now + 62.
+        ctx1.clock().advance_secs(1);
+        tick_background_cluster(&ctx1).await;
+        let sp_before_restart = ctx1.db.with_snapshot(|s| s.skill_queues[&char_id][0].start_sp);
+        assert!(
+            (sp_before_restart - 31.5).abs() < 1e-4,
+            "expected 31.5 SP before restart, got {sp_before_restart}"
+        );
+    }
+
+    // 6. Restart: clock_offset_secs = 60 restored from world_meta; ticking at +70
+    //    must only apply +8s (+62..+70 -> +4.0 SP = 35.5 SP total), not +10s (+60..+70).
+    let db2 = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("reopen_sqlite"));
+    assert_eq!(db2.clock().offset_secs(), 60);
+    let ctx2 = ServerContext::with_sde_and_repository(sde, db2);
+    let restored_off = ctx2.clock().offset_secs();
+    assert_eq!(restored_off, 60);
+    ctx2.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base_and_offset(
+        base_now,
+        restored_off + 10,
+    )));
+    tick_background_cluster(&ctx2).await;
+    let sp_after_restart_tick = ctx2.db.with_snapshot(|s| s.skill_queues[&char_id][0].start_sp);
+    assert!(
+        (sp_after_restart_tick - 35.5).abs() < 1e-4,
+        "restart tick must not double-credit 60..62s; expected 35.5 SP, got {sp_after_restart_tick}"
+    );
+
+    drop(ctx2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn clean_shutdown_final_checkpoint_persists_ship_condition_and_clock_offset() {
+    let dir = std::env::temp_dir().join(format!(
+        "evomu_clean_shutdown_ckpt_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("world.sqlite");
+    let sde_path = std::env::var("EVOMU_SDE_PATH").unwrap_or_else(|_| "data/evomu_sde.sqlite".into());
+    let sde = Arc::new(eve_sde::SdeRegistry::open(&sde_path).unwrap_or_default());
+
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+
+    {
+        let db = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("open_sqlite"));
+        let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), db);
+        ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
+        ctx.seed_demo_world_fixtures();
+
+        let init_cs = eve_destiny::CombatState {
+            shield_hp: 500.0,
+            max_shield_hp: 500.0,
+            armor_hp: 275.0,
+            max_armor_hp: 400.0,
+            structure_hp: 350.0,
+            max_structure_hp: 350.0,
+            capacitor: 250.0,
+            max_capacitor: 250.0,
+            ..Default::default()
+        };
+        let pos = [1_234.0, 2_345.0, 3_456.0];
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.solar_system_id = sys_id;
+                ch.station_id = None;
+                ch.structure_id = None;
+                ch.active_ship_id = ship_id;
+            }
+            if let Some(item) = snap.items.get_mut(&ship_id) {
+                item.location_id = sys_id as i64;
+            }
+            crate::sp6_lifecycle::leave_space_in_snap(snap, ship_id, Some(&init_cs), Some(sys_id), Some(pos))
+        });
+
+        let handle = ctx.systems.get_or_spawn(sys_id);
+        handle
+            .spawn_ball_with_combat(
+                eve_destiny::Ball {
+                    id: ship_id,
+                    type_id: 587,
+                    position: glam::DVec3::from_array(pos),
+                    velocity: glam::DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 2.5,
+                    mass: 1_000_000.0,
+                    radius: 40.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Stop,
+                },
+                init_cs,
+            )
+            .await
+            .expect("spawn_ball_with_combat");
+
+        // Advance clock directly (not yet persisted to world_meta) & populate CrashLost map.
+        ctx.clock().advance_secs(42);
+        ctx.active_warps.lock().unwrap().insert(ship_id, 60_003_760);
+
+        let flushed = crate::sp6_lifecycle::flush_all_systems_final_checkpoints(&ctx).await;
+        assert_eq!(flushed, 1, "expected 1 active system flushed on shutdown");
+        ctx.persist_server_runtime_to_db();
+        ctx.db
+            .with_sqlite_conn(|conn| {
+                eve_db::sqlite_store::system_checkpoint::set_clean_shutdown_marker(conn, true)
+            })
+            .expect("set_clean_shutdown_marker");
+    }
+
+    let db2 = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("reopen_sqlite"));
+    assert_eq!(db2.clock().offset_secs(), 42);
+    let was_clean = db2
+        .with_sqlite_conn(|conn| eve_db::sqlite_store::system_checkpoint::load_clean_shutdown_marker(conn))
+        .expect("load_clean_shutdown_marker");
+    assert!(was_clean);
+
+    let ckpts = crate::sp6_lifecycle::load_system_condition_checkpoints_sqlite(&db2, sys_id);
+    let ship_ckpt = ckpts
+        .iter()
+        .find(|c| c.ball_id == ship_id)
+        .expect("ship_condition checkpoint persisted even when snapshot already matched");
+    assert_eq!(ship_ckpt.armor_hp, Some(275.0));
+
+    let ctx2 = ServerContext::with_sde_and_repository(sde, db2);
+    ctx2.hydrate_server_runtime_from_db();
+    assert!(ctx2.active_warps.lock().unwrap().is_empty());
+
+    drop(ctx2);
+    let _ = std::fs::remove_dir_all(&dir);
+}

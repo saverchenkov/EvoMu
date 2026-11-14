@@ -13,6 +13,7 @@ pub mod schema;
 pub mod service_domains_store;
 pub mod sync;
 pub mod sync_ext;
+pub mod system_checkpoint;
 
 pub use auth_store::*;
 pub use domain_rows::*;

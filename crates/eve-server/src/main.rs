@@ -20,12 +20,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Semaphore;
+use tokio::sync::{watch, Semaphore};
 use tokio::time::{timeout, timeout_at, Instant};
 use tracing::{error, info, warn};
 
 use eve_server::router::NEXT_TRANSPORT_SESSION_ID as NEXT_SESSION_ID;
 const MAX_CONCURRENT_CONNECTIONS: usize = 512;
+const SHUTDOWN_RPC_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 const XMPP_IDLE_READ_TIMEOUT: Duration = Duration::from_secs(300);
 const XMPP_STANZA_TIMEOUT: Duration = Duration::from_secs(15);
@@ -71,6 +72,13 @@ async fn main() -> Result<()> {
     }
     let conn_limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
     let http_conn_limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+
+    if !ctx.db.is_write_locked_by_current_thread() {
+        let _ = ctx.db.with_sqlite_conn(|conn| {
+            eve_db::sqlite_store::system_checkpoint::set_clean_shutdown_marker(conn, false)
+        });
+    }
 
     // Pre-spawn Jita (30000142) solar system actor inside the ServerContext registry
     let _jita = ctx.systems.get_or_spawn(30000142);
@@ -79,8 +87,9 @@ async fn main() -> Result<()> {
     // so warp decelerations complete strictly in real time.
     ctx.dedicated_physics_ticker_active
         .store(true, std::sync::atomic::Ordering::Release);
-    {
+    let physics_handle = {
         let physics_ctx = Arc::clone(&ctx);
+        let mut physics_shutdown = shutdown_tx.subscribe();
         tokio::spawn(async move {
             let mut last_step = std::time::Instant::now();
             let mut physics_ticker = tokio::time::interval(Duration::from_secs(1));
@@ -88,7 +97,15 @@ async fn main() -> Result<()> {
             physics_ticker.tick().await;
             let mut panic_count = 0u64;
             loop {
-                physics_ticker.tick().await;
+                tokio::select! {
+                    _ = physics_ticker.tick() => {}
+                    _ = physics_shutdown.changed() => {
+                        if *physics_shutdown.borrow() {
+                            break;
+                        }
+                        continue;
+                    }
+                }
                 let elapsed = eve_server::sp6_lifecycle::clamp_physics_ticker_backlog(
                     last_step.elapsed().as_secs(),
                 );
@@ -111,23 +128,40 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-        });
-    }
+        })
+    };
 
     // World tick: advance live server clock (`tick_wall_second`, honoring pause/pause_on_tick/acceleration)
     // and run the unified 1 Hz cluster tick pipeline.
-    {
+    let cluster_tick_handle = {
         let tick_ctx = Arc::clone(&ctx);
+        let mut tick_shutdown = shutdown_tx.subscribe();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(1));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             ticker.tick().await;
             let mut panic_count = 0u64;
             loop {
-                ticker.tick().await;
+                tokio::select! {
+                    _ = ticker.tick() => {}
+                    _ = tick_shutdown.changed() => {
+                        if *tick_shutdown.borrow() {
+                            break;
+                        }
+                        continue;
+                    }
+                }
                 let res = eve_server::sp6_lifecycle::catch_unwind_future(async {
+                    let prev_offset = tick_ctx.clock().offset_secs();
                     let advanced = tick_ctx.clock().tick_wall_second();
                     if advanced > 0 {
+                        let cur_offset = tick_ctx.clock().offset_secs();
+                        if cur_offset != prev_offset {
+                            let _ = tick_ctx.db.tx("clock_offset_sync", |wtx| {
+                                wtx.set_clock_offset_secs(cur_offset);
+                                Ok::<_, eve_db::TxError>(())
+                            });
+                        }
                         eve_server::sp6_lifecycle::tick_background_cluster_with_step(
                             &tick_ctx, advanced,
                         )
@@ -144,8 +178,8 @@ async fn main() -> Result<()> {
                     );
                 }
             }
-        });
-    }
+        })
+    };
 
     info!(
         loaded_types = ctx.sde.types.len(),
@@ -200,10 +234,24 @@ async fn main() -> Result<()> {
         "Listening on XMPP Chat TCP"
     );
     let xmpp_conn_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    let xmpp_conn_semaphore_task = Arc::clone(&xmpp_conn_semaphore);
     let xmpp_ctx = Arc::clone(&ctx);
-    tokio::spawn(async move {
-        while let Ok((stream, _addr)) = xmpp_listener.accept().await {
-            let Ok(permit) = Arc::clone(&xmpp_conn_semaphore).try_acquire_owned() else {
+    let mut xmpp_shutdown = shutdown_tx.subscribe();
+    let xmpp_handle = tokio::spawn(async move {
+        loop {
+            let accept_res = tokio::select! {
+                res = xmpp_listener.accept() => res,
+                _ = xmpp_shutdown.changed() => {
+                    if *xmpp_shutdown.borrow() {
+                        break;
+                    }
+                    continue;
+                }
+            };
+            let Ok((stream, _addr)) = accept_res else {
+                break;
+            };
+            let Ok(permit) = Arc::clone(&xmpp_conn_semaphore_task).try_acquire_owned() else {
                 continue;
             };
             let client_ctx = Arc::clone(&xmpp_ctx);
@@ -234,6 +282,16 @@ async fn main() -> Result<()> {
 
     loop {
         tokio::select! {
+            _ = wait_for_shutdown_signal() => {
+                info!("Shutdown signal received; stopping listeners");
+                break;
+            }
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    info!("Programmatic shutdown requested; stopping listeners");
+                    break;
+                }
+            }
             Ok((stream, addr)) = bridge_listener.accept() => {
                 let Ok(permit) = Arc::clone(&conn_limiter).try_acquire_owned() else {
                     warn!(%addr, "Connection limit reached; rejecting Client Bridge connection");
@@ -298,6 +356,151 @@ async fn main() -> Result<()> {
                     }
                 });
             }
+        }
+    }
+
+    drop(bridge_listener);
+    drop(macho_listener);
+    drop(esi_listener);
+    drop(quasar_grpc_listener);
+
+    run_clean_shutdown(
+        &ctx,
+        &shutdown_tx,
+        Some(physics_handle),
+        Some(cluster_tick_handle),
+        Some(xmpp_handle),
+        &conn_limiter,
+        &http_conn_limiter,
+        &xmpp_conn_semaphore,
+        SHUTDOWN_RPC_DRAIN_TIMEOUT,
+    )
+    .await;
+    Ok(())
+}
+
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = async {
+                match sigterm {
+                    Ok(mut s) => {
+                        s.recv().await;
+                    }
+                    Err(_) => std::future::pending::<()>().await,
+                }
+            } => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+async fn drain_semaphore_permits(sem: &Semaphore, total_permits: usize, deadline: Instant) -> bool {
+    let want = u32::try_from(total_permits).unwrap_or(u32::MAX);
+    match timeout_at(deadline, sem.acquire_many(want)).await {
+        Ok(Ok(permit)) => {
+            drop(permit);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Executes the graceful server shutdown sequence (`#920`, `#899` §3.6):
+/// 1. Signal background tickers and acceptors to stop accepting new work.
+/// 2. Wait up to `drain_timeout` (10s in production) for in-flight RPC/connection permits to drain.
+/// 3. Flush final checkpoints from every active solar system actor, sync runtime state, and persist
+///    `world_meta.clock_offset_secs`.
+/// 4. Record `world_meta.clean_shutdown = 1` and run `PRAGMA wal_checkpoint(TRUNCATE)`.
+#[allow(clippy::too_many_arguments)]
+async fn run_clean_shutdown(
+    ctx: &ServerContext,
+    shutdown_tx: &watch::Sender<bool>,
+    physics_handle: Option<tokio::task::JoinHandle<()>>,
+    cluster_tick_handle: Option<tokio::task::JoinHandle<()>>,
+    xmpp_handle: Option<tokio::task::JoinHandle<()>>,
+    conn_limiter: &Arc<Semaphore>,
+    http_conn_limiter: &Arc<Semaphore>,
+    xmpp_conn_semaphore: &Arc<Semaphore>,
+    drain_timeout: Duration,
+) {
+    let _ = shutdown_tx.send(true);
+    {
+        let mut cs = ctx.cluster_state.write().unwrap_or_else(|e| e.into_inner());
+        cs.shutdown_in_progress = true;
+        cs.shutdown_graceful = Some(true);
+        cs.shutdown_reason = Some("Cluster shutting down gracefully".to_string());
+        cs.shutdown_timeout_seconds = Some(drain_timeout.as_secs() as i64);
+    }
+
+    for handle in [xmpp_handle, physics_handle, cluster_tick_handle]
+        .into_iter()
+        .flatten()
+    {
+        let _ = timeout(Duration::from_secs(2), handle).await;
+    }
+
+    let drain_deadline = Instant::now() + drain_timeout;
+    let (drained_tcp, drained_http, drained_xmpp) = tokio::join!(
+        drain_semaphore_permits(conn_limiter, MAX_CONCURRENT_CONNECTIONS, drain_deadline),
+        drain_semaphore_permits(http_conn_limiter, MAX_CONCURRENT_CONNECTIONS, drain_deadline),
+        drain_semaphore_permits(xmpp_conn_semaphore, MAX_CONCURRENT_CONNECTIONS, drain_deadline),
+    );
+    if !(drained_tcp && drained_http && drained_xmpp) {
+        warn!(
+            drained_tcp,
+            drained_http,
+            drained_xmpp,
+            timeout_secs = drain_timeout.as_secs(),
+            "Shutdown drain deadline elapsed with active connections still open; proceeding to final checkpoint"
+        );
+    }
+
+    let closers: Vec<_> = {
+        let mut guard = ctx
+            .session_closers
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.drain().map(|(_, tx)| tx).collect()
+    };
+    for tx in closers {
+        let _ = tx.send((
+            "ServerShuttingDown".to_string(),
+            "Cluster shutting down".to_string(),
+        ));
+    }
+
+    let flushed = eve_server::sp6_lifecycle::flush_all_systems_final_checkpoints(ctx).await;
+
+    let wal_res = if !ctx.db.is_write_locked_by_current_thread() {
+        Some(ctx.db.with_sqlite_conn(|conn| -> Result<(i64, i64, i64), String> {
+            eve_db::sqlite_store::system_checkpoint::set_clean_shutdown_marker(conn, true)?;
+            eve_db::sqlite_store::system_checkpoint::wal_checkpoint_truncate(conn)
+        }))
+    } else {
+        None
+    };
+    match wal_res {
+        Some(Ok((busy, log_frames, checkpointed_frames))) => {
+            info!(
+                flushed,
+                busy,
+                log_frames,
+                checkpointed_frames,
+                "Clean shutdown complete after WAL truncate checkpoint"
+            );
+        }
+        Some(Err(err)) => {
+            warn!(flushed, error = %err, "Clean shutdown WAL truncate failed");
+        }
+        None => {
+            info!(flushed, "Clean shutdown complete");
         }
     }
 }

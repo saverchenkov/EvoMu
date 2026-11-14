@@ -635,3 +635,69 @@ async fn xmpp_stream_times_out_idle_connections_and_discovers_player_channels() 
     drop(cli);
     srv_task.await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clean_shutdown_sequence_stops_accepting_drains_and_persists_clock_and_wal() {
+    use eve_db::sqlite_store::system_checkpoint::{
+        apply_system_checkpoint_migration, load_clean_shutdown_marker, load_clock_offset_secs,
+    };
+
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(
+        Arc::new(eve_sde::SdeRegistry::default()),
+        Arc::new(eve_db::WorldRepository::with_demo_seed()),
+    ));
+    ctx.db
+        .with_sqlite_conn(|conn| apply_system_checkpoint_migration(conn))
+        .expect("migrate system_checkpoint");
+    ctx.clock().advance_secs(7_200);
+    let _jita = ctx.systems.get_or_spawn(30_000_142);
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let mut bg_rx = shutdown_tx.subscribe();
+    let bg_task = tokio::spawn(async move {
+        let _ = bg_rx.changed().await;
+    });
+
+    let conn_limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    let http_conn_limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    let xmpp_conn_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    let in_flight_permit = Arc::clone(&conn_limiter)
+        .try_acquire_owned()
+        .expect("acquire permit");
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        drop(in_flight_permit);
+    });
+
+    let (close_tx, mut close_rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.session_closers.write().unwrap().insert(42, close_tx);
+
+    run_clean_shutdown(
+        &ctx,
+        &shutdown_tx,
+        Some(bg_task),
+        None,
+        None,
+        &conn_limiter,
+        &http_conn_limiter,
+        &xmpp_conn_semaphore,
+        Duration::from_secs(2),
+    )
+    .await;
+
+    assert!(*shutdown_rx.borrow());
+    assert!(ctx.cluster_state.read().unwrap().shutdown_in_progress);
+    let (close_reason, _) = close_rx.recv().await.expect("session closer notice");
+    assert_eq!(close_reason, "ServerShuttingDown");
+    let (persisted_offset, clean_marker) = ctx
+        .db
+        .with_sqlite_conn(|conn| {
+            Ok::<_, String>((
+                load_clock_offset_secs(conn)?,
+                load_clean_shutdown_marker(conn)?,
+            ))
+        })
+        .expect("read shutdown metadata");
+    assert_eq!(persisted_offset, 7_200);
+    assert!(clean_marker);
+}

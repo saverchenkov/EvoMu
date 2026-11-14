@@ -38,6 +38,14 @@ pub trait ServerClock: Send + Sync {
     /// Advances virtual time by `secs` seconds immediately.
     fn advance_secs(&self, secs: u64);
 
+    /// Returns the cumulative virtual time offset in seconds (`0` for un-offset wall clocks).
+    fn offset_secs(&self) -> u64 {
+        0
+    }
+
+    /// Restores a previously persisted `world_meta.clock_offset_secs` offset on startup.
+    fn restore_offset_secs(&self, _offset_secs: u64) {}
+
     /// Returns the configured time-acceleration multiplier (`>= 1`).
     fn acceleration_multiplier(&self) -> u64;
 
@@ -95,30 +103,52 @@ impl Default for VirtualServerClock {
 }
 
 impl VirtualServerClock {
-    /// Creates a new `VirtualServerClock` anchored to the host wall clock with `1x` multiplier.
-    pub fn new() -> Self {
+    fn from_parts(fixed_base_secs: u64, offset_secs: u64) -> Self {
         Self {
-            fixed_base_secs: AtomicU64::new(0),
+            fixed_base_secs: AtomicU64::new(fixed_base_secs),
             paused_at_wall_secs: AtomicU64::new(0),
             paused_accum_wall_secs: AtomicU64::new(0),
-            offset_secs: AtomicU64::new(0),
+            offset_secs: AtomicU64::new(offset_secs),
             acceleration_multiplier: AtomicU64::new(1),
             paused: AtomicBool::new(false),
             pause_on_tick: AtomicBool::new(false),
         }
     }
 
+    /// Creates a new `VirtualServerClock` anchored to the host wall clock with `1x` multiplier.
+    pub fn new() -> Self {
+        Self::from_parts(0, 0)
+    }
+
+    /// Creates a wall-clock-anchored `VirtualServerClock` initialized with a persisted `offset_secs`.
+    pub fn with_offset_secs(offset_secs: u64) -> Self {
+        Self::from_parts(0, offset_secs)
+    }
+
     /// Creates a deterministic `VirtualServerClock` anchored at a fixed `initial_unix_secs` timestamp.
     pub fn with_fixed_base(initial_unix_secs: u64) -> Self {
-        Self {
-            fixed_base_secs: AtomicU64::new(initial_unix_secs.max(1)),
-            paused_at_wall_secs: AtomicU64::new(0),
-            paused_accum_wall_secs: AtomicU64::new(0),
-            offset_secs: AtomicU64::new(0),
-            acceleration_multiplier: AtomicU64::new(1),
-            paused: AtomicBool::new(false),
-            pause_on_tick: AtomicBool::new(false),
-        }
+        Self::from_parts(initial_unix_secs.max(1), 0)
+    }
+
+    /// Creates a deterministic `VirtualServerClock` anchored at `initial_unix_secs` with `offset_secs`.
+    pub fn with_fixed_base_and_offset(initial_unix_secs: u64, offset_secs: u64) -> Self {
+        Self::from_parts(initial_unix_secs.max(1), offset_secs)
+    }
+
+    /// Returns the cumulative virtual time offset in seconds.
+    pub fn offset_secs(&self) -> u64 {
+        self.offset_secs.load(Ordering::SeqCst)
+    }
+
+    /// Restores the persisted virtual clock offset in seconds.
+    pub fn restore_offset_secs(&self, offset_secs: u64) {
+        self.offset_secs.store(offset_secs, Ordering::SeqCst);
+    }
+
+    /// Atomically advances virtual time by `secs` seconds and returns the updated cumulative offset.
+    pub fn advance_secs_and_read_offset(&self, secs: u64) -> u64 {
+        let prev = self.offset_secs.fetch_add(secs, Ordering::SeqCst);
+        prev.saturating_add(secs)
     }
 }
 
@@ -154,6 +184,14 @@ impl ServerClock for VirtualServerClock {
 
     fn advance_secs(&self, secs: u64) {
         self.offset_secs.fetch_add(secs, Ordering::SeqCst);
+    }
+
+    fn offset_secs(&self) -> u64 {
+        VirtualServerClock::offset_secs(self)
+    }
+
+    fn restore_offset_secs(&self, offset_secs: u64) {
+        VirtualServerClock::restore_offset_secs(self, offset_secs);
     }
 
     fn acceleration_multiplier(&self) -> u64 {
