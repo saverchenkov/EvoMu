@@ -230,6 +230,367 @@ pub struct ShipFittingEngine {
     eval_inputs_snapshot: Option<Box<EvalInputsSnapshot>>,
 }
 
+/// Target domain of a client Brain-in-a-Jar modifier (`eve.common.script.dogma.effect.BrainEffect`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrainEffectDomain {
+    Char,
+    Ship,
+    Structure,
+}
+
+impl BrainEffectDomain {
+    /// Returns the wire `toItemID` domain token expected by `eve.common.script.dogma.effect.BrainEffect`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Char => "charID",
+            Self::Ship => "shipID",
+            Self::Structure => "structureID",
+        }
+    }
+}
+
+/// Modifier matching kind of a client `BrainEffect`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrainEffectModifierType {
+    Item,
+    Location,
+    LocationGroup(u32),
+    LocationRequiredSkill(u32),
+    OwnerRequiredSkill(u32),
+}
+
+impl BrainEffectModifierType {
+    /// Returns the short `modifierType` discriminator expected by `eve.common.script.dogma.effect.BrainEffect`.
+    pub fn modifier_type_str(self) -> &'static str {
+        match self {
+            Self::Item => "M",
+            Self::Location => "L",
+            Self::LocationGroup(_) => "LG",
+            Self::LocationRequiredSkill(_) => "LRS",
+            Self::OwnerRequiredSkill(_) => "ORS",
+        }
+    }
+
+    /// Returns the group or skill type ID carried in `BrainEffect.extras` (`None` for `"M"` / `"L"`).
+    pub fn extra_id(self) -> Option<u32> {
+        match self {
+            Self::Item | Self::Location => None,
+            Self::LocationGroup(gid) => Some(gid),
+            Self::LocationRequiredSkill(sid) | Self::OwnerRequiredSkill(sid) => Some(sid),
+        }
+    }
+}
+
+/// A compiled passive skill or implant modifier formatted for CCP's `BrainEffect` wire contract.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompiledBrainEffect {
+    pub source_type_id: TypeId,
+    pub domain: BrainEffectDomain,
+    pub modifier_type: BrainEffectModifierType,
+    pub to_attrib_id: AttributeId,
+    pub operation: i32,
+    pub value: f64,
+}
+
+fn execute_item_domain_passive_effects(
+    item_id: i64,
+    type_id: TypeId,
+    state: &mut DogmaItemState,
+    sde: &SdeRegistry,
+) {
+    let Some(type_entry) = sde.types.get(&type_id) else {
+        return;
+    };
+    for &eid in &type_entry.effect_ids {
+        // effect_id == 132 (`skillEffect`, operator 9 `SpecialSkillRelationship`, domain `"itemID"`)
+        // executes here onto `state` and is treated as a no-op by `context.rs`,
+        // matching CCP's `SkillLevelAttribute.AddIncomingModifier`.
+        if let Some(effect) = sde.effects.get(&eid) {
+            if effect.effect_category == 0 {
+                for spec in &effect.modifiers {
+                    if spec.domain == "itemID" {
+                        if let Some(vm) = compile_modifier_spec_to_vm(spec, false) {
+                            let snap = state.clone();
+                            vm.execute_on_target_with_effect(
+                                item_id,
+                                Some(eid),
+                                &snap,
+                                state,
+                                sde,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Skill effects `1730` (`droneDmgBonus`), `660..=662`/`668` (missile damage bonus skills),
+/// `848` (`Cloaking`), and `1851` (`selfRof`) have empty `modifiers` in `dogmaeffects.fsdbinary`.
+/// Derive their dynamic `OwnerRequiredSkillModifier` / `LocationRequiredSkillModifier` spec.
+fn special_skill_effect_spec(
+    skill_tid: TypeId,
+    skill_type: &eve_sde::InvType,
+    eid: eve_sde::EffectId,
+) -> Option<EffectModifierSpec> {
+    let dmg_bonus_attr = || {
+        if skill_type.default_attributes.contains_key(&292) {
+            292
+        } else if skill_type.default_attributes.contains_key(&1255) {
+            1255
+        } else {
+            292
+        }
+    };
+    match eid {
+        1730 => Some(EffectModifierSpec {
+            domain: "charID".to_string(),
+            func: "OwnerRequiredSkillModifier".to_string(),
+            modified_attribute_id: attr_ids::DAMAGE_MULTIPLIER,
+            modifying_attribute_id: dmg_bonus_attr(),
+            operator: 6,
+            group_id: None,
+            skill_type_id: Some(skill_tid),
+            effect_id: None,
+        }),
+        660 | 661 | 662 | 668 => {
+            let modified_attribute_id = match eid {
+                660 => attr_ids::EM_DAMAGE,
+                661 => attr_ids::EXPLOSIVE_DAMAGE,
+                662 => attr_ids::THERMAL_DAMAGE,
+                _ => attr_ids::KINETIC_DAMAGE,
+            };
+            Some(EffectModifierSpec {
+                domain: "charID".to_string(),
+                func: "OwnerRequiredSkillModifier".to_string(),
+                modified_attribute_id,
+                modifying_attribute_id: dmg_bonus_attr(),
+                operator: 6,
+                group_id: None,
+                skill_type_id: Some(skill_tid),
+                effect_id: None,
+            })
+        }
+        848 => Some(EffectModifierSpec {
+            domain: "shipID".to_string(),
+            func: "LocationRequiredSkillModifier".to_string(),
+            modified_attribute_id: 560,
+            modifying_attribute_id: 619,
+            operator: 6,
+            group_id: None,
+            skill_type_id: Some(skill_tid),
+            effect_id: None,
+        }),
+        1851 => Some(EffectModifierSpec {
+            domain: "shipID".to_string(),
+            func: "LocationRequiredSkillModifier".to_string(),
+            modified_attribute_id: attr_ids::SPEED,
+            modifying_attribute_id: 293,
+            operator: 6,
+            group_id: None,
+            skill_type_id: Some(skill_tid),
+            effect_id: None,
+        }),
+        _ => None,
+    }
+}
+
+fn build_sorted_active_skills(skill_levels: &HashMap<TypeId, u8>) -> Vec<(TypeId, u8)> {
+    let mut sorted_skills: Vec<(TypeId, u8)> = skill_levels
+        .iter()
+        .filter(|&(_, &lvl)| lvl > 0)
+        .map(|(&tid, &lvl)| (tid, lvl))
+        .collect();
+    sorted_skills.sort_by_key(|&(tid, _)| tid);
+    sorted_skills
+}
+
+fn build_evaluated_skill_state(
+    skill_tid: TypeId,
+    trained_lvl: u8,
+    sde: &SdeRegistry,
+) -> Option<(i64, &eve_sde::InvType, DogmaItemState)> {
+    let skill_type = sde.types.get(&skill_tid)?;
+    if !skill_type.effect_ids.iter().any(|&eid| eid != 132) {
+        return None;
+    }
+    let skill_item_id = i64::from(skill_tid);
+    let mut skill_state = DogmaItemState::from_sde(skill_item_id, skill_tid, sde);
+    skill_state
+        .base_attributes
+        .insert(280, f64::from(trained_lvl.min(5)));
+    execute_item_domain_passive_effects(skill_item_id, skill_tid, &mut skill_state, sde);
+    Some((skill_item_id, skill_type, skill_state))
+}
+
+fn implant_spec_is_set_multiplier(spec: &EffectModifierSpec) -> bool {
+    spec.operator == 0
+        && matches!(
+            spec.func.as_str(),
+            "LocationGroupModifier" | "LocationRequiredSkillModifier"
+        )
+}
+
+fn stage_and_compound_implants(
+    ctx: &mut DogmaEffectContext,
+    implants: &[TypeId],
+    sde: &SdeRegistry,
+) -> Vec<(usize, i64, TypeId)> {
+    let mut active_implants: Vec<(usize, i64, TypeId)> = Vec::new();
+    for (idx, &imp_tid) in implants.iter().enumerate() {
+        if !sde.types.contains_key(&imp_tid) {
+            continue;
+        }
+        let imp_item_id = -100_000 - (idx as i64);
+        let mut imp_state = DogmaItemState::from_sde(imp_item_id, imp_tid, sde);
+        execute_item_domain_passive_effects(imp_item_id, imp_tid, &mut imp_state, sde);
+        let char_loc_idx = ctx.char_located_items.len();
+        ctx.char_located_items.push(imp_state);
+        active_implants.push((char_loc_idx, imp_item_id, imp_tid));
+    }
+
+    let multi_implant_set = active_implants.len() > 1;
+    for &(char_loc_idx, imp_item_id, imp_tid) in &active_implants {
+        let Some(imp_type) = sde.types.get(&imp_tid) else {
+            continue;
+        };
+        ctx.item = ctx.char_located_items[char_loc_idx].clone();
+        for &eid in &imp_type.effect_ids {
+            if let Some(effect) = sde.effects.get(&eid) {
+                if effect.effect_category == 0 {
+                    for spec in &effect.modifiers {
+                        if spec.domain == "charID"
+                            && (!implant_spec_is_set_multiplier(spec) || multi_implant_set)
+                        {
+                            ctx.apply_modifier_spec_with_effect(
+                                imp_item_id,
+                                Some(eid),
+                                spec,
+                                sde,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    active_implants
+}
+
+fn push_compiled_brain_spec(
+    out: &mut Vec<CompiledBrainEffect>,
+    source_type_id: TypeId,
+    state: &DogmaItemState,
+    spec: &EffectModifierSpec,
+    sde: &SdeRegistry,
+) {
+    if spec.domain == "itemID" || spec.operator == 9 {
+        return;
+    }
+    let domain = match spec.domain.as_str() {
+        "charID" => BrainEffectDomain::Char,
+        "shipID" => BrainEffectDomain::Ship,
+        "structureID" => BrainEffectDomain::Structure,
+        _ => return,
+    };
+    let modifier_type = match spec.func.as_str() {
+        "ItemModifier" | "ItemModifierWithFalloff" => BrainEffectModifierType::Item,
+        "LocationModifier" => BrainEffectModifierType::Location,
+        "LocationGroupModifier" => match spec.group_id {
+            Some(gid) => BrainEffectModifierType::LocationGroup(gid),
+            None => return,
+        },
+        "LocationRequiredSkillModifier" => match spec.skill_type_id {
+            Some(sid) => BrainEffectModifierType::LocationRequiredSkill(sid),
+            None => return,
+        },
+        "OwnerRequiredSkillModifier" => match spec.skill_type_id {
+            Some(sid) => BrainEffectModifierType::OwnerRequiredSkill(sid),
+            None => return,
+        },
+        _ => return,
+    };
+    let value = state.get_attribute(spec.modifying_attribute_id, sde);
+    if !value.is_finite() {
+        return;
+    }
+    if matches!(spec.operator, 2 | 3 | 6 | 8) && value.abs() <= 1e-9 {
+        return;
+    }
+    out.push(CompiledBrainEffect {
+        source_type_id,
+        domain,
+        modifier_type,
+        to_attrib_id: spec.modified_attribute_id,
+        operation: spec.operator,
+        value,
+    });
+}
+
+/// Compiles a character's trained skills and active implants into client `BrainEffect` modifiers
+/// matching CCP's Brain-in-a-Jar wire format (`GetAllInfo.charInfo[1]` and `OnServerBrainUpdated`).
+pub fn compile_character_brain_effects(
+    sde: &SdeRegistry,
+    skill_levels: &HashMap<TypeId, u8>,
+    implants: &[TypeId],
+) -> Vec<CompiledBrainEffect> {
+    let mut out = Vec::new();
+    for (skill_tid, trained_lvl) in build_sorted_active_skills(skill_levels) {
+        let Some((_, skill_type, skill_state)) = build_evaluated_skill_state(skill_tid, trained_lvl, sde) else {
+            continue;
+        };
+        for &eid in &skill_type.effect_ids {
+            let Some(effect) = sde.effects.get(&eid) else {
+                continue;
+            };
+            if effect.effect_category != 0 {
+                continue;
+            }
+            for spec in &effect.modifiers {
+                push_compiled_brain_spec(&mut out, skill_tid, &skill_state, spec, sde);
+            }
+            if let Some(ref spec) = special_skill_effect_spec(skill_tid, skill_type, eid) {
+                push_compiled_brain_spec(&mut out, skill_tid, &skill_state, spec, sde);
+            }
+        }
+    }
+
+    let mut scratch_ctx = DogmaEffectContext::new(
+        DogmaItemState::from_sde(0, 0, sde),
+        DogmaItemState::from_sde(0, 0, sde),
+        DogmaItemState::from_sde(0, 0, sde),
+        DogmaItemState::from_sde(0, 0, sde),
+        DogmaItemState::from_sde(0, 0, sde),
+        DogmaItemState::from_sde(0, 0, sde),
+    );
+    let active_implants = stage_and_compound_implants(&mut scratch_ctx, implants, sde);
+    for (char_loc_idx, _, imp_tid) in active_implants {
+        let Some(imp_type) = sde.types.get(&imp_tid) else {
+            continue;
+        };
+        let imp_state = &scratch_ctx.char_located_items[char_loc_idx];
+        for &eid in &imp_type.effect_ids {
+            let Some(effect) = sde.effects.get(&eid) else {
+                continue;
+            };
+            if effect.effect_category != 0 {
+                continue;
+            }
+            for spec in &effect.modifiers {
+                // Pirate implant set multipliers on `charID` were compounded into `imp_state` above;
+                // client `CharacterDogmaItem` does not hold implant sub-items to target directly.
+                if spec.domain == "charID" && implant_spec_is_set_multiplier(spec) {
+                    continue;
+                }
+                push_compiled_brain_spec(&mut out, imp_tid, imp_state, spec, sde);
+            }
+        }
+    }
+    out
+}
+
 impl ShipFittingEngine {
     pub fn from_sde(ship_item_id: i64, ship_type_id: TypeId, sde: &SdeRegistry) -> Self {
         Self {
@@ -528,56 +889,14 @@ impl ShipFittingEngine {
         // 1. Evaluate trained character skills (`category_id == 16`, passive effects `effect_category == 0`).
         //    First evaluate each skill's self-modifiers (`domain == "itemID"`, e.g. `skillLevel` -> `velocityBonus`),
         //    then apply its cross-domain modifiers (`shipID`, `charID`, `LocationGroupModifier`, `LocationRequiredSkillModifier`, `OwnerRequiredSkillModifier`).
-        let mut sorted_skills: Vec<(TypeId, u8)> = self
-            .character_skills
-            .iter()
-            .filter(|&(_, &lvl)| lvl > 0)
-            .map(|(&tid, &lvl)| (tid, lvl))
-            .collect();
-        sorted_skills.sort_by_key(|&(tid, _)| tid);
-
-        for (skill_tid, trained_lvl) in sorted_skills {
-            let Some(skill_type) = sde.types.get(&skill_tid) else {
+        for (skill_tid, trained_lvl) in build_sorted_active_skills(&self.character_skills) {
+            let Some((skill_item_id, skill_type, skill_state)) =
+                build_evaluated_skill_state(skill_tid, trained_lvl, sde)
+            else {
                 continue;
             };
-            if !skill_type.effect_ids.iter().any(|&eid| eid != 132) {
-                continue;
-            }
-            let skill_item_id = i64::from(skill_tid);
-            let mut skill_state = DogmaItemState::from_sde(skill_item_id, skill_tid, sde);
-            skill_state
-                .base_attributes
-                .insert(280, f64::from(trained_lvl.min(5)));
-
-            for &eid in &skill_type.effect_ids {
-                // effect_id == 132 (skillEffect, operator 9 SpecialSkillRelationship, domain "itemID")
-                // executes here onto skill_state and is treated as a no-op by context.rs,
-                // matching CCP's SkillLevelAttribute.AddIncomingModifier.
-                if let Some(effect) = sde.effects.get(&eid) {
-                    if effect.effect_category == 0 {
-                        for spec in &effect.modifiers {
-                            if spec.domain == "itemID" {
-                                if let Some(vm) = compile_modifier_spec_to_vm(spec, false) {
-                                    let snap = skill_state.clone();
-                                    vm.execute_on_target_with_effect(
-                                        skill_item_id,
-                                        Some(eid),
-                                        &snap,
-                                        &mut skill_state,
-                                        sde,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
             ctx.item = skill_state;
             for &eid in &skill_type.effect_ids {
-                // effect_id == 132 (skillEffect, operator 9 SpecialSkillRelationship, domain "itemID")
-                // executes here onto skill_state and is treated as a no-op by context.rs,
-                // matching CCP's SkillLevelAttribute.AddIncomingModifier.
                 if let Some(effect) = sde.effects.get(&eid) {
                     if effect.effect_category == 0 {
                         for spec in &effect.modifiers {
@@ -590,92 +909,8 @@ impl ShipFittingEngine {
                                 );
                             }
                         }
-                        // Skill effects `1730` (`droneDmgBonus`), `660..=662`/`668` (missile damage bonus skills),
-                        // `848` (`Cloaking`), and `1851` (`selfRof`) have empty `modifiers` in `dogmaeffects.fsdbinary`.
-                        // They are evaluated dynamically by deriving their `OwnerRequiredSkillModifier` / `LocationRequiredSkillModifier`
-                        // spec using the skill's SDE attributes (modifying attr 292 / 1255, 619, 293 with operator 6 PreMul).
-                        let param_spec = match eid {
-                            1730 => {
-                                let modifying_attribute_id = if skill_type.default_attributes.contains_key(&292) {
-                                    292
-                                } else if skill_type.default_attributes.contains_key(&1255) {
-                                    1255
-                                } else {
-                                    292
-                                };
-                                Some(EffectModifierSpec {
-                                    domain: "charID".to_string(),
-                                    func: "OwnerRequiredSkillModifier".to_string(),
-                                    modified_attribute_id: attr_ids::DAMAGE_MULTIPLIER,
-                                    modifying_attribute_id,
-                                    operator: 6,
-                                    group_id: None,
-                                    skill_type_id: Some(skill_tid),
-                                    effect_id: None,
-                                })
-                            }
-                            660 | 661 | 662 | 668 => {
-                                let modified_attribute_id = match eid {
-                                    660 => attr_ids::EM_DAMAGE,
-                                    661 => attr_ids::EXPLOSIVE_DAMAGE,
-                                    662 => attr_ids::THERMAL_DAMAGE,
-                                    _ => attr_ids::KINETIC_DAMAGE,
-                                };
-                                let modifying_attribute_id = if skill_type.default_attributes.contains_key(&292) {
-                                    292
-                                } else if skill_type.default_attributes.contains_key(&1255) {
-                                    1255
-                                } else {
-                                    292
-                                };
-                                Some(EffectModifierSpec {
-                                    domain: "charID".to_string(),
-                                    func: "OwnerRequiredSkillModifier".to_string(),
-                                    modified_attribute_id,
-                                    modifying_attribute_id,
-                                    operator: 6,
-                                    group_id: None,
-                                    skill_type_id: Some(skill_tid),
-                                    effect_id: None,
-                                })
-                            }
-                            848 => {
-                                let modifying_attribute_id = if skill_type.default_attributes.contains_key(&619) {
-                                    619
-                                } else {
-                                    619
-                                };
-                                Some(EffectModifierSpec {
-                                    domain: "shipID".to_string(),
-                                    func: "LocationRequiredSkillModifier".to_string(),
-                                    modified_attribute_id: 560,
-                                    modifying_attribute_id,
-                                    operator: 6,
-                                    group_id: None,
-                                    skill_type_id: Some(skill_tid),
-                                    effect_id: None,
-                                })
-                            }
-                            1851 => {
-                                let modifying_attribute_id = if skill_type.default_attributes.contains_key(&293) {
-                                    293
-                                } else {
-                                    293
-                                };
-                                Some(EffectModifierSpec {
-                                    domain: "shipID".to_string(),
-                                    func: "LocationRequiredSkillModifier".to_string(),
-                                    modified_attribute_id: attr_ids::SPEED,
-                                    modifying_attribute_id,
-                                    operator: 6,
-                                    group_id: None,
-                                    skill_type_id: Some(skill_tid),
-                                    effect_id: None,
-                                })
-                            }
-                            _ => None,
-                        };
-                        if let Some(ref spec) = param_spec {
+                        if let Some(ref spec) = special_skill_effect_spec(skill_tid, skill_type, eid)
+                        {
                             ctx.apply_modifier_spec_with_effect(
                                 skill_item_id,
                                 Some(eid),
@@ -692,69 +927,7 @@ impl ShipFittingEngine {
         //     in 3 passes so pirate implant set multipliers (`PreMul` on `charID` via `LocationGroupModifier` grp 300 or
         //     `LocationRequiredSkillModifier` skill 3411) compound across all plugged-in implants before each implant
         //     applies its `shipID` / `charID` bonus (`feat:attributes.implant-sets`).
-        let mut active_implants: Vec<(usize, i64, TypeId)> = Vec::new();
-        for (idx, &imp_tid) in self.implants.iter().enumerate() {
-            let Some(imp_type) = sde.types.get(&imp_tid) else {
-                continue;
-            };
-            let imp_item_id = -100_000 - (idx as i64);
-            let mut imp_state = DogmaItemState::from_sde(imp_item_id, imp_tid, sde);
-            for &eid in &imp_type.effect_ids {
-                if let Some(effect) = sde.effects.get(&eid) {
-                    if effect.effect_category == 0 {
-                        for spec in &effect.modifiers {
-                            if spec.domain == "itemID" {
-                                if let Some(vm) = compile_modifier_spec_to_vm(spec, false) {
-                                    let snap = imp_state.clone();
-                                    vm.execute_on_target_with_effect(
-                                        imp_item_id,
-                                        Some(eid),
-                                        &snap,
-                                        &mut imp_state,
-                                        sde,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            let char_loc_idx = ctx.char_located_items.len();
-            ctx.char_located_items.push(imp_state);
-            active_implants.push((char_loc_idx, imp_item_id, imp_tid));
-        }
-
-        // Pass 2: Apply `charID`-domain modifiers (including pirate implant set `PreMul` multipliers when >= 2 implants are active).
-        let multi_implant_set = active_implants.len() > 1;
-        for &(char_loc_idx, imp_item_id, imp_tid) in &active_implants {
-            let Some(imp_type) = sde.types.get(&imp_tid) else {
-                continue;
-            };
-            ctx.item = ctx.char_located_items[char_loc_idx].clone();
-            for &eid in &imp_type.effect_ids {
-                if let Some(effect) = sde.effects.get(&eid) {
-                    if effect.effect_category == 0 {
-                        for spec in &effect.modifiers {
-                            if spec.domain == "charID" {
-                                let is_set_multiplier = spec.operator == 0
-                                    && matches!(
-                                        spec.func.as_str(),
-                                        "LocationGroupModifier" | "LocationRequiredSkillModifier"
-                                    );
-                                if !is_set_multiplier || multi_implant_set {
-                                    ctx.apply_modifier_spec_with_effect(
-                                        imp_item_id,
-                                        Some(eid),
-                                        spec,
-                                        sde,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let active_implants = stage_and_compound_implants(&mut ctx, &self.implants, sde);
 
         // Pass 3: Using each implant's set-compounded state in `ctx.char_located_items`, apply `shipID` (and non-`charID`/`itemID`) modifiers.
         for &(char_loc_idx, imp_item_id, imp_tid) in &active_implants {

@@ -1179,6 +1179,91 @@ pub(crate) fn prime_ship_on_board(
     ship_state
 }
 
+fn encode_brain_effect(effect: &eve_dogma::CompiledBrainEffect) -> PyRep {
+    let extras = match effect.modifier_type.extra_id() {
+        Some(id) => PyRep::Tuple(vec![PyRep::Integer(i64::from(id))]),
+        None => PyRep::Tuple(Vec::new()),
+    };
+    let state_dict = PyRep::Dict(vec![
+        (PyRep::String("fromAttrib".into()), PyRep::None),
+        (PyRep::String("value".into()), PyRep::Real(effect.value)),
+        (
+            PyRep::String("toItemID".into()),
+            PyRep::String(effect.domain.as_str().into()),
+        ),
+        (
+            PyRep::String("modifierType".into()),
+            PyRep::String(effect.modifier_type.modifier_type_str().into()),
+        ),
+        (
+            PyRep::String("toAttribID".into()),
+            PyRep::Integer(i64::from(effect.to_attrib_id)),
+        ),
+        (
+            PyRep::String("operation".into()),
+            PyRep::Integer(i64::from(effect.operation)),
+        ),
+        (PyRep::String("extras".into()), extras),
+        (
+            PyRep::String("skills".into()),
+            PyRep::List(vec![PyRep::Integer(i64::from(effect.source_type_id))]),
+        ),
+    ]);
+    PyRep::ObjectEx {
+        is_type_2: true,
+        header: Box::new(PyRep::Tuple(vec![
+            PyRep::Tuple(vec![PyRep::Token(
+                "eve.common.script.dogma.effect.BrainEffect".into(),
+            )]),
+            state_dict,
+        ])),
+        list: Vec::new(),
+        dict: Vec::new(),
+    }
+}
+
+/// Compiles a character's Brain-in-a-Jar effect tuples `(charEffects, shipEffects, structureEffects)`
+/// from trained skills (including Alpha caps / expert systems) and active implants.
+pub fn build_character_brain_effect_tuples(ctx: &ServerContext, char_id: i64) -> (PyRep, PyRep, PyRep) {
+    let skill_levels = ctx.character_skill_levels(char_id);
+    let implants = ctx
+        .db
+        .with_snapshot(|snap| snap.active_implants.get(&char_id).cloned().unwrap_or_default());
+    let compiled = eve_dogma::compile_character_brain_effects(&ctx.sde, &skill_levels, &implants);
+    let mut char_effects = Vec::new();
+    let mut ship_effects = Vec::new();
+    let mut structure_effects = Vec::new();
+    for eff in compiled {
+        let rep = encode_brain_effect(&eff);
+        match eff.domain {
+            eve_dogma::BrainEffectDomain::Char => char_effects.push(rep),
+            eve_dogma::BrainEffectDomain::Ship => ship_effects.push(rep),
+            eve_dogma::BrainEffectDomain::Structure => structure_effects.push(rep),
+        }
+    }
+    (
+        PyRep::Tuple(char_effects),
+        PyRep::Tuple(ship_effects),
+        PyRep::Tuple(structure_effects),
+    )
+}
+
+/// Builds `(brainVersion, charEffects, shipEffects, structureEffects)` for `dogmaIM.GetAllInfo.charInfo[1]`.
+pub fn build_character_brain_tuple(
+    ctx: &ServerContext,
+    char_id: i64,
+    brain_version: i64,
+) -> PyRep {
+    let (char_effects, ship_effects, structure_effects) =
+        build_character_brain_effect_tuples(ctx, char_id);
+    PyRep::Tuple(vec![
+        PyRep::Integer(brain_version),
+        char_effects,
+        ship_effects,
+        structure_effects,
+    ])
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_all_info(
     ctx: &ServerContext,
@@ -1294,12 +1379,7 @@ pub(crate) fn build_all_info(
             ("wallclockTime", PyRep::Integer(now_ft)),
             ("description", PyRep::String(String::new())),
         ]);
-        let char_brain = PyRep::Tuple(vec![
-            PyRep::Integer(0),
-            PyRep::Tuple(Vec::new()),
-            PyRep::Tuple(Vec::new()),
-            PyRep::Tuple(Vec::new()),
-        ]);
+        let char_brain = build_character_brain_tuple(ctx, char_id, ctx.current_brain_version(char_id));
         PyRep::Tuple(vec![PyRep::Dict(vec![(PyRep::Integer(char_id), char_row)]), char_brain])
     } else {
         PyRep::None

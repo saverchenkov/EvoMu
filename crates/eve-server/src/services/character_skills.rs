@@ -284,6 +284,7 @@ pub fn catch_up_skill_queue(ctx: &ServerContext, char_id: i64) {
             !paused_by_lapse,
         );
     }
+    let had_completed_skill = !completed_events.is_empty();
     for (skill_type_id, lvl, _, _) in completed_events {
         let _ = ctx.notify_skill_trained(char_id, 0, skill_type_id, lvl);
         super::jump_clone_names::emit_server_skills_changed(
@@ -292,6 +293,9 @@ pub fn catch_up_skill_queue(ctx: &ServerContext, char_id: i64) {
             &[skill_type_id],
             Some("SkillTrained"),
         );
+    }
+    if had_completed_skill {
+        ctx.push_brain_update(char_id);
     }
     if let Some(ship_id) = ship_to_invalidate {
         ctx.invalidate_and_push_fit(ship_id);
@@ -1048,6 +1052,7 @@ pub fn handle(
                             &[skill_type_id],
                             None,
                         );
+                        ctx.push_brain_update(char_id);
                         ctx.notify(
                             crate::router::NotificationTarget::Character(char_id),
                             "OnFreeSkillPointsChanged",
@@ -1188,7 +1193,8 @@ pub fn handle(
                     }
                 }
                 snap.skill_queues.insert(char_id, remaining_queue);
-                if !history_to_append.is_empty() {
+                let changed_skills = !history_to_append.is_empty();
+                if changed_skills {
                     snap.skill_history
                         .entry(char_id)
                         .or_default()
@@ -1198,14 +1204,17 @@ pub fn handle(
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.free_skill_points = (ch.free_skill_points - total_applied).max(0.0);
                     ch.skill_points += total_applied;
-                    return Ok((ch.skill_points, ch.free_skill_points));
+                    return Ok((ch.skill_points, ch.free_skill_points, changed_skills));
                 }
-                Ok((0.0, 0.0))
+                Ok((0.0, 0.0, changed_skills))
             });
             match res {
-                Ok((sp, rem_free)) => {
+                Ok((sp, rem_free, changed_skills)) => {
                     if let Some(sid) = session.ship_id {
                         ctx.invalidate_and_push_fit(sid);
+                    }
+                    if changed_skills {
+                        ctx.push_brain_update(char_id);
                     }
                     ctx.notify(
                         crate::router::NotificationTarget::Character(char_id),

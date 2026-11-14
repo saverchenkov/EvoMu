@@ -379,7 +379,7 @@ async fn station_entry_handlers_match_v24_client_shapes_and_effective_attributes
         .expect("native GetMySkillHandler");
     assert_eq!(ctx.verify_bound_object(&sess, oid_bound_id(&native_h)).expect("bound").object_id, char_id);
 
-    // 3. `dogmaIM.GetAllInfo`: `shipInfo`, `charInfo` (`(char_dict, (0, (), (), ()))`), `shipState`, and 2-arg `ProcessGodmaPrimeLocation`.
+    // 3. `dogmaIM.GetAllInfo`: `shipInfo`, `charInfo` (`(char_dict, (brainVersion, charEffects, shipEffects, structureEffects))`), `shipState`, and 2-arg `ProcessGodmaPrimeLocation`.
     let _ = sess.drain_notifications();
     let all_info = ctx
         .dispatch_rpc(&mut sess, "dogmaIM", None, "GetAllInfo", &[PyRep::Bool(true), PyRep::Bool(true), PyRep::Bool(false)], &kw, None)
@@ -404,9 +404,20 @@ async fn station_entry_handlers_match_v24_client_shapes_and_effective_attributes
         char_row_attrs.iter().find(|(k, _)| k.as_i64() == Some(165)).and_then(|(_, v)| v.as_f64()),
         Some(eff_int as f64),
     );
-    assert_eq!(
-        char_info[1],
-        PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Tuple(vec![]), PyRep::Tuple(vec![]), PyRep::Tuple(vec![])])
+    let PyRep::Tuple(char_brain) = &char_info[1] else {
+        panic!("charInfo[1] must be 4-tuple charBrain");
+    };
+    assert_eq!(char_brain.len(), 4);
+    assert_eq!(char_brain[0], PyRep::Integer(0));
+    assert!(matches!(char_brain[1], PyRep::Tuple(_)));
+    assert!(matches!(char_brain[2], PyRep::Tuple(_)));
+    assert!(matches!(char_brain[3], PyRep::Tuple(_)));
+    let PyRep::Tuple(ship_brain_effects) = &char_brain[2] else {
+        unreachable!();
+    };
+    assert!(
+        !ship_brain_effects.is_empty(),
+        "seeded pilot skills must populate compiled BrainEffect entries in charInfo[1][2]"
     );
     let PyRep::Tuple(ship_state) = all_info.dict_get("shipState").expect("shipState") else { panic!("shipState 4-tuple") };
     assert_eq!(ship_state.len(), 4);

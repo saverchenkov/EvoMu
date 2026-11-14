@@ -419,6 +419,7 @@ fn handle_apply_free_skill_points_to_queue(
             &changed_skills,
             None,
         );
+        ctx.push_brain_update(char_id);
     }
     ctx.emit_typed(
         NotificationTarget::Character(char_id),
@@ -639,6 +640,7 @@ fn handle_apply_free_skill_points_to_skills(
             &changed_skills,
             None,
         );
+        ctx.push_brain_update(char_id);
     }
     ctx.emit_typed(
         NotificationTarget::Character(char_id),

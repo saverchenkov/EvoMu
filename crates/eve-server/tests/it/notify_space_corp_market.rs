@@ -791,7 +791,39 @@ async fn notify_batch9_password_player_state_brain_and_subscription() {
     .await
     .expect("ApplyFreeSkillPoints");
     let brain_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
-    assert!(!brain_notifs.iter().any(|(e, _)| e == "OnServerBrainUpdated"));
+    let brain_args = find_notif(&brain_notifs, "OnServerBrainUpdated");
+    assert_eq!(brain_args.len(), 1, "ApplyFreeSkillPoints must emit OnServerBrainUpdated");
+    let PyRep::Tuple(ref brain_parts) = brain_args[0] else {
+        panic!("brainData must be tuple: {:?}", brain_args[0]);
+    };
+    assert!(
+        brain_parts[0].as_i64().is_some_and(|v| v >= 1),
+        "brainVersion must be >= 1: {:?}",
+        brain_parts[0]
+    );
+    let PyRep::Bytes(ref raw_gm) = brain_parts[1] else {
+        panic!("grayMatter must be bytes: {:?}", brain_parts[1]);
+    };
+    let PyRep::Tuple(gm_domains) = eve_proto::marshal::decode(raw_gm).expect("decode grayMatter") else {
+        panic!("decoded grayMatter must be 3-tuple");
+    };
+    let PyRep::Tuple(ref ship_brain_effects) = gm_domains[1] else {
+        panic!("shipEffects must be tuple");
+    };
+    assert!(
+        ship_brain_effects.iter().any(|eff| {
+            let PyRep::ObjectEx { header, .. } = eff else {
+                return false;
+            };
+            let PyRep::Tuple(hdr) = header.as_ref() else {
+                return false;
+            };
+            hdr.get(1)
+                .and_then(|st| st.dict_get("skills"))
+                == Some(&PyRep::List(vec![PyRep::Integer(3300)]))
+        }),
+        "ApplyFreeSkillPoints(3300) must include Gunnery BrainEffect in grayMatter"
+    );
 
     // 9-10. OnSubscriptionChangedServer & OnSubscriptionTimeUpdateServer
     let uid_a = sess_a.user_id.unwrap_or(9_211);
