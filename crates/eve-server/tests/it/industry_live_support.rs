@@ -11,6 +11,7 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
 use eve_server::services::station_structure::structure_lifecycle as life;
+use eve_testkit::client_harness::{extract_bound_id_from_wire_rep, ClientErrorResponse, ClientHarness};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 pub(crate) const PILOT_1: i64 = 90_000_001;
@@ -21,8 +22,19 @@ const FREIGHTER: u32 = 20_185;
 /// Racial fuel blocks (Caldari, Minmatar, Amarr, Gallente); each Jita seller lists 1,000 units.
 const FUEL_BLOCKS: [u32; 4] = [4_051, 4_246, 4_247, 4_312];
 
+/// Backwards-compatible raw RPC helper for unmigrated external IT callers.
 pub(crate) async fn rpc(ctx: &ServerContext, sess: &mut SessionState, service: &str, method: &str, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None).await
+}
+
+pub(crate) async fn rpc_harness(ctx: &ServerContext, sess: &mut SessionState, service: &str, method: &str, args: &[PyRep]) -> Result<PyRep, ClientErrorResponse> {
+    ClientHarness::new(common::SessionBorrowWireTransport {
+        ctx,
+        session: sess,
+        preserve_char_notifications: true,
+    })
+    .call(service, None, method, args, &HashMap::new())
+    .await
 }
 
 pub(crate) fn int(rep: &PyRep, key: &str) -> i64 {
@@ -36,7 +48,7 @@ pub(crate) fn real(rep: &PyRep, key: &str) -> f64 {
 pub(crate) async fn login(ctx: &ServerContext, sess_id: u64, user: &str, char_id: i64) -> SessionState {
     let mut sess = SessionState::new(sess_id);
     common::login_pilot(ctx, &mut sess, user, &format!("{user}-secret")).await;
-    rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)]).await.expect("SelectCharacterID");
+    rpc_harness(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)]).await.expect("SelectCharacterID");
     ctx.advance_secs(12);
     sess
 }
@@ -45,9 +57,9 @@ pub(crate) async fn login(ctx: &ServerContext, sess_id: u64, user: &str, char_id
 pub(crate) async fn fund_pilots(ctx: &ServerContext, targets: &[(i64, f64)]) {
     ctx.db.provision_gm_account("isd_treasury", "isd_treasury-secret", 90_000_099, "ISD Treasury");
     let mut gm = login(ctx, 7_999, "isd_treasury", 90_000_099).await;
-    rpc(ctx, &mut gm, "slash", "SlashCmd", &[PyRep::String("/giveisk 900000000000".into())]).await.expect("GM /giveisk");
+    rpc_harness(ctx, &mut gm, "slash", "SlashCmd", &[PyRep::String("/giveisk 900000000000".into())]).await.expect("GM /giveisk");
     for &(cid, amount) in targets {
-        rpc(ctx, &mut gm, "account", "GiveCash", &[PyRep::Integer(cid), PyRep::Real(amount), PyRep::String("industry-grant".into())])
+        rpc_harness(ctx, &mut gm, "account", "GiveCash", &[PyRep::Integer(cid), PyRep::Real(amount), PyRep::String("industry-grant".into())])
             .await
             .expect("GM GiveCash");
     }
@@ -72,7 +84,7 @@ fn collect_skill_topo(sde: &eve_sde::SdeRegistry, tid: u32, seen: &mut HashSet<u
 /// Trains every skill required by `type_ids` (skills, ships, modules) to level V through the live skill queue.
 /// Alpha clones stop at their cap (`strict = false` tolerates the refusal).
 pub(crate) async fn train_skills(ctx: &ServerContext, sess: &mut SessionState, type_ids: &[u32], strict: bool) {
-    let char_id = sess.character_id.unwrap();
+    let char_id = sess.character_id.expect("character_id");
     let (mut seen, mut ordered) = (HashSet::new(), Vec::new());
     for &tid in type_ids {
         collect_skill_topo(&ctx.sde, tid, &mut seen, &mut ordered);
@@ -82,19 +94,19 @@ pub(crate) async fn train_skills(ctx: &ServerContext, sess: &mut SessionState, t
         if curr >= 5 {
             continue;
         }
-        let _ = rpc(ctx, sess, "skillMgr2", "PurchaseSkills", &[PyRep::List(vec![PyRep::Integer(i64::from(sid))])]).await;
+        let _ = rpc_harness(ctx, sess, "skillMgr2", "PurchaseSkills", &[PyRep::List(vec![PyRep::Integer(i64::from(sid))])]).await;
         // Alpha clones cap some skills below V: fall back to the highest level the clone accepts.
         let mut queued = false;
         for top in ((curr + 1)..=5).rev() {
             let q: Vec<PyRep> = ((curr + 1)..=top).map(|l| PyRep::Tuple(vec![PyRep::Integer(i64::from(sid)), PyRep::Integer(i64::from(l))])).collect();
-            if rpc(ctx, sess, "skillMgr2", "SaveNewQueue", &[PyRep::List(q)]).await.is_ok() {
+            if rpc_harness(ctx, sess, "skillMgr2", "SaveNewQueue", &[PyRep::List(q)]).await.is_ok() {
                 queued = true;
                 break;
             }
         }
         assert!(queued || !strict, "SaveNewQueue skill {sid} failed");
         ctx.advance_virtual_clock(90 * 86_400);
-        let _ = rpc(ctx, sess, "skillMgr2", "GetSkillQueueAndFreePoints", &[]).await;
+        let _ = rpc_harness(ctx, sess, "skillMgr2", "GetSkillQueueAndFreePoints", &[]).await;
     }
 }
 
@@ -113,7 +125,7 @@ pub(crate) fn owned_qty(ctx: &ServerContext, owner: i64, loc: i64, type_id: u32)
 
 /// Buys `qty` of `type_id` from Jita sell orders (pilot docked in Jita 4-4); returns the new hangar item IDs.
 pub(crate) async fn buy(ctx: &ServerContext, sess: &mut SessionState, type_id: u32, qty: i64) -> Vec<i64> {
-    let owner = sess.character_id.unwrap();
+    let owner = sess.character_id.expect("character_id");
     let before: HashSet<i64> = items_at(ctx, owner, JITA_STATION, type_id).into_iter().map(|x| x.0).collect();
     let ask = ctx.db.with_snapshot(|s| {
         s.market_orders
@@ -136,13 +148,13 @@ pub(crate) async fn buy(ctx: &ServerContext, sess: &mut SessionState, type_id: u
         PyRep::Integer(0),
         PyRep::Bool(false),
     ];
-    rpc(ctx, sess, "marketProxy", "PlaceBuyOrder", &args).await.unwrap_or_else(|e| panic!("buy {type_id} x{qty}: {e:?}"));
+    rpc_harness(ctx, sess, "marketProxy", "PlaceBuyOrder", &args).await.unwrap_or_else(|e| panic!("buy {type_id} x{qty}: {e:?}"));
     items_at(ctx, owner, JITA_STATION, type_id).into_iter().map(|x| x.0).filter(|id| !before.contains(id)).collect()
 }
 
 /// Uses hangar stock in Jita first and buys only the shortfall; returns every Jita stack of `type_id`.
 pub(crate) async fn acquire(ctx: &ServerContext, sess: &mut SessionState, type_id: u32, qty: i64) -> Vec<i64> {
-    let owner = sess.character_id.unwrap();
+    let owner = sess.character_id.expect("character_id");
     let have = owned_qty(ctx, owner, JITA_STATION, type_id);
     if have < qty {
         buy(ctx, sess, type_id, qty - have).await;
@@ -165,7 +177,7 @@ pub(crate) async fn split_off(ctx: &ServerContext, sess: &mut SessionState, stac
     };
     let tid = ctx.db.with_snapshot(|s| s.items[&stack].type_id);
     let before: HashSet<i64> = at_dest(tid).into_iter().collect();
-    rpc(ctx, sess, "invbroker", "Add", &[PyRep::Integer(stack), PyRep::Integer(dest), PyRep::Integer(flag), PyRep::Integer(qty)])
+    rpc_harness(ctx, sess, "invbroker", "Add", &[PyRep::Integer(stack), PyRep::Integer(dest), PyRep::Integer(flag), PyRep::Integer(qty)])
         .await
         .unwrap_or_else(|e| panic!("split {stack} -> {dest}: {e:?}"));
     let after = at_dest(tid);
@@ -192,7 +204,7 @@ pub(crate) fn small_mineral_bp(ctx: &ServerContext) -> u32 {
 
 pub(crate) async fn move_item(ctx: &ServerContext, sess: &mut SessionState, item: i64, dest: i64, flag: i64) {
     let qty = ctx.db.with_snapshot(|s| i64::from(s.items[&item].quantity));
-    rpc(ctx, sess, "invbroker", "Add", &[PyRep::Integer(item), PyRep::Integer(dest), PyRep::Integer(flag), PyRep::Integer(qty)])
+    rpc_harness(ctx, sess, "invbroker", "Add", &[PyRep::Integer(item), PyRep::Integer(dest), PyRep::Integer(flag), PyRep::Integer(qty)])
         .await
         .unwrap_or_else(|e| panic!("move {item} -> {dest}/{flag}: {e:?}"));
 }
@@ -200,9 +212,9 @@ pub(crate) async fn move_item(ctx: &ServerContext, sess: &mut SessionState, item
 /// Buys, assembles and boards a Charon in Jita, then acquires `cargo` (hangar stock + market) into its hold. Returns the freighter ID.
 pub(crate) async fn board_loaded_freighter(ctx: &ServerContext, sess: &mut SessionState, cargo: &[(u32, i64)]) -> i64 {
     let freighter = buy(ctx, sess, FREIGHTER, 1).await[0];
-    rpc(ctx, sess, "ship", "AssembleShip", &[PyRep::Integer(freighter)]).await.expect("AssembleShip Charon");
+    rpc_harness(ctx, sess, "ship", "AssembleShip", &[PyRep::Integer(freighter)]).await.expect("AssembleShip Charon");
     ctx.advance_secs(12);
-    rpc(ctx, sess, "ship", "Board", &[PyRep::Integer(freighter)]).await.expect("Board Charon");
+    rpc_harness(ctx, sess, "ship", "Board", &[PyRep::Integer(freighter)]).await.expect("Board Charon");
     for &(tid, qty) in cargo {
         for item in acquire(ctx, sess, tid, qty).await {
             move_item(ctx, sess, item, freighter, 5).await;
@@ -211,7 +223,7 @@ pub(crate) async fn board_loaded_freighter(ctx: &ServerContext, sess: &mut Sessi
     freighter
 }
 
-pub(crate) async fn install(ctx: &ServerContext, sess: &mut SessionState, bp: i64, facility: i64, activity: i64, runs: i64, extra: &[(&str, PyRep)]) -> Result<PyRep, BridgeRpcError> {
+pub(crate) async fn install(ctx: &ServerContext, sess: &mut SessionState, bp: i64, facility: i64, activity: i64, runs: i64, extra: &[(&str, PyRep)]) -> Result<PyRep, ClientErrorResponse> {
     let mut kv = vec![
         ("blueprintID", PyRep::Integer(bp)),
         ("facilityID", PyRep::Integer(facility)),
@@ -219,11 +231,11 @@ pub(crate) async fn install(ctx: &ServerContext, sess: &mut SessionState, bp: i6
         ("runs", PyRep::Integer(runs)),
     ];
     kv.extend(extra.iter().cloned());
-    rpc(ctx, sess, "industryManager", "InstallJob", &[PyRep::keyval(kv)]).await
+    rpc_harness(ctx, sess, "industryManager", "InstallJob", &[PyRep::keyval(kv)]).await
 }
 
 async fn settle(ctx: &ServerContext, sess: &SessionState, max_steps: usize) {
-    let (sys, ship) = (sess.solar_system_id.unwrap(), sess.ship_id.unwrap());
+    let (sys, ship) = (sess.solar_system_id.expect("solar_system_id"), sess.ship_id.expect("ship_id"));
     let h = ctx.systems.get_or_spawn(sys);
     let mut seen_warp = false;
     for i in 0..max_steps {
@@ -239,7 +251,7 @@ async fn settle(ctx: &ServerContext, sess: &SessionState, max_steps: usize) {
 }
 
 pub(crate) async fn warp_to(ctx: &ServerContext, sess: &mut SessionState, target: i64, dist: f64) {
-    match rpc(ctx, sess, "beyonce", "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(target), PyRep::Real(dist)]).await {
+    match rpc_harness(ctx, sess, "beyonce", "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(target), PyRep::Real(dist)]).await {
         Ok(_) => settle(ctx, sess, 4000).await,
         Err(e) if e.code == "WarpDistanceTooShort" => {}
         Err(e) => panic!("warp to {target}: {e:?}"),
@@ -248,9 +260,9 @@ pub(crate) async fn warp_to(ctx: &ServerContext, sess: &mut SessionState, target
 
 async fn undock(ctx: &ServerContext, sess: &mut SessionState) {
     if sess.structure_id.is_some() {
-        rpc(ctx, sess, "structureDocking", "Undock", &[]).await.expect("structure Undock");
+        rpc_harness(ctx, sess, "structureDocking", "Undock", &[]).await.expect("structure Undock");
     } else if sess.station_id.is_some() {
-        rpc(ctx, sess, "stationSvc", "Undock", &[]).await.expect("station Undock");
+        rpc_harness(ctx, sess, "stationSvc", "Undock", &[]).await.expect("station Undock");
     }
     ctx.advance_secs(15);
 }
@@ -306,9 +318,9 @@ pub(crate) fn nearest_system(ctx: &ServerContext, from: u32, pred: impl Fn(u32) 
 /// Undocks and flies the active ship by stargate to `dest_sys`.
 pub(crate) async fn travel(ctx: &ServerContext, sess: &mut SessionState, dest_sys: u32) {
     undock(ctx, sess).await;
-    for gate in route(ctx, sess.solar_system_id.unwrap(), dest_sys) {
+    for gate in route(ctx, sess.solar_system_id.expect("solar_system_id"), dest_sys) {
         warp_to(ctx, sess, gate, 0.0).await;
-        rpc(ctx, sess, "beyonce", "CmdStargateJump", &[PyRep::Integer(gate)]).await.unwrap_or_else(|e| panic!("jump {gate}: {e:?}"));
+        rpc_harness(ctx, sess, "beyonce", "CmdStargateJump", &[PyRep::Integer(gate)]).await.unwrap_or_else(|e| panic!("jump {gate}: {e:?}"));
         ctx.advance_secs(15);
     }
     assert_eq!(sess.solar_system_id, Some(dest_sys));
@@ -317,7 +329,7 @@ pub(crate) async fn travel(ctx: &ServerContext, sess: &mut SessionState, dest_sy
 pub(crate) async fn dock_station(ctx: &ServerContext, sess: &mut SessionState, station_id: i64) {
     travel(ctx, sess, ctx.sde.stations[&station_id].solar_system_id).await;
     warp_to(ctx, sess, station_id, 0.0).await;
-    rpc(ctx, sess, "stationSvc", "Dock", &[PyRep::Integer(station_id)]).await.unwrap_or_else(|e| panic!("Dock {station_id}: {e:?}"));
+    rpc_harness(ctx, sess, "stationSvc", "Dock", &[PyRep::Integer(station_id)]).await.unwrap_or_else(|e| panic!("Dock {station_id}: {e:?}"));
     ctx.advance_secs(15);
 }
 
@@ -327,23 +339,28 @@ pub(crate) async fn dock_structure(ctx: &ServerContext, sess: &mut SessionState,
         travel(ctx, sess, sys).await;
         warp_to(ctx, sess, structure_id, 0.0).await;
     }
-    let PyRep::Tuple(bound) = rpc(ctx, sess, "beyonce", "MachoBindObject", &[PyRep::Integer(i64::from(sys)), PyRep::None]).await.expect("bind beyonce") else {
-        panic!("MachoBindObject tuple");
-    };
-    let bound_id = bound[0].as_i64().unwrap() as u64;
-    ctx.dispatch_rpc(sess, "beyonce", Some(bound_id), "CmdFollowBall", &[PyRep::Integer(structure_id), PyRep::Real(0.0)], &HashMap::new(), None)
+    let bind = rpc_harness(ctx, sess, "beyonce", "MachoBindObject", &[PyRep::Integer(i64::from(sys)), PyRep::None])
         .await
-        .expect("Approach structure");
-    ctx.dispatch_rpc(sess, "beyonce", Some(bound_id), "CmdSetSpeedFraction", &[PyRep::Real(1.0)], &HashMap::new(), None)
-        .await
-        .expect("Full speed");
+        .expect("bind beyonce");
+    let bound_id = extract_bound_id_from_wire_rep(&bind).expect("beyonce bound id");
+    let mut harness = ClientHarness::new(common::SessionBorrowWireTransport {
+        ctx,
+        session: sess,
+        preserve_char_notifications: true,
+    });
+    harness
+        .call_ok("beyonce", Some(bound_id), "CmdFollowBall", &[PyRep::Integer(structure_id), PyRep::Real(0.0)], &HashMap::new())
+        .await;
+    harness
+        .call_ok("beyonce", Some(bound_id), "CmdSetSpeedFraction", &[PyRep::Real(1.0)], &HashMap::new())
+        .await;
     let h = ctx.systems.get_or_spawn(sys);
     for attempt in 0..80 {
         for _ in 0..15 {
             let _ = h.step_manual(1.0).await;
         }
         ctx.advance_secs(15);
-        match rpc(ctx, sess, "structureDocking", "Dock", &[PyRep::Integer(structure_id)]).await {
+        match rpc_harness(ctx, sess, "structureDocking", "Dock", &[PyRep::Integer(structure_id)]).await {
             Ok(_) => break,
             Err(e) if e.code == "OutsideDockingPerimeter" && attempt < 79 => continue,
             Err(e) => panic!("Dock {structure_id}: {e:?}"),
@@ -368,9 +385,9 @@ pub(crate) fn fuel_cargo() -> Vec<(u32, i64)> {
 /// Flies the loaded freighter to `sys_id`, anchors `hull_tid` near the sun, inserts core + fuel, onlines
 /// it, docks, and fits `services` (each onlined) into service slots 0... Returns `(structure, fitted)`.
 pub(crate) async fn deploy_online_upwell(ctx: &ServerContext, sess: &mut SessionState, sys_id: u32, hull_tid: u32, services: &[u32], fuel_qty: i64) -> (i64, Vec<i64>) {
-    let owner = sess.character_id.unwrap();
+    let owner = sess.character_id.expect("character_id");
     travel(ctx, sess, sys_id).await;
-    let ship_id = sess.ship_id.unwrap();
+    let ship_id = sess.ship_id.expect("ship_id");
     if let Ok(Some((_, b))) = ctx.systems.get_or_spawn(sys_id).get_ball_snapshot(ship_id).await {
         if b.velocity.length_squared() > 1.0 {
             if let Some(clear_planet) = ctx
@@ -386,35 +403,35 @@ pub(crate) async fn deploy_online_upwell(ctx: &ServerContext, sess: &mut Session
     }
     let sun = ctx.sde.celestials_in_system(sys_id).into_iter().find(|c| c.group_id == 6).expect("sun").celestial_id;
     warp_to(ctx, sess, sun, 100_000.0).await;
-    let anc = rpc(ctx, sess, "structureDeployment", "Anchor", &[PyRep::Integer(i64::from(hull_tid)), PyRep::String("Live Industry Complex".into())])
+    let anc = rpc_harness(ctx, sess, "structureDeployment", "Anchor", &[PyRep::Integer(i64::from(hull_tid)), PyRep::String("Live Industry Complex".into())])
         .await
         .expect("Anchor Upwell structure");
     let st_id = int(&anc, "structureID");
     ctx.advance_virtual_clock(life::ANCHOR_VULNERABLE_SECS + life::ANCHORING_SECS + 10);
-    let _ = rpc(ctx, sess, "structureGuests", "GetGuests", &[PyRep::Integer(st_id)]).await;
+    let _ = rpc_harness(ctx, sess, "structureGuests", "GetGuests", &[PyRep::Integer(st_id)]).await;
     dock_structure(ctx, sess, st_id).await;
-    let ship = sess.ship_id.unwrap();
+    let ship = sess.ship_id.expect("ship_id");
     let core = ctx.sde.types[&hull_tid].default_attributes[&life::ATTR_REQUIRES_DEED_TYPE] as u32;
     let core_item = items_at(ctx, owner, ship, core)[0].0;
-    rpc(ctx, sess, "invbroker", "Add", &[PyRep::Integer(core_item), PyRep::Integer(st_id), PyRep::Integer(172)]).await.expect("Insert Quantum Core");
+    rpc_harness(ctx, sess, "invbroker", "Add", &[PyRep::Integer(core_item), PyRep::Integer(st_id), PyRep::Integer(172)]).await.expect("Insert Quantum Core");
     let mut fuel_left = fuel_qty;
     for (item, qty) in FUEL_BLOCKS.iter().flat_map(|&f| items_at(ctx, owner, ship, f)) {
         let take = qty.min(fuel_left);
         if take > 0 {
-            rpc(ctx, sess, "invbroker", "Add", &[PyRep::Integer(item), PyRep::Integer(st_id), PyRep::Integer(133), PyRep::Integer(take)])
+            rpc_harness(ctx, sess, "invbroker", "Add", &[PyRep::Integer(item), PyRep::Integer(st_id), PyRep::Integer(133), PyRep::Integer(take)])
                 .await
                 .expect("Load Fuel Bay");
             fuel_left -= take;
         }
     }
     assert_eq!(fuel_left, 0, "freighter must carry {fuel_qty} fuel blocks");
-    rpc(ctx, sess, "structureDocking", "Undock", &[]).await.expect("Undock for onlining");
+    rpc_harness(ctx, sess, "structureDocking", "Undock", &[]).await.expect("Undock for onlining");
     ctx.advance_virtual_clock(life::ONLINING_SECS + 15);
     dock_structure(ctx, sess, st_id).await;
     let mut fitted = Vec::new();
     for (idx, &stid) in services.iter().enumerate() {
         let item = items_at(ctx, owner, ship, stid)[0].0;
-        let fit = rpc(ctx, sess, "invbroker", "Add", &[PyRep::Integer(item), PyRep::Integer(st_id), PyRep::Integer(164 + idx as i64)])
+        let fit = rpc_harness(ctx, sess, "invbroker", "Add", &[PyRep::Integer(item), PyRep::Integer(st_id), PyRep::Integer(164 + idx as i64)])
             .await
             .expect("Fit & online service module");
         assert_eq!(fit.dict_get("online").and_then(|v| v.as_bool()), Some(true));

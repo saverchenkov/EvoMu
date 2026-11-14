@@ -37,6 +37,7 @@ const ATHANOR_TYPE: u32 = 35835;
 async fn test_pochven_anchoring_restrictions_customs_office_and_upwell_blocks() {
     // parity: feat:structures.pochven-anchoring-restrictions
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
     let kw = HashMap::new();
     let char_id = 90_000_001_i64;
     let ship_id = 100_000_501_i64;
@@ -47,17 +48,15 @@ async fn test_pochven_anchoring_restrictions_customs_office_and_upwell_blocks() 
 
     let mut sess = SessionState::new(885_001);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
+    common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_id)],
+            &kw,
+        )
+        .await;
     ctx.advance_secs(11);
 
     let planet_pos = ctx
@@ -174,15 +173,13 @@ async fn test_pochven_anchoring_restrictions_customs_office_and_upwell_blocks() 
     // 1. Upwell structures (Astrahus, Raitaru, Athanor) remain strictly blocked in Pochven
     // via structureDeployment.Anchor regardless of standing
     for &upwell_type in &[ASTRAHUS_TYPE, RAITARU_TYPE, ATHANOR_TYPE] {
-        let upwell_err = ctx
-            .dispatch_rpc(
-                &mut sess,
+        let upwell_err = common::borrow_wire_harness(&ctx, &mut sess)
+            .call(
                 "structureDeployment",
                 None,
                 "Anchor",
                 &[PyRep::Integer(upwell_type as i64)],
                 &kw,
-                None,
             )
             .await
             .expect_err("Upwell structure anchoring in Pochven must be blocked");
@@ -191,15 +188,13 @@ async fn test_pochven_anchoring_restrictions_customs_office_and_upwell_blocks() 
 
     // 2. Customs Office Gantry anchoring via posMgr.AnchorOrbital (1 argument: itemID)
     // With standing 0.5 < 1.5: rejected with InsufficientTriglavianStanding
-    let low_standing_err = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let low_standing_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "posMgr",
             None,
             "AnchorOrbital",
             &[PyRep::Integer(gantry_item_id)],
             &kw,
-            None,
         )
         .await
         .expect_err("Gantry anchoring in Pochven must fail when Triglavian standing < 1.5");
@@ -213,44 +208,50 @@ async fn test_pochven_anchoring_restrictions_customs_office_and_upwell_blocks() 
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters
             .get_mut(&char_id)
-            .unwrap()
+            .expect("char exists")
             .standings
             .insert(TRIGLAVIAN_FACTION_ID, 3.0);
     });
-    let mut far_ball = p_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
+    let mut far_ball = p_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .expect("get_ball_snapshot")
+        .expect("ship ball exists")
+        .1;
     far_ball.position = planet_pos + DVec3::new(500_000_000.0, 0.0, 0.0); // 500,000 km away
     let _ = p_handle.spawn_ball(far_ball).await;
 
-    let out_of_range_err = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let out_of_range_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "posMgr",
             None,
             "AnchorOrbital",
             &[PyRep::Integer(gantry_item_id)],
             &kw,
-            None,
         )
         .await
         .expect_err("Gantry anchoring must fail when too far from planet");
     assert_eq!(out_of_range_err.code, "OrbitalOutOfRange");
 
     // Move ship back near planet
-    let mut near_ball = p_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
+    let mut near_ball = p_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .expect("get_ball_snapshot")
+        .expect("ship ball exists")
+        .1;
     near_ball.position = ship_pos_near_planet;
     let _ = p_handle.spawn_ball(near_ball).await;
 
     // 4. Positive test: Customs Office Gantry anchoring succeeds with 1 argument (R-POCH-04)
     // Standing >= 1.5, nearest planet automatically resolved to OTELA_PLANET_ID
-    let gantry_res = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let gantry_res = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "posMgr",
             None,
             "AnchorOrbital",
             &[PyRep::Integer(gantry_item_id)],
             &kw,
-            None,
         )
         .await
         .expect("Anchor Customs Office Gantry in Pochven with standing >= 1.5");
@@ -283,15 +284,13 @@ async fn test_pochven_anchoring_restrictions_customs_office_and_upwell_blocks() 
     assert_eq!(struct_rec.state, "ShieldVulnerable");
 
     // 5. Re-anchoring protection (R-POCH-03): Already-anchored structure cannot be re-anchored
-    let reanchor_err = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let reanchor_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "posMgr",
             None,
             "AnchorOrbital",
             &[PyRep::Integer(gantry_item_id)],
             &kw,
-            None,
         )
         .await
         .expect_err("Already anchored orbital cannot be re-anchored");
@@ -299,24 +298,21 @@ async fn test_pochven_anchoring_restrictions_customs_office_and_upwell_blocks() 
 
     // 6. Direct POCO anchoring forbidden (R-POCH-03): Finished Customs Office (type 2233)
     // cannot be directly anchored via AnchorOrbital without gantry deployment
-    let direct_poco_err = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let direct_poco_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "posMgr",
             None,
             "AnchorOrbital",
             &[PyRep::Integer(poco_upgrade_id)],
             &kw,
-            None,
         )
         .await
         .expect_err("Finished Customs Office cannot be directly anchored via AnchorOrbital");
     assert_eq!(direct_poco_err.code, "StarbaseRemoved");
 
     // 7. Online / upgrade Gantry to finished Customs Office via posMgr.OnlineOrbital
-    let online_res = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let online_res = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "posMgr",
             None,
             "OnlineOrbital",
@@ -325,7 +321,6 @@ async fn test_pochven_anchoring_restrictions_customs_office_and_upwell_blocks() 
                 PyRep::Integer(poco_upgrade_id),
             ],
             &kw,
-            None,
         )
         .await
         .expect("Online/upgrade Gantry to POCO");
@@ -345,6 +340,7 @@ async fn test_pochven_anchoring_restrictions_customs_office_and_upwell_blocks() 
 async fn test_pochven_existing_structures_survive_and_remain_operational() {
     // parity: feat:structures.pochven-anchoring-restrictions
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
     let corp_id = 98_000_102_i64;
     let existing_struct_id = 1_000_000_500_001_i64;
     let struct_pos = [100_000_000.0, 200_000_000.0, 300_000_000.0];
