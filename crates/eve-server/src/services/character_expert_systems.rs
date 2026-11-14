@@ -130,6 +130,7 @@ pub fn sweep_expired_expert_systems_all(ctx: &ServerContext, now_ft: i64) {
             &removed_skill_ids,
             Some("ExpertSystemExpired"),
         );
+        ctx.push_brain_update(char_id);
         ctx.sync_ship_ballpark_stats(char_id, ship_id);
     }
 }
@@ -300,6 +301,7 @@ pub fn handle(
                             expert_system_type_id: added_type_id,
                         },
                     );
+                    ctx.push_brain_update(char_id);
                     Some(Ok(PyRep::None))
                 }
                 Err(e) => Some(Err(e)),
@@ -337,6 +339,7 @@ pub fn handle(
                         expert_system_type_id: type_id,
                     },
                 );
+                ctx.push_brain_update(char_id);
             }
             Some(Ok(PyRep::None))
         }

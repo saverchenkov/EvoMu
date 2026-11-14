@@ -504,6 +504,7 @@ pub fn inject_implant(
         "charid",
         vec![],
     );
+    ctx.push_brain_update(char_id);
     Ok(PyRep::None)
 }
 
@@ -589,6 +590,7 @@ pub fn destroy_implant(
         "charid",
         vec![],
     );
+    ctx.push_brain_update(char_id);
     Ok(PyRep::None)
 }
 

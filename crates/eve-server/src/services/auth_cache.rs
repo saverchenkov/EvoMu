@@ -1340,22 +1340,21 @@ pub async fn handle(
                 match res {
                     Ok((sp, total_sp, active_ship, prev_lvl)) => {
                         ctx.invalidate_ship_fitting(active_ship);
-                        if !session.address.is_empty() {
-                            if lvl == 0 {
-                                crate::services::jump_clone_names::emit_server_skills_removed(
-                                    ctx,
-                                    cid,
-                                    &[(skill_id, prev_lvl)],
-                                );
-                            } else {
-                                crate::services::jump_clone_names::emit_server_skills_changed(
-                                    ctx,
-                                    cid,
-                                    &[skill_id],
-                                    Some("GMGiveSkill"),
-                                );
-                            }
+                        if lvl == 0 {
+                            crate::services::jump_clone_names::emit_server_skills_removed(
+                                ctx,
+                                cid,
+                                &[(skill_id, prev_lvl)],
+                            );
+                        } else {
+                            crate::services::jump_clone_names::emit_server_skills_changed(
+                                ctx,
+                                cid,
+                                &[skill_id],
+                                Some("GMGiveSkill"),
+                            );
                         }
+                        ctx.push_brain_update(cid);
                         Some(Ok(PyRep::keyval([
                             ("command", PyRep::String(cmd.to_string())),
                             ("skillID", PyRep::Integer(skill_id as i64)),

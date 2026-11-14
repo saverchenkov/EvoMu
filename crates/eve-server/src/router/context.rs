@@ -66,6 +66,7 @@ pub struct ServerContext {
     pub session_closers: Arc<RankedRwLock<HashMap<u64, tokio::sync::mpsc::UnboundedSender<(String, String)>>, RANK_LEAF>>,
     pub ship_fittings: Arc<RankedRwLock<HashMap<i64, ShipFittingEngine>, RANK_LEAF>>,
     pub ship_fit_revs: Arc<RankedRwLock<HashMap<i64, eve_dogma::FitRev>, RANK_LEAF>>,
+    pub brain_versions: Arc<RankedRwLock<HashMap<i64, i64>, RANK_LEAF>>,
     pub projected_ewar: Arc<RankedRwLock<HashMap<i64, Vec<eve_dogma::ProjectedEwarEffect>>, RANK_LEAF>>,
     pub projected_ewar_sources: Arc<RankedRwLock<HashMap<i64, i64>, RANK_LEAF>>,
     pub active_ewar_starts: Arc<RankedRwLock<HashMap<(i64, i64), Vec<(i64, &'static str)>>, RANK_LEAF>>,
@@ -143,6 +144,7 @@ pub(crate) struct ServerContextWeak {
     session_closers: std::sync::Weak<RankedRwLock<HashMap<u64, tokio::sync::mpsc::UnboundedSender<(String, String)>>, RANK_LEAF>>,
     ship_fittings: std::sync::Weak<RankedRwLock<HashMap<i64, ShipFittingEngine>, RANK_LEAF>>,
     ship_fit_revs: std::sync::Weak<RankedRwLock<HashMap<i64, eve_dogma::FitRev>, RANK_LEAF>>,
+    brain_versions: std::sync::Weak<RankedRwLock<HashMap<i64, i64>, RANK_LEAF>>,
     projected_ewar: std::sync::Weak<RankedRwLock<HashMap<i64, Vec<eve_dogma::ProjectedEwarEffect>>, RANK_LEAF>>,
     projected_ewar_sources: std::sync::Weak<RankedRwLock<HashMap<i64, i64>, RANK_LEAF>>,
     active_ewar_starts: std::sync::Weak<RankedRwLock<HashMap<(i64, i64), Vec<(i64, &'static str)>>, RANK_LEAF>>,
@@ -210,6 +212,7 @@ impl ServerContextWeak {
             session_closers: self.session_closers.upgrade()?,
             ship_fittings: self.ship_fittings.upgrade()?,
             ship_fit_revs: self.ship_fit_revs.upgrade()?,
+            brain_versions: self.brain_versions.upgrade()?,
             projected_ewar: self.projected_ewar.upgrade()?,
             projected_ewar_sources: self.projected_ewar_sources.upgrade()?,
             active_ewar_starts: self.active_ewar_starts.upgrade()?,
@@ -521,6 +524,7 @@ impl ServerContext {
             session_closers: Arc::downgrade(&self.session_closers),
             ship_fittings: Arc::downgrade(&self.ship_fittings),
             ship_fit_revs: Arc::downgrade(&self.ship_fit_revs),
+            brain_versions: Arc::downgrade(&self.brain_versions),
             projected_ewar: Arc::downgrade(&self.projected_ewar),
             projected_ewar_sources: Arc::downgrade(&self.projected_ewar_sources),
             active_ewar_starts: Arc::downgrade(&self.active_ewar_starts),
@@ -665,6 +669,7 @@ impl ServerContext {
             session_closers: Arc::new(RankedRwLock::new(HashMap::new())),
             ship_fittings,
             ship_fit_revs,
+            brain_versions: Arc::new(RankedRwLock::new(HashMap::new())),
             projected_ewar,
             projected_ewar_sources,
             active_ewar_starts,
@@ -1213,6 +1218,35 @@ impl ServerContext {
             }
             levels
         })
+    }
+
+    /// Returns the character's current Brain-in-a-Jar monotonic version counter (`0` before first update).
+    pub fn current_brain_version(&self, char_id: i64) -> i64 {
+        self.brain_versions
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&char_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Advances and returns the character's monotonic Brain-in-a-Jar version counter.
+    pub fn bump_brain_version(&self, char_id: i64) -> i64 {
+        let mut guard = self
+            .brain_versions
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let entry = guard.entry(char_id).or_insert(0);
+        *entry = entry.saturating_add(1).max(1);
+        *entry
+    }
+
+    /// Advances the character's brain version and pushes `OnServerBrainUpdated` to the client.
+    pub fn push_brain_update(&self, char_id: i64) {
+        let version = self.bump_brain_version(char_id);
+        crate::services::notify_emitters_missing2::emit_server_brain_updated(
+            self, char_id, version,
+        );
     }
 
     fn resolve_ship_cooldown_clock(&self, ship_id: i64, module_id: i64) -> (u32, Option<u32>, f64) {
@@ -1935,6 +1969,7 @@ impl ServerContext {
                 &skill_ids,
                 Some("SkillTrained"),
             );
+            self.push_brain_update(cid);
             let _ = self.notify_new_skill_queue_saved(
                 cid,
                 crate::services::jump_clone_names::skill_queue_rowset(self, cid),

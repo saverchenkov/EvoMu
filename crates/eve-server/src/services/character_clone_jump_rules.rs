@@ -808,6 +808,7 @@ pub fn handle_clone_jump(
                 "charid",
                 vec![],
             );
+            ctx.push_brain_update(char_id);
             let implant_reps: Vec<PyRep> = active_implants
                 .into_iter()
                 .map(|t| PyRep::Integer(t as i64))

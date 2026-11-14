@@ -2454,4 +2454,313 @@ async fn live_client_hotfixes_1062_1063_structure_dock_invbroker_and_godma_wire_
         .expect_err("foreign-system structure GetInventoryFromId must fail");
     assert_eq!(bad_inv_err.code, "InventoryNotAccessible"); // rpc-lint: allow error code assertion
 }
+
+#[tokio::test]
+async fn live_client_hotfix_1064_char_brain_and_server_brain_updated_wire_harness() {
+    use eve_machonet::service_roles;
+    use eve_testkit::client_harness::ContractValidationMode;
+
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let char_id = 90_000_001_i64;
+    let station_id = 60_003_760_i64;
+    let tristan_id = 100_991_064_i64;
+    let implant_item_id = 100_991_065_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(acc) = snap.accounts.get_mut("demo") {
+            acc.role |=
+                service_roles::ROLE_ADMIN | service_roles::ROLE_GMH | service_roles::ROLE_GML;
+        }
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 1;
+            ch.station_id = Some(station_id);
+            ch.solar_system_id = 30_000_142;
+            ch.active_ship_id = tristan_id;
+        }
+        snap.items.insert(
+            tristan_id,
+            InventoryItemRecord {
+                item_id: tristan_id,
+                type_id: 593, // Tristan (base CPU 130.0, base PG 35.0)
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+                insured_payout_isk: 0.0,
+            },
+        );
+        snap.items.insert(
+            implant_item_id,
+            InventoryItemRecord {
+                item_id: implant_item_id,
+                type_id: 13216, // Zainou 'Gypsy' CPU Management EE-603 (+3% CPU, slot 6)
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+                insured_payout_isk: 0.0,
+            },
+        );
+        let skills = snap.skills.entry(char_id).or_default();
+        for (tid, lvl) in [
+            (3426u32, 5u8), // CPU Management V (+25% CPU -> 162.5)
+            (3413, 5),      // Power Grid Management V (+25% PG -> 43.75)
+            (3411, 2),      // Cybernetics II (for EE-603 implant)
+            (3300, 1),      // Gunnery I
+            (3302, 1),      // Small Projectile Turret I
+            (3454, 1),      // High Speed Maneuvering I
+            (3416, 1),      // Shield Operation I
+            (3435, 4),      // Propulsion Jamming IV (for Stasis Webifier II)
+            (3394, 4),      // Hull Upgrades IV (for Damage Control II)
+        ] {
+            skills.insert(
+                tid,
+                eve_db::TrainedSkillRecord {
+                    type_id: tid,
+                    level: lvl,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+    });
+
+    let mut harness =
+        common::new_wire_harness(&ctx, 78_064).with_mode(ContractValidationMode::Ratcheted);
+    harness
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[
+                PyRep::String("demo".into()),
+                PyRep::String("demo-secret".into()),
+            ],
+            &kw,
+        )
+        .await;
+    harness
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_id)],
+            &kw,
+        )
+        .await;
+
+    // 1. GetAllInfo primes charInfo[1] = (brainVersion, charEffects, shipEffects, structureEffects)
+    //    with BrainEffect(toAttribID=48, operation=6, value=25.0, skills=[3426]) so clientDogmaLocation
+    //    evaluates Tristan CPU Output as 162.5 rather than base 130.0.
+    let all_info = harness
+        .call_ok(
+            "dogmaIM",
+            None,
+            "GetAllInfo",
+            &[PyRep::Bool(true), PyRep::Bool(true)],
+            &kw,
+        )
+        .await;
+    let PyRep::Dict(ship_info) = all_info.dict_get("shipInfo").expect("shipInfo") else {
+        panic!("shipInfo must be Dict");
+    };
+    let tristan_entry = ship_info
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(tristan_id))
+        .map(|(_, v)| v)
+        .expect("Tristan in shipInfo");
+    let PyRep::Dict(tristan_attrs) = tristan_entry.dict_get("attributes").expect("attributes") else {
+        panic!("Tristan attributes must be Dict");
+    };
+    let ship_cpu_output = tristan_attrs
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(48))
+        .and_then(|(_, v)| v.as_f64())
+        .expect("CPU_OUTPUT attr 48");
+    assert!((ship_cpu_output - 162.5).abs() < 1e-6);
+
+    let PyRep::Tuple(char_info) = all_info.dict_get("charInfo").expect("charInfo") else {
+        panic!("charInfo must be 2-tuple (charRowDict, charBrain)");
+    };
+    assert_eq!(char_info.len(), 2);
+    let PyRep::Tuple(char_brain) = &char_info[1] else {
+        panic!("charInfo[1] must be 4-tuple charBrain");
+    };
+    assert_eq!(char_brain.len(), 4);
+    assert_eq!(char_brain[0], PyRep::Integer(0));
+    let has_brain_effect = |effects: &PyRep, skill_tid: i64, to_attr: i64, expected_val: f64| -> bool {
+        let PyRep::Tuple(items) = effects else {
+            return false;
+        };
+        items.iter().any(|item| {
+            let PyRep::ObjectEx {
+                is_type_2: true,
+                header,
+                ..
+            } = item
+            else {
+                return false;
+            };
+            let PyRep::Tuple(hdr) = header.as_ref() else {
+                return false;
+            };
+            if hdr.first()
+                != Some(&PyRep::Tuple(vec![PyRep::Token(
+                    "eve.common.script.dogma.effect.BrainEffect".into(),
+                )]))
+            {
+                return false;
+            }
+            let Some(st) = hdr.get(1) else {
+                return false;
+            };
+            st.dict_get("toItemID") == Some(&PyRep::String("shipID".into()))
+                && st.dict_get("modifierType") == Some(&PyRep::String("M".into()))
+                && st.dict_get("toAttribID") == Some(&PyRep::Integer(to_attr))
+                && st.dict_get("operation") == Some(&PyRep::Integer(6))
+                && st
+                    .dict_get("value")
+                    .and_then(|v| v.as_f64())
+                    .is_some_and(|v| (v - expected_val).abs() < 1e-9)
+                && st.dict_get("extras") == Some(&PyRep::Tuple(Vec::new()))
+                && st.dict_get("skills") == Some(&PyRep::List(vec![PyRep::Integer(skill_tid)]))
+        })
+    };
+    assert!(
+        has_brain_effect(&char_brain[2], 3426, 48, 25.0),
+        "GetAllInfo charBrain shipEffects must include CPU Management V BrainEffect: {:?}",
+        char_brain[2]
+    );
+
+    // 2. Fit the #1064 Tristan loadout whose CPU load (153.0) exceeds base 130.0 but fits 162.5.
+    //    /fit me 10836 and Put Online (SetModuleOnline) must both succeed.
+    let mut msb_id = 0_i64;
+    for cmd in [
+        "/fit me 486",
+        "/fit me 486",
+        "/fit me 434",
+        "/fit me 527",
+        "/fit me 2048",
+        "/fit me 10836",
+    ] {
+        let rep = harness
+            .call_ok("slash", None, "SlashCmd", &[PyRep::String(cmd.into())], &kw)
+            .await;
+        assert_eq!(rep.dict_get("online"), Some(&PyRep::Bool(true)), "cmd={cmd}");
+        if cmd == "/fit me 10836" {
+            msb_id = rep
+                .dict_get("itemID")
+                .and_then(|v| v.as_i64())
+                .expect("msb itemID");
+        }
+    }
+    harness
+        .call_ok(
+            "dogmaIM",
+            None,
+            "TakeModuleOffline",
+            &[PyRep::Integer(tristan_id), PyRep::Integer(msb_id)],
+            &kw,
+        )
+        .await;
+    harness
+        .call_ok(
+            "dogmaIM",
+            None,
+            "SetModuleOnline",
+            &[PyRep::Integer(tristan_id), PyRep::Integer(msb_id)],
+            &kw,
+        )
+        .await;
+
+    // 3. Skill & implant mutations push OnServerBrainUpdated with strictly monotonic brainVersion
+    //    and marshaled (charEffects, shipEffects, structureEffects) reflecting the updated BrainEffects.
+    let extract_brain_update = |notifs: &[(String, Vec<PyRep>)]| -> (i64, PyRep) {
+        let (_, args) = notifs
+            .iter()
+            .find(|(ev, _)| ev == "OnServerBrainUpdated")
+            .expect("OnServerBrainUpdated notification");
+        let PyRep::Tuple(parts) = &args[0] else {
+            panic!("brainData must be tuple");
+        };
+        let ver = parts[0].as_i64().expect("brainVersion");
+        let PyRep::Bytes(raw) = &parts[1] else {
+            panic!("grayMatter must be marshaled bytes");
+        };
+        let PyRep::Tuple(domains) = eve_proto::marshal::decode(raw).expect("decode grayMatter") else {
+            panic!("decoded grayMatter must be 3-tuple");
+        };
+        (ver, domains[1].clone())
+    };
+
+    let _ = harness.drain_notifications();
+    let drop_ex = harness
+        .call_exchange(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/giveskill me 3426 0".into())],
+            &kw,
+        )
+        .await;
+    assert!(drop_ex.result.is_ok());
+    let (v1, ship_v1) = extract_brain_update(&drop_ex.notifications);
+    assert_eq!(v1, 1);
+    assert!(!has_brain_effect(&ship_v1, 3426, 48, 25.0));
+
+    let restore_ex = harness
+        .call_exchange(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/giveskill me 3426 5".into())],
+            &kw,
+        )
+        .await;
+    assert!(restore_ex.result.is_ok());
+    let (v2, ship_v2) = extract_brain_update(&restore_ex.notifications);
+    assert_eq!(v2, 2);
+    assert!(has_brain_effect(&ship_v2, 3426, 48, 25.0));
+
+    let plug_ex = harness
+        .call_exchange(
+            "dogmaIM",
+            None,
+            "InjectImplant",
+            &[PyRep::Integer(implant_item_id)],
+            &kw,
+        )
+        .await;
+    assert!(plug_ex.result.is_ok());
+    let (v3, ship_v3) = extract_brain_update(&plug_ex.notifications);
+    assert_eq!(v3, 3);
+    assert!(has_brain_effect(&ship_v3, 13216, 48, 3.0));
+
+    let destroy_ex = harness
+        .call_exchange(
+            "dogmaIM",
+            None,
+            "DestroyImplant",
+            &[PyRep::Integer(implant_item_id)],
+            &kw,
+        )
+        .await;
+    assert!(destroy_ex.result.is_ok());
+    let (v4, ship_v4) = extract_brain_update(&destroy_ex.notifications);
+    assert_eq!(v4, 4);
+    assert!(!has_brain_effect(&ship_v4, 13216, 48, 3.0));
+}
 }

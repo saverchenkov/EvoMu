@@ -223,26 +223,29 @@ async fn test_system_brain_map_and_service_notifications() {
 
     // 7. OnServerBrainUpdated
     // V24 client BaseDogmaLocation.ProcessBrainData unpacks (brainVersion, grayMatter) 2-tuple:
-    emit_server_brain_updated(&ctx, PILOT_A, 3);
-    let notifs = ctx.drain_notifications_for_char(PILOT_A);
-    let brain_notif = notifs
-        .iter()
-        .find(|n| n.event == "OnServerBrainUpdated")
-        .expect("OnServerBrainUpdated emitted");
-    assert_eq!(brain_notif.args.len(), 1);
-    assert_eq!(
-        brain_notif.args[0],
-        PyRep::Tuple(vec![PyRep::Integer(3), PyRep::None])
-    );
-
-    emit_server_brain_updated(&ctx, PILOT_A, 4);
-    let notifs = ctx.drain_notifications_for_char(PILOT_A);
-    assert_eq!(notifs.len(), 1);
-    assert_eq!(notifs[0].event, "OnServerBrainUpdated");
-    assert_eq!(
-        notifs[0].args[0],
-        PyRep::Tuple(vec![PyRep::Integer(4), PyRep::None])
-    );
+    for expected_ver in [3i64, 4] {
+        emit_server_brain_updated(&ctx, PILOT_A, expected_ver);
+        let notifs = ctx.drain_notifications_for_char(PILOT_A);
+        let brain_notif = notifs
+            .iter()
+            .find(|n| n.event == "OnServerBrainUpdated")
+            .expect("OnServerBrainUpdated emitted");
+        assert_eq!(brain_notif.args.len(), 1);
+        let PyRep::Tuple(ref brain_parts) = brain_notif.args[0] else {
+            panic!("brainData must be 2-tuple: {:?}", brain_notif.args[0]);
+        };
+        assert_eq!(brain_parts.len(), 2);
+        assert_eq!(brain_parts[0], PyRep::Integer(expected_ver));
+        let PyRep::Bytes(ref raw_gray_matter) = brain_parts[1] else {
+            panic!("grayMatter must be marshaled bytes: {:?}", brain_parts[1]);
+        };
+        let decoded = eve_proto::marshal::decode(raw_gray_matter).expect("decode grayMatter");
+        let PyRep::Tuple(domains) = decoded else {
+            panic!("decoded grayMatter must be 3-tuple");
+        };
+        assert_eq!(domains.len(), 3);
+        assert!(domains.iter().all(|d| matches!(d, PyRep::Tuple(_))));
+    }
 
     // 8. OnServerMapDataPush
     let tricolors = vec![(1.0, 0.5, 0.25)];

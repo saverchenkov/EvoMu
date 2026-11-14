@@ -717,6 +717,9 @@ pub(crate) fn extract_skills(
         ctx.invalidate_ship_fitting(sid);
     }
     emit_server_skills_removed(ctx, char_id, &removed);
+    if !removed.is_empty() {
+        ctx.push_brain_update(char_id);
+    }
     Ok(PyRep::keyval([
         ("injectorItemID", PyRep::Integer(injector_id)),
         ("extractedSkills", PyRep::Integer(removed.len() as i64)),

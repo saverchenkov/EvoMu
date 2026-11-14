@@ -132,7 +132,19 @@ pub fn emit_recommendations_changed(ctx: &ServerContext, char_id: i64) {
 /// Matches `eve/client/script/dogma/clientDogmaLocation.pyj:DogmaLocation.OnServerBrainUpdated`.
 /// V24 client unpacks `brainVersion, grayMatter = brainData` (`eve/common/script/dogma/baseDogmaLocation.pyj:ProcessBrainData`).
 pub fn emit_server_brain_updated(ctx: &ServerContext, char_id: i64, brain_version: i64) {
-    let brain_data = PyRep::Tuple(vec![PyRep::Integer(brain_version), PyRep::None]);
+    let (char_effects, ship_effects, structure_effects) =
+        crate::services::inventory_fitting::fitting_module_cycles::build_character_brain_effect_tuples(
+            ctx, char_id,
+        );
+    let gray_matter = eve_proto::marshal::encode(&PyRep::Tuple(vec![
+        char_effects,
+        ship_effects,
+        structure_effects,
+    ]));
+    let brain_data = PyRep::Tuple(vec![
+        PyRep::Integer(brain_version),
+        PyRep::Bytes(gray_matter),
+    ]);
     ctx.emit_typed(
         NotificationTarget::Character(char_id),
         OnServerBrainUpdated { brain_data },

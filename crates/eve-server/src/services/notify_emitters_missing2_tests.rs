@@ -92,9 +92,22 @@ fn emit_progression_recommendations_brain_conversation_and_service_mapping() {
     assert!(drained[1].args.is_empty());
 
     assert_eq!(drained[2].event, "OnServerBrainUpdated");
+    assert_eq!(drained[2].args.len(), 1);
+    let PyRep::Tuple(brain_tuple) = &drained[2].args[0] else {
+        panic!("expected brainData tuple");
+    };
+    assert_eq!(brain_tuple.len(), 2);
+    assert_eq!(brain_tuple[0], PyRep::Integer(7));
+    let PyRep::Bytes(ref gray_matter) = brain_tuple[1] else {
+        panic!("expected marshaled grayMatter bytes");
+    };
     assert_eq!(
-        drained[2].args,
-        vec![PyRep::Tuple(vec![PyRep::Integer(7), PyRep::None])]
+        eve_proto::marshal::decode(gray_matter).expect("decode grayMatter"),
+        PyRep::Tuple(vec![
+            PyRep::Tuple(Vec::new()),
+            PyRep::Tuple(Vec::new()),
+            PyRep::Tuple(Vec::new()),
+        ])
     );
 
     assert_eq!(drained[3].event, "OnStartConversation");
@@ -169,4 +182,168 @@ fn emit_server_map_data_push_formats_tricolors_and_override_colors() {
             ]),
         ])
     );
+}
+
+#[test]
+fn emit_server_brain_updated_encodes_brain_effect_objectex2_and_monotonic_versions() {
+    use eve_sde::{DogmaEffectType, EffectModifierSpec, InvType};
+    use std::collections::HashMap;
+
+    let mut sde = SdeRegistry::default();
+    sde.types.insert(
+        3426,
+        InvType {
+            type_id: 3426,
+            group_id: 269,
+            category_id: 16,
+            name: "CPU Management".into(),
+            mass: 0.0,
+            volume: 0.01,
+            capacity: 0.0,
+            radius: 0.0,
+            base_price: 0.0,
+            published: true,
+            portion_size: 1,
+            market_group_id: None,
+            race_id: None,
+            faction_id: None,
+            variation_parent_type_id: None,
+            description_id: None,
+            icon_id: None,
+            graphic_id: None,
+            sound_id: None,
+            meta_group_id: None,
+            meta_level: None,
+            tech_level: None,
+            default_effect_id: None,
+            description: String::new(),
+            effect_ids: vec![132, 368, 397],
+            default_attributes: HashMap::from([(275, 1.0), (424, 5.0)]),
+        },
+    );
+    sde.effects.insert(
+        368,
+        DogmaEffectType {
+            effect_id: 368,
+            name: "skillBoostCpuOutputBonus".into(),
+            effect_category: 0,
+            modifiers: vec![EffectModifierSpec {
+                domain: "itemID".into(),
+                func: "ItemModifier".into(),
+                modified_attribute_id: 424,
+                modifying_attribute_id: 280,
+                operator: 4,
+                group_id: None,
+                skill_type_id: None,
+                effect_id: None,
+            }],
+            ..Default::default()
+        },
+    );
+    sde.effects.insert(
+        397,
+        DogmaEffectType {
+            effect_id: 397,
+            name: "cpuOutputBonusPostPercent".into(),
+            effect_category: 0,
+            modifiers: vec![EffectModifierSpec {
+                domain: "shipID".into(),
+                func: "ItemModifier".into(),
+                modified_attribute_id: 48,
+                modifying_attribute_id: 424,
+                operator: 6,
+                group_id: None,
+                skill_type_id: None,
+                effect_id: None,
+            }],
+            ..Default::default()
+        },
+    );
+
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let char_id = 90_000_001;
+    db.acquire_online_lock(1, 501, Some(char_id), true, 1_775_400_000)
+        .expect("online lock");
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 2;
+        }
+        snap.skills.entry(char_id).or_default().insert(
+            3426,
+            eve_db::TrainedSkillRecord {
+                type_id: 3426,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+    });
+    let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_400_000)));
+    assert_eq!(ctx.current_brain_version(char_id), 0);
+
+    ctx.push_brain_update(char_id);
+    ctx.push_brain_update(char_id);
+    assert_eq!(ctx.current_brain_version(char_id), 2);
+
+    let drained = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(drained.len(), 2);
+    for (idx, expected_ver) in [(0usize, 1i64), (1usize, 2i64)] {
+        assert_eq!(drained[idx].event, "OnServerBrainUpdated");
+        let PyRep::Tuple(ref parts) = drained[idx].args[0] else {
+            panic!("brainData must be tuple");
+        };
+        assert_eq!(parts[0], PyRep::Integer(expected_ver));
+        let PyRep::Bytes(ref raw) = parts[1] else {
+            panic!("grayMatter must be marshaled bytes");
+        };
+        let decoded = eve_proto::marshal::decode(raw).expect("decode grayMatter");
+        let PyRep::Tuple(domains) = decoded else {
+            panic!("decoded grayMatter must be 3-tuple");
+        };
+        assert_eq!(domains.len(), 3);
+        let PyRep::Tuple(ref ship_effects) = domains[1] else {
+            panic!("shipEffects must be tuple");
+        };
+        assert_eq!(ship_effects.len(), 1);
+        let PyRep::ObjectEx {
+            is_type_2: true,
+            ref header,
+            ..
+        } = ship_effects[0]
+        else {
+            panic!("BrainEffect must marshal as PyObjectEx2: {:?}", ship_effects[0]);
+        };
+        let PyRep::Tuple(hdr_parts) = header.as_ref() else {
+            panic!("ObjectEx2 header must be tuple");
+        };
+        assert_eq!(
+            hdr_parts[0],
+            PyRep::Tuple(vec![PyRep::Token(
+                "eve.common.script.dogma.effect.BrainEffect".into()
+            )])
+        );
+        let state = &hdr_parts[1];
+        assert_eq!(state.dict_get("toItemID"), Some(&PyRep::String("shipID".into())));
+        assert_eq!(state.dict_get("modifierType"), Some(&PyRep::String("M".into())));
+        assert_eq!(state.dict_get("toAttribID"), Some(&PyRep::Integer(48)));
+        assert_eq!(state.dict_get("operation"), Some(&PyRep::Integer(6)));
+        assert_eq!(state.dict_get("value"), Some(&PyRep::Real(25.0)));
+        assert_eq!(state.dict_get("extras"), Some(&PyRep::Tuple(Vec::new())));
+        assert_eq!(
+            state.dict_get("skills"),
+            Some(&PyRep::List(vec![PyRep::Integer(3426)]))
+        );
+    }
+
+    let char_brain =
+        crate::services::inventory_fitting::fitting_module_cycles::build_character_brain_tuple(
+            &ctx,
+            char_id,
+            ctx.current_brain_version(char_id),
+        );
+    let PyRep::Tuple(cb_parts) = char_brain else {
+        panic!("char_brain must be 4-tuple");
+    };
+    assert_eq!(cb_parts[0], PyRep::Integer(2));
+    assert!(matches!(cb_parts[2], PyRep::Tuple(ref v) if v.len() == 1));
 }

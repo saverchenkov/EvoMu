@@ -1886,4 +1886,259 @@ fn propulsion_thrust_scales_matched_undersized_oversized_mwd_and_afterburner() {
     assert!((boost_ab - expected_ab_boost).abs() < 1e-9);
 }
 
+#[test]
+fn compile_character_brain_effects_compiles_skills_and_compounded_implants() {
+    let mut sde = SdeRegistry::default();
+    // Skill 3426 (CPU Management): itemID computes cpuOutputBonus (attr 424) = 5% * skillLevel (attr 280),
+    // then shipID ItemModifier applies +25% to attr 48 (CPU_OUTPUT). Operator 9 (effect 132) must be skipped.
+    sde.types.insert(
+        3426,
+        make_type(3426, 269, 16, &[(424, 5.0)], &[132, 5001]),
+    );
+    sde.effects.insert(
+        132,
+        DogmaEffectType {
+            effect_id: 132,
+            name: "skillEffect".into(),
+            effect_category: 0,
+            modifiers: vec![EffectModifierSpec {
+                domain: "charID".into(),
+                func: "ItemModifier".into(),
+                modified_attribute_id: 280,
+                modifying_attribute_id: 275,
+                operator: 9,
+                group_id: None,
+                skill_type_id: None,
+                effect_id: None,
+            }],
+            ..Default::default()
+        },
+    );
+    sde.effects.insert(
+        5001,
+        DogmaEffectType {
+            effect_id: 5001,
+            name: "cpuOutputBonusSkill".into(),
+            effect_category: 0,
+            modifiers: vec![
+                EffectModifierSpec {
+                    domain: "itemID".into(),
+                    func: "ItemModifier".into(),
+                    modified_attribute_id: 424,
+                    modifying_attribute_id: 280,
+                    operator: 4, // PostMul
+                    group_id: None,
+                    skill_type_id: None,
+                    effect_id: None,
+                },
+                EffectModifierSpec {
+                    domain: "shipID".into(),
+                    func: "ItemModifier".into(),
+                    modified_attribute_id: attr_ids::CPU_OUTPUT,
+                    modifying_attribute_id: 424,
+                    operator: 6, // PostPercent
+                    group_id: None,
+                    skill_type_id: None,
+                    effect_id: None,
+                },
+            ],
+            ..Default::default()
+        },
+    );
+
+    // Skill 3436 with parameterized special effect 1730 (`droneDmgBonus` -> charID ORS DAMAGE_MULTIPLIER).
+    sde.types
+        .insert(3436, make_type(3436, 273, 16, &[(292, 10.0)], &[1730]));
+    sde.effects.insert(
+        1730,
+        DogmaEffectType {
+            effect_id: 1730,
+            name: "droneDmgBonus".into(),
+            effect_category: 0,
+            modifiers: Vec::new(),
+            ..Default::default()
+        },
+    );
+
+    // Skill 99001 exercises LocationModifier, LocationGroupModifier, LocationRequiredSkillModifier on ship/structure.
+    sde.types.insert(
+        99001,
+        make_type(99001, 269, 16, &[(292, 7.5)], &[5002]),
+    );
+    sde.effects.insert(
+        5002,
+        DogmaEffectType {
+            effect_id: 5002,
+            name: "multiDomainSkill".into(),
+            effect_category: 0,
+            modifiers: vec![
+                EffectModifierSpec {
+                    domain: "shipID".into(),
+                    func: "LocationModifier".into(),
+                    modified_attribute_id: 101,
+                    modifying_attribute_id: 292,
+                    operator: 6,
+                    group_id: None,
+                    skill_type_id: None,
+                    effect_id: None,
+                },
+                EffectModifierSpec {
+                    domain: "shipID".into(),
+                    func: "LocationGroupModifier".into(),
+                    modified_attribute_id: 102,
+                    modifying_attribute_id: 292,
+                    operator: 6,
+                    group_id: Some(74),
+                    skill_type_id: None,
+                    effect_id: None,
+                },
+                EffectModifierSpec {
+                    domain: "structureID".into(),
+                    func: "LocationRequiredSkillModifier".into(),
+                    modified_attribute_id: 103,
+                    modifying_attribute_id: 292,
+                    operator: 6,
+                    group_id: None,
+                    skill_type_id: Some(3426),
+                    effect_id: None,
+                },
+            ],
+            ..Default::default()
+        },
+    );
+
+    // Untrained skill (level 0) must be ignored.
+    sde.types
+        .insert(99002, make_type(99002, 269, 16, &[(424, 5.0)], &[5001]));
+
+    // Two implants: 99100 adds charID ItemModifier (+3) and a charID LocationGroupModifier set PreMul (1.5x);
+    // 99101 has shipID ItemModifier (10.0) that compounds to 15.0 when paired with 99100.
+    sde.types.insert(
+        99100,
+        make_type(99100, 300, 20, &[(851, 1.5), (175, 3.0)], &[5003]),
+    );
+    sde.types.insert(
+        99101,
+        make_type(99101, 300, 20, &[(335, 10.0)], &[5004]),
+    );
+    sde.effects.insert(
+        5003,
+        DogmaEffectType {
+            effect_id: 5003,
+            name: "implantSetLeader".into(),
+            effect_category: 0,
+            modifiers: vec![
+                EffectModifierSpec {
+                    domain: "charID".into(),
+                    func: "ItemModifier".into(),
+                    modified_attribute_id: 165,
+                    modifying_attribute_id: 175,
+                    operator: 2, // ModAdd
+                    group_id: None,
+                    skill_type_id: None,
+                    effect_id: None,
+                },
+                EffectModifierSpec {
+                    domain: "charID".into(),
+                    func: "LocationGroupModifier".into(),
+                    modified_attribute_id: 335,
+                    modifying_attribute_id: 851,
+                    operator: 0, // PreMul set multiplier
+                    group_id: Some(300),
+                    skill_type_id: None,
+                    effect_id: None,
+                },
+            ],
+            ..Default::default()
+        },
+    );
+    sde.effects.insert(
+        5004,
+        DogmaEffectType {
+            effect_id: 5004,
+            name: "implantShipBonus".into(),
+            effect_category: 0,
+            modifiers: vec![EffectModifierSpec {
+                domain: "shipID".into(),
+                func: "ItemModifier".into(),
+                modified_attribute_id: attr_ids::ARMOR_HP,
+                modifying_attribute_id: 335,
+                operator: 6,
+                group_id: None,
+                skill_type_id: None,
+                effect_id: None,
+            }],
+            ..Default::default()
+        },
+    );
+
+    let skills = HashMap::from([(3426, 5), (3436, 1), (99001, 1), (99002, 0)]);
+    let compiled = compile_character_brain_effects(&sde, &skills, &[99100, 99101]);
+
+    assert!(compiled.contains(&CompiledBrainEffect {
+        source_type_id: 3426,
+        domain: BrainEffectDomain::Ship,
+        modifier_type: BrainEffectModifierType::Item,
+        to_attrib_id: attr_ids::CPU_OUTPUT,
+        operation: 6,
+        value: 25.0,
+    }));
+    assert!(compiled.contains(&CompiledBrainEffect {
+        source_type_id: 3436,
+        domain: BrainEffectDomain::Char,
+        modifier_type: BrainEffectModifierType::OwnerRequiredSkill(3436),
+        to_attrib_id: attr_ids::DAMAGE_MULTIPLIER,
+        operation: 6,
+        value: 10.0,
+    }));
+    assert!(compiled.contains(&CompiledBrainEffect {
+        source_type_id: 99001,
+        domain: BrainEffectDomain::Ship,
+        modifier_type: BrainEffectModifierType::Location,
+        to_attrib_id: 101,
+        operation: 6,
+        value: 7.5,
+    }));
+    assert!(compiled.contains(&CompiledBrainEffect {
+        source_type_id: 99001,
+        domain: BrainEffectDomain::Ship,
+        modifier_type: BrainEffectModifierType::LocationGroup(74),
+        to_attrib_id: 102,
+        operation: 6,
+        value: 7.5,
+    }));
+    assert!(compiled.contains(&CompiledBrainEffect {
+        source_type_id: 99001,
+        domain: BrainEffectDomain::Structure,
+        modifier_type: BrainEffectModifierType::LocationRequiredSkill(3426),
+        to_attrib_id: 103,
+        operation: 6,
+        value: 7.5,
+    }));
+    // Direct charID ItemModifier on implant is preserved; internal charID set multiplier is not leaked.
+    assert!(compiled.contains(&CompiledBrainEffect {
+        source_type_id: 99100,
+        domain: BrainEffectDomain::Char,
+        modifier_type: BrainEffectModifierType::Item,
+        to_attrib_id: 165,
+        operation: 2,
+        value: 3.0,
+    }));
+    assert!(!compiled
+        .iter()
+        .any(|e| e.source_type_id == 99100 && e.operation == 0));
+    // Paired implant's shipID bonus reflects the 1.5x compounded set bonus (10.0 -> 15.0).
+    assert!(compiled.contains(&CompiledBrainEffect {
+        source_type_id: 99101,
+        domain: BrainEffectDomain::Ship,
+        modifier_type: BrainEffectModifierType::Item,
+        to_attrib_id: attr_ids::ARMOR_HP,
+        operation: 6,
+        value: 15.0,
+    }));
+    // Untrained skill and operator 9 (`skillEffect`) must not emit BrainEffects.
+    assert!(!compiled.iter().any(|e| e.source_type_id == 99002));
+    assert!(!compiled.iter().any(|e| e.operation == 9));
+}
+
 
