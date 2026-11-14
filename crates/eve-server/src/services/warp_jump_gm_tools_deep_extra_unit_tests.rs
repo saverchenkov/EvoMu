@@ -40,6 +40,7 @@ fn custom_type(
     capacity: f64,
     name: &str,
     attrs: &[(u16, f64)],
+    effects: &[u16],
 ) -> InvType {
     let mut t = sde.types.get(&587).expect("Rifter seed").clone();
     t.type_id = type_id;
@@ -52,26 +53,46 @@ fn custom_type(
     for &(k, v) in attrs {
         t.default_attributes.insert(k, v);
     }
+    t.effect_ids = effects.to_vec();
     t
 }
 
 fn make_ctx() -> ServerContext {
     let mut sde = (*shared_sde()).clone();
-    let specs: &[(u32, u32, u32, f64, f64, &str, &[(u16, f64)])] = &[
-        (996_001, 25, 6, 2_500.0, 200.0, "Warp Frigate", &[(600, 5.0), (153, 5e-5), (482, 500.0), (4, 1_000_000.0)]),
-        (996_002, 513, 6, 500_000.0, 200_000.0, "Obelisk Freighter", &[(600, 1.5), (153, 2e-5), (482, 2_000.0)]),
-        (996_003, 941, 6, 250_000.0, 40_000.0, "Orca", &[(600, 2.0), (153, 3e-5), (482, 2_000.0)]),
-        (996_004, 485, 6, 500_000.0, 10_000.0, "Naglfar Capital", &[(600, 1.5), (153, 2e-5), (482, 5_000.0)]),
-        (996_005, 193, 7, 5.0, 0.0, "Covert Ops Cloaking Device II", &[(1034, 1.0)]),
-        (996_006, 330, 7, 5.0, 0.0, "Improved Cloaking Device II", &[]),
-        (996_007, 46, 7, 5.0, 0.0, "1MN Afterburner II", &[(12, 1.0)]),
-        (996_008, 60, 7, 5.0, 0.0, "Damage Control II", &[(11, 1.0)]),
-        (996_009, 773, 7, 5.0, 0.0, "Small Trimark Armor Pump I", &[(2663, 1.0)]),
-        (996_010, 954, 7, 5.0, 0.0, "Tengu Offensive", &[(3772, 1.0)]),
-        (996_011, 100, 18, 5.0, 0.0, "Hobgoblin II", &[]),
+    let specs: &[(u32, u32, u32, f64, f64, &str, &[(u16, f64)], &[u16])] = &[
+        (
+            996_001,
+            25,
+            6,
+            2_500.0,
+            200.0,
+            "Warp Frigate",
+            &[
+                (600, 5.0),
+                (153, 5e-5),
+                (482, 500.0),
+                (4, 1_000_000.0),
+                (12, 4.0),
+                (13, 4.0),
+                (14, 4.0),
+                (1137, 3.0),
+                (1547, 1.0),
+            ],
+            &[],
+        ),
+        (996_002, 513, 6, 500_000.0, 200_000.0, "Obelisk Freighter", &[(600, 1.5), (153, 2e-5), (482, 2_000.0)], &[]),
+        (996_003, 941, 6, 250_000.0, 40_000.0, "Orca", &[(600, 2.0), (153, 3e-5), (482, 2_000.0)], &[]),
+        (996_004, 485, 6, 500_000.0, 10_000.0, "Naglfar Capital", &[(600, 1.5), (153, 2e-5), (482, 5_000.0)], &[]),
+        (996_005, 193, 7, 5.0, 0.0, "Covert Ops Cloaking Device II", &[(1034, 1.0)], &[12]),
+        (996_006, 330, 7, 5.0, 0.0, "Improved Cloaking Device II", &[], &[12]),
+        (996_007, 46, 7, 5.0, 0.0, "1MN Afterburner II", &[(12, 1.0)], &[12]),
+        (996_008, 60, 7, 5.0, 0.0, "Damage Control II", &[(11, 1.0)], &[11]),
+        (996_009, 773, 7, 5.0, 0.0, "Small Trimark Armor Pump I", &[(2663, 1.0), (1547, 1.0)], &[2663]),
+        (996_010, 954, 32, 5.0, 0.0, "Tengu Offensive", &[(3772, 1.0)], &[3772]),
+        (996_011, 100, 18, 5.0, 0.0, "Hobgoblin II", &[], &[]),
     ];
-    for &(tid, gid, cat, vol, cap, name, attrs) in specs {
-        sde.types.insert(tid, custom_type(&sde, tid, gid, cat, vol, cap, name, attrs));
+    for &(tid, gid, cat, vol, cap, name, attrs, effects) in specs {
+        sde.types.insert(tid, custom_type(&sde, tid, gid, cat, vol, cap, name, attrs, effects));
     }
     let db = Arc::new(WorldRepository::with_demo_seed());
     let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db);
@@ -440,9 +461,17 @@ async fn character_gm_slash_commands_and_qa_tools_deep() {
 
     assert!(handle_gm_slash_ext(&ctx, &mut sess, c1, "/setattr me 37 555.0").await.unwrap().is_ok());
     assert!(handle_gm_slash_ext(&ctx, &mut sess, c1, "/getattr me 37").await.unwrap().is_ok());
-    for tid in [996_007u32, 996_008, 996_009, 996_010, 996_011] {
-        assert!(handle_gm_slash_ext(&ctx, &mut sess, c1, &format!("/fit me {tid}")).await.unwrap().is_ok());
+    for tid in [996_007u32, 996_008, 996_009, 996_011] {
+        let fit_res = handle_gm_slash_ext(&ctx, &mut sess, c1, &format!("/fit me {tid}"))
+            .await
+            .expect("slash handled");
+        assert!(fit_res.is_ok(), "expected /fit me {tid} to succeed: {fit_res:?}");
     }
+    let sub_err = handle_gm_slash_ext(&ctx, &mut sess, c1, "/fit me 996010")
+        .await
+        .expect("slash handled")
+        .expect_err("subsystem must not fit onto non-T3C frigate");
+    assert_eq!(sub_err.code, "FittingValidationFailed");
     assert!(handle_gm_slash_ext(&ctx, &mut sess, c1, "/location").await.unwrap().is_ok());
     assert!(handle_gm_slash_ext(&ctx, &mut sess, c1, "/online").await.unwrap().is_ok());
     assert!(handle_gm_slash_ext(&ctx, &mut sess, c1, "/tidi 0.5").await.unwrap().is_ok());

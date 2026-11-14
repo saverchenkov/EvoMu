@@ -59,8 +59,10 @@ pub const MIN_ANCHOR_DISTANCE_M: f64 = 1_000_000.0;
 /// Fuel is burned per hour (`serviceModuleFuelAmount` is an hourly amount).
 const SECS_PER_HOUR: u64 = 3_600;
 
+pub const STATE_UNANCHORED: &str = "Unanchored";
 pub const STATE_ANCHOR_VULNERABLE: &str = "AnchorVulnerable";
 pub const STATE_ANCHORING: &str = "Anchoring";
+pub const STATE_ONLINE_DEPRECATED: &str = "OnlineDeprecated";
 pub const STATE_NO_CORE: &str = "NoCore";
 pub const STATE_ONLINING: &str = "Onlining";
 pub const STATE_SHIELD_VULNERABLE: &str = "ShieldVulnerable";
@@ -68,6 +70,8 @@ pub const STATE_ARMOR_REINFORCED: &str = "ArmorReinforced";
 pub const STATE_ARMOR_VULNERABLE: &str = "ArmorVulnerable";
 pub const STATE_HULL_REINFORCED: &str = "HullReinforced";
 pub const STATE_HULL_VULNERABLE: &str = "HullVulnerable";
+pub const STATE_DEPLOY_VULNERABLE: &str = "DeployVulnerable";
+pub const STATE_FOB_INVULNERABLE: &str = "FobInvulnerable";
 pub const STATE_DESTROYED: &str = "Destroyed";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1968,6 +1972,153 @@ pub fn validate_structure_refit(ctx: &ServerContext, snap: &WorldStateSnapshot, 
         return Err(BridgeRpcError { code: "StructureDamagedCannotRefit".into(), message: format!("Structure {structure_id} must be at 100% shield, armor, and hull HP to refit"), client_error: None });
     }
     Ok((st, profile))
+}
+
+/// Maps a V24 `structures.const` `STATES` integer ID to the server's persisted Upwell state string.
+pub fn v24_structure_state_name(state_id: i64) -> Option<&'static str> {
+    match state_id {
+        1 => Some(STATE_UNANCHORED),
+        2 => Some(STATE_ANCHORING),
+        100 => Some(STATE_ONLINE_DEPRECATED),
+        101 => Some(STATE_NO_CORE),
+        102 => Some(STATE_ONLINING),
+        110 => Some(STATE_SHIELD_VULNERABLE),
+        111 => Some(STATE_ARMOR_REINFORCED),
+        112 => Some(STATE_ARMOR_VULNERABLE),
+        113 => Some(STATE_HULL_REINFORCED),
+        114 => Some(STATE_HULL_VULNERABLE),
+        115 => Some(STATE_ANCHOR_VULNERABLE),
+        116 => Some(STATE_DEPLOY_VULNERABLE),
+        118 => Some(STATE_FOB_INVULNERABLE),
+        _ => None,
+    }
+}
+
+/// Transitions `structure_id` to the Upwell state identified by V24 `state_id`, updating timers/HP
+/// and emitting `OnCorporationStructuresUpdated`, `OnStructureStateChanged`, and
+/// `OnCurrentStructureStateChanged`.
+pub(crate) fn gm_set_structure_state(
+    ctx: &ServerContext,
+    structure_id: i64,
+    state_id: i64,
+) -> Result<(String, String), BridgeRpcError> {
+    let target_state = v24_structure_state_name(state_id).ok_or_else(|| BridgeRpcError {
+        code: "InvalidSlashArgument".into(),
+        message: format!("Invalid structure state ID {state_id}"),
+        client_error: None,
+    })?;
+    let now = ctx.now_unix();
+    let (sys_id, corp_id, old_state) = ctx.db.try_with_mut_snapshot(|snap| {
+        let Some(st) = snap.structures.get(&structure_id).cloned() else {
+            return Err(BridgeRpcError {
+                code: "StructureNotFound".into(),
+                message: format!("Structure {structure_id} does not exist"),
+                client_error: None,
+            });
+        };
+        let mut ext = load_ext_state(snap);
+        let profile = structure_profile(ctx, st.type_id);
+        let (max_shield, default_armor, default_hull, armor_rf_dur, hull_rf_dur) =
+            if let Some(ref prof) = profile {
+                let power = power_state(ctx, snap, &ext, &st, now);
+                let max_shield = effective_max_shield(ctx, snap, prof, structure_id, power);
+                let space = space_class(ctx, st.solar_system_id);
+                let armor_rf =
+                    armor_reinforcement_secs(prof.hull_class, space, power).unwrap_or(24 * 3_600);
+                let hull_rf =
+                    hull_reinforcement_secs(prof.hull_class, space, power).unwrap_or(24 * 3_600);
+                (max_shield, prof.armor_hp, prof.hull_hp, armor_rf, hull_rf)
+            } else {
+                (
+                    st.shield_hp.max(1.0),
+                    st.armor_hp.max(1.0),
+                    st.hull_hp.max(1.0),
+                    24 * 3_600,
+                    24 * 3_600,
+                )
+            };
+        let anchoring_secs = ext
+            .lifecycle
+            .get(&structure_id)
+            .and_then(|l| l.anchoring_duration_secs)
+            .unwrap_or(ANCHORING_SECS);
+        ext.unanchoring_until_unix.remove(&structure_id);
+        let life = ext.lifecycle.entry(structure_id).or_default();
+        life.repair_until_unix = None;
+        life.fight_started_unix = None;
+        life.shield_fight_started_unix = None;
+        life.armor_reinforce_secs_applied = None;
+        life.unjittered_reinforce_exit_unix = None;
+        if target_state == STATE_SHIELD_VULNERABLE && life.last_fuel_tick_unix.is_none() {
+            life.last_fuel_tick_unix = Some(now);
+        }
+        if let Some(s) = snap.structures.get_mut(&structure_id) {
+            s.state = target_state.into();
+            match target_state {
+                STATE_ANCHOR_VULNERABLE => {
+                    s.reinforced_until_unix = now + ANCHOR_VULNERABLE_SECS;
+                }
+                STATE_ANCHORING => {
+                    s.reinforced_until_unix = now + anchoring_secs;
+                }
+                STATE_ONLINING => {
+                    s.reinforced_until_unix = now + ONLINING_SECS;
+                }
+                STATE_SHIELD_VULNERABLE => {
+                    s.reinforced_until_unix = 0;
+                    s.shield_hp = max_shield;
+                    s.armor_hp = default_armor;
+                    s.hull_hp = default_hull;
+                }
+                STATE_ARMOR_REINFORCED => {
+                    s.reinforced_until_unix = now + armor_rf_dur;
+                    s.shield_hp = 0.0;
+                    if s.armor_hp <= 0.0 {
+                        s.armor_hp = default_armor;
+                    }
+                    if s.hull_hp <= 0.0 {
+                        s.hull_hp = default_hull;
+                    }
+                }
+                STATE_ARMOR_VULNERABLE => {
+                    s.reinforced_until_unix = 0;
+                    s.shield_hp = 0.0;
+                    if s.armor_hp <= 0.0 {
+                        s.armor_hp = default_armor;
+                    }
+                    if s.hull_hp <= 0.0 {
+                        s.hull_hp = default_hull;
+                    }
+                }
+                STATE_HULL_REINFORCED => {
+                    s.reinforced_until_unix = now + hull_rf_dur;
+                    s.shield_hp = 0.0;
+                    s.armor_hp = 0.0;
+                    if s.hull_hp <= 0.0 {
+                        s.hull_hp = default_hull;
+                    }
+                }
+                STATE_HULL_VULNERABLE => {
+                    s.reinforced_until_unix = 0;
+                    s.shield_hp = 0.0;
+                    s.armor_hp = 0.0;
+                    if s.hull_hp <= 0.0 {
+                        s.hull_hp = default_hull;
+                    }
+                }
+                _ => {
+                    s.reinforced_until_unix = 0;
+                }
+            }
+        }
+        save_ext_state(snap, &ext);
+        Ok((st.solar_system_id, st.owner_corp_id, st.state))
+    })?;
+    emit_structure_state_transition_notifs(
+        ctx,
+        vec![(sys_id, structure_id, corp_id, target_state.to_string())],
+    );
+    Ok((old_state, target_state.to_string()))
 }
 #[cfg(test)]
 #[path = "structure_lifecycle_tests.rs"]

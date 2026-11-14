@@ -723,3 +723,53 @@ async fn rowset_login_global_config_and_teleport_kill_all_mutants() {
     assert_eq!(same_tp.dict_get("solarSystemID"), Some(&PyRep::Integer(sys_b as i64)));
     assert_eq!(tp_sess.solar_system_id, Some(sys_b));
 }
+
+#[tokio::test]
+async fn structure_slash_command_role_and_listing() {
+    let expected_mask =
+        service_roles::ROLE_ADMIN | service_roles::ROLE_GMH | service_roles::ROLE_GML;
+    assert_eq!(
+        required_slash_role("/structure state 1001 110"),
+        expected_mask
+    );
+
+    for role in [
+        service_roles::ROLE_ADMIN,
+        service_roles::ROLE_GMH,
+        service_roles::ROLE_GML,
+    ] {
+        assert!(
+            remote_slash_commands_for_role(role).contains(&"structure"),
+            "role 0x{role:x} must see 'structure' command"
+        );
+    }
+    for denied in [
+        service_roles::ROLE_QA,
+        service_roles::ROLE_SPAWN,
+        service_roles::ROLE_GMS,
+        service_roles::ROLE_WORLDMOD,
+        service_roles::ROLE_PLAYER_DEFAULT,
+    ] {
+        assert!(
+            !remote_slash_commands_for_role(denied).contains(&"structure"),
+            "role 0x{denied:x} must not see 'structure' command"
+        );
+    }
+
+    let ctx = test_ctx();
+    let mut denied_sess = auth_session(1, 90_000_001, 98_000_001, 30_000_142);
+    denied_sess.role =
+        service_roles::ROLE_QA | service_roles::ROLE_SPAWN | service_roles::ROLE_GMS;
+    let err = handle(
+        &ctx,
+        &mut denied_sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/structure state 1001 110".into())],
+        &HashMap::new(),
+    )
+    .await
+    .expect("slash dispatch handled")
+    .expect_err("non-ADMIN/GMH/GML role must be rejected");
+    assert_eq!(err.code, "InsufficientRole");
+}

@@ -788,3 +788,96 @@ async fn launch_from_container_newbie_ship_guards_and_trash_dirt_mastery_edges()
     assert!(pod_ball.max_velocity > 0.0 && pod_ball.mass > 0.0 && pod_ball.radius >= 15.0);
     assert!(pod_cs.max_structure_hp > 0.0 && pod_cs.max_shield_hp > 0.0);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn newbie_ship_clears_stale_future_cooldown_timestamp() {
+    let ctx = make_ctx();
+    let fixed_now = 1_800_000_000_u64;
+    ctx.set_clock(Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(
+        fixed_now,
+    )));
+    let char_id = 96_500_401_i64;
+    let station_id = 60_003_760_i64;
+    let sys_id = 30_000_142_u32;
+    let capsule_id = 96_500_410_i64;
+    let kw = HashMap::new();
+    seed_pilot(&ctx, char_id, sys_id, Some(station_id), capsule_id, 670);
+
+    let claim_key = -8_800_000_i64 - char_id;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_custom_names
+            .insert(claim_key, (fixed_now + 86_400).to_string());
+    });
+
+    let mut sess = make_session(char_id, sys_id, Some(station_id), Some(capsule_id));
+    let claim_res = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "CreateNewbieShip",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("CreateNewbieShip route handled")
+    .expect("stale future cooldown timestamp must not block CreateNewbieShip");
+    assert!(
+        claim_res
+            .dict_get("shipID")
+            .and_then(|v| v.as_i64())
+            .is_some_and(|id| id > 0),
+        "expected spawned corvette shipID in response: {claim_res:?}"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.item_custom_names.get(&claim_key).map(String::as_str),
+            Some(fixed_now.to_string().as_str())
+        );
+    });
+
+    // Normal active cooldown still blocks within 60s.
+    let cooldown_err = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "CreateNewbieShip",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("CreateNewbieShip route handled")
+    .expect_err("fresh cooldown timestamp within 60s must return NewbieShipCooldown");
+    assert_eq!(cooldown_err.code, "NewbieShipCooldown");
+
+    // When a stale future key is detected and the claim subsequently exits early, the stale key is deleted.
+    let rifter_id = 96_500_420_i64;
+    let char_b = 96_500_402_i64;
+    let claim_key_b = -8_800_000_i64 - char_b;
+    seed_pilot(&ctx, char_b, sys_id, Some(station_id), rifter_id, 587);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_custom_names
+            .insert(claim_key_b, (fixed_now + 5_000).to_string());
+    });
+    let mut sess_b = make_session(char_b, sys_id, Some(station_id), Some(rifter_id));
+    let early_err = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess_b,
+        None,
+        "dogmaIM",
+        "CreateNewbieShip",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("CreateNewbieShip route handled")
+    .expect_err("0-arg call in non-capsule ship fails after stale cleanup");
+    assert_eq!(early_err.code, "AlreadyInNewbieShip");
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            !snap.item_custom_names.contains_key(&claim_key_b),
+            "stale future cooldown key must be purged from snapshot"
+        );
+    });
+}

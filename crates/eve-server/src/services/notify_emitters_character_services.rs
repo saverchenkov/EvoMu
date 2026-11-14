@@ -1185,6 +1185,40 @@ pub fn handle_batch3_gm_slash_cmd(
                 ("structures", PyRep::List(transitions)),
             ])))
         }
+        "/structure" => {
+            if parts.len() != 4 || !parts.get(1).is_some_and(|s| s.eq_ignore_ascii_case("state"))
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidSlashArgument".into(),
+                    message: "Usage: /structure state <structure_id> <state_id>".into(),
+                    client_error: None,
+                }));
+            }
+            let (Some(structure_id), Some(state_id)) = (
+                parts.get(2).and_then(|s| s.parse::<i64>().ok()),
+                parts.get(3).and_then(|s| s.parse::<i64>().ok()),
+            ) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidSlashArgument".into(),
+                    message: "Usage: /structure state <structure_id> <state_id>".into(),
+                    client_error: None,
+                }));
+            };
+            match crate::services::station_structure::structure_lifecycle::gm_set_structure_state(
+                ctx,
+                structure_id,
+                state_id,
+            ) {
+                Ok((old_state, new_state)) => Some(Ok(PyRep::keyval([
+                    ("command", PyRep::String(cmd.to_string())),
+                    ("structureID", PyRep::Integer(structure_id)),
+                    ("stateID", PyRep::Integer(state_id)),
+                    ("oldState", PyRep::String(old_state)),
+                    ("newState", PyRep::String(new_state)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
+        }
         "/completeindustry" | "/finishjobs" | "/industrytimer" => {
             let target_job = parts.get(1).and_then(|s| s.parse::<i64>().ok());
             let now = ctx.now_unix();
@@ -1261,6 +1295,7 @@ pub fn handle_batch3_gm_slash_cmd(
                     ch.jump_cooldown_until_unix = 0;
                     ch.jump_fatigue_until_unix = 0;
                 }
+                snap.item_custom_names.remove(&(-8_800_000 - caller_cid));
             });
             {
                 let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
