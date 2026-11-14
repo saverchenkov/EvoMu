@@ -927,6 +927,15 @@ async fn test_crimewatch_sec_status_gain_caps_and_tag_tier_bands() {
             && eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, st.station_id, 27))
             .then_some(st.station_id)
     }).min().unwrap_or(lowsec_station);
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&char_id) {
+            ch.station_id = Some(sec_office_st);
+            ch.structure_id = None;
+        }
+        if let Some(sh) = s.items.get_mut(&ship_id) {
+            sh.location_id = sec_office_st;
+        }
+    });
     let mut sess = make_sess(char_id, ship_id, lowsec_sys, Some(sec_office_st));
     let wrong_band_err = {
         let mut harness = borrow_wire_harness(&ctx, &mut sess);
@@ -945,8 +954,7 @@ async fn test_crimewatch_sec_status_gain_caps_and_tag_tier_bands() {
 
     // 2. Negotiator tag (33141) at -0.3 raises security status to 0.0 (capped at 0.0 per V24)
     ctx.db.with_mut_snapshot(|s| {
-        if let Some(ch) = s.characters.get_mut(&char_id) { ch.security_status = -0.3; ch.station_id = sess.station_id; }
-        if let Some(sh) = s.items.get_mut(&ship_id) { sh.location_id = sec_office_st; }
+        if let Some(ch) = s.characters.get_mut(&char_id) { ch.security_status = -0.3; }
     });
     let _ = {
         let mut harness = borrow_wire_harness(&ctx, &mut sess);
