@@ -64,18 +64,15 @@ async fn quasar_rpc(
         authoritative_context: None,
         trace_context: None,
     };
-    let rep = ctx
-        .dispatch_rpc(
-            sess,
+    let rep = crate::common::borrow_wire_harness(ctx, sess)
+        .call_ok(
             "publicGatewaySvc",
             None,
             "SendRequest",
             &[PyRep::Bytes(req.encode_proto())],
             &empty_kw,
-            None,
         )
-        .await
-        .expect("SendRequest");
+        .await;
     extract_response_proto(&rep)
 }
 
@@ -234,9 +231,9 @@ async fn q_final_entitlements_faction_freelance_payment_stargate() {
 
     // Stargate lock notice validation (loopback infrastructure test without closing open notice row)
     let empty_kw = HashMap::new();
-    ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "Subscribe", &[], &empty_kw, None)
-        .await
-        .expect("Subscribe");
+    crate::common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok("publicGatewaySvc", None, "Subscribe", &[], &empty_kw)
+        .await;
     let mut stream_rx = ctx
         .quasar_gateway
         .take_stream_receiver(sess.session_id)
@@ -260,7 +257,7 @@ async fn q_final_entitlements_faction_freelance_payment_stargate() {
             .publish_notice(NoticeScope::Broadcast, payload, ctx.now_unix())
             .expect("publish_notice");
         let recvd = stream_rx.recv().await.expect("recv notice");
-        assert_eq!(recvd.payload.unwrap().normalized_type_name(), sg_notice);
+        assert_eq!(recvd.payload.expect("stargate notice payload").normalized_type_name(), sg_notice);
         assert_eq!(recvd.internal_origin, "evomu.quasar.notice_publisher");
     }
 
@@ -269,34 +266,65 @@ async fn q_final_entitlements_faction_freelance_payment_stargate() {
     let mut inc_payload = vec![0x0A, 0x05, 0x08, 0x8E, 0x88, 0xA7, 0x0E, 0x12, 0x04, 0x08, 0xA1, 0xC2, 0x1E];
     eve_proto::quasar::encode_varint_field(3, 500, &mut inc_payload);
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.faction.activity.admin.IncrementContributionScoreRequest", inc_payload, b"corr-fac-inc").await.status_code, STATUS_OK);
-    let contrib_n = stream_rx.recv().await.expect("recv ScoreContributionNotice").payload.unwrap();
+    let contrib_n = stream_rx
+        .recv()
+        .await
+        .expect("recv ScoreContributionNotice")
+        .payload
+        .expect("ScoreContributionNotice payload");
     assert_eq!(contrib_n.normalized_type_name(), "eve_public.faction.activity.ScoreContributionNotice");
-    let dyn_contrib_n = reg.decode_dynamic("eve_public.faction.activity.ScoreContributionNotice", &contrib_n.value).unwrap();
+    let dyn_contrib_n = reg
+        .decode_dynamic("eve_public.faction.activity.ScoreContributionNotice", &contrib_n.value)
+        .expect("decode ScoreContributionNotice");
     assert_eq!(dyn_contrib_n.get(4), Some(&eve_proto::quasar::DynamicValue::Int32(500)));
-    let scores_n1 = stream_rx.recv().await.expect("recv SolarSystemScoresNotice after inc").payload.unwrap();
+    let scores_n1 = stream_rx
+        .recv()
+        .await
+        .expect("recv SolarSystemScoresNotice after inc")
+        .payload
+        .expect("SolarSystemScoresNotice after inc payload");
     assert_eq!(scores_n1.normalized_type_name(), "eve_public.faction.activity.SolarSystemScoresNotice");
-    let dyn_scores_n1 = reg.decode_dynamic("eve_public.faction.activity.SolarSystemScoresNotice", &scores_n1.value).unwrap();
+    let dyn_scores_n1 = reg
+        .decode_dynamic("eve_public.faction.activity.SolarSystemScoresNotice", &scores_n1.value)
+        .expect("decode SolarSystemScoresNotice after inc");
     let Some(eve_proto::quasar::DynamicValue::Repeated(sn1_list)) = dyn_scores_n1.get(2) else { panic!("sn1_list") };
     let eve_proto::quasar::DynamicValue::Message(sn1_0) = &sn1_list[0] else { panic!("sn1_0") };
     assert_eq!(sn1_0.get(2), Some(&eve_proto::quasar::DynamicValue::Uint32(3_000)));
 
     let rsp_after_inc = quasar_rpc(&ctx, &mut sess, "eve_public.faction.activity.GetSolarSystemScoresRequest", Vec::new(), b"corr-fac-after-inc").await;
-    let dyn_inc = reg.decode_dynamic("eve_public.faction.activity.GetSolarSystemScoresResponse", &rsp_after_inc.payload.unwrap().value).unwrap();
+    let dyn_inc = reg
+        .decode_dynamic(
+            "eve_public.faction.activity.GetSolarSystemScoresResponse",
+            &rsp_after_inc.payload.expect("GetSolarSystemScoresResponse after inc payload").value,
+        )
+        .expect("decode GetSolarSystemScoresResponse after inc");
     let Some(eve_proto::quasar::DynamicValue::Repeated(scores_inc)) = dyn_inc.get(2) else { panic!("scores_inc") };
     let eve_proto::quasar::DynamicValue::Message(score_inc0) = &scores_inc[0] else { panic!("score_inc0") };
     assert_eq!(score_inc0.get(2), Some(&eve_proto::quasar::DynamicValue::Uint32(3_000)));
 
     let set_payload = vec![0x0A, 0x05, 0x08, 0x8E, 0x88, 0xA7, 0x0E, 0x12, 0x04, 0x08, 0xA1, 0xC2, 0x1E, 0x18, 0xE8, 0x20]; // 4200 varint = 0xE8 0x20
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.faction.activity.admin.SetContributionScoreRequest", set_payload, b"corr-fac-set").await.status_code, STATUS_OK);
-    let scores_n2 = stream_rx.recv().await.expect("recv SolarSystemScoresNotice after set").payload.unwrap();
+    let scores_n2 = stream_rx
+        .recv()
+        .await
+        .expect("recv SolarSystemScoresNotice after set")
+        .payload
+        .expect("SolarSystemScoresNotice after set payload");
     assert_eq!(scores_n2.normalized_type_name(), "eve_public.faction.activity.SolarSystemScoresNotice");
-    let dyn_scores_n2 = reg.decode_dynamic("eve_public.faction.activity.SolarSystemScoresNotice", &scores_n2.value).unwrap();
+    let dyn_scores_n2 = reg
+        .decode_dynamic("eve_public.faction.activity.SolarSystemScoresNotice", &scores_n2.value)
+        .expect("decode SolarSystemScoresNotice after set");
     let Some(eve_proto::quasar::DynamicValue::Repeated(sn2_list)) = dyn_scores_n2.get(2) else { panic!("sn2_list") };
     let eve_proto::quasar::DynamicValue::Message(sn2_0) = &sn2_list[0] else { panic!("sn2_0") };
     assert_eq!(sn2_0.get(2), Some(&eve_proto::quasar::DynamicValue::Uint32(4_200)));
 
     let rsp_after_set = quasar_rpc(&ctx, &mut sess, "eve_public.faction.activity.GetSolarSystemScoresRequest", Vec::new(), b"corr-fac-after-set").await;
-    let dyn_set = reg.decode_dynamic("eve_public.faction.activity.GetSolarSystemScoresResponse", &rsp_after_set.payload.unwrap().value).unwrap();
+    let dyn_set = reg
+        .decode_dynamic(
+            "eve_public.faction.activity.GetSolarSystemScoresResponse",
+            &rsp_after_set.payload.expect("GetSolarSystemScoresResponse after set payload").value,
+        )
+        .expect("decode GetSolarSystemScoresResponse after set");
     let Some(eve_proto::quasar::DynamicValue::Repeated(scores_set)) = dyn_set.get(2) else { panic!("scores_set") };
     let eve_proto::quasar::DynamicValue::Message(score_set0) = &scores_set[0] else { panic!("score_set0") };
     assert_eq!(score_set0.get(2), Some(&eve_proto::quasar::DynamicValue::Uint32(4_200)));
@@ -316,9 +344,9 @@ async fn q_final_cosmetic_skinr_and_tale_notices() {
     let mut sess = build_sess(40_004, 90_000_204, 98_000_001);
 
     let empty_kw = HashMap::new();
-    ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "Subscribe", &[], &empty_kw, None)
-        .await
-        .expect("Subscribe");
+    crate::common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok("publicGatewaySvc", None, "Subscribe", &[], &empty_kw)
+        .await;
     let mut stream_rx = ctx
         .quasar_gateway
         .take_stream_receiver(sess.session_id)
@@ -361,14 +389,14 @@ async fn q_final_cosmetic_skinr_and_tale_notices() {
     ).expect("title granted notice");
     assert_eq!(n1, 1);
     let r1 = stream_rx.recv().await.expect("recv r1");
-    assert!(r1.payload.unwrap().type_url.ends_with("GrantedNotice"));
+    assert!(r1.payload.expect("r1 payload").type_url.ends_with("GrantedNotice"));
 
     let n3 = eve_server::services::quasar_cosmetics_services::publish_cosmetic_market_transaction_notice(
         &ctx.quasar_gateway, 90_000_204, 8801, ctx.now_unix(),
     ).expect("market tx notice");
     assert_eq!(n3, 1);
     let r3 = stream_rx.recv().await.expect("recv r3");
-    assert!(r3.payload.unwrap().type_url.ends_with("TransactionSucceededNotice"));
+    assert!(r3.payload.expect("r3 payload").type_url.ends_with("TransactionSucceededNotice"));
 }
 
 // 5. Sovereignty & Goals Notices Fan-out
@@ -389,9 +417,9 @@ async fn q_final_sovereignty_and_goals_notices() {
     let mut sess = build_sess(40_005, 90_000_205, 98_000_001);
 
     let empty_kw = HashMap::new();
-    ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "Subscribe", &[], &empty_kw, None)
-        .await
-        .expect("Subscribe");
+    crate::common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok("publicGatewaySvc", None, "Subscribe", &[], &empty_kw)
+        .await;
     let mut stream_rx = ctx
         .quasar_gateway
         .take_stream_receiver(sess.session_id)

@@ -109,18 +109,15 @@ async fn quasar_rpc(
         authoritative_context: None,
         trace_context: None,
     };
-    let rep = ctx
-        .dispatch_rpc(
-            sess,
+    let rep = crate::common::borrow_wire_harness(ctx, sess)
+        .call_ok(
             "publicGatewaySvc",
             None,
             "SendRequest",
             &[PyRep::Bytes(req.encode_proto())],
             &empty_kw,
-            None,
         )
-        .await
-        .expect("SendRequest");
+        .await;
     extract_response_proto(&rep)
 }
 
@@ -152,9 +149,9 @@ async fn test_quasar_achievements_admin_notices_and_queries() {
     let mut sess = build_sess(&ctx, 51_001, 91_000_001, 98_000_001);
     let reg = QuasarDescriptorRegistry::open_default().expect("open QuasarDescriptorRegistry");
 
-    ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "Subscribe", &[], &HashMap::new(), None)
-        .await
-        .expect("Subscribe");
+    crate::common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok("publicGatewaySvc", None, "Subscribe", &[], &HashMap::new())
+        .await;
     let mut stream_rx = ctx.quasar_gateway.take_stream_receiver(sess.session_id).expect("stream rx");
 
     // 1. GetRequest on disabled achievement #3 -> NOT_FOUND; on enabled #2 -> not_completed=true, progress=0
@@ -164,7 +161,7 @@ async fn test_quasar_achievements_admin_notices_and_queries() {
     let get_rsp1 = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.GetRequest", make_u32_ident_req(2), b"a-02").await;
     assert_eq!(get_rsp1.status_code, STATUS_OK);
     let dyn_get1 = reg
-        .decode_dynamic("eve_public.achievement.api.GetResponse", &get_rsp1.payload.unwrap().value)
+        .decode_dynamic("eve_public.achievement.api.GetResponse", &get_rsp1.payload.expect("GetResponse payload").value)
         .expect("decode GetResponse");
     assert!(matches!(dyn_get1.get(2), Some(DynamicValue::Bool(true))));
     assert_eq!(dyn_get1.get(3).and_then(|v| match v { DynamicValue::Uint64(u) => Some(*u), _ => None }), Some(0));
@@ -184,7 +181,7 @@ async fn test_quasar_achievements_admin_notices_and_queries() {
         .find(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("eve_public.achievement.api.ProgressedNotice")))
         .expect("ProgressedNotice emitted");
     let dyn_prog = reg
-        .decode_dynamic("eve_public.achievement.api.ProgressedNotice", &prog_not.payload.as_ref().unwrap().value)
+        .decode_dynamic("eve_public.achievement.api.ProgressedNotice", &prog_not.payload.as_ref().expect("ProgressedNotice payload").value)
         .expect("decode ProgressedNotice");
     assert_eq!(dyn_prog.get(2).and_then(|v| match v { DynamicValue::Uint64(u) => Some(*u), _ => None }), Some(1));
 
@@ -204,7 +201,7 @@ async fn test_quasar_achievements_admin_notices_and_queries() {
     let get_rsp2 = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.GetRequest", make_u32_ident_req(2), b"a-07").await;
     assert_eq!(get_rsp2.status_code, STATUS_OK);
     let dyn_get2 = reg
-        .decode_dynamic("eve_public.achievement.api.GetResponse", &get_rsp2.payload.unwrap().value)
+        .decode_dynamic("eve_public.achievement.api.GetResponse", &get_rsp2.payload.expect("completed GetResponse payload").value)
         .expect("decode completed GetResponse");
     assert!(dyn_get2.get(1).is_some());
     assert!(dyn_get2.get(2).is_none());
@@ -222,14 +219,14 @@ async fn test_quasar_achievements_admin_notices_and_queries() {
     let cat_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.category.api.GetRequest", make_u32_ident_req(1), b"a-11").await;
     assert_eq!(cat_rsp.status_code, STATUS_OK);
     let dyn_cat = reg
-        .decode_dynamic("eve_public.achievement.category.api.GetResponse", &cat_rsp.payload.unwrap().value)
+        .decode_dynamic("eve_public.achievement.category.api.GetResponse", &cat_rsp.payload.expect("category GetResponse payload").value)
         .expect("decode category GetResponse");
     assert!(matches!(dyn_cat.get(1), Some(DynamicValue::Uint32(0))));
 
     let sc_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.showcase.api.GetCharacterScoreRequest", Vec::new(), b"a-12").await;
     assert_eq!(sc_rsp.status_code, STATUS_OK);
     let dyn_sc = reg
-        .decode_dynamic("eve_public.achievement.showcase.api.GetCharacterScoreResponse", &sc_rsp.payload.unwrap().value)
+        .decode_dynamic("eve_public.achievement.showcase.api.GetCharacterScoreResponse", &sc_rsp.payload.expect("GetCharacterScoreResponse payload").value)
         .expect("decode GetCharacterScoreResponse");
     assert!(matches!(dyn_sc.get(1), Some(DynamicValue::Uint32(0))));
 
@@ -238,9 +235,24 @@ async fn test_quasar_achievements_admin_notices_and_queries() {
     encode_varint_field(2, 1, &mut cdn_req);
     let cdn_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.definition.api.cdn.GetLatestRequest", cdn_req, b"a-13").await;
     assert_eq!(cdn_rsp.status_code, STATUS_OK);
-    let wm_cdn = WireMessage::decode(&cdn_rsp.payload.unwrap().value).expect("decode GetLatestResponse");
-    let cp_wm = WireMessage::decode(wm_cdn.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
-    let url_str = cp_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_str().ok().flatten()).unwrap();
+    let wm_cdn = WireMessage::decode(&cdn_rsp.payload.expect("GetLatestResponse payload").value).expect("decode GetLatestResponse");
+    let cp_wm = WireMessage::decode(
+        wm_cdn
+            .fields
+            .iter()
+            .find(|f| f.field_number == 1)
+            .expect("checkpoint field")
+            .value
+            .as_bytes()
+            .expect("checkpoint bytes"),
+    )
+    .expect("decode Checkpoint");
+    let url_str = cp_wm
+        .fields
+        .iter()
+        .find(|f| f.field_number == 1)
+        .and_then(|f| f.value.as_str().ok().flatten())
+        .expect("checkpoint url string");
     assert!(url_str.contains("/cdn/achievements/v24.1.60/"));
 
     let mut ver_msg = Vec::new();
@@ -266,23 +278,23 @@ async fn test_quasar_career_goals_requests_admin_and_notices() {
     let mut sess = build_sess(&ctx, 51_002, 91_000_002, 98_000_001);
     let reg = QuasarDescriptorRegistry::open_default().expect("open QuasarDescriptorRegistry");
 
-    ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "Subscribe", &[], &HashMap::new(), None)
-        .await
-        .expect("Subscribe");
+    crate::common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok("publicGatewaySvc", None, "Subscribe", &[], &HashMap::new())
+        .await;
     let mut stream_rx = ctx.quasar_gateway.take_stream_receiver(sess.session_id).expect("stream rx");
 
     // 1. GetDefinitionsRequest & GetAllRequest
     let defs_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.GetDefinitionsRequest", Vec::new(), b"c-01").await;
     assert_eq!(defs_rsp.status_code, STATUS_OK);
     let dyn_defs = reg
-        .decode_dynamic("eve_public.career.goal.api.GetDefinitionsResponse", &defs_rsp.payload.unwrap().value)
+        .decode_dynamic("eve_public.career.goal.api.GetDefinitionsResponse", &defs_rsp.payload.expect("GetDefinitionsResponse payload").value)
         .expect("decode GetDefinitionsResponse");
     assert!(matches!(dyn_defs.get(1), Some(DynamicValue::Repeated(items)) if items.len() == 196));
 
     let all_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.GetAllRequest", Vec::new(), b"c-02").await;
     assert_eq!(all_rsp.status_code, STATUS_OK);
     let dyn_all = reg
-        .decode_dynamic("eve_public.career.goal.api.GetAllResponse", &all_rsp.payload.unwrap().value)
+        .decode_dynamic("eve_public.career.goal.api.GetAllResponse", &all_rsp.payload.expect("GetAllResponse payload").value)
         .expect("decode GetAllResponse");
     assert!(matches!(dyn_all.get(1), Some(DynamicValue::Repeated(items)) if items.len() == 196));
 
@@ -317,7 +329,7 @@ async fn test_quasar_career_goals_requests_admin_and_notices() {
         .find(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("eve_public.career.goal.api.ProgressedNotice")))
         .expect("ProgressedNotice emitted");
     let dyn_prog = reg
-        .decode_dynamic("eve_public.career.goal.api.ProgressedNotice", &prog_not.payload.as_ref().unwrap().value)
+        .decode_dynamic("eve_public.career.goal.api.ProgressedNotice", &prog_not.payload.as_ref().expect("ProgressedNotice payload").value)
         .expect("decode ProgressedNotice");
     assert_eq!(dyn_prog.get(2).and_then(|v| match v { DynamicValue::Uint32(u) => Some(*u), _ => None }), Some(5));
 
@@ -333,12 +345,12 @@ async fn test_quasar_career_goals_requests_admin_and_notices() {
     );
 
     // 4. ClaimRewardRequest -> credits ISK
-    let bal_before = ctx.db.with_snapshot(|snap| snap.characters.get(&91_000_002).unwrap().balance);
+    let bal_before = ctx.db.with_snapshot(|snap| snap.characters.get(&91_000_002).expect("char 91000002").balance);
     let mut claim_req = Vec::new();
     encode_bytes_field(1, &id_inner, &mut claim_req);
     let claim_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.ClaimRewardRequest", claim_req, b"c-07").await;
     assert_eq!(claim_rsp.status_code, STATUS_OK);
-    let bal_after = ctx.db.with_snapshot(|snap| snap.characters.get(&91_000_002).unwrap().balance);
+    let bal_after = ctx.db.with_snapshot(|snap| snap.characters.get(&91_000_002).expect("char 91000002").balance);
     assert!(bal_after > bal_before, "ClaimRewardRequest must credit character ISK balance");
 }
 
@@ -346,6 +358,7 @@ async fn test_quasar_career_goals_requests_admin_and_notices() {
 async fn test_quasar_ai_assistant_chat_requests() {
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut sess = build_sess(&ctx, 51_003, 91_000_003, 98_000_001);
     let reg = QuasarDescriptorRegistry::open_default().expect("open QuasarDescriptorRegistry");
 
@@ -359,7 +372,7 @@ async fn test_quasar_ai_assistant_chat_requests() {
     let jita_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.ai.assistant.chat.api.QueryRequest", jita_req, b"ai-02").await;
     assert_eq!(jita_rsp.status_code, STATUS_OK);
     let dyn_jita = reg
-        .decode_dynamic("eve_public.ai.assistant.chat.api.QueryResponse", &jita_rsp.payload.unwrap().value)
+        .decode_dynamic("eve_public.ai.assistant.chat.api.QueryResponse", &jita_rsp.payload.expect("Jita QueryResponse payload").value)
         .expect("decode QueryResponse");
     match dyn_jita.get(1) {
         Some(DynamicValue::String(s)) => {
@@ -376,7 +389,7 @@ async fn test_quasar_ai_assistant_chat_requests() {
     let drake_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.ai.assistant.chat.api.QueryRequest", drake_req, b"ai-03").await;
     assert_eq!(drake_rsp.status_code, STATUS_OK);
     let dyn_drake = reg
-        .decode_dynamic("eve_public.ai.assistant.chat.api.QueryResponse", &drake_rsp.payload.unwrap().value)
+        .decode_dynamic("eve_public.ai.assistant.chat.api.QueryResponse", &drake_rsp.payload.expect("Drake QueryResponse payload").value)
         .expect("decode Drake QueryResponse");
     match dyn_drake.get(1) {
         Some(DynamicValue::String(s)) => {
@@ -391,7 +404,7 @@ async fn test_quasar_ai_assistant_chat_requests() {
     let gen_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.ai.assistant.chat.api.QueryRequest", gen_req, b"ai-04").await;
     assert_eq!(gen_rsp.status_code, STATUS_OK);
     let dyn_gen = reg
-        .decode_dynamic("eve_public.ai.assistant.chat.api.QueryResponse", &gen_rsp.payload.unwrap().value)
+        .decode_dynamic("eve_public.ai.assistant.chat.api.QueryResponse", &gen_rsp.payload.expect("fallback QueryResponse payload").value)
         .expect("decode fallback QueryResponse");
     assert!(matches!(dyn_gen.get(2), Some(DynamicValue::Bool(true))));
 }
@@ -400,6 +413,7 @@ async fn test_quasar_ai_assistant_chat_requests() {
 async fn test_quasar_campaign_trigger_eventmatch_definitions() {
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut sess = build_sess(&ctx, 51_004, 91_000_004, 98_000_001);
     let reg = QuasarDescriptorRegistry::open_default().expect("open QuasarDescriptorRegistry");
 
