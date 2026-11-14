@@ -2021,3 +2021,201 @@ async fn invbroker_upwell_structure_bound_on_solar_system_supports_structure_con
     .unwrap_err();
     assert_eq!(undocked_err.code, "CharacterNotAtStation"); // rpc-lint: allow error code assertion
 }
+
+#[test]
+fn get_inventory_from_id_accepts_item_descriptors_and_rejects_malformed_args() {
+    let ctx = test_ctx();
+    let char_id = 95_900_001_i64;
+    let corp_id = 98_900_001_i64;
+    let station_id = 60_003_760_i64;
+    let active_ship_id = 1_896_945_100_i64;
+    let assembled_shuttle_id = 1_896_945_262_i64;
+    let foreign_ship_id = 1_896_945_999_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = char_id as u64;
+        ch.name = "Descriptor Pilot".into();
+        ch.corporation_id = corp_id;
+        ch.station_id = Some(station_id);
+        ch.solar_system_id = 30_000_142;
+        ch.active_ship_id = active_ship_id;
+        snap.characters.insert(char_id, ch);
+        for (item_id, owner_id) in [
+            (active_ship_id, char_id),
+            (assembled_shuttle_id, char_id),
+            (foreign_ship_id, 99_999_999),
+        ] {
+            snap.items.insert(
+                item_id,
+                InventoryItemRecord {
+                    item_id,
+                    type_id: 587,
+                    owner_id,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    version: 4,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let sess = SessionState {
+        session_id: 1,
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(corp_id),
+        station_id: Some(station_id),
+        solar_system_id: Some(30_000_142),
+        ship_id: Some(active_ship_id),
+        ..Default::default()
+    };
+    let b_station = bound_invbroker(char_id, station_id);
+
+    let keyval_desc = PyRep::keyval([
+        ("itemID", PyRep::Integer(assembled_shuttle_id)),
+        ("singleton", PyRep::Bool(true)),
+        ("version", PyRep::Integer(4)),
+    ]);
+    let dict_desc = PyRep::Dict(vec![
+        (PyRep::String("itemID".into()), PyRep::Integer(assembled_shuttle_id)),
+        (PyRep::String("singleton".into()), PyRep::Bool(true)),
+        (PyRep::String("version".into()), PyRep::Integer(4)),
+    ]);
+    let dbrow_desc = DBRowDescriptor::inv_item_header().build_dbrow(vec![
+        PyRep::Integer(assembled_shuttle_id),
+        PyRep::Integer(587),
+        PyRep::Integer(char_id),
+        PyRep::Integer(station_id),
+        PyRep::Integer(InventoryFlag::Hangar as i64),
+        PyRep::Integer(-1),
+        PyRep::Integer(25),
+        PyRep::Integer(6),
+        PyRep::String(String::new()),
+    ]);
+    let row_obj_desc = PyRep::Object {
+        type_name: "util.Row".into(),
+        args: Box::new(PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::String("itemID".into())]),
+            PyRep::List(vec![PyRep::Integer(assembled_shuttle_id)]),
+        ])),
+    };
+    let obj_ex_desc = PyRep::ObjectEx {
+        is_type_2: false,
+        header: Box::new(PyRep::Tuple(vec![
+            PyRep::Token("utillib.KeyVal".into()),
+            PyRep::Tuple(Vec::new()),
+        ])),
+        list: Vec::new(),
+        dict: vec![(
+            PyRep::String("itemID".into()),
+            PyRep::Integer(assembled_shuttle_id),
+        )],
+    };
+
+    for (label, call_args) in [
+        ("int + int passive=0", vec![PyRep::Integer(assembled_shuttle_id), PyRep::Integer(0)]),
+        ("KeyVal + int passive=0", vec![keyval_desc.clone(), PyRep::Integer(0)]),
+        ("KeyVal + int passive=1", vec![keyval_desc.clone(), PyRep::Integer(1)]),
+        ("KeyVal + bool passive=false", vec![keyval_desc.clone(), PyRep::Bool(false)]),
+        ("KeyVal + bool passive=true", vec![keyval_desc.clone(), PyRep::Bool(true)]),
+        ("KeyVal omitted passive", vec![keyval_desc]),
+        ("Dict descriptor", vec![dict_desc, PyRep::Integer(0)]),
+        ("DBRow descriptor", vec![dbrow_desc, PyRep::Integer(0)]),
+        ("util.Row Object descriptor", vec![row_obj_desc, PyRep::Integer(0)]),
+        ("ObjectEx descriptor", vec![obj_ex_desc, PyRep::Integer(0)]),
+    ] {
+        let rep = handle(
+            &ctx,
+            &sess,
+            Some(&b_station),
+            "invbroker",
+            "GetInventoryFromId",
+            &call_args,
+            None,
+        )
+        .unwrap()
+        .unwrap_or_else(|e| panic!("{label} must succeed, got {e:?}"));
+        let bid = rep.as_i64().expect("bound id") as u64;
+        let bound = ctx.verify_bound_object(&sess, bid).expect("verified sub-object");
+        assert_eq!(bound.service, "invbroker", "{label}");
+        assert_eq!(bound.object_id, assembled_shuttle_id, "{label}");
+    }
+
+    // Missing item and foreign ship inside KeyVal descriptors must still hit normal guards.
+    let missing_rep = PyRep::keyval([("itemID", PyRep::Integer(199_888_777))]);
+    assert_eq!(
+        handle(
+            &ctx,
+            &sess,
+            Some(&b_station),
+            "invbroker",
+            "GetInventoryFromId",
+            &[missing_rep, PyRep::Integer(0)],
+            None,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "FakeItemNotFound"
+    );
+    let foreign_rep = PyRep::keyval([("itemID", PyRep::Integer(foreign_ship_id))]);
+    assert_eq!(
+        handle(
+            &ctx,
+            &sess,
+            Some(&b_station),
+            "invbroker",
+            "GetInventoryFromId",
+            &[foreign_rep, PyRep::Integer(0)],
+            None,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InventoryNotAccessible"
+    );
+
+    // Genuinely invalid arguments must still be rejected with InvalidArguments.
+    for bad_args in [
+        vec![],
+        vec![PyRep::None, PyRep::Integer(0)],
+        vec![PyRep::Bool(true), PyRep::Integer(0)],
+        vec![PyRep::String("1896945262".into()), PyRep::Integer(0)],
+        vec![PyRep::List(vec![PyRep::Integer(assembled_shuttle_id)]), PyRep::Integer(0)],
+        vec![
+            PyRep::List(vec![PyRep::keyval([("itemID", PyRep::Integer(assembled_shuttle_id))])]),
+            PyRep::Integer(0),
+        ],
+        vec![PyRep::Dict(Vec::new()), PyRep::Integer(0)],
+        vec![
+            PyRep::keyval([
+                ("singleton", PyRep::Bool(true)),
+                ("version", PyRep::Integer(4)),
+            ]),
+            PyRep::Integer(0),
+        ],
+        vec![
+            PyRep::keyval([("itemID", PyRep::String("bad".into()))]),
+            PyRep::Integer(0),
+        ],
+        vec![PyRep::keyval([("itemID", PyRep::Bool(true))]), PyRep::Integer(0)],
+    ] {
+        let err = handle(
+            &ctx,
+            &sess,
+            Some(&b_station),
+            "invbroker",
+            "GetInventoryFromId",
+            &bad_args,
+            None,
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err.code, "InvalidArguments", "args: {bad_args:?}");
+    }
+}
