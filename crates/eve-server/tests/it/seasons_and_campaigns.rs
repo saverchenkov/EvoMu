@@ -686,3 +686,162 @@ async fn test_season_challenge_isk_award_trust_and_claim_guards() {
     rpc(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(990_003)]).await.expect("claim undocked item reward");
     assert!(ctx.drain_notifications_for_char(PILOT_1).iter().any(|n| n.event == "OnRedeemingTokensUpdated"));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_1053_season_challenge_expiry_rpc_vs_active_tick_wire() {
+    let ctx = new_ctx();
+    common::pin_clock(&ctx);
+    let kw = HashMap::new();
+
+    // Session 1: login via wire ClientHarness, select character, and initialize season state.
+    let mut harness = common::new_wire_harness(&ctx, 10_530);
+    harness
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())],
+            &kw,
+        )
+        .await;
+    harness
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(PILOT_1)],
+            &kw,
+        )
+        .await;
+    let init_prog = harness
+        .call_ok("seasonManager", None, "get_character_progress_by_character_id", &[], &kw)
+        .await;
+    let _ = harness.drain_notifications();
+    let _ = ctx.drain_notifications_for_char(PILOT_1);
+
+    let PyRep::Dict(init_map) = init_prog
+        .dict_get("challenges")
+        .cloned()
+        .expect("initial challenges Dict")
+    else {
+        panic!("expected challenges Dict");
+    };
+    assert_eq!(init_map.len(), 4);
+    let first_cid = init_map
+        .iter()
+        .find_map(|(k, _)| k.as_i64())
+        .expect("initial challengeID");
+
+    // Relog into Session 2 after challenge expiration: SelectCharacterID clears initialized marker,
+    // pre-init ticks do not emit OnChallengeExpired, and get_character_progress_by_character_id returns
+    // the post-expiry replacement without emitting OnChallengeExpired for the already-evicted ID.
+    let mut harness2 = common::new_wire_harness(&ctx, 10_531);
+    harness2
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())],
+            &kw,
+        )
+        .await;
+    harness2
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(PILOT_1)],
+            &kw,
+        )
+        .await;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st = load_season_state_from_blobs(snap, PILOT_1);
+        if let Some(ch) = st.challenges.get_mut(&first_cid) {
+            ch.expiration_date = 100;
+        }
+        save_season_state_to_blobs(snap, PILOT_1, &st);
+    });
+    let _ = harness2.drain_notifications();
+    let _ = ctx.drain_notifications_for_char(PILOT_1);
+
+    ctx.advance_secs(5);
+    assert!(
+        ctx.drain_notifications_for_char(PILOT_1)
+            .iter()
+            .all(|n| n.event != "OnChallengeExpired"),
+        "pre-init tick must not emit OnChallengeExpired before SeasonService fetches progress"
+    );
+
+    let login_prog = harness2
+        .call_ok("seasonManager", None, "get_character_progress_by_character_id", &[], &kw)
+        .await;
+    let wire_notifs = harness2.drain_notifications();
+    assert!(
+        wire_notifs.iter().all(|(ev, _)| ev != "OnChallengeExpired"),
+        "get_character_progress_by_character_id must not emit OnChallengeExpired for stripped challenge {first_cid}: {wire_notifs:?}"
+    );
+    assert!(
+        ctx.drain_notifications_for_char(PILOT_1)
+            .iter()
+            .all(|n| n.event != "OnChallengeExpired"),
+        "per-char queue must not contain OnChallengeExpired after get_character_progress_by_character_id"
+    );
+
+    let PyRep::Dict(post_map) = login_prog
+        .dict_get("challenges")
+        .cloned()
+        .expect("post-expiry challenges Dict")
+    else {
+        panic!("expected challenges Dict");
+    };
+    assert_eq!(post_map.len(), 4);
+    assert!(
+        !post_map.iter().any(|(k, _)| k.as_i64() == Some(first_cid)),
+        "expired challenge {first_cid} must already be replaced in RPC reply"
+    );
+
+    // Active initialized session tick expiry emits OnChallengeExpired(active_cid, replacement)
+    // so the live client replaces active_cid cleanly in self.current_user_progress.challenges.
+    let active_cid = post_map
+        .iter()
+        .find_map(|(k, _)| k.as_i64())
+        .expect("active challengeID");
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st = load_season_state_from_blobs(snap, PILOT_1);
+        if let Some(ch) = st.challenges.get_mut(&active_cid) {
+            ch.expiration_date = now_ft + 30 * 10_000_000;
+        }
+        save_season_state_to_blobs(snap, PILOT_1, &st);
+    });
+    let _ = harness2.drain_notifications();
+    let _ = ctx.drain_notifications_for_char(PILOT_1);
+
+    ctx.advance_secs(60);
+    let tick_notifs = ctx.drain_notifications_for_char(PILOT_1);
+    let exp_notif = tick_notifs
+        .iter()
+        .find(|n| n.event == "OnChallengeExpired")
+        .expect("active initialized session tick must emit OnChallengeExpired");
+    assert_eq!(exp_notif.args.first(), Some(&PyRep::Integer(active_cid)));
+    let new_cid = exp_notif
+        .args
+        .get(1)
+        .and_then(|obj| obj.dict_get("challengeID"))
+        .and_then(|v| v.as_i64())
+        .expect("replacement challengeID in OnChallengeExpired");
+    assert_ne!(new_cid, active_cid);
+
+    let after_tick_prog = harness2
+        .call_ok("seasonManager", None, "get_character_progress_by_character_id", &[], &kw)
+        .await;
+    let PyRep::Dict(after_tick_map) = after_tick_prog
+        .dict_get("challenges")
+        .cloned()
+        .expect("after-tick challenges Dict")
+    else {
+        panic!("expected challenges Dict");
+    };
+    assert!(!after_tick_map.iter().any(|(k, _)| k.as_i64() == Some(active_cid)));
+    assert!(after_tick_map.iter().any(|(k, _)| k.as_i64() == Some(new_cid)));
+}
