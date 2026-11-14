@@ -1054,3 +1054,178 @@ async fn cmd_warp_to_stuff_preserves_custom_ball_kinematics_on_normal_warp() {
         "CmdWarpToStuff must deduct warp capacitor via set_capacitor"
     );
 }
+
+#[tokio::test]
+async fn agency_dock_21au_warp_after_advance_clock_keeps_sync_and_docks() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let ship_id = 895_131_i64;
+    let sys_id = 30_000_142_u32;
+    let st_id = 60_003_760_i64;
+    let st_pos = ctx.sde.stations[&st_id].position;
+    let ship_type_id = if ctx.sde.types.contains_key(&32880) {
+        32880
+    } else {
+        606
+    };
+    let kw = HashMap::new();
+
+    // Start 21.116 AU from station (matching #1031 Agency Dock Venture warp)
+    let start_pos = st_pos + DVec3::new(21.116 * 149_597_870_700.0, 0.0, 0.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: ship_type_id,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle.try_spawn_ball_with_combat(
+        Ball {
+            id: ship_id,
+            type_id: ship_type_id,
+            position: start_pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 2.0,
+            mass: 1_100_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        CombatState {
+            shield_hp: 500.0,
+            max_shield_hp: 500.0,
+            armor_hp: 500.0,
+            max_armor_hp: 500.0,
+            structure_hp: 500.0,
+            max_structure_hp: 500.0,
+            capacitor: 100_000.0,
+            max_capacitor: 100_000.0,
+            ..Default::default()
+        },
+    );
+
+    let mut sess = SessionState {
+        session_id: 1031,
+        user_id: Some(1),
+        character_id: Some(char_id),
+        solar_system_id: Some(sys_id),
+        station_id: None,
+        ship_id: Some(ship_id),
+        role: eve_machonet::service_roles::ROLE_GML,
+        address: "tcp:127.0.0.1:44446".to_string(),
+        ..Default::default()
+    };
+
+    // Pre-warp AdvanceClock (+120s) without DoSimClockRebase must not skew machoNet.GetTime
+    ctx.dispatch_rpc(
+        &mut sess,
+        "timeControl",
+        None,
+        "AdvanceClock",
+        &[PyRep::Integer(120)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("AdvanceClock +120s");
+
+    let server_get_time = ctx
+        .dispatch_rpc(&mut sess, "machoNet", None, "GetTime", &[], &kw, None)
+        .await
+        .expect("machoNet.GetTime")
+        .as_i64()
+        .expect("GetTime integer");
+    let wall_ticks = crate::router::context::host_wall_blueos_filetime_ticks();
+    let diff_secs = (wall_ticks - server_get_time) as f64 / 10_000_000.0;
+    // Mirrors CCP connectionService.ClockSyncDaemon rate clamp (up to 1.95x on skewed GetTime)
+    let client_clock_rate = if diff_secs.abs() < 5.0 {
+        1.0
+    } else {
+        let drift = (diff_secs.abs() / 60.0).clamp(0.02, 0.95);
+        if diff_secs < 0.0 {
+            1.0 + drift
+        } else {
+            (1.0 - drift).max(0.05)
+        }
+    };
+    assert!(
+        (client_clock_rate - 1.0).abs() < 1e-9,
+        "ClockSyncDaemon must stay at 1.0x after AdvanceClock (diff_secs={diff_secs:.3})"
+    );
+
+    // Agency Dock -> autopilot.__NavigateSystemTo -> CmdWarpToStuff("item", station_id)
+    handle(
+        &ctx,
+        &mut sess,
+        None,
+        "beyonce",
+        "CmdWarpToStuff",
+        &[PyRep::String("item".into()), PyRep::Integer(st_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("CmdWarpToStuff to station should initiate warp");
+
+    let (_, warped_ball) = sys_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .expect("ship ball in space");
+    assert!(matches!(warped_ball.mode, MovementMode::Warp { .. }));
+
+    let mut client_bp = eve_destiny::Ballpark::new(sys_id);
+    assert!(client_bp.add_ball(warped_ball));
+
+    let mut client_finished_warp = false;
+    for _step in 0..180 {
+        client_bp.step(client_clock_rate);
+        let _ = sys_handle.step_manual(1.0).await.unwrap();
+        if !matches!(
+            client_bp.balls.get(&ship_id).map(|b| &b.mode),
+            Some(MovementMode::Warp { .. })
+        ) {
+            client_finished_warp = true;
+            break;
+        }
+    }
+    assert!(
+        client_finished_warp,
+        "client Destiny ball should exit 21 AU warp within 180s"
+    );
+
+    // Client autopilot immediately invokes CmdDock upon client warp completion
+    let dock_res = handle(
+        &ctx,
+        &mut sess,
+        None,
+        "beyonce",
+        "CmdDock",
+        &[PyRep::Integer(st_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("CmdDock after client warp exit must succeed instead of raising ShipInWarp (#1031)");
+    assert_eq!(
+        dock_res.dict_get("locationID"),
+        Some(&PyRep::Integer(st_id))
+    );
+    assert_eq!(sess.station_id, Some(st_id));
+}

@@ -113,6 +113,7 @@ pub struct ServerContext {
     pub cluster_tick_last_unix: Arc<AtomicU64>,
     pub cluster_tick_persisted_unix: Arc<AtomicU64>,
     pub dedicated_physics_ticker_active: Arc<AtomicBool>,
+    pub(crate) unrebased_clock_offset_secs: Arc<AtomicU64>,
     pub fw_idle_last_step_unix: Arc<RankedRwLock<HashMap<i64, u64>, RANK_LEAF>>,
 }
 
@@ -180,6 +181,7 @@ pub(crate) struct ServerContextWeak {
     cluster_tick_last_unix: std::sync::Weak<AtomicU64>,
     cluster_tick_persisted_unix: std::sync::Weak<AtomicU64>,
     dedicated_physics_ticker_active: std::sync::Weak<AtomicBool>,
+    unrebased_clock_offset_secs: std::sync::Weak<AtomicU64>,
     fw_idle_last_step_unix: std::sync::Weak<RankedRwLock<HashMap<i64, u64>, RANK_LEAF>>,
 }
 
@@ -250,6 +252,7 @@ impl ServerContextWeak {
             cluster_tick_last_unix: self.cluster_tick_last_unix.upgrade()?,
             cluster_tick_persisted_unix: self.cluster_tick_persisted_unix.upgrade()?,
             dedicated_physics_ticker_active: self.dedicated_physics_ticker_active.upgrade()?,
+            unrebased_clock_offset_secs: self.unrebased_clock_offset_secs.upgrade()?,
             fw_idle_last_step_unix: self.fw_idle_last_step_unix.upgrade()?,
         })
     }
@@ -556,6 +559,7 @@ impl ServerContext {
             cluster_tick_last_unix: Arc::downgrade(&self.cluster_tick_last_unix),
             cluster_tick_persisted_unix: Arc::downgrade(&self.cluster_tick_persisted_unix),
             dedicated_physics_ticker_active: Arc::downgrade(&self.dedicated_physics_ticker_active),
+            unrebased_clock_offset_secs: Arc::downgrade(&self.unrebased_clock_offset_secs),
             fw_idle_last_step_unix: Arc::downgrade(&self.fw_idle_last_step_unix),
         }
     }
@@ -699,6 +703,7 @@ impl ServerContext {
             cluster_tick_last_unix: Arc::new(AtomicU64::new(0)),
             cluster_tick_persisted_unix: Arc::new(AtomicU64::new(0)),
             dedicated_physics_ticker_active: Arc::new(AtomicBool::new(false)),
+            unrebased_clock_offset_secs: Arc::new(AtomicU64::new(0)),
             fw_idle_last_step_unix: Arc::new(RankedRwLock::new(HashMap::new())),
         };
         let npc_ctx_w = ctx.downgrade();
@@ -1313,6 +1318,7 @@ impl ServerContext {
     /// Injects a custom [`eve_db::ServerClock`] into both `ServerContext` and `WorldRepository` (`T-7`).
     pub fn set_clock(&self, clock: Arc<dyn eve_db::ServerClock>) {
         let now_u = clock.now_unix_secs();
+        self.unrebased_clock_offset_secs.store(0, Ordering::Release);
         self.db.set_clock(clock.clone());
         *self.clock.write().unwrap_or_else(|e| e.into_inner()) = clock;
         self.db.with_mut_snapshot(|snap| {
@@ -1356,6 +1362,10 @@ impl ServerContext {
     fn advance_secs_inner(&self, secs: u64, emit_sim_clock_rebase: bool) {
         let prev_unix = self.now_unix_secs();
         self.clock().advance_secs(secs);
+        if !emit_sim_clock_rebase && secs > 0 {
+            self.unrebased_clock_offset_secs
+                .fetch_add(secs, Ordering::AcqRel);
+        }
         let cur_unix = self.now_unix_secs();
         self.db.with_mut_snapshot(|snap| {
             snap.service_state_blobs
@@ -1664,6 +1674,18 @@ impl ServerContext {
     /// >24h into the client's future and trigger `godma.py ActualStopEffect` sleep overflows.
     pub fn now_client_sim_filetime_ticks(&self) -> i64 {
         host_wall_blueos_filetime_ticks()
+    }
+
+    /// Returns a BlueOS 100ns FILETIME timestamp for `machoNet.GetTime` (`blue.os.GetWallclockTimeNow()`),
+    /// tracking [`Self::clock`] (`set_clock` and `advance_secs`) while subtracting offsets added via
+    /// [`Self::advance_secs_without_sim_clock_rebase`] (`timeControl.AdvanceClock` / `/advancetime`)
+    /// so live client `ClockSyncDaemon` never skews `timeSyncAdjustFactor` above 1.0x (#1031).
+    pub fn now_machonet_wallclock_filetime_ticks(&self) -> i64 {
+        let unrebased_secs = self.unrebased_clock_offset_secs.load(Ordering::Acquire);
+        let unrebased_ticks = i64::try_from(unrebased_secs)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(10_000_000);
+        self.now_blueos_filetime_ticks().saturating_sub(unrebased_ticks)
     }
 
     /// Advances all active character skill queues by `elapsed_secs` of virtual time (`T-7`).

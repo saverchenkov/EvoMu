@@ -1284,3 +1284,96 @@ async fn slash_tr_same_system_zeroes_client_velocity_after_warp_and_subwarp_gh10
         "subwarp same-system /tr must emit SetBallPosition: {sub_evs:?}"
     );
 }
+
+#[tokio::test]
+async fn machonet_get_time_stays_anchored_to_wallclock_across_advance_clock() {
+    let ctx = test_ctx();
+    let mut sess = auth_session(1, 90_000_001, 98_000_001, 30_000_142);
+    sess.role = service_roles::ROLE_GML;
+    let kw = HashMap::new();
+    let five_secs_ticks: i64 = 5 * 10_000_000;
+
+    let wall_before = crate::router::context::host_wall_blueos_filetime_ticks();
+    let t_initial = handle(&ctx, &mut sess, "machoNet", "GetTime", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap()
+        .as_i64()
+        .unwrap();
+    assert!(
+        (t_initial - wall_before).abs() < five_secs_ticks,
+        "initial machoNet.GetTime ({t_initial}) should track host wallclock ({wall_before})"
+    );
+
+    // #1031: timeControl.AdvanceClock and /advancetime advance ctx.clock() without emitting
+    // DoSimClockRebase. machoNet.GetTime must keep returning host wallclock (matching CCP
+    // blue.os.GetWallclockTimeNow()) so client ClockSyncDaemon never drives timeSyncAdjustFactor
+    // to 0.95 (1.95x client clock speed vs 1.0x server physics).
+    ctx.dispatch_rpc(
+        &mut sess,
+        "timeControl",
+        None,
+        "AdvanceClock",
+        &[PyRep::Integer(120)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("AdvanceClock +120s");
+    let wall_mid = crate::router::context::host_wall_blueos_filetime_ticks();
+    let t_after_adv = handle(&ctx, &mut sess, "machoNet", "GetTime", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap()
+        .as_i64()
+        .unwrap();
+    assert!(
+        (t_after_adv - wall_mid).abs() < five_secs_ticks,
+        "machoNet.GetTime ({t_after_adv}) must not shift with timeControl.AdvanceClock ({wall_mid})"
+    );
+    assert!(
+        ctx.now_blueos_filetime_ticks() - t_after_adv >= 110 * 10_000_000,
+        "server ctx.clock() should advance by +120s independently of machoNet.GetTime"
+    );
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "slash",
+        None,
+        "SlashCmd",
+        &[PyRep::String("/advancetime 3600".to_string())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("/advancetime +3600s");
+    let wall_after = crate::router::context::host_wall_blueos_filetime_ticks();
+    let t_after_slash = handle(&ctx, &mut sess, "machoNet", "GetTime", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap()
+        .as_i64()
+        .unwrap();
+    assert!(
+        (t_after_slash - wall_after).abs() < five_secs_ticks,
+        "machoNet.GetTime ({t_after_slash}) must stay anchored to wallclock after /advancetime ({wall_after})"
+    );
+    assert!(
+        ctx.now_blueos_filetime_ticks() - t_after_slash >= 3_700 * 10_000_000,
+        "server ctx.clock() should advance by +3720s total while machoNet.GetTime stays at wallclock"
+    );
+
+    // Rebased virtual clock advances (advance_virtual_clock / advance_secs) still propagate to machoNet.GetTime.
+    ctx.advance_virtual_clock(60);
+    let t_after_rebased = handle(&ctx, &mut sess, "machoNet", "GetTime", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap()
+        .as_i64()
+        .unwrap();
+    assert!(
+        t_after_rebased >= t_after_slash + 60 * 10_000_000
+            && t_after_rebased < t_after_slash + 65 * 10_000_000,
+        "advance_virtual_clock(60) should advance machoNet.GetTime by ~60s (before={t_after_slash}, after={t_after_rebased})"
+    );
+}
