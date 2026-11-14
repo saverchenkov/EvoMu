@@ -37,11 +37,25 @@ fn new_ctx() -> ServerContext {
 
 async fn pilot(ctx: &ServerContext, sid: u64, user: &str, pass: &str, char_id: i64) -> SessionState {
     let mut s = SessionState::new(sid);
-    common::login_pilot(ctx, &mut s, user, pass).await;
-    let args = [PyRep::Integer(char_id)];
-    ctx.dispatch_rpc(&mut s, "charUnboundMgr", None, "SelectCharacterID", &args, &HashMap::new(), None)
-        .await
-        .expect("SelectCharacterID");
+    {
+        let mut h = common::borrow_wire_harness(ctx, &mut s);
+        h.call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[PyRep::String(user.into()), PyRep::String(pass.into())],
+            &HashMap::new(),
+        )
+        .await;
+        h.call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_id)],
+            &HashMap::new(),
+        )
+        .await;
+    }
     ctx.advance_secs(12);
     ctx.drain_notifications_for_char(char_id);
     s
@@ -161,80 +175,219 @@ async fn test_batch6_ship_and_pod_destruction_pipeline() {
         "notify:OnPlayerPodRespawn",
     ]);
 
+    const ZARZAKH_SYSTEM: u32 = 30_100_000;
+    const FULCRUM_STATION: i64 = 60_015_187;
     let ctx = new_ctx();
-    let _s1 = pilot(&ctx, 831, "demo", "demo-secret", P1).await;
-    let _s2 = pilot(&ctx, 832, "other", "other-secret", P2).await;
+    let empty = HashMap::new();
+    let _ = ctx.db.set_account_role("demo", eve_db::service_roles::ROLE_GM_DEFAULT);
+    let _ = ctx.db.set_account_role("other", eve_db::service_roles::ROLE_GM_DEFAULT);
+    let fulcrum_pos = ctx.sde.stations[&FULCRUM_STATION].position;
 
-    let ship1: i64 = 770_001;
-    let pod1: i64 = 770_002;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(ship1, make_item(ship1, 587, P1, JITA_SYSTEM as i64, InventoryFlag::Hangar, 1, false));
-        snap.items.insert(pod1, make_item(pod1, 670, P1, JITA_SYSTEM as i64, InventoryFlag::Hangar, 1, false));
-    });
+    let mut h1 = common::new_wire_harness(&ctx, 831);
+    h1.call_ok(
+        "authentication",
+        None,
+        "Login",
+        &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())],
+        &empty,
+    )
+    .await;
+    h1.call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(P1)], &empty)
+        .await;
+    ctx.advance_secs(31);
+    h1.call_ok("stationSvc", None, "Undock", &[], &empty).await;
+    h1.call_ok("slash", None, "SlashCmd", &[PyRep::String(format!("/tr {FULCRUM_STATION}"))], &empty)
+        .await;
 
-    // 1. Ship destruction via execute_death_pipeline_sync
-    let res = eve_server::combat::death_pipeline::execute_death_pipeline_sync(
-        &ctx,
-        JITA_SYSTEM,
-        P1,
-        ship1,
-        P2,
-        DVec3::ZERO,
-        42,
+    let mut h2 = common::new_wire_harness(&ctx, 832);
+    h2.call_ok(
+        "authentication",
+        None,
+        "Login",
+        &[PyRep::String("other".into()), PyRep::String("other-secret".into())],
+        &empty,
+    )
+    .await;
+    h2.call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(P2)], &empty)
+        .await;
+    ctx.advance_secs(31);
+    h2.call_ok("stationSvc", None, "Undock", &[], &empty).await;
+    h2.call_ok("slash", None, "SlashCmd", &[PyRep::String(format!("/tr {FULCRUM_STATION}"))], &empty)
+        .await;
+
+    let ship1 = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&P1).map(|c| c.active_ship_id))
+        .expect("P1 active ship after undock");
+    let ship2 = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&P2).map(|c| c.active_ship_id))
+        .expect("P2 active ship after undock");
+    let sys_h = ctx.systems.get_or_spawn(ZARZAKH_SYSTEM);
+    sys_h.set_ball_position(ship1, fulcrum_pos + DVec3::new(5_500.0, 0.0, 0.0)).await;
+
+    // Fit 2x Small Autocannon + EMP S on P2 through GM slash RPCs + LoadAmmo
+    h2.call_ok("slash", None, "SlashCmd", &[PyRep::String("/setskill 3300 5".into())], &empty).await;
+    h2.call_ok("slash", None, "SlashCmd", &[PyRep::String("/setskill 3301 5".into())], &empty).await;
+    let fit1_rep = h2
+        .call_ok("slash", None, "SlashCmd", &[PyRep::String("/fit me 484".into())], &empty)
+        .await;
+    let fit2_rep = h2
+        .call_ok("slash", None, "SlashCmd", &[PyRep::String("/fit me 484".into())], &empty)
+        .await;
+    let gun1_id = fit1_rep
+        .dict_get("itemID")
+        .and_then(|v| v.as_i64())
+        .expect("fitted gun1 itemID");
+    let gun2_id = fit2_rep
+        .dict_get("itemID")
+        .and_then(|v| v.as_i64())
+        .expect("fitted gun2 itemID");
+    let ammo_rep = h2
+        .call_ok("slash", None, "SlashCmd", &[PyRep::String("/giveitem 185 500".into())], &empty)
+        .await;
+    let ammo_id = ammo_rep
+        .dict_get("itemID")
+        .and_then(|v| v.as_i64())
+        .expect("given ammo itemID");
+    h2.call_ok(
+        "dogmaIM",
+        None,
+        "LoadAmmo",
+        &[
+            PyRep::Integer(ship2),
+            PyRep::List(vec![PyRep::Integer(gun1_id), PyRep::Integer(gun2_id)]),
+            PyRep::List(vec![PyRep::Integer(ammo_id)]),
+        ],
+        &empty,
+    )
+    .await;
+    ctx.advance_secs(12);
+
+    // 1. Ship destruction via live weapon combat over ClientHarness
+    h2.call_ok("dogmaIM", None, "AddTarget", &[PyRep::Integer(ship1)], &empty).await;
+    sys_h.step_manual(10.0).await.unwrap();
+    let _ = h1.call_ok("machoNet", None, "GetTime", &[], &empty).await;
+    let _ = h1.drain_notifications();
+    let _ = h2.drain_notifications();
+
+    for &gid in &[gun1_id, gun2_id] {
+        h2.call_ok(
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(gid),
+                PyRep::String("projectileFired".into()),
+                PyRep::Integer(ship1),
+                PyRep::Integer(100),
+            ],
+            &empty,
+        )
+        .await;
+    }
+    for _ in 0..120 {
+        if sys_h.get_ball_snapshot(ship1).await.ok().flatten().is_none() {
+            break;
+        }
+        ctx.advance_secs(1);
+        sys_h.step_manual(1.0).await.unwrap();
+    }
+    assert!(
+        sys_h.get_ball_snapshot(ship1).await.ok().flatten().is_none(),
+        "P1 ship must be destroyed in space by live weapon fire"
     );
-    assert!(res.is_ok(), "execute_death_pipeline_sync must succeed");
 
-    let ev_sd = events(&ctx, P1, "OnShipDeath");
-    assert_eq!(ev_sd.len(), 1, "P1 receives OnShipDeath");
+    let _ = h1.call_ok("machoNet", None, "GetTime", &[], &empty).await;
+    let _ = h2.call_ok("machoNet", None, "GetTime", &[], &empty).await;
+    let h1_ship_notifs = h1.drain_notifications();
+    let h2_ship_notifs = h2.drain_notifications();
+
+    let ev_sd: Vec<_> = h1_ship_notifs.iter().filter(|(e, _)| e == "OnShipDeath").map(|(_, a)| a).collect();
+    assert_eq!(ev_sd.len(), 1, "P1 receives OnShipDeath on the wire");
     assert!(ev_sd[0].is_empty(), "OnShipDeath has arity 0");
 
-    let ev_km_vic = events(&ctx, P1, "OnKillNotification");
-    assert_eq!(ev_km_vic.len(), 1, "Victim P1 receives OnKillNotification");
+    let ev_km_vic: Vec<_> = h1_ship_notifs.iter().filter(|(e, _)| e == "OnKillNotification").map(|(_, a)| a).collect();
+    assert_eq!(ev_km_vic.len(), 1, "Victim P1 receives OnKillNotification on the wire");
     assert!(ev_km_vic[0].is_empty(), "OnKillNotification has arity 0");
 
-    let ev_km_atk = events(&ctx, P2, "OnKillNotification");
-    assert_eq!(ev_km_atk.len(), 1, "Attacker P2 receives OnKillNotification");
+    let ev_km_atk: Vec<_> = h2_ship_notifs.iter().filter(|(e, _)| e == "OnKillNotification").map(|(_, a)| a).collect();
+    assert_eq!(ev_km_atk.len(), 1, "Attacker P2 receives OnKillNotification on the wire");
     assert!(ev_km_atk[0].is_empty(), "OnKillNotification has arity 0");
 
-    // 2. Pod destruction via execute_death_pipeline_sync_inner with authentic combat kill (is_self_destruct = false)
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&P1) {
-            ch.active_ship_id = pod1;
-            ch.solar_system_id = JITA_SYSTEM;
-            ch.station_id = None;
-            ch.structure_id = None;
-        }
-    });
-    let res_pod = eve_server::combat::death_pipeline::execute_death_pipeline_sync_inner(
-        &ctx,
-        JITA_SYSTEM,
-        P1,
-        pod1,
-        P2,
-        DVec3::ZERO,
-        43,
-        false,
+    // 2. Pod destruction via live weapon combat against ejected capsule
+    let pod1 = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&P1).map(|c| c.active_ship_id))
+        .expect("P1 ejected capsule after ship loss");
+    assert_ne!(pod1, ship1, "P1 active_ship_id must transition to ejected capsule");
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.items.get(&pod1).map(|i| i.type_id)),
+        Some(670),
+        "ejected ship must be a Capsule (670)"
     );
-    assert!(res_pod.is_ok(), "execute_death_pipeline_sync_inner for pod must succeed");
 
-    let ev_pd = events(&ctx, P1, "OnPodDeath");
-    assert_eq!(ev_pd.len(), 1, "P1 receives OnPodDeath");
+    ctx.advance_secs(5);
+    h2.call_ok("dogmaIM", None, "AddTarget", &[PyRep::Integer(pod1)], &empty).await;
+    sys_h.step_manual(10.0).await.unwrap();
+    let _ = h1.call_ok("machoNet", None, "GetTime", &[], &empty).await;
+    let _ = h1.drain_notifications();
+    let _ = h2.drain_notifications();
+
+    for &gid in &[gun1_id, gun2_id] {
+        h2.call_ok(
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(gid),
+                PyRep::String("projectileFired".into()),
+                PyRep::Integer(pod1),
+                PyRep::Integer(100),
+            ],
+            &empty,
+        )
+        .await;
+    }
+    for _ in 0..120 {
+        if sys_h.get_ball_snapshot(pod1).await.ok().flatten().is_none() {
+            break;
+        }
+        ctx.advance_secs(1);
+        sys_h.step_manual(1.0).await.unwrap();
+    }
+    assert!(
+        sys_h.get_ball_snapshot(pod1).await.ok().flatten().is_none(),
+        "P1 ejected pod must be destroyed in space by live weapon fire"
+    );
+
+    let _ = h1.call_ok("machoNet", None, "GetTime", &[], &empty).await;
+    let _ = h2.call_ok("machoNet", None, "GetTime", &[], &empty).await;
+    let h1_pod_notifs = h1.drain_notifications();
+    let h2_pod_notifs = h2.drain_notifications();
+
+    let ev_pd: Vec<_> = h1_pod_notifs.iter().filter(|(e, _)| e == "OnPodDeath").map(|(_, a)| a).collect();
+    assert_eq!(ev_pd.len(), 1, "P1 receives OnPodDeath on the wire");
     assert!(ev_pd[0].is_empty(), "OnPodDeath has arity 0");
 
-    let ev_ppd = events(&ctx, P1, "OnPlayerPodDeath");
-    assert_eq!(ev_ppd.len(), 1, "P1 receives OnPlayerPodDeath");
+    let ev_ppd: Vec<_> = h1_pod_notifs.iter().filter(|(e, _)| e == "OnPlayerPodDeath").map(|(_, a)| a).collect();
+    assert_eq!(ev_ppd.len(), 1, "P1 receives OnPlayerPodDeath on the wire");
     assert!(ev_ppd[0].is_empty(), "OnPlayerPodDeath has arity 0");
 
-    let ev_pk = events(&ctx, P1, "OnPodKilled");
-    assert_eq!(ev_pk.len(), 1, "P1 receives OnPodKilled");
-    assert_eq!(ev_pk[0], vec![PyRep::Integer(pod1)]);
+    let ev_pk: Vec<_> = h1_pod_notifs.iter().filter(|(e, _)| e == "OnPodKilled").map(|(_, a)| a).collect();
+    assert_eq!(ev_pk.len(), 1, "P1 receives OnPodKilled on the wire");
+    assert_eq!(ev_pk[0], &vec![PyRep::Integer(pod1)]);
 
-    let ev_respawn = events(&ctx, P1, "OnPlayerPodRespawn");
-    assert_eq!(ev_respawn.len(), 1, "P1 receives OnPlayerPodRespawn");
+    let ev_respawn: Vec<_> = h1_pod_notifs.iter().filter(|(e, _)| e == "OnPlayerPodRespawn").map(|(_, a)| a).collect();
+    assert_eq!(ev_respawn.len(), 1, "P1 receives OnPlayerPodRespawn on the wire");
     assert!(ev_respawn[0].is_empty(), "OnPlayerPodRespawn has arity 0");
 
-    let ev_km_atk2 = events(&ctx, P2, "OnKillNotification");
-    assert_eq!(ev_km_atk2.len(), 1, "Attacker P2 receives OnKillNotification for pod");
+    let ev_km_vic2: Vec<_> = h1_pod_notifs.iter().filter(|(e, _)| e == "OnKillNotification").map(|(_, a)| a).collect();
+    assert_eq!(ev_km_vic2.len(), 1, "Victim P1 receives OnKillNotification for pod on the wire");
+    assert!(ev_km_vic2[0].is_empty(), "OnKillNotification for pod has arity 0");
+
+    let ev_km_atk2: Vec<_> = h2_pod_notifs.iter().filter(|(e, _)| e == "OnKillNotification").map(|(_, a)| a).collect();
+    assert_eq!(ev_km_atk2.len(), 1, "Attacker P2 receives OnKillNotification for pod on the wire");
     assert!(ev_km_atk2[0].is_empty(), "OnKillNotification for pod has arity 0");
 }
 

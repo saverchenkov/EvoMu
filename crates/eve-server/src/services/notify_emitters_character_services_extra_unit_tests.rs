@@ -345,12 +345,42 @@ fn batch3_gm_slash_commands_all_validation_and_schedule_branches_kill_mutations(
         .expect("SDE has login campaign");
 
     assert_eq!(
+        handle_batch3_gm_slash_cmd(&ctx, char_id, sys_id, "/campaign enroll")
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "InvalidSlashArguments"
+    );
+    assert_eq!(
+        handle_batch3_gm_slash_cmd(&ctx, char_id, sys_id, "/campaign enroll 0")
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "InvalidSlashArguments"
+    );
+    assert_eq!(
+        handle_batch3_gm_slash_cmd(&ctx, char_id, sys_id, "/campaign enroll -1")
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "InvalidSlashArguments"
+    );
+    assert_eq!(
+        handle_batch3_gm_slash_cmd(&ctx, char_id, sys_id, "/campaign enroll 1 not_a_char")
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "InvalidSlashArguments"
+    );
+    assert_eq!(
         handle_batch3_gm_slash_cmd(&ctx, char_id, sys_id, "/campaign enroll 999999999")
             .unwrap()
             .unwrap_err()
             .code,
         "CampaignNotFound"
     );
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let _ = ctx.drain_notifications_for_char(target_cid);
     let enroll_ok = handle_batch3_gm_slash_cmd(
         &ctx,
         char_id,
@@ -364,6 +394,30 @@ fn batch3_gm_slash_commands_all_validation_and_schedule_branches_kill_mutations(
         enroll_ok.dict_get("campaignID"),
         Some(&PyRep::Integer(valid_camp_id))
     );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.seasons_and_campaigns
+                .login_campaign_enrollments
+                .get(&char_id)
+                .copied(),
+            Some(valid_camp_id)
+        );
+        assert!(!snap
+            .seasons_and_campaigns
+            .login_campaign_enrollments
+            .contains_key(&target_cid));
+        assert!(crate::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap)
+            .active_login_campaign_id
+            .is_none());
+    });
+    assert!(ctx
+        .drain_notifications_for_char(char_id)
+        .iter()
+        .any(|n| n.event == "OnCampaignEnrollmentChanged" && n.args.is_empty()));
+    assert!(!ctx
+        .drain_notifications_for_char(target_cid)
+        .iter()
+        .any(|n| n.event == "OnCampaignEnrollmentChanged"));
 
     assert_eq!(
         handle_batch3_gm_slash_cmd(&ctx, char_id, sys_id, "/campaign seasonal")

@@ -276,6 +276,7 @@ pub fn add_victory_points(ctx: &ServerContext, sys_id: u32, vp: i64) -> (i64, f6
             PyRep::String(frontline_status_to_adjacency_state(front).into()),
         ),
         ("frontlineStatus", PyRep::Integer(front)),
+        ("isFrontline", PyRep::Bool(front == STATUS_FRONTLINE)),
         ("contestedPercentage", PyRep::Real(contested)),
     ]);
     ctx.emit_typed(
@@ -347,6 +348,7 @@ pub fn capture_warzone_system(
             PyRep::String(frontline_status_to_adjacency_state(front).into()),
         ),
         ("frontlineStatus", PyRep::Integer(front)),
+        ("isFrontline", PyRep::Bool(front == STATUS_FRONTLINE)),
         ("contestedPercentage", PyRep::Real(0.0)),
     ]);
     ctx.emit_typed(
@@ -807,6 +809,7 @@ pub async fn handle(
                         ("occupierFactionID", PyRep::Integer(occ.occupier_faction_id)),
                         ("adjacencyState", PyRep::String(adj_state.into())),
                         ("frontlineStatus", PyRep::Integer(front)),
+                        ("isFrontline", PyRep::Bool(front == STATUS_FRONTLINE)),
                         ("contestedPercentage", PyRep::Real(c)),
                         ("dateTaken", PyRep::Integer(0)),
                     ]);
@@ -874,6 +877,7 @@ pub async fn handle(
                     ("ownerFactionID", PyRep::Integer(occ.owner_faction_id)),
                     ("adjacencyState", PyRep::String(adj_state.into())),
                     ("frontlineStatus", PyRep::Integer(front)),
+                    ("isFrontline", PyRep::Bool(front == STATUS_FRONTLINE)),
                     ("contestedPercentage", PyRep::Real(c)),
                     ("dateTaken", PyRep::Integer(0)),
                 ]))

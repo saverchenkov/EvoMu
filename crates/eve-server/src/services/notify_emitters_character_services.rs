@@ -797,8 +797,37 @@ pub fn handle_batch3_gm_slash_cmd(
             ])))
         }
         "/campaign" if parts.get(1).is_some_and(|s| s.eq_ignore_ascii_case("enroll")) => {
-            let campaign_id = parts.get(2).and_then(|s| s.parse::<i64>().ok()).unwrap_or(1);
-            let target_cid = parts.get(3).and_then(|s| s.parse::<i64>().ok()).unwrap_or(caller_cid);
+            let Some(campaign_id) = parts
+                .get(2)
+                .and_then(|s| s.parse::<i64>().ok())
+                .filter(|&id| id > 0)
+            else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidSlashArguments".into(),
+                    message: "Usage: /campaign enroll <campaign_id> [character_id]".into(),
+                    client_error: None,
+                }));
+            };
+            let target_cid = match parts.get(3) {
+                Some(raw) => match raw.parse::<i64>().ok().filter(|&id| id > 0) {
+                    Some(id) => id,
+                    None => {
+                        return Some(Err(BridgeRpcError {
+                            code: "InvalidSlashArguments".into(),
+                            message: "character_id must be a positive integer".into(),
+                            client_error: None,
+                        }))
+                    }
+                },
+                None if caller_cid > 0 => caller_cid,
+                None => {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArguments".into(),
+                        message: "character_id is required when no character is selected".into(),
+                        client_error: None,
+                    }))
+                }
+            };
             let sde_campaigns = crate::services::campaigns_and_milestones::get_sde_login_campaigns(&ctx.sde);
             if !sde_campaigns.is_empty() && !sde_campaigns.contains_key(&campaign_id) {
                 return Some(Err(BridgeRpcError {

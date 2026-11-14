@@ -2629,11 +2629,11 @@ async fn test_sov_hub_anchor_upgrades_power_and_fuel() {
         .solar_systems
         .values()
         .filter(|s| {
-            s.security_status <= 0.0
-                && s.region_id < 11_000_000
-                && ctx.sde.regions.get(&s.region_id).is_none_or(|r| r.faction_id.is_none())
+            eve_server::services::sov_gameplay::is_claimable_nullsec_system(&ctx.sde, s.solar_system_id)
+                && eve_server::services::quasar_sov_hub::system_yield(&ctx.sde, s.solar_system_id).planet_workforce
+                    >= 2_500
         })
-        .find(|s| eve_server::services::quasar_sov_hub::system_yield(&ctx.sde, s.solar_system_id).planet_workforce >= 2_500)
+        .min_by_key(|s| s.solar_system_id)
         .map(|s| s.solar_system_id)
         .unwrap_or_else(|| find_nullsec_planets(&ctx).0);
     let hub_pos = DVec3::new(150_000.0, 0.0, 0.0);
