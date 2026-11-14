@@ -42,19 +42,21 @@ pub use super::season_fsd::*;
 #[path = "season_manager_ops.rs"]
 pub(crate) mod ops;
 
-/// Challenge keyvals for `st`, sorted by challenge ID.
-fn sorted_challenge_keyvals(st: &CharacterSeasonState) -> Vec<PyRep> {
-    let mut list: Vec<_> = st.challenges.values().filter(|c| !c.claimed).collect();
-    list.sort_by_key(|c| c.challenge_id);
-    list.into_iter().map(|c| challenge_to_keyval(c, st.season_points)).collect()
-}
-
-/// Active challenge dictionary entries `(challenge_id, KeyVal)` sorted by `challenge_id` for V24 `SeasonService`.
-fn sorted_challenge_dict(st: &CharacterSeasonState) -> Vec<(PyRep, PyRep)> {
+/// Active challenge dictionary entries `(challenge_id, seasons.common.challenge.Challenge)` sorted by `challenge_id`.
+fn sorted_challenge_dict(
+    st: &CharacterSeasonState,
+    char_id: i64,
+    sde: &eve_sde::SdeRegistry,
+) -> Vec<(PyRep, PyRep)> {
     let mut list: Vec<_> = st.challenges.values().filter(|c| !c.claimed).collect();
     list.sort_by_key(|c| c.challenge_id);
     list.into_iter()
-        .map(|c| (PyRep::Integer(c.challenge_id), challenge_to_keyval(c, st.season_points)))
+        .map(|c| {
+            (
+                PyRep::Integer(c.challenge_id),
+                challenge_to_v24_object(c, st.season_points, char_id, sde),
+            )
+        })
         .collect()
 }
 
@@ -69,7 +71,7 @@ fn emit_expired_challenges(
             NotificationTarget::Character(char_id),
             OnChallengeExpired {
                 challenge_id: *old_id,
-                new_challenge: challenge_to_keyval(new_ch, season_points),
+                new_challenge: challenge_to_v24_object(new_ch, season_points, char_id, &ctx.sde),
             },
         );
     }
@@ -114,18 +116,203 @@ where
 pub fn challenge_to_keyval(c: &CharacterChallenge, season_points: i64) -> PyRep {
     PyRep::keyval([
         ("challengeID", PyRep::Integer(c.challenge_id)),
+        ("challenge_id", PyRep::Integer(c.challenge_id)),
         ("seasonID", PyRep::Integer(c.season_id)),
+        ("season_id", PyRep::Integer(c.season_id)),
         ("seasonPoints", PyRep::Integer(season_points)),
+        ("season_points", PyRep::Integer(season_points)),
         ("title", PyRep::String(c.title.clone())),
         ("description", PyRep::String(c.description.clone())),
         ("points", PyRep::Integer(c.points)),
         ("progress", PyRep::Integer(c.progress)),
         ("maxProgress", PyRep::Integer(c.max_progress)),
+        ("max_progress", PyRep::Integer(c.max_progress)),
         ("completed", PyRep::Bool(c.completed)),
         ("claimed", PyRep::Bool(c.claimed)),
         ("isDormant", PyRep::Bool(c.is_dormant)),
+        ("is_dormant", PyRep::Bool(c.is_dormant)),
         ("expirationDate", PyRep::Integer(c.expiration_date)),
+        ("expiration_date", PyRep::Integer(c.expiration_date)),
     ])
+}
+
+/// Encodes a [`CharacterChallenge`] as a V24 `seasons.common.challenge.Challenge` instance (`PyObjectEx2`)
+/// so client methods (`has_unclaimed_completion_rewards`, `is_progress_complete`, `has_completion_rewards`)
+/// and Rust `.dict_get(...)` inspections both work seamlessly.
+pub fn challenge_to_v24_object(
+    c: &CharacterChallenge,
+    season_points: i64,
+    char_id: i64,
+    sde: &eve_sde::SdeRegistry,
+) -> PyRep {
+    let meta = ops::fsd_challenge_ui_meta(sde).get(&c.challenge_id);
+    let opt_id = |id: i64| -> PyRep {
+        if id > 0 {
+            PyRep::Integer(id)
+        } else {
+            PyRep::None
+        }
+    };
+    let reward_date = if c.completed && !c.claimed {
+        PyRep::Integer(c.expiration_date.max(1))
+    } else {
+        PyRep::None
+    };
+    let finish_date = if c.claimed {
+        PyRep::Integer(c.expiration_date.max(1))
+    } else {
+        PyRep::None
+    };
+    let reward_type = if c.reward_type_id > 0 {
+        PyRep::Integer(c.reward_type_id as i64)
+    } else {
+        PyRep::None
+    };
+    let state_dict = PyRep::Dict(vec![
+        (PyRep::String("challenge_id".into()), PyRep::Integer(c.challenge_id)),
+        (PyRep::String("challengeID".into()), PyRep::Integer(c.challenge_id)),
+        (PyRep::String("challenge_type_id".into()), PyRep::Integer(c.challenge_id)),
+        (PyRep::String("character_id".into()), PyRep::Integer(char_id)),
+        (PyRep::String("season_id".into()), PyRep::Integer(c.season_id)),
+        (PyRep::String("seasonID".into()), PyRep::Integer(c.season_id)),
+        (PyRep::String("season_points".into()), PyRep::Integer(season_points)),
+        (PyRep::String("seasonPoints".into()), PyRep::Integer(season_points)),
+        (
+            PyRep::String("event_type".into()),
+            PyRep::String(meta.map(|m| m.event_type.clone()).unwrap_or_default()),
+        ),
+        (PyRep::String("expiration_date".into()), PyRep::Integer(c.expiration_date)),
+        (PyRep::String("expirationDate".into()), PyRep::Integer(c.expiration_date)),
+        (PyRep::String("finish_date".into()), finish_date),
+        (PyRep::String("is_expired".into()), PyRep::Bool(false)),
+        (PyRep::String("progress".into()), PyRep::Integer(c.progress)),
+        (PyRep::String("max_progress".into()), PyRep::Integer(c.max_progress.max(1))),
+        (PyRep::String("maxProgress".into()), PyRep::Integer(c.max_progress.max(1))),
+        (
+            PyRep::String("message_text".into()),
+            opt_id(meta.map(|m| m.message_text_id).unwrap_or(0)),
+        ),
+        (
+            PyRep::String("progress_text".into()),
+            opt_id(meta.map(|m| m.progress_text_id).unwrap_or(0)),
+        ),
+        (
+            PyRep::String("name".into()),
+            opt_id(meta.map(|m| m.display_name_id).unwrap_or(0)),
+        ),
+        (
+            PyRep::String("challenge_category".into()),
+            PyRep::String(
+                meta.map(|m| m.challenge_category.clone())
+                    .unwrap_or_else(|| "PvE".to_string()),
+            ),
+        ),
+        (
+            PyRep::String("challenge_security".into()),
+            PyRep::String(meta.map(|m| m.challenge_security.clone()).unwrap_or_default()),
+        ),
+        (PyRep::String("points_awarded".into()), PyRep::Integer(c.points)),
+        (
+            PyRep::String("isk_awarded".into()),
+            PyRep::Integer(meta.map(|m| m.isk_awarded).unwrap_or(0)),
+        ),
+        (
+            PyRep::String("is_coop".into()),
+            PyRep::Bool(meta.is_some_and(|m| m.is_coop)),
+        ),
+        (
+            PyRep::String("expiration_minutes".into()),
+            PyRep::Integer(meta.map(|m| m.expiration_time_minutes).unwrap_or(0)),
+        ),
+        (PyRep::String("received_date".into()), PyRep::Integer(c.expiration_date)),
+        (PyRep::String("start_date".into()), PyRep::Integer(c.expiration_date)),
+        (
+            PyRep::String("should_be_active_on_season_start".into()),
+            PyRep::Bool(meta.map(|m| m.should_be_active_on_season_start).unwrap_or(!c.is_dormant)),
+        ),
+        (
+            PyRep::String("should_only_appear_once_per_season".into()),
+            PyRep::Bool(meta.is_some_and(|m| m.should_only_appear_once_per_season)),
+        ),
+        (
+            PyRep::String("next_challenge".into()),
+            meta.and_then(|m| m.next_challenge).map(PyRep::Integer).unwrap_or(PyRep::None),
+        ),
+        (
+            PyRep::String("is_chained".into()),
+            PyRep::Bool(meta.is_some_and(|m| m.is_chained)),
+        ),
+        (
+            PyRep::String("should_not_expire_at_downtime".into()),
+            PyRep::Bool(meta.is_some_and(|m| m.should_not_expire_at_downtime)),
+        ),
+        (PyRep::String("is_dormant".into()), PyRep::Bool(c.is_dormant)),
+        (PyRep::String("isDormant".into()), PyRep::Bool(c.is_dormant)),
+        (PyRep::String("reward_type".into()), reward_type),
+        (PyRep::String("reward_amount".into()), PyRep::Integer(c.reward_quantity as i64)),
+        (PyRep::String("reward_date".into()), reward_date),
+        (
+            PyRep::String("reward_type_soul_bound".into()),
+            PyRep::Bool(meta.is_some_and(|m| m.reward_type_soul_bound)),
+        ),
+        (PyRep::String("title".into()), PyRep::String(c.title.clone())),
+        (PyRep::String("description".into()), PyRep::String(c.description.clone())),
+        (PyRep::String("points".into()), PyRep::Integer(c.points)),
+        (PyRep::String("completed".into()), PyRep::Bool(c.completed)),
+        (PyRep::String("claimed".into()), PyRep::Bool(c.claimed)),
+    ]);
+    PyRep::ObjectEx {
+        is_type_2: true,
+        header: Box::new(PyRep::Tuple(vec![
+            PyRep::Tuple(vec![PyRep::Token("seasons.common.challenge.Challenge".into())]),
+            state_dict,
+        ])),
+        list: Vec::new(),
+        dict: Vec::new(),
+    }
+}
+
+/// Builds the complete V24 `character_progress` `util.KeyVal` shared by `OnSeasonSelected`
+/// and `get_character_progress_by_character_id` (fixes `#1043` and `#1044`).
+#[allow(clippy::too_many_arguments)]
+fn build_character_progress_keyval(
+    st: &CharacterSeasonState,
+    snap: &eve_db::WorldStateSnapshot,
+    sde: &eve_sde::SdeRegistry,
+    char_id: i64,
+    season_id: i64,
+    max_season_points_override: Option<i64>,
+    now_ft: i64,
+    extra_fields: Vec<(&'static str, PyRep)>,
+) -> PyRep {
+    let claimed_cnt = (st.claimed_challenges.len()
+        + st.challenges.values().filter(|c| c.claimed).count()) as i64;
+    let max_pts = max_season_points_override
+        .filter(|&p| p > 0)
+        .unwrap_or_else(|| ops::resolve_season_max_points(snap, sde, season_id, now_ft))
+        .max(10);
+    let reward_tids = ops::resolve_season_reward_type_ids(sde, season_id);
+    let (seasonal_goals, next_seasonal_goal, last_seasonal_goal) =
+        ops::build_seasonal_goals_payload(st, max_pts, &reward_tids);
+    let mut fields = vec![
+        ("character_id", PyRep::Integer(char_id)),
+        ("characterID", PyRep::Integer(char_id)),
+        ("season_id", PyRep::Integer(season_id)),
+        ("seasonID", PyRep::Integer(season_id)),
+        ("total_points", PyRep::Integer(st.season_points)),
+        ("season_points", PyRep::Integer(st.season_points)),
+        ("seasonal_points", PyRep::Integer(st.season_points)),
+        ("seasonPoints", PyRep::Integer(st.season_points)),
+        ("max_seasonal_points", PyRep::Integer(max_pts)),
+        ("seasonal_goals", seasonal_goals),
+        ("next_seasonal_goal", next_seasonal_goal),
+        ("last_seasonal_goal", last_seasonal_goal),
+        ("claimedRewards", PyRep::Integer(claimed_cnt)),
+        ("current_reward_index", PyRep::Integer(claimed_cnt)),
+        ("challenges", PyRep::Dict(sorted_challenge_dict(st, char_id, sde))),
+    ];
+    fields.extend(extra_fields);
+    PyRep::keyval(fields)
 }
 
 
@@ -516,15 +703,16 @@ pub fn handle_season_manager(
 
                 let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
                 let season_data_kv = season_config_to_keyval(&active_cfg, &defs);
-                let character_progress_kv = PyRep::keyval([
-                    ("character_id", PyRep::Integer(char_id)),
-                    ("characterID", PyRep::Integer(char_id)),
-                    ("season_id", PyRep::Integer(season_id)),
-                    ("seasonID", PyRep::Integer(season_id)),
-                    ("season_points", PyRep::Integer(st.season_points)),
-                    ("seasonPoints", PyRep::Integer(st.season_points)),
-                    ("challenges", PyRep::Dict(sorted_challenge_dict(st))),
-                ]);
+                let character_progress_kv = build_character_progress_keyval(
+                    st,
+                    snap,
+                    &ctx.sde,
+                    char_id,
+                    season_id,
+                    Some(active_cfg.max_season_points),
+                    now_ft,
+                    Vec::new(),
+                );
                 Ok((season_data_kv, character_progress_kv))
             });
             match res {
@@ -593,7 +781,7 @@ pub fn handle_season_manager(
                 let defs = ops::load_localized_challenge_definitions(snap, &ctx.sde);
                 let expired = ops::fill_and_normalize_character_challenges(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
                 sync_character_challenges_with_defs(st, &defs, snap, char_id);
-                Ok((sorted_challenge_dict(st), st.season_points, expired))
+                Ok((sorted_challenge_dict(st, char_id, &ctx.sde), st.season_points, expired))
             });
             match res {
                 Ok((challenges, pts, expired)) => {
@@ -617,14 +805,14 @@ pub fn handle_season_manager(
             };
             let res = read_character_season_state(ctx, char_id, |st, snap| {
                 if let Some(c) = st.challenges.get(&ch_id).or_else(|| st.claimed_challenges.get(&ch_id)) {
-                    Ok(challenge_to_keyval(c, st.season_points))
+                    Ok(challenge_to_v24_object(c, st.season_points, char_id, &ctx.sde))
                 } else {
                     let defs = ops::load_localized_challenge_definitions(snap, &ctx.sde);
                     if let Some(def) = defs.iter().find(|d| d.challenge_id == ch_id) {
                         let now_ft = ctx.now_blueos_filetime_ticks();
                         let (season_end_ft, _) = resolve_season_bounds(st, snap, &ctx.sde, now_ft);
                         let ch = ops::build_character_challenge(def, st.selected_season_id, snap, char_id, now_ft, season_end_ft, def.is_dormant);
-                        Ok(challenge_to_keyval(&ch, st.season_points))
+                        Ok(challenge_to_v24_object(&ch, st.season_points, char_id, &ctx.sde))
                     } else {
                         Err(BridgeRpcError {
                             code: "ChallengeNotFound".into(),
@@ -790,6 +978,9 @@ pub fn handle_season_manager(
                     if def_opt.is_some_and(|d| !matches_challenge_conditions(d, extra_data, cond_catalog)) {
                         return Ok((expired, st.season_points, updates));
                     }
+                    if ch.claimed || ch.completed {
+                        return Ok((expired, st.season_points, updates));
+                    }
                     let was_completed = ch.completed;
                     ch.progress = ch.progress.saturating_add(step).min(ch.max_progress);
                     if ch.progress >= ch.max_progress {
@@ -801,7 +992,7 @@ pub fn handle_season_manager(
                         .challenges
                         .values()
                         .filter(|ch| {
-                            if ch.is_dormant || ch.claimed {
+                            if ch.is_dormant || ch.claimed || ch.completed {
                                 return false;
                             }
                             let def_opt = defs.iter().find(|d| d.challenge_id == ch.challenge_id);
@@ -918,7 +1109,7 @@ pub fn handle_season_manager(
                 let mut ch = st.challenges.remove(&ch_id).expect("verified present");
                 ch.completed = true;
                 ch.claimed = true;
-                let (prev_pts, reward_pts, season_id) = (st.season_points, ch.points, st.selected_season_id);
+                let (prev_pts, reward_pts) = (st.season_points, ch.points);
                 let (r_tid, r_qty, client_driven) = (ch.reward_type_id, ch.reward_quantity, ch.client_event_driven);
                 if def_opt.as_ref().is_some_and(|d| d.should_only_appear_once_per_season) {
                     st.completed_once_per_season_ids.insert(ch_id);
@@ -967,6 +1158,17 @@ pub fn handle_season_manager(
                     }
                 }
                 let is_omega = snap.characters.get(&char_id).map(|c| c.clone_grade >= 2).unwrap_or(false);
+                let eff_season_id = if st.selected_season_id > 0 {
+                    st.selected_season_id
+                } else {
+                    let catalog = ops::load_fsd_seasons_catalog_clean(snap, &ctx.sde, now_ft);
+                    catalog
+                        .values()
+                        .find(|c| c.end_time_ft > now_ft)
+                        .or_else(|| catalog.values().next())
+                        .map(|c| c.season_id)
+                        .unwrap_or(1)
+                };
                 let mut created_item_notif: Option<(i64, u32, i64, i32)> = None;
                 let mut enqueued_redeem = false;
                 let delivered_rep = if !client_driven && r_tid > 0 && r_qty > 0 {
@@ -1001,7 +1203,7 @@ pub fn handle_season_manager(
                     ("seasonPoints", PyRep::Integer(pts)), ("rewardGranted", PyRep::Bool(true)),
                     ("rewardPoints", PyRep::Integer(reward_pts)), ("deliveredItemID", delivered_rep),
                 ]);
-                Ok((rep, season_id, prev_pts, pts, is_omega, expired, new_balance_cents, created_item_notif, enqueued_redeem))
+                Ok((rep, eff_season_id, prev_pts, pts, is_omega, expired, new_balance_cents, created_item_notif, enqueued_redeem))
             });
             match res {
                 Ok((rep, season_id, prev_pts, pts, is_omega, expired, new_balance_cents, created_item_notif, enqueued_redeem)) => {
@@ -1064,32 +1266,38 @@ pub fn handle_season_manager(
                             new_points: pts,
                         },
                     );
-                    // Emit OnSeasonalGoalCompleted and Omega reward tier notifications across 10-point milestones
+                    // Emit OnSeasonalGoalCompleted and Omega reward tier notifications across 10-point goal milestones
                     let (prev_goal, new_goal) = (prev_pts / 10, pts / 10);
-                    if new_goal > prev_goal {
-                        for g_idx in prev_goal..new_goal {
-                            let goal_data = PyRep::Dict(vec![
-                                (PyRep::String("goal_index".into()), PyRep::Integer(g_idx)),
-                                (PyRep::String("points_required".into()), PyRep::Integer((g_idx + 1) * 10)),
-                                (PyRep::String("completed".into()), PyRep::Bool(true)),
-                            ]);
-                            ctx.emit_typed(
-                                NotificationTarget::Character(char_id),
-                                OnSeasonalGoalCompleted {
-                                    goal_index: g_idx,
-                                    goal_data,
-                                },
-                            );
-                        }
-                        if is_omega {
-                            let claimed_idxs: Vec<i64> = (prev_goal..new_goal).collect();
-                            ctx.emit_typed(
-                                NotificationTarget::Character(char_id),
-                                OnSeasonOmegaRewardsClaimed {
-                                    claimed_goal_indexes: claimed_idxs,
-                                },
-                            );
-                        }
+                    let reward_tids = ops::resolve_season_reward_type_ids(&ctx.sde, season_id);
+                    for g_idx in prev_goal..new_goal {
+                        let reward_tid = if reward_tids.is_empty() {
+                            34
+                        } else {
+                            reward_tids[(g_idx as usize) % reward_tids.len()]
+                        };
+                        let goal_data = ops::build_seasonal_goal_dict(
+                            g_idx,
+                            (g_idx + 1) * 10,
+                            reward_tid,
+                            true,
+                            false,
+                        );
+                        ctx.emit_typed(
+                            NotificationTarget::Character(char_id),
+                            OnSeasonalGoalCompleted {
+                                goal_index: g_idx,
+                                goal_data,
+                            },
+                        );
+                    }
+                    if is_omega && new_goal > prev_goal {
+                        let claimed_goals: Vec<i64> = (prev_goal..new_goal).collect();
+                        ctx.emit_typed(
+                            NotificationTarget::Character(char_id),
+                            OnSeasonOmegaRewardsClaimed {
+                                claimed_goal_indexes: claimed_goals,
+                            },
+                        );
                     }
                     Some(Ok(rep))
                 }
@@ -1178,19 +1386,18 @@ pub fn handle_season_manager(
                 let defs = ops::load_localized_challenge_definitions(snap, &ctx.sde);
                 let expired = ops::fill_and_normalize_character_challenges(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
                 sync_character_challenges_with_defs(st, &defs, snap, char_id);
-                let challenges = sorted_challenge_keyvals(st);
-                let claimed_cnt = (st.claimed_challenges.len()
-                    + st.challenges.values().filter(|c| c.claimed).count()) as i64;
-                let eff_season_id = if st.selected_season_id > 0 { st.selected_season_id } else { 1 };
-                let mut fields = vec![
-                    ("season_id", PyRep::Integer(eff_season_id)),
-                    ("seasonID", PyRep::Integer(eff_season_id)),
-                    ("total_points", PyRep::Integer(st.season_points)),
-                    ("season_points", PyRep::Integer(st.season_points)),
-                    ("seasonPoints", PyRep::Integer(st.season_points)),
-                    ("current_reward_index", PyRep::Integer(claimed_cnt)),
-                    ("challenges", PyRep::List(challenges)),
-                ];
+                let eff_season_id = if st.selected_season_id > 0 {
+                    st.selected_season_id
+                } else {
+                    let catalog = ops::load_fsd_seasons_catalog_clean(snap, &ctx.sde, now_ft);
+                    catalog
+                        .values()
+                        .find(|c| c.end_time_ft > now_ft)
+                        .or_else(|| catalog.values().next())
+                        .map(|c| c.season_id)
+                        .unwrap_or(1)
+                };
+                let mut extra = Vec::new();
                 if let Some((goal_id, milestone_cp)) = goal_filter {
                     let (prog, req_prog, from_cp) = if let Some((cp, req)) = milestone_cp {
                         (cp, req, true)
@@ -1208,12 +1415,22 @@ pub fn handle_season_manager(
                             .unwrap_or(0);
                         (cur, req, false)
                     };
-                    fields.push(("goalID", PyRep::Integer(goal_id as i64)));
-                    fields.push(("currentProgress", PyRep::Integer(prog as i64)));
-                    fields.push(("requiredProgress", PyRep::Integer(req_prog as i64)));
-                    fields.push(("verifiedFromCareerPoints", PyRep::Bool(from_cp)));
+                    extra.push(("goalID", PyRep::Integer(goal_id as i64)));
+                    extra.push(("currentProgress", PyRep::Integer(prog as i64)));
+                    extra.push(("requiredProgress", PyRep::Integer(req_prog as i64)));
+                    extra.push(("verifiedFromCareerPoints", PyRep::Bool(from_cp)));
                 }
-                Ok((PyRep::keyval(fields), st.season_points, expired))
+                let kv = build_character_progress_keyval(
+                    st,
+                    snap,
+                    &ctx.sde,
+                    char_id,
+                    eff_season_id,
+                    None,
+                    now_ft,
+                    extra,
+                );
+                Ok((kv, st.season_points, expired))
             });
             match res {
                 Ok((rep, pts, expired)) => {

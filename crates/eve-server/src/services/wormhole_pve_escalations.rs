@@ -48,6 +48,30 @@ pub struct DecloakedRelayInfo {
     pub warp_hop_count: u32,
 }
 
+fn build_wh_npc_slim_meta(
+    sde: &SdeRegistry,
+    type_id: TypeId,
+    faction_id: i64,
+    default_group_id: u32,
+) -> SlimItemMeta {
+    let sde_t = sde.types.get(&type_id);
+    SlimItemMeta {
+        group_id: sde_t.map(|t| t.group_id).unwrap_or(default_group_id),
+        category_id: sde_t.map(|t| t.category_id).unwrap_or(11),
+        owner_id: faction_id,
+        char_id: None,
+        corp_id: crate::services::combat_crimewatch::combat_npc_ai::resolve_npc_corp_id_for_sde_faction(
+            sde,
+            faction_id,
+        ),
+        alliance_id: -1,
+        security_status: -1.0,
+        is_cloaked: false,
+        name: sde_t.map(|t| t.name.clone()).filter(|n| !n.is_empty()),
+        ..Default::default()
+    }
+}
+
 /// Spawns `Upgraded Avenger` (`37472`) capital escalation battleships (`3` in C5, `4` in C6)
 /// with `30,000 m` signature radius, web, scram, and neut (`feat:pve.wormhole-capital-escalations`).
 pub async fn spawn_upgraded_avengers_core(
@@ -93,7 +117,8 @@ pub async fn spawn_upgraded_avengers_core(
             speed_fraction: 0.0,
             mode: MovementMode::Stop,
         };
-        let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
+        let avenger_meta = build_wh_npc_slim_meta(sde, tid, 500_005, sde_type.group_id);
+        let _ = sys_handle.spawn_ball_with_meta(ball, cs, avenger_meta).await;
         let dmg_mult = attr(64).unwrap_or(0.0);
         let entity = ExtendedNpcEntity {
             ball_id: bid,
@@ -215,7 +240,8 @@ pub async fn spawn_decloaked_transmission_relay_core(
         speed_fraction: 0.0,
         mode: MovementMode::Stop,
     };
-    let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
+    let relay_meta = build_wh_npc_slim_meta(sde, relay_tid, 500_024, relay_type.group_id);
+    let _ = sys_handle.spawn_ball_with_meta(ball, cs, relay_meta).await;
     let entity = ExtendedNpcEntity {
         ball_id: relay_bid,
         type_id: relay_tid,
@@ -314,15 +340,8 @@ pub fn on_decloaked_relay_attacked_sync(
         mode: MovementMode::Stop,
     };
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
-    sys_handle.try_spawn_ball_with_meta(
-        ball,
-        cs,
-        SlimItemMeta {
-            group_id: sde_type.group_id,
-            category_id: sde_type.category_id,
-            ..Default::default()
-        },
-    );
+    let drifter_meta = build_wh_npc_slim_meta(&ctx.sde, drifter_tid, 500_024, sde_type.group_id);
+    sys_handle.try_spawn_ball_with_meta(ball, cs, drifter_meta);
     sys_handle
         .actor_state
         .write()
@@ -831,6 +850,8 @@ pub fn on_asteroid_mined_in_system(
         let (trigger_tid, other_tids) =
             crate::services::pve_exploration_sites::sleeper_npc_types_for_class_and_wave(wh_c, 1);
         let sentry_tid = sleeper_sentry_type_for_class(wh_c);
+        let blue_loot =
+            crate::services::pve_exploration_sites::sleeper_blue_loot_for_class(&ctx.sde, wh_c);
         let center = DVec3::from_array(site_pos);
         let mut spawned_ids = Vec::new();
         for (idx, tid) in std::iter::once(trigger_tid)
@@ -847,28 +868,53 @@ pub fn on_asteroid_mined_in_system(
                     ((idx % 2) as f64) * 1_500.0,
                     0.0,
                 );
+            let sde_t = ctx.sde.types.get(&tid);
+            let sde_attr = |aid: u16| sde_t.and_then(|t| t.default_attributes.get(&aid).copied());
+            let mut cs = build_type_combat_state_from_sde(&ctx.sde, tid);
+            if let Some(sig_rad) = sde_attr(552).filter(|&v| v > 0.0) {
+                cs.signature_radius = sig_rad;
+            }
             let ball = Ball {
                 id: bid,
                 type_id: tid,
                 position: pos,
                 velocity: DVec3::ZERO,
-                max_velocity: 350.0,
+                max_velocity: sde_attr(37).filter(|&v| v > 0.0).unwrap_or(350.0),
                 inertia: 0.8,
-                mass: 5_000_000.0,
-                radius: 45.0,
+                mass: sde_t.map(|t| t.mass).filter(|&v| v > 0.0).unwrap_or(5_000_000.0),
+                radius: sde_t.map(|t| t.radius).filter(|&v| v > 0.0).unwrap_or(45.0),
                 speed_fraction: 0.0,
                 mode: MovementMode::Stop,
             };
-            let sde_t = ctx.sde.types.get(&tid);
-            sys_handle.try_spawn_ball_with_meta(
-                ball,
-                build_type_combat_state_from_sde(&ctx.sde, tid),
-                SlimItemMeta {
-                    group_id: sde_t.map(|t| t.group_id).unwrap_or(0),
-                    category_id: sde_t.map(|t| t.category_id).unwrap_or(11),
-                    ..Default::default()
-                },
-            );
+            let sleeper_meta = build_wh_npc_slim_meta(&ctx.sde, tid, 500_005, 0);
+            sys_handle.try_spawn_ball_with_meta(ball, cs, sleeper_meta);
+            let dmg_mult = sde_attr(64).unwrap_or(1.0);
+            let em = sde_attr(114).unwrap_or(0.0) * dmg_mult;
+            let th = sde_attr(118).unwrap_or(0.0) * dmg_mult;
+            let ki = sde_attr(117).unwrap_or(0.0) * dmg_mult;
+            let ex = sde_attr(116).unwrap_or(0.0) * dmg_mult;
+            let damage_vector = if em > 0.0 || th > 0.0 || ki > 0.0 || ex > 0.0 {
+                DamageVector {
+                    em,
+                    thermal: th,
+                    kinetic: ki,
+                    explosive: ex,
+                }
+            } else {
+                DamageVector {
+                    em: 80.0,
+                    thermal: 80.0,
+                    kinetic: 80.0,
+                    explosive: 80.0,
+                }
+            };
+            let remote_shield_rep = sde_attr(68).unwrap_or(0.0);
+            let remote_armor_rep = sde_attr(84).unwrap_or(0.0);
+            let remote_rep_range = if remote_shield_rep > 0.0 || remote_armor_rep > 0.0 {
+                25_000.0
+            } else {
+                0.0
+            };
             ctx.combat_ephemeral
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
@@ -886,36 +932,31 @@ pub fn on_asteroid_mined_in_system(
                         aggression_threat: HashMap::new(),
                         threat_table: HashMap::new(),
                         bounty_isk: 0.0,
-                        optimal_range: 20_000.0,
-                        orbit_range: 15_000.0,
-                        damage_vector: DamageVector {
-                            em: 80.0,
-                            thermal: 80.0,
-                            kinetic: 80.0,
-                            explosive: 80.0,
-                        },
+                        optimal_range: sde_attr(54).filter(|&v| v > 0.0).unwrap_or(20_000.0),
+                        orbit_range: sde_attr(416).filter(|&v| v > 0.0).unwrap_or(15_000.0),
+                        damage_vector,
                         entropic_cycles: 0,
                         drifter_overshield_hp: 0.0,
                         drifter_doomsday_fired: false,
-                        web_speed_factor: ctx
-                            .sde
-                            .types
-                            .get(&tid)
-                            .and_then(|t| t.default_attributes.get(&20).copied())
-                            .filter(|&v| v < 0.0)
-                            .unwrap_or(-50.0),
-                        web_range: 15_000.0,
-                        scram_strength: 2.0,
-                        scram_range: 12_000.0,
-                        neut_amount: 120.0,
+                        web_speed_factor: sde_attr(20).filter(|&v| v < 0.0).unwrap_or(-50.0),
+                        web_range: sde_attr(514)
+                            .or_else(|| sde_attr(580))
+                            .unwrap_or(if sde_t.is_some() { 0.0 } else { 15_000.0 }),
+                        scram_strength: sde_attr(105)
+                            .unwrap_or(if sde_t.is_some() { 0.0 } else { 2.0 }),
+                        scram_range: sde_attr(103)
+                            .or_else(|| sde_attr(582))
+                            .unwrap_or(if sde_t.is_some() { 0.0 } else { 12_000.0 }),
+                        neut_amount: sde_attr(97)
+                            .unwrap_or(if sde_t.is_some() { 0.0 } else { 120.0 }),
                         ecm_jammed: false,
-                        remote_shield_rep: 0.0,
-                        remote_armor_rep: 0.0,
-                        remote_rep_range: 0.0,
+                        remote_shield_rep,
+                        remote_armor_rep,
+                        remote_rep_range,
                         tag_drop_type_id: None,
                         spawn_position: pos,
                         sleeper_wh_class: wh_c,
-                        custom_cargo_loot: None,
+                        custom_cargo_loot: blue_loot,
                     },
                 );
             spawned_ids.push(bid);
@@ -932,16 +973,8 @@ pub fn on_asteroid_mined_in_system(
             center + DVec3::new(3_000.0, 0.0, 2_500.0),
             wh_c,
         );
-        let sentry_sde = ctx.sde.types.get(&sentry_tid);
-        sys_handle.try_spawn_ball_with_meta(
-            sball,
-            scs,
-            SlimItemMeta {
-                group_id: sentry_sde.map(|t| t.group_id).unwrap_or(383),
-                category_id: sentry_sde.map(|t| t.category_id).unwrap_or(11),
-                ..Default::default()
-            },
-        );
+        let sentry_meta = build_wh_npc_slim_meta(&ctx.sde, sentry_tid, 500_005, 383);
+        sys_handle.try_spawn_ball_with_meta(sball, scs, sentry_meta);
         ctx.combat_ephemeral
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -1009,6 +1042,38 @@ pub fn process_wormhole_sites_on_downtime(ctx: &ServerContext) -> usize {
                         true
                     }
                 });
+            }
+            if !removed.is_empty() {
+                let mut relay_extra_balls: HashMap<(SolarSystemId, String), Vec<i64>> =
+                    HashMap::new();
+                reg.active_relays.retain(|_, relay| {
+                    let belongs = removed.iter().any(|(rsys, rsite_id, _, _, _)| {
+                        *rsys == relay.solar_system_id && rsite_id == &relay.site_id
+                    });
+                    if belongs {
+                        let entry = relay_extra_balls
+                            .entry((relay.solar_system_id, relay.site_id.clone()))
+                            .or_default();
+                        entry.push(relay.relay_ball_id);
+                        if let Some(dbid) = relay.spawned_drifter_ball_id {
+                            entry.push(dbid);
+                        }
+                    }
+                    !belongs
+                });
+                for (rsys, rsite_id, _, ball_ids, _) in &mut removed {
+                    if let Some(extra) = relay_extra_balls.remove(&(*rsys, rsite_id.clone())) {
+                        for bid in extra {
+                            if !ball_ids.contains(&bid) {
+                                ball_ids.push(bid);
+                            }
+                        }
+                    }
+                    for &bid in ball_ids.iter() {
+                        reg.sentry_last_fire_unix.remove(&bid);
+                        reg.sentry_last_fire_sim_s.remove(&bid);
+                    }
+                }
             }
             removed
         });

@@ -50,6 +50,212 @@ fn fsd_localized_challenge_texts(
     })
 }
 
+/// V24 UI metadata fields for `seasons.common.challenge.Challenge` extracted from `challenges.fsdbinary`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ChallengeUiMeta {
+    pub event_type: String,
+    pub challenge_category: String,
+    pub challenge_security: String,
+    pub display_name_id: i64,
+    pub message_text_id: i64,
+    pub progress_text_id: i64,
+    pub expiration_time_minutes: i64,
+    pub isk_awarded: i64,
+    pub next_challenge: Option<i64>,
+    pub is_chained: bool,
+    pub is_coop: bool,
+    pub should_be_active_on_season_start: bool,
+    pub should_not_expire_at_downtime: bool,
+    pub should_only_appear_once_per_season: bool,
+    pub reward_type_soul_bound: bool,
+}
+
+/// Cached `challenge_id -> ChallengeUiMeta` decoded from `res:/staticdata/challenges.fsdbinary`.
+pub(crate) fn fsd_challenge_ui_meta(sde: &SdeRegistry) -> &'static HashMap<i64, ChallengeUiMeta> {
+    static META_MAP: OnceLock<HashMap<i64, ChallengeUiMeta>> = OnceLock::new();
+    META_MAP.get_or_init(|| {
+        let mut out = HashMap::new();
+        if let Ok(raw) = sde.challenges() {
+            for (k, v) in raw {
+                let Ok(cid) = k.parse::<i64>() else {
+                    continue;
+                };
+                let is_truthy = |field: &str| {
+                    v.get(field)
+                        .and_then(|x| x.as_bool().or_else(|| x.as_i64().map(|n| n != 0)))
+                        .unwrap_or(false)
+                };
+                let reward_soul_bound = v
+                    .get("reward")
+                    .and_then(|r| r.get("reward_type_soul_bound"))
+                    .and_then(|x| x.as_bool().or_else(|| x.as_i64().map(|n| n != 0)))
+                    .unwrap_or(false);
+                out.insert(
+                    cid,
+                    ChallengeUiMeta {
+                        event_type: v
+                            .get("achievement_event_type")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        challenge_category: v
+                            .get("challenge_category")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("PvE")
+                            .to_string(),
+                        challenge_security: v
+                            .get("challenge_security")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        display_name_id: v.get("display_name_id").and_then(|n| n.as_i64()).unwrap_or(0),
+                        message_text_id: v.get("message_text_id").and_then(|n| n.as_i64()).unwrap_or(0),
+                        progress_text_id: v.get("progress_text_id").and_then(|n| n.as_i64()).unwrap_or(0),
+                        expiration_time_minutes: v
+                            .get("expiration_time_minutes")
+                            .and_then(|n| n.as_i64())
+                            .unwrap_or(0),
+                        isk_awarded: v.get("isk_awarded").and_then(|n| n.as_i64()).unwrap_or(0),
+                        next_challenge: v
+                            .get("next_challenge")
+                            .and_then(|n| n.as_i64())
+                            .filter(|&n| n > 0),
+                        is_chained: is_truthy("is_chained"),
+                        is_coop: is_truthy("is_coop"),
+                        should_be_active_on_season_start: is_truthy("should_be_active_on_season_start"),
+                        should_not_expire_at_downtime: is_truthy("should_not_expire_at_downtime"),
+                        should_only_appear_once_per_season: is_truthy("should_only_appear_once_per_season"),
+                        reward_type_soul_bound: reward_soul_bound,
+                    },
+                );
+            }
+        }
+        out
+    })
+}
+
+/// Resolves deterministic valid `typeID`s for seasonal goal track icons and reward previews.
+pub(crate) fn resolve_season_reward_type_ids(sde: &SdeRegistry, season_id: i64) -> Vec<u32> {
+    let mut tids = Vec::new();
+    if let Ok(campaigns) = sde.load_cfsd_nested("res:/staticdata/seasonalcampaignsloginrewards.fsdbinary") {
+        if let Some(entry) = campaigns.get(&season_id.to_string()) {
+            for bucket in ["alphaRewards", "omegaRewards"] {
+                if let Some(map) = entry.get(bucket).and_then(|v| v.as_object()) {
+                    let mut keys: Vec<_> = map.keys().collect();
+                    keys.sort_by_key(|k| k.parse::<u64>().unwrap_or(u64::MAX));
+                    for k in keys {
+                        if let Some(tid) = map[k].get("typeID").and_then(|n| n.as_u64()).map(|n| n as u32) {
+                            if tid > 0 && sde.types.contains_key(&tid) && !tids.contains(&tid) {
+                                tids.push(tid);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if tids.is_empty() {
+        for &crate_tid in crate::services::season_fsd::fsd_crate_loot_tables(sde).keys() {
+            if sde.types.contains_key(&crate_tid) && !tids.contains(&crate_tid) {
+                tids.push(crate_tid);
+                if tids.len() >= 10 {
+                    break;
+                }
+            }
+        }
+    }
+    if tids.is_empty() {
+        tids.push(34);
+    }
+    tids
+}
+
+/// Resolves positive `max_seasonal_points` for `season_id` from the season catalog.
+pub(crate) fn resolve_season_max_points(
+    snap: &WorldStateSnapshot,
+    sde: &SdeRegistry,
+    season_id: i64,
+    anchor_ft: i64,
+) -> i64 {
+    let catalog = load_fsd_seasons_catalog_clean(snap, sde, anchor_ft);
+    catalog
+        .get(&season_id)
+        .map(|cfg| cfg.max_season_points.max(10))
+        .unwrap_or(100)
+}
+
+/// Computes `(goal_count, points_step)` for a season's `max_seasonal_points`.
+pub(crate) fn seasonal_goal_schedule(max_seasonal_points: i64) -> (i64, i64) {
+    let max_pts = max_seasonal_points.max(10);
+    if max_pts <= 100 {
+        ((max_pts / 10).max(1), 10_i64)
+    } else {
+        (10_i64, (max_pts / 10).max(10))
+    }
+}
+
+/// Builds a single V24 seasonal goal dictionary entry for `seasonal_goals` and `OnSeasonalGoalCompleted`.
+pub(crate) fn build_seasonal_goal_dict(
+    idx: i64,
+    pts_req: i64,
+    reward_tid: u32,
+    completed: bool,
+    claimed: bool,
+) -> eve_proto::PyRep {
+    use eve_proto::PyRep;
+
+    PyRep::Dict(vec![
+        (PyRep::String("goal_index".into()), PyRep::Integer(idx)),
+        (PyRep::String("points_required".into()), PyRep::Integer(pts_req)),
+        (PyRep::String("reward_type_id".into()), PyRep::Integer(reward_tid as i64)),
+        (PyRep::String("reward_amount".into()), PyRep::Integer(1)),
+        (PyRep::String("omega_only".into()), PyRep::Bool(idx % 2 == 1)),
+        (PyRep::String("completed".into()), PyRep::Bool(completed)),
+        (PyRep::String("claimed".into()), PyRep::Bool(claimed)),
+    ])
+}
+
+/// Builds `(seasonal_goals, next_seasonal_goal, last_seasonal_goal)` for V24 `SeasonService`.
+pub(crate) fn build_seasonal_goals_payload(
+    st: &CharacterSeasonState,
+    max_seasonal_points: i64,
+    reward_type_ids: &[u32],
+) -> (eve_proto::PyRep, eve_proto::PyRep, eve_proto::PyRep) {
+    use eve_proto::PyRep;
+
+    let max_pts = max_seasonal_points.max(10);
+    let (goal_count, step) = seasonal_goal_schedule(max_pts);
+    let mut goal_entries = Vec::with_capacity(goal_count as usize);
+    let mut next_goal: Option<PyRep> = None;
+    let mut last_goal: Option<PyRep> = None;
+
+    for idx in 0..goal_count {
+        let pts_req = if idx + 1 == goal_count {
+            max_pts
+        } else {
+            (idx + 1) * step
+        };
+        let reward_tid = if reward_type_ids.is_empty() {
+            34
+        } else {
+            reward_type_ids[(idx as usize) % reward_type_ids.len()]
+        };
+        let completed = st.season_points >= pts_req;
+        let goal_dict = build_seasonal_goal_dict(idx, pts_req, reward_tid, completed, false);
+        if !completed && next_goal.is_none() {
+            next_goal = Some(goal_dict.clone());
+        }
+        last_goal = Some(goal_dict.clone());
+        goal_entries.push((PyRep::Integer(idx), goal_dict));
+    }
+
+    (
+        PyRep::Dict(goal_entries),
+        next_goal.unwrap_or(PyRep::None),
+        last_goal.unwrap_or(PyRep::None),
+    )
+}
+
 /// Apply authentic English localization strings from `localization_fsd_en-us.pickle` to a
 /// `SeasonalChallengeDef`, replacing any unresolved `Category #id (msg:...)` placeholders.
 pub fn localize_challenge_def(def: &mut SeasonalChallengeDef, sde: &SdeRegistry) {
@@ -135,7 +341,8 @@ pub fn load_fsd_seasons_catalog_clean(
         .load_cfsd_nested("res:/staticdata/seasonselection.fsdbinary")
         .unwrap_or_default();
     let nav_path = sel
-        .get("navigationCardPicturePath")
+        .get("navigation_card_picture_path")
+        .or_else(|| sel.get("navigationCardPicturePath"))
         .and_then(|v| v.as_str())
         .unwrap_or("res:/UI/Texture/classes/seasons/agency/seasonSelectionCard.png")
         .to_string();
@@ -242,6 +449,10 @@ pub fn load_fsd_seasons_catalog_clean(
 
     if let Some(cfg) = &snap.seasons_and_campaigns.season_configuration {
         apply_season_override(&mut out, cfg);
+    }
+    let multi = out.len() > 1;
+    for cfg in out.values_mut() {
+        cfg.multiple_season_running = multi;
     }
     out
 }
@@ -397,6 +608,12 @@ pub fn fill_and_normalize_character_challenges(
                 && (ch.description.is_empty() || ch.description.starts_with("msg:"))
             {
                 ch.description = def.description.clone();
+            }
+            if ch.points == 0 && def.points > 0 {
+                ch.points = def.points;
+            }
+            if ch.expiration_date <= 0 {
+                ch.expiration_date = compute_challenge_expiration_ft(def, now_ft, season_end_ft);
             }
         }
     }

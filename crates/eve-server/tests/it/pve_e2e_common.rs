@@ -196,6 +196,7 @@ pub fn kv_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
         PyRep::Dict(entries) => entries.iter().find(|(k, _)| k.as_str() == Some(key)).map(|(_, v)| v),
         PyRep::Object { args, .. } => kv_get(args, key),
         PyRep::SubStruct(inner) | PyRep::SubStream(inner) => kv_get(inner, key),
+        PyRep::ObjectEx { .. } => rep.dict_get(key),
         _ => None,
     }
 }

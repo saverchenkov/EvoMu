@@ -12,7 +12,7 @@
 
 use glam::DVec3;
 use eve_db::CosmicSignatureRecord;
-use eve_destiny::{Ball, MovementMode};
+use eve_destiny::{Ball, MovementMode, SlimItemMeta};
 use eve_proto::BridgeRpcError;
 use crate::router::ServerContext;
 use super::space_docking_cloaking::{make_wh_sig, pick_system_celestial_position, wormhole_exit_item_id_for_signature};
@@ -379,10 +379,11 @@ pub async fn ensure_pochven_side_guards(
                 gid,
                 npc_tid,
                 archetype,
-                888_001,
+                0,
                 g_pos,
             );
-        if let Some(sde_t) = ctx.sde.types.get(&npc_tid) {
+        let sde_t = ctx.sde.types.get(&npc_tid);
+        if let Some(sde_t) = sde_t {
             if sde_t.mass > 0.0 {
                 ball.mass = sde_t.mass;
             }
@@ -390,14 +391,35 @@ pub async fn ensure_pochven_side_guards(
                 ball.radius = sde_t.radius;
             }
             if sde_t.faction_id.is_none() {
-                entity.faction_id = if npc_tid == 48_087 || npc_tid == 48_092 {
-                    500_026
-                } else {
-                    500_024
+                entity.faction_id = match npc_tid {
+                    48_087 | 48_092 => 500_026,
+                    47_876 => 500_025,
+                    48_245 => 500_005,
+                    _ => 500_024,
                 };
             }
         }
-        let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
+        let fac_owner: i64 = if entity.faction_id > 0 {
+            entity.faction_id as i64
+        } else {
+            500_024
+        };
+        let guard_meta = SlimItemMeta {
+            group_id: sde_t.map(|t| t.group_id).unwrap_or(0),
+            category_id: sde_t.map(|t| t.category_id).unwrap_or(11),
+            owner_id: fac_owner,
+            char_id: None,
+            corp_id: crate::services::combat_crimewatch::combat_npc_ai::resolve_npc_corp_id_for_sde_faction(
+                &ctx.sde,
+                fac_owner,
+            ),
+            alliance_id: -1,
+            security_status: -1.0,
+            is_cloaked: false,
+            name: sde_t.map(|t| t.name.clone()).filter(|n| !n.is_empty()),
+            ..Default::default()
+        };
+        let _ = sys_handle.spawn_ball_with_meta(ball, cs, guard_meta).await;
         crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
             rt.npc_entities.insert(gid, entity);
         });
@@ -411,8 +433,11 @@ pub async fn open_pochven_wormhole_and_spawn_guards(
     sig: &CosmicSignatureRecord,
     wh_item_id: i64,
 ) -> (DVec3, Vec<i64>) {
-    let is_pochven_side = ctx.sde.solar_systems.get(&sys_id).map(|s| s.region_id) == Some(10_000_070);
     let wh_pos = pochven_wormhole_ball_position(&ctx.sde, sig);
+    if sig.collapsed {
+        return (wh_pos, Vec::new());
+    }
+    let is_pochven_side = ctx.sde.solar_systems.get(&sys_id).map(|s| s.region_id) == Some(10_000_070);
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     if sys_handle
         .get_ball_snapshot(wh_item_id)

@@ -537,3 +537,339 @@ fn season_config_keyval_emits_v24_agency_selection_and_service_fields() {
     );
     assert_v24_season_keyval_contract(&selected, Some(583_333), Some(583_335));
 }
+
+#[test]
+fn r11_k12_challenge_keyval_completed_event_noop_and_progress_fields() {
+    let ctx = test_ctx();
+    let cid = 970_199_i64;
+    let kw = HashMap::new();
+    let mut sess = season_session(cid, false);
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let uid = ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().unwrap().clone();
+        ch.character_id = cid;
+        snap.characters.insert(cid, ch.clone());
+        ch.user_id
+    });
+    let _ = ctx
+        .db
+        .acquire_online_lock(uid, 1, Some(cid), true, ctx.now_unix());
+
+    let ch = default_challenge(9_110_001, 1, now_ft);
+    let kv = challenge_to_keyval(&ch, 250);
+    assert_eq!(kv.dict_get("challenge_id").and_then(|v| v.as_i64()), Some(9_110_001));
+    assert_eq!(kv.dict_get("season_id").and_then(|v| v.as_i64()), Some(1));
+    assert_eq!(kv.dict_get("season_points").and_then(|v| v.as_i64()), Some(250));
+    assert_eq!(kv.dict_get("max_progress").and_then(|v| v.as_i64()), kv.dict_get("maxProgress").and_then(|v| v.as_i64()));
+    assert_eq!(kv.dict_get("is_dormant").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(kv.dict_get("expiration_date").and_then(|v| v.as_i64()), kv.dict_get("expirationDate").and_then(|v| v.as_i64()));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.seasons_and_campaigns.challenge_definitions = vec![eve_db::SeasonalChallengeDef {
+            challenge_id: 9_110_001,
+            season_id: 1,
+            event_type: "client_r11_test_event".into(),
+            title: "R11 Test Challenge".into(),
+            description: "Complete once".into(),
+            points: 45,
+            max_progress: 1,
+            client_event_driven: true,
+            expiration_time_minutes: 60,
+            ..Default::default()
+        }];
+        let mut st = CharacterSeasonState::default();
+        st.selected_season_id = 1;
+        let mut c = default_challenge(9_110_001, 1, now_ft);
+        c.points = 45;
+        c.max_progress = 1;
+        st.challenges.insert(9_110_001, c);
+        save_season_state_to_blobs(snap, cid, &st);
+    });
+
+    let _ = ctx.drain_notifications_for_char(cid);
+    handle_season_manager(
+        &ctx,
+        &mut sess,
+        "seasonManager",
+        "process_client_event",
+        &[PyRep::Integer(9_110_001)],
+        &kw,
+    )
+    .unwrap()
+    .expect("first completion");
+    let first_notices = ctx.drain_notifications_for_char(cid);
+    assert!(first_notices.iter().any(|n| n.event == "OnChallengeProgressUpdate"));
+    assert!(first_notices.iter().any(|n| n.event == "OnChallengeCompleted"));
+
+    // Subsequent events against an already-completed challenge must not emit duplicate progress updates
+    handle_season_manager(
+        &ctx,
+        &mut sess,
+        "seasonManager",
+        "process_client_event",
+        &[PyRep::Integer(9_110_001)],
+        &kw,
+    )
+    .unwrap()
+    .expect("idempotent by id");
+    handle_season_manager(
+        &ctx,
+        &mut sess,
+        "seasonManager",
+        "process_client_event",
+        &[PyRep::String("client_r11_test_event".into())],
+        &kw,
+    )
+    .unwrap()
+    .expect("idempotent by event name");
+    let dup_notices = ctx.drain_notifications_for_char(cid);
+    assert!(
+        !dup_notices.iter().any(|n| n.event == "OnChallengeProgressUpdate"),
+        "expected no duplicate OnChallengeProgressUpdate, got {dup_notices:?}"
+    );
+
+    handle_season_manager(
+        &ctx,
+        &mut sess,
+        "seasonManager",
+        "claim_challenge_rewards",
+        &[PyRep::Integer(9_110_001)],
+        &kw,
+    )
+    .unwrap()
+    .expect("claim challenge");
+
+    let prog = handle_season_manager(
+        &ctx,
+        &mut sess,
+        "seasonManager",
+        "get_character_progress_by_character_id",
+        &[],
+        &kw,
+    )
+    .unwrap()
+    .expect("progress keyval");
+    assert_eq!(prog.dict_get("character_id").and_then(|v| v.as_i64()), Some(cid));
+    assert_eq!(prog.dict_get("seasonal_points").and_then(|v| v.as_i64()), Some(45));
+    assert_eq!(prog.dict_get("claimedRewards").and_then(|v| v.as_i64()), Some(1));
+    assert_eq!(prog.dict_get("current_reward_index").and_then(|v| v.as_i64()), Some(1));
+    let goal_notifs = ctx.drain_notifications_for_char(cid);
+    let goal_completed = goal_notifs
+        .iter()
+        .find(|n| n.event == "OnSeasonalGoalCompleted")
+        .expect("OnSeasonalGoalCompleted emitted");
+    assert!(matches!(goal_completed.args[1].dict_get("omega_only"), Some(PyRep::Bool(_))));
+    assert!(
+        goal_completed.args[1]
+            .dict_get("reward_type_id")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            > 0
+    );
+}
+
+fn assert_v24_character_progress_payload(
+    cp: &PyRep,
+    expected_char_id: i64,
+    expected_season_id: i64,
+    expected_points: i64,
+    expected_max_points: i64,
+) {
+    assert_eq!(cp.dict_get("character_id").and_then(|v| v.as_i64()), Some(expected_char_id));
+    assert_eq!(cp.dict_get("characterID").and_then(|v| v.as_i64()), Some(expected_char_id));
+    assert_eq!(cp.dict_get("season_id").and_then(|v| v.as_i64()), Some(expected_season_id));
+    assert_eq!(cp.dict_get("seasonID").and_then(|v| v.as_i64()), Some(expected_season_id));
+    // #1044: seasonal_points and max_seasonal_points (> 0)
+    assert_eq!(cp.dict_get("seasonal_points").and_then(|v| v.as_i64()), Some(expected_points));
+    assert_eq!(cp.dict_get("season_points").and_then(|v| v.as_i64()), Some(expected_points));
+    assert_eq!(cp.dict_get("total_points").and_then(|v| v.as_i64()), Some(expected_points));
+    assert_eq!(cp.dict_get("seasonPoints").and_then(|v| v.as_i64()), Some(expected_points));
+    assert_eq!(
+        cp.dict_get("max_seasonal_points").and_then(|v| v.as_i64()),
+        Some(expected_max_points)
+    );
+
+    // #1043: seasonal_goals Dict with goal entries + next_seasonal_goal / last_seasonal_goal
+    let Some(PyRep::Dict(goals)) = cp.dict_get("seasonal_goals") else {
+        panic!("character_progress.seasonal_goals must be PyRep::Dict, got {:?}", cp.dict_get("seasonal_goals"));
+    };
+    assert!(!goals.is_empty(), "seasonal_goals must not be empty");
+    for (idx, (k, goal)) in goals.iter().enumerate() {
+        assert_eq!(k.as_i64(), Some(idx as i64));
+        assert!(matches!(goal, PyRep::Dict(_)), "each seasonal goal must be a PyRep::Dict");
+        let req_pts = goal.dict_get("points_required").and_then(|v| v.as_i64()).expect("points_required");
+        assert!(req_pts > 0);
+        assert!(goal.dict_get("reward_type_id").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+        assert!(goal.dict_get("reward_amount").and_then(|v| v.as_i64()).unwrap_or(0) >= 1);
+        assert!(matches!(goal.dict_get("omega_only"), Some(PyRep::Bool(_))));
+        assert_eq!(goal.dict_get("completed"), Some(&PyRep::Bool(expected_points >= req_pts)));
+        assert_eq!(goal.dict_get("claimed"), Some(&PyRep::Bool(false)));
+    }
+    if expected_points >= expected_max_points {
+        assert_eq!(cp.dict_get("next_seasonal_goal"), Some(&PyRep::None));
+    } else {
+        assert!(matches!(cp.dict_get("next_seasonal_goal"), Some(PyRep::Dict(_))));
+    }
+    assert!(matches!(cp.dict_get("last_seasonal_goal"), Some(PyRep::Dict(_))));
+
+    // challenges must be a Dict of seasons.common.challenge.Challenge ObjectEx2 instances
+    let Some(PyRep::Dict(ch_entries)) = cp.dict_get("challenges") else {
+        panic!("character_progress.challenges must be PyRep::Dict, got {:?}", cp.dict_get("challenges"));
+    };
+    for (k, v) in ch_entries {
+        let Some(cid) = k.as_i64() else {
+            panic!("challenge dict key must be Integer, got {k:?}");
+        };
+        assert_eq!(v.dict_get("challenge_id").and_then(|x| x.as_i64()), Some(cid));
+        assert_eq!(v.dict_get("challenge_id").and_then(|x| x.as_i64()), Some(cid));
+        assert_eq!(v.dict_get("challengeID").and_then(|x| x.as_i64()), Some(cid));
+        assert_eq!(v.dict_get("character_id").and_then(|x| x.as_i64()), Some(expected_char_id));
+        assert!(v.dict_get("is_dormant").and_then(|x| x.as_bool()).is_some());
+        assert!(v.dict_get("is_expired").and_then(|x| x.as_bool()).is_some());
+        assert!(v.dict_get("points_awarded").and_then(|x| x.as_i64()).is_some());
+        assert!(v.dict_get("max_progress").and_then(|x| x.as_i64()).unwrap_or(0) >= 1);
+        let PyRep::ObjectEx { is_type_2: true, header, .. } = v else {
+            panic!("challenge entry must be PyRep::ObjectEx2 for seasons.common.challenge.Challenge, got {v:?}");
+        };
+        let PyRep::Tuple(parts) = header.as_ref() else {
+            panic!("Challenge ObjectEx header must be Tuple");
+        };
+        assert_eq!(
+            parts.first(),
+            Some(&PyRep::Tuple(vec![PyRep::Token("seasons.common.challenge.Challenge".into())]))
+        );
+    }
+}
+
+#[test]
+fn r11_k12_issues_1043_1044_1045_1046_select_season_and_character_progress_fields() {
+    let ctx = test_ctx();
+    let cid = 970_243_i64;
+    let kw = HashMap::new();
+    let mut sess = season_session(cid, false);
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let uid = ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().unwrap().clone();
+        ch.character_id = cid;
+        snap.characters.insert(cid, ch.clone());
+        ch.user_id
+    });
+    let _ = ctx
+        .db
+        .acquire_online_lock(uid, 1, Some(cid), true, ctx.now_unix());
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.seasons_and_campaigns.seasons_catalog.insert(
+            2211,
+            eve_db::SeasonConfig {
+                season_id: 2211,
+                template_id: 2211,
+                max_active_challenges: 4,
+                max_season_points: 100,
+                season_name: "Issue 1043/1044/1045/1046 Season".into(),
+                start_time_ft: now_ft - 3_600 * 10_000_000,
+                end_time_ft: now_ft + 7 * 86_400 * 10_000_000,
+                ..Default::default()
+            },
+        );
+        let mut st = CharacterSeasonState::default();
+        st.season_points = 25;
+        let mut incomplete_ch = default_challenge(9_221_101, 2211, now_ft);
+        incomplete_ch.points = 15;
+        incomplete_ch.max_progress = 3;
+        st.challenges.insert(9_221_101, incomplete_ch);
+
+        let mut completed_ch = default_challenge(9_221_102, 2211, now_ft);
+        completed_ch.points = 20;
+        completed_ch.progress = 1;
+        completed_ch.max_progress = 1;
+        completed_ch.completed = true;
+        completed_ch.claimed = false;
+        st.challenges.insert(9_221_102, completed_ch);
+        save_season_state_to_blobs(snap, cid, &st);
+    });
+
+    // Login path before select_season (#1045 challenges Dict + #1046 character_id + #1043/#1044)
+    let login_prog = handle_season_manager(
+        &ctx,
+        &mut sess,
+        "seasonManager",
+        "get_character_progress_by_character_id",
+        &[],
+        &kw,
+    )
+    .unwrap()
+    .expect("get_character_progress_by_character_id on login");
+    assert_v24_character_progress_payload(&login_prog, cid, 2211, 25, 100);
+
+    let _ = ctx.drain_notifications_for_char(cid);
+    let sel = handle_season_manager(
+        &ctx,
+        &mut sess,
+        "seasonManager",
+        "select_season",
+        &[PyRep::Integer(2211)],
+        &kw,
+    )
+    .unwrap()
+    .expect("select_season 2211");
+    assert_eq!(sel, PyRep::Bool(true));
+
+    let notifs = ctx.drain_notifications_for_char(cid);
+    let on_sel = notifs
+        .iter()
+        .find(|n| n.event == "OnSeasonSelected")
+        .expect("OnSeasonSelected emitted");
+    assert_eq!(on_sel.args.len(), 3);
+    assert_v24_character_progress_payload(&on_sel.args[2], cid, 2211, 25, 100);
+
+    // Completed & unclaimed challenge must carry non-None reward_date and None finish_date
+    // so V24 Challenge.has_unclaimed_completion_rewards() evaluates True without KeyVal AttributeError.
+    let sel_challenges = on_sel.args[2].dict_get("challenges").unwrap();
+    let PyRep::Dict(sel_ch_map) = sel_challenges else { panic!("expected challenges Dict") };
+    let ch_unclaimed = sel_ch_map
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(9_221_102))
+        .map(|(_, v)| v)
+        .expect("completed challenge 9_221_102");
+    assert_ne!(ch_unclaimed.dict_get("reward_date"), Some(&PyRep::None));
+    assert_eq!(ch_unclaimed.dict_get("finish_date"), Some(&PyRep::None));
+    assert_eq!(ch_unclaimed.dict_get("points_awarded").and_then(|v| v.as_i64()), Some(20));
+
+    // get_character_progress_by_character_id must return the same V24 Dict + goal structure
+    let prog = handle_season_manager(
+        &ctx,
+        &mut sess,
+        "seasonManager",
+        "get_character_progress_by_character_id",
+        &[],
+        &kw,
+    )
+    .unwrap()
+    .expect("get_character_progress_by_character_id");
+    assert_v24_character_progress_payload(&prog, cid, 2211, 25, 100);
+
+    // Next goal with 25 points (on 10-pt steps) is points_required=30; when >= 100 next_seasonal_goal is None
+    assert_eq!(
+        prog.dict_get("next_seasonal_goal")
+            .and_then(|g| g.dict_get("points_required"))
+            .and_then(|v| v.as_i64()),
+        Some(30)
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st = load_season_state_from_blobs(snap, cid);
+        st.season_points = 100;
+        save_season_state_to_blobs(snap, cid, &st);
+    });
+    let prog_full = handle_season_manager(
+        &ctx,
+        &mut sess,
+        "seasonManager",
+        "get_character_progress_by_character_id",
+        &[],
+        &kw,
+    )
+    .unwrap()
+    .expect("get_character_progress_by_character_id full");
+    assert_v24_character_progress_payload(&prog_full, cid, 2211, 100, 100);
+}
