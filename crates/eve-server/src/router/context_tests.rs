@@ -573,6 +573,190 @@ fn advance_skill_queues_emits_server_skills_changed_and_queue_saved_and_advance_
     });
 }
 
+#[test]
+fn synthetic_clock_jump_partial_skill_progress_pushes_aligned_notifications_without_tick_spam() {
+    let ctx = test_ctx();
+    let base_now = 1_800_000_000_u64;
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(base_now)));
+    let char_id = 90_000_001_i64;
+    let short_skill_tid = 3392_u32;
+    let long_skill_tid = 3402_u32;
+
+    ctx.db
+        .acquire_online_lock(1, 502, Some(char_id), true, base_now)
+        .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 2;
+            ch.skill_points = 45_255.0;
+        }
+        snap.paused_skill_queues.remove(&char_id);
+        snap.skills.entry(char_id).or_default().insert(
+            long_skill_tid,
+            TrainedSkillRecord {
+                type_id: long_skill_tid,
+                level: 4,
+                skill_points: 45_255.0,
+            },
+        );
+        snap.skill_queues.insert(
+            char_id,
+            vec![eve_db::SkillQueueEntry {
+                type_id: long_skill_tid,
+                target_level: 5,
+                start_sp: 45_255.0,
+                end_sp: 256_000.0,
+                duration_seconds: 500_000.0,
+                started_at_unix: Some(base_now),
+            }],
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // Non-synthetic clock tick (`is_synthetic_jump == false`) must NOT emit partial SP notifications.
+    ctx.clock().advance_secs(5);
+    ctx.advance_skill_queues_for_clock(base_now, 5.0, false);
+    let tick_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        !tick_notifs
+            .iter()
+            .any(|n| n.event == "OnServerSkillsChanged" || n.event == "OnNewSkillQueueSaved"),
+        "1s wall/sim ticks must not spam partial skill notifications"
+    );
+
+    // Synthetic jump (`advance_secs_without_sim_clock_rebase`) with NO completion MUST push both
+    // `OnServerSkillsChanged` and client-wallclock-aligned `OnNewSkillQueueSaved` (#1066).
+    let sp_before = ctx
+        .db
+        .with_snapshot(|s| s.skills[&char_id][&long_skill_tid].skill_points);
+    let jump_secs = 86_400_u64;
+    ctx.advance_secs_without_sim_clock_rebase(jump_secs);
+    let jump_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        !jump_notifs
+            .iter()
+            .any(|n| n.event == "OnSkillTrained" || n.event == "DoSimClockRebase"),
+        "partial /advancetime jump must not emit OnSkillTrained or DoSimClockRebase"
+    );
+    let skills_changed = jump_notifs
+        .iter()
+        .filter(|n| n.event == "OnServerSkillsChanged")
+        .collect::<Vec<_>>();
+    assert_eq!(skills_changed.len(), 1, "exactly one OnServerSkillsChanged");
+    assert_eq!(skills_changed[0].args.get(1), Some(&PyRep::None));
+    let PyRep::Dict(ref skill_map) = skills_changed[0].args[0] else {
+        panic!("OnServerSkillsChanged arg0 must be Dict");
+    };
+    let pushed_sp = skill_map
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(i64::from(long_skill_tid)))
+        .and_then(|(_, v)| v.dict_get("trainedSkillPoints"))
+        .and_then(|v| v.as_f64())
+        .expect("updated trainedSkillPoints in OnServerSkillsChanged");
+    assert!(
+        pushed_sp > sp_before,
+        "pushed SP {pushed_sp} must exceed pre-jump SP {sp_before}"
+    );
+
+    let queue_saved = jump_notifs
+        .iter()
+        .filter(|n| n.event == "OnNewSkillQueueSaved")
+        .collect::<Vec<_>>();
+    assert_eq!(queue_saved.len(), 1, "exactly one OnNewSkillQueueSaved");
+    let PyRep::List(ref q_entries) = queue_saved[0].args[0] else {
+        panic!("OnNewSkillQueueSaved arg0 must be List");
+    };
+    assert_eq!(q_entries.len(), 1);
+    let head = &q_entries[0];
+    let start_ft = head
+        .dict_get("trainingStartTime")
+        .and_then(|v| v.as_i64())
+        .expect("trainingStartTime");
+    let end_ft = head
+        .dict_get("trainingEndTime")
+        .and_then(|v| v.as_i64())
+        .expect("trainingEndTime");
+    let dur_secs = head
+        .dict_get("durationSeconds")
+        .and_then(|v| v.as_f64())
+        .expect("durationSeconds");
+    let expected_client_now_ft = ctx.now_machonet_wallclock_filetime_ticks();
+    assert_eq!(
+        start_ft, expected_client_now_ft,
+        "trainingStartTime must stay anchored to client wallclock baseline across /advancetime"
+    );
+    let expected_end_ft = start_ft + (dur_secs * 10_000_000.0) as i64;
+    assert_eq!(end_ft, expected_end_ft);
+
+    // Mixed completion + partial advance in a single synthetic jump emits ONE notification pair
+    // covering both skills without duplicate notifications.
+    let now2 = ctx.now_unix_secs();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().remove(&short_skill_tid);
+        let cur_long_sp = snap.skills[&char_id][&long_skill_tid].skill_points;
+        snap.skill_queues.insert(
+            char_id,
+            vec![
+                eve_db::SkillQueueEntry {
+                    type_id: short_skill_tid,
+                    target_level: 1,
+                    start_sp: 0.0,
+                    end_sp: 250.0,
+                    duration_seconds: 500.0,
+                    started_at_unix: Some(now2),
+                },
+                eve_db::SkillQueueEntry {
+                    type_id: long_skill_tid,
+                    target_level: 5,
+                    start_sp: cur_long_sp,
+                    end_sp: 256_000.0,
+                    duration_seconds: 400_000.0,
+                    started_at_unix: None,
+                },
+            ],
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+    ctx.advance_secs_without_sim_clock_rebase(3_600);
+    let mixed_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(
+        mixed_notifs
+            .iter()
+            .filter(|n| n.event == "OnSkillTrained")
+            .count(),
+        1
+    );
+    let mixed_skills = mixed_notifs
+        .iter()
+        .filter(|n| n.event == "OnServerSkillsChanged")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        mixed_skills.len(),
+        1,
+        "mixed completion+partial jump must emit one OnServerSkillsChanged"
+    );
+    let PyRep::Dict(ref mixed_map) = mixed_skills[0].args[0] else {
+        panic!("OnServerSkillsChanged arg0 must be Dict");
+    };
+    assert!(
+        mixed_map
+            .iter()
+            .any(|(k, _)| k.as_i64() == Some(i64::from(short_skill_tid)))
+            && mixed_map
+                .iter()
+                .any(|(k, _)| k.as_i64() == Some(i64::from(long_skill_tid))),
+        "OnServerSkillsChanged must include both completed and partially-trained skills"
+    );
+    assert_eq!(
+        mixed_notifs
+            .iter()
+            .filter(|n| n.event == "OnNewSkillQueueSaved")
+            .count(),
+        1,
+        "mixed completion+partial jump must emit one OnNewSkillQueueSaved"
+    );
+}
+
 #[tokio::test]
 async fn unified_clock_tick_pipeline_syncs_ballpark_stats_and_preserves_ice_belts() {
     let ctx = test_ctx();

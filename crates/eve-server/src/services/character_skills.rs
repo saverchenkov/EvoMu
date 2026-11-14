@@ -440,6 +440,7 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             catch_up_skill_queue(ctx, char_id);
+            let unrebased_offset = ctx.unrebased_clock_offset_secs();
             let end_ft = ctx.db.with_snapshot(|snap| {
                 if snap.paused_skill_queues.contains(&char_id) {
                     return None;
@@ -450,7 +451,8 @@ pub fn handle(
                 let elapsed = ctx.now_unix().saturating_sub(base_unix) as f64;
                 let head_rem = (head.duration_seconds - elapsed).max(0.0);
                 let tail_secs: f64 = q.iter().skip(1).map(|e| e.duration_seconds.max(0.0)).sum();
-                let base_ft = (base_unix as i64 * 10_000_000) + 116_444_736_000_000_000;
+                let client_base_unix = base_unix.saturating_sub(unrebased_offset);
+                let base_ft = (client_base_unix as i64 * 10_000_000) + 116_444_736_000_000_000;
                 let end_ticks = base_ft + ((elapsed + head_rem + tail_secs) * 10_000_000.0) as i64;
                 Some(end_ticks)
             });

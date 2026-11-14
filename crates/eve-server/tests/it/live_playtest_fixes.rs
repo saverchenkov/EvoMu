@@ -1103,3 +1103,221 @@ async fn test_live_playtest_upwell_1055_1056_1057_1059_wire_ratcheted() {
     assert_eq!(row[7], PyRep::Real(st_pos[0]));
     let _ = now;
 }
+
+#[tokio::test]
+async fn test_1066_advancetime_partial_skill_training_pushes_notifications_and_aligned_queue_times() {
+    use eve_db::{TrainedSkillRecord, VirtualServerClock};
+    use eve_testkit::client_harness::ContractValidationMode;
+    use std::sync::Arc;
+
+    let ctx = Arc::new(ServerContext::new());
+    let base_unix = 1_800_000_000_u64;
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(base_unix)));
+    let char_id: i64 = 90_000_003;
+    let skill_tid: u32 = 3402;
+    ctx.db
+        .provision_gm_account("gm_1066", "gm-1066-secret", char_id, "GM 1066");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 2;
+            ch.skill_points = 45_255.0;
+        }
+        snap.paused_skill_queues.remove(&char_id);
+        snap.skills.entry(char_id).or_default().insert(
+            skill_tid,
+            TrainedSkillRecord {
+                type_id: skill_tid,
+                level: 4,
+                skill_points: 45_255.0,
+            },
+        );
+    });
+
+    let kw = HashMap::new();
+    let mut harness = crate::common::new_wire_harness(&ctx, 106_601)
+        .with_mode(ContractValidationMode::Ratcheted);
+    harness
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[
+                PyRep::String("gm_1066".into()),
+                PyRep::String("gm-1066-secret".into()),
+            ],
+            &kw,
+        )
+        .await;
+    harness
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_id)],
+            &kw,
+        )
+        .await;
+
+    harness
+        .call_ok(
+            "skillMgr2",
+            None,
+            "SaveSkillQueue",
+            &[PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(i64::from(skill_tid)),
+                PyRep::Integer(5),
+            ])])],
+            &kw,
+        )
+        .await;
+    let _ = harness.drain_notifications();
+
+    let client_wall_ft = harness
+        .call_ok("machoNet", None, "GetTime", &[], &kw)
+        .await
+        .as_i64()
+        .expect("initial machoNet.GetTime");
+    let initial_queue = harness
+        .call_ok("skillMgr2", None, "GetSkillQueue", &[], &kw)
+        .await;
+    let PyRep::List(ref init_entries) = initial_queue else {
+        panic!("GetSkillQueue must return List, got {initial_queue:?}");
+    };
+    assert_eq!(init_entries.len(), 1);
+    let init_dur = init_entries[0]
+        .dict_get("durationSeconds")
+        .and_then(|v| v.as_f64())
+        .expect("initial durationSeconds");
+    let init_end_ft = init_entries[0]
+        .dict_get("trainingEndTime")
+        .and_then(|v| v.as_i64())
+        .expect("initial trainingEndTime");
+    let init_eot = harness
+        .call_ok("skillMgr2", None, "GetEndOfTraining", &[], &kw)
+        .await
+        .as_i64()
+        .expect("initial GetEndOfTraining");
+    assert_eq!(init_eot, init_end_ft);
+
+    // Run `/advancetime 3600` followed by `/advancetime 86400` (+25h total, partial on level 5).
+    harness
+        .call_ok(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/advancetime 3600".into())],
+            &kw,
+        )
+        .await;
+    let adv_notifs_1 = harness.drain_notifications();
+    assert!(
+        adv_notifs_1
+            .iter()
+            .any(|(ev, _)| ev == "OnServerSkillsChanged"),
+        "/advancetime 3600 must push OnServerSkillsChanged for partial training"
+    );
+    assert!(
+        adv_notifs_1
+            .iter()
+            .any(|(ev, _)| ev == "OnNewSkillQueueSaved"),
+        "/advancetime 3600 must push OnNewSkillQueueSaved for partial training"
+    );
+
+    harness
+        .call_ok(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/advancetime 86400".into())],
+            &kw,
+        )
+        .await;
+    let adv_notifs_2 = harness.drain_notifications();
+    assert!(
+        !adv_notifs_2
+            .iter()
+            .any(|(ev, _)| ev == "OnSkillTrained" || ev == "DoSimClockRebase"),
+        "partial /advancetime must not emit OnSkillTrained or DoSimClockRebase"
+    );
+
+    let skills_changed_args = adv_notifs_2
+        .iter()
+        .find(|(ev, _)| ev == "OnServerSkillsChanged")
+        .map(|(_, args)| args)
+        .expect("OnServerSkillsChanged emitted on /advancetime 86400");
+    let PyRep::Dict(ref skill_infos) = skills_changed_args[0] else {
+        panic!("OnServerSkillsChanged arg0 must be Dict");
+    };
+    let pushed_sp = skill_infos
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(i64::from(skill_tid)))
+        .and_then(|(_, v)| v.dict_get("trainedSkillPoints"))
+        .and_then(|v| v.as_f64())
+        .expect("trainedSkillPoints in OnServerSkillsChanged");
+    let db_sp = ctx
+        .db
+        .with_snapshot(|s| s.skills[&char_id][&skill_tid].skill_points);
+    assert!(
+        (pushed_sp - db_sp).abs() < 1e-4 && db_sp > 45_255.0,
+        "pushed SP ({pushed_sp}) must match updated DB SP ({db_sp}) > 45255.0"
+    );
+
+    let queue_saved_args = adv_notifs_2
+        .iter()
+        .find(|(ev, _)| ev == "OnNewSkillQueueSaved")
+        .map(|(_, args)| args)
+        .expect("OnNewSkillQueueSaved emitted on /advancetime 86400");
+    let PyRep::List(ref saved_entries) = queue_saved_args[0] else {
+        panic!("OnNewSkillQueueSaved arg0 must be List");
+    };
+    assert_eq!(saved_entries.len(), 1);
+    let entry_0 = &saved_entries[0];
+    let new_start_ft = entry_0
+        .dict_get("trainingStartTime")
+        .and_then(|v| v.as_i64())
+        .expect("updated trainingStartTime");
+    let new_end_ft = entry_0
+        .dict_get("trainingEndTime")
+        .and_then(|v| v.as_i64())
+        .expect("updated trainingEndTime");
+    let new_dur = entry_0
+        .dict_get("durationSeconds")
+        .and_then(|v| v.as_f64())
+        .expect("updated durationSeconds");
+
+    assert_eq!(
+        new_start_ft, client_wall_ft,
+        "trainingStartTime must stay anchored to client wallclock after /advancetime"
+    );
+    assert!(
+        (init_dur - new_dur - 90_000.0).abs() < 1.0,
+        "durationSeconds must decrease by 90000s (init={init_dur}, new={new_dur})"
+    );
+    let remaining_ticks = new_end_ft - client_wall_ft;
+    let init_remaining_ticks = init_end_ft - client_wall_ft;
+    assert!(
+        (init_remaining_ticks - remaining_ticks - 90_000 * 10_000_000).abs() <= 20_000_000,
+        "client-relative remaining time (end - wallclock) must shrink by ~90000s"
+    );
+
+    let eot_after = harness
+        .call_ok("skillMgr2", None, "GetEndOfTraining", &[], &kw)
+        .await
+        .as_i64()
+        .expect("post-/advancetime GetEndOfTraining");
+    assert_eq!(eot_after, new_end_ft);
+
+    let skills_rpc = harness
+        .call_ok("skillMgr2", None, "GetSkills", &[], &kw)
+        .await;
+    let PyRep::Dict(ref skills_dict) = skills_rpc else {
+        panic!("wire GetSkills must return Dict");
+    };
+    let wire_sp = skills_dict
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(i64::from(skill_tid)))
+        .and_then(|(_, v)| v.dict_get("trainedSkillPoints"))
+        .and_then(|v| v.as_f64())
+        .expect("trainedSkillPoints from GetSkills");
+    assert!((wire_sp - db_sp).abs() < 1e-4);
+}
