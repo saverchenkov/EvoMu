@@ -1717,4 +1717,173 @@ fn fit_projection_preserves_stance_and_overload_persisted_inputs() {
     assert!((proj.modules[&20].prop_speed_boost - 1.5).abs() < 1e-9);
 }
 
+#[test]
+fn propulsion_thrust_scales_matched_undersized_oversized_mwd_and_afterburner() {
+    let mut sde = SdeRegistry::default();
+    sde.effects.insert(
+        6730,
+        DogmaEffectType {
+            effect_id: 6730,
+            name: "moduleBonusMicrowarpdrive".to_string(),
+            effect_category: 1,
+            ..Default::default()
+        },
+    );
+    sde.effects.insert(
+        6731,
+        DogmaEffectType {
+            effect_id: 6731,
+            name: "moduleBonusAfterburner".to_string(),
+            effect_category: 1,
+            ..Default::default()
+        },
+    );
+    sde.types.insert(
+        639,
+        make_type(
+            639,
+            27,
+            6,
+            &[
+                (attr_ids::MAX_VELOCITY, 127.0),
+                (attr_ids::MASS, 99_500_000.0),
+                (attr_ids::SIGNATURE_RADIUS, 360.0),
+                (attr_ids::CPU_OUTPUT, 600.0),
+                (attr_ids::POWER_OUTPUT, 15_000.0),
+            ],
+            &[],
+        ),
+    );
+    sde.types.insert(
+        587,
+        make_type(
+            587,
+            25,
+            6,
+            &[
+                (attr_ids::MAX_VELOCITY, 365.0),
+                (attr_ids::MASS, 1_000_000.0),
+                (attr_ids::SIGNATURE_RADIUS, 35.0),
+                (attr_ids::CPU_OUTPUT, 300.0),
+                (attr_ids::POWER_OUTPUT, 500.0),
+            ],
+            &[],
+        ),
+    );
+    sde.types.insert(
+        434,
+        make_type(
+            434,
+            46,
+            7,
+            &[
+                (attr_ids::SPEED_FACTOR, 500.0),
+                (567, 1_500_000.0),
+                (attr_ids::MASS_ADDITION, 500_000.0),
+                (554, 500.0),
+            ],
+            &[6730],
+        ),
+    );
+    sde.types.insert(
+        3568,
+        make_type(
+            3568,
+            46,
+            7,
+            &[
+                (attr_ids::SPEED_FACTOR, 500.0),
+                (567, 50_000_000.0),
+                (attr_ids::MASS_ADDITION, 50_000_000.0),
+                (554, 500.0),
+            ],
+            &[6730],
+        ),
+    );
+    sde.types.insert(
+        5973,
+        make_type(
+            5973,
+            46,
+            7,
+            &[
+                (attr_ids::SPEED_FACTOR, 500.0),
+                (567, 15_000_000.0),
+                (attr_ids::MASS_ADDITION, 15_000_000.0),
+                (554, 500.0),
+            ],
+            &[6730],
+        ),
+    );
+    // 100MN Afterburner type intentionally omits MASS_ADDITION from default_attributes so we also
+    // verify dynamic base_attributes MASS_ADDITION overrides in evaluation.rs.
+    sde.types.insert(
+        12068,
+        make_type(
+            12068,
+            46,
+            7,
+            &[(attr_ids::SPEED_FACTOR, 135.0), (567, 50_000_000.0)],
+            &[6731],
+        ),
+    );
+
+    let fit_prop = |ship_tid: u32, mod_tid: u32, overrides: &[(AttributeId, f64)]| -> (f64, f64, f64, f64) {
+        let mut eng = ShipFittingEngine::from_sde(1, ship_tid, &sde);
+        eng.modules.insert(
+            10,
+            FittedModule {
+                item_id: 10,
+                type_id: mod_tid,
+                flag_id: 19,
+                state: ModuleState::Active,
+                damage_hp: 0.0,
+                max_hp: 40.0,
+                charge_type_id: None,
+                charge_quantity: 0,
+                dynamic_attribute_overrides: overrides.iter().copied().collect(),
+            },
+        );
+        eng.recalculate_stats(&sde);
+        let proj = eng.to_projection(FitRev(1), &sde);
+        (
+            eng.ship.get_attribute(attr_ids::MAX_VELOCITY, &sde),
+            eng.ship.get_attribute(attr_ids::MASS, &sde),
+            eng.ship.get_attribute(attr_ids::SIGNATURE_RADIUS, &sde),
+            proj.propulsion.expect("active propulsion").speed_boost,
+        )
+    };
+
+    // Undersized 5MN MWD on Tempest -> 1.075x (not 6x)
+    let (vel_u, mass_u, sig_u, boost_u) = fit_prop(639, 434, &[]);
+    assert!((vel_u - 127.0 * 1.075).abs() < 1e-9);
+    assert!((mass_u - 100_000_000.0).abs() < 1e-9);
+    assert!((sig_u - 360.0 * 6.0).abs() < 1e-9);
+    assert!((boost_u - 0.075).abs() < 1e-9);
+
+    // Matched 500MN MWD on Tempest -> 1 + 5.0 * 50e6 / 149.5e6 (~2.67224x)
+    let (vel_m, mass_m, sig_m, boost_m) = fit_prop(639, 3568, &[]);
+    let expected_m_boost = 5.0 * 50_000_000.0 / 149_500_000.0;
+    assert!((vel_m - 127.0 * (1.0 + expected_m_boost)).abs() < 1e-9);
+    assert!((mass_m - 149_500_000.0).abs() < 1e-9);
+    assert!((sig_m - 360.0 * 6.0).abs() < 1e-9);
+    assert!((boost_m - expected_m_boost).abs() < 1e-9);
+
+    // Oversized 50MN MWD on Frigate -> 1 + 5.0 * 15e6 / 16e6 = 5.6875x
+    let (vel_o, mass_o, sig_o, boost_o) = fit_prop(587, 5973, &[]);
+    assert!((vel_o - 365.0 * 5.6875).abs() < 1e-9);
+    assert!((mass_o - 16_000_000.0).abs() < 1e-9);
+    assert!((sig_o - 35.0 * 6.0).abs() < 1e-9);
+    assert!((boost_o - 4.6875).abs() < 1e-9);
+
+    // Matched 100MN Afterburner on Tempest with dynamic MASS_ADDITION override -> no sig bloom
+    let (vel_ab, mass_ab, sig_ab, boost_ab) =
+        fit_prop(639, 12068, &[(attr_ids::MASS_ADDITION, 50_000_000.0)]);
+    let expected_ab_boost = 1.35 * 50_000_000.0 / 149_500_000.0;
+    assert!((vel_ab - 127.0 * (1.0 + expected_ab_boost)).abs() < 1e-9);
+    assert!((mass_ab - 149_500_000.0).abs() < 1e-9);
+    assert!((sig_ab - 360.0).abs() < 1e-9);
+    assert!((boost_ab - expected_ab_boost).abs() < 1e-9);
+}
+
 

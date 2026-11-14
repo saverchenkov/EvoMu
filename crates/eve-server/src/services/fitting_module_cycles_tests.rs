@@ -1094,20 +1094,38 @@ async fn cehe_duration_fallbacks_crystal_volatility_and_survey_cycle_completion(
     assert_eq!(nonvol_rep.dict_get("duration").and_then(|v| v.as_f64()), Some(2.0));
 
     // 6. Propulsion (group 46) & Stasis Webifier (group 65) reject duplicate Activate while active (#819).
-    let ab_type = ctx
-        .sde
-        .types
-        .values()
-        .find(|t| t.group_id == 46 && t.published)
-        .map(|t| t.type_id)
-        .expect("propulsion module type");
-    let web_type = ctx
-        .sde
-        .types
-        .values()
-        .find(|t| t.group_id == 65 && t.published)
-        .map(|t| t.type_id)
-        .expect("stasis webifier type");
+    let pick_deterministic_small_type =
+        |group_id: u32, prefer_name: &str, prefer_effect: Option<u16>| -> u32 {
+            ctx.sde
+                .types
+                .values()
+                .filter(|t| t.group_id == group_id && t.published)
+                .min_by(|a, b| {
+                    let eff_a = prefer_effect.is_some_and(|eid| !a.effect_ids.contains(&eid));
+                    let eff_b = prefer_effect.is_some_and(|eid| !b.effect_ids.contains(&eid));
+                    let name_a = !a.name.contains(prefer_name);
+                    let name_b = !b.name.contains(prefer_name);
+                    let cap_a = a
+                        .default_attributes
+                        .get(&attr_ids::CAPACITOR_NEED)
+                        .copied()
+                        .unwrap_or(f64::MAX);
+                    let cap_b = b
+                        .default_attributes
+                        .get(&attr_ids::CAPACITOR_NEED)
+                        .copied()
+                        .unwrap_or(f64::MAX);
+                    eff_a
+                        .cmp(&eff_b)
+                        .then_with(|| name_a.cmp(&name_b))
+                        .then_with(|| cap_a.total_cmp(&cap_b))
+                        .then_with(|| a.type_id.cmp(&b.type_id))
+                })
+                .map(|t| t.type_id)
+                .expect("published module type in group")
+        };
+    let ab_type = pick_deterministic_small_type(46, "1MN Afterburner", Some(6731));
+    let web_type = pick_deterministic_small_type(65, "Stasis Webifier", None);
     let mod_ab = 992_020_i64;
     let mod_web = 992_021_i64;
     ctx.db.with_mut_snapshot(|snap| {
@@ -1262,6 +1280,160 @@ async fn activate_5mn_mwd_on_battleship_uses_mass_scaled_propulsion_boost_860() 
         ball.max_velocity < 125.0 && (ball.max_velocity - expected_vel).abs() < 0.5,
         "5MN MWD on Battleship must scale by ship mass ({expected_vel:.2} m/s), not raw +510% ({} m/s)",
         ball.max_velocity
+    );
+}
+
+#[tokio::test]
+async fn activate_afterburner_and_matched_mwd_use_mass_scaled_propulsion_boost_860() {
+    const SYN_TEMPEST: u32 = 999_639;
+    const SYN_500MN_MWD: u32 = 999_441;
+    const SYN_100MN_AB: u32 = 999_442;
+    let ctx = test_ctx_with_custom(|sde| {
+        let mut tempest = custom_inv_type(
+            sde,
+            SYN_TEMPEST,
+            27,
+            6,
+            500_000.0,
+            500.0,
+            "Tempest",
+            &[
+                (4, 99_500_000.0),
+                (37, 127.0),
+                (70, 0.115),
+                (482, 5_500.0),
+                (55, 950_000.0),
+                (263, 8_000.0),
+                (265, 5_000.0),
+                (9, 6_000.0),
+                (552, 360.0),
+                (192, 7.0),
+                (76, 95_000.0),
+            ],
+        );
+        tempest.mass = 99_500_000.0;
+        sde.types.insert(SYN_TEMPEST, tempest);
+
+        let mut mwd_500mn = custom_inv_type(
+            sde,
+            SYN_500MN_MWD,
+            46,
+            7,
+            5.0,
+            0.0,
+            "500MN Microwarpdrive I",
+            &[
+                (6, 50.0),
+                (73, 10_000.0),
+                (20, 500.0),
+                (567, 50_000_000.0),
+                (796, 50_000_000.0),
+                (554, 500.0),
+            ],
+        );
+        mwd_500mn.effect_ids = vec![13, 6730];
+        sde.types.insert(SYN_500MN_MWD, mwd_500mn);
+
+        let mut ab_100mn = custom_inv_type(
+            sde,
+            SYN_100MN_AB,
+            46,
+            7,
+            5.0,
+            0.0,
+            "100MN Afterburner I",
+            &[
+                (6, 50.0),
+                (73, 10_000.0),
+                (20, 135.0),
+                (567, 50_000_000.0),
+                (796, 50_000_000.0),
+            ],
+        );
+        ab_100mn.effect_ids = vec![13, 6731];
+        sde.types.insert(SYN_100MN_AB, ab_100mn);
+    });
+
+    let char_id = 97_000_861;
+    let sys_id = 30_002_505;
+    let ship_mwd_id = 1_000_861_001;
+    let mwd_id = 1_000_861_002;
+    ensure_char(&ctx, char_id, 98_000_001, sys_id, ship_mwd_id);
+    insert_item(&ctx, ship_mwd_id, SYN_TEMPEST, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    insert_item(&ctx, mwd_id, SYN_500MN_MWD, char_id, ship_mwd_id, InventoryFlag::MedSlot0, 1, true);
+    spawn_ship(&ctx, sys_id, ship_mwd_id, SYN_TEMPEST, char_id, 5_500.0).await;
+
+    let kw = HashMap::new();
+    let mut sess = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(98_000_001),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_mwd_id),
+        ..Default::default()
+    };
+
+    handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(mwd_id), PyRep::String("moduleBonusMicrowarpdrive".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("Activate matched 500MN MWD on Tempest");
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let (_, ball_mwd) = sys.get_ball_snapshot(ship_mwd_id).await.unwrap().unwrap();
+    let expected_mwd_boost =
+        eve_dogma::compute_propulsion_speed_boost(500.0, 50_000_000.0, 99_500_000.0, 50_000_000.0);
+    let expected_mwd_vel = 127.0 * (1.0 + expected_mwd_boost);
+    assert!(
+        (ball_mwd.max_velocity - expected_mwd_vel).abs() < 0.5,
+        "Matched 500MN MWD on Tempest expected ~{expected_mwd_vel:.2} m/s, got {} m/s",
+        ball_mwd.max_velocity
+    );
+
+    let char_ab_id = 97_000_862;
+    let ship_ab_id = 1_000_862_001;
+    let ab_id = 1_000_862_002;
+    ensure_char(&ctx, char_ab_id, 98_000_001, sys_id, ship_ab_id);
+    insert_item(&ctx, ship_ab_id, SYN_TEMPEST, char_ab_id, sys_id as i64, InventoryFlag::None, 1, true);
+    insert_item(&ctx, ab_id, SYN_100MN_AB, char_ab_id, ship_ab_id, InventoryFlag::MedSlot0, 1, true);
+    spawn_ship(&ctx, sys_id, ship_ab_id, SYN_TEMPEST, char_ab_id, 5_500.0).await;
+
+    let mut sess_ab = SessionState {
+        user_id: Some(char_ab_id as u64),
+        character_id: Some(char_ab_id),
+        corporation_id: Some(98_000_001),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_ab_id),
+        ..Default::default()
+    };
+    handle_module_cycles(
+        &ctx,
+        &mut sess_ab,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(ab_id), PyRep::String("moduleBonusAfterburner".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("Activate matched 100MN AB on Tempest");
+
+    let (_, ball_ab) = sys.get_ball_snapshot(ship_ab_id).await.unwrap().unwrap();
+    let expected_ab_boost =
+        eve_dogma::compute_propulsion_speed_boost(135.0, 50_000_000.0, 99_500_000.0, 50_000_000.0);
+    let expected_ab_vel = 127.0 * (1.0 + expected_ab_boost);
+    assert!(
+        (ball_ab.max_velocity - expected_ab_vel).abs() < 0.5,
+        "Matched 100MN AB on Tempest expected ~{expected_ab_vel:.2} m/s, got {} m/s",
+        ball_ab.max_velocity
     );
 }
 

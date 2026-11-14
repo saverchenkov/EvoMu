@@ -16,6 +16,25 @@ pub struct PropulsionModuleStats {
     pub can_activate: bool,
 }
 
+/// Returns the attribute ID supplying a propulsion module's mass addition (`796` `massAddition`,
+/// falling back to `4` `mass` when `796` is not defined on the item, its modifiers, or its SDE type).
+pub fn propulsion_mass_addition_attr_id(module: &DogmaItemState, sde: &SdeRegistry) -> AttributeId {
+    if module.base_attributes.contains_key(&attr_ids::MASS_ADDITION)
+        || module
+            .modifiers
+            .iter()
+            .any(|m| m.target_attribute_id == attr_ids::MASS_ADDITION)
+        || sde
+            .types
+            .get(&module.type_id)
+            .is_some_and(|t| t.default_attributes.contains_key(&attr_ids::MASS_ADDITION))
+    {
+        attr_ids::MASS_ADDITION
+    } else {
+        attr_ids::MASS
+    }
+}
+
 /// Computes the fractional velocity boost `(speedFactor / 100.0) * speedBoostFactor / (hullMass + massAddition)`
 /// for an active Microwarpdrive or Afterburner (`#860`, `#922`).
 ///
@@ -84,17 +103,7 @@ pub fn eval_propulsion_module(
         speed_factor *= 1.0 + (ovl_pct / 100.0);
     }
 
-    let mass_addition = if module.base_attributes.contains_key(&796)
-        || sde
-            .types
-            .get(&module.type_id)
-            .map(|t| t.default_attributes.contains_key(&796))
-            .unwrap_or(false)
-    {
-        module.get_attribute(796, sde)
-    } else {
-        module.get_attribute(attr_ids::MASS, sde)
-    };
+    let mass_addition = module.get_attribute(propulsion_mass_addition_attr_id(module, sde), sde);
 
     let speed_boost_factor = module.get_attribute(567, sde);
     let speed_boost =

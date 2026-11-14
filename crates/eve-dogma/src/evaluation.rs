@@ -1162,14 +1162,7 @@ impl ShipFittingEngine {
                     // Engine propulsion effects (`6730` MWD, `6731` Afterburner) have empty `modifiers` in `dogmaeffects.fsdbinary`
                     // and read the module's effective `SPEED_FACTOR` and `SPEED_BOOST_FACTOR` against total ship mass (`#860`).
                     if scope == EvalScope::Full && is_active && matches!(eid, 6730 | 6731) {
-                        let mass_attr_id = if mod_type
-                            .default_attributes
-                            .contains_key(&attr_ids::MASS_ADDITION)
-                        {
-                            attr_ids::MASS_ADDITION
-                        } else {
-                            attr_ids::MASS
-                        };
+                        let mass_attr_id = propulsion_mass_addition_attr_id(&mod_state, sde);
                         let mut nodes = vec![DogmaExpressionNode {
                             opcode: DogmaVmOpcode::AddItmMod,
                             value_f64: None,
@@ -1186,9 +1179,9 @@ impl ShipFittingEngine {
                             })),
                         }];
                         if eid == 6730 {
-                            let sig_bonus_attr = if mod_type.default_attributes.contains_key(&554) {
+                            let sig_bonus_attr = if mod_state.get_attribute(554, sde) > 0.0 {
                                 554
-                            } else if mod_type.default_attributes.contains_key(&986) {
+                            } else if mod_state.get_attribute(986, sde) > 0.0 {
                                 986
                             } else {
                                 0
@@ -2114,12 +2107,8 @@ impl ShipFittingEngine {
 
             let speed_factor = mod_state.get_attribute(attr_ids::SPEED_FACTOR, sde);
             let speed_boost_factor = mod_state.get_attribute(567, sde);
-            let mass_addition = if mod_state.base_attributes.contains_key(&attr_ids::MASS_ADDITION)
-                || mod_type.is_some_and(|t| t.default_attributes.contains_key(&attr_ids::MASS_ADDITION))
-            {
-                mod_state.get_attribute(attr_ids::MASS_ADDITION, sde)
-            } else if is_mwd || is_afterburner {
-                mod_state.get_attribute(attr_ids::MASS, sde)
+            let mass_addition = if is_mwd || is_afterburner {
+                mod_state.get_attribute(propulsion_mass_addition_attr_id(&mod_state, sde), sde)
             } else {
                 0.0
             };
