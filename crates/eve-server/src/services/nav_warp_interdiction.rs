@@ -71,11 +71,9 @@ pub fn sync_waypoints_from_char_settings(
         }
     });
     sync_waypoints_to_char_settings(ctx, char_id, &parsed);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnAutopilotUpdated",
-        "charid",
-        vec![],
+        crate::router::notify_registry::OnAutopilotUpdated,
     );
     Ok(())
 }
@@ -129,11 +127,9 @@ pub fn advance_waypoints_on_arrival(ctx: &ServerContext, char_id: i64, arrived_l
     });
     if let Some(updated_wps) = updated_opt {
         sync_waypoints_to_char_settings(ctx, char_id, &updated_wps);
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnAutopilotUpdated",
-            "charid",
-            vec![],
+            crate::router::notify_registry::OnAutopilotUpdated,
         );
     }
 }

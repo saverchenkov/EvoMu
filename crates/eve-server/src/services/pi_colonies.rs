@@ -329,11 +329,12 @@ pub fn handle_pi_colonies(
             });
             if res.is_ok() {
                 // `planetSvc.OnMajorPlanetStateUpdate(planetID, numCommandCentersChanged)` refreshes the client PI planet view on Command Center abandonment.
-                ctx.notify(
+                ctx.emit_typed(
                     crate::router::NotificationTarget::Character(char_id),
-                    "OnMajorPlanetStateUpdate",
-                    "charid",
-                    vec![PyRep::Integer(planet_id), PyRep::Bool(true)],
+                    crate::router::notify_registry::OnMajorPlanetStateUpdate {
+                        planet_id,
+                        num_command_centers_changed: true,
+                    },
                 );
             }
             Some(res)
@@ -1314,11 +1315,12 @@ pub fn handle_pi_colonies(
                 Ok((cc_changed, rep)) => {
                     if cc_changed {
                         // `planetSvc.OnMajorPlanetStateUpdate(planetID, numCommandCentersChanged)` refreshes the client PI planet view on Command Center deployment.
-                        ctx.notify(
+                        ctx.emit_typed(
                             crate::router::NotificationTarget::Character(char_id),
-                            "OnMajorPlanetStateUpdate",
-                            "charid",
-                            vec![PyRep::Integer(planet_id), PyRep::Bool(true)],
+                            crate::router::notify_registry::OnMajorPlanetStateUpdate {
+                                planet_id,
+                                num_command_centers_changed: true,
+                            },
                         );
                     }
                     Some(Ok(rep))

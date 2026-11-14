@@ -529,40 +529,6 @@ pub(crate) fn emit_expedition_destruction_notifications(
     new_escalation: Option<&EscalatingPathEntry>,
     advanced_step: Option<&EscalatingPathEntry>,
 ) {
-    let now_ft = db.clock().now_blueos_filetime_ticks();
-    let broadcast_sys = |sys_id: SolarSystemId, event: &str, args: Vec<PyRep>| {
-        let recips: Vec<(i64, Option<u64>)> = db.with_snapshot(|snap| {
-            snap.characters
-                .values()
-                .filter(|c| c.station_id.is_none() && c.structure_id.is_none() && c.solar_system_id == sys_id)
-                .map(|c| (c.character_id, Some(c.user_id)))
-                .collect()
-        });
-        for (cid, uid) in recips {
-            let (packet, marshaled_packet) =
-                ServerContext::build_macho_notification_packet(cid, uid, event, "solarsystemid", args.clone());
-            let notif = crate::router::cache_notifications::PendingMachoNotification {
-                seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-                recipient_char_id: cid,
-                event: event.to_string(),
-                id_type: "solarsystemid".to_string(),
-                args: args.clone(),
-                packet,
-                marshaled_packet,
-                created_filetime: now_ft,
-            };
-            {
-                let mut q_guard = pending_notifications.write().unwrap_or_else(|e| e.into_inner());
-                let q = q_guard.entry(cid).or_default();
-                if q.len() >= 512 {
-                    q.remove(0);
-                }
-                q.push(notif.clone());
-            }
-            let _ = notify_tx.send((cid, notif));
-        }
-    };
-
     if let Some(esc) = new_escalation {
         let sig_id = expedition_sig_id(esc.instance_id, esc.step_index);
         let instance = PyRep::keyval([
@@ -571,10 +537,15 @@ pub(crate) fn emit_expedition_destruction_notifications(
             ("signatureID", PyRep::String(sig_id)),
             ("scanStrengthValue", PyRep::Real(0.5)),
         ]);
-        broadcast_sys(
+        crate::router::notify_registry::emit_typed_to_solar_system_in_space_core(
+            db,
+            pending_notifications,
+            notify_tx,
             esc.destination_solar_system_id,
-            "OnDungeonInstanceAdded",
-            vec![PyRep::Integer(i64::from(esc.destination_solar_system_id)), instance],
+            crate::router::notify_registry::OnDungeonInstanceAdded {
+                solar_system_id: i64::from(esc.destination_solar_system_id),
+                instance,
+            },
         );
     }
 
@@ -587,15 +558,17 @@ pub(crate) fn emit_expedition_destruction_notifications(
         };
         let old_sig_id = expedition_sig_id(esc.instance_id, prev_step);
         let (prev_sys, prev_did) = cleared_sys_and_did.unwrap_or((esc.destination_solar_system_id, esc.expedition_dungeon_id));
-        broadcast_sys(
+        crate::router::notify_registry::emit_typed_to_solar_system_in_space_core(
+            db,
+            pending_notifications,
+            notify_tx,
             prev_sys,
-            "OnDungeonInstanceRemoved",
-            vec![
-                PyRep::Integer(i64::from(prev_sys)),
-                PyRep::Integer(esc.instance_id),
-                PyRep::String(old_sig_id),
-                PyRep::Integer(i64::from(prev_did)),
-            ],
+            crate::router::notify_registry::OnDungeonInstanceRemoved {
+                solar_system_id: i64::from(prev_sys),
+                instance_id: esc.instance_id,
+                signature_id: old_sig_id,
+                dungeon_id: i64::from(prev_did),
+            },
         );
         if has_more_steps && esc.step_index > prev_step {
             let new_sig_id = expedition_sig_id(esc.instance_id, esc.step_index);
@@ -605,10 +578,15 @@ pub(crate) fn emit_expedition_destruction_notifications(
                 ("signatureID", PyRep::String(new_sig_id)),
                 ("scanStrengthValue", PyRep::Real(0.5)),
             ]);
-            broadcast_sys(
+            crate::router::notify_registry::emit_typed_to_solar_system_in_space_core(
+                db,
+                pending_notifications,
+                notify_tx,
                 esc.destination_solar_system_id,
-                "OnDungeonInstanceAdded",
-                vec![PyRep::Integer(i64::from(esc.destination_solar_system_id)), instance],
+                crate::router::notify_registry::OnDungeonInstanceAdded {
+                    solar_system_id: i64::from(esc.destination_solar_system_id),
+                    instance,
+                },
             );
         }
     }
@@ -713,11 +691,9 @@ pub fn get_my_escalating_path_details_rowset(ctx: &ServerContext, char_id: Chara
                 i64::from(e.expedition_dungeon_id),
             );
         }
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::Character(char_id),
-            "OnEscalatingPathChange",
-            "charid",
-            vec![],
+            crate::router::notify_registry::OnEscalatingPathChange,
         );
     }
 

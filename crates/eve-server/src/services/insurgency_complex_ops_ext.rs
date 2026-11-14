@@ -100,27 +100,27 @@ pub fn notify_moderate_outpost_bc_bonus(
     } else {
         0.0
     };
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnAttributes",
-        "charid",
-        vec![PyRep::Dict(vec![(
-            PyRep::Integer(ship_id),
-            PyRep::Dict(vec![
-                (
-                    PyRep::String("moderateOutpostDbuffID".into()),
-                    PyRep::Integer(if active {
-                        i64::from(MODERATE_OUTPOST_BC_SKILL_DBUFF_ID)
-                    } else {
-                        0
-                    }),
-                ),
-                (
-                    PyRep::String("battlecruiserRoleBonusPct".into()),
-                    PyRep::Real(effective_bonus_pct),
-                ),
-            ]),
-        )])],
+        crate::router::notify_registry::OnAttributes {
+            changes: PyRep::Dict(vec![(
+                PyRep::Integer(ship_id),
+                PyRep::Dict(vec![
+                    (
+                        PyRep::String("moderateOutpostDbuffID".into()),
+                        PyRep::Integer(if active {
+                            i64::from(MODERATE_OUTPOST_BC_SKILL_DBUFF_ID)
+                        } else {
+                            0
+                        }),
+                    ),
+                    (
+                        PyRep::String("battlecruiserRoleBonusPct".into()),
+                        PyRep::Real(effective_bonus_pct),
+                    ),
+                ]),
+            )]),
+        },
     );
 }
 
@@ -129,7 +129,7 @@ pub fn notify_insurgency_laundering_reward(
     ctx: &ServerContext,
     char_id: i64,
     war_faction_id: i64,
-    sys_id: SolarSystemId,
+    _sys_id: SolarSystemId,
 ) {
     let total_lp = ctx.db.with_snapshot(|snap| {
         snap.characters
@@ -137,15 +137,14 @@ pub fn notify_insurgency_laundering_reward(
             .and_then(|c| c.loyalty_points.get(&war_faction_id).copied())
             .unwrap_or(0)
     });
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnLPChange",
-        "charid",
-        vec![
-            PyRep::Integer(war_faction_id),
-            PyRep::Integer(total_lp),
-            PyRep::Integer(i64::from(sys_id)),
-        ],
+        crate::router::notify_registry::OnLPChange {
+            change_type: "insurgency_laundering".into(),
+            issuer_corp_id: war_faction_id,
+            lp_before: total_lp,
+            lp_after: total_lp,
+        },
     );
 }
 

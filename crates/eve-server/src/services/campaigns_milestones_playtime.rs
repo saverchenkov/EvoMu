@@ -286,20 +286,15 @@ pub fn emit_account_change_isk(
     bal_after_cents: i64,
 ) {
     let bal_f64 = (bal_after_cents as f64) / 100.0;
-    let args = vec![
-        PyRep::String("cash".into()),
-        PyRep::Integer(char_id),
-        PyRep::Real(bal_f64),
-    ];
+    let notif = crate::router::notify_registry::OnAccountChange {
+        account_key: "cash".into(),
+        owner_id: char_id,
+        balance: bal_f64,
+    };
     if !session.live_notify_listener {
-        session.push_notification("OnAccountChange", args.clone());
+        crate::router::notify_registry::push_typed_session_notification(session, notif.clone());
     }
-    ctx.notify(
-        crate::router::NotificationTarget::Character(char_id),
-        "OnAccountChange",
-        "charid",
-        args,
-    );
+    ctx.emit_typed(crate::router::NotificationTarget::Character(char_id), notif);
 }
 
 /// Resolves the character's reward delivery station/structure from active session docking or

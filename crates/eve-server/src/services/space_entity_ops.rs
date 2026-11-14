@@ -147,11 +147,13 @@ pub async fn handle(
                                 ("isEmpty", PyRep::Integer(if is_empty { 1 } else { 0 })),
                             ])
                         };
-                        ctx.notify(
+                        ctx.emit_typed_with_id_type(
                             crate::router::NotificationTarget::SolarSystem(sys_id),
-                            "OnSlimItemChange",
                             "clientID",
-                            vec![build_slim_kv(prev_owner_id), build_slim_kv(0)],
+                            crate::router::notify_registry::OnSlimItemChange {
+                                old_slim: build_slim_kv(prev_owner_id),
+                                new_slim: build_slim_kv(0),
+                            },
                         );
                     }
                     let first_id = target_ids[0];
@@ -287,11 +289,10 @@ pub async fn handle(
                 }
             }
             let fleet_state = crate::services::fleet_social::fleet_social_notify::build_fleet_state_keyval(ctx, Some(fid), char_id, 1.0, 1.0, 1.0);
-            ctx.notify(
+            ctx.emit_typed_with_id_type(
                 crate::router::NotificationTarget::Fleet(fid),
-                "OnFleetStateChange",
                 "fleetid",
-                vec![fleet_state],
+                crate::router::notify_registry::OnFleetStateChange { fleet_state },
             );
             Some(Ok(PyRep::None))
         }

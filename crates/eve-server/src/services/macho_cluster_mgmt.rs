@@ -1770,17 +1770,16 @@ fn handle_session_attribute_update(
 
     if !diff_entries.is_empty() {
         let sess_kv = session_state_to_keyval(&target_state_after);
-        let notify_args = vec![PyRep::Bool(false), sess_kv, PyRep::Dict(diff_entries)];
+        let notif = crate::router::notify_registry::OnSessionChanged {
+            is_remote: false,
+            session: sess_kv,
+            change: PyRep::Dict(diff_entries),
+        };
         if is_caller {
-            session.push_notification("OnSessionChanged", notify_args.clone());
+            crate::router::notify_registry::push_typed_session_notification(session, notif.clone());
         }
         if let Some(cid) = target_state_after.character_id.filter(|&id| id > 0) {
-            ctx.notify(
-                crate::router::NotificationTarget::Character(cid),
-                "OnSessionChanged",
-                "charid",
-                notify_args,
-            );
+            ctx.emit_typed(crate::router::NotificationTarget::Character(cid), notif);
         }
     }
 

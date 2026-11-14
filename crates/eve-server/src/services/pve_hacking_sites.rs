@@ -520,7 +520,12 @@ pub async fn handle_pve_hacking(
                     ]),
                 ),
             ])];
-            session.push_notification("OnHackingTurnComplete", vec![PyRep::List(start_events)]);
+            crate::router::notify_registry::push_typed_session_notification(
+                session,
+                crate::router::notify_registry::OnHackingTurnComplete {
+                    events: start_events,
+                },
+            );
             Some(Ok(PyRep::keyval([
                 ("gameID", PyRep::Integer(game.game_id)),
                 ("containerID", PyRep::Integer(container_id)),
@@ -792,7 +797,12 @@ pub async fn handle_pve_hacking(
                     ]),
                 ),
             ])];
-            session.push_notification("OnHackingTurnComplete", vec![PyRep::List(turn_events)]);
+            crate::router::notify_registry::push_typed_session_notification(
+                session,
+                crate::router::notify_registry::OnHackingTurnComplete {
+                    events: turn_events,
+                },
+            );
             let spew_py: Vec<PyRep> = spewed_cans
                 .iter()
                 .map(|c| {

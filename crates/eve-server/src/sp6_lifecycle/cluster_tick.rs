@@ -1088,11 +1088,11 @@ pub fn on_advance_secs_internal(
     }
 
     for (cid, reason) in aborted_safe_logoffs {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(cid),
-            "OnSafeLogoffAborted",
-            "charid",
-            vec![eve_proto::PyRep::String(reason.to_string())],
+            crate::router::notify_registry::OnSafeLogoffAborted {
+                reason_code: reason.to_string(),
+            },
         );
     }
 
@@ -1243,11 +1243,9 @@ pub fn on_advance_secs_internal(
             entry.ship_id,
         );
         handle.try_remove_ball(entry.ship_id);
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(entry.char_id),
-            "OnSafeLogoffActivated",
-            "charid",
-            vec![],
+            crate::router::notify_registry::OnSafeLogoffActivated,
         );
         super::disconnect_safe_logoff_sessions(ctx, entry.char_id);
     }

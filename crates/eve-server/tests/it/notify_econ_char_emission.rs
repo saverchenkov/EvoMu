@@ -245,7 +245,7 @@ async fn test_ship_clone_vat_bookmarks_standings_agents_and_item_locking_notific
     assert!(matches!(&st_mod[0][0], PyRep::List(l) if !l.is_empty()));
     assert!(events_from(&n_msn, "OnNPCStandingChange").is_empty());
 
-    // 4. Item Locking: ALSCLockItems -> OnLockedItemChange(itemID, ownerID, locationID)
+    // 4. Item Locking: ALSCLockItems -> OnLockedItemChange(itemID, ownerID, locationID, isLocked)
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&P1) {
             ch.solar_system_id = SYS_JITA;
@@ -260,7 +260,7 @@ async fn test_ship_clone_vat_bookmarks_standings_agents_and_item_locking_notific
     seed_item(&ctx, lock_item_id, 34, corp_id, container_id, InventoryFlag::Locked, 100, false);
     call(&ctx, &mut s1, "invbroker", "ALSCLockItems", &[PyRep::Integer(container_id), PyRep::List(vec![PyRep::Integer(lock_item_id)])]).await;
     let n_lock = ctx.drain_notifications_for_char(P1);
-    assert_eq!(events_from(&n_lock, "OnLockedItemChange"), vec![vec![PyRep::Integer(lock_item_id), PyRep::Integer(corp_id), PyRep::Integer(container_id),]]);
+    assert_eq!(events_from(&n_lock, "OnLockedItemChange"), vec![vec![PyRep::Integer(lock_item_id), PyRep::Integer(corp_id), PyRep::Integer(container_id), PyRep::Bool(true)]]);
     assert!(ctx.drain_notifications_for_char(p3).is_empty());
 }
 
@@ -3464,7 +3464,7 @@ async fn test_blueprints_and_contracts_notifications() {
     let cid1 = c1_rep.dict_get("contractID").and_then(|v| v.as_i64()).expect("cid1");
     let n_c1_p1 = ctx.drain_notifications_for_char(P1);
     let n_c1_p2 = ctx.drain_notifications_for_char(P2);
-    assert_eq!(events_from(&n_c1_p1, "OnContractCreated"), vec![vec![PyRep::Integer(cid1)]]);
+    assert_eq!(events_from(&n_c1_p1, "OnContractCreated"), vec![Vec::<PyRep>::new()]);
     assert!(events_from(&n_c1_p1, "OnContractEscrowChanged").is_empty());
     assert_eq!(events_from(&n_c1_p2, "OnContractAssigned"), vec![vec![PyRep::Integer(cid1)]]);
     assert!(ctx.drain_notifications_for_char(p3).is_empty());

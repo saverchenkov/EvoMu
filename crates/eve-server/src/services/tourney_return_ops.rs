@@ -142,14 +142,12 @@ pub(super) async fn handle_return_players(
                 ("solarsystemid2", PyRep::Integer(i64::from(home_sys))),
                 ("solarsystemid", PyRep::None),
             ]);
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(cid),
-                "OnSessionChanged",
-                "charid",
-                vec![
-                    PyRep::Bool(false),
-                    sess_rep,
-                    PyRep::Dict(vec![
+                crate::router::notify_registry::OnSessionChanged {
+                    is_remote: false,
+                    session: sess_rep,
+                    change: PyRep::Dict(vec![
                         (
                             PyRep::String("stationid".into()),
                             PyRep::Tuple(vec![
@@ -165,7 +163,7 @@ pub(super) async fn handle_return_players(
                             ]),
                         ),
                     ]),
-                ],
+                },
             );
         }
     }
@@ -258,14 +256,12 @@ pub(super) async fn handle_teleport_ref_home(
                 ("solarsystemid2", PyRep::Integer(i64::from(home_sys))),
                 ("solarsystemid", PyRep::None),
             ]);
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(caller_cid),
-                "OnSessionChanged",
-                "charid",
-                vec![
-                    PyRep::Bool(false),
-                    sess_rep,
-                    PyRep::Dict(vec![
+                crate::router::notify_registry::OnSessionChanged {
+                    is_remote: false,
+                    session: sess_rep,
+                    change: PyRep::Dict(vec![
                         (
                             PyRep::String("stationid".into()),
                             PyRep::Tuple(vec![
@@ -281,7 +277,7 @@ pub(super) async fn handle_teleport_ref_home(
                             ]),
                         ),
                     ]),
-                ],
+                },
             );
         }
     }

@@ -1132,7 +1132,15 @@ fn handle_alsc_lock_unlock(
                 });
             }
         });
-        ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnLockedItemChange", "charid", vec![PyRep::Integer(iid), PyRep::Integer(owner_id), PyRep::Integer(loc_id)]);
+        ctx.emit_typed(
+            crate::router::NotificationTarget::Character(char_id),
+            crate::router::notify_registry::OnLockedItemChange {
+                item_id: iid,
+                owner_id,
+                location_id: loc_id,
+                is_locked: is_lock,
+            },
+        );
     }
     save_container_ship_state(ctx, &st);
     Ok(PyRep::keyval([("containerID", PyRep::Integer(container_id)), ("locked", PyRep::Bool(is_lock)), ("count", PyRep::Integer(item_ids.len() as i64))]))
@@ -1497,12 +1505,10 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                             .get(&item.type_id)
                             .map(|t| (t.group_id, t.category_id))
                             .unwrap_or((0, 0));
-                        ctx.notify(
+                        ctx.emit_typed(
                             crate::router::NotificationTarget::Character(char_id),
-                            "OnItemChange",
-                            "charid",
-                            vec![
-                                PyRep::keyval([
+                            crate::router::notify_registry::OnItemChange {
+                                item: PyRep::keyval([
                                     ("itemID", PyRep::Integer(item.item_id)),
                                     ("typeID", PyRep::Integer(item.type_id as i64)),
                                     ("ownerID", PyRep::Integer(item.owner_id)),
@@ -1520,11 +1526,12 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                                     ("categoryID", PyRep::Integer(i64::from(category_id))),
                                     ("singleton", PyRep::Bool(item.singleton)),
                                 ]),
-                                PyRep::Dict(vec![
+                                change: PyRep::Dict(vec![
                                     (PyRep::Integer(3), PyRep::Integer(wrap_id)),
                                     (PyRep::Integer(4), PyRep::Integer(prev_flag as i64)),
                                 ]),
-                            ],
+                                location: PyRep::None,
+                            },
                         );
                     }
                     let _ = prev_loc;

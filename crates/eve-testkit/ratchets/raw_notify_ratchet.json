@@ -1,5 +1,5 @@
 {
   "version": 1,
-  "max_raw_notify_calls": 219,
-  "max_files_with_raw_notify": 85
+  "max_raw_notify_calls": 159,
+  "max_files_with_raw_notify": 55
 }
