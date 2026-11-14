@@ -1593,7 +1593,578 @@ async fn issue_1008_1020_destroyed_player_drone_emits_clear_notifications() {
         "destroyed drone must clear activity via OnDroneActivityChange"
     );
     assert!(
-        notifs.iter().any(|n| n.event == "OnItemChange"),
+        notifs.iter().any(|n| {
+            n.event == "OnItemChange"
+        }),
         "destroyed drone must emit tombstone OnItemChange"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unpiloted_capsule_destruction_preserves_owner_implants_ship_and_location() {
+    let ctx = test_ctx();
+    let sys_id = 30_002_813_u32; // Low-sec system distinct from Jita home station (30_000_142 / 60_003_760)
+    let victim = 90_000_001_i64;
+    let attacker = 90_000_002_i64;
+    let home_station_id = 60_003_760_i64;
+    let now = ctx.now_unix();
+
+    let piloted_ship_id = 400_100_001_i64;
+    let unpiloted_pod_id = 400_100_002_i64;
+    let implant_id = 400_100_003_i64;
+    let booster_id = 400_100_004_i64;
+    let pod_pos = DVec3::new(12_000.0, -500.0, 2_000.0);
+
+    // Owner is piloting another ship in space, with implants, boosters, and a Zarzakh gate lock
+    spawn_ship(&ctx, sys_id, piloted_ship_id, victim, 587, DVec3::ZERO, 0.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&victim) {
+            ch.home_station_id = home_station_id;
+        }
+        snap.items.insert(
+            unpiloted_pod_id,
+            make_item(
+                unpiloted_pod_id,
+                670,
+                victim,
+                sys_id as i64,
+                InventoryFlag::None,
+                1,
+                0.0,
+            ),
+        );
+        snap.item_positions
+            .insert(unpiloted_pod_id, [pod_pos.x, pod_pos.y, pod_pos.z]);
+        snap.active_implants.insert(victim, vec![9_899, 10_208]);
+        snap.items.insert(
+            implant_id,
+            make_item(implant_id, 9_899, victim, victim, InventoryFlag::Implant, 1, 0.0),
+        );
+        snap.items.insert(
+            booster_id,
+            make_item(booster_id, 28_672, victim, victim, InventoryFlag::Booster, 1, 0.0),
+        );
+        snap.zarzakh_gate_locks.insert(victim, (40_000_001, now + 3_600));
+    });
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle.try_spawn_ball_with_combat(
+        Ball {
+            id: unpiloted_pod_id,
+            type_id: 670,
+            position: pod_pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 335.0,
+            inertia: 0.25,
+            mass: 16_000.0,
+            radius: 15.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        ctx.build_type_combat_state(670),
+    );
+    let _ = ctx.drain_notifications_for_char(victim);
+
+    let res = on_ball_destroyed_sync(&ctx, sys_id, unpiloted_pod_id, Some(attacker), pod_pos)
+        .expect("unpiloted capsule destruction succeeds")
+        .expect("unpiloted capsule produces DeathPipelineResult");
+    assert_eq!(res.wreck_type_id, 25);
+    assert_eq!(res.ejected_capsule_id, None);
+    assert_eq!(res.insurance_payout_isk, 0.0);
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&unpiloted_pod_id));
+        assert!(!snap.item_positions.contains_key(&unpiloted_pod_id));
+        assert!(snap.items.contains_key(&res.wreck_item_id));
+        assert!(snap.killmails.contains_key(&res.killmail_id));
+
+        let ch = &snap.characters[&victim];
+        assert_eq!(
+            ch.active_ship_id, piloted_ship_id,
+            "destroying an unpiloted capsule must NOT overwrite owner's active_ship_id"
+        );
+        assert_eq!(ch.solar_system_id, sys_id);
+        assert_eq!(ch.station_id, None);
+        assert_eq!(ch.structure_id, None);
+
+        assert_eq!(
+            snap.active_implants.get(&victim),
+            Some(&vec![9_899, 10_208]),
+            "destroying an unpiloted capsule must NOT strip owner's active_implants"
+        );
+        assert!(snap.items.contains_key(&implant_id));
+        assert!(snap.items.contains_key(&booster_id));
+        assert!(snap.zarzakh_gate_locks.contains_key(&victim));
+    });
+
+    crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        let dkm = &rt.detailed_killmails[&res.killmail_id];
+        assert!(
+            !dkm
+                .destroyed_items
+                .iter()
+                .any(|i| i.type_id == 9_899 || i.type_id == 10_208),
+            "unpiloted capsule killmail must NOT list owner's implants"
+        );
+    });
+    assert!(
+        crate::services::space_destiny::get_session_change_timer(&ctx, victim).is_none(),
+        "destroying an unpiloted capsule must NOT trigger a podding session-change timer"
+    );
+    let notifs = ctx.drain_notifications_for_char(victim);
+    assert!(
+        !notifs.iter().any(|n| matches!(
+            n.event.as_str(),
+            "OnPodDeath" | "OnPlayerPodDeath" | "OnPodKilled" | "OnPlayerPodRespawn"
+        )),
+        "destroying an unpiloted capsule must NOT emit pod death/respawn notifications"
+    );
+
+    // Subcase B: Owner docked in a non-home station also keeps implants and stays docked when an unpiloted capsule is destroyed
+    let docked_station_id = 60_003_761_i64;
+    let docked_pod_id = 400_100_005_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&victim) {
+            ch.station_id = Some(docked_station_id);
+            ch.solar_system_id = 30_000_142;
+            ch.active_ship_id = piloted_ship_id;
+        }
+        snap.items.insert(
+            docked_pod_id,
+            make_item(
+                docked_pod_id,
+                33_328,
+                victim,
+                sys_id as i64,
+                InventoryFlag::None,
+                1,
+                0.0,
+            ),
+        );
+    });
+    let res2 = execute_death_pipeline_sync(
+        &ctx,
+        sys_id,
+        victim,
+        docked_pod_id,
+        attacker,
+        DVec3::ZERO,
+        99,
+    )
+    .expect("second unpiloted capsule kill succeeds");
+    assert_eq!(res2.wreck_type_id, 25);
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&docked_pod_id));
+        let ch = &snap.characters[&victim];
+        assert_eq!(ch.active_ship_id, piloted_ship_id);
+        assert_eq!(ch.station_id, Some(docked_station_id));
+        assert_eq!(snap.active_implants.get(&victim), Some(&vec![9_899, 10_208]));
+        assert!(snap.items.contains_key(&implant_id));
+        assert!(snap.items.contains_key(&booster_id));
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn piloted_pod_death_respawns_atomically_in_single_transaction_and_rolls_back_cleanly() {
+    #[derive(Debug, Clone)]
+    struct CommitSnapshot {
+        pod_exists: bool,
+        active_ship_id: i64,
+        active_ship_exists: bool,
+        station_id: Option<i64>,
+        solar_system_id: u32,
+        implants_present: bool,
+        zarzakh_present: bool,
+        corpse_exists: bool,
+    }
+
+    // 1. Single-transaction atomicity: pod deletion + implant clearing + home-station respawn
+    //    commit together in one DB transaction (never an intermediate dangling active_ship_id).
+    let ctx = test_ctx();
+    let sys_id = 30_002_813_u32; // Low-sec
+    let home_station_id = 60_003_760_i64; // Jita 4-4 in 30_000_142
+    let victim = 90_000_001_i64;
+    let now = ctx.now_unix();
+
+    let pod_id = 400_200_001_i64;
+    let implant_id = 400_200_002_i64;
+    let booster_id = 400_200_003_i64;
+    spawn_ship(&ctx, sys_id, pod_id, victim, 670, DVec3::new(1_000.0, 0.0, 0.0), 0.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&victim) {
+            ch.home_station_id = home_station_id;
+        }
+        snap.active_implants.insert(victim, vec![9_899, 10_208]);
+        snap.items.insert(
+            implant_id,
+            make_item(implant_id, 9_899, victim, victim, InventoryFlag::Implant, 1, 0.0),
+        );
+        snap.items.insert(
+            booster_id,
+            make_item(booster_id, 28_672, victim, victim, InventoryFlag::Booster, 1, 0.0),
+        );
+        snap.zarzakh_gate_locks.insert(victim, (40_000_001, now + 3_600));
+        snap.sp6_lifecycle.disconnected_ships.insert(
+            victim,
+            DisconnectedShipEntry {
+                char_id: victim,
+                ship_id: pod_id,
+                ship_type_id: 670,
+                solar_system_id: sys_id,
+                disconnected_at_unix: now,
+                remove_at_unix: now + 60,
+                emergency_warp_dest: None,
+                last_position: [1_000.0, 0.0, 0.0],
+                removed_from_space: false,
+                pre_warp_position: None,
+            },
+        );
+    });
+
+    let commits = Arc::new(std::sync::Mutex::new(Vec::<CommitSnapshot>::new()));
+    let commits_cb = Arc::clone(&commits);
+    ctx.db.register_post_commit_listener(Arc::new(move |snap, _ch, _eff| {
+        let ch = &snap.characters[&victim];
+        let corpse_exists = snap.items.values().any(|i| i.type_id == 25 && i.owner_id == victim);
+        commits_cb.lock().unwrap().push(CommitSnapshot {
+            pod_exists: snap.items.contains_key(&pod_id),
+            active_ship_id: ch.active_ship_id,
+            active_ship_exists: snap.items.contains_key(&ch.active_ship_id),
+            station_id: ch.station_id,
+            solar_system_id: ch.solar_system_id,
+            implants_present: snap.active_implants.contains_key(&victim),
+            zarzakh_present: snap.zarzakh_gate_locks.contains_key(&victim),
+            corpse_exists,
+        });
+    }));
+
+    let pod_res = execute_death_pipeline_sync(&ctx, sys_id, victim, pod_id, 0, DVec3::ZERO, 77)
+        .expect("piloted pod death succeeds");
+    assert_eq!(pod_res.wreck_type_id, 25);
+    assert_eq!(pod_res.ejected_capsule_id, None);
+
+    let recorded = commits.lock().unwrap().clone();
+    assert_eq!(
+        recorded.len(),
+        1,
+        "piloted pod death must execute deletion, implant stripping, and home-station respawn in a single transaction"
+    );
+    let c0 = &recorded[0];
+    assert!(!c0.pod_exists);
+    assert_ne!(c0.active_ship_id, pod_id);
+    assert!(
+        c0.active_ship_exists,
+        "committed active_ship_id must immediately point to the existing/spawned home-station capsule"
+    );
+    assert_eq!(c0.station_id, Some(home_station_id));
+    assert_eq!(c0.solar_system_id, 30_000_142);
+    assert!(!c0.implants_present);
+    assert!(!c0.zarzakh_present);
+    assert!(c0.corpse_exists);
+
+    // 2. Commit failure (FailAtCommit) rolls back the entire single transaction and preserves pre-death state
+    let rb_ctx = test_ctx();
+    let rb_pod = 400_300_001_i64;
+    let rb_imp = 400_300_002_i64;
+    let rb_bst = 400_300_003_i64;
+    spawn_ship(&rb_ctx, sys_id, rb_pod, victim, 670, DVec3::ZERO, 0.0);
+    rb_ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&victim) {
+            ch.home_station_id = home_station_id;
+        }
+        snap.active_implants.insert(victim, vec![9_899]);
+        snap.items.insert(
+            rb_imp,
+            make_item(rb_imp, 9_899, victim, victim, InventoryFlag::Implant, 1, 0.0),
+        );
+        snap.items.insert(
+            rb_bst,
+            make_item(rb_bst, 28_672, victim, victim, InventoryFlag::Booster, 1, 0.0),
+        );
+        snap.zarzakh_gate_locks.insert(victim, (40_000_001, now + 3_600));
+    });
+    let kms_before = rb_ctx.db.with_snapshot(|s| s.killmails.len());
+    rb_ctx.db.set_fault_plan_for_test(eve_db::TxFaultPlan::FailAtCommit);
+
+    let fail_res =
+        execute_death_pipeline_sync(&rb_ctx, sys_id, victim, rb_pod, 0, DVec3::ZERO, 77);
+    assert!(fail_res.is_err(), "FailAtCommit must fail the death pipeline");
+    rb_ctx.db.with_snapshot(|snap| {
+        assert!(snap.items.contains_key(&rb_pod), "pod item preserved on rollback");
+        assert!(snap.items.contains_key(&rb_imp), "implant item preserved on rollback");
+        assert!(snap.items.contains_key(&rb_bst), "booster item preserved on rollback");
+        assert_eq!(snap.active_implants.get(&victim), Some(&vec![9_899]));
+        assert!(snap.zarzakh_gate_locks.contains_key(&victim));
+        assert_eq!(snap.characters[&victim].active_ship_id, rb_pod);
+        assert_eq!(snap.characters[&victim].solar_system_id, sys_id);
+        assert_eq!(snap.characters[&victim].station_id, None);
+        assert_eq!(snap.killmails.len(), kms_before);
+        assert!(!snap.items.values().any(|i| i.type_id == 25 && i.owner_id == victim));
+    });
+
+    // 3. Mid-transaction persistence abort (FailNthStatement) after partial SQLite writes
+    //    rolls back corpse creation, pod deletion, and implant removal cleanly and emits 0 post-commit callbacks.
+    let rb_commits = Arc::new(std::sync::Mutex::new(Vec::<CommitSnapshot>::new()));
+    let rb_commits_cb = Arc::clone(&rb_commits);
+    rb_ctx.db.register_post_commit_listener(Arc::new(move |snap, _ch, _eff| {
+        if let Some(ch) = snap.characters.get(&victim) {
+            rb_commits_cb.lock().unwrap().push(CommitSnapshot {
+                pod_exists: snap.items.contains_key(&rb_pod),
+                active_ship_id: ch.active_ship_id,
+                active_ship_exists: snap.items.contains_key(&ch.active_ship_id),
+                station_id: ch.station_id,
+                solar_system_id: ch.solar_system_id,
+                implants_present: snap.active_implants.contains_key(&victim),
+                zarzakh_present: snap.zarzakh_gate_locks.contains_key(&victim),
+                corpse_exists: snap.items.values().any(|i| i.type_id == 25 && i.owner_id == victim),
+            });
+        }
+    }));
+    rb_ctx.db.set_fault_plan_for_test(eve_db::TxFaultPlan::FailNthStatement(2));
+    let abort_err =
+        execute_death_pipeline_sync(&rb_ctx, sys_id, victim, rb_pod, 0, DVec3::ZERO, 77)
+            .unwrap_err();
+    assert!(
+        abort_err.contains("death transaction failed"),
+        "expected FailNthStatement abort error, got: {abort_err}"
+    );
+    assert!(
+        rb_commits.lock().unwrap().is_empty(),
+        "aborted transaction must not trigger post-commit callbacks"
+    );
+    rb_ctx.db.with_snapshot(|snap| {
+        assert!(snap.items.contains_key(&rb_pod));
+        assert!(snap.items.contains_key(&rb_imp));
+        assert!(snap.items.contains_key(&rb_bst));
+        assert_eq!(snap.active_implants.get(&victim), Some(&vec![9_899]));
+        assert!(snap.zarzakh_gate_locks.contains_key(&victim));
+        assert_eq!(snap.characters[&victim].active_ship_id, rb_pod);
+        assert_eq!(snap.characters[&victim].solar_system_id, sys_id);
+        assert_eq!(snap.characters[&victim].station_id, None);
+        assert_eq!(snap.killmails.len(), kms_before);
+        assert!(!snap.items.values().any(|i| i.type_id == 25 && i.owner_id == victim));
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn piloted_ship_destruction_clears_modules_runtime_state_and_emits_tombstones() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let victim = 90_000_001_i64;
+    let attacker = 90_000_002_i64;
+    let ship_id = 400_300_001_i64;
+    let cycled_mod_id = 400_300_011_i64;
+    let uncycled_active_mod_id = 400_300_012_i64;
+    let offline_mod_id = 400_300_013_i64;
+    let cargo_item_id = 400_300_014_i64;
+    let now = ctx.now_unix();
+
+    let victim_uid = ctx.db.with_snapshot(|s| s.characters[&victim].user_id);
+    let _ = ctx
+        .db
+        .acquire_online_lock(victim_uid, 701, Some(victim), false, now);
+    spawn_ship(&ctx, sys_id, ship_id, victim, 587, DVec3::ZERO, 0.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            cycled_mod_id,
+            make_item(
+                cycled_mod_id,
+                2048,
+                victim,
+                ship_id,
+                InventoryFlag::from_u16(11),
+                1,
+                0.0,
+            ),
+        );
+        snap.items.insert(
+            uncycled_active_mod_id,
+            make_item(
+                uncycled_active_mod_id,
+                2048,
+                victim,
+                ship_id,
+                InventoryFlag::from_u16(12),
+                1,
+                0.0,
+            ),
+        );
+        snap.items.insert(
+            offline_mod_id,
+            make_item(
+                offline_mod_id,
+                2048,
+                victim,
+                ship_id,
+                InventoryFlag::from_u16(13),
+                1,
+                0.0,
+            ),
+        );
+        snap.items.insert(
+            cargo_item_id,
+            make_item(
+                cargo_item_id,
+                232,
+                victim,
+                ship_id,
+                InventoryFlag::Cargo,
+                10,
+                0.0,
+            ),
+        );
+        snap.module_active_states.insert(cycled_mod_id);
+        snap.module_active_states.insert(uncycled_active_mod_id);
+        snap.module_active_charges.insert(cycled_mod_id, 232);
+        snap.module_active_charges.insert(uncycled_active_mod_id, 232);
+        snap.module_active_charges.insert(offline_mod_id, 232);
+        snap.transient_item_attributes
+            .entry(cycled_mod_id)
+            .or_default()
+            .insert(267, 0.75);
+        snap.transient_item_attributes
+            .entry(uncycled_active_mod_id)
+            .or_default()
+            .insert(267, 0.5);
+        snap.transient_item_attributes
+            .entry(offline_mod_id)
+            .or_default()
+            .insert(1176, 0.25);
+        snap.transient_item_attributes
+            .entry(ship_id)
+            .or_default()
+            .insert(267, 0.9);
+        snap.sp6_lifecycle.self_destructs.insert(
+            ship_id,
+            eve_db::SelfDestructPersistedEntry {
+                ship_id,
+                char_id: victim,
+                solar_system_id: sys_id,
+                started_unix: now,
+                detonate_at_unix: now + 120,
+            },
+        );
+    });
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.self_destruct_countdowns.insert(
+            ship_id,
+            crate::services::combat_crimewatch::SelfDestructCountdown {
+                ship_id,
+                char_id: victim,
+                solar_system_id: sys_id,
+                started_unix: now,
+                detonate_at_unix: now + 120,
+            },
+        );
+    });
+    {
+        let mut fittings = ctx.ship_fittings.write().unwrap();
+        fittings.insert(
+            ship_id,
+            eve_dogma::ShipFittingEngine::from_sde(ship_id, 587, &ctx.sde),
+        );
+    }
+    {
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        let mut st = sys_handle.actor_state.write().unwrap();
+        st.active_module_cycles
+            .push(crate::system_actor::ActiveModuleCycle {
+                ship_id,
+                module_id: cycled_mod_id,
+                module_type_id: 2048,
+                owner_char_id: Some(victim),
+                effect_name: "online".to_string(),
+                duration_s: 10.0,
+                ..Default::default()
+            });
+    }
+    let _ = ctx.drain_notifications_for_char(victim);
+
+    let res = on_ball_destroyed_sync(&ctx, sys_id, ship_id, Some(attacker), DVec3::ZERO)
+        .expect("piloted ship destruction succeeds")
+        .expect("piloted ship destruction produces DeathPipelineResult");
+    assert!(res.ejected_capsule_id.is_some());
+
+    let survived_in_snap: Vec<bool> = ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&ship_id));
+        for id in [cycled_mod_id, uncycled_active_mod_id, offline_mod_id] {
+            assert!(!snap.module_active_states.contains(&id));
+            assert!(!snap.module_active_charges.contains_key(&id));
+            assert!(!snap.transient_item_attributes.contains_key(&id));
+        }
+        assert!(!snap.transient_item_attributes.contains_key(&ship_id));
+        assert!(!snap.sp6_lifecycle.self_destructs.contains_key(&ship_id));
+        [
+            cycled_mod_id,
+            uncycled_active_mod_id,
+            offline_mod_id,
+            cargo_item_id,
+        ]
+        .iter()
+        .map(|id| snap.items.contains_key(id))
+        .collect()
+    });
+    crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        assert!(!rt.self_destruct_countdowns.contains_key(&ship_id));
+    });
+    assert!(!ctx.ship_fittings.read().unwrap().contains_key(&ship_id));
+    assert!(!ctx
+        .systems
+        .get_or_spawn(sys_id)
+        .actor_state
+        .read()
+        .unwrap()
+        .active_module_cycles
+        .iter()
+        .any(|c| c.ship_id == ship_id));
+
+    let notifs = ctx.drain_notifications_for_char(victim);
+    for active_mid in [cycled_mod_id, uncycled_active_mod_id] {
+        let stop_count = notifs
+            .iter()
+            .filter(|n| {
+                n.event == "OnGodmaShipEffect"
+                    && n.args.first().and_then(|v| v.as_i64()) == Some(active_mid)
+                    && n.args.get(3).and_then(|v| v.as_i64()) == Some(0)
+            })
+            .count();
+        assert_eq!(
+            stop_count, 1,
+            "module {active_mid} must emit exactly one OnGodmaShipEffect stop notification"
+        );
+    }
+
+    let has_tombstone = |item_id: i64| {
+        notifs.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args
+                    .first()
+                    .and_then(|r| r.dbrow_get("itemID"))
+                    .and_then(|v| v.as_i64())
+                    == Some(item_id)
+                && n.args
+                    .first()
+                    .and_then(|r| r.dbrow_get("locationID"))
+                    .and_then(|v| v.as_i64())
+                    == Some(6)
+        })
+    };
+    assert!(
+        has_tombstone(ship_id),
+        "destroyed ship must emit OnItemChange locJunkyard tombstone"
+    );
+    for (idx, child_id) in [
+        cycled_mod_id,
+        uncycled_active_mod_id,
+        offline_mod_id,
+        cargo_item_id,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            has_tombstone(child_id),
+            !survived_in_snap[idx],
+            "item {child_id} tombstone emission must match whether it was destroyed"
+        );
+    }
 }

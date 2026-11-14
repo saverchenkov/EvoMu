@@ -563,7 +563,6 @@ async fn test_session_change_timer_triggers_and_coverage() {
     ctx.advance_secs(12);
     let victim_char_id = 90_000_002i64;
     let victim_ship_id = 100_000_090i64;
-    let victim_pod_id = 100_000_091i64;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&victim_char_id) {
             ch.corporation_id = 1000001;
@@ -574,10 +573,6 @@ async fn test_session_change_timer_triggers_and_coverage() {
         }
         snap.items.insert(victim_ship_id, eve_db::InventoryItemRecord {
             item_id: victim_ship_id, type_id: 587, owner_id: victim_char_id, location_id: sys_id as i64,
-            quantity: 1, singleton: true, version: 1, ..Default::default()
-        });
-        snap.items.insert(victim_pod_id, eve_db::InventoryItemRecord {
-            item_id: victim_pod_id, type_id: 670, owner_id: victim_char_id, location_id: sys_id as i64,
             quantity: 1, singleton: true, version: 1, ..Default::default()
         });
     });
@@ -593,9 +588,10 @@ async fn test_session_change_timer_triggers_and_coverage() {
     };
 
     // Ship destruction triggers "ship_loss" timer
-    let _ = execute_death_pipeline(&ctx, sys_id, victim_char_id, victim_ship_id, char_id, DVec3::ZERO, 42)
+    let ship_death = execute_death_pipeline(&ctx, sys_id, victim_char_id, victim_ship_id, char_id, DVec3::ZERO, 42)
         .await
         .expect("ship death pipeline");
+    let victim_pod_id = ship_death.ejected_capsule_id.expect("ejected capsule");
 
     let ship_timer = get_session_change_timer(&ctx, victim_char_id).expect("ship_loss timer");
     assert_eq!(ship_timer.reason, "ship_loss");

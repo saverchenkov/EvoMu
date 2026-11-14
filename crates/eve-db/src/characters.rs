@@ -480,179 +480,7 @@ impl WorldRepository {
         sde: &SdeRegistry,
     ) -> Result<(CharacterRecord, InventoryItemRecord), DbError> {
         self.try_with_mut_snapshot(|guard| {
-            let ch_pre = guard
-                .characters
-                .get(&character_id)
-                .cloned()
-                .ok_or(DbError::CharacterNotFound(character_id))?;
-            let raw_home_id = ch_pre.home_station_id;
-
-            let resolve_school_fallback = || -> (i64, SolarSystemId, u32, u32) {
-                let school_opt = sde
-                    .schools
-                    .get(&ch_pre.school_id)
-                    .or_else(|| sde.schools.values().find(|s| s.race_id == ch_pre.race_id))
-                    .or_else(|| sde.schools.values().min_by_key(|s| s.school_id));
-                let (sta_id, sys_id) = if let Some(sc) = school_opt {
-                    (sc.station_id, sc.solar_system_id)
-                } else if let Some(st) = sde.stations.values().min_by_key(|s| s.station_id) {
-                    (st.station_id, st.solar_system_id)
-                } else {
-                    (raw_home_id, ch_pre.solar_system_id)
-                };
-                let (const_id, reg_id) = sde
-                    .solar_systems
-                    .get(&sys_id)
-                    .map(|s| (s.constellation_id, s.region_id))
-                    .unwrap_or((ch_pre.constellation_id, ch_pre.region_id));
-                (sta_id, sys_id, const_id, reg_id)
-            };
-
-            let (respawn_loc_id, respawn_is_structure, reset_home, home_sys_id, home_const_id, home_reg_id) =
-                if raw_home_id >= 1_000_000_000_000 {
-                    let valid_struct = guard.structures.get(&raw_home_id).filter(|st| {
-                        let is_op = !matches!(
-                            st.state.as_str(),
-                            "AnchorVulnerable" | "Anchoring" | "NoCore" | "Onlining" | "Destroyed"
-                        );
-                        let req_core = sde
-                            .types
-                            .get(&st.type_id)
-                            .and_then(|t| t.default_attributes.get(&3101).copied())
-                            .unwrap_or(0.0)
-                            > 0.0;
-                        let cored = !req_core || st.quantum_core_installed;
-                        let has_clone_bay = guard.items.values().any(|it| {
-                            it.location_id == raw_home_id
-                                && (164..=171).contains(&(it.flag as u16))
-                                && guard.module_online_states.get(&it.item_id) == Some(&true)
-                                && (it.type_id == 35894
-                                    || sde.types.get(&it.type_id).is_some_and(|t| {
-                                        t.name.to_ascii_lowercase().contains("clone bay")
-                                    }))
-                        });
-                        is_op && cored && has_clone_bay
-                    });
-                    if let Some(st) = valid_struct {
-                        let sys_id = st.solar_system_id;
-                        let (const_id, reg_id) = sde
-                            .solar_systems
-                            .get(&sys_id)
-                            .map(|s| (s.constellation_id, s.region_id))
-                            .unwrap_or((ch_pre.constellation_id, ch_pre.region_id));
-                        (raw_home_id, true, false, sys_id, const_id, reg_id)
-                    } else {
-                        let (sta_id, sys_id, const_id, reg_id) = resolve_school_fallback();
-                        (sta_id, false, true, sys_id, const_id, reg_id)
-                    }
-                } else if let Some(st) = sde.stations.get(&raw_home_id) {
-                    let sys_id = st.solar_system_id;
-                    let (const_id, reg_id) = sde
-                        .solar_systems
-                        .get(&sys_id)
-                        .map(|s| (s.constellation_id, s.region_id))
-                        .unwrap_or((ch_pre.constellation_id, ch_pre.region_id));
-                    (raw_home_id, false, false, sys_id, const_id, reg_id)
-                } else if let Some(sys) = sde
-                    .solar_systems
-                    .values()
-                    .find(|sys| sys.stations.iter().any(|st| st.station_id == raw_home_id))
-                {
-                    (raw_home_id, false, false, sys.solar_system_id, sys.constellation_id, sys.region_id)
-                } else {
-                    let (sta_id, sys_id, const_id, reg_id) = resolve_school_fallback();
-                    (sta_id, false, true, sys_id, const_id, reg_id)
-                };
-
-            // Recursively remove the destroyed ship and all items fitted/contained inside it (including nested containers)
-            let mut to_remove = HashSet::from([destroyed_ship_id]);
-            loop {
-                let mut added = false;
-                for (&id, item) in &guard.items {
-                    if !to_remove.contains(&id) && to_remove.contains(&item.location_id) {
-                        to_remove.insert(id);
-                        added = true;
-                    }
-                }
-                if !added {
-                    break;
-                }
-            }
-            let is_pod = guard
-                .items
-                .get(&destroyed_ship_id)
-                .map(|i| {
-                    i.type_id == 670
-                        || i.type_id == 33328
-                        || sde.types.get(&i.type_id).map(|t| t.group_id == 29).unwrap_or(false)
-                })
-                .unwrap_or(true);
-            if is_pod {
-                guard.active_implants.remove(&character_id);
-                guard.items.retain(|_, item| {
-                    !(item.location_id == character_id
-                        && matches!(item.flag, InventoryFlag::Implant | InventoryFlag::Booster))
-                });
-            }
-
-            guard.items.retain(|id, _| !to_remove.contains(id));
-
-            let existing_capsule_id = guard
-                .items
-                .values()
-                .find(|i| {
-                    i.owner_id == character_id
-                        && i.type_id == 670
-                        && i.location_id == respawn_loc_id
-                })
-                .map(|i| i.item_id);
-            let (capsule_id, capsule) = if let Some(cid) = existing_capsule_id {
-                let cap = guard.items.get_mut(&cid).unwrap();
-                cap.flag = InventoryFlag::Hangar;
-                cap.version += 1;
-                (cid, cap.clone())
-            } else {
-                guard.next_entity_id += 1;
-                let cid = guard.next_entity_id;
-                let cap = InventoryItemRecord {
-                    item_id: cid,
-                    type_id: 670, // Capsule
-                    owner_id: character_id,
-                    location_id: respawn_loc_id,
-                    flag: InventoryFlag::Hangar,
-                    quantity: 1,
-                    singleton: true,
-                    version: 1,
-                    dynamic_attributes: HashMap::new(),
-                    source_mutaplasmid_id: None,
-                    insured_payout_isk: 0.0,
-                    is_blueprint_copy: false,
-                    blueprint_runs_remaining: None,
-                };
-                guard.items.insert(cid, cap.clone());
-                (cid, cap)
-            };
-
-            let ch = guard.characters.get_mut(&character_id).unwrap();
-            ch.active_ship_id = capsule_id;
-            if reset_home {
-                ch.home_station_id = respawn_loc_id;
-            }
-            if respawn_is_structure {
-                ch.station_id = None;
-                ch.structure_id = Some(respawn_loc_id);
-            } else {
-                ch.station_id = Some(respawn_loc_id);
-                ch.structure_id = None;
-            }
-            ch.solar_system_id = home_sys_id;
-            ch.constellation_id = home_const_id;
-            ch.region_id = home_reg_id;
-            ch.version += 1;
-            ch.system_epoch += 1;
-            let ch_snapshot = ch.clone();
-
-            Ok((ch_snapshot, capsule))
+            respawn_character_at_home_station_in_snap(guard, character_id, destroyed_ship_id, sde)
         })
     }
 
@@ -984,6 +812,190 @@ impl WorldRepository {
         ids.sort_unstable();
         ids
     }
+}
+
+/// Mutates `guard` in-place to destroy `destroyed_ship_id` (and all fitted/contained items inside
+/// it), reuse or spawn a Capsule (`type_id = 670`) at `character.home_station_id`, and relocate the
+/// character to their home station/structure without starting a nested transaction.
+pub fn respawn_character_at_home_station_in_snap(
+    guard: &mut WorldStateSnapshot,
+    character_id: i64,
+    destroyed_ship_id: i64,
+    sde: &SdeRegistry,
+) -> Result<(CharacterRecord, InventoryItemRecord), DbError> {
+    let ch_pre = guard
+        .characters
+        .get(&character_id)
+        .cloned()
+        .ok_or(DbError::CharacterNotFound(character_id))?;
+    let raw_home_id = ch_pre.home_station_id;
+
+    let resolve_school_fallback = || -> (i64, SolarSystemId, u32, u32) {
+        let school_opt = sde
+            .schools
+            .get(&ch_pre.school_id)
+            .or_else(|| sde.schools.values().find(|s| s.race_id == ch_pre.race_id))
+            .or_else(|| sde.schools.values().min_by_key(|s| s.school_id));
+        let (sta_id, sys_id) = if let Some(sc) = school_opt {
+            (sc.station_id, sc.solar_system_id)
+        } else if let Some(st) = sde.stations.values().min_by_key(|s| s.station_id) {
+            (st.station_id, st.solar_system_id)
+        } else {
+            (raw_home_id, ch_pre.solar_system_id)
+        };
+        let (const_id, reg_id) = sde
+            .solar_systems
+            .get(&sys_id)
+            .map(|s| (s.constellation_id, s.region_id))
+            .unwrap_or((ch_pre.constellation_id, ch_pre.region_id));
+        (sta_id, sys_id, const_id, reg_id)
+    };
+
+    let (respawn_loc_id, respawn_is_structure, reset_home, home_sys_id, home_const_id, home_reg_id) =
+        if raw_home_id >= 1_000_000_000_000 {
+            let valid_struct = guard.structures.get(&raw_home_id).filter(|st| {
+                let is_op = !matches!(
+                    st.state.as_str(),
+                    "AnchorVulnerable" | "Anchoring" | "NoCore" | "Onlining" | "Destroyed"
+                );
+                let req_core = sde
+                    .types
+                    .get(&st.type_id)
+                    .and_then(|t| t.default_attributes.get(&3101).copied())
+                    .unwrap_or(0.0)
+                    > 0.0;
+                let cored = !req_core || st.quantum_core_installed;
+                let has_clone_bay = guard.items.values().any(|it| {
+                    it.location_id == raw_home_id
+                        && (164..=171).contains(&(it.flag as u16))
+                        && guard.module_online_states.get(&it.item_id) == Some(&true)
+                        && (it.type_id == 35894
+                            || sde.types.get(&it.type_id).is_some_and(|t| {
+                                t.name.to_ascii_lowercase().contains("clone bay")
+                            }))
+                });
+                is_op && cored && has_clone_bay
+            });
+            if let Some(st) = valid_struct {
+                let sys_id = st.solar_system_id;
+                let (const_id, reg_id) = sde
+                    .solar_systems
+                    .get(&sys_id)
+                    .map(|s| (s.constellation_id, s.region_id))
+                    .unwrap_or((ch_pre.constellation_id, ch_pre.region_id));
+                (raw_home_id, true, false, sys_id, const_id, reg_id)
+            } else {
+                let (sta_id, sys_id, const_id, reg_id) = resolve_school_fallback();
+                (sta_id, false, true, sys_id, const_id, reg_id)
+            }
+        } else if let Some(st) = sde.stations.get(&raw_home_id) {
+            let sys_id = st.solar_system_id;
+            let (const_id, reg_id) = sde
+                .solar_systems
+                .get(&sys_id)
+                .map(|s| (s.constellation_id, s.region_id))
+                .unwrap_or((ch_pre.constellation_id, ch_pre.region_id));
+            (raw_home_id, false, false, sys_id, const_id, reg_id)
+        } else if let Some(sys) = sde
+            .solar_systems
+            .values()
+            .find(|sys| sys.stations.iter().any(|st| st.station_id == raw_home_id))
+        {
+            (raw_home_id, false, false, sys.solar_system_id, sys.constellation_id, sys.region_id)
+        } else {
+            let (sta_id, sys_id, const_id, reg_id) = resolve_school_fallback();
+            (sta_id, false, true, sys_id, const_id, reg_id)
+        };
+
+    // Recursively remove the destroyed ship and all items fitted/contained inside it (including nested containers)
+    let mut to_remove = HashSet::from([destroyed_ship_id]);
+    loop {
+        let mut added = false;
+        for (&id, item) in &guard.items {
+            if !to_remove.contains(&id) && to_remove.contains(&item.location_id) {
+                to_remove.insert(id);
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    let is_pod = guard
+        .items
+        .get(&destroyed_ship_id)
+        .map(|i| {
+            i.type_id == 670
+                || i.type_id == 33328
+                || sde.types.get(&i.type_id).map(|t| t.group_id == 29).unwrap_or(false)
+        })
+        .unwrap_or(true);
+    if is_pod {
+        guard.active_implants.remove(&character_id);
+        guard.items.retain(|_, item| {
+            !(item.location_id == character_id
+                && matches!(item.flag, InventoryFlag::Implant | InventoryFlag::Booster))
+        });
+    }
+
+    guard.items.retain(|id, _| !to_remove.contains(id));
+
+    let existing_capsule_id = guard
+        .items
+        .values()
+        .find(|i| {
+            i.owner_id == character_id
+                && i.type_id == 670
+                && i.location_id == respawn_loc_id
+        })
+        .map(|i| i.item_id);
+    let (capsule_id, capsule) = if let Some(cid) = existing_capsule_id {
+        let cap = guard.items.get_mut(&cid).unwrap();
+        cap.flag = InventoryFlag::Hangar;
+        cap.version += 1;
+        (cid, cap.clone())
+    } else {
+        guard.next_entity_id += 1;
+        let cid = guard.next_entity_id;
+        let cap = InventoryItemRecord {
+            item_id: cid,
+            type_id: 670, // Capsule
+            owner_id: character_id,
+            location_id: respawn_loc_id,
+            flag: InventoryFlag::Hangar,
+            quantity: 1,
+            singleton: true,
+            version: 1,
+            dynamic_attributes: HashMap::new(),
+            source_mutaplasmid_id: None,
+            insured_payout_isk: 0.0,
+            is_blueprint_copy: false,
+            blueprint_runs_remaining: None,
+        };
+        guard.items.insert(cid, cap.clone());
+        (cid, cap)
+    };
+
+    let ch = guard.characters.get_mut(&character_id).unwrap();
+    ch.active_ship_id = capsule_id;
+    if reset_home {
+        ch.home_station_id = respawn_loc_id;
+    }
+    if respawn_is_structure {
+        ch.station_id = None;
+        ch.structure_id = Some(respawn_loc_id);
+    } else {
+        ch.station_id = Some(respawn_loc_id);
+        ch.structure_id = None;
+    }
+    ch.solar_system_id = home_sys_id;
+    ch.constellation_id = home_const_id;
+    ch.region_id = home_reg_id;
+    ch.version += 1;
+    ch.system_epoch += 1;
+    let ch_snapshot = ch.clone();
+
+    Ok((ch_snapshot, capsule))
 }
 #[cfg(test)] #[path = "characters_unit_tests.rs"] mod characters_unit_tests;
 

@@ -197,6 +197,14 @@ async fn test_batch6_ship_and_pod_destruction_pipeline() {
     assert!(ev_km_atk[0].is_empty(), "OnKillNotification has arity 0");
 
     // 2. Pod destruction via execute_death_pipeline_sync_inner with authentic combat kill (is_self_destruct = false)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&P1) {
+            ch.active_ship_id = pod1;
+            ch.solar_system_id = JITA_SYSTEM;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
     let res_pod = eve_server::combat::death_pipeline::execute_death_pipeline_sync_inner(
         &ctx,
         JITA_SYSTEM,

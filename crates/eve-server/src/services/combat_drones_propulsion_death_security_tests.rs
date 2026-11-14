@@ -296,6 +296,12 @@ async fn r7_tb_14_death_pipeline_mixes_csprng_entropy_and_clears_boosters_on_pod
     let booster_id = 950_002_i64;
     let implant_id = 950_003_i64;
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&victim) {
+            ch.active_ship_id = pod_id;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
         snap.items.insert(
             pod_id,
             make_fighter_item(pod_id, 670, victim, sys_id as i64, InventoryFlag::None, 1),
