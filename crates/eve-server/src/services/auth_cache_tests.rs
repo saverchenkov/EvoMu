@@ -1041,7 +1041,7 @@ async fn slash_tr_mid_warp_stops_warp_and_flushes_pre_set_state_tick_gh994() {
     assert_eq!(same_snap.velocity, glam::DVec3::ZERO);
 
     // 2. Cross-system /tr while mid-warp: must flush warp-stop on old system before take_ball
-    //    and spawn stopped in destination system with SetState queued.
+    //    and spawn stopped in destination system without premature SetState (#1067).
     let mut warp_ball = same_snap;
     warp_ball.velocity = glam::DVec3::new(2.0 * eve_destiny::AU_METERS, 0.0, 0.0);
     warp_ball.mode = MovementMode::Warp {
@@ -1108,10 +1108,12 @@ async fn slash_tr_mid_warp_stops_warp_and_flushes_pre_set_state_tick_gh994() {
         .drain_observer_updates(ship_id)
         .await
         .expect("destination drain");
-    assert!(matches!(
-        dest_evs.first(),
-        Some(eve_destiny::DestinyEvent::SetState { observer_ball_id }) if *observer_ball_id == ship_id
-    ));
+    assert!(
+        !dest_evs
+            .iter()
+            .any(|ev| matches!(ev, eve_destiny::DestinyEvent::SetState { .. })),
+        "cross-system /tr must not push SetState before beyonce.MachoBindObject (#1067): {dest_evs:?}"
+    );
 }
 
 #[tokio::test]

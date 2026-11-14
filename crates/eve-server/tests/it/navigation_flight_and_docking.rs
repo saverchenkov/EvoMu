@@ -605,6 +605,324 @@ async fn test_navigation_warp_dock_emits_stop_warp_destiny_before_session_change
 }
 
 #[tokio::test]
+async fn test_navigation_slash_moveme_cross_system_defers_set_state_until_beyonce_bind_gh1067() {
+    use eve_testkit::client_harness::{
+        extract_bound_id_from_wire_rep, ClientCallOutput, ClientWireFrameKind,
+    };
+    use std::collections::HashSet;
+
+    const DEST_NULL_SYS: u32 = 30_004_759; // 1DQ1-A
+    const DEST_HIGH_SYS: u32 = 30_000_144; // Perimeter
+
+    fn extract_set_state_dicts(out: &ClientCallOutput) -> Vec<&PyRep> {
+        let mut found = Vec::new();
+        for frame in &out.frames {
+            let ClientWireFrameKind::DoDestinyUpdate {
+                has_set_state,
+                updates,
+                ..
+            } = &frame.kind
+            else {
+                continue;
+            };
+            let mut in_this_frame = 0usize;
+            if let PyRep::List(items) = updates {
+                for item in items {
+                    if let PyRep::Tuple(pair) = item {
+                        if let Some(PyRep::Tuple(fa)) = pair.get(1) {
+                            if fa.first().and_then(|v| v.as_str()) == Some("SetState") {
+                                let Some(PyRep::Tuple(args)) = fa.get(1) else {
+                                    panic!("malformed SetState destiny action: {item:?}");
+                                };
+                                let Some(kv) = args.first() else {
+                                    panic!("SetState missing KeyVal payload: {item:?}");
+                                };
+                                found.push(kv);
+                                in_this_frame += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            if *has_set_state {
+                assert!(
+                    in_this_frame > 0,
+                    "DoDestinyUpdate has_set_state=true without SetState tuple in updates: {updates:?}"
+                );
+            }
+        }
+        found
+    }
+
+    fn system_object_ids(ctx: &ServerContext, sys_id: u32) -> HashSet<i64> {
+        let mut ids: HashSet<i64> = ctx
+            .sde
+            .celestials_in_system(sys_id)
+            .into_iter()
+            .map(|c| c.celestial_id)
+            .collect();
+        ids.extend(
+            ctx.sde
+                .stations
+                .values()
+                .filter(|s| s.solar_system_id == sys_id)
+                .map(|s| s.station_id),
+        );
+        ids.extend(
+            ctx.sde
+                .jumps
+                .values()
+                .filter(|j| j.from_solar_system_id == sys_id)
+                .map(|j| j.stargate_id),
+        );
+        ids
+    }
+
+    fn assert_valid_dest_set_state(
+        label: &str,
+        out: &ClientCallOutput,
+        ship_id: i64,
+        expected_ids: &HashSet<i64>,
+    ) {
+        let set_states = extract_set_state_dicts(out);
+        assert!(
+            !set_states.is_empty(),
+            "{label}: beyonce.MachoBindObject must emit DoDestinyUpdate(SetState)"
+        );
+        let state_kv = set_states.last().expect("SetState KeyVal");
+        assert_eq!(
+            state_kv.dict_get("ego").and_then(|v| v.as_i64()),
+            Some(ship_id),
+            "{label}: SetState ego must match active ship {ship_id}"
+        );
+        let Some(PyRep::Bytes(state_bytes)) = state_kv.dict_get("state") else {
+            panic!("{label}: SetState KeyVal missing binary 'state': {state_kv:?}");
+        };
+        let (_pkt_type, _stamp, decoded_balls) = eve_destiny::wire::decode_add_balls(state_bytes)
+            .unwrap_or_else(|e| panic!("{label}: decode_add_balls failed: {e}"));
+        assert!(
+            decoded_balls.iter().any(|b| b.id == ship_id),
+            "{label}: SetState decoded_balls must include active ship {ship_id}"
+        );
+        assert!(
+            decoded_balls
+                .iter()
+                .any(|b| b.id != ship_id && expected_ids.contains(&b.id)),
+            "{label}: SetState decoded_balls must contain destination system celestials/stations/gates"
+        );
+    }
+
+    let ctx = crate::seasons_and_campaigns::fast_real_sde_ctx();
+    common::pin_clock(&ctx);
+    let kw = HashMap::new();
+
+    // Case A: Pilot in space in Jita calls `/moveme 30004759` (cross-system).
+    let cid_space: i64 = 99_106_701;
+    ctx.db
+        .provision_gm_account("gm_moveme_space", "pass", cid_space, "Moveme Space Pilot");
+    let mut h_space = common::new_wire_harness(&ctx, 99_106_701);
+    h_space
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[PyRep::String("gm_moveme_space".into()), PyRep::String("pass".into())],
+            &kw,
+        )
+        .await;
+    h_space
+        .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(cid_space)], &kw)
+        .await;
+    let ship_space = ctx
+        .db
+        .with_snapshot(|s| s.characters[&cid_space].active_ship_id);
+
+    ctx.advance_secs(12);
+    h_space.call_ok("stationSvc", None, "Undock", &[], &kw).await;
+    let bind_jita = h_space
+        .call_exchange(
+            "beyonce",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(i64::from(JITA_SYS)), PyRep::None],
+            &kw,
+        )
+        .await;
+    let _jita_bid = extract_bound_id_from_wire_rep(
+        bind_jita
+            .result
+            .as_ref()
+            .expect("Jita beyonce.MachoBindObject"),
+    )
+    .expect("Jita beyonce bound id");
+
+    ctx.advance_secs(12);
+    let moveme_space_out = h_space
+        .call_exchange(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(format!("/moveme {DEST_NULL_SYS}"))],
+            &kw,
+        )
+        .await;
+    assert!(
+        moveme_space_out.result.is_ok(),
+        "in-space /moveme must succeed: {:?}",
+        moveme_space_out.result
+    );
+    assert!(
+        moveme_space_out.violations.is_empty(),
+        "in-space /moveme contract violations: {:?}",
+        moveme_space_out.violations
+    );
+    assert!(
+        !moveme_space_out.session_change_packets.is_empty(),
+        "cross-system /moveme must emit SessionChangeNotification"
+    );
+    assert_eq!(
+        h_space.transport().inner.session.solar_system_id,
+        Some(DEST_NULL_SYS)
+    );
+    assert_eq!(h_space.transport().inner.session.station_id, None);
+    assert!(
+        extract_set_state_dicts(&moveme_space_out).is_empty(),
+        "SlashCmd(/moveme) must NOT emit SetState prior to SessionChangeNotification / beyonce.MachoBindObject (#1067)"
+    );
+
+    // Simulate a 1Hz tick and client `beyonce.GetFormations` before `beyonce.MachoBindObject`.
+    let dest_null_handle = ctx.systems.get_or_spawn(DEST_NULL_SYS);
+    dest_null_handle
+        .step_manual(1.0)
+        .await
+        .expect("step destination null system");
+    let form_space_out = h_space
+        .call_exchange("beyonce", None, "GetFormations", &[], &kw)
+        .await;
+    assert!(
+        form_space_out.result.is_ok(),
+        "beyonce.GetFormations must succeed: {:?}",
+        form_space_out.result
+    );
+    assert!(
+        extract_set_state_dicts(&form_space_out).is_empty(),
+        "No premature SetState should arrive during 1Hz tick / GetFormations before MachoBindObject (#1067)"
+    );
+
+    let bind_dest_null = h_space
+        .call_exchange(
+            "beyonce",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(i64::from(DEST_NULL_SYS)), PyRep::None],
+            &kw,
+        )
+        .await;
+    assert!(
+        bind_dest_null.violations.is_empty(),
+        "dest beyonce.MachoBindObject contract violations: {:?}",
+        bind_dest_null.violations
+    );
+    let _dest_null_bid = extract_bound_id_from_wire_rep(
+        bind_dest_null
+            .result
+            .as_ref()
+            .expect("dest null beyonce.MachoBindObject"),
+    )
+    .expect("dest null beyonce bound id");
+    let null_ids = system_object_ids(&ctx, DEST_NULL_SYS);
+    assert_valid_dest_set_state("in-space /moveme -> 1DQ1-A", &bind_dest_null, ship_space, &null_ids);
+
+    // Case B: Docked pilot in Jita 4-4 calls `/moveme 30000144` (Perimeter).
+    let cid_docked: i64 = 99_106_702;
+    ctx.db
+        .provision_gm_account("gm_moveme_docked", "pass", cid_docked, "Moveme Docked Pilot");
+    let mut h_docked = common::new_wire_harness(&ctx, 99_106_702);
+    h_docked
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[PyRep::String("gm_moveme_docked".into()), PyRep::String("pass".into())],
+            &kw,
+        )
+        .await;
+    h_docked
+        .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(cid_docked)], &kw)
+        .await;
+    let ship_docked = ctx
+        .db
+        .with_snapshot(|s| s.characters[&cid_docked].active_ship_id);
+    assert_eq!(
+        h_docked.transport().inner.session.station_id,
+        Some(JITA_44_STATION)
+    );
+
+    ctx.advance_secs(12);
+    let moveme_docked_out = h_docked
+        .call_exchange(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(format!("/moveme {DEST_HIGH_SYS}"))],
+            &kw,
+        )
+        .await;
+    assert!(
+        moveme_docked_out.result.is_ok(),
+        "docked /moveme must succeed: {:?}",
+        moveme_docked_out.result
+    );
+    assert!(
+        !moveme_docked_out.session_change_packets.is_empty(),
+        "docked cross-system /moveme must emit SessionChangeNotification"
+    );
+    assert_eq!(
+        h_docked.transport().inner.session.solar_system_id,
+        Some(DEST_HIGH_SYS)
+    );
+    assert_eq!(h_docked.transport().inner.session.station_id, None);
+    assert!(
+        extract_set_state_dicts(&moveme_docked_out).is_empty(),
+        "docked /moveme must NOT emit SetState before beyonce.MachoBindObject (#1067)"
+    );
+
+    let dest_high_handle = ctx.systems.get_or_spawn(DEST_HIGH_SYS);
+    dest_high_handle
+        .step_manual(1.0)
+        .await
+        .expect("step Perimeter system");
+    let bind_dest_high = h_docked
+        .call_exchange(
+            "beyonce",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(i64::from(DEST_HIGH_SYS)), PyRep::None],
+            &kw,
+        )
+        .await;
+    assert!(
+        bind_dest_high.violations.is_empty(),
+        "Perimeter beyonce.MachoBindObject contract violations: {:?}",
+        bind_dest_high.violations
+    );
+    let _dest_high_bid = extract_bound_id_from_wire_rep(
+        bind_dest_high
+            .result
+            .as_ref()
+            .expect("Perimeter beyonce.MachoBindObject"),
+    )
+    .expect("Perimeter beyonce bound id");
+    let high_ids = system_object_ids(&ctx, DEST_HIGH_SYS);
+    assert_valid_dest_set_state(
+        "docked /moveme -> Perimeter",
+        &bind_dest_high,
+        ship_docked,
+        &high_ids,
+    );
+}
+
+#[tokio::test]
 async fn test_navigation_flight_approach_orbit_and_keep_at_range() {
     // parity: feat:navigation.approach
     // parity: feat:navigation.orbit
