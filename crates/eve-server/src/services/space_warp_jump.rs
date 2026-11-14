@@ -887,6 +887,13 @@ async fn handle_cmd_stargate_jump(
             },
         )
         .await;
+    if arrived_at_warp_dest {
+        let _ = old_handle.force_stop_warp(ship_id);
+        ctx.active_warps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&ship_id);
+    }
     let Some(taken) = old_handle.take_ball(ship_id).await else {
         return Err(BridgeRpcError {
             code: "SystemTransitionFailed".into(),
@@ -981,13 +988,6 @@ async fn handle_cmd_stargate_jump(
             None,
         );
     });
-    if arrived_at_warp_dest {
-        let _ = old_handle.force_stop_warp(ship_id);
-        ctx.active_warps
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&ship_id);
-    }
     deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
 
@@ -1443,6 +1443,13 @@ async fn handle_dock(
             client_error: None,
         });
     }
+    if arrived_at_warp_dest {
+        let _ = handle.force_stop_warp(ship_id);
+        ctx.active_warps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&ship_id);
+    }
     let Some(taken) = handle.take_ball_for_docking(ship_id, dock_id, target_pos).await else {
         return Err(BridgeRpcError {
             code: "DockFailed".into(),
@@ -1461,13 +1468,6 @@ async fn handle_dock(
                     None,
                 );
             });
-            if arrived_at_warp_dest {
-                let _ = handle.force_stop_warp(ship_id);
-                ctx.active_warps
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&ship_id);
-            }
             crate::services::notify_emitters_space_dungeons::emit_exiting_dungeon_on_warp_if_present(
                 ctx,
                 char_id,

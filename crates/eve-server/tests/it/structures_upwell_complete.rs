@@ -266,8 +266,11 @@ async fn test_structure_description_deliveries_cargo_dropoff_guests_and_hangar_v
         .expect_err("drop-off is an in-space action");
     assert_eq!(docked_drop.code, "MustBeInSpace");
     let guests = rpc(&ctx, &mut other, "structureGuests", "GetGuests", &[PyRep::Integer(struct_id)]).await.expect("GetGuests");
-    let PyRep::List(guest_rows) = &guests else { panic!("list expected") };
-    let guest_ids: Vec<i64> = guest_rows.iter().filter_map(|g| if let PyRep::Tuple(t) = g { t.first().and_then(|v| v.as_i64()) } else { None }).collect();
+    let PyRep::Dict(guest_rows) = &guests else { panic!("dict expected, got {guests:?}") };
+    let guest_ids: Vec<i64> = guest_rows.iter().filter_map(|(k, v)| {
+        assert!(matches!(v, PyRep::Tuple(t) if t.len() == 3), "expected 3-tuple value, got {v:?}");
+        k.as_i64()
+    }).collect();
     assert_eq!(guest_ids, vec![char_id], "only the docked character is a guest");
 
     let view = rpc(&ctx, &mut sess, "structureHangarViewMgr", "GetMyHangarViewState", &[]).await.expect("GetMyHangarViewState");

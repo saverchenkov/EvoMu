@@ -799,7 +799,7 @@ fn synthetic_session_from_character(
 /// Builds the full keyval representation of current session attributes expected by `OnSessionChanged`.
 pub fn build_session_state_keyval(session: &SessionState, char_id: i64) -> PyRep {
     let eff_loc = session.effective_location_id();
-    let in_space_sys = if session.station_id.is_none() && session.structure_id.is_none() {
+    let active_sys = if session.station_id.is_none() {
         session.solar_system_id.map(|s| PyRep::Integer(i64::from(s)))
     } else {
         None
@@ -856,7 +856,7 @@ pub fn build_session_state_keyval(session: &SessionState, char_id: i64) -> PyRep
                 .map(|s| PyRep::Integer(i64::from(s)))
                 .unwrap_or(PyRep::None),
         ),
-        ("solarsystemid", in_space_sys.unwrap_or(PyRep::None)),
+        ("solarsystemid", active_sys.unwrap_or(PyRep::None)),
         (
             "locationid",
             eff_loc.map(PyRep::Integer).unwrap_or(PyRep::None),
@@ -1669,9 +1669,10 @@ mod tests {
             .expect("dock succeeds");
         assert!(dock_res.removed_departing_ball.is_some());
         assert!(dock_res.diff.contains_key("structureid"));
-        assert!(dock_res.diff.contains_key("solarsystemid"));
+        assert!(!dock_res.diff.contains_key("solarsystemid"));
         assert_eq!(session.structure_id, Some(amarr_struct));
         assert_eq!(session.station_id, None);
+        assert_eq!(session.effective_location_id(), Some(i64::from(amarr_sys)));
         assert!(ctx.systems.get_ball_position_sync(amarr_sys, ship_id).is_none());
 
         let ship_after_dock = ctx.db.with_snapshot(|s| s.items[&ship_id].clone());

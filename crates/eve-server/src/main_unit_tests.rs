@@ -108,12 +108,15 @@ fn build_session_changed_envelope_handles_docked_structure_and_in_space() {
         Some(&PyRep::Integer(60_003_760))
     );
 
-    // Structure-docked also clears solarsystemid
+    // Structure-docked keeps solarsystemid and locationid set (V24.01 eveSessions)
     sess.station_id = None;
     sess.structure_id = Some(1_000_000_000_001);
     let in_struct = build_session_changed_envelope(&sess, diff.clone());
     if let BridgeEnvelope::ServerEvent { args, .. } = in_struct {
-        assert_eq!(args[1].dict_get("solarsystemid"), Some(&PyRep::None));
+        assert_eq!(
+            args[1].dict_get("solarsystemid"),
+            Some(&PyRep::Integer(30_000_142))
+        );
         assert_eq!(
             args[1].dict_get("structureid"),
             Some(&PyRep::Integer(1_000_000_000_001))

@@ -13,7 +13,7 @@
 #![forbid(unsafe_code)]
 use super::structure_upwell_ops::{load_ext_state, save_ext_state, AssetSafetyWrapRecord, StructureExtendedState, StructureLifecycleState, ASSET_SAFETY_DELIVERY_DELAY_SECS};
 use crate::router::notify_registry::{
-    emit_typed_target_to_char_with_id_type, OnCharacterLeftStructure, OnSessionChanged,
+    emit_typed_target_to_char_with_id_type, OnSessionChanged,
     OnSolarSystemSovStructuresUpdated, OnSovereigntyChanged, OnStructureHacked, OnStructureRemoved,
     OnStructureRemovedFromSpace, OnStructureTargetRemoved, TypedNotification,
 };
@@ -1048,13 +1048,6 @@ fn evacuate_structure_on_leave_space(
                 session: sess_rep,
                 change: eve_proto::PyRep::Dict(diff),
             },
-        );
-        push_char_notification(
-            ctx,
-            snap,
-            cid,
-            "charid",
-            OnCharacterLeftStructure { character_id: cid },
         );
     }
 

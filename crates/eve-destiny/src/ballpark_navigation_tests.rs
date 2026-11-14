@@ -514,17 +514,25 @@ fn force_stop_warp_emits_zero_velocity_event_for_warp_and_subwarp_gh1025() {
     assert_eq!(park.balls[&warper].velocity, DVec3::ZERO);
     assert_eq!(park.balls[&warper].speed_fraction, 0.0);
     let warp_evs = park.drain_observer_events(warper);
-    assert!(
-        warp_evs.iter().any(|e| matches!(e, DestinyEvent::Stop { ball_id } if *ball_id == warper)),
-        "expected Stop event: {warp_evs:?}"
-    );
-    assert!(
-        warp_evs.iter().any(|e| matches!(
+    let stop_idx = warp_evs
+        .iter()
+        .position(|e| matches!(e, DestinyEvent::Stop { ball_id } if *ball_id == warper))
+        .expect("expected Stop event");
+    let vel_idx = warp_evs
+        .iter()
+        .position(|e| matches!(
             e,
             DestinyEvent::SetBallVelocity { ball_id, velocity }
                 if *ball_id == warper && *velocity == [0.0, 0.0, 0.0]
-        )),
-        "force_stop_warp must emit SetBallVelocity([0,0,0]) so DSTBALL_STOP does not coast at warp speed: {warp_evs:?}"
+        ))
+        .expect("force_stop_warp must emit SetBallVelocity([0,0,0]) so DSTBALL_STOP does not coast at warp speed");
+    let pos_idx = warp_evs
+        .iter()
+        .position(|e| matches!(e, DestinyEvent::SetBallPosition { ball_id, .. } if *ball_id == warper))
+        .expect("force_stop_warp while warping must emit SetBallPosition");
+    assert!(
+        stop_idx < vel_idx && vel_idx < pos_idx,
+        "Stop -> SetBallVelocity([0,0,0]) -> SetBallPosition order required on force_stop_warp: {warp_evs:?}"
     );
 
     // Subwarp moving ship stopped via force_stop_warp must also emit SetBallVelocity([0,0,0]).

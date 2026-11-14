@@ -376,11 +376,12 @@ fn session_state_notifications_locations_and_full_diff_matrix() {
     assert_eq!(s1.effective_location_id(), None);
     assert_eq!(s1.to_session_change_pyrep(&s1, vec![888_444]), None);
 
-    // Location priority: station > structure > solar_system
+    // Location priority (V24.01 `basesession.RecalculateDependantAttributes`):
+    // `stationid or solarsystemid`; Upwell structures keep `solarsystemid` and `locationid` at the solar system.
     s1.solar_system_id = Some(30_000_142);
     assert_eq!(s1.effective_location_id(), Some(30_000_142));
     s1.structure_id = Some(1_000_000_001);
-    assert_eq!(s1.effective_location_id(), Some(1_000_000_001));
+    assert_eq!(s1.effective_location_id(), Some(30_000_142));
     s1.station_id = Some(60_003_760);
     assert_eq!(s1.effective_location_id(), Some(60_003_760));
 
@@ -462,6 +463,61 @@ fn session_state_live_notify_listener_defaults_serde_skip_and_diff_invariance() 
     assert_eq!(restored.session_id, 42);
     assert!(!restored.live_notify_listener);
     assert!(restored.notifications.is_empty());
+}
+
+#[test]
+fn upwell_structure_dock_and_undock_preserve_solarsystemid_and_effective_location_gh1048() {
+    let mut in_space = SessionState::new(1048);
+    in_space.user_id = Some(1);
+    in_space.character_id = Some(90_000_001);
+    in_space.corporation_id = Some(1_000_035);
+    in_space.solar_system_id = Some(30_000_142);
+    in_space.constellation_id = Some(20_000_020);
+    in_space.region_id = Some(10_000_002);
+    in_space.ship_id = Some(30_000_000_001);
+
+    let mut docked_structure = in_space.clone();
+    docked_structure.structure_id = Some(1_040_000_000_200);
+    assert_eq!(docked_structure.effective_location_id(), Some(30_000_142));
+
+    let dock_diff = in_space.compute_diff(&docked_structure);
+    assert_eq!(
+        dock_diff.get("structureid"),
+        Some(&(PyRep::None, PyRep::Integer(1_040_000_000_200)))
+    );
+    assert!(!dock_diff.contains_key("solarsystemid"));
+    assert!(!dock_diff.contains_key("stationid"));
+    assert!(!dock_diff.contains_key("locationid"));
+
+    let dock_pkt = in_space
+        .to_session_change_pyrep(&docked_structure, vec![888_444])
+        .expect("structure dock must emit SessionChangeNotification");
+    let PyRep::Tuple(dock_outer) = dock_pkt else {
+        panic!("expected Tuple");
+    };
+    let PyRep::Tuple(dock_inner) = &dock_outer[1] else {
+        panic!("expected inner Tuple");
+    };
+    let PyRep::Dict(dock_entries) = &dock_inner[1] else {
+        panic!("expected Dict changes");
+    };
+    assert!(
+        dock_entries.iter().any(|(k, v)| k.as_str() == Some("structureid")
+            && *v == PyRep::Tuple(vec![PyRep::None, PyRep::Integer(1_040_000_000_200)])),
+        "structure dock diff must update structureid: {dock_entries:?}"
+    );
+    assert!(
+        !dock_entries.iter().any(|(k, _)| k.as_str() == Some("solarsystemid")),
+        "structure dock diff must NOT clear solarsystemid: {dock_entries:?}"
+    );
+
+    let undock_diff = docked_structure.compute_diff(&in_space);
+    assert_eq!(
+        undock_diff.get("structureid"),
+        Some(&(PyRep::Integer(1_040_000_000_200), PyRep::None))
+    );
+    assert!(!undock_diff.contains_key("solarsystemid"));
+    assert!(!undock_diff.contains_key("locationid"));
 }
 
 #[test]

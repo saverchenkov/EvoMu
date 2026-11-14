@@ -802,8 +802,11 @@ async fn test_structure_guests_hangar_view_and_directory_parity() {
     );
 
     let g_init = rpc(&ctx, &mut sess1, "structureGuests", "GetGuests", &[PyRep::Integer(structure_id)]).await.expect("structureGuests.GetGuests initially empty");
-    let PyRep::List(g_list0) = g_init else { panic!("expected List"); };
-    assert!(g_list0.is_empty(), "No guests should be docked yet");
+    let PyRep::Dict(g_map0) = g_init else { panic!("expected Dict, got {g_init:?}"); };
+    assert!(g_map0.is_empty(), "No guests should be docked yet");
+
+    let g_none = rpc(&ctx, &mut sess1, "structureGuests", "GetGuests", &[PyRep::None]).await.expect("structureGuests.GetGuests(None) when undocked");
+    assert_eq!(g_none, PyRep::Dict(Vec::new()));
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&PILOT1) {
@@ -813,24 +816,35 @@ async fn test_structure_guests_hangar_view_and_directory_parity() {
     sess1.structure_id = Some(structure_id);
 
     let g_p1 = rpc(&ctx, &mut sess1, "structureGuests", "GetGuests", &[PyRep::Integer(structure_id)]).await.expect("structureGuests.GetGuests after pilot1 docks");
-    let PyRep::List(g_list1) = g_p1 else { panic!("expected List"); };
-    assert_eq!(g_list1.len(), 1);
-    assert_eq!(g_list1[0], PyRep::Tuple(vec![PyRep::Integer(PILOT1), PyRep::Integer(CORP_CALDARI_NAVY), PyRep::None]));
+    let PyRep::Dict(g_map1) = g_p1 else { panic!("expected Dict, got {g_p1:?}"); };
+    assert_eq!(g_map1.len(), 1);
+    assert_eq!(
+        g_map1[0],
+        (
+            PyRep::Integer(PILOT1),
+            PyRep::Tuple(vec![PyRep::Integer(CORP_CALDARI_NAVY), PyRep::None, PyRep::None]),
+        )
+    );
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&PILOT2) {
             ch.structure_id = Some(structure_id);
+            ch.war_faction_id = Some(500_001);
         }
     });
     sess2.structure_id = Some(structure_id);
 
     let g_both = rpc(&ctx, &mut sess1, "structureGuests", "GetGuests", &[PyRep::Integer(structure_id)]).await.expect("structureGuests.GetGuests after pilot2 docks");
-    let PyRep::List(g_list2) = g_both else { panic!("expected List"); };
-    assert_eq!(g_list2.len(), 2);
-    let PyRep::Tuple(ref t0) = g_list2[0] else { panic!("expected Tuple") };
-    let PyRep::Tuple(ref t1) = g_list2[1] else { panic!("expected Tuple") };
-    assert_eq!(t0.first(), Some(&PyRep::Integer(PILOT1)));
-    assert_eq!(t1.first(), Some(&PyRep::Integer(PILOT2)));
+    let PyRep::Dict(g_map2) = g_both else { panic!("expected Dict, got {g_both:?}"); };
+    assert_eq!(g_map2.len(), 2);
+    assert_eq!(g_map2[0].0, PyRep::Integer(PILOT1));
+    assert_eq!(
+        g_map2[1],
+        (
+            PyRep::Integer(PILOT2),
+            PyRep::Tuple(vec![PyRep::Integer(CORP_CALDARI_NAVY), PyRep::None, PyRep::Integer(500_001)]),
+        )
+    );
 
     let ship_id = 30_000_000_001_i64;
     seed_test_item(&ctx, ship_id, 587, PILOT1, structure_id, InventoryFlag::Hangar, 1);
@@ -1060,6 +1074,212 @@ async fn test_pos_mgr_parity() {
     assert_eq!(poco_struct.type_id, POCO_TYPE_ID);
     assert_eq!(poco_struct.state, "ShieldVulnerable");
     assert_eq!(poco_struct.shield_hp, 10_000_000.0);
+}
+
+#[tokio::test]
+async fn test_wire_upwell_dock_session_guests_dict_and_undock_left_notify_gh1048_1049_1050() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c1) = snap.characters.get_mut(&PILOT1) {
+            c1.corporation_id = CORP_CALDARI_NAVY;
+        }
+        if let Some(c2) = snap.characters.get_mut(&PILOT2) {
+            c2.corporation_id = CORP_CALDARI_NAVY;
+        }
+    });
+
+    let kw = HashMap::new();
+    let mut harness1 = common::new_wire_harness(&ctx, 104_801);
+    harness1
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())],
+            &kw,
+        )
+        .await;
+    harness1
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(PILOT1)],
+            &kw,
+        )
+        .await;
+
+    let mut harness2 = common::new_wire_harness(&ctx, 104_802);
+    harness2
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[PyRep::String("other".into()), PyRep::String("other-secret".into())],
+            &kw,
+        )
+        .await;
+    harness2
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(PILOT2)],
+            &kw,
+        )
+        .await;
+
+    ctx.advance_secs(12);
+    harness1.call_ok("stationSvc", None, "Undock", &[], &kw).await;
+
+    let ship1_id = ctx.db.with_snapshot(|s| s.characters[&PILOT1].active_ship_id);
+    let sys_handle = ctx.systems.get_or_spawn(SYS_JITA);
+    let (_, ship1_ball) = sys_handle
+        .get_ball_snapshot(ship1_id)
+        .await
+        .expect("get_ball_snapshot")
+        .expect("undocked ship1 ball");
+
+    let structure_id = 1_040_000_010_480_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            structure_id,
+            UpwellStructureRecord {
+                structure_id,
+                type_id: ASTRAHUS_TYPE_ID,
+                owner_corp_id: CORP_CALDARI_NAVY,
+                solar_system_id: SYS_JITA,
+                name: "Wire Parity Astrahus".into(),
+                position: ship1_ball.position.to_array(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 5_000,
+                shield_hp: 1_000_000.0,
+                armor_hp: 1_000_000.0,
+                hull_hp: 1_000_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        if let Some(c2) = snap.characters.get_mut(&PILOT2) {
+            c2.station_id = None;
+            c2.structure_id = Some(structure_id);
+        }
+    });
+
+    let extract_sc_dict = |pkt_rep: &PyRep| -> HashMap<String, PyRep> {
+        let pkt = eve_machonet::MachoPacket::from_pyrep(pkt_rep)
+            .expect("SessionChangeNotification MachoPacket");
+        let PyRep::Tuple(outer) = pkt.payload else {
+            panic!("expected Tuple payload, got {:?}", pkt.payload);
+        };
+        let PyRep::Tuple(inner) = &outer[1] else {
+            panic!("expected inner tuple, got {:?}", outer[1]);
+        };
+        let PyRep::Dict(entries) = &inner[1] else {
+            panic!("expected Dict changes, got {:?}", inner[1]);
+        };
+        entries
+            .iter()
+            .filter_map(|(k, v)| k.as_str().map(|ks| (ks.to_string(), v.clone())))
+            .collect()
+    };
+
+    // #1048: Dock in Upwell structure keeps solarsystemid and locationid intact in wire SessionChangeNotification.
+    ctx.advance_secs(12);
+    let dock_out = harness1
+        .call_exchange(
+            "structureDocking",
+            None,
+            "Dock",
+            &[PyRep::Integer(structure_id)],
+            &kw,
+        )
+        .await;
+    assert!(dock_out.result.is_ok(), "structureDocking.Dock must succeed: {:?}", dock_out.result);
+    assert_eq!(dock_out.session_change_packets.len(), 1);
+    let dock_changes = extract_sc_dict(&dock_out.session_change_packets[0]);
+    assert_eq!(
+        dock_changes.get("structureid"),
+        Some(&PyRep::Tuple(vec![PyRep::None, PyRep::Integer(structure_id)]))
+    );
+    assert!(
+        !dock_changes.contains_key("solarsystemid"),
+        "Upwell structure dock must NOT clear solarsystemid (#1048): {dock_changes:?}"
+    );
+    assert!(
+        !dock_changes.contains_key("locationid"),
+        "Upwell structure dock must NOT change locationid away from solarsystemid (#1048): {dock_changes:?}"
+    );
+
+    // #1049: structureGuests.GetGuests returns dict {charID: (corpID, allianceID, warFactionID)} with zero contract violations.
+    let guests_out = harness1
+        .call_exchange(
+            "structureGuests",
+            None,
+            "GetGuests",
+            &[PyRep::Integer(structure_id)],
+            &kw,
+        )
+        .await;
+    assert!(guests_out.violations.is_empty(), "GetGuests contract violations: {:?}", guests_out.violations);
+    let guests_rep = guests_out.result.expect("structureGuests.GetGuests must succeed");
+    let PyRep::Dict(guests_map) = guests_rep else {
+        panic!("expected PyRep::Dict from GetGuests (#1049), got {guests_rep:?}");
+    };
+    assert_eq!(guests_map.len(), 2);
+    assert!(guests_map.iter().any(|(k, v)| {
+        *k == PyRep::Integer(PILOT1)
+            && *v == PyRep::Tuple(vec![PyRep::Integer(CORP_CALDARI_NAVY), PyRep::None, PyRep::None])
+    }));
+    assert!(guests_map.iter().any(|(k, _)| *k == PyRep::Integer(PILOT2)));
+
+    // #1050: Undock clears structureid while preserving solarsystemid, emits OnCharacterLeftStructure to peer ONLY, and GetGuests(None) returns empty dict.
+    let _ = ctx.drain_notifications_for_char(PILOT1);
+    let _ = ctx.drain_notifications_for_char(PILOT2);
+    ctx.advance_secs(12);
+    let undock_out = harness1
+        .call_exchange("structureDocking", None, "Undock", &[], &kw)
+        .await;
+    assert!(undock_out.result.is_ok(), "structureDocking.Undock must succeed: {:?}", undock_out.result);
+    assert_eq!(undock_out.session_change_packets.len(), 1);
+    let undock_changes = extract_sc_dict(&undock_out.session_change_packets[0]);
+    assert_eq!(
+        undock_changes.get("structureid"),
+        Some(&PyRep::Tuple(vec![PyRep::Integer(structure_id), PyRep::None]))
+    );
+    assert!(
+        !undock_changes.contains_key("solarsystemid"),
+        "Upwell structure undock must NOT emit stale solarsystemid diff (#1048): {undock_changes:?}"
+    );
+    assert!(
+        !undock_out
+            .notifications
+            .iter()
+            .any(|(ev, _)| ev == "OnCharacterLeftStructure"),
+        "Undocking pilot must NOT receive OnCharacterLeftStructure (#1050): {:?}",
+        undock_out.notifications
+    );
+    let peer_notifs = ctx.drain_notifications_for_char(PILOT2);
+    assert!(
+        peer_notifs
+            .iter()
+            .any(|n| n.event == "OnCharacterLeftStructure" && n.args == vec![PyRep::Integer(PILOT1)]),
+        "Remaining structure peer must receive OnCharacterLeftStructure(PILOT1) (#1050): {peer_notifs:?}"
+    );
+
+    let guests_none = harness1
+        .call_ok("structureGuests", None, "GetGuests", &[PyRep::None], &kw)
+        .await;
+    assert_eq!(
+        guests_none,
+        PyRep::Dict(Vec::new()),
+        "GetGuests(None) while undocked must return empty Dict (#1050)"
+    );
 }
 
 }

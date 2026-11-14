@@ -171,11 +171,11 @@ fn test_session_state_diffs_notifications_and_gm_roles() {
     assert_eq!(s1.drain_notifications().len(), 1);
     assert!(s1.drain_notifications().is_empty());
 
-    // Hierarchy: station_id > structure_id > solar_system_id
+    // Hierarchy (V24.01 `basesession`): `station_id` overrides `solar_system_id`, while `structure_id` leaves `locationid == solar_system_id`.
     s1.solar_system_id = Some(30_000_142);
     assert_eq!(s1.effective_location_id(), Some(30_000_142));
     s1.structure_id = Some(1_000_000_000_001);
-    assert_eq!(s1.effective_location_id(), Some(1_000_000_000_001));
+    assert_eq!(s1.effective_location_id(), Some(30_000_142));
     s1.station_id = Some(60_003_760);
     assert_eq!(s1.effective_location_id(), Some(60_003_760));
 

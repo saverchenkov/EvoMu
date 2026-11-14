@@ -1031,7 +1031,7 @@ async fn session_transition_variants_builders_resolution_and_sync_branches() {
     sess.user_id = Some(1);
     sess.character_id = Some(cid);
     let mut ch_for_sess = ctx.db.get_character(cid).unwrap();
-    // Active ship <= 0 + structure_id Some(..) -> keyval omits shipid/stationid/solarsystemid, includes structureid
+    // Active ship <= 0 + structure_id Some(..) -> keyval omits shipid/stationid, keeps solarsystemid, includes structureid
     ch_for_sess.active_ship_id = 0;
     apply_session_from_character(&mut sess, &ch_for_sess, Some(Some(ship_id)), Some(&ctx.sde));
     assert_eq!(sess.ship_id, Some(ship_id));
@@ -1042,7 +1042,14 @@ async fn session_transition_variants_builders_resolution_and_sync_branches() {
         kv_struct.dict_get("structureid"),
         Some(&PyRep::Integer(upwell_id))
     );
-    assert_eq!(kv_struct.dict_get("solarsystemid"), Some(&PyRep::None));
+    assert_eq!(
+        kv_struct.dict_get("solarsystemid"),
+        Some(&PyRep::Integer(i64::from(jita_sys)))
+    );
+    assert_eq!(
+        kv_struct.dict_get("locationid"),
+        Some(&PyRep::Integer(i64::from(jita_sys)))
+    );
     assert_eq!(kv_struct.dict_get("shipid"), Some(&PyRep::None));
     let snap_sess = sess.clone();
     let empty_diff = std::collections::HashMap::new();
