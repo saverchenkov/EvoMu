@@ -1,8 +1,9 @@
 //! Deterministic, seedable mechanic RNG (seeded test RNG): seeded contexts force both mining-crit outcomes
 //! by value, and production constructors stay on the OS CSPRNG.
 
+use crate::common;
 use crate::mining_cycle_engine::{activate, advance, attr, hold, lock, rock, rock_left, Pilot, CHAR_ID, JITA, MINER_I, SKILL_MINING, SKILL_MINING_FRIGATE, VELDSPAR, VENTURE};
-use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord, VirtualServerClock};
+use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::rng::MechanicRng;
@@ -29,22 +30,20 @@ fn fast_demo_ctx() -> ServerContext {
 /// First seed in `1..` whose first SplitMix64 unit draw satisfies `pred`.
 fn find_seed(pred: impl Fn(f64) -> bool) -> u64 {
     (1u64..100_000)
-        .find(|&s| pred(MechanicRng::seeded(s).try_unit_f64().unwrap()))
+        .find(|&s| pred(MechanicRng::seeded(s).try_unit_f64().expect("unit f64 draw")))
         .expect("seed search")
 }
 
 /// Undocks the demo pilot in a Venture with one Miner I (MN-04 cycle engine).
 async fn venture_with_miner() -> Pilot {
     let ctx = fast_demo_ctx();
-    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    common::pin_clock(&ctx);
     let mut sess = SessionState::new(1001);
     let kw = HashMap::new();
-    ctx.dispatch_rpc(&mut sess, "authentication", None, "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())], &kw, None)
-        .await
-        .expect("Login");
-    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(CHAR_ID)], &kw, None)
-        .await
-        .expect("SelectCharacterID");
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(CHAR_ID)], &kw)
+        .await;
     ctx.db.with_mut_snapshot(|snap| {
         let map = [(SKILL_MINING, 5), (SKILL_MINING_FRIGATE, 5)]
             .into_iter()
@@ -52,12 +51,14 @@ async fn venture_with_miner() -> Pilot {
             .collect();
         snap.skills.insert(CHAR_ID, map);
     });
-    let undock = ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None).await.expect("Undock");
+    let undock = common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok("stationSvc", None, "Undock", &[], &kw)
+        .await;
     let PyRep::KeyVal(kv) = &undock else { panic!("Undock returns KeyVal") };
-    let ship_id = kv["shipID"].as_i64().unwrap();
-    let beyonce_id = kv["beyonceBoundID"].as_i64().unwrap() as u64;
+    let ship_id = kv["shipID"].as_i64().expect("shipID");
+    let beyonce_id = kv["beyonceBoundID"].as_i64().expect("beyonceBoundID") as u64;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.get_mut(&ship_id).unwrap().type_id = VENTURE;
+        snap.items.get_mut(&ship_id).expect("ship item").type_id = VENTURE;
         snap.items.retain(|_, i| i.location_id != ship_id);
         snap.items.insert(
             MODULE_ID,
@@ -76,7 +77,7 @@ async fn venture_with_miner() -> Pilot {
     });
     ctx.invalidate_ship_fitting(ship_id);
     let sys = ctx.systems.get_or_spawn(JITA);
-    let (_, ball) = sys.get_ball_snapshot(ship_id).await.unwrap().expect("ship ball after undock");
+    let (_, ball) = sys.get_ball_snapshot(ship_id).await.expect("get_ball_snapshot").expect("ship ball after undock");
     Pilot { ctx, sess, ship_id, beyonce_id, ship_pos: ball.position }
 }
 
@@ -146,25 +147,29 @@ async fn test_c5_same_seed_replays_identical_mining_sequence() {
 async fn test_c5_production_constructors_stay_on_os_csprng() {
     let db = Arc::new(eve_db::WorldRepository::new_empty());
     let prod = ServerContext::with_repository(db);
+    common::pin_clock(&prod);
     assert!(!prod.mechanic_rng.is_seeded(), "production context must use the OS CSPRNG");
     let first = prod.mechanic_rng.try_next_u64().expect("OS CSPRNG readable");
     let second = prod.mechanic_rng.try_next_u64().expect("OS CSPRNG readable");
     assert_ne!(first, second);
 
     let test_ctx = ServerContext::new();
+    common::pin_clock(&test_ctx);
     assert!(test_ctx.mechanic_rng.is_seeded(), "test constructor is seeded");
     let reference = MechanicRng::seeded(eve_server::rng::TEST_MODE_DEFAULT_SEED);
     assert_eq!(test_ctx.mechanic_rng.try_next_u64(), reference.try_next_u64());
 
     let seeded = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::new_empty()))
         .with_seeded_rng(77);
+    common::pin_clock(&seeded);
     assert_eq!(seeded.mechanic_rng.try_next_u64(), MechanicRng::seeded(77).try_next_u64());
     seeded.set_mechanic_rng_seed(None);
     assert!(!seeded.mechanic_rng.is_seeded());
 
     // Invention rolls share the stream; the explicit override still wins.
     let inv = ServerContext::new().with_seeded_rng(5);
-    let expected = MechanicRng::seeded(5).try_unit_f64().unwrap();
+    common::pin_clock(&inv);
+    let expected = MechanicRng::seeded(5).try_unit_f64().expect("unit f64 draw");
     assert_eq!(inv.next_invention_roll(1, 2, 3), expected);
     inv.set_invention_roll_override(Some(0.25));
     assert_eq!(inv.next_invention_roll(1, 2, 3), 0.25);

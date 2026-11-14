@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use crate::common;
 use crate::quasar_sov_equinox_hub::sess;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
@@ -8,6 +9,7 @@ use std::collections::HashMap;
 #[tokio::test]
 async fn test_sde_localization_fsd_pickle_resources_and_server_rpcs() {
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
 
     let expected: &[(&str, &str, usize, &str)] = &[
         (
@@ -87,23 +89,21 @@ async fn test_sde_localization_fsd_pickle_resources_and_server_rpcs() {
     // Exercise localizationServer RPCs
     let mut gm = sess(91_001, 91_001, 1000002, 30000142, 0);
     gm.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
-    let changes = ctx
-        .dispatch_rpc(&mut gm, "localizationServer", None, "GetAllTextChanges", &[], &HashMap::new(), None)
-        .await
-        .expect("GetAllTextChanges");
+    let mut wire = common::borrow_wire_harness(&ctx, &mut gm);
+    let changes = wire
+        .call_ok("localizationServer", None, "GetAllTextChanges", &[], &HashMap::new())
+        .await;
     assert_eq!(changes, PyRep::None);
 
-    let reload = ctx
-        .dispatch_rpc(
-            &mut gm,
+    let reload = wire
+        .call(
             "localizationServer",
             None,
             "ReloadFSDPickle",
             &[PyRep::String("en-us".into())],
             &HashMap::new(),
-            None,
         )
         .await
-        .unwrap_err();
+        .expect_err("ReloadFSDPickle should fail with UnimplementedRPC");
     assert_eq!(reload.code, "UnimplementedRPC");
 }
