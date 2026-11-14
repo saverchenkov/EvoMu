@@ -2023,6 +2023,35 @@ pub fn v24_structure_state_name(state_id: i64) -> Option<&'static str> {
     }
 }
 
+/// Maps a persisted Upwell state string (or legacy alias) to its V24 `structures.const.STATES` wire ID.
+pub fn structure_state_wire_code(state: &str) -> i64 {
+    match state {
+        STATE_UNANCHORED => 1,
+        STATE_ANCHORING => 2,
+        STATE_ONLINE_DEPRECATED | "Online" => 100,
+        STATE_NO_CORE | "FittingInvulnerable" => 101,
+        STATE_ONLINING | "OnliningVulnerable" => 102,
+        STATE_SHIELD_VULNERABLE => 110,
+        STATE_ARMOR_REINFORCED | "ArmorReinforce" => 111,
+        STATE_ARMOR_VULNERABLE => 112,
+        STATE_HULL_REINFORCED | "HullReinforce" => 113,
+        STATE_HULL_VULNERABLE => 114,
+        STATE_ANCHOR_VULNERABLE => 115,
+        STATE_DEPLOY_VULNERABLE => 116,
+        STATE_FOB_INVULNERABLE => 118,
+        _ => 0,
+    }
+}
+
+/// Maps server Upwell [`PowerState`] to the V24 `structures.const` upkeep state ID (`1`=FullPower, `2`=LowPower, `3`=Abandoned).
+pub fn upkeep_state_wire_code(power: PowerState) -> i64 {
+    match power {
+        PowerState::FullPower => 1,
+        PowerState::LowPower | PowerState::NotOperational => 2,
+        PowerState::Abandoned => 3,
+    }
+}
+
 /// Transitions `structure_id` to the Upwell state identified by V24 `state_id`, updating timers/HP
 /// and emitting `OnCorporationStructuresUpdated`, `OnStructureStateChanged`, and
 /// `OnCurrentStructureStateChanged`.

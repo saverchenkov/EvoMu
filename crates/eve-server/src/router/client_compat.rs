@@ -4327,25 +4327,8 @@ fn normalize_on_godma_ship_effect(
     ]
 }
 
-fn structure_state_wire_code(state: &str) -> i64 {
-    match state {
-        "Unanchored" => 1,
-        "Anchoring" => 2,
-        "Online" => 100,
-        "NoCore" | "FittingInvulnerable" => 101,
-        "Onlining" | "OnliningVulnerable" => 102,
-        "ShieldVulnerable" => 110,
-        "ArmorReinforced" | "ArmorReinforce" => 111,
-        "ArmorVulnerable" => 112,
-        "HullReinforced" | "HullReinforce" => 113,
-        "HullVulnerable" => 114,
-        "AnchorVulnerable" => 115,
-        "DeployVulnerable" => 116,
-        _ => 0,
-    }
-}
-
 fn normalize_structure_dir_entry_wire(rep: PyRep) -> PyRep {
+    use crate::services::station_structure::structure_lifecycle::structure_state_wire_code;
     match rep {
         PyRep::KeyVal(mut entries) => {
             if let Some(v) = entries.get_mut("state") {

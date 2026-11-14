@@ -526,3 +526,226 @@ async fn guests_hangar_view_clones_and_structure_access_profile_helpers_work() {
         assert_eq!(s.corporations[&98770].master_wallet_balance(), IskCents(525_000_000));
     });
 }
+
+#[tokio::test]
+async fn test_hangar_view_state_covers_v24_upkeep_damage_and_timer_fields() {
+    let ctx = test_ctx();
+    let now: u64 = 1_700_000_000;
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(now)));
+
+    let corp_id = 98_780_i64;
+    let char_id = 95_000_780_i64;
+    let st_id = 1_000_990_001_i64;
+    let ship_id = 1_900_990_001_i64;
+    let mod_id = 1_900_990_002_i64;
+    let kw = HashMap::new();
+
+    ctx.db
+        .provision_gm_account("hangar_1069", "secret", char_id, "Hangar Tester");
+    let uid = ctx.db.with_snapshot(|snap| snap.characters[&char_id].user_id);
+    ctx.db
+        .acquire_online_lock_with_computer_hash(uid, 106_901, Some(char_id), None, true, now)
+        .expect("online lock");
+
+    let profile = structure_lifecycle::structure_profile(&ctx, 35_834).expect("Keepstar profile");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.insert(
+            corp_id,
+            CorporationRecord::new(corp_id, "Hangar Test Corp", "HTC", char_id),
+        );
+        snap.structures.insert(
+            st_id,
+            UpwellStructureRecord {
+                structure_id: st_id,
+                type_id: 35_834, // Keepstar
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_142,
+                name: "Test Keepstar".into(),
+                position: [10_000.0, 0.0, 0.0],
+                state: STATE_SHIELD_VULNERABLE.into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: profile.shield_hp * 0.5,
+                armor_hp: profile.armor_hp * 0.25,
+                hull_hp: profile.hull_hp * 0.75,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 606, // Velator
+                owner_id: char_id,
+                location_id: st_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut sess = SessionState {
+        user_id: Some(uid),
+        character_id: Some(char_id),
+        corporation_id: Some(corp_id),
+        solar_system_id: Some(30_000_142),
+        structure_id: Some(st_id),
+        station_id: Some(st_id),
+        ship_id: Some(ship_id),
+        role: service_roles::ROLE_PLAYER,
+        ..Default::default()
+    };
+
+    // 1. LowPower Keepstar (no online service module) with fractional damage and idle timers.
+    let low_power = handle(&ctx, &mut sess, "structureHangarViewMgr", "GetMyHangarViewState", &[], &kw)
+        .await
+        .unwrap()
+        .expect("hangar view");
+    let PyRep::KeyVal(kv) = &low_power else {
+        panic!("expected KeyVal, got {low_power:?}");
+    };
+    assert_eq!(kv["characterID"].as_i64(), Some(char_id));
+    assert_eq!(kv["structureID"].as_i64(), Some(st_id));
+    assert_eq!(kv["structureTypeID"].as_i64(), Some(35_834));
+    assert_eq!(kv["shipID"].as_i64(), Some(ship_id));
+    assert_eq!(kv["shipTypeID"].as_i64(), Some(606));
+    assert_eq!(kv["upkeepState"].as_i64(), Some(2));
+    assert_eq!(kv["operatingState"].as_i64(), Some(110));
+    assert_eq!(kv["state"].as_i64(), Some(110));
+    let PyRep::Tuple(dmg) = &kv["damageState"] else {
+        panic!("damageState must be a 3-tuple");
+    };
+    assert_eq!(dmg.len(), 3);
+    assert!((dmg[0].as_f64().unwrap() - 0.5).abs() < 1e-9);
+    assert!((dmg[1].as_f64().unwrap() - 0.25).abs() < 1e-9);
+    assert!((dmg[2].as_f64().unwrap() - 0.75).abs() < 1e-9);
+    assert_eq!(kv["timerProgress"], PyRep::None);
+    assert_eq!(kv["timerIsProgressing"].as_bool(), Some(false));
+    assert_eq!(kv["timerIsPaused"].as_bool(), Some(false));
+    assert_eq!(kv["timerEndAt"], PyRep::None);
+
+    // 2. FullPower Keepstar (online Standup Cloning Center I service module) + shared dock notification parity.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            mod_id,
+            InventoryItemRecord {
+                item_id: mod_id,
+                type_id: 35_894,
+                owner_id: corp_id,
+                location_id: st_id,
+                flag: InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(mod_id, true);
+    });
+    let full_power = handle(&ctx, &mut sess, "structureHangarViewMgr", "GetMyHangarViewState", &[], &kw)
+        .await
+        .unwrap()
+        .expect("hangar view");
+    let PyRep::KeyVal(kv_full) = &full_power else {
+        panic!("expected KeyVal");
+    };
+    assert_eq!(kv_full["upkeepState"].as_i64(), Some(1));
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    emit_structure_dock_notifications(&ctx, st_id, char_id, corp_id, None, None, 35_834, ship_id);
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    let hv_notif = notifs
+        .into_iter()
+        .find(|n| n.event == "OnHangarViewStateUpdated")
+        .expect("OnHangarViewStateUpdated emitted");
+    assert_eq!(hv_notif.args.len(), 2);
+    assert_eq!(hv_notif.args[0].as_i64(), Some(st_id));
+    assert_eq!(hv_notif.args[1], full_power);
+
+    // 3. Abandoned Keepstar after 7+ days in low power.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.remove(&mod_id);
+        snap.items.remove(&mod_id);
+        let mut ext = load_ext_state(snap);
+        ext.lifecycle
+            .entry(st_id)
+            .or_default()
+            .low_power_since_unix = Some(now - (structure_lifecycle::ABANDON_AFTER_LOW_POWER_SECS + 60));
+        save_ext_state(snap, &ext);
+    });
+    let abandoned = build_hangar_view_state(&ctx, char_id, st_id, Some(ship_id), None);
+    let PyRep::KeyVal(kv_aband) = &abandoned else {
+        panic!("expected KeyVal");
+    };
+    assert_eq!(kv_aband["upkeepState"].as_i64(), Some(3));
+
+    // 4. ArmorReinforced with active reinforcement timer.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.structures.get_mut(&st_id) {
+            st.state = STATE_ARMOR_REINFORCED.into();
+            st.reinforced_until_unix = now + 3_600;
+        }
+        let mut ext = load_ext_state(snap);
+        let entry = ext.lifecycle.entry(st_id).or_default();
+        entry.low_power_since_unix = None;
+        entry.armor_reinforce_secs_applied = Some(7_200);
+        save_ext_state(snap, &ext);
+    });
+    let reinforced = build_hangar_view_state(&ctx, char_id, st_id, Some(ship_id), None);
+    let PyRep::KeyVal(kv_rf) = &reinforced else {
+        panic!("expected KeyVal");
+    };
+    assert_eq!(kv_rf["operatingState"].as_i64(), Some(111));
+    assert_eq!(kv_rf["state"].as_i64(), Some(111));
+    assert_eq!(kv_rf["upkeepState"].as_i64(), Some(2));
+    assert!((kv_rf["timerProgress"].as_f64().unwrap() - 0.5).abs() < 1e-9);
+    assert_eq!(kv_rf["timerIsProgressing"].as_bool(), Some(true));
+    assert_eq!(kv_rf["timerIsPaused"].as_bool(), Some(false));
+    assert_eq!(
+        kv_rf["timerEndAt"].as_i64(),
+        Some(crate::sp6_lifecycle::unix_to_filetime(now + 3_600))
+    );
+
+    // 5. Active armor repair timer.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.structures.get_mut(&st_id) {
+            st.state = structure_lifecycle::STATE_ARMOR_VULNERABLE.into();
+            st.reinforced_until_unix = 0;
+        }
+        let mut ext = load_ext_state(snap);
+        ext.lifecycle.entry(st_id).or_default().repair_until_unix =
+            Some(now + (structure_lifecycle::REPAIR_SHIELD_ARMOR_SECS / 2));
+        save_ext_state(snap, &ext);
+    });
+    let repairing = build_hangar_view_state(&ctx, char_id, st_id, Some(ship_id), None);
+    let PyRep::KeyVal(kv_rep) = &repairing else {
+        panic!("expected KeyVal");
+    };
+    assert_eq!(kv_rep["operatingState"].as_i64(), Some(112));
+    assert!((kv_rep["timerProgress"].as_f64().unwrap() - 0.5).abs() < 1e-9);
+    assert_eq!(kv_rep["timerIsProgressing"].as_bool(), Some(true));
+    assert_eq!(kv_rep["timerIsPaused"].as_bool(), Some(false));
+    assert_eq!(
+        kv_rep["timerEndAt"].as_i64(),
+        Some(crate::sp6_lifecycle::unix_to_filetime(
+            now + (structure_lifecycle::REPAIR_SHIELD_ARMOR_SECS / 2)
+        ))
+    );
+
+    // 6. Synthetic fallback when structure is absent from snapshot.
+    let fallback = build_hangar_view_state(&ctx, char_id, 9_999_999_999, None, Some(35_834));
+    let PyRep::KeyVal(kv_fb) = &fallback else {
+        panic!("expected KeyVal");
+    };
+    assert_eq!(kv_fb["structureTypeID"].as_i64(), Some(35_834));
+    assert_eq!(kv_fb["shipID"], PyRep::None);
+    assert_eq!(kv_fb["shipTypeID"], PyRep::None);
+    assert_eq!(kv_fb["upkeepState"].as_i64(), Some(2));
+    assert_eq!(kv_fb["operatingState"].as_i64(), Some(110));
+    assert_eq!(kv_fb["timerIsProgressing"].as_bool(), Some(false));
+    assert_eq!(kv_fb["timerIsPaused"].as_bool(), Some(false));
+}

@@ -2791,7 +2791,21 @@ define_notifications! {
         fields: { structure_id: i64, hangar_view_state: PyRep },
         samples: || vec![vec![
             PyRep::Integer(1_000_000_000_001),
-            PyRep::Integer(1),
+            PyRep::keyval([
+                ("characterID", PyRep::Integer(90_000_001)),
+                ("structureID", PyRep::Integer(1_000_000_000_001)),
+                ("structureTypeID", PyRep::Integer(35_834)),
+                ("shipID", PyRep::Integer(1_000_000_000_002)),
+                ("shipTypeID", PyRep::Integer(606)),
+                ("upkeepState", PyRep::Integer(1)),
+                ("operatingState", PyRep::Integer(110)),
+                ("state", PyRep::Integer(110)),
+                ("damageState", PyRep::Tuple(vec![PyRep::Real(1.0), PyRep::Real(1.0), PyRep::Real(1.0)])),
+                ("timerProgress", PyRep::None),
+                ("timerIsProgressing", PyRep::Bool(false)),
+                ("timerIsPaused", PyRep::Bool(false)),
+                ("timerEndAt", PyRep::None),
+            ]),
         ]],
     },
     OnInvulunOnUndockingUpdated => "OnInvulunOnUndockingUpdated" ("charid") {

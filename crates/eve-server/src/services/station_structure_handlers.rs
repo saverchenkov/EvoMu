@@ -503,11 +503,7 @@ fn build_structure_dir_entry(
     let can_see_reinforce = caller_corp == st.owner_corp_id || hacked_reveal;
     let can_see_pending = is_corp_manager || hacked_reveal;
     let pending = ext.pending_reinforce_schedule.get(&st.structure_id).copied();
-    let upkeep_state = match power {
-        life::PowerState::FullPower => 1_i64,
-        life::PowerState::LowPower | life::PowerState::NotOperational => 2_i64,
-        life::PowerState::Abandoned => 3_i64,
-    };
+    let upkeep_state = life::upkeep_state_wire_code(power);
     let mut war_ids: Vec<i64> = snap
         .wars
         .values()
