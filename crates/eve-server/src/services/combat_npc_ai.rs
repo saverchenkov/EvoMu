@@ -31,6 +31,24 @@ pub fn derive_npc_archetype(ctx: &ServerContext, npc_type_id: u32) -> &'static s
         return "PochvenHypnosianSleeper";
     }
 
+    // 1b. Zarzakh gate guns and Deathless / Outer Zarzakh pirate patrol fleets
+    if matches!(npc_type_id, 78_890 | 79_183 | 79_184 | 79_185 | 73_815)
+        || (group_id == 383 && type_name.contains("Deathless Retribution"))
+    {
+        return "ZarzakhGateGun";
+    }
+    if group_id == 4636
+        || matches!(
+            npc_type_id,
+            78_891..=78_898 | 80_806..=80_809 | 80_448..=80_452 | 73_818
+        )
+    {
+        if type_name.contains("Outer Zarzakh") || (80_448..=80_452).contains(&npc_type_id) {
+            return "OuterZarzakhPatrol";
+        }
+        return "ZarzakhPatrol";
+    }
+
     // 2. Sleepers: Sleeper group IDs (e.g. 959..=961, 982..=1005), Sleeper factions (500021, 500022), or group/type name
     if group_name.contains("Sleeper")
         || type_name.contains("Sleeper")
@@ -230,6 +248,7 @@ where
                     archetype_hint,
                     "FactionPolice" | "Police" | "Sleeper" | "CounterInsurgencySentry" | "Navy"
                     | "CaldariNavy" | "MinmatarNavy" | "AmarrNavy" | "GallenteNavy"
+                    | "ZarzakhGateGun" | "ZarzakhPatrol" | "OuterZarzakhPatrol"
                 ))
         {
             archetype_hint
@@ -951,7 +970,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         // warped out (`MovementMode::Warp`), lost lock (`is_cloaked`), or destroyed (`structure_hp <= 0.0`).
         let max_engage_range = if npc.type_id == 79_507 {
             npc.optimal_range.max(500_000.0)
-        } else if npc.archetype == "SleeperSentry" {
+        } else if npc.archetype == "SleeperSentry" || npc.archetype == "ZarzakhGateGun" {
             npc.optimal_range.max(250_000.0)
         } else {
             150_000.0
@@ -1000,10 +1019,11 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             );
             let is_edencom = matches!(npc.archetype.as_str(), "EDENCOM" | "Edencom");
             let is_zarzakh_gun = npc.archetype == "ZarzakhGateGun";
+            let is_zarzakh_patrol = matches!(npc.archetype.as_str(), "ZarzakhPatrol" | "OuterZarzakhPatrol");
 
             let max_acquire_range = if npc.type_id == 79_507 {
                 npc.optimal_range.max(500_000.0)
-            } else if npc.archetype == "SleeperSentry" {
+            } else if npc.archetype == "SleeperSentry" || is_zarzakh_gun {
                 npc.optimal_range.max(250_000.0)
             } else if npc.archetype == "Drifter" {
                 npc.optimal_range.max(100_000.0)
@@ -1072,6 +1092,8 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                         if npc.faction_id == 500_018 { !owner.pilot_is_pirate } else { pilot_is_same_pirate }
                     } else if is_zarzakh_gun {
                         !owner.has_criminal_flag && !owner.has_suspect_flag && !owner.has_disapproval_flag
+                    } else if is_zarzakh_patrol {
+                        owner.pilot_is_pirate && !owner.has_disapproval_flag
                     } else if is_navy {
                         standing > -5.0 && !is_criminal
                     } else if is_police {
@@ -1270,8 +1292,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                     cycle_dmg = cycle_dmg.scaled(2.5);
                 }
             } else if npc.archetype == "ZarzakhGateGun" {
-                bp.apply_ecm_jam(target_id, 15.0);
-                bp.clear_target_locks(target_id);
+                apply_zarzakh_gate_gun_ewar(&ctx.sde, npc.type_id, &mut bp, target_id, target_ball.radius, dist);
             } else if npc.archetype == "CounterInsurgencySentry" || npc.type_id == 79_507 {
                 crate::services::security_mgr::apply_counter_insurgency_sentry_ewar(&ctx.sde, &mut bp, target_id, target_ball.radius, dist);
             }
@@ -1875,6 +1896,133 @@ pub async fn destroy_specialized_npc_with_hint(
     crate::services::combat_crimewatch::combat_npc_encounters::record_npc_kill_progression(ctx, killer_char_id, npc_type_id);
 
     (wreck_id, effective_bounty, dropped_types)
+}
+
+fn apply_zarzakh_gate_gun_ewar(
+    sde: &eve_sde::SdeRegistry,
+    npc_type_id: u32,
+    bp: &mut eve_destiny::Ballpark,
+    target_id: i64,
+    target_radius: f64,
+    dist: f64,
+) {
+    let gun_type = sde.types.get(&npc_type_id).or_else(|| sde.types.get(&79_183));
+    let attr = |aid: u16, def: f64| {
+        gun_type
+            .and_then(|t| t.default_attributes.get(&aid).copied())
+            .unwrap_or(def)
+    };
+    let tp_range = attr(2524, 250_000.0);
+    let tp_sig_pct = attr(554, 50.0);
+    let ecm_range = attr(2532, 75_000.0);
+    let ecm_dur_s = (attr(2822, 15_000.0) / 1_000.0).max(5.0);
+    if dist <= tp_range {
+        if let Some(t_cs) = bp.combat_states.get_mut(&target_id) {
+            if t_cs.base_signature_radius.is_none() {
+                t_cs.base_signature_radius = Some(if t_cs.signature_radius > 0.0 {
+                    t_cs.signature_radius
+                } else {
+                    target_radius.max(35.0)
+                });
+            }
+            t_cs.tp_sig_multiplier = Some(1.0 + tp_sig_pct / 100.0);
+        }
+        bp.recompute_ball_attributes(target_id);
+    }
+    if dist <= ecm_range && ecm_dur_s > 0.0 {
+        bp.apply_ecm_jam(target_id, ecm_dur_s);
+        bp.clear_target_locks(target_id);
+    }
+}
+
+/// Ensures Zarzakh gate guns and Deathless / Outer Zarzakh pirate patrol fleets are present
+/// at Zarzakh (`30_100_000`) gates/stations and at Zarzakh-linked gates and stations in adjacent k-space systems.
+pub async fn ensure_zarzakh_patrols_and_gate_guns(ctx: &ServerContext, solar_system_id: u32) -> Vec<i64> {
+    const ZARZAKH_SYSTEM_ID: u32 = 30_100_000;
+    let mut specs: Vec<(u32, &'static str, u32, DVec3)> = Vec::new();
+    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+
+    let existing_anchors: Vec<(String, DVec3)> =
+        crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+            rt.npc_entities
+                .values()
+                .filter(|n| {
+                    n.solar_system_id == solar_system_id
+                        && matches!(
+                            n.archetype.as_str(),
+                            "ZarzakhGateGun" | "ZarzakhPatrol" | "OuterZarzakhPatrol"
+                        )
+                })
+                .filter_map(|n| {
+                    sys_handle
+                        .get_ball_position_sync(n.npc_id)
+                        .map(|pos| (n.archetype.to_string(), pos))
+                })
+                .collect()
+        });
+
+    let has_nearby = |arch: &str, center: DVec3| {
+        existing_anchors
+            .iter()
+            .any(|(existing_arch, pos)| existing_arch == arch && pos.distance(center) <= 25_000.0)
+    };
+
+    if solar_system_id == ZARZAKH_SYSTEM_ID {
+        let mut gate_positions: Vec<DVec3> = ctx
+            .sde
+            .stargates()
+            .values()
+            .filter(|g| g.from_solar_system_id == ZARZAKH_SYSTEM_ID)
+            .map(|g| g.position)
+            .collect();
+        gate_positions.sort_by(|a, b| a.x.total_cmp(&b.x).then_with(|| a.z.total_cmp(&b.z)));
+        for pos in gate_positions {
+            if !has_nearby("ZarzakhGateGun", pos) {
+                specs.push((79_183, "ZarzakhGateGun", 0, pos + DVec3::new(3_500.0, 0.0, 0.0)));
+            }
+            if !has_nearby("ZarzakhPatrol", pos) {
+                specs.push((78_891, "ZarzakhPatrol", 0, pos + DVec3::new(-3_500.0, 1_500.0, 0.0)));
+                specs.push((78_896, "ZarzakhPatrol", 0, pos + DVec3::new(1_500.0, -3_500.0, 0.0)));
+            }
+        }
+        for st in ctx.sde.stations.values().filter(|s| s.solar_system_id == ZARZAKH_SYSTEM_ID) {
+            if !has_nearby("ZarzakhGateGun", st.position) {
+                specs.push((79_183, "ZarzakhGateGun", 0, st.position + DVec3::new(5_000.0, 0.0, 0.0)));
+            }
+            if !has_nearby("ZarzakhPatrol", st.position) {
+                specs.push((78_897, "ZarzakhPatrol", 0, st.position + DVec3::new(-4_000.0, 2_000.0, 0.0)));
+            }
+        }
+    } else {
+        let mut outer_gates: Vec<DVec3> = ctx
+            .sde
+            .stargates()
+            .values()
+            .filter(|g| g.from_solar_system_id == solar_system_id && g.to_solar_system_id == ZARZAKH_SYSTEM_ID)
+            .map(|g| g.position)
+            .collect();
+        if outer_gates.is_empty() {
+            return Vec::new();
+        }
+        outer_gates.sort_by(|a, b| a.x.total_cmp(&b.x).then_with(|| a.z.total_cmp(&b.z)));
+        for pos in outer_gates {
+            if !has_nearby("OuterZarzakhPatrol", pos) {
+                specs.push((80_448, "OuterZarzakhPatrol", 0, pos + DVec3::new(3_500.0, 1_000.0, 0.0)));
+                specs.push((80_451, "OuterZarzakhPatrol", 0, pos + DVec3::new(-3_500.0, -1_000.0, 0.0)));
+            }
+        }
+        for st in ctx.sde.stations.values().filter(|s| s.solar_system_id == solar_system_id) {
+            if !has_nearby("OuterZarzakhPatrol", st.position) {
+                specs.push((80_449, "OuterZarzakhPatrol", 0, st.position + DVec3::new(4_500.0, 1_200.0, 0.0)));
+                specs.push((80_452, "OuterZarzakhPatrol", 0, st.position + DVec3::new(-4_500.0, -1_200.0, 0.0)));
+            }
+        }
+    }
+
+    if specs.is_empty() {
+        return Vec::new();
+    }
+    spawn_specialized_npc_batch(ctx, solar_system_id, &specs, |_| {}).await
 }
 
 pub use crate::services::combat_crimewatch::combat_npc_encounters::{

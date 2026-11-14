@@ -1811,7 +1811,11 @@ async fn handle_invbroker_add(
                     if updated.owner_id != old_owner_id {
                         crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &[updated.item_id]);
                     }
-                    if dst_corp_owner > 0 || (116..=122).contains(&flag_u16) {
+                    if dst_corp_owner > 0
+                        || (116..=122).contains(&flag_u16)
+                        || flag == InventoryFlag::CorpDeliveries
+                        || updated.owner_id != old_owner_id && updated.owner_id != char_id
+                    {
                         let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::void_ship_insurance_contract(ctx, updated.item_id);
                     }
                     if flag_u16 == 180 || flag == InventoryFlag::StructureDeedBay {

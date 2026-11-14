@@ -830,6 +830,7 @@ pub fn handle_orders_escrow(
             match res {
                 Ok((order_ids, order_owner_id, total_broker, total_tax, all_filled_immediately, matched_buyers, consumed_items, buyer_acct_updates, delivered_items, seller_acct_final)) => {
                     for (rec, changes) in &consumed_items {
+                        let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::void_ship_insurance_contract(ctx, rec.item_id);
                         super::emit_market_item_change(ctx, char_id, rec, changes.clone());
                     }
                     for (rec_char, rec) in &delivered_items {
