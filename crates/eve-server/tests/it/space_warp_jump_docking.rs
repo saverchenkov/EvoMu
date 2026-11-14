@@ -3046,3 +3046,610 @@ async fn it_dock_enforces_2500m_perimeter_even_with_nonempty_session_address() {
     assert_eq!(sess.station_id, Some(st_id));
     assert_eq!(ctx.db.with_snapshot(|s| s.characters[&char_id].station_id), Some(st_id));
 }
+
+fn parse_destiny_action_names(updates: &PyRep) -> Vec<String> {
+    let bytes = eve_proto::marshal::encode(updates);
+    let decoded = eve_proto::marshal::decode(&bytes).expect("DoDestinyUpdate marshal round-trip");
+    let PyRep::List(entries) = decoded else {
+        panic!("DoDestinyUpdate payload must be a list, got {decoded:?}");
+    };
+    entries
+        .into_iter()
+        .map(|entry| {
+            let PyRep::Tuple(outer) = entry else {
+                panic!("destiny entry must be (stamp, action)");
+            };
+            let PyRep::Tuple(inner) = &outer[1] else {
+                panic!("destiny action must be (name, args)");
+            };
+            inner[0]
+                .as_str()
+                .expect("destiny action name")
+                .to_string()
+        })
+        .collect()
+}
+
+fn collect_tcp_destiny_action_names(rep: &PyRep, out: &mut Vec<String>) {
+    match rep {
+        PyRep::SubStream(inner) => collect_tcp_destiny_action_names(inner, out),
+        PyRep::Tuple(items) => {
+            if items.len() == 2 && items[0].as_i64().is_some() {
+                if let PyRep::Tuple(act) = &items[1] {
+                    if let Some(name) = act.first().and_then(|v| match v {
+                        PyRep::String(s) => Some(s.as_str()),
+                        PyRep::Bytes(b) => std::str::from_utf8(b).ok(),
+                        _ => None,
+                    }) {
+                        out.push(name.to_string());
+                        return;
+                    }
+                }
+            }
+            for item in items {
+                collect_tcp_destiny_action_names(item, out);
+            }
+        }
+        PyRep::List(items) => {
+            for item in items {
+                collect_tcp_destiny_action_names(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[tokio::test]
+async fn test_1051_ratcheted_arriving_warp_dock_structure_and_station() {
+    use eve_destiny::WarpPhase;
+    use eve_testkit::client_harness::{
+        extract_bound_id_from_wire_rep, ClientCallOutput, ClientWireFrameKind,
+        ContractValidationMode,
+    };
+
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let st_id = 60_003_760_i64;
+    let struct_id = 1_040_105_102_i64;
+    let kw = HashMap::new();
+
+    let (ship_id, corp_id) = ctx.db.with_snapshot(|snap| {
+        let ch = &snap.characters[&char_id];
+        (ch.active_ship_id, ch.corporation_id)
+    });
+    let st_pos = ctx.sde.stations[&st_id].position;
+    let struct_pos = st_pos + DVec3::new(0.0, 500_000.0, 0.0);
+    let struct_radius = ctx
+        .sde
+        .types
+        .get(&35832)
+        .map(|t| t.radius)
+        .filter(|&r| r > 0.0)
+        .unwrap_or(15_000.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            struct_id,
+            UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35832,
+                solar_system_id: sys_id,
+                owner_corp_id: corp_id,
+                name: "Ratchet Astrahus".into(),
+                position: struct_pos.to_array(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 100_000.0,
+                armor_hp: 100_000.0,
+                hull_hp: 100_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let (_, st_ball) = sys_handle.get_ball_snapshot(st_id).await.unwrap().unwrap();
+    let st_radius = st_ball.radius;
+
+    let mut harness =
+        common::new_wire_harness(&ctx, 105_102).with_mode(ContractValidationMode::Ratcheted);
+    harness
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())],
+            &kw,
+        )
+        .await;
+    harness
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_id)],
+            &kw,
+        )
+        .await;
+
+    let assert_warp_stop_before_release = |label: &str, out: &ClientCallOutput| {
+        assert!(out.result.is_ok(), "{label} must succeed: {:?}", out.result);
+        let destiny_idx = out
+            .frames
+            .iter()
+            .position(|f| matches!(f.kind, ClientWireFrameKind::DoDestinyUpdate { .. }))
+            .unwrap_or_else(|| panic!("{label} must emit DoDestinyUpdate"));
+        let sess_idx = out
+            .frames
+            .iter()
+            .position(|f| matches!(f.kind, ClientWireFrameKind::SessionChange { .. }))
+            .unwrap_or_else(|| panic!("{label} must emit SessionChange"));
+        let rsp_idx = out
+            .frames
+            .iter()
+            .position(|f| matches!(f.kind, ClientWireFrameKind::CallRsp { .. }))
+            .unwrap_or_else(|| panic!("{label} must emit CallRsp"));
+        assert!(
+            destiny_idx < sess_idx && sess_idx < rsp_idx,
+            "{label}: DoDestinyUpdate ({destiny_idx}) must precede SessionChange ({sess_idx}) and CallRsp ({rsp_idx})"
+        );
+        let ClientWireFrameKind::DoDestinyUpdate { updates, .. } = &out.frames[destiny_idx].kind else {
+            unreachable!();
+        };
+        let actions = parse_destiny_action_names(updates);
+        let massive_idx = actions
+            .iter()
+            .position(|n| n == "SetBallMassive")
+            .unwrap_or_else(|| panic!("{label} missing SetBallMassive in {actions:?}"));
+        let fx_idx = actions
+            .iter()
+            .position(|n| n == "OnSpecialFX")
+            .unwrap_or_else(|| panic!("{label} missing OnSpecialFX in {actions:?}"));
+        let stop_idx = actions
+            .iter()
+            .position(|n| n == "Stop")
+            .unwrap_or_else(|| panic!("{label} missing Stop in {actions:?}"));
+        let vel_idx = actions
+            .iter()
+            .position(|n| n == "SetBallVelocity")
+            .unwrap_or_else(|| panic!("{label} missing SetBallVelocity in {actions:?}"));
+        let pos_idx = actions
+            .iter()
+            .position(|n| n == "SetBallPosition")
+            .unwrap_or_else(|| panic!("{label} missing SetBallPosition in {actions:?}"));
+        assert!(
+            massive_idx < fx_idx && fx_idx < stop_idx && stop_idx < vel_idx && vel_idx < pos_idx,
+            "{label}: expected SetBallMassive < OnSpecialFX < Stop < SetBallVelocity < SetBallPosition in {actions:?}"
+        );
+        assert!(
+            !actions.iter().any(|n| n == "RemoveBall" || n == "RemoveBalls"),
+            "{label}: self observer must not receive RemoveBall(s) before OnReleaseBallpark: {actions:?}"
+        );
+    };
+
+    // 1. structureDocking.Dock while arriving from warp (300m short of landing, outside static 2,500m shell)
+    ctx.advance_secs(12);
+    harness.call_ok("stationSvc", None, "Undock", &[], &kw).await;
+    let bind1 = harness
+        .call_exchange(
+            "beyonce",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(sys_id as i64), PyRep::None],
+            &kw,
+        )
+        .await;
+    assert!(bind1.result.is_ok());
+
+    let struct_origin = struct_pos + DVec3::new(1_000_000_000.0, 0.0, 0.0);
+    let struct_landing = struct_pos + DVec3::new(struct_radius + 2_300.0, 0.0, 0.0);
+    let mut ship_ball = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
+    ship_ball.position = struct_landing + DVec3::new(300.0, 0.0, 0.0);
+    ship_ball.mode = MovementMode::Warp {
+        origin: struct_origin,
+        destination: struct_landing,
+        warp_speed_au_s: 15.0,
+        total_distance: struct_origin.distance(struct_landing),
+        phase: WarpPhase::Decelerating,
+        elapsed_warp_time: 5.0,
+    };
+    sys_handle.spawn_ball(ship_ball).await.unwrap();
+    harness.drain_frames();
+
+    ctx.advance_secs(12);
+    let struct_dock_out = harness
+        .call_exchange(
+            "structureDocking",
+            None,
+            "Dock",
+            &[PyRep::Integer(struct_id)],
+            &kw,
+        )
+        .await;
+    assert_warp_stop_before_release("structureDocking.Dock", &struct_dock_out);
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.characters[&char_id].structure_id),
+        Some(struct_id)
+    );
+
+    // 2. beyonce.CmdDock at NPC station while arriving from warp (300m short of landing)
+    ctx.advance_secs(12);
+    harness
+        .call_ok("structureDocking", None, "Undock", &[], &kw)
+        .await;
+    let bind2 = harness
+        .call_exchange(
+            "beyonce",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(sys_id as i64), PyRep::None],
+            &kw,
+        )
+        .await;
+    let beyonce_bid2 = extract_bound_id_from_wire_rep(&bind2.result.expect("MachoBindObject 2"))
+        .expect("beyonce bound id 2");
+
+    let st_origin = st_pos + DVec3::new(1_000_000_000.0, 0.0, 0.0);
+    let st_landing = st_pos + DVec3::new(st_radius + 2_300.0, 0.0, 0.0);
+    let mut ship_ball2 = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
+    ship_ball2.position = st_landing + DVec3::new(300.0, 0.0, 0.0);
+    ship_ball2.mode = MovementMode::Warp {
+        origin: st_origin,
+        destination: st_landing,
+        warp_speed_au_s: 15.0,
+        total_distance: st_origin.distance(st_landing),
+        phase: WarpPhase::Decelerating,
+        elapsed_warp_time: 5.0,
+    };
+    sys_handle.spawn_ball(ship_ball2).await.unwrap();
+    harness.drain_frames();
+
+    ctx.advance_secs(12);
+    let st_cmd_dock_out = harness
+        .call_exchange(
+            "beyonce",
+            Some(beyonce_bid2),
+            "CmdDock",
+            &[PyRep::Integer(st_id)],
+            &kw,
+        )
+        .await;
+    assert_warp_stop_before_release("beyonce.CmdDock", &st_cmd_dock_out);
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.characters[&char_id].station_id),
+        Some(st_id)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_1051_live_tcp_macho_dock_splits_warp_stop_and_session_change_settle_gap() {
+    use eve_destiny::WarpPhase;
+    use eve_machonet::{
+        placebo_crypto_hash, CryptoChallengePacket, CryptoHandshakeResult, CryptoRequestPacket,
+        CryptoServerHandshake, MachoAddress, MachoPacket, MachoPacketType, MACHO_PROXY_NODE_ID,
+    };
+    use eve_server::macho_listener::{handle_macho_client, read_framed_pyrep, write_framed_pyrep};
+    use eve_server::services::space_warp_jump::WARP_DOCK_SETTLE_DURATION;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::net::{TcpListener, TcpStream};
+
+    let ctx = Arc::new(ServerContext::new());
+    common::pin_clock(&ctx);
+
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let st_id = 60_003_760_i64;
+    let ship_id = ctx.db.with_snapshot(|s| s.characters[&char_id].active_ship_id);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let st_pos = ctx.sde.stations[&st_id].position;
+    let (_, st_ball) = sys_handle.get_ball_snapshot(st_id).await.unwrap().unwrap();
+    let st_radius = st_ball.radius;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind macho");
+    let addr = listener.local_addr().expect("local_addr");
+    let ctx_server = Arc::clone(&ctx);
+    tokio::spawn(async move {
+        if let Ok((stream, _)) = listener.accept().await {
+            let _ = handle_macho_client(stream, ctx_server).await;
+        }
+    });
+
+    let mut s = TcpStream::connect(addr).await.expect("connect macho");
+    let _hello = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+    let client_ver = PyRep::Tuple(vec![
+        PyRep::Integer(170_472),
+        PyRep::Integer(496),
+        PyRep::Integer(0),
+        PyRep::Real(24.01),
+        PyRep::Integer(3_624_425),
+        PyRep::ascii_bytes("V24.01@ccp"),
+    ]);
+    write_framed_pyrep(&mut s, &client_ver).await.unwrap();
+    write_framed_pyrep(&mut s, &CryptoRequestPacket::placebo().to_pyrep())
+        .await
+        .unwrap();
+    assert_eq!(read_framed_pyrep(&mut s).await.unwrap().unwrap().as_str(), Some("OK CC"));
+
+    let challenge = CryptoChallengePacket::new_password_login("demo", "demo-secret");
+    write_framed_pyrep(&mut s, &challenge.to_pyrep()).await.unwrap();
+    assert_eq!(read_framed_pyrep(&mut s).await.unwrap().unwrap(), PyRep::Integer(2));
+    let srv_hs = CryptoServerHandshake::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap())
+        .expect("CryptoServerHandshake");
+    let hs_res = CryptoHandshakeResult {
+        challenge_response_hash: placebo_crypto_hash(&srv_hs.server_challenge),
+        func_output: Vec::new(),
+        func_result: PyRep::Integer(0),
+    };
+    write_framed_pyrep(&mut s, &hs_res.to_pyrep()).await.unwrap();
+    let _ack = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+    let init_pkt =
+        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    let MachoAddress::Client { client_id, .. } = init_pkt.destination else {
+        panic!("expected Client destination on SessionInitialStateNotification");
+    };
+    let _sess0 = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+
+    let send_call = |call_id: u64, service: &str, method: &str, args: Vec<PyRep>| {
+        let inner_tuple = PyRep::Tuple(vec![
+            PyRep::ascii_bytes(method),
+            PyRep::Tuple(args),
+            PyRep::Dict(Vec::new()),
+        ]);
+        MachoPacket {
+            packet_type: MachoPacketType::CallReq,
+            source: MachoAddress::Client {
+                client_id,
+                call_id,
+                service: None,
+            },
+            destination: MachoAddress::Node {
+                node_id: MACHO_PROXY_NODE_ID,
+                service: Some(service.into()),
+                call_id: 0,
+            },
+            user_id: Some(1001),
+            payload: PyRep::Tuple(vec![PyRep::Tuple(vec![
+                PyRep::Integer(0),
+                PyRep::SubStream(Box::new(inner_tuple)),
+            ])]),
+            named_payload: HashMap::new(),
+        }
+    };
+
+    async fn drain_until_call_rsp(
+        stream: &mut TcpStream,
+    ) -> Vec<(tokio::time::Instant, MachoPacket)> {
+        let mut pkts = Vec::new();
+        loop {
+            let rep = tokio::time::timeout(
+                Duration::from_secs(5),
+                read_framed_pyrep(stream),
+            )
+            .await
+            .expect("TCP read timeout waiting for CallRsp")
+            .expect("frame read ok")
+            .expect("non-EOF frame");
+            let pkt = MachoPacket::from_pyrep(&rep).expect("MachoPacket");
+            assert_ne!(
+                pkt.packet_type,
+                MachoPacketType::ErrorResponse,
+                "unexpected ErrorResponse: {rep:?}"
+            );
+            let done = pkt.packet_type == MachoPacketType::CallRsp;
+            pkts.push((tokio::time::Instant::now(), pkt));
+            if done {
+                return pkts;
+            }
+        }
+    }
+
+    // SelectCharacterID(90_000_001)
+    write_framed_pyrep(
+        &mut s,
+        &send_call(1, "charUnboundMgr", "SelectCharacterID", vec![PyRep::Integer(char_id)])
+            .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let _ = drain_until_call_rsp(&mut s).await;
+
+    // Phase A: Undock, transition destiny stream to Live, enter arriving warp (300m short of landing),
+    // and call stationSvc.Dock over live TCP.
+    ctx.advance_secs(12);
+    write_framed_pyrep(
+        &mut s,
+        &send_call(2, "stationSvc", "Undock", Vec::new()).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let _ = drain_until_call_rsp(&mut s).await;
+
+    write_framed_pyrep(
+        &mut s,
+        &send_call(
+            3,
+            "beyonce",
+            "MachoBindObject",
+            vec![
+                PyRep::Integer(sys_id as i64),
+                PyRep::Tuple(vec![
+                    PyRep::ascii_bytes("GetFormations"),
+                    PyRep::Tuple(Vec::new()),
+                    PyRep::Dict(Vec::new()),
+                ]),
+            ],
+        )
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let _ = drain_until_call_rsp(&mut s).await;
+
+    let origin = st_pos + DVec3::new(1_000_000_000.0, 0.0, 0.0);
+    let landing = st_pos + DVec3::new(st_radius + 2_300.0, 0.0, 0.0);
+    let mut ball = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
+    ball.position = landing + DVec3::new(300.0, 0.0, 0.0);
+    ball.mode = MovementMode::Warp {
+        origin,
+        destination: landing,
+        warp_speed_au_s: 15.0,
+        total_distance: origin.distance(landing),
+        phase: WarpPhase::Decelerating,
+        elapsed_warp_time: 5.0,
+    };
+    sys_handle.spawn_ball(ball).await.unwrap();
+
+    ctx.advance_secs(12);
+    let dock_sent_a = tokio::time::Instant::now();
+    write_framed_pyrep(
+        &mut s,
+        &send_call(4, "stationSvc", "Dock", vec![PyRep::Integer(st_id)]).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let pkts_a = drain_until_call_rsp(&mut s).await;
+
+    let mut stop_at_a = None;
+    let mut sess_at_a = None;
+    let mut rsp_at_a = None;
+    for (ts, pkt) in &pkts_a {
+        match pkt.packet_type {
+            MachoPacketType::Notification => {
+                if let MachoAddress::Broadcast { broadcast_id, .. } = &pkt.destination {
+                    if broadcast_id == "DoDestinyUpdate" {
+                        let mut actions = Vec::new();
+                        collect_tcp_destiny_action_names(&pkt.payload, &mut actions);
+                        if actions.iter().any(|n| n == "Stop")
+                            && actions.iter().any(|n| n == "SetBallMassive")
+                            && !actions.iter().any(|n| n == "RemoveBall" || n == "RemoveBalls")
+                            && stop_at_a.is_none()
+                        {
+                            stop_at_a = Some(*ts);
+                        }
+                    }
+                }
+            }
+            MachoPacketType::SessionChangeNotification if sess_at_a.is_none() => {
+                sess_at_a = Some(*ts);
+            }
+            MachoPacketType::CallRsp if rsp_at_a.is_none() => {
+                rsp_at_a = Some(*ts);
+            }
+            _ => {}
+        }
+    }
+    let stop_at_a = stop_at_a.expect("immediate DoDestinyUpdate(Stop, SetBallMassive) before settle");
+    let sess_at_a = sess_at_a.expect("SessionChangeNotification after settle");
+    let rsp_at_a = rsp_at_a.expect("CallRsp after settle");
+    assert!(
+        stop_at_a.duration_since(dock_sent_a) < Duration::from_millis(500),
+        "DoDestinyUpdate(Stop) must flush immediately instead of waiting for settle ({:?})",
+        stop_at_a.duration_since(dock_sent_a)
+    );
+    assert!(
+        sess_at_a.duration_since(stop_at_a)
+            >= WARP_DOCK_SETTLE_DURATION.saturating_sub(Duration::from_millis(50)),
+        "SessionChangeNotification must wait out WARP_DOCK_SETTLE_DURATION after Stop ({:?})",
+        sess_at_a.duration_since(stop_at_a)
+    );
+    assert!(rsp_at_a >= sess_at_a);
+    assert_eq!(
+        ctx.db.with_snapshot(|db| db.characters[&char_id].station_id),
+        Some(st_id)
+    );
+
+    // Phase B: Post-OnWarpArrived / natural Ballpark::step warp-exit race:
+    // Undock, warp 300km to station via CmdWarpToStuff, advance physics until MovementMode::Stop,
+    // then immediately call stationSvc.Dock while server has already left MovementMode::Warp.
+    ctx.advance_secs(12);
+    write_framed_pyrep(
+        &mut s,
+        &send_call(5, "stationSvc", "Undock", Vec::new()).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let _ = drain_until_call_rsp(&mut s).await;
+
+    write_framed_pyrep(
+        &mut s,
+        &send_call(
+            6,
+            "beyonce",
+            "MachoBindObject",
+            vec![
+                PyRep::Integer(sys_id as i64),
+                PyRep::Tuple(vec![
+                    PyRep::ascii_bytes("GetFormations"),
+                    PyRep::Tuple(Vec::new()),
+                    PyRep::Dict(Vec::new()),
+                ]),
+            ],
+        )
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let _ = drain_until_call_rsp(&mut s).await;
+
+    let _ = sys_handle
+        .set_ball_position(ship_id, st_pos + DVec3::new(st_radius + 300_000.0, 0.0, 0.0))
+        .await;
+    write_framed_pyrep(
+        &mut s,
+        &send_call(
+            7,
+            "beyonce",
+            "CmdWarpToStuff",
+            vec![PyRep::String("item".into()), PyRep::Integer(st_id)],
+        )
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let _ = drain_until_call_rsp(&mut s).await;
+
+    let mut exited = false;
+    for _ in 0..45 {
+        sys_handle.step_manual(1.0).await.unwrap();
+        let b = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
+        if matches!(b.mode, MovementMode::Stop) {
+            exited = true;
+            break;
+        }
+    }
+    assert!(exited, "CmdWarpToStuff 300km warp must naturally exit to MovementMode::Stop");
+
+    ctx.advance_secs(12);
+    let dock_sent_b = tokio::time::Instant::now();
+    write_framed_pyrep(
+        &mut s,
+        &send_call(8, "stationSvc", "Dock", vec![PyRep::Integer(st_id)]).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let pkts_b = drain_until_call_rsp(&mut s).await;
+
+    let sess_at_b = pkts_b
+        .iter()
+        .find_map(|(ts, pkt)| {
+            (pkt.packet_type == MachoPacketType::SessionChangeNotification).then_some(*ts)
+        })
+        .expect("Phase B SessionChangeNotification after natural warp exit");
+    assert!(
+        sess_at_b.duration_since(dock_sent_b)
+            >= WARP_DOCK_SETTLE_DURATION.saturating_sub(Duration::from_millis(150)),
+        "Dock right after natural server warp exit must still defer SessionChangeNotification ({:?})",
+        sess_at_b.duration_since(dock_sent_b)
+    );
+    assert_eq!(
+        ctx.db.with_snapshot(|db| db.characters[&char_id].station_id),
+        Some(st_id)
+    );
+}

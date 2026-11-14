@@ -499,12 +499,15 @@ impl SystemRegistry {
             Arc::new(RankedRwLock::new(std::collections::HashSet::new()));
         let committed_warp_balls: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>> =
             Arc::new(RankedRwLock::new(HashMap::new()));
+        let warp_stopped_at: Arc<RankedRwLock<HashMap<BallId, tokio::time::Instant>, RANK_LEAF>> =
+            Arc::new(RankedRwLock::new(HashMap::new()));
         let active_module_ships: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>> =
             Arc::new(RankedRwLock::new(std::collections::HashSet::new()));
         register_committed_warp_cache(&ball_positions, &committed_warp_balls);
         sync_ball_positions(&initial_ballpark, &ball_positions, &scrambled_balls);
         let ball_positions_actor = ball_positions.clone();
         let scrambled_balls_actor = scrambled_balls.clone();
+        let warp_stopped_at_actor = warp_stopped_at.clone();
         let active_module_ships_actor = active_module_ships.clone();
         let hibernated = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let hibernated_since_unix = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -1715,7 +1718,21 @@ impl SystemRegistry {
                                 let _ = reply.send(ballpark.set_interdiction_nullified(ball_id, nullified));
                             }
                             SystemCommand::FastForwardClock { ship_id, secs, reply } => {
+                                let was_warping = matches!(
+                                    ballpark.balls.get(&ship_id).map(|b| &b.mode),
+                                    Some(eve_destiny::MovementMode::Warp { .. })
+                                );
                                 fast_forward_clock_in_actor_with_epochs(solar_system_id, &mut ballpark, ship_id, secs, sim_elapsed_secs, &db_opt, ball_space_entry_epochs, &ball_positions_actor, &scrambled_balls_actor, &event_tx_actor);
+                                let now_warping = matches!(
+                                    ballpark.balls.get(&ship_id).map(|b| &b.mode),
+                                    Some(eve_destiny::MovementMode::Warp { .. })
+                                );
+                                if was_warping && !now_warping {
+                                    warp_stopped_at_actor
+                                        .write()
+                                        .unwrap_or_else(|e| e.into_inner())
+                                        .insert(ship_id, tokio::time::Instant::now());
+                                }
                                 let _ = reply.send(());
                             }
                             SystemCommand::MicroJump { ball_id, distance_meters, reply } => {
@@ -2075,11 +2092,14 @@ impl SystemRegistry {
                             let has_subscribers = event_tx_actor.receiver_count() > 0;
                             let broadcast_opt = if has_subscribers || matches!(step_reply, StepReply::Full(_)) {
                                 let broadcast = build_tick_broadcast(solar_system_id, &mut ballpark, events);
+                                celestials::record_warp_stops_from_events_in_map(&broadcast.events, &warp_stopped_at_actor);
                                 if has_subscribers {
                                     let _ = event_tx_actor.send(broadcast.clone());
                                 }
                                 Some(broadcast)
                             } else {
+                                celestials::record_warp_stops_from_events_in_map(&events, &warp_stopped_at_actor);
+                                celestials::record_warp_stops_from_events_in_map(&ballpark.pending_events, &warp_stopped_at_actor);
                                 belts::drain_tick_events_without_encode(&mut ballpark);
                                 None
                             };
@@ -2157,6 +2177,7 @@ impl SystemRegistry {
             ball_positions,
             scrambled_balls,
             committed_warp_balls,
+            warp_stopped_at,
             active_module_ships,
             ballpark: ballpark_shared,
             actor_state: actor_state_shared,

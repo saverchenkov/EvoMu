@@ -28,6 +28,7 @@ pub struct SystemHandle {
     pub(crate) ball_positions: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
     pub(crate) scrambled_balls: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     pub(crate) committed_warp_balls: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+    pub(crate) warp_stopped_at: Arc<RankedRwLock<HashMap<BallId, tokio::time::Instant>, RANK_LEAF>>,
     pub(crate) active_module_ships: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     pub ballpark: Arc<RankedRwLock<Ballpark, RANK_BALLPARK>>,
     pub(crate) actor_state: Arc<RankedRwLock<super::SystemActorState, RANK_ACTOR_STATE>>,
@@ -1077,6 +1078,9 @@ impl SystemHandle {
         persist_landed_warps_in_db(&bp, &events, &st.db_opt, &st.ball_space_entry_epochs);
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
         let broadcast = build_tick_broadcast(self.solar_system_id, &mut bp, events);
+        drop(st);
+        drop(bp);
+        self.record_warp_stops_from_events(&broadcast.events);
         let _ = self.event_tx.send(broadcast);
     }
 
@@ -2029,7 +2033,8 @@ pub(crate) use celestials_helpers::{
     collect_immediate_armor_hull_checkpoint_entries,
     collect_landed_warp_positions, fast_forward_clock_in_actor_with_epochs,
     persist_ball_positions_in_db, persist_landed_warps_in_db,
-    record_spawned_ball_checkpoint_baseline, register_committed_warp_cache,
+    record_spawned_ball_checkpoint_baseline, record_warp_stops_from_events_in_map,
+    register_committed_warp_cache,
     register_db_system_ballpark, remove_ball_checkpoint_tracking, sync_ball_positions,
     update_system_hibernation_flag,
 };

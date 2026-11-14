@@ -831,14 +831,112 @@ pub(crate) fn fast_forward_clock_in_actor_with_epochs(
     let _ = event_tx_actor.send(broadcast);
 }
 
+/// Records wallclock warp-stop timestamps (`tokio::time::Instant`) whenever warp ends via
+/// `SetBallMassive { is_massive: true }`, and clears entries when a ball enters warp or leaves space.
+pub(crate) fn record_warp_stops_from_events_in_map(
+    events: &[eve_destiny::DestinyEvent],
+    map: &RankedRwLock<HashMap<BallId, tokio::time::Instant>, RANK_LEAF>,
+) {
+    let has_relevant = events.iter().any(|ev| {
+        matches!(
+            ev,
+            eve_destiny::DestinyEvent::SetBallMassive { is_massive: true, .. }
+                | eve_destiny::DestinyEvent::WarpTo { .. }
+                | eve_destiny::DestinyEvent::RemoveBall { .. }
+        )
+    });
+    if !has_relevant {
+        return;
+    }
+    let now = tokio::time::Instant::now();
+    let mut guard = map.write().unwrap_or_else(|e| e.into_inner());
+    for ev in events {
+        match ev {
+            eve_destiny::DestinyEvent::SetBallMassive {
+                ball_id,
+                is_massive: true,
+            } => {
+                guard.insert(*ball_id, now);
+            }
+            eve_destiny::DestinyEvent::WarpTo { ball_id, .. }
+            | eve_destiny::DestinyEvent::RemoveBall { ball_id } => {
+                guard.remove(ball_id);
+            }
+            _ => {}
+        }
+    }
+}
+
 impl SystemHandle {
+    /// Records an immediate warp-stop timestamp for `ball_id`.
+    pub(crate) fn record_warp_stop(&self, ball_id: BallId) {
+        let now = tokio::time::Instant::now();
+        self.warp_stopped_at
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(ball_id, now);
+    }
+
+    /// Clears any recorded warp-stop settle timestamp for `ball_id`.
+    pub(crate) fn clear_warp_stopped_at(&self, ball_id: BallId) {
+        self.warp_stopped_at
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&ball_id);
+    }
+
+    /// Updates `warp_stopped_at` from a batch of destiny events.
+    pub(crate) fn record_warp_stops_from_events(&self, events: &[eve_destiny::DestinyEvent]) {
+        record_warp_stops_from_events_in_map(events, &self.warp_stopped_at);
+    }
+
+    /// Returns the settle deadline if `ball_id` exited warp within `window` and the client
+    /// `Warp.WarpLoop` tasklet (`blue.synchro.SleepSim(500)`) may still need time to finish
+    /// before `OnReleaseBallpark`.
+    pub(crate) fn warp_stop_settle_deadline(
+        &self,
+        ball_id: BallId,
+        window: std::time::Duration,
+    ) -> Option<tokio::time::Instant> {
+        let stopped_at = self
+            .warp_stopped_at
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&ball_id)
+            .copied()?;
+        let deadline = stopped_at + window;
+        (tokio::time::Instant::now() < deadline).then_some(deadline)
+    }
+
+    /// Stops an arriving warp before docking, optionally snapping `ball.position` to the
+    /// verified `landing_pos` inside the docking perimeter so subsequent post-settle checks
+    /// stay within range.
+    pub(crate) fn finish_warp_for_dock(
+        &self,
+        ball_id: BallId,
+        landing_pos: Option<DVec3>,
+    ) -> Result<u64, String> {
+        let tick = {
+            let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+            if let Some(pos) = landing_pos.filter(|p| p.is_finite()) {
+                if let Some(ball) = bp.balls.get_mut(&ball_id) {
+                    if matches!(ball.mode, eve_destiny::MovementMode::Warp { .. }) {
+                        ball.position = pos;
+                    }
+                }
+            }
+            bp.force_stop_warp(ball_id)?;
+            crate::system_actor::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+            bp.current_tick
+        };
+        self.record_warp_stop(ball_id);
+        Ok(tick)
+    }
+
     /// Server-authoritative warp termination (reconnect recovery / admin reset) that stops even
     /// mid-tunnel warps, zeroes velocity, and restores `SetBallMassive { is_massive: true }`.
     pub fn force_stop_warp(&self, ball_id: BallId) -> Result<u64, String> {
-        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        bp.force_stop_warp(ball_id)?;
-        crate::system_actor::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-        Ok(bp.current_tick)
+        self.finish_warp_for_dock(ball_id, None)
     }
 }
 
