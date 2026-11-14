@@ -22,7 +22,8 @@ use super::quasar_progression_extra::ProgressionExtraManager;
 use crate::quasar_gateway::{
     NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_NOT_FOUND, STATUS_PRECONDITION_FAILED,
 };
-use eve_proto::quasar::{encode_bytes_field, encode_varint_field, GoogleAny, TYPE_GOOGLEAPIS_PREFIX};
+use eve_proto::pb;
+use eve_proto::quasar::GoogleAny;
 use std::collections::HashMap;
 
 /// `eve_public.campaign.State` values used by the engine (0 = scheduled, not yet started).
@@ -208,40 +209,35 @@ fn tagged_uuid(tag: &[u8; 8], id: u64) -> [u8; 16] {
 
 /// Encodes `{ <field 1>: Identifier { uuid = 1 } }` — the shared shape of every campaign notice id.
 pub fn encode_identifier(uuid: &[u8; 16]) -> Vec<u8> {
-    let mut id = Vec::new();
-    encode_bytes_field(1, uuid, &mut id);
-    id
-}
-
-fn notice(type_name: &str, value: Vec<u8>) -> GoogleAny {
-    GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"), value }
+    pb::message("eve_public.campaign.Identifier")
+        .set("uuid", *uuid)
+        .must_encode()
 }
 
 fn campaign_notice(type_name: &str, campaign_id: u64) -> GoogleAny {
-    let mut out = Vec::new();
-    encode_bytes_field(1, &encode_identifier(&campaign_id_to_uuid_bytes(campaign_id)), &mut out);
-    notice(type_name, out)
+    pb::message(type_name)
+        .set("campaign.uuid", campaign_id_to_uuid_bytes(campaign_id))
+        .must_to_any()
 }
 
-fn contributed_notice(type_name: &str, uuid: [u8; 16], total_participant_progress: u64) -> GoogleAny {
-    let mut out = Vec::new();
-    encode_bytes_field(1, &encode_identifier(&uuid), &mut out);
-    encode_varint_field(2, total_participant_progress, &mut out);
-    notice(type_name, out)
+fn contributed_notice(type_name: &str, id_field: &str, uuid: [u8; 16], total_participant_progress: u64) -> GoogleAny {
+    pb::message(type_name)
+        .set(&format!("{id_field}.uuid"), uuid)
+        .set("total_participant_progress", total_participant_progress)
+        .must_to_any()
 }
 
 /// `CurrentVersionNotice { versions: [CampaignVersion { campaign = 1, version = 2 { etag = 2 } }] }`.
 fn current_version_notice(versions: &[(u64, u64)]) -> GoogleAny {
-    let mut out = Vec::new();
+    let mut notice = pb::message("eve_public.campaign.api.CurrentVersionNotice");
     for (cid, etag) in versions {
-        let mut ver = Vec::new();
-        encode_varint_field(2, *etag, &mut ver);
-        let mut entry = Vec::new();
-        encode_bytes_field(1, &encode_identifier(&campaign_id_to_uuid_bytes(*cid)), &mut entry);
-        encode_bytes_field(2, &ver, &mut entry);
-        encode_bytes_field(1, &entry, &mut out);
+        notice = notice.add_with("versions", |entry| {
+            entry
+                .set("campaign.uuid", campaign_id_to_uuid_bytes(*cid))
+                .set("version.etag", *etag)
+        });
     }
-    notice("eve_public.campaign.api.CurrentVersionNotice", out)
+    notice.must_to_any()
 }
 
 /// Parameter list `(key, parameter type, icon)` of an authentic contribution method, if the name is known.
@@ -513,6 +509,7 @@ impl ProgressionExtraManager {
                     NoticeScope::Character(char_id),
                     contributed_notice(
                         "eve_public.campaign.objective.api.ContributedNotice",
+                        "objective",
                         objective_id_to_uuid_bytes(oid),
                         participant_total,
                     ),
@@ -551,6 +548,7 @@ impl ProgressionExtraManager {
                         NoticeScope::Character(char_id),
                         contributed_notice(
                             "eve_public.campaign.track.api.ContributedNotice",
+                            "track",
                             track_id_to_uuid_bytes(*tid),
                             participant_total,
                         ),

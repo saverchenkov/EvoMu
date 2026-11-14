@@ -12,7 +12,7 @@
 #![forbid(unsafe_code)]
 
 use super::quasar_campaign_state::{
-    campaign_id_to_uuid_bytes, contribution_method_params, encode_identifier, objective_id_to_uuid_bytes, require_id, ticking_value,
+    campaign_id_to_uuid_bytes, contribution_method_params, objective_id_to_uuid_bytes, require_id, ticking_value,
     track_id_to_uuid_bytes, CampaignObjectiveRecord, CampaignRecord, CampaignTrackRecord, PendingNotices,
     CAMPAIGN_STATE_ACTIVE, CAMPAIGN_STATE_COMPLETED, MAX_ACTIVE_OBJECTIVES_PER_PARTICIPANT, OBJECTIVE_STATE_ACTIVE,
     TRACK_STATE_STARTED,
@@ -86,7 +86,7 @@ fn id_builder(type_name: &str, uuid: [u8; 16]) -> ProtoBuilder {
     pb::message(type_name).set("uuid", uuid)
 }
 
-fn lifecycle_builder(type_name: &str, state: u32, transition_unix: u64) -> ProtoBuilder {
+pub(crate) fn lifecycle_builder(type_name: &str, state: u32, transition_unix: u64) -> ProtoBuilder {
     pb::message(type_name)
         .set("state", state as i32)
         .when(transition_unix > 0, |b| b.set("transition_time", ts_unix(transition_unix)))
@@ -95,10 +95,6 @@ fn lifecycle_builder(type_name: &str, state: u32, transition_unix: u64) -> Proto
 fn wrap_wire_bytes(field: u32, bytes: Vec<u8>, out: &mut Vec<u8>) {
     let msg = WireMessage { fields: vec![WireField { field_number: field, value: WireValue::LengthDelimited(bytes) }] };
     out.extend_from_slice(&msg.encode());
-}
-
-pub fn encode_id_field(field: u32, uuid: [u8; 16], out: &mut Vec<u8>) {
-    wrap_wire_bytes(field, encode_identifier(&uuid), out);
 }
 
 /// `LifecycleState { state = 1; transition_time = 2 }` (same shape for campaign/objective/track).
@@ -141,18 +137,21 @@ pub fn encode_campaign_attributes(c: &CampaignRecord, objs: &[&CampaignObjective
     campaign_attributes_builder(c, objs).must_encode()
 }
 
-/// `objective.Stats { current_objective_progress = 1; committed_participants = 2;
-/// total_participants = 3; total_contributors = 4 }`.
-pub fn encode_objective_stats(o: &CampaignObjectiveRecord) -> Vec<u8> {
+pub(crate) fn objective_stats_builder(o: &CampaignObjectiveRecord) -> ProtoBuilder {
     pb::message("eve_public.campaign.objective.Stats")
         .set("current_objective_progress", o.current_progress.max(0) as u64)
         .set("committed_participants", o.committed_participants.len() as u32)
         .set("total_participants", (o.committed_participants.len() + o.resigned_participants.len()) as u32)
         .set("total_contributors", o.contributors.len() as u32)
-        .must_encode()
 }
 
-fn objective_attributes_builder(o: &CampaignObjectiveRecord) -> ProtoBuilder {
+/// `objective.Stats { current_objective_progress = 1; committed_participants = 2;
+/// total_participants = 3; total_contributors = 4 }`.
+pub fn encode_objective_stats(o: &CampaignObjectiveRecord) -> Vec<u8> {
+    objective_stats_builder(o).must_encode()
+}
+
+pub(crate) fn objective_attributes_builder(o: &CampaignObjectiveRecord) -> ProtoBuilder {
     let types = contribution_method_params(&o.contribution_method).unwrap_or(&[]);
     let mut b = pb::message("eve_public.campaign.objective.Attributes")
         .set("state", o.state as i32)
@@ -191,7 +190,7 @@ pub fn encode_objective_attributes(o: &CampaignObjectiveRecord) -> Vec<u8> {
     objective_attributes_builder(o).must_encode()
 }
 
-fn track_attributes_builder(t: &CampaignTrackRecord) -> ProtoBuilder {
+pub(crate) fn track_attributes_builder(t: &CampaignTrackRecord) -> ProtoBuilder {
     let mut b = pb::message("eve_public.campaign.track.Attributes")
         .set("key", &t.key)
         .when(t.target_progress_value > 0, |b| b.set("target_progress_value", t.target_progress_value))
@@ -240,7 +239,7 @@ pub fn encode_track_attributes(t: &CampaignTrackRecord) -> Vec<u8> {
     track_attributes_builder(t).must_encode()
 }
 
-fn track_stats_builder(t: &CampaignTrackRecord) -> ProtoBuilder {
+pub(crate) fn track_stats_builder(t: &CampaignTrackRecord) -> ProtoBuilder {
     let mut b = pb::message("eve_public.campaign.track.Stats").set("current_progress", t.current_progress);
     for tc in &t.ticking {
         b = b.add_with("ticking_contributions", |tick| {
@@ -260,8 +259,7 @@ pub fn encode_track_stats(t: &CampaignTrackRecord) -> Vec<u8> {
     track_stats_builder(t).must_encode()
 }
 
-/// `track.ParticipantStats { participant_track = 1 { current = 1; max_reached = 2 } | no_participant_track = 2 }`.
-pub fn encode_track_participant_stats(t: &CampaignTrackRecord, char_id: u32) -> Vec<u8> {
+pub(crate) fn track_participant_stats_builder(t: &CampaignTrackRecord, char_id: u32) -> ProtoBuilder {
     let b = pb::message("eve_public.campaign.track.ParticipantStats");
     match t.participants.get(&char_id) {
         Some(&mine) => {
@@ -272,7 +270,11 @@ pub fn encode_track_participant_stats(t: &CampaignTrackRecord, char_id: u32) -> 
         }
         None => b.set("no_participant_track", true),
     }
-    .must_encode()
+}
+
+/// `track.ParticipantStats { participant_track = 1 { current = 1; max_reached = 2 } | no_participant_track = 2 }`.
+pub fn encode_track_participant_stats(t: &CampaignTrackRecord, char_id: u32) -> Vec<u8> {
+    track_participant_stats_builder(t, char_id).must_encode()
 }
 
 fn status_track_builder(t: &CampaignTrackRecord) -> ProtoBuilder {
@@ -454,7 +456,7 @@ pub fn register_campaign_handlers(router: &PublicGatewayRouter, manager: Arc<Pro
             for o in &objs {
                 b = b.add_with("objective_stats", |e| {
                     e.set("objective", id_builder("eve_public.campaign.objective.Identifier", objective_id_to_uuid_bytes(o.id)))
-                        .set_raw_message("stats", &encode_objective_stats(o))
+                        .set("stats", objective_stats_builder(o))
                 });
             }
             Ok(b.must_to_any())
@@ -551,8 +553,7 @@ pub fn register_campaign_handlers(router: &PublicGatewayRouter, manager: Arc<Pro
     super::quasar_campaign_objective_handlers::register_objective_and_track_handlers(router, manager);
 }
 
-/// Predicted value of the next tick of each ticking contribution on `t`.
-pub fn encode_ticking_prediction(t: &CampaignTrackRecord, units: u64) -> Vec<u8> {
+pub(crate) fn ticking_prediction_builder(t: &CampaignTrackRecord, units: u64) -> ProtoBuilder {
     let mut b = pb::message("eve_public.campaign.track.api.GetTickingContributionsPredictionResponse");
     for tc in &t.ticking {
         b = b.add_with("contributions", |c| {
@@ -570,7 +571,12 @@ pub fn encode_ticking_prediction(t: &CampaignTrackRecord, units: u64) -> Vec<u8>
             c.set("value", ticking_value(tc, units).max(0) as u64)
         });
     }
-    b.must_encode()
+    b
+}
+
+/// Predicted value of the next tick of each ticking contribution on `t`.
+pub fn encode_ticking_prediction(t: &CampaignTrackRecord, units: u64) -> Vec<u8> {
+    ticking_prediction_builder(t, units).must_encode()
 }
 
 #[cfg(test)] #[path = "quasar_campaign_handlers_tests.rs"]

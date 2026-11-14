@@ -13,10 +13,10 @@ use crate::services::quasar_cosmetics_market::seed_component_listings_if_empty;
 use crate::services::quasar_cosmetics_market_types::CosmeticsMarketData;
 use crate::services::quasar_payment_store_types::record_plex_transaction;
 use eve_db::WorldRepository;
-use eve_proto::quasar::{
-    encode_bytes_field, encode_fixed64_field, encode_string_field, encode_varint_field,
-    DynamicQuasarMessage, DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
-};
+use eve_proto::pb;
+#[cfg(test)]
+use eve_proto::quasar::GoogleAny;
+use eve_proto::quasar::{DynamicQuasarMessage, DynamicValue, GoogleTimestamp};
 use eve_sde::SdeRegistry;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -28,24 +28,23 @@ pub use eve_db::{
     FailedFulfillmentRecord, OrchestratorState, SemVerSpec, TargetedOfferAdminRecord,
 };
 
+fn semver_builder(ver: &SemVerSpec) -> pb::ProtoBuilder {
+    pb::message("eve.semanticversion.Specification")
+        .when(ver.major > 0, |b| b.set("major", ver.major))
+        .when(ver.minor > 0, |b| b.set("minor", ver.minor))
+        .when(ver.patch > 0, |b| b.set("patch", ver.patch))
+}
+
 pub(crate) trait SemVerSpecExt {
+    #[cfg(test)]
     fn encode(&self) -> Vec<u8>;
     fn from_dyn(msg: &DynamicQuasarMessage) -> Self;
 }
 
 impl SemVerSpecExt for SemVerSpec {
+    #[cfg(test)]
     fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        if self.major > 0 {
-            encode_varint_field(1, self.major as u64, &mut out);
-        }
-        if self.minor > 0 {
-            encode_varint_field(2, self.minor as u64, &mut out);
-        }
-        if self.patch > 0 {
-            encode_varint_field(3, self.patch as u64, &mut out);
-        }
-        out
+        semver_builder(self).must_encode()
     }
 
     fn from_dyn(msg: &DynamicQuasarMessage) -> Self {
@@ -65,13 +64,6 @@ fn save_orch_state(db: &WorldRepository, state: &OrchestratorState) {
     db.with_mut_snapshot(|snap| {
         snap.quasar_commerce.orchestrator = state.clone();
     });
-}
-
-fn any_resp(type_name: &str, value: Vec<u8>) -> GoogleAny {
-    GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"),
-        value,
-    }
 }
 
 fn get_u64(msg: &DynamicQuasarMessage, field_num: u32) -> u64 {
@@ -113,18 +105,6 @@ fn get_bytes(msg: &DynamicQuasarMessage, field_num: u32) -> Vec<u8> {
     }
 }
 
-fn encode_seq_id(field_num: u32, id: u64, out: &mut Vec<u8>) {
-    let mut sub = Vec::new();
-    encode_varint_field(1, id, &mut sub);
-    encode_bytes_field(field_num, &sub, out);
-}
-
-fn encode_uuid_id(field_num: u32, uuid: &[u8], out: &mut Vec<u8>) {
-    let mut sub = Vec::new();
-    encode_bytes_field(1, uuid, &mut sub);
-    encode_bytes_field(field_num, &sub, out);
-}
-
 fn extract_tag_list(msg: &DynamicQuasarMessage, field_num: u32) -> Vec<String> {
     match msg.get(field_num) {
         Some(DynamicValue::Repeated(items)) => items
@@ -164,18 +144,14 @@ fn system_matches_tag(sid: u32, info: &eve_sde::SolarSystem, tag: &str) -> bool 
         }
     }
 }
-fn encode_space_location_solar_system(
-    field_num: u32,
+
+fn set_solar_system_location(
+    m: pb::ProtoBuilder,
     sys_id: u32,
     const_id: u32,
-    out: &mut Vec<u8>,
-) {
-    let mut const_msg = Vec::new();
-    encode_seq_id(1, const_id as u64, &mut const_msg);
-    encode_seq_id(2, sys_id as u64, &mut const_msg);
-    let mut loc_msg = Vec::new();
-    encode_bytes_field(2, &const_msg, &mut loc_msg);
-    encode_bytes_field(field_num, &loc_msg, out);
+) -> pb::ProtoBuilder {
+    m.set("constellation.constellation.sequential", const_id as u64)
+        .set("constellation.solar_system.sequential", sys_id as u64)
 }
 
 pub fn register_handlers(
@@ -205,10 +181,10 @@ fn register_orchestrator_handlers(
                 let mut st = load_orch_state(&db1);
                 st.default_tenant_version = ver;
                 save_orch_state(&db1, &st);
-                Ok(any_resp(
+                Ok(pb::message(
                     "eve.content.orchestrator.admin.api.SetDefaultTenantVersionResponse",
-                    Vec::new(),
-                ))
+                )
+                .must_to_any())
             }),
         );
 
@@ -229,10 +205,10 @@ fn register_orchestrator_handlers(
                     ));
                 }
                 save_orch_state(&db2, &st);
-                Ok(any_resp(
+                Ok(pb::message(
                     "eve.content.orchestrator.admin.api.SetTenantVersionResponse",
-                    Vec::new(),
-                ))
+                )
+                .must_to_any())
             }),
         );
     }
@@ -244,12 +220,11 @@ fn register_orchestrator_handlers(
             "eve.content.orchestrator.api.GetDefaultTenantVersionRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
                 let st = load_orch_state(&db1);
-                let mut out = Vec::new();
-                encode_bytes_field(1, &st.default_tenant_version.encode(), &mut out);
-                Ok(any_resp(
+                Ok(pb::message(
                     "eve.content.orchestrator.api.GetDefaultTenantVersionResponse",
-                    out,
-                ))
+                )
+                .set("version", semver_builder(&st.default_tenant_version))
+                .must_to_any())
             }),
         );
 
@@ -262,12 +237,11 @@ fn register_orchestrator_handlers(
                     .tenant_version
                     .as_ref()
                     .unwrap_or(&st.default_tenant_version);
-                let mut out = Vec::new();
-                encode_bytes_field(1, &ver.encode(), &mut out);
-                Ok(any_resp(
+                Ok(pb::message(
                     "eve.content.orchestrator.api.GetTenantVersionResponse",
-                    out,
-                ))
+                )
+                .set("version", semver_builder(ver))
+                .must_to_any())
             }),
         );
 
@@ -342,33 +316,32 @@ fn register_orchestrator_handlers(
                     ));
                 }
 
-                let mut out = Vec::new();
+                let mut resp = pb::message("eve.content.orchestrator.api.DryRunRulesetResponse");
                 for (sys_id, const_id, tags) in &matched_locations {
-                    let mut eval_buf = Vec::new();
-                    encode_space_location_solar_system(1, *sys_id, *const_id, &mut eval_buf);
-                    for t in tags {
-                        let mut tid = Vec::new();
-                        encode_string_field(1, t, &mut tid);
-                        encode_bytes_field(2, &tid, &mut eval_buf);
-                    }
-                    encode_bytes_field(1, &eval_buf, &mut out);
+                    resp = resp.add_with("evaluation_result", |mut m| {
+                        m = m.set_with("location", |loc| {
+                            set_solar_system_location(loc, *sys_id, *const_id)
+                        });
+                        for t in tags {
+                            m = m.add_with("tags", |tag| tag.set("name", t.as_str()));
+                        }
+                        m
+                    });
                 }
                 for t in &all_tags {
-                    let mut lft_buf = Vec::new();
-                    let mut tid = Vec::new();
-                    encode_string_field(1, t, &mut tid);
-                    encode_bytes_field(1, &tid, &mut lft_buf);
-                    if let Some(locs) = tag_locations.get(t) {
-                        for (sys_id, const_id) in locs {
-                            encode_space_location_solar_system(2, *sys_id, *const_id, &mut lft_buf);
+                    resp = resp.add_with("ruleset_tags_evaluated", |mut m| {
+                        m = m.set("tag.name", t.as_str());
+                        if let Some(locs) = tag_locations.get(t) {
+                            for (sys_id, const_id) in locs {
+                                m = m.add_with("locations", |loc| {
+                                    set_solar_system_location(loc, *sys_id, *const_id)
+                                });
+                            }
                         }
-                    }
-                    encode_bytes_field(2, &lft_buf, &mut out);
+                        m
+                    });
                 }
-                Ok(any_resp(
-                    "eve.content.orchestrator.api.DryRunRulesetResponse",
-                    out,
-                ))
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -380,19 +353,16 @@ fn register_orchestrator_handlers(
             "eve.content.orchestrator.deployment.api.ListRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
                 let st = load_orch_state(&db1);
-                let mut out = Vec::new();
+                let mut resp =
+                    pb::message("eve.content.orchestrator.deployment.api.ListResponse");
                 for dep in st.deployments.values() {
-                    let mut dbuf = Vec::new();
-                    encode_seq_id(1, dep.id, &mut dbuf);
-                    encode_string_field(2, &dep.name, &mut dbuf);
-                    encode_string_field(3, &dep.short_description, &mut dbuf);
-                    encode_varint_field(4, u64::from(dep.enabled), &mut dbuf);
-                    encode_bytes_field(1, &dbuf, &mut out);
+                    resp = resp.add_with("deployments", |m| {
+                        m.set("id.sequential", dep.id)
+                            .set("name", dep.name.as_str())
+                            .set("short_description", dep.short_description.as_str())
+                    });
                 }
-                Ok(any_resp(
-                    "eve.content.orchestrator.deployment.api.ListResponse",
-                    out,
-                ))
+                Ok(resp.must_to_any())
             }),
         );
 
@@ -406,17 +376,15 @@ fn register_orchestrator_handlers(
                     .deployments
                     .get(&dep_id)
                     .ok_or_else(|| (STATUS_NOT_FOUND, "Deployment not found".into()))?;
-                let mut attr_buf = Vec::new();
-                encode_string_field(1, &dep.name, &mut attr_buf);
-                encode_seq_id(2, dep.content_group_id, &mut attr_buf);
-                encode_varint_field(6, dep.current_content_count as u64, &mut attr_buf);
-                encode_varint_field(7, u64::from(dep.no_region_limit), &mut attr_buf);
-                let mut out = Vec::new();
-                encode_bytes_field(1, &attr_buf, &mut out);
-                Ok(any_resp(
-                    "eve.content.orchestrator.deployment.api.GetResponse",
-                    out,
-                ))
+                Ok(pb::message("eve.content.orchestrator.deployment.api.GetResponse")
+                    .set("attributes.name", dep.name.as_str())
+                    .set("attributes.content_group.sequential", dep.content_group_id)
+                    .set(
+                        "attributes.current_content_count",
+                        dep.current_content_count,
+                    )
+                    .set("attributes.no_region_limit", dep.no_region_limit)
+                    .must_to_any())
             }),
         );
 
@@ -432,10 +400,10 @@ fn register_orchestrator_handlers(
                     .ok_or_else(|| (STATUS_NOT_FOUND, "Deployment not found".into()))?;
                 dep.enabled = true;
                 save_orch_state(&db3, &st);
-                Ok(any_resp(
-                    "eve.content.orchestrator.deployment.api.EnableResponse",
-                    Vec::new(),
-                ))
+                Ok(
+                    pb::message("eve.content.orchestrator.deployment.api.EnableResponse")
+                        .must_to_any(),
+                )
             }),
         );
 
@@ -451,10 +419,10 @@ fn register_orchestrator_handlers(
                     .ok_or_else(|| (STATUS_NOT_FOUND, "Deployment not found".into()))?;
                 dep.enabled = false;
                 save_orch_state(&db4, &st);
-                Ok(any_resp(
-                    "eve.content.orchestrator.deployment.api.DisableResponse",
-                    Vec::new(),
-                ))
+                Ok(
+                    pb::message("eve.content.orchestrator.deployment.api.DisableResponse")
+                        .must_to_any(),
+                )
             }),
         );
     }
@@ -471,18 +439,15 @@ fn register_orchestrator_handlers(
                     .content_groups
                     .get(&cg_id)
                     .ok_or_else(|| (STATUS_NOT_FOUND, "Content group not found".into()))?;
-                let mut wt_buf = Vec::new();
-                encode_seq_id(1, cg.content_type_id, &mut wt_buf);
-                encode_fixed64_field(2, cg.weight.to_bits(), &mut wt_buf);
-                let mut attr_buf = Vec::new();
-                encode_string_field(2, &cg.name, &mut attr_buf);
-                encode_bytes_field(3, &wt_buf, &mut attr_buf);
-                let mut out = Vec::new();
-                encode_bytes_field(1, &attr_buf, &mut out);
-                Ok(any_resp(
+                Ok(pb::message(
                     "eve.content.orchestrator.deployment.contentgroup.api.GetResponse",
-                    out,
-                ))
+                )
+                .set("attributes.name", cg.name.as_str())
+                .add_with("attributes.weighted_content_types", |m| {
+                    m.set("content_type.sequential", cg.content_type_id)
+                        .set("weight", cg.weight)
+                })
+                .must_to_any())
             }),
         );
     }
@@ -499,16 +464,16 @@ fn register_orchestrator_handlers(
                     .content_types
                     .get(&ct_id)
                     .ok_or_else(|| (STATUS_NOT_FOUND, "Content type not found".into()))?;
-                let mut attr_buf = Vec::new();
-                encode_string_field(1, &ct.name, &mut attr_buf);
-                encode_string_field(2, &ct.short_description, &mut attr_buf);
-                encode_seq_id(3, ct.dungeon_id, &mut attr_buf);
-                let mut out = Vec::new();
-                encode_bytes_field(1, &attr_buf, &mut out);
-                Ok(any_resp(
+                Ok(pb::message(
                     "eve.content.orchestrator.deployment.contenttype.api.GetResponse",
-                    out,
-                ))
+                )
+                .set("attributes.name", ct.name.as_str())
+                .set(
+                    "attributes.short_description",
+                    ct.short_description.as_str(),
+                )
+                .set("attributes.dungeon.sequential", ct.dungeon_id)
+                .must_to_any())
             }),
         );
     }
@@ -530,10 +495,10 @@ fn register_orchestrator_handlers(
                     return Err((STATUS_NOT_FOUND, "Deployment instance not found".into()));
                 }
                 save_orch_state(&db1, &st);
-                Ok(any_resp(
+                Ok(pb::message(
                     "eve.content.orchestrator.deployment.instance.admin.api.RemoveResponse",
-                    Vec::new(),
-                ))
+                )
+                .must_to_any())
             }),
         );
     }
@@ -546,18 +511,17 @@ fn register_orchestrator_handlers(
             Arc::new(move |_ctx, _any, dyn_msg| {
                 let dep_id = get_u64(dyn_msg, 1);
                 let st = load_orch_state(&db1);
-                let mut out = Vec::new();
+                let mut resp = pb::message(
+                    "eve.content.orchestrator.deployment.instance.api.ListResponse",
+                );
                 for inst in st
                     .instances
                     .iter()
                     .filter(|i| dep_id == 0 || i.deployment_id == dep_id)
                 {
-                    encode_uuid_id(1, &inst.uuid, &mut out);
+                    resp = resp.add_with("instances", |m| m.set("uuid", inst.uuid.clone()));
                 }
-                Ok(any_resp(
-                    "eve.content.orchestrator.deployment.instance.api.ListResponse",
-                    out,
-                ))
+                Ok(resp.must_to_any())
             }),
         );
 
@@ -575,21 +539,18 @@ fn register_orchestrator_handlers(
                     .iter()
                     .find(|i| i.uuid == uuid)
                     .ok_or_else(|| (STATUS_NOT_FOUND, "Instance not found".into()))?;
-                let mut attr_buf = Vec::new();
-                encode_seq_id(1, inst.deployment_id, &mut attr_buf);
-                encode_seq_id(3, inst.content_type_id, &mut attr_buf);
-                encode_space_location_solar_system(
-                    4,
-                    inst.solar_system_id,
-                    inst.constellation_id,
-                    &mut attr_buf,
-                );
-                let mut out = Vec::new();
-                encode_bytes_field(1, &attr_buf, &mut out);
-                Ok(any_resp(
+                Ok(pb::message(
                     "eve.content.orchestrator.deployment.instance.api.GetResponse",
-                    out,
-                ))
+                )
+                .set(
+                    "attributes.deployment_template.sequential",
+                    inst.deployment_id,
+                )
+                .set("attributes.content.sequential", inst.content_type_id)
+                .set_with("attributes.location", |loc| {
+                    set_solar_system_location(loc, inst.solar_system_id, inst.constellation_id)
+                })
+                .must_to_any())
             }),
         );
     }
@@ -614,25 +575,25 @@ fn register_commerce_admin_handlers(
                         .unwrap_or_default()
                 });
                 seed_component_listings_if_empty(&mut data, &sde1);
-                let mut out = Vec::new();
-                for l in data.component_listings.values() {
-                    let mut attr_buf = Vec::new();
-                    let mut plex_buf = Vec::new();
-                    encode_varint_field(1, l.price_plex_cents.unwrap_or(0), &mut plex_buf);
-                    encode_bytes_field(5, &plex_buf, &mut attr_buf);
-                    encode_seq_id(6, l.component_item_type_id as u64, &mut attr_buf);
-                    encode_varint_field(7, l.bundle_size, &mut attr_buf);
-                    encode_varint_field(8, l.discount_percent as u64, &mut attr_buf);
-
-                    let mut entry_buf = Vec::new();
-                    encode_uuid_id(1, &l.uuid, &mut entry_buf);
-                    encode_bytes_field(2, &attr_buf, &mut entry_buf);
-                    encode_bytes_field(1, &entry_buf, &mut out);
-                }
-                Ok(any_resp(
+                let mut resp = pb::message(
                     "eve.cosmetic.market.component.listing.api.GetAllResponse",
-                    out,
-                ))
+                );
+                for l in data.component_listings.values() {
+                    resp = resp.add_with("listings", |m| {
+                        m.set("id.uuid", l.uuid.to_vec())
+                            .set(
+                                "attributes.plex.total_in_cents",
+                                l.price_plex_cents.unwrap_or(0) as i64,
+                            )
+                            .set(
+                                "attributes.component_license_item.sequential",
+                                l.component_item_type_id as u64,
+                            )
+                            .set("attributes.bundle_size", l.bundle_size)
+                            .set("attributes.discount_percent", l.discount_percent)
+                    });
+                }
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -653,28 +614,25 @@ fn register_commerce_admin_handlers(
                         .and_then(|s| serde_json::from_str(s).ok())
                         .unwrap_or_default()
                 });
-                let mut out = Vec::new();
+                let mut resp = pb::message(
+                    "eve.cosmetic.market.skin.listing.api.admin.GetAllListedByCharacterResponse",
+                );
                 for l in data
                     .skin_listings
                     .values()
                     .filter(|l| l.seller_id as u64 == creator_id)
                 {
-                    let mut attr_buf = Vec::new();
-                    encode_seq_id(1, l.seller_id as u64, &mut attr_buf);
-                    let mut ts_buf = Vec::new();
-                    encode_varint_field(1, l.expires_unix, &mut ts_buf);
-                    encode_bytes_field(3, &ts_buf, &mut attr_buf);
-                    encode_varint_field(8, l.quantity as u64, &mut attr_buf);
-
-                    let mut entry_buf = Vec::new();
-                    encode_uuid_id(1, &l.uuid, &mut entry_buf);
-                    encode_bytes_field(2, &attr_buf, &mut entry_buf);
-                    encode_bytes_field(1, &entry_buf, &mut out);
+                    resp = resp.add_with("listings", |m| {
+                        m.set("id.uuid", l.uuid.to_vec())
+                            .set("attributes.seller.sequential", l.seller_id)
+                            .set(
+                                "attributes.expires",
+                                GoogleTimestamp::from_unix(l.expires_unix as i64, 0),
+                            )
+                            .set("attributes.quantity", l.quantity)
+                    });
                 }
-                Ok(any_resp(
-                    "eve.cosmetic.market.skin.listing.api.admin.GetAllListedByCharacterResponse",
-                    out,
-                ))
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -726,10 +684,10 @@ fn register_commerce_admin_handlers(
                 if !found {
                     return Err((STATUS_NOT_FOUND, "Failed fulfillment not found".into()));
                 }
-                Ok(any_resp(
-                    "eve.store.sale.admin.RetryFailedFulfillmentResponse",
-                    Vec::new(),
-                ))
+                Ok(
+                    pb::message("eve.store.sale.admin.RetryFailedFulfillmentResponse")
+                        .must_to_any(),
+                )
             }),
         );
 
@@ -763,10 +721,10 @@ fn register_commerce_admin_handlers(
                         }
                     }
                 });
-                Ok(any_resp(
-                    "eve.store.sale.admin.RetryAllFailedFulfillmentsResponse",
-                    Vec::new(),
-                ))
+                Ok(
+                    pb::message("eve.store.sale.admin.RetryAllFailedFulfillmentsResponse")
+                        .must_to_any(),
+                )
             }),
         );
 
@@ -785,10 +743,10 @@ fn register_commerce_admin_handlers(
                 if !removed {
                     return Err((STATUS_NOT_FOUND, "Failed fulfillment not found".into()));
                 }
-                Ok(any_resp(
-                    "eve.store.sale.admin.DropFailedFulfillmentResponse",
-                    Vec::new(),
-                ))
+                Ok(
+                    pb::message("eve.store.sale.admin.DropFailedFulfillmentResponse")
+                        .must_to_any(),
+                )
             }),
         );
     }
@@ -826,10 +784,10 @@ fn register_commerce_admin_handlers(
                     rec.promoted = true;
                     rec.retracted = false;
                 });
-                Ok(any_resp(
-                    "eve.store.targetaudience.offer.api.admin.PromoteResponse",
-                    Vec::new(),
-                ))
+                Ok(
+                    pb::message("eve.store.targetaudience.offer.api.admin.PromoteResponse")
+                        .must_to_any(),
+                )
             }),
         );
 
@@ -852,10 +810,10 @@ fn register_commerce_admin_handlers(
                 if !found {
                     return Err((STATUS_NOT_FOUND, "Targeted offer not found".into()));
                 }
-                Ok(any_resp(
-                    "eve.store.targetaudience.offer.api.admin.RetractResponse",
-                    Vec::new(),
-                ))
+                Ok(
+                    pb::message("eve.store.targetaudience.offer.api.admin.RetractResponse")
+                        .must_to_any(),
+                )
             }),
         );
 
@@ -891,10 +849,10 @@ fn register_commerce_admin_handlers(
                         });
                     rec.partner_code = partner_code;
                 });
-                Ok(any_resp(
+                Ok(pb::message(
                     "eve.store.targetaudience.offer.api.admin.BackfillPartnerCodeResponse",
-                    Vec::new(),
-                ))
+                )
+                .must_to_any())
             }),
         );
     }

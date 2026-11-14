@@ -5,10 +5,9 @@ use crate::quasar_gateway::{
     PublicGatewayRouter, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
 };
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, MarketOrderRecord, WorldRepository};
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
-    DynamicQuasarMessage, DynamicValue, GoogleAny, QuasarDescriptorRegistry,
-    TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, QuasarDescriptorRegistry,
 };
 use eve_sde::{MarketGroupInfo, SdeRegistry};
 use std::sync::{Arc, OnceLock};
@@ -93,14 +92,32 @@ fn make_ctx(char_id: Option<u32>, role: u64) -> AuthoritativeContext {
 }
 
 fn encode_id_req(type_name: &str, id: u64) -> GoogleAny {
-    let mut id_msg = Vec::new();
-    encode_varint_field(1, id, &mut id_msg);
-    let mut req = Vec::new();
-    encode_bytes_field(1, &id_msg, &mut req);
-    GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"),
-        value: req,
+    let b = pb::message(type_name);
+    match type_name {
+        "eve.inventory.category.GetRequest" | "eve.inventory.group.GetGroupsInCategoryRequest" => {
+            b.set("category.sequential", id as u32)
+        }
+        "eve.inventory.group.GetRequest"
+        | "eve.inventory.market_group.GetRequest"
+        | "eve.inventory.genericitemtype.GetTypesInGroupRequest" => {
+            b.set("group.sequential", id as u32)
+        }
+        "eve.inventory.genericitemtype.GetRequest" => b.set("type.sequential", id),
+        "eve.inventory.genericitemtype.TypeValuationRequest" => {
+            b.set("item_type.sequential", id)
+        }
+        "eve.inventory.genericname.GetNameByIDRequest" => b.set("id.sequential", id),
+        "eve.inventory.assetholding.operation.api.HoldItemsRequest"
+        | "eve.inventory.assetholding.operation.api.HoldItemsOfTypeRequest"
+        | "eve.inventory.assetholding.operation.api.SpawnItemsOfTypeRequest" => {
+            b.set("id.uuid", id.to_le_bytes().to_vec())
+        }
+        "eve.asset.GetAssetsItemsRequest" | "eve.asset.GetShipAssetsRequest" => {
+            b.set("character_id.sequential", id as u32)
+        }
+        other => panic!("unexpected encode_id_req type: {other}"),
     }
+    .must_to_any()
 }
 
 #[test]
@@ -140,10 +157,7 @@ fn category_group_market_group_and_item_type_queries() {
     assert!(!router
         .dispatch(
             &user,
-            &GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.inventory.category.GetAllRequest"),
-                value: vec![],
-            },
+            &pb::message("eve.inventory.category.GetAllRequest").must_to_any(),
         )
         .unwrap()
         .value
@@ -170,10 +184,7 @@ fn category_group_market_group_and_item_type_queries() {
     assert!(!router
         .dispatch(
             &user,
-            &GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.inventory.group.GetAllRequest"),
-                value: vec![],
-            },
+            &pb::message("eve.inventory.group.GetAllRequest").must_to_any(),
         )
         .unwrap()
         .value
@@ -208,10 +219,7 @@ fn category_group_market_group_and_item_type_queries() {
     assert!(!router
         .dispatch(
             &user,
-            &GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.inventory.market_group.GetAllRequest"),
-                value: vec![],
-            },
+            &pb::message("eve.inventory.market_group.GetAllRequest").must_to_any(),
         )
         .unwrap()
         .value
@@ -233,12 +241,7 @@ fn category_group_market_group_and_item_type_queries() {
     assert!(!router
         .dispatch(
             &user,
-            &GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.inventory.genericitemtype.GetAllRequest"
-                ),
-                value: vec![],
-            },
+            &pb::message("eve.inventory.genericitemtype.GetAllRequest").must_to_any(),
         )
         .unwrap()
         .value
@@ -252,19 +255,12 @@ fn category_group_market_group_and_item_type_queries() {
         .value
         .is_empty());
 
-    let mut mg_req = Vec::new();
-    let mut mg_id = Vec::new();
-    encode_varint_field(1, 1857, &mut mg_id);
-    encode_bytes_field(4, &mg_id, &mut mg_req);
     assert!(!router
         .dispatch(
             &user,
-            &GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.inventory.genericitemtype.GetTypeInfoByMarketGroupRequest"
-                ),
-                value: mg_req,
-            },
+            &pb::message("eve.inventory.genericitemtype.GetTypeInfoByMarketGroupRequest")
+                .set("market_group.sequential", 1857u32)
+                .must_to_any(),
         )
         .unwrap()
         .value
@@ -362,15 +358,12 @@ fn search_genericname_assetholding_and_character_asset_handlers() {
     let admin = make_ctx(None, ROLE_PROGRAMMER);
 
     // 13. SearchRequest
-    let mut q_bytes = Vec::new();
-    encode_string_field(1, "trit", &mut q_bytes);
     let search_resp = router
         .dispatch(
             &user,
-            &GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.inventory.genericitem.SearchRequest"),
-                value: q_bytes,
-            },
+            &pb::message("eve.inventory.genericitem.SearchRequest")
+                .set_with("query", |q| q.add("keywords", "trit"))
+                .must_to_any(),
         )
         .unwrap();
     assert!(!search_resp.value.is_empty());
@@ -387,22 +380,13 @@ fn search_genericname_assetholding_and_character_asset_handlers() {
         .value
         .is_empty());
 
-    let mut multi_ids = Vec::new();
-    let mut id1 = Vec::new();
-    encode_varint_field(1, 34, &mut id1);
-    let mut id2 = Vec::new();
-    encode_varint_field(1, 587, &mut id2);
-    encode_bytes_field(1, &id1, &mut multi_ids);
-    encode_bytes_field(1, &id2, &mut multi_ids);
     let names_cats = router
         .dispatch(
             &user,
-            &GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.inventory.genericname.GetNamesAndCategoriesByIDsRequest"
-                ),
-                value: multi_ids,
-            },
+            &pb::message("eve.inventory.genericname.GetNamesAndCategoriesByIDsRequest")
+                .add_with("ids", |id| id.set("sequential", 34u64))
+                .add_with("ids", |id| id.set("sequential", 587u64))
+                .must_to_any(),
         )
         .unwrap();
     assert!(!names_cats.value.is_empty());

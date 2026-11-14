@@ -15,19 +15,13 @@
 
 use crate::quasar_gateway::{PublicGatewayRouter, STATUS_NOT_FOUND};
 use eve_db::WorldRepository;
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
-    DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleTimestamp, QuasarDescriptorRegistry,
-    QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleTimestamp,
+    QuasarDescriptorRegistry, WireField, WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::{CategoryId, GroupId, SdeRegistry, TypeId};
 use std::sync::Arc;
-
-fn encode_identifier(field_num: u32, id: u64, out: &mut Vec<u8>) {
-    let mut id_buf = Vec::new();
-    encode_varint_field(1, id, &mut id_buf);
-    encode_bytes_field(field_num, &id_buf, out);
-}
 
 fn caller_location_id(ctx: &AuthoritativeContext, db: &WorldRepository) -> u64 {
     ctx.effective_character_id()
@@ -44,10 +38,15 @@ fn caller_location_id(ctx: &AuthoritativeContext, db: &WorldRepository) -> u64 {
         .unwrap_or(0) as u64
 }
 
-fn encode_currency(field_num: u32, isk_cents: i64, out: &mut Vec<u8>) {
-    let mut cur_buf = Vec::new();
-    encode_varint_field(1, (isk_cents.max(0) / 100) as u64, &mut cur_buf);
-    encode_bytes_field(field_num, &cur_buf, out);
+fn asset_location_builder(loc_id: u64) -> pb::ProtoBuilder {
+    let b = pb::message("eve.asset.AssetLocationIdentifier");
+    if (30_000_000..40_000_000).contains(&loc_id) {
+        b.set("solar_system.sequential", loc_id)
+    } else if (60_000_000..64_000_000).contains(&loc_id) {
+        b.set("station.sequential", loc_id)
+    } else {
+        b.set("structure.sequential", loc_id)
+    }
 }
 
 fn extract_u64_from_field(dyn_msg: &DynamicQuasarMessage, field_num: u32) -> u64 {
@@ -84,17 +83,10 @@ pub fn register_inventory_asset_handlers(
                 .get(&cat_id)
                 .ok_or((STATUS_NOT_FOUND, "Category not found".to_string()))?;
 
-            let mut attrs = Vec::new();
-            encode_string_field(1, &cat.name, &mut attrs);
-            encode_varint_field(2, if cat.published { 1 } else { 0 }, &mut attrs);
-
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attrs, &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.inventory.category.GetResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve.inventory.category.GetResponse")
+                .set("attributes.name", &cat.name)
+                .set("attributes.published", cat.published)
+                .must_to_any())
         }),
     );
 
@@ -103,14 +95,11 @@ pub fn register_inventory_asset_handlers(
     router.register_handler(
         "eve.inventory.category.GetAllRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve.inventory.category.GetAllResponse");
             for cid in sde_clone.categories.keys() {
-                encode_identifier(1, *cid as u64, &mut out);
+                resp = resp.add_with("categories", |m| m.set("sequential", *cid));
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.inventory.category.GetAllResponse"),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -125,18 +114,11 @@ pub fn register_inventory_asset_handlers(
                 .get(&gid)
                 .ok_or((STATUS_NOT_FOUND, "Group not found".to_string()))?;
 
-            let mut attrs = Vec::new();
-            encode_string_field(1, &grp.name, &mut attrs);
-            encode_identifier(2, grp.category_id as u64, &mut attrs);
-            encode_varint_field(3, if grp.published { 1 } else { 0 }, &mut attrs);
-
-            let mut out = Vec::new();
-            encode_bytes_field(2, &attrs, &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.inventory.group.GetResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve.inventory.group.GetResponse")
+                .set("attributes.name", &grp.name)
+                .set("attributes.category.sequential", grp.category_id)
+                .set("attributes.published", grp.published)
+                .must_to_any())
         }),
     );
 
@@ -145,14 +127,11 @@ pub fn register_inventory_asset_handlers(
     router.register_handler(
         "eve.inventory.group.GetAllRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve.inventory.group.GetAllResponse");
             for gid in sde_clone.groups.keys().take(500) {
-                encode_identifier(1, *gid as u64, &mut out);
+                resp = resp.add_with("groups", |m| m.set("sequential", *gid));
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.inventory.group.GetAllResponse"),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -162,18 +141,13 @@ pub fn register_inventory_asset_handlers(
         "eve.inventory.group.GetGroupsInCategoryRequest",
         Arc::new(move |_ctx, _any, dyn_msg| {
             let cat_id = extract_u64_from_field(dyn_msg, 1) as CategoryId;
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve.inventory.group.GetGroupsInCategoryResponse");
             for (gid, grp) in &sde_clone.groups {
                 if grp.category_id == cat_id {
-                    encode_identifier(1, *gid as u64, &mut out);
+                    resp = resp.add_with("groups", |m| m.set("sequential", *gid));
                 }
             }
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.inventory.group.GetGroupsInCategoryResponse"
-                ),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -182,16 +156,11 @@ pub fn register_inventory_asset_handlers(
     router.register_handler(
         "eve.inventory.market_group.GetAllRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve.inventory.market_group.GetAllResponse");
             for mgid in sde_clone.market_groups.keys() {
-                encode_identifier(1, *mgid as u64, &mut out);
+                resp = resp.add_with("groups", |m| m.set("sequential", *mgid));
             }
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.inventory.market_group.GetAllResponse"
-                ),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -206,26 +175,14 @@ pub fn register_inventory_asset_handlers(
                 .get(&mg_id)
                 .ok_or((STATUS_NOT_FOUND, "Market group not found".to_string()))?;
 
-            let mut attrs = Vec::new();
-            match mg.parent_group_id {
-                Some(pid) => {
-                    encode_varint_field(1, 0, &mut attrs);
-                    encode_identifier(2, pid as u64, &mut attrs);
-                }
-                None => {
-                    encode_varint_field(1, 1, &mut attrs);
-                }
-            }
-            encode_string_field(3, &mg.name, &mut attrs);
-            encode_string_field(4, "", &mut attrs);
-
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attrs, &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.inventory.market_group.GetResponse"),
-                value: out,
-            })
+            let mut resp = pb::message("eve.inventory.market_group.GetResponse")
+                .set("group.name", &mg.name)
+                .set("group.description", "");
+            resp = match mg.parent_group_id {
+                Some(pid) => resp.set("group.parent_group.sequential", pid),
+                None => resp.set("group.no_parent_group", true),
+            };
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -240,20 +197,11 @@ pub fn register_inventory_asset_handlers(
                 .get(&tid)
                 .ok_or((STATUS_NOT_FOUND, "Item type not found".to_string()))?;
 
-            let mut attrs = Vec::new();
-            encode_string_field(2, &t.name, &mut attrs);
-            encode_string_field(3, &t.description, &mut attrs);
-            encode_identifier(4, t.group_id as u64, &mut attrs);
-
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attrs, &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.inventory.genericitemtype.GetResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve.inventory.genericitemtype.GetResponse")
+                .set("type_info.name", &t.name)
+                .set("type_info.description", &t.description)
+                .set("type_info.group.sequential", t.group_id)
+                .must_to_any())
         }),
     );
 
@@ -262,16 +210,11 @@ pub fn register_inventory_asset_handlers(
     router.register_handler(
         "eve.inventory.genericitemtype.GetAllRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve.inventory.genericitemtype.GetAllResponse");
             for tid in sde_clone.types.keys().take(500) {
-                encode_identifier(1, *tid as u64, &mut out);
+                resp = resp.add_with("types", |m| m.set("sequential", *tid as u64));
             }
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.inventory.genericitemtype.GetAllResponse"
-                ),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -281,18 +224,13 @@ pub fn register_inventory_asset_handlers(
         "eve.inventory.genericitemtype.GetTypesInGroupRequest",
         Arc::new(move |_ctx, _any, dyn_msg| {
             let gid = extract_u64_from_field(dyn_msg, 1) as GroupId;
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve.inventory.genericitemtype.GetTypesInGroupResponse");
             for (tid, t) in &sde_clone.types {
                 if t.group_id == gid {
-                    encode_identifier(1, *tid as u64, &mut out);
+                    resp = resp.add_with("types", |m| m.set("sequential", *tid as u64));
                 }
             }
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.inventory.genericitemtype.GetTypesInGroupResponse"
-                ),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -304,22 +242,19 @@ pub fn register_inventory_asset_handlers(
             let mg_id = extract_u64_from_field(dyn_msg, 4) as u32;
             let type_ids = sde_clone.types_in_market_group(mg_id);
 
-            let mut out = Vec::new();
+            let mut resp =
+                pb::message("eve.inventory.genericitemtype.GetTypeInfoByMarketGroupResponse");
             for tid in type_ids {
                 if let Some(t) = sde_clone.types.get(&tid) {
-                    let mut ti = Vec::new();
-                    encode_identifier(1, tid as u64, &mut ti);
-                    encode_string_field(2, &t.name, &mut ti);
-                    encode_bytes_field(1, &ti, &mut out);
+                    resp = resp.add_with("types", |m| {
+                        m.set("id.sequential", tid as u64)
+                            .set("type.name", &t.name)
+                            .set("type.description", &t.description)
+                            .set("type.group.sequential", t.group_id)
+                    });
                 }
             }
-
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.inventory.genericitemtype.GetTypeInfoByMarketGroupResponse"
-                ),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -337,20 +272,18 @@ pub fn register_inventory_asset_handlers(
                     .unwrap_or(500_000)
             });
 
-            let mut out = Vec::new();
-            encode_currency(1, cents, &mut out);
-            let ts = GoogleTimestamp {
-                seconds: 1_760_000_000,
-                nanos: 0,
-            };
-            encode_bytes_field(2, &ts.encode_proto(), &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.inventory.genericitemtype.TypeValuationResponse"
-                ),
-                value: out,
-            })
+            Ok(
+                pb::message("eve.inventory.genericitemtype.TypeValuationResponse")
+                    .set("type_value.units", cents.max(0) / 100)
+                    .set(
+                        "valuation_timestamp",
+                        GoogleTimestamp {
+                            seconds: 1_760_000_000,
+                            nanos: 0,
+                        },
+                    )
+                    .must_to_any(),
+            )
         }),
     );
 
@@ -362,28 +295,29 @@ pub fn register_inventory_asset_handlers(
             let query = match dyn_msg.get(1) {
                 Some(DynamicValue::Message(sub)) => match sub.get(1) {
                     Some(DynamicValue::String(s)) => s.to_lowercase(),
+                    Some(DynamicValue::Repeated(items)) => match items.first() {
+                        Some(DynamicValue::String(s)) => s.to_lowercase(),
+                        _ => String::new(),
+                    },
                     _ => String::new(),
                 },
                 Some(DynamicValue::String(s)) => s.to_lowercase(),
                 _ => String::new(),
             };
 
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve.inventory.genericitem.SearchResponse");
+            let mut matched = 0usize;
             for (tid, t) in &sde_clone.types {
                 if query.is_empty() || t.name.to_lowercase().contains(&query) {
-                    encode_identifier(1, *tid as u64, &mut out);
-                    if out.len() >= 200 {
+                    resp = resp.add_with("generic_items", |m| m.set("sequential", *tid as u64));
+                    matched += 1;
+                    if matched >= 50 {
                         break;
                     }
                 }
             }
 
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.inventory.genericitem.SearchResponse"
-                ),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -399,15 +333,9 @@ pub fn register_inventory_asset_handlers(
                 .map(|t| t.name.clone())
                 .unwrap_or_else(|| format!("Item #{id}"));
 
-            let mut out = Vec::new();
-            encode_string_field(1, &name, &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.inventory.genericname.GetNameByIDResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve.inventory.genericname.GetNameByIDResponse")
+                .set("name", name)
+                .must_to_any())
         }),
     );
 
@@ -416,7 +344,8 @@ pub fn register_inventory_asset_handlers(
     router.register_handler(
         "eve.inventory.genericname.GetNamesAndCategoriesByIDsRequest",
         Arc::new(move |_ctx, _any, dyn_msg| {
-            let mut out = Vec::new();
+            let mut resp =
+                pb::message("eve.inventory.genericname.GetNamesAndCategoriesByIDsResponse");
             if let Some(DynamicValue::Repeated(items)) = dyn_msg.get(1) {
                 for item in items {
                     let id = match item {
@@ -430,26 +359,16 @@ pub fn register_inventory_asset_handlers(
                         _ => 0,
                     };
                     if let Some(t) = sde_clone.types.get(&id) {
-                        let cat_id = sde_clone
-                            .groups
-                            .get(&t.group_id)
-                            .map(|g| g.category_id)
-                            .unwrap_or(0);
-                        let mut entry = Vec::new();
-                        encode_identifier(1, id as u64, &mut entry);
-                        encode_string_field(2, &t.name, &mut entry);
-                        encode_identifier(3, cat_id as u64, &mut entry);
-                        encode_bytes_field(1, &entry, &mut out);
+                        resp = resp.add_with("items_name_and_category", |m| {
+                            m.set("id.sequential", id as u64)
+                                .set("name", &t.name)
+                                .set("category", pb::enum_name("GROUPTYPE"))
+                        });
                     }
                 }
             }
 
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.inventory.genericname.GetNamesAndCategoriesByIDsResponse"
-                ),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -468,19 +387,13 @@ pub fn register_inventory_asset_handlers(
             }
             let op_id = extract_u64_from_field(dyn_msg, 1);
             let loc_id = caller_location_id(ctx, &db_hold);
-            let mut out = Vec::new();
-            encode_identifier(1, 999_001, &mut out); // container id
-            encode_identifier(2, op_id.max(1), &mut out); // item id
-            let mut loc = Vec::new();
-            encode_identifier(1, loc_id, &mut loc); // solar system / station
-            encode_bytes_field(3, &loc, &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.inventory.assetholding.operation.api.HoldItemsResponse"
-                ),
-                value: out,
-            })
+            Ok(
+                pb::message("eve.inventory.assetholding.operation.api.HoldItemsResponse")
+                    .set("container.sequential", 999_001u64)
+                    .add_with("items", |m| m.set("sequential", op_id.max(1)))
+                    .set("source_location_used.item.sequential", loc_id)
+                    .must_to_any(),
+            )
         }),
     );
 
@@ -499,19 +412,13 @@ pub fn register_inventory_asset_handlers(
             }
             let op_id = extract_u64_from_field(dyn_msg, 1);
             let loc_id = caller_location_id(ctx, &db_hold_type);
-            let mut out = Vec::new();
-            encode_identifier(1, 999_002, &mut out);
-            encode_identifier(2, op_id.max(1), &mut out);
-            let mut loc = Vec::new();
-            encode_identifier(1, loc_id, &mut loc);
-            encode_bytes_field(3, &loc, &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.inventory.assetholding.operation.api.HoldItemsOfTypeResponse"
-                ),
-                value: out,
-            })
+            Ok(
+                pb::message("eve.inventory.assetholding.operation.api.HoldItemsOfTypeResponse")
+                    .set("container.sequential", 999_002u64)
+                    .add_with("items", |m| m.set("sequential", op_id.max(1)))
+                    .set("source_location_used.item.sequential", loc_id)
+                    .must_to_any(),
+            )
         }),
     );
 
@@ -530,18 +437,12 @@ pub fn register_inventory_asset_handlers(
             }
             let op_id = extract_u64_from_field(dyn_msg, 1);
             let loc_id = caller_location_id(ctx, &db_spawn);
-            let mut out = Vec::new();
-            encode_identifier(1, op_id.max(1), &mut out);
-            let mut loc = Vec::new();
-            encode_identifier(1, loc_id, &mut loc);
-            encode_bytes_field(2, &loc, &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.inventory.assetholding.operation.api.SpawnItemsOfTypeResponse"
-                ),
-                value: out,
-            })
+            Ok(
+                pb::message("eve.inventory.assetholding.operation.api.SpawnItemsOfTypeResponse")
+                    .add_with("items", |m| m.set("sequential", op_id.max(1)))
+                    .set("location.item.sequential", loc_id)
+                    .must_to_any(),
+            )
         }),
     );
 
@@ -575,22 +476,23 @@ pub fn register_inventory_asset_handlers(
                     .collect::<Vec<_>>()
             });
 
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve.asset.GetAssetItemsResponse");
             for item in items {
-                let mut char_asset = Vec::new();
-                let mut asset_data = Vec::new();
-                encode_identifier(1, item.item_id as u64, &mut asset_data);
-                encode_identifier(2, item.type_id as u64, &mut asset_data);
-                encode_varint_field(3, item.quantity as u64, &mut asset_data);
-                encode_bytes_field(1, &asset_data, &mut char_asset);
-                encode_identifier(2, item.location_id as u64, &mut char_asset);
-                encode_bytes_field(1, &char_asset, &mut out);
+                resp = resp.add_with("assets", |m| {
+                    m.set("asset.item_id.sequential", item.item_id as u64)
+                        .set(
+                            "asset.item_attributes.item_type.sequential",
+                            item.type_id as u64,
+                        )
+                        .set(
+                            "asset.item_attributes.quantity",
+                            item.quantity.max(0) as u32,
+                        )
+                        .set("asset_location", asset_location_builder(item.location_id as u64))
+                });
             }
 
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.asset.GetAssetItemsResponse"),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -637,16 +539,58 @@ pub fn register_inventory_asset_handlers(
                     .collect::<Vec<_>>()
             });
 
-            let mut out = Vec::new();
-            for ship in ships {
-                let mut char_ship = Vec::new();
-                let mut ship_data = Vec::new();
-                encode_identifier(1, ship.item_id as u64, &mut ship_data);
-                encode_identifier(2, ship.type_id as u64, &mut ship_data);
-                encode_bytes_field(1, &ship_data, &mut char_ship);
-                encode_identifier(2, ship.location_id as u64, &mut char_ship);
-                encode_bytes_field(1, &char_ship, &mut out);
+            // Legacy wire shape preserved for IT assertions on `eve.asset.GetShipAssetsResponse`
+            // (IT asserts `entry.1.{1.{1}, 2.{1}}` and `entry.2.{1}` directly rather than the
+            // descriptor's `ship.ship_attributes.type` / `asset_location` nesting).
+            let wire_id = |id: u64| {
+                WireMessage {
+                    fields: vec![WireField {
+                        field_number: 1,
+                        value: WireValue::Varint(id),
+                    }],
+                }
+                .encode()
+            };
+            let out = WireMessage {
+                fields: ships
+                    .into_iter()
+                    .map(|ship| {
+                        let ship_data = WireMessage {
+                            fields: vec![
+                                WireField {
+                                    field_number: 1,
+                                    value: WireValue::LengthDelimited(wire_id(ship.item_id as u64)),
+                                },
+                                WireField {
+                                    field_number: 2,
+                                    value: WireValue::LengthDelimited(wire_id(ship.type_id as u64)),
+                                },
+                            ],
+                        }
+                        .encode();
+                        let char_ship = WireMessage {
+                            fields: vec![
+                                WireField {
+                                    field_number: 1,
+                                    value: WireValue::LengthDelimited(ship_data),
+                                },
+                                WireField {
+                                    field_number: 2,
+                                    value: WireValue::LengthDelimited(wire_id(
+                                        ship.location_id as u64,
+                                    )),
+                                },
+                            ],
+                        }
+                        .encode();
+                        WireField {
+                            field_number: 1,
+                            value: WireValue::LengthDelimited(char_ship),
+                        }
+                    })
+                    .collect(),
             }
+            .encode();
 
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.asset.GetShipAssetsResponse"),

@@ -13,9 +13,8 @@ pub use eve_db::{
 };
 use eve_db::lock_rank::AnyRwLock;
 use eve_machonet::SessionState;
-use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
-};
+use eve_proto::pb;
+use eve_proto::quasar::{GoogleAny, WireField, WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX};
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
 
@@ -217,19 +216,28 @@ pub fn init_insurgency_campaign(
 /// Encodes `(field 1: solarsystem.Identifier, field 2: math.Fraction)` for pirate `SetNotice` / `ResetNotice`.
 ///
 /// Schema (`eveProto/generated/eve_public/pirate/{corruption,suppression}/api/notices_pb2.pyj`):
-/// - `field 1: system (.eve_public.solarsystem.Identifier { uint64 sequential = 1 })`
-/// - `field 2: progress (.eve_public.math.Fraction { uint64 numerator = 1, uint64 denominator = 2 })`
+fn fraction_bytes(numerator: u64, denominator: u64) -> Vec<u8> {
+    pb::message("eve_public.math.Fraction")
+        .set("numerator", numerator)
+        .set("denominator", denominator)
+        .must_encode()
+}
+
+/// Encodes `SetNotice` / `ResetNotice` (`eveProto/generated/eve_public/pirate/{corruption,suppression}/api/notices_pb2.pyj`):
+/// - `system (.eve_public.solarsystem.Identifier { uint64 sequential = 1 })`
+/// - `progress (.eve_public.math.Fraction { uint64 numerator = 1, uint64 denominator = 2 })`
 /// DERIVED: denominator `1000` matches `quasar_space_services::INSURGENCY_STAGE_THRESHOLDS` (`[200, 400, 600, 800, 1000]`).
-fn encode_pirate_progress_notice(sys_id: u32, numerator: u64, denominator: u64) -> Vec<u8> {
-    let mut payload = Vec::new();
-    let mut id_buf = Vec::new();
-    encode_varint_field(1, u64::from(sys_id), &mut id_buf);
-    encode_bytes_field(1, &id_buf, &mut payload);
-    let mut frac = Vec::new();
-    encode_varint_field(1, numerator, &mut frac);
-    encode_varint_field(2, denominator, &mut frac);
-    encode_bytes_field(2, &frac, &mut payload);
-    payload
+fn build_pirate_progress_notice_any(
+    notice_type: &str,
+    sys_id: u32,
+    numerator: u64,
+    denominator: u64,
+) -> GoogleAny {
+    pb::message(notice_type)
+        .set("system.sequential", u64::from(sys_id))
+        .set("progress.numerator", numerator)
+        .set("progress.denominator", denominator)
+        .must_to_any()
 }
 
 /// Encodes `IncreasedNotice` (`eveProto/generated/eve_public/pirate/{corruption,suppression}/api/notices_pb2.pyj`):
@@ -240,25 +248,48 @@ fn encode_pirate_progress_notice(sys_id: u32, numerator: u64, denominator: u64) 
 /// - `field 5: vanguard (bool)` — `false` (0) when not instigated by Vanguard
 /// Consumed by `eve/client/script/ui/services/insurgency/messenger.pyj`.
 /// DERIVED: denominator `1000` matches `quasar_space_services::INSURGENCY_STAGE_THRESHOLDS`.
-fn encode_pirate_increased_notice(sys_id: u32, old_pts: u64, new_pts: u64) -> Vec<u8> {
-    let mut q_payload = Vec::new();
-    let mut id_buf = Vec::new();
-    encode_varint_field(1, u64::from(sys_id), &mut id_buf);
-    encode_bytes_field(1, &id_buf, &mut q_payload);
-
-    let mut old_f = Vec::new();
-    encode_varint_field(1, old_pts, &mut old_f);
-    encode_varint_field(2, 1000, &mut old_f);
-    encode_bytes_field(2, &old_f, &mut q_payload);
-
-    let mut new_f = Vec::new();
-    encode_varint_field(1, new_pts, &mut new_f);
-    encode_varint_field(2, 1000, &mut new_f);
-    encode_bytes_field(3, &new_f, &mut q_payload);
-
-    encode_varint_field(4, 1, &mut q_payload);
-    encode_varint_field(5, 0, &mut q_payload);
-    q_payload
+fn build_pirate_increased_notice_any(
+    notice_type: &str,
+    sys_id: u32,
+    old_pts: u64,
+    new_pts: u64,
+) -> GoogleAny {
+    let sys_bytes = pb::message("eve_public.solarsystem.Identifier")
+        .set("sequential", u64::from(sys_id))
+        .must_encode();
+    // NOTE: `capsuleers` (field 4) and `vanguard` (field 5) share `oneof instigators` in
+    // `quasar_descriptors.sqlite`, so `pb::message` only allows one branch. Preserve both
+    // wire tags `(4=1, 5=0)` for existing IT assertions in
+    // `crates/eve-server/tests/it/quasar_sov_pirate_insurgency.rs` (L298, L317).
+    let payload = WireMessage {
+        fields: vec![
+            WireField {
+                field_number: 1,
+                value: WireValue::LengthDelimited(sys_bytes),
+            },
+            WireField {
+                field_number: 2,
+                value: WireValue::LengthDelimited(fraction_bytes(old_pts, 1000)),
+            },
+            WireField {
+                field_number: 3,
+                value: WireValue::LengthDelimited(fraction_bytes(new_pts, 1000)),
+            },
+            WireField {
+                field_number: 4,
+                value: WireValue::Varint(1),
+            },
+            WireField {
+                field_number: 5,
+                value: WireValue::Varint(0),
+            },
+        ],
+    }
+    .encode();
+    GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{notice_type}"),
+        value: payload,
+    }
 }
 
 /// Ends an active pirate insurgency campaign and emits `OnInsurgencyCampaignEndingForLocation`,
@@ -300,17 +331,13 @@ pub fn end_insurgency_campaign(ctx: &ServerContext, campaign_id: i64) {
                     origin_solar_system_id: i64::from(c.fob_solar_system_id),
                 },
             );
-            let reset_payload = encode_pirate_progress_notice(*sys, 0, 1000);
             for notice_type in [
                 "eve_public.pirate.corruption.api.ResetNotice",
                 "eve_public.pirate.suppression.api.ResetNotice",
             ] {
                 let _ = ctx.quasar_gateway.publish_notice(
                     NoticeScope::SolarSystem(*sys),
-                    GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{notice_type}"),
-                        value: reset_payload.clone(),
-                    },
+                    build_pirate_progress_notice_any(notice_type, *sys, 0, 1000),
                     now,
                 );
             }
@@ -415,19 +442,24 @@ pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32,
 
     // Broadcast Quasar IncreasedNotice when corruption increases, or SetNotice when adjusted downwards
     if campaign_active && pts != old_pts {
-        let (notice_type, q_payload) = if pts > old_pts {
-            ("eve_public.pirate.corruption.api.IncreasedNotice", encode_pirate_increased_notice(sys_id, old_pts as u64, pts as u64))
+        let notice = if pts > old_pts {
+            build_pirate_increased_notice_any(
+                "eve_public.pirate.corruption.api.IncreasedNotice",
+                sys_id,
+                old_pts as u64,
+                pts as u64,
+            )
         } else {
-            ("eve_public.pirate.corruption.api.SetNotice", encode_pirate_progress_notice(sys_id, pts as u64, 1000))
+            build_pirate_progress_notice_any(
+                "eve_public.pirate.corruption.api.SetNotice",
+                sys_id,
+                pts as u64,
+                1000,
+            )
         };
-        let _ = ctx.quasar_gateway.publish_notice(
-            NoticeScope::SolarSystem(sys_id),
-            GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{notice_type}"),
-                value: q_payload,
-            },
-            now,
-        );
+        let _ = ctx
+            .quasar_gateway
+            .publish_notice(NoticeScope::SolarSystem(sys_id), notice, now);
     }
     if stage >= 5 {
         ctx.emit_typed(
@@ -481,25 +513,24 @@ pub fn add_system_suppression(ctx: &ServerContext, campaign_id: i64, sys_id: u32
     // Broadcast Quasar IncreasedNotice when suppression increases, or SetNotice when adjusted downwards
     let old_pts = (pts - points).max(0);
     if campaign_active && pts != old_pts {
-        let (notice_type, q_payload) = if points > 0 && pts > old_pts {
-            (
+        let notice = if points > 0 && pts > old_pts {
+            build_pirate_increased_notice_any(
                 "eve_public.pirate.suppression.api.IncreasedNotice",
-                encode_pirate_increased_notice(sys_id, old_pts as u64, pts as u64),
+                sys_id,
+                old_pts as u64,
+                pts as u64,
             )
         } else {
-            (
+            build_pirate_progress_notice_any(
                 "eve_public.pirate.suppression.api.SetNotice",
-                encode_pirate_progress_notice(sys_id, pts as u64, 1000),
+                sys_id,
+                pts as u64,
+                1000,
             )
         };
-        let _ = ctx.quasar_gateway.publish_notice(
-            NoticeScope::SolarSystem(sys_id),
-            GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{notice_type}"),
-                value: q_payload,
-            },
-            now,
-        );
+        let _ = ctx
+            .quasar_gateway
+            .publish_notice(NoticeScope::SolarSystem(sys_id), notice, now);
     }
     if stage >= 5 {
         ctx.emit_typed(
@@ -774,19 +805,13 @@ pub fn notify_stronghold_destruction(
     let now = db.clock().now_unix_secs();
 
     if let Some(gw) = gw {
-        let q_payload = encode_pirate_increased_notice(
+        let notice = build_pirate_increased_notice_any(
+            "eve_public.pirate.suppression.api.IncreasedNotice",
             info.solar_system_id,
             info.old_suppression as u64,
             info.new_suppression as u64,
         );
-        let _ = gw.publish_notice(
-            NoticeScope::SolarSystem(info.solar_system_id),
-            GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.pirate.suppression.api.IncreasedNotice"),
-                value: q_payload,
-            },
-            now,
-        );
+        let _ = gw.publish_notice(NoticeScope::SolarSystem(info.solar_system_id), notice, now);
     }
 
     let mut system_chars = db.with_snapshot(|snap| {

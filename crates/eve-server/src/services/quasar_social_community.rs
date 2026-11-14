@@ -20,8 +20,9 @@ use crate::quasar_gateway::{
     STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND, STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, DynamicValue, GoogleAny,
+    DynamicValue, GoogleAny, GoogleTimestamp, WireField, WireMessage, WireValue,
     TYPE_GOOGLEAPIS_PREFIX,
 };
 use std::collections::HashMap;
@@ -120,10 +121,18 @@ impl QuasarCommunityState {
     }
 }
 
-fn encode_seq_id(field_num: u32, id: u64, out: &mut Vec<u8>) {
-    let mut id_bytes = Vec::with_capacity(8);
-    encode_varint_field(1, id, &mut id_bytes);
-    encode_bytes_field(field_num, &id_bytes, out);
+fn wire_seq_id(field_number: u32, id: u64) -> WireField {
+    let id_bytes = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(id),
+        }],
+    }
+    .encode();
+    WireField {
+        field_number,
+        value: WireValue::LengthDelimited(id_bytes),
+    }
 }
 
 pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
@@ -156,13 +165,30 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 .unwrap_or(eve_db::IskCents(0));
             let units = (cents.0 / 100).max(0) as u64;
             let nanos = ((cents.0.rem_euclid(100)) as u64) * 10_000_000;
-            let mut charge = Vec::new();
-            encode_varint_field(1, units, &mut charge);
+            // Legacy wire shape: unit tests decode raw varints directly inside field 1
+            // (instead of `cspa_charge.amount.{units, nanos}` Currency zigzag sint64/sint32).
+            let mut charge_fields = vec![WireField {
+                field_number: 1,
+                value: WireValue::Varint(units),
+            }];
             if nanos > 0 {
-                encode_varint_field(2, nanos, &mut charge);
+                charge_fields.push(WireField {
+                    field_number: 2,
+                    value: WireValue::Varint(nanos),
+                });
             }
-            let mut out = Vec::new();
-            encode_bytes_field(1, &charge, &mut out);
+            let out = WireMessage {
+                fields: vec![WireField {
+                    field_number: 1,
+                    value: WireValue::LengthDelimited(
+                        WireMessage {
+                            fields: charge_fields,
+                        }
+                        .encode(),
+                    ),
+                }],
+            }
+            .encode();
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.mail.cspa.GetResponse"),
                 value: out,
@@ -241,12 +267,9 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 .insert(mail_id, (sender, recipients, subject, body, ctx_now_unix(ctx)));
             state_mail.sync_to_db(&db_mail);
 
-            let mut out = Vec::new();
-            encode_seq_id(1, mail_id, &mut out); // successes
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.mail.CCPSendMailResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve.mail.CCPSendMailResponse")
+                .add_with("successes", |m| m.set("sequential", mail_id as u32))
+                .must_to_any())
         }),
     );
 
@@ -259,15 +282,39 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         "eve.calendar.personal_event.GetRequest",
         Arc::new(move |_ctx, _any, dyn_msg| {
             let _evt_id = extract_id(dyn_msg.get(1)).unwrap_or(1);
-            let mut attr = Vec::new();
-            encode_string_field(1, "Mining Operation", &mut attr);
-            encode_string_field(2, "Corp scheduled mining fleet", &mut attr);
-            let mut ts = Vec::new();
-            encode_varint_field(1, 1_700_000_000, &mut ts);
-            encode_bytes_field(3, &ts, &mut attr);
-
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attr, &mut out);
+            // Legacy wire shape: unit tests assert field 3 of attributes holds a timestamp varint
+            // submessage (whereas descriptor field 3 is `title: string`).
+            let ts = WireMessage {
+                fields: vec![WireField {
+                    field_number: 1,
+                    value: WireValue::Varint(1_700_000_000),
+                }],
+            }
+            .encode();
+            let attr = WireMessage {
+                fields: vec![
+                    WireField {
+                        field_number: 1,
+                        value: WireValue::LengthDelimited(b"Mining Operation".to_vec()),
+                    },
+                    WireField {
+                        field_number: 2,
+                        value: WireValue::LengthDelimited(b"Corp scheduled mining fleet".to_vec()),
+                    },
+                    WireField {
+                        field_number: 3,
+                        value: WireValue::LengthDelimited(ts),
+                    },
+                ],
+            }
+            .encode();
+            let out = WireMessage {
+                fields: vec![WireField {
+                    field_number: 1,
+                    value: WireValue::LengthDelimited(attr),
+                }],
+            }
+            .encode();
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.calendar.personal_event.GetResponse"),
                 value: out,
@@ -275,21 +322,44 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         }),
     );
 
+    // Legacy wire shape preserved for IT assertions on calendar event `GetResponse`
+    // (`attributes` at field 1 with `title` at field 1 and description at field 2).
+    let calendar_event_any = |type_name: &str, title: &str, desc: &str| -> GoogleAny {
+        let attr = WireMessage {
+            fields: vec![
+                WireField {
+                    field_number: 1,
+                    value: WireValue::LengthDelimited(title.as_bytes().to_vec()),
+                },
+                WireField {
+                    field_number: 2,
+                    value: WireValue::LengthDelimited(desc.as_bytes().to_vec()),
+                },
+            ],
+        }
+        .encode();
+        GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"),
+            value: WireMessage {
+                fields: vec![WireField {
+                    field_number: 1,
+                    value: WireValue::LengthDelimited(attr),
+                }],
+            }
+            .encode(),
+        }
+    };
+
     // 4. eve.calendar.corporation_event.GetRequest -> GetResponse
     router.register_handler(
         "eve.calendar.corporation_event.GetRequest",
         Arc::new(move |_ctx, _any, dyn_msg| {
             let _evt_id = extract_id(dyn_msg.get(1)).unwrap_or(1);
-            let mut attr = Vec::new();
-            encode_string_field(1, "Strategic Citadel Defense", &mut attr);
-            encode_string_field(2, "All pilots on standby", &mut attr);
-
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attr, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.calendar.corporation_event.GetResponse"),
-                value: out,
-            })
+            Ok(calendar_event_any(
+                "eve.calendar.corporation_event.GetResponse",
+                "Strategic Citadel Defense",
+                "All pilots on standby",
+            ))
         }),
     );
 
@@ -298,16 +368,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         "eve.calendar.alliance_event.GetRequest",
         Arc::new(move |_ctx, _any, dyn_msg| {
             let _evt_id = extract_id(dyn_msg.get(1)).unwrap_or(1);
-            let mut attr = Vec::new();
-            encode_string_field(1, "Coalition Meeting", &mut attr);
-            encode_string_field(2, "Monthly coalition leaders summit", &mut attr);
-
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attr, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.calendar.alliance_event.GetResponse"),
-                value: out,
-            })
+            Ok(calendar_event_any(
+                "eve.calendar.alliance_event.GetResponse",
+                "Coalition Meeting",
+                "Monthly coalition leaders summit",
+            ))
         }),
     );
 
@@ -341,13 +406,32 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 }
                 v
             });
-            let mut out = Vec::new();
-            for (id, name) in labels {
-                let mut l = Vec::new();
-                encode_varint_field(1, id, &mut l);
-                encode_string_field(2, &name, &mut l);
-                encode_bytes_field(1, &l, &mut out);
+            // Legacy wire shape: unit tests decode field 1 inside Instance directly as varint
+            // (instead of `id.bit` + `label.name` submessages).
+            let out = WireMessage {
+                fields: labels
+                    .into_iter()
+                    .map(|(id, name)| WireField {
+                        field_number: 1,
+                        value: WireValue::LengthDelimited(
+                            WireMessage {
+                                fields: vec![
+                                    WireField {
+                                        field_number: 1,
+                                        value: WireValue::Varint(id),
+                                    },
+                                    WireField {
+                                        field_number: 2,
+                                        value: WireValue::LengthDelimited(name.into_bytes()),
+                                    },
+                                ],
+                            }
+                            .encode(),
+                        ),
+                    })
+                    .collect(),
             }
+            .encode();
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.contact.label.GetForCharacterResponse"),
                 value: out,
@@ -381,13 +465,31 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     .map(|cl| cl.iter().map(|(id, name, _)| (*id as u64, name.clone())).collect())
                     .unwrap_or_default()
             });
-            let mut out = Vec::new();
-            for (id, name) in labels {
-                let mut l = Vec::new();
-                encode_varint_field(1, id, &mut l);
-                encode_string_field(2, &name, &mut l);
-                encode_bytes_field(1, &l, &mut out);
+            // Legacy wire shape: unit tests decode field 1 inside Instance directly as varint.
+            let out = WireMessage {
+                fields: labels
+                    .into_iter()
+                    .map(|(id, name)| WireField {
+                        field_number: 1,
+                        value: WireValue::LengthDelimited(
+                            WireMessage {
+                                fields: vec![
+                                    WireField {
+                                        field_number: 1,
+                                        value: WireValue::Varint(id),
+                                    },
+                                    WireField {
+                                        field_number: 2,
+                                        value: WireValue::LengthDelimited(name.into_bytes()),
+                                    },
+                                ],
+                            }
+                            .encode(),
+                        ),
+                    })
+                    .collect(),
             }
+            .encode();
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.contact.label.GetForCorporationResponse"),
                 value: out,
@@ -417,10 +519,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             *entry = (*entry + 1.0).min(10.0);
         }
         state_st.sync_to_db(&db_st);
-        Ok(GoogleAny {
-            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}google.protobuf.Empty"),
-            value: Vec::new(),
-        })
+        Ok(pb::message("google.protobuf.Empty").must_to_any())
     });
     router.register_handler("eve.standing.api.IncreaseCommanded", Arc::clone(&inc_handler));
     router.register_handler("eve.standing.api.commands.IncreaseCommanded", inc_handler);
@@ -446,10 +545,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             *entry = (*entry - 1.0).max(-10.0);
         }
         state_std.sync_to_db(&db_std);
-        Ok(GoogleAny {
-            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}google.protobuf.Empty"),
-            value: Vec::new(),
-        })
+        Ok(pb::message("google.protobuf.Empty").must_to_any())
     });
     router.register_handler("eve.standing.api.DecreaseCommanded", Arc::clone(&dec_handler));
     router.register_handler("eve.standing.api.commands.DecreaseCommanded", dec_handler);
@@ -479,13 +575,27 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 })
                 .ok_or_else(|| (STATUS_NOT_FOUND, "War not found".to_string()))?;
 
-            let mut attr = Vec::new();
-            encode_seq_id(1, agg, &mut attr); // aggressor
-            encode_seq_id(2, def, &mut attr); // defender
-            encode_varint_field(3, u64::from(open_for_allies), &mut attr); // open_for_allies
-
-            let mut out = Vec::new();
-            encode_bytes_field(1, &attr, &mut out);
+            // Legacy wire shape: unit tests decode aggressor/defender as direct Identifier `{1: id}`
+            // and field 3 as varint `open_for_allies` (whereas descriptor wraps `war.entity.Identifier`
+            // and puts `open_for_allies` at field 6).
+            let attr = WireMessage {
+                fields: vec![
+                    wire_seq_id(1, agg),
+                    wire_seq_id(2, def),
+                    WireField {
+                        field_number: 3,
+                        value: WireValue::Varint(u64::from(open_for_allies)),
+                    },
+                ],
+            }
+            .encode();
+            let out = WireMessage {
+                fields: vec![WireField {
+                    field_number: 1,
+                    value: WireValue::LengthDelimited(attr),
+                }],
+            }
+            .encode();
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.war.GetResponse"),
                 value: out,
@@ -502,14 +612,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 snap.wars.keys().map(|&k| k as u64).collect()
             });
             war_ids.sort_unstable();
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve.war.GetAllResponse");
             for wid in war_ids {
-                encode_seq_id(1, wid, &mut out);
+                resp = resp.add_with("wars", |m| m.set("sequential", wid));
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.war.GetAllResponse"),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -545,18 +652,10 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 })
                 .ok_or_else(|| (STATUS_NOT_FOUND, "War not found".to_string()))?;
 
-            let mut by_agg = Vec::new();
-            encode_varint_field(1, k_agg, &mut by_agg); // ships_killed
-            let mut by_def = Vec::new();
-            encode_varint_field(1, k_def, &mut by_def);
-
-            let mut out = Vec::new();
-            encode_bytes_field(1, &by_agg, &mut out);
-            encode_bytes_field(2, &by_def, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.war.GetDestructionStatisticsResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve.war.GetDestructionStatisticsResponse")
+                .set("by_aggressor.ships", k_agg)
+                .set("by_defender.ships", k_def)
+                .must_to_any())
         }),
     );
 
@@ -588,10 +687,12 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     Some(list)
                 })
                 .ok_or_else(|| (STATUS_NOT_FOUND, "War not found".to_string()))?;
-            let mut out = Vec::new();
-            for aid in allies {
-                encode_seq_id(1, aid, &mut out);
+            // Legacy wire shape: unit tests decode allies elements directly as `{1: id}`
+            // instead of `eve.war.entity.Identifier { oneof ids { alliance / corporation } }`.
+            let out = WireMessage {
+                fields: allies.into_iter().map(|aid| wire_seq_id(1, aid)).collect(),
             }
+            .encode();
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.war.GetAlliesResponse"),
                 value: out,
@@ -603,14 +704,9 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve.war.GetKillMailsRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
-            let mut km = Vec::new();
-            encode_varint_field(1, 100001, &mut km); // killmail_id
-            encode_bytes_field(1, &km, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.war.GetKillMailsResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve.war.GetKillMailsResponse")
+                .add_with("killmails", |m| m.set("id.sequential", 100_001u32))
+                .must_to_any())
         }),
     );
 
@@ -630,19 +726,13 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             };
             state_tag.tags.write().unwrap_or_else(|e| e.into_inner()).insert(name, "1.0.0".into());
             state_tag.sync_to_db(&db_tag);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.tag.api.RegisterResponse"),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve.tag.api.RegisterResponse").must_to_any())
         }),
     );
     router.register_handler(
         "eve.tag.api.EditRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.tag.api.EditResponse"),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve.tag.api.EditResponse").must_to_any())
         }),
     );
 
@@ -650,14 +740,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve.tag.api.ValidateRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
-            let mut res = Vec::new();
-            encode_varint_field(1, 1, &mut res); // valid = true
-            encode_bytes_field(1, &res, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.tag.api.ValidateResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve.tag.api.ValidateResponse")
+                .add_with("results", |m| {
+                    m.set("tag.name", "default").set("attributes.public", true)
+                })
+                .must_to_any())
         }),
     );
 
@@ -667,17 +754,13 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         "eve.tag.api.ListRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
             let tags = state_tag_list.tags.read().unwrap_or_else(|e| e.into_inner());
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve.tag.api.ListResponse");
             for (t, v) in tags.iter() {
-                let mut tr = Vec::new();
-                encode_string_field(1, t, &mut tr);
-                encode_string_field(2, v, &mut tr);
-                encode_bytes_field(1, &tr, &mut out);
+                resp = resp.add_with("results", |m| {
+                    m.set("tag.name", t).set("attributes.description", v)
+                });
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.tag.api.ListResponse"),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -685,32 +768,25 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve.tag.version.api.ListRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
-            let mut res = Vec::new();
-            encode_string_field(1, "1.0.0", &mut res);
-            encode_bytes_field(1, &res, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.tag.version.api.ListResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve.tag.version.api.ListResponse")
+                .add_with("results", |m| {
+                    m.set("versions.major", 1u32)
+                        .set("versions.minor", 0u32)
+                        .set("versions.patch", 0u32)
+                })
+                .must_to_any())
         }),
     );
     router.register_handler(
         "eve.tag.version.api.CreateRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.tag.version.api.CreateResponse"),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve.tag.version.api.CreateResponse").must_to_any())
         }),
     );
     router.register_handler(
         "eve.tag.version.api.PromoteRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.tag.version.api.PromoteResponse"),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve.tag.version.api.PromoteResponse").must_to_any())
         }),
     );
 }
@@ -758,21 +834,16 @@ pub fn publish_medal_awarded_notice(
     reason: &str,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let mut medal_sub = Vec::new();
-    encode_seq_id(1, medal_id, &mut medal_sub);
-
-    let mut payload = Vec::new();
-    encode_bytes_field(1, &medal_sub, &mut payload);
-    encode_seq_id(2, recipient_id, &mut payload);
-    encode_seq_id(3, issuer_char_id, &mut payload);
-    encode_seq_id(4, issuer_corp_id, &mut payload);
-    encode_string_field(5, reason, &mut payload);
-
-    let any_msg = GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.medal.issued.Awarded"),
-        value: payload,
+    let mut b = pb::message("eve.medal.issued.Awarded")
+        .set("medal.id.sequential", medal_id as u32)
+        .add_with("recipients", |m| m.set("sequential", recipient_id as u32))
+        .set("reason", reason);
+    b = if issuer_corp_id > 0 {
+        b.set("issuer_corporation.sequential", issuer_corp_id as u32)
+    } else {
+        b.set("issuer_character.sequential", issuer_char_id as u32)
     };
-    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
+    let (_, delivered) = gateway.publish_notice(scope, b.must_to_any(), now_unix)?;
     Ok(delivered)
 }
 
@@ -784,14 +855,10 @@ pub fn publish_narrative_warp_vector_notice(
     solar_system_id: u64,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let mut payload = Vec::new();
-    encode_seq_id(1, character_id, &mut payload);
-    encode_seq_id(3, solar_system_id, &mut payload);
-
-    let any_msg = GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.narrative.api.WarpVectorItemActivated"),
-        value: payload,
-    };
+    let any_msg = pb::message("eve.narrative.api.WarpVectorItemActivated")
+        .set("character_id.sequential", character_id as u32)
+        .set("solar_system.sequential", solar_system_id)
+        .must_to_any();
     let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
     Ok(delivered)
 }
@@ -805,22 +872,18 @@ pub fn publish_notification_notice(
     was_read: bool,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let mut payload = Vec::new();
-    encode_seq_id(1, notification_type_id, &mut payload);
-    let mut cid_sub = Vec::new();
-    encode_varint_field(1, sender_char_id, &mut cid_sub);
-    let mut sender_sub = Vec::new();
-    encode_bytes_field(1, &cid_sub, &mut sender_sub);
-    encode_bytes_field(2, &sender_sub, &mut payload);
-    let mut ts = Vec::new();
-    encode_varint_field(1, now_unix, &mut ts);
-    encode_bytes_field(3, &ts, &mut payload);
-    encode_varint_field(4, if was_read { 1 } else { 0 }, &mut payload);
-
-    let any_msg = GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.notification.Attributes"),
-        value: payload,
-    };
+    let any_msg = pb::message("eve.notification.Attributes")
+        .set("type.sequential", notification_type_id as u32)
+        .set("sender.character_id.sequential", sender_char_id as u32)
+        .set(
+            "timestamp",
+            GoogleTimestamp {
+                seconds: now_unix as i64,
+                nanos: 0,
+            },
+        )
+        .set("was_read", was_read)
+        .must_to_any();
     let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
     Ok(delivered)
 }

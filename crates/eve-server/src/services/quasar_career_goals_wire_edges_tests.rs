@@ -3,7 +3,9 @@
 #![forbid(unsafe_code)]
 
 use super::*;
-use eve_proto::quasar::{encode_bytes_field, encode_varint_field, DynamicQuasarMessage, DynamicValue, GoogleAny};
+use eve_proto::quasar::{
+    DynamicQuasarMessage, DynamicValue, GoogleAny, WireField, WireMessage, WireValue,
+};
 
 fn sample_def(isk: i64, sp: f64) -> CareerGoalDef {
     CareerGoalDef {
@@ -158,31 +160,43 @@ fn extract_uuid_and_extract_target_character_all_branches_and_wire_fallbacks() {
 
     // WireMessage fallback when dyn_msg does not contain field_num:
     // 1) Bytes submessage with field 1 varint > 0
-    let mut inner_bytes = Vec::new();
-    encode_varint_field(1, 90_000_021, &mut inner_bytes);
-    let mut wire_sub = Vec::new();
-    encode_bytes_field(4, &inner_bytes, &mut wire_sub);
+    let inner_bytes = WireMessage {
+        fields: vec![WireField { field_number: 1, value: WireValue::Varint(90_000_021) }],
+    }
+    .encode();
+    let wire_sub = WireMessage {
+        fields: vec![WireField { field_number: 4, value: WireValue::LengthDelimited(inner_bytes) }],
+    }
+    .encode();
     let any_sub = GoogleAny { type_url: String::new(), value: wire_sub };
     let empty_dyn = DynamicQuasarMessage::new("Req");
     assert_eq!(extract_target_character(&empty_dyn, &any_sub, 4, false), Some(90_000_021));
 
     // 2) Bytes submessage with field 1 varint == 0 -> None
-    let mut inner_zero = Vec::new();
-    encode_varint_field(1, 0, &mut inner_zero);
-    let mut wire_zero = Vec::new();
-    encode_bytes_field(4, &inner_zero, &mut wire_zero);
+    let inner_zero = WireMessage {
+        fields: vec![WireField { field_number: 1, value: WireValue::Varint(0) }],
+    }
+    .encode();
+    let wire_zero = WireMessage {
+        fields: vec![WireField { field_number: 4, value: WireValue::LengthDelimited(inner_zero) }],
+    }
+    .encode();
     let any_zero = GoogleAny { type_url: String::new(), value: wire_zero };
     assert_eq!(extract_target_character(&empty_dyn, &any_zero, 4, false), None);
 
     // 3) Scalar varint >= 1_000_000 vs < 1_000_000 and allow_scalar = false vs true
-    let mut wire_scalar = Vec::new();
-    encode_varint_field(5, 90_000_033, &mut wire_scalar);
+    let wire_scalar = WireMessage {
+        fields: vec![WireField { field_number: 5, value: WireValue::Varint(90_000_033) }],
+    }
+    .encode();
     let any_scalar = GoogleAny { type_url: String::new(), value: wire_scalar };
     assert_eq!(extract_target_character(&empty_dyn, &any_scalar, 5, true), Some(90_000_033));
     assert_eq!(extract_target_character(&empty_dyn, &any_scalar, 5, false), None);
 
-    let mut wire_small = Vec::new();
-    encode_varint_field(5, 42, &mut wire_small);
+    let wire_small = WireMessage {
+        fields: vec![WireField { field_number: 5, value: WireValue::Varint(42) }],
+    }
+    .encode();
     let any_small = GoogleAny { type_url: String::new(), value: wire_small };
     assert_eq!(extract_target_character(&empty_dyn, &any_small, 5, true), None);
 

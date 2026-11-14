@@ -12,8 +12,8 @@ use crate::quasar_gateway::{
 };
 use eve_db::{IskCents, WorldRepository};
 use eve_proto::quasar::{
-    encode_varint_field, AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny,
-    QuasarDescriptorRegistry,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, QuasarDescriptorRegistry,
+    WireField, WireMessage, WireValue,
 };
 use std::sync::{Arc, OnceLock};
 
@@ -147,8 +147,10 @@ fn gateway_handlers_all_endpoints_aliases_and_wire_fallbacks() {
     );
 
     // WireMessage field 3 varint fallback (delta = 3 -> completes goal with target 3!)
-    let mut raw_wire = Vec::new();
-    encode_varint_field(3, 3, &mut raw_wire);
+    let raw_wire = WireMessage {
+        fields: vec![WireField { field_number: 3, value: WireValue::Varint(3) }],
+    }
+    .encode();
     let any_with_wire = GoogleAny {
         type_url: String::new(),
         value: raw_wire,

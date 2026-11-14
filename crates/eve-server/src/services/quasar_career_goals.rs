@@ -13,10 +13,10 @@ use crate::quasar_gateway::{
     PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
 };
 use eve_db::{IskCents, WorldRepository};
-use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, DynamicValue, GoogleAny, WireMessage,
-    TYPE_GOOGLEAPIS_PREFIX,
-};
+use eve_proto::pb;
+#[cfg(test)]
+use eve_proto::quasar::GoogleAny;
+use eve_proto::quasar::{DynamicValue, WireMessage};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
@@ -634,30 +634,21 @@ impl CareerGoalManager {
         self.save_to_db();
 
         for (uuid, new_progress, just_completed) in progressed {
-            let mut id_bytes = Vec::new();
-            encode_career_goal_identifier(&uuid, &mut id_bytes);
-            let mut not_bytes = Vec::new();
-            encode_bytes_field(1, &id_bytes, &mut not_bytes);
-            encode_varint_field(2, new_progress, &mut not_bytes);
-
             let _ = gateway.publish_notice(
                 crate::quasar_gateway::NoticeScope::Character(char_id),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.career.goal.api.ProgressedNotice"),
-                    value: not_bytes,
-                },
+                pb::message("eve_public.career.goal.api.ProgressedNotice")
+                    .set("goal.uuid", uuid.to_vec())
+                    .set("amount", new_progress.min(u64::from(u32::MAX)) as u32)
+                    .must_to_any(),
                 now_unix,
             );
 
             if just_completed {
-                let mut comp_bytes = Vec::new();
-                encode_bytes_field(1, &id_bytes, &mut comp_bytes);
                 let _ = gateway.publish_notice(
                     crate::quasar_gateway::NoticeScope::Character(char_id),
-                    GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.career.goal.api.CompletedNotice"),
-                        value: comp_bytes,
-                    },
+                    pb::message("eve_public.career.goal.api.CompletedNotice")
+                        .set("goal.uuid", uuid.to_vec())
+                        .must_to_any(),
                     now_unix,
                 );
             }
@@ -956,22 +947,19 @@ pub fn register_career_goal_handlers(
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
             let goals = mgr.get_or_init_goals(cid);
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve_public.career.goal.api.GetAllResponse");
             for g in &goals {
                 let mut gw = Vec::new();
                 encode_career_goal_wire(g, &mut gw);
-                encode_bytes_field(1, &gw, &mut out);
+                resp = resp.add("goals", pb::raw_message(&gw));
             }
             for (ms, reached, claimed) in mgr.get_character_milestones(cid) {
                 let cp = mgr.career_points_for_character(cid, ms.career_id);
                 let mut mw = Vec::new();
                 encode_career_milestone_goal_wire(&ms, cp, reached, claimed, &mut mw);
-                encode_bytes_field(1, &mw, &mut out);
+                resp = resp.add("goals", pb::raw_message(&mw));
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.career.goal.api.GetAllResponse"),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -985,23 +973,18 @@ pub fn register_career_goal_handlers(
             req_name,
             Arc::new(move |_ctx, _any, _dyn| {
                 let defs = mgr_defs.load_definitions();
-                let mut out = Vec::new();
+                let mut resp = pb::message("eve_public.career.goal.api.GetDefinitionsResponse");
                 for def in &defs {
                     let mut gw = Vec::new();
                     encode_career_goal_definition_wire(def, &mut gw);
-                    encode_bytes_field(1, &gw, &mut out);
+                    resp = resp.add("goals", pb::raw_message(&gw));
                 }
                 for ms in &mgr_defs.milestones {
                     let mut mw = Vec::new();
                     encode_career_milestone_definition_wire(ms, &mut mw);
-                    encode_bytes_field(1, &mw, &mut out);
+                    resp = resp.add("goals", pb::raw_message(&mw));
                 }
-                Ok(GoogleAny {
-                    type_url: format!(
-                        "{TYPE_GOOGLEAPIS_PREFIX}eve_public.career.goal.api.GetDefinitionsResponse"
-                    ),
-                    value: out,
-                })
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -1027,12 +1010,7 @@ pub fn register_career_goal_handlers(
                 let _ = mgr.claim_reward(cid, &target_uuid, &db_claim)?;
                 mgr.save_to_db();
             }
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.career.goal.api.ClaimRewardResponse"
-                ),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve_public.career.goal.api.ClaimRewardResponse").must_to_any())
         }),
     );
 
@@ -1080,39 +1058,26 @@ pub fn register_career_goal_handlers(
             };
             mgr.save_to_db();
 
-            let mut not_bytes = Vec::new();
-            let mut id_bytes = Vec::new();
-            encode_career_goal_identifier(&target_uuid, &mut id_bytes);
-            encode_bytes_field(1, &id_bytes, &mut not_bytes);
-            encode_varint_field(2, goal.progress, &mut not_bytes);
             super::quasar_social_chat::ctx_queue_notice(
                 crate::quasar_gateway::NoticeScope::Character(target_char),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.career.goal.api.ProgressedNotice"),
-                    value: not_bytes,
-                },
+                pb::message("eve_public.career.goal.api.ProgressedNotice")
+                    .set("goal.uuid", target_uuid.to_vec())
+                    .set("amount", goal.progress.min(u64::from(u32::MAX)) as u32)
+                    .must_to_any(),
                 ctx.now_unix(),
             );
 
             if just_completed {
-                let mut comp_bytes = Vec::new();
-                encode_bytes_field(1, &id_bytes, &mut comp_bytes);
                 super::quasar_social_chat::ctx_queue_notice(
                     crate::quasar_gateway::NoticeScope::Character(target_char),
-                    GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.career.goal.api.CompletedNotice"),
-                        value: comp_bytes,
-                    },
+                    pb::message("eve_public.career.goal.api.CompletedNotice")
+                        .set("goal.uuid", target_uuid.to_vec())
+                        .must_to_any(),
                     ctx.now_unix(),
                 );
             }
 
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.career.goal.api.admin.ProgressResponse"
-                ),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve_public.career.goal.api.admin.ProgressResponse").must_to_any())
         }),
     );
 
@@ -1133,25 +1098,15 @@ pub fn register_career_goal_handlers(
             let _ = mgr.mark_completed(target_char, &target_uuid, ctx.now_unix())?;
             mgr.save_to_db();
 
-            let mut not_bytes = Vec::new();
-            let mut id_bytes = Vec::new();
-            encode_career_goal_identifier(&target_uuid, &mut id_bytes);
-            encode_bytes_field(1, &id_bytes, &mut not_bytes);
             super::quasar_social_chat::ctx_queue_notice(
                 crate::quasar_gateway::NoticeScope::Character(target_char),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.career.goal.api.CompletedNotice"),
-                    value: not_bytes,
-                },
+                pb::message("eve_public.career.goal.api.CompletedNotice")
+                    .set("goal.uuid", target_uuid.to_vec())
+                    .must_to_any(),
                 ctx.now_unix(),
             );
 
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.career.goal.api.admin.CompleteResponse"
-                ),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve_public.career.goal.api.admin.CompleteResponse").must_to_any())
         }),
     );
 
@@ -1164,24 +1119,19 @@ pub fn register_career_goal_handlers(
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
             let goals = mgr.get_or_init_goals(cid);
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve_public.app.eveonline.career.goal.GetAllResponse");
             for g in &goals {
                 let mut gw = Vec::new();
                 encode_career_goal_wire(g, &mut gw);
-                encode_bytes_field(1, &gw, &mut out);
+                resp = resp.add("goals", pb::raw_message(&gw));
             }
             for (ms, reached, claimed) in mgr.get_character_milestones(cid) {
                 let cp = mgr.career_points_for_character(cid, ms.career_id);
                 let mut mw = Vec::new();
                 encode_career_milestone_goal_wire(&ms, cp, reached, claimed, &mut mw);
-                encode_bytes_field(1, &mw, &mut out);
+                resp = resp.add("goals", pb::raw_message(&mw));
             }
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.app.eveonline.career.goal.GetAllResponse"
-                ),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -1206,16 +1156,9 @@ pub fn register_career_goal_handlers(
                 let _ = mgr.claim_reward(cid, &target_uuid, &db_app_claim)?;
                 mgr.save_to_db();
             }
-            let mut id_bytes = Vec::new();
-            encode_career_goal_identifier(&target_uuid, &mut id_bytes);
-            let mut out = Vec::new();
-            encode_bytes_field(1, &id_bytes, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.app.eveonline.career.goal.ClaimRewardResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve_public.app.eveonline.career.goal.ClaimRewardResponse")
+                .set("goal.uuid", target_uuid.to_vec())
+                .must_to_any())
         }),
     );
 
@@ -1229,23 +1172,18 @@ pub fn register_career_goal_handlers(
             req_name,
             Arc::new(move |_ctx, _any, _dyn| {
                 let defs = mgr_eve_defs.load_definitions();
-                let mut out = Vec::new();
+                let mut resp = pb::message("eve.career.goal.api.GetDefinitionsResponse");
                 for def in &defs {
                     let mut gw = Vec::new();
                     encode_internal_career_goal_definition_wire(def, &mut gw);
-                    encode_bytes_field(1, &gw, &mut out);
+                    resp = resp.add("goals", pb::raw_message(&gw));
                 }
                 for ms in &mgr_eve_defs.milestones {
                     let mut mw = Vec::new();
                     encode_internal_career_milestone_definition_wire(ms, &mut mw);
-                    encode_bytes_field(1, &mw, &mut out);
+                    resp = resp.add("goals", pb::raw_message(&mw));
                 }
-                Ok(GoogleAny {
-                    type_url: format!(
-                        "{TYPE_GOOGLEAPIS_PREFIX}eve.career.goal.api.GetDefinitionsResponse"
-                    ),
-                    value: out,
-                })
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -1266,24 +1204,19 @@ pub fn register_career_goal_handlers(
                     return Err((STATUS_FORBIDDEN, "Active character required".into()));
                 };
                 let goals = mgr.get_or_init_goals(target_char);
-                let mut out = Vec::new();
+                let mut resp = pb::message("eve.career.goal.api.admin.GetAllByCharacterResponse");
                 for g in &goals {
                     let mut gw = Vec::new();
                     encode_career_goal_wire(g, &mut gw);
-                    encode_bytes_field(1, &gw, &mut out);
+                    resp = resp.add("goals", pb::raw_message(&gw));
                 }
                 for (ms, reached, claimed) in mgr.get_character_milestones(target_char) {
                     let cp = mgr.career_points_for_character(target_char, ms.career_id);
                     let mut mw = Vec::new();
                     encode_career_milestone_goal_wire(&ms, cp, reached, claimed, &mut mw);
-                    encode_bytes_field(1, &mw, &mut out);
+                    resp = resp.add("goals", pb::raw_message(&mw));
                 }
-                Ok(GoogleAny {
-                    type_url: format!(
-                        "{TYPE_GOOGLEAPIS_PREFIX}eve.career.goal.api.admin.GetAllByCharacterResponse"
-                    ),
-                    value: out,
-                })
+                Ok(resp.must_to_any())
             }),
         );
     }
@@ -1308,12 +1241,7 @@ pub fn register_career_goal_handlers(
                 };
                 let _ = mgr.mark_completed(target_char, &target_uuid, ctx.now_unix())?;
                 mgr.save_to_db();
-                Ok(GoogleAny {
-                    type_url: format!(
-                        "{TYPE_GOOGLEAPIS_PREFIX}eve.career.goal.api.admin.CompleteResponse"
-                    ),
-                    value: Vec::new(),
-                })
+                Ok(pb::message("eve.career.goal.api.admin.CompleteResponse").must_to_any())
             }),
         );
     }
@@ -1336,14 +1264,9 @@ pub fn register_career_goal_handlers(
                 .find(|g| g.uuid == target_uuid)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Career goal not found".into()))?;
 
-            let mut out = Vec::new();
-            encode_varint_field(1, g.progress, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.character.career.goal.GetProgressResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve.character.career.goal.GetProgressResponse")
+                .set("progress", g.progress.min(u64::from(u32::MAX)) as u32)
+                .must_to_any())
         }),
     );
 
@@ -1365,14 +1288,9 @@ pub fn register_career_goal_handlers(
                 .find(|g| g.uuid == target_uuid)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Career goal not found".into()))?;
 
-            let mut out = Vec::new();
-            encode_varint_field(1, if g.claimed { 1 } else { 0 }, &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.character.career.goal.HasClaimedRewardResponse"
-                ),
-                value: out,
-            })
+            Ok(pb::message("eve.character.career.goal.HasClaimedRewardResponse")
+                .set("claimed", g.claimed)
+                .must_to_any())
         }),
     );
 }

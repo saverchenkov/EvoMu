@@ -19,9 +19,10 @@ use crate::quasar_gateway::{
 use super::quasar_goal_tale_notices as notices;
 use super::quasar_social_chat::ctx_queue_notice;
 use eve_db::WorldRepository;
+use eve_proto::pb::{self, ProtoBuilder};
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, DynamicQuasarMessage,
-    DynamicValue, GoogleAny, GoogleEmpty, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
+    DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleEmpty, QuasarMessage, WireField,
+    WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -460,17 +461,28 @@ pub fn register_progression_extra_handlers(
                 .get_community_track(tid)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Community track not found".into()))?;
 
-            let mut out = Vec::new();
-            let mut attr_bytes = Vec::new();
-            let mut def_id = Vec::new();
+            // Legacy wire divergence from `eve_public.communitytrack.instance.Attributes`
+            // (which only defines `1: definition`, `2: progress`): unit tests assert extra
+            // fields `3: target_progress`, `4: name`, `5: active`.
             let def_tid = if track.template_id != 0 { track.template_id } else { track.track_id };
-            encode_varint_field(1, def_tid as u64, &mut def_id);
-            encode_bytes_field(1, &def_id, &mut attr_bytes);
-            encode_varint_field(2, track.current_progress, &mut attr_bytes);
-            encode_varint_field(3, track.target_progress, &mut attr_bytes);
-            encode_string_field(4, &track.name, &mut attr_bytes);
-            encode_varint_field(5, if track.active { 1 } else { 0 }, &mut attr_bytes);
-            encode_bytes_field(1, &attr_bytes, &mut out);
+            let def_id = WireMessage {
+                fields: vec![WireField { field_number: 1, value: WireValue::Varint(def_tid as u64) }],
+            }
+            .encode();
+            let attr_bytes = WireMessage {
+                fields: vec![
+                    WireField { field_number: 1, value: WireValue::LengthDelimited(def_id) },
+                    WireField { field_number: 2, value: WireValue::Varint(track.current_progress) },
+                    WireField { field_number: 3, value: WireValue::Varint(track.target_progress) },
+                    WireField { field_number: 4, value: WireValue::LengthDelimited(track.name.as_bytes().to_vec()) },
+                    WireField { field_number: 5, value: WireValue::Varint(if track.active { 1 } else { 0 }) },
+                ],
+            }
+            .encode();
+            let out = WireMessage {
+                fields: vec![WireField { field_number: 1, value: WireValue::LengthDelimited(attr_bytes) }],
+            }
+            .encode();
 
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.communitytrack.api.GetResponse"),
@@ -489,13 +501,22 @@ pub fn register_progression_extra_handlers(
                 .get_community_track(tid)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Community track not found".into()))?;
 
-            let mut out = Vec::new();
-            let mut attr_bytes = Vec::new();
-            encode_varint_field(1, track.track_id as u64, &mut attr_bytes);
-            encode_string_field(2, &track.name, &mut attr_bytes);
-            encode_varint_field(3, track.target_progress, &mut attr_bytes);
-            encode_varint_field(4, track.current_progress, &mut attr_bytes);
-            encode_bytes_field(1, &attr_bytes, &mut out);
+            // Legacy wire divergence from `eve.communitytrack.instance.Attributes`
+            // (`1: definition` submessage, `2: progress`): tests assert `1: track_id`,
+            // `2: name`, `3: target_progress`, `4: current_progress`.
+            let attr_bytes = WireMessage {
+                fields: vec![
+                    WireField { field_number: 1, value: WireValue::Varint(track.track_id as u64) },
+                    WireField { field_number: 2, value: WireValue::LengthDelimited(track.name.as_bytes().to_vec()) },
+                    WireField { field_number: 3, value: WireValue::Varint(track.target_progress) },
+                    WireField { field_number: 4, value: WireValue::Varint(track.current_progress) },
+                ],
+            }
+            .encode();
+            let out = WireMessage {
+                fields: vec![WireField { field_number: 1, value: WireValue::LengthDelimited(attr_bytes) }],
+            }
+            .encode();
 
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.communitytrack.api.GetResponse"),
@@ -530,9 +551,13 @@ pub fn register_progression_extra_handlers(
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Community track not found".into()))?;
             mgr.save_to_db();
 
-            let mut not_bytes = Vec::new();
-            encode_varint_field(1, updated.track_id as u64, &mut not_bytes);
-            let notice = GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.communitytrack.api.ProgressedNotice"), value: not_bytes.clone() };
+            // Synthetic gateway notice `eve_public.communitytrack.api.ProgressedNotice` is absent
+            // from V24.01 `quasar_descriptors.sqlite` (only `eve.communitytrack.api.Progressed` exists).
+            let not_bytes = WireMessage {
+                fields: vec![WireField { field_number: 1, value: WireValue::Varint(updated.track_id as u64) }],
+            }
+            .encode();
+            let notice = GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.communitytrack.api.ProgressedNotice"), value: not_bytes };
             super::quasar_social_chat::ctx_queue_notice(crate::quasar_gateway::NoticeScope::Broadcast, notice.clone(), ctx.now_unix());
             super::quasar_social_chat::ctx_queue_notice(crate::quasar_gateway::NoticeScope::Character(cid), notice, ctx.now_unix());
 
@@ -680,8 +705,12 @@ pub fn register_progression_extra_handlers(
                 let progressed = mgr.record_tale_contribution(template_id, stopped.len() as u64);
                 mgr.save_to_db();
                 for tr in progressed {
-                    let mut not_bytes = Vec::new();
-                    encode_varint_field(1, tr.track_id as u64, &mut not_bytes);
+                    // Synthetic gateway notice `eve_public.communitytrack.api.ProgressedNotice` is absent
+                    // from V24.01 `quasar_descriptors.sqlite`.
+                    let not_bytes = WireMessage {
+                        fields: vec![WireField { field_number: 1, value: WireValue::Varint(tr.track_id as u64) }],
+                    }
+                    .encode();
                     let notice = GoogleAny {
                         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.communitytrack.api.ProgressedNotice"),
                         value: not_bytes,
@@ -713,12 +742,9 @@ pub fn register_progression_extra_handlers(
                 .values()
                 .filter(|t| filter.is_none_or(|f| t.0 == f))
                 .count() as u32;
-            let mut out = Vec::new();
-            encode_varint_field(1, count as u64, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.tale.api.GetActiveTalesCountResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve.tale.api.GetActiveTalesCountResponse")
+                .set("count", count)
+                .must_to_any())
         }),
     );
 
@@ -999,15 +1025,9 @@ pub fn register_progression_extra_handlers(
             mgr.save_to_db();
             ctx_queue_notice(notices::goal_scope(goal_corp, cid), created, now_u);
 
-            let mut out = Vec::new();
-            let mut id_bytes = Vec::new();
-            encode_bytes_field(1, &uuid, &mut id_bytes);
-            encode_bytes_field(1, &id_bytes, &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.api.CreateResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve_public.goal.api.CreateResponse")
+                .set("goal.uuid", uuid.to_vec())
+                .must_to_any())
         }),
     );
 
@@ -1032,7 +1052,6 @@ pub fn register_progression_extra_handlers(
             let (g, state) = load_live_goal(&mgr, &target_uuid, ctx.now_unix())
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Goal not found".into()))?;
 
-            let mut out = Vec::new();
             let contrib_pb = resolved_contrib_pb(&g.contribution_config_pb, &g.matcher_type, g.filter_id);
             let attr_bytes = notices::encode_goal_attributes(&notices::GoalAttributesView {
                 created_unix: if g.created_unix > 0 { g.created_unix } else { ctx.now_unix() },
@@ -1045,12 +1064,10 @@ pub fn register_progression_extra_handlers(
                 state: Some(state),
                 contribution_config_pb: &contrib_pb,
             });
-            encode_bytes_field(1, &attr_bytes, &mut out);
 
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.api.GetResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve_public.goal.api.GetResponse")
+                .set_raw_message("goal", &attr_bytes)
+                .must_to_any())
         }),
     );
 
@@ -1065,7 +1082,7 @@ pub fn register_progression_extra_handlers(
                     db.with_snapshot(|s| s.characters.get(&(cid as i64)).map(|c| c.corporation_id as u32))
                 })
             });
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve_public.goal.api.GetAllResponse");
             for g in collect_all_live_goals(&mgr, ctx.now_unix()) {
                 if !is_admin {
                     if let (Some(gc), Some(cc)) = (mgr.goal_corp_id(&g.uuid), caller_corp) {
@@ -1074,11 +1091,6 @@ pub fn register_progression_extra_handlers(
                         }
                     }
                 }
-                let mut goal_bytes = Vec::new();
-                let mut id_bytes = Vec::new();
-                encode_bytes_field(1, &g.uuid, &mut id_bytes);
-                encode_bytes_field(1, &id_bytes, &mut goal_bytes);
-
                 let g_corp = mgr.goal_corp_id(&g.uuid);
                 let g_state = if g.closed {
                     notices::GOAL_STATE_CLOSED
@@ -1099,14 +1111,12 @@ pub fn register_progression_extra_handlers(
                     state: Some(g_state),
                     contribution_config_pb: &contrib_pb,
                 });
-                encode_bytes_field(2, &attr_bytes, &mut goal_bytes);
-
-                encode_bytes_field(3, &goal_bytes, &mut out);
+                resp = resp.add_with("goals", |goal| {
+                    goal.set("id.uuid", g.uuid.to_vec())
+                        .set_raw_message("goal", &attr_bytes)
+                });
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.api.GetAllResponse"),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -1166,10 +1176,7 @@ pub fn register_progression_extra_handlers(
                     now_u,
                 );
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.api.CloseResponse"),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve_public.goal.api.CloseResponse").must_to_any())
         }),
     );
 
@@ -1239,10 +1246,7 @@ pub fn register_progression_extra_handlers(
             if capped >= desired && prev < desired {
                 ctx_queue_notice(scope, notices::goal_completed(&target_uuid), now_u);
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.api.SetCurrentProgressResponse"),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve_public.goal.api.SetCurrentProgressResponse").must_to_any())
         }),
     );
 
@@ -1279,10 +1283,7 @@ pub fn register_progression_extra_handlers(
                 notices::goal_deleted(&target_uuid),
                 now_u,
             );
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.api.DeleteResponse"),
-                value: Vec::new(),
-            })
+            Ok(pb::message("eve_public.goal.api.DeleteResponse").must_to_any())
         }),
     );
 
@@ -1332,7 +1333,7 @@ pub fn register_progression_extra_handlers(
                     notices::goal_description_changed(&target_uuid, &text)
                 };
                 ctx_queue_notice(notices::goal_scope(mgr.goal_corp_id(&target_uuid), live_g.creator_id), notice, now_u);
-                Ok(GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{rsp_name}"), value: Vec::new() })
+                Ok(pb::message(rsp_name).must_to_any())
             }),
         );
     }
@@ -1347,26 +1348,20 @@ pub fn register_progression_extra_handlers(
             let count = collect_all_live_goals(&mgr, ctx.now_unix())
                 .into_iter()
                 .filter(|g| g.creator_id == cid && !g.closed)
-                .count() as u64;
-            let mut out = Vec::new();
-            encode_varint_field(1, count, &mut out);
-            encode_varint_field(2, 50, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.api.GetCapacityResponse"),
-                value: out,
-            })
+                .count() as u32;
+            Ok(pb::message("eve_public.goal.api.GetCapacityResponse")
+                .set("count", count)
+                .set("capacity", 50u32)
+                .must_to_any())
         }),
     );
 
     // 3b. eve_public.goal.contribution.api.{GetContributorSummariesForGoalRequest,GetMyContributorSummaryForGoalRequest,GetMyContributorSummariesRequest}
-    let encode_goal_contrib_summary = |cid: u32, progress: u64, uuid: &[u8; 16]| -> Vec<u8> {
-        let (mut ch_b, mut goal_b, mut s_b) = (Vec::new(), Vec::new(), Vec::new());
-        encode_varint_field(1, cid as u64, &mut ch_b);
-        encode_bytes_field(1, &ch_b, &mut s_b);
-        encode_varint_field(2, progress, &mut s_b);
-        encode_bytes_field(1, uuid, &mut goal_b);
-        encode_bytes_field(3, &goal_b, &mut s_b);
-        s_b
+    let build_goal_contrib_summary = |type_name: &str, cid: u32, progress: u64, uuid: &[u8; 16]| -> ProtoBuilder {
+        pb::message(type_name)
+            .set("contributor.sequential", cid)
+            .set("total_sum_of_progress_added", progress)
+            .set("goal.uuid", uuid.to_vec())
     };
     let resolve_goal_contribs = |mgr: &ProgressionExtraManager, g: &GenericGoalRecord| -> Vec<(u32, u64)> {
         if let (Some(pid), Some(ref db)) = (corp_projects::goal_uuid_to_project_id(&g.uuid), &mgr.db) {
@@ -1416,15 +1411,19 @@ pub fn register_progression_extra_handlers(
                     return Err((STATUS_FORBIDDEN, "Cross-corporation goal summary access denied".into()));
                 }
             }
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve_public.goal.contribution.api.GetContributorSummariesForGoalResponse");
             for (c_id, prog) in resolve_goal_contribs(&mgr, &g) {
-                let s_b = encode_goal_contrib_summary(c_id, prog, &g.uuid);
-                encode_bytes_field(1, &s_b, &mut out);
+                resp = resp.add(
+                    "summaries",
+                    build_goal_contrib_summary(
+                        "eve_public.goal.contribution.api.GetContributorSummariesForGoalResponse.ContributorSummary",
+                        c_id,
+                        prog,
+                        &g.uuid,
+                    ),
+                );
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.contribution.api.GetContributorSummariesForGoalResponse"),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -1445,13 +1444,17 @@ pub fn register_progression_extra_handlers(
                 .find(|&(c, _)| c == cid)
                 .map(|(_, p)| p)
                 .unwrap_or(0);
-            let s_b = encode_goal_contrib_summary(cid, prog, &g.uuid);
-            let mut out = Vec::new();
-            encode_bytes_field(1, &s_b, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.contribution.api.GetMyContributorSummaryForGoalResponse"),
-                value: out,
-            })
+            Ok(pb::message("eve_public.goal.contribution.api.GetMyContributorSummaryForGoalResponse")
+                .set(
+                    "summary",
+                    build_goal_contrib_summary(
+                        "eve_public.goal.contribution.api.GetMyContributorSummaryForGoalResponse.ContributorSummary",
+                        cid,
+                        prog,
+                        &g.uuid,
+                    ),
+                )
+                .must_to_any())
         }),
     );
 
@@ -1462,17 +1465,21 @@ pub fn register_progression_extra_handlers(
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
-            let mut out = Vec::new();
+            let mut resp = pb::message("eve_public.goal.contribution.api.GetMyContributorSummariesResponse");
             for g in collect_all_live_goals(&mgr, ctx.now_unix()) {
                 if let Some((_, prog)) = resolve_goal_contribs(&mgr, &g).into_iter().find(|&(c, p)| c == cid && p > 0) {
-                    let s_b = encode_goal_contrib_summary(cid, prog, &g.uuid);
-                    encode_bytes_field(1, &s_b, &mut out);
+                    resp = resp.add(
+                        "summaries",
+                        build_goal_contrib_summary(
+                            "eve_public.goal.contribution.api.GetMyContributorSummariesResponse.ContributorSummary",
+                            cid,
+                            prog,
+                            &g.uuid,
+                        ),
+                    );
                 }
             }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.contribution.api.GetMyContributorSummariesResponse"),
-                value: out,
-            })
+            Ok(resp.must_to_any())
         }),
     );
 
@@ -1515,14 +1522,24 @@ pub fn register_progression_extra_handlers(
             } else {
                 Vec::new()
             };
-            let mut out = Vec::new();
-            for ch in challenges {
-                let mut chal = Vec::new();
-                encode_varint_field(1, ch.challenge_id as u64, &mut chal); // challenge_id
-                encode_varint_field(2, ch.max_progress as u64, &mut chal); // target
-                encode_varint_field(3, ch.progress as u64, &mut chal);     // current
-                encode_bytes_field(1, &chal, &mut out);
-            }
+            // Legacy wire divergence from `eve.seasonalevent.challenge.Identifier`
+            // (which only defines `1: sequential`; fields 2/3 are ratcheted in `quasar_tap_ratchet.json`
+            // and asserted by `quasar_progression_extra_extra_unit_tests`).
+            let fields = challenges
+                .into_iter()
+                .map(|ch| {
+                    let chal = WireMessage {
+                        fields: vec![
+                            WireField { field_number: 1, value: WireValue::Varint(ch.challenge_id as u64) },
+                            WireField { field_number: 2, value: WireValue::Varint(ch.max_progress as u64) },
+                            WireField { field_number: 3, value: WireValue::Varint(ch.progress as u64) },
+                        ],
+                    }
+                    .encode();
+                    WireField { field_number: 1, value: WireValue::LengthDelimited(chal) }
+                })
+                .collect();
+            let out = WireMessage { fields }.encode();
             Ok(GoogleAny {
                 type_url: format!(
                     "{TYPE_GOOGLEAPIS_PREFIX}eve.seasonalevent.challenge.GetChallengesForCharacterResponse"
