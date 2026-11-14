@@ -410,6 +410,7 @@ pub(crate) async fn handle_multi_add(
             snap.module_online_states.remove(&item_id);
             snap.module_active_states.remove(&item_id);
             snap.module_active_charges.remove(&item_id);
+            crate::router::ServerContext::clear_persisted_module_overload(snap, old_loc, item_id);
             let (fin_opt, _) = crate::services::structure_acl_defense_rules::finalize_fuel_bay_move_in_snap(
                 ctx, snap, item_id, old_loc, old_flag, new_loc, flag, char_id, caller_corp_id,
             );

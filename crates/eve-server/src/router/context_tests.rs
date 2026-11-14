@@ -1110,3 +1110,152 @@ async fn persisted_future_module_reactivation_cooldown_does_not_freeze_after_res
     sys_h.step_manual(8.0).await.unwrap();
     assert!(!ctx3.is_module_in_reactivation_delay(ship_id, mod_id));
 }
+
+#[test]
+fn get_or_rebuild_ship_fitting_cached_branch_rejects_non_owner_and_preserves_cache() {
+    let ctx = test_ctx();
+    let char_a = 90_000_001_i64;
+    let char_b = 90_000_999_i64;
+    let ship_a = 100_000_960_i64;
+    let ship_b = 100_000_961_i64;
+    let mwd_mod_id = 100_000_962_i64;
+    let confessor_type_id = 34317_u32;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_a) {
+            ch.active_ship_id = ship_a;
+        }
+        let mut ch_b = snap.characters.get(&char_a).cloned().expect("seed char_a");
+        ch_b.character_id = char_b;
+        ch_b.active_ship_id = ship_b;
+        snap.characters.insert(char_b, ch_b);
+
+        // Give char_b distinct skill levels/implants so any cache overwrite would be observable.
+        snap.skills.insert(
+            char_b,
+            HashMap::from([(
+                3449_u32,
+                TrainedSkillRecord {
+                    type_id: 3449,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            )]),
+        );
+        snap.active_implants.insert(char_b, vec![20121]);
+
+        snap.items.insert(
+            ship_a,
+            make_item(
+                ship_a,
+                confessor_type_id,
+                char_a,
+                60_003_760,
+                InventoryFlag::None,
+                1,
+            ),
+        );
+        snap.items.insert(
+            ship_b,
+            make_item(
+                ship_b,
+                confessor_type_id,
+                char_b,
+                60_003_760,
+                InventoryFlag::None,
+                1,
+            ),
+        );
+        snap.items.insert(
+            mwd_mod_id,
+            make_item(mwd_mod_id, 5973, char_a, ship_a, InventoryFlag::MedSlot0, 1),
+        );
+        snap.module_online_states.insert(mwd_mod_id, true);
+        snap.module_active_states.insert(mwd_mod_id);
+    });
+
+    // Populate and cache char_a's fit with stance and overloaded MWD.
+    let mut fit_a = ctx.get_or_rebuild_ship_fitting(char_a, ship_a).unwrap();
+    let now_ms = ctx.now_unix_secs().saturating_mul(1000);
+    fit_a.switch_ship_stance(34321, now_ms, &ctx.sde).unwrap();
+    if let Some(m) = fit_a.modules.get_mut(&mwd_mod_id) {
+        m.state = eve_dogma::ModuleState::Overloaded;
+    }
+    ctx.persist_fit_inputs(ship_a, &fit_a.persisted_inputs());
+    ctx.store_ship_fitting(ship_a, fit_a.clone());
+
+    let err = ctx
+        .get_or_rebuild_ship_fitting(char_b, ship_a)
+        .expect_err("non-owner/non-pilot must be rejected on cached fit");
+    assert_eq!(err.code, "ShipNotFound");
+
+    // Verify cached fit on ship_a still reflects char_a's skills/implants, stance, and overload.
+    let cached = ctx
+        .ship_fittings
+        .read()
+        .unwrap()
+        .get(&ship_a)
+        .cloned()
+        .expect("ship_a must remain cached for owner");
+    assert_eq!(cached.character_skills, fit_a.character_skills);
+    assert_eq!(cached.implants, fit_a.implants);
+    assert_eq!(cached.active_stance_type_id, Some(34321));
+    assert_eq!(cached.last_stance_switch_ms, Some(now_ms));
+    assert_eq!(
+        cached.modules.get(&mwd_mod_id).map(|m| m.state),
+        Some(eve_dogma::ModuleState::Overloaded)
+    );
+}
+
+#[test]
+fn clear_persisted_module_overload_preserves_stance_and_prunes_empty_records() {
+    let ctx = test_ctx();
+    let ship_id = 100_000_970_i64;
+    let mod_1 = 100_000_971_i64;
+    let mod_2 = 100_000_972_i64;
+
+    ctx.persist_fit_inputs(
+        ship_id,
+        &eve_dogma::PersistedFitInputs {
+            active_stance_type_id: Some(34321),
+            last_stance_switch_ms: Some(1_800_000_000_000),
+            overloaded_modules: [mod_1, mod_2].into_iter().collect(),
+        },
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        ServerContext::clear_persisted_module_overload(snap, ship_id, mod_1);
+        let rec = snap.ship_fit_inputs.get(&ship_id).expect("record kept");
+        assert_eq!(rec.active_stance_type_id, Some(34321));
+        assert_eq!(rec.last_stance_switch_ms, Some(1_800_000_000_000));
+        assert!(!rec.overloaded_modules.contains(&mod_1));
+        assert!(rec.overloaded_modules.contains(&mod_2));
+
+        assert!(ServerContext::clear_all_persisted_ship_overloads(
+            snap, ship_id
+        ));
+        let rec_after = snap
+            .ship_fit_inputs
+            .get(&ship_id)
+            .expect("stance state keeps record after overload clear");
+        assert!(rec_after.overloaded_modules.is_empty());
+        assert_eq!(rec_after.active_stance_type_id, Some(34321));
+
+        // Removing the final overload from a stance-less record prunes the map entry completely.
+        snap.ship_fit_inputs
+            .get_mut(&ship_id)
+            .unwrap()
+            .active_stance_type_id = None;
+        snap.ship_fit_inputs
+            .get_mut(&ship_id)
+            .unwrap()
+            .last_stance_switch_ms = None;
+        snap.ship_fit_inputs
+            .get_mut(&ship_id)
+            .unwrap()
+            .overloaded_modules
+            .insert(mod_1);
+        ServerContext::clear_persisted_module_overload(snap, ship_id, mod_1);
+        assert!(!snap.ship_fit_inputs.contains_key(&ship_id));
+    });
+}

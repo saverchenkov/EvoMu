@@ -1147,6 +1147,11 @@ pub fn apply_overheat_rack_and_damage_on_cycle(
                 if mod_burned {
                     snap.module_online_states.insert(mod_id, false);
                     snap.module_active_states.remove(&mod_id);
+                    crate::router::ServerContext::clear_persisted_module_overload(
+                        snap,
+                        cycle.ship_id,
+                        mod_id,
+                    );
                     if mod_id == cycle.module_id {
                         *burned_out = true;
                     } else {

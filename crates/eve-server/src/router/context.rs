@@ -2115,6 +2115,46 @@ impl ServerContext {
         });
     }
 
+    /// Removes a single module from `ship_id`'s persisted `overloaded_modules` while keeping
+    /// stance state intact, pruning the entry when no persisted fit inputs remain.
+    pub(crate) fn clear_persisted_module_overload(
+        snap: &mut eve_db::WorldStateSnapshot,
+        ship_id: i64,
+        module_id: i64,
+    ) {
+        let should_prune = if let Some(rec) = snap.ship_fit_inputs.get_mut(&ship_id) {
+            rec.overloaded_modules.remove(&module_id);
+            rec.active_stance_type_id.is_none()
+                && rec.last_stance_switch_ms.is_none()
+                && rec.overloaded_modules.is_empty()
+        } else {
+            false
+        };
+        if should_prune {
+            snap.ship_fit_inputs.remove(&ship_id);
+        }
+    }
+
+    /// Clears all persisted `overloaded_modules` for `ship_id` while keeping stance state intact,
+    /// returning `true` if any overloaded module entry was cleared.
+    pub(crate) fn clear_all_persisted_ship_overloads(
+        snap: &mut eve_db::WorldStateSnapshot,
+        ship_id: i64,
+    ) -> bool {
+        let (cleared, should_prune) = if let Some(rec) = snap.ship_fit_inputs.get_mut(&ship_id) {
+            let had = !rec.overloaded_modules.is_empty();
+            rec.overloaded_modules.clear();
+            let empty = rec.active_stance_type_id.is_none() && rec.last_stance_switch_ms.is_none();
+            (had, empty)
+        } else {
+            (false, false)
+        };
+        if should_prune {
+            snap.ship_fit_inputs.remove(&ship_id);
+        }
+        cleared
+    }
+
     /// Captures cached rack heat and module heat damage for `ship_id` before cross-system transit.
     pub(crate) fn snapshot_rack_heat_and_damage(
         &self,

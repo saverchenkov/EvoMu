@@ -657,10 +657,16 @@ pub(crate) async fn handle_dogma_im(
                 Err(e) => return Some(Err(e)),
             };
             let (ship_id_opt, stance_type_id_opt) = if args.len() >= 2 {
-                (
-                    args.first().and_then(|a| a.as_i64()),
-                    args.get(1).and_then(|a| a.as_i64()),
-                )
+                let explicit_ship_id = args.first().and_then(|a| a.as_i64());
+                let valid_none = matches!(args.first(), Some(PyRep::None));
+                if !valid_none && explicit_ship_id.is_none_or(|id| id <= 0) {
+                    return Some(Err(BridgeRpcError {
+                        code: "AccessDenied".into(),
+                        message: "Cannot change stance on invalid ship target".into(),
+                        client_error: None,
+                    }));
+                }
+                (explicit_ship_id, args.get(1).and_then(|a| a.as_i64()))
             } else {
                 (None, args.first().and_then(|a| a.as_i64()))
             };
@@ -846,6 +852,7 @@ pub(crate) async fn handle_dogma_im(
                         }
                         banks.retain(|k, v| *k != item_id && v.len() > 1);
                     }
+                    ServerContext::clear_persisted_module_overload(snap, loc, item_id);
                     snap.remove_system_cleanup_item(item_id);
                     Ok(Some((found, removed_charges)))
                 } else {

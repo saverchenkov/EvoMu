@@ -1304,3 +1304,260 @@ fn test_propulsion_upgrades_overdrive_synthetic_overdrive_istab_nanofiber_stacki
     assert!((omen.ship.get_attribute(attr_ids::SIGNATURE_RADIUS, sde) - base_sig * 1.11).abs() < 1e-4);
     assert!(omen.ship.get_attribute(attr_ids::HP_STRUCT, sde) < base_hull * 0.85);
 }
+
+#[tokio::test]
+async fn test_ship_stance_cooldown_and_overload_survive_cache_invalidation_and_fit_rpcs() {
+    let ctx = ServerContext::new();
+    let base_secs = 1_800_000_000_u64;
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::VirtualServerClock::with_fixed_base(base_secs),
+    ));
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(4702);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(90_000_001)],
+            &kw,
+        )
+        .await;
+
+    let char_id = 90_000_001_i64;
+    let station_id = 60_003_760_i64;
+    let confessor_id = 720_001_i64;
+    let mwd_id = 720_002_i64;
+    let cap_mod_id = 720_003_i64;
+    let cap_charge_id = 720_004_i64;
+    let low_mod_id = 720_005_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let make_rec = |item_id, type_id, location_id, flag, quantity| InventoryItemRecord {
+            item_id,
+            type_id,
+            owner_id: char_id,
+            location_id,
+            flag,
+            quantity,
+            singleton: quantity == 1 && flag != InventoryFlag::Cargo,
+            version: 1,
+            dynamic_attributes: HashMap::new(),
+            source_mutaplasmid_id: None,
+            insured_payout_isk: 0.0,
+            is_blueprint_copy: false,
+            blueprint_runs_remaining: None,
+        };
+        snap.items.insert(
+            confessor_id,
+            make_rec(confessor_id, 34317, station_id, InventoryFlag::Hangar, 1),
+        );
+        snap.items.insert(
+            mwd_id,
+            make_rec(mwd_id, 5973, confessor_id, InventoryFlag::MedSlot0, 1),
+        );
+        snap.items.insert(
+            cap_mod_id,
+            make_rec(cap_mod_id, 3556, confessor_id, InventoryFlag::MedSlot1, 1),
+        );
+        snap.items.insert(
+            cap_charge_id,
+            make_rec(cap_charge_id, 3554, confessor_id, InventoryFlag::Cargo, 4),
+        );
+        snap.items.insert(
+            low_mod_id,
+            make_rec(low_mod_id, 1236, station_id, InventoryFlag::Hangar, 1),
+        );
+        snap.module_online_states.insert(mwd_id, true);
+        snap.module_online_states.insert(cap_mod_id, true);
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = confessor_id;
+            ch.station_id = Some(station_id);
+        }
+        let skills = snap.skills.entry(char_id).or_default();
+        for (sid, lvl) in [
+            (3426_u32, 5_u8),
+            (3413_u32, 5_u8),
+            (3449_u32, 5_u8),
+            (3394_u32, 5_u8),
+            (28164_u32, 4_u8),
+        ] {
+            skills.insert(
+                sid,
+                TrainedSkillRecord {
+                    type_id: sid,
+                    level: lvl,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+    });
+    sess.ship_id = Some(confessor_id);
+    let mut harness = common::borrow_wire_harness(&ctx, &mut sess);
+
+    // 1. Switch Confessor to Sharpshooter stance (34321) while docked.
+    let set_res = harness
+        .call_ok(
+            "shipStanceMgr",
+            None,
+            "SetShipStance",
+            &[PyRep::Integer(confessor_id), PyRep::Integer(34321)],
+            &kw,
+        )
+        .await;
+    assert_eq!(set_res, PyRep::Integer(34321));
+
+    let sharp_lock_range = ctx
+        .fit(char_id, confessor_id)
+        .unwrap()
+        .ship
+        .get_attribute(attr_ids::MAX_TARGET_RANGE, &ctx.sde);
+    let base_lock_range = ShipFittingEngine::from_sde(confessor_id, 34317, &ctx.sde)
+        .ship
+        .get_attribute(attr_ids::MAX_TARGET_RANGE, &ctx.sde);
+    assert!(sharp_lock_range > base_lock_range);
+
+    // 2. Perform docked fit mutations (invbroker.Add, LoadAmmo, TakeModuleOffline, SetModuleOnline).
+    harness
+        .call_ok(
+            "invbroker",
+            None,
+            "Add",
+            &[
+                PyRep::Integer(low_mod_id),
+                PyRep::Integer(confessor_id),
+                PyRep::Integer(InventoryFlag::LoSlot0 as i64),
+            ],
+            &kw,
+        )
+        .await;
+
+    harness
+        .call_ok(
+            "dogmaIM",
+            None,
+            "LoadAmmo",
+            &[
+                PyRep::Integer(confessor_id),
+                PyRep::PySet(vec![PyRep::Integer(cap_mod_id)]),
+                PyRep::PySet(vec![PyRep::Integer(cap_charge_id)]),
+            ],
+            &kw,
+        )
+        .await;
+
+    harness
+        .call_ok(
+            "dogmaIM",
+            None,
+            "TakeModuleOffline",
+            &[PyRep::Integer(confessor_id), PyRep::Integer(low_mod_id)],
+            &kw,
+        )
+        .await;
+    harness
+        .call_ok(
+            "dogmaIM",
+            None,
+            "SetModuleOnline",
+            &[PyRep::Integer(confessor_id), PyRep::Integer(low_mod_id)],
+            &kw,
+        )
+        .await;
+
+    // 3. Undock and overload the MWD in space, then force cold fit cache invalidation.
+    harness
+        .call_ok("stationSvc", None, "Undock", &[], &kw)
+        .await;
+    harness
+        .call_ok("dogmaIM", None, "Overload", &[PyRep::Integer(mwd_id)], &kw)
+        .await;
+
+    // Explicit fit cache invalidation simulating F4 tick / restart cache cold rebuild.
+    ctx.invalidate_ship_fitting(confessor_id);
+
+    // 4. GetAllInfo & rebuilt ShipFittingEngine preserve stance, Sharpshooter bonus, and overloaded MWD.
+    let rebuilt = ctx
+        .get_or_rebuild_ship_fitting(char_id, confessor_id)
+        .unwrap();
+    assert_eq!(rebuilt.active_stance_type_id, Some(34321));
+    assert_eq!(
+        rebuilt.last_stance_switch_ms,
+        Some(base_secs.saturating_mul(1000))
+    );
+    assert!(
+        rebuilt
+            .ship
+            .get_attribute(attr_ids::MAX_TARGET_RANGE, &ctx.sde)
+            > base_lock_range,
+        "Sharpshooter stance target range bonus must survive rebuild"
+    );
+    assert_eq!(
+        rebuilt.modules.get(&mwd_id).map(|m| m.state),
+        Some(eve_dogma::ModuleState::Overloaded),
+        "MWD overload state must survive cache invalidation and fitting RPCs"
+    );
+
+    let all_info = harness
+        .call_ok(
+            "dogmaIM",
+            None,
+            "GetAllInfo",
+            &[PyRep::Bool(true), PyRep::Bool(true)],
+            &kw,
+        )
+        .await;
+    let PyRep::KeyVal(all_kv) = all_info else {
+        panic!("Expected KeyVal from GetAllInfo");
+    };
+    assert_eq!(all_kv.get("activeStance"), Some(&PyRep::Integer(34321)));
+
+    // 4. Stance switch cooldown still enforces 10s wait after cache invalidation (<10s rejected, >=10s allowed).
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::VirtualServerClock::with_fixed_base(base_secs + 5),
+    ));
+    let cd_err = harness
+        .call(
+            "shipStanceMgr",
+            None,
+            "SetShipStance",
+            &[PyRep::Integer(confessor_id), PyRep::Integer(34323)],
+            &kw,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(cd_err.code, "StanceSwitchCooldown");
+
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::VirtualServerClock::with_fixed_base(base_secs + 12),
+    ));
+    let prop_res = harness
+        .call_ok(
+            "shipStanceMgr",
+            None,
+            "SetShipStance",
+            &[PyRep::Integer(confessor_id), PyRep::Integer(34323)],
+            &kw,
+        )
+        .await;
+    assert_eq!(prop_res, PyRep::Integer(34323));
+
+    // 5. Offlining the overloaded MWD clears its persisted overload so re-onlining does not leave it overloaded.
+    harness
+        .call_ok(
+            "dogmaIM",
+            None,
+            "TakeModuleOffline",
+            &[PyRep::Integer(confessor_id), PyRep::Integer(mwd_id)],
+            &kw,
+        )
+        .await;
+    ctx.db.with_snapshot(|snap| {
+        let rec = snap
+            .ship_fit_inputs
+            .get(&confessor_id)
+            .expect("stance still persisted");
+        assert_eq!(rec.active_stance_type_id, Some(34323));
+        assert!(!rec.overloaded_modules.contains(&mwd_id));
+    });
+}

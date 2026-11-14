@@ -1680,6 +1680,11 @@ async fn handle_invbroker_add(
                     snap.module_online_states.remove(&effective_item_id);
                     snap.module_active_states.remove(&effective_item_id);
                     snap.module_active_charges.remove(&effective_item_id);
+                    crate::router::ServerContext::clear_persisted_module_overload(
+                        snap,
+                        old_loc_id,
+                        effective_item_id,
+                    );
                 }
                 if old_was_fitted && (old_loc_id != new_loc || orig_item.flag != flag) {
                     if let Some(banks) = snap.weapon_banks.get_mut(&old_loc_id) {

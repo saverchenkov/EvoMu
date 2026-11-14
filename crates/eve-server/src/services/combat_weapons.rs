@@ -662,6 +662,7 @@ pub async fn handle_weapons(
                         fm.state = eve_dogma::ModuleState::Online;
                     }
                     fit.recalculate_stats(&ctx.sde);
+                    ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
                     ctx.invalidate_and_push_fit(ship_id);
                 }
             }
@@ -1430,6 +1431,7 @@ pub async fn handle_weapons(
                 });
                 let _ = fit.activate_module(module_id, is_overloaded, &ctx.sde);
             }
+            ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
             ctx.invalidate_and_push_fit(ship_id);
             ctx.record_module_reactivation_delay(ship_id, module_id, cycle_secs);
 
