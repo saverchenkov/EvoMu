@@ -959,6 +959,9 @@ pub async fn flush_all_systems_final_checkpoints(ctx: &ServerContext) -> usize {
     ctx.sync_runtime_to_db();
     let now_unix = ctx.now_unix();
     let offset_secs = ctx.clock().offset_secs();
+    let unrebased_offset_secs = ctx
+        .unrebased_clock_offset_secs
+        .load(std::sync::atomic::Ordering::Acquire);
     if !ctx.db.is_write_locked_by_current_thread() {
         let last_tick = ctx
             .cluster_tick_last_unix
@@ -972,6 +975,7 @@ pub async fn flush_all_systems_final_checkpoints(ctx: &ServerContext) -> usize {
                 .service_state_blobs
                 .insert("cluster_tick_last_unix".into(), last_tick.to_string());
             wtx.set_clock_offset_secs(offset_secs);
+            wtx.set_unrebased_clock_offset_secs(unrebased_offset_secs);
             Ok::<_, eve_db::TxError>(())
         });
     }

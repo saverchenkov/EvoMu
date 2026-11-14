@@ -568,6 +568,10 @@ impl ServerContext {
     pub fn with_sde_and_repository(sde: Arc<SdeRegistry>, db: Arc<WorldRepository>) -> Self {
         let _ = world_seeder::seed_dual_anchor_markets(&db, &sde);
         let clock = db.clock();
+        let unrebased_clock_offset_secs = db
+            .persisted_unrebased_clock_offset_secs()
+            .unwrap_or(0)
+            .min(clock.offset_secs());
         let cataloged_services = Arc::clone(Self::default_cataloged_services());
         let quasar_domains = Arc::clone(Self::default_quasar_domains());
         let (notify_tx, _) = tokio::sync::broadcast::channel(256);
@@ -703,7 +707,7 @@ impl ServerContext {
             cluster_tick_last_unix: Arc::new(AtomicU64::new(0)),
             cluster_tick_persisted_unix: Arc::new(AtomicU64::new(0)),
             dedicated_physics_ticker_active: Arc::new(AtomicBool::new(false)),
-            unrebased_clock_offset_secs: Arc::new(AtomicU64::new(0)),
+            unrebased_clock_offset_secs: Arc::new(AtomicU64::new(unrebased_clock_offset_secs)),
             fw_idle_last_step_unix: Arc::new(RankedRwLock::new(HashMap::new())),
         };
         let npc_ctx_w = ctx.downgrade();
@@ -1367,6 +1371,7 @@ impl ServerContext {
         if self.db.is_write_locked_by_current_thread() {
             return;
         }
+        let unrebased_offset_secs = self.unrebased_clock_offset_secs.load(Ordering::Acquire);
         let _ = self.db.tx("clock_advance", |wtx| {
             wtx.snap
                 .service_state_blobs
@@ -1375,6 +1380,7 @@ impl ServerContext {
                 .service_state_blobs
                 .insert("cluster_tick_last_unix".into(), cur_unix.to_string());
             wtx.set_clock_offset_secs(offset_secs);
+            wtx.set_unrebased_clock_offset_secs(unrebased_offset_secs);
             Ok::<_, eve_db::TxError>(())
         });
     }

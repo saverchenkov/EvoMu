@@ -677,3 +677,216 @@ async fn test_t7_injectable_server_clock_time_acceleration_and_pause_on_tick() {
         );
     }
 }
+
+#[tokio::test]
+async fn test_machonet_get_time_sqlite_restart_preserves_clock_offset_without_wallclock_jump() {
+    use eve_testkit::client_harness::ContractValidationMode;
+
+    let dir = std::env::temp_dir().join(format!(
+        "evomu_it_clock_restart_1061_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let db_path = dir.join("world_clock_restart.sqlite");
+
+    let sde = Arc::new(
+        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path())
+            .expect("open default SDE"),
+    );
+    let kw = HashMap::new();
+    let five_secs_ticks: i64 = 5 * 10_000_000;
+    let char_id: i64 = 90_000_003;
+
+    // Boot 1: pin clock, queue Mechanics I, run `/advancetime 791825` (+9.16d) via ClientHarness,
+    // verify machoNet.GetTime stays anchored while skill queue completes, then run clean shutdown.
+    {
+        let db1 = Arc::new(
+            eve_db::WorldRepository::open_sqlite(&db_path).expect("open sqlite boot 1"),
+        );
+        let ctx1 = Arc::new(ServerContext::with_sde_and_repository(
+            Arc::clone(&sde),
+            db1,
+        ));
+        pin_clock(&ctx1);
+        ctx1.seed_demo_world_fixtures();
+        ctx1.db
+            .provision_gm_account("gm_clock", "gm-clock-secret", char_id, "GM Clock");
+        ctx1.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.clone_grade = 2;
+                ch.skill_points = 0.0;
+            }
+            if let Some(skills) = snap.skills.get_mut(&char_id) {
+                skills.remove(&3392);
+            }
+        });
+
+        let mut harness1 = new_wire_harness(&ctx1, 99_101)
+            .with_mode(ContractValidationMode::Ratcheted);
+        harness1
+            .call_ok(
+                "authentication",
+                None,
+                "Login",
+                &[
+                    PyRep::String("gm_clock".into()),
+                    PyRep::String("gm-clock-secret".into()),
+                ],
+                &kw,
+            )
+            .await;
+        harness1
+            .call_ok(
+                "charUnboundMgr",
+                None,
+                "SelectCharacterID",
+                &[PyRep::Integer(char_id)],
+                &kw,
+            )
+            .await;
+
+        let t_pinned_initial = harness1
+            .call_ok("machoNet", None, "GetTime", &[], &kw)
+            .await
+            .as_i64()
+            .expect("initial GetTime integer");
+        let expected_pinned =
+            ((TEST_CLOCK_BASE_UNIX as i64) + 11_644_473_600) * 10_000_000;
+        assert_eq!(t_pinned_initial, expected_pinned);
+
+        harness1
+            .call_ok(
+                "skillMgr2",
+                None,
+                "SaveSkillQueue",
+                &[PyRep::List(vec![PyRep::Tuple(vec![
+                    PyRep::Integer(3392),
+                    PyRep::Integer(1),
+                ])])],
+                &kw,
+            )
+            .await;
+
+        harness1
+            .call_ok(
+                "slash",
+                None,
+                "SlashCmd",
+                &[PyRep::String("/advancetime 791825".into())],
+                &kw,
+            )
+            .await;
+
+        let t_after_advancetime = harness1
+            .call_ok("machoNet", None, "GetTime", &[], &kw)
+            .await
+            .as_i64()
+            .expect("post-/advancetime GetTime integer");
+        assert_eq!(
+            t_after_advancetime, expected_pinned,
+            "/advancetime must not shift machoNet.GetTime away from pinned baseline"
+        );
+        assert_eq!(ctx1.clock().offset_secs(), 791_825);
+        assert_eq!(ctx1.now_unix_secs(), TEST_CLOCK_BASE_UNIX + 791_825);
+        let mechanics_lvl = ctx1.db.with_snapshot(|snap| {
+            snap.skills
+                .get(&char_id)
+                .and_then(|m| m.get(&3392))
+                .map(|s| s.level)
+        });
+        assert_eq!(
+            mechanics_lvl,
+            Some(1),
+            "/advancetime 791825 must complete Mechanics I training via preserved server clock"
+        );
+
+        eve_server::sp6_lifecycle::flush_all_systems_final_checkpoints(&ctx1).await;
+    }
+
+    // Boot 2: reopen SQLite without resetting the restored clock. db.clock() keeps +791_825s
+    // while machoNet.GetTime on the ClientHarness wire stays anchored to real host wallclock.
+    {
+        let db2 = Arc::new(
+            eve_db::WorldRepository::open_sqlite(&db_path).expect("reopen sqlite boot 2"),
+        );
+        assert_eq!(db2.clock().offset_secs(), 791_825);
+        assert_eq!(
+            db2.persisted_unrebased_clock_offset_secs()
+                .expect("read persisted unrebased offset"),
+            791_825
+        );
+        let ctx2 = Arc::new(ServerContext::with_sde_and_repository(
+            Arc::clone(&sde),
+            db2,
+        ));
+        let mut harness2 = new_wire_harness(&ctx2, 99_102)
+            .with_mode(ContractValidationMode::Ratcheted);
+        harness2
+            .call_ok(
+                "authentication",
+                None,
+                "Login",
+                &[
+                    PyRep::String("gm_clock".into()),
+                    PyRep::String("gm-clock-secret".into()),
+                ],
+                &kw,
+            )
+            .await;
+        harness2
+            .call_ok(
+                "charUnboundMgr",
+                None,
+                "SelectCharacterID",
+                &[PyRep::Integer(char_id)],
+                &kw,
+            )
+            .await;
+
+        let wall_before = eve_server::router::context::host_wall_blueos_filetime_ticks();
+        let t_restarted = harness2
+            .call_ok("machoNet", None, "GetTime", &[], &kw)
+            .await
+            .as_i64()
+            .expect("restarted GetTime integer");
+        let wall_after = eve_server::router::context::host_wall_blueos_filetime_ticks();
+        assert!(
+            t_restarted >= wall_before - five_secs_ticks
+                && t_restarted <= wall_after + five_secs_ticks,
+            "restarted machoNet.GetTime ({t_restarted}) must stay anchored to host wallclock ({wall_before}..{wall_after}), not jump +9.16d"
+        );
+        assert!(
+            ctx2.now_blueos_filetime_ticks() - t_restarted >= 791_800 * 10_000_000,
+            "db.clock() must preserve the +791_825s offset across restart for skill queues and timers"
+        );
+
+        // Additional timeControl.AdvanceClock after restart keeps GetTime anchored while advancing db.clock().
+        harness2
+            .call_ok(
+                "timeControl",
+                None,
+                "AdvanceClock",
+                &[PyRep::Integer(60)],
+                &kw,
+            )
+            .await;
+        let t_after_tc = harness2
+            .call_ok("machoNet", None, "GetTime", &[], &kw)
+            .await
+            .as_i64()
+            .expect("post-AdvanceClock GetTime integer");
+        let wall_after_tc = eve_server::router::context::host_wall_blueos_filetime_ticks();
+        assert!(
+            (t_after_tc - wall_after_tc).abs() < five_secs_ticks,
+            "machoNet.GetTime ({t_after_tc}) must remain anchored to wallclock ({wall_after_tc}) after AdvanceClock"
+        );
+        assert_eq!(ctx2.clock().offset_secs(), 791_885);
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
