@@ -20,8 +20,9 @@ async fn call_rpc(
     service: &str,
     method: &str,
     args: &[PyRep],
-) -> Result<PyRep, eve_proto::BridgeRpcError> {
-    ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None)
+) -> Result<PyRep, eve_testkit::client_harness::ClientErrorResponse> {
+    crate::common::borrow_wire_harness(ctx, sess)
+        .call(service, None, method, args, &HashMap::new())
         .await
 }
 
@@ -61,15 +62,13 @@ async fn quasar_rpc(
         authoritative_context: None,
         trace_context: None,
     };
-    let rep = ctx
-        .dispatch_rpc(
-            sess,
+    let rep = crate::common::borrow_wire_harness(ctx, sess)
+        .call(
             "publicGatewaySvc",
             None,
             "SendRequest",
             &[PyRep::Bytes(req.encode_proto())],
             &HashMap::new(),
-            None,
         )
         .await
         .expect("SendRequest");
@@ -259,7 +258,11 @@ async fn test_journey_esi_external() {
         let resp = send_raw_esi_request(addr, &req).await.expect("ESI GET");
         assert_eq!(resp.status_code, 200, "ESI {path} must return 200");
         if path.ends_with("/wallet/") {
-            let bal: f64 = std::str::from_utf8(&resp.body).unwrap().trim().parse().unwrap();
+            let bal: f64 = std::str::from_utf8(&resp.body)
+                .expect("utf8 body")
+                .trim()
+                .parse()
+                .expect("f64 balance");
             assert!(bal > 0.0, "ESI wallet balance must match in-client balance");
         }
         assert!(
@@ -294,7 +297,7 @@ async fn test_journey_downtime_persistence() {
             .await
             .expect("SelectCharacterID");
 
-        ctx.db.add_or_stack_item(90_000_001, 60_003_760, InventoryFlag::Hangar, 34, 777).unwrap();
+        ctx.db.add_or_stack_item(90_000_001, 60_003_760, InventoryFlag::Hangar, 34, 777).expect("add tritanium");
         call_rpc(&ctx, &mut sess, "slash", "SlashCmd", &[PyRep::String("/giveisk 25000".into())])
             .await
             .expect("/giveisk");
@@ -344,7 +347,7 @@ async fn test_journey_gm_tools() {
 
     for cmd in ["/giveisk 1000", "/createitem 34 10", "/giveskill 3300 5", "/spawnnpc 10002", "/teleport 30000144", "/heal"] {
         let denied = call_rpc(&ctx, &mut normal_sess, "slash", "SlashCmd", &[PyRep::String(cmd.into())]).await;
-        assert_eq!(denied.unwrap_err().code, "InsufficientRole", "normal account must be refused {cmd}");
+        assert_eq!(denied.expect_err("InsufficientRole").code, "InsufficientRole", "normal account must be refused {cmd}");
     }
 
     // 2. Provision real GM account via account-role path (no session.role mutation)
@@ -380,7 +383,7 @@ async fn test_journey_gm_tools() {
     .await
     .expect("CreateCharacterWithDoll GM")
     .as_i64()
-    .unwrap();
+    .expect("gm character id");
     call_rpc(&ctx, &mut gm_sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(gm_cid)])
         .await
         .expect("SelectCharacterID GM");

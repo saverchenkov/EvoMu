@@ -1145,7 +1145,7 @@ async fn test_mobile_deploy_restrictions_and_gate_bubble_regression() {
         });
         snap.items.insert(ammo_mod_id, InventoryItemRecord {
             item_id: ammo_mod_id, type_id: 47925, owner_id: PILOT_2,
-            location_id: SHIP_2, flag: eve_db::InventoryFlag::Cargo, quantity: 50, singleton: false, ..Default::default()
+            location_id: SHIP_2, flag: eve_db::InventoryFlag::HiSlot0, quantity: 50, singleton: false, ..Default::default()
         });
     });
 
@@ -1872,7 +1872,7 @@ async fn test_mobile_cyno_inhibitor_deploy_restrictions_and_suspect_flag() {
         });
         snap.items.insert(ammo_id, InventoryItemRecord {
             item_id: ammo_id, type_id: 47925, owner_id: PILOT_2,
-            location_id: SHIP_2, flag: eve_db::InventoryFlag::Cargo, quantity: 50, singleton: false, ..Default::default()
+            location_id: SHIP_2, flag: eve_db::InventoryFlag::HiSlot0, quantity: 50, singleton: false, ..Default::default()
         });
     });
 
