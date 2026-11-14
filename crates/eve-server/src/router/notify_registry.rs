@@ -3872,6 +3872,23 @@ define_notifications! {
     OnSafeLogoffActivated => "OnSafeLogoffActivated" ("charid") {
         samples: || vec![vec![]],
     },
+    ProcessGodmaPrimeLocation => "ProcessGodmaPrimeLocation" ("charid") {
+        fields: { location_id: i64, data: PyRep },
+        samples: || vec![vec![
+            PyRep::Integer(100_000_010),
+            PyRep::Dict(vec![(
+                PyRep::Integer(100_000_010),
+                PyRep::keyval([
+                    ("itemID", PyRep::Integer(100_000_010)),
+                    ("invItem", sample_keyval_item()),
+                    (
+                        "attributes",
+                        PyRep::Dict(vec![(PyRep::Integer(2), PyRep::Real(1.0))]),
+                    ),
+                ]),
+            )]),
+        ]],
+    },
 }
 
 impl OnOwnOrdersChanged {

@@ -241,7 +241,7 @@ pub(super) fn should_invalidate_bound_object(
             let inv_in_ctx = oid == char_id
                 || ship_id == Some(oid)
                 || active_dock_id == Some(oid)
-                || (active_dock_id.is_none() && oid == i64::from(system_id))
+                || ((active_dock_id.is_none() || dock_is_structure) && oid == i64::from(system_id))
                 || ctx
                     .sde
                     .stations
@@ -385,7 +385,6 @@ fn authorize_invbroker_binding(
         || Some(object_id) == session.station_id
         || Some(object_id) == session.structure_id
         || (session.station_id.is_none()
-            && session.structure_id.is_none()
             && session.solar_system_id.map(i64::from) == Some(object_id))
         || ctx
             .sde

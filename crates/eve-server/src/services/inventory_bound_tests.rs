@@ -1812,3 +1812,212 @@ async fn hf1020_01_capsuleer_deliveries_multi_add_ownership_and_deposit_rejectio
         assert_eq!(it.owner_id, member_id);
     });
 }
+
+#[tokio::test]
+async fn invbroker_upwell_structure_bound_on_solar_system_supports_structure_containers_and_enforces_auth() {
+    let ctx = test_ctx();
+    let char_id = 95_301_062;
+    let corp_id = 98_301_062;
+    let other_corp_id = 98_991_062;
+    let sys_id = 30_000_142u32;
+    let other_sys = 30_002_187u32;
+    let struct_id = 1_030_001_062_001i64;
+    let other_sys_struct_id = 1_030_001_062_002i64;
+    let active_ship_id = 1_000_953_620i64;
+    let hangar_ship_id = 1_000_953_621i64;
+    let foreign_ship_id = 1_000_953_622i64;
+    let space_can_id = 1_000_953_623i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = char_id as u64;
+        ch.name = "Structure Dock Pilot".into();
+        ch.corporation_id = corp_id;
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = Some(struct_id);
+        ch.active_ship_id = active_ship_id;
+        snap.characters.insert(char_id, ch);
+
+        for (sid, s_sys) in [(struct_id, sys_id), (other_sys_struct_id, other_sys)] {
+            snap.structures.insert(
+                sid,
+                UpwellStructureRecord {
+                    structure_id: sid,
+                    type_id: 35_832,
+                    owner_corp_id: other_corp_id,
+                    solar_system_id: s_sys,
+                    name: format!("Public Citadel {sid}"),
+                    state: "ShieldVulnerable".into(),
+                    ..Default::default()
+                },
+            );
+        }
+        for (item_id, type_id, owner_id, location_id, flag) in [
+            (active_ship_id, 587, char_id, struct_id, InventoryFlag::Hangar),
+            (hangar_ship_id, 588, char_id, struct_id, InventoryFlag::Hangar),
+            (foreign_ship_id, 587, 99_999_999, struct_id, InventoryFlag::Hangar),
+            (space_can_id, 23, char_id, i64::from(sys_id), InventoryFlag::None),
+        ] {
+            snap.items.insert(
+                item_id,
+                InventoryItemRecord {
+                    item_id,
+                    type_id,
+                    owner_id,
+                    location_id,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let mut sess = SessionState {
+        session_id: 1062,
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(corp_id),
+        solar_system_id: Some(sys_id),
+        station_id: None,
+        structure_id: Some(struct_id),
+        ship_id: Some(active_ship_id),
+        ..Default::default()
+    };
+    let sys_bid = ctx
+        .bind_object(&sess, "invbroker", i64::from(sys_id))
+        .expect("invbroker must bind to solar_system_id while docked in Upwell structure");
+    let sys_entry = ctx.verify_bound_object(&sess, sys_bid).expect("verify sys invbroker");
+
+    // 1. GetInventoryFromId(struct_id, 1) on sys-bound invbroker succeeds even when structure is owned by another corp.
+    let struct_inv_rep = handle(
+        &ctx,
+        &sess,
+        Some(&sys_entry),
+        "invbroker",
+        "GetInventoryFromId",
+        &[PyRep::Integer(struct_id), PyRep::Integer(1)],
+        None,
+    )
+    .expect("handled")
+    .expect("GetInventoryFromId(struct_id) must succeed when docked there");
+    let struct_sub_bid = struct_inv_rep.as_i64().expect("bound sub-object id") as u64;
+    let struct_sub_entry = ctx.verify_bound_object(&sess, struct_sub_bid).expect("verify struct sub-object");
+    assert_eq!(struct_sub_entry.object_id, struct_id);
+
+    let self_row = handle(
+        &ctx,
+        &sess,
+        Some(&struct_sub_entry),
+        "invbroker",
+        "GetSelfInvItem",
+        &[],
+        None,
+    )
+    .expect("handled")
+    .expect("GetSelfInvItem on structure inventory");
+    assert_eq!(self_row.dbrow_get("itemID"), Some(&PyRep::Integer(struct_id)));
+
+    // 2. GetInventoryFromId for another ship in the structure hangar succeeds.
+    let hangar_ship_rep = handle(
+        &ctx,
+        &sess,
+        Some(&sys_entry),
+        "invbroker",
+        "GetInventoryFromId",
+        &[PyRep::Integer(hangar_ship_id), PyRep::Integer(0)],
+        None,
+    )
+    .expect("handled")
+    .expect("GetInventoryFromId(hangar_ship_id) must succeed");
+    assert!(hangar_ship_rep.as_i64().is_some());
+
+    // 3. GetInventory(10014, None) (`containerStructure`) binds sub-object to `struct_id` and lists hangar items.
+    let container_rep = handle(
+        &ctx,
+        &sess,
+        Some(&sys_entry),
+        "invbroker",
+        "GetInventory",
+        &[PyRep::Integer(CONTAINER_STRUCTURE), PyRep::None],
+        None,
+    )
+    .expect("handled")
+    .expect("GetInventory(10014) must succeed while docked in structure");
+    let container_bid = container_rep.as_i64().expect("container sub-object id") as u64;
+    let container_entry = ctx.verify_bound_object(&sess, container_bid).expect("verify container sub-object");
+    assert_eq!(container_entry.object_id, struct_id);
+
+    let listed = crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut sess,
+        Some(&container_entry),
+        "invbroker",
+        "List",
+        &[PyRep::Integer(i64::from(InventoryFlag::Hangar as u16))],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("List(Hangar) on structure container");
+    let listed_ids: Vec<i64> = listed
+        .crowset_rows()
+        .expect("CRowset")
+        .iter()
+        .filter_map(|r| r.dbrow_get("itemID").and_then(|v| v.as_i64()))
+        .collect();
+    assert!(listed_ids.contains(&active_ship_id));
+    assert!(listed_ids.contains(&hangar_ship_id));
+    assert!(!listed_ids.contains(&foreign_ship_id));
+
+    // 4. Negative security checks: foreign ship, space can while docked, foreign structure, and undocked GetInventory(10014).
+    for denied_id in [foreign_ship_id, space_can_id, other_sys_struct_id] {
+        let err = handle(
+            &ctx,
+            &sess,
+            Some(&sys_entry),
+            "invbroker",
+            "GetInventoryFromId",
+            &[PyRep::Integer(denied_id), PyRep::Integer(0)],
+            None,
+        )
+        .expect("handled")
+        .unwrap_err();
+        assert_eq!(
+            err.code,
+            "InventoryNotAccessible", // rpc-lint: allow error code assertion
+            "GetInventoryFromId({denied_id}) must be denied"
+        );
+    }
+
+    let wrong_sys_entry = bound_invbroker(char_id, i64::from(other_sys));
+    let wrong_sys_err = handle(
+        &ctx,
+        &sess,
+        Some(&wrong_sys_entry),
+        "invbroker",
+        "GetInventory",
+        &[PyRep::Integer(CONTAINER_STRUCTURE), PyRep::None],
+        None,
+    )
+    .expect("handled")
+    .unwrap_err();
+    assert_eq!(wrong_sys_err.code, "CharacterNotAtStation"); // rpc-lint: allow error code assertion
+
+    sess.structure_id = None;
+    let undocked_err = handle(
+        &ctx,
+        &sess,
+        Some(&sys_entry),
+        "invbroker",
+        "GetInventory",
+        &[PyRep::Integer(CONTAINER_STRUCTURE), PyRep::None],
+        None,
+    )
+    .expect("handled")
+    .unwrap_err();
+    assert_eq!(undocked_err.code, "CharacterNotAtStation"); // rpc-lint: allow error code assertion
+}
