@@ -1246,3 +1246,110 @@ fn issue_771_and_776_get_members_paged_crowset_and_reprocess_list_compat() {
     assert!(job_norm.dict_get("startDate").and_then(|v| v.as_i64()).unwrap_or(0) > 130_000_000_000_000_000);
     assert!(job_norm.dict_get("endDate").and_then(|v| v.as_i64()).unwrap_or(0) > 130_000_000_000_000_000);
 }
+
+#[test]
+fn normalize_industry_job_promotes_elapsed_active_and_ready_paused_to_status_ready() {
+    let mk_job = |job_id: i64, status: &str, pause_unix: Option<i64>| {
+        let mut entries = vec![
+            ("jobID", PyRep::Integer(job_id)),
+            ("installerID", PyRep::Integer(90_000_001)),
+            ("facilityID", PyRep::Integer(60_003_760)),
+            ("blueprintItemID", PyRep::Integer(200_000_000 + job_id)),
+            ("blueprintTypeID", PyRep::Integer(967)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(1)),
+            ("status", PyRep::String(status.into())),
+            ("durationSeconds", PyRep::Integer(600)),
+            ("startUnix", PyRep::Integer(1_700_000_000)),
+            ("endUnix", PyRep::Integer(1_700_000_600)),
+        ];
+        if let Some(p) = pause_unix {
+            entries.push(("pauseUnix", PyRep::Integer(p)));
+        }
+        PyRep::keyval(entries)
+    };
+
+    // Before endUnix (1_700_000_599 < 1_700_000_600), an active job stays STATUS_INSTALLED (1).
+    let before_end = normalize_macho_rpc_reply_at(
+        "industryManager",
+        "GetJob",
+        Ok(mk_job(1, "Active", None)),
+        Some(1_700_000_599),
+    )
+    .expect("GetJob before endUnix");
+    assert_eq!(before_end.dict_get("status"), Some(&PyRep::Integer(1)));
+
+    // At and past endUnix, an active job promotes to STATUS_READY (3) (#1052).
+    for now in [1_700_000_600_u64, 1_700_001_000_u64] {
+        let at_or_past = normalize_macho_rpc_reply_at(
+            "industryManager",
+            "GetJob",
+            Ok(mk_job(2, "Active", None)),
+            Some(now),
+        )
+        .expect("GetJob at or past endUnix");
+        assert_eq!(at_or_past.dict_get("status"), Some(&PyRep::Integer(3)));
+    }
+
+    // Paused jobs stay STATUS_PAUSED (2) unless paused at/after endUnix (`industryCommon.JobStatus`).
+    let paused_early = normalize_macho_rpc_reply_at(
+        "industryManager",
+        "GetJob",
+        Ok(mk_job(3, "Paused", Some(1_700_000_599))),
+        Some(1_700_001_000),
+    )
+    .expect("GetJob paused before endUnix");
+    assert_eq!(paused_early.dict_get("status"), Some(&PyRep::Integer(2)));
+
+    let paused_ready = normalize_macho_rpc_reply_at(
+        "industryManager",
+        "GetJob",
+        Ok(mk_job(4, "Paused", Some(1_700_000_600))),
+        Some(1_700_001_000),
+    )
+    .expect("GetJob paused at endUnix");
+    assert_eq!(paused_ready.dict_get("status"), Some(&PyRep::Integer(3)));
+
+    // Terminal statuses must remain unchanged even past endUnix.
+    let delivered = normalize_macho_rpc_reply_at(
+        "industryManager",
+        "GetJob",
+        Ok(mk_job(5, "Delivered", None)),
+        Some(1_700_001_000),
+    )
+    .expect("GetJob delivered");
+    assert_eq!(delivered.dict_get("status"), Some(&PyRep::Integer(101)));
+
+    let cancelled = normalize_macho_rpc_reply_at(
+        "industryManager",
+        "GetJob",
+        Ok(mk_job(6, "Cancelled", None)),
+        Some(1_700_001_000),
+    )
+    .expect("GetJob cancelled");
+    assert_eq!(cancelled.dict_get("status"), Some(&PyRep::Integer(102)));
+
+    // GetJobsByOwner applies the same elapsed promotion across a mixed list.
+    let mut future_active = mk_job(7, "Active", None);
+    if let PyRep::KeyVal(ref mut map) = future_active {
+        map.insert("endUnix".into(), PyRep::Integer(1_700_001_200));
+    }
+    let owner_list = normalize_macho_rpc_reply_at(
+        "industryManager",
+        "GetJobsByOwner",
+        Ok(PyRep::List(vec![
+            mk_job(8, "Active", None),
+            future_active,
+            mk_job(9, "Delivered", None),
+        ])),
+        Some(1_700_000_600),
+    )
+    .expect("GetJobsByOwner mixed list");
+    let PyRep::List(rows) = owner_list else {
+        panic!("expected List from GetJobsByOwner normalization");
+    };
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].dict_get("status"), Some(&PyRep::Integer(3)));
+    assert_eq!(rows[1].dict_get("status"), Some(&PyRep::Integer(1)));
+    assert_eq!(rows[2].dict_get("status"), Some(&PyRep::Integer(101)));
+}

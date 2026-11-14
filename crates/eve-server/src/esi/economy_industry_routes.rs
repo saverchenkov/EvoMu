@@ -313,7 +313,9 @@ pub fn dispatch_economy_industry_route(
                                 .is_some_and(|m| m.use_corp);
                         j.installer_id == char_id
                             && !is_corp_job
-                            && (include_completed || j.status.eq_ignore_ascii_case("active"))
+                            && (include_completed
+                                || j.status.eq_ignore_ascii_case("active")
+                                || j.status.eq_ignore_ascii_case("ready"))
                     })
                     .collect();
                 jobs.sort_by_key(|j| j.job_id);
@@ -397,7 +399,10 @@ pub fn dispatch_economy_industry_route(
                         let is_corp_job = j.installer_id == corp_id
                             || crate::services::industry_pi::load_job_cost_meta(snap, j.job_id)
                                 .is_some_and(|m| m.use_corp && m.owner_id == corp_id);
-                        is_corp_job && (include_completed || j.status.eq_ignore_ascii_case("active"))
+                        is_corp_job
+                            && (include_completed
+                                || j.status.eq_ignore_ascii_case("active")
+                                || j.status.eq_ignore_ascii_case("ready"))
                     })
                     .collect();
                 jobs.sort_by_key(|j| j.job_id);

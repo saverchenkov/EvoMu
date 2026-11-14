@@ -456,3 +456,107 @@ fn industry_job_queries_permissions_and_monitor_branches() {
     let disc_empty = handle_industry_job_queries(&ctx, &mut sess_a, "industryMonitor", "DisconnectJob", &[], &HashMap::new()).unwrap().unwrap();
     assert_eq!(disc_empty, PyRep::None);
 }
+
+#[test]
+fn format_industry_job_pyrep_at_promotes_elapsed_and_aligns_advancetime_dates() {
+    let to_ft = |u: u64| ((u as i64).saturating_add(11_644_473_600)).saturating_mul(10_000_000);
+    let offset_7d = 7 * 86_400_u64;
+    let client_base = 1_800_000_000_u64;
+    let job = IndustryJobRecord {
+        job_id: 7701,
+        installer_id: 90_000_001,
+        facility_id: 60_003_760,
+        blueprint_item_id: 88_001,
+        blueprint_type_id: 967,
+        activity_id: 1,
+        runs: 1,
+        product_type_id: 587,
+        status: "Active".into(),
+        duration_seconds: 600,
+        start_unix: client_base + offset_7d,
+        blueprint_location_id: 60_003_760,
+        output_location_id: 60_003_760,
+        cost: Some(250.0),
+        licensed_runs: None,
+        probability: None,
+        completed_unix: None,
+        completed_character_id: None,
+    };
+    let meta = IndustryJobCostMeta::default();
+
+    // Unelapsed job keeps "Active" while FILETIME dates subtract `/advancetime` lead (`offset_7d`)
+    // so client `blue.os.GetWallclockTime()` sees a 600s job rather than 7d + 600s (#1052).
+    let before = format_industry_job_pyrep_at(
+        &job,
+        &meta,
+        Some(client_base + offset_7d + 599),
+        offset_7d,
+    );
+    assert_eq!(before.dict_get("status"), Some(&PyRep::String("Active".into())));
+    assert_eq!(before.dict_get("startUnix"), Some(&PyRep::Integer((client_base + offset_7d) as i64)));
+    assert_eq!(before.dict_get("endUnix"), Some(&PyRep::Integer((client_base + offset_7d + 600) as i64)));
+    assert_eq!(before.dict_get("startDate"), Some(&PyRep::Integer(to_ft(client_base))));
+    assert_eq!(before.dict_get("endDate"), Some(&PyRep::Integer(to_ft(client_base + 600))));
+
+    // Elapsed job promotes to "Ready" on wire while preserving aligned dates.
+    let at_end = format_industry_job_pyrep_at(
+        &job,
+        &meta,
+        Some(client_base + offset_7d + 600),
+        offset_7d,
+    );
+    assert_eq!(at_end.dict_get("status"), Some(&PyRep::String("Ready".into())));
+    assert_eq!(at_end.dict_get("endDate"), Some(&PyRep::Integer(to_ft(client_base + 600))));
+
+    // Paused job paused at or past end_unix promotes to "Ready" with aligned pauseDate.
+    let mut paused_job = job.clone();
+    paused_job.status = "Paused".into();
+    let paused_meta = IndustryJobCostMeta {
+        paused_at_unix: Some(client_base + offset_7d + 600),
+        ..Default::default()
+    };
+    let paused_ready = format_industry_job_pyrep_at(
+        &paused_job,
+        &paused_meta,
+        Some(client_base + offset_7d + 700),
+        offset_7d,
+    );
+    assert_eq!(paused_ready.dict_get("status"), Some(&PyRep::String("Ready".into())));
+    assert_eq!(paused_ready.dict_get("pauseDate"), Some(&PyRep::Integer(to_ft(client_base + 600))));
+
+    // GetJobCounts must continue counting "Ready" undelivered jobs against open slot totals.
+    let ctx = make_ctx();
+    let char_id = 90_000_001_i64;
+    let corp_id = 98_000_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.remove(&char_id);
+        snap.industry_jobs.clear();
+        let mut ready_mfg = job.clone();
+        ready_mfg.status = "Ready".into();
+        snap.industry_jobs.insert(ready_mfg.job_id, ready_mfg);
+        let mut ready_sci = job.clone();
+        ready_sci.job_id = 7702;
+        ready_sci.activity_id = 4;
+        ready_sci.status = "Ready".into();
+        snap.industry_jobs.insert(ready_sci.job_id, ready_sci);
+        let mut ready_react = job;
+        ready_react.job_id = 7703;
+        ready_react.activity_id = 9;
+        ready_react.status = "Ready".into();
+        snap.industry_jobs.insert(ready_react.job_id, ready_react);
+    });
+    let mut sess = char_session(char_id, corp_id);
+    let counts = handle_industry_job_queries(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "GetJobCounts",
+        &[],
+        &HashMap::new(),
+    )
+    .expect("GetJobCounts dispatch")
+    .expect("GetJobCounts ok");
+    assert_eq!(counts.dict_get("manufacturingUsed"), Some(&PyRep::Integer(1)));
+    assert_eq!(counts.dict_get("researchUsed"), Some(&PyRep::Integer(1)));
+    assert_eq!(counts.dict_get("reactionsUsed"), Some(&PyRep::Integer(1)));
+}

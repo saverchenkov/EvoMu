@@ -108,9 +108,40 @@ pub fn resolve_decryptor_modifiers(
 }
 
 pub fn format_industry_job_pyrep(j: &IndustryJobRecord, meta: &IndustryJobCostMeta) -> PyRep {
+    format_industry_job_pyrep_at(j, meta, None, 0)
+}
+
+/// Serializes an [`IndustryJobRecord`] for `industryManager.GetJob` / `GetJobsByOwner`.
+///
+/// When `now_unix` is supplied, active jobs whose `end_unix` has elapsed (or paused jobs
+/// paused at or after `end_unix`) are promoted to `"Ready"` (`STATUS_READY = 3`) to match
+/// V24.01 `eve/common/script/util/industryCommon.pyj:JobStatus`, and `startDate` / `endDate` /
+/// `pauseDate` FILETIMEs subtract `unrebased_offset_secs` (`/advancetime` lead) so dates stay
+/// aligned with the client's `blue.os.GetWallclockTime()` baseline.
+pub fn format_industry_job_pyrep_at(
+    j: &IndustryJobRecord,
+    meta: &IndustryJobCostMeta,
+    now_unix: Option<u64>,
+    unrebased_offset_secs: u64,
+) -> PyRep {
     let owner_id = if meta.owner_id > 0 { meta.owner_id } else { j.installer_id };
     let end_unix = j.start_unix.saturating_add(j.duration_seconds);
-    let to_ft = |u: u64| ((u as i64).saturating_add(11_644_473_600)).saturating_mul(10_000_000);
+    let to_ft = |u: u64| {
+        ((u.saturating_sub(unrebased_offset_secs) as i64).saturating_add(11_644_473_600))
+            .saturating_mul(10_000_000)
+    };
+    let wire_status = if (j.status.eq_ignore_ascii_case("active")
+        || j.status.eq_ignore_ascii_case("installed"))
+        && now_unix.is_some_and(|now| now >= end_unix)
+    {
+        "Ready".to_string()
+    } else if j.status.eq_ignore_ascii_case("paused")
+        && meta.paused_at_unix.is_some_and(|paused_at| paused_at >= end_unix)
+    {
+        "Ready".to_string()
+    } else {
+        j.status.clone()
+    };
     let bp_loc_id = if j.blueprint_location_id > 0 {
         j.blueprint_location_id
     } else {
@@ -125,7 +156,7 @@ pub fn format_industry_job_pyrep(j: &IndustryJobRecord, meta: &IndustryJobCostMe
         .completed_character_id
         .map(PyRep::Integer)
         .unwrap_or_else(|| {
-            if j.status.eq_ignore_ascii_case("delivered") {
+            if wire_status.eq_ignore_ascii_case("delivered") {
                 PyRep::Integer(j.installer_id)
             } else {
                 PyRep::None
@@ -157,7 +188,7 @@ pub fn format_industry_job_pyrep(j: &IndustryJobRecord, meta: &IndustryJobCostMe
         ("outputLocationID", PyRep::Integer(out_loc_id)),
         ("outputFlagID", PyRep::Integer(4)),
         ("completedCharacterID", completed_char_rep),
-        ("status", PyRep::String(j.status.clone())),
+        ("status", PyRep::String(wire_status)),
         ("durationSeconds", PyRep::Integer(j.duration_seconds as i64)),
         ("timeInSeconds", PyRep::Integer(j.duration_seconds as i64)),
         ("startUnix", PyRep::Integer(j.start_unix as i64)),
@@ -860,21 +891,29 @@ pub(crate) fn handle_industry_job_queries(
                 let mfg_used = snap
                     .industry_jobs
                     .values()
-                    .filter(|j| j.installer_id == char_id && matches!(j.status.as_str(), "Active" | "Paused") && j.activity_id == 1)
+                    .filter(|j| {
+                        j.installer_id == char_id
+                            && matches!(j.status.as_str(), "Active" | "Paused" | "Ready")
+                            && j.activity_id == 1
+                    })
                     .count() as i64;
                 let sci_used = snap
                     .industry_jobs
                     .values()
                     .filter(|j| {
                         j.installer_id == char_id
-                            && matches!(j.status.as_str(), "Active" | "Paused")
+                            && matches!(j.status.as_str(), "Active" | "Paused" | "Ready")
                             && matches!(j.activity_id, 3 | 4 | 5 | 8)
                     })
                     .count() as i64;
                 let react_used = snap
                     .industry_jobs
                     .values()
-                    .filter(|j| j.installer_id == char_id && matches!(j.status.as_str(), "Active" | "Paused") && j.activity_id == 9)
+                    .filter(|j| {
+                        j.installer_id == char_id
+                            && matches!(j.status.as_str(), "Active" | "Paused" | "Ready")
+                            && j.activity_id == 9
+                    })
                     .count() as i64;
                 PyRep::keyval([
                     ("manufacturingUsed", PyRep::Integer(mfg_used)),
@@ -895,6 +934,7 @@ pub(crate) fn handle_industry_job_queries(
             };
             let job_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let now_unix = ctx.now_unix();
+            let unrebased_offset_secs = ctx.unrebased_clock_offset_secs();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 sync_industry_job_pause_states(snap, now_unix);
                 let Some(j) = snap.industry_jobs.get(&job_id) else {
@@ -913,7 +953,8 @@ pub(crate) fn handle_industry_job_queries(
                         client_error: None,
                     });
                 }
-                let mut rep = format_industry_job_pyrep(j, &meta);
+                let mut rep =
+                    format_industry_job_pyrep_at(j, &meta, Some(now_unix), unrebased_offset_secs);
                 let sys_id = ctx
                     .sde
                     .stations
@@ -956,6 +997,7 @@ pub(crate) fn handle_industry_job_queries(
                 }));
             }
             let now_unix = ctx.now_unix();
+            let unrebased_offset_secs = ctx.unrebased_clock_offset_secs();
             let jobs = ctx.db.with_mut_snapshot(|snap| {
                 sync_industry_job_pause_states(snap, now_unix);
                 snap.industry_jobs
@@ -970,7 +1012,12 @@ pub(crate) fn handle_industry_job_queries(
                     })
                     .map(|j| {
                         let meta = load_job_cost_meta(snap, j.job_id).unwrap_or_default();
-                        let mut rep = format_industry_job_pyrep(j, &meta);
+                        let mut rep = format_industry_job_pyrep_at(
+                            j,
+                            &meta,
+                            Some(now_unix),
+                            unrebased_offset_secs,
+                        );
                         let sys_id = ctx
                             .sde
                             .stations

@@ -1722,6 +1722,12 @@ impl ServerContext {
         self.now_blueos_filetime_ticks().saturating_sub(unrebased_ticks)
     }
 
+    /// Seconds added via [`Self::advance_secs_without_sim_clock_rebase`] (`/advancetime`)
+    /// by which the server's virtual clock leads the live client's `blue.os.GetSimTime()`.
+    pub fn unrebased_clock_offset_secs(&self) -> u64 {
+        self.unrebased_clock_offset_secs.load(Ordering::Acquire)
+    }
+
     /// Advances all active character skill queues by `elapsed_secs` of virtual time (`T-7`).
     pub fn advance_skill_queues(&self, elapsed_secs: f64) {
         self.advance_skill_queues_inner(elapsed_secs, None);

@@ -1196,7 +1196,7 @@ pub(crate) fn handle_kick_out_members(
                         || c.acceptor_id == Some(corp_id))
             });
             let has_open_corp_job = snap.industry_jobs.values().any(|j| {
-                matches!(j.status.as_str(), "Active" | "Paused")
+                matches!(j.status.as_str(), "Active" | "Paused" | "Ready")
                     && (j.installer_id == corp_id
                         || snap
                             .items

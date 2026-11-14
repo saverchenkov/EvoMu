@@ -337,10 +337,11 @@ impl ServerContext {
                         .map(|bid| self.bound_object_rep(bid, caller_trace));
                 }
             }
-            res = crate::router::client_compat::normalize_macho_rpc_reply(
+            res = crate::router::client_compat::normalize_macho_rpc_reply_at(
                 &effective_service,
                 method,
                 res,
+                Some(self.now_unix()),
             );
             if effective_service == "marketProxy"
                 && matches!(method, "GetOrders" | "GetPlexOrders")

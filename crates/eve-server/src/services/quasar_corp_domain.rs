@@ -575,7 +575,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                         .industry_jobs
                         .values()
                         .filter(|j| {
-                            j.status == "Active"
+                            matches!(j.status.as_str(), "Active" | "Ready")
                                 && (s.characters
                                     .get(&j.installer_id)
                                     .is_some_and(|c| c.corporation_id == corpid)

@@ -496,6 +496,17 @@ pub fn normalize_macho_rpc_reply(
     method: &str,
     rpc_res: Result<PyRep, BridgeRpcError>,
 ) -> Result<PyRep, BridgeRpcError> {
+    normalize_macho_rpc_reply_at(service, method, rpc_res, None)
+}
+
+/// MachoNet wire-compatibility adjustments with optional server Unix timestamp for
+/// time-dependent normalization (e.g. promoting elapsed industry jobs to `STATUS_READY`).
+pub fn normalize_macho_rpc_reply_at(
+    service: &str,
+    method: &str,
+    rpc_res: Result<PyRep, BridgeRpcError>,
+    now_unix: Option<u64>,
+) -> Result<PyRep, BridgeRpcError> {
     if service == "XmppChatMgr" && method == "ResyncSystemChannelAccess" {
         if let Ok(ref rep) = rpc_res {
             if let Some(PyRep::List(chans)) = rep.dict_get("channels") {
@@ -1889,13 +1900,13 @@ pub fn normalize_macho_rpc_reply(
         }
     } else if service == "industryManager" && method == "GetJob" {
         if let Ok(rep) = rpc_res {
-            return Ok(normalize_industry_job_rep(rep));
+            return Ok(normalize_industry_job_rep(rep, now_unix));
         }
     } else if service == "industryManager" && method == "GetJobsByOwner" {
         if let Ok(PyRep::List(jobs)) = rpc_res {
             return Ok(PyRep::List(
                 jobs.into_iter()
-                    .map(normalize_industry_job_rep)
+                    .map(|job| normalize_industry_job_rep(job, now_unix))
                     .collect(),
             ));
         }
@@ -3016,7 +3027,7 @@ fn normalize_facility_rep(rep: PyRep) -> PyRep {
     PyRep::KeyVal(entries)
 }
 
-fn normalize_industry_job_rep(rep: PyRep) -> PyRep {
+fn normalize_industry_job_rep(rep: PyRep, now_unix: Option<u64>) -> PyRep {
     let mut entries = match rep {
         PyRep::KeyVal(m) => m,
         PyRep::Dict(kvs) => kvs
@@ -3057,9 +3068,10 @@ fn normalize_industry_job_rep(rep: PyRep) -> PyRep {
         .get("endUnix")
         .and_then(PyRep::as_i64)
         .unwrap_or_else(|| start_unix.saturating_add(dur_secs));
+    let pause_unix = entries.get("pauseUnix").and_then(PyRep::as_i64);
     let to_ft = |u: i64| (u.saturating_add(11_644_473_600)).saturating_mul(10_000_000);
 
-    let status_int = match entries.get("status") {
+    let raw_status_int = match entries.get("status") {
         Some(PyRep::Integer(v)) => *v,
         Some(PyRep::String(s)) => match s.to_ascii_lowercase().as_str() {
             "active" | "installed" => 1,
@@ -3070,6 +3082,18 @@ fn normalize_industry_job_rep(rep: PyRep) -> PyRep {
             _ => 1,
         },
         _ => 1,
+    };
+    // Match V24.01 `industryCommon.JobStatus`: active jobs at or past `endUnix` (or paused jobs
+    // paused at or after `endUnix`) surface as `STATUS_READY` (`3`) so `JobsStrip/SubmitButton`
+    // transitions from `Stop` to `Deliver` after `/completeindustry` or natural completion.
+    let status_int = if raw_status_int == 1
+        && now_unix.is_some_and(|now| (now as i64) >= end_unix)
+    {
+        3
+    } else if raw_status_int == 2 && pause_unix.is_some_and(|p| p >= end_unix) {
+        3
+    } else {
+        raw_status_int
     };
     entries.insert("status".into(), PyRep::Integer(status_int));
     entries
