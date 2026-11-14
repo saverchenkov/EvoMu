@@ -326,6 +326,41 @@ pub fn push_pending_session_notification(
     session.push_notification(notif.event, notif.args);
 }
 
+/// Encodes a registered notification by event name into a wire-ready [`PendingMachoNotification`]
+/// after verifying that `event` is registered in [`all_registered_notifications`] and `args.len()`
+/// satisfies its registered arity bounds.
+pub fn build_pending_registered_notification(
+    recipient_char_id: i64,
+    user_id_opt: Option<u64>,
+    event: &str,
+    id_type: &str,
+    args: Vec<PyRep>,
+    created_filetime: i64,
+) -> Option<PendingMachoNotification> {
+    let entry = all_registered_notifications()
+        .iter()
+        .find(|e| e.event == event)?;
+    if args.len() < entry.min_arity || args.len() > entry.max_arity {
+        return None;
+    }
+    let (packet, marshaled_packet) = ServerContext::build_macho_notification_packet(
+        recipient_char_id,
+        user_id_opt,
+        entry.event,
+        id_type,
+        args.clone(),
+    );
+    Some(PendingMachoNotification::new(
+        recipient_char_id,
+        entry.event,
+        id_type,
+        args,
+        packet,
+        marshaled_packet,
+        created_filetime,
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_and_push_typed_notification<N: TypedNotification>(
     pending_notifications: Option<&dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>>,
@@ -1302,6 +1337,14 @@ define_notifications! {
     OnNesIntroStateChanged => "OnNesIntroStateChanged" ("charid") {
         fields: { character_id: i64, new_state_id: i64 },
         samples: || vec![vec![PyRep::Integer(90_000_001), PyRep::Integer(2)]],
+    },
+    OnNewSkillQueueSaved => "OnNewSkillQueueSaved" ("charid") {
+        fields: { new_queue: PyRep },
+        samples: || vec![vec![PyRep::List(vec![PyRep::keyval([
+            ("trainingTypeID", PyRep::Integer(3402)),
+            ("trainingToLevel", PyRep::Integer(2)),
+            ("queuePosition", PyRep::Integer(0)),
+        ])])]],
     },
     OnNonDiminishingInjectionsAdded => "OnNonDiminishingInjectionsAdded" ("charid") {
         fields: { amount: i64 },
