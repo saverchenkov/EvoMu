@@ -309,30 +309,35 @@ pub fn deactivate_ship_modules_on_leave_space(ctx: &ServerContext, char_id: i64,
     for (_, handle) in ctx.systems.active_system_handles() {
         handle.cancel_ship_nanite_repairs_sync(ship_id, true);
     }
-    let (solar_system_id, active_mods): (Option<u32>, Vec<i64>) = ctx.db.with_mut_snapshot(|snap| {
-        let sys_id = snap.characters.get(&char_id).map(|c| c.solar_system_id);
-        let mods: Vec<i64> = snap
-            .items
-            .values()
-            .filter(|it| {
-                it.location_id == ship_id && snap.module_active_states.contains(&it.item_id)
-            })
-            .map(|it| it.item_id)
-            .collect();
-        for mid in &mods {
-            snap.module_active_states.remove(mid);
-            snap.module_active_charges.remove(mid);
-        }
-        (sys_id, mods)
-    });
+    let (solar_system_id, active_mods, cleared_overloads): (Option<u32>, Vec<i64>, bool) =
+        ctx.db.with_mut_snapshot(|snap| {
+            let sys_id = snap.characters.get(&char_id).map(|c| c.solar_system_id);
+            let mods: Vec<i64> = snap
+                .items
+                .values()
+                .filter(|it| {
+                    it.location_id == ship_id && snap.module_active_states.contains(&it.item_id)
+                })
+                .map(|it| it.item_id)
+                .collect();
+            for mid in &mods {
+                snap.module_active_states.remove(mid);
+                snap.module_active_charges.remove(mid);
+            }
+            let had_overloads =
+                crate::router::ServerContext::clear_all_persisted_ship_overloads(snap, ship_id);
+            (sys_id, mods, had_overloads)
+        });
     let _ = crate::services::notify_emitters_space_dungeons::flush_ship_all_ewar_sync(
         ctx,
         char_id,
         solar_system_id,
         ship_id,
     );
-    if !active_mods.is_empty() {
+    if !active_mods.is_empty() || cleared_overloads {
         ctx.invalidate_ship_fitting(ship_id);
+    }
+    if !active_mods.is_empty() {
         for mid in active_mods {
             let _ = crate::services::notify_emitters_space_dungeons::flush_module_ewar_end(
                 ctx,

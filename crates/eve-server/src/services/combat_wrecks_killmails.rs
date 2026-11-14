@@ -1029,6 +1029,11 @@ pub async fn handle_wrecks_killmails(
             }
             ctx.db.with_mut_snapshot(|snap| {
                 snap.module_active_states.remove(&module_id);
+                crate::router::ServerContext::clear_persisted_module_overload(
+                    snap,
+                    ship_id,
+                    module_id,
+                );
                 if let Some(m_item) = snap.items.get_mut(&module_id) {
                     if let Some(t) = ctx.sde.types.get(&m_item.type_id).filter(|t| t.group_id == 2018) {
                         let base_rep = t.default_attributes.get(&84).copied().unwrap_or(0.0);

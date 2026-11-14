@@ -823,9 +823,11 @@ pub async fn handle_dogma_take_module_offline(
     ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
         snap.module_online_states.insert(module_id, false);
         snap.module_active_states.remove(&module_id);
+        crate::router::ServerContext::clear_persisted_module_overload(snap, ship_id, module_id);
         for &mid in &offline_mod_ids {
             snap.module_online_states.insert(mid, false);
             snap.module_active_states.remove(&mid);
+            crate::router::ServerContext::clear_persisted_module_overload(snap, ship_id, mid);
         }
         Ok(())
     })?;

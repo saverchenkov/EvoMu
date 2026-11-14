@@ -504,6 +504,124 @@ async fn set_ship_stance_enforces_ownership_and_pushes_fit_projection_in_space()
     assert_eq!(pushed.baseline, expected.baseline);
 }
 
+#[tokio::test]
+async fn set_ship_stance_rejects_bound_ship_and_invalid_ship_args_without_mutating_state() {
+    let ctx = new_seeded_ctx();
+    let char_a = 92_100_111i64;
+    let char_b = 92_100_112i64;
+    let corp_id = 98_100_111i64;
+    let station_id = 60_003_760i64;
+    let ship_a = 10_921_111_001i64;
+    let ship_b = 10_921_111_002i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_a;
+        ch.corporation_id = corp_id;
+        ch.station_id = Some(station_id);
+        ch.active_ship_id = ship_a;
+        snap.characters.insert(char_a, ch.clone());
+
+        ch.character_id = char_b;
+        ch.active_ship_id = ship_b;
+        snap.characters.insert(char_b, ch);
+
+        for (sid, oid) in [(ship_a, char_a), (ship_b, char_b)] {
+            snap.items.insert(
+                sid,
+                InventoryItemRecord {
+                    item_id: sid,
+                    type_id: 34317, // Confessor
+                    owner_id: oid,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let mut sess_a = make_session(
+        char_a,
+        corp_id,
+        Some(30_000_142),
+        Some(station_id),
+        Some(ship_a),
+    );
+    let mut sess_b = make_session(
+        char_b,
+        corp_id,
+        Some(30_000_142),
+        Some(station_id),
+        Some(ship_b),
+    );
+
+    let switched = call_ship_stance_mgr(
+        &ctx,
+        &mut sess_a,
+        None,
+        "SetShipStance",
+        &[PyRep::Integer(ship_a), PyRep::Integer(34321)],
+    )
+    .await
+    .unwrap();
+    assert_eq!(switched, PyRep::Integer(34321));
+
+    // 1. 1-arg call bound to another character's ship must fail with AccessDenied.
+    let bound_to_a = BoundObjectEntry {
+        bound_id: 77,
+        session_id: sess_b.session_id,
+        user_id: sess_b.user_id.unwrap_or(42),
+        character_id: char_b,
+        service: "shipStanceMgr".into(),
+        object_id: ship_a,
+        oid_str: ship_a.to_string(),
+        ref_id: 1,
+    };
+    let bound_err = call_ship_stance_mgr(
+        &ctx,
+        &mut sess_b,
+        Some(&bound_to_a),
+        "SetShipStance",
+        &[PyRep::Integer(34323)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(bound_err.code, "AccessDenied");
+
+    // 2. Non-positive or non-integer ship_id in 2-arg SetShipStance must NOT fall back to active_ship_id.
+    for bad_arg in [
+        PyRep::Integer(0),
+        PyRep::Integer(-1),
+        PyRep::String("bad".into()),
+    ] {
+        let bad_err = call_ship_stance_mgr(
+            &ctx,
+            &mut sess_b,
+            None,
+            "SetShipStance",
+            &[bad_arg, PyRep::Integer(34323)],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(bad_err.code, "AccessDenied");
+    }
+
+    // Ship A's stance and Ship B's unswitched state must both remain untouched.
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.ship_fit_inputs
+                .get(&ship_a)
+                .and_then(|r| r.active_stance_type_id),
+            Some(34321)
+        );
+        assert!(!snap.ship_fit_inputs.contains_key(&ship_b));
+    });
+}
+
 fn new_seeded_ctx() -> ServerContext {
     ServerContext::with_sde_and_repository(
         shared_sde(),

@@ -898,6 +898,11 @@ pub(crate) fn step_cycles_and_capacitor_with_epochs(
                         }
                         snap.module_online_states.insert(cycle.module_id, false);
                         snap.module_active_states.remove(&cycle.module_id);
+                        crate::router::ServerContext::clear_persisted_module_overload(
+                            snap,
+                            cycle.ship_id,
+                            cycle.module_id,
+                        );
                     });
                 }
             }

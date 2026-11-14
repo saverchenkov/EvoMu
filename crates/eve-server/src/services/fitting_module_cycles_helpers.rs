@@ -1640,6 +1640,7 @@ async fn deactivate_repeating_cycle_after_action(
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.remove(&module_id);
         snap.module_active_charges.remove(&module_id);
+        crate::router::ServerContext::clear_persisted_module_overload(snap, ship_id, module_id);
     });
     if let Some(cid) = owner_char_id {
         ctx.invalidate_and_push_fit(ship_id);

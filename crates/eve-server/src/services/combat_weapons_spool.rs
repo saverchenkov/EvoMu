@@ -72,6 +72,7 @@ pub fn stop_entropic_spool_and_deactivate(
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.remove(&module_id);
         snap.module_active_charges.remove(&module_id);
+        crate::router::ServerContext::clear_persisted_module_overload(snap, ship_id, module_id);
     });
     if let Ok(mut fittings) = ctx.ship_fittings.write() {
         if let Some(fit) = fittings.get_mut(&ship_id) {
