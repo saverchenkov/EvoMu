@@ -1195,7 +1195,7 @@ pub fn handle_batch3_gm_slash_cmd(
             let completed_jobs: Vec<(i64, i64, i64, i64, u32)> = ctx.db.with_mut_snapshot(|snap| {
                 let mut matched = Vec::new();
                 for job in snap.industry_jobs.values_mut() {
-                    if job.status != "Active" {
+                    if !matches!(job.status.as_str(), "Active" | "Ready") {
                         continue;
                     }
                     let matches = match target_job {
@@ -1203,6 +1203,7 @@ pub fn handle_batch3_gm_slash_cmd(
                         None => job.installer_id == caller_cid || job.installer_id == corp_id,
                     };
                     if matches {
+                        job.status = "Ready".into();
                         job.start_unix = now.saturating_sub(job.duration_seconds.max(1));
                         matched.push((job.job_id, job.installer_id, job.blueprint_item_id, job.runs));
                     }

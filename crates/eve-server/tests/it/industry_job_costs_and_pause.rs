@@ -306,3 +306,337 @@ async fn test_live_industry_service_offline_pause_resume_batch_complete_and_ex_c
         .expect_err("Ex-corp member must not CompleteJob");
     assert_eq!(comp_err.code, "JobOwnershipViolation");
 }
+
+#[tokio::test]
+async fn test_wire_completeindustry_and_elapsed_jobs_report_status_ready_and_aligned_dates() {
+    // parity: fix:1052
+    let ctx = fast_full_market_ctx();
+    let char_id = 93_800_052_i64;
+    let user = "hf1052_pilot";
+    let pass = "hf1052_secret";
+    ctx.db
+        .provision_gm_account(user, pass, char_id, "HF1052 Builder");
+
+    let kw = std::collections::HashMap::new();
+    let mut harness = common::new_wire_harness(&ctx, 88_052);
+    harness
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[PyRep::String(user.into()), PyRep::String(pass.into())],
+            &kw,
+        )
+        .await;
+    harness
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_id)],
+            &kw,
+        )
+        .await;
+
+    harness
+        .call_ok(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/giveisk 500000000".into())],
+            &kw,
+        )
+        .await;
+    harness
+        .call_ok(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/giveskill 3380 5".into())],
+            &kw,
+        )
+        .await;
+    harness
+        .call_ok(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/giveskill 3387 5".into())],
+            &kw,
+        )
+        .await;
+
+    let small_bp = small_mineral_bp(&ctx);
+    let bp1_rep = harness
+        .call_ok(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(format!("/createitem {small_bp} 1"))],
+            &kw,
+        )
+        .await;
+    let bp1_id = int(&bp1_rep, "itemID");
+    let bp2_rep = harness
+        .call_ok(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(format!("/createitem {small_bp} 1"))],
+            &kw,
+        )
+        .await;
+    let bp2_id = int(&bp2_rep, "itemID");
+    for (tid, qty) in bom(&ctx, small_bp, 3) {
+        harness
+            .call_ok(
+                "slash",
+                None,
+                "SlashCmd",
+                &[PyRep::String(format!("/createitem {tid} {qty}"))],
+                &kw,
+            )
+            .await;
+    }
+
+    // Repro #1052: advance server clock +7d via `/advancetime` (leaves client wallclock at
+    // TEST_CLOCK_BASE_UNIX) before installing jobs, then `/completeindustry` on Job 1 while
+    // letting Job 2 run to natural elapsed time via `advance_virtual_clock`.
+    let advance_secs = 7 * 86_400_u64;
+    harness
+        .call_ok(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(format!("/advancetime {advance_secs}"))],
+            &kw,
+        )
+        .await;
+
+    let j1_req = PyRep::keyval([
+        ("blueprintID", PyRep::Integer(bp1_id)),
+        ("blueprintTypeID", PyRep::Integer(i64::from(small_bp))),
+        ("activityID", PyRep::Integer(1)),
+        ("runs", PyRep::Integer(1)),
+        ("facilityID", PyRep::Integer(JITA_STATION)),
+    ]);
+    let j1_inst = harness
+        .call_ok("industryManager", None, "InstallJob", &[j1_req], &kw)
+        .await;
+    let j1_id = int(&j1_inst, "jobID");
+
+    let j2_req = PyRep::keyval([
+        ("blueprintID", PyRep::Integer(bp2_id)),
+        ("blueprintTypeID", PyRep::Integer(i64::from(small_bp))),
+        ("activityID", PyRep::Integer(1)),
+        ("runs", PyRep::Integer(2)),
+        ("facilityID", PyRep::Integer(JITA_STATION)),
+    ]);
+    let j2_inst = harness
+        .call_ok("industryManager", None, "InstallJob", &[j2_req], &kw)
+        .await;
+    let j2_id = int(&j2_inst, "jobID");
+
+    let to_ft = |u: u64| ((u as i64).saturating_add(11_644_473_600)).saturating_mul(10_000_000);
+    let j1_before = harness
+        .call_ok(
+            "industryManager",
+            None,
+            "GetJob",
+            &[PyRep::Integer(j1_id)],
+            &kw,
+        )
+        .await;
+    let j1_dur = int(&j1_before, "durationSeconds") as u64;
+    assert_eq!(j1_before.dict_get("status"), Some(&PyRep::Integer(1)));
+    assert_eq!(
+        j1_before.dict_get("startDate"),
+        Some(&PyRep::Integer(to_ft(common::TEST_CLOCK_BASE_UNIX)))
+    );
+    assert_eq!(
+        j1_before.dict_get("endDate"),
+        Some(&PyRep::Integer(to_ft(common::TEST_CLOCK_BASE_UNIX + j1_dur)))
+    );
+
+    // `/completeindustry` marks Job 1 Ready on snapshot + emits OnIndustryJob(status=3), and
+    // immediate `GetJob` / `GetJobsByOwner` wire replies must preserve `status == 3` and
+    // client-aligned `endDate` (not `1` and not +7 days in the future).
+    let slash_out = harness
+        .call_exchange(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(format!("/completeindustry {j1_id}"))],
+            &kw,
+        )
+        .await;
+    let slash_done = slash_out
+        .result
+        .expect("/completeindustry slash command must succeed");
+    assert_eq!(slash_done.dict_get("readyJobCount"), Some(&PyRep::Integer(1)));
+    assert!(
+        slash_out.notifications.iter().any(|(event, args)| {
+            event == "OnIndustryJob"
+                && args.first() == Some(&PyRep::Integer(j1_id))
+                && args.get(4) == Some(&PyRep::Integer(3))
+        }),
+        "/completeindustry must emit OnIndustryJob with STATUS_READY (3)"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.industry_jobs[&j1_id].status, "Ready");
+    });
+
+    let j1_after = harness
+        .call_ok(
+            "industryManager",
+            None,
+            "GetJob",
+            &[PyRep::Integer(j1_id)],
+            &kw,
+        )
+        .await;
+    assert_eq!(j1_after.dict_get("status"), Some(&PyRep::Integer(3)));
+    let j1_end_date = int(&j1_after, "endDate");
+    assert!(
+        j1_end_date <= to_ft(common::TEST_CLOCK_BASE_UNIX),
+        "completed job endDate ({j1_end_date}) must not sit +7d ahead of client clock ({})",
+        to_ft(common::TEST_CLOCK_BASE_UNIX)
+    );
+
+    let owner_jobs = harness
+        .call_ok(
+            "industryManager",
+            None,
+            "GetJobsByOwner",
+            &[PyRep::Integer(char_id)],
+            &kw,
+        )
+        .await;
+    let PyRep::List(owner_list) = owner_jobs else {
+        panic!("expected List from GetJobsByOwner");
+    };
+    let find_status = |jid: i64| -> Option<i64> {
+        owner_list
+            .iter()
+            .find(|r| r.dict_get("jobID") == Some(&PyRep::Integer(jid)))
+            .and_then(|r| r.dict_get("status"))
+            .and_then(PyRep::as_i64)
+    };
+    assert_eq!(find_status(j1_id), Some(3));
+    assert_eq!(find_status(j2_id), Some(1));
+
+    let counts_ready = harness
+        .call_ok("industryManager", None, "GetJobCounts", &[], &kw)
+        .await;
+    assert_eq!(counts_ready.dict_get("manufacturingUsed"), Some(&PyRep::Integer(2)));
+
+    // Negative check: un-elapsed Job 2 cannot be delivered early; delivering Job 1 works once.
+    let early_err = harness
+        .call(
+            "industryManager",
+            None,
+            "CompleteJob",
+            &[PyRep::Integer(j2_id)],
+            &kw,
+        )
+        .await
+        .expect_err("unelapsed Job 2 must reject CompleteJob");
+    assert_eq!(early_err.code, "JobNotYetComplete");
+
+    harness
+        .call_ok(
+            "industryManager",
+            None,
+            "CompleteJob",
+            &[PyRep::Integer(j1_id)],
+            &kw,
+        )
+        .await;
+    let j1_deliv = harness
+        .call_ok(
+            "industryManager",
+            None,
+            "GetJob",
+            &[PyRep::Integer(j1_id)],
+            &kw,
+        )
+        .await;
+    assert_eq!(j1_deliv.dict_get("status"), Some(&PyRep::Integer(101)));
+    let redeliver_err = harness
+        .call(
+            "industryManager",
+            None,
+            "CompleteJob",
+            &[PyRep::Integer(j1_id)],
+            &kw,
+        )
+        .await
+        .expect_err("re-delivering Delivered job must reject CompleteJob");
+    assert_eq!(redeliver_err.code, "InvalidJobState");
+
+    // Scenario B: natural elapsed time without `/completeindustry` promotes snapshot-"Active" Job 2
+    // to STATUS_READY (3) on both `GetJob` and `GetJobsByOwner`, then delivers cleanly.
+    let j2_before = harness
+        .call_ok(
+            "industryManager",
+            None,
+            "GetJob",
+            &[PyRep::Integer(j2_id)],
+            &kw,
+        )
+        .await;
+    let j2_dur = int(&j2_before, "durationSeconds") as u64;
+    ctx.advance_virtual_clock(j2_dur);
+
+    let j2_elapsed = harness
+        .call_ok(
+            "industryManager",
+            None,
+            "GetJob",
+            &[PyRep::Integer(j2_id)],
+            &kw,
+        )
+        .await;
+    assert_eq!(j2_elapsed.dict_get("status"), Some(&PyRep::Integer(3)));
+
+    let owner_after = harness
+        .call_ok(
+            "industryManager",
+            None,
+            "GetJobsByOwner",
+            &[PyRep::Integer(char_id)],
+            &kw,
+        )
+        .await;
+    let PyRep::List(owner_list_after) = owner_after else {
+        panic!("expected List from GetJobsByOwner");
+    };
+    assert_eq!(
+        owner_list_after
+            .iter()
+            .find(|r| r.dict_get("jobID") == Some(&PyRep::Integer(j2_id)))
+            .and_then(|r| r.dict_get("status"))
+            .and_then(PyRep::as_i64),
+        Some(3)
+    );
+
+    harness
+        .call_ok(
+            "industryManager",
+            None,
+            "CompleteJob",
+            &[PyRep::Integer(j2_id)],
+            &kw,
+        )
+        .await;
+    let j2_deliv = harness
+        .call_ok(
+            "industryManager",
+            None,
+            "GetJob",
+            &[PyRep::Integer(j2_id)],
+            &kw,
+        )
+        .await;
+    assert_eq!(j2_deliv.dict_get("status"), Some(&PyRep::Integer(101)));
+}

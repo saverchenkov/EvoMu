@@ -588,7 +588,7 @@ pub fn handle_industry_jobs(
                     .values()
                     .filter(|j| {
                         j.installer_id == char_id
-                            && matches!(j.status.as_str(), "Active" | "Paused")
+                            && matches!(j.status.as_str(), "Active" | "Paused" | "Ready")
                             && match activity_id {
                                 1 => j.activity_id == 1,
                                 9 => j.activity_id == 9,

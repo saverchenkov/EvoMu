@@ -87,7 +87,7 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                         });
                     }
                 }
-                if !matches!(job.status.as_str(), "Active" | "Paused") {
+                if !matches!(job.status.as_str(), "Active" | "Paused" | "Ready") {
                     return Err(BridgeRpcError {
                         code: "InvalidJobState".into(),
                         message: format!("Industry job {job_id} is not Active"),
@@ -237,11 +237,11 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                             client_error: None,
                         });
                     }
-                    if job.status != "Active" {
+                    if !matches!(job.status.as_str(), "Active" | "Ready") {
                         return Err(BridgeRpcError {
                             code: "InvalidJobState".into(),
                             message: format!(
-                                "Industry job {job_id} is in state '{}', not Active",
+                                "Industry job {job_id} is in state '{}', not Active or Ready",
                                 job.status
                             ),
                             client_error: None,
