@@ -78,7 +78,7 @@ fn zero_dynamic_balls_fast_path_with_many_statics() {
 
 #[test]
 fn step_time_scales_linearly_with_dynamic_balls() {
-    fn measure_ns_per_tick(dynamic_count: usize) -> f64 {
+    fn build_park(dynamic_count: usize) -> Ballpark {
         let mut park = Ballpark::new(30_000_142);
         populate_static_system(&mut park, 2_000);
 
@@ -107,25 +107,47 @@ fn step_time_scales_linearly_with_dynamic_balls() {
             let _ = park.step(1.0);
             park.drain_all_observer_events();
         }
+        park
+    }
 
-        let ticks = 20;
+    fn sample_ns_per_tick(park: &mut Ballpark, ticks: usize) -> f64 {
         let t0 = Instant::now();
         for _ in 0..ticks {
-            let _ = park.step(1.0);
-            park.drain_all_observer_events();
+            std::hint::black_box(park.step(1.0));
+            std::hint::black_box(park.drain_all_observer_events());
         }
         t0.elapsed().as_nanos() as f64 / ticks as f64
     }
 
-    let ns_50 = measure_ns_per_tick(50);
-    let ns_200 = measure_ns_per_tick(200);
-    let ns_800 = measure_ns_per_tick(800);
+    const ROUNDS: usize = 10;
+    const TICKS_PER_ROUND: usize = 5;
+
+    let mut parks = [build_park(50), build_park(200), build_park(800)];
+    let mut best_ns = [f64::INFINITY; 3];
+
+    // Interleave short multi-tick bursts across rounds and take each configuration's minimum
+    // sample time: under heavy concurrent test load, individual bursts can hit OS scheduler
+    // preemption, whereas the minimum across interleaved rounds isolates true CPU scaling
+    // without relaxing the sub-quadratic ratio bounds.
+    for round in 0..ROUNDS {
+        let order = if round % 2 == 0 { [0, 1, 2] } else { [2, 1, 0] };
+        for idx in order {
+            let ns = sample_ns_per_tick(&mut parks[idx], TICKS_PER_ROUND);
+            best_ns[idx] = best_ns[idx].min(ns);
+        }
+    }
+
+    for park in &parks {
+        assert_eq!(park.grids.len(), 4);
+    }
+
+    let [ns_50, ns_200, ns_800] = best_ns;
     let ratio_200_50 = ns_200 / ns_50.max(1.0);
     let ratio_800_200 = ns_800 / ns_200.max(1.0);
     let ratio_800_50 = ns_800 / ns_50.max(1.0);
 
     eprintln!(
-        "[bench] step(1.0) with 2000 statics: D=50 {:.3} ms/tick | D=200 {:.3} ms/tick ({:.2}x for 4x D) | D=800 {:.3} ms/tick ({:.2}x for 4x D, {:.2}x for 16x D)",
+        "[bench] step(1.0) with 2000 statics (min over {ROUNDS}x{TICKS_PER_ROUND} ticks): D=50 {:.3} ms/tick | D=200 {:.3} ms/tick ({:.2}x for 4x D) | D=800 {:.3} ms/tick ({:.2}x for 4x D, {:.2}x for 16x D)",
         ns_50 / 1e6,
         ns_200 / 1e6,
         ratio_200_50,
