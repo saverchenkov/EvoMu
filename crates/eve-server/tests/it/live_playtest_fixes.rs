@@ -1277,6 +1277,9 @@ async fn test_live_playtest_keepstar_dock_hangar_view_state_wire_ratcheted() {
         })
         .await;
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.structures.get_mut(&st_id) {
+            st.fuel_blocks = 5_000;
+        }
         snap.items.insert(
             svc_mod_id,
             InventoryItemRecord {
