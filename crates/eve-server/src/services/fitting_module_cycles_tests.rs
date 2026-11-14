@@ -1590,3 +1590,68 @@ async fn weapon_fires_first_volley_on_activate_and_rejects_duplicate_activate_89
     assert_eq!(dup_err.code, "ModuleAlreadyActive");
 }
 
+#[tokio::test]
+async fn cloaking_device_activation_emits_zero_godma_duration_ms() {
+    const SYN_CLOAK_TEST: u32 = 999_893;
+    let ctx = test_ctx_with_custom(|sde| {
+        let cloak_eid = sde
+            .effects
+            .values()
+            .find(|e| e.name == "cloaking")
+            .map(|e| e.effect_id)
+            .unwrap_or(12);
+        let mut cloak = custom_inv_type(
+            sde,
+            SYN_CLOAK_TEST,
+            330,
+            7,
+            5.0,
+            0.0,
+            "Prototype Cloaking Device I",
+            &[(6, 0.0), (51, 2000.0), (eve_sde::attr_ids::HP_STRUCT, 40.0)],
+        );
+        cloak.effect_ids = vec![16, cloak_eid];
+        sde.types.insert(SYN_CLOAK_TEST, cloak);
+    });
+
+    let char_id = 97_000_895;
+    let sys_id = 30_002_506;
+    let ship_id = 1_000_895_001;
+    let cloak_id = 1_000_895_002;
+    ensure_char(&ctx, char_id, 98_000_001, sys_id, ship_id);
+    insert_item(&ctx, ship_id, 587, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    insert_item(&ctx, cloak_id, SYN_CLOAK_TEST, char_id, ship_id, InventoryFlag::HiSlot0, 1, true);
+    spawn_ship(&ctx, sys_id, ship_id, 587, char_id, 1_000.0).await;
+
+    let kw = HashMap::new();
+    let mut sess = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(98_000_001),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(cloak_id), PyRep::String("cloaking".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("Activate cloak succeeds");
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    let eff = notifs
+        .iter()
+        .find(|n| n.event == "OnGodmaShipEffect")
+        .expect("OnGodmaShipEffect emitted for cloak activation");
+    assert_eq!(eff.args.get(7), Some(&PyRep::Real(0.0)));
+}
+

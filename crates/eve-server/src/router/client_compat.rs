@@ -4191,6 +4191,18 @@ fn ensure_i4_pyrep(rep: &mut PyRep) {
     }
 }
 
+fn ensure_real_duration_pyrep(rep: &mut PyRep) {
+    match rep {
+        PyRep::Real(v) if v.is_finite() => {
+            *rep = PyRep::Real((*v).max(0.0));
+        }
+        PyRep::Integer(v) => {
+            *rep = PyRep::Real((*v).max(0) as f64);
+        }
+        _ => *rep = PyRep::Real(0.0),
+    }
+}
+
 /// Normalizes `OnSpecialFX` MachoNet broadcast notifications to the V24.01 14-positional-arg
 /// signature (`shipID, moduleID, moduleTypeID, targetID, otherTypeID, guid, isOffensive,
 /// start, active, duration, repeat, startTime, timeFromStart, graphicInfo`).
@@ -4244,7 +4256,7 @@ fn normalize_on_godma_ship_effect(
         let env = std::mem::replace(&mut args[5], PyRep::None);
         args[5] = normalize_godma_environment(env, &item_id, &effect_id, sde);
         ensure_filetime_pyrep(&mut args[6], fallback_ft);
-        ensure_i4_pyrep(&mut args[7]);
+        ensure_real_duration_pyrep(&mut args[7]);
         ensure_i4_pyrep(&mut args[8]);
         if args.len() == 10 {
             args.push(PyRep::None);
@@ -4270,7 +4282,7 @@ fn normalize_on_godma_ship_effect(
         active_flag,
         env,
         PyRep::Integer(fallback_ft),
-        PyRep::Integer(0),
+        PyRep::Real(0.0),
         PyRep::Integer(0),
         PyRep::None,
         PyRep::None,
@@ -4319,9 +4331,33 @@ mod client_compat_tests {
         assert_eq!(ten_zero_ft.len(), 11);
         assert!(ten_zero_ft[2].as_i64().unwrap() > i32::MAX as i64);
         assert!(ten_zero_ft[6].as_i64().unwrap() > i32::MAX as i64);
-        assert_eq!(ten_zero_ft[7], PyRep::Integer(4000));
+        assert_eq!(ten_zero_ft[7], PyRep::Real(4000.0));
         assert_eq!(ten_zero_ft[8], PyRep::Integer(0));
         assert!(matches!(&ten_zero_ft[5], PyRep::Tuple(t) if t.len() == 7));
+
+        // Sub-2000ms durations must remain PyRep::Real (never coerced to int) so V24 Python 2
+        // `ModuleButton.DoActivateRampsThread` avoids `500 / 1000 == 0` ZeroDivisionError.
+        let sub_2s_real = normalize_macho_notification(
+            "OnGodmaShipEffect",
+            vec![
+                PyRep::Integer(200_018_015),
+                PyRep::Integer(101),
+                PyRep::Integer(valid_ft),
+                PyRep::Integer(1),
+                PyRep::Integer(1),
+                PyRep::Tuple(vec![PyRep::Integer(200_018_015)]),
+                PyRep::Integer(valid_ft),
+                PyRep::Real(1000.0),
+                PyRep::Integer(1000),
+                PyRep::None,
+            ],
+        );
+        assert_eq!(sub_2s_real[7], PyRep::Real(1000.0));
+        let mut sub_2s_int_in = sub_2s_real.clone();
+        sub_2s_int_in[7] = PyRep::Integer(1000);
+        let sub_2s_int = normalize_macho_notification("OnGodmaShipEffect", sub_2s_int_in);
+        assert_eq!(sub_2s_int[7], PyRep::Real(1000.0));
+        assert_eq!(short[7], PyRep::Real(0.0));
 
         let preserved = normalize_macho_notification(
             "OnGodmaShipEffect",

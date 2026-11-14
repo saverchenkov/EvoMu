@@ -1789,6 +1789,11 @@ pub(crate) async fn handle_module_cycles(
 
             // V24 client derives `OnModuleActivated` from `OnGodmaShipEffect` (active=1).
             let godma_repeat = if repeat == 0 { 0 } else { 1000 };
+            let godma_duration_ms = if mod_type.group_id == 330 {
+                0.0
+            } else {
+                (duration_s * 1_000.0).max(0.0)
+            };
             let _ = ctx.notify_module_effect_started_with_cycle(
                 char_id,
                 ship_id,
@@ -1797,7 +1802,7 @@ pub(crate) async fn handle_module_cycles(
                 Some(effect_name.as_str()),
                 target_id_opt,
                 Some(godma_repeat),
-                Some((duration_s * 1_000.0).max(0.0)),
+                Some(godma_duration_ms),
             );
             if cap_need > 0.0 || cap_booster_inject_amount > 0.0 || effective_max_capacitor.is_some() {
                 if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {

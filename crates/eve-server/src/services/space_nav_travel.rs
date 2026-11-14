@@ -301,22 +301,23 @@ pub(crate) async fn emit_cloak_transition(ctx: &ServerContext, sys_id: u32, ship
             },
         )
         .await;
-    let time_ft = unix_to_filetime(ctx.now_unix());
-    let (new_v, old_v) = if cloaked { (1.0, 0.0) } else { (0.0, 1.0) };
-    let module_states: Vec<(i64, i64, u32, i64, f64, f64)> = ctx.db.with_snapshot(|snap| {
-        snap.items
-            .values()
-            .filter(|i| {
-                i.location_id == ship_id
-                    && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 330)
-            })
-            .map(|i| (i.owner_id, i.item_id, 2, time_ft, new_v, old_v))
-            .collect()
-    });
-    if !module_states.is_empty() {
-        let _ = handle
-            .emit_destiny_event(ship_id, DestinyEvent::OnShipStateUpdate { module_states })
-            .await;
+    if cloaked {
+        let time_ft = ctx.now_client_sim_filetime_ticks();
+        let module_states: Vec<(i64, i64, u32, i64, f64, f64)> = ctx.db.with_snapshot(|snap| {
+            snap.items
+                .values()
+                .filter(|i| {
+                    i.location_id == ship_id
+                        && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 330)
+                })
+                .map(|i| (i.owner_id, i.item_id, 2, time_ft, 1.0, 0.0))
+                .collect()
+        });
+        if !module_states.is_empty() {
+            let _ = handle
+                .emit_destiny_event(ship_id, DestinyEvent::OnShipStateUpdate { module_states })
+                .await;
+        }
     }
 }
 

@@ -151,3 +151,47 @@ async fn jump_clone_names_and_extract_skills_mutations() {
         .unwrap();
     assert_eq!(moved.dict_get("solarSystemID"), Some(&PyRep::Integer(30000142)));
 }
+
+#[test]
+fn emit_server_skills_removed_marks_zero_level_negative_sp() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001;
+    let uid = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.user_id).unwrap_or(1));
+    ctx.db
+        .acquire_online_lock(uid, 100, Some(char_id), true, ctx.now_unix())
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // Full removal (level == 0) must emit negative SP so V24 `SkillsSvc._UpdateMySkillsAndReturnLevelsTrained`
+    // enters the delete branch instead of inserting/updating `self.myskills[typeID]`.
+    emit_server_skills_removed(&ctx, char_id, &[(3369, 0), (24242, 4)]);
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    let rem = notifs
+        .iter()
+        .find(|n| n.event == "OnServerSkillsRemoved")
+        .expect("OnServerSkillsRemoved emitted");
+    let PyRep::Dict(entries) = &rem.args[0] else {
+        panic!("skillInfos must be a dict");
+    };
+    let (_, full_info) = entries
+        .iter()
+        .find(|(k, _)| *k == PyRep::Integer(3369))
+        .expect("full removal entry");
+    assert_eq!(full_info.dict_get("skillPoints"), Some(&PyRep::Real(-1.0)));
+    assert_eq!(full_info.dict_get("trainedSkillPoints"), Some(&PyRep::Real(-1.0)));
+    assert_eq!(full_info.dict_get("virtualSkillLevel"), Some(&PyRep::None));
+
+    let (_, partial_info) = entries
+        .iter()
+        .find(|(k, _)| *k == PyRep::Integer(24242))
+        .expect("partial removal entry");
+    assert!(
+        partial_info
+            .dict_get("trainedSkillPoints")
+            .and_then(PyRep::as_f64)
+            .unwrap_or(0.0)
+            > 0.0
+    );
+}
