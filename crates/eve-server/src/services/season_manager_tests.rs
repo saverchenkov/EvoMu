@@ -873,3 +873,152 @@ fn r11_k12_issues_1043_1044_1045_1046_select_season_and_character_progress_field
     .expect("get_character_progress_by_character_id full");
     assert_v24_character_progress_payload(&prog_full, cid, 2211, 100, 100);
 }
+
+#[test]
+fn issue_1053_get_character_progress_suppresses_stale_expiry_and_tick_emits_for_initialized_session() {
+    let ctx = test_ctx();
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let cid = 970_253_i64;
+    let kw = HashMap::new();
+    let mut sess = season_session(cid, true);
+    sess.session_id = 77;
+    let uid = ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().unwrap().clone();
+        ch.character_id = cid;
+        snap.characters.insert(cid, ch.clone());
+        ch.user_id
+    });
+    let _ = ctx
+        .db
+        .acquire_online_lock(uid, sess.session_id, Some(cid), true, ctx.now_unix());
+
+    // 1. Initialize client season state via get_character_progress_by_character_id.
+    let init_prog = handle_season_manager(
+        &ctx,
+        &mut sess,
+        "seasonManager",
+        "get_character_progress_by_character_id",
+        &[],
+        &kw,
+    )
+    .unwrap()
+    .expect("initial get_character_progress_by_character_id");
+    let PyRep::Dict(init_map) = init_prog
+        .dict_get("challenges")
+        .cloned()
+        .expect("initial challenges Dict")
+    else {
+        panic!("expected challenges Dict");
+    };
+    assert_eq!(init_map.len(), 4);
+    let expired_cid = init_map
+        .iter()
+        .find_map(|(k, _)| k.as_i64())
+        .expect("initial challenge_id");
+
+    // 2. Simulate offline/relog transition before SeasonService re-initializes:
+    // mark challenge expired, clear initialized marker, advance ticks -> must NOT emit OnChallengeExpired.
+    clear_season_session_initialized(&ctx, cid);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st = load_season_state_from_blobs(snap, cid);
+        if let Some(ch) = st.challenges.get_mut(&expired_cid) {
+            ch.expiration_date = 100;
+        }
+        save_season_state_to_blobs(snap, cid, &st);
+    });
+    let _ = ctx.drain_notifications_for_char(cid);
+    ctx.advance_secs(5);
+    assert!(
+        ctx.drain_notifications_for_char(cid)
+            .iter()
+            .all(|n| n.event != "OnChallengeExpired"),
+        "pre-init tick must not emit OnChallengeExpired before client fetches character progress"
+    );
+
+    // 3. get_character_progress_by_character_id strips expired_cid, inserts replacement, and emits NO OnChallengeExpired.
+    let relogin_prog = handle_season_manager(
+        &ctx,
+        &mut sess,
+        "seasonManager",
+        "get_character_progress_by_character_id",
+        &[],
+        &kw,
+    )
+    .unwrap()
+    .expect("relogin get_character_progress_by_character_id");
+    let relogin_notifs = ctx.drain_notifications_for_char(cid);
+    assert!(
+        relogin_notifs.iter().all(|n| n.event != "OnChallengeExpired"),
+        "get_character_progress_by_character_id must not emit OnChallengeExpired when expired challenge is already stripped from RPC reply: {relogin_notifs:?}"
+    );
+    let PyRep::Dict(relogin_map) = relogin_prog
+        .dict_get("challenges")
+        .cloned()
+        .expect("relogin challenges Dict")
+    else {
+        panic!("expected challenges Dict");
+    };
+    assert_eq!(relogin_map.len(), 4);
+    assert!(
+        !relogin_map.iter().any(|(k, _)| k.as_i64() == Some(expired_cid)),
+        "expired challenge {expired_cid} must be evicted from returned dict"
+    );
+
+    // 4. While session is initialized and online, cluster tick advancing past expiration_date
+    // MUST emit OnChallengeExpired(active_cid, new_challenge) and replace it in DB.
+    let active_cid = relogin_map
+        .iter()
+        .find_map(|(k, _)| k.as_i64())
+        .expect("active challenge_id");
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st = load_season_state_from_blobs(snap, cid);
+        if let Some(ch) = st.challenges.get_mut(&active_cid) {
+            ch.expiration_date = now_ft + 30 * 10_000_000;
+        }
+        save_season_state_to_blobs(snap, cid, &st);
+    });
+    let _ = ctx.drain_notifications_for_char(cid);
+
+    ctx.advance_secs(60);
+    let tick_notifs = ctx.drain_notifications_for_char(cid);
+    let exp_notif = tick_notifs
+        .iter()
+        .find(|n| n.event == "OnChallengeExpired")
+        .expect("initialized online session tick must emit OnChallengeExpired");
+    assert_eq!(exp_notif.args.first(), Some(&PyRep::Integer(active_cid)));
+    let tick_new_cid = exp_notif
+        .args
+        .get(1)
+        .and_then(|obj| obj.dict_get("challengeID"))
+        .and_then(|v| v.as_i64())
+        .expect("replacement challengeID on tick OnChallengeExpired");
+    assert_ne!(tick_new_cid, active_cid);
+
+    let after_tick_state = ctx
+        .db
+        .with_snapshot(|snap| load_season_state_from_blobs(snap, cid));
+    assert!(!after_tick_state.challenges.contains_key(&active_cid));
+    assert!(after_tick_state.challenges.contains_key(&tick_new_cid));
+
+    // 5. reload_fsd_data triggers OnSeasonsFsdDataChanged -> client get_character_progress_by_character_id;
+    // it must NOT emit OnChallengeExpired and must clear initialized state until client re-fetches.
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st = load_season_state_from_blobs(snap, cid);
+        if let Some(ch) = st.challenges.get_mut(&tick_new_cid) {
+            ch.expiration_date = 100;
+        }
+        save_season_state_to_blobs(snap, cid, &st);
+    });
+    let _ = ctx.drain_notifications_for_char(cid);
+    let reload_rep = handle_season_manager(&ctx, &mut sess, "seasonManager", "reload_fsd_data", &[], &kw)
+        .unwrap()
+        .expect("reload_fsd_data");
+    assert_eq!(reload_rep, PyRep::Bool(true));
+    let reload_notifs = ctx.drain_notifications_for_char(cid);
+    assert!(reload_notifs.iter().any(|n| n.event == "OnSeasonsFsdDataChanged"));
+    assert!(
+        reload_notifs.iter().all(|n| n.event != "OnChallengeExpired"),
+        "reload_fsd_data must not emit OnChallengeExpired ahead of OnSeasonsFsdDataChanged re-fetch"
+    );
+}

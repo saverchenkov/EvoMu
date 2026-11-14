@@ -186,6 +186,10 @@ fn starter_launcher_to_db(l: &StarterLauncherRecord) -> eve_db::PersistedStarter
 pub struct ClusterMiscRuntimeState {
     pub sde_initialized: bool,
     pub char_settings: HashMap<i64, BTreeMap<String, PyRep>>,
+    /// Tracks which active `session_id` has fetched/cached `seasonManager` client state per character.
+    /// Cleared on `SelectCharacterID` and `reload_fsd_data` so tick expiry does not emit `OnChallengeExpired`
+    /// while V24 `SeasonService.current_user_progress` is uninitialized (`None`) or mid-reload.
+    pub season_initialized_sessions: HashMap<i64, u64>,
     pub landing_pads: Vec<LandingPadRecord>,
     pub launchers: Vec<LauncherRecord>,
     pub starter_launchers: Vec<StarterLauncherRecord>,
@@ -420,6 +424,7 @@ impl ClusterMiscRuntimeState {
         let mut st = Self {
             sde_initialized: false,
             char_settings: HashMap::new(),
+            season_initialized_sessions: HashMap::new(),
             landing_pads: default_pirate_fob_pads(db.clock().now_unix_secs()),
             launchers: Vec::new(),
             starter_launchers: Vec::new(),

@@ -812,8 +812,9 @@ pub fn on_advance_secs_internal(
     crate::services::space_destiny::space_probe_scanning::tick_probe_warp_end(ctx);
     let now_unix = ctx.now_unix();
 
-    // 0. Sweep expired market orders and check season transitions across cluster ticks.
+    // 0. Sweep expired market orders, season transitions, and online expired season challenges across cluster ticks.
     crate::services::notify_emitters_seasons_tactical::check_and_emit_season_transitions(ctx);
+    crate::services::season_manager::sweep_expired_online_challenges(ctx);
     let swept = if ctx
         .db
         .with_snapshot(|s| crate::services::market_contracts::has_expired_orders(s, now_unix))

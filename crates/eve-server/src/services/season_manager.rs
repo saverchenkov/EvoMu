@@ -77,6 +77,136 @@ fn emit_expired_challenges(
     }
 }
 
+fn lock_cluster_misc(
+    ctx: &ServerContext,
+) -> eve_db::lock_rank::RankedMutexGuard<
+    '_,
+    crate::services::cluster_macho_misc_services::ClusterMiscRuntimeState,
+    { eve_db::lock_rank::RANK_LEAF },
+> {
+    ctx.cluster_misc_state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Marks `session_id` as holding initialized V24 `SeasonService` challenge state for `char_id`.
+pub(crate) fn mark_season_session_initialized(ctx: &ServerContext, char_id: i64, session_id: u64) {
+    if char_id <= 0 {
+        return;
+    }
+    let mut guard = lock_cluster_misc(ctx);
+    guard.season_initialized_sessions.insert(char_id, session_id);
+}
+
+/// Clears any initialized `SeasonService` session marker for `char_id`.
+pub(crate) fn clear_season_session_initialized(ctx: &ServerContext, char_id: i64) {
+    if char_id <= 0 {
+        return;
+    }
+    let mut guard = lock_cluster_misc(ctx);
+    guard.season_initialized_sessions.remove(&char_id);
+}
+
+/// Expires active challenges on cluster ticks for already-initialized online sessions and
+/// emits `OnChallengeExpired(old_id, new_challenge)` so live clients replace stale entries in place.
+pub(crate) fn sweep_expired_online_challenges(ctx: &ServerContext) {
+    let initialized: Vec<(i64, u64)> = {
+        let guard = lock_cluster_misc(ctx);
+        let mut entries: Vec<(i64, u64)> = guard
+            .season_initialized_sessions
+            .iter()
+            .map(|(&cid, &sid)| (cid, sid))
+            .collect();
+        entries.sort_by_key(|(cid, _)| *cid);
+        entries
+    };
+    if initialized.is_empty() {
+        return;
+    }
+
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let inspected: Vec<(i64, u64, u64, bool)> = ctx.db.with_snapshot(|snap| {
+        initialized
+            .into_iter()
+            .filter_map(|(cid, init_sid)| {
+                let user_id = snap.characters.get(&cid)?.user_id;
+                let has_expired = snap
+                    .seasons_and_campaigns
+                    .season_states
+                    .get(&cid)
+                    .is_some_and(|st| {
+                        st.challenges.values().any(|ch| {
+                            !ch.claimed
+                                && !ch.is_dormant
+                                && ch.expiration_date > 0
+                                && now_ft >= ch.expiration_date
+                        })
+                    });
+                Some((cid, init_sid, user_id, has_expired))
+            })
+            .collect()
+    });
+
+    let mut active_candidates: Vec<(i64, u64, u64)> = Vec::new();
+    let mut stale_chars: Vec<(i64, u64)> = Vec::new();
+    for (cid, init_sid, user_id, has_expired) in inspected {
+        let is_current = ctx
+            .db
+            .get_online_session(user_id)
+            .is_some_and(|s| s.character_id == Some(cid) && s.session_id == init_sid);
+        if !is_current {
+            stale_chars.push((cid, init_sid));
+        } else if has_expired {
+            active_candidates.push((cid, init_sid, user_id));
+        }
+    }
+
+    let mut pending_emissions: Vec<(i64, u64, i64, Vec<(i64, CharacterChallenge)>)> = Vec::new();
+    if !active_candidates.is_empty() {
+        ctx.db.with_mut_snapshot(|snap| {
+            let defs = ops::load_localized_challenge_definitions(snap, &ctx.sde);
+            for (cid, init_sid, user_id) in active_candidates {
+                let mut st = load_season_state_from_blobs(snap, cid);
+                let (season_end_ft, max_active) = resolve_season_bounds(&st, snap, &ctx.sde, now_ft);
+                let expired = ops::fill_and_normalize_character_challenges(
+                    &mut st,
+                    &defs,
+                    snap,
+                    cid,
+                    now_ft,
+                    season_end_ft,
+                    max_active,
+                );
+                sync_character_challenges_with_defs(&mut st, &defs, snap, cid);
+                save_season_state_to_blobs(snap, cid, &st);
+                if !expired.is_empty() {
+                    pending_emissions.push((cid, init_sid, st.season_points, expired));
+                }
+                let _ = user_id;
+            }
+        });
+    }
+
+    if !stale_chars.is_empty() {
+        let mut guard = lock_cluster_misc(ctx);
+        for (cid, init_sid) in stale_chars {
+            if guard.season_initialized_sessions.get(&cid).copied() == Some(init_sid) {
+                guard.season_initialized_sessions.remove(&cid);
+            }
+        }
+    }
+
+    for (cid, init_sid, pts, expired) in pending_emissions {
+        let still_initialized = {
+            let guard = lock_cluster_misc(ctx);
+            guard.season_initialized_sessions.get(&cid).copied() == Some(init_sid)
+        };
+        if still_initialized {
+            emit_expired_challenges(ctx, cid, pts, &expired);
+        }
+    }
+}
+
 fn resolve_season_bounds(
     st: &CharacterSeasonState,
     snap: &eve_db::WorldStateSnapshot,
@@ -717,6 +847,7 @@ pub fn handle_season_manager(
             });
             match res {
                 Ok((season_data_kv, character_progress_kv)) => {
+                    mark_season_session_initialized(ctx, char_id, session.session_id);
                     ctx.emit_typed(
                         NotificationTarget::Character(char_id),
                         OnSeasonSelected {
@@ -785,6 +916,7 @@ pub fn handle_season_manager(
             });
             match res {
                 Ok((challenges, pts, expired)) => {
+                    mark_season_session_initialized(ctx, char_id, session.session_id);
                     emit_expired_challenges(ctx, char_id, pts, &expired);
                     Some(Ok(PyRep::Dict(challenges)))
                 }
@@ -1384,7 +1516,7 @@ pub fn handle_season_manager(
                 let now_ft = ctx.now_blueos_filetime_ticks();
                 let (season_end_ft, max_active) = resolve_season_bounds(st, snap, &ctx.sde, now_ft);
                 let defs = ops::load_localized_challenge_definitions(snap, &ctx.sde);
-                let expired = ops::fill_and_normalize_character_challenges(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
+                let _ = ops::fill_and_normalize_character_challenges(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
                 sync_character_challenges_with_defs(st, &defs, snap, char_id);
                 let eff_season_id = if st.selected_season_id > 0 {
                     st.selected_season_id
@@ -1430,11 +1562,15 @@ pub fn handle_season_manager(
                     now_ft,
                     extra,
                 );
-                Ok((kv, st.season_points, expired))
+                Ok(kv)
             });
             match res {
-                Ok((rep, pts, expired)) => {
-                    emit_expired_challenges(ctx, char_id, pts, &expired);
+                Ok(rep) => {
+                    // The RPC reply already contains post-expiry challenges (stripped of expired IDs
+                    // with replacements inserted). Emitting OnChallengeExpired(old_id, new_ch) here
+                    // races V24 SeasonService._fetch_character_data / _ReplaceChallenge and logs
+                    // "Replace challenge failed for challenge" because old_id is absent from the dict.
+                    mark_season_session_initialized(ctx, char_id, session.session_id);
                     Some(Ok(rep))
                 }
                 Err(e) => Some(Err(e)),
@@ -1521,12 +1657,15 @@ pub fn handle_season_manager(
                     .map(|c| usize::try_from(c.max_active_challenges.max(1)).unwrap_or(4))
                     .unwrap_or(4);
                 snap.seasons_and_campaigns.seasons_catalog = seasons;
-                let expired = ops::fill_and_normalize_character_challenges(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
-                Ok((st.season_points, expired))
+                let _ = ops::fill_and_normalize_character_challenges(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
+                Ok(())
             });
             match res {
-                Ok((pts, expired)) => {
-                    emit_expired_challenges(ctx, char_id, pts, &expired);
+                Ok(()) => {
+                    // V24 SeasonService.OnSeasonsFsdDataChanged clears client challenges and
+                    // re-fetches via get_character_progress_by_character_id; do not emit
+                    // OnChallengeExpired for IDs already omitted from that upcoming snapshot.
+                    clear_season_session_initialized(ctx, char_id);
                     let sent = ctx.emit_typed(NotificationTarget::All, OnSeasonsFsdDataChanged {});
                     if !sent.iter().any(|n| n.recipient_char_id == char_id) {
                         ctx.emit_typed(
