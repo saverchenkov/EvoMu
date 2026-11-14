@@ -59,7 +59,7 @@ use eve_destiny::DamageVector;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 #[path = "combat_fighters.rs"]
 pub mod combat_fighters;
@@ -432,6 +432,7 @@ pub struct CombatRuntimeState {
     pub ci_sentry_deployed_systems: std::collections::HashSet<u32>,
     pub npc_scrambled_ships: HashMap<u32, std::collections::HashSet<i64>>,
     pub npc_sec_gain_intervals: HashMap<(i64, i32), (u64, f64)>,
+    pub recently_destroyed_item_ids: VecDeque<i64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -484,6 +485,7 @@ struct PersistedCombatExtendedPayload {
     ci_sentry_deployed_systems: std::collections::HashSet<u32>,
     npc_scrambled_ships: HashMap<u32, std::collections::HashSet<i64>>,
     npc_sec_gain_intervals: Vec<((i64, i32), (u64, f64))>,
+    recently_destroyed_item_ids: VecDeque<i64>,
 }
 
 impl CombatRuntimeState {
@@ -544,6 +546,30 @@ impl CombatRuntimeState {
         self.npc_timers
             .get(&char_id)
             .is_some_and(|&exp| now_unix < exp)
+    }
+
+    /// Records an item or ball ID whose inventory/space state was destroyed so late
+    /// client `dogmaIM.ItemGetInfo` queries return `None` instead of `TypeNotFound` (`#1032`).
+    pub fn record_destroyed_item_id(&mut self, item_id: i64) {
+        const MAX_RECENTLY_DESTROYED_ITEM_IDS: usize = 1_024;
+        if item_id <= 0 {
+            return;
+        }
+        if let Some(pos) = self
+            .recently_destroyed_item_ids
+            .iter()
+            .position(|&existing| existing == item_id)
+        {
+            self.recently_destroyed_item_ids.remove(pos);
+        } else if self.recently_destroyed_item_ids.len() >= MAX_RECENTLY_DESTROYED_ITEM_IDS {
+            self.recently_destroyed_item_ids.pop_front();
+        }
+        self.recently_destroyed_item_ids.push_back(item_id);
+    }
+
+    /// Returns `true` if `item_id` was recently destroyed in combat or space cleanup (`#1032`).
+    pub fn is_recently_destroyed_item_id(&self, item_id: i64) -> bool {
+        item_id > 0 && self.recently_destroyed_item_ids.contains(&item_id)
     }
 
     pub fn sync_core_from_persisted(&mut self, p: &eve_db::PersistedCombatCrimewatchState) {
@@ -622,6 +648,7 @@ impl CombatRuntimeState {
             self.ci_sentry_deployed_systems.clear();
             self.npc_scrambled_ships.clear();
             self.npc_sec_gain_intervals.clear();
+            self.recently_destroyed_item_ids.clear();
         } else if let Ok(ext) =
             serde_json::from_str::<PersistedCombatExtendedPayload>(&p.extended_runtime_json)
         {
@@ -670,6 +697,7 @@ impl CombatRuntimeState {
             self.ci_sentry_deployed_systems = ext.ci_sentry_deployed_systems;
             self.npc_scrambled_ships = ext.npc_scrambled_ships;
             self.npc_sec_gain_intervals = ext.npc_sec_gain_intervals.into_iter().collect();
+            self.recently_destroyed_item_ids = ext.recently_destroyed_item_ids;
         }
     }
 
@@ -706,6 +734,7 @@ impl CombatRuntimeState {
             || !self.ci_sentry_deployed_systems.is_empty()
             || !self.npc_scrambled_ships.is_empty()
             || !self.npc_sec_gain_intervals.is_empty()
+            || !self.recently_destroyed_item_ids.is_empty()
     }
 
     pub fn to_persisted(&self) -> eve_db::PersistedCombatCrimewatchState {
@@ -775,6 +804,7 @@ impl CombatRuntimeState {
                     .iter()
                     .map(|(k, v)| (*k, *v))
                     .collect(),
+                recently_destroyed_item_ids: self.recently_destroyed_item_ids.clone(),
             };
             payload.entropic_spools.sort_by_key(|(k, _)| *k);
             payload.sentry_gun_aggression.sort_by_key(|(k, _)| *k);

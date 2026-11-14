@@ -360,7 +360,14 @@ pub async fn apply_damage_to_drone_in_space(
     };
     if destroyed {
         let removed_drone = with_mut_combat_runtime(ctx, |rt| {
-            rt.active_drones_in_space.remove(&drone_ball_id)
+            let d = rt.active_drones_in_space.remove(&drone_ball_id);
+            if let Some(ref drone) = d {
+                rt.record_destroyed_item_id(drone.ball_id);
+                rt.record_destroyed_item_id(drone.drone_item_id);
+            } else {
+                rt.record_destroyed_item_id(drone_ball_id);
+            }
+            d
         });
         let _ = sys_handle.remove_ball(drone_ball_id).await;
         if let Some(d) = removed_drone {

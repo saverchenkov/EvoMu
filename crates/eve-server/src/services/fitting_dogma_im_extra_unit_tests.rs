@@ -269,6 +269,114 @@ async fn item_get_info_space_drone_charges_ship_attributes_and_ship_stances() {
 }
 
 #[tokio::test]
+async fn item_get_info_destroyed_drone_and_64bit_entity_ids_return_none_1032() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 96_400_901i64;
+    let sys_id = 30_000_142u32;
+    let ship_id = 96_400_910i64;
+    let drone_id = 1_897_080_352i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            drone_id,
+            InventoryItemRecord {
+                item_id: drone_id,
+                type_id: 2454,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.active_drones_in_space.insert(
+            drone_id,
+            DroneSpaceState {
+                ball_id: drone_id,
+                drone_item_id: drone_id,
+                type_id: 2454,
+                group_id: 100,
+                owner_char_id: char_id,
+                original_owner_char_id: char_id,
+                parent_ship_id: ship_id,
+                solar_system_id: sys_id,
+                target_id: None,
+                activity_state: 1,
+                assist_char_id: None,
+                guard_char_id: None,
+                is_abandoned: false,
+                is_sentry: false,
+                bandwidth_used: 5.0,
+                max_velocity: 300.0,
+                optimal_range: 5_000.0,
+                damage_vector: eve_destiny::DamageVector::default(),
+                shield_repair_amount: 0.0,
+                armor_repair_amount: 0.0,
+                hull_repair_amount: 0.0,
+                web_speed_factor: 0.0,
+                neut_amount: 0.0,
+                ecm_strength: 0.0,
+                tp_sig_bonus_pct: 0.0,
+            },
+        );
+    });
+
+    let mut session =
+        make_session(char_id, 1_000_009, Some(sys_id), None, Some(ship_id));
+    let before = call_dogma_im(&ctx, &mut session, None, "ItemGetInfo", &[PyRep::Integer(drone_id)])
+        .await
+        .expect("live drone ItemGetInfo succeeds");
+    assert_eq!(before.dict_get("typeID"), Some(&PyRep::Integer(2454)));
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    assert!(crate::combat::death_pipeline::cleanup_destroyed_player_drone_sync(
+        &ctx,
+        &sys_handle,
+        drone_id,
+    ));
+
+    let after = call_dogma_im(&ctx, &mut session, None, "ItemGetInfo", &[PyRep::Integer(drone_id)])
+        .await
+        .expect("destroyed drone ItemGetInfo must return None instead of TypeNotFound (#1032)");
+    assert_eq!(after, PyRep::None);
+
+    // 64-bit dynamic entity ID (> u32::MAX) must also return None instead of truncating to u32 typeID.
+    let stale_64bit = i64::from(u32::MAX) + 1 + 587;
+    let after_64 =
+        call_dogma_im(&ctx, &mut session, None, "ItemGetInfo", &[PyRep::Integer(stale_64bit)])
+            .await
+            .expect("out-of-u32-range dynamic entity ID returns None");
+    assert_eq!(after_64, PyRep::None);
+
+    // Valid SDE typeID lookup and invalid synthetic typeID error remain intact.
+    let valid_type = call_dogma_im(&ctx, &mut session, None, "ItemGetInfo", &[PyRep::Integer(587)])
+        .await
+        .expect("typeID lookup still succeeds");
+    assert_eq!(valid_type.dict_get("typeID"), Some(&PyRep::Integer(587)));
+    assert_eq!(
+        call_dogma_im(&ctx, &mut session, None, "ItemGetInfo", &[PyRep::Integer(999_999_999)])
+            .await
+            .unwrap_err()
+            .code,
+        "TypeNotFound"
+    );
+    assert_eq!(
+        call_dogma_im(&ctx, &mut session, None, "ItemGetInfo", &[PyRep::Integer(-1)])
+            .await
+            .unwrap_err()
+            .code,
+        "TypeNotFound"
+    );
+}
+
+#[tokio::test]
 async fn set_ship_stance_enforces_ownership_and_pushes_fit_projection_in_space() {
     use eve_destiny::{Ball, CombatState, MovementMode};
     use glam::DVec3;

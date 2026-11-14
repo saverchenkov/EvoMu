@@ -1402,6 +1402,23 @@ async fn has_extended_runtime_state_all_32_fields_epoch_sync_and_sig_radius_muta
         },
         |r: &mut CombatRuntimeState| r.npc_sec_gain_intervals.clear()
     );
+    check_ext_field!(
+        |r: &mut CombatRuntimeState| {
+            r.record_destroyed_item_id(1_897_080_352);
+        },
+        |r: &mut CombatRuntimeState| r.recently_destroyed_item_ids.clear()
+    );
+    for id in 1..=1_025_i64 {
+        rt.record_destroyed_item_id(id);
+    }
+    assert!(!rt.is_recently_destroyed_item_id(1));
+    assert!(rt.is_recently_destroyed_item_id(2));
+    assert!(rt.is_recently_destroyed_item_id(1_025));
+    rt.record_destroyed_item_id(2);
+    rt.record_destroyed_item_id(1_026);
+    assert!(rt.is_recently_destroyed_item_id(2));
+    assert!(!rt.is_recently_destroyed_item_id(3));
+    rt.recently_destroyed_item_ids.clear();
 
     // 2. `ext_runtime_hash`, `rehydrate_from_persisted_epochs`, and `sync_from_persisted` bounty tick precedence
     let mut rt_ext = CombatRuntimeState::default();

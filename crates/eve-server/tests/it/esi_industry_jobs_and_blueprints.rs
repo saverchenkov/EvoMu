@@ -221,30 +221,41 @@ async fn test_esi_live_corp_blueprints_and_char_corp_industry_jobs() {
     let mut s2 = login_and_select(&ctx, 7902, "other", "other-secret", PILOT_2).await;
 
     let (bp_tid, inv_skills, inv_mats, mfg_mats) = {
-        let (&tid, bp) = ctx
-            .sde
-            .blueprints
-            .iter()
-            .find(|(&btid, b)| {
+        let has_jita_sell_supply = |type_id: u32, min_qty: i64, max_price_isk: f64| -> bool {
+            let max_cents = eve_db::IskCents::from_f64_isk(max_price_isk);
+            ctx.db.with_snapshot(|s| {
+                let available: i64 = s
+                    .market_orders
+                    .values()
+                    .filter(|o| {
+                        o.station_id == JITA_STATION
+                            && !o.is_bid
+                            && o.type_id == type_id
+                            && o.price <= max_cents
+                    })
+                    .map(|o| i64::from(o.vol_remaining))
+                    .sum();
+                available >= min_qty
+            })
+        };
+        let mut bp_ids: Vec<u32> = ctx.sde.blueprints.keys().copied().collect();
+        bp_ids.sort_unstable();
+        let (tid, bp) = bp_ids
+            .into_iter()
+            .filter_map(|btid| ctx.sde.blueprints.get(&btid).map(|b| (btid, b)))
+            .find(|&(btid, b)| {
                 ctx.sde.types.get(&btid).is_some_and(|t| t.published && t.market_group_id.is_some())
+                    && has_jita_sell_supply(btid, 9, 50_000_000.0)
                     && !b.materials.is_empty()
                     && b.materials.iter().all(|m| {
                         m.quantity <= 80
-                            && ctx.db.with_snapshot(|s| {
-                                s.market_orders.values().any(|o| {
-                                    o.station_id == JITA_STATION && !o.is_bid && o.type_id == m.type_id && o.vol_remaining >= 800
-                                })
-                            })
+                            && has_jita_sell_supply(m.type_id, (m.quantity as i64 * 8).max(20).max(800), 5_000_000.0)
                     })
                     && b.activities.get("invention").or_else(|| b.activities.get("8")).is_some_and(|a| {
                         !a.products.is_empty()
                             && a.materials.iter().all(|m| {
                                 m.quantity <= 20
-                                    && ctx.db.with_snapshot(|s| {
-                                        s.market_orders.values().any(|o| {
-                                            o.station_id == JITA_STATION && !o.is_bid && o.type_id == m.type_id && o.vol_remaining >= 50
-                                        })
-                                    })
+                                    && has_jita_sell_supply(m.type_id, (m.quantity as i64 * 4).max(8).max(50), 50_000_000.0)
                             })
                     })
             })

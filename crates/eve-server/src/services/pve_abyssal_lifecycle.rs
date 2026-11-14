@@ -450,6 +450,9 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
                     true
                 }
             });
+            for &did in &destroyed_drones {
+                rt.record_destroyed_item_id(did);
+            }
         });
         for did in &destroyed_drones {
             abyss_handle.try_remove_ball(*did);
