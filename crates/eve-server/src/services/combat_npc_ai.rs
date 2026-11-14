@@ -1955,7 +1955,7 @@ pub async fn ensure_zarzakh_patrols_and_gate_guns(ctx: &ServerContext, solar_sys
                 })
                 .filter_map(|n| {
                     sys_handle
-                        .get_ball_position_sync(n.npc_id)
+                        .get_ball_position_sync(n.ball_id)
                         .map(|pos| (n.archetype.to_string(), pos))
                 })
                 .collect()

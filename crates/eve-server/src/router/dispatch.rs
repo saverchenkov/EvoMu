@@ -1588,7 +1588,7 @@ async fn spawn_pochven_ore_hypnosian_defenders_if_missing(ctx: &ServerContext, s
             rt.npc_entities
                 .values()
                 .filter(|n| n.solar_system_id == sys_id && n.archetype == "PochvenHypnosianSleeper")
-                .filter_map(|n| sys_handle.get_ball_position_sync(n.npc_id))
+                .filter_map(|n| sys_handle.get_ball_position_sync(n.ball_id))
                 .collect()
         });
     let ore_centres: Vec<(u32, [f64; 3])> = ctx.db.with_snapshot(|snap| {

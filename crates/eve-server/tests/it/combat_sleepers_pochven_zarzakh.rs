@@ -752,7 +752,7 @@ async fn test_zarzakh_gate_guns_and_deathless_patrols() {
             rt.npc_entities
                 .values()
                 .filter(|n| n.solar_system_id == adj_sys && n.archetype == "OuterZarzakhPatrol")
-                .filter_map(|n| adj_handle.get_ball_position_sync(n.npc_id).map(|p| (n.npc_id, p)))
+                .filter_map(|n| adj_handle.get_ball_position_sync(n.ball_id).map(|p| (n.ball_id, p)))
                 .collect()
         });
         assert!(
@@ -1107,7 +1107,7 @@ async fn test_pochven_hypnosian_sleepers_and_60pct_loot_drop() {
         rt.npc_entities
             .values()
             .filter(|n| n.solar_system_id == pochven_sys_id && n.archetype == "PochvenHypnosianSleeper")
-            .filter_map(|n| sys_handle.get_ball_position_sync(n.npc_id).map(|p| (n.npc_id, n.type_id, p)))
+            .filter_map(|n| sys_handle.get_ball_position_sync(n.ball_id).map(|p| (n.ball_id, n.type_id, p)))
             .collect()
     });
     let has_all_tiers_near = |center: DVec3, radius: f64| {
