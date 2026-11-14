@@ -1148,13 +1148,18 @@ pub fn on_advance_secs_internal(
     let mut finished_warps: std::collections::HashSet<i64> = std::collections::HashSet::new();
     for _ in 0..step_iters {
         if step_active_npc_ai_sync && !dedicated_physics_active {
-            for &sys_id in active_systems.keys() {
+            for (&sys_id, handle) in &active_systems {
                 crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync(ctx, sys_id);
-                if let Some(mgr) = ctx.npc_spawns.write().unwrap_or_else(|e| e.into_inner()).get_mut(&sys_id) {
-                    if !mgr.entities.is_empty() {
-                        let tick = ctx.systems.get_or_spawn(sys_id).ballpark.try_read().map(|b| b.current_tick).unwrap_or(0);
-                        mgr.step_ai_sync(ctx, sys_id, tick, 1.0);
-                    }
+                let has_spawns = {
+                    ctx.npc_spawns
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(&sys_id)
+                        .is_some_and(|mgr| !mgr.entities.is_empty())
+                };
+                if has_spawns {
+                    let tick = handle.ballpark.try_read().map(|b| b.current_tick).unwrap_or(0);
+                    crate::combat::npc_ai::step_system_npc_spawns_ai_sync(ctx, sys_id, tick, 1.0);
                 }
             }
         }
@@ -2150,15 +2155,17 @@ async fn step_single_system_physics_step(
             crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai(ctx, sys_id),
         )
         .await;
-        if let Some(mgr) = ctx
-            .npc_spawns
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .get_mut(&sys_id)
-        {
+        let has_spawns = {
+            ctx.npc_spawns
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&sys_id)
+                .is_some_and(|mgr| !mgr.entities.is_empty())
+        };
+        if has_spawns {
             let tick = handle.ballpark.try_read().map(|b| b.current_tick).unwrap_or(0);
             let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, sys_id);
-            mgr.step_ai_sync(ctx, sys_id, tick, 1.0 * tidi);
+            crate::combat::npc_ai::step_system_npc_spawns_ai_sync(ctx, sys_id, tick, 1.0 * tidi);
         }
     })
     .await;

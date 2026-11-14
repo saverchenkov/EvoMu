@@ -2114,3 +2114,256 @@ async fn clean_shutdown_final_checkpoint_persists_ship_condition_and_clock_offse
     drop(ctx2);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn cluster_tick_npc_ai_ship_death_flushes_projected_ewar_without_lock_rank_violation() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let violations_before = eve_db::lock_rank::unratcheted_violation_count();
+
+    let sys_a = 30_000_142_u32;
+    let sys_b = 30_002_187_u32;
+
+    let char_a1 = 90_000_001_i64;
+    let ship_a1 = 100_000_001_i64;
+    let char_a2 = 90_000_702_i64;
+    let ship_a2 = 100_000_702_i64;
+    let mod_a1 = 100_000_901_i64;
+    let npc_a1 = 100_400_901_i64;
+
+    let char_b1 = 90_000_703_i64;
+    let ship_b1 = 100_000_703_i64;
+    let char_b2 = 90_000_704_i64;
+    let ship_b2 = 100_000_704_i64;
+    let mod_b1 = 100_000_902_i64;
+    let npc_b1 = 100_400_902_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base_char = snap.characters[&char_a1].clone();
+        if let Some(ch) = snap.characters.get_mut(&char_a1) {
+            ch.solar_system_id = sys_a;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_a1;
+        }
+        if let Some(sh) = snap.items.get_mut(&ship_a1) {
+            sh.location_id = sys_a as i64;
+            sh.flag = InventoryFlag::None;
+        }
+        for (cid, sid, sys_id, uid, name) in [
+            (char_a2, ship_a2, sys_a, 702_u64, "Pilot A2"),
+            (char_b1, ship_b1, sys_b, 703_u64, "Pilot B1"),
+            (char_b2, ship_b2, sys_b, 704_u64, "Pilot B2"),
+        ] {
+            snap.characters.insert(
+                cid,
+                eve_db::CharacterRecord {
+                    character_id: cid,
+                    user_id: uid,
+                    name: name.into(),
+                    solar_system_id: sys_id,
+                    station_id: None,
+                    structure_id: None,
+                    active_ship_id: sid,
+                    ..base_char.clone()
+                },
+            );
+            snap.items.insert(
+                sid,
+                InventoryItemRecord {
+                    item_id: sid,
+                    type_id: 587,
+                    owner_id: cid,
+                    location_id: sys_id as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+        for (mid, owner, loc) in [(mod_a1, char_a1, ship_a1), (mod_b1, char_b1, ship_b1)] {
+            snap.items.insert(
+                mid,
+                InventoryItemRecord {
+                    item_id: mid,
+                    type_id: 447,
+                    owner_id: owner,
+                    location_id: loc,
+                    flag: InventoryFlag::MedSlot0,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let spawn_ship = |handle: &crate::system_actor::SystemHandle,
+                      ship_id: i64,
+                      pos: glam::DVec3,
+                      structure_hp: f64| {
+        let ball = eve_destiny::Ball {
+            id: ship_id,
+            type_id: 587,
+            position: pos,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 2.5,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 1.0,
+            mode: eve_destiny::MovementMode::Stop,
+        };
+        let cs = eve_destiny::CombatState {
+            shield_hp: 0.0,
+            max_shield_hp: 100.0,
+            armor_hp: 0.0,
+            max_armor_hp: 100.0,
+            structure_hp,
+            max_structure_hp: 300.0,
+            ..Default::default()
+        };
+        handle.try_spawn_ball_with_combat(ball, cs);
+    };
+    let spawn_npc = |handle: &crate::system_actor::SystemHandle, npc_id: i64, pos: glam::DVec3| {
+        handle.try_spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: npc_id,
+                type_id: 597,
+                position: pos,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 320.0,
+                inertia: 2.5,
+                mass: 1_200_000.0,
+                radius: 45.0,
+                speed_fraction: 1.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ctx.build_type_combat_state(597),
+        );
+        crate::combat::npc_ai::NpcCombatEntity {
+            ball_id: npc_id,
+            type_id: 597,
+            faction_id: 500_010,
+            state: crate::combat::npc_ai::NpcAiState::Idle,
+            spawn_group_id: 1,
+            spawn_pos: pos,
+            target_id: None,
+            bounty_isk: 10_000.0,
+            optimal_range: 10_000.0,
+            orbit_range: 5_000.0,
+            base_dps: 500.0,
+            damage_vector: eve_destiny::DamageVector::new(250.0, 250.0, 250.0, 250.0),
+            last_attack_tick: 0,
+            has_shield_rep: false,
+            has_armor_rep: false,
+        }
+    };
+
+    let handle_a = ctx.systems.get_or_spawn(sys_a);
+    let handle_b = ctx.systems.get_or_spawn(sys_b);
+    spawn_ship(&handle_a, ship_a1, glam::DVec3::ZERO, 1.0);
+    spawn_ship(&handle_a, ship_a2, glam::DVec3::new(100_000.0, 0.0, 0.0), 300.0);
+    spawn_ship(&handle_b, ship_b1, glam::DVec3::ZERO, 1.0);
+    spawn_ship(&handle_b, ship_b2, glam::DVec3::new(100_000.0, 0.0, 0.0), 300.0);
+
+    let npc_ent_a1 = spawn_npc(&handle_a, npc_a1, glam::DVec3::new(1_000.0, 0.0, 0.0));
+    let npc_ent_b1 = spawn_npc(&handle_b, npc_b1, glam::DVec3::new(1_000.0, 0.0, 0.0));
+    {
+        let mut spawns = ctx.npc_spawns.write().unwrap();
+        spawns.entry(sys_a).or_default().entities.insert(npc_a1, npc_ent_a1);
+        spawns.entry(sys_b).or_default().entities.insert(npc_b1, npc_ent_b1);
+    }
+
+    let mut eff_a = eve_dogma::DogmaItemState::from_sde(mod_a1, 447, &ctx.sde);
+    eff_a.base_attributes.insert(103, 2.0);
+    ctx.upsert_projected_ewar_on_ship(
+        ship_a1,
+        ship_a2,
+        eve_dogma::ProjectedEwarEffect {
+            source_module_id: mod_a1,
+            source_module_type_id: 447,
+            charge_type_id: None,
+            distance: 5_000.0,
+            overloaded: false,
+            effective_module: eff_a,
+        },
+    );
+    let mut eff_b = eve_dogma::DogmaItemState::from_sde(mod_b1, 447, &ctx.sde);
+    eff_b.base_attributes.insert(103, 2.0);
+    ctx.upsert_projected_ewar_on_ship(
+        ship_b1,
+        ship_b2,
+        eve_dogma::ProjectedEwarEffect {
+            source_module_id: mod_b1,
+            source_module_type_id: 447,
+            charge_type_id: None,
+            distance: 5_000.0,
+            overloaded: false,
+            effective_module: eff_b,
+        },
+    );
+
+    // Ensure current_tick >= last_attack_tick + 2 so both NPCs attack immediately.
+    handle_a.ballpark.write().unwrap().current_tick = 10;
+    handle_b.ballpark.write().unwrap().current_tick = 10;
+    // Drain initial actor commands before testing cluster_tick paths.
+    let _ = handle_a.get_ball_snapshot(ship_a2).await;
+    let _ = handle_b.get_ball_snapshot(ship_b2).await;
+
+    // 1. Exercise `on_advance_secs` (`cluster_tick.rs` sync NPC AI path):
+    //    `npc_a1` kills `ship_a1` -> `death_pipeline` flushes EWAR onto `ship_a2`
+    //    -> `try_send_fit_projection` -> `cmd_sender()` must see zero held locks.
+    let now_unix = ctx.now_unix();
+    on_advance_secs(&ctx, now_unix, 1);
+    assert_eq!(
+        eve_db::lock_rank::unratcheted_violation_count(),
+        violations_before,
+        "on_advance_secs NPC AI ship kill must not trigger lock-rank violations"
+    );
+    let _ = handle_a.get_ball_snapshot(ship_a2).await;
+    assert!(
+        ctx.projected_ewar
+            .read()
+            .unwrap()
+            .get(&ship_a2)
+            .is_none_or(|v| v.is_empty()),
+        "ship_a1 death in on_advance_secs must flush projected EWAR on ship_a2"
+    );
+    assert!(
+        handle_a.latest_fit_projection(ship_a2).is_some(),
+        "flushed projected EWAR must push FitProjection to sys_a actor"
+    );
+
+    // 2. Exercise `step_active_systems_physics_tick` (`step_single_system_physics_step` path)
+    //    with both `sys_a` and `sys_b` active concurrently:
+    //    `npc_b1` kills `ship_b1` -> flushes EWAR onto `ship_b2` -> pushes FitProjection
+    //    while `npc_a1` remains tracked in `sys_a`'s `ctx.npc_spawns`.
+    step_active_systems_physics_tick(&ctx, 1).await;
+    assert_eq!(
+        eve_db::lock_rank::unratcheted_violation_count(),
+        violations_before,
+        "step_active_systems_physics_tick NPC AI ship kill must not trigger lock-rank violations"
+    );
+    let _ = handle_b.get_ball_snapshot(ship_b2).await;
+    assert!(
+        ctx.projected_ewar
+            .read()
+            .unwrap()
+            .get(&ship_b2)
+            .is_none_or(|v| v.is_empty()),
+        "ship_b1 death in step_active_systems_physics_tick must flush projected EWAR on ship_b2"
+    );
+    assert!(
+        handle_b.latest_fit_projection(ship_b2).is_some(),
+        "flushed projected EWAR must push FitProjection to sys_b actor"
+    );
+    assert!(
+        ctx.npc_spawns
+            .read()
+            .unwrap()
+            .get(&sys_a)
+            .is_some_and(|mgr| mgr.entities.contains_key(&npc_a1)),
+        "sibling system npc_spawns entity must survive concurrent physics tick"
+    );
+}
