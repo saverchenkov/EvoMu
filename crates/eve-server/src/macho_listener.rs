@@ -286,6 +286,57 @@ async fn write_out_frames<W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
+struct PendingDockCall {
+    source: MachoAddress,
+    destination: MachoAddress,
+    service: String,
+    bound_id: Option<u64>,
+    method: String,
+    call_args: Vec<PyRep>,
+    call_kwargs: HashMap<String, PyRep>,
+    sleep: std::pin::Pin<Box<tokio::time::Sleep>>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_call_req_to_wire<W: AsyncWriteExt + Unpin>(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    wire_refs: &mut CallReqWireRefs<'_>,
+    writer: &mut W,
+    user_id_before_call: Option<u64>,
+    source: &MachoAddress,
+    destination: &MachoAddress,
+    service: &str,
+    bound_id: Option<u64>,
+    method: &str,
+    call_args: &[PyRep],
+    call_kwargs: &HashMap<String, PyRep>,
+) -> Result<()> {
+    let client_id = wire_refs.client_id;
+    let wire_out = execute_call_req_wire(
+        ctx,
+        session,
+        wire_refs,
+        source,
+        destination,
+        service,
+        bound_id,
+        method,
+        call_args,
+        call_kwargs,
+    )
+    .await;
+    let frame_user_id = session.user_id.or(user_id_before_call);
+    write_out_frames(
+        writer,
+        MACHO_PROXY_NODE_ID,
+        client_id,
+        frame_user_id,
+        &wire_out.out_frames,
+    )
+    .await
+}
+
 fn is_suppressed_self_terminal_explosion(entry: &PyRep, suppressed_ship_ids: &[i64]) -> bool {
     let PyRep::Tuple(outer) = entry else {
         return false;
@@ -1094,9 +1145,44 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
         }
     });
     session_guard.set_reader_abort(reader_task.abort_handle());
+    let mut pending_dock: Option<PendingDockCall> = None;
 
     loop {
         tokio::select! {
+            () = async {
+                if let Some(ref mut pending) = pending_dock {
+                    pending.sleep.as_mut().await;
+                }
+            }, if pending_dock.is_some() => {
+                if let Some(pending) = pending_dock.take() {
+                    let user_id_before = session.user_id;
+                    let mut wire_refs = CallReqWireRefs {
+                        client_id,
+                        sys_rx: &mut sys_rx,
+                        subscribed_sys_id: &mut subscribed_sys_id,
+                        wire_state: &mut wire_state,
+                    };
+                    if dispatch_call_req_to_wire(
+                        &ctx,
+                        &mut session,
+                        &mut wire_refs,
+                        &mut writer,
+                        user_id_before,
+                        &pending.source,
+                        &pending.destination,
+                        &pending.service,
+                        pending.bound_id,
+                        &pending.method,
+                        &pending.call_args,
+                        &pending.call_kwargs,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
             Some((reason_code, reason)) = close_rx.recv() => {
                 let closed = GPSTransportClosed::new(reason, reason_code);
                 let _ = write_framed_pyrep(&mut writer, &closed.to_pyrep()).await;
@@ -1396,7 +1482,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                     }
                 }
             }
-            frame_opt = frame_rx.recv() => {
+            frame_opt = frame_rx.recv(), if pending_dock.is_none() => {
                 let payload = match frame_opt {
                     Some(Ok(bytes)) => bytes,
                     Some(Err(e)) => {
@@ -1714,16 +1800,78 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
 
                         let (bound_id, method, call_args, call_kwargs) =
                             extract_macho_call_req(&pkt.payload);
+                        if let Some(plan) = crate::services::space_warp_jump::prepare_dock_warp_settle(
+                            &ctx,
+                            &session,
+                            &service,
+                            &method,
+                            &call_args,
+                        )
+                        .await
+                        {
+                            if plan.stopped_now {
+                                let handle = ctx.systems.get_or_spawn(plan.sys_id);
+                                if let Ok((tick, events, updates_pyrep)) =
+                                    handle.drain_observer_updates(plan.ship_id).await
+                                {
+                                    if let Some(batch) = build_destiny_batch(
+                                        &ctx,
+                                        wire_state.current_epoch(),
+                                        tick,
+                                        &events,
+                                        updates_pyrep,
+                                        &[plan.ship_id],
+                                    ) {
+                                        if let Some(frame) =
+                                            crate::outbound_sequencer::sequence_tick(
+                                                &mut wire_state,
+                                                batch,
+                                            )
+                                        {
+                                            if write_out_frames(
+                                                &mut writer,
+                                                MACHO_PROXY_NODE_ID,
+                                                client_id,
+                                                session.user_id,
+                                                &[frame],
+                                            )
+                                            .await
+                                            .is_err()
+                                            {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                let _ = handle.flush_peer_observer_updates(Some(plan.ship_id)).await;
+                            }
+                            if plan.settle_deadline > tokio::time::Instant::now() {
+                                pending_dock = Some(PendingDockCall {
+                                    source: pkt.source,
+                                    destination: pkt.destination,
+                                    service,
+                                    bound_id,
+                                    method,
+                                    call_args,
+                                    call_kwargs,
+                                    sleep: Box::pin(tokio::time::sleep_until(plan.settle_deadline)),
+                                });
+                                continue;
+                            }
+                        }
+                        let user_id_before = session.user_id;
                         let mut wire_refs = CallReqWireRefs {
                             client_id,
                             sys_rx: &mut sys_rx,
                             subscribed_sys_id: &mut subscribed_sys_id,
                             wire_state: &mut wire_state,
                         };
-                        let wire_out = execute_call_req_wire(
+                        if dispatch_call_req_to_wire(
                             &ctx,
                             &mut session,
                             &mut wire_refs,
+                            &mut writer,
+                            user_id_before,
                             &pkt.source,
                             &pkt.destination,
                             &service,
@@ -1731,14 +1879,6 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             &method,
                             &call_args,
                             &call_kwargs,
-                        )
-                        .await;
-                        if write_out_frames(
-                            &mut writer,
-                            MACHO_PROXY_NODE_ID,
-                            client_id,
-                            session.user_id,
-                            &wire_out.out_frames,
                         )
                         .await
                         .is_err()

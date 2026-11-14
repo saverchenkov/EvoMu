@@ -1897,6 +1897,7 @@ impl SystemHandle {
         let broadcast = crate::system_actor::build_tick_broadcast(self.solar_system_id, &mut bp, events);
         drop(st);
         drop(bp);
+        self.record_warp_stops_from_events(&broadcast.events);
         let _ = self.event_tx.send(broadcast);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             for fut in death_futs { let _ = handle.spawn(fut); }

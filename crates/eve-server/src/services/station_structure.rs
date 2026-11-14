@@ -826,11 +826,13 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError { code: "ShipWarpScrambled".into(), message: "Cannot dock at an Upwell structure while ship is warp scrambled".into(), client_error: None }));
             }
             if arrived_at_warp_dest {
-                let _ = handle.force_stop_warp(ship_id);
-                ctx.active_warps
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&ship_id);
+                crate::services::space_warp_jump::stop_arriving_warp_for_dock(
+                    ctx,
+                    &handle,
+                    &ball,
+                    target_pos,
+                    target_radius,
+                );
             }
             let Some(taken) = handle.take_ball_for_docking(ship_id, dock_id, target_pos).await else {
                 return Some(Err(BridgeRpcError {
@@ -839,6 +841,7 @@ pub async fn handle(
                     client_error: None,
                 }));
             };
+            handle.clear_warp_stopped_at(ship_id);
             match ctx.db.dock_character_if_in_space(char_id, sys_id, dock_id, is_structure) {
                 Ok(_) => {
                     let active_mods: Vec<i64> = ctx.db.with_mut_snapshot(|snap| {

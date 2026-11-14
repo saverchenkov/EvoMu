@@ -648,6 +648,19 @@ pub async fn handle(
             if !is_sde_station && !is_struct {
                 return Some(Err(BridgeRpcError { code: "DockTargetNotFound".into(), message: format!("Station or structure {target_id} not found"), client_error: None }));
             }
+            if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
+                let handle = ctx.systems.get_or_spawn(sys_id);
+                if let Ok(Some((_, ball))) = handle.get_ball_snapshot(ship_id).await {
+                    if matches!(ball.mode, eve_destiny::MovementMode::Warp { .. }) {
+                        let _ = handle.force_stop_warp(ship_id);
+                        ctx.active_warps
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .remove(&ship_id);
+                    }
+                }
+                handle.clear_warp_stopped_at(ship_id);
+            }
             // Game mechanics: Despawn active ship ball from physics simulation and commit atomic dock transition.
             let dock_spec = crate::router::SessionTransitionSpec::for_kind(
                 char_id,

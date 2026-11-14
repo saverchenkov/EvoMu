@@ -1229,3 +1229,337 @@ async fn agency_dock_21au_warp_after_advance_clock_keeps_sync_and_docks() {
     );
     assert_eq!(sess.station_id, Some(st_id));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dock_warp_settle_plan_handles_arriving_warp_post_exit_race_and_rejections() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let ship_id = 895_101_i64;
+    let sys_id = 30_000_142_u32;
+    let st_id = 60_003_760_i64;
+    let struct_id = 1_040_000_895_101_i64;
+    let kw = HashMap::new();
+
+    let st_pos = ctx.sde.stations[&st_id].position;
+    spawn_ship_in_space(&ctx, char_id, ship_id, 606, sys_id, st_pos);
+    let corp_id = ctx.db.with_mut_snapshot(|snap| {
+        let corp_id = snap.characters[&char_id].corporation_id;
+        snap.structures.insert(
+            struct_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35832,
+                solar_system_id: sys_id,
+                owner_corp_id: corp_id,
+                name: "Test Astrahus".into(),
+                position: (st_pos + DVec3::new(0.0, 500_000.0, 0.0)).to_array(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 100_000.0,
+                armor_hp: 100_000.0,
+                hull_hp: 100_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        corp_id
+    });
+    ctx.session_change_timers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let (_, st_ball) = sys_handle.get_ball_snapshot(st_id).await.unwrap().unwrap();
+    let st_radius = st_ball.radius;
+    let struct_pos = st_pos + DVec3::new(0.0, 500_000.0, 0.0);
+    let struct_radius = ctx
+        .sde
+        .types
+        .get(&35832)
+        .map(|t| t.radius)
+        .filter(|&r| r > 0.0)
+        .unwrap_or(15_000.0);
+
+    let mut sess = SessionState {
+        user_id: Some(1),
+        character_id: Some(char_id),
+        corporation_id: Some(corp_id),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+
+    // 1. Mid-warp (> 4.0s from destination) must return None and leave ship in warp (`ShipInWarp`).
+    let far_origin = st_pos + DVec3::new(1_000_000_000.0, 0.0, 0.0);
+    let landing = st_pos + DVec3::new(st_radius + 2_300.0, 0.0, 0.0);
+    let mut ball = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
+    ball.position = st_pos + DVec3::new(500_000_000.0, 0.0, 0.0);
+    ball.mode = MovementMode::Warp {
+        origin: far_origin,
+        destination: landing,
+        warp_speed_au_s: 15.0,
+        total_distance: far_origin.distance(landing),
+        phase: eve_destiny::WarpPhase::Cruising,
+        elapsed_warp_time: 1.0,
+    };
+    sys_handle.spawn_ball(ball.clone()).await.unwrap();
+    assert!(
+        prepare_dock_warp_settle(&ctx, &sess, "stationSvc", "Dock", &[PyRep::Integer(st_id)])
+            .await
+            .is_none(),
+        "mid-warp Dock must fail fast without a settle wait"
+    );
+    let after_mid = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
+    assert!(
+        matches!(after_mid.mode, MovementMode::Warp { .. }),
+        "mid-warp prepare_dock_warp_settle must not force-stop warp"
+    );
+
+    // 2. Arriving station warp (< 4.0s, 300m short of landing = outside static 2,500m shell):
+    //    stationSvc.Dock stops warp immediately, snaps to `landing`, clears active_warps, and queues Stop.
+    let _ = sys_handle.drain_observer_updates(ship_id).await;
+    ball.position = landing + DVec3::new(300.0, 0.0, 0.0);
+    ball.mode = MovementMode::Warp {
+        origin: far_origin,
+        destination: landing,
+        warp_speed_au_s: 15.0,
+        total_distance: far_origin.distance(landing),
+        phase: eve_destiny::WarpPhase::Decelerating,
+        elapsed_warp_time: 5.0,
+    };
+    sys_handle.spawn_ball(ball.clone()).await.unwrap();
+    ctx.active_warps
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(ship_id, st_id);
+    assert_eq!(evaluate_dock_perimeter(&ball, st_pos, st_radius).unwrap(), true);
+
+    let plan = prepare_dock_warp_settle(
+        &ctx,
+        &sess,
+        "stationSvc",
+        "Dock",
+        &[PyRep::Integer(st_id)],
+    )
+    .await
+    .expect("arriving stationSvc.Dock must produce a warp settle plan");
+    assert!(plan.stopped_now);
+    assert_eq!(plan.sys_id, sys_id);
+    assert_eq!(plan.ship_id, ship_id);
+    assert!(plan.settle_deadline > tokio::time::Instant::now());
+    assert!(
+        !ctx.active_warps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&ship_id),
+        "stop_arriving_warp_for_dock must clear active_warps"
+    );
+
+    let stopped_ball = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
+    assert_eq!(stopped_ball.mode, MovementMode::Stop);
+    assert!(
+        stopped_ball.position.distance(landing) < 1e-3,
+        "finish_warp_for_dock must snap arriving warp to verified landing_pos inside perimeter"
+    );
+    assert_eq!(
+        evaluate_dock_perimeter(&stopped_ball, st_pos, st_radius).unwrap(),
+        false,
+        "post-settle Dock perimeter re-check must succeed after landing snap"
+    );
+
+    let (_tick, events, _pyrep) = sys_handle.drain_observer_updates(ship_id).await.unwrap();
+    assert!(events.iter().any(|ev| matches!(
+        ev,
+        eve_destiny::DestinyEvent::SetBallMassive { ball_id, is_massive: true } if *ball_id == ship_id
+    )));
+    assert!(events.iter().any(|ev| matches!(
+        ev,
+        eve_destiny::DestinyEvent::Stop { ball_id } if *ball_id == ship_id
+    )));
+    assert!(events.iter().any(|ev| matches!(
+        ev,
+        eve_destiny::DestinyEvent::SetBallPosition { ball_id, .. } if *ball_id == ship_id
+    )));
+    assert!(!events.iter().any(|ev| matches!(
+        ev,
+        eve_destiny::DestinyEvent::RemoveBall { ball_id } if *ball_id == ship_id
+    )));
+
+    // 3. Post-OnWarpArrived coast race: ship is already stopped inside perimeter, but
+    //    warp_stopped_at is still within WARP_DOCK_SETTLE_DURATION -> stopped_now == false + deadline.
+    let race_plan = prepare_dock_warp_settle(
+        &ctx,
+        &sess,
+        "stationSvc",
+        "Dock",
+        &[PyRep::Integer(st_id)],
+    )
+    .await
+    .expect("docking immediately after server warp exit must still wait out settle deadline");
+    assert!(!race_plan.stopped_now);
+    assert!(race_plan.settle_deadline > tokio::time::Instant::now());
+
+    // After settle timestamp clears (or expires), stationary dock requires no extra wait.
+    sys_handle.clear_warp_stopped_at(ship_id);
+    assert!(
+        prepare_dock_warp_settle(&ctx, &sess, "stationSvc", "Dock", &[PyRep::Integer(st_id)])
+            .await
+            .is_none(),
+        "docking after settle window clears must not delay"
+    );
+
+    // `record_warp_stops_from_events` records SetBallMassive(true) and clears on WarpTo / RemoveBall.
+    sys_handle.record_warp_stops_from_events(&[eve_destiny::DestinyEvent::SetBallMassive {
+        ball_id: ship_id,
+        is_massive: true,
+    }]);
+    assert!(sys_handle
+        .warp_stop_settle_deadline(ship_id, WARP_DOCK_SETTLE_DURATION)
+        .is_some());
+    sys_handle.record_warp_stops_from_events(&[eve_destiny::DestinyEvent::WarpTo {
+        ball_id: ship_id,
+        destination: landing.to_array(),
+        warp_speed_au_s: 15.0,
+    }]);
+    assert!(sys_handle
+        .warp_stop_settle_deadline(ship_id, WARP_DOCK_SETTLE_DURATION)
+        .is_none());
+
+    // 4. `beyonce.CmdDock` during arriving station warp also prepares settle plan and stops warp.
+    ball.position = landing + DVec3::new(300.0, 0.0, 0.0);
+    ball.mode = MovementMode::Warp {
+        origin: far_origin,
+        destination: landing,
+        warp_speed_au_s: 15.0,
+        total_distance: far_origin.distance(landing),
+        phase: eve_destiny::WarpPhase::Decelerating,
+        elapsed_warp_time: 5.0,
+    };
+    sys_handle.spawn_ball(ball.clone()).await.unwrap();
+    let cmd_dock_plan = prepare_dock_warp_settle(
+        &ctx,
+        &sess,
+        "beyonce",
+        "CmdDock",
+        &[PyRep::Integer(st_id)],
+    )
+    .await
+    .expect("beyonce.CmdDock during arriving warp must prepare settle plan");
+    assert!(cmd_dock_plan.stopped_now);
+    assert_eq!(
+        sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1.mode,
+        MovementMode::Stop
+    );
+    sys_handle.clear_warp_stopped_at(ship_id);
+
+    // 5. Fast-fail rejections while warp_stopped_at is active:
+    //    5a. OutsideDockingPerimeter must return None (fast error response).
+    sys_handle.record_warp_stop(ship_id);
+    let _ = sys_handle
+        .set_ball_position(ship_id, st_pos + DVec3::new(st_radius + 8_000.0, 0.0, 0.0))
+        .await;
+    assert!(
+        prepare_dock_warp_settle(&ctx, &sess, "stationSvc", "Dock", &[PyRep::Integer(st_id)])
+            .await
+            .is_none(),
+        "OutsideDockingPerimeter must return None immediately"
+    );
+
+    //    5b. SessionChangeInProgress must return None.
+    let _ = sys_handle
+        .set_ball_position(ship_id, st_pos + DVec3::new(st_radius + 2_000.0, 0.0, 0.0))
+        .await;
+    ctx.session_change_timers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(
+            char_id,
+            crate::services::space_destiny::SessionChangeTimerState {
+                expires_unix: ctx.now_unix() + 20,
+                system_id: sys_id,
+                started_tick: 0,
+                reason: "test".into(),
+                location_change_invul_until: 0,
+            },
+        );
+    assert!(
+        prepare_dock_warp_settle(&ctx, &sess, "stationSvc", "Dock", &[PyRep::Integer(st_id)])
+            .await
+            .is_none(),
+        "SessionChangeInProgress must return None immediately"
+    );
+    ctx.session_change_timers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    sys_handle.clear_warp_stopped_at(ship_id);
+
+    // 6. Upwell `structureDocking.Dock`: ShipWarpScrambled returns None; unscrambled arriving warp stops + settles.
+    let struct_origin = struct_pos + DVec3::new(1_000_000_000.0, 0.0, 0.0);
+    let struct_landing = struct_pos + DVec3::new(struct_radius + 2_300.0, 0.0, 0.0);
+    ball.position = struct_landing + DVec3::new(300.0, 0.0, 0.0);
+    ball.mode = MovementMode::Warp {
+        origin: struct_origin,
+        destination: struct_landing,
+        warp_speed_au_s: 15.0,
+        total_distance: struct_origin.distance(struct_landing),
+        phase: eve_destiny::WarpPhase::Decelerating,
+        elapsed_warp_time: 5.0,
+    };
+    sys_handle.spawn_ball(ball.clone()).await.unwrap();
+    let _ = sys_handle.set_warp_scramble_strength(ship_id, 2).await;
+    assert!(
+        prepare_dock_warp_settle(
+            &ctx,
+            &sess,
+            "structureDocking",
+            "Dock",
+            &[PyRep::Integer(struct_id)],
+        )
+        .await
+        .is_none(),
+        "Upwell structureDocking.Dock while warp scrambled must fail fast without stopping warp"
+    );
+    assert!(matches!(
+        sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1.mode,
+        MovementMode::Warp { .. }
+    ));
+
+    let _ = sys_handle.set_warp_scramble_strength(ship_id, 0).await;
+    let _ = sys_handle.drain_observer_updates(ship_id).await;
+    let struct_plan = prepare_dock_warp_settle(
+        &ctx,
+        &sess,
+        "structureDocking",
+        "Dock",
+        &[PyRep::Integer(struct_id)],
+    )
+    .await
+    .expect("arriving structureDocking.Dock must prepare settle plan");
+    assert!(struct_plan.stopped_now);
+    assert!(struct_plan.settle_deadline > tokio::time::Instant::now());
+    let (_tick2, struct_events, _) = sys_handle.drain_observer_updates(ship_id).await.unwrap();
+    assert!(struct_events.iter().any(|ev| matches!(
+        ev,
+        eve_destiny::DestinyEvent::Stop { ball_id } if *ball_id == ship_id
+    )));
+
+    // End-to-end synchronous dispatch after settle still completes docking cleanly.
+    let struct_dock_res = crate::services::station_structure::handle(
+        &ctx,
+        &mut sess,
+        "structureDocking",
+        "Dock",
+        &[PyRep::Integer(struct_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("structureDocking.Dock must succeed after arriving warp snap");
+    assert_ne!(struct_dock_res, PyRep::None);
+    assert_eq!(sess.structure_id, Some(struct_id));
+}

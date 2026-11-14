@@ -1444,11 +1444,7 @@ async fn handle_dock(
         });
     }
     if arrived_at_warp_dest {
-        let _ = handle.force_stop_warp(ship_id);
-        ctx.active_warps
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&ship_id);
+        stop_arriving_warp_for_dock(ctx, &handle, &ball, target_pos, target_radius);
     }
     let Some(taken) = handle.take_ball_for_docking(ship_id, dock_id, target_pos).await else {
         return Err(BridgeRpcError {
@@ -1457,6 +1453,7 @@ async fn handle_dock(
             client_error: None,
         });
     };
+    handle.clear_warp_stopped_at(ship_id);
     match ctx.db.dock_character_if_in_space(char_id, sys_id, dock_id, is_structure) {
         Ok(_) => {
             ctx.db.with_mut_snapshot(|snap| {
@@ -1538,6 +1535,211 @@ async fn handle_dock(
             })
         }
     }
+}
+
+/// Delay between flushing warp-stop Destiny updates and completing dock session change so
+/// V24 `Warp.WarpLoop` (`blue.synchro.SleepSim(500)`) exits before `OnReleaseBallpark`.
+pub const WARP_DOCK_SETTLE_DURATION: std::time::Duration =
+    std::time::Duration::from_millis(1_200);
+
+pub(crate) struct DockWarpSettlePlan {
+    pub sys_id: eve_sde::SolarSystemId,
+    pub ship_id: eve_destiny::BallId,
+    pub stopped_now: bool,
+    pub settle_deadline: tokio::time::Instant,
+}
+
+/// Terminates an arriving warp before docking and clears `active_warps`, snapping the ball to
+/// the verified warp landing point when `is_warp_finishing_within(ball, 4.0)` accepted it outside
+/// the static `target_radius + 2,500 m` shell so post-settle perimeter checks remain valid.
+pub(crate) fn stop_arriving_warp_for_dock(
+    ctx: &ServerContext,
+    handle: &crate::system_actor::SystemHandle,
+    ball: &eve_destiny::Ball,
+    target_pos: DVec3,
+    target_radius: f64,
+) {
+    let landing_pos = match ball.mode {
+        MovementMode::Warp { destination, .. }
+            if ball.position.distance(target_pos) > target_radius + 2_500.0
+                && destination.is_finite() =>
+        {
+            Some(destination)
+        }
+        _ => None,
+    };
+    let _ = handle.finish_warp_for_dock(ball.id, landing_pos);
+    ctx.active_warps
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&ball.id);
+}
+
+fn resolve_dock_target_for_settle(
+    ctx: &ServerContext,
+    sys_id: eve_sde::SolarSystemId,
+    service: &str,
+    method: &str,
+    target_id: i64,
+) -> Option<(DVec3, f64, bool)> {
+    let station_target = || {
+        let st = ctx.sde.stations.get(&target_id)?;
+        if st.solar_system_id != sys_id {
+            return None;
+        }
+        let pos = DVec3::new(st.position.x, st.position.y, st.position.z);
+        let radius = ctx
+            .sde
+            .types
+            .get(&st.station_type_id)
+            .map(|t| t.radius)
+            .filter(|&r| r > 0.0)
+            .unwrap_or(5_000.0);
+        Some((pos, radius, false))
+    };
+    let structure_target = || {
+        ctx.db.with_snapshot(|snap| {
+            let st = snap.structures.get(&target_id)?;
+            if st.solar_system_id != sys_id || st.state == "Destroyed" || st.state == "Anchoring" {
+                return None;
+            }
+            let pos = DVec3::from_array(st.position);
+            let radius = ctx
+                .sde
+                .types
+                .get(&st.type_id)
+                .map(|t| t.radius)
+                .filter(|&r| r > 0.0)
+                .unwrap_or(15_000.0);
+            Some((pos, radius, true))
+        })
+    };
+    match (service, method) {
+        ("stationSvc", "Dock") => station_target(),
+        ("structureDocking", "Dock") => structure_target(),
+        ("beyonce", "CmdDock") => station_target().or_else(structure_target),
+        _ => None,
+    }
+}
+
+/// Evaluates on the live TCP path whether a valid dock request needs a `DoDestinyUpdate(Stop)`
+/// flush and `WARP_DOCK_SETTLE_DURATION` wait before completing `OnReleaseBallpark`.
+///
+/// The V24 client's `Warp.WarpLoop` tasklet (`eve/client/script/environment/effects/Warp.py`)
+/// polls `ball.mode == DSTBALL_WARP` every `blue.synchro.SleepSim(500)` and invokes
+/// `LocationArrivalIndicationService.on_warp_finished` after loop exit; delaying the dock
+/// session transition until `Stop` has been delivered and settled prevents `OnReleaseBallpark`
+/// (`michelle.__bp = None`) from racing ahead of `on_warp_finished`.
+pub(crate) async fn prepare_dock_warp_settle(
+    ctx: &ServerContext,
+    session: &SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+) -> Option<DockWarpSettlePlan> {
+    let is_turbo = match (service, method) {
+        ("stationSvc", "Dock") | ("structureDocking", "Dock") | ("beyonce", "CmdDock") => false,
+        ("beyonce", "CmdTurboDock") => true,
+        _ => return None,
+    };
+    let char_id = session.character_id?;
+    let sys_id = session.solar_system_id?;
+    let ship_id = session.ship_id?;
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return None;
+    }
+    if !is_turbo
+        && args
+            .get(1)
+            .and_then(|a| a.as_i64())
+            .is_some_and(|req| req > 0 && req != ship_id)
+    {
+        return None;
+    }
+    if crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "dock").is_err()
+        || crate::services::space_navigation_advanced::check_immobilizing_module_active(
+            ctx, ship_id, "dock",
+        )
+        .is_err()
+    {
+        return None;
+    }
+
+    let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    let (cur_tick, ball) = handle.get_ball_snapshot(ship_id).await.ok().flatten()?;
+
+    let stopped_now = if is_turbo {
+        if !session.has_gm_role() {
+            return None;
+        }
+        let target_exists = ctx.sde.stations.contains_key(&target_id)
+            || ctx.db.with_snapshot(|snap| snap.structures.contains_key(&target_id));
+        if !target_exists {
+            return None;
+        }
+        if matches!(ball.mode, MovementMode::Warp { .. }) {
+            let _ = handle.force_stop_warp(ship_id);
+            ctx.active_warps
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&ship_id);
+            true
+        } else {
+            false
+        }
+    } else {
+        let now_unix = ctx.now_unix();
+        if check_session_change_timer_active(ctx, char_id, now_unix, Some((sys_id, cur_tick)))
+            .is_some()
+        {
+            return None;
+        }
+        let (target_pos, sde_radius, is_structure) =
+            resolve_dock_target_for_settle(ctx, sys_id, service, method, target_id)?;
+        let target_radius = handle
+            .get_ball_snapshot(target_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|(_, b)| b.radius)
+            .filter(|&r| r > 0.0)
+            .unwrap_or(sde_radius);
+        let arrived_at_warp_dest =
+            evaluate_dock_perimeter(&ball, target_pos, target_radius).ok()?;
+        if crate::services::combat_crimewatch::check_crimewatch_action_restriction(
+            ctx, char_id, ship_id, sys_id, "dock", now_unix,
+        )
+        .is_err()
+        {
+            return None;
+        }
+        if is_structure {
+            let acl_ok = ctx.db.with_snapshot(|snap| {
+                crate::services::structure_acl_defense_rules::verify_structure_docking_acl(
+                    ctx, snap, target_id, char_id,
+                )
+                .is_ok()
+            });
+            if !acl_ok || handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
+                return None;
+            }
+        }
+        if arrived_at_warp_dest {
+            stop_arriving_warp_for_dock(ctx, &handle, &ball, target_pos, target_radius);
+            true
+        } else {
+            false
+        }
+    };
+
+    let settle_deadline = handle.warp_stop_settle_deadline(ship_id, WARP_DOCK_SETTLE_DURATION)?;
+    Some(DockWarpSettlePlan {
+        sys_id,
+        ship_id,
+        stopped_now,
+        settle_deadline,
+    })
 }
 
 pub use crate::services::space_navigation_advanced::deactivate_ship_modules_on_leave_space;
