@@ -9,9 +9,8 @@ use crate::services::quasar_progression::new_progression_managers;
 use crate::services::quasar_progression_extra::CommunityTrackState;
 use eve_db::WorldRepository;
 use eve_machonet::{service_roles, SessionState};
-use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, QuasarDescriptorRegistry, WireMessage,
-};
+use eve_proto::pb;
+use eve_proto::quasar::{QuasarDescriptorRegistry, WireMessage};
 use eve_sde::SdeRegistry;
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
@@ -113,12 +112,9 @@ fn opportunity_events_and_server_opportunity_recording() {
     sess.role = service_roles::ROLE_PLAYER_DEFAULT;
 
     // 1. Client Discovered event
-    let mut disc_inner = Vec::new();
-    encode_string_field(1, "opp_mining_1", &mut disc_inner);
-    let mut disc_opp = Vec::new();
-    encode_bytes_field(1, &disc_inner, &mut disc_opp);
-    let mut disc_req = Vec::new();
-    encode_bytes_field(1, &disc_opp, &mut disc_req);
+    let disc_req = pb::message("eve_public.opportunity.api.Discovered")
+        .set("opportunity.opportunity.name", "opp_mining_1")
+        .must_encode();
     handle_opportunity_event(
         &mgrs,
         &desc,
@@ -131,15 +127,10 @@ fn opportunity_events_and_server_opportunity_recording() {
     );
 
     // 2. Client Tracked -> Viewed -> Untracked events
-    let mut ch_msg = Vec::new();
-    encode_varint_field(1, cid as u64, &mut ch_msg);
-    let mut opp_var = Vec::new();
-    encode_varint_field(1, 777, &mut opp_var);
-    let mut opp_msg = Vec::new();
-    encode_bytes_field(1, &opp_var, &mut opp_msg);
-    let mut track_req = Vec::new();
-    encode_bytes_field(1, &ch_msg, &mut track_req);
-    encode_bytes_field(2, &opp_msg, &mut track_req);
+    let track_req = pb::message("eve_public.opportunity.api.Tracked")
+        .set("character.sequential", cid)
+        .set("opportunity.dungeon.dungeon.sequential", 777u64)
+        .must_encode();
 
     for ev in [
         "eve_public.opportunity.api.Tracked",
@@ -239,10 +230,7 @@ fn tale_matching_and_community_track_progression() {
 
 #[test]
 fn issue_765_goal_created_and_get_always_include_contribution_config() {
-    use eve_proto::quasar::{
-        encode_bytes_field, encode_string_field, encode_varint_field, EvePublicRequest, GoogleAny,
-        WireValue, TYPE_GOOGLEAPIS_PREFIX,
-    };
+    use eve_proto::quasar::{EvePublicRequest, GoogleAny, WireValue, TYPE_GOOGLEAPIS_PREFIX};
 
     let db = Arc::new(WorldRepository::with_demo_seed());
     let sde = shared_sde();
@@ -267,11 +255,12 @@ fn issue_765_goal_created_and_get_always_include_contribution_config() {
 
     // 1. CreateRequest with explicit deliver_item ContributionConfiguration (field 4)
     let deliver_pb = encode_goal_contribution_config("DeliverItem", Some(34));
-    let mut create_deliver = Vec::new();
-    encode_string_field(1, "Deliver Tritanium", &mut create_deliver);
-    encode_string_field(2, "Bring minerals", &mut create_deliver);
-    encode_varint_field(3, 500, &mut create_deliver);
-    encode_bytes_field(4, &deliver_pb, &mut create_deliver);
+    let create_deliver = pb::message("eve_public.goal.api.CreateRequest")
+        .set("name", "Deliver Tritanium")
+        .set("description", "Bring minerals")
+        .set("desired_progress", 500u64)
+        .set_raw_message("contribution_configuration", &deliver_pb)
+        .must_encode();
 
     let req1 = EvePublicRequest {
         issued: None,
@@ -318,10 +307,11 @@ fn issue_765_goal_created_and_get_always_include_contribution_config() {
     assert!(cfg.get(2).is_some(), "expected deliver_item (field 2) on CreatedNotice");
 
     // 2. CreateRequest omitting field 4 must still emit a valid non-empty contribution_config (`manual`)
-    let mut create_fallback = Vec::new();
-    encode_string_field(1, "Manual Goal", &mut create_fallback);
-    encode_string_field(2, "No config supplied", &mut create_fallback);
-    encode_varint_field(3, 10, &mut create_fallback);
+    let create_fallback = pb::message("eve_public.goal.api.CreateRequest")
+        .set("name", "Manual Goal")
+        .set("description", "No config supplied")
+        .set("desired_progress", 10u64)
+        .must_encode();
     let req2 = EvePublicRequest {
         payload: Some(GoogleAny {
             type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.api.CreateRequest"),
@@ -356,8 +346,9 @@ fn issue_765_goal_created_and_get_always_include_contribution_config() {
     assert!(cfg2.get(1).is_some(), "fallback contribution_config must set manual (field 1)");
 
     // 3. GetRequest and GetAllRequest must also include contribution_config (field 7)
-    let mut get_req_bytes = Vec::new();
-    encode_bytes_field(1, &goal_id_bytes, &mut get_req_bytes);
+    let get_req_bytes = pb::message("eve_public.goal.api.GetRequest")
+        .set_raw_message("goal", &goal_id_bytes)
+        .must_encode();
     let get_rsp = router.handle_public_request(
         &sess,
         &EvePublicRequest {
@@ -422,10 +413,7 @@ fn issue_765_goal_created_and_get_always_include_contribution_config() {
 
 #[test]
 fn issue_779_non_gm_corp_goal_create_emits_v24_attributes_and_active_list() {
-    use eve_proto::quasar::{
-        encode_bytes_field, encode_string_field, encode_varint_field, EvePublicRequest, GoogleAny,
-        WireValue, TYPE_GOOGLEAPIS_PREFIX,
-    };
+    use eve_proto::quasar::{EvePublicRequest, GoogleAny, WireValue, TYPE_GOOGLEAPIS_PREFIX};
 
     let db = Arc::new(WorldRepository::with_demo_seed());
     let sde = shared_sde();
@@ -450,11 +438,12 @@ fn issue_779_non_gm_corp_goal_create_emits_v24_attributes_and_active_list() {
     let _rx = router.subscribe_session(&sess, Vec::new(), 1_760_000_100);
 
     let manual_pb = encode_goal_contribution_config("Manual", None);
-    let mut create_req = Vec::new();
-    encode_string_field(1, "V24 Corp Project", &mut create_req);
-    encode_string_field(2, "Created by non-GM CEO", &mut create_req);
-    encode_varint_field(3, 250, &mut create_req);
-    encode_bytes_field(4, &manual_pb, &mut create_req);
+    let create_req = pb::message("eve_public.goal.api.CreateRequest")
+        .set("name", "V24 Corp Project")
+        .set("description", "Created by non-GM CEO")
+        .set("desired_progress", 250u64)
+        .set_raw_message("contribution_configuration", &manual_pb)
+        .must_encode();
 
     let req = EvePublicRequest {
         issued: None,
@@ -527,8 +516,9 @@ fn issue_779_non_gm_corp_goal_create_emits_v24_attributes_and_active_list() {
     );
 
     // GetRequest must return Attributes with assigner/assignee and manual contribution_config
-    let mut get_bytes = Vec::new();
-    encode_bytes_field(1, &goal_id_bytes, &mut get_bytes);
+    let get_bytes = pb::message("eve_public.goal.api.GetRequest")
+        .set_raw_message("goal", &goal_id_bytes)
+        .must_encode();
     let get_rsp = router.handle_public_request(
         &sess,
         &EvePublicRequest {
@@ -662,15 +652,10 @@ fn goal_tale_wire_contents_and_opportunity_security_edges() {
     );
 
     // Spoofed character ID inside Tracked payload is ignored
-    let mut spoof_ch = Vec::new();
-    encode_varint_field(1, 90_999_999, &mut spoof_ch);
-    let mut opp_story = Vec::new();
-    encode_string_field(1, "air_npe_storyline", &mut opp_story);
-    let mut opp_msg = Vec::new();
-    encode_bytes_field(5, &opp_story, &mut opp_msg);
-    let mut spoof_req = Vec::new();
-    encode_bytes_field(1, &spoof_ch, &mut spoof_req);
-    encode_bytes_field(2, &opp_msg, &mut spoof_req);
+    let spoof_req = pb::message("eve_public.opportunity.api.Tracked")
+        .set("character.sequential", 90_999_999u32)
+        .set("opportunity.storyline.content_label", "air_npe_storyline")
+        .must_encode();
     handle_opportunity_event(
         &mgrs,
         &desc,
@@ -687,11 +672,10 @@ fn goal_tale_wire_contents_and_opportunity_security_edges() {
     );
 
     // Client-sent Completed event only records history and NEVER marks server completion
-    let mut own_ch = Vec::new();
-    encode_varint_field(1, cid as u64, &mut own_ch);
-    let mut own_req = Vec::new();
-    encode_bytes_field(1, &own_ch, &mut own_req);
-    encode_bytes_field(2, &opp_msg, &mut own_req);
+    let own_req = pb::message("eve_public.opportunity.api.Completed")
+        .set("character.sequential", cid)
+        .set("opportunity.storyline.content_label", "air_npe_storyline")
+        .must_encode();
     handle_opportunity_event(
         &mgrs,
         &desc,

@@ -14,10 +14,7 @@ use eve_db::{
     CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents, corp_roles,
 };
 use eve_proto::PyRep;
-use eve_proto::quasar::{
-    EvePublicRequest, GoogleAny, TYPE_GOOGLEAPIS_PREFIX, WireMessage, encode_bytes_field,
-    encode_varint_field,
-};
+use eve_proto::quasar::{EvePublicRequest, WireMessage};
 use std::collections::HashMap;
 
 const DAILY_REWARD_COOLDOWN_ERR: &str = "DailyRewardAlreadyClaimedToday";
@@ -140,26 +137,19 @@ fn r7_464_title_role_maturation_and_singleton_ship_container_delivery_blocked() 
     });
 
     let fl_uuid = freelance_uuid(now, fl_pid);
-    let mut goal_id_bytes = Vec::new();
-    encode_bytes_field(1, &fl_uuid, &mut goal_id_bytes);
-    let mut item_id_bytes = Vec::new();
-    encode_varint_field(1, assembled_ship_id as u64, &mut item_id_bytes);
-
-    let mut deliver_bytes = Vec::new();
-    encode_bytes_field(1, &goal_id_bytes, &mut deliver_bytes);
-    encode_bytes_field(3, &item_id_bytes, &mut deliver_bytes);
-    encode_varint_field(4, 1, &mut deliver_bytes);
+    let deliver_any = eve_proto::pb::message(
+        "eve_public.freelance.contributionmethod.itemdelivery.api.DeliverRequest",
+    )
+    .set("project.uuid", fl_uuid.as_slice())
+    .set("item.sequential", assembled_ship_id as u64)
+    .set("quantity", 1u32)
+    .must_to_any();
 
     let mut sess = auth_session(1, member_id, corp_id, 30_000_142);
     sess.station_id = Some(station_id);
     let deliver_req = EvePublicRequest {
         correlation_uuid: vec![15; 16],
-        payload: Some(GoogleAny {
-            type_url: format!(
-                "{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.contributionmethod.itemdelivery.api.DeliverRequest"
-            ),
-            value: deliver_bytes,
-        }),
+        payload: Some(deliver_any),
         ..Default::default()
     };
     let resp = ctx

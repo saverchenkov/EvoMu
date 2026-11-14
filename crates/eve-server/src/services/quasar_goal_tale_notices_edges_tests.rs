@@ -11,9 +11,10 @@ use crate::services::quasar_progression::new_progression_managers;
 use crate::services::quasar_progression_extra::CommunityTrackState;
 use eve_db::WorldRepository;
 use eve_machonet::{service_roles, SessionState};
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, DynamicQuasarMessage, DynamicValue,
-    GoogleAny, QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
+    DynamicQuasarMessage, DynamicValue, GoogleAny, QuasarDescriptorRegistry, WireField,
+    WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::{DungeonTemplate, SdeRegistry};
 use std::collections::HashSet;
@@ -89,15 +90,10 @@ fn opportunity_id_formatting_variants_and_event_guards() {
     assert!(db.with_snapshot(|s| !s.quasar_state_blobs.contains_key("quasar_opportunities")));
 
     // 2. Character ID mismatch in Tracked payload is ignored
-    let mut ch_other = Vec::new();
-    encode_varint_field(1, 90_000_999, &mut ch_other);
-    let mut opp_var = Vec::new();
-    encode_varint_field(1, 888, &mut opp_var);
-    let mut opp_msg = Vec::new();
-    encode_bytes_field(1, &opp_var, &mut opp_msg);
-    let mut mismatch_req = Vec::new();
-    encode_bytes_field(1, &ch_other, &mut mismatch_req);
-    encode_bytes_field(2, &opp_msg, &mut mismatch_req);
+    let mismatch_req = pb::message("eve_public.opportunity.api.Tracked")
+        .set("character.sequential", 90_000_999u32)
+        .set("opportunity.dungeon.dungeon.sequential", 888u64)
+        .must_encode();
     handle_opportunity_event(
         &mgrs,
         &desc,
@@ -114,12 +110,9 @@ fn opportunity_id_formatting_variants_and_event_guards() {
     db.with_mut_snapshot(|s| {
         s.quasar_state_blobs.insert("quasar_opportunities".into(), "[]".into());
     });
-    let mut disc_empty = Vec::new();
-    encode_string_field(1, "   ", &mut disc_empty);
-    let mut disc_opp_empty = Vec::new();
-    encode_bytes_field(1, &disc_empty, &mut disc_opp_empty);
-    let mut disc_req_empty = Vec::new();
-    encode_bytes_field(1, &disc_opp_empty, &mut disc_req_empty);
+    let disc_req_empty = pb::message("eve_public.opportunity.api.Discovered")
+        .set("opportunity.opportunity.name", "   ")
+        .must_encode();
     handle_opportunity_event(
         &mgrs,
         &desc,
@@ -131,12 +124,16 @@ fn opportunity_id_formatting_variants_and_event_guards() {
         now,
     );
 
-    let mut disc_num = Vec::new();
-    encode_varint_field(1, 12345, &mut disc_num);
-    let mut disc_opp_num = Vec::new();
-    encode_bytes_field(1, &disc_num, &mut disc_opp_num);
-    let mut disc_req_num = Vec::new();
-    encode_bytes_field(1, &disc_opp_num, &mut disc_req_num);
+    let disc_num = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(12345),
+        }],
+    }
+    .encode();
+    let disc_req_num = pb::message("eve_public.opportunity.api.Discovered")
+        .set_raw_message("opportunity.opportunity", disc_num)
+        .must_encode();
     handle_opportunity_event(
         &mgrs,
         &desc,
@@ -168,11 +165,10 @@ fn opportunity_id_formatting_variants_and_event_guards() {
         );
     });
 
-    let mut ch_ok = Vec::new();
-    encode_varint_field(1, cid as u64, &mut ch_ok);
-    let mut track_req = Vec::new();
-    encode_bytes_field(1, &ch_ok, &mut track_req);
-    encode_bytes_field(2, &opp_msg, &mut track_req);
+    let track_req = pb::message("eve_public.opportunity.api.Tracked")
+        .set("character.sequential", cid)
+        .set("opportunity.dungeon.dungeon.sequential", 888u64)
+        .must_encode();
     for ev in [
         "eve_public.opportunity.api.Tracked",
         "eve_public.opportunity.api.Viewed",
@@ -361,9 +357,19 @@ fn server_opportunity_multi_condition_and_tale_archetype_edges() {
     assert_eq!(res[0].current_progress, 50);
 
     // Direct unit checks for `extract_raw_length_delimited_field` and `encode_goal_attributes`
-    let mut wire = Vec::new();
-    encode_varint_field(1, 42, &mut wire);
-    encode_bytes_field(4, &[0xAA, 0xBB, 0xCC], &mut wire);
+    let wire = WireMessage {
+        fields: vec![
+            WireField {
+                field_number: 1,
+                value: WireValue::Varint(42),
+            },
+            WireField {
+                field_number: 4,
+                value: WireValue::LengthDelimited(vec![0xAA, 0xBB, 0xCC]),
+            },
+        ],
+    }
+    .encode();
     assert_eq!(
         extract_raw_length_delimited_field(&wire, 4),
         Some(vec![0xAA, 0xBB, 0xCC])
@@ -400,15 +406,25 @@ fn server_opportunity_multi_condition_and_tale_archetype_edges() {
 
 #[test]
 fn goal_wire_encoders_and_extractors_kill_all_mutants() {
-    use eve_proto::quasar::{encode_bytes_field, WireMessage, WireValue};
+    use eve_proto::quasar::{WireMessage, WireValue};
 
     // 1. extract_raw_length_delimited_field: empty bytes returns None; wrong field None; non-empty Some
-    let mut wire_empty_field = Vec::new();
-    encode_bytes_field(7, &[], &mut wire_empty_field);
+    let wire_empty_field = WireMessage {
+        fields: vec![WireField {
+            field_number: 7,
+            value: WireValue::LengthDelimited(Vec::new()),
+        }],
+    }
+    .encode();
     assert_eq!(extract_raw_length_delimited_field(&wire_empty_field, 7), None);
 
-    let mut wire_nonempty = Vec::new();
-    encode_bytes_field(7, &[0xDE, 0xAD], &mut wire_nonempty);
+    let wire_nonempty = WireMessage {
+        fields: vec![WireField {
+            field_number: 7,
+            value: WireValue::LengthDelimited(vec![0xDE, 0xAD]),
+        }],
+    }
+    .encode();
     assert_eq!(extract_raw_length_delimited_field(&wire_nonempty, 8), None);
     assert_eq!(
         extract_raw_length_delimited_field(&wire_nonempty, 7),

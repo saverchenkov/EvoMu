@@ -5,9 +5,10 @@ use crate::quasar_gateway::{
     PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_PRECONDITION_FAILED,
 };
 use eve_db::{IskCents, WorldRepository};
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny,
-    QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, QuasarDescriptorRegistry,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
@@ -510,19 +511,10 @@ fn on_gameplay_event_bonus_progression_and_admin_progress_variants() {
 
     // Also test GetProgressRequest when not completed (field 3 = 1)
     let user = make_ctx(Some(cid), 0, 300_100);
-    let mut id_bytes = Vec::new();
-    encode_bytes_field(1, &g3_uuid, &mut id_bytes);
-    let mut req_bytes = Vec::new();
-    encode_bytes_field(1, &id_bytes, &mut req_bytes);
-    let prog_uncomp = dispatch(
-        &router,
-        &user,
-        &GoogleAny {
-            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.dailygoal.api.GetProgressRequest"),
-            value: req_bytes,
-        },
-    )
-    .expect("GetProgressRequest uncompleted");
+    let req_any = pb::message("eve.dailygoal.api.GetProgressRequest")
+        .set("goal.uuid", &g3_uuid)
+        .must_to_any();
+    let prog_uncomp = dispatch(&router, &user, &req_any).expect("GetProgressRequest uncompleted");
     let dyn_uncomp =
         crate::services::quasar_char_skill_services::decode_wire_dynamic("test.Msg", &prog_uncomp.value);
     assert_eq!(dyn_uncomp.get(1), Some(&DynamicValue::Uint64(1)));

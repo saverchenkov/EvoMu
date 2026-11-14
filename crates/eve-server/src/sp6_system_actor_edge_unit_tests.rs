@@ -33,8 +33,7 @@ use eve_dogma::{FittedModule, ModuleState, ShipFittingEngine};
 use eve_machonet::{SessionState, service_roles};
 use eve_proto::PyRep;
 use eve_proto::quasar::{
-    EvePublicRequest, GoogleAny, QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
-    encode_bytes_field, encode_string_field, encode_varint_field,
+    EvePublicRequest, GoogleAny, GoogleDuration, QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use glam::DVec3;
@@ -136,18 +135,6 @@ fn find_type_by_group_attr(sde: &SdeRegistry, group_id: u32, req_attr: Option<u1
         })
         .map(|t| t.type_id)
         .expect("SDE must contain requested group")
-}
-
-fn encode_seq_id(field_num: u32, id: u32, out: &mut Vec<u8>) {
-    let mut sub = Vec::new();
-    encode_varint_field(1, u64::from(id), &mut sub);
-    encode_bytes_field(field_num, &sub, out);
-}
-
-fn encode_duration(field_num: u32, secs: i64, out: &mut Vec<u8>) {
-    let mut sub = Vec::new();
-    encode_varint_field(1, secs as u64, &mut sub);
-    encode_bytes_field(field_num, &sub, out);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2150,16 +2137,13 @@ async fn xmpp_chat_auth_acl_moderation_and_quasar_social_edges() {
     );
 
     // BroadcastMessageRequest with valid text & MuteRequest errors + success
-    let mut bcast_bytes = Vec::new();
-    encode_string_field(1, "Fly safe", &mut bcast_bytes);
     let bcast_req = EvePublicRequest {
         correlation_uuid: vec![2, 2, 3, 4],
-        payload: Some(GoogleAny {
-            type_url: format!(
-                "{TYPE_GOOGLEAPIS_PREFIX}eve_public.chat.local.api.BroadcastMessageRequest"
-            ),
-            value: bcast_bytes,
-        }),
+        payload: Some(
+            eve_proto::pb::message("eve_public.chat.local.api.BroadcastMessageRequest")
+                .set("message", "Fly safe")
+                .must_to_any(),
+        ),
         ..Default::default()
     };
     assert_eq!(
@@ -2169,16 +2153,13 @@ async fn xmpp_chat_auth_acl_moderation_and_quasar_social_edges() {
     );
 
     // MuteRequest: non-admin denied (403), invalid payload (400), missing char (404), valid mute (200)
-    let mut bad_mute = Vec::new();
-    encode_seq_id(1, 0, &mut bad_mute);
     let mute_bad_req = EvePublicRequest {
         correlation_uuid: vec![3, 2, 3, 4],
-        payload: Some(GoogleAny {
-            type_url: format!(
-                "{TYPE_GOOGLEAPIS_PREFIX}eve_public.chat.local.api.admin.MuteRequest"
-            ),
-            value: bad_mute,
-        }),
+        payload: Some(
+            eve_proto::pb::message("eve_public.chat.local.api.admin.MuteRequest")
+                .set("character.sequential", 0u32)
+                .must_to_any(),
+        ),
         ..Default::default()
     };
     assert_eq!(
@@ -2192,17 +2173,14 @@ async fn xmpp_chat_auth_acl_moderation_and_quasar_social_edges() {
         STATUS_BAD_REQUEST
     );
 
-    let mut missing_mute = Vec::new();
-    encode_seq_id(1, 999_999_888, &mut missing_mute);
-    encode_duration(2, 60, &mut missing_mute);
     let mute_missing_req = EvePublicRequest {
         correlation_uuid: vec![4, 2, 3, 4],
-        payload: Some(GoogleAny {
-            type_url: format!(
-                "{TYPE_GOOGLEAPIS_PREFIX}eve_public.chat.local.api.admin.MuteRequest"
-            ),
-            value: missing_mute,
-        }),
+        payload: Some(
+            eve_proto::pb::message("eve_public.chat.local.api.admin.MuteRequest")
+                .set("character.sequential", 999_999_888u32)
+                .set("duration", GoogleDuration { seconds: 60, nanos: 0 })
+                .must_to_any(),
+        ),
         ..Default::default()
     };
     assert_eq!(
@@ -2211,18 +2189,15 @@ async fn xmpp_chat_auth_acl_moderation_and_quasar_social_edges() {
         STATUS_NOT_FOUND
     );
 
-    let mut ok_mute = Vec::new();
-    encode_seq_id(1, owner_id as u32, &mut ok_mute);
-    encode_duration(2, 120, &mut ok_mute);
-    encode_string_field(3, "Test mute", &mut ok_mute);
     let mute_ok_req = EvePublicRequest {
         correlation_uuid: vec![5, 2, 3, 4],
-        payload: Some(GoogleAny {
-            type_url: format!(
-                "{TYPE_GOOGLEAPIS_PREFIX}eve_public.chat.local.api.admin.MuteRequest"
-            ),
-            value: ok_mute,
-        }),
+        payload: Some(
+            eve_proto::pb::message("eve_public.chat.local.api.admin.MuteRequest")
+                .set("character.sequential", owner_id as u32)
+                .set("duration", GoogleDuration { seconds: 120, nanos: 0 })
+                .set("reason", "Test mute")
+                .must_to_any(),
+        ),
         ..Default::default()
     };
     assert_eq!(

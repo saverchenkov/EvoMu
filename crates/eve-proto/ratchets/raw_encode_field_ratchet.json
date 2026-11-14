@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "max_raw_encode_field_calls": 262,
-  "max_files_with_raw_encode_field": 31,
-  "notes": "RFC-3 C-9 (#933) falling ratchet for raw encode_{varint,bytes,string,fixed32,fixed64}_field(...) calls in crates/eve-server/src/. Tightened from 587 calls / 48 files (batch 7) down to 262 calls / 31 files (batch 8: quasar_social_community, quasar_corp_structure_services, quasar_social_corp, quasar_progression_extra + tests, quasar_inventory_asset + tests, quasar_campaign_{definitions,objective_handlers,state,handlers}, quasar_career_goals + wire/edges/gateway tests, social_corp_projects, quasar_social_chat, insurgency_services)."
+  "max_raw_encode_field_calls": 3,
+  "max_files_with_raw_encode_field": 1,
+  "notes": "RFC-3 C-9 (#933) falling ratchet for raw encode_{varint,bytes,string,fixed32,fixed64}_field(...) calls in crates/eve-server/src/. Tightened from 262 calls / 31 files (batch 8) down to 3 calls / 1 file (batch 9: remaining 3 calls are in quasar_gateway.rs L656-L658, owned by r11/e09-locks-b2)."
 }

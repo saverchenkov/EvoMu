@@ -6,10 +6,9 @@ use super::*;
 use eve_db::{corp_roles, CorpMemberRoleAssignment, WorldRepository};
 use eve_machonet::{service_roles, SessionState};
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
-    EvePublicEvent, EvePublicNotice, EvePublicRequest, EvePublicResponse, GoogleAny, GoogleEmpty,
-    GoogleTimestamp, NoticeTargetGroup, QuasarDescriptorRegistry, QuasarMessage,
-    TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, EvePublicEvent, EvePublicNotice, EvePublicRequest, EvePublicResponse,
+    GoogleAny, GoogleEmpty, GoogleTimestamp, NoticeTargetGroup, QuasarDescriptorRegistry,
+    QuasarMessage, WireField, WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::PyRep;
 use eve_sde::SdeRegistry;
@@ -145,8 +144,13 @@ fn response_and_notice_to_pyrep_and_wire_validation_and_admin_guard() {
     assert_eq!(require_admin_role(&gm), Ok(()));
 
     // validate_raw_wire_frame
-    let mut buf = Vec::new();
-    encode_varint_field(1, 1, &mut buf);
+    let buf = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(1),
+        }],
+    }
+    .encode();
     let decoded_wire = validate_raw_wire_frame(&buf).unwrap();
     assert_eq!(decoded_wire.fields.len(), 1);
     assert!(validate_raw_wire_frame(&[0xFF, 0xFF, 0xFF]).is_err());
@@ -458,10 +462,20 @@ fn public_gateway_rpc_subscribe_poll_publish_and_send_request_edges() {
     );
 
     // PublishEventPayload with GoogleAny (with quasar prefix), fallback EvePublicEvent, and invalid bytes
-    let mut any_bytes = Vec::new();
     let ping_type_url = format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.test.PingEvent");
-    encode_string_field(1, &ping_type_url, &mut any_bytes);
-    encode_bytes_field(2, &[0x08, 0x01], &mut any_bytes);
+    let any_bytes = WireMessage {
+        fields: vec![
+            WireField {
+                field_number: 1,
+                value: WireValue::LengthDelimited(ping_type_url.into_bytes()),
+            },
+            WireField {
+                field_number: 2,
+                value: WireValue::LengthDelimited(vec![0x08, 0x01]),
+            },
+        ],
+    }
+    .encode();
     assert_eq!(
         router
             .dispatch_public_gateway_rpc(

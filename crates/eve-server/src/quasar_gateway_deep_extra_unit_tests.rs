@@ -15,7 +15,7 @@ use eve_proto::quasar::{
     AuthoritativeContext, DescriptorProto, DynamicQuasarMessage, EveInternalRequest,
     EvePublicRequest, EvePublicResponse, FieldDescriptorProto, FieldLabel, FieldType, GoogleAny,
     InternalGatewayRequest, QuasarDescriptorRegistry, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
-    WireField, WireMessage, WireValue, encode_varint_field,
+    WireField, WireMessage, WireValue,
 };
 use eve_sde::SdeRegistry;
 use http::{Request, StatusCode};
@@ -563,8 +563,13 @@ async fn http2_grpc_requests_notices_stream_jwt_variants_and_wire_coercion_mutan
             is_map_entry: false,
         },
     );
-    let mut raw_v = Vec::new();
-    encode_varint_field(1, 5, &mut raw_v);
+    let raw_v = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(5),
+        }],
+    }
+    .encode();
     let mut any_sint = GoogleAny {
         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}test.wire.SintLeaf"),
         value: raw_v,

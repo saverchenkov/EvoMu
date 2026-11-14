@@ -6,9 +6,10 @@ use crate::quasar_gateway::{
     STATUS_PRECONDITION_FAILED,
 };
 use eve_db::{IskCents, WorldRepository};
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, AuthoritativeContext, GoogleAny,
-    QuasarDescriptorRegistry, WireMessage, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, GoogleAny, QuasarDescriptorRegistry, WireMessage,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
@@ -87,14 +88,9 @@ fn make_ctx(char_id: Option<u32>, role: u64, now_unix: u64) -> AuthoritativeCont
 }
 
 fn make_uuid_req(type_name: &str, uuid: &[u8; 16]) -> GoogleAny {
-    let mut id_msg = Vec::new();
-    encode_bytes_field(1, uuid, &mut id_msg);
-    let mut req = Vec::new();
-    encode_bytes_field(1, &id_msg, &mut req);
-    GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"),
-        value: req,
-    }
+    pb::message(type_name)
+        .set("goal.uuid", uuid)
+        .must_to_any()
 }
 
 #[test]
@@ -260,18 +256,11 @@ fn gameplay_events_and_handler_rpc_edges() {
     // admin.ProgressRequest: field 1=goal Identifier, field 2=character Identifier, field 3=progress
     let other_goals = mgr.get_or_init_goals_at(other_cid, now);
     let other_uuid = other_goals[0].uuid;
-    let mut admin_val = Vec::new();
-    let mut id_msg = Vec::new();
-    encode_bytes_field(1, &other_uuid, &mut id_msg);
-    encode_bytes_field(1, &id_msg, &mut admin_val);
-    let mut char_msg = Vec::new();
-    encode_varint_field(1, other_cid as u64, &mut char_msg);
-    encode_bytes_field(2, &char_msg, &mut admin_val);
-    encode_varint_field(3, 5, &mut admin_val);
-    let admin_req = GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.admin.ProgressRequest"),
-        value: admin_val,
-    };
+    let admin_req = pb::message("eve_public.dailygoal.api.admin.ProgressRequest")
+        .set("goal.uuid", &other_uuid)
+        .set("character.sequential", other_cid)
+        .set("progress", 5u64)
+        .must_to_any();
     assert_eq!(dispatch(&router, &user_ctx, &admin_req).unwrap_err().0, STATUS_FORBIDDEN);
 
     let admin_ctx = make_ctx(Some(cid), ROLE_PROGRAMMER, now);

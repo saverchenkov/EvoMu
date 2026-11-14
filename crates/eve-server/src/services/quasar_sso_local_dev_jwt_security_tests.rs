@@ -14,8 +14,8 @@ use eve_db::accounts::{hmac_sha256, sha256_bytes};
 use eve_db::{base64url_encode_no_pad, service_roles};
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
-    encode_varint_field, AuthoritativeContext, EvePublicEvent, EvePublicNotice, EvePublicRequest,
-    EvePublicResponse, GoogleAny, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, EvePublicEvent, EvePublicNotice, EvePublicRequest, EvePublicResponse,
+    GoogleAny, QuasarMessage, WireField, WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::PyRep;
 use http::{Request, StatusCode};
@@ -180,8 +180,13 @@ async fn quasar_sso_zero_char_and_multichar_switching_work_while_blocking_impers
         let _ = conn.await;
     });
 
-    let mut uid_payload = Vec::new();
-    encode_varint_field(1, zero_uid, &mut uid_payload);
+    let uid_payload = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(zero_uid),
+        }],
+    }
+    .encode();
     let user_req = EvePublicRequest {
         authoritative_context: Some(auth_ctx_opt(zero_uid, None, None, now_u)),
         payload: Some(GoogleAny {
@@ -315,8 +320,13 @@ async fn quasar_sso_zero_char_and_multichar_switching_work_while_blocking_impers
         .unwrap()
         .access_token;
 
-    let mut multi_uid_payload = Vec::new();
-    encode_varint_field(1, multi_uid, &mut multi_uid_payload);
+    let multi_uid_payload = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(multi_uid),
+        }],
+    }
+    .encode();
     let switch_to_b_req = EvePublicRequest {
         authoritative_context: Some(auth_ctx_opt(multi_uid, Some(char_b), Some(1_000_009), now_u)),
         payload: Some(GoogleAny {
@@ -514,8 +524,13 @@ async fn quasar_local_dev_client_jwt_requires_flag_active_macho_session_and_matc
         Some("16")
     );
 
-    let mut uid_payload = Vec::new();
-    encode_varint_field(1, uid, &mut uid_payload);
+    let uid_payload = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(uid),
+        }],
+    }
+    .encode();
     let ok_req = EvePublicRequest {
         authoritative_context: Some(auth_ctx_opt(uid, Some(cid), Some(1_000_009), now_u)),
         payload: Some(GoogleAny {

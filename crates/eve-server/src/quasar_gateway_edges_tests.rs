@@ -2,9 +2,9 @@ use super::*;
 use eve_db::WorldRepository;
 use eve_machonet::{service_roles, SessionState};
 use eve_proto::quasar::{
-    encode_bytes_field, AuthoritativeContext, DescriptorProto, EvePublicEvent, EvePublicRequest,
-    FieldDescriptorProto, FieldLabel, FieldType, GoogleAny, GoogleTimestamp,
-    QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DescriptorProto, EvePublicEvent, EvePublicRequest, FieldDescriptorProto,
+    FieldLabel, FieldType, GoogleAny, GoogleTimestamp, QuasarDescriptorRegistry, WireField,
+    WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::PyRep;
 use eve_sde::SdeRegistry;
@@ -212,10 +212,20 @@ fn handle_public_request_lazy_char_upgrade_gm_role_empty_ok_explicit_idem_and_na
     assert_eq!(rsp_unowned.status_code, STATUS_FORBIDDEN);
 
     // 2. Lazy character upgrade with OWNED character -> upgrades -> passes policy & executes handler!
-    let mut empty_tok_inner = Vec::new();
-    encode_bytes_field(1, b"", &mut empty_tok_inner);
-    let mut wire_empty_tok = Vec::new();
-    encode_bytes_field(1, &empty_tok_inner, &mut wire_empty_tok);
+    let empty_tok_inner = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(Vec::new()),
+        }],
+    }
+    .encode();
+    let wire_empty_tok = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(empty_tok_inner),
+        }],
+    }
+    .encode();
 
     let owned_ctx = AuthoritativeContext::for_session(Some(10), Some(94_000_001), None, 0, "tranquility", vec![]);
     let rsp_owned = router.handle_public_request(

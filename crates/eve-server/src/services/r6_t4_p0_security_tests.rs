@@ -15,9 +15,8 @@ use eve_db::{
 };
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, AuthoritativeContext, EvePublicEvent,
-    EvePublicRequest, EvePublicResponse, GoogleAny, QuasarMessage,
-    TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, EvePublicEvent, EvePublicRequest, EvePublicResponse, GoogleAny,
+    QuasarMessage, WireField, WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use http::{Request, StatusCode};
 use std::sync::Arc;
@@ -40,10 +39,20 @@ impl TestRouterExt for PublicGatewayRouter {
 }
 
 pub(super) fn encode_id_req(type_name: &str, id: u64) -> GoogleAny {
-    let mut id_msg = Vec::new();
-    encode_varint_field(1, id, &mut id_msg);
-    let mut req = Vec::new();
-    encode_bytes_field(1, &id_msg, &mut req);
+    let id_msg = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(id),
+        }],
+    }
+    .encode();
+    let req = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(id_msg),
+        }],
+    }
+    .encode();
     GoogleAny {
         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"),
         value: req,

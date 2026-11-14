@@ -4,9 +4,8 @@ use super::normalize_notices::{
     normalize_macho_notification, normalize_quasar_any_payload, normalize_quasar_client_response,
 };
 use eve_proto::quasar::{
-    encode_bytes_field, encode_fixed32_field, encode_fixed64_field, encode_string_field,
-    encode_varint_field, DescriptorProto, DynamicValue, EvePublicResponse, FieldDescriptorProto,
-    FieldLabel, FieldType, GoogleAny, QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
+    DescriptorProto, DynamicValue, EvePublicResponse, FieldDescriptorProto, FieldLabel, FieldType,
+    GoogleAny, QuasarDescriptorRegistry, WireField, WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::PyRep;
 
@@ -487,8 +486,13 @@ fn quasar_response_and_any_payload_coercion_covers_wire_variants() {
     assert!(rsp_none.payload.is_none());
 
     // GetAllResponse type_url rewrite + valid payload preserved
-    let mut valid_title_bytes = Vec::new();
-    encode_string_field(1, "Admiral", &mut valid_title_bytes);
+    let valid_title_bytes = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(b"Admiral".to_vec()),
+        }],
+    }
+    .encode();
     let mut rsp_titles = EvePublicResponse {
         payload: Some(GoogleAny {
             type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.cosmetic.character.title.definition.api.GetAllResponse"),
@@ -568,8 +572,13 @@ fn quasar_response_and_any_payload_coercion_covers_wire_variants() {
     assert!(reg.decode_dynamic("test.BytesBox", &any_bytes.value).is_ok());
 
     // Unknown wire field number falls back to coerce_raw_leaf_bytes_to_message
-    let mut unknown_only = Vec::new();
-    encode_varint_field(99, 123, &mut unknown_only);
+    let unknown_only = WireMessage {
+        fields: vec![WireField {
+            field_number: 99,
+            value: WireValue::Varint(123),
+        }],
+    }
+    .encode();
     let mut any_unknown_field = GoogleAny {
         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}test.BytesBox"),
         value: unknown_only,
@@ -578,28 +587,42 @@ fn quasar_response_and_any_payload_coercion_covers_wire_variants() {
     assert!(reg.decode_dynamic("test.BytesBox", &any_unknown_field.value).is_ok());
 
     // Wire-type mismatch coercion across all field types in test.AllFields
-    let mut mismatched = Vec::new();
-    encode_varint_field(999, 1, &mut mismatched); // unknown field skipped
-    encode_varint_field(1, 5, &mut mismatched); // Message <- Varint (VarintPrefer1 picks #1 Sint32)
-    encode_varint_field(2, 42, &mut mismatched); // String <- Varint ("42")
-    encode_varint_field(3, 7, &mut mismatched); // Bytes <- Varint (7u64.to_le_bytes())
-    let mut sub_varint = Vec::new();
-    encode_varint_field(1, 77, &mut sub_varint);
-    encode_bytes_field(4, &sub_varint, &mut mismatched); // Int64 <- LengthDelimited(sub_varint)
-    encode_varint_field(5, 88, &mut mismatched); // Fixed64 <- Varint
-    encode_varint_field(6, 99, &mut mismatched); // Fixed32 <- Varint
-    encode_varint_field(7, 11, &mut mismatched); // Msg(StringBox) <- Varint
-    encode_varint_field(8, 22, &mut mismatched); // Msg(BytesBox) <- Varint
-    encode_varint_field(9, 33, &mut mismatched); // Msg(Fixed64Box) <- Varint
-    encode_varint_field(10, 44, &mut mismatched); // Msg(Fixed32Box) <- Varint
-    encode_varint_field(11, 55, &mut mismatched); // Msg(Sint64Box) <- Varint
-    encode_varint_field(12, 66, &mut mismatched); // Msg(MsgWrap) <- Varint
-    // DeepCycle (>8 levels) varint triggers depth > 8 guard -> empty submessage
-    encode_varint_field(13, 1, &mut mismatched);
-    // Nested StringBox inside MsgWrap with invalid UTF-8 bytes
-    let mut bad_sub = Vec::new();
-    encode_bytes_field(1, &[0xfe, 0xff], &mut bad_sub);
-    encode_bytes_field(12, &bad_sub, &mut mismatched);
+    let sub_varint = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(77),
+        }],
+    }
+    .encode();
+    let bad_sub = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(vec![0xfe, 0xff]),
+        }],
+    }
+    .encode();
+    let mismatched = WireMessage {
+        fields: vec![
+            WireField { field_number: 999, value: WireValue::Varint(1) }, // unknown field skipped
+            WireField { field_number: 1, value: WireValue::Varint(5) },   // Message <- Varint (VarintPrefer1 picks #1 Sint32)
+            WireField { field_number: 2, value: WireValue::Varint(42) },  // String <- Varint ("42")
+            WireField { field_number: 3, value: WireValue::Varint(7) },   // Bytes <- Varint (7u64.to_le_bytes())
+            WireField { field_number: 4, value: WireValue::LengthDelimited(sub_varint) }, // Int64 <- LengthDelimited(sub_varint)
+            WireField { field_number: 5, value: WireValue::Varint(88) },  // Fixed64 <- Varint
+            WireField { field_number: 6, value: WireValue::Varint(99) },  // Fixed32 <- Varint
+            WireField { field_number: 7, value: WireValue::Varint(11) },  // Msg(StringBox) <- Varint
+            WireField { field_number: 8, value: WireValue::Varint(22) },  // Msg(BytesBox) <- Varint
+            WireField { field_number: 9, value: WireValue::Varint(33) },  // Msg(Fixed64Box) <- Varint
+            WireField { field_number: 10, value: WireValue::Varint(44) }, // Msg(Fixed32Box) <- Varint
+            WireField { field_number: 11, value: WireValue::Varint(55) }, // Msg(Sint64Box) <- Varint
+            WireField { field_number: 12, value: WireValue::Varint(66) }, // Msg(MsgWrap) <- Varint
+            // DeepCycle (>8 levels) varint triggers depth > 8 guard -> empty submessage
+            WireField { field_number: 13, value: WireValue::Varint(1) },
+            // Nested StringBox inside MsgWrap with invalid UTF-8 bytes
+            WireField { field_number: 12, value: WireValue::LengthDelimited(bad_sub) },
+        ],
+    }
+    .encode();
 
     let mut any_all = GoogleAny {
         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}test.AllFields"),
@@ -611,8 +634,13 @@ fn quasar_response_and_any_payload_coercion_covers_wire_variants() {
     assert_eq!(dec_all.fields.get(&4), Some(&DynamicValue::Int64(77)));
 
     // Also test Fixed64/Fixed32 -> Varint field coercion
-    let mut fixed_to_varint = Vec::new();
-    encode_fixed64_field(4, 1234, &mut fixed_to_varint);
+    let fixed_to_varint = WireMessage {
+        fields: vec![WireField {
+            field_number: 4,
+            value: WireValue::Fixed64(1234),
+        }],
+    }
+    .encode();
     let mut any_f64 = GoogleAny {
         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}test.AllFields"),
         value: fixed_to_varint,
@@ -621,8 +649,13 @@ fn quasar_response_and_any_payload_coercion_covers_wire_variants() {
     let dec_f64 = reg.decode_dynamic("test.AllFields", &any_f64.value).unwrap();
     assert_eq!(dec_f64.fields.get(&4), Some(&DynamicValue::Int64(1234)));
 
-    let mut fixed32_to_varint = Vec::new();
-    encode_fixed32_field(4, 4321, &mut fixed32_to_varint);
+    let fixed32_to_varint = WireMessage {
+        fields: vec![WireField {
+            field_number: 4,
+            value: WireValue::Fixed32(4321),
+        }],
+    }
+    .encode();
     let mut any_f32 = GoogleAny {
         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}test.AllFields"),
         value: fixed32_to_varint,

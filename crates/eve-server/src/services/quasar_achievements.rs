@@ -11,10 +11,8 @@
 
 use crate::quasar_gateway::{PublicGatewayRouter, STATUS_NOT_FOUND};
 use eve_db::{IskCents, WorldRepository};
-use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, sha256_hex, DynamicValue, GoogleAny,
-    TYPE_GOOGLEAPIS_PREFIX,
-};
+use eve_proto::pb;
+use eve_proto::quasar::{sha256_hex, DynamicValue};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
@@ -947,12 +945,10 @@ impl AchievementManager {
 // Registration
 // ============================================================================
 
-pub(crate) fn encode_uuid_ident(field_no: u32, id: u32, out: &mut Vec<u8>) {
+fn u32_to_uuid(id: u32) -> [u8; 16] {
     let mut uuid = [0u8; 16];
     uuid[12..16].copy_from_slice(&id.to_be_bytes());
-    let mut ident = Vec::new();
-    encode_bytes_field(1, &uuid, &mut ident);
-    encode_bytes_field(field_no, &ident, out);
+    uuid
 }
 
 pub(crate) fn emit_achievement_notices(
@@ -965,67 +961,52 @@ pub(crate) fn emit_achievement_notices(
     milestones: &[u32],
     now: u64,
 ) {
-    let mut not_bytes = Vec::new();
-    encode_uuid_ident(1, aid, &mut not_bytes);
-    encode_varint_field(2, progress, &mut not_bytes);
     super::quasar_social_chat::ctx_queue_notice(
         crate::quasar_gateway::NoticeScope::Character(cid),
-        GoogleAny {
-            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.api.ProgressedNotice"),
-            value: not_bytes,
-        },
+        pb::message("eve_public.achievement.api.ProgressedNotice")
+            .set("achievement.uuid", u32_to_uuid(aid))
+            .set("value", progress)
+            .must_to_any(),
         now,
     );
     if completed {
-        let mut comp_bytes = Vec::new();
-        encode_uuid_ident(1, aid, &mut comp_bytes);
         super::quasar_social_chat::ctx_queue_notice(
             crate::quasar_gateway::NoticeScope::Character(cid),
-            GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.api.CompletedNotice"),
-                value: comp_bytes,
-            },
+            pb::message("eve_public.achievement.api.CompletedNotice")
+                .set("achievement.uuid", u32_to_uuid(aid))
+                .must_to_any(),
             now,
         );
     }
     for m_id in milestones {
-        let mut ms_bytes = Vec::new();
-        encode_uuid_ident(1, aid, &mut ms_bytes);
-        encode_uuid_ident(2, *m_id, &mut ms_bytes);
         super::quasar_social_chat::ctx_queue_notice(
             crate::quasar_gateway::NoticeScope::Character(cid),
-            GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.milestone.api.ReachedNotice"),
-                value: ms_bytes,
-            },
+            pb::message("eve_public.achievement.milestone.api.ReachedNotice")
+                .set("achievement.uuid", u32_to_uuid(aid))
+                .set("milestone.uuid", u32_to_uuid(*m_id))
+                .must_to_any(),
             now,
         );
 
         if cat_id > 0 {
-            let mut cat_ms_data = Vec::new();
-            encode_uuid_ident(1, cat_id, &mut cat_ms_data);
-            encode_uuid_ident(2, *m_id, &mut cat_ms_data);
             super::quasar_social_chat::ctx_queue_notice(
                 crate::quasar_gateway::NoticeScope::Character(cid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.category.milestone.api.ReachedNotice"),
-                    value: cat_ms_data,
-                },
+                pb::message("eve_public.achievement.category.milestone.api.ReachedNotice")
+                    .set("category.uuid", u32_to_uuid(cat_id))
+                    .set("milestone.uuid", u32_to_uuid(*m_id))
+                    .must_to_any(),
                 now,
             );
         }
     }
 
     if cat_id > 0 {
-        let mut cat_prog = Vec::new();
-        encode_uuid_ident(1, cat_id, &mut cat_prog);
-        encode_varint_field(2, cat_score as u64, &mut cat_prog);
         super::quasar_social_chat::ctx_queue_notice(
             crate::quasar_gateway::NoticeScope::Character(cid),
-            GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.category.api.ProgressedNotice"),
-                value: cat_prog,
-            },
+            pb::message("eve_public.achievement.category.api.ProgressedNotice")
+                .set("category.uuid", u32_to_uuid(cat_id))
+                .set("score", cat_score)
+                .must_to_any(),
             now,
         );
     }

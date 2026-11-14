@@ -22,8 +22,8 @@ use eve_db::{
 };
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, AuthoritativeContext, DynamicQuasarMessage,
-    DynamicValue, GoogleAny, QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny,
+    QuasarDescriptorRegistry, WireField, WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::PyRep;
 use eve_sde::SdeRegistry;
@@ -90,11 +90,20 @@ fn auth_ctx(cid: i64, corp_id: i64, role_mask: u64) -> AuthoritativeContext {
 }
 
 fn id_bytes(field: u32, val: u64) -> Vec<u8> {
-    let mut inner = Vec::new();
-    encode_varint_field(1, val, &mut inner);
-    let mut outer = Vec::new();
-    encode_bytes_field(field, &inner, &mut outer);
-    outer
+    let inner = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(val),
+        }],
+    }
+    .encode();
+    WireMessage {
+        fields: vec![WireField {
+            field_number: field,
+            value: WireValue::LengthDelimited(inner),
+        }],
+    }
+    .encode()
 }
 
 #[test]

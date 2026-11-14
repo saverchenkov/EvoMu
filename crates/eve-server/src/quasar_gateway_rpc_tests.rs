@@ -7,10 +7,9 @@ use super::*;
 use eve_db::WorldRepository;
 use eve_machonet::{service_roles, SessionState};
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
-    DescriptorProto, EveInternalRequest, EvePublicEvent, EvePublicRequest, FieldDescriptorProto,
-    FieldLabel, FieldType, GoogleAny, GoogleEmpty, InternalGatewayRequest,
-    QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DescriptorProto, EveInternalRequest, EvePublicEvent, EvePublicRequest,
+    FieldDescriptorProto, FieldLabel, FieldType, GoogleAny, GoogleEmpty, InternalGatewayRequest,
+    QuasarDescriptorRegistry, WireField, WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::PyRep;
 use eve_sde::SdeRegistry;
@@ -276,8 +275,13 @@ fn handle_public_request_wire_fallback_idempotency_and_notice_rollback() {
         STATUS_BAD_REQUEST
     );
     // Valid wire bytes on handler without descriptor -> 200 via decode_wire_dynamic
-    let mut valid_wire = Vec::new();
-    encode_varint_field(1, 99, &mut valid_wire);
+    let valid_wire = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(99),
+        }],
+    }
+    .encode();
     let no_desc_rsp = router.handle_public_request(&player, &make_pub_req("eve_public.test.NoDescriptorRequest", valid_wire, None), None, false, now);
     assert_eq!(no_desc_rsp.status_code, STATUS_OK);
     assert_eq!(no_desc_rsp.payload.unwrap().value, vec![42]);
@@ -293,17 +297,32 @@ fn handle_public_request_wire_fallback_idempotency_and_notice_rollback() {
     );
 
     // 3. Failed handler rolls back pending notices queued during execution!
-    let mut fail_wire = Vec::new();
-    encode_varint_field(2, 1, &mut fail_wire);
+    let fail_wire = WireMessage {
+        fields: vec![WireField {
+            field_number: 2,
+            value: WireValue::Varint(1),
+        }],
+    }
+    .encode();
     let fail_rsp = router.handle_public_request(&player, &make_pub_req("eve_public.test.IdempotentActionRequest", fail_wire, None), None, false, now);
     assert_eq!(fail_rsp.status_code, STATUS_CONFLICT);
     assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
 
     // 4. Embedded idempotency token deduplicates within TTL and re-executes after TTL!
-    let mut tok_inner = Vec::new();
-    encode_bytes_field(1, b"idem-uuid-123456", &mut tok_inner);
-    let mut idem_wire = Vec::new();
-    encode_bytes_field(1, &tok_inner, &mut idem_wire);
+    let tok_inner = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(b"idem-uuid-123456".to_vec()),
+        }],
+    }
+    .encode();
+    let idem_wire = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::LengthDelimited(tok_inner),
+        }],
+    }
+    .encode();
 
     let r1 = router.handle_public_request(&player, &make_pub_req("eve_public.test.IdempotentActionRequest", idem_wire.clone(), None), None, false, now);
     assert_eq!(r1.status_code, STATUS_OK);
@@ -364,14 +383,13 @@ fn internal_envelopes_event_publishing_and_machonet_rpc_dispatch() {
 
     // 3. publish_event caps at MAX_PUBLISHED_EVENTS (1024) and stamps occurred & authoritative_context.
     for i in 0..(MAX_PUBLISHED_EVENTS + 5) {
-        let mut ev_bytes = Vec::new();
-        encode_string_field(1, &format!("ptr_{i}"), &mut ev_bytes);
         let ev = EvePublicEvent {
             uuid: vec![i as u8],
-            payload: Some(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.app.eveonline.helperpointer.ui.link.Clicked"),
-                value: ev_bytes,
-            }),
+            payload: Some(
+                eve_proto::pb::message("eve_public.app.eveonline.helperpointer.ui.link.Clicked")
+                    .set("pointer_unique_name", format!("ptr_{i}"))
+                    .must_to_any(),
+            ),
             external_origin: "client".into(),
             ..Default::default()
         };

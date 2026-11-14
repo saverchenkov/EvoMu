@@ -6,9 +6,10 @@ use crate::quasar_gateway::{
     STATUS_PRECONDITION_FAILED,
 };
 use eve_db::{IskCents, WorldRepository};
+use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, AuthoritativeContext, DynamicValue, GoogleAny,
-    QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicValue, GoogleAny, QuasarDescriptorRegistry,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::collections::HashMap;
@@ -98,14 +99,9 @@ fn make_ctx(char_id: Option<u32>, role: u64, now_unix: u64) -> AuthoritativeCont
 }
 
 fn make_uuid_req(type_name: &str, uuid: &[u8; 16]) -> GoogleAny {
-    let mut id_msg = Vec::new();
-    encode_bytes_field(1, uuid, &mut id_msg);
-    let mut req = Vec::new();
-    encode_bytes_field(1, &id_msg, &mut req);
-    GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"),
-        value: req,
-    }
+    pb::message(type_name)
+        .set("goal.uuid", uuid)
+        .must_to_any()
 }
 
 #[test]
@@ -630,18 +626,11 @@ fn gameplay_events_and_all_12_rpc_handlers() {
     assert!(red_all.type_url.ends_with("RedeemAllResponse"));
 
     // 8. eve_public.dailygoal.api.admin.ProgressRequest
-    let mut admin_prog_bytes = Vec::new();
-    let mut id_msg = Vec::new();
-    encode_bytes_field(1, &g1_uuid, &mut id_msg);
-    encode_bytes_field(1, &id_msg, &mut admin_prog_bytes);
-    let mut char_msg = Vec::new();
-    encode_varint_field(1, char_id as u64, &mut char_msg);
-    encode_bytes_field(2, &char_msg, &mut admin_prog_bytes);
-    encode_varint_field(3, 25, &mut admin_prog_bytes);
-    let admin_prog_req = GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.admin.ProgressRequest"),
-        value: admin_prog_bytes,
-    };
+    let admin_prog_req = pb::message("eve_public.dailygoal.api.admin.ProgressRequest")
+        .set("goal.uuid", &g1_uuid)
+        .set("character.sequential", char_id)
+        .set("progress", 25u64)
+        .must_to_any();
     assert_eq!(router.dispatch(&user, &admin_prog_req).unwrap_err().0, STATUS_FORBIDDEN);
     let admin_prog_resp = router.dispatch(&admin, &admin_prog_req).expect("admin ProgressRequest");
     assert!(admin_prog_resp.type_url.ends_with("ProgressResponse"));

@@ -15,7 +15,7 @@
 use crate::quasar_gateway::NoticeScope;
 use eve_proto::pb;
 use eve_proto::quasar::{
-    encode_varint_field, DynamicValue, GoogleAny, GoogleTimestamp, WireMessage, WireValue,
+    DynamicValue, GoogleAny, GoogleTimestamp, WireField, WireMessage, WireValue,
     TYPE_GOOGLEAPIS_PREFIX,
 };
 
@@ -586,8 +586,13 @@ pub fn publish_community_track_progressed_notices(
     for tr in tracks {
         // Synthetic gateway notice `eve_public.communitytrack.api.ProgressedNotice` is absent
         // from V24.01 `quasar_descriptors.sqlite` (only `eve.communitytrack.api.Progressed` exists).
-        let mut not_bytes = Vec::new();
-        encode_varint_field(1, tr.track_id as u64, &mut not_bytes);
+        let not_bytes = WireMessage {
+            fields: vec![WireField {
+                field_number: 1,
+                value: WireValue::Varint(tr.track_id as u64),
+            }],
+        }
+        .encode();
         let notice = GoogleAny {
             type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.communitytrack.api.ProgressedNotice"),
             value: not_bytes,

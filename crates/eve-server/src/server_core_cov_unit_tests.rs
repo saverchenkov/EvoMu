@@ -22,9 +22,8 @@ use eve_machonet::{
     SessionState, VersionExchange, MACHO_PROXY_NODE_ID,
 };
 use eve_proto::quasar::{
-    encode_bytes_field, encode_fixed32_field, encode_fixed64_field, encode_varint_field,
     DescriptorProto, FieldDescriptorProto, FieldLabel, FieldType, GoogleAny,
-    QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
+    QuasarDescriptorRegistry, WireField, WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::PyRep;
 use eve_sde::{SdeRegistry, SolarSystemId};
@@ -480,24 +479,28 @@ fn normalize_notices_covers_bookmarks_bean_item_change_and_any_coercion() {
     reg.messages_by_full_name.insert(".CovTestMsg".to_string(), msg_desc.clone());
     reg.messages_by_full_name.insert("CovTestMsg".to_string(), msg_desc);
 
-    let mut bad_wire = Vec::new();
-    encode_bytes_field(1, b"1", &mut bad_wire);
-    encode_bytes_field(2, b"-5", &mut bad_wire);
-    encode_bytes_field(3, b"123", &mut bad_wire);
-    encode_bytes_field(4, b"44", &mut bad_wire);
-    encode_bytes_field(5, b"55", &mut bad_wire);
-    encode_bytes_field(6, b"-7", &mut bad_wire);
-    encode_bytes_field(7, b"-8", &mut bad_wire);
-    encode_bytes_field(8, b"1.5", &mut bad_wire);
-    encode_bytes_field(9, b"2.5", &mut bad_wire);
-    encode_varint_field(10, 42, &mut bad_wire);
-    encode_varint_field(11, 99, &mut bad_wire);
-    encode_varint_field(12, 777, &mut bad_wire);
-    encode_varint_field(13, 888, &mut bad_wire);
-    encode_bytes_field(14, b"12", &mut bad_wire);
-    encode_bytes_field(15, b"34", &mut bad_wire);
-    encode_fixed64_field(10, 0x4000_0000_0000_0000, &mut bad_wire);
-    encode_fixed32_field(11, 0x4040_0000, &mut bad_wire);
+    let bad_wire = WireMessage {
+        fields: vec![
+            WireField { field_number: 1, value: WireValue::LengthDelimited(b"1".to_vec()) },
+            WireField { field_number: 2, value: WireValue::LengthDelimited(b"-5".to_vec()) },
+            WireField { field_number: 3, value: WireValue::LengthDelimited(b"123".to_vec()) },
+            WireField { field_number: 4, value: WireValue::LengthDelimited(b"44".to_vec()) },
+            WireField { field_number: 5, value: WireValue::LengthDelimited(b"55".to_vec()) },
+            WireField { field_number: 6, value: WireValue::LengthDelimited(b"-7".to_vec()) },
+            WireField { field_number: 7, value: WireValue::LengthDelimited(b"-8".to_vec()) },
+            WireField { field_number: 8, value: WireValue::LengthDelimited(b"1.5".to_vec()) },
+            WireField { field_number: 9, value: WireValue::LengthDelimited(b"2.5".to_vec()) },
+            WireField { field_number: 10, value: WireValue::Varint(42) },
+            WireField { field_number: 11, value: WireValue::Varint(99) },
+            WireField { field_number: 12, value: WireValue::Varint(777) },
+            WireField { field_number: 13, value: WireValue::Varint(888) },
+            WireField { field_number: 14, value: WireValue::LengthDelimited(b"12".to_vec()) },
+            WireField { field_number: 15, value: WireValue::LengthDelimited(b"34".to_vec()) },
+            WireField { field_number: 10, value: WireValue::Fixed64(0x4000_0000_0000_0000) },
+            WireField { field_number: 11, value: WireValue::Fixed32(0x4040_0000) },
+        ],
+    }
+    .encode();
 
     let mut any = GoogleAny {
         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}CovTestMsg"),
@@ -506,8 +509,13 @@ fn normalize_notices_covers_bookmarks_bean_item_change_and_any_coercion() {
     normalize_quasar_any_payload(&reg, &mut any);
     assert!(!any.value.is_empty());
 
-    let mut leaf_bytes_wire = Vec::new();
-    encode_bytes_field(12, b"alpha", &mut leaf_bytes_wire);
+    let leaf_bytes_wire = WireMessage {
+        fields: vec![WireField {
+            field_number: 12,
+            value: WireValue::LengthDelimited(b"alpha".to_vec()),
+        }],
+    }
+    .encode();
     let mut any_leaf_bytes = GoogleAny {
         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}CovTestMsg"),
         value: leaf_bytes_wire,
