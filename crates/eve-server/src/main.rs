@@ -1203,7 +1203,7 @@ fn build_session_changed_envelope(
             .map(|(k, (old_v, new_v))| (PyRep::String(k), PyRep::Tuple(vec![old_v, new_v])))
             .collect(),
     );
-    let in_space = session.station_id.is_none() && session.structure_id.is_none();
+    let has_solarsystem = session.station_id.is_none();
     let sess_rep = PyRep::keyval([
         ("sessionID", PyRep::Integer(session.session_id as i64)),
         (
@@ -1245,7 +1245,7 @@ fn build_session_changed_envelope(
         ),
         (
             "solarsystemid",
-            if in_space {
+            if has_solarsystem {
                 session
                     .solar_system_id
                     .map(|s| PyRep::Integer(s as i64))

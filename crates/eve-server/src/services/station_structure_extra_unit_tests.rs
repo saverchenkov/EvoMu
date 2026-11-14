@@ -725,10 +725,12 @@ async fn undock_fulcrum_inertia_structure_notice_and_anchor_structure_all_gates_
     let pirate_fulcrum = 929_102_i64;
     let pirate_zarzakh_st = 929_103_i64;
     let jita_pilot = 929_104_i64;
+    let peer_zarzakh_st = 929_105_i64;
     let ship_neutral = 929_201_i64;
     let ship_pirate_f = 929_202_i64;
     let ship_pirate_z = 929_203_i64;
     let ship_jita = 929_204_i64;
+    let ship_peer_z = 929_205_i64;
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(corp_id, {
@@ -764,6 +766,7 @@ async fn undock_fulcrum_inertia_structure_notice_and_anchor_structure_all_gates_
             (pirate_fulcrum, 102, "PirateFulcrum", zarzakh_sys, Some(fulcrum_station), None, ship_pirate_f, Some(500_010)),
             (pirate_zarzakh_st, 103, "PirateZarzakhSt", zarzakh_sys, None, Some(st_zarzakh), ship_pirate_z, Some(500_010)),
             (jita_pilot, 104, "JitaNpcUndock", jita_sys, Some(jita_station), None, ship_jita, None),
+            (peer_zarzakh_st, 105, "PeerZarzakhSt", zarzakh_sys, None, Some(st_zarzakh), ship_peer_z, None),
         ] {
             let uname = format!("u_{uid}");
             snap.accounts.insert(
@@ -806,6 +809,7 @@ async fn undock_fulcrum_inertia_structure_notice_and_anchor_structure_all_gates_
         (102, pirate_fulcrum),
         (103, pirate_zarzakh_st),
         (104, jita_pilot),
+        (105, peer_zarzakh_st),
     ] {
         ctx.db
             .acquire_online_lock(uid, uid, Some(cid), true, ctx.now_unix())
@@ -834,6 +838,7 @@ async fn undock_fulcrum_inertia_structure_notice_and_anchor_structure_all_gates_
     assert!((pir_f_ball.inertia - neu_ball.inertia * 0.80).abs() < 1e-6);
 
     let _ = ctx.drain_notifications_for_char(pirate_zarzakh_st);
+    let _ = ctx.drain_notifications_for_char(peer_zarzakh_st);
     let mut s_pir_z = make_sess(pirate_zarzakh_st, corp_id, Some(zarzakh_sys), None, Some(st_zarzakh), Some(ship_pirate_z));
     s_pir_z.user_id = Some(103);
     handle(&ctx, &mut s_pir_z, "stationSvc", "Undock", &[], &kw).await.unwrap().expect("pirate zarzakh upwell undock");
@@ -842,10 +847,15 @@ async fn undock_fulcrum_inertia_structure_notice_and_anchor_structure_all_gates_
     assert!(pir_z_cs.base_inertia.is_some());
     assert_eq!(pir_z_cs.external_inertia_multiplier, Some(0.80));
     assert!((pir_z_ball.inertia - neu_ball.inertia * 0.80).abs() < 1e-6);
-    let upwell_notifs = ctx.drain_notifications_for_char(pirate_zarzakh_st);
+    let self_upwell_notifs = ctx.drain_notifications_for_char(pirate_zarzakh_st);
     assert!(
-        upwell_notifs.iter().any(|n| n.event == "OnCharacterLeftStructure" && n.args == vec![PyRep::Integer(pirate_zarzakh_st)]),
-        "Upwell undock must emit OnCharacterLeftStructure: {upwell_notifs:?}"
+        !self_upwell_notifs.iter().any(|n| n.event == "OnCharacterLeftStructure"),
+        "Upwell undocking character must NOT receive OnCharacterLeftStructure for self: {self_upwell_notifs:?}"
+    );
+    let peer_upwell_notifs = ctx.drain_notifications_for_char(peer_zarzakh_st);
+    assert!(
+        peer_upwell_notifs.iter().any(|n| n.event == "OnCharacterLeftStructure" && n.args == vec![PyRep::Integer(pirate_zarzakh_st)]),
+        "Upwell undock must emit OnCharacterLeftStructure to docked peers: {peer_upwell_notifs:?}"
     );
 
     let _ = ctx.drain_notifications_for_char(jita_pilot);

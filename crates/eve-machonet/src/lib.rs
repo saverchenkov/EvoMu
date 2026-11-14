@@ -800,10 +800,13 @@ impl SessionState {
         self.user_id.is_some()
     }
 
-    /// Computes effective `locationid` (`stationid` -> `structureid` -> `solarsystemid2`).
+    /// Computes effective `locationid` (`stationid` -> `solarsystemid2`).
+    ///
+    /// In EVE V24.01 (`basesession.RecalculateDependantAttributes`), `locationid`
+    /// resolves to `stationid or solarsystemid`; Upwell structures keep
+    /// `solarsystemid` set, so `locationid` remains the solar system ID.
     pub fn effective_location_id(&self) -> Option<i64> {
         self.station_id
-            .or(self.structure_id)
             .or_else(|| self.solar_system_id.map(|s| s as i64))
     }
 
@@ -880,13 +883,14 @@ impl SessionState {
                 "solarsystemid2".into(),
                 (opt_u32(self.solar_system_id), opt_u32(next.solar_system_id)),
             );
-            // In EVE, `solarsystemid` is only set when in space (neither docked in station nor structure)
-            let old_space_sys = if self.station_id.is_none() && self.structure_id.is_none() {
+            // In EVE V24.01 (`eveSessions.GetSessionValuesFromItemID`), `solarsystemid`
+            // is cleared only when docked in an NPC station; Upwell structures keep it set.
+            let old_space_sys = if self.station_id.is_none() {
                 self.solar_system_id
             } else {
                 None
             };
-            let new_space_sys = if next.station_id.is_none() && next.structure_id.is_none() {
+            let new_space_sys = if next.station_id.is_none() {
                 next.solar_system_id
             } else {
                 None
@@ -898,15 +902,15 @@ impl SessionState {
                 );
             }
         } else {
-            let old_in_space = self.station_id.is_none() && self.structure_id.is_none();
-            let new_in_space = next.station_id.is_none() && next.structure_id.is_none();
-            if old_in_space != new_in_space {
-                let old_space_sys = if old_in_space {
+            let old_has_solarsystem = self.station_id.is_none();
+            let new_has_solarsystem = next.station_id.is_none();
+            if old_has_solarsystem != new_has_solarsystem {
+                let old_space_sys = if old_has_solarsystem {
                     self.solar_system_id
                 } else {
                     None
                 };
-                let new_space_sys = if new_in_space {
+                let new_space_sys = if new_has_solarsystem {
                     next.solar_system_id
                 } else {
                     None

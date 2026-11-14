@@ -1305,7 +1305,7 @@ fn pyrep_to_json(val: &PyRep) -> serde_json::Value {
 fn session_state_to_keyval(s: &SessionState) -> PyRep {
     let opt_i64 = |v: Option<i64>| v.map(PyRep::Integer).unwrap_or(PyRep::None);
     let opt_u32 = |v: Option<u32>| v.map(|n| PyRep::Integer(i64::from(n))).unwrap_or(PyRep::None);
-    let in_space = s.station_id.is_none() && s.structure_id.is_none();
+    let has_solarsystem = s.station_id.is_none();
     PyRep::keyval([
         ("userid", s.user_id.map(|u| PyRep::Integer(u as i64)).unwrap_or(PyRep::None)),
         ("charid", opt_i64(s.character_id)),
@@ -1314,7 +1314,7 @@ fn session_state_to_keyval(s: &SessionState) -> PyRep {
         ("stationid", opt_i64(s.station_id)),
         ("structureid", opt_i64(s.structure_id)),
         ("locationid", opt_i64(s.effective_location_id())),
-        ("solarsystemid", if in_space { opt_u32(s.solar_system_id) } else { PyRep::None }),
+        ("solarsystemid", if has_solarsystem { opt_u32(s.solar_system_id) } else { PyRep::None }),
         ("solarsystemid2", opt_u32(s.solar_system_id)),
         ("constellationid", opt_u32(s.constellation_id)),
         ("regionid", opt_u32(s.region_id)),

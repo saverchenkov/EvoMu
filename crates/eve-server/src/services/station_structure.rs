@@ -589,13 +589,6 @@ pub async fn handle(
                         character_id: char_id,
                     },
                 );
-                ctx.emit_typed_with_id_type(
-                    crate::router::NotificationTarget::Character(char_id),
-                    "charid",
-                    crate::router::notify_registry::OnCharacterLeftStructure {
-                        character_id: char_id,
-                    },
-                );
             }
             let invuln_end_ft = ctx.now_blueos_filetime_ticks() + 300_000_000;
             ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["undockFromStation"], 1, ctx.now_unix(), &ctx.quasar_gateway);
@@ -832,6 +825,13 @@ pub async fn handle(
             if is_structure && handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
                 return Some(Err(BridgeRpcError { code: "ShipWarpScrambled".into(), message: "Cannot dock at an Upwell structure while ship is warp scrambled".into(), client_error: None }));
             }
+            if arrived_at_warp_dest {
+                let _ = handle.force_stop_warp(ship_id);
+                ctx.active_warps
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&ship_id);
+            }
             let Some(taken) = handle.take_ball_for_docking(ship_id, dock_id, target_pos).await else {
                 return Some(Err(BridgeRpcError {
                     code: "DockFailed".into(),
@@ -841,13 +841,6 @@ pub async fn handle(
             };
             match ctx.db.dock_character_if_in_space(char_id, sys_id, dock_id, is_structure) {
                 Ok(_) => {
-                    if arrived_at_warp_dest {
-                        let _ = handle.force_stop_warp(ship_id);
-                        ctx.active_warps
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .remove(&ship_id);
-                    }
                     let active_mods: Vec<i64> = ctx.db.with_mut_snapshot(|snap| {
                         crate::sp6_lifecycle::leave_space_in_snap(
                             snap,
@@ -921,29 +914,27 @@ pub async fn handle(
                         &[],
                         1,
                     );
-                    let sess_rep = PyRep::keyval([
-                        ("userid", session.user_id.map(|u| PyRep::Integer(u as i64)).unwrap_or(PyRep::None)),
-                        ("charid", PyRep::Integer(char_id)),
-                        ("corpid", session.corporation_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                        ("allianceid", session.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                        ("shipid", session.ship_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                        ("stationid", session.station_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                        ("structureid", session.structure_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                        ("solarsystemid2", session.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None)),
-                        ("solarsystemid", PyRep::None),
-                        ("locationid", PyRep::Integer(dock_id)),
-                        ("constellationid", session.constellation_id.map(|c| PyRep::Integer(c as i64)).unwrap_or(PyRep::None)),
-                        ("regionid", session.region_id.map(|r| PyRep::Integer(r as i64)).unwrap_or(PyRep::None)),
-                    ]);
+                    let sess_rep = crate::router::session_transition::build_session_state_keyval(session, char_id);
+                    let mut change_entries = vec![(
+                        PyRep::String(if is_structure { "structureid" } else { "stationid" }.into()),
+                        PyRep::Tuple(vec![PyRep::None, PyRep::Integer(dock_id)]),
+                    )];
+                    if !is_structure {
+                        change_entries.push((
+                            PyRep::String("solarsystemid".into()),
+                            PyRep::Tuple(vec![PyRep::Integer(i64::from(sys_id)), PyRep::None]),
+                        ));
+                        change_entries.push((
+                            PyRep::String("locationid".into()),
+                            PyRep::Tuple(vec![PyRep::Integer(i64::from(sys_id)), PyRep::Integer(dock_id)]),
+                        ));
+                    }
                     ctx.emit_typed(
                         crate::router::NotificationTarget::Character(char_id),
                         crate::router::notify_registry::OnSessionChanged {
                             is_remote: false,
                             session: sess_rep,
-                            change: PyRep::Dict(vec![(
-                                PyRep::String(if is_structure { "structureid" } else { "stationid" }.into()),
-                                PyRep::Tuple(vec![PyRep::None, PyRep::Integer(dock_id)]),
-                            )]),
+                            change: PyRep::Dict(change_entries),
                         },
                     );
                     ctx.emit_typed(

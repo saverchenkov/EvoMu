@@ -713,7 +713,7 @@ pub(crate) fn emit_corp_role_session_changed(
         ("shipid", if ship_id > 0 { PyRep::Integer(ship_id) } else { PyRep::None }),
         ("stationid", sta_id.map_or(PyRep::None, PyRep::Integer)),
         ("structureid", st_id.map_or(PyRep::None, PyRep::Integer)),
-        ("solarsystemid", if sta_id.is_none() && st_id.is_none() { PyRep::Integer(sys_id as i64) } else { PyRep::None }),
+        ("solarsystemid", if sta_id.is_none() { PyRep::Integer(sys_id as i64) } else { PyRep::None }),
         ("solarsystemid2", PyRep::Integer(sys_id as i64)),
         ("constellationid", PyRep::Integer(const_id as i64)),
         ("regionid", PyRep::Integer(reg_id as i64)),

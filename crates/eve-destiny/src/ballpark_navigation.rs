@@ -365,6 +365,11 @@ impl Ballpark {
             return Err(format!("Ball {ball_id} not found in ballpark"));
         };
         let was_warping = matches!(ball.mode, MovementMode::Warp { .. });
+        let landing_pos = if was_warping && ball.position.is_finite() {
+            Some(ball.position.to_array())
+        } else {
+            None
+        };
         ball.mode = MovementMode::Stop;
         ball.speed_fraction = 0.0;
         ball.velocity = DVec3::ZERO;
@@ -382,6 +387,9 @@ impl Ballpark {
                 velocity: [0.0, 0.0, 0.0],
             },
         );
+        if let Some(position) = landing_pos {
+            self.emit_event(Some(ball_id), DestinyEvent::SetBallPosition { ball_id, position });
+        }
         Ok(())
     }
 }

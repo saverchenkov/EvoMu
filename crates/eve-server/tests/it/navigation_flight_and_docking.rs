@@ -381,6 +381,230 @@ async fn test_navigation_structure_docking_and_tethering() {
 }
 
 #[tokio::test]
+async fn test_navigation_warp_dock_emits_stop_warp_destiny_before_session_change_gh1051() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let kw = HashMap::new();
+    let mut harness = common::new_wire_harness(&ctx, 105_101);
+    harness
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())],
+            &kw,
+        )
+        .await;
+    harness
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(DEMO_PILOT)],
+            &kw,
+        )
+        .await;
+
+    let parse_destiny_actions = |updates: &PyRep| -> Vec<(String, Vec<PyRep>)> {
+        let bytes = eve_proto::marshal::encode(updates);
+        let decoded = eve_proto::marshal::decode(&bytes).expect("DoDestinyUpdate marshal round-trip");
+        let PyRep::List(entries) = decoded else {
+            panic!("DoDestinyUpdate payload must be a list");
+        };
+        entries
+            .into_iter()
+            .map(|e| {
+                let PyRep::Tuple(outer) = e else {
+                    panic!("entry must be (stamp, action)");
+                };
+                let PyRep::Tuple(inner) = &outer[1] else {
+                    panic!("action must be (name, args)");
+                };
+                let name = inner[0].as_str().expect("action name").to_string();
+                let args = match &inner[1] {
+                    PyRep::Tuple(t) => t.clone(),
+                    other => vec![other.clone()],
+                };
+                (name, args)
+            })
+            .collect()
+    };
+
+    let assert_warp_stop_precedes_session_change =
+        |label: &str, ship_id: i64, out: &eve_testkit::client_harness::ClientCallOutput| {
+            use eve_testkit::client_harness::ClientWireFrameKind;
+            assert!(out.result.is_ok(), "{label} must succeed: {:?}", out.result);
+            let destiny_idx = out
+                .frames
+                .iter()
+                .position(|f| matches!(f.kind, ClientWireFrameKind::DoDestinyUpdate { .. }))
+                .unwrap_or_else(|| panic!("{label} must emit DoDestinyUpdate frame"));
+            let sess_idx = out
+                .frames
+                .iter()
+                .position(|f| matches!(f.kind, ClientWireFrameKind::SessionChange { .. }))
+                .unwrap_or_else(|| panic!("{label} must emit SessionChange frame"));
+            let rsp_idx = out
+                .frames
+                .iter()
+                .position(|f| matches!(f.kind, ClientWireFrameKind::CallRsp { .. }))
+                .unwrap_or_else(|| panic!("{label} must emit CallRsp frame"));
+            assert!(
+                destiny_idx < sess_idx && sess_idx < rsp_idx,
+                "{label} must emit DoDestinyUpdate ({destiny_idx}) BEFORE SessionChange ({sess_idx}) and CallRsp ({rsp_idx})"
+            );
+            let ClientWireFrameKind::DoDestinyUpdate { updates, .. } = &out.frames[destiny_idx].kind else {
+                unreachable!();
+            };
+            let actions = parse_destiny_actions(updates);
+            let massive_idx = actions
+                .iter()
+                .position(|(n, a)| {
+                    n == "SetBallMassive" && a.as_slice() == [PyRep::Integer(ship_id), PyRep::Integer(1)]
+                })
+                .unwrap_or_else(|| panic!("{label}: missing SetBallMassive(true) in {actions:?}"));
+            let fx_idx = actions
+                .iter()
+                .position(|(n, a)| {
+                    n == "OnSpecialFX"
+                        && a.first() == Some(&PyRep::Integer(ship_id))
+                        && a.get(5).and_then(|v| v.as_str()) == Some("effects.Warping")
+                        && a.get(7) == Some(&PyRep::Integer(0))
+                        && a.get(8) == Some(&PyRep::Integer(0))
+                })
+                .unwrap_or_else(|| panic!("{label}: missing stop OnSpecialFX(effects.Warping) in {actions:?}"));
+            let stop_idx = actions
+                .iter()
+                .position(|(n, a)| n == "Stop" && a.as_slice() == [PyRep::Integer(ship_id)])
+                .unwrap_or_else(|| panic!("{label}: missing Stop in {actions:?}"));
+            let vel_idx = actions
+                .iter()
+                .position(|(n, a)| {
+                    n == "SetBallVelocity"
+                        && a.as_slice()
+                            == [
+                                PyRep::Integer(ship_id),
+                                PyRep::Real(0.0),
+                                PyRep::Real(0.0),
+                                PyRep::Real(0.0),
+                            ]
+                })
+                .unwrap_or_else(|| panic!("{label}: missing SetBallVelocity([0,0,0]) in {actions:?}"));
+            let pos_idx = actions
+                .iter()
+                .rposition(|(n, a)| n == "SetBallPosition" && a.first() == Some(&PyRep::Integer(ship_id)))
+                .unwrap_or_else(|| panic!("{label}: missing SetBallPosition in {actions:?}"));
+            assert!(
+                massive_idx < fx_idx && fx_idx < stop_idx && stop_idx < vel_idx && vel_idx < pos_idx,
+                "{label}: expected SetBallMassive ({massive_idx}) < OnSpecialFX ({fx_idx}) < Stop ({stop_idx}) < SetBallVelocity ({vel_idx}) < SetBallPosition ({pos_idx}) in {actions:?}"
+            );
+            let accepted_frame_idx = out
+                .frames
+                .iter()
+                .position(|f| matches!(&f.kind, ClientWireFrameKind::Notification { event, .. } if event == "OnDockingAccepted"))
+                .unwrap_or_else(|| panic!("{label}: missing OnDockingAccepted notification frame in {:?}", out.frames));
+            assert!(
+                destiny_idx < accepted_frame_idx,
+                "{label}: warp-stop DoDestinyUpdate ({destiny_idx}) must precede OnDockingAccepted ({accepted_frame_idx})"
+            );
+        };
+
+    let ship_id = ctx.db.with_snapshot(|s| s.characters[&DEMO_PILOT].active_ship_id);
+    let sys_handle = ctx.systems.get_or_spawn(JITA_SYS);
+
+    // 1. stationSvc.Dock while arriving from warp (arrived_at_warp_dest == true).
+    ctx.advance_secs(12);
+    harness.call_ok("stationSvc", None, "Undock", &[], &kw).await;
+    let bind_out1 = harness
+        .call_exchange(
+            "beyonce",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(JITA_SYS as i64), PyRep::None],
+            &kw,
+        )
+        .await;
+    let beyonce_bid1 = eve_testkit::client_harness::extract_bound_id_from_wire_rep(
+        &bind_out1.result.expect("beyonce.MachoBindObject 1"),
+    )
+    .expect("beyonce bound id 1");
+    let (_, undocked_ball1) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(
+        sys_handle
+            .set_ball_position(ship_id, undocked_ball1.position + DVec3::new(300_000_000.0, 0.0, 0.0))
+            .await
+    );
+    harness
+        .call_ok(
+            "beyonce",
+            Some(beyonce_bid1),
+            "CmdWarpToStuff",
+            &[PyRep::String("item".into()), PyRep::Integer(JITA_44_STATION)],
+            &kw,
+        )
+        .await;
+    let (_, warp_ball1) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let MovementMode::Warp { destination: dest1, .. } = warp_ball1.mode else {
+        panic!("expected MovementMode::Warp before stationSvc.Dock, got {:?}", warp_ball1.mode);
+    };
+    assert!(sys_handle.set_ball_position(ship_id, dest1).await);
+    let dock_out1 = harness
+        .call_exchange("stationSvc", None, "Dock", &[PyRep::Integer(JITA_44_STATION)], &kw)
+        .await;
+    assert_warp_stop_precedes_session_change("stationSvc.Dock", ship_id, &dock_out1);
+    assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+
+    // 2. beyonce.CmdDock while arriving from warp (arrived_at_warp_dest == true).
+    ctx.advance_secs(12);
+    harness.call_ok("stationSvc", None, "Undock", &[], &kw).await;
+    let bind_out2 = harness
+        .call_exchange(
+            "beyonce",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(JITA_SYS as i64), PyRep::None],
+            &kw,
+        )
+        .await;
+    let beyonce_bid2 = eve_testkit::client_harness::extract_bound_id_from_wire_rep(
+        &bind_out2.result.expect("beyonce.MachoBindObject 2"),
+    )
+    .expect("beyonce bound id 2");
+    let (_, undocked_ball2) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(
+        sys_handle
+            .set_ball_position(ship_id, undocked_ball2.position + DVec3::new(300_000_000.0, 0.0, 0.0))
+            .await
+    );
+    harness
+        .call_ok(
+            "beyonce",
+            Some(beyonce_bid2),
+            "CmdWarpToStuff",
+            &[PyRep::String("item".into()), PyRep::Integer(JITA_44_STATION)],
+            &kw,
+        )
+        .await;
+    let (_, warp_ball2) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let MovementMode::Warp { destination: dest2, .. } = warp_ball2.mode else {
+        panic!("expected MovementMode::Warp before beyonce.CmdDock, got {:?}", warp_ball2.mode);
+    };
+    assert!(sys_handle.set_ball_position(ship_id, dest2).await);
+    let dock_out2 = harness
+        .call_exchange(
+            "beyonce",
+            Some(beyonce_bid2),
+            "CmdDock",
+            &[PyRep::Integer(JITA_44_STATION)],
+            &kw,
+        )
+        .await;
+    assert_warp_stop_precedes_session_change("beyonce.CmdDock", ship_id, &dock_out2);
+    assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+}
+
+#[tokio::test]
 async fn test_navigation_flight_approach_orbit_and_keep_at_range() {
     // parity: feat:navigation.approach
     // parity: feat:navigation.orbit

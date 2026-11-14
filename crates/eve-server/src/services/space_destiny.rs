@@ -228,14 +228,16 @@ fn record_session_change_timer_with_invuln(
                 PyRep::Tuple(vec![PyRep::None, PyRep::Integer(i64::from(system_id))]),
             ));
         }
-        let in_space = station_id.is_none() && structure_id.is_none();
+        let has_solarsystem = station_id.is_none();
         if station_id.is_some() || reason == "dock" || reason == "undock" {
             entries.push((PyRep::String("stationid".into()), PyRep::Tuple(vec![PyRep::None, station_id.map(PyRep::Integer).unwrap_or(PyRep::None)])));
-            entries.push((PyRep::String("solarsystemid".into()), PyRep::Tuple(vec![
-                station_id.map(|_| PyRep::Integer(i64::from(system_id))).unwrap_or(PyRep::None),
-                if station_id.is_some() || structure_id.is_some() { PyRep::None } else { PyRep::Integer(i64::from(system_id)) },
-            ])));
-        } else if in_space && system_id != 0 && !matches!(reason, "set_account_key" | "corp_change" | "ship_loss") {
+            if station_id.is_some() || (structure_id.is_none() && reason == "undock") {
+                entries.push((PyRep::String("solarsystemid".into()), PyRep::Tuple(vec![
+                    station_id.map(|_| PyRep::Integer(i64::from(system_id))).unwrap_or(PyRep::None),
+                    if station_id.is_some() { PyRep::None } else { PyRep::Integer(i64::from(system_id)) },
+                ])));
+            }
+        } else if has_solarsystem && system_id != 0 && !matches!(reason, "set_account_key" | "corp_change" | "ship_loss") {
             entries.push((PyRep::String("solarsystemid".into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(i64::from(system_id))])));
         }
         if let Some(st_id) = structure_id {
@@ -252,7 +254,7 @@ fn record_session_change_timer_with_invuln(
             ("stationid", station_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
             ("structureid", structure_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
             ("solarsystemid2", PyRep::Integer(i64::from(system_id))),
-            ("solarsystemid", if in_space { PyRep::Integer(i64::from(system_id)) } else { PyRep::None }),
+            ("solarsystemid", if has_solarsystem { PyRep::Integer(i64::from(system_id)) } else { PyRep::None }),
             ("shipid", ship_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
             ("nextSessionChange", PyRep::Integer(expires_unix as i64)),
         ]);

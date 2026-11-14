@@ -442,7 +442,27 @@ async fn guests_hangar_view_clones_and_structure_access_profile_helpers_work() {
         .await
         .unwrap()
         .expect("get guests");
-    assert!(matches!(guests, PyRep::List(_)));
+    let PyRep::Dict(guest_entries) = &guests else {
+        panic!("expected Dict from structureGuests.GetGuests, got {guests:?}");
+    };
+    assert_eq!(guest_entries.len(), 2);
+    assert_eq!(guest_entries[0].0, PyRep::Integer(7701));
+    assert_eq!(
+        guest_entries[0].1,
+        PyRep::Tuple(vec![PyRep::Integer(98770), PyRep::None, PyRep::None])
+    );
+    assert_eq!(guest_entries[1].0, PyRep::Integer(7702));
+    assert_eq!(
+        guest_entries[1].1,
+        PyRep::Tuple(vec![PyRep::Integer(98999), PyRep::None, PyRep::None])
+    );
+
+    let mut undocked_sess = make_session(7702, 98999, None, 2);
+    let empty_none = handle(&ctx, &mut undocked_sess, "structureGuests", "GetGuests", &[PyRep::None], &kw)
+        .await
+        .unwrap()
+        .expect("get guests with None structureID");
+    assert_eq!(empty_none, PyRep::Dict(Vec::new()));
 
     let hangar = handle(
         &ctx,

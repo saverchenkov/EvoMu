@@ -173,7 +173,7 @@ async fn test_structure_dock_undock_and_lifecycle_notifications() {
     ]);
 
     let ctx = new_ctx();
-    let (mut s1, _s2, _s3, p3) = three_pilots(&ctx).await;
+    let (mut s1, _s2, mut s3, p3) = three_pilots(&ctx).await;
     let (corp_id, alliance_id) = (98_000_701, 99_000_701);
     setup_player_corp_and_alliance(&ctx, corp_id, alliance_id);
     s1.corporation_id = Some(corp_id);
@@ -255,9 +255,27 @@ async fn test_structure_dock_undock_and_lifecycle_notifications() {
     call(&ctx, &mut s1, "invbroker", "Add", &[PyRep::Integer(svc_item_id), PyRep::Integer(structure_id), PyRep::Integer(InventoryFlag::ServiceSlot0 as i64)]).await;
     assert_eq!(events(&ctx, P1, "OnStructureServiceChanged"), vec![vec![PyRep::Integer(structure_id)]]);
 
-    // 4. Undock from the structure: emits OnCharacterLeftStructure and OnInvulunOnUndockingUpdated.
+    // 4. Dock p3 into the same structure, then undock P1: OnCharacterLeftStructure goes to peer p3, NOT P1.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&p3) {
+            let sid3 = ch.active_ship_id;
+            ch.solar_system_id = perim_sys;
+            ch.station_id = None;
+            ch.structure_id = Some(structure_id);
+            if let Some(sh) = snap.items.get_mut(&sid3) {
+                sh.location_id = structure_id;
+                sh.flag = InventoryFlag::Hangar;
+            }
+        }
+    });
+    s3.solar_system_id = Some(perim_sys);
+    s3.station_id = None;
+    s3.structure_id = Some(structure_id);
+    let _ = events(&ctx, p3, "OnCharacterLeftStructure");
+
     call(&ctx, &mut s1, "structureDocking", "Undock", &[]).await;
-    assert_eq!(events(&ctx, P1, "OnCharacterLeftStructure"), vec![vec![PyRep::Integer(P1)]]);
+    assert!(events(&ctx, P1, "OnCharacterLeftStructure").is_empty());
+    assert_eq!(events(&ctx, p3, "OnCharacterLeftStructure"), vec![vec![PyRep::Integer(P1)]]);
     let invuln = events(&ctx, P1, "OnInvulunOnUndockingUpdated");
     assert_eq!(invuln.len(), 1);
     assert_eq!(invuln[0][2], PyRep::Integer(30_000));

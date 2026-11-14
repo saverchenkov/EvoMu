@@ -934,11 +934,32 @@ fn handle_get_structure_description(ctx: &ServerContext, session: &mut SessionSt
 
 fn handle_structure_get_guests(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let _ = ServerContext::require_character(session)?;
-    let structure_id = arg_i64(args, 0).or(session.structure_id).ok_or_else(|| err("MissingStructureId", "structureGuests.GetGuests requires structureID"))?;
+    let Some(structure_id) = arg_i64(args, 0).or(session.structure_id) else {
+        return Ok(PyRep::Dict(Vec::new()));
+    };
     ctx.db.with_snapshot(|snap| {
-        let mut guests: Vec<(i64, i64, Option<i64>)> = snap.characters.values().filter(|c| c.structure_id == Some(structure_id)).map(|c| (c.character_id, c.corporation_id, c.alliance_id)).collect();
+        let mut guests: Vec<(i64, i64, Option<i64>, Option<i64>)> = snap
+            .characters
+            .values()
+            .filter(|c| c.structure_id == Some(structure_id))
+            .map(|c| (c.character_id, c.corporation_id, c.alliance_id, c.war_faction_id))
+            .collect();
         guests.sort_by_key(|g| g.0);
-        Ok(PyRep::List(guests.into_iter().map(|(cid, corp_id, ally_id)| PyRep::Tuple(vec![PyRep::Integer(cid), PyRep::Integer(corp_id), ally_id.map(PyRep::Integer).unwrap_or(PyRep::None)])).collect()))
+        Ok(PyRep::Dict(
+            guests
+                .into_iter()
+                .map(|(cid, corp_id, ally_id, war_faction_id)| {
+                    (
+                        PyRep::Integer(cid),
+                        PyRep::Tuple(vec![
+                            PyRep::Integer(corp_id),
+                            ally_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                            war_faction_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                        ]),
+                    )
+                })
+                .collect(),
+        ))
     })
 }
 
