@@ -1230,10 +1230,10 @@ mod tests {
             assert_eq!(rsp.status(), StatusCode::OK);
             let mut reader = GrpcFrameReader::new(rsp.into_body(), "identity".into());
 
-            let mut sys_inner = Vec::new();
-            eve_proto::quasar::encode_varint_field(1, 30_000_139, &mut sys_inner);
-            let mut corruption_req = Vec::new();
-            eve_proto::quasar::encode_bytes_field(1, &sys_inner, &mut corruption_req);
+            let corruption_req =
+                eve_proto::pb::message("eve_public.pirate.corruption.api.GetSystemInfoRequest")
+                    .set("system.sequential", 30_000_139u64)
+                    .must_encode();
 
             let request_types: &[(&str, Option<u32>, Vec<u8>)] = &[
                 ("eve_public.corporationgoal.api.GetMineWithRewardsRequest", Some(90_000_001u32), Vec::new()),
@@ -1451,9 +1451,8 @@ mod tests {
             CampaignObjectiveRecord, CampaignRecord, CampaignTrackRecord, OBJECTIVE_STATE_ACTIVE,
             TRACK_STATE_STARTED,
         };
-        use eve_proto::quasar::{
-            encode_bytes_field, encode_string_field, DynamicValue, QuasarDescriptorRegistry,
-        };
+        use eve_proto::pb;
+        use eve_proto::quasar::{DynamicValue, QuasarDescriptorRegistry};
 
         let ctx = Arc::new(ServerContext::with_repository(Arc::new(
             eve_db::WorldRepository::with_demo_seed(),
@@ -1643,58 +1642,36 @@ mod tests {
         let mut reader = GrpcFrameReader::new(rsp.into_body(), "identity".into());
 
         // Helper encoded request payloads
-        let mut goal_id_req = Vec::new();
-        {
-            let mut id_msg = Vec::new();
-            encode_bytes_field(1, &corp_goal_uuid, &mut id_msg);
-            encode_bytes_field(1, &id_msg, &mut goal_id_req);
-        }
-        let mut career_claim_req = Vec::new();
-        {
-            let mut id_msg = Vec::new();
-            encode_bytes_field(1, &career_goal_uuid, &mut id_msg);
-            encode_bytes_field(1, &id_msg, &mut career_claim_req);
-        }
-        let mut career_api_claim_req = Vec::new();
-        {
-            let mut id_msg = Vec::new();
-            encode_bytes_field(1, &career_goal_uuid_2, &mut id_msg);
-            encode_bytes_field(1, &id_msg, &mut career_api_claim_req);
-        }
-        let mut daily_get_req = Vec::new();
-        {
-            let mut id_msg = Vec::new();
-            encode_bytes_field(1, &first_daily.uuid, &mut id_msg);
-            encode_bytes_field(1, &id_msg, &mut daily_get_req);
-        }
-        let mut ach_get_req = Vec::new();
-        {
-            let mut u = [0u8; 16];
-            u[12..16].copy_from_slice(&ach_id.to_be_bytes());
-            let mut id_msg = Vec::new();
-            encode_bytes_field(1, &u, &mut id_msg);
-            encode_bytes_field(1, &id_msg, &mut ach_get_req);
-        }
-        let mut ach_cat_req = Vec::new();
-        {
-            let mut u = [0u8; 16];
-            u[12..16].copy_from_slice(&ach_cat_id.to_be_bytes());
-            let mut id_msg = Vec::new();
-            encode_bytes_field(1, &u, &mut id_msg);
-            encode_bytes_field(1, &id_msg, &mut ach_cat_req);
-        }
-        let mut camp_get_req = Vec::new();
-        {
-            let mut id_msg = Vec::new();
-            encode_bytes_field(1, &campaign_id_to_uuid_bytes(camp_id), &mut id_msg);
-            encode_bytes_field(1, &id_msg, &mut camp_get_req);
-        }
-        let mut camp_ns_req = Vec::new();
-        {
-            let mut ns_msg = Vec::new();
-            encode_string_field(1, "eve", &mut ns_msg);
-            encode_bytes_field(1, &ns_msg, &mut camp_ns_req);
-        }
+        let goal_id_req =
+            pb::message("eve_public.corporationgoal.api.GetContributorSummariesForGoalRequest")
+                .set("goal.uuid", &corp_goal_uuid)
+                .must_encode();
+        let career_claim_req =
+            pb::message("eve_public.app.eveonline.career.goal.ClaimRewardRequest")
+                .set("goal.uuid", &career_goal_uuid)
+                .must_encode();
+        let career_api_claim_req = pb::message("eve_public.career.goal.api.ClaimRewardRequest")
+            .set("goal.uuid", &career_goal_uuid_2)
+            .must_encode();
+        let daily_get_req = pb::message("eve_public.dailygoal.api.GetRequest")
+            .set("goal.uuid", &first_daily.uuid)
+            .must_encode();
+        let mut ach_uuid = [0u8; 16];
+        ach_uuid[12..16].copy_from_slice(&ach_id.to_be_bytes());
+        let ach_get_req = pb::message("eve_public.achievement.api.GetRequest")
+            .set("achievement.uuid", &ach_uuid)
+            .must_encode();
+        let mut ach_cat_uuid = [0u8; 16];
+        ach_cat_uuid[12..16].copy_from_slice(&ach_cat_id.to_be_bytes());
+        let ach_cat_req = pb::message("eve_public.achievement.category.api.GetRequest")
+            .set("category.uuid", &ach_cat_uuid)
+            .must_encode();
+        let camp_get_req = pb::message("eve_public.campaign.api.GetRequest")
+            .set("campaign.uuid", &campaign_id_to_uuid_bytes(camp_id))
+            .must_encode();
+        let camp_ns_req = pb::message("eve_public.campaign.api.GetAllForNamespaceRequest")
+            .set("namespace.namespace", "eve")
+            .must_encode();
 
         let cases: Vec<(&str, Vec<u8>, &str, bool)> = vec![
             // #256 corporation/client/goals/goalsController.py -> get_unclaimed_goal_ids

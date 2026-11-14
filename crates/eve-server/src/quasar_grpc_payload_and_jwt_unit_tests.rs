@@ -5,10 +5,9 @@ use crate::router::client_compat::normalize_macho_notification;
 use crate::router::ServerContext;
 use bytes::{Buf, Bytes, BytesMut};
 use eve_proto::quasar::{
-    encode_bytes_field, encode_fixed32_field, encode_fixed64_field, encode_varint_field,
     DescriptorProto, EvePublicEvent, EvePublicRequest, EvePublicResponse, FieldDescriptorProto,
-    FieldLabel, FieldType, GoogleAny, GoogleTimestamp, QuasarDescriptorRegistry,
-    TYPE_GOOGLEAPIS_PREFIX,
+    FieldLabel, FieldType, GoogleAny, GoogleTimestamp, QuasarDescriptorRegistry, WireField,
+    WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::PyRep;
 use http::{Request, StatusCode};
@@ -215,16 +214,20 @@ fn normalize_quasar_any_payload_covers_leaf_and_nested_coercion_branches() {
             .insert(name.into(), mk_msg(name, fields));
     }
 
-    let mut wire = Vec::new();
-    encode_varint_field(1, 100, &mut wire);
-    encode_varint_field(2, 200, &mut wire);
-    encode_varint_field(3, 300, &mut wire);
-    encode_varint_field(4, 400, &mut wire);
-    encode_bytes_field(5, b"hello", &mut wire);
-    encode_fixed64_field(6, 600, &mut wire);
-    encode_fixed32_field(7, 700, &mut wire);
-    encode_bytes_field(8, b"utf8-ok", &mut wire);
-    encode_varint_field(99, 999, &mut wire); // unknown field number -> triggers coercion & skipped
+    let wire = WireMessage {
+        fields: vec![
+            WireField { field_number: 1, value: WireValue::Varint(100) },
+            WireField { field_number: 2, value: WireValue::Varint(200) },
+            WireField { field_number: 3, value: WireValue::Varint(300) },
+            WireField { field_number: 4, value: WireValue::Varint(400) },
+            WireField { field_number: 5, value: WireValue::LengthDelimited(b"hello".to_vec()) },
+            WireField { field_number: 6, value: WireValue::Fixed64(600) },
+            WireField { field_number: 7, value: WireValue::Fixed32(700) },
+            WireField { field_number: 8, value: WireValue::LengthDelimited(b"utf8-ok".to_vec()) },
+            WireField { field_number: 99, value: WireValue::Varint(999) }, // unknown field number -> triggers coercion & skipped
+        ],
+    }
+    .encode();
 
     let mut any_container = GoogleAny {
         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.test.Container"),

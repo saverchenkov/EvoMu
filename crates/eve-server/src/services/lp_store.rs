@@ -806,17 +806,12 @@ fn handle_take_offer(
                     } else {
                         "eve_public.entitlement.character.ship.corplogo"
                     };
-                    let mut notice_bytes = Vec::new();
-                    eve_proto::quasar::encode_bytes_field(1, &ident, &mut notice_bytes);
+                    let any = eve_proto::pb::message(&format!("{pkg}.GrantedNotice"))
+                        .set_raw_message("entitlement", ident)
+                        .must_to_any();
                     let _ = ctx.quasar_gateway.publish_notice(
                         crate::quasar_gateway::NoticeScope::Character(char_id as u32),
-                        eve_proto::quasar::GoogleAny {
-                            type_url: format!(
-                                "{}{pkg}.GrantedNotice",
-                                eve_proto::quasar::TYPE_GOOGLEAPIS_PREFIX
-                            ),
-                            value: notice_bytes,
-                        },
+                        any,
                         ctx.now_unix(),
                     );
                 }

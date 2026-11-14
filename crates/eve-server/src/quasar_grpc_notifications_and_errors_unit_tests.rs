@@ -109,8 +109,8 @@ fn normalize_macho_notification_covers_all_event_shapes() {
 #[test]
 fn normalize_quasar_any_payload_coerces_types_and_wire_mismatches() {
     use eve_proto::quasar::{
-        encode_bytes_field, encode_fixed32_field, encode_fixed64_field, encode_varint_field,
         DescriptorProto, FieldDescriptorProto, FieldLabel, FieldType, QuasarDescriptorRegistry,
+        WireField, WireMessage, WireValue,
     };
 
     let mut reg = QuasarDescriptorRegistry::empty_with_builtins();
@@ -195,19 +195,23 @@ fn normalize_quasar_any_payload_coerces_types_and_wire_mismatches() {
     normalize_quasar_any_payload(&reg, &mut any_cspa);
     assert!(any_cspa.type_url.ends_with("google.protobuf.Empty"));
 
-    let mut mismatched = Vec::new();
-    encode_varint_field(1, 7, &mut mismatched);
-    encode_varint_field(2, 99, &mut mismatched);
-    encode_varint_field(3, 123, &mut mismatched);
-    encode_bytes_field(4, &[0xFF, 0xFE], &mut mismatched);
-    encode_varint_field(5, 42, &mut mismatched);
-    encode_bytes_field(6, &[0xFF, 0xAB], &mut mismatched);
-    encode_varint_field(7, 55, &mut mismatched);
-    encode_bytes_field(8, &[0x08, 0x2A], &mut mismatched);
-    encode_fixed64_field(9, 77, &mut mismatched);
-    encode_fixed32_field(10, 88, &mut mismatched);
-    encode_varint_field(11, 999, &mut mismatched);
-    encode_varint_field(12, 111, &mut mismatched);
+    let mismatched = WireMessage {
+        fields: vec![
+            WireField { field_number: 1, value: WireValue::Varint(7) },
+            WireField { field_number: 2, value: WireValue::Varint(99) },
+            WireField { field_number: 3, value: WireValue::Varint(123) },
+            WireField { field_number: 4, value: WireValue::LengthDelimited(vec![0xFF, 0xFE]) },
+            WireField { field_number: 5, value: WireValue::Varint(42) },
+            WireField { field_number: 6, value: WireValue::LengthDelimited(vec![0xFF, 0xAB]) },
+            WireField { field_number: 7, value: WireValue::Varint(55) },
+            WireField { field_number: 8, value: WireValue::LengthDelimited(vec![0x08, 0x2A]) },
+            WireField { field_number: 9, value: WireValue::Fixed64(77) },
+            WireField { field_number: 10, value: WireValue::Fixed32(88) },
+            WireField { field_number: 11, value: WireValue::Varint(999) },
+            WireField { field_number: 12, value: WireValue::Varint(111) },
+        ],
+    }
+    .encode();
 
     let mut rsp = EvePublicResponse {
         status_code: 200,
@@ -317,8 +321,8 @@ async fn quasar_grpc_error_branches_compression_and_unauthenticated_paths() {
 #[test]
 fn normalize_notices_covers_all_remaining_event_and_coercion_branches() {
     use eve_proto::quasar::{
-        encode_bytes_field, encode_fixed32_field, encode_varint_field,
         DescriptorProto, FieldDescriptorProto, FieldLabel, FieldType, QuasarDescriptorRegistry,
+        WireField, WireMessage, WireValue,
     };
 
     // 1. DoDestinyUpdate with OnDockingAccepted having < 3 args falls through to recursive tuple normalization
@@ -574,8 +578,13 @@ fn normalize_notices_covers_all_remaining_event_and_coercion_branches() {
     );
 
     // UnknownChildHolder with varint and invalid wire triggers unknown sub_desc branches in varint & leaf coercion
-    let mut unk_var = Vec::new();
-    encode_varint_field(1, 5, &mut unk_var);
+    let unk_var = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(5),
+        }],
+    }
+    .encode();
     let mut any_unk = GoogleAny {
         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.test.UnknownChildHolder"),
         value: unk_var,
@@ -588,15 +597,19 @@ fn normalize_notices_covers_all_remaining_event_and_coercion_branches() {
     normalize_quasar_any_payload(&reg, &mut any_unk_leaf);
 
     // MsgHolder: empty sub-message bytes, Fixed32 on Message/String/Bytes/Fixed64, Varint & Fixed32 alongside bad field
-    let mut msg_wire = Vec::new();
-    encode_bytes_field(1, &[], &mut msg_wire);
-    encode_fixed32_field(1, 1, &mut msg_wire);
-    encode_fixed32_field(2, 2, &mut msg_wire);
-    encode_fixed32_field(3, 3, &mut msg_wire);
-    encode_varint_field(4, 44, &mut msg_wire);
-    encode_fixed32_field(5, 5, &mut msg_wire);
-    encode_fixed32_field(6, 66, &mut msg_wire);
-    encode_varint_field(99, 1, &mut msg_wire); // force coercion pass
+    let msg_wire = WireMessage {
+        fields: vec![
+            WireField { field_number: 1, value: WireValue::LengthDelimited(Vec::new()) },
+            WireField { field_number: 1, value: WireValue::Fixed32(1) },
+            WireField { field_number: 2, value: WireValue::Fixed32(2) },
+            WireField { field_number: 3, value: WireValue::Fixed32(3) },
+            WireField { field_number: 4, value: WireValue::Varint(44) },
+            WireField { field_number: 5, value: WireValue::Fixed32(5) },
+            WireField { field_number: 6, value: WireValue::Fixed32(66) },
+            WireField { field_number: 99, value: WireValue::Varint(1) }, // force coercion pass
+        ],
+    }
+    .encode();
     let mut any_holder = GoogleAny {
         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.test.MsgHolder"),
         value: msg_wire,
@@ -607,8 +620,13 @@ fn normalize_notices_covers_all_remaining_event_and_coercion_branches() {
         .is_ok());
 
     // Valid WireMessage with ONLY unknown field 99 on StrLeaf -> out.is_empty() fallback to coerce_raw_leaf_bytes_to_message
-    let mut only_unknown = Vec::new();
-    encode_varint_field(99, 7, &mut only_unknown);
+    let only_unknown = WireMessage {
+        fields: vec![WireField {
+            field_number: 99,
+            value: WireValue::Varint(7),
+        }],
+    }
+    .encode();
     let mut any_fallback = GoogleAny {
         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.test.StrLeaf"),
         value: only_unknown,
@@ -619,20 +637,37 @@ fn normalize_notices_covers_all_remaining_event_and_coercion_branches() {
     // Depth > 8 on bytes, varint, and raw leaf chains (D0 -> ... -> D9 -> StrLeaf)
     let mut deep_bytes = vec![0xFF, 0x21]; // raw leaf at bottom
     for _ in 0..=9 {
-        let mut outer = Vec::new();
-        encode_bytes_field(1, &deep_bytes, &mut outer);
-        deep_bytes = outer;
+        deep_bytes = WireMessage {
+            fields: vec![WireField {
+                field_number: 1,
+                value: WireValue::LengthDelimited(deep_bytes),
+            }],
+        }
+        .encode();
     }
     // Add unknown field 99 at top so top-level fails decode_dynamic and enters coerce_quasar_bytes_to_message
-    encode_varint_field(99, 1, &mut deep_bytes);
+    deep_bytes.extend_from_slice(
+        &WireMessage {
+            fields: vec![WireField {
+                field_number: 99,
+                value: WireValue::Varint(1),
+            }],
+        }
+        .encode(),
+    );
     let mut any_deep_bytes = GoogleAny {
         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.test.D0"),
         value: deep_bytes,
     };
     normalize_quasar_any_payload(&reg, &mut any_deep_bytes);
 
-    let mut deep_varint = Vec::new();
-    encode_varint_field(1, 777, &mut deep_varint);
+    let deep_varint = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(777),
+        }],
+    }
+    .encode();
     let mut any_deep_varint = GoogleAny {
         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.test.D0"),
         value: deep_varint,

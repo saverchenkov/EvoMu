@@ -23,7 +23,7 @@ pub mod sov_gameplay_entosis;
 pub use sov_gameplay_entosis::*;
 
 use crate::router::{NotificationTarget, ServerContext};
-use crate::services::quasar_sov_hub::{id_field, push_notice, PendingNotices};
+use crate::services::quasar_sov_hub::{push_notice, PendingNotices};
 use crate::services::quasar_sov_mercden::{
     encode_evolution_simulation, push_definitions_updated_notice, refresh_activities,
     simulate_den_in_snap, MERCENARY_DEN_ABSOLUTE_MAX, TYPE_MERCENARY_DEN_MANAGEMENT,
@@ -34,7 +34,6 @@ use crate::services::sov_services::{
 use eve_db::{InventoryFlag, InventoryItemRecord, PersistedMercenaryDen, UpwellStructureRecord};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
-use eve_proto::quasar::encode_bytes_field;
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
 use std::sync::{Arc, RwLock};
@@ -621,9 +620,12 @@ pub async fn handle_mercden_component_call(
         let max_owner_units = ((free_m3 + 1e-9) / unit_vol).floor() as u32;
         if simulate_den_in_snap(&mut snap.sov_runtime, den_id, now) {
             let den_mut = snap.sov_runtime.mercenary_dens.get(&den_id).expect("checked");
-            let mut n = Vec::new();
-            id_field(1, den_id as u64, &mut n);
-            encode_bytes_field(2, &encode_evolution_simulation(den_mut), &mut n);
+            let n = eve_proto::pb::message(
+                "eve_public.sovereignty.mercenaryden.api.EvolutionStateChangedNotice",
+            )
+            .set("mercenary_den.sequential", den_id as u64)
+            .set_raw_message("state", encode_evolution_simulation(den_mut))
+            .must_encode();
             push_notice(
                 &pending,
                 den_mut.solar_system_id,
@@ -766,9 +768,12 @@ pub(crate) fn tick_mercenary_den_reinforcements_in_snap(
                 if !den_mut.enabled {
                     den_mut.enabled = true;
                     den_mut.simulated_at_unix = now;
-                    let mut n = Vec::new();
-                    id_field(1, den_id as u64, &mut n);
-                    encode_bytes_field(2, &encode_evolution_simulation(den_mut), &mut n);
+                    let n = eve_proto::pb::message(
+                        "eve_public.sovereignty.mercenaryden.api.EvolutionStateChangedNotice",
+                    )
+                    .set("mercenary_den.sequential", den_id as u64)
+                    .set_raw_message("state", encode_evolution_simulation(den_mut))
+                    .must_encode();
                     push_notice(
                         pending,
                         sys_id,
@@ -861,9 +866,12 @@ pub async fn apply_mercenary_den_weapon_damage(
                     let _ = simulate_den_in_snap(&mut snap.sov_runtime, den_id, now);
                     let den_mut = snap.sov_runtime.mercenary_dens.get_mut(&den_id).expect("checked");
                     den_mut.enabled = false;
-                    let mut n = Vec::new();
-                    id_field(1, den_id as u64, &mut n);
-                    encode_bytes_field(2, &encode_evolution_simulation(den_mut), &mut n);
+                    let n = eve_proto::pb::message(
+                        "eve_public.sovereignty.mercenaryden.api.EvolutionStateChangedNotice",
+                    )
+                    .set("mercenary_den.sequential", den_id as u64)
+                    .set_raw_message("state", encode_evolution_simulation(den_mut))
+                    .must_encode();
                     push_notice(
                         &pending,
                         sys_id,
@@ -1097,9 +1105,12 @@ pub async fn apply_mercenary_den_shield_repair(
                 den_mut.enabled = true;
                 den_mut.simulated_at_unix = now;
                 enabled_now = true;
-                let mut n = Vec::new();
-                id_field(1, den_id as u64, &mut n);
-                encode_bytes_field(2, &encode_evolution_simulation(den_mut), &mut n);
+                let n = eve_proto::pb::message(
+                    "eve_public.sovereignty.mercenaryden.api.EvolutionStateChangedNotice",
+                )
+                .set("mercenary_den.sequential", den_id as u64)
+                .set_raw_message("state", encode_evolution_simulation(den_mut))
+                .must_encode();
                 push_notice(
                     &pending,
                     sys_id,

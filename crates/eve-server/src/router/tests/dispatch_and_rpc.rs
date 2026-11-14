@@ -534,23 +534,22 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
             c.wallet_divisions[0].balance = eve_db::IskCents::from_isk(1_000_000);
         }
     });
-    let (mut g_req, mut g_cfg, mut curr, mut isk, mut pool) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    eve_proto::quasar::encode_string_field(1, "Mine Veldspar", &mut g_req);
-    eve_proto::quasar::encode_varint_field(3, 500, &mut g_req);
-    eve_proto::quasar::encode_bytes_field(25, &[], &mut g_cfg);
-    eve_proto::quasar::encode_bytes_field(4, &g_cfg, &mut g_req);
-    eve_proto::quasar::encode_varint_field(1, eve_proto::quasar::encode_zigzag64(50_000), &mut curr);
-    eve_proto::quasar::encode_bytes_field(1, &curr, &mut isk);
-    eve_proto::quasar::encode_varint_field(1, 1, &mut pool);
-    eve_proto::quasar::encode_bytes_field(2, &isk, &mut pool);
-    eve_proto::quasar::encode_bytes_field(8, &pool, &mut g_req);
+    let g_any = eve_proto::pb::message("eve_public.goal.api.CreateRequest")
+        .set("name", "Mine Veldspar")
+        .set("desired_progress", 500u64)
+        .set_raw_message("contribution_configuration.mined_ore", b"")
+        .add_with("reward_pools", |pool| {
+            pool.set("period", 1i32)
+                .set("isk.amount.units", 50_000i64)
+        })
+        .must_to_any();
     let now_u = ctx.now_unix();
     let proj_rsp = ctx.quasar_gateway.handle_public_request(
         &session,
         &eve_proto::quasar::EvePublicRequest {
             issued: Some(eve_proto::quasar::GoogleTimestamp { seconds: now_u as i64, nanos: 0 }),
             correlation_uuid: vec![0x41; 16],
-            payload: Some(eve_proto::quasar::GoogleAny { type_url: "type.googleapis.com/eve_public.goal.api.CreateRequest".into(), value: g_req }),
+            payload: Some(g_any),
             external_origin: "test".into(),
             application_instance_uuid: vec![0x42; 16],
             authoritative_context: Some(eve_proto::quasar::AuthoritativeContext::for_session_at(Some(1), Some(90_000_001), Some(corp_id as u32), session.corp_role, "tranquility", vec![0x43; 16], now_u)),

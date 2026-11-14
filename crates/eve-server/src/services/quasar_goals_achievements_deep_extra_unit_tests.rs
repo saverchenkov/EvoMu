@@ -13,8 +13,8 @@ use crate::quasar_gateway::{
 };
 use eve_db::{IskCents, WorldRepository};
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, AuthoritativeContext, DynamicQuasarMessage,
-    DynamicValue, GoogleAny, QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, QuasarDescriptorRegistry,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
@@ -489,9 +489,4 @@ fn achievement_ops_progress_milestones_rewards_claim_and_admin_resets() {
         &DynamicQuasarMessage::new("Empty"),
     )
     .is_ok());
-
-    // Keep unused imports clean
-    let mut buf = Vec::new();
-    encode_varint_field(1, 5001, &mut buf);
-    encode_bytes_field(1, &buf, &mut Vec::new());
 }

@@ -360,8 +360,13 @@ async fn fast_checkout_consumes_tokens_blocks_negative_vault_and_rejects_unprice
         .await
         .is_err());
 
-    let mut q_val = Vec::new();
-    eve_proto::quasar::encode_varint_field(1, 9901, &mut q_val);
+    let q_val = eve_proto::quasar::WireMessage {
+        fields: vec![eve_proto::quasar::WireField {
+            field_number: 1,
+            value: eve_proto::quasar::WireValue::Varint(9901),
+        }],
+    }
+    .encode();
     let q_req = eve_proto::quasar::EvePublicRequest {
         issued: Some(eve_proto::quasar::GoogleTimestamp { seconds: 1_700_000_010, nanos: 0 }),
         correlation_uuid: vec![2; 16],

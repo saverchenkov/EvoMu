@@ -24,7 +24,7 @@ use eve_db::{InventoryFlag, InventoryItemRecord, UpwellStructureRecord, WorldSta
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
+    GoogleAny, WireField, WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
@@ -1183,19 +1183,59 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
                     mode: MovementMode::Rigid,
                 })
                 .await;
-            let mut n = Vec::new();
-            let mut id_b = Vec::new();
-            encode_varint_field(1, skyhook_id as u64, &mut id_b);
-            encode_bytes_field(1, &id_b, &mut n);
-            let mut sim = Vec::new();
-            encode_varint_field(1, final_sec, &mut sim);
-            encode_varint_field(2, 0, &mut sim);
-            let mut r = Vec::new();
-            let mut rt_b = Vec::new();
-            encode_varint_field(1, u64::from(r_type), &mut rt_b);
-            encode_bytes_field(1, &rt_b, &mut r);
-            encode_bytes_field(2, &sim, &mut r);
-            encode_bytes_field(2, &r, &mut n);
+            let id_b = WireMessage {
+                fields: vec![WireField {
+                    field_number: 1,
+                    value: WireValue::Varint(skyhook_id as u64),
+                }],
+            }
+            .encode();
+            let sim = WireMessage {
+                fields: vec![
+                    WireField {
+                        field_number: 1,
+                        value: WireValue::Varint(final_sec),
+                    },
+                    WireField {
+                        field_number: 2,
+                        value: WireValue::Varint(0),
+                    },
+                ],
+            }
+            .encode();
+            let rt_b = WireMessage {
+                fields: vec![WireField {
+                    field_number: 1,
+                    value: WireValue::Varint(u64::from(r_type)),
+                }],
+            }
+            .encode();
+            let r = WireMessage {
+                fields: vec![
+                    WireField {
+                        field_number: 1,
+                        value: WireValue::LengthDelimited(rt_b),
+                    },
+                    WireField {
+                        field_number: 2,
+                        value: WireValue::LengthDelimited(sim),
+                    },
+                ],
+            }
+            .encode();
+            let n = WireMessage {
+                fields: vec![
+                    WireField {
+                        field_number: 1,
+                        value: WireValue::LengthDelimited(id_b),
+                    },
+                    WireField {
+                        field_number: 2,
+                        value: WireValue::LengthDelimited(r),
+                    },
+                ],
+            }
+            .encode();
             let _ = ctx.quasar_gateway.publish_notice(
                 NoticeScope::SolarSystem(sys_id),
                 GoogleAny {

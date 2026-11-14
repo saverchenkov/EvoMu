@@ -51,13 +51,11 @@ fn coerce_quasar_varint_to_message(
     depth: usize,
 ) -> Vec<u8> {
     use eve_proto::quasar::{
-        encode_bytes_field, encode_fixed32_field, encode_fixed64_field, encode_string_field,
-        encode_varint_field, encode_zigzag32, encode_zigzag64, FieldType, WireType,
+        encode_zigzag32, encode_zigzag64, FieldType, WireField, WireMessage, WireType, WireValue,
     };
     if depth > 8 {
         return Vec::new();
     }
-    let mut out = Vec::new();
     let varint_field = desc
         .fields
         .iter()
@@ -73,32 +71,57 @@ fn coerce_quasar_varint_to_message(
             FieldType::Sint64 => encode_zigzag64(v as i64),
             _ => v,
         };
-        encode_varint_field(vf.number, enc_v, &mut out);
-        return out;
+        return WireMessage {
+            fields: vec![WireField {
+                field_number: vf.number,
+                value: WireValue::Varint(enc_v),
+            }],
+        }
+        .encode();
     }
     if let Some(sf) = desc.fields.iter().find(|f| f.field_type == FieldType::String) {
-        encode_string_field(sf.number, &v.to_string(), &mut out);
-        return out;
+        return WireMessage {
+            fields: vec![WireField {
+                field_number: sf.number,
+                value: WireValue::LengthDelimited(v.to_string().into_bytes()),
+            }],
+        }
+        .encode();
     }
     if let Some(bf) = desc.fields.iter().find(|f| f.field_type == FieldType::Bytes) {
-        encode_bytes_field(bf.number, &v.to_le_bytes(), &mut out);
-        return out;
+        return WireMessage {
+            fields: vec![WireField {
+                field_number: bf.number,
+                value: WireValue::LengthDelimited(v.to_le_bytes().to_vec()),
+            }],
+        }
+        .encode();
     }
     if let Some(ff) = desc
         .fields
         .iter()
         .find(|f| f.field_type.expected_wire_type() == WireType::Fixed64)
     {
-        encode_fixed64_field(ff.number, v, &mut out);
-        return out;
+        return WireMessage {
+            fields: vec![WireField {
+                field_number: ff.number,
+                value: WireValue::Fixed64(v),
+            }],
+        }
+        .encode();
     }
     if let Some(ff) = desc
         .fields
         .iter()
         .find(|f| f.field_type.expected_wire_type() == WireType::Fixed32)
     {
-        encode_fixed32_field(ff.number, v as u32, &mut out);
-        return out;
+        return WireMessage {
+            fields: vec![WireField {
+                field_number: ff.number,
+                value: WireValue::Fixed32(v as u32),
+            }],
+        }
+        .encode();
     }
     if let Some(mf) = desc
         .fields
@@ -107,10 +130,16 @@ fn coerce_quasar_varint_to_message(
     {
         if let Some(sub_desc) = descriptors.get_message(&mf.type_name) {
             let sub = coerce_quasar_varint_to_message(descriptors, sub_desc, v, depth + 1);
-            encode_bytes_field(mf.number, &sub, &mut out);
+            return WireMessage {
+                fields: vec![WireField {
+                    field_number: mf.number,
+                    value: WireValue::LengthDelimited(sub),
+                }],
+            }
+            .encode();
         }
     }
-    out
+    Vec::new()
 }
 
 fn coerce_raw_leaf_bytes_to_message(
@@ -119,28 +148,50 @@ fn coerce_raw_leaf_bytes_to_message(
     buf: &[u8],
     depth: usize,
 ) -> Vec<u8> {
-    use eve_proto::quasar::{encode_bytes_field, encode_string_field, encode_varint_field, FieldType};
+    use eve_proto::quasar::{FieldType, WireField, WireMessage, WireValue};
     if depth > 8 {
         return Vec::new();
     }
-    let mut out = Vec::new();
     if desc.full_name.ends_with("semanticversion.Specification") {
-        encode_varint_field(1, 24, &mut out);
-        encode_varint_field(2, 1, &mut out);
-        encode_varint_field(3, 0, &mut out);
-        return out;
+        return WireMessage {
+            fields: vec![
+                WireField {
+                    field_number: 1,
+                    value: WireValue::Varint(24),
+                },
+                WireField {
+                    field_number: 2,
+                    value: WireValue::Varint(1),
+                },
+                WireField {
+                    field_number: 3,
+                    value: WireValue::Varint(0),
+                },
+            ],
+        }
+        .encode();
     }
     if let Some(sf) = desc.fields.iter().find(|f| f.field_type == FieldType::String) {
         let s = match std::str::from_utf8(buf) {
             Ok(valid) => valid.to_string(),
             Err(_) => buf.iter().map(|b| format!("{b:02x}")).collect(),
         };
-        encode_string_field(sf.number, &s, &mut out);
-        return out;
+        return WireMessage {
+            fields: vec![WireField {
+                field_number: sf.number,
+                value: WireValue::LengthDelimited(s.into_bytes()),
+            }],
+        }
+        .encode();
     }
     if let Some(bf) = desc.fields.iter().find(|f| f.field_type == FieldType::Bytes) {
-        encode_bytes_field(bf.number, buf, &mut out);
-        return out;
+        return WireMessage {
+            fields: vec![WireField {
+                field_number: bf.number,
+                value: WireValue::LengthDelimited(buf.to_vec()),
+            }],
+        }
+        .encode();
     }
     if let Some(mf) = desc
         .fields
@@ -149,10 +200,16 @@ fn coerce_raw_leaf_bytes_to_message(
     {
         if let Some(sub_desc) = descriptors.get_message(&mf.type_name) {
             let sub = coerce_raw_leaf_bytes_to_message(descriptors, sub_desc, buf, depth + 1);
-            encode_bytes_field(mf.number, &sub, &mut out);
+            return WireMessage {
+                fields: vec![WireField {
+                    field_number: mf.number,
+                    value: WireValue::LengthDelimited(sub),
+                }],
+            }
+            .encode();
         }
     }
-    out
+    Vec::new()
 }
 
 fn coerce_quasar_bytes_to_message(
@@ -161,10 +218,7 @@ fn coerce_quasar_bytes_to_message(
     buf: &[u8],
     depth: usize,
 ) -> Vec<u8> {
-    use eve_proto::quasar::{
-        encode_bytes_field, encode_fixed32_field, encode_fixed64_field, encode_string_field,
-        encode_varint_field, FieldType, WireMessage, WireType, WireValue,
-    };
+    use eve_proto::quasar::{FieldType, WireField, WireMessage, WireType, WireValue};
     if depth > 8 || buf.is_empty() {
         return Vec::new();
     }
@@ -174,7 +228,7 @@ fn coerce_quasar_bytes_to_message(
     let Ok(wm) = WireMessage::decode(buf) else {
         return coerce_raw_leaf_bytes_to_message(descriptors, desc, buf, depth);
     };
-    let mut out = Vec::new();
+    let mut out_fields = Vec::new();
     for wf in wm.fields {
         let Some(fdesc) = desc.fields.iter().find(|f| f.number == wf.field_number) else {
             continue;
@@ -189,14 +243,20 @@ fn coerce_quasar_bytes_to_message(
                             &sub_bytes,
                             depth + 1,
                         );
-                        encode_bytes_field(fdesc.number, &sub, &mut out);
+                        out_fields.push(WireField {
+                            field_number: fdesc.number,
+                            value: WireValue::LengthDelimited(sub),
+                        });
                     }
                 }
                 WireValue::Varint(v) => {
                     if let Some(sub_desc) = descriptors.get_message(&fdesc.type_name) {
                         let sub =
                             coerce_quasar_varint_to_message(descriptors, sub_desc, v, depth + 1);
-                        encode_bytes_field(fdesc.number, &sub, &mut out);
+                        out_fields.push(WireField {
+                            field_number: fdesc.number,
+                            value: WireValue::LengthDelimited(sub),
+                        });
                     }
                 }
                 _ => {}
@@ -207,46 +267,76 @@ fn coerce_quasar_bytes_to_message(
                         Ok(valid) => valid.to_string(),
                         Err(_) => b.iter().map(|byte| format!("{byte:02x}")).collect(),
                     };
-                    encode_string_field(fdesc.number, &s, &mut out);
+                    out_fields.push(WireField {
+                        field_number: fdesc.number,
+                        value: WireValue::LengthDelimited(s.into_bytes()),
+                    });
                 }
                 WireValue::Varint(v) => {
-                    encode_string_field(fdesc.number, &v.to_string(), &mut out);
+                    out_fields.push(WireField {
+                        field_number: fdesc.number,
+                        value: WireValue::LengthDelimited(v.to_string().into_bytes()),
+                    });
                 }
                 _ => {}
             },
             FieldType::Bytes => match wf.value {
-                WireValue::LengthDelimited(b) => encode_bytes_field(fdesc.number, &b, &mut out),
-                WireValue::Varint(v) => {
-                    encode_bytes_field(fdesc.number, &v.to_le_bytes(), &mut out)
-                }
+                WireValue::LengthDelimited(b) => out_fields.push(WireField {
+                    field_number: fdesc.number,
+                    value: WireValue::LengthDelimited(b),
+                }),
+                WireValue::Varint(v) => out_fields.push(WireField {
+                    field_number: fdesc.number,
+                    value: WireValue::LengthDelimited(v.to_le_bytes().to_vec()),
+                }),
                 _ => {}
             },
             ft if ft.expected_wire_type() == WireType::Varint => match wf.value {
-                WireValue::Varint(v) => encode_varint_field(fdesc.number, v, &mut out),
+                WireValue::Varint(v) => out_fields.push(WireField {
+                    field_number: fdesc.number,
+                    value: WireValue::Varint(v),
+                }),
                 WireValue::LengthDelimited(b) => {
                     let v = WireMessage::decode(&b)
                         .ok()
                         .and_then(|sub| sub.fields.iter().find_map(|sf| sf.value.as_varint()))
                         .unwrap_or(0);
-                    encode_varint_field(fdesc.number, v, &mut out);
+                    out_fields.push(WireField {
+                        field_number: fdesc.number,
+                        value: WireValue::Varint(v),
+                    });
                 }
-                WireValue::Fixed64(v) => encode_varint_field(fdesc.number, v, &mut out),
-                WireValue::Fixed32(v) => encode_varint_field(fdesc.number, u64::from(v), &mut out),
+                WireValue::Fixed64(v) => out_fields.push(WireField {
+                    field_number: fdesc.number,
+                    value: WireValue::Varint(v),
+                }),
+                WireValue::Fixed32(v) => out_fields.push(WireField {
+                    field_number: fdesc.number,
+                    value: WireValue::Varint(u64::from(v)),
+                }),
             },
             ft if ft.expected_wire_type() == WireType::Fixed64 => match wf.value {
-                WireValue::Fixed64(v) | WireValue::Varint(v) => {
-                    encode_fixed64_field(fdesc.number, v, &mut out)
-                }
+                WireValue::Fixed64(v) | WireValue::Varint(v) => out_fields.push(WireField {
+                    field_number: fdesc.number,
+                    value: WireValue::Fixed64(v),
+                }),
                 _ => {}
             },
             ft if ft.expected_wire_type() == WireType::Fixed32 => match wf.value {
-                WireValue::Fixed32(v) => encode_fixed32_field(fdesc.number, v, &mut out),
-                WireValue::Varint(v) => encode_fixed32_field(fdesc.number, v as u32, &mut out),
+                WireValue::Fixed32(v) => out_fields.push(WireField {
+                    field_number: fdesc.number,
+                    value: WireValue::Fixed32(v),
+                }),
+                WireValue::Varint(v) => out_fields.push(WireField {
+                    field_number: fdesc.number,
+                    value: WireValue::Fixed32(v as u32),
+                }),
                 _ => {}
             },
             _ => {}
         }
     }
+    let out = WireMessage { fields: out_fields }.encode();
     if out.is_empty() && !buf.is_empty() {
         let leaf = coerce_raw_leaf_bytes_to_message(descriptors, desc, buf, depth);
         if descriptors.decode_dynamic(&desc.full_name, &leaf).is_ok() {

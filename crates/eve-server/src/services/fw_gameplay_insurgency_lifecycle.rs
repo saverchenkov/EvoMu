@@ -493,9 +493,19 @@ pub fn emit_campaign_resolution_effects_core(
     };
     for &sys in &res.sys_list {
         if let Some(router) = gw {
-            let mut pb = Vec::new();
-            eve_proto::quasar::encode_varint_field(1, res.campaign_id as u64, &mut pb);
-            eve_proto::quasar::encode_varint_field(2, 5, &mut pb);
+            let pb = eve_proto::quasar::WireMessage {
+                fields: vec![
+                    eve_proto::quasar::WireField {
+                        field_number: 1,
+                        value: eve_proto::quasar::WireValue::Varint(res.campaign_id as u64),
+                    },
+                    eve_proto::quasar::WireField {
+                        field_number: 2,
+                        value: eve_proto::quasar::WireValue::Varint(5),
+                    },
+                ],
+            }
+            .encode();
             let _ = router.publish_notice(
                 crate::quasar_gateway::NoticeScope::SolarSystem(sys),
                 eve_proto::quasar::GoogleAny {
