@@ -107,22 +107,22 @@ fn notes_lp_sequence_store_granular_mutations_deletions_and_selective_rollbacks(
     // 3. Test selective rollback_d6 for each individual dirty flag:
     // 3a. Only owner_notes mutated in-place (same len, different content!)
     snap.owner_notes.get_mut(&10).unwrap().note = "ModifiedInPlace".into();
-    rollback_d6(&conn, &mut snap, &fp);
+    rollback_d6(&conn, &mut snap, &fp).unwrap();
     assert_eq!(snap.owner_notes[&10].note, "Body1");
 
     // 3b. Only corp_lp_balances mutated
     snap.corp_lp_balances.insert((98_000_001, 1_000_125), 9_999);
-    rollback_d6(&conn, &mut snap, &fp);
+    rollback_d6(&conn, &mut snap, &fp).unwrap();
     assert_eq!(snap.corp_lp_balances[&(98_000_001, 1_000_125)], 1_500);
 
     // 3c. Only char_lp_logs mutated in-place (same len, different content!)
     snap.char_lp_logs.get_mut(&90_000_001).unwrap()[0].amount = 9_999;
-    rollback_d6(&conn, &mut snap, &fp);
+    rollback_d6(&conn, &mut snap, &fp).unwrap();
     assert_eq!(snap.char_lp_logs[&90_000_001][0].amount, 300);
 
     // 3d. Only sp6_lifecycle mutated
     snap.sp6_lifecycle.last_downtime_day_idx = Some(99_999);
-    rollback_d6(&conn, &mut snap, &fp);
+    rollback_d6(&conn, &mut snap, &fp).unwrap();
     assert_eq!(snap.sp6_lifecycle.last_downtime_day_idx, Some(20_100));
 
     // 4. Delete one key from each collection and verify the other key remains in SQLite

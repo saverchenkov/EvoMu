@@ -270,7 +270,7 @@ fn d6_corp_crimewatch_payload_roundtrip_sync_load_and_rollback() {
         populated_fps
     );
 
-    rollback_d6_corp_crimewatch(&conn, &mut loaded, &fp);
+    rollback_d6_corp_crimewatch(&conn, &mut loaded, &fp).expect("rollback_d6_corp_crimewatch");
     assert_eq!(loaded.corp_member_limits.get(&98_000_001), Some(&50));
     assert_eq!(
         loaded.wh_polarizations.get(&(90_000_001, 31_000_001)),
@@ -305,7 +305,8 @@ fn corp_crimewatch_rollback_preserves_state_on_missing_or_corrupt_kv_row() {
     snap.corp_member_limits.insert(98_000_002, 999);
     snap.zarzakh_gate_locks.insert(90_000_001, (30_100_000, 777));
     snap.sov_prospecting_levels.insert(30_000_142, 5);
-    rollback_d6_corp_crimewatch(&conn, &mut snap, &fp);
+    let err = rollback_d6_corp_crimewatch(&conn, &mut snap, &fp).unwrap_err();
+    assert!(err.contains("missing row"));
     assert_eq!(
         snap.corp_member_limits.get(&98_000_001),
         Some(&75),
@@ -322,7 +323,7 @@ fn corp_crimewatch_rollback_preserves_state_on_missing_or_corrupt_kv_row() {
         "missing KV row must not wipe non-default warfare state"
     );
 
-    // Corrupt JSON in KV table must likewise refuse to wipe non-default in-memory state.
+    // Corrupt JSON in KV table must likewise fail closed and refuse to wipe non-default in-memory state.
     for key in [KEY_CORP_GOV, KEY_CRIMEWATCH, KEY_WARFARE] {
         conn.execute(
             "INSERT OR REPLACE INTO d6_corp_crimewatch_kv (store_key, payload_json) VALUES (?1, '{corrupt')",
@@ -330,7 +331,8 @@ fn corp_crimewatch_rollback_preserves_state_on_missing_or_corrupt_kv_row() {
         )
         .unwrap();
     }
-    rollback_d6_corp_crimewatch(&conn, &mut snap, &fp);
+    let err = rollback_d6_corp_crimewatch(&conn, &mut snap, &fp).unwrap_err();
+    assert!(err.contains("parse failed"));
     assert_eq!(snap.corp_member_limits.get(&98_000_001), Some(&75));
     assert_eq!(snap.wh_polarizations.get(&(90_000_001, 31_000_001)), Some(&4242));
     assert_eq!(snap.fw_wars, vec![(500_001, 500_004)]);
@@ -348,7 +350,8 @@ fn corp_crimewatch_rollback_preserves_state_on_missing_or_corrupt_kv_row() {
         .wh_polarizations
         .insert((90_000_099, 31_000_001), 1);
     dirty_from_empty.fw_wars.push((500_002, 500_003));
-    rollback_d6_corp_crimewatch(&conn, &mut dirty_from_empty, &empty_fp);
+    rollback_d6_corp_crimewatch(&conn, &mut dirty_from_empty, &empty_fp)
+        .expect("empty baseline rollback should succeed");
     assert!(dirty_from_empty.corp_member_limits.is_empty());
     assert!(dirty_from_empty.wh_polarizations.is_empty());
     assert!(dirty_from_empty.fw_wars.is_empty());

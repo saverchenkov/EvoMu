@@ -375,66 +375,195 @@ pub fn sync_d6_batch4(
     Ok(changed)
 }
 
-pub fn rollback_d6_batch4(conn: &Connection, snap: &mut WorldStateSnapshot, fp: &TableFingerprints) {
-    let cur = compute_d6_batch4_fingerprints(snap);
-    if cur == fp.d6_batch4 {
-        return;
-    }
+fn reload_d6_batch4_blobs_strict(
+    conn: &Connection,
+    dirty_blobs: &HashSet<&'static str>,
+    expected_blobs: &HashMap<&'static str, u64>,
+) -> Result<WorldStateSnapshot, String> {
     let mut fresh = WorldStateSnapshot::default();
-    load_d6_batch4(conn, &mut fresh);
-    if let Ok(mut stmt) = conn.prepare(
-        "SELECT character_id, solar_system_id, type_id, quantity, date, timestamp_unix FROM char_mining_ledger ORDER BY id ASC",
-    ) {
-        if let Ok(rows) = stmt.query_map([], |r| {
-            Ok(crate::types::MiningLedgerRecord {
-                character_id: r.get(0)?,
-                solar_system_id: r.get::<_, i64>(1)? as u32,
-                type_id: r.get::<_, i64>(2)? as u32,
-                quantity: r.get(3)?,
-                date: r.get(4)?,
-                timestamp_unix: r.get::<_, i64>(5)? as u64,
-            })
-        }) {
-            for r in rows.flatten() {
-                fresh.mining_ledger.push(r);
+    let mut seen_keys = HashSet::with_capacity(dirty_blobs.len());
+    let mut stmt = conn
+        .prepare("SELECT blob_key, blob_json FROM world_kv_blobs")
+        .map_err(|e| format!("rollback world_kv_blobs prepare failed: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("rollback world_kv_blobs query failed: {e}"))?;
+    while let Some(r) = rows
+        .next()
+        .map_err(|e| format!("rollback world_kv_blobs row failed: {e}"))?
+    {
+        let key: String = r
+            .get(0)
+            .map_err(|e| format!("rollback world_kv_blobs blob_key: {e}"))?;
+        let js: String = r
+            .get(1)
+            .map_err(|e| format!("rollback world_kv_blobs blob_json ({key}): {e}"))?;
+        if dirty_blobs.contains(key.as_str()) {
+            apply_blob_json_checked(&mut fresh, &key, &js)
+                .map_err(|e| format!("rollback world_kv_blobs parse '{key}' failed: {e}"))?;
+            seen_keys.insert(key);
+        }
+    }
+    let empty_hashes = compute_blob_hashes(&WorldStateSnapshot::default());
+    for &k in dirty_blobs {
+        if !seen_keys.contains(k) {
+            let expected_empty = empty_hashes.get(k).copied().unwrap_or(0);
+            if expected_blobs.get(k).is_some_and(|&h| h != expected_empty) {
+                return Err(format!(
+                    "rollback world_kv_blobs missing row for non-empty dirty key '{k}'"
+                ));
             }
         }
     }
-    snap.moon_extractions = fresh.moon_extractions;
-    snap.auto_moon_miners = fresh.auto_moon_miners;
-    snap.observer_mining_ledger = fresh.observer_mining_ledger;
-    snap.mining_ledger = fresh.mining_ledger;
-    snap.char_research_agents = fresh.char_research_agents;
-    snap.planetary_colony_layouts = fresh.planetary_colony_layouts;
-    snap.corp_customs_offices = fresh.corp_customs_offices;
-    snap.orbital_provision_types = fresh.orbital_provision_types;
-    snap.wallet_journal_timestamps = fresh.wallet_journal_timestamps;
-    snap.char_wallet_transactions = fresh.char_wallet_transactions;
-    snap.corp_wallet_journals = fresh.corp_wallet_journals;
-    snap.corp_wallet_transactions = fresh.corp_wallet_transactions;
-    snap.market_order_meta = fresh.market_order_meta;
-    snap.market_history = fresh.market_history;
-    snap.cosmic_signatures = fresh.cosmic_signatures;
-    snap.cosmic_anomalies = fresh.cosmic_anomalies;
-    snap.incursions = fresh.incursions;
-    snap.last_mission_decline_times = fresh.last_mission_decline_times;
-    snap.wh_polarizations = fresh.wh_polarizations;
-    snap.module_online_states = fresh.module_online_states;
-    snap.module_active_states = fresh.module_active_states;
-    snap.module_active_charges = fresh.module_active_charges;
-    snap.ship_fit_inputs = fresh.ship_fit_inputs;
-    snap.weapon_banks = fresh.weapon_banks;
-    snap.paused_skill_queues = fresh.paused_skill_queues;
-    snap.starbase_settings = fresh.starbase_settings;
-    snap.corp_container_logs = fresh.corp_container_logs;
-    snap.killmail_details = fresh.killmail_details;
-    snap.station_office_rental_costs = fresh.station_office_rental_costs;
-    snap.structure_esi_timer_meta = fresh.structure_esi_timer_meta;
-    snap.corp_project_contributors = fresh.corp_project_contributors;
-    snap.loyalty_store_offers = fresh.loyalty_store_offers;
-    snap.system_jump_events = fresh.system_jump_events;
-    snap.system_kill_events = fresh.system_kill_events;
-    snap.quasar_state_blobs = fresh.quasar_state_blobs;
-    snap.service_state_blobs = fresh.service_state_blobs;
-    snap.insurance_contracts = fresh.insurance_contracts;
+    Ok(fresh)
+}
+
+fn reload_mining_ledger_strict(
+    conn: &Connection,
+    expected_fp: u64,
+) -> Result<Vec<crate::types::MiningLedgerRecord>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT character_id, solar_system_id, type_id, quantity, date, timestamp_unix FROM char_mining_ledger ORDER BY id ASC",
+        )
+        .map_err(|e| format!("rollback char_mining_ledger prepare failed: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("rollback char_mining_ledger query failed: {e}"))?;
+    let mut out = Vec::new();
+    while let Some(r) = rows
+        .next()
+        .map_err(|e| format!("rollback char_mining_ledger row failed: {e}"))?
+    {
+        out.push(crate::types::MiningLedgerRecord {
+            character_id: r
+                .get(0)
+                .map_err(|e| format!("rollback char_mining_ledger character_id: {e}"))?,
+            solar_system_id: r
+                .get::<_, i64>(1)
+                .map_err(|e| format!("rollback char_mining_ledger solar_system_id: {e}"))?
+                as u32,
+            type_id: r
+                .get::<_, i64>(2)
+                .map_err(|e| format!("rollback char_mining_ledger type_id: {e}"))?
+                as u32,
+            quantity: r
+                .get(3)
+                .map_err(|e| format!("rollback char_mining_ledger quantity: {e}"))?,
+            date: r
+                .get(4)
+                .map_err(|e| format!("rollback char_mining_ledger date: {e}"))?,
+            timestamp_unix: r
+                .get::<_, i64>(5)
+                .map_err(|e| format!("rollback char_mining_ledger timestamp_unix: {e}"))?
+                as u64,
+        });
+    }
+    let empty_fp = fp_json(&Vec::<crate::types::MiningLedgerRecord>::new());
+    if out.is_empty() && expected_fp != 0 && expected_fp != empty_fp {
+        return Err(
+            "rollback char_mining_ledger returned empty table for non-empty baseline".into(),
+        );
+    }
+    Ok(out)
+}
+
+/// Restores dirty `D-6` Batch 4 domains from SQLite into temporaries, only mutating `snap`
+/// after every required query and JSON parse succeeds.
+pub fn rollback_d6_batch4(
+    conn: &Connection,
+    snap: &mut WorldStateSnapshot,
+    fp: &TableFingerprints,
+) -> Result<(), String> {
+    let cur = compute_d6_batch4_fingerprints(snap);
+    if cur == fp.d6_batch4 {
+        return Ok(());
+    }
+    let dirty_blobs: HashSet<&'static str> = cur
+        .blobs
+        .iter()
+        .filter_map(|(&k, &cur_h)| (fp.d6_batch4.blobs.get(k) != Some(&cur_h)).then_some(k))
+        .collect();
+    let dirty_mining = cur.mining_ledger != fp.d6_batch4.mining_ledger;
+
+    let staged_res = (|| -> Result<_, String> {
+        let fresh_blobs = if !dirty_blobs.is_empty() {
+            Some(reload_d6_batch4_blobs_strict(
+                conn,
+                &dirty_blobs,
+                &fp.d6_batch4.blobs,
+            )?)
+        } else {
+            None
+        };
+        let fresh_mining = if dirty_mining {
+            Some(reload_mining_ledger_strict(conn, fp.d6_batch4.mining_ledger)?)
+        } else {
+            None
+        };
+        Ok((fresh_blobs, fresh_mining))
+    })();
+
+    let (fresh_blobs, fresh_mining) = match staged_res {
+        Ok(staged) => staged,
+        Err(err) => {
+            crate::persistence::record_persist_failure();
+            tracing::error!("rollback_d6_batch4 failed closed without mutating snapshot: {err}");
+            return Err(err);
+        }
+    };
+
+    if let Some(fresh) = fresh_blobs {
+        macro_rules! assign_if_dirty {
+            ($($key:literal => $field:ident),* $(,)?) => {
+                $(
+                    if dirty_blobs.contains($key) {
+                        snap.$field = fresh.$field;
+                    }
+                )*
+            };
+        }
+        assign_if_dirty!(
+            "moon_extractions" => moon_extractions,
+            "auto_moon_miners" => auto_moon_miners,
+            "observer_mining_ledger" => observer_mining_ledger,
+            "char_research_agents" => char_research_agents,
+            "planetary_colony_layouts" => planetary_colony_layouts,
+            "corp_customs_offices" => corp_customs_offices,
+            "orbital_provision_types" => orbital_provision_types,
+            "wallet_journal_timestamps" => wallet_journal_timestamps,
+            "char_wallet_transactions" => char_wallet_transactions,
+            "corp_wallet_journals" => corp_wallet_journals,
+            "corp_wallet_transactions" => corp_wallet_transactions,
+            "market_order_meta" => market_order_meta,
+            "market_history" => market_history,
+            "cosmic_signatures" => cosmic_signatures,
+            "cosmic_anomalies" => cosmic_anomalies,
+            "incursions" => incursions,
+            "last_mission_decline_times" => last_mission_decline_times,
+            "wh_polarizations" => wh_polarizations,
+            "module_online_states" => module_online_states,
+            "module_active_states" => module_active_states,
+            "module_active_charges" => module_active_charges,
+            "ship_fit_inputs" => ship_fit_inputs,
+            "weapon_banks" => weapon_banks,
+            "paused_skill_queues" => paused_skill_queues,
+            "starbase_settings" => starbase_settings,
+            "corp_container_logs" => corp_container_logs,
+            "killmail_details" => killmail_details,
+            "station_office_rental_costs" => station_office_rental_costs,
+            "structure_esi_timer_meta" => structure_esi_timer_meta,
+            "corp_project_contributors" => corp_project_contributors,
+            "loyalty_store_offers" => loyalty_store_offers,
+            "system_jump_events" => system_jump_events,
+            "system_kill_events" => system_kill_events,
+            "quasar_state_blobs" => quasar_state_blobs,
+            "service_state_blobs" => service_state_blobs,
+            "insurance_contracts" => insurance_contracts,
+        );
+    }
+    if let Some(mining_ledger) = fresh_mining {
+        snap.mining_ledger = mining_ledger;
+    }
+    Ok(())
 }

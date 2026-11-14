@@ -391,6 +391,11 @@ pub fn persist_failures_total() -> u64 {
     PERSIST_FAILURES_TOTAL.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+#[inline]
+pub(crate) fn record_persist_failure() {
+    PERSIST_FAILURES_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Returns the cumulative count of panics caught inside `run_mut_snapshot_tx` write closures (`#904` / `#833`).
 pub fn tx_panics_total() -> u64 {
     PERSIST_TX_PANICS_TOTAL.load(std::sync::atomic::Ordering::Relaxed)

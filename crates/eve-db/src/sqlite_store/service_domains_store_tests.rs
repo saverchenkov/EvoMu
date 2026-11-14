@@ -404,7 +404,7 @@ fn rollback_domain_row_expected_fp_zero_and_missing_table_branches() {
         node_graph_state: 123,
         ..Default::default()
     };
-    rollback_service_domains(&mem, &mut s, &fake_fp);
+    assert!(rollback_service_domains(&mem, &mut s, &fake_fp).is_err());
 
     let _ = std::fs::remove_file(&path);
 }
@@ -856,6 +856,81 @@ fn entity_kv_legacy_blobs_and_945_owner_notes_migration_and_quarantine() {
     assert_eq!(quarantined_snap.entity_kv, migrated.entity_kv);
     let q_rows = crate::list_quarantined_rows(&conn).expect("list quarantined");
     assert!(q_rows.iter().filter(|r| r.source_table == "entity_kv").count() >= 2);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn rollback_service_domains_and_entity_kv_fail_closed_preserving_live_maps() {
+    use crate::sqlite_store::service_domains_store::rollback_service_domains;
+
+    let path = temp_db_path("fail_closed_rollback");
+    let mut conn = Connection::open(&path).expect("open");
+    apply_migrations(&conn).expect("migrate");
+
+    let mut base = WorldStateSnapshot::default();
+    base.node_graph_state.certificates.insert(90_000_001, Default::default());
+    base.fleet_and_social_ops.contract_deposits.insert(1, 500);
+    base.kv_mut(Ns::XmppAuthToken)
+        .set_with_unix(90_000_001, "", &"tok-base", 1_700_000_001)
+        .expect("set base kv");
+
+    let fp = replace_sqlite_from_snapshot(&mut conn, &base).expect("seed");
+
+    let mut dirty = base.clone();
+    dirty.node_graph_state.certificates.clear();
+    dirty.fleet_and_social_ops.contract_deposits.insert(2, 999);
+    dirty
+        .kv_mut(Ns::XmppAuthToken)
+        .set_with_unix(90_000_002, "", &"tok-uncommitted", 1_700_000_002)
+        .expect("set dirty kv");
+
+    // 1. Corrupt `fleet_and_social_ops` JSON while `node_graph_state` is valid in SQLite:
+    // rollback must fail closed without partially restoring `node_graph_state` or overwriting `entity_kv`.
+    conn.execute(
+        "UPDATE service_domain_state SET payload_json = '{corrupt' WHERE domain_key = 'fleet_and_social_ops'",
+        [],
+    )
+    .expect("corrupt domain row");
+    let failures_before = crate::persist_failures_total();
+    let err = rollback_service_domains(&conn, &mut dirty, &fp).unwrap_err();
+    assert!(err.contains("fleet_and_social_ops"), "unexpected err: {err}");
+    assert!(crate::persist_failures_total() >= failures_before + 1);
+    assert!(dirty.node_graph_state.certificates.is_empty());
+    assert_eq!(dirty.fleet_and_social_ops.contract_deposits.get(&2), Some(&999));
+    assert_eq!(
+        dirty.kv(Ns::XmppAuthToken).get::<String>(90_000_002, "").as_deref(),
+        Some("tok-uncommitted")
+    );
+
+    // 2. Delete a committed non-empty `service_domain_state` row: must fail closed instead of
+    // silently treating missing row as Default::default().
+    conn.execute(
+        "DELETE FROM service_domain_state WHERE domain_key = 'fleet_and_social_ops'",
+        [],
+    )
+    .expect("delete domain row");
+    let err_missing = rollback_service_domains(&conn, &mut dirty, &fp).unwrap_err();
+    assert!(err_missing.contains("fleet_and_social_ops"), "unexpected err: {err_missing}");
+    assert!(dirty.node_graph_state.certificates.is_empty());
+    assert_eq!(dirty.fleet_and_social_ops.contract_deposits.get(&2), Some(&999));
+
+    // 3. Re-seed valid `service_domain_state` rows, then inject a corrupt `entity_kv` row:
+    // rollback must fail closed without clearing `dirty.entity_kv` or touching dirty domains.
+    replace_sqlite_from_snapshot(&mut conn, &base).expect("reseed");
+    conn.execute(
+        "INSERT INTO entity_kv (ns, entity_id, sub_key, value, updated_unix) VALUES (?1, 777, '', ?2, 0)",
+        rusqlite::params![Ns::XmppAuthToken.as_str(), b"{bad-json" as &[u8]],
+    )
+    .expect("inject corrupt entity_kv");
+    let err_kv = rollback_service_domains(&conn, &mut dirty, &fp).unwrap_err();
+    assert!(err_kv.contains("entity_kv"), "unexpected err: {err_kv}");
+    assert!(dirty.node_graph_state.certificates.is_empty());
+    assert_eq!(dirty.fleet_and_social_ops.contract_deposits.get(&2), Some(&999));
+    assert_eq!(
+        dirty.kv(Ns::XmppAuthToken).get::<String>(90_000_002, "").as_deref(),
+        Some("tok-uncommitted")
+    );
 
     let _ = std::fs::remove_file(&path);
 }

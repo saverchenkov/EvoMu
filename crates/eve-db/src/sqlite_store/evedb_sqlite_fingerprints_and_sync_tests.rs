@@ -167,7 +167,7 @@ fn evedb_kills_all_remaining_sqlite_store_mutants() {
     let empty_conn = open_migrated_conn();
     let clean_fp = compute_fingerprints(&base);
     let mut clean_snap = base.clone();
-    rollback_d6(&empty_conn, &mut clean_snap, &clean_fp);
+    rollback_d6(&empty_conn, &mut clean_snap, &clean_fp).unwrap();
     assert_eq!(clean_snap.accounts.len(), base.accounts.len());
     assert_eq!(clean_snap.characters.len(), base.characters.len());
     assert_eq!(clean_snap.skills.len(), base.skills.len());

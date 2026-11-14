@@ -1275,7 +1275,7 @@ where
             [],
             |r| r.get(0),
         )
-        .unwrap_or(false);
+        .map_err(|e| format!("domain_rows table check({domain}): {e}"))?;
     if !has_table {
         return Ok(Vec::new());
     }
@@ -1454,13 +1454,13 @@ where
 // Family 1 (`ledger`) Helpers & Legacy Blob-Table -> `domain_rows` Migration
 // ============================================================================
 
-fn table_exists(conn: &Connection, name: &str) -> bool {
+fn table_exists(conn: &Connection, name: &str) -> Result<bool, String> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
         params![name],
         |r| r.get(0),
     )
-    .unwrap_or(false)
+    .map_err(|e| format!("sqlite_master check({name}): {e}"))
 }
 
 /// Validates and applies `domain_rows` operations inside an active SQLite transaction.
@@ -1519,16 +1519,16 @@ pub(crate) fn load_ledger_domain_rows(
     snap: &mut crate::WorldStateSnapshot,
     ctx: &mut super::quarantine::LoadContext,
 ) -> Result<bool, String> {
-    snap.wallet_journal_meta =
+    let mut wallet_journal_meta: CowMap<i64, crate::ledger::JournalMeta> =
         CowMap::load_domain(conn, DOMAIN_WALLET_JOURNAL_META, ctx)?;
-    snap.market_transactions =
+    let mut market_transactions: CowMap<i64, crate::ledger::MarketTransactionRecord> =
         CowMap::load_domain(conn, DOMAIN_MARKET_TRANSACTIONS, ctx)?;
-    snap.account_plex_vault =
+    let mut account_plex_vault: CowMap<u64, i64> =
         CowMap::load_domain(conn, DOMAIN_ACCOUNT_PLEX_VAULT, ctx)?;
 
     let mut had_legacy = false;
 
-    if table_exists(conn, "wallet_journal_meta") {
+    if table_exists(conn, "wallet_journal_meta")? {
         had_legacy = true;
         let mut stmt = conn
             .prepare("SELECT rowid, entry_id, meta_json FROM wallet_journal_meta")
@@ -1542,8 +1542,8 @@ pub(crate) fn load_ledger_domain_rows(
             let payload: String = row.get(2).map_err(|e| e.to_string())?;
             match from_checked_domain_json::<crate::ledger::JournalMeta>(&payload) {
                 Ok(meta) => {
-                    if !snap.wallet_journal_meta.contains_key(&id) {
-                        snap.wallet_journal_meta.insert(id, meta);
+                    if !wallet_journal_meta.contains_key(&id) {
+                        wallet_journal_meta.insert(id, meta);
                     }
                 }
                 Err(err) => {
@@ -1560,7 +1560,7 @@ pub(crate) fn load_ledger_domain_rows(
         }
     }
 
-    if table_exists(conn, "market_transactions") {
+    if table_exists(conn, "market_transactions")? {
         had_legacy = true;
         let mut stmt = conn
             .prepare("SELECT rowid, transaction_id, tx_json FROM market_transactions ORDER BY transaction_id ASC")
@@ -1574,8 +1574,8 @@ pub(crate) fn load_ledger_domain_rows(
             let payload: String = row.get(2).map_err(|e| e.to_string())?;
             match from_checked_domain_json::<crate::ledger::MarketTransactionRecord>(&payload) {
                 Ok(rec) => {
-                    if !snap.market_transactions.contains_key(&rec.transaction_id) {
-                        snap.market_transactions.insert(rec.transaction_id, rec);
+                    if !market_transactions.contains_key(&rec.transaction_id) {
+                        market_transactions.insert(rec.transaction_id, rec);
                     }
                 }
                 Err(err) => {
@@ -1592,7 +1592,7 @@ pub(crate) fn load_ledger_domain_rows(
         }
     }
 
-    if table_exists(conn, "account_plex_vault") {
+    if table_exists(conn, "account_plex_vault")? {
         had_legacy = true;
         let mut stmt = conn
             .prepare("SELECT rowid, user_id, plex FROM account_plex_vault")
@@ -1616,11 +1616,15 @@ pub(crate) fn load_ledger_domain_rows(
                 continue;
             }
             let uid = uid as u64;
-            if !snap.account_plex_vault.contains_key(&uid) {
-                snap.account_plex_vault.insert(uid, plex);
+            if !account_plex_vault.contains_key(&uid) {
+                account_plex_vault.insert(uid, plex);
             }
         }
     }
+
+    snap.wallet_journal_meta = wallet_journal_meta;
+    snap.market_transactions = market_transactions;
+    snap.account_plex_vault = account_plex_vault;
 
     Ok(had_legacy)
 }
@@ -1954,7 +1958,7 @@ mod tests {
                 "account_plex_vault",
             ] {
                 assert!(
-                    !table_exists(&conn, old_tbl),
+                    !table_exists(&conn, old_tbl).expect("check table exists"),
                     "legacy table {old_tbl} should be dropped after migration"
                 );
             }
@@ -2072,5 +2076,65 @@ mod tests {
             1,
             "deleting one CowMap entry must delete strictly 1 SQLite row"
         );
+    }
+
+    #[test]
+    fn load_ledger_domain_rows_fails_closed_without_overwriting_existing_snapshot_maps() {
+        let conn = Connection::open_in_memory().expect("open");
+        crate::sqlite_store::apply_migrations(&conn).expect("migrations");
+
+        // Seed valid `wallet_journal_meta` and invalid `market_transactions` directly in `domain_rows`.
+        conn.execute(
+            "INSERT INTO domain_rows (domain, key, value) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                DOMAIN_WALLET_JOURNAL_META,
+                "10",
+                serde_json::to_string(&crate::ledger::JournalMeta::new(
+                    10,
+                    90_000_001,
+                    90_000_002,
+                    1_700_000_010
+                ))
+                .expect("json")
+            ],
+        )
+        .expect("insert valid wallet_journal_meta");
+        conn.execute(
+            "INSERT INTO domain_rows (domain, key, value) VALUES (?1, ?2, ?3)",
+            rusqlite::params![DOMAIN_MARKET_TRANSACTIONS, "20", "{corrupt-json"],
+        )
+        .expect("insert corrupt market_transactions");
+
+        // Pre-populate live maps on `snap` and verify a mid-load error leaves ALL 3 maps untouched.
+        let mut snap = crate::WorldStateSnapshot::default();
+        snap.wallet_journal_meta.insert(
+            99,
+            crate::ledger::JournalMeta::new(10, 1, 2, 1_700_000_099),
+        );
+        snap.market_transactions.insert(
+            88,
+            crate::ledger::MarketTransactionRecord {
+                transaction_id: 88,
+                date_unix: 1_700_000_088,
+                type_id: 34,
+                quantity: 5,
+                price: crate::types::IskCents(200),
+                location_id: 60_003_760,
+                buyer_id: 90_000_001,
+                seller_id: 90_000_002,
+                buyer_account_key: 1000,
+                seller_account_key: 1000,
+                journal_ref_id: 99,
+            },
+        );
+        snap.account_plex_vault.insert(77, 777);
+
+        let mut load_ctx = crate::sqlite_store::LoadContext::new(false);
+        let err = load_ledger_domain_rows(&conn, &mut snap, &mut load_ctx).unwrap_err();
+        assert!(!err.is_empty());
+        assert!(snap.wallet_journal_meta.contains_key(&99));
+        assert!(!snap.wallet_journal_meta.contains_key(&10));
+        assert!(snap.market_transactions.contains_key(&88));
+        assert_eq!(snap.account_plex_vault.get(&77), Some(&777));
     }
 }

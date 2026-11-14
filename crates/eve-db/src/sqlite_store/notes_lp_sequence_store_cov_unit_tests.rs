@@ -429,7 +429,7 @@ fn rollback_d6_restores_counters_on_clean_maps_and_detects_deleted_keys() {
     snap.next_corporation_id = 2;
     snap.next_notification_id = 3;
     snap.next_report_id = 4;
-    rollback_d6(&conn, &mut snap, &fp);
+    rollback_d6(&conn, &mut snap, &fp).unwrap();
     assert_eq!(snap.next_alliance_id, 99_100_001);
     assert_eq!(snap.next_corporation_id, 98_200_002);
     assert_eq!(snap.next_notification_id, 940_300_003);
@@ -439,14 +439,14 @@ fn rollback_d6_restores_counters_on_clean_maps_and_detects_deleted_keys() {
     // must trigger `dirty_notes` and restore the deleted note from SQLite.
     snap.owner_notes.remove(&1);
     assert_eq!(snap.owner_notes.len(), 1);
-    rollback_d6(&conn, &mut snap, &fp);
+    rollback_d6(&conn, &mut snap, &fp).unwrap();
     assert_eq!(snap.owner_notes.len(), 2);
     assert_eq!(snap.owner_notes[&1].note, "N_A");
 
     // 3. Deleting a key from `char_lp_logs` (only `len()` differs!) must trigger `dirty_logs` and restore it.
     snap.char_lp_logs.remove(&90_000_001);
     assert_eq!(snap.char_lp_logs.len(), 1);
-    rollback_d6(&conn, &mut snap, &fp);
+    rollback_d6(&conn, &mut snap, &fp).unwrap();
     assert_eq!(snap.char_lp_logs.len(), 2);
     assert_eq!(snap.char_lp_logs[&90_000_001][0].amount, 50);
 
@@ -454,22 +454,114 @@ fn rollback_d6_restores_counters_on_clean_maps_and_detects_deleted_keys() {
     for v in snap.owner_notes.values_mut() {
         v.note = "MutatedAll".into();
     }
-    rollback_d6(&conn, &mut snap, &fp);
+    rollback_d6(&conn, &mut snap, &fp).unwrap();
     assert_eq!(snap.owner_notes[&1].note, "N_A");
     assert_eq!(snap.owner_notes[&2].note, "N_B");
 
     snap.corp_lp_balances.insert((98_000_001, 1_000_125), 12_345);
-    rollback_d6(&conn, &mut snap, &fp);
+    rollback_d6(&conn, &mut snap, &fp).unwrap();
     assert_eq!(snap.corp_lp_balances[&(98_000_001, 1_000_125)], 900);
 
     for logs in snap.char_lp_logs.values_mut() {
         logs[0].amount = 99_999;
     }
-    rollback_d6(&conn, &mut snap, &fp);
+    rollback_d6(&conn, &mut snap, &fp).unwrap();
     assert_eq!(snap.char_lp_logs[&90_000_001][0].amount, 50);
     assert_eq!(snap.char_lp_logs[&90_000_002][0].amount, 75);
 
     snap.sp6_lifecycle.last_downtime_day_idx = Some(999);
-    rollback_d6(&conn, &mut snap, &fp);
+    rollback_d6(&conn, &mut snap, &fp).unwrap();
     assert_eq!(snap.sp6_lifecycle.last_downtime_day_idx, Some(42));
+}
+
+#[test]
+fn rollback_d6_fails_closed_without_partial_overwrite_or_counter_drift() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    apply_migrations(&conn).unwrap();
+    apply_d6_migration(&conn).unwrap();
+
+    let mut base = WorldStateSnapshot::default();
+    base.next_alliance_id = 99_100_001;
+    base.next_corporation_id = 98_200_002;
+    base.next_notification_id = 940_300_003;
+    base.next_report_id = 400_004;
+    base.owner_notes.insert(
+        1,
+        OwnerNoteRecord {
+            note_id: 1,
+            character_id: 90_000_001,
+            item_id: 60_003_760,
+            label: "A".into(),
+            note: "committed_note".into(),
+            timestamp_unix: 10,
+        },
+    );
+    base.corp_lp_balances.insert((98_000_001, 1_000_125), 900);
+    base.char_lp_logs.insert(
+        90_000_001,
+        vec![LpRewardLogEntry {
+            log_id: 1,
+            corp_id: 1_000_125,
+            amount: 50,
+            reason: "committed_lp".into(),
+            timestamp_unix: 10,
+        }],
+    );
+    base.sp6_lifecycle.last_downtime_day_idx = Some(42);
+
+    let mut fp = TableFingerprints::default();
+    {
+        let tx = conn.transaction().unwrap();
+        assert!(sync_d6(&tx, &base, &mut fp).unwrap());
+        tx.commit().unwrap();
+    }
+
+    // Mutate counters AND every D6 table in memory.
+    let mut dirty = base.clone();
+    dirty.next_alliance_id = 777;
+    dirty.next_corporation_id = 888;
+    dirty.owner_notes.get_mut(&1).unwrap().note = "uncommitted_note".into();
+    dirty.corp_lp_balances.insert((98_000_001, 1_000_125), 12_345);
+    dirty.char_lp_logs.get_mut(&90_000_001).unwrap()[0].amount = 99_999;
+    dirty.sp6_lifecycle.last_downtime_day_idx = Some(999);
+
+    // 1. Corrupt `char_lp_logs` JSON later in the rollback pipeline: must fail closed and NOT
+    // partially overwrite counters, `owner_notes`, or `corp_lp_balances`.
+    conn.execute(
+        "UPDATE char_lp_logs SET logs_json = '{corrupt' WHERE character_id = 90000001",
+        [],
+    )
+    .unwrap();
+    let failures_before = crate::persist_failures_total();
+    let err = rollback_d6(&conn, &mut dirty, &fp).unwrap_err();
+    assert!(err.contains("char_lp_logs"), "unexpected err: {err}");
+    assert!(crate::persist_failures_total() >= failures_before + 1);
+    assert_eq!(dirty.next_alliance_id, 777);
+    assert_eq!(dirty.next_corporation_id, 888);
+    assert_eq!(dirty.owner_notes[&1].note, "uncommitted_note");
+    assert_eq!(dirty.corp_lp_balances[&(98_000_001, 1_000_125)], 12_345);
+    assert_eq!(dirty.char_lp_logs[&90_000_001][0].amount, 99_999);
+    assert_eq!(dirty.sp6_lifecycle.last_downtime_day_idx, Some(999));
+
+    // 2. Restore `char_lp_logs`, but delete the `sp6_lifecycle_state` singleton row while dirty:
+    // must fail closed without touching counters or maps.
+    conn.execute(
+        "UPDATE char_lp_logs SET logs_json = '[]' WHERE character_id = 90000001",
+        [],
+    )
+    .unwrap();
+    conn.execute("DELETE FROM sp6_lifecycle_state WHERE singleton_id = 1", [])
+        .unwrap();
+    let err2 = rollback_d6(&conn, &mut dirty, &fp).unwrap_err();
+    assert!(err2.contains("sp6_lifecycle_state"), "unexpected err2: {err2}");
+    assert_eq!(dirty.owner_notes[&1].note, "uncommitted_note");
+    assert_eq!(dirty.corp_lp_balances[&(98_000_001, 1_000_125)], 12_345);
+    assert_eq!(dirty.next_alliance_id, 777);
+    assert_eq!(dirty.sp6_lifecycle.last_downtime_day_idx, Some(999));
+
+    // 3. Dropped `owner_notes` table must fail closed when `owner_notes` is dirty.
+    conn.execute("DROP TABLE owner_notes", []).unwrap();
+    let err3 = rollback_d6(&conn, &mut dirty, &fp).unwrap_err();
+    assert!(err3.contains("owner_notes"), "unexpected err3: {err3}");
+    assert_eq!(dirty.owner_notes[&1].note, "uncommitted_note");
 }

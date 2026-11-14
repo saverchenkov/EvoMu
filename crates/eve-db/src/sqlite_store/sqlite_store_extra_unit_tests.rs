@@ -318,7 +318,7 @@ fn notes_lp_sequence_store_sync_load_and_selective_rollback() {
         tx.commit().unwrap();
     }
 
-    notes_lp_sequence_store::rollback_d6(&conn, &mut snap, &fp);
+    notes_lp_sequence_store::rollback_d6(&conn, &mut snap, &fp).unwrap();
     assert_eq!(snap.next_alliance_id, 99_000_111);
 
     snap.next_alliance_id = 1;
@@ -326,7 +326,7 @@ fn notes_lp_sequence_store_sync_load_and_selective_rollback() {
     snap.corp_lp_balances.clear();
     snap.char_lp_logs.clear();
     snap.sp6_lifecycle.last_downtime_day_idx = None;
-    notes_lp_sequence_store::rollback_d6(&conn, &mut snap, &fp);
+    notes_lp_sequence_store::rollback_d6(&conn, &mut snap, &fp).unwrap();
     assert_eq!(snap.next_alliance_id, 99_000_111);
     assert_eq!(snap.owner_notes.len(), 1);
     assert_eq!(snap.corp_lp_balances.get(&(98_000_001, 1_000_035)), Some(&4_500));
@@ -378,7 +378,7 @@ fn industry_market_pve_store_sync_load_and_rollback_all_blobs() {
         tx.commit().unwrap();
     }
 
-    industry_market_pve_store::rollback_d6_batch4(&conn, &mut snap, &fp);
+    industry_market_pve_store::rollback_d6_batch4(&conn, &mut snap, &fp).unwrap();
     assert_eq!(snap.mining_ledger.len(), 1);
 
     snap.module_online_states.clear();
@@ -386,7 +386,7 @@ fn industry_market_pve_store_sync_load_and_rollback_all_blobs() {
     snap.weapon_banks.clear();
     snap.paused_skill_queues.clear();
     snap.mining_ledger.clear();
-    industry_market_pve_store::rollback_d6_batch4(&conn, &mut snap, &fp);
+    industry_market_pve_store::rollback_d6_batch4(&conn, &mut snap, &fp).unwrap();
     assert_eq!(snap.module_online_states.get(&100_000_005), Some(&true));
     assert!(snap.module_active_states.contains(&100_000_005));
     assert_eq!(snap.weapon_banks[&100_000_001][&100_000_005], vec![100_000_006]);
@@ -706,7 +706,7 @@ fn service_domains_store_hash_json_all_variants_and_corrupt_load() {
     // Rollback restores mutated cluster_and_runtime
     let expected = snap.cluster_and_runtime.session_registry.clone();
     snap.cluster_and_runtime.session_registry.clear();
-    service_domains_store::rollback_service_domains(&conn, &mut snap, &fp);
+    service_domains_store::rollback_service_domains(&conn, &mut snap, &fp).unwrap();
     assert_eq!(snap.cluster_and_runtime.session_registry, expected);
 
     // Corrupt rows in service_domain_state are gracefully skipped by load_service_domains

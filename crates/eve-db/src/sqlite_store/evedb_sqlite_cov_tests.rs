@@ -809,7 +809,20 @@ fn schema_and_cold_stores_dropped_table_and_corrupt_paths() {
         });
         pop_b4.quasar_state_blobs.insert("k".into(), "v".into());
         let mut fp_b4 = TableFingerprints::default();
-        crate::sqlite_store::industry_market_pve_store::rollback_d6_batch4(&c2, &mut pop_b4, &fp_b4);
+        assert!(
+            crate::sqlite_store::industry_market_pve_store::rollback_d6_batch4(
+                &c2,
+                &mut pop_b4,
+                &fp_b4
+            )
+            .is_err(),
+            "rollback_d6_batch4 must fail closed when {t} is missing"
+        );
+        assert_eq!(pop_b4.mining_ledger.len(), 1);
+        assert_eq!(
+            pop_b4.quasar_state_blobs.get("k").map(String::as_str),
+            Some("v")
+        );
         let tx = c2.transaction().unwrap();
         assert!(sync_d6_batch4(&tx, &pop_b4, &mut fp_b4).is_err());
     }
