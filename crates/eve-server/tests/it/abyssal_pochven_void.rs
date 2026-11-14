@@ -10,6 +10,7 @@ use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
+use eve_testkit::client_harness::extract_bound_id_from_wire_rep;
 use glam::DVec3;
 use std::collections::HashMap;
 
@@ -24,6 +25,7 @@ const TRIGLAVIAN_FACTION_ID: i64 = 500_026;
 async fn test_void_space_player_jump_and_gate_activation() {
     eve_testkit::attest(&["feat:navigation.filament-void"]);
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
     let kw = HashMap::new();
     let char_id = 90_000_001_i64;
     let ship_id = 100_000_601_i64;
@@ -31,17 +33,9 @@ async fn test_void_space_player_jump_and_gate_activation() {
 
     let mut sess = SessionState::new(886_001);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
+    common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw)
+        .await;
     ctx.advance_secs(11);
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -91,8 +85,8 @@ async fn test_void_space_player_jump_and_gate_activation() {
     sess.ship_id = Some(ship_id);
 
     // 1. Missing arguments rejected
-    let missing_err = ctx
-        .dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpacePlayerJump", &[], &kw, None)
+    let missing_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("voidSpaceMgr", None, "VoidSpacePlayerJump", &[], &kw)
         .await
         .expect_err("VoidSpacePlayerJump with no args must fail");
     assert_eq!(missing_err.code, "MissingRequiredArgument");
@@ -104,15 +98,13 @@ async fn test_void_space_player_jump_and_gate_activation() {
         }
     });
     sess.station_id = Some(60_003_760);
-    let docked_err = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let docked_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "voidSpaceMgr",
             None,
             "VoidSpacePlayerJump",
             &[PyRep::Integer(filament_item_id)],
             &kw,
-            None,
         )
         .await
         .expect_err("VoidSpacePlayerJump while docked must fail");
@@ -142,15 +134,13 @@ async fn test_void_space_player_jump_and_gate_activation() {
         .await;
 
     // 4. Invalid target / own ship rejected
-    let self_err = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let self_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "voidSpaceMgr",
             None,
             "VoidSpacePlayerJump",
             &[PyRep::Integer(ship_id)],
             &kw,
-            None,
         )
         .await
         .expect_err("Targeting own ship must fail");
@@ -171,8 +161,8 @@ async fn test_void_space_player_jump_and_gate_activation() {
                 ..Default::default()
             });
         });
-        let err = ctx
-            .dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpacePlayerJump", &[PyRep::Integer(bad_iid)], &kw, None)
+        let err = common::borrow_wire_harness(&ctx, &mut sess)
+            .call("voidSpaceMgr", None, "VoidSpacePlayerJump", &[PyRep::Integer(bad_iid)], &kw)
             .await
             .expect_err("Non-Void filament must be rejected by VoidSpacePlayerJump");
         assert_eq!(err.code, "InvalidTarget", "type {non_void_tid} rejected");
@@ -194,8 +184,8 @@ async fn test_void_space_player_jump_and_gate_activation() {
             inertia: 1.0,
         })
         .await;
-    let trace_err = ctx
-        .dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpacePlayerJump", &[PyRep::Integer(200_000_750)], &kw, None)
+    let trace_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("voidSpaceMgr", None, "VoidSpacePlayerJump", &[PyRep::Integer(200_000_750)], &kw)
         .await
         .expect_err("Abyssal Trace must be rejected by VoidSpacePlayerJump");
     assert_eq!(trace_err.code, "InvalidTarget");
@@ -219,15 +209,21 @@ async fn test_void_space_player_jump_and_gate_activation() {
     });
     let stn_pos = ctx.sde.stations[&60_003_760].position;
     let _ = jita_handle.set_ball_position(ship_id, stn_pos + DVec3::new(500_000.0, 0.0, 0.0)).await;
-    let stn_prox = ctx
-        .dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpacePlayerJump", &[PyRep::Integer(filament_item_id)], &kw, None)
+    let stn_prox = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("voidSpaceMgr", None, "VoidSpacePlayerJump", &[PyRep::Integer(filament_item_id)], &kw)
         .await
         .expect_err("VoidSpacePlayerJump <1000km from station must fail");
     assert_eq!(stn_prox.code, "ProximityRestriction");
-    let gate_pos = ctx.sde.jumps.values().find(|j| j.from_solar_system_id == JITA_SYS_ID).unwrap().position;
+    let gate_pos = ctx
+        .sde
+        .jumps
+        .values()
+        .find(|j| j.from_solar_system_id == JITA_SYS_ID)
+        .expect("Jita stargate")
+        .position;
     let _ = jita_handle.set_ball_position(ship_id, gate_pos + DVec3::new(500_000.0, 0.0, 0.0)).await;
-    let gate_prox = ctx
-        .dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpacePlayerJump", &[PyRep::Integer(filament_item_id)], &kw, None)
+    let gate_prox = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("voidSpaceMgr", None, "VoidSpacePlayerJump", &[PyRep::Integer(filament_item_id)], &kw)
         .await
         .expect_err("VoidSpacePlayerJump <1000km from stargate must fail");
     assert_eq!(gate_prox.code, "ProximityRestriction");
@@ -236,19 +232,16 @@ async fn test_void_space_player_jump_and_gate_activation() {
     // Move >1,000 km from Jita stations/stargates and jump
     let _ = jita_handle.set_ball_position(ship_id, DVec3::new(0.0, 2.0e9, 0.0)).await;
 
-    let _ = ctx.drain_notifications_for_char(char_id);
-    let jump_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let jump_out = common::borrow_wire_harness(&ctx, &mut sess)
+        .call_exchange(
             "voidSpaceMgr",
             None,
             "VoidSpacePlayerJump",
             &[PyRep::Integer(filament_item_id), PyRep::Integer(5001)],
             &kw,
-            None,
         )
-        .await
-        .expect("VoidSpacePlayerJump via cargo filament");
+        .await;
+    let jump_rep = jump_out.result.expect("VoidSpacePlayerJump via cargo filament");
 
     assert_eq!(
         jump_rep.dict_get("solarSystemID"),
@@ -268,18 +261,18 @@ async fn test_void_space_player_jump_and_gate_activation() {
     );
 
     // Verify OnVoidSpaceEntered notification
-    let notifs = ctx.drain_notifications_for_char(char_id);
-    let entered_notif = notifs
+    let (_, entered_args) = jump_out
+        .notifications
         .iter()
-        .find(|n| n.event == "OnVoidSpaceEntered")
+        .find(|(ev, _)| ev == "OnVoidSpaceEntered")
         .expect("OnVoidSpaceEntered notification must be emitted");
-    assert_eq!(entered_notif.args.len(), 1);
+    assert_eq!(entered_args.len(), 1);
     assert_eq!(
-        entered_notif.args[0].dict_get("content_id"),
+        entered_args[0].dict_get("content_id"),
         Some(&PyRep::Integer(filament_item_id))
     );
     assert_eq!(
-        entered_notif.args[0].dict_get("nebula_graphic_id"),
+        entered_args[0].dict_get("nebula_graphic_id"),
         Some(&PyRep::Integer(25_126))
     );
 
@@ -302,31 +295,61 @@ async fn test_void_space_player_jump_and_gate_activation() {
     assert!((fit_vel - raw_vel).abs() > 1.0 && (fit_in - raw_in).abs() > 0.01, "Nanofiber II modifies maxVelocity & agility from raw hull");
 
     let void_handle = ctx.systems.get_or_spawn(VOID_SPACE_SYS_ID);
-    let (_, vb) = void_handle.get_ball_snapshot(ship_id).await.unwrap().expect("Ship ball must exist in Void Space");
+    let (_, vb) = void_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .expect("get void ship snapshot")
+        .expect("Ship ball must exist in Void Space");
     assert!((vb.max_velocity - fit_vel).abs() < 1e-3 && (vb.inertia - fit_in).abs() < 1e-4, "Void Space ball preserves fitted Dogma kinematics");
     assert!(
-        void_handle.get_ball_snapshot(888_001).await.unwrap().is_some(),
+        void_handle
+            .get_ball_snapshot(888_001)
+            .await
+            .expect("get exit gate snapshot")
+            .is_some(),
         "Exit gate 888001 must exist in Void Space"
     );
 
     // 6. ClientIsReady RPC & R-VOID-BOUNDARY-02: Void Space ship at 100 km from [0,0,0] takes 0 Abyssal boundary damage
-    let ready_rep = ctx.dispatch_rpc(&mut sess, "voidSpaceMgr", None, "ClientIsReady", &[], &kw, None).await.expect("ClientIsReady");
+    let ready_rep = common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok("voidSpaceMgr", None, "ClientIsReady", &[], &kw)
+        .await;
     assert_eq!(ready_rep.dict_get("ready"), Some(&PyRep::Bool(true)));
     let _ = void_handle.set_ball_position(ship_id, DVec3::new(100_000.0, 0.0, 0.0)).await;
-    let pre_void_hp = void_handle.get_combat_state(ship_id).await.unwrap().unwrap().structure_hp;
+    let pre_void_hp = void_handle
+        .get_combat_state(ship_id)
+        .await
+        .expect("get void combat state")
+        .expect("void combat state present")
+        .structure_hp;
     for _ in 0..5 {
-        let mut bp = void_handle.ballpark.write().unwrap();
+        let mut bp = void_handle.ballpark.write().expect("ballpark write lock");
         eve_server::services::pve_special_sites_abyssal::step_abyssal_hazards_and_pylons_in_ballpark(&mut bp, Some(&ctx.sde), Some(&ctx.db), VOID_SPACE_SYS_ID);
     }
-    assert_eq!(void_handle.get_combat_state(ship_id).await.unwrap().unwrap().structure_hp, pre_void_hp, "Void Space ship at 100km takes 0 Abyssal boundary damage");
+    assert_eq!(
+        void_handle
+            .get_combat_state(ship_id)
+            .await
+            .expect("get void combat state")
+            .expect("void combat state present")
+            .structure_hp,
+        pre_void_hp,
+        "Void Space ship at 100km takes 0 Abyssal boundary damage"
+    );
     let _ = void_handle.set_ball_position(ship_id, DVec3::ZERO).await;
 
     // 7. Exit gate activation returns to origin solar system, restores Local chat, and preserves fitted Dogma kinematics
-    let exit_rep = ctx.dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpaceEndGateActivation", &[PyRep::Integer(888_001)], &kw, None).await.expect("VoidSpaceEndGateActivation");
+    let exit_rep = common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok("voidSpaceMgr", None, "VoidSpaceEndGateActivation", &[PyRep::Integer(888_001)], &kw)
+        .await;
     assert_eq!(exit_rep.dict_get("solarSystemID"), Some(&PyRep::Integer(JITA_SYS_ID as i64)));
     assert_eq!(sess.solar_system_id, Some(JITA_SYS_ID));
     assert!(ctx.db.with_snapshot(|s| s.chat_channels["solarsystemid2:30000142"].members.contains(&char_id)), "Restored to Jita Local chat on Void Space exit");
-    let (_, jb) = jita_handle.get_ball_snapshot(ship_id).await.unwrap().expect("Ship ball restored in Jita");
+    let (_, jb) = jita_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .expect("get Jita ship snapshot")
+        .expect("Ship ball restored in Jita");
     assert!((jb.max_velocity - fit_vel).abs() < 1e-3 && (jb.inertia - fit_in).abs() < 1e-4, "Returned Jita ball preserves fitted Dogma kinematics");
 
     // 8. Verify V24 Warp Matrix / Void filament 62_448 (group 4145) vs Needlejack 53_977 (group 4041), and verify Void Space expiry evacuates cleanly without stranding
@@ -339,7 +362,9 @@ async fn test_void_space_player_jump_and_gate_activation() {
         });
     });
     let _ = jita_handle.set_ball_position(ship_id, DVec3::new(0.0, 2.0e9, 0.0)).await;
-    let jump_rep2 = ctx.dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpacePlayerJump", &[PyRep::Integer(void_fil_iid), PyRep::Integer(5002)], &kw, None).await.expect("VoidSpacePlayerJump 62448");
+    let jump_rep2 = common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok("voidSpaceMgr", None, "VoidSpacePlayerJump", &[PyRep::Integer(void_fil_iid), PyRep::Integer(5002)], &kw)
+        .await;
     assert_eq!(jump_rep2.dict_get("solarSystemID"), Some(&PyRep::Integer(VOID_SPACE_SYS_ID as i64)));
     assert_eq!(sess.solar_system_id, Some(VOID_SPACE_SYS_ID));
     eve_server::services::pve_special_sites::with_abyssal_state(&ctx, |st| {
@@ -347,48 +372,63 @@ async fn test_void_space_player_jump_and_gate_activation() {
             vs.expires_at_sec = ctx.now_unix().saturating_sub(1);
         }
     });
-    let exp_err = ctx.dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpaceEndGateActivation", &[PyRep::Integer(888_001)], &kw, None).await.expect_err("Expired Void Space gate returns PocketCollapsed");
+    let exp_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("voidSpaceMgr", None, "VoidSpaceEndGateActivation", &[PyRep::Integer(888_001)], &kw)
+        .await
+        .expect_err("Expired Void Space gate returns PocketCollapsed");
     assert_eq!(exp_err.code, "PocketCollapsed");
     assert_eq!(sess.solar_system_id, Some(JITA_SYS_ID), "Expired Void Space gate evacuates session back to Jita (not stranded in 32000002)");
     assert_eq!(ctx.db.with_snapshot(|s| s.characters[&char_id].solar_system_id), JITA_SYS_ID, "DB solar_system_id evacuated to Jita");
-    assert!(jita_handle.get_ball_snapshot(ship_id).await.unwrap().is_some(), "Evacuated ship ball spawned in Jita");
+    assert!(
+        jita_handle
+            .get_ball_snapshot(ship_id)
+            .await
+            .expect("get Jita ship snapshot")
+            .is_some(),
+        "Evacuated ship ball spawned in Jita"
+    );
 
     let _ = jita_handle.set_ball_position(ship_id, DVec3::new(0.0, 2.0e9, 0.0)).await;
     ctx.advance_secs(15);
-    let _ = ctx.dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpacePlayerJump", &[PyRep::Integer(void_fil_iid)], &kw, None).await.expect("VoidSpacePlayerJump 3");
+    let _ = common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok("voidSpaceMgr", None, "VoidSpacePlayerJump", &[PyRep::Integer(void_fil_iid)], &kw)
+        .await;
     ctx.advance_secs(1_205); // at 20m (< 30m ENCOUNTER_LIFE_TIME = 1800s), Void Space session is still active
     assert_eq!(ctx.db.with_snapshot(|s| s.characters[&char_id].solar_system_id), VOID_SPACE_SYS_ID, "Void Space session remains active before 1800s ENCOUNTER_LIFE_TIME");
     ctx.advance_secs(600); // past 1800s ENCOUNTER_LIFE_TIME, background cluster tick expiry sweep evacuates pilot cleanly to Jita
     assert_eq!(ctx.db.with_snapshot(|s| s.characters[&char_id].solar_system_id), JITA_SYS_ID, "Background Void Space expiry sweep evacuates pilot to Jita");
-    assert!(jita_handle.get_ball_snapshot(ship_id).await.unwrap().is_some(), "Background Void Space expiry spawns ship ball in Jita");
-    let _ = ctx.dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpaceEndGateActivation", &[PyRep::Integer(888_001)], &kw, None).await.expect_err("Post-sweep VoidSpaceEndGateActivation syncs stale session");
+    assert!(
+        jita_handle
+            .get_ball_snapshot(ship_id)
+            .await
+            .expect("get Jita ship snapshot")
+            .is_some(),
+        "Background Void Space expiry spawns ship ball in Jita"
+    );
+    let _ = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("voidSpaceMgr", None, "VoidSpaceEndGateActivation", &[PyRep::Integer(888_001)], &kw)
+        .await
+        .expect_err("Post-sweep VoidSpaceEndGateActivation syncs stale session");
     assert_eq!(sess.solar_system_id, Some(JITA_SYS_ID), "Stale session synced back to Jita");
 }
 
 #[tokio::test]
 async fn test_pochven_travel_conduits_filaments_and_gates() {
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
     let kw = HashMap::new();
     let char_id = 90_000_001_i64;
     let ship_id = 100_000_602_i64;
 
     let mut sess = SessionState::new(886_002);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
+    common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw)
+        .await;
     ctx.advance_secs(11);
 
     ctx.db.with_mut_snapshot(|snap| {
-        let ch = snap.characters.get_mut(&char_id).unwrap();
+        let ch = snap.characters.get_mut(&char_id).expect("pilot character");
         ch.station_id = None;
         ch.structure_id = None;
         ch.solar_system_id = POCHVEN_SYS_ID;
@@ -464,16 +504,17 @@ async fn test_pochven_travel_conduits_filaments_and_gates() {
             inertia: 0.1,
         })
         .await;
-    let poch_beyonce = ctx.bind_object(&mut sess, "beyonce", POCHVEN_SYS_ID as i64).unwrap();
-    let cap_err = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let poch_bind = common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok("beyonce", None, "MachoBindObject", &[PyRep::Integer(POCHVEN_SYS_ID as i64), PyRep::None], &kw)
+        .await;
+    let poch_beyonce = extract_bound_id_from_wire_rep(&poch_bind).expect("beyonce bound id");
+    let cap_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "beyonce",
             Some(poch_beyonce),
             "CmdStargateJump",
             &[PyRep::Integer(50_016_520)],
             &kw,
-            None,
         )
         .await
         .expect_err("Capital ship jumping Pochven gate must fail");
@@ -503,18 +544,15 @@ async fn test_pochven_travel_conduits_filaments_and_gates() {
         })
         .await;
     ctx.advance_secs(15);
-    let jump_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let jump_rep = common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok(
             "beyonce",
             Some(poch_beyonce),
             "CmdStargateJump",
             &[PyRep::Integer(gate_nalvula)],
             &kw,
-            None,
         )
-        .await
-        .expect("Internal Pochven conduit allows standing < 6.0");
+        .await;
     assert_eq!(
         jump_rep.dict_get("solarSystemID").and_then(|v| v.as_i64()),
         Some(30_001_445)
@@ -528,8 +566,10 @@ async fn test_pochven_travel_conduits_filaments_and_gates() {
         }
     });
     sess.solar_system_id = Some(POCHVEN_SYS_ID);
-    let poch_beyonce = ctx
-        .bind_object(&sess, "beyonce", POCHVEN_SYS_ID as i64)
+    let poch_rebind = common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok("beyonce", None, "MachoBindObject", &[PyRep::Integer(POCHVEN_SYS_ID as i64), PyRep::None], &kw)
+        .await;
+    let poch_beyonce = extract_bound_id_from_wire_rep(&poch_rebind)
         .expect("rebind beyonce in Otela after manual return");
     let home_gate = 50_016_520_i64; // Otela -> Kino (30001372)
     let hpos = ctx.sde.jumps.get(&home_gate).map(|j| j.position).unwrap_or(DVec3::ZERO);
@@ -548,15 +588,13 @@ async fn test_pochven_travel_conduits_filaments_and_gates() {
         })
         .await;
     ctx.advance_secs(15);
-    let low_err = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let low_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "beyonce",
             Some(poch_beyonce),
             "CmdStargateJump",
             &[PyRep::Integer(home_gate)],
             &kw,
-            None,
         )
         .await
         .expect_err("Pochven home gate jump with standing < 6.0 must fail");
@@ -564,21 +602,22 @@ async fn test_pochven_travel_conduits_filaments_and_gates() {
 
     // Grant standing >= 6.0 and verify jump succeeds into Kino
     ctx.db.with_mut_snapshot(|snap| {
-        snap.characters.get_mut(&char_id).unwrap().standings.insert(TRIGLAVIAN_FACTION_ID, 7.0);
+        snap.characters
+            .get_mut(&char_id)
+            .expect("pilot character")
+            .standings
+            .insert(TRIGLAVIAN_FACTION_ID, 7.0);
     });
     ctx.advance_secs(15);
-    let home_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let home_rep = common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok(
             "beyonce",
             Some(poch_beyonce),
             "CmdStargateJump",
             &[PyRep::Integer(home_gate)],
             &kw,
-            None,
         )
-        .await
-        .expect("Pochven home gate jump with standing >= 6.0");
+        .await;
     assert_eq!(
         home_rep.dict_get("solarSystemID").and_then(|v| v.as_i64()),
         Some(KINO_SYS_ID as i64)
@@ -637,20 +676,25 @@ async fn test_pochven_travel_conduits_filaments_and_gates() {
         .set_ball_position(ship_id, DVec3::new(50_000_000.0, 50_000_000.0, 50_000_000.0))
         .await;
     ctx.advance_secs(11);
-    let fil_res = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let fil_res = common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok(
             "randomJumpMgr",
             None,
             "ActivateRandomJumpFilament",
             &[PyRep::Integer(exit_fil_id)],
             &kw,
-            None,
         )
-        .await
-        .expect("Exit filament from Pochven");
-    let exit_dest = fil_res.dict_get("solarSystemID").and_then(|v| v.as_i64()).unwrap();
-    let exit_reg = ctx.sde.solar_systems.get(&(exit_dest as u32)).map(|s| s.region_id).unwrap();
+        .await;
+    let exit_dest = fil_res
+        .dict_get("solarSystemID")
+        .and_then(|v| v.as_i64())
+        .expect("exit solarSystemID");
+    let exit_reg = ctx
+        .sde
+        .solar_systems
+        .get(&(exit_dest as u32))
+        .map(|s| s.region_id)
+        .expect("exit solar system region");
     assert_ne!(exit_reg, 10_000_070, "Exit filament must take pilot out of Pochven");
 }
 
@@ -675,6 +719,7 @@ const JITA_SYS_ID: u32 = 30_000_142; // Jita (Empire K-space)
 #[tokio::test]
 async fn test_warp_vector_mechanics_and_celestial_bookmark_targets() {
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
     let kw = HashMap::new();
     let char_id = 90_000_001_i64;
     let ship_id = 100_000_604_i64;
@@ -684,21 +729,13 @@ async fn test_warp_vector_mechanics_and_celestial_bookmark_targets() {
 
     let mut sess = SessionState::new(886_003);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
+    common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw)
+        .await;
     ctx.advance_secs(11);
 
     ctx.db.with_mut_snapshot(|snap| {
-        let ch = snap.characters.get_mut(&char_id).unwrap();
+        let ch = snap.characters.get_mut(&char_id).expect("pilot character");
         ch.station_id = None;
         ch.structure_id = None;
         ch.solar_system_id = JITA_SYS_ID;
@@ -729,8 +766,8 @@ async fn test_warp_vector_mechanics_and_celestial_bookmark_targets() {
         }
     });
     sess.station_id = Some(60_003_760);
-    let docked_err = ctx
-        .dispatch_rpc(&mut sess, "warpVectorMgr", None, "UseVector", &[PyRep::Integer(1)], &kw, None)
+    let docked_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("warpVectorMgr", None, "UseVector", &[PyRep::Integer(1)], &kw)
         .await
         .expect_err("UseVector while docked must fail");
     assert_eq!(docked_err.code, "ShipDocked");
@@ -759,24 +796,24 @@ async fn test_warp_vector_mechanics_and_celestial_bookmark_targets() {
         .await;
 
     // 3. Own ship target rejected
-    let self_err = ctx
-        .dispatch_rpc(&mut sess, "warpVectorMgr", None, "UseVector", &[PyRep::Integer(ship_id)], &kw, None)
+    let self_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("warpVectorMgr", None, "UseVector", &[PyRep::Integer(ship_id)], &kw)
         .await
         .expect_err("Targeting own ship must fail");
     assert_eq!(self_err.code, "InvalidArgument");
 
     // 4. Warp scrambled rejected
     jita_handle.try_add_mobile_warp_disruptor(999_001, DVec3::ZERO, 20_000.0);
-    let scram_err = ctx
-        .dispatch_rpc(&mut sess, "warpVectorMgr", None, "UseVector", &[PyRep::Integer(123)], &kw, None)
+    let scram_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("warpVectorMgr", None, "UseVector", &[PyRep::Integer(123)], &kw)
         .await
         .expect_err("UseVector while scrambled must fail");
     assert_eq!(scram_err.code, "WarpScrambled");
     jita_handle.try_remove_warp_bubble(999_001);
 
     // 5. Non-inventory / space ball IDs (missing ID, ship ball, container ball) rejected with InvalidVectorItem
-    let missing_err = ctx
-        .dispatch_rpc(&mut sess, "warpVectorMgr", None, "UseVector", &[PyRep::Integer(999_999_999)], &kw, None)
+    let missing_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("warpVectorMgr", None, "UseVector", &[PyRep::Integer(999_999_999)], &kw)
         .await
         .expect_err("Non-existent vector item must fail");
     assert_eq!(missing_err.code, "InvalidVectorItem");
@@ -795,8 +832,8 @@ async fn test_warp_vector_mechanics_and_celestial_bookmark_targets() {
             inertia: 1.0,
         })
         .await;
-    let ship_err = ctx
-        .dispatch_rpc(&mut sess, "warpVectorMgr", None, "UseVector", &[PyRep::Integer(other_ship_id)], &kw, None)
+    let ship_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("warpVectorMgr", None, "UseVector", &[PyRep::Integer(other_ship_id)], &kw)
         .await
         .expect_err("Space ship ball must fail with InvalidVectorItem");
     assert_eq!(ship_err.code, "InvalidVectorItem");
@@ -815,8 +852,8 @@ async fn test_warp_vector_mechanics_and_celestial_bookmark_targets() {
             inertia: 1.0,
         })
         .await;
-    let ball_err = ctx
-        .dispatch_rpc(&mut sess, "warpVectorMgr", None, "UseVector", &[PyRep::Integer(far_beacon_id)], &kw, None)
+    let ball_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("warpVectorMgr", None, "UseVector", &[PyRep::Integer(far_beacon_id)], &kw)
         .await
         .expect_err("Non-inventory space ball must fail with InvalidVectorItem");
     assert_eq!(ball_err.code, "InvalidVectorItem");
@@ -838,17 +875,20 @@ async fn test_warp_vector_mechanics_and_celestial_bookmark_targets() {
         );
     });
 
-    let _ = ctx.drain_notifications_for_char(char_id);
-    let vec_res = ctx
-        .dispatch_rpc(&mut sess, "warpVectorMgr", None, "UseVector", &[PyRep::Integer(vector_beacon_id)], &kw, None)
-        .await
-        .expect("UseVector with cargo Warp Vector Data");
+    let vec_out = common::borrow_wire_harness(&ctx, &mut sess)
+        .call_exchange("warpVectorMgr", None, "UseVector", &[PyRep::Integer(vector_beacon_id)], &kw)
+        .await;
+    let vec_res = vec_out.result.expect("UseVector with cargo Warp Vector Data");
     assert_eq!(vec_res.dict_get("vectorItemID"), Some(&PyRep::Integer(vector_beacon_id)));
     assert_eq!(vec_res.dict_get("shipID"), Some(&PyRep::Integer(ship_id)));
     assert_eq!(vec_res.dict_get("consumed"), Some(&PyRep::Bool(true)));
 
     // Verify ship ball entered authentic warp movement mode without instant teleport
-    let (_, ball_after_vec) = jita_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let (_, ball_after_vec) = jita_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .expect("get Jita ship snapshot")
+        .expect("ship ball present");
     assert_eq!(
         ball_after_vec.position,
         DVec3::ZERO,
@@ -865,9 +905,8 @@ async fn test_warp_vector_mechanics_and_celestial_bookmark_targets() {
     }
 
     // OnWarpStarted is client_local and must not be emitted by the server
-    let notifs = ctx.drain_notifications_for_char(char_id);
     assert!(
-        !notifs.iter().any(|n| n.event == "OnWarpStarted"),
+        !vec_out.notifications.iter().any(|(ev, _)| ev == "OnWarpStarted"),
         "OnWarpStarted is client_local and must not be emitted by server"
     );
 }

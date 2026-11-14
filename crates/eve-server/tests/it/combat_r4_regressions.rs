@@ -11,6 +11,7 @@
 //! - #162: Directional scan (ConeScan) docked rejection and convoy range/cone filtering
 //! - #163: Salvage ship cargo capacity enforcement and 6,000 m Salvager module range check
 
+use crate::common;
 use eve_db::{
     AccountRecord, BookmarkFolderRecord, BookmarkRecord, CharacterRecord, ContractRecord,
     InventoryFlag, InventoryItemRecord, IskCents, NeuralAttributes, TrainedSkillRecord,
@@ -77,7 +78,6 @@ async fn setup_pilot_in_space(
 async fn test_r4_153_fighter_tube_duplicate_load_and_launch_ownership_validation() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let kw = HashMap::new();
     let sys_id = 30_000_142u32;
     let (char_id, other_char_id, ship_id) = (97_153_001i64, 97_153_002i64, 87_153_100i64);
     // Archon carrier (23757) with FighterBay
@@ -102,49 +102,55 @@ async fn test_r4_153_fighter_tube_duplicate_load_and_launch_ownership_validation
     });
 
     // Loading into tube 0 succeeds
-    ctx.dispatch_rpc(
-        &mut sess,
-        "fighterMgr",
-        None,
-        "LoadFightersToTube",
-        &[PyRep::Integer(0), PyRep::Integer(fighter_item_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Load fighter into tube 0");
+    {
+        let mut harness = common::borrow_wire_harness(&ctx, &mut sess);
+        harness
+            .call_ok(
+                "fighterMgr",
+                None,
+                "LoadFightersToTube",
+                &[PyRep::Integer(0), PyRep::Integer(fighter_item_id)],
+                &HashMap::new(),
+            )
+            .await;
+    }
 
     // Loading the same fighter item into sibling tube 1 must be rejected with FighterAlreadyLoaded
-    let dup_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "fighterMgr",
-            None,
-            "LoadFightersToTube",
-            &[PyRep::Integer(1), PyRep::Integer(fighter_item_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect_err("Same fighter stack must not load into two tubes");
+    let dup_err = {
+        let mut harness = common::borrow_wire_harness(&ctx, &mut sess);
+        harness
+            .call(
+                "fighterMgr",
+                None,
+                "LoadFightersToTube",
+                &[PyRep::Integer(1), PyRep::Integer(fighter_item_id)],
+                &HashMap::new(),
+            )
+            .await
+            .expect_err("Same fighter stack must not load into two tubes")
+    };
     assert_eq!(dup_err.code, "FighterAlreadyLoaded");
 
     // If the fighter item is moved out of FighterBay or transferred to another owner before launch, LaunchFightersFromTubes must reject
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.get_mut(&fighter_item_id).unwrap().owner_id = other_char_id;
+        snap.items
+            .get_mut(&fighter_item_id)
+            .expect("fighter item")
+            .owner_id = other_char_id;
     });
-    let launch_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "fighterMgr",
-            None,
-            "LaunchFightersFromTubes",
-            &[PyRep::List(vec![PyRep::Integer(0)])],
-            &kw,
-            None,
-        )
-        .await
-        .expect_err("Launching fighter no longer owned by pilot in FighterBay must fail");
+    let launch_err = {
+        let mut harness = common::borrow_wire_harness(&ctx, &mut sess);
+        harness
+            .call(
+                "fighterMgr",
+                None,
+                "LaunchFightersFromTubes",
+                &[PyRep::List(vec![PyRep::Integer(159)])],
+                &HashMap::new(),
+            )
+            .await
+            .expect_err("Launching fighter no longer owned by pilot in FighterBay must fail")
+    };
     assert_eq!(launch_err.code, "ItemNotInFighterBay");
 }
 
@@ -152,7 +158,6 @@ async fn test_r4_153_fighter_tube_duplicate_load_and_launch_ownership_validation
 async fn test_r4_154_self_destruct_docked_rejection_countdown_and_pvp_assist_attribution() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let kw = HashMap::new();
     let sys_id = 30_002_813u32; // Tama
     let (vic_id, atk_id, vic_ship_id, atk_ship_id) =
         (97_154_001i64, 97_154_002i64, 87_154_101i64, 87_154_102i64);
@@ -175,22 +180,33 @@ async fn test_r4_154_self_destruct_docked_rejection_countdown_and_pvp_assist_att
     let mut docked_sess = vic_sess.clone();
     docked_sess.station_id = Some(60_003_760);
     ctx.db.with_mut_snapshot(|snap| {
-        snap.characters.get_mut(&vic_id).unwrap().station_id = Some(60_003_760);
+        snap.characters
+            .get_mut(&vic_id)
+            .expect("victim character")
+            .station_id = Some(60_003_760);
     });
-    let docked_err = ctx
-        .dispatch_rpc(&mut docked_sess, "ship", None, "SelfDestruct", &[], &kw, None)
-        .await
-        .expect_err("Docked ship must not self-destruct");
+    let docked_err = {
+        let mut harness = common::borrow_wire_harness(&ctx, &mut docked_sess);
+        harness
+            .call("ship", None, "SelfDestruct", &[], &HashMap::new())
+            .await
+            .expect_err("Docked ship must not self-destruct")
+    };
     assert_eq!(docked_err.code, "CannotSelfDestructWhileDocked");
     ctx.db.with_mut_snapshot(|snap| {
-        snap.characters.get_mut(&vic_id).unwrap().station_id = None;
+        snap.characters
+            .get_mut(&vic_id)
+            .expect("victim character")
+            .station_id = None;
     });
 
     // 2. Empty args SelfDestruct starts the 120s countdown instead of bypassing it
-    let start_rep = ctx
-        .dispatch_rpc(&mut vic_sess, "ship", None, "SelfDestruct", &[], &kw, None)
-        .await
-        .expect("Start countdown with empty args");
+    let start_rep = {
+        let mut harness = common::borrow_wire_harness(&ctx, &mut vic_sess);
+        harness
+            .call_ok("ship", None, "SelfDestruct", &[], &HashMap::new())
+            .await
+    };
     assert_eq!(
         start_rep.dict_get("countdownStarted").and_then(|v| v.as_bool()),
         Some(true)
@@ -241,7 +257,6 @@ async fn test_r4_154_self_destruct_docked_rejection_countdown_and_pvp_assist_att
 async fn test_r4_155_156_smartbomb_safety_invulnerability_and_breacher_dot_lethal_death() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let kw = HashMap::new();
     let jita_sys = 30_000_142u32;
     let (atk_id, vic_id, atk_ship_id, vic_ship_id, sb_mod_id) = (
         97_155_001i64,
@@ -293,16 +308,13 @@ async fn test_r4_155_156_smartbomb_safety_invulnerability_and_breacher_dot_letha
     with_mut_combat_runtime(&ctx, |rt| {
         rt.safety_levels.insert(atk_id, SafetyLevel::Green);
     });
-    let sb_err = eve_server::services::combat_crimewatch::dispatch_combat_rpc(
-        &ctx,
-        &mut atk_sess,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(sb_mod_id)],
-        &kw,
-    )
-    .await
-    .expect_err("Smartbomb in highsec with Green safety must be blocked");
+    let sb_err = {
+        let mut harness = common::borrow_wire_harness(&ctx, &mut atk_sess);
+        harness
+            .call("dogmaIM", None, "Activate", &[PyRep::Integer(sb_mod_id)], &HashMap::new())
+            .await
+            .expect_err("Smartbomb in highsec with Green safety must be blocked")
+    };
     assert_eq!(sb_err.code, "CantDoInCurrentSafetyLevel");
 
     // 2. Lethal Breacher Pod DoT tick triggers death pipeline and removes destroyed ship ball
@@ -342,7 +354,7 @@ async fn test_r4_155_156_smartbomb_safety_invulnerability_and_breacher_dot_letha
         sys_handle
             .get_ball_snapshot(vic_ship_id)
             .await
-            .unwrap()
+            .expect("get victim ship ball snapshot")
             .is_none(),
         "Lethal breacher DoT must destroy target ship ball via death pipeline"
     );
@@ -352,7 +364,6 @@ async fn test_r4_155_156_smartbomb_safety_invulnerability_and_breacher_dot_letha
 async fn test_r4_157_sec_tag_turn_in_requires_local_hangar_and_not_contract_locked() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let kw = HashMap::new();
     let char_id = 97_157_001i64;
     let ship_id = 87_157_101i64;
     let sec_office_svc = ctx.sde.station_services.values().find(|s| s.name == "Security Office").map(|s| s.service_id).unwrap_or(26);
@@ -398,7 +409,7 @@ async fn test_r4_157_sec_tag_turn_in_requires_local_hangar_and_not_contract_lock
     let remote_tag_id = 87_157_201i64;
     let locked_tag_id = 87_157_202i64;
     ctx.db.with_mut_snapshot(|snap| {
-        let ch = snap.characters.get_mut(&char_id).unwrap();
+        let ch = snap.characters.get_mut(&char_id).expect("pilot character");
         ch.station_id = Some(sec_office_st);
         ch.security_status = -8.5;
         // Tag in remote station 60_008_494
@@ -437,18 +448,19 @@ async fn test_r4_157_sec_tag_turn_in_requires_local_hangar_and_not_contract_lock
         });
     });
 
-    let err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "crimewatch",
-            None,
-            "ApplyTagsForSecStatus",
-            &[PyRep::Real(-8.0), PyRep::Dict(vec![(PyRep::Integer(33138), PyRep::Integer(1))])],
-            &kw,
-            None,
-        )
-        .await
-        .expect_err("Remote and contract-locked tags must not be consumed");
+    let err = {
+        let mut harness = common::borrow_wire_harness(&ctx, &mut sess);
+        harness
+            .call(
+                "crimewatch",
+                None,
+                "ApplyTagsForSecStatus",
+                &[PyRep::Real(-8.0), PyRep::Dict(vec![(PyRep::Integer(33138), PyRep::Integer(1))])],
+                &HashMap::new(),
+            )
+            .await
+            .expect_err("Remote and contract-locked tags must not be consumed")
+    };
     assert_eq!(err.code, "InsufficientSecurityTags");
 }
 
@@ -456,7 +468,6 @@ async fn test_r4_157_sec_tag_turn_in_requires_local_hangar_and_not_contract_lock
 async fn test_r4_158_159_160_161_162_163_exploration_wormhole_dscan_and_salvage() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let kw = HashMap::new();
     let sys_id = 30_000_142u32;
     let (char_id, ship_id) = (97_158_001i64, 87_158_101i64);
     let mut sess =
@@ -467,23 +478,30 @@ async fn test_r4_158_159_160_161_162_163_exploration_wormhole_dscan_and_salvage(
     let mut docked_sess = sess.clone();
     docked_sess.station_id = Some(60_003_760);
     ctx.db.with_mut_snapshot(|snap| {
-        snap.characters.get_mut(&char_id).unwrap().station_id = Some(60_003_760);
+        snap.characters
+            .get_mut(&char_id)
+            .expect("pilot character")
+            .station_id = Some(60_003_760);
     });
-    let dscan_err = ctx
-        .dispatch_rpc(
-            &mut docked_sess,
-            "scanMgr",
-            None,
-            "ConeScan",
-            &[PyRep::Real(360.0), PyRep::Real(1_000_000.0)],
-            &kw,
-            None,
-        )
-        .await
-        .expect_err("ConeScan while docked must fail");
+    let dscan_err = {
+        let mut harness = common::borrow_wire_harness(&ctx, &mut docked_sess);
+        harness
+            .call(
+                "scanMgr",
+                None,
+                "ConeScan",
+                &[PyRep::Real(360.0), PyRep::Real(1_000_000.0)],
+                &HashMap::new(),
+            )
+            .await
+            .expect_err("ConeScan while docked must fail")
+    };
     assert_eq!(dscan_err.code, "CannotDirectionalScanWhileDocked");
     ctx.db.with_mut_snapshot(|snap| {
-        snap.characters.get_mut(&char_id).unwrap().station_id = None;
+        snap.characters
+            .get_mut(&char_id)
+            .expect("pilot character")
+            .station_id = None;
     });
 
     // #160: Hacking minigame minimum difficulty floor ignores client difficulty=1 spoof
@@ -518,11 +536,11 @@ async fn test_r4_158_159_160_161_162_163_exploration_wormhole_dscan_and_salvage(
     ctx.invalidate_ship_fitting(ship_id);
     eve_server::services::pve_exploration::ensure_system_pve_sites_seeded(&ctx, sys_id).await;
     let relic_can_id = eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
-        let sites = reg.sites_by_system.get_mut(&sys_id).unwrap();
+        let sites = reg.sites_by_system.get_mut(&sys_id).expect("system pve sites");
         let relic_site = sites
             .iter_mut()
             .find(|s| s.site_category == "Relic" || s.site_category == "Ghost")
-            .unwrap();
+            .expect("relic or ghost site");
         relic_site.position = [0.0, 0.0, 0.0];
         relic_site.hackable_can_ids[0]
     });
@@ -541,27 +559,30 @@ async fn test_r4_158_159_160_161_162_163_exploration_wormhole_dscan_and_salvage(
             mode: MovementMode::Stop,
         })
         .await;
-    let _hack_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "hackingMgr",
-            None,
-            "StartNewGameInstance",
-            &[
-                PyRep::Integer(relic_can_id),
-                PyRep::Integer(0),
-                PyRep::Integer(0),
-                PyRep::Integer(0),
-                PyRep::Integer(1), // client difficulty=1 spoof
-            ],
-            &kw,
-            None,
-        )
-        .await
-        .expect("StartNewGameInstance");
+    let _hack_rep = {
+        let mut harness = common::borrow_wire_harness(&ctx, &mut sess);
+        harness
+            .call_ok(
+                "hackingMgr",
+                None,
+                "StartNewGameInstance",
+                &[
+                    PyRep::Integer(relic_can_id),
+                    PyRep::Integer(0),
+                    PyRep::Integer(0),
+                    PyRep::Integer(0),
+                    PyRep::Integer(1), // client difficulty=1 spoof
+                ],
+                &HashMap::new(),
+            )
+            .await
+    };
     let (utility_cap, core_coherence) =
         eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
-            let g = reg.hacking_games.get(&(char_id, relic_can_id)).unwrap();
+            let g = reg
+                .hacking_games
+                .get(&(char_id, relic_can_id))
+                .expect("active hacking game");
             let core_coh = g
                 .tiles
                 .iter()
@@ -596,32 +617,22 @@ async fn test_r4_158_159_160_161_162_163_exploration_wormhole_dscan_and_salvage(
             solar_system_id: sys_id, item_id: None, label: "ACL Restricted".into(), memo: String::new(), x: 200_000.0, y: 0.0, z: 0.0,
         });
     });
-    let exp_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "beyonce",
-            None,
-            "CmdGotoBookmark",
-            &[PyRep::Integer(exp_bm_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect_err("Expired bookmark must be rejected");
+    let exp_err = {
+        let mut harness = common::borrow_wire_harness(&ctx, &mut sess);
+        harness
+            .call("beyonce", None, "CmdGotoBookmark", &[PyRep::Integer(exp_bm_id)], &HashMap::new())
+            .await
+            .expect_err("Expired bookmark must be rejected")
+    };
     assert_eq!(exp_err.code, "BookmarkExpired");
 
-    let acl_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "beyonce",
-            None,
-            "CmdGotoBookmark",
-            &[PyRep::Integer(acl_bm_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect_err("Bookmark in folder without ACL access must be rejected");
+    let acl_err = {
+        let mut harness = common::borrow_wire_harness(&ctx, &mut sess);
+        harness
+            .call("beyonce", None, "CmdGotoBookmark", &[PyRep::Integer(acl_bm_id)], &HashMap::new())
+            .await
+            .expect_err("Bookmark in folder without ACL access must be rejected")
+    };
     assert_eq!(acl_err.code, "AccessDenied");
 
     // #163: Salvager module range check (wreck at 12 km > 6 km max range) and cargo capacity check
