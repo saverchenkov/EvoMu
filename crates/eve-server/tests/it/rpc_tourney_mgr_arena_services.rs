@@ -4,6 +4,7 @@ use crate::common;
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
+use eve_testkit::client_harness::{extract_bound_id_from_wire_rep, ClientErrorResponse, ClientHarness};
 use std::collections::HashMap;
 
 const P1: i64 = 90_000_001;
@@ -18,17 +19,16 @@ async fn select_pilot(
 ) -> SessionState {
     let mut s = SessionState::new(sid);
     common::login_pilot(ctx, &mut s, user, pass).await;
-    ctx.dispatch_rpc(
-        &mut s,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &HashMap::new(),
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
+    common::borrow_wire_harness(ctx, &mut s)
+        .call(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_id)],
+            &HashMap::new(),
+        )
+        .await
+        .expect("SelectCharacterID");
     s
 }
 
@@ -38,9 +38,33 @@ async fn rpc(
     service: &str,
     method: &str,
     args: &[PyRep],
-) -> Result<PyRep, eve_proto::BridgeRpcError> {
-    ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None)
-        .await
+) -> Result<PyRep, ClientErrorResponse> {
+    ClientHarness::new(common::SessionBorrowWireTransport {
+        ctx,
+        session: sess,
+        preserve_char_notifications: true,
+    })
+    .call(service, None, method, args, &HashMap::new())
+    .await
+}
+
+async fn bind_wire(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    service: &str,
+    obj_id: i64,
+) -> Result<u64, ClientErrorResponse> {
+    let rep = rpc(
+        ctx,
+        sess,
+        service,
+        "MachoBindObject",
+        &[PyRep::Integer(obj_id), PyRep::None],
+    )
+    .await?;
+    Ok(extract_bound_id_from_wire_rep(&rep).unwrap_or_else(|| {
+        panic!("expected bound oid from {service}.MachoBindObject, got {rep:?}")
+    }))
 }
 
 #[tokio::test]
@@ -57,6 +81,7 @@ async fn test_tourney_setup_pairings_and_teleportation() {
     ]);
 
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
     let mut sess = select_pilot(&ctx, 80_101, "demo", "demo-secret", P1).await;
     sess.role = eve_machonet::service_roles::ROLE_GMH;
 
@@ -66,7 +91,7 @@ async fn test_tourney_setup_pairings_and_teleportation() {
 
     // Unknown (non-SDE) arena system is rejected
     let bad = eve_server::services::tourney_service::register_tourney_setup(&ctx, 1, "AT XXI", 39_999_999, Default::default());
-    assert_eq!(bad.unwrap_err().code, "InvalidSolarSystem");
+    assert_eq!(bad.expect_err("InvalidSolarSystem").code, "InvalidSolarSystem");
     // Register tournament 1 with arena system 30_000_142; the SDE name is resolved from ctx.sde.solar_systems
     let arena = eve_server::services::tourney_service::TourneyArenaSystem { combat_beacons: vec![9_001, 9_002], warp_bubbles: vec![9_101] };
     let sde_name = eve_server::services::tourney_service::register_tourney_setup(&ctx, 1, "AT XXI", 30_000_142, arena).expect("register");
@@ -146,7 +171,7 @@ async fn test_tourney_setup_pairings_and_teleportation() {
 
     // 4. TeleportToArena: teleports referee/GM into arena space
     let bound_oid = 99_001;
-    ctx.bound_objects.write().unwrap().insert(
+    ctx.bound_objects.write().expect("bound_objects write").insert(
         bound_oid,
         eve_server::router::BoundObjectEntry {
             bound_id: bound_oid,
@@ -160,7 +185,7 @@ async fn test_tourney_setup_pairings_and_teleportation() {
         },
     );
 
-    let p1_ship = ctx.db.with_snapshot(|s| s.characters.get(&P1).unwrap().active_ship_id);
+    let p1_ship = ctx.db.with_snapshot(|s| s.characters.get(&P1).expect("P1 character").active_ship_id);
     let old_sys = 30_000_144u32;
     ctx.db.with_mut_snapshot(|s| {
         if let Some(ch) = s.characters.get_mut(&P1) {
@@ -185,8 +210,8 @@ async fn test_tourney_setup_pairings_and_teleportation() {
             mode: eve_destiny::MovementMode::Stop,
         })
         .await
-        .unwrap();
-    assert!(old_sys_handle.get_ball_snapshot(p1_ship).await.unwrap().is_some());
+        .expect("spawn p1 ship ball");
+    assert!(old_sys_handle.get_ball_snapshot(p1_ship).await.expect("get_ball_snapshot").is_some());
 
     let tele_res = rpc(&ctx, &mut sess, "tourneyMgr", "TeleportToArena", &[PyRep::Integer(match_id)])
         .await
@@ -194,9 +219,9 @@ async fn test_tourney_setup_pairings_and_teleportation() {
     assert_eq!(tele_res, PyRep::Bool(true));
     assert!(sess.station_id.is_none(), "Station ID should be None in space");
     assert_eq!(sess.solar_system_id, Some(30_000_142));
-    assert!(old_sys_handle.get_ball_snapshot(p1_ship).await.unwrap().is_none(), "Ship ball should be removed from old_sys");
+    assert!(old_sys_handle.get_ball_snapshot(p1_ship).await.expect("get_ball_snapshot").is_none(), "Ship ball should be removed from old_sys");
     assert!(
-        !ctx.bound_objects.read().unwrap().contains_key(&bound_oid),
+        !ctx.bound_objects.read().expect("bound_objects read").contains_key(&bound_oid),
         "stale beyonce bound object must be evicted on TeleportToArena"
     );
     let arena_notifs = ctx.drain_notifications_for_char(P1);
@@ -210,7 +235,7 @@ async fn test_tourney_setup_pairings_and_teleportation() {
     let arena_oid = ctx
         .bound_objects
         .read()
-        .unwrap()
+        .expect("bound_objects read")
         .iter()
         .find(|(_, b)| b.character_id == P1 && b.service == "beyonce" && b.object_id == 30_000_142)
         .map(|(id, _)| *id)
@@ -223,9 +248,9 @@ async fn test_tourney_setup_pairings_and_teleportation() {
         .expect("TeleportToStation");
     assert_eq!(tele_home_res, PyRep::Bool(true));
     assert!(sess.station_id.is_some(), "Character should be docked in station");
-    let home_sys = sess.solar_system_id.unwrap() as i64;
+    let home_sys = sess.solar_system_id.expect("home solar system") as i64;
     assert!(
-        !ctx.bound_objects.read().unwrap().contains_key(&arena_oid),
+        !ctx.bound_objects.read().expect("bound_objects read").contains_key(&arena_oid),
         "arena beyonce bound object must be evicted on TeleportToStation"
     );
     let notifs = ctx.drain_notifications_for_char(P1);
@@ -243,6 +268,7 @@ async fn test_tourney_setup_pairings_and_teleportation() {
 #[tokio::test]
 async fn test_slash_teleport_evicts_space_and_pi_bindings_and_blocks_cross_system_binds() {
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
     let mut sess = select_pilot(&ctx, 80_201, "demo", "demo-secret", P1).await;
     sess.role |= eve_machonet::service_roles::ROLE_GMH;
 
@@ -255,25 +281,33 @@ async fn test_slash_teleport_evicts_space_and_pi_bindings_and_blocks_cross_syste
 
     // Non-system keeper (1) succeeds, while cross-system keeper & planetOrbitalRegistryBroker fail
     let bind_denied = ["BindAuthorization", "Denied"].concat();
-    let keep_global = ctx.bind_object(&sess, "keeper", 1).expect("keeper global bind");
+    let keep_global = bind_wire(&ctx, &mut sess, "keeper", 1)
+        .await
+        .expect("keeper global bind");
     assert_eq!(
-        ctx.bind_object(&sess, "keeper", 30_000_144)
-            .unwrap_err()
+        bind_wire(&ctx, &mut sess, "keeper", 30_000_144)
+            .await
+            .expect_err("cross-system keeper bind denied")
             .code,
         bind_denied
     );
     assert_eq!(
-        ctx.bind_object(&sess, "planetOrbitalRegistryBroker", 30_000_144)
-            .unwrap_err()
+        bind_wire(&ctx, &mut sess, "planetOrbitalRegistryBroker", 30_000_144)
+            .await
+            .expect_err("cross-system planetOrbitalRegistryBroker bind denied")
             .code,
         bind_denied
     );
 
-    let bey_bind = ctx.bind_object(&sess, "beyonce", sys_id).expect("beyonce bind");
-    let pi_bind = ctx
-        .bind_object(&sess, "planetOrbitalRegistryBroker", sys_id)
+    let bey_bind = bind_wire(&ctx, &mut sess, "beyonce", sys_id)
+        .await
+        .expect("beyonce bind");
+    let pi_bind = bind_wire(&ctx, &mut sess, "planetOrbitalRegistryBroker", sys_id)
+        .await
         .expect("planetOrbitalRegistryBroker bind");
-    let keep_sys_bind = ctx.bind_object(&sess, "keeper", sys_id).expect("keeper sys bind");
+    let keep_sys_bind = bind_wire(&ctx, &mut sess, "keeper", sys_id)
+        .await
+        .expect("keeper sys bind");
     let _ = ctx.drain_notifications_for_char(P1);
 
     // Slash teleport to another system (30_000_144) evicts all system-scoped bindings
@@ -301,6 +335,7 @@ async fn test_slash_teleport_evicts_space_and_pi_bindings_and_blocks_cross_syste
 #[tokio::test]
 async fn test_same_system_slash_teleport_preserves_scan_mgr_and_space_bindings() {
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
     let mut sess = select_pilot(&ctx, 80_202, "demo", "demo-secret", P1).await;
     sess.role |= eve_machonet::service_roles::ROLE_GMH;
 
@@ -312,11 +347,17 @@ async fn test_same_system_slash_teleport_preserves_scan_mgr_and_space_bindings()
     assert_eq!(sys_id, 30_000_142);
 
     // Bind scanMgr (simulating directionalScanSvc.OnLoadScene -> GetSystemScanMgr), beyonce, entity, PI
-    let scan_bind = ctx.bind_object(&sess, "scanMgr", sys_id).expect("scanMgr bind");
-    let bey_bind = ctx.bind_object(&sess, "beyonce", sys_id).expect("beyonce bind");
-    let entity_bind = ctx.bind_object(&sess, "entity", sys_id).expect("entity bind");
-    let pi_bind = ctx
-        .bind_object(&sess, "planetOrbitalRegistryBroker", sys_id)
+    let scan_bind = bind_wire(&ctx, &mut sess, "scanMgr", sys_id)
+        .await
+        .expect("scanMgr bind");
+    let bey_bind = bind_wire(&ctx, &mut sess, "beyonce", sys_id)
+        .await
+        .expect("beyonce bind");
+    let entity_bind = bind_wire(&ctx, &mut sess, "entity", sys_id)
+        .await
+        .expect("entity bind");
+    let pi_bind = bind_wire(&ctx, &mut sess, "planetOrbitalRegistryBroker", sys_id)
+        .await
         .expect("planetOrbitalRegistryBroker bind");
     let _ = ctx.drain_notifications_for_char(P1);
 
@@ -356,24 +397,26 @@ async fn test_same_system_slash_teleport_preserves_scan_mgr_and_space_bindings()
 
     // Bound RPC on the preserved scanMgr bound ID still succeeds (no InvalidBoundObject / UnMachoDestination)
     let kw = std::collections::HashMap::new();
-    let scan_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "scanMgr",
-            Some(scan_bind),
-            "ConeScan",
-            &[
-                PyRep::Real(std::f64::consts::TAU),
-                PyRep::Real(2_147_483_647_000.0),
-                PyRep::Real(0.0),
-                PyRep::Real(0.0),
-                PyRep::Real(1.0),
-            ],
-            &kw,
-            Some("machoNet:26000"),
-        )
-        .await
-        .expect("ConeScan using preserved scanMgr bound object after /tr me");
+    let scan_res = ClientHarness::new(common::SessionBorrowWireTransport {
+        ctx: &ctx,
+        session: &mut sess,
+        preserve_char_notifications: true,
+    })
+    .call(
+        "scanMgr",
+        Some(scan_bind),
+        "ConeScan",
+        &[
+            PyRep::Real(std::f64::consts::TAU),
+            PyRep::Real(2_147_483_647_000.0),
+            PyRep::Real(0.0),
+            PyRep::Real(0.0),
+            PyRep::Real(1.0),
+        ],
+        &kw,
+    )
+    .await
+    .expect("ConeScan using preserved scanMgr bound object after /tr me");
     assert!(matches!(scan_res, PyRep::List(_)));
 
     // Cross-system /tr me to another solar system still evicts them cleanly

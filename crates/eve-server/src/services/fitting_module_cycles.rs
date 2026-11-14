@@ -212,13 +212,6 @@ pub(crate) async fn handle_module_cycles(
                 }
             }
             let is_weapon = matches!(mod_type.group_id, 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807);
-            if method == "Activate" && is_weapon && ctx.is_module_in_reactivation_delay(ship_id, module_id) {
-                return Some(Err(BridgeRpcError {
-                    code: "ModuleAlreadyActive".into(),
-                    message: format!("Module {module_id} is already active in a cycle"),
-                    client_error: None,
-                }));
-            }
             let is_upwell_weapon_or_aoe = (target_id_opt.is_some_and(|tid| {
                 tid >= 1_000_000_000_000 || ctx.db.with_snapshot(|s| s.structures.contains_key(&tid) || s.sov_runtime.mercenary_dens.contains_key(&tid) || s.sov_runtime.mto_site_balls.contains_key(&tid) || (s.system_states.get(&sys_id).is_some_and(|st| st.sov_alliance_id.is_some()) && !s.characters.contains_key(&tid) && !s.characters.values().any(|c| c.active_ship_id == tid)))
             }) && is_weapon)
@@ -234,7 +227,7 @@ pub(crate) async fn handle_module_cycles(
                 })
             });
             let is_special_target = !matches!(mod_type.group_id, 1122 | 650)
-                && (matches!(mod_type.group_id, 862 | 4060 | 4500 | 4805 | 4807)
+                && (matches!(mod_type.group_id, 862 | 1986 | 4060 | 4500 | 4805 | 4807)
                     || target_id_opt.is_some_and(|tid| {
                         ctx.living_world.get_convoy(tid).is_some()
                             || ctx.db.with_snapshot(|s| {
@@ -248,6 +241,13 @@ pub(crate) async fn handle_module_cycles(
                 && ctx.db.with_snapshot(|s| crate::services::pvp_filament_mgr::load_pvp_store(s).active_matches.values().any(|m| m.active && m.arena_solar_system_id == sys_id));
             if is_fw_pvp || is_arena_pvp || is_upwell_weapon_or_aoe || is_special_target || matches!(mod_type.group_id, 1328 | 1330 | 1333) {
                 return crate::router::box_fut(|| crate::services::combat_crimewatch::combat_weapons::handle_weapons(ctx, session, service, method, args, kwargs)).await;
+            }
+            if method == "Activate" && is_weapon && ctx.is_module_in_reactivation_delay(ship_id, module_id) {
+                return Some(Err(BridgeRpcError {
+                    code: "ModuleAlreadyActive".into(),
+                    message: format!("Module {module_id} is already active in a cycle"),
+                    client_error: None,
+                }));
             }
 
             if (matches!(

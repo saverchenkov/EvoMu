@@ -1,7 +1,7 @@
 //! `fw_parity_complete` — Integration tests for Faction Warfare Warzones, Victory Points,
 //! System Capture, Advantage, Militia Ranks, and War Targets.
 
-use crate::common::login_pilot;
+use crate::common::{self, login_pilot};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::combat::crimewatch::AggressionEvaluation;
@@ -19,6 +19,7 @@ use std::sync::Arc;
 async fn test_fw_warzones_victory_points_and_system_capture() {
     // parity: feat:fw.warzones, feat:fw.victory-points
     let ctx = Arc::new(ServerContext::new());
+    common::pin_clock(&ctx);
     let mut sess = SessionState::new(10_001);
     login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     let char_id = 90_000_001;
@@ -26,7 +27,8 @@ async fn test_fw_warzones_victory_points_and_system_capture() {
 
     // Select character and place session in FW solar system (Amo: 30002055, Minmatar HQ)
     let sys_id = HQ_SYSTEM_AMO;
-    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw, None)
+    common::borrow_wire_harness(&ctx, &mut sess)
+        .call("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw)
         .await
         .expect("SelectCharacterID");
     sess.solar_system_id = Some(sys_id);
@@ -40,8 +42,8 @@ async fn test_fw_warzones_victory_points_and_system_capture() {
     // 1. feat:fw.warzones
     // ------------------------------------------------------------------------
     // GetAllWarzones returns Caldari-Gallente and Amarr-Minmatar warzones
-    let wz_rep = ctx
-        .dispatch_rpc(&mut sess, "fwWarzoneSolarsystem", None, "GetAllWarzones", &[], &kw, None)
+    let wz_rep = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("fwWarzoneSolarsystem", None, "GetAllWarzones", &[], &kw)
         .await
         .expect("GetAllWarzones");
     match wz_rep {
@@ -60,8 +62,8 @@ async fn test_fw_warzones_victory_points_and_system_capture() {
     }
 
     // GetAllWarzonesOccupationStates returns owner, occupier, frontline status, and contested %
-    let all_states = ctx
-        .dispatch_rpc(&mut sess, "fwWarzoneSolarsystem", None, "GetAllWarzonesOccupationStates", &[], &kw, None)
+    let all_states = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("fwWarzoneSolarsystem", None, "GetAllWarzonesOccupationStates", &[], &kw)
         .await
         .expect("GetAllWarzonesOccupationStates");
     match all_states {
@@ -104,8 +106,8 @@ async fn test_fw_warzones_victory_points_and_system_capture() {
     }
 
     // GetLocalOccupationState returns tuple (sys_id, state_keyval)
-    let local_occ = ctx
-        .dispatch_rpc(&mut sess, "fwWarzoneSolarsystem", None, "GetLocalOccupationState", &[], &kw, None)
+    let local_occ = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("fwWarzoneSolarsystem", None, "GetLocalOccupationState", &[], &kw)
         .await
         .expect("GetLocalOccupationState");
     match local_occ {
@@ -123,11 +125,23 @@ async fn test_fw_warzones_victory_points_and_system_capture() {
     // ------------------------------------------------------------------------
     // 2. feat:fw.victory-points
     // ------------------------------------------------------------------------
+    let unpack_vp = |rep: PyRep| -> PyRep {
+        match rep {
+            PyRep::Tuple(mut parts) if parts.len() == 2 => {
+                assert_eq!(parts[0], PyRep::Integer(sys_id as i64));
+                parts.swap_remove(1)
+            }
+            other => panic!("Expected (sys_id, state_keyval) tuple from wire GetLocalVictoryPointState, got {other:?}"),
+        }
+    };
+
     // Check initial local victory point state
-    let vp_initial = ctx
-        .dispatch_rpc(&mut sess, "fwVictoryPointMgr", None, "GetLocalVictoryPointState", &[], &kw, None)
-        .await
-        .expect("GetLocalVictoryPointState");
+    let vp_initial = unpack_vp(
+        common::borrow_wire_harness(&ctx, &mut sess)
+            .call("fwVictoryPointMgr", None, "GetLocalVictoryPointState", &[], &kw)
+            .await
+            .expect("GetLocalVictoryPointState"),
+    );
     assert_eq!(vp_initial.dict_get("solarSystemID"), Some(&PyRep::Integer(sys_id as i64)));
     assert_eq!(vp_initial.dict_get("victoryPoints"), Some(&PyRep::Integer(0)));
     assert_eq!(vp_initial.dict_get("contestedPercentage"), Some(&PyRep::Real(0.0)));
@@ -140,17 +154,21 @@ async fn test_fw_warzones_victory_points_and_system_capture() {
     // Killing an enemy awards status-scaled LP and does NOT push solar system contested VP
     let kill_lp = fw_services::award_fw_kill_lp(&ctx, char_id, sys_id, 100_000_000.0);
     assert!(kill_lp > 0, "Kill in warzone awards LP");
-    let vp_after_kill = ctx
-        .dispatch_rpc(&mut sess, "fwVictoryPointMgr", None, "GetLocalVictoryPointState", &[], &kw, None)
-        .await
-        .expect("GetLocalVictoryPointState after kill");
+    let vp_after_kill = unpack_vp(
+        common::borrow_wire_harness(&ctx, &mut sess)
+            .call("fwVictoryPointMgr", None, "GetLocalVictoryPointState", &[], &kw)
+            .await
+            .expect("GetLocalVictoryPointState after kill"),
+    );
     assert_eq!(vp_after_kill.dict_get("victoryPoints"), Some(&PyRep::Integer(0)));
 
     let _ = fw_services::add_victory_points(&ctx, sys_id, 20);
-    let vp_after_plex_tick = ctx
-        .dispatch_rpc(&mut sess, "fwVictoryPointMgr", None, "GetLocalVictoryPointState", &[], &kw, None)
-        .await
-        .expect("GetLocalVictoryPointState after +20 VP");
+    let vp_after_plex_tick = unpack_vp(
+        common::borrow_wire_harness(&ctx, &mut sess)
+            .call("fwVictoryPointMgr", None, "GetLocalVictoryPointState", &[], &kw)
+            .await
+            .expect("GetLocalVictoryPointState after +20 VP"),
+    );
     assert_eq!(vp_after_plex_tick.dict_get("victoryPoints"), Some(&PyRep::Integer(20)));
     let c_kill = match vp_after_plex_tick.dict_get("contestedPercentage") {
         Some(PyRep::Real(v)) => *v,
@@ -163,10 +181,12 @@ async fn test_fw_warzones_victory_points_and_system_capture() {
     assert_eq!(new_vp, threshold);
     assert_eq!(new_c, 100.0);
 
-    let vp_full = ctx
-        .dispatch_rpc(&mut sess, "fwVictoryPointMgr", None, "GetLocalVictoryPointState", &[], &kw, None)
-        .await
-        .expect("GetLocalVictoryPointState at 100%");
+    let vp_full = unpack_vp(
+        common::borrow_wire_harness(&ctx, &mut sess)
+            .call("fwVictoryPointMgr", None, "GetLocalVictoryPointState", &[], &kw)
+            .await
+            .expect("GetLocalVictoryPointState at 100%"),
+    );
     assert_eq!(vp_full.dict_get("victoryPoints"), Some(&PyRep::Integer(threshold)));
     assert_eq!(vp_full.dict_get("contestedPercentage"), Some(&PyRep::Real(100.0)));
 
@@ -181,16 +201,18 @@ async fn test_fw_warzones_victory_points_and_system_capture() {
     assert_eq!(capture_res.2, FACTION_MINMATAR, "Owner faction unchanged");
 
     // After capture, contested percentage and VP reset to 0
-    let vp_reset = ctx
-        .dispatch_rpc(&mut sess, "fwVictoryPointMgr", None, "GetLocalVictoryPointState", &[], &kw, None)
-        .await
-        .expect("GetLocalVictoryPointState after capture");
+    let vp_reset = unpack_vp(
+        common::borrow_wire_harness(&ctx, &mut sess)
+            .call("fwVictoryPointMgr", None, "GetLocalVictoryPointState", &[], &kw)
+            .await
+            .expect("GetLocalVictoryPointState after capture"),
+    );
     assert_eq!(vp_reset.dict_get("victoryPoints"), Some(&PyRep::Integer(0)));
     assert_eq!(vp_reset.dict_get("contestedPercentage"), Some(&PyRep::Real(0.0)));
 
     // Verify occupation state reflects the new occupier faction
-    let occ_after_capture = ctx
-        .dispatch_rpc(&mut sess, "fwWarzoneSolarsystem", None, "GetLocalOccupationState", &[], &kw, None)
+    let occ_after_capture = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("fwWarzoneSolarsystem", None, "GetLocalOccupationState", &[], &kw)
         .await
         .expect("GetLocalOccupationState after capture");
     if let PyRep::Tuple(t) = occ_after_capture {
@@ -203,7 +225,8 @@ async fn test_fw_warzones_victory_points_and_system_capture() {
     }
 
     // Capture when not 100% contested must fail with SystemNotVulnerable
-    let err = capture_warzone_system(&ctx, sys_id, FACTION_MINMATAR).unwrap_err();
+    let err = capture_warzone_system(&ctx, sys_id, FACTION_MINMATAR)
+        .expect_err("SystemNotVulnerable");
     assert_eq!(err.code, "SystemNotVulnerable");
 
     // Verify system recapture via internal helper when 100% contested
@@ -214,8 +237,8 @@ async fn test_fw_warzones_victory_points_and_system_capture() {
     assert_eq!(cap_back.1, FACTION_MINMATAR);
     assert_eq!(cap_back.2, FACTION_MINMATAR);
 
-    let occ_recap = ctx
-        .dispatch_rpc(&mut sess, "fwWarzoneSolarsystem", None, "GetLocalOccupationState", &[], &kw, None)
+    let occ_recap = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("fwWarzoneSolarsystem", None, "GetLocalOccupationState", &[], &kw)
         .await
         .expect("GetLocalOccupationState after recapture");
     if let PyRep::Tuple(t) = occ_recap {
@@ -232,12 +255,14 @@ async fn test_fw_warzones_victory_points_and_system_capture() {
 async fn test_fw_advantage_ranks_and_war_targets() {
     // parity: feat:fw.advantage, feat:fw.fw-ranks, feat:fw.fw-war-targets
     let ctx = Arc::new(ServerContext::new());
+    common::pin_clock(&ctx);
     let mut sess = SessionState::new(10_002);
     login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     let char_id = 90_000_001;
     let kw = HashMap::new();
     let sys_id = HQ_SYSTEM_AMO;
-    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw, None)
+    common::borrow_wire_harness(&ctx, &mut sess)
+        .call("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw)
         .await
         .expect("SelectCharacterID");
     sess.solar_system_id = Some(sys_id);
@@ -274,17 +299,16 @@ async fn test_fw_advantage_ranks_and_war_targets() {
     // 5. feat:fw.fw-ranks
     // ------------------------------------------------------------------------
     // Join Minmatar militia
-    ctx.dispatch_rpc(
-        &mut sess,
-        "facWarMgr",
-        None,
-        "JoinFactionAsCharacter",
-        &[PyRep::Integer(FACTION_MINMATAR)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("JoinFactionAsCharacter");
+    common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
+            "facWarMgr",
+            None,
+            "JoinFactionAsCharacter",
+            &[PyRep::Integer(FACTION_MINMATAR)],
+            &kw,
+        )
+        .await
+        .expect("JoinFactionAsCharacter");
 
     // Rank derivation checks from standing
     assert_eq!(calculate_militia_rank(0.0), 0);
@@ -295,13 +319,13 @@ async fn test_fw_advantage_ranks_and_war_targets() {
 
     // Set character standing towards Minmatar faction to 3.50 (Rank 4)
     ctx.db.with_mut_snapshot(|snap| {
-        let ch = snap.characters.get_mut(&char_id).unwrap();
+        let ch = snap.characters.get_mut(&char_id).expect("character exists");
         ch.standings.insert(FACTION_MINMATAR, 3.50);
     });
 
     // Verify show-info (charMgr.GetPublicInfo) displays warFactionID and militiaRank
-    let pub_info = ctx
-        .dispatch_rpc(&mut sess, "charMgr", None, "GetPublicInfo", &[PyRep::Integer(char_id)], &kw, None)
+    let pub_info = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("charMgr", None, "GetPublicInfo", &[PyRep::Integer(char_id)], &kw)
         .await
         .expect("GetPublicInfo");
     assert_eq!(pub_info.dict_get("warFactionID"), Some(&PyRep::Integer(FACTION_MINMATAR)));
@@ -309,8 +333,8 @@ async fn test_fw_advantage_ranks_and_war_targets() {
     assert_eq!(pub_info.dict_get("rank"), Some(&PyRep::Integer(4)));
 
     // Verify show-info (charMgr.GetPublicInfo3)
-    let pub_info3 = ctx
-        .dispatch_rpc(&mut sess, "charMgr", None, "GetPublicInfo3", &[PyRep::Integer(char_id)], &kw, None)
+    let pub_info3 = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("charMgr", None, "GetPublicInfo3", &[PyRep::Integer(char_id)], &kw)
         .await
         .expect("GetPublicInfo3");
     assert_eq!(pub_info3.dict_get("warFactionID"), Some(&PyRep::Integer(FACTION_MINMATAR)));
@@ -323,7 +347,7 @@ async fn test_fw_advantage_ranks_and_war_targets() {
     let neutral_char_id = 90_000_003i64;
     ctx.db.with_mut_snapshot(|snap| {
         // Enemy militia member (Amarr, opposing Minmatar)
-        let mut enemy_char = snap.characters.get(&char_id).unwrap().clone();
+        let mut enemy_char = snap.characters.get(&char_id).expect("character exists").clone();
         enemy_char.character_id = enemy_char_id;
         enemy_char.name = "Amarr Militia Pilot".into();
         enemy_char.war_faction_id = Some(FACTION_AMARR);
@@ -331,7 +355,7 @@ async fn test_fw_advantage_ranks_and_war_targets() {
         snap.characters.insert(enemy_char_id, enemy_char);
 
         // Neutral pilot (no militia)
-        let mut neutral_char = snap.characters.get(&char_id).unwrap().clone();
+        let mut neutral_char = snap.characters.get(&char_id).expect("character exists").clone();
         neutral_char.character_id = neutral_char_id;
         neutral_char.name = "Neutral Trader".into();
         neutral_char.war_faction_id = None;
@@ -352,7 +376,7 @@ async fn test_fw_advantage_ranks_and_war_targets() {
     assert!(!is_neutral_legal, "Neutral pilot is NOT a legal target");
 
     // Execute combat aggression against opposing militia member in low-sec
-    let mut cw = ctx.crimewatch.write().unwrap();
+    let mut cw = ctx.crimewatch.write().expect("crimewatch write");
     let enemy_eval = cw.handle_combat_aggression(
         char_id,
         enemy_char_id,

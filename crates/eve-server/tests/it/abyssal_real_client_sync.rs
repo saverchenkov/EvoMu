@@ -9,6 +9,7 @@ use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
+use eve_testkit::client_harness::extract_bound_id_from_wire_rep;
 use glam::DVec3;
 use std::collections::HashMap;
 
@@ -49,21 +50,21 @@ async fn move_ship_near_gate(ctx: &ServerContext, sys_id: u32, ship_id: i64, gat
 #[tokio::test]
 async fn test_abyssal_entry_client_is_ready_and_exit_sync() {
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(9_801);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     sess.role = u64::MAX;
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(PILOT1)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
+    common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(PILOT1)],
+            &kw,
+        )
+        .await
+        .expect("SelectCharacterID");
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&PILOT1) {
@@ -114,29 +115,25 @@ async fn test_abyssal_entry_client_is_ready_and_exit_sync() {
         .await
         .expect("spawn Jita ship ball");
 
-    let deploy = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let deploy = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "abyssalMgr",
             None,
             "AbyssalEntranceDeployment",
             &[PyRep::Integer(FILAMENT_ITEM_ID)],
             &kw,
-            None,
         )
         .await
         .expect("AbyssalEntranceDeployment");
     let trace_id = keyval_i64(&deploy, "traceBallID").expect("traceBallID");
 
-    let enter = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let enter = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "abyssalMgr",
             None,
             "AbyssalEntranceGateActivation",
             &[PyRep::Integer(trace_id)],
             &kw,
-            None,
         )
         .await
         .expect("AbyssalEntranceGateActivation");
@@ -151,17 +148,10 @@ async fn test_abyssal_entry_client_is_ready_and_exit_sync() {
     assert_eq!(sess.constellation_id, Some(expected_abyss_sde.constellation_id));
     assert_eq!(sess.region_id, Some(expected_abyss_sde.region_id));
 
-    ctx.dispatch_rpc(
-        &mut sess,
-        "abyssalMgr",
-        None,
-        "ClientIsReady",
-        &[],
-        &kw,
-        None,
-    )
-    .await
-    .expect("ClientIsReady");
+    common::borrow_wire_harness(&ctx, &mut sess)
+        .call("abyssalMgr", None, "ClientIsReady", &[], &kw)
+        .await
+        .expect("ClientIsReady");
 
     let abyss_handle = ctx.systems.get_or_spawn(SYS_ABYSS);
     assert!(
@@ -171,57 +161,50 @@ async fn test_abyssal_entry_client_is_ready_and_exit_sync() {
 
     for rm in 1..=3_i64 {
         for npc_id in room_npcs.drain(..) {
-            let _ = ctx
-                .dispatch_rpc(
-                    &mut sess,
+            let _ = common::borrow_wire_harness(&ctx, &mut sess)
+                .call(
                     "slash",
                     None,
                     "SlashCmd",
                     &[PyRep::String(format!("/despawn {npc_id}"))],
                     &kw,
-                    None,
                 )
                 .await;
         }
-        let _ = ctx
-            .dispatch_rpc(
-                &mut sess,
+        let _ = common::borrow_wire_harness(&ctx, &mut sess)
+            .call(
                 "slash",
                 None,
                 "SlashCmd",
                 &[PyRep::String("/heal".into())],
                 &kw,
-                None,
             )
             .await;
         let gate_id = 1_895_000_000 + pocket_id * 10 + rm;
         move_ship_near_gate(&ctx, SYS_ABYSS, SHIP_ID, gate_id).await;
         if rm < 3 {
-            let gate_rep = ctx
-                .dispatch_rpc(
-                    &mut sess,
+            let gate_rep = common::borrow_wire_harness(&ctx, &mut sess)
+                .call(
                     "abyssalMgr",
                     None,
                     "AbyssalGateActivation",
                     &[PyRep::Integer(gate_id)],
                     &kw,
-                    None,
                 )
                 .await
                 .expect("AbyssalGateActivation");
             room_npcs = keyval_i64_list(&gate_rep, "npcBallIDs");
         } else {
-            ctx.dispatch_rpc(
-                &mut sess,
-                "abyssalMgr",
-                None,
-                "AbyssalEndGateActivation",
-                &[PyRep::Integer(gate_id)],
-                &kw,
-                None,
-            )
-            .await
-            .expect("AbyssalEndGateActivation");
+            common::borrow_wire_harness(&ctx, &mut sess)
+                .call(
+                    "abyssalMgr",
+                    None,
+                    "AbyssalEndGateActivation",
+                    &[PyRep::Integer(gate_id)],
+                    &kw,
+                )
+                .await
+                .expect("AbyssalEndGateActivation");
         }
     }
 
@@ -237,77 +220,72 @@ async fn test_abyssal_entry_client_is_ready_and_exit_sync() {
 #[tokio::test]
 async fn capsule_inventory_is_accessible_after_ship_loss() {
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
     let mut sess = SessionState::new(9_302);
     let kw = HashMap::new();
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     sess.role = u64::MAX;
 
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(PILOT1)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
+    common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(PILOT1)],
+            &kw,
+        )
+        .await
+        .expect("SelectCharacterID");
 
     if sess.station_id.is_some() {
-        ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        common::borrow_wire_harness(&ctx, &mut sess)
+            .call("stationSvc", None, "Undock", &[], &kw)
             .await
             .expect("Undock");
     }
 
     let sys_id = sess.solar_system_id.expect("solar_system_id") as i64;
-    let bound = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let bound = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "invbroker",
             None,
             "MachoBindObject",
             &[PyRep::Integer(sys_id)],
             &kw,
-            None,
         )
         .await
         .expect("MachoBindObject invbroker");
-    let PyRep::Tuple(parts) = bound else {
-        panic!("MachoBindObject returns tuple, got {bound:?}");
-    };
-    let inv_mgr_id = parts[0].as_i64().expect("bound invbroker id") as u64;
+    let inv_mgr_id = extract_bound_id_from_wire_rep(&bound)
+        .unwrap_or_else(|| panic!("expected bound invbroker id, got {bound:?}"));
 
     let old_ship_id = sess.ship_id.expect("initial ship_id");
-    ctx.dispatch_rpc(&mut sess, "ship", None, "SelfDestruct", &[], &kw, None)
+    common::borrow_wire_harness(&ctx, &mut sess)
+        .call("ship", None, "SelfDestruct", &[], &kw)
         .await
         .expect("SelfDestruct");
-    ctx.dispatch_rpc(
-        &mut sess,
-        "timeControl",
-        None,
-        "AdvanceClock",
-        &[PyRep::Integer(125)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("AdvanceClock");
+    common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
+            "timeControl",
+            None,
+            "AdvanceClock",
+            &[PyRep::Integer(125)],
+            &kw,
+        )
+        .await
+        .expect("AdvanceClock");
     ctx.sync_session(&mut sess);
 
     let cap_id = sess.ship_id.expect("capsule ship_id after self-destruct");
     let cap_type = ctx.db.get_item(cap_id).expect("capsule item").type_id;
     assert_eq!(cap_type, 670, "expected Capsule typeID 670");
 
-    let inv_res = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let inv_res = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "invbroker",
             Some(inv_mgr_id),
             "GetInventoryFromId",
             &[PyRep::Integer(cap_id), PyRep::Integer(1)],
             &kw,
-            None,
         )
         .await;
     assert!(
@@ -315,18 +293,16 @@ async fn capsule_inventory_is_accessible_after_ship_loss() {
         "Capsule inventory must be accessible for godma priming after ship loss, got: {inv_res:?}"
     );
 
-    let destroyed_inv_err = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let destroyed_inv_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "invbroker",
             Some(inv_mgr_id),
             "GetInventoryFromId",
             &[PyRep::Integer(old_ship_id), PyRep::Integer(0)],
             &kw,
-            None,
         )
         .await
-        .unwrap_err();
+        .expect_err("FakeItemNotFound for destroyed ship");
     assert_eq!(
         destroyed_inv_err.code, "FakeItemNotFound",
         "Destroyed ship GetInventoryFromId must raise FakeItemNotFound so V24.01 HoldTracker handles ship loss cleanly"
@@ -336,6 +312,7 @@ async fn capsule_inventory_is_accessible_after_ship_loss() {
 #[tokio::test]
 async fn reentrant_db_read_snapshot_and_container_list_never_deadlock() {
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
     let nested = ctx.db.with_snapshot(|outer| {
         ctx.db.with_snapshot(|inner| {
             assert_eq!(outer.wal_seq, inner.wal_seq);
@@ -354,35 +331,30 @@ async fn reentrant_db_read_snapshot_and_container_list_never_deadlock() {
             .map(|c| c.character_id)
             .expect("demo char")
     });
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
-    let PyRep::Tuple(bound) = ctx
-        .dispatch_rpc(
-            &mut sess,
+    common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_id)],
+            &kw,
+        )
+        .await
+        .expect("SelectCharacterID");
+    let bound = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "invbroker",
             None,
             "MachoBindObject",
             &[PyRep::Integer(60_003_760), PyRep::None],
             &kw,
-            None,
         )
         .await
-        .expect("MachoBindObject")
-    else {
-        panic!("expected tuple");
-    };
-    let inv_id = bound[0].as_i64().unwrap() as u64;
-    let listed = ctx
-        .dispatch_rpc(&mut sess, "invbroker", Some(inv_id), "List", &[], &kw, None)
+        .expect("MachoBindObject");
+    let inv_id = extract_bound_id_from_wire_rep(&bound)
+        .unwrap_or_else(|| panic!("expected bound invbroker id, got {bound:?}"));
+    let listed = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("invbroker", Some(inv_id), "List", &[], &kw)
         .await
         .expect("invbroker.List");
     assert!(matches!(listed, PyRep::Object { .. } | PyRep::ObjectEx { .. } | PyRep::List(_) | PyRep::Tuple(_)));
