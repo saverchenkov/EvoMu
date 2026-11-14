@@ -68,10 +68,12 @@ async fn wire_dock_station(
     station_id: i64,
 ) {
     ctx.advance_secs(12);
-    common::slash_cmd(ctx, sess, &format!("/tr {sys_id}")).await;
+    common::slash_cmd(ctx, sess, &format!("/tr {station_id}")).await;
     let sys = ctx.systems.get_or_spawn(sys_id);
     let st_pos = ctx.sde.stations[&station_id].position;
-    sys.set_ball_position(ship_id, st_pos + DVec3::new(300.0, 0.0, 0.0)).await;
+    let active_ship = sess.ship_id.unwrap_or(ship_id);
+    let moved = sys.set_ball_position(active_ship, st_pos + DVec3::new(300.0, 0.0, 0.0)).await;
+    assert!(moved, "wire_dock_station failed to move ship {active_ship} (arg {ship_id}) in sys {sys_id}");
     sys.step_manual(0.1).await.unwrap();
     wire_ok(ctx, sess, "stationSvc", None, "Dock", &[PyRep::Integer(station_id)]).await;
 }
@@ -488,19 +490,48 @@ async fn test_zarzakh_gate_guns_and_deathless_patrols() {
     common::pin_clock(&ctx);
     let zarzakh_sys_id = 30_100_000_u32; // Zarzakh solar system
 
-    // Provision two live pilots in Zarzakh via ClientHarness flows
+    // Provision live pilots via ClientHarness flows before spawning Zarzakh test NPCs
     let mut offender = common::gm_pilot_in_space(&ctx, 101, 91_100_001, 587, zarzakh_sys_id).await;
     let victim = common::gm_pilot_in_space(&ctx, 102, 91_100_002, 587, zarzakh_sys_id).await;
     let offender_guns =
         fit_and_load_turrets(&ctx, &mut offender, zarzakh_sys_id, 2889, 185, 1_000, 2).await;
+    let mut pirate = common::gm_pilot_in_space(&ctx, 103, 91_100_003, 587, JITA_SYS).await;
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&pirate.char_id) {
+            ch.war_faction_id = Some(500_010);
+        }
+    });
+    let pirate_guns =
+        fit_and_load_turrets(&ctx, &mut pirate, zarzakh_sys_id, 2889, 185, 1_000, 2).await;
 
     let sys_handle = ctx.systems.get_or_spawn(zarzakh_sys_id);
-    let gun_pos = DVec3::ZERO;
-    let offender_pos = gun_pos + DVec3::new(15_000.0, 0.0, 0.0);
-    let victim_pos = gun_pos + DVec3::new(17_500.0, 0.0, 0.0);
-    let patrol_pos = gun_pos + DVec3::new(15_000.0, 2_000.0, 0.0);
+    let fulcrum_pos = ctx
+        .sde
+        .stations
+        .get(&60_015_187)
+        .map(|s| s.position)
+        .unwrap_or(DVec3::ZERO);
+    let gun_pos = fulcrum_pos + DVec3::new(135_000.0, 0.0, 0.0);
+    let park_pos = fulcrum_pos - DVec3::new(140_000.0, 0.0, 0.0);
+    // Place the pirate-immunity scenario inside a distant Zarzakh stargate's 150 km safe zone
+    // (> 500 km from The Fulcrum) so ships neither take Jovian gravity hazard nor enter Fulcrum NPC range.
+    let gate_pos = ctx
+        .sde
+        .stargates()
+        .values()
+        .filter(|g| g.from_solar_system_id == zarzakh_sys_id)
+        .map(|g| g.position)
+        .find(|p| p.distance(gun_pos) > 500_000.0)
+        .expect("Zarzakh must have a stargate >500km from The Fulcrum");
+    let safe_zone_anchor = gate_pos + DVec3::new(100_000.0, 0.0, 0.0);
+    let offender_pos = gun_pos - DVec3::new(15_000.0, 0.0, 0.0);
+    let victim_pos = gun_pos - DVec3::new(17_500.0, 0.0, 0.0);
+    let patrol_pos = gun_pos - DVec3::new(15_000.0, 2_000.0, 0.0);
     sys_handle.set_ball_position(offender.ship_id, offender_pos).await;
     sys_handle.set_ball_position(victim.ship_id, victim_pos).await;
+    sys_handle
+        .set_ball_position(pirate.ship_id, safe_zone_anchor + DVec3::new(10_000.0, 0.0, 0.0))
+        .await;
     sys_handle.step_manual(0.1).await.unwrap();
 
     // 1. Spawn SDE Zarzakh Gate Gun (Deathless Retribution Emplacement, type 79183) and Deathless Patrol (Guristas Zarzakh Mamba, type 78896)
@@ -613,16 +644,6 @@ async fn test_zarzakh_gate_guns_and_deathless_patrols() {
 
     // 4. Pirate-aligned pilot without retribution timer is spared by Zarzakh gate guns & patrols,
     //    then engaged once they acquire a retribution timer via live aggression.
-    let mut pirate = common::gm_pilot_in_space(&ctx, 103, 91_100_003, 587, zarzakh_sys_id).await;
-    let pirate_guns =
-        fit_and_load_turrets(&ctx, &mut pirate, zarzakh_sys_id, 2889, 185, 1_000, 2).await;
-    ctx.db.with_mut_snapshot(|s| {
-        if let Some(ch) = s.characters.get_mut(&pirate.char_id) {
-            ch.war_faction_id = Some(500_010);
-        }
-    });
-
-    let safe_zone_anchor = DVec3::new(1_000_000.0, 0.0, 0.0);
     let immune_gun_id = spawn_specialized_npc_entity(
         &ctx,
         zarzakh_sys_id,
@@ -641,9 +662,13 @@ async fn test_zarzakh_gate_guns_and_deathless_patrols() {
         safe_zone_anchor + DVec3::new(2_000.0, 0.0, 0.0),
     )
     .await;
-    // Move victim out of patrol range for the immunity check, keeping pirate in range.
+    // Move offender and victim to park_pos (>250km from gun_pos/patrol_pos yet inside Fulcrum's 150km safe zone)
+    // so they take neither repeated gun fire nor Jovian gravity hazard during the pirate immunity check.
     sys_handle
-        .set_ball_position(victim.ship_id, DVec3::new(500_000.0, 0.0, 0.0))
+        .set_ball_position(offender.ship_id, park_pos)
+        .await;
+    sys_handle
+        .set_ball_position(victim.ship_id, park_pos + DVec3::new(0.0, 2_000.0, 0.0))
         .await;
     sys_handle
         .set_ball_position(pirate.ship_id, safe_zone_anchor + DVec3::new(10_000.0, 0.0, 0.0))
@@ -690,6 +715,11 @@ async fn test_zarzakh_gate_guns_and_deathless_patrols() {
         with_combat_runtime(&ctx, |rt| rt.disapproval_flags.contains_key(&pirate.char_id)),
         "Pirate-aligned pilot attacking in Zarzakh must receive retribution/disapproval timer"
     );
+    // Move the non-pirate victim back to park_pos so the Deathless patrol isolates the flagged pirate.
+    sys_handle
+        .set_ball_position(victim.ship_id, park_pos + DVec3::new(0.0, 2_000.0, 0.0))
+        .await;
+    sys_handle.step_manual(0.1).await.expect("step victim away");
     step_extended_npc_ai(&ctx, zarzakh_sys_id).await;
     let (retrib_gun_target, retrib_patrol_target) = with_combat_runtime(&ctx, |rt| {
         (
@@ -710,19 +740,26 @@ async fn test_zarzakh_gate_guns_and_deathless_patrols() {
 
     // 5. Outer Zarzakh k-space gate & station patrols in the 4 adjacent k-space systems
     let mut pirate_clean =
-        common::gm_pilot_in_space(&ctx, 104, 91_100_004, 587, zarzakh_sys_id).await;
+        common::gm_pilot_in_space(&ctx, 104, 91_100_004, 587, JITA_SYS).await;
     ctx.db.with_mut_snapshot(|s| {
         if let Some(ch) = s.characters.get_mut(&pirate_clean.char_id) {
             ch.war_faction_id = Some(500_011);
         }
     });
 
-    for adj_sys in [30_002_086_u32, 30_003_841, 30_001_269, 30_001_041] {
+    for (idx, adj_sys) in [30_002_086_u32, 30_003_841, 30_001_269, 30_001_041].into_iter().enumerate() {
         ctx.advance_secs(12);
-        common::slash_cmd(&ctx, &mut offender.sess, &format!("/tr {adj_sys}")).await;
+        let mut visitor = common::gm_pilot_in_space(
+            &ctx,
+            105 + idx as u64,
+            91_100_005 + idx as i64,
+            587,
+            adj_sys,
+        )
+        .await;
         wire_bind_oid(
             &ctx,
-            &mut offender.sess,
+            &mut visitor.sess,
             "beyonce",
             PyRep::Integer(i64::from(adj_sys)),
         )
@@ -772,13 +809,13 @@ async fn test_zarzakh_gate_guns_and_deathless_patrols() {
             );
         }
 
-        // Clean pirate pilot placed at the Zarzakh gate must be spared, while non-pirate offender is engaged
+        // Clean pirate pilot placed at the Zarzakh gate must be spared, while non-pirate visitor is engaged
         common::slash_cmd(&ctx, &mut pirate_clean.sess, &format!("/tr {adj_sys}")).await;
         adj_handle
             .set_ball_position(pirate_clean.ship_id, gate_positions[0] + DVec3::new(3_000.0, 0.0, 0.0))
             .await;
         adj_handle
-            .set_ball_position(offender.ship_id, gate_positions[0] + DVec3::new(4_000.0, 0.0, 0.0))
+            .set_ball_position(visitor.ship_id, gate_positions[0] + DVec3::new(4_000.0, 0.0, 0.0))
             .await;
         adj_handle.step_manual(0.1).await.expect("step adj pos");
         step_extended_npc_ai(&ctx, adj_sys).await;
@@ -790,7 +827,7 @@ async fn test_zarzakh_gate_guns_and_deathless_patrols() {
                 .filter(|n| n.solar_system_id == adj_sys && n.archetype == "OuterZarzakhPatrol")
                 .collect();
             (
-                patrols.iter().any(|n| n.target_id == Some(offender.ship_id)),
+                patrols.iter().any(|n| n.target_id == Some(visitor.ship_id)),
                 patrols.iter().any(|n| n.target_id == Some(pirate_clean.ship_id)),
             )
         });
@@ -1192,6 +1229,7 @@ async fn test_pochven_hypnosian_sleepers_and_60pct_loot_drop() {
     const OTELA_TRIG_STATION: i64 = 60_003_034; // Otela - Convocation of Triglav
     const TRIG_CORP_ID: i64 = 1_000_298; // Convocation of Triglav
     const LOG_TRADE_OFFER_ID: i64 = 17_023; // 25x 56708 -> 1x 47867 (0 LP, 0 ISK)
+    ctx.advance_secs(65);
     wire_dock_station(
         &ctx,
         &mut hunter.sess,
@@ -1366,10 +1404,17 @@ async fn test_insurance_voiding_and_12_week_expiry() {
         s2: &mut SessionState,
         ship_id: i64,
     ) -> f64 {
+        ctx.advance_secs(31);
         wire_ok(ctx, s1, "ship", None, "Board", &[PyRep::Integer(ship_id)]).await;
         ctx.advance_secs(31);
         wire_ok(ctx, s1, "stationSvc", None, "Undock", &[]).await;
         ctx.advance_secs(31);
+
+        // Halt both ships after Undock so neither drifts out of optimal turret range across repeated duels.
+        let b1 = wire_bind_oid(ctx, s1, "beyonce", PyRep::Integer(i64::from(JITA_SYS))).await;
+        wire_ok(ctx, s1, "beyonce", Some(b1), "CmdStop", &[]).await;
+        let b2 = wire_bind_oid(ctx, s2, "beyonce", PyRep::Integer(i64::from(JITA_SYS))).await;
+        wire_ok(ctx, s2, "beyonce", Some(b2), "CmdStop", &[]).await;
 
         wire_ok(ctx, s2, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(PILOT_1)]).await;
         wire_ok(
@@ -1409,11 +1454,11 @@ async fn test_insurance_voiding_and_12_week_expiry() {
         }
 
         let before = wallet_isk(ctx, PILOT_1);
-        for _ in 0..60 {
+        for _ in 0..120 {
             if sys.get_ball_snapshot(ship_id).await.unwrap().is_none() {
                 break;
             }
-            let _ = wire_call(
+            let act_res = wire_call(
                 ctx,
                 s2,
                 "dogmaIM",
@@ -1421,12 +1466,44 @@ async fn test_insurance_voiding_and_12_week_expiry() {
                 "Activate",
                 &[
                     PyRep::Integer(PILOT_2_GUN),
-                    PyRep::String("targetAttack".into()),
+                    PyRep::String("projectileFired".into()),
                     PyRep::Integer(ship_id),
                 ],
                 &HashMap::new(),
             )
             .await;
+            if let Err(ref err) = act_res {
+                if err.code != "ModuleIsReloading" {
+                    let cargo_ammo: Vec<PyRep> = ctx.db.with_snapshot(|s| {
+                        s.items
+                            .values()
+                            .filter(|i| {
+                                i.location_id == PILOT_2_SHIP
+                                    && i.flag == InventoryFlag::Cargo
+                                    && i.type_id == EMP_S
+                                    && i.quantity > 0
+                            })
+                            .map(|i| PyRep::Integer(i.item_id))
+                            .collect()
+                    });
+                    if !cargo_ammo.is_empty() {
+                        let _ = wire_call(
+                            ctx,
+                            s2,
+                            "dogmaIM",
+                            None,
+                            "LoadAmmo",
+                            &[
+                                PyRep::Integer(PILOT_2_SHIP),
+                                PyRep::List(vec![PyRep::Integer(PILOT_2_GUN)]),
+                                PyRep::List(cargo_ammo),
+                            ],
+                            &HashMap::new(),
+                        )
+                        .await;
+                    }
+                }
+            }
             sys.step_manual(4.0).await.unwrap();
             ctx.advance_secs(4);
         }
@@ -1639,7 +1716,7 @@ async fn test_insurance_voiding_and_12_week_expiry() {
     );
 
     // Arm & undock pilot 2 outside Jita 4-4 for live PvP destruction steps
-    let ammo2 = buy_at_jita(&ctx, &mut s2, EMP_S, 500).await[0];
+    let ammo2 = buy_at_jita(&ctx, &mut s2, EMP_S, 2_000).await[0];
     wire_ok(
         &ctx,
         &mut s2,
@@ -1935,22 +2012,31 @@ async fn test_insurance_voiding_and_12_week_expiry() {
         &[sell_entry(ship_mkt), PyRep::Bool(false), PyRep::Integer(90)],
     )
     .await;
-    let mkt_contract_after = wire_ok(
+    let mkt_contract_after = wire_call(
         &ctx,
         &mut s1,
         "insuranceSvc",
         None,
         "GetContractForShip",
         &[PyRep::Integer(ship_mkt)],
+        &HashMap::new(),
     )
     .await;
     assert!(
-        matches!(mkt_contract_after, PyRep::None),
-        "Market sell flow must void GetContractForShip"
+        matches!(mkt_contract_after, Ok(PyRep::None))
+            || mkt_contract_after
+                .as_ref()
+                .is_err_and(|e| e.code == "ShipNotFound"),
+        "Market sell flow must void GetContractForShip (got {mkt_contract_after:?})"
     );
     assert!(
         contract_in_list(&list_contracts(&ctx, &mut s1).await, ship_mkt).is_none(),
         "Market sell flow must void contract from GetContracts"
+    );
+    assert!(
+        !ctx.db
+            .with_snapshot(|s| s.insurance_contracts.contains_key(&ship_mkt)),
+        "Market sell flow must remove sold ship from s.insurance_contracts"
     );
 
     // Also exercise PlaceMultiSellOrder's direct contract-voiding path on a contract still present

@@ -1985,14 +1985,6 @@ pub async fn ensure_zarzakh_patrols_and_gate_guns(ctx: &ServerContext, solar_sys
                 specs.push((78_896, "ZarzakhPatrol", 0, pos + DVec3::new(1_500.0, -3_500.0, 0.0)));
             }
         }
-        for st in ctx.sde.stations.values().filter(|s| s.solar_system_id == ZARZAKH_SYSTEM_ID) {
-            if !has_nearby("ZarzakhGateGun", st.position) {
-                specs.push((79_183, "ZarzakhGateGun", 0, st.position + DVec3::new(5_000.0, 0.0, 0.0)));
-            }
-            if !has_nearby("ZarzakhPatrol", st.position) {
-                specs.push((78_897, "ZarzakhPatrol", 0, st.position + DVec3::new(-4_000.0, 2_000.0, 0.0)));
-            }
-        }
     } else {
         let mut outer_gates: Vec<DVec3> = ctx
             .sde
