@@ -222,6 +222,7 @@ fn aggression_manager_and_director_exact_timer_and_security_boundaries() {
 #[test]
 fn crimewatch_lock_corruption_campaigns_and_report_ring_buffer() {
     let ctx = test_ctx();
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
     let now = ctx.now_unix();
     let sys_active = 30_000_142;
     let sys_future = 30_000_144;
@@ -304,6 +305,11 @@ fn crimewatch_lock_corruption_campaigns_and_report_ring_buffer() {
         ctx.db.with_snapshot(|s| s.system_states[&sys_active].insurgency_corruption_stage),
         5
     );
+    ctx.advance_secs(1);
+    lock.with_crimewatch(|dir| {
+        assert_eq!(dir.system_corruption_stages.get(&sys_future).copied(), Some(5));
+        assert!(!dir.system_corruption_stages.contains_key(&sys_expired));
+    });
 
     // Empty push is no-op; 32 reports kept; 33rd evicts 1st
     lock.push_concord_reports(&[]);
@@ -347,6 +353,7 @@ fn crimewatch_lock_corruption_campaigns_and_report_ring_buffer() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn step_concord_arrival_boundary_and_bounty_sec_gain_intervals() {
     let ctx = test_ctx();
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
     let sys_id = 30_000_142;
     let crim = 90_000_001;
     let victim = 90_000_002;

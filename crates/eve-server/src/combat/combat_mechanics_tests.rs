@@ -548,6 +548,7 @@ async fn crimewatch_step_concord_guards_despawns_tick_and_kill_right_reuse() {
     use crate::services::combat_crimewatch::{with_mut_combat_runtime, SecStatusTransaction};
 
     let ctx = test_ctx();
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
     let sys_id = 30_000_142u32;
     let now = ctx.now_unix();
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
