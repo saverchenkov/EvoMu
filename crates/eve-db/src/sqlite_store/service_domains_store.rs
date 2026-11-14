@@ -124,27 +124,25 @@ fn load_domain_row_checked<T: Default + DeserializeOwned>(
     Ok(())
 }
 
-fn rollback_domain_row<T: Default + DeserializeOwned>(
+fn load_domain_row_for_rollback<T: Default + DeserializeOwned>(
     conn: &Connection,
     key: &str,
     expected_fp: u64,
-    dst: &mut T,
-) {
+) -> Result<T, String> {
     match conn.query_row(
         "SELECT payload_json FROM service_domain_state WHERE domain_key = ?1",
         params![key],
         |r| r.get::<_, String>(0),
     ) {
-        Ok(json) => {
-            if let Ok(parsed) = serde_json::from_str::<T>(&json) {
-                *dst = parsed;
-            }
-        }
-        Err(rusqlite::Error::QueryReturnedNoRows) if expected_fp == 0 => {
-            // Committed baseline was `T::default()` (stored as an omitted row); revert dirty mutations.
-            *dst = T::default();
-        }
-        Err(_) => {}
+        Ok(json) => serde_json::from_str::<T>(&json)
+            .map_err(|e| format!("rollback service_domain_state '{key}' parse failed: {e}")),
+        Err(rusqlite::Error::QueryReturnedNoRows) if expected_fp == 0 => Ok(T::default()),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Err(format!(
+            "rollback service_domain_state '{key}' missing row for non-zero fingerprint {expected_fp}"
+        )),
+        Err(e) => Err(format!(
+            "rollback service_domain_state '{key}' query failed: {e}"
+        )),
     }
 }
 
@@ -176,25 +174,40 @@ fn sync_domain_row<T: Default + PartialEq + Serialize>(
     Ok(true)
 }
 
+macro_rules! for_each_service_domain_batch {
+    ($cb:ident $($extra:tt)*) => {
+        $cb!(
+            $($extra)*
+            pve_special_sites: "pve_special_sites",
+            crab_beacons: "crab_beacons",
+            abyssal_state: "abyssal_state",
+            dungeon_runtime: "dungeon_runtime",
+            dungeon_editor: "dungeon_editor",
+            fob_observatory_state: "fob_observatory_state",
+            mining_and_ess_state: "mining_and_ess_state",
+            pvp_filament_state: "pvp_filament_state",
+            tourney_state: "tourney_state",
+            deployable_state: "deployable_state",
+            superweapon_runtime: "superweapon_runtime",
+            insurgency_complex_ops: "insurgency_complex_ops",
+            node_graph_state: "node_graph_state",
+            seasons_and_campaigns: "seasons_and_campaigns",
+            quasar_commerce: "quasar_commerce",
+            fleet_and_social_ops: "fleet_and_social_ops",
+            cluster_and_runtime: "cluster_and_runtime",
+        );
+    };
+}
+
+macro_rules! __dispatch_service_domain_each {
+    ($cb:ident; $($field:ident : $key:expr,)+) => {
+        $( $cb!($field, $key); )+
+    };
+}
+
 macro_rules! for_each_service_domain {
     ($cb:ident) => {
-        $cb!(pve_special_sites, "pve_special_sites");
-        $cb!(crab_beacons, "crab_beacons");
-        $cb!(abyssal_state, "abyssal_state");
-        $cb!(dungeon_runtime, "dungeon_runtime");
-        $cb!(dungeon_editor, "dungeon_editor");
-        $cb!(fob_observatory_state, "fob_observatory_state");
-        $cb!(mining_and_ess_state, "mining_and_ess_state");
-        $cb!(pvp_filament_state, "pvp_filament_state");
-        $cb!(tourney_state, "tourney_state");
-        $cb!(deployable_state, "deployable_state");
-        $cb!(superweapon_runtime, "superweapon_runtime");
-        $cb!(insurgency_complex_ops, "insurgency_complex_ops");
-        $cb!(node_graph_state, "node_graph_state");
-        $cb!(seasons_and_campaigns, "seasons_and_campaigns");
-        $cb!(quasar_commerce, "quasar_commerce");
-        $cb!(fleet_and_social_ops, "fleet_and_social_ops");
-        $cb!(cluster_and_runtime, "cluster_and_runtime");
+        for_each_service_domain_batch!(__dispatch_service_domain_each $cb;);
     };
 }
 
@@ -216,17 +229,28 @@ pub fn compute_service_domains_fingerprints(
     fp
 }
 
-fn load_entity_kv_checked(
+fn read_entity_kv_map(
     conn: &Connection,
-    snap: &mut WorldStateSnapshot,
     ctx: &mut super::quarantine::LoadContext,
-) -> Result<(), String> {
-    snap.entity_kv.clear();
+    fail_on_prepare_err: bool,
+) -> Result<
+    std::collections::BTreeMap<
+        crate::service_domains::EntityKvKey,
+        crate::service_domains::EntityKvRow,
+    >,
+    String,
+> {
+    let mut out = std::collections::BTreeMap::new();
     let mut stmt = match conn
         .prepare("SELECT ns, entity_id, sub_key, value, updated_unix FROM entity_kv")
     {
         Ok(s) => s,
-        Err(_) => return Ok(()),
+        Err(e) => {
+            if fail_on_prepare_err {
+                return Err(format!("rollback entity_kv prepare failed: {e}"));
+            }
+            return Ok(out);
+        }
     };
     let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
     let mut quarantined_pks: Vec<(rusqlite::types::Value, rusqlite::types::Value, rusqlite::types::Value)> =
@@ -280,7 +304,7 @@ fn load_entity_kv_checked(
         })();
         match parsed_res {
             Ok((k, v)) => {
-                snap.entity_kv.insert(k, v);
+                out.insert(k, v);
             }
             Err(err) => {
                 ctx.record_bad_row("entity_kv", "entity_kv", key_display, raw_payload, err, None)?;
@@ -304,6 +328,16 @@ fn load_entity_kv_checked(
             );
         }
     }
+    Ok(out)
+}
+
+fn load_entity_kv_checked(
+    conn: &Connection,
+    snap: &mut WorldStateSnapshot,
+    ctx: &mut super::quarantine::LoadContext,
+) -> Result<(), String> {
+    let loaded = read_entity_kv_map(conn, ctx, false)?;
+    snap.entity_kv = loaded;
     Ok(())
 }
 
@@ -357,20 +391,22 @@ pub fn sync_entity_kv(
     Ok(changed)
 }
 
-fn rollback_entity_kv(
+fn load_entity_kv_for_rollback(
     conn: &Connection,
-    snap: &mut WorldStateSnapshot,
     fp: &TableFingerprints,
-) {
-    if fp_domain(&snap.entity_kv) != fp.service_domains.entity_kv_fp
-        || snap.entity_kv.len() != fp.service_domains.entity_kv_rows.len()
-    {
-        let _ = load_entity_kv_checked(
-            conn,
-            snap,
-            &mut super::quarantine::LoadContext::quarantine_in_memory(),
-        );
+) -> Result<
+    std::collections::BTreeMap<
+        crate::service_domains::EntityKvKey,
+        crate::service_domains::EntityKvRow,
+    >,
+    String,
+> {
+    let mut ctx = super::quarantine::LoadContext::new(false);
+    let out = read_entity_kv_map(conn, &mut ctx, true)?;
+    if out.is_empty() && !fp.service_domains.entity_kv_rows.is_empty() {
+        return Err("rollback entity_kv returned empty table for non-empty baseline".into());
     }
+    Ok(out)
 }
 
 pub fn load_service_domains_checked(
@@ -481,18 +517,56 @@ pub fn sync_service_domains(
     Ok(changed)
 }
 
+fn rollback_service_domains_inner(
+    conn: &Connection,
+    snap: &mut WorldStateSnapshot,
+    fp: &TableFingerprints,
+) -> Result<(), String> {
+    macro_rules! stage_and_commit_all {
+        ($($field:ident : $key:expr,)+) => {
+            $(
+                let $field = if fp_domain(&snap.$field) != fp.service_domains.$field {
+                    Some(load_domain_row_for_rollback(
+                        conn,
+                        $key,
+                        fp.service_domains.$field,
+                    )?)
+                } else {
+                    None
+                };
+            )+
+            let staged_entity_kv = if fp_domain(&snap.entity_kv) != fp.service_domains.entity_kv_fp
+                || snap.entity_kv.len() != fp.service_domains.entity_kv_rows.len()
+            {
+                Some(load_entity_kv_for_rollback(conn, fp)?)
+            } else {
+                None
+            };
+            $(
+                if let Some(val) = $field {
+                    snap.$field = val;
+                }
+            )+
+            if let Some(kv) = staged_entity_kv {
+                snap.entity_kv = kv;
+            }
+        };
+    }
+    for_each_service_domain_batch!(stage_and_commit_all);
+    Ok(())
+}
+
+/// Restores dirty typed service domains and `entity_kv` from SQLite into temporaries,
+/// only mutating `snap` after every required query and parse succeeds.
 pub fn rollback_service_domains(
     conn: &Connection,
     snap: &mut WorldStateSnapshot,
     fp: &TableFingerprints,
-) {
-    macro_rules! rollback_one {
-        ($field:ident, $key:expr) => {
-            if fp_domain(&snap.$field) != fp.service_domains.$field {
-                rollback_domain_row(conn, $key, fp.service_domains.$field, &mut snap.$field);
-            }
-        };
+) -> Result<(), String> {
+    if let Err(err) = rollback_service_domains_inner(conn, snap, fp) {
+        crate::persistence::record_persist_failure();
+        tracing::error!("rollback_service_domains failed closed without mutating snapshot: {err}");
+        return Err(err);
     }
-    for_each_service_domain!(rollback_one);
-    rollback_entity_kv(conn, snap, fp);
+    Ok(())
 }

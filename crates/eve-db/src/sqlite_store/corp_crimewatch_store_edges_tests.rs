@@ -156,7 +156,7 @@ fn corp_crimewatch_sync_error_and_rollback_fallbacks() {
     assert_eq!(loaded.zarzakh_gate_locks.get(&1001), Some(&(1, 1_700_000_000)));
     assert!(loaded.war_state.wars.contains_key(&1));
 
-    // Corrupt JSON on warfare key -> rollback restores clean domains and preserves non-default warfare state
+    // Corrupt JSON on warfare key -> rollback fails closed without partial mutation or wiping
     conn.execute(
         "INSERT OR REPLACE INTO d6_corp_crimewatch_kv (store_key, payload_json) VALUES (?1, 'corrupt')",
         [KEY_WARFARE],
@@ -164,9 +164,10 @@ fn corp_crimewatch_sync_error_and_rollback_fallbacks() {
     .unwrap();
     snap.corp_hangar_divisions.clear();
     snap.war_state.wars.insert(2, Default::default());
-    rollback_d6_corp_crimewatch(&conn, &mut snap, &fp);
+    let err = rollback_d6_corp_crimewatch(&conn, &mut snap, &fp).unwrap_err();
+    assert!(err.contains("warfare_domain"));
     assert!(snap.war_state.wars.contains_key(&2));
-    assert!(snap.corp_hangar_divisions.contains_key(&98000001));
+    assert!(snap.corp_hangar_divisions.is_empty());
 
     // Missing row in DB triggers default rollback for crimewatch domain when baseline fp is empty
     conn.execute(
@@ -179,8 +180,10 @@ fn corp_crimewatch_sync_error_and_rollback_fallbacks() {
         ..TableFingerprints::default()
     };
     snap.zarzakh_gate_locks.insert(9999, (2, 123));
-    rollback_d6_corp_crimewatch(&conn, &mut snap, &empty_fp);
-    assert!(snap.zarzakh_gate_locks.is_empty());
+    let mut cw_only = WorldStateSnapshot::default();
+    cw_only.zarzakh_gate_locks.insert(9999, (2, 123));
+    rollback_d6_corp_crimewatch(&conn, &mut cw_only, &empty_fp).unwrap();
+    assert!(cw_only.zarzakh_gate_locks.is_empty());
 
     // SQL error during sync on each dirty domain preserves fp unchanged
     let mut conn_err = Connection::open_in_memory().unwrap();
@@ -232,6 +235,51 @@ fn corp_crimewatch_sync_error_and_rollback_fallbacks() {
         ..TableFingerprints::default()
     };
     let mut dirty_dropped = clean_snap.clone();
-    rollback_d6_corp_crimewatch(&conn, &mut dirty_dropped, &clean_fp);
+    rollback_d6_corp_crimewatch(&conn, &mut dirty_dropped, &clean_fp).unwrap();
     assert_eq!(dirty_dropped.next_entity_id, clean_snap.next_entity_id);
+    dirty_dropped.zarzakh_gate_locks.insert(77, (1, 100));
+    assert!(rollback_d6_corp_crimewatch(&conn, &mut dirty_dropped, &clean_fp).is_err());
+    assert!(dirty_dropped.zarzakh_gate_locks.contains_key(&77));
+}
+
+#[test]
+fn rollback_d6_corp_crimewatch_fails_closed_on_missing_nonempty_row_without_partial_overwrite() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    init_migrations_table(&conn);
+    apply_d6_corp_crimewatch_migration(&conn).unwrap();
+
+    let mut base = WorldStateSnapshot::default();
+    base.corp_hangar_divisions
+        .entry(98_000_001)
+        .or_default()
+        .insert(1, "BaseHangar".into());
+    base.zarzakh_gate_locks.insert(1001, (1, 1_700_000_000));
+    base.war_state.wars.insert(1, Default::default());
+
+    let mut fp = TableFingerprints::default();
+    {
+        let tx = conn.transaction().unwrap();
+        assert!(sync_d6_corp_crimewatch(&tx, &base, &mut fp).unwrap());
+        tx.commit().unwrap();
+    }
+
+    // Mutate all 3 domains in memory and delete `KEY_CRIMEWATCH` (middle row) while keeping non-empty fp.
+    let mut dirty = base.clone();
+    dirty.corp_hangar_divisions.clear();
+    dirty.zarzakh_gate_locks.insert(2002, (2, 2_000));
+    dirty.war_state.wars.insert(2, Default::default());
+
+    conn.execute(
+        "DELETE FROM d6_corp_crimewatch_kv WHERE store_key = ?1",
+        [KEY_CRIMEWATCH],
+    )
+    .unwrap();
+    let failures_before = crate::persist_failures_total();
+    let err = rollback_d6_corp_crimewatch(&conn, &mut dirty, &fp).unwrap_err();
+    assert!(err.contains("crimewatch_domain"), "unexpected err: {err}");
+    assert!(crate::persist_failures_total() >= failures_before + 1);
+    // Neither the earlier `corp_gov` domain nor later `warfare` domain was mutated.
+    assert!(dirty.corp_hangar_divisions.is_empty());
+    assert!(dirty.zarzakh_gate_locks.contains_key(&2002));
+    assert!(dirty.war_state.wars.contains_key(&2));
 }

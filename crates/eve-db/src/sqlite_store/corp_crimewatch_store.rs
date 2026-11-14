@@ -16,7 +16,7 @@ pub(crate) use crate::sqlite_store::fingerprints::{FnvSerError, FnvSerializer};
 use crate::types::*;
 use eve_sde::SolarSystemId;
 use rusqlite::{params, Connection, Transaction};
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 pub const D6_CORP_CRIMEWATCH_SCHEMA_VERSION: i64 = 4;
@@ -534,74 +534,98 @@ pub fn sync_d6_corp_crimewatch(
     Ok(changed)
 }
 
+fn load_domain_payload_for_rollback<P: Default + DeserializeOwned>(
+    conn: &Connection,
+    key: &str,
+    expected_fp: u64,
+    empty_fp: u64,
+) -> Result<P, String> {
+    match conn.query_row(
+        "SELECT payload_json FROM d6_corp_crimewatch_kv WHERE store_key = ?1",
+        params![key],
+        |r| r.get::<_, String>(0),
+    ) {
+        Ok(js) => serde_json::from_str::<P>(&js)
+            .map_err(|e| format!("rollback d6_corp_crimewatch_kv '{key}' parse failed: {e}")),
+        Err(rusqlite::Error::QueryReturnedNoRows) if expected_fp == empty_fp => Ok(P::default()),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Err(format!(
+            "rollback d6_corp_crimewatch_kv '{key}' missing row for non-default baseline"
+        )),
+        Err(e) => Err(format!(
+            "rollback d6_corp_crimewatch_kv '{key}' query failed: {e}"
+        )),
+    }
+}
+
+/// Restores dirty `D-6` corp-governance, crimewatch, and warfare domains from SQLite into
+/// temporaries, only mutating `snap` after every required query and parse succeeds.
 pub fn rollback_d6_corp_crimewatch(
     conn: &Connection,
     snap: &mut WorldStateSnapshot,
     fp: &TableFingerprints,
-) {
+) -> Result<(), String> {
     let dfp = &fp.d6_corp_crimewatch;
-
-    if canonical_fp(&CorpGovernanceDomainRef::from_snapshot(snap)) != dfp.corp_governance_fp {
-        match conn.query_row(
-            "SELECT payload_json FROM d6_corp_crimewatch_kv WHERE store_key = ?1",
-            params![KEY_CORP_GOV],
-            |r| r.get::<_, String>(0),
-        ) {
-            Ok(js) => {
-                if let Ok(payload) = serde_json::from_str::<CorpGovernanceDomainPayload>(&js) {
-                    payload.apply_to_snapshot(snap);
-                }
-            }
-            Err(_) => {
-                let empty = WorldStateSnapshot::default();
-                if dfp.corp_governance_fp
-                    == canonical_fp(&CorpGovernanceDomainRef::from_snapshot(&empty))
-                {
-                    CorpGovernanceDomainPayload::default().apply_to_snapshot(snap);
-                }
-            }
-        }
+    let dirty_corp = canonical_fp(&CorpGovernanceDomainRef::from_snapshot(snap)) != dfp.corp_governance_fp;
+    let dirty_cw = canonical_fp(&CrimewatchDomainRef::from_snapshot(snap)) != dfp.crimewatch_fp;
+    let dirty_war = canonical_fp(&WarfareDomainRef::from_snapshot(snap)) != dfp.warfare_fp;
+    if !(dirty_corp || dirty_cw || dirty_war) {
+        return Ok(());
     }
 
-    if canonical_fp(&CrimewatchDomainRef::from_snapshot(snap)) != dfp.crimewatch_fp {
-        match conn.query_row(
-            "SELECT payload_json FROM d6_corp_crimewatch_kv WHERE store_key = ?1",
-            params![KEY_CRIMEWATCH],
-            |r| r.get::<_, String>(0),
-        ) {
-            Ok(js) => {
-                if let Ok(payload) = serde_json::from_str::<CrimewatchDomainPayload>(&js) {
-                    payload.apply_to_snapshot(snap);
-                }
-            }
-            Err(_) => {
-                let empty = WorldStateSnapshot::default();
-                if dfp.crimewatch_fp == canonical_fp(&CrimewatchDomainRef::from_snapshot(&empty)) {
-                    CrimewatchDomainPayload::default().apply_to_snapshot(snap);
-                }
-            }
-        }
-    }
+    let empty = WorldStateSnapshot::default();
+    let staged_res = (|| -> Result<_, String> {
+        let staged_corp = if dirty_corp {
+            Some(load_domain_payload_for_rollback::<CorpGovernanceDomainPayload>(
+                conn,
+                KEY_CORP_GOV,
+                dfp.corp_governance_fp,
+                canonical_fp(&CorpGovernanceDomainRef::from_snapshot(&empty)),
+            )?)
+        } else {
+            None
+        };
+        let staged_cw = if dirty_cw {
+            Some(load_domain_payload_for_rollback::<CrimewatchDomainPayload>(
+                conn,
+                KEY_CRIMEWATCH,
+                dfp.crimewatch_fp,
+                canonical_fp(&CrimewatchDomainRef::from_snapshot(&empty)),
+            )?)
+        } else {
+            None
+        };
+        let staged_war = if dirty_war {
+            Some(load_domain_payload_for_rollback::<WarfareDomainPayload>(
+                conn,
+                KEY_WARFARE,
+                dfp.warfare_fp,
+                canonical_fp(&WarfareDomainRef::from_snapshot(&empty)),
+            )?)
+        } else {
+            None
+        };
+        Ok((staged_corp, staged_cw, staged_war))
+    })();
 
-    if canonical_fp(&WarfareDomainRef::from_snapshot(snap)) != dfp.warfare_fp {
-        match conn.query_row(
-            "SELECT payload_json FROM d6_corp_crimewatch_kv WHERE store_key = ?1",
-            params![KEY_WARFARE],
-            |r| r.get::<_, String>(0),
-        ) {
-            Ok(js) => {
-                if let Ok(payload) = serde_json::from_str::<WarfareDomainPayload>(&js) {
-                    payload.apply_to_snapshot(snap);
-                }
-            }
-            Err(_) => {
-                let empty = WorldStateSnapshot::default();
-                if dfp.warfare_fp == canonical_fp(&WarfareDomainRef::from_snapshot(&empty)) {
-                    WarfareDomainPayload::default().apply_to_snapshot(snap);
-                }
-            }
+    let (staged_corp, staged_cw, staged_war) = match staged_res {
+        Ok(staged) => staged,
+        Err(err) => {
+            crate::persistence::record_persist_failure();
+            tracing::error!("rollback_d6_corp_crimewatch failed closed without mutating snapshot: {err}");
+            return Err(err);
         }
+    };
+
+    if let Some(payload) = staged_corp {
+        payload.apply_to_snapshot(snap);
     }
+    if let Some(payload) = staged_cw {
+        payload.apply_to_snapshot(snap);
+    }
+    if let Some(payload) = staged_war {
+        payload.apply_to_snapshot(snap);
+    }
+    Ok(())
 }
 #[cfg(test)] #[path = "corp_crimewatch_store_unit_tests.rs"] mod corp_crimewatch_store_unit_tests;
 #[cfg(test)] #[path = "corp_crimewatch_store_edges_tests.rs"] mod corp_crimewatch_store_edges_tests;

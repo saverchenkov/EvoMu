@@ -419,7 +419,7 @@ fn all_27_batch4_blobs_and_mining_ledger_roundtrip_and_rollback() {
 
     // Wipe a dirty snapshot and verify rollback_d6_batch4 restores all blobs + mining_ledger
     let mut dirty = WorldStateSnapshot::default();
-    rollback_d6_batch4(&conn, &mut dirty, &fp);
+    rollback_d6_batch4(&conn, &mut dirty, &fp).unwrap();
     assert_eq!(dirty.moon_extractions, full.moon_extractions);
     assert_eq!(dirty.auto_moon_miners, full.auto_moon_miners);
     assert_eq!(dirty.observer_mining_ledger, full.observer_mining_ledger);
@@ -451,4 +451,74 @@ fn all_27_batch4_blobs_and_mining_ledger_roundtrip_and_rollback() {
     assert_eq!(dirty.service_state_blobs, full.service_state_blobs);
     assert_eq!(dirty.insurance_contracts, full.insurance_contracts);
     let _ = (HashMap::<i64, i64>::new(), HashSet::<i64>::new());
+}
+
+#[test]
+fn rollback_d6_batch4_fails_closed_without_wiping_or_partial_overwrite() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    apply_migrations(&conn).unwrap();
+    apply_d6_batch4_migration(&conn).unwrap();
+
+    let full = populate_all_27_batch4_blobs_and_mining_ledger();
+    let mut fp = TableFingerprints::default();
+    {
+        let tx = conn.transaction().unwrap();
+        assert!(sync_d6_batch4(&tx, &full, &mut fp).unwrap());
+        tx.commit().unwrap();
+    }
+
+    let mut dirty = full.clone();
+    dirty.moon_extractions.clear();
+    dirty.insurance_contracts.clear();
+    dirty.mining_ledger.clear();
+    dirty.mining_ledger.push(MiningLedgerRecord {
+        character_id: 90_000_999,
+        solar_system_id: 30_000_142,
+        type_id: 1230,
+        quantity: 9_999,
+        date: "2026-01-03".into(),
+        timestamp_unix: 1_700_009_000,
+    });
+
+    // 1. Corrupt `insurance_contracts` JSON (last blob key): must fail closed and NOT overwrite
+    // earlier `moon_extractions` or replace `mining_ledger` with a partial reload.
+    conn.execute(
+        "UPDATE world_kv_blobs SET blob_json = '{corrupt' WHERE blob_key = 'insurance_contracts'",
+        [],
+    )
+    .unwrap();
+    let failures_before = crate::persist_failures_total();
+    let err = rollback_d6_batch4(&conn, &mut dirty, &fp).unwrap_err();
+    assert!(err.contains("insurance_contracts"), "unexpected err: {err}");
+    assert!(crate::persist_failures_total() >= failures_before + 1);
+    assert!(dirty.moon_extractions.is_empty());
+    assert!(dirty.insurance_contracts.is_empty());
+    assert_eq!(dirty.mining_ledger.len(), 1);
+    assert_eq!(dirty.mining_ledger[0].character_id, 90_000_999);
+
+    // 2. Delete a non-empty baseline blob row while dirty: must treat missing committed row as
+    // failure rather than silently resetting to empty.
+    {
+        let tx = conn.transaction().unwrap();
+        // Restore valid insurance_contracts row, then remove `moon_extractions` from SQLite.
+        let mut repair_fp = TableFingerprints::default();
+        assert!(sync_d6_batch4(&tx, &full, &mut repair_fp).unwrap());
+        tx.commit().unwrap();
+    }
+    conn.execute(
+        "DELETE FROM world_kv_blobs WHERE blob_key = 'moon_extractions'",
+        [],
+    )
+    .unwrap();
+    let err_missing = rollback_d6_batch4(&conn, &mut dirty, &fp).unwrap_err();
+    assert!(err_missing.contains("moon_extractions"), "unexpected err: {err_missing}");
+    assert!(dirty.moon_extractions.is_empty());
+    assert!(dirty.insurance_contracts.is_empty());
+    assert_eq!(dirty.mining_ledger[0].character_id, 90_000_999);
+
+    // 3. Dropped `char_mining_ledger` table fails closed when `mining_ledger` is dirty.
+    conn.execute("DROP TABLE char_mining_ledger", []).unwrap();
+    let err_ledger = rollback_d6_batch4(&conn, &mut dirty, &fp).unwrap_err();
+    assert!(!err_ledger.is_empty());
+    assert_eq!(dirty.mining_ledger[0].character_id, 90_000_999);
 }
