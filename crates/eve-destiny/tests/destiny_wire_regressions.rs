@@ -314,6 +314,11 @@ async fn test_destiny_ballpark_state_events_fleet_and_controllers() {
     let PyRep::Tuple(ssu_outer) = &ssu_rep else { panic!("Expected tuple") };
     let PyRep::Tuple(ssu_action) = &ssu_outer[1] else { panic!("Expected action tuple") };
     assert_eq!(ssu_action[0].as_str(), Some("OnShipStateUpdate"));
+    let PyRep::Tuple(ssu_args) = &ssu_action[1] else { panic!("Expected OnShipStateUpdate args tuple") };
+    let PyRep::Dict(ssu_dict) = &ssu_args[0] else { panic!("Expected shipState dict") };
+    let PyRep::Tuple(ssu_mod_tuple) = &ssu_dict[0].1 else { panic!("Expected moduleState 7-tuple") };
+    assert_eq!(ssu_mod_tuple.len(), 7);
+    assert_eq!(ssu_mod_tuple[6], PyRep::None);
 
     // 5. OnSlimItemChange
     let sic_rep = encode_destiny_event(46, &DestinyEvent::OnSlimItemChange { ball_id: ship_id }, Some(&park));

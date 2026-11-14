@@ -477,3 +477,50 @@ async fn omega_weekly_sp_abort_respec_strip_fitting_and_container_hooks() {
         "AssetSafetyLocked"
     );
 }
+
+#[test]
+fn obsolete_skill_migration_notifications_split_login_and_session() {
+    let ctx = test_ctx();
+    let cid = 90_000_001_i64;
+    let uid = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&cid).map(|c| c.user_id).unwrap_or(1));
+    ctx.db
+        .acquire_online_lock(uid, 100, Some(cid), true, ctx.now_unix())
+        .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(cid).or_default().insert(
+            3374,
+            TrainedSkillRecord {
+                type_id: 3374,
+                level: 2,
+                skill_points: 10_000.0,
+            },
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(cid);
+
+    let (removed, refunded) = migrate_obsolete_skills_on_login(&ctx, cid);
+    assert_eq!((removed, refunded), (1, 10_000.0));
+    let login_notifs = ctx.drain_notifications_for_char(cid);
+    assert!(!login_notifs.iter().any(|n| n.event == "OnServerSkillsRemoved"));
+    assert!(!login_notifs.iter().any(|n| n.event == "OnSkillForcedRefresh"));
+    assert!(login_notifs.iter().any(|n| n.event == "OnFreeSkillPointsChanged"));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(cid).or_default().insert(
+            3374,
+            TrainedSkillRecord {
+                type_id: 3374,
+                level: 2,
+                skill_points: 10_000.0,
+            },
+        );
+    });
+    let (removed2, refunded2) = migrate_obsolete_skills_for_character(&ctx, cid);
+    assert_eq!((removed2, refunded2), (1, 10_000.0));
+    let session_notifs = ctx.drain_notifications_for_char(cid);
+    assert!(!session_notifs.iter().any(|n| n.event == "OnServerSkillsRemoved"));
+    assert!(session_notifs.iter().any(|n| n.event == "OnSkillForcedRefresh"));
+    assert!(session_notifs.iter().any(|n| n.event == "OnFreeSkillPointsChanged"));
+}

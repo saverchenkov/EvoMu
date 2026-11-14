@@ -1840,7 +1840,7 @@ async fn test_z2_systematic_notification_emission_pipelines_and_scope_multicast(
     assert_eq!(notifs5[0].args[1], PyRep::Integer(16));
     assert_eq!(notifs5[0].args[3], PyRep::Integer(1)); // start = 1
     assert_eq!(notifs5[0].args[4], PyRep::Integer(1)); // active = 1
-    assert_eq!(notifs5[0].args[7], PyRep::Integer(6000)); // duration_ms = 6000
+    assert_eq!(notifs5[0].args[7], PyRep::Real(6000.0)); // duration_ms = 6000.0
     assert_eq!(notifs5[0].args[8], PyRep::Integer(1)); // repeat = 1
 
     // =========================================================================

@@ -1064,6 +1064,7 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
                                 PyRep::Integer(time_ft),
                                 PyRep::Real(new_val),
                                 PyRep::Real(old_val),
+                                PyRep::None,
                             ]),
                         )
                     })

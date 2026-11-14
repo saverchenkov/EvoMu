@@ -281,7 +281,13 @@ pub(crate) fn emit_server_skills_removed(ctx: &ServerContext, char_id: i64, remo
                         .copied()
                 })
                 .unwrap_or(1.0);
-            let sp = crate::formulas::sp_for_skill_level(rank, lvl);
+            let sp = if lvl == 0 {
+                // V24 `SkillsSvc._UpdateMySkillsAndReturnLevelsTrained` only deletes a skill
+                // when `trainedSkillPoints < 0` and `virtualSkillLevel is None` (`>= 0` inserts/updates).
+                -1.0
+            } else {
+                crate::formulas::sp_for_skill_level(rank, lvl)
+            };
             let lvl_i64 = lvl as i64;
             (
                 PyRep::Integer(tid as i64),

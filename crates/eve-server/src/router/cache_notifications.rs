@@ -1206,7 +1206,7 @@ impl ServerContext {
                     PyRep::Integer(effect_id as i64),
                 ]),
                 PyRep::Integer(now_ticks),
-                PyRep::Integer(duration_ms),
+                PyRep::Real((duration_ms.max(0)) as f64),
                 PyRep::Integer(repeat as i64),
                 PyRep::Integer(0),
                 PyRep::None,

@@ -230,7 +230,14 @@ async fn test_feat_skills_history_events_and_obsolete_refund() {
     assert!((ch_post.skill_points - (sp_pre_obs - 9_500.0)).abs() < 1e-3);
     assert!((ch_post.free_skill_points - (free_pre_obs + 9_500.0)).abs() < 1e-3);
     let notifs = ctx2.drain_notifications_for_char(char_id);
-    assert!(notifs.iter().any(|n| n.event == "OnServerSkillsRemoved"));
+    assert!(
+        !notifs.iter().any(|n| n.event == "OnServerSkillsRemoved"),
+        "login obsolete-skill migration must not emit OnServerSkillsRemoved for pre-login removed skills"
+    );
+    assert!(
+        !notifs.iter().any(|n| n.event == "OnSkillForcedRefresh"),
+        "login obsolete-skill migration runs before GetSkills and must not emit OnSkillForcedRefresh"
+    );
     assert!(notifs.iter().any(|n| n.event == "OnFreeSkillPointsChanged"));
 
     let PyRep::Rowset { rows, .. } = rpc(&ctx2, &mut sess2, "skillMgr2", "GetSkillHistory", &[]).await.unwrap() else { panic!("Expected Rowset") };

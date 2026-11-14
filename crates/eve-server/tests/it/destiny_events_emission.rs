@@ -302,11 +302,13 @@ async fn test_cloak_ball_emitted_on_cloak_toggle() {
     assert_eq!(ship_state.len(), 1, "activating cloak emits OnShipStateUpdate");
     let PyRep::Dict(mod_dict) = &ship_state[0][0] else { panic!("shipState must be a dict") };
     let (_, PyRep::Tuple(mod_tuple)) = mod_dict.iter().find(|(k, _)| *k == PyRep::Integer(cloak_id)).expect("cloak entry") else {
-        panic!("moduleState must be a 6-tuple");
+        panic!("moduleState must be a 7-tuple");
     };
-    assert_eq!(mod_tuple.len(), 6);
+    assert_eq!(mod_tuple.len(), 7);
     assert_eq!((&mod_tuple[0], &mod_tuple[1], &mod_tuple[2]), (&PyRep::Integer(PILOT), &PyRep::Integer(cloak_id), &PyRep::Integer(2)));
+    assert!(mod_tuple[3].as_i64().unwrap_or(0) > 0);
     assert_eq!((real(&mod_tuple[4]), real(&mod_tuple[5])), (1.0, 0.0));
+    assert_eq!(mod_tuple[6], PyRep::None);
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.remove(&cloak_id);
@@ -317,6 +319,10 @@ async fn test_cloak_ball_emitted_on_cloak_toggle() {
     let off = find(&actions, "CloakBall");
     assert_eq!(off.len(), 1, "deactivating the cloak emits one CloakBall");
     assert_eq!(off[0].as_slice(), &[PyRep::Integer(ship_id), PyRep::Bool(false)]);
+    assert!(
+        find(&actions, "OnShipStateUpdate").is_empty(),
+        "decloak must not emit OnShipStateUpdate attributeIsOnline=0.0"
+    );
     // No state change, no CloakBall.
     ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce), "CmdStop", &[], &kw, None).await.expect("CmdStop");
     assert!(find(&drain_actions(&handle, ship_id).await, "CloakBall").is_empty());

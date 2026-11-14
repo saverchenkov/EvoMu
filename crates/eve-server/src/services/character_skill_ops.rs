@@ -19,10 +19,32 @@ fn is_obsolete_skill(sde: &eve_sde::SdeRegistry, sk_id: u32) -> bool {
 ///
 /// Detects deprecated or unpublished skill types in the character's trained skills,
 /// removes them, and refunds 100% of trained skill points to `free_skill_points`.
-/// Emits `OnServerSkillsRemoved` and `OnFreeSkillPointsChanged` notifications and logs history event 38.
+/// Emits `OnSkillForcedRefresh` (mid-session callers) and `OnFreeSkillPointsChanged`,
+/// and logs history event 38. Never emits `OnServerSkillsRemoved` alongside
+/// `OnSkillForcedRefresh`, which would race V24 `SkillsSvc.ForceRefresh()` resetting
+/// `self.myskills = None`.
 pub fn migrate_obsolete_skills_for_character(
     ctx: &ServerContext,
     char_id: i64,
+) -> (usize, f64) {
+    migrate_obsolete_skills_inner(ctx, char_id, true)
+}
+
+/// Runs obsolete skill migration during character selection before the client calls `GetSkills`.
+///
+/// Omits `OnServerSkillsRemoved` and `OnSkillForcedRefresh` because the migrated skill is already
+/// absent from the initial `GetSkills` response and `SkillsSvc.myskills` is not primed yet.
+pub(crate) fn migrate_obsolete_skills_on_login(
+    ctx: &ServerContext,
+    char_id: i64,
+) -> (usize, f64) {
+    migrate_obsolete_skills_inner(ctx, char_id, false)
+}
+
+fn migrate_obsolete_skills_inner(
+    ctx: &ServerContext,
+    char_id: i64,
+    emit_forced_refresh: bool,
 ) -> (usize, f64) {
     // Guard against incomplete SDE catalogs so missing entries never wipe valid character skills.
     let has_core_skills = ctx
@@ -90,9 +112,9 @@ pub fn migrate_obsolete_skills_for_character(
 
     match res {
         Ok((to_refund, total_sp, new_free_sp)) if !to_refund.is_empty() => {
-            let removed_pairs: Vec<(u32, u8)> = to_refund.iter().map(|&(sk, _)| (sk, 0u8)).collect();
-            super::jump_clone_names::emit_server_skills_removed(ctx, char_id, &removed_pairs);
-            super::notify_emitters_skills_trade_godma::emit_skill_forced_refresh(ctx, char_id);
+            if emit_forced_refresh {
+                super::notify_emitters_skills_trade_godma::emit_skill_forced_refresh(ctx, char_id);
+            }
             ctx.emit_typed(
                 NotificationTarget::Character(char_id),
                 crate::router::notify_registry::OnFreeSkillPointsChanged {
