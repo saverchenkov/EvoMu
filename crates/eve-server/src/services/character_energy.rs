@@ -53,6 +53,12 @@ fn unix_to_filetime(u: u64) -> i64 {
 /// Converts a `CharacterEnergyState` into a client-compatible `PyRep::KeyVal`.
 pub fn energy_to_keyval(state: &CharacterEnergyState) -> PyRep {
     let hourly_gain = state.recharge_rate * 60.0;
+    let energy_range = state.max_energy.max(0);
+    let normalised = if energy_range > 0 {
+        ((state.current_energy as f64) / (energy_range as f64)).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     PyRep::keyval([
         ("currentEnergy", PyRep::Integer(state.current_energy)),
         ("maxEnergy", PyRep::Integer(state.max_energy)),
@@ -64,6 +70,9 @@ pub fn energy_to_keyval(state: &CharacterEnergyState) -> PyRep {
         ("rechargeTickPeriod", PyRep::Integer(3_600)),
         ("minEnergyLevel", PyRep::Integer(0)),
         ("quiescentEnergyLevel", PyRep::Integer(state.max_energy)),
+        ("isAtQuiescentLevel", PyRep::Bool(state.current_energy >= state.max_energy)),
+        ("energyRange", PyRep::Integer(energy_range)),
+        ("normalisedEnergyLevel", PyRep::Real(normalised)),
     ])
 }
 

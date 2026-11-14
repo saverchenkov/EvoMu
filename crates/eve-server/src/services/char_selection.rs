@@ -54,6 +54,7 @@ pub fn get_character_selection_data(
     ])]);
     let (training_details, rows, wars) = ctx.db.with_snapshot(|snap| {
         let store = super::account_services::load_store(snap);
+        let lifecycle_store = super::character_lifecycle::load_store(snap);
         let mct_slots: Vec<u64> = snap
             .cluster_and_runtime
             .mct_slots
@@ -129,6 +130,18 @@ pub fn get_character_selection_data(
                     .resculpt_pending
                     .contains(&c.character_id);
             let paperdoll_state = if is_resculpt_pending { 1 } else { 0 };
+            let alliance_id = c
+                .alliance_id
+                .or_else(|| snap.corporations.get(&c.corporation_id).and_then(|co| co.alliance_id));
+            let delete_prepare_dt = lifecycle_store
+                .delete_prepared_unix
+                .get(&c.character_id)
+                .map(|&prep| {
+                    PyRep::Integer(unix_to_filetime(
+                        prep.saturating_add(super::character_lifecycle::BIOMASS_DELAY_SECS),
+                    ))
+                })
+                .unwrap_or(PyRep::None);
             rows.push(PyRep::keyval([
                 ("characterID", PyRep::Integer(c.character_id)),
                 ("characterName", PyRep::String(c.name.clone())),
@@ -139,7 +152,7 @@ pub fn get_character_selection_data(
                 ("balanceChange", PyRep::Real(0.0)),
                 ("skillPoints", PyRep::Real(c.skill_points)),
                 ("corporationID", PyRep::Integer(c.corporation_id)),
-                ("allianceID", c.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("allianceID", alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
                 ("factionID", c.war_faction_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
                 ("unreadMailCount", PyRep::Integer(unread as i64)),
                 ("shipTypeID", ship_type),
@@ -155,7 +168,7 @@ pub fn get_character_selection_data(
                 ("queueEndTime", queue_end.unwrap_or(PyRep::None)),
                 ("finishSP", finish_sp),
                 ("trainedSP", trained_sp),
-                ("deletePrepareDateTime", PyRep::None),
+                ("deletePrepareDateTime", delete_prepare_dt),
                 ("lockTypeID", PyRep::None),
                 // DERIVED: logoff times are not stored; the creation date stands in so the client's
                 // "most recently played first" sort is at least stable.

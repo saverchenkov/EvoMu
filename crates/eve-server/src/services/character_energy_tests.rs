@@ -29,6 +29,12 @@ fn energy_state_default_keyval_regen_consume_and_rpc() {
         kv.dict_get("energyIncreasePerRechargeTick"),
         Some(&PyRep::Real(DEFAULT_RECHARGE_RATE * 60.0))
     );
+    assert_eq!(kv.dict_get("isAtQuiescentLevel"), Some(&PyRep::Bool(true)));
+    assert_eq!(
+        kv.dict_get("energyRange"),
+        Some(&PyRep::Integer(DEFAULT_MAX_ENERGY))
+    );
+    assert_eq!(kv.dict_get("normalisedEnergyLevel"), Some(&PyRep::Real(1.0)));
 
     let ctx = test_ctx();
     let cid = 90_000_001_i64;
@@ -65,6 +71,19 @@ fn energy_state_default_keyval_regen_consume_and_rpc() {
     // Consume energy: <= 0 no-op, valid deduction, insufficient error
     let st_set = set_character_energy(&ctx, cid, 40);
     assert_eq!(st_set.current_energy, 40);
+    let kv_partial = energy_to_keyval(&st_set);
+    assert_eq!(
+        kv_partial.dict_get("isAtQuiescentLevel"),
+        Some(&PyRep::Bool(false))
+    );
+    assert_eq!(
+        kv_partial.dict_get("energyRange"),
+        Some(&PyRep::Integer(DEFAULT_MAX_ENERGY))
+    );
+    assert_eq!(
+        kv_partial.dict_get("normalisedEnergyLevel"),
+        Some(&PyRep::Real(40.0 / (DEFAULT_MAX_ENERGY as f64)))
+    );
     let st_noop = consume_character_energy(&ctx, cid, 0).unwrap();
     assert_eq!(st_noop.current_energy, 40);
     let st_after = consume_character_energy(&ctx, cid, 15).unwrap();
