@@ -12,6 +12,7 @@ use crate::industry_live_support::{buy, dock_station, fund_pilots, login, move_i
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::world_seeder::seed_full_market_catalog;
+use eve_testkit::client_harness::extract_bound_id_from_wire_rep;
 use std::collections::HashMap;
 
 const RIFTER: u32 = 587;
@@ -57,20 +58,26 @@ async fn lose_ship(
     }
     let jita_h = ctx.systems.get_or_spawn(30_000_142);
     let att_ship = attacker.ship_id.expect("attacker ship");
-    let beyonce_vic = ctx.bind_object(sess, "beyonce", 30_000_142).expect("bind beyonce victim");
-    let _ = ctx.dispatch_rpc(sess, "beyonce", Some(beyonce_vic), "CmdStop", &[], &HashMap::new(), None).await;
-    let beyonce_att = ctx.bind_object(attacker, "beyonce", 30_000_142).expect("bind beyonce attacker");
-    ctx.dispatch_rpc(
-        attacker,
-        "beyonce",
-        Some(beyonce_att),
-        "CmdFollowBall",
-        &[PyRep::Integer(ship), PyRep::Real(1_000.0)],
-        &HashMap::new(),
-        None,
-    )
-    .await
-    .expect("CmdFollowBall");
+    let beyonce_vic_bind = common::borrow_wire_harness(ctx, sess)
+        .call_ok("beyonce", None, "MachoBindObject", &[PyRep::Integer(30_000_142), PyRep::None], &HashMap::new())
+        .await;
+    let beyonce_vic = extract_bound_id_from_wire_rep(&beyonce_vic_bind).expect("bind beyonce victim");
+    let _ = common::borrow_wire_harness(ctx, sess)
+        .call("beyonce", Some(beyonce_vic), "CmdStop", &[], &HashMap::new())
+        .await;
+    let beyonce_att_bind = common::borrow_wire_harness(ctx, attacker)
+        .call_ok("beyonce", None, "MachoBindObject", &[PyRep::Integer(30_000_142), PyRep::None], &HashMap::new())
+        .await;
+    let beyonce_att = extract_bound_id_from_wire_rep(&beyonce_att_bind).expect("bind beyonce attacker");
+    common::borrow_wire_harness(ctx, attacker)
+        .call_ok(
+            "beyonce",
+            Some(beyonce_att),
+            "CmdFollowBall",
+            &[PyRep::Integer(ship), PyRep::Real(1_000.0)],
+            &HashMap::new(),
+        )
+        .await;
     let mut last_d = f64::MAX;
     for _ in 0..1_200 {
         last_d = match (jita_h.get_ball_snapshot(att_ship).await, jita_h.get_ball_snapshot(ship).await) {
@@ -83,7 +90,9 @@ async fn lose_ship(
         jita_h.step_manual(1.0).await.expect("step approach");
     }
     assert!(last_d <= 2_500.0, "attacker failed to close range to victim: {last_d}m");
-    let _ = ctx.dispatch_rpc(attacker, "beyonce", Some(beyonce_att), "CmdStop", &[], &HashMap::new(), None).await;
+    let _ = common::borrow_wire_harness(ctx, attacker)
+        .call("beyonce", Some(beyonce_att), "CmdStop", &[], &HashMap::new())
+        .await;
     ctx.advance_secs(35);
     rpc(ctx, attacker, "crimewatch", "StartDuelChallenge", &[PyRep::Integer(PILOT_1)]).await.expect("StartDuelChallenge");
     rpc(ctx, sess, "crimewatch", "RespondToDuelChallenge", &[PyRep::Integer(PILOT_2), PyRep::Bool(true)]).await.expect("RespondToDuelChallenge");
@@ -138,10 +147,10 @@ async fn test_live_insurance_void_triggers_expiry_and_loss_payout_mail() {
     let ins = rpc(&ctx, &mut s1, "insuranceSvc", "InsureShip", &[PyRep::Integer(ship_a), PyRep::Real(1.0)]).await.expect("InsureShip A");
     let list = contracts(&ctx, &mut s1).await;
     let c_a = contract_for(&list, ship_a).unwrap_or_else(|| panic!("contract for A after {ins:?}"));
-    let term = c_a.dict_get("endDate").and_then(|v| v.as_i64()).unwrap() - c_a.dict_get("startDate").and_then(|v| v.as_i64()).unwrap();
+    let term = c_a.dict_get("endDate").and_then(|v| v.as_i64()).expect("endDate") - c_a.dict_get("startDate").and_then(|v| v.as_i64()).expect("startDate");
     assert_eq!(term, 84 * 86_400 * FILETIME_TICKS_PER_SEC, "insurance lasts 12 weeks");
     assert_eq!(c_a.dict_get("fraction").and_then(|v| v.as_f64()), Some(1.0));
-    let platinum_payout = c_a.dict_get("payoutISK").and_then(|v| v.as_f64()).unwrap();
+    let platinum_payout = c_a.dict_get("payoutISK").and_then(|v| v.as_f64()).expect("payoutISK");
     rpc(&ctx, &mut s1, "repackagingSvc", "RepackageItems", &[PyRep::List(vec![PyRep::Integer(ship_a)])]).await.expect("RepackageItems");
     assert!(contract_for(&contracts(&ctx, &mut s1).await, ship_a).is_none(), "repackaging voids insurance");
 
@@ -164,7 +173,9 @@ async fn test_live_insurance_void_triggers_expiry_and_loss_payout_mail() {
         ("itemList", PyRep::List(vec![PyRep::Integer(ship_b)])),
     ]);
     let kw = HashMap::from([("confirm".to_string(), PyRep::Bool(true))]);
-    ctx.dispatch_rpc(&mut s1, "contractProxy", None, "CreateContract", &[params], &kw, None).await.expect("CreateContract");
+    common::borrow_wire_harness(&ctx, &mut s1)
+        .call_ok("contractProxy", None, "CreateContract", &[params], &kw)
+        .await;
     assert!(contract_for(&contracts(&ctx, &mut s1).await, ship_b).is_none(), "contracting voids insurance");
 
     // 3. A contract older than 12 weeks has lapsed: the loss pays only the default 40%.
@@ -178,7 +189,7 @@ async fn test_live_insurance_void_triggers_expiry_and_loss_payout_mail() {
     // 4. A live Platinum contract pays immediately on loss and sends the insurance EVE-mail.
     let ship_d = new_hull(&ctx, &mut s1).await;
     rpc(&ctx, &mut s1, "insuranceSvc", "InsureShip", &[PyRep::Integer(ship_d), PyRep::Real(1.0)]).await.expect("InsureShip D");
-    let d_payout = contract_for(&contracts(&ctx, &mut s1).await, ship_d).and_then(|c| c.dict_get("payoutISK")).and_then(|v| v.as_f64()).unwrap();
+    let d_payout = contract_for(&contracts(&ctx, &mut s1).await, ship_d).and_then(|c| c.dict_get("payoutISK")).and_then(|v| v.as_f64()).expect("payoutISK");
     let paid = lose_ship(&ctx, &mut s1, &mut s2, ship_d).await;
     assert!((paid - d_payout).abs() < 0.02, "loss pays the contracted Platinum payout ({paid} vs {d_payout})");
     assert!(contract_for(&contracts(&ctx, &mut s1).await, ship_d).is_none(), "contract consumed by the payout");
