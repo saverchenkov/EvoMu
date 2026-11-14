@@ -3,7 +3,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::common::login_pilot;
+use crate::common::{self, login_pilot, pin_clock};
 use eve_db::{
     ContractRecord, CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents,
     UpwellStructureRecord,
@@ -16,6 +16,7 @@ use std::collections::{HashMap, HashSet};
 #[tokio::test]
 async fn test_r4_164_sov_hub_install_upgrade_ownership_flag_and_stack_split() {
     let ctx = ServerContext::new();
+    pin_clock(&ctx);
     let mut sess = SessionState::new(16401);
     login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     let char_id = 90_000_001;
@@ -26,17 +27,16 @@ async fn test_r4_164_sov_hub_install_upgrade_ownership_flag_and_stack_split() {
     let hub_id = 950_164_001i64;
     let kw = HashMap::new();
 
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &kw,
-        None,
-    )
-    .await
-    .unwrap();
+    common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_id)],
+            &kw,
+        )
+        .await
+        .expect("SelectCharacterID");
     sess.solar_system_id = Some(sys_id);
 
     // Use Megacyte Prospecting Array 1 (82587, group 4768)
@@ -116,18 +116,16 @@ async fn test_r4_164_sov_hub_install_upgrade_ownership_flag_and_stack_split() {
     });
 
     // 1. Only an unowned item in Hangar -> rejected with UpgradeItemNotFound
-    let err_unowned = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let err_unowned = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "sovHubSvc",
             None,
             "SaveUpgradeConfiguration",
             &[PyRep::List(vec![PyRep::Integer(upg_tid as i64)])],
             &kw,
-            None,
         )
         .await
-        .unwrap_err();
+        .expect_err("unowned upgrade must fail with UpgradeItemNotFound");
     assert_eq!(err_unowned.code, "UpgradeItemNotFound");
 
     // 2. Owned item in Hangar but locked in an Outstanding contract -> rejected with UpgradeItemLocked
@@ -165,18 +163,16 @@ async fn test_r4_164_sov_hub_install_upgrade_ownership_flag_and_stack_split() {
             },
         );
     });
-    let err_locked = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let err_locked = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "sovHubSvc",
             None,
             "SaveUpgradeConfiguration",
             &[PyRep::List(vec![PyRep::Integer(upg_tid as i64)])],
             &kw,
-            None,
         )
         .await
-        .unwrap_err();
+        .expect_err("contract-locked upgrade must fail with UpgradeItemLocked");
     assert_eq!(err_locked.code, "UpgradeItemLocked");
 
     // 3. Multi-unit stack (quantity 3) splits 1 unit into SubSystemSlot0 and leaves 2 in Hangar
@@ -198,19 +194,18 @@ async fn test_r4_164_sov_hub_install_upgrade_ownership_flag_and_stack_split() {
             },
         );
     });
-    ctx.dispatch_rpc(
-        &mut sess,
-        "sovHubSvc",
-        None,
-        "SaveUpgradeConfiguration",
-        &[PyRep::List(vec![PyRep::Integer(upg_tid as i64)])],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SaveUpgradeConfiguration from stack");
+    common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
+            "sovHubSvc",
+            None,
+            "SaveUpgradeConfiguration",
+            &[PyRep::List(vec![PyRep::Integer(upg_tid as i64)])],
+            &kw,
+        )
+        .await
+        .expect("SaveUpgradeConfiguration from stack");
 
-    let orig_stack = ctx.db.get_item(stack_item_id).unwrap();
+    let orig_stack = ctx.db.get_item(stack_item_id).expect("original upgrade stack");
     assert_eq!(orig_stack.quantity, 2);
     assert_eq!(orig_stack.flag, InventoryFlag::Hangar);
 
@@ -232,6 +227,7 @@ async fn test_r4_164_sov_hub_install_upgrade_ownership_flag_and_stack_split() {
 #[tokio::test]
 async fn test_r4_165_mining_drone_waste_probability_normalization() {
     let ctx = ServerContext::new();
+    pin_clock(&ctx);
     // Verify SDE attr 3154 on Mining Drone II (type 10248) is 34.0 (percentage points)
     let raw_3154 = ctx
         .sde
@@ -252,6 +248,7 @@ async fn test_r4_165_mining_drone_waste_probability_normalization() {
 #[tokio::test]
 async fn test_r4_166_structure_fit_module_splits_stack() {
     let ctx = ServerContext::new();
+    pin_clock(&ctx);
     let mut sess = SessionState::new(16601);
     login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     let char_id = 90_000_001;
@@ -260,17 +257,16 @@ async fn test_r4_166_structure_fit_module_splits_stack() {
     let mod_stack_id = 770_166_001i64;
     let kw = HashMap::new();
 
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &kw,
-        None,
-    )
-    .await
-    .unwrap();
+    common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_id)],
+            &kw,
+        )
+        .await
+        .expect("SelectCharacterID");
     sess.station_id = None;
     sess.structure_id = Some(struct_id);
 
@@ -330,9 +326,8 @@ async fn test_r4_166_structure_fit_module_splits_stack() {
         );
     });
 
-    let fit_res = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let fit_res = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "invbroker",
             None,
             "Add",
@@ -342,17 +337,19 @@ async fn test_r4_166_structure_fit_module_splits_stack() {
                 PyRep::Integer(InventoryFlag::ServiceSlot0 as i64),
             ],
             &kw,
-            None,
         )
         .await
         .expect("invbroker.Add to fit structure module from stack");
 
-    let fitted_id = fit_res.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
+    let fitted_id = fit_res
+        .dict_get("itemID")
+        .and_then(|v| v.as_i64())
+        .expect("fitted itemID");
     assert_ne!(fitted_id, mod_stack_id);
-    let rem_stack = ctx.db.get_item(mod_stack_id).unwrap();
+    let rem_stack = ctx.db.get_item(mod_stack_id).expect("remaining stack");
     assert_eq!(rem_stack.quantity, 3);
     assert_eq!(rem_stack.flag, InventoryFlag::Hangar);
-    let fitted_item = ctx.db.get_item(fitted_id).unwrap();
+    let fitted_item = ctx.db.get_item(fitted_id).expect("fitted item");
     assert_eq!(fitted_item.quantity, 1);
     assert_eq!(fitted_item.flag, InventoryFlag::ServiceSlot0);
 }
@@ -360,23 +357,23 @@ async fn test_r4_166_structure_fit_module_splits_stack() {
 #[tokio::test]
 async fn test_r4_167_reprocess_and_compress_flag_ownership_and_acl() {
     let ctx = ServerContext::new();
+    pin_clock(&ctx);
     let mut sess = SessionState::new(16701);
     login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     let char_id = 90_000_001;
     let other_id = 90_000_002;
     let kw = HashMap::new();
 
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &kw,
-        None,
-    )
-    .await
-    .unwrap();
+    common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_id)],
+            &kw,
+        )
+        .await
+        .expect("SelectCharacterID");
 
     let locked_ore_id = 770_167_001i64;
     let unowned_ore_id = 770_167_002i64;
@@ -412,30 +409,26 @@ async fn test_r4_167_reprocess_and_compress_flag_ownership_and_acl() {
     });
 
     // Reprocess rejects Locked item in station
-    let rep_err = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let rep_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "reprocessingSvc",
             None,
             "Reprocess",
             &[PyRep::List(vec![PyRep::Integer(locked_ore_id)])],
             &kw,
-            None,
         )
         .await
-        .unwrap_err();
+        .expect_err("Locked item must fail Reprocess");
     assert_eq!(rep_err.code, "OwnershipOrLocationViolation");
 
     // GetQuotes filters out unowned items (returns empty rawQuotesDict instead of leaking quote)
-    let quote_res = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let quote_res = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "reprocessingSvc",
             None,
             "GetQuotes",
             &[PyRep::List(vec![PyRep::Integer(unowned_ore_id)])],
             &kw,
-            None,
         )
         .await
         .expect("GetQuotes");
@@ -448,23 +441,23 @@ async fn test_r4_167_reprocess_and_compress_flag_ownership_and_acl() {
 #[tokio::test]
 async fn test_r4_168_moon_resources_auth_and_observer_ledger_validation() {
     let ctx = ServerContext::new();
+    pin_clock(&ctx);
     let mut sess = SessionState::new(16801);
     login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     let char_id = 90_000_001;
     let struct_id = 950_168_001i64;
     let kw = HashMap::new();
 
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &kw,
-        None,
-    )
-    .await
-    .unwrap();
+    common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_id)],
+            &kw,
+        )
+        .await
+        .expect("SelectCharacterID");
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(
@@ -491,39 +484,36 @@ async fn test_r4_168_moon_resources_auth_and_observer_ledger_validation() {
     });
 
     // Non-owner corp cannot query GetMoonResourcesForStructure
-    let moon_err = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let moon_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "moonExtractions",
             None,
             "GetMoonResourcesForStructure",
             &[PyRep::Integer(struct_id)],
             &kw,
-            None,
         )
         .await
-        .unwrap_err();
+        .expect_err("non-owner corp must fail GetMoonResourcesForStructure");
     assert_eq!(moon_err.code, "NotStructureOwnerCorp");
 
     // Nonexistent observer ID is rejected by corpMiningLedger.GetObserverLedger
-    let obs_err = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let obs_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "corpMiningLedger",
             None,
             "GetObserverLedger",
             &[PyRep::Integer(999_999_999)],
             &kw,
-            None,
         )
         .await
-        .unwrap_err();
+        .expect_err("nonexistent observer must fail GetObserverLedger");
     assert_eq!(obs_err.code, "CrpAccessDenied");
 }
 
 #[tokio::test]
 async fn test_r4_169_asset_safety_contract_lock_and_nested_container_value() {
     let ctx = ServerContext::new();
+    pin_clock(&ctx);
     let mut sess = SessionState::new(16901);
     login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     let char_id = 90_000_001;
@@ -533,17 +523,16 @@ async fn test_r4_169_asset_safety_contract_lock_and_nested_container_value() {
     let plex_inside_box_id = 770_169_003i64;
     let kw = HashMap::new();
 
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &kw,
-        None,
-    )
-    .await
-    .unwrap();
+    common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_id)],
+            &kw,
+        )
+        .await
+        .expect("SelectCharacterID");
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(
@@ -630,20 +619,21 @@ async fn test_r4_169_asset_safety_contract_lock_and_nested_container_value() {
     });
 
     // MovePersonalAssetsToSafety must skip contract-locked item and include nested PLEX value in box wrap
-    let res = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let res = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "structureAssetSafety",
             None,
             "MovePersonalAssetsToSafety",
             &[PyRep::Integer(30_000_142), PyRep::Integer(struct_id)],
             &kw,
-            None,
         )
         .await
         .expect("MovePersonalAssetsToSafety");
     assert_eq!(res.dict_get("itemCount"), Some(&PyRep::Integer(1)));
-    assert_eq!(ctx.db.get_item(locked_item_id).unwrap().location_id, struct_id);
+    assert_eq!(
+        ctx.db.get_item(locked_item_id).expect("locked item still in db").location_id,
+        struct_id
+    );
 
     let wrap = ctx.db.with_snapshot(|snap| {
         let ext = eve_server::services::station_structure::structure_upwell_ops::load_ext_state(snap);
@@ -671,6 +661,7 @@ async fn test_r4_169_asset_safety_contract_lock_and_nested_container_value() {
 #[tokio::test]
 async fn test_gh784_788_reprocess_from_docked_ship_ore_hold_and_live_notifications() {
     let ctx = ServerContext::new();
+    pin_clock(&ctx);
     let mut sess = SessionState::new(17841);
     login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     let char_id = 90_000_001;
@@ -680,17 +671,16 @@ async fn test_gh784_788_reprocess_from_docked_ship_ore_hold_and_live_notificatio
     let ore_id = 950_788_002_i64;
     let kw = HashMap::new();
 
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &kw,
-        None,
-    )
-    .await
-    .unwrap();
+    common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_id)],
+            &kw,
+        )
+        .await
+        .expect("SelectCharacterID");
     sess.station_id = Some(station_id);
     sess.ship_id = Some(venture_id);
 
@@ -732,9 +722,8 @@ async fn test_gh784_788_reprocess_from_docked_ship_ore_hold_and_live_notificatio
     });
 
     let _ = ctx.drain_notifications_for_char(char_id);
-    let res = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let out = common::borrow_wire_harness(&ctx, &mut sess)
+        .call_exchange(
             "reprocessingSvc",
             None,
             "Reprocess",
@@ -746,9 +735,10 @@ async fn test_gh784_788_reprocess_from_docked_ship_ore_hold_and_live_notificatio
                 PyRep::Integer(InventoryFlag::Hangar as i64),
             ],
             &kw,
-            Some("machoNet:26000"),
         )
-        .await
+        .await;
+    let res = out
+        .result
         .expect("5-arg Reprocess from docked ship SpecializedOreHold must succeed");
 
     let PyRep::Tuple(parts) = res else {
@@ -756,13 +746,12 @@ async fn test_gh784_788_reprocess_from_docked_ship_ore_hold_and_live_notificatio
     };
     assert_eq!(parts[0], PyRep::List(vec![PyRep::Integer(ore_id)]));
 
-    let notifs = ctx.drain_notifications_for_char(char_id);
     assert!(
-        notifs.iter().any(|n| n.event == "OnAccountChange"),
+        out.notifications.iter().any(|(ev, _)| ev == "OnAccountChange"),
         "Expected OnAccountChange notification"
     );
     assert!(
-        notifs.iter().any(|n| n.event == "OnItemChange"),
+        out.notifications.iter().any(|(ev, _)| ev == "OnItemChange"),
         "Expected OnItemChange notification"
     );
 }
