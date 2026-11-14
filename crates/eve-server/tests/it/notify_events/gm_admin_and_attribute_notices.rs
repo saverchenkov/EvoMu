@@ -237,15 +237,96 @@ async fn test_batch3_gm_and_admin_rpc_notifications() {
         .expect("IsFastCheckoutEnabledForUser after disable");
     assert_eq!(fc_disabled, PyRep::Bool(false));
 
-    // 9. OnCampaignEnrollmentChanged via /campaign enroll
-    let campaigns = eve_server::services::campaigns_and_milestones::get_sde_login_campaigns(&ctx.sde);
-    let target_campaign = campaigns.keys().copied().next().unwrap_or(2261);
-    ctx.dispatch_rpc(&mut s1, "slash", None, "SlashCmd", &[PyRep::String(format!("/campaign enroll {target_campaign}"))], &HashMap::new(), None)
-        .await
-        .expect("/campaign enroll");
-    let ev = events(&ctx, P1, "OnCampaignEnrollmentChanged");
-    assert_eq!(ev.len(), 1);
-    assert_eq!(ev[0].len(), 0);
+    // 9. OnCampaignEnrollmentChanged via /campaign enroll (ClientHarness, per-char isolation)
+    {
+        let empty = HashMap::new();
+        let mut h1 = common::borrow_wire_harness(&ctx, &mut s1);
+        let mut h2 = common::borrow_wire_harness(&ctx, &mut s2);
+
+        let p1_before = h1
+            .call_ok("loginCampaignManager", None, "get_client_campaign_state", &[], &empty)
+            .await;
+        let p2_before = h2
+            .call_ok("loginCampaignManager", None, "get_client_campaign_state", &[], &empty)
+            .await;
+        let p1_before_cid = p1_before
+            .dict_get("static_data")
+            .and_then(|d| d.dict_get("campaign_id"))
+            .and_then(|v| v.as_i64());
+        let p2_before_cid = p2_before
+            .dict_get("static_data")
+            .and_then(|d| d.dict_get("campaign_id"))
+            .and_then(|v| v.as_i64());
+        assert!(p2_before_cid.is_some(), "P2 must start with an active login campaign");
+        let _ = h1.drain_notifications();
+        let _ = h2.drain_notifications();
+
+        let campaigns = eve_server::services::campaigns_and_milestones::get_sde_login_campaigns(&ctx.sde);
+        let target_campaign = campaigns
+            .keys()
+            .copied()
+            .find(|&id| Some(id) != p1_before_cid)
+            .or_else(|| campaigns.keys().copied().next())
+            .unwrap_or(2261);
+
+        // Negative: missing/invalid args and non-existent campaign must fail without notifying
+        let err_missing = h1
+            .call("slash", None, "SlashCmd", &[PyRep::String("/campaign enroll".into())], &empty)
+            .await
+            .expect_err("/campaign enroll without campaign_id must fail");
+        assert_eq!(err_missing.code, "InvalidSlashArguments");
+
+        let err_unknown = h1
+            .call("slash", None, "SlashCmd", &[PyRep::String("/campaign enroll 999999999".into())], &empty)
+            .await
+            .expect_err("non-existent campaign must fail");
+        assert_eq!(err_unknown.code, "CampaignNotFound");
+        assert!(
+            !h1.drain_notifications().iter().any(|(e, _)| e == "OnCampaignEnrollmentChanged"),
+            "failed /campaign enroll must not emit OnCampaignEnrollmentChanged"
+        );
+
+        // Positive: enroll P1; assert wire payload, readback, and P2 isolation
+        h1.call_ok(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(format!("/campaign enroll {target_campaign}"))],
+            &empty,
+        )
+        .await;
+
+        let ev_p1: Vec<Vec<PyRep>> = h1
+            .drain_notifications()
+            .into_iter()
+            .filter(|(e, _)| e == "OnCampaignEnrollmentChanged")
+            .map(|(_, args)| args)
+            .collect();
+        assert_eq!(ev_p1.len(), 1, "P1 must receive OnCampaignEnrollmentChanged on the wire");
+        assert_eq!(ev_p1[0].len(), 0, "OnCampaignEnrollmentChanged expects 0 args");
+
+        let _ = h2.call_ok("machoNet", None, "GetTime", &[], &empty).await;
+        assert!(
+            !h2.drain_notifications().iter().any(|(e, _)| e == "OnCampaignEnrollmentChanged"),
+            "P2 must not receive OnCampaignEnrollmentChanged when P1 enrolls"
+        );
+
+        let p1_after = h1
+            .call_ok("loginCampaignManager", None, "get_client_campaign_state", &[], &empty)
+            .await;
+        let p2_after = h2
+            .call_ok("loginCampaignManager", None, "get_client_campaign_state", &[], &empty)
+            .await;
+        assert_eq!(
+            p1_after.dict_get("static_data").and_then(|d| d.dict_get("campaign_id")),
+            Some(&PyRep::Integer(target_campaign))
+        );
+        assert_eq!(
+            p2_after.dict_get("static_data").and_then(|d| d.dict_get("campaign_id")),
+            p2_before_cid.map(PyRep::Integer).as_ref(),
+            "enrolling P1 must leave P2's campaign state unaffected"
+        );
+    }
 
     // 10 & 11. OnModuleAttributeChange & OnLocationAttributeChange via /setattr with strict non-GM negative test
     let neg_setattr = ctx

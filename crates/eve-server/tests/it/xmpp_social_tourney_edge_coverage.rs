@@ -1240,6 +1240,13 @@ async fn test_notify_emitters_character_and_batch3_gm_slash_cmds() {
             .await
             .unwrap_err()
             .code,
+        "InvalidSlashArguments"
+    );
+    assert_eq!(
+        gm_slash(&ctx, &mut gm, "/campaign enroll 999999999")
+            .await
+            .unwrap_err()
+            .code,
         "CampaignNotFound"
     );
     gm_slash(&ctx, &mut gm, "/campaign enroll 1")

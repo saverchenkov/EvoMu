@@ -320,43 +320,82 @@ async fn test_parity_notify_campaign_enrollment_and_chat_bans() {
         "PILOT_A must not receive FW enrollment notification"
     );
 
-    // A2: Login campaign enrollment transition via slash command
-    let sde_camps = eve_server::services::campaigns_and_milestones::get_sde_login_campaigns(&ctx.sde);
-    let alt_campaign = sde_camps
-        .keys()
-        .copied()
-        .find(|&id| id != 2261)
-        .expect("alternate login campaign");
+    // A2: Login campaign enrollment transition via slash command (ClientHarness, per-char isolation)
+    {
+        let empty = HashMap::new();
+        let mut h_gm = crate::common::borrow_wire_harness(&ctx, &mut gm);
+        let mut h_p2 = crate::common::borrow_wire_harness(&ctx, &mut p2);
 
-    rpc(
-        &ctx,
-        &mut gm,
-        "slash",
-        "SlashCmd",
-        &[PyRep::String(format!("/campaign enroll {alt_campaign} {PILOT_A}"))],
-    )
-    .await
-    .expect("/campaign enroll");
+        let p2_before = h_p2
+            .call_ok("loginCampaignManager", None, "get_client_campaign_state", &[], &empty)
+            .await;
+        let p2_before_cid = p2_before
+            .dict_get("static_data")
+            .and_then(|d| d.dict_get("campaign_id"))
+            .and_then(|v| v.as_i64());
+        assert!(p2_before_cid.is_some(), "PILOT_B must have an initial campaign state");
+        let _ = h_gm.drain_notifications();
+        let _ = h_p2.drain_notifications();
 
-    let login_notifs: Vec<Vec<PyRep>> = drain_events(&ctx, &mut gm, PILOT_A)
-        .into_iter()
-        .filter(|(e, _)| e == "OnCampaignEnrollmentChanged")
-        .map(|(_, a)| a)
-        .collect();
-    assert_eq!(login_notifs.len(), 1, "PILOT_A must receive OnCampaignEnrollmentChanged on login campaign enroll");
-    assert_eq!(login_notifs[0].len(), 0, "OnCampaignEnrollmentChanged expects 0 args");
+        let sde_camps = eve_server::services::campaigns_and_milestones::get_sde_login_campaigns(&ctx.sde);
+        let alt_campaign = sde_camps
+            .keys()
+            .copied()
+            .find(|&id| id != 2261)
+            .expect("alternate login campaign");
 
-    // Negative check: invalid campaign ID fails and does not emit
-    let err_camp = rpc(
-        &ctx,
-        &mut gm,
-        "slash",
-        "SlashCmd",
-        &[PyRep::String("/campaign enroll 88888888".into())],
-    )
-    .await
-    .expect_err("non-existent campaign must fail");
-    assert_eq!(err_camp.code, "CampaignNotFound");
+        // Negative check: invalid campaign ID fails and does not emit
+        let err_camp = h_gm
+            .call("slash", None, "SlashCmd", &[PyRep::String("/campaign enroll 88888888".into())], &empty)
+            .await
+            .expect_err("non-existent campaign must fail");
+        assert_eq!(err_camp.code, "CampaignNotFound");
+        assert!(
+            !h_gm.drain_notifications().iter().any(|(e, _)| e == "OnCampaignEnrollmentChanged"),
+            "failed /campaign enroll must not emit OnCampaignEnrollmentChanged"
+        );
+
+        h_gm
+            .call_ok(
+                "slash",
+                None,
+                "SlashCmd",
+                &[PyRep::String(format!("/campaign enroll {alt_campaign} {PILOT_A}"))],
+                &empty,
+            )
+            .await;
+
+        let login_notifs: Vec<Vec<PyRep>> = h_gm
+            .drain_notifications()
+            .into_iter()
+            .filter(|(e, _)| e == "OnCampaignEnrollmentChanged")
+            .map(|(_, a)| a)
+            .collect();
+        assert_eq!(login_notifs.len(), 1, "PILOT_A must receive OnCampaignEnrollmentChanged on login campaign enroll");
+        assert_eq!(login_notifs[0].len(), 0, "OnCampaignEnrollmentChanged expects 0 args");
+
+        let _ = h_p2.call_ok("machoNet", None, "GetTime", &[], &empty).await;
+        assert!(
+            !h_p2.drain_notifications().iter().any(|(e, _)| e == "OnCampaignEnrollmentChanged"),
+            "PILOT_B must not receive OnCampaignEnrollmentChanged when PILOT_A enrolls"
+        );
+
+        let p1_after = h_gm
+            .call_ok("loginCampaignManager", None, "get_client_campaign_state", &[], &empty)
+            .await;
+        let p2_after = h_p2
+            .call_ok("loginCampaignManager", None, "get_client_campaign_state", &[], &empty)
+            .await;
+        assert_eq!(
+            p1_after.dict_get("static_data").and_then(|d| d.dict_get("campaign_id")),
+            Some(&PyRep::Integer(alt_campaign))
+        );
+        assert_eq!(
+            p2_after.dict_get("static_data").and_then(|d| d.dict_get("campaign_id")),
+            p2_before_cid.map(PyRep::Integer).as_ref(),
+            "enrolling PILOT_A must not mutate PILOT_B's campaign state"
+        );
+    }
 
     // --- Part B: OnCharacterPermanentlyBanned ---
     // B1: Enforce permanent chat ban on PILOT_B
