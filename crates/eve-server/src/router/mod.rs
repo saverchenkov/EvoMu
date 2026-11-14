@@ -12,6 +12,7 @@ pub mod client_wire;
 pub mod context;
 mod context_charges;
 mod context_runtime_persistence;
+pub mod delta_projection;
 pub mod dispatch;
 pub mod notify_registry;
 pub mod rpc_args;
@@ -21,6 +22,13 @@ pub mod session_transition;
 pub use binding::{alloc_transport_session_id, SessionCleanupGuard, NEXT_TRANSPORT_SESSION_ID};
 pub use cache_notifications::*;
 pub use context::*;
+pub use delta_projection::{
+    materialize_pending_notifications, project_fit_attribute_diff, resolve_all_notifications,
+    resolve_projected_recipients, DefaultDeltaProjection, DefaultGodmaFitHook, DeltaProjection,
+    DeltaProjectionHook, DeltaProjectionInput, DeltaSink, DeltaStateCache, FitProjectionDiff,
+    FitProjectionSnapshot, OnlineCharacterLookup, PlexDelta, ProjectedNotification,
+    ProjectedTarget, ResolvedNotification,
+};
 pub use dispatch::box_fut;
 pub use eve_proto::{ClientError, UserErrorKey, V24_PROGRAMMATIC_USER_ERROR_KEYS};
 pub use rpc_args::RpcArgs;
@@ -35,6 +43,8 @@ mod binding_deep_extra_unit_tests;
 mod binding_hooks_and_skills_extra_unit_tests;
 #[cfg(test)]
 mod cache_notifications_deep_extra_unit_tests;
+#[cfg(test)]
+mod delta_projection_tests;
 #[cfg(test)]
 mod dispatch_deep_extra_unit_tests;
 #[cfg(test)]
