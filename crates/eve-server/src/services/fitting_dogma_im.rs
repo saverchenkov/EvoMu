@@ -684,19 +684,35 @@ pub(crate) async fn handle_dogma_im(
                     client_error: None,
                 }));
             }
-            let Some(stance_type_id) = stance_type_id_opt.filter(|&id| id > 0) else {
-                return Some(Err(BridgeRpcError { code: "InvalidShipStance".into(), message: "SetShipStance requires a valid stance typeID".into(), client_error: None }));
+            let Some(stance_arg) = stance_type_id_opt.filter(|&id| id > 0) else {
+                return Some(Err(BridgeRpcError { code: "InvalidShipStance".into(), message: "SetShipStance requires a valid stance ID or typeID".into(), client_error: None }));
             };
             let now_ms = ctx.now_unix_secs().saturating_mul(1000);
             let mut fit = match ctx.fit(char_id, ship_id) {
                 Ok(f) => f,
                 Err(e) => return Some(Err(e)),
             };
+            // V24.01 `shipstance.pyj` passes 1-based `shipmode/data.pyj` stance keys
+            // (`1 = shipStanceDefense`, `2 = shipStanceSpeed`, `3 = shipStanceSniper`),
+            // while internal/compat tests may pass group-1306 stance `type_id`s directly.
+            let Some(stance_type_id) = eve_dogma::ShipFittingEngine::resolve_t3d_stance_type_id(
+                fit.ship.type_id,
+                stance_arg,
+            ) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidShipStance".into(),
+                    message: format!(
+                        "Ship type {} cannot enter stance {stance_arg}",
+                        fit.ship.type_id
+                    ),
+                    client_error: None,
+                }));
+            };
             if fit.active_stance_type_id.is_none() {
                 fit.active_stance_type_id =
                     eve_dogma::ShipFittingEngine::default_t3d_stance_type_id(fit.ship.type_id);
             }
-            if let Err(e) = fit.switch_ship_stance(stance_type_id as u32, now_ms, &ctx.sde) {
+            if let Err(e) = fit.switch_ship_stance(stance_type_id, now_ms, &ctx.sde) {
                 let code = if e.contains("Cooldown") {
                     "StanceSwitchCooldown"
                 } else {
@@ -705,13 +721,22 @@ pub(crate) async fn handle_dogma_im(
                 return Some(Err(BridgeRpcError { code: code.into(), message: e, client_error: None }));
             }
             let max_vel = fit.ship.get_attribute(eve_sde::attr_ids::MAX_VELOCITY, &ctx.sde);
+            // `ShipStanceButton.OnStanceActive`, `FittingController.OnStanceActive`, and
+            // `spaceobjanimation.SetShipAnimationStance` all match against the V24 1-based
+            // `shipmode/data.pyj` stance key (`1/2/3`), not the group-1306 item `type_id`.
+            let active_stance_key = eve_dogma::ShipFittingEngine::t3d_stance_key(
+                fit.ship.type_id,
+                stance_type_id,
+            )
+            .map(i64::from)
+            .unwrap_or_else(|| i64::from(stance_type_id));
             ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
             ctx.invalidate_and_push_fit(ship_id);
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
                 "OnStanceActive",
                 "charid",
-                vec![PyRep::Integer(ship_id), PyRep::Integer(stance_type_id)],
+                vec![PyRep::Integer(ship_id), PyRep::Integer(active_stance_key)],
             );
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
@@ -728,7 +753,7 @@ pub(crate) async fn handle_dogma_im(
                     PyRep::None,
                 ])])],
             );
-            Some(Ok(PyRep::Integer(stance_type_id)))
+            Some(Ok(PyRep::Integer(i64::from(stance_type_id))))
         }
 
         ("dogmaIM", "ItemGetInfo") => {

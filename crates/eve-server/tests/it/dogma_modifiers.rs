@@ -1561,3 +1561,233 @@ async fn test_ship_stance_cooldown_and_overload_survive_cache_invalidation_and_f
         assert!(!rec.overloaded_modules.contains(&mwd_id));
     });
 }
+
+#[tokio::test]
+async fn test_issue_1047_wire_ship_stance_indices_project_space_ball_and_emit_v24_keys() {
+    use eve_destiny::{Ball, MovementMode};
+    use glam::DVec3;
+
+    let ctx = ServerContext::new();
+    let base_secs = 1_800_000_000_u64;
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::VirtualServerClock::with_fixed_base(base_secs),
+    ));
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(4703);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(90_000_001)],
+            &kw,
+        )
+        .await;
+
+    let (char_id, confessor_id, sys_id) = (90_000_001_i64, 710_147_i64, 30_000_142_u32);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap
+            .characters
+            .get(&char_id)
+            .cloned()
+            .expect("selected character seeded");
+        ch.active_ship_id = confessor_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.solar_system_id = sys_id;
+        snap.characters.insert(char_id, ch);
+        snap.items.insert(
+            confessor_id,
+            InventoryItemRecord {
+                item_id: confessor_id,
+                type_id: 34317, // Confessor
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.ship_fit_inputs.remove(&confessor_id);
+    });
+    sess.station_id = None;
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(confessor_id);
+
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    let cs = ctx.build_ship_combat_state(char_id, confessor_id, 34317);
+    let slim = ctx.build_ship_slim_meta(char_id, 34317);
+    let ball = Ball {
+        id: confessor_id,
+        type_id: 34317,
+        position: DVec3::new(1_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 100.0,
+        inertia: 1.0,
+        mass: 1_500_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    handle
+        .spawn_ball_with_meta(ball, cs, slim)
+        .await
+        .expect("spawn confessor ball");
+    ctx.invalidate_ship_fitting(confessor_id);
+    let _ = sess.drain_notifications();
+
+    // 1. Exact #1047 reproduction: clicking middle ShipStanceButton sends `(ship_id, 3)` -> Sharpshooter 34321.
+    let sharp_ex = common::borrow_wire_harness(&ctx, &mut sess)
+        .call_exchange(
+            "shipStanceMgr",
+            None,
+            "SetShipStance",
+            &[PyRep::Integer(confessor_id), PyRep::Integer(3)],
+            &kw,
+        )
+        .await;
+    assert_eq!(sharp_ex.result.expect("index 3 -> Sharpshooter"), PyRep::Integer(34321));
+    let sharp_notifs: Vec<Vec<PyRep>> = sharp_ex
+        .notifications
+        .into_iter()
+        .filter(|(ev, _)| ev == "OnStanceActive")
+        .map(|(_, args)| args)
+        .collect();
+    assert_eq!(
+        sharp_notifs,
+        vec![vec![PyRep::Integer(confessor_id), PyRep::Integer(3)]]
+    );
+
+    // 2. Out-of-range V24 indices (`0`, `4`) fail cleanly on wire and leave notifications untouched.
+    for bad_idx in [0_i64, 4] {
+        let bad_ex = common::borrow_wire_harness(&ctx, &mut sess)
+            .call_exchange(
+                "shipStanceMgr",
+                None,
+                "SetShipStance",
+                &[PyRep::Integer(confessor_id), PyRep::Integer(bad_idx)],
+                &kw,
+            )
+            .await;
+        let err = bad_ex.result.expect_err("out-of-range stance index must fail");
+        assert_eq!(err.code, "InvalidShipStance");
+        assert!(
+            !bad_ex
+                .notifications
+                .into_iter()
+                .any(|(ev, _)| ev == "OnStanceActive")
+        );
+    }
+
+    let (_, ball_sharp) = handle
+        .get_ball_snapshot(confessor_id)
+        .await
+        .expect("get_ball_snapshot")
+        .expect("confessor ball present after Sharpshooter");
+
+    // 3. Advance clock >= 10s, switch to key `2` (Propulsion 34323) and verify live space projection.
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::VirtualServerClock::with_fixed_base(base_secs + 12),
+    ));
+    let prop_ex = common::borrow_wire_harness(&ctx, &mut sess)
+        .call_exchange(
+            "shipStanceMgr",
+            None,
+            "SetShipStance",
+            &[PyRep::Integer(confessor_id), PyRep::Integer(2)],
+            &kw,
+        )
+        .await;
+    assert_eq!(prop_ex.result.expect("index 2 -> Propulsion"), PyRep::Integer(34323));
+    let prop_notifs: Vec<Vec<PyRep>> = prop_ex
+        .notifications
+        .into_iter()
+        .filter(|(ev, _)| ev == "OnStanceActive")
+        .map(|(_, args)| args)
+        .collect();
+    assert_eq!(
+        prop_notifs,
+        vec![vec![PyRep::Integer(confessor_id), PyRep::Integer(2)]]
+    );
+    assert!(
+        ball_sharp.max_velocity > 200.0,
+        "Sharpshooter (3) projection must overwrite initial dummy ball velocity (100.0): got {}",
+        ball_sharp.max_velocity
+    );
+    let (_, ball_prop) = handle
+        .get_ball_snapshot(confessor_id)
+        .await
+        .expect("get_ball_snapshot")
+        .expect("confessor ball present after Propulsion");
+    let cs_prop = handle
+        .get_combat_state(confessor_id)
+        .await
+        .expect("get_combat_state")
+        .expect("confessor combat state present after Propulsion");
+    assert!(
+        ball_prop.inertia < ball_sharp.inertia * 0.7,
+        "Propulsion (2) must project lower inertia (modeAgilityPostDiv 1.5x) to SystemActor Ball: prop={} sharp={}",
+        ball_prop.inertia,
+        ball_sharp.inertia
+    );
+
+    // 4. Advance clock >= 10s, switch to key `1` (Defense 34319), verify projection & persistence.
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::VirtualServerClock::with_fixed_base(base_secs + 24),
+    ));
+    let def_ex = common::borrow_wire_harness(&ctx, &mut sess)
+        .call_exchange(
+            "shipStanceMgr",
+            None,
+            "SetShipStance",
+            &[PyRep::Integer(confessor_id), PyRep::Integer(1)],
+            &kw,
+        )
+        .await;
+    assert_eq!(def_ex.result.expect("index 1 -> Defense"), PyRep::Integer(34319));
+    let def_notifs: Vec<Vec<PyRep>> = def_ex
+        .notifications
+        .into_iter()
+        .filter(|(ev, _)| ev == "OnStanceActive")
+        .map(|(_, args)| args)
+        .collect();
+    assert_eq!(
+        def_notifs,
+        vec![vec![PyRep::Integer(confessor_id), PyRep::Integer(1)]]
+    );
+    let (_, ball_def) = handle
+        .get_ball_snapshot(confessor_id)
+        .await
+        .expect("get_ball_snapshot")
+        .expect("confessor ball present after Defense");
+    let cs_def = handle
+        .get_combat_state(confessor_id)
+        .await
+        .expect("get_combat_state")
+        .expect("confessor combat state present after Defense");
+    assert!(ball_def.inertia > ball_prop.inertia);
+    assert!(
+        cs_def.signature_radius < cs_prop.signature_radius,
+        "Defense (1) must project lower signature_radius to CombatState: def={} prop={}",
+        cs_def.signature_radius,
+        cs_prop.signature_radius
+    );
+    assert!(
+        cs_def.armor_resonance[0] < cs_prop.armor_resonance[0],
+        "Defense (1) must project lower armor EM resonance to CombatState: def={} prop={}",
+        cs_def.armor_resonance[0],
+        cs_prop.armor_resonance[0]
+    );
+
+    ctx.invalidate_ship_fitting(confessor_id);
+    ctx.db.with_snapshot(|snap| {
+        let rec = snap
+            .ship_fit_inputs
+            .get(&confessor_id)
+            .expect("persisted fit inputs");
+        assert_eq!(rec.active_stance_type_id, Some(34319));
+    });
+}
