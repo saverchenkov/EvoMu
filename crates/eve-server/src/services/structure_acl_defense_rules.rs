@@ -321,6 +321,103 @@ pub fn handle_edit_group(
     Ok(PyRep::Bool(true))
 }
 
+fn can_view_owner_group(
+    char_id: i64,
+    caller_corp: i64,
+    caller_alliance: i64,
+    grp: &ops::AccessGroupRecord,
+) -> bool {
+    let explicitly_excluded = grp
+        .members
+        .get(&char_id)
+        .copied()
+        .is_some_and(is_acl_role_excluded);
+    !explicitly_excluded
+        && (is_acl_creator_active_for_corp(char_id, caller_corp, grp)
+            || (grp.members.get(&char_id).copied().is_some_and(is_acl_role_allowed)
+                && (grp.owner_corp_id == 0 || char_id != grp.creator_id || grp.owner_corp_id == caller_corp))
+            || (caller_corp != 0 && grp.members.get(&caller_corp).copied().is_some_and(is_acl_role_allowed))
+            || (caller_alliance != 0 && grp.members.get(&caller_alliance).copied().is_some_and(is_acl_role_allowed))
+            || (grp.owner_corp_id != 0 && grp.owner_corp_id == caller_corp))
+}
+
+fn caller_group_membership_type(
+    char_id: i64,
+    caller_corp: i64,
+    caller_alliance: i64,
+    grp: &ops::AccessGroupRecord,
+) -> i64 {
+    if grp.members.get(&char_id).copied().is_some_and(is_acl_role_excluded) {
+        return ACL_ROLE_EXCLUDED;
+    }
+    if is_acl_admin(char_id, caller_corp, grp) {
+        return ACL_ROLE_ADMIN;
+    }
+    if is_acl_manager_or_admin(char_id, caller_corp, grp) {
+        return ACL_ROLE_MANAGER;
+    }
+    if let Some(&role) = grp.members.get(&char_id).filter(|&&r| is_acl_role_allowed(r)) {
+        return role;
+    }
+    let best_org = [caller_corp, caller_alliance]
+        .into_iter()
+        .filter(|&id| id != 0)
+        .filter_map(|id| grp.members.get(&id).copied().filter(|&r| is_acl_role_allowed(r)))
+        .max();
+    if let Some(role) = best_org {
+        return role;
+    }
+    if grp.owner_corp_id != 0 && grp.owner_corp_id == caller_corp {
+        return ACL_ROLE_MEMBER;
+    }
+    ACL_ROLE_NONE
+}
+
+/// Builds the V24 `ownerGroupManager` `KeyVal` entry shared by `GetGroup` and `GetMyGroups`.
+fn build_owner_group_keyval(
+    grp: &ops::AccessGroupRecord,
+    char_id: i64,
+    caller_corp: i64,
+    caller_alliance: i64,
+) -> PyRep {
+    let mut admin_ids = std::collections::BTreeSet::new();
+    if grp.creator_id > 0 && !grp.members.get(&grp.creator_id).copied().is_some_and(is_acl_role_excluded) {
+        admin_ids.insert(grp.creator_id);
+    }
+    for (&eid, &role) in &grp.members {
+        if role == ACL_ROLE_ADMIN {
+            admin_ids.insert(eid);
+        }
+    }
+    let membership_type = caller_group_membership_type(char_id, caller_corp, caller_alliance, grp);
+    PyRep::keyval([
+        ("groupID", PyRep::Integer(grp.group_id)),
+        ("name", PyRep::String(grp.name.clone())),
+        ("description", PyRep::String(grp.description.clone())),
+        ("creatorID", PyRep::Integer(grp.creator_id)),
+        ("ownerCorpID", PyRep::Integer(grp.owner_corp_id)),
+        ("memberCount", PyRep::Integer(grp.members.len() as i64)),
+        ("membershipType", PyRep::Integer(membership_type)),
+        ("admins", PyRep::List(admin_ids.into_iter().map(PyRep::Integer).collect())),
+    ])
+}
+
+fn caller_corp_and_alliance(snap: &WorldStateSnapshot, session: &SessionState, char_id: i64) -> (i64, i64) {
+    let corp_id = snap
+        .characters
+        .get(&char_id)
+        .map(|c| c.corporation_id)
+        .or(session.corporation_id)
+        .unwrap_or(0);
+    let alliance_id = snap
+        .corporations
+        .get(&corp_id)
+        .and_then(|c| c.alliance_id)
+        .or(session.alliance_id)
+        .unwrap_or(0);
+    (corp_id, alliance_id)
+}
+
 pub fn handle_get_group(
     ctx: &ServerContext,
     session: &SessionState,
@@ -330,35 +427,43 @@ pub fn handle_get_group(
     let group_id = arg_i64(args, 0).ok_or_else(|| err("MissingGroupId", "GetGroup requires groupID"))?;
     ctx.db.with_snapshot(|snap| {
         let ext = load_ext_state(snap);
-        let grp = ext.owner_groups.get(&group_id).ok_or_else(|| err("AccessGroupNotFound", format!("Group {group_id} not found")))?;
-        let caller_corp = snap
-            .characters
-            .get(&char_id)
-            .map(|c| c.corporation_id)
-            .or(session.corporation_id)
-            .unwrap_or(0);
-        let explicitly_excluded = grp
-            .members
-            .get(&char_id)
-            .copied()
-            .is_some_and(is_acl_role_excluded);
-        let can_view = !explicitly_excluded
-            && (is_acl_creator_active_for_corp(char_id, caller_corp, grp)
-                || (grp.members.get(&char_id).copied().is_some_and(is_acl_role_allowed)
-                    && (grp.owner_corp_id == 0 || char_id != grp.creator_id || grp.owner_corp_id == caller_corp))
-                || (grp.owner_corp_id != 0 && grp.owner_corp_id == caller_corp))
-            || session.has_gm_role();
+        let grp = ext
+            .owner_groups
+            .get(&group_id)
+            .ok_or_else(|| err("AccessGroupNotFound", format!("Group {group_id} not found")))?;
+        let (caller_corp, caller_alliance) = caller_corp_and_alliance(snap, session, char_id);
+        let can_view = can_view_owner_group(char_id, caller_corp, caller_alliance, grp) || session.has_gm_role();
         if !can_view {
-            return Err(err("AccessGroupAccessDenied", "Caller does not have access to view this access group"));
+            return Err(err(
+                "AccessGroupAccessDenied",
+                "Caller does not have access to view this access group",
+            ));
         }
-        Ok(PyRep::keyval([
-            ("groupID", PyRep::Integer(grp.group_id)),
-            ("name", PyRep::String(grp.name.clone())),
-            ("description", PyRep::String(grp.description.clone())),
-            ("creatorID", PyRep::Integer(grp.creator_id)),
-            ("ownerCorpID", PyRep::Integer(grp.owner_corp_id)),
-            ("memberCount", PyRep::Integer(grp.members.len() as i64)),
-        ]))
+        Ok(build_owner_group_keyval(grp, char_id, caller_corp, caller_alliance))
+    })
+}
+
+/// Returns all access groups visible to the calling character (`ownerGroupManager.GetMyGroups`).
+pub fn handle_get_my_groups(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    ctx.db.with_snapshot(|snap| {
+        let ext = load_ext_state(snap);
+        let (caller_corp, caller_alliance) = caller_corp_and_alliance(snap, session, char_id);
+        let mut groups: Vec<&ops::AccessGroupRecord> = ext
+            .owner_groups
+            .values()
+            .filter(|grp| can_view_owner_group(char_id, caller_corp, caller_alliance, grp))
+            .collect();
+        groups.sort_by_key(|grp| grp.group_id);
+        Ok(PyRep::List(
+            groups
+                .into_iter()
+                .map(|grp| build_owner_group_keyval(grp, char_id, caller_corp, caller_alliance))
+                .collect(),
+        ))
     })
 }
 
@@ -1222,6 +1327,7 @@ pub async fn handle(
             Some(handle_edit_group(ctx, session, args))
         }
         ("ownerGroupManager", "GetGroup") => Some(handle_get_group(ctx, session, args)),
+        ("ownerGroupManager", "GetMyGroups") => Some(handle_get_my_groups(ctx, session)),
         ("ownerGroupManager", "GetMembers") | ("ownerGroupManager", "GetGroupMembers") => {
             Some(handle_get_members(ctx, session, args))
         }

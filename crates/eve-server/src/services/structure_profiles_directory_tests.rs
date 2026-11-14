@@ -131,7 +131,7 @@ fn structure_directory_rpc_queries_filter_by_type_state_and_access() {
     };
     assert_eq!(checked, vec![PyRep::Integer(astra_id)]);
 
-    // GetStructureMapData returns all 3 non-destroyed structures in system with accurate hasDockingAccess
+    // GetStructureMapData returns all 3 non-destroyed structures in system as 12-column CRowset rows
     let PyRep::List(map_data) = handle(
         &ctx,
         &mut session,
@@ -145,6 +145,24 @@ fn structure_directory_rpc_queries_filter_by_type_state_and_access() {
         panic!("expected list");
     };
     assert_eq!(map_data.len(), 3);
+    let mut astra_row_matched = false;
+    for row in &map_data {
+        let PyRep::List(cols) = row else {
+            panic!("expected 12-column row list, got {row:?}");
+        };
+        assert_eq!(cols.len(), 12);
+        if cols[2].as_i64() == Some(astra_id) {
+            astra_row_matched = true;
+            assert_eq!(cols[1].as_i64(), Some(35_832));
+            assert_eq!(cols[3].as_str(), Some("Perimeter Citadel"));
+            assert_eq!(cols[4].as_i64(), Some(i64::from(sys_id)));
+            assert_eq!(cols[6], PyRep::Bool(false));
+            assert_eq!(cols[7], PyRep::Real(1_000.0));
+            assert_eq!(cols[8], PyRep::Real(2_000.0));
+            assert_eq!(cols[9], PyRep::Real(3_000.0));
+        }
+    }
+    assert!(astra_row_matched, "Astrahus row must be present in GetStructureMapData");
 
     // GetMyAccessibleOnlineCynoBeaconStructures & GetSolarSystemsWithBeacons
     let PyRep::Dict(beacons) = handle(

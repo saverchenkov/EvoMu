@@ -551,10 +551,14 @@ async fn structure_deliver_and_cargo_dropoff_all_error_and_hold_branches() {
     sess.structure_id = None;
     sess.ship_id = None;
     assert_eq!(
-        handle_cargo_dropoff(&ctx, &mut sess, &[PyRep::Integer(sid), PyRep::Integer(88_103)])
-            .await
-            .unwrap_err()
-            .code,
+        handle_cargo_dropoff(
+            &ctx,
+            &mut sess,
+            &[PyRep::Integer(88_103), PyRep::Integer(ship_id), PyRep::Integer(sid)],
+        )
+        .await
+        .unwrap_err()
+        .code,
         "NoActiveShip"
     );
     sess.ship_id = Some(ship_id);
@@ -563,39 +567,59 @@ async fn structure_deliver_and_cargo_dropoff_all_error_and_hold_branches() {
         "MissingStructureId"
     );
     assert_eq!(
-        handle_cargo_dropoff(&ctx, &mut sess, &[PyRep::Integer(sid), PyRep::List(vec![])])
-            .await
-            .unwrap_err()
-            .code,
+        handle_cargo_dropoff(
+            &ctx,
+            &mut sess,
+            &[PyRep::List(vec![]), PyRep::Integer(ship_id), PyRep::Integer(sid)],
+        )
+        .await
+        .unwrap_err()
+        .code,
         "NoItemsSpecified"
     );
     assert_eq!(
-        handle_cargo_dropoff(&ctx, &mut sess, &[PyRep::Integer(999_777), PyRep::Integer(88_103)])
-            .await
-            .unwrap_err()
-            .code,
+        handle_cargo_dropoff(
+            &ctx,
+            &mut sess,
+            &[PyRep::Integer(88_103), PyRep::Integer(ship_id), PyRep::Integer(999_777)],
+        )
+        .await
+        .unwrap_err()
+        .code,
         "StructureNotFound"
     );
     assert_eq!(
-        handle_cargo_dropoff(&ctx, &mut sess, &[PyRep::Integer(flex_sid), PyRep::Integer(88_103)])
-            .await
-            .unwrap_err()
-            .code,
+        handle_cargo_dropoff(
+            &ctx,
+            &mut sess,
+            &[PyRep::Integer(88_103), PyRep::Integer(ship_id), PyRep::Integer(flex_sid)],
+        )
+        .await
+        .unwrap_err()
+        .code,
         "StructureNotDockable"
     );
     assert_eq!(
-        handle_cargo_dropoff(&ctx, &mut sess, &[PyRep::Integer(reinf_sid), PyRep::Integer(88_103)])
-            .await
-            .unwrap_err()
-            .code,
+        handle_cargo_dropoff(
+            &ctx,
+            &mut sess,
+            &[PyRep::Integer(88_103), PyRep::Integer(ship_id), PyRep::Integer(reinf_sid)],
+        )
+        .await
+        .unwrap_err()
+        .code,
         "StructureNotOperational"
     );
     // ShipNotInSpace before ball spawned
     assert_eq!(
-        handle_cargo_dropoff(&ctx, &mut sess, &[PyRep::Integer(sid), PyRep::Integer(88_103)])
-            .await
-            .unwrap_err()
-            .code,
+        handle_cargo_dropoff(
+            &ctx,
+            &mut sess,
+            &[PyRep::Integer(88_103), PyRep::Integer(ship_id), PyRep::Integer(sid)],
+        )
+        .await
+        .unwrap_err()
+        .code,
         "ShipNotInSpace"
     );
 
@@ -629,17 +653,25 @@ async fn structure_deliver_and_cargo_dropoff_all_error_and_hold_branches() {
         }
     });
     assert_eq!(
-        handle_cargo_dropoff(&ctx, &mut sess, &[PyRep::Integer(sid), PyRep::Integer(88_104)])
-            .await
-            .unwrap_err()
-            .code,
+        handle_cargo_dropoff(
+            &ctx,
+            &mut sess,
+            &[PyRep::Integer(88_104), PyRep::Integer(ship_id), PyRep::Integer(sid)],
+        )
+        .await
+        .unwrap_err()
+        .code,
         "ItemNotInShipCargo"
     );
     assert_eq!(
-        handle_cargo_dropoff(&ctx, &mut sess, &[PyRep::Integer(sid), PyRep::Integer(88_103)])
-            .await
-            .expect("single-int gas hold dropoff"),
-        PyRep::None
+        handle_cargo_dropoff(
+            &ctx,
+            &mut sess,
+            &[PyRep::Integer(88_103), PyRep::Integer(ship_id), PyRep::Integer(sid)],
+        )
+        .await
+        .expect("single-int gas hold dropoff"),
+        PyRep::List(vec![PyRep::Integer(88_103)])
     );
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items[&88_103].location_id, sid);

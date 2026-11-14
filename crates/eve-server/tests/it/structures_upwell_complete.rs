@@ -247,11 +247,14 @@ async fn test_structure_description_deliveries_cargo_dropoff_guests_and_hangar_v
     // Cargo drop-off from space into the structure's deliveries.
     let ore = grant_item(&ctx, char_id, ship_id, 1230, InventoryFlag::Cargo, 50);
     let not_mine = grant_item(&ctx, other_id, 60_003_760, 34, InventoryFlag::Hangar, 1);
-    let bad = rpc(&ctx, &mut sess, "structureCargoDelivery", "DropOffItems", &[PyRep::Integer(struct_id), PyRep::List(vec![PyRep::Integer(not_mine)])])
+    let bad = rpc(&ctx, &mut sess, "structureCargoDelivery", "DropOffItems", &[PyRep::List(vec![PyRep::Integer(not_mine)]), PyRep::Integer(ship_id), PyRep::Integer(struct_id)])
         .await
         .expect_err("item not in cargo");
     assert_eq!(bad.code, "ItemNotInShipCargo");
-    rpc(&ctx, &mut sess, "structureCargoDelivery", "DropOffItems", &[PyRep::Integer(struct_id), PyRep::List(vec![PyRep::Integer(ore)])]).await.expect("DropOffItems");
+    let moved = rpc(&ctx, &mut sess, "structureCargoDelivery", "DropOffItems", &[PyRep::List(vec![PyRep::Integer(ore)]), PyRep::Integer(ship_id), PyRep::Integer(struct_id)])
+        .await
+        .expect("DropOffItems");
+    assert_eq!(moved, PyRep::List(vec![PyRep::Integer(ore)]));
     ctx.db.with_snapshot(|snap| {
         let it = snap.items.get(&ore).expect("ore");
         assert_eq!(it.location_id, struct_id);
@@ -261,7 +264,7 @@ async fn test_structure_description_deliveries_cargo_dropoff_guests_and_hangar_v
 
     // Dock and check guests + hangar view.
     rpc(&ctx, &mut sess, "structureDocking", "Dock", &[PyRep::Integer(struct_id)]).await.expect("Dock");
-    let docked_drop = rpc(&ctx, &mut sess, "structureCargoDelivery", "DropOffItems", &[PyRep::Integer(struct_id), PyRep::List(vec![PyRep::Integer(ore)])])
+    let docked_drop = rpc(&ctx, &mut sess, "structureCargoDelivery", "DropOffItems", &[PyRep::List(vec![PyRep::Integer(ore)]), PyRep::Integer(ship_id), PyRep::Integer(struct_id)])
         .await
         .expect_err("drop-off is an in-space action");
     assert_eq!(docked_drop.code, "MustBeInSpace");
@@ -419,7 +422,7 @@ async fn test_r3_track2_structures_compression_special_sites_regressions() {
         &mut sess,
         "structureCargoDelivery",
         "DropOffItems",
-        &[PyRep::Integer(struct_id), PyRep::List(vec![PyRep::Integer(fitted_rig)])],
+        &[PyRep::List(vec![PyRep::Integer(fitted_rig)]), PyRep::Integer(ship_id), PyRep::Integer(struct_id)],
     )
     .await
     .expect_err("#122: Fitted rig must not be dropped off via DropOffItems");

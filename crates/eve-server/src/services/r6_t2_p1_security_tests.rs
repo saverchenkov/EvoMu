@@ -416,7 +416,7 @@ async fn r6_t2_13_and_14_cone_scan_cloaked_and_map_data_acl() {
 
     let map_res = ctx.dispatch_rpc(&mut s, "structureDirectory", None, "GetStructureMapData", &[PyRep::Integer(i64::from(sys_id))], &empty, None).await.expect("map data");
     let st_ids: Vec<i64> = match map_res {
-        PyRep::List(items) => items.into_iter().filter_map(|r| match r { PyRep::KeyVal(kv) => kv.get("structureID").and_then(PyRep::as_i64), _ => None }).filter(|id| [1_010_000_090_101, 1_010_000_090_102].contains(id)).collect(),
+        PyRep::List(items) => items.into_iter().filter_map(|r| match r { PyRep::List(cols) => cols.get(2).and_then(PyRep::as_i64), _ => None }).filter(|id| [1_010_000_090_101, 1_010_000_090_102].contains(id)).collect(),
         _ => Vec::new(),
     };
     assert_eq!(st_ids, vec![1_010_000_090_102]);

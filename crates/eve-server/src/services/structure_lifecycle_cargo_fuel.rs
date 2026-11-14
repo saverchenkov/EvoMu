@@ -297,8 +297,19 @@ pub(crate) async fn handle_cargo_dropoff(ctx: &ServerContext, session: &mut Sess
         return Err(err("MustBeInSpace", "structureCargoDelivery.DropOffItems requires a ship in space"));
     }
     let ship_id = session.ship_id.ok_or_else(|| err("NoActiveShip", "No active ship in space"))?;
-    let structure_id = args.first().and_then(|a| a.as_i64()).ok_or_else(|| err("MissingStructureId", "DropOffItems requires structureID"))?;
-    let item_ids: Vec<i64> = match args.get(1) {
+    let structure_id = args
+        .get(2)
+        .and_then(|a| a.as_i64())
+        .ok_or_else(|| err("MissingStructureId", "DropOffItems requires (itemIDs, sourceLocationID, structureID)"))?;
+    if let Some(source_location_id) = args.get(1).and_then(|a| a.as_i64()) {
+        if source_location_id != ship_id {
+            return Err(err(
+                "InvalidSourceLocation",
+                format!("DropOffItems sourceLocationID {source_location_id} does not match active ship {ship_id}"),
+            ));
+        }
+    }
+    let item_ids: Vec<i64> = match args.first() {
         Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => items.iter().filter_map(|x| x.as_i64()).collect(),
         Some(PyRep::Integer(id)) => vec![*id],
         _ => Vec::new(),
@@ -384,7 +395,7 @@ pub(crate) async fn handle_cargo_dropoff(ctx: &ServerContext, session: &mut Sess
                 it.version += 1;
             }
         }
-        Ok(PyRep::None)
+        Ok(PyRep::List(item_ids.iter().map(|&id| PyRep::Integer(id)).collect()))
     })
 }
 

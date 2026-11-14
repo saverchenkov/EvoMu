@@ -146,18 +146,27 @@ fn handle_get_structure_map_data(
         let rows = list
             .into_iter()
             .map(|st| {
-                let has_dock = !matches!(st.type_id, 35840 | 35841 | 37534 | 81826)
-                    && evaluate_character_structure_access_in_snap(snap, st.structure_id, char_id);
-                PyRep::keyval([
-                    ("structureID", PyRep::Integer(st.structure_id)),
-                    ("typeID", PyRep::Integer(i64::from(st.type_id))),
-                    ("ownerID", PyRep::Integer(st.owner_corp_id)),
-                    ("solarSystemID", PyRep::Integer(i64::from(st.solar_system_id))),
-                    ("itemName", PyRep::String(st.name.clone())),
-                    ("x", PyRep::Real(st.position[0])),
-                    ("y", PyRep::Real(st.position[1])),
-                    ("z", PyRep::Real(st.position[2])),
-                    ("hasDockingAccess", PyRep::Bool(has_dock)),
+                // V24 `mapSvc.GetSolarsystemItems` passes each element to `CRowset.InsertNew`,
+                // matching `eveCfg.GetLocationsLocalBySystem`'s 12-column `solarSystemObjectRowDescriptor`.
+                let group_id = ctx
+                    .sde
+                    .types
+                    .get(&st.type_id)
+                    .map(|t| i64::from(t.group_id))
+                    .unwrap_or(1657);
+                PyRep::List(vec![
+                    PyRep::Integer(group_id),
+                    PyRep::Integer(i64::from(st.type_id)),
+                    PyRep::Integer(st.structure_id),
+                    PyRep::String(st.name.clone()),
+                    PyRep::Integer(i64::from(st.solar_system_id)),
+                    PyRep::Integer(0),
+                    PyRep::Bool(false),
+                    PyRep::Real(st.position[0]),
+                    PyRep::Real(st.position[1]),
+                    PyRep::Real(st.position[2]),
+                    PyRep::Integer(0),
+                    PyRep::Integer(0),
                 ])
             })
             .collect();

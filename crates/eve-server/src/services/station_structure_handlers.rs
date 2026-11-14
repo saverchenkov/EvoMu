@@ -2,6 +2,7 @@
 
 use crate::router::ServerContext;
 use crate::services::station_structure::{
+    structure_ansiblex_navigation,
     structure_lifecycle,
     structure_lifecycle as life,
     structure_lifecycle_rpc::has_structure_manager_role,
@@ -502,6 +503,73 @@ fn build_structure_dir_entry(
     let can_see_reinforce = caller_corp == st.owner_corp_id || hacked_reveal;
     let can_see_pending = is_corp_manager || hacked_reveal;
     let pending = ext.pending_reinforce_schedule.get(&st.structure_id).copied();
+    let upkeep_state = match power {
+        life::PowerState::FullPower => 1_i64,
+        life::PowerState::LowPower | life::PowerState::NotOperational => 2_i64,
+        life::PowerState::Abandoned => 3_i64,
+    };
+    let mut war_ids: Vec<i64> = snap
+        .wars
+        .values()
+        .filter(|w| {
+            w.active
+                && snap.war_state.wars.get(&w.war_id).is_some_and(|meta| {
+                    meta.war_hq_id == Some(st.structure_id)
+                        && meta.finish_at_unix.is_none_or(|f| f > now)
+                })
+        })
+        .map(|w| w.war_id)
+        .collect();
+    war_ids.sort_unstable();
+    let fuel_expires = if is_corp_manager {
+        life::estimated_fuel_expires_unix(ctx, snap, st, now)
+            .map(|t| PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(t)))
+            .unwrap_or(PyRep::None)
+    } else {
+        PyRep::None
+    };
+    let timer_end = if st.reinforced_until_unix > now {
+        PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(st.reinforced_until_unix))
+    } else {
+        PyRep::None
+    };
+    let unanchoring = if can_see_reinforce {
+        ext.unanchoring_until_unix
+            .get(&st.structure_id)
+            .copied()
+            .filter(|&u| u > now)
+            .map(|u| PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(u)))
+            .unwrap_or(PyRep::None)
+    } else {
+        PyRep::None
+    };
+    let liquid_ozone_qty = if is_corp_manager
+        && st.type_id == structure_ansiblex_navigation::ANSIBLEX_TYPE_ID
+    {
+        let qty: i64 = snap
+            .items
+            .values()
+            .filter(|i| {
+                i.location_id == st.structure_id
+                    && super::structure_acl_defense_rules::is_structure_fuel_flag(i.flag)
+                    && i.type_id == structure_ansiblex_navigation::LIQUID_OZONE_TYPE_ID
+                    && i.quantity > 0
+            })
+            .map(|i| i64::from(i.quantity))
+            .fold(0_i64, i64::saturating_add);
+        PyRep::Integer(qty)
+    } else {
+        PyRep::None
+    };
+    let r_hour = if can_see_reinforce { PyRep::Integer(hour as i64) } else { PyRep::None };
+    let r_day = if can_see_reinforce { PyRep::Integer(day as i64) } else { PyRep::None };
+    let nr_hour = if can_see_pending { pending.map_or(PyRep::None, |(nh, _, _)| PyRep::Integer(nh as i64)) } else { PyRep::None };
+    let nr_day = if can_see_pending { pending.map_or(PyRep::None, |(_, nd, _)| PyRep::Integer(nd as i64)) } else { PyRep::None };
+    let nr_apply_ft = if can_see_pending {
+        pending.map_or(PyRep::None, |(_, _, at)| PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(at)))
+    } else {
+        PyRep::None
+    };
     PyRep::keyval([
         ("structureID", PyRep::Integer(st.structure_id)),
         ("typeID", PyRep::Integer(i64::from(st.type_id))),
@@ -509,17 +577,28 @@ fn build_structure_dir_entry(
         ("solarSystemID", PyRep::Integer(i64::from(st.solar_system_id))),
         ("itemName", PyRep::String(st.name.clone())),
         ("state", PyRep::String(st.state.clone())),
+        ("upkeepState", PyRep::Integer(upkeep_state)),
         ("powerState", PyRep::String(power.as_str().into())),
         ("profileID", if is_corp_manager { ext.structure_profile_id.get(&st.structure_id).copied().map(PyRep::Integer).unwrap_or(PyRep::None) } else { PyRep::None }),
         ("fuelBlocks", if is_corp_manager { PyRep::Integer(i64::from(st.fuel_blocks)) } else { PyRep::None }),
+        ("fuelExpires", fuel_expires),
+        ("timerEnd", timer_end),
+        ("unanchoring", unanchoring),
+        ("liquidOzoneQty", liquid_ozone_qty),
+        ("wars", PyRep::List(war_ids.into_iter().map(PyRep::Integer).collect())),
         ("services", PyRep::Dict(services)),
         ("onlineServiceTypeIDs", PyRep::List(online_types.into_iter().map(|t| PyRep::Integer(i64::from(t))).collect())),
         ("inSpace", PyRep::Bool(st.state != life::STATE_DESTROYED)),
-        ("reinforceHour", if can_see_reinforce { PyRep::Integer(hour as i64) } else { PyRep::None }),
-        ("reinforceWeekday", if can_see_reinforce { PyRep::Integer(day as i64) } else { PyRep::None }),
-        ("nextReinforceHour", if can_see_pending { pending.map_or(PyRep::None, |(nh, _, _)| PyRep::Integer(nh as i64)) } else { PyRep::None }),
-        ("nextReinforceWeekday", if can_see_pending { pending.map_or(PyRep::None, |(_, nd, _)| PyRep::Integer(nd as i64)) } else { PyRep::None }),
+        ("reinforceHour", r_hour.clone()),
+        ("reinforceWeekday", r_day.clone()),
+        ("nextReinforceHour", nr_hour.clone()),
+        ("nextReinforceWeekday", nr_day.clone()),
         ("applyAfterUnix", if can_see_pending { pending.map_or(PyRep::None, |(_, _, at)| PyRep::Integer(at as i64)) } else { PyRep::None }),
+        ("reinforce_hour", r_hour),
+        ("reinforce_weekday", r_day),
+        ("next_reinforce_hour", nr_hour),
+        ("next_reinforce_weekday", nr_day),
+        ("next_reinforce_apply", nr_apply_ft),
     ])
 }
 

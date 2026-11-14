@@ -708,3 +708,218 @@ async fn mutant_kill_anchor_orbital_and_upgrade_gantry_role_bitmasks_and_outputs
         assert_eq!(upg.dict_get("typeID"), Some(&PyRep::Integer(2_233)));
     }
 }
+
+#[test]
+fn structure_directory_v24_fields_and_wire_state_normalization() {
+    let now = 1_800_000_000_u64;
+    let ctx = test_ctx_with_clock(now);
+    let ceo_id = 930_901_i64;
+    let corp_id = 98_930_901_i64;
+    let defender_corp = 98_930_902_i64;
+    let sys_id = 30_000_142_u32;
+    let st_full = 1_060_000_930_001_i64;
+    let st_low = 1_060_000_930_002_i64;
+    let st_abandoned = 1_060_000_930_003_i64;
+    let jb_id = 1_060_000_930_004_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let ceo = clone_char_with(snap, ceo_id, "Dir CEO", corp_id, sys_id, 60_003_760);
+        snap.characters.insert(ceo_id, ceo);
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "Dir Corp".into();
+        corp.ticker = "DIRC".into();
+        corp.ceo_id = ceo_id;
+        snap.corporations.insert(corp_id, corp);
+        snap.structures.insert(
+            st_full,
+            UpwellStructureRecord {
+                structure_id: st_full,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Full Power WarHQ".into(),
+                position: [1_000.0, 0.0, 0.0],
+                state: "ArmorReinforced".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                reinforced_until_unix: now + 7_200,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            890_901,
+            InventoryItemRecord {
+                item_id: 890_901,
+                type_id: 35_892, // Market service module
+                owner_id: corp_id,
+                location_id: st_full,
+                flag: InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(890_901, true);
+        snap.structures.insert(
+            st_low,
+            UpwellStructureRecord {
+                structure_id: st_low,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Low Power".into(),
+                position: [2_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 0,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            st_abandoned,
+            UpwellStructureRecord {
+                structure_id: st_abandoned,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Abandoned".into(),
+                position: [3_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 0,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            jb_id,
+            UpwellStructureRecord {
+                structure_id: jb_id,
+                type_id: 35_841, // Ansiblex
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Ozone Gate".into(),
+                position: [4_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 50,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            890_902,
+            InventoryItemRecord {
+                item_id: 890_902,
+                type_id: 16_273, // Liquid Ozone
+                owner_id: corp_id,
+                location_id: jb_id,
+                flag: InventoryFlag::StructureFuel,
+                quantity: 12_500,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        let mut ext = load_ext_state(snap);
+        ext.unanchoring_until_unix.insert(st_full, now + 86_400);
+        ext.pending_reinforce_schedule.insert(st_full, (21, 6, now + 604_800));
+        ext.lifecycle.entry(st_abandoned).or_default().low_power_since_unix =
+            Some(now.saturating_sub(8 * 86_400));
+        save_ext_state(snap, &ext);
+
+        snap.wars.insert(
+            701,
+            eve_db::types::WarRecord {
+                war_id: 701,
+                aggressor_corp_id: corp_id,
+                defender_corp_id: defender_corp,
+                mutual: false,
+                started_unix: now - 3_600,
+                active: true,
+            },
+        );
+        snap.war_state.wars.insert(
+            701,
+            eve_db::durable_domain_types::PersistedWarMeta {
+                war_hq_id: Some(st_full),
+                open_for_allies: false,
+                finish_at_unix: None,
+            },
+        );
+    });
+
+    let mut ceo_sess = SessionState::new(901);
+    ceo_sess.user_id = Some(ceo_id as u64);
+    ceo_sess.character_id = Some(ceo_id);
+    ceo_sess.corporation_id = Some(corp_id);
+    ceo_sess.corp_role = corp_roles::ROLE_DIRECTOR;
+    ceo_sess.solar_system_id = Some(sys_id);
+
+    let dir_raw = handle_get_structures(&ctx, &mut ceo_sess, true)
+        .expect("GetMyCorporationStructures");
+    let PyRep::Dict(entries) = &dir_raw else {
+        panic!("expected Dict from GetMyCorporationStructures");
+    };
+    let find_entry = |sid: i64| -> &PyRep {
+        entries
+            .iter()
+            .find(|(k, _)| k.as_i64() == Some(sid))
+            .map(|(_, v)| v)
+            .expect("missing structure entry")
+    };
+    let full_kv = find_entry(st_full);
+    assert_eq!(full_kv.dict_get("upkeepState"), Some(&PyRep::Integer(1)));
+    assert_eq!(full_kv.dict_get("wars"), Some(&PyRep::List(vec![PyRep::Integer(701)])));
+    assert_eq!(
+        full_kv.dict_get("timerEnd"),
+        Some(&PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(now + 7_200)))
+    );
+    assert_eq!(
+        full_kv.dict_get("unanchoring"),
+        Some(&PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(now + 86_400)))
+    );
+    let fuel_exp = full_kv
+        .dict_get("fuelExpires")
+        .and_then(PyRep::as_i64)
+        .expect("fuelExpires FILETIME for full power");
+    assert!(fuel_exp > crate::sp6_lifecycle::unix_to_filetime(now));
+    assert_eq!(full_kv.dict_get("reinforce_hour"), Some(&PyRep::Integer(18)));
+    assert_eq!(full_kv.dict_get("reinforce_weekday"), Some(&PyRep::Integer(5)));
+    assert_eq!(full_kv.dict_get("next_reinforce_hour"), Some(&PyRep::Integer(21)));
+    assert_eq!(full_kv.dict_get("next_reinforce_weekday"), Some(&PyRep::Integer(6)));
+    assert_eq!(
+        full_kv.dict_get("next_reinforce_apply"),
+        Some(&PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(now + 604_800)))
+    );
+
+    assert_eq!(find_entry(st_low).dict_get("upkeepState"), Some(&PyRep::Integer(2)));
+    assert_eq!(find_entry(st_abandoned).dict_get("upkeepState"), Some(&PyRep::Integer(3)));
+    assert_eq!(
+        find_entry(jb_id).dict_get("liquidOzoneQty"),
+        Some(&PyRep::Integer(12_500))
+    );
+
+    // Macho wire normalization maps string `state` to V24 integer `structures.const.STATE_*`
+    let wire_dir = crate::router::client_compat::normalize_macho_rpc_reply(
+        "structureDirectory",
+        "GetMyCorporationStructures",
+        Ok(dir_raw),
+    )
+    .expect("wire normalize");
+    let PyRep::Dict(wire_entries) = wire_dir else {
+        panic!("expected Dict after normalize");
+    };
+    let wire_full = wire_entries
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(st_full))
+        .map(|(_, v)| v)
+        .expect("wire full entry");
+    assert_eq!(wire_full.dict_get("state"), Some(&PyRep::Integer(111)));
+    let wire_low = wire_entries
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(st_low))
+        .map(|(_, v)| v)
+        .expect("wire low entry");
+    assert_eq!(wire_low.dict_get("state"), Some(&PyRep::Integer(110)));
+}

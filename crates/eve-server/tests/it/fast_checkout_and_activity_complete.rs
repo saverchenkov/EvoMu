@@ -246,9 +246,10 @@ async fn test_fast_checkout_and_activity_complete() {
     )
     .await
     .expect("GetStructureInfo after anchoring/onlining");
+    // Wire replies normalize `state` strings to V24 integer constants (STATE_SHIELD_VULNERABLE = 110).
     assert_eq!(
-        info_rep.dict_get("state").and_then(|v| v.as_str()),
-        Some("ShieldVulnerable")
+        info_rep.dict_get("state").and_then(|v| v.as_i64()),
+        Some(110)
     );
 
     // Fly ship within 5,000 m of the anchored Metenox and load fuel + magmatic gas via invbroker.Add

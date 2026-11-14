@@ -723,7 +723,7 @@ async fn cargo_dropoff_covers_space_range_acl_flex_state_locks_and_specialized_h
         "MissingStructureId"
     );
     assert_eq!(
-        handle_cargo_dropoff(&ctx, &mut s, &[PyRep::Integer(st_id)])
+        handle_cargo_dropoff(&ctx, &mut s, &[PyRep::List(vec![]), PyRep::Integer(ship_id), PyRep::Integer(st_id)])
             .await
             .unwrap_err()
             .code,
@@ -805,7 +805,7 @@ async fn cargo_dropoff_covers_space_range_acl_flex_state_locks_and_specialized_h
 
     // StructureNotFound (wrong id)
     assert_eq!(
-        handle_cargo_dropoff(&ctx, &mut s, &[PyRep::Integer(999_777), PyRep::Integer(610_001)])
+        handle_cargo_dropoff(&ctx, &mut s, &[PyRep::Integer(610_001), PyRep::Integer(ship_id), PyRep::Integer(999_777)])
             .await
             .unwrap_err()
             .code,
@@ -814,7 +814,7 @@ async fn cargo_dropoff_covers_space_range_acl_flex_state_locks_and_specialized_h
 
     // StructureNotDockable (FLEX)
     assert_eq!(
-        handle_cargo_dropoff(&ctx, &mut s, &[PyRep::Integer(flex_id), PyRep::Integer(610_001)])
+        handle_cargo_dropoff(&ctx, &mut s, &[PyRep::Integer(610_001), PyRep::Integer(ship_id), PyRep::Integer(flex_id)])
             .await
             .unwrap_err()
             .code,
@@ -823,7 +823,7 @@ async fn cargo_dropoff_covers_space_range_acl_flex_state_locks_and_specialized_h
 
     // StructureNotOperational (HullReinforced)
     assert_eq!(
-        handle_cargo_dropoff(&ctx, &mut s, &[PyRep::Integer(st_id), PyRep::Integer(610_001)])
+        handle_cargo_dropoff(&ctx, &mut s, &[PyRep::Integer(610_001), PyRep::Integer(ship_id), PyRep::Integer(st_id)])
             .await
             .unwrap_err()
             .code,
@@ -835,7 +835,7 @@ async fn cargo_dropoff_covers_space_range_acl_flex_state_locks_and_specialized_h
         snap.structures.get_mut(&st_id).unwrap().state = life::STATE_SHIELD_VULNERABLE.into();
     });
     assert_eq!(
-        handle_cargo_dropoff(&ctx, &mut s, &[PyRep::Integer(st_id), PyRep::Integer(610_001)])
+        handle_cargo_dropoff(&ctx, &mut s, &[PyRep::Integer(610_001), PyRep::Integer(ship_id), PyRep::Integer(st_id)])
             .await
             .unwrap_err()
             .code,
@@ -859,7 +859,7 @@ async fn cargo_dropoff_covers_space_range_acl_flex_state_locks_and_specialized_h
         })
         .await;
     assert_eq!(
-        handle_cargo_dropoff(&ctx, &mut s, &[PyRep::Integer(st_id), PyRep::Integer(610_001)])
+        handle_cargo_dropoff(&ctx, &mut s, &[PyRep::Integer(610_001), PyRep::Integer(ship_id), PyRep::Integer(st_id)])
             .await
             .unwrap_err()
             .code,
@@ -880,7 +880,7 @@ async fn cargo_dropoff_covers_space_range_acl_flex_state_locks_and_specialized_h
         handle_cargo_dropoff(
             &ctx,
             &mut s,
-            &[PyRep::Integer(st_id), PyRep::List(vec![PyRep::Integer(610_003)])]
+            &[PyRep::List(vec![PyRep::Integer(610_003)]), PyRep::Integer(ship_id), PyRep::Integer(st_id)]
         )
         .await
         .unwrap_err()
@@ -904,7 +904,7 @@ async fn cargo_dropoff_covers_space_range_acl_flex_state_locks_and_specialized_h
         handle_cargo_dropoff(
             &ctx,
             &mut s,
-            &[PyRep::Integer(st_id), PyRep::Tuple(vec![PyRep::Integer(610_001)])]
+            &[PyRep::Tuple(vec![PyRep::Integer(610_001)]), PyRep::Integer(ship_id), PyRep::Integer(st_id)]
         )
         .await
         .unwrap_err()
@@ -918,14 +918,26 @@ async fn cargo_dropoff_covers_space_range_acl_flex_state_locks_and_specialized_h
         handle_cargo_dropoff(
             &ctx,
             &mut s,
+            &[PyRep::List(vec![PyRep::Integer(610_001)]), PyRep::Integer(ship_id + 1), PyRep::Integer(st_id)]
+        )
+        .await
+        .expect_err("mismatched sourceLocationID must fail")
+        .code,
+        "InvalidSourceLocation"
+    );
+    assert_eq!(
+        handle_cargo_dropoff(
+            &ctx,
+            &mut s,
             &[
+                PyRep::List(vec![PyRep::Integer(610_001), PyRep::Integer(610_002)]),
+                PyRep::Integer(ship_id),
                 PyRep::Integer(st_id),
-                PyRep::List(vec![PyRep::Integer(610_001), PyRep::Integer(610_002)])
             ]
         )
         .await
-        .unwrap(),
-        PyRep::None
+        .expect("cargo + ore hold dropoff"),
+        PyRep::List(vec![PyRep::Integer(610_001), PyRep::Integer(610_002)])
     );
     ctx.db.with_snapshot(|snap| {
         for iid in [610_001, 610_002] {

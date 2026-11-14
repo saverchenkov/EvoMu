@@ -940,6 +940,20 @@ pub fn normalize_macho_rpc_reply_at(
                 PyRep::Dict(Vec::new()),
             ]));
         }
+    }
+    if service == "structureDirectory"
+        && matches!(
+            method,
+            "GetMyCorporationStructures"
+                | "GetMyCharacterStructures"
+                | "GetStructures"
+                | "GetCorporationStructures"
+                | "GetStructureInfo"
+        )
+    {
+        if let Ok(rep) = rpc_res {
+            return Ok(normalize_structure_directory_reply(rep));
+        }
     } else if service == "jumpTimers" && method == "GetTimers" {
         if let Ok(ref rep) = rpc_res {
             if matches!(rep, PyRep::KeyVal(_) | PyRep::Dict(_)) {
@@ -4311,6 +4325,61 @@ fn normalize_on_godma_ship_effect(
         PyRep::None,
         PyRep::None,
     ]
+}
+
+fn structure_state_wire_code(state: &str) -> i64 {
+    match state {
+        "Unanchored" => 1,
+        "Anchoring" => 2,
+        "Online" => 100,
+        "NoCore" | "FittingInvulnerable" => 101,
+        "Onlining" | "OnliningVulnerable" => 102,
+        "ShieldVulnerable" => 110,
+        "ArmorReinforced" | "ArmorReinforce" => 111,
+        "ArmorVulnerable" => 112,
+        "HullReinforced" | "HullReinforce" => 113,
+        "HullVulnerable" => 114,
+        "AnchorVulnerable" => 115,
+        "DeployVulnerable" => 116,
+        _ => 0,
+    }
+}
+
+fn normalize_structure_dir_entry_wire(rep: PyRep) -> PyRep {
+    match rep {
+        PyRep::KeyVal(mut entries) => {
+            if let Some(v) = entries.get_mut("state") {
+                if let Some(s) = v.as_str() {
+                    *v = PyRep::Integer(structure_state_wire_code(s));
+                }
+            }
+            PyRep::KeyVal(entries)
+        }
+        PyRep::Dict(mut entries) => {
+            for (k, v) in &mut entries {
+                if k.as_str() == Some("state") {
+                    if let Some(s) = v.as_str() {
+                        *v = PyRep::Integer(structure_state_wire_code(s));
+                    }
+                }
+            }
+            PyRep::Dict(entries)
+        }
+        other => other,
+    }
+}
+
+fn normalize_structure_directory_reply(rep: PyRep) -> PyRep {
+    match rep {
+        PyRep::Dict(items) => PyRep::Dict(
+            items
+                .into_iter()
+                .map(|(k, v)| (k, normalize_structure_dir_entry_wire(v)))
+                .collect(),
+        ),
+        PyRep::KeyVal(entries) => normalize_structure_dir_entry_wire(PyRep::KeyVal(entries)),
+        other => other,
+    }
 }
 
 #[cfg(test)]

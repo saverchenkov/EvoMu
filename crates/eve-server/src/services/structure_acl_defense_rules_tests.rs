@@ -528,6 +528,128 @@ fn ex_director_creator_loses_corp_acl_admin_and_can_be_demoted_by_director() {
     );
 }
 
+#[tokio::test]
+async fn owner_group_get_my_groups_returns_v24_fields_and_filters_excluded() {
+    let ctx = test_ctx();
+    let admin_id = 910_801_i64;
+    let member_id = 910_802_i64;
+    let excluded_id = 910_803_i64;
+    let outsider_id = 910_804_i64;
+    let corp_a = 98_910_801_i64;
+    let corp_b = 98_910_802_i64;
+    let g_corp = 80_901_001_i64;
+    let g_personal = 80_901_002_i64;
+    let g_other = 80_901_003_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, corp) in [
+            (admin_id, corp_a),
+            (member_id, corp_a),
+            (excluded_id, corp_a),
+            (outsider_id, corp_b),
+        ] {
+            let mut ch = snap
+                .characters
+                .values()
+                .next()
+                .cloned()
+                .expect("seed character");
+            ch.character_id = cid;
+            ch.corporation_id = corp;
+            snap.characters.insert(cid, ch);
+        }
+        let mut ext = load_ext_state(snap);
+        ext.owner_groups.insert(
+            g_corp,
+            AccessGroupRecord {
+                group_id: g_corp,
+                creator_id: admin_id,
+                owner_corp_id: corp_a,
+                name: "Corp ACL".into(),
+                description: "Corp access".into(),
+                members: HashMap::from([
+                    (member_id, ACL_ROLE_MANAGER),
+                    (excluded_id, ACL_ROLE_EXCLUDED),
+                ]),
+            },
+        );
+        ext.owner_groups.insert(
+            g_personal,
+            AccessGroupRecord {
+                group_id: g_personal,
+                creator_id: admin_id,
+                owner_corp_id: 0,
+                name: "Personal ACL".into(),
+                description: "Shared list".into(),
+                members: HashMap::from([(member_id, ACL_ROLE_MEMBER)]),
+            },
+        );
+        ext.owner_groups.insert(
+            g_other,
+            AccessGroupRecord {
+                group_id: g_other,
+                creator_id: outsider_id,
+                owner_corp_id: corp_b,
+                name: "Other Corp ACL".into(),
+                description: "Hidden".into(),
+                members: HashMap::new(),
+            },
+        );
+        save_ext_state(snap, &ext);
+    });
+
+    let kw = HashMap::new();
+    let mut admin_sess = make_session(admin_id, corp_a, 30_000_142, None, 0);
+    let PyRep::List(admin_groups) = handle(&ctx, &mut admin_sess, "ownerGroupManager", "GetMyGroups", &[], &kw)
+        .await
+        .expect("GetMyGroups handled")
+        .expect("admin GetMyGroups ok")
+    else {
+        panic!("expected list from GetMyGroups");
+    };
+    let admin_gids: Vec<i64> = admin_groups
+        .iter()
+        .filter_map(|g| g.dict_get("groupID").and_then(PyRep::as_i64))
+        .collect();
+    assert_eq!(admin_gids, vec![g_corp, g_personal]);
+    assert_eq!(
+        admin_groups[0].dict_get("membershipType"),
+        Some(&PyRep::Integer(ACL_ROLE_ADMIN))
+    );
+    assert_eq!(
+        admin_groups[0].dict_get("admins"),
+        Some(&PyRep::List(vec![PyRep::Integer(admin_id)]))
+    );
+
+    let mut member_sess = make_session(member_id, corp_a, 30_000_142, None, 0);
+    let PyRep::List(member_groups) = handle(&ctx, &mut member_sess, "ownerGroupManager", "GetMyGroups", &[], &kw)
+        .await
+        .expect("GetMyGroups handled")
+        .expect("member GetMyGroups ok")
+    else {
+        panic!("expected list");
+    };
+    assert_eq!(member_groups.len(), 2);
+    assert_eq!(
+        member_groups[0].dict_get("membershipType"),
+        Some(&PyRep::Integer(ACL_ROLE_MANAGER))
+    );
+    assert_eq!(
+        member_groups[1].dict_get("membershipType"),
+        Some(&PyRep::Integer(ACL_ROLE_MEMBER))
+    );
+
+    let mut excluded_sess = make_session(excluded_id, corp_a, 30_000_142, None, 0);
+    let PyRep::List(excluded_groups) = handle(&ctx, &mut excluded_sess, "ownerGroupManager", "GetMyGroups", &[], &kw)
+        .await
+        .expect("GetMyGroups handled")
+        .expect("excluded GetMyGroups ok")
+    else {
+        panic!("expected list");
+    };
+    assert!(excluded_groups.is_empty(), "excluded character must not receive corp-owned group");
+}
+
 #[cfg(test)]
 #[path = "structure_acl_defense_rules_extra_unit_tests.rs"]
 mod extra_unit_tests;
