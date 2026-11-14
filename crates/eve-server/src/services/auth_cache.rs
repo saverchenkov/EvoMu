@@ -1756,7 +1756,9 @@ async fn handle_slash_teleport(
             let _ = new_handle
                 .spawn_ball_with_meta(new_ball, combat_state, slim_meta)
                 .await;
-            let _ = new_handle.push_set_state(ship_id).await;
+            // Do not push SetState here: cross-system teleport sends SessionChangeNotification
+            // before the client opens its new ballpark and calls beyonce.MachoBindObject /
+            // UpdateStateRequest, which pushes SetState synchronously on bind (#802, #1067).
             persisted_pos = Some(tr_pos);
         } else {
             let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
@@ -1789,7 +1791,7 @@ async fn handle_slash_teleport(
                 let _ = new_handle
                     .spawn_ball_with_meta(new_ball, combat_state, slim_meta)
                     .await;
-                let _ = new_handle.push_set_state(ship_id).await;
+                // Same-system board/undock fallback: client requests state on bind (#1067).
                 persisted_pos = Some(tr_pos);
             } else {
                 if !stopped_mid_warp {
@@ -1797,9 +1799,6 @@ async fn handle_slash_teleport(
                 }
                 if let Some(tr_pos) = explicit_pos {
                     let _ = new_handle.set_ball_position(ship_id, tr_pos).await;
-                }
-                if !was_in_space {
-                    let _ = new_handle.push_set_state(ship_id).await;
                 }
                 persisted_pos = explicit_pos;
             }
