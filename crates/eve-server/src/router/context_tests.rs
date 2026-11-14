@@ -1,6 +1,6 @@
 //! Unit and mutation-killing tests for `router::context`.
 
-use crate::router::context::{ActiveMoonSurveyProbe, ServerContext};
+use crate::router::context::{ActiveMoonSurveyProbe, ModuleCooldownEntry, ServerContext};
 use eve_db::{
     AsteroidRecord, CosmicSignatureRecord, FleetRole, InventoryFlag, InventoryItemRecord,
     MoonExtractionRecord, PersistedSpaceObjectMeta, ServerClock, TrainedSkillRecord,
@@ -987,4 +987,126 @@ fn persisted_fit_inputs_rehydrate_stance_cooldown_and_overloaded_modules_after_i
         rebuilt.modules.get(&mwd_mod_id).map(|m| m.state),
         Some(eve_dogma::ModuleState::Overloaded)
     );
+}
+
+#[tokio::test]
+async fn persisted_future_module_reactivation_cooldown_does_not_freeze_after_restart_1036() {
+    let sde = Arc::clone(&test_ctx().sde);
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let wall_t0 = 1_794_608_434_u64;
+    let char_id = 90_000_001_i64;
+    let ship_id = 1_897_064_908_i64;
+    let mod_id = 1_897_065_268_i64;
+    let mod_cloak_id = 1_897_065_269_i64;
+    let mod_normal_id = 1_897_065_270_i64;
+    let mod_type_id = 440_u32;
+    let sys_id = 30_000_142_u32;
+
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            make_item(ship_id, 587, char_id, sys_id as i64, InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            mod_id,
+            make_item(mod_id, mod_type_id, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+        snap.items.insert(
+            mod_cloak_id,
+            make_item(mod_cloak_id, mod_type_id, char_id, ship_id, InventoryFlag::HiSlot1, 1),
+        );
+        snap.items.insert(
+            mod_normal_id,
+            make_item(mod_normal_id, mod_type_id, char_id, ship_id, InventoryFlag::HiSlot2, 1),
+        );
+    });
+
+    // Session 1: record an already-past cooldown (at `wall_t0 - 60` with 30s delay), advance to
+    // `wall_t0`, then `/advancetime` ~7.7 days (`667_793s`) and persist future-recorded cooldowns
+    // (including higher `recorded_sys_sim_s` as in #1036).
+    {
+        db.set_clock(Arc::new(VirtualServerClock::with_fixed_base(wall_t0 - 60)));
+        let ctx1 = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db));
+        ctx1.record_module_reactivation_delay(ship_id, mod_normal_id, 30.0);
+        assert!(ctx1.is_module_in_reactivation_delay(ship_id, mod_normal_id));
+
+        ctx1.clock().advance_secs(60);
+        assert!(!ctx1.is_module_in_reactivation_delay(ship_id, mod_normal_id));
+
+        ctx1.advance_secs_without_sim_clock_rebase(667_793);
+        assert!(!ctx1.is_module_in_reactivation_delay(ship_id, mod_normal_id));
+
+        ctx1.module_reactivation_cooldowns.write().unwrap().insert(
+            (ship_id, mod_id, mod_type_id),
+            ModuleCooldownEntry {
+                recorded_unix_f64: 1_795_276_227.0,
+                delay_s: 2.76,
+                solar_system_id: Some(sys_id),
+                recorded_sys_sim_s: 1_880.0,
+            },
+        );
+        ctx1.record_module_reactivation_delay(ship_id, mod_cloak_id, 15.0);
+        assert!(ctx1.is_module_in_reactivation_delay(ship_id, mod_id));
+        assert!(ctx1.is_module_in_reactivation_delay(ship_id, mod_cloak_id));
+        ctx1.persist_server_runtime_to_db();
+    }
+
+    // Session 2 (restart): virtual clock resets to wall clock `wall_t0` and system sim resets to `0.0`.
+    // Persisted future-recorded and already-expired cooldowns must be pruned and not block activation.
+    db.set_clock(Arc::new(VirtualServerClock::with_fixed_base(wall_t0)));
+    let ctx2 = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db));
+    assert!(!ctx2.is_module_in_reactivation_delay(ship_id, mod_id));
+    assert!(!ctx2.is_module_in_reactivation_delay(ship_id, mod_cloak_id));
+    assert!(!ctx2.is_module_in_reactivation_delay(ship_id, mod_normal_id));
+    assert!(ctx2.module_reactivation_cooldowns.read().unwrap().is_empty());
+
+    // Advancing wall clock later past the old future timestamp must not resurrect pruned entries.
+    ctx2.clock().advance_secs(667_793);
+    assert!(!ctx2.is_module_in_reactivation_delay(ship_id, mod_id));
+    assert!(!ctx2.is_module_in_reactivation_delay(ship_id, mod_cloak_id));
+
+    // Even if a future-recorded entry is present in memory directly, lookup treats it as expired
+    // and re-recording replaces it cleanly with the new delay.
+    let future_ts = (ctx2.now_unix_secs() + 3_600) as f64;
+    ctx2.module_reactivation_cooldowns.write().unwrap().insert(
+        (ship_id, mod_id, mod_type_id),
+        ModuleCooldownEntry {
+            recorded_unix_f64: future_ts,
+            delay_s: 10.0,
+            solar_system_id: Some(sys_id),
+            recorded_sys_sim_s: 1_880.0,
+        },
+    );
+    assert!(!ctx2.is_module_in_reactivation_delay(ship_id, mod_id));
+    ctx2.record_module_reactivation_delay(ship_id, mod_id, 5.0);
+    assert!(ctx2.is_module_in_reactivation_delay(ship_id, mod_id));
+    ctx2.clock().advance_secs(6);
+    assert!(!ctx2.is_module_in_reactivation_delay(ship_id, mod_id));
+
+    // Non-regression: normal cross-restart cooldown (wall clock advancing monotonically) persists
+    // for its remaining duration and then expires.
+    let t_restart_base = ctx2.now_unix_secs();
+    ctx2.record_module_reactivation_delay(ship_id, mod_normal_id, 30.0);
+    db.set_clock(Arc::new(VirtualServerClock::with_fixed_base(
+        t_restart_base + 10,
+    )));
+    let ctx3 = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db));
+    assert!(ctx3.is_module_in_reactivation_delay(ship_id, mod_normal_id));
+    ctx3.clock().advance_secs(21);
+    assert!(!ctx3.is_module_in_reactivation_delay(ship_id, mod_normal_id));
+
+    // Non-regression: same-session system sim clock progression expires cooldowns without wall advance.
+    let sys_h = ctx3.systems.get_or_spawn(sys_id);
+    ctx3.record_module_reactivation_delay(ship_id, mod_id, 12.0);
+    assert!(ctx3.is_module_in_reactivation_delay(ship_id, mod_id));
+    sys_h.step_manual(5.0).await.unwrap();
+    assert!(ctx3.is_module_in_reactivation_delay(ship_id, mod_id));
+    sys_h.step_manual(8.0).await.unwrap();
+    assert!(!ctx3.is_module_in_reactivation_delay(ship_id, mod_id));
 }

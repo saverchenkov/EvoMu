@@ -540,10 +540,26 @@ impl PersistedServerRuntimeState {
             fg.charge_state = self.fighter_charge_state.into_iter().collect();
             fg.tube_loads = self.fighter_tube_loads.into_iter().collect();
         }
+        let now_unix_f64 = ctx.now_unix_secs() as f64;
+        let filtered_cooldowns: HashMap<(i64, i64, u32), ModuleCooldownEntry> = self
+            .module_reactivation_cooldowns
+            .into_iter()
+            .filter(|(_, entry)| {
+                let cur_sys_sim_s = entry
+                    .solar_system_id
+                    .map(|sid| ctx.systems.get_system_sim_elapsed(sid))
+                    .unwrap_or(0.0);
+                ServerContext::remaining_cooldown_secs(
+                    entry,
+                    now_unix_f64,
+                    entry.solar_system_id,
+                    cur_sys_sim_s,
+                ) > 1e-6
+            })
+            .collect();
         *ctx.module_reactivation_cooldowns
             .write()
-            .unwrap_or_else(|e| e.into_inner()) =
-            self.module_reactivation_cooldowns.into_iter().collect();
+            .unwrap_or_else(|e| e.into_inner()) = filtered_cooldowns;
         *ctx.mining_cycles
             .write()
             .unwrap_or_else(|e| e.into_inner()) = self.mining_cycles;
