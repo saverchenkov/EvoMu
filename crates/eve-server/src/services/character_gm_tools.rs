@@ -1526,62 +1526,154 @@ pub async fn handle_gm_slash_ext(
                 ]
             };
 
-            let has_slot_effect = mod_type.category_id == 32
-                || effects.iter().any(|e| matches!(e, 11 | 12 | 13 | 2663 | 3772));
-            let chosen_flag = if let Some(ef) = explicit_flag {
-                ef
+            let has_slot_effect = effects.iter().any(|e| matches!(e, 11 | 12 | 13 | 2663 | 3772));
+            let has_structure_slot_effect = has_slot_effect || effects.contains(&6306);
+            let ship_group_id = ctx.sde.types.get(&ship_item.type_id).map(|t| t.group_id);
+            let chosen_flag = if explicit_flag == Some(InventoryFlag::Cargo) {
+                InventoryFlag::Cargo
             } else if mod_type.category_id == 18 {
-                InventoryFlag::DroneBay
-            } else if ship_cat_id == 6 && matches!(mod_type.category_id, 7 | 32) && has_slot_effect {
-                // Validate hull slot limits, subsystem slots, and turret/launcher hardpoints before creating the item.
-                let mut chosen: Option<InventoryFlag> = None;
-                let mut first_err: Option<String> = None;
-                for &cand in &candidate_flags {
-                    if occupied_flags.contains(&cand) {
-                        continue;
-                    }
-                    if let Some(ref base_fit) = pre_fit_opt {
-                        let mut sim_fit = base_fit.clone();
-                        match sim_fit.fit_module_with_state(
-                            -(snap.next_entity_id + 1),
-                            type_id,
-                            cand as u16,
-                            false,
-                            &ctx.sde,
-                        ) {
-                            Ok(()) => {
-                                chosen = Some(cand);
-                                break;
-                            }
-                            Err(msg) => {
-                                if first_err.is_none() {
-                                    first_err = Some(msg);
-                                }
-                            }
-                        }
-                    } else {
-                        chosen = Some(cand);
-                        break;
+                match explicit_flag {
+                    None | Some(InventoryFlag::DroneBay) => InventoryFlag::DroneBay,
+                    Some(other) => {
+                        return Err(BridgeRpcError {
+                            code: "FittingValidationFailed".into(),
+                            message: format!(
+                                "Drone type {type_id} cannot be fitted into slot flag {}",
+                                other as u16
+                            ),
+                            client_error: None,
+                        });
                     }
                 }
-                let Some(valid_flag) = chosen else {
+            } else if ship_cat_id == 6 && mod_type.category_id == 8 {
+                match explicit_flag {
+                    Some(ef) if matches!(ef as u16, 11..=34) => ef,
+                    _ => {
+                        return Err(BridgeRpcError {
+                            code: "FittingValidationFailed".into(),
+                            message: format!(
+                                "Charge type {type_id} ({}) requires an explicit module slot or Cargo flag",
+                                mod_type.name
+                            ),
+                            client_error: None,
+                        });
+                    }
+                }
+            } else if ship_cat_id == 6 && matches!(mod_type.category_id, 7 | 32) && has_slot_effect
+            {
+                if mod_type.category_id == 32 && ship_group_id != Some(963) {
                     return Err(BridgeRpcError {
                         code: "FittingValidationFailed".into(),
-                        message: first_err.unwrap_or_else(|| {
-                            format!(
-                                "No free compatible fitting slot for module type {type_id} on ship {ship_id}"
-                            )
-                        }),
+                        message: format!(
+                            "Subsystem type {type_id} ({}) can only be fitted to Strategic Cruisers",
+                            mod_type.name
+                        ),
                         client_error: None,
                     });
-                };
-                valid_flag
+                }
+                if let Some(ef) = explicit_flag {
+                    let raw = ef as u16;
+                    let slot_matches = match raw {
+                        11..=18 => effects.contains(&11),
+                        19..=26 => effects.contains(&13),
+                        27..=34 => effects.contains(&12),
+                        92..=94 => effects.contains(&2663),
+                        125..=132 => mod_type.category_id == 32 || effects.contains(&3772),
+                        _ => false,
+                    };
+                    if !slot_matches {
+                        return Err(BridgeRpcError {
+                            code: "FittingValidationFailed".into(),
+                            message: format!(
+                                "Type {type_id} ({}) is incompatible with slot flag {raw}",
+                                mod_type.name
+                            ),
+                            client_error: None,
+                        });
+                    }
+                    ef
+                } else {
+                    // Validate hull slot limits, subsystem slots, and turret/launcher hardpoints before creating the item.
+                    let mut chosen: Option<InventoryFlag> = None;
+                    let mut first_err: Option<String> = None;
+                    for &cand in &candidate_flags {
+                        if occupied_flags.contains(&cand) {
+                            continue;
+                        }
+                        if let Some(ref base_fit) = pre_fit_opt {
+                            let mut sim_fit = base_fit.clone();
+                            match sim_fit.fit_module_with_state(
+                                -(snap.next_entity_id + 1),
+                                type_id,
+                                cand as u16,
+                                false,
+                                &ctx.sde,
+                            ) {
+                                Ok(()) => {
+                                    chosen = Some(cand);
+                                    break;
+                                }
+                                Err(msg) => {
+                                    if first_err.is_none() {
+                                        first_err = Some(msg);
+                                    }
+                                }
+                            }
+                        } else {
+                            chosen = Some(cand);
+                            break;
+                        }
+                    }
+                    let Some(valid_flag) = chosen else {
+                        return Err(BridgeRpcError {
+                            code: "FittingValidationFailed".into(),
+                            message: first_err.unwrap_or_else(|| {
+                                format!(
+                                    "No free compatible fitting slot for module type {type_id} on ship {ship_id}"
+                                )
+                            }),
+                            client_error: None,
+                        });
+                    };
+                    valid_flag
+                }
+            } else if ship_cat_id == 65
+                && mod_type.category_id == 66
+                && has_structure_slot_effect
+            {
+                if let Some(ef) = explicit_flag {
+                    if !matches!(ef as u16, 11..=34 | 92..=94 | 164..=171) {
+                        return Err(BridgeRpcError {
+                            code: "FittingValidationFailed".into(),
+                            message: format!(
+                                "Structure module type {type_id} is incompatible with slot flag {}",
+                                ef as u16
+                            ),
+                            client_error: None,
+                        });
+                    }
+                    ef
+                } else if effects.contains(&6306) {
+                    (164u16..=171)
+                        .map(InventoryFlag::from_u16)
+                        .find(|f| !occupied_flags.contains(f))
+                        .unwrap_or_else(|| InventoryFlag::from_u16(164))
+                } else {
+                    candidate_flags
+                        .iter()
+                        .copied()
+                        .find(|f| !occupied_flags.contains(f))
+                        .unwrap_or(candidate_flags[0])
+                }
             } else {
-                candidate_flags
-                    .iter()
-                    .copied()
-                    .find(|f| !occupied_flags.contains(f))
-                    .unwrap_or(candidate_flags[0])
+                return Err(BridgeRpcError {
+                    code: "FittingValidationFailed".into(),
+                    message: format!(
+                        "Type {type_id} ({}) cannot be fitted onto target {ship_id}",
+                        mod_type.name
+                    ),
+                    client_error: None,
+                });
             };
 
             snap.next_entity_id += 1;

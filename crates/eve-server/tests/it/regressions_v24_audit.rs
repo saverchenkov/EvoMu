@@ -1844,4 +1844,292 @@ async fn inventory_autofit_slash_fit_undock_dock_and_mining_ledger_regressions()
         "fitted module must remain synced after Undock -> Dock"
     );
 }
+
+#[tokio::test]
+async fn live_client_hotfixes_1054_1058_1060_wire_harness() {
+    use eve_machonet::service_roles;
+    use eve_testkit::client_harness::ContractValidationMode;
+
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let now = ctx.now_unix();
+    let char_id = 90_000_001_i64;
+    let other_cid = 90_000_002_i64;
+    let station_id = 60_003_760_i64;
+    let sys_id = 30_000_142_u32;
+    let corp_id = 1_000_170_i64;
+    let structure_id = 1_000_991_058_i64;
+    let claim_key = -8_800_000_i64 - char_id;
+
+    let orig_ship_id = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(acc) = snap.accounts.get_mut("demo") {
+            acc.role |=
+                service_roles::ROLE_ADMIN | service_roles::ROLE_GMH | service_roles::ROLE_GML;
+        }
+        if let Some(acc) = snap.accounts.get_mut("other") {
+            acc.role = service_roles::ROLE_PLAYER_DEFAULT
+                | service_roles::ROLE_QA
+                | service_roles::ROLE_SPAWN
+                | service_roles::ROLE_GMS;
+        }
+        snap.item_custom_names
+            .insert(claim_key, (now + 86_400).to_string());
+        snap.structures.insert(
+            structure_id,
+            UpwellStructureRecord {
+                structure_id,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Hotfix 1058 Astrahus".into(),
+                position: [1_500_000.0, 0.0, 0.0],
+                state: "Anchoring".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 0.0,
+                armor_hp: 10_000.0,
+                hull_hp: 10_000.0,
+                reinforced_until_unix: now + 86_400,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        snap.characters[&char_id].active_ship_id
+    });
+
+    let mut harness =
+        common::new_wire_harness(&ctx, 77_990).with_mode(ContractValidationMode::Ratcheted);
+    harness
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[
+                PyRep::String("demo".into()),
+                PyRep::String("demo-secret".into()),
+            ],
+            &kw,
+        )
+        .await;
+    harness
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_id)],
+            &kw,
+        )
+        .await;
+
+    // #1054: stale future cooldown timestamp does not block CreateNewbieShip.
+    let corv1_rep = harness
+        .call_ok(
+            "dogmaIM",
+            None,
+            "CreateNewbieShip",
+            &[PyRep::Integer(orig_ship_id), PyRep::Integer(station_id)],
+            &kw,
+        )
+        .await;
+    let corv1_id = corv1_rep
+        .dict_get("shipID")
+        .and_then(|v| v.as_i64())
+        .expect("corvette shipID");
+    assert!(corv1_id > 0);
+
+    let cooldown_err = harness
+        .call(
+            "dogmaIM",
+            None,
+            "CreateNewbieShip",
+            &[PyRep::Integer(corv1_id), PyRep::Integer(station_id)],
+            &kw,
+        )
+        .await
+        .expect_err("immediate second CreateNewbieShip must hit NewbieShipCooldown");
+    assert_eq!(cooldown_err.code, "NewbieShipCooldown");
+
+    // #1054: /cleartimers clears persisted corvette cooldown key so re-claim succeeds immediately.
+    let clear_rep = harness
+        .call_ok(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/cleartimers".into())],
+            &kw,
+        )
+        .await;
+    assert_eq!(clear_rep.dict_get("cleared"), Some(&PyRep::Bool(true)));
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            !snap.item_custom_names.contains_key(&claim_key),
+            "/cleartimers must clear persisted corvette cooldown key"
+        );
+    });
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, char_id);
+    harness
+        .call_ok("ship", None, "Board", &[PyRep::Integer(orig_ship_id)], &kw)
+        .await;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(item) = snap.items.get_mut(&corv1_id) {
+            item.location_id = 60_008_494;
+        }
+    });
+    let corv2_rep = harness
+        .call_ok(
+            "dogmaIM",
+            None,
+            "CreateNewbieShip",
+            &[PyRep::Integer(orig_ship_id), PyRep::Integer(station_id)],
+            &kw,
+        )
+        .await;
+    let corv2_id = corv2_rep
+        .dict_get("shipID")
+        .and_then(|v| v.as_i64())
+        .expect("second corvette shipID after /cleartimers");
+    assert_ne!(corv2_id, corv1_id);
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, char_id);
+    harness
+        .call_ok("ship", None, "Board", &[PyRep::Integer(orig_ship_id)], &kw)
+        .await;
+
+    // #1058: /structure state transitions Upwell state, emits client notifications, and enforces role.
+    let _ = harness.drain_notifications();
+    let struct_ex = harness
+        .call_exchange(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(format!("/structure state {structure_id} 110"))],
+            &kw,
+        )
+        .await;
+    let struct_rep = struct_ex
+        .result
+        .expect("/structure state 110 must succeed");
+    assert_eq!(
+        struct_rep.dict_get("oldState"),
+        Some(&PyRep::String("Anchoring".into()))
+    );
+    assert_eq!(
+        struct_rep.dict_get("newState"),
+        Some(&PyRep::String("ShieldVulnerable".into()))
+    );
+    for expected_ev in [
+        "OnCorporationStructuresUpdated",
+        "OnStructureStateChanged",
+        "OnCurrentStructureStateChanged",
+    ] {
+        assert!(
+            struct_ex.notifications.iter().any(|(ev, _)| ev == expected_ev),
+            "expected {expected_ev} in wire notifications: {:?}",
+            struct_ex.notifications
+        );
+    }
+    ctx.db.with_snapshot(|snap| {
+        let st = snap.structures.get(&structure_id).expect("structure present");
+        assert_eq!(st.state, "ShieldVulnerable");
+        assert_eq!(st.reinforced_until_unix, 0);
+        assert!(st.shield_hp > 0.0 && st.armor_hp > 0.0 && st.hull_hp > 0.0);
+    });
+
+    let bad_state_err = harness
+        .call(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(format!("/structure state {structure_id} 0"))],
+            &kw,
+        )
+        .await
+        .expect_err("/structure state 0 must fail");
+    assert_eq!(bad_state_err.code, "InvalidSlashArgument");
+
+    let mut denied_harness =
+        common::new_wire_harness(&ctx, 77_991).with_mode(ContractValidationMode::Ratcheted);
+    denied_harness
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[
+                PyRep::String("other".into()),
+                PyRep::String("other-secret".into()),
+            ],
+            &kw,
+        )
+        .await;
+    denied_harness
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(other_cid)],
+            &kw,
+        )
+        .await;
+    let role_err = denied_harness
+        .call(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(format!("/structure state {structure_id} 110"))],
+            &kw,
+        )
+        .await
+        .expect_err("non-ADMIN/GMH/GML role must be rejected");
+    assert_eq!(role_err.code, "InsufficientRole");
+
+    // #1060: /fit rejects non-fittable types (e.g. typeID 3657) before mutating inventory.
+    let (pre_item_count, pre_next_id) =
+        ctx.db.with_snapshot(|snap| (snap.items.len(), snap.next_entity_id));
+    for bad_fit in ["/fit me 3657", "/fit me 3657 27"] {
+        let fit_err = harness
+            .call(
+                "slash",
+                None,
+                "SlashCmd",
+                &[PyRep::String(bad_fit.into())],
+                &kw,
+            )
+            .await
+            .expect_err("non-fittable /fit must fail");
+        assert_eq!(fit_err.code, "FittingValidationFailed", "cmd: {bad_fit}");
+    }
+    let (post_item_count, post_next_id) =
+        ctx.db.with_snapshot(|snap| (snap.items.len(), snap.next_entity_id));
+    assert_eq!(post_item_count, pre_item_count);
+    assert_eq!(post_next_id, pre_next_id);
+
+    let cargo_fit = harness
+        .call_ok(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/fit me 3657 5".into())],
+            &kw,
+        )
+        .await;
+    assert_eq!(cargo_fit.dict_get("flagID"), Some(&PyRep::Integer(5)));
+
+    let mod_fit = harness
+        .call_ok(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/fit me 2048".into())],
+            &kw,
+        )
+        .await;
+    assert!(
+        mod_fit
+            .dict_get("itemID")
+            .and_then(|v| v.as_i64())
+            .is_some_and(|id| id > 0),
+        "valid module /fit must succeed: {mod_fit:?}"
+    );
+}
 }

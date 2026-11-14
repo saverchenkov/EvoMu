@@ -1093,12 +1093,24 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             }
             let now_unix = ctx.now_unix_secs();
             let claim_key = -8_800_000 - char_id;
-            let on_cooldown = ctx.db.with_snapshot(|snap| {
-                snap.item_custom_names
+            // Match #1036 (#1054): future-dated claim timestamps are stale/expired,
+            // so clear them rather than blocking corvette claims until that future time.
+            let (on_cooldown, stale_future) = ctx.db.with_snapshot(|snap| {
+                match snap
+                    .item_custom_names
                     .get(&claim_key)
                     .and_then(|s| s.parse::<u64>().ok())
-                    .is_some_and(|last_ts| now_unix < last_ts.saturating_add(60))
+                {
+                    Some(last_ts) if last_ts > now_unix => (false, true),
+                    Some(last_ts) => (now_unix < last_ts.saturating_add(60), false),
+                    None => (false, false),
+                }
             });
+            if stale_future {
+                ctx.db.with_mut_snapshot(|snap| {
+                    snap.item_custom_names.remove(&claim_key);
+                });
+            }
             if on_cooldown {
                 return Some(Err(BridgeRpcError {
                     code: "NewbieShipCooldown".into(),

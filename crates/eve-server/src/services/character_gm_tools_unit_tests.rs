@@ -1214,3 +1214,57 @@ async fn gm_heal_syncs_godma_damage_cap_heat_and_flushes_self_destiny_update() {
         "auth_cache /heal must emit OnModuleAttributeChanges: {docked_notifs:?}"
     );
 }
+
+#[tokio::test]
+async fn fit_rejects_non_fittable_types_without_mutating_inventory() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let ship_id = 1_855_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587, // Rifter
+                owner_id: char_id,
+                location_id: 60_003_760,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+        }
+    });
+    let mut sess = gm_session(char_id, ship_id);
+    let (pre_item_count, pre_next_id) =
+        ctx.db.with_snapshot(|snap| (snap.items.len(), snap.next_entity_id));
+
+    for bad_cmd in [
+        "/fit me 3657",
+        "/fit me 3657 27",
+        "/fit me 34",
+        "/fit me 2048 27",
+    ] {
+        let err = handle_gm_slash_ext(&ctx, &mut sess, char_id, bad_cmd)
+            .await
+            .expect("slash handled")
+            .expect_err("non-fittable or wrong-slot /fit must fail");
+        assert_eq!(err.code, "FittingValidationFailed", "cmd: {bad_cmd}");
+    }
+
+    let (post_item_count, post_next_id) =
+        ctx.db.with_snapshot(|snap| (snap.items.len(), snap.next_entity_id));
+    assert_eq!(post_item_count, pre_item_count);
+    assert_eq!(post_next_id, pre_next_id);
+
+    // Explicit Cargo flag (5) remains allowed for valid SDE types.
+    let cargo_rep = handle_gm_slash_ext(&ctx, &mut sess, char_id, "/fit me 3657 5")
+        .await
+        .expect("slash handled")
+        .expect("/fit me 3657 5 into explicit Cargo flag must succeed");
+    assert_eq!(cargo_rep.dict_get("flagID"), Some(&PyRep::Integer(5)));
+}

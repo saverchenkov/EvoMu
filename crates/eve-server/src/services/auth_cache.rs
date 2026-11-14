@@ -82,6 +82,7 @@ const ALL_REMOTE_SLASH_COMMANDS: &[&str] = &[
     "spawnanomaly",
     "spawnnpc",
     "standing",
+    "structure",
     "structuretimer",
     "survey",
     "suspend",
@@ -120,7 +121,7 @@ pub fn format_remote_command_list_reason(role: u64) -> String {
 
 pub fn required_slash_role(cmd: &str) -> u64 {
     use eve_machonet::service_roles::{
-        ROLE_ADMIN, ROLE_GMH, ROLE_GMS, ROLE_GM_MASK, ROLE_QA, ROLE_ROLEADMIN, ROLE_SPAWN,
+        ROLE_ADMIN, ROLE_GMH, ROLE_GML, ROLE_GMS, ROLE_GM_MASK, ROLE_QA, ROLE_ROLEADMIN, ROLE_SPAWN,
     };
     let tok = cmd.split_whitespace().next().unwrap_or("");
     match tok {
@@ -131,6 +132,7 @@ pub fn required_slash_role(cmd: &str) -> u64 {
         }
         "/spawn" | "/unspawn" | "/despawn" | "/spawnnpc" => ROLE_SPAWN | ROLE_GM_MASK,
         "/createccpevent" | "/role" => ROLE_GMH | ROLE_GMS | ROLE_ADMIN | ROLE_ROLEADMIN,
+        "/structure" => ROLE_ADMIN | ROLE_GMH | ROLE_GML,
         "/advancetime" | "/fastforward" | "/ff" | "/completeskills" | "/trainskills"
         | "/finishskills" | "/upwelltimer" | "/structuretimer" | "/finishstructure"
         | "/completeindustry" | "/finishjobs" | "/industrytimer" | "/cleartimers" => ROLE_GM_MASK,

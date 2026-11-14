@@ -1047,3 +1047,151 @@ fn emit_allow_war_updated_for_alliance_and_slash_unknown_none_kill_mutants() {
     assert_eq!(res.dict_get("reset"), Some(&PyRep::Bool(true)));
     assert_eq!(res.dict_get("characterID"), Some(&PyRep::Integer(char_id)));
 }
+
+#[test]
+fn cleartimers_removes_corvette_cooldown_and_structure_state_slash_updates_state() {
+    let (ctx, char_id) = make_ctx();
+    let sys_id = 30_000_142_u32;
+    let corp_id = 98_000_801_i64;
+    let sid = 1_000_990_001_i64;
+    let now = ctx.now_unix();
+    let claim_key = -8_800_000_i64 - char_id;
+
+    // #1054: /cleartimers clears persisted corvette cooldown timestamp.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_custom_names
+            .insert(claim_key, (now + 120).to_string());
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_id;
+            ch.solar_system_id = sys_id;
+        }
+        snap.structures.insert(
+            sid,
+            UpwellStructureRecord {
+                structure_id: sid,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Test Astrahus".into(),
+                position: [1_500_000.0, 0.0, 0.0],
+                state: "Anchoring".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 0.0,
+                armor_hp: 10_000.0,
+                hull_hp: 10_000.0,
+                reinforced_until_unix: now + 86_400,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+    });
+    let clear_rep = handle_batch3_gm_slash_cmd(&ctx, char_id, Some(sys_id), "/cleartimers")
+        .expect("/cleartimers handled")
+        .expect("/cleartimers succeeds");
+    assert_eq!(clear_rep.dict_get("cleared"), Some(&PyRep::Bool(true)));
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            !snap.item_custom_names.contains_key(&claim_key),
+            "/cleartimers must clear persisted corvette cooldown key"
+        );
+    });
+
+    // #1058: /structure state validation and state transitions + notifications.
+    let _ = ctx.drain_notifications_for_char(char_id);
+    for bad_cmd in [
+        "/structure",
+        "/structure invalid 1001 110",
+        "/structure state notanid 110",
+        &format!("/structure state {sid} 0"),
+        &format!("/structure state {sid} 999"),
+    ] {
+        let err = handle_batch3_gm_slash_cmd(&ctx, char_id, Some(sys_id), bad_cmd)
+            .expect("/structure handled")
+            .expect_err("invalid /structure syntax or state ID must fail");
+        assert_eq!(err.code, "InvalidSlashArgument", "cmd: {bad_cmd}");
+    }
+
+    let missing_err =
+        handle_batch3_gm_slash_cmd(&ctx, char_id, Some(sys_id), "/structure state 999999999 110")
+            .expect("/structure handled")
+            .expect_err("missing structure must return StructureNotFound");
+    assert_eq!(missing_err.code, "StructureNotFound");
+
+    let vuln_rep = handle_batch3_gm_slash_cmd(
+        &ctx,
+        char_id,
+        Some(sys_id),
+        &format!("/structure state {sid} 110"),
+    )
+    .expect("/structure handled")
+    .expect("/structure state 110 must succeed");
+    assert_eq!(vuln_rep.dict_get("oldState"), Some(&PyRep::String("Anchoring".into())));
+    assert_eq!(
+        vuln_rep.dict_get("newState"),
+        Some(&PyRep::String("ShieldVulnerable".into()))
+    );
+    ctx.db.with_snapshot(|snap| {
+        let st = snap.structures.get(&sid).expect("structure present");
+        assert_eq!(st.state, "ShieldVulnerable");
+        assert_eq!(st.reinforced_until_unix, 0);
+        assert!(st.shield_hp > 0.0 && st.armor_hp > 0.0 && st.hull_hp > 0.0);
+    });
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs
+            .iter()
+            .any(|n| n.event == "OnCorporationStructuresUpdated"),
+        "expected OnCorporationStructuresUpdated: {notifs:?}"
+    );
+    assert!(
+        notifs.iter().any(|n| n.event == "OnStructureStateChanged"),
+        "expected OnStructureStateChanged: {notifs:?}"
+    );
+    assert!(
+        notifs
+            .iter()
+            .any(|n| n.event == "OnCurrentStructureStateChanged"),
+        "expected OnCurrentStructureStateChanged: {notifs:?}"
+    );
+
+    let armor_rf = handle_batch3_gm_slash_cmd(
+        &ctx,
+        char_id,
+        Some(sys_id),
+        &format!("/structure state {sid} 111"),
+    )
+    .expect("/structure handled")
+    .expect("/structure state 111 must succeed");
+    assert_eq!(
+        armor_rf.dict_get("newState"),
+        Some(&PyRep::String("ArmorReinforced".into()))
+    );
+    ctx.db.with_snapshot(|snap| {
+        let st = snap.structures.get(&sid).expect("structure present");
+        assert_eq!(st.state, "ArmorReinforced");
+        assert!(st.reinforced_until_unix > now);
+        assert_eq!(st.shield_hp, 0.0);
+    });
+
+    let hull_rf = handle_batch3_gm_slash_cmd(
+        &ctx,
+        char_id,
+        Some(sys_id),
+        &format!("/structure state {sid} 113"),
+    )
+    .expect("/structure handled")
+    .expect("/structure state 113 must succeed");
+    assert_eq!(
+        hull_rf.dict_get("newState"),
+        Some(&PyRep::String("HullReinforced".into()))
+    );
+    ctx.db.with_snapshot(|snap| {
+        let st = snap.structures.get(&sid).expect("structure present");
+        assert_eq!(st.state, "HullReinforced");
+        assert!(st.reinforced_until_unix > now);
+        assert_eq!(st.shield_hp, 0.0);
+        assert_eq!(st.armor_hp, 0.0);
+    });
+}
