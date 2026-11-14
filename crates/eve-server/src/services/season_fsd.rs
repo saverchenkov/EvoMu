@@ -180,6 +180,10 @@ pub fn default_fsd_seasons(
             }
         }
     }
+    let multi = out.len() > 1;
+    for cfg in out.values_mut() {
+        cfg.multiple_season_running = multi;
+    }
     out
 }
 

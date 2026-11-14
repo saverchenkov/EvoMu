@@ -219,3 +219,76 @@ fn season_ops_localization_schedule_expiration_and_challenge_fill() {
         }
     }
 }
+
+#[test]
+fn r11_k12_multiple_season_flag_navigation_card_and_challenge_backfill() {
+    let ctx = test_ctx();
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let snap_empty = ctx.db.with_snapshot(|s| s.clone());
+
+    let catalog = load_fsd_seasons_catalog_clean(&snap_empty, &ctx.sde, now_ft);
+    assert!(!catalog.is_empty());
+    let expected_multi = catalog.len() > 1;
+    let sel_nav = ctx
+        .sde
+        .load_cfsd_nested("res:/staticdata/seasonselection.fsdbinary")
+        .ok()
+        .and_then(|m| {
+            m.get("navigation_card_picture_path")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        });
+    for cfg in catalog.values() {
+        assert_eq!(cfg.multiple_season_running, expected_multi);
+        assert!(!cfg.navigation_card_picture_path.is_empty());
+        if let Some(ref exp) = sel_nav {
+            assert_eq!(&cfg.navigation_card_picture_path, exp);
+        }
+    }
+
+    let mut st = CharacterSeasonState::default();
+    st.selected_season_id = 1;
+    let backfill_def = SeasonalChallengeDef {
+        challenge_id: 700_099,
+        season_id: 1,
+        event_type: "client_test_backfill".into(),
+        title: "Real Backfill Title".into(),
+        description: "Real Backfill Desc".into(),
+        points: 35,
+        max_progress: 5,
+        expiration_time_minutes: 30,
+        ..Default::default()
+    };
+    st.challenges.insert(
+        700_099,
+        CharacterChallenge {
+            challenge_id: 700_099,
+            season_id: 1,
+            title: "Category #700099 (msg:1)".into(),
+            description: "msg:1".into(),
+            points: 0,
+            progress: 0,
+            max_progress: 5,
+            completed: false,
+            claimed: false,
+            is_dormant: false,
+            expiration_date: 0,
+            client_event_driven: true,
+            reward_type_id: 0,
+            reward_quantity: 0,
+            baseline_progress: 0,
+        },
+    );
+    let _ = fill_and_normalize_character_challenges(
+        &mut st,
+        &[backfill_def],
+        &snap_empty,
+        900_001,
+        now_ft,
+        now_ft + 86_400 * 10_000_000,
+        1,
+    );
+    let normalized = st.challenges.get(&700_099).expect("challenge retained");
+    assert_eq!(normalized.points, 35);
+    assert_eq!(normalized.expiration_date, now_ft + 30 * 60 * 10_000_000);
+}

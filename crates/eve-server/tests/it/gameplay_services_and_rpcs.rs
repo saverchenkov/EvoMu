@@ -3857,6 +3857,7 @@ fn dict_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
             .iter()
             .find(|(k, _)| k.as_str() == Some(key))
             .map(|(_, v)| v),
+        PyRep::ObjectEx { .. } => rep.dict_get(key),
         _ => None,
     }
 }

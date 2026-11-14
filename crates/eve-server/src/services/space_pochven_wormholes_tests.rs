@@ -164,3 +164,60 @@ async fn open_pochven_wormhole_spawns_k162_exit_and_side_guards() {
     let k_guards = ensure_pochven_side_guards(&ctx, dest_sys, 890_001, DVec3::ZERO, false).await;
     assert_eq!(k_guards.len(), 2);
 }
+
+#[tokio::test]
+async fn r11_k12_collapsed_pochven_wormhole_skips_spawn_and_guards_have_slim_meta() {
+    let ctx = test_ctx_with_clock(1_800_000_000);
+    let (border, _, _) = pochven_topology_pools(&ctx.sde);
+    let poch_sys = border[0];
+    let dest_sys = 30_000_142_u32;
+    let statics = pochven_static_wormholes(&ctx.sde, poch_sys, 0, 1_800_000_000);
+    let mut collapsed_sig = statics[0].clone();
+    collapsed_sig.destination_system_id = Some(dest_sys);
+    collapsed_sig.collapsed = true;
+
+    let wh_item_id = 889_100_i64;
+    let (_wh_pos, no_guards) =
+        open_pochven_wormhole_and_spawn_guards(&ctx, poch_sys, &collapsed_sig, wh_item_id).await;
+    assert!(no_guards.is_empty());
+    let poch_handle = ctx.systems.get_or_spawn(poch_sys);
+    assert!(poch_handle.get_ball_snapshot(wh_item_id).await.ok().flatten().is_none());
+    ctx.db.with_snapshot(|snap| {
+        let k162_id = format!("K162-{}", collapsed_sig.signature_id);
+        let has_k162 = snap
+            .cosmic_signatures
+            .get(&dest_sys)
+            .is_some_and(|list| list.iter().any(|s| s.signature_id == k162_id));
+        assert!(!has_k162);
+    });
+
+    let guards = ensure_pochven_side_guards(&ctx, poch_sys, 889_200, DVec3::ZERO, true).await;
+    assert_eq!(guards.len(), 6);
+    let guard_entities: Vec<(i64, u32)> = {
+        let rt = ctx.combat_ephemeral.read().unwrap_or_else(|e| e.into_inner());
+        guards
+            .iter()
+            .map(|&gid| {
+                let ent = rt.npc_entities.get(&gid).expect("guard entity");
+                assert_eq!(ent.spawn_group_id, 0);
+                (gid, ent.faction_id)
+            })
+            .collect()
+    };
+    {
+        let bp = poch_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
+        for (gid, faction_id) in guard_entities {
+            let meta = bp.ball_slim_meta.get(&gid).expect("guard slim meta");
+            assert_eq!(meta.owner_id, faction_id as i64);
+            assert_eq!(
+                meta.corp_id,
+                crate::services::combat_crimewatch::combat_npc_ai::resolve_npc_corp_id_for_sde_faction(
+                    &ctx.sde,
+                    meta.owner_id,
+                )
+            );
+            assert_eq!(meta.category_id, 11);
+            assert!(meta.name.is_some());
+        }
+    }
+}
