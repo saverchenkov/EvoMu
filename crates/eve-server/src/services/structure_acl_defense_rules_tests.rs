@@ -650,6 +650,225 @@ async fn owner_group_get_my_groups_returns_v24_fields_and_filters_excluded() {
     assert!(excluded_groups.is_empty(), "excluded character must not receive corp-owned group");
 }
 
+#[tokio::test]
+async fn owner_group_get_groups_many_handles_public_zero_dedup_and_visibility() {
+    let ctx = test_ctx();
+    let admin_id = 910_901_i64;
+    let member_id = 910_902_i64;
+    let excluded_id = 910_903_i64;
+    let outsider_id = 910_904_i64;
+    let gm_id = 910_905_i64;
+    let corp_a = 98_910_901_i64;
+    let corp_b = 98_910_902_i64;
+    let g_corp = 80_902_001_i64;
+    let g_public = 80_902_002_i64;
+    let g_other = 80_902_003_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, corp) in [
+            (admin_id, corp_a),
+            (member_id, corp_a),
+            (excluded_id, corp_a),
+            (outsider_id, corp_b),
+            (gm_id, corp_b),
+        ] {
+            let mut ch = snap
+                .characters
+                .values()
+                .next()
+                .cloned()
+                .expect("seed character");
+            ch.character_id = cid;
+            ch.corporation_id = corp;
+            snap.characters.insert(cid, ch);
+        }
+        let mut ext = load_ext_state(snap);
+        ext.owner_groups.insert(
+            g_corp,
+            AccessGroupRecord {
+                group_id: g_corp,
+                creator_id: admin_id,
+                owner_corp_id: corp_a,
+                name: "Corp ACL".into(),
+                description: "Corp access".into(),
+                members: HashMap::from([
+                    (member_id, ACL_ROLE_MANAGER),
+                    (excluded_id, ACL_ROLE_EXCLUDED),
+                ]),
+            },
+        );
+        ext.owner_groups.insert(
+            g_public,
+            AccessGroupRecord {
+                group_id: g_public,
+                creator_id: admin_id,
+                owner_corp_id: 0,
+                name: "Public ACL".into(),
+                description: "Open access".into(),
+                members: HashMap::from([
+                    (0, ACL_ROLE_MEMBER),
+                    (excluded_id, ACL_ROLE_EXCLUDED),
+                ]),
+            },
+        );
+        ext.owner_groups.insert(
+            g_other,
+            AccessGroupRecord {
+                group_id: g_other,
+                creator_id: outsider_id,
+                owner_corp_id: corp_b,
+                name: "Private Corp B".into(),
+                description: "Hidden".into(),
+                members: HashMap::new(),
+            },
+        );
+        save_ext_state(snap, &ext);
+    });
+
+    let kw = HashMap::new();
+    let mut admin_sess = make_session(admin_id, corp_a, 30_000_142, None, 0);
+    let PyRep::List(admin_rows) = handle(
+        &ctx,
+        &mut admin_sess,
+        "ownerGroupManager",
+        "GetGroupsMany",
+        &[PyRep::List(vec![
+            PyRep::Integer(0),
+            PyRep::Integer(g_corp),
+            PyRep::Integer(0),
+            PyRep::Integer(g_corp),
+            PyRep::Integer(999_999),
+            PyRep::Integer(g_other),
+        ])],
+        &kw,
+    )
+    .await
+    .expect("GetGroupsMany handled")
+    .expect("admin GetGroupsMany ok")
+    else {
+        panic!("expected List from GetGroupsMany");
+    };
+    let admin_gids: Vec<i64> = admin_rows
+        .iter()
+        .filter_map(|g| g.dict_get("groupID").and_then(PyRep::as_i64))
+        .collect();
+    assert_eq!(admin_gids, vec![0, g_corp]);
+    assert_eq!(admin_rows[0].dict_get("name"), Some(&PyRep::String("Public".into())));
+    assert_eq!(admin_rows[0].dict_get("creatorID"), Some(&PyRep::Integer(1)));
+    assert_eq!(admin_rows[0].dict_get("ownerCorpID"), Some(&PyRep::Integer(0)));
+    assert_eq!(admin_rows[0].dict_get("memberCount"), Some(&PyRep::Integer(0)));
+    assert_eq!(
+        admin_rows[0].dict_get("membershipType"),
+        Some(&PyRep::Integer(ACL_ROLE_NONE))
+    );
+    assert_eq!(admin_rows[0].dict_get("admins"), Some(&PyRep::List(vec![])));
+    assert_eq!(
+        admin_rows[1].dict_get("membershipType"),
+        Some(&PyRep::Integer(ACL_ROLE_ADMIN))
+    );
+    assert_eq!(
+        admin_rows[1].dict_get("admins"),
+        Some(&PyRep::List(vec![PyRep::Integer(admin_id)]))
+    );
+
+    // Outsider sees synthetic group 0 and public group (with PUBLIC_MEMBER_ID = 0), but not corp_a private group
+    let mut outsider_sess = make_session(outsider_id, corp_b, 30_000_142, None, 0);
+    let PyRep::List(outsider_rows) = handle(
+        &ctx,
+        &mut outsider_sess,
+        "ownerGroupManager",
+        "GetGroupsMany",
+        &[PyRep::List(vec![
+            PyRep::Integer(0),
+            PyRep::Integer(g_corp),
+            PyRep::Integer(g_public),
+        ])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("outsider GetGroupsMany ok")
+    else {
+        panic!("expected List");
+    };
+    let outsider_gids: Vec<i64> = outsider_rows
+        .iter()
+        .filter_map(|g| g.dict_get("groupID").and_then(PyRep::as_i64))
+        .collect();
+    assert_eq!(outsider_gids, vec![0, g_public]);
+    assert_eq!(
+        outsider_rows[1].dict_get("membershipType"),
+        Some(&PyRep::Integer(ACL_ROLE_NONE))
+    );
+
+    // Excluded character is omitted from both g_corp and g_public, while keeping synthetic 0
+    let mut excluded_sess = make_session(excluded_id, corp_a, 30_000_142, None, 0);
+    let PyRep::List(excluded_rows) = handle(
+        &ctx,
+        &mut excluded_sess,
+        "ownerGroupManager",
+        "GetGroupsMany",
+        &[PyRep::List(vec![
+            PyRep::Integer(0),
+            PyRep::Integer(g_corp),
+            PyRep::Integer(g_public),
+        ])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("excluded GetGroupsMany ok")
+    else {
+        panic!("expected List");
+    };
+    let excluded_gids: Vec<i64> = excluded_rows
+        .iter()
+        .filter_map(|g| g.dict_get("groupID").and_then(PyRep::as_i64))
+        .collect();
+    assert_eq!(excluded_gids, vec![0]);
+
+    // Empty list returns empty list; missing arg returns MissingGroupId; GM sees private groups
+    let empty_rep = handle(
+        &ctx,
+        &mut admin_sess,
+        "ownerGroupManager",
+        "GetGroupsMany",
+        &[PyRep::List(vec![])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("empty GetGroupsMany ok");
+    assert_eq!(empty_rep, PyRep::List(vec![]));
+    let missing_err = handle(&ctx, &mut admin_sess, "ownerGroupManager", "GetGroupsMany", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(missing_err.code, "MissingGroupId");
+
+    let mut gm_sess = make_session(gm_id, corp_b, 30_000_142, None, 0);
+    gm_sess.role |= eve_machonet::service_roles::ROLE_GMH;
+    let PyRep::List(gm_rows) = handle(
+        &ctx,
+        &mut gm_sess,
+        "ownerGroupManager",
+        "GetGroupsMany",
+        &[PyRep::List(vec![PyRep::Integer(g_corp), PyRep::Integer(g_other)])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("gm GetGroupsMany ok")
+    else {
+        panic!("expected List");
+    };
+    let gm_gids: Vec<i64> = gm_rows
+        .iter()
+        .filter_map(|g| g.dict_get("groupID").and_then(PyRep::as_i64))
+        .collect();
+    assert_eq!(gm_gids, vec![g_corp, g_other]);
+}
+
 #[cfg(test)]
 #[path = "structure_acl_defense_rules_extra_unit_tests.rs"]
 mod extra_unit_tests;

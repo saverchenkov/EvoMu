@@ -341,6 +341,28 @@ fn can_view_owner_group(
             || (grp.owner_corp_id != 0 && grp.owner_corp_id == caller_corp))
 }
 
+fn can_view_owner_group_or_public(
+    char_id: i64,
+    caller_corp: i64,
+    caller_alliance: i64,
+    is_gm: bool,
+    grp: &ops::AccessGroupRecord,
+) -> bool {
+    if is_gm {
+        return true;
+    }
+    let explicitly_excluded = grp
+        .members
+        .get(&char_id)
+        .copied()
+        .is_some_and(is_acl_role_excluded);
+    if explicitly_excluded {
+        return false;
+    }
+    can_view_owner_group(char_id, caller_corp, caller_alliance, grp)
+        || grp.members.get(&0).copied().is_some_and(is_acl_role_allowed)
+}
+
 fn caller_group_membership_type(
     char_id: i64,
     caller_corp: i64,
@@ -373,7 +395,7 @@ fn caller_group_membership_type(
     ACL_ROLE_NONE
 }
 
-/// Builds the V24 `ownerGroupManager` `KeyVal` entry shared by `GetGroup` and `GetMyGroups`.
+/// Builds the V24 `ownerGroupManager` `KeyVal` entry shared by `GetGroup`, `GetGroupsMany`, and `GetMyGroups`.
 fn build_owner_group_keyval(
     grp: &ops::AccessGroupRecord,
     char_id: i64,
@@ -399,6 +421,21 @@ fn build_owner_group_keyval(
         ("memberCount", PyRep::Integer(grp.members.len() as i64)),
         ("membershipType", PyRep::Integer(membership_type)),
         ("admins", PyRep::List(admin_ids.into_iter().map(PyRep::Integer).collect())),
+    ])
+}
+
+/// Builds the synthetic V24 `KeyVal` for `groupID = 0` (`PUBLIC_MEMBER_ID` / `NO_GROUP_ID`)
+/// requested by `accessGroupsController.PopulatePublicGroupInfo`.
+fn build_public_placeholder_group_keyval() -> PyRep {
+    PyRep::keyval([
+        ("groupID", PyRep::Integer(0)),
+        ("name", PyRep::String("Public".into())),
+        ("description", PyRep::String("Public access".into())),
+        ("creatorID", PyRep::Integer(1)),
+        ("ownerCorpID", PyRep::Integer(0)),
+        ("memberCount", PyRep::Integer(0)),
+        ("membershipType", PyRep::Integer(ACL_ROLE_NONE)),
+        ("admins", PyRep::List(Vec::new())),
     ])
 }
 
@@ -432,7 +469,13 @@ pub fn handle_get_group(
             .get(&group_id)
             .ok_or_else(|| err("AccessGroupNotFound", format!("Group {group_id} not found")))?;
         let (caller_corp, caller_alliance) = caller_corp_and_alliance(snap, session, char_id);
-        let can_view = can_view_owner_group(char_id, caller_corp, caller_alliance, grp) || session.has_gm_role();
+        let can_view = can_view_owner_group_or_public(
+            char_id,
+            caller_corp,
+            caller_alliance,
+            session.has_gm_role(),
+            grp,
+        );
         if !can_view {
             return Err(err(
                 "AccessGroupAccessDenied",
@@ -440,6 +483,57 @@ pub fn handle_get_group(
             ));
         }
         Ok(build_owner_group_keyval(grp, char_id, caller_corp, caller_alliance))
+    })
+}
+
+fn parse_group_ids_arg(args: &[PyRep]) -> Result<Vec<i64>, BridgeRpcError> {
+    let raw = match args.first() {
+        Some(PyRep::List(items))
+        | Some(PyRep::Tuple(items))
+        | Some(PyRep::PySet(items))
+        | Some(PyRep::Set(items)) => items.iter().filter_map(PyRep::as_i64).collect(),
+        Some(PyRep::Integer(id)) => vec![*id],
+        _ => return Err(err("MissingGroupId", "GetGroupsMany requires groupIDs")),
+    };
+    let mut seen = std::collections::HashSet::with_capacity(raw.len());
+    let mut deduped = Vec::with_capacity(raw.len());
+    for gid in raw {
+        if seen.insert(gid) {
+            deduped.push(gid);
+        }
+    }
+    Ok(deduped)
+}
+
+/// Resolves a batch of access group IDs (`ownerGroupManager.GetGroupsMany(groupIDs)`)
+/// for `accessGroupsController.PopulatePublicGroupInfo`, returning V24 `KeyVal` entries
+/// for accessible/public groups and `groupID = 0` (`PUBLIC_MEMBER_ID` / `NO_GROUP_ID`)
+/// while omitting unknown or inaccessible group IDs.
+pub fn handle_get_groups_many(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let group_ids = parse_group_ids_arg(args)?;
+    if group_ids.is_empty() {
+        return Ok(PyRep::List(Vec::new()));
+    }
+    let is_gm = session.has_gm_role();
+    ctx.db.with_snapshot(|snap| {
+        let ext = load_ext_state(snap);
+        let (caller_corp, caller_alliance) = caller_corp_and_alliance(snap, session, char_id);
+        let mut out = Vec::with_capacity(group_ids.len());
+        for gid in group_ids {
+            if let Some(grp) = ext.owner_groups.get(&gid) {
+                if can_view_owner_group_or_public(char_id, caller_corp, caller_alliance, is_gm, grp) {
+                    out.push(build_owner_group_keyval(grp, char_id, caller_corp, caller_alliance));
+                }
+            } else if gid == 0 {
+                out.push(build_public_placeholder_group_keyval());
+            }
+        }
+        Ok(PyRep::List(out))
     })
 }
 
@@ -1327,6 +1421,7 @@ pub async fn handle(
             Some(handle_edit_group(ctx, session, args))
         }
         ("ownerGroupManager", "GetGroup") => Some(handle_get_group(ctx, session, args)),
+        ("ownerGroupManager", "GetGroupsMany") => Some(handle_get_groups_many(ctx, session, args)),
         ("ownerGroupManager", "GetMyGroups") => Some(handle_get_my_groups(ctx, session)),
         ("ownerGroupManager", "GetMembers") | ("ownerGroupManager", "GetGroupMembers") => {
             Some(handle_get_members(ctx, session, args))

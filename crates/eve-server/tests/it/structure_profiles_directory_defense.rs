@@ -3227,3 +3227,165 @@ async fn test_mobile_scan_inhibitor_and_mobile_siphon_unit_end_to_end() {
 }
 
 }
+
+/// Wire IT for #1068: Structure Browser -> Structure Profiles (`GetProfileSettings` ->
+/// `ownerGroupManager.GetMyGroups` -> `ownerGroupManager.GetGroupsMany([0, ...])`)
+/// via `ClientHarness` (`ContractValidationMode::Ratcheted`, `common::pin_clock(&ctx)`).
+#[tokio::test]
+async fn test_1068_owner_group_get_groups_many_wire_ratcheted() {
+    use eve_server::services::station_structure::structure_upwell_ops::{
+        load_ext_state, save_ext_state, AccessGroupRecord, StructureAccessProfile,
+    };
+    use eve_testkit::client_harness::ContractValidationMode;
+    use std::sync::Arc;
+
+    let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
+    let sess = login_with_corp(&ctx, 10_680, 90_000_001, "T1068").await;
+    let char_id = sess.character_id.expect("char_id");
+    let corp_id = sess.corporation_id.expect("corp_id");
+    let profile_id = 70_000_001_i64;
+    let own_group_id = 80_680_001_i64;
+    let public_group_id = 80_680_002_i64;
+    let foreign_group_id = 80_680_003_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        ext.profiles_by_id.insert(
+            profile_id,
+            StructureAccessProfile {
+                profile_id,
+                owner_corp_id: corp_id,
+                name: "Corp Default".into(),
+                description: "Default profile".into(),
+                is_default: true,
+                ..Default::default()
+            },
+        );
+        ext.owner_groups.insert(
+            own_group_id,
+            AccessGroupRecord {
+                group_id: own_group_id,
+                creator_id: char_id,
+                owner_corp_id: corp_id,
+                name: "Corp Members".into(),
+                description: "Corp access group".into(),
+                members: HashMap::new(),
+            },
+        );
+        ext.owner_groups.insert(
+            public_group_id,
+            AccessGroupRecord {
+                group_id: public_group_id,
+                creator_id: 90_000_002,
+                owner_corp_id: 0,
+                name: "Public Docking".into(),
+                description: "Everyone".into(),
+                members: HashMap::from([(0, acl_rules::ACL_ROLE_MEMBER)]),
+            },
+        );
+        ext.owner_groups.insert(
+            foreign_group_id,
+            AccessGroupRecord {
+                group_id: foreign_group_id,
+                creator_id: 90_000_002,
+                owner_corp_id: 98_999_999,
+                name: "Foreign Private".into(),
+                description: "Inaccessible".into(),
+                members: HashMap::new(),
+            },
+        );
+        save_ext_state(snap, &ext);
+    });
+
+    let mut harness = crate::common::wrap_wire_harness(&ctx, sess)
+        .with_mode(ContractValidationMode::Ratcheted);
+    let kw = HashMap::new();
+
+    // 1. Structure Browser -> Structure Profiles loads profiles & Corp Default settings (which emit groupID = 0)
+    let profs = harness
+        .call_ok("structureProfiles", None, "GetProfiles", &[], &kw)
+        .await;
+    let PyRep::List(prof_rows) = profs else {
+        panic!("expected List from GetProfiles");
+    };
+    assert!(prof_rows.iter().any(|p| p.dict_get("profileID") == Some(&PyRep::Integer(profile_id))));
+
+    let settings = harness
+        .call_ok(
+            "structureProfiles",
+            None,
+            "GetProfileSettings",
+            &[PyRep::Integer(profile_id)],
+            &kw,
+        )
+        .await;
+    let PyRep::Dict(by_setting) = settings else {
+        panic!("expected Dict from GetProfileSettings");
+    };
+    let (_, dock_entries) = by_setting
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(19))
+        .expect("SETTING_HOUSING_CAN_DOCK (19) present");
+    let PyRep::List(dock_list) = dock_entries else {
+        panic!("expected List for setting 19");
+    };
+    assert_eq!(dock_list[0].dict_get("groupID"), Some(&PyRep::Integer(0)));
+
+    // 2. Client calls ownerGroupManager.GetMyGroups() then ownerGroupManager.GetGroupsMany([0, ...])
+    let my_groups = harness
+        .call_ok("ownerGroupManager", None, "GetMyGroups", &[], &kw)
+        .await;
+    let PyRep::List(my_list) = my_groups else {
+        panic!("expected List from GetMyGroups");
+    };
+    assert!(my_list.iter().any(|g| g.dict_get("groupID") == Some(&PyRep::Integer(own_group_id))));
+
+    let many = harness
+        .call_ok(
+            "ownerGroupManager",
+            None,
+            "GetGroupsMany",
+            &[PyRep::List(vec![
+                PyRep::Integer(0),
+                PyRep::Integer(public_group_id),
+                PyRep::Integer(0),
+                PyRep::Integer(foreign_group_id),
+                PyRep::Integer(999_999_999),
+            ])],
+            &kw,
+        )
+        .await;
+    let PyRep::List(many_list) = many else {
+        panic!("expected List from GetGroupsMany");
+    };
+    let gids: Vec<i64> = many_list
+        .iter()
+        .filter_map(|g| g.dict_get("groupID").and_then(PyRep::as_i64))
+        .collect();
+    assert_eq!(gids, vec![0, public_group_id]);
+
+    assert_eq!(many_list[0].dict_get("name"), Some(&PyRep::String("Public".into())));
+    assert_eq!(many_list[0].dict_get("description"), Some(&PyRep::String("Public access".into())));
+    assert_eq!(many_list[0].dict_get("creatorID"), Some(&PyRep::Integer(1)));
+    assert_eq!(many_list[0].dict_get("ownerCorpID"), Some(&PyRep::Integer(0)));
+    assert_eq!(many_list[0].dict_get("memberCount"), Some(&PyRep::Integer(0)));
+    assert_eq!(
+        many_list[0].dict_get("membershipType"),
+        Some(&PyRep::Integer(acl_rules::ACL_ROLE_NONE))
+    );
+    assert_eq!(many_list[0].dict_get("admins"), Some(&PyRep::List(vec![])));
+
+    assert_eq!(
+        many_list[1].dict_get("name"),
+        Some(&PyRep::String("Public Docking".into()))
+    );
+    assert_eq!(
+        many_list[1].dict_get("membershipType"),
+        Some(&PyRep::Integer(acl_rules::ACL_ROLE_NONE))
+    );
+    assert_eq!(
+        many_list[1].dict_get("admins"),
+        Some(&PyRep::List(vec![PyRep::Integer(90_000_002)]))
+    );
+}
