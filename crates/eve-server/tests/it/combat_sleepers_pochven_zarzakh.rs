@@ -1246,7 +1246,7 @@ async fn test_pochven_hypnosian_sleepers_and_60pct_loot_drop() {
                     && i.flag == InventoryFlag::Hangar
                     && i.type_id == 56_708
             })
-            .map(|i| i.quantity)
+            .map(|i| i64::from(i.quantity))
             .sum();
         let reward: i64 = s
             .items
@@ -1257,7 +1257,7 @@ async fn test_pochven_hypnosian_sleepers_and_60pct_loot_drop() {
                     && i.flag == InventoryFlag::Hangar
                     && i.type_id == 47_867
             })
-            .map(|i| i.quantity)
+            .map(|i| i64::from(i.quantity))
             .sum();
         (logs, reward)
     });
