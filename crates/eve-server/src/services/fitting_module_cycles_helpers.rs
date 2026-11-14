@@ -821,6 +821,81 @@ pub(crate) fn evaluate_ship_dogma_attributes(
     Ok((ship_type_id, active_stance, entries, module_entries))
 }
 
+/// Builds the `godma` item-info entry map for a docked Upwell structure so `StateManager.UpdateItem`
+/// primes `itemsByLocationID[structure_id]` before priming ships located inside the structure.
+fn build_structure_info_entries(
+    ctx: &ServerContext,
+    session: &SessionState,
+    struct_id: i64,
+    now_ft: i64,
+    header: &eve_proto::DBRowDescriptor,
+) -> Vec<(PyRep, PyRep)> {
+    let (type_id, owner_id, solar_system_id, name) = ctx.db.with_snapshot(|snap| {
+        if let Some(st) = snap.structures.get(&struct_id) {
+            (
+                st.type_id,
+                st.owner_corp_id,
+                i64::from(st.solar_system_id),
+                st.name.clone(),
+            )
+        } else if let Some(it) = snap.items.get(&struct_id) {
+            (
+                it.type_id,
+                it.owner_id,
+                it.location_id,
+                snap.item_custom_names
+                    .get(&struct_id)
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+        } else {
+            (
+                35_832,
+                session.corporation_id.unwrap_or(0),
+                session.solar_system_id.map(i64::from).unwrap_or(30_000_142),
+                String::new(),
+            )
+        }
+    });
+    let (grp, cat, default_attrs) = ctx
+        .sde
+        .types
+        .get(&type_id)
+        .map(|t| {
+            let mut attrs: Vec<(PyRep, PyRep)> = t
+                .default_attributes
+                .iter()
+                .map(|(&k, &v)| (PyRep::Integer(i64::from(k)), PyRep::Real(v)))
+                .collect();
+            attrs.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
+            (i64::from(t.group_id), i64::from(t.category_id), attrs)
+        })
+        .unwrap_or_else(|| (1657, 65, Vec::new()));
+    let struct_inv_row = header.build_dbrow(vec![
+        PyRep::Integer(struct_id),
+        PyRep::Integer(i64::from(type_id)),
+        PyRep::Integer(owner_id),
+        PyRep::Integer(solar_system_id),
+        PyRep::Integer(0),
+        PyRep::Integer(-1),
+        PyRep::Integer(grp),
+        PyRep::Integer(cat),
+        PyRep::String(name),
+    ]);
+    vec![(
+        PyRep::Integer(struct_id),
+        PyRep::keyval([
+            ("itemID", PyRep::Integer(struct_id)),
+            ("invItem", struct_inv_row),
+            ("attributes", PyRep::Dict(default_attrs)),
+            ("activeEffects", PyRep::Dict(Vec::new())),
+            ("time", PyRep::Integer(now_ft)),
+            ("wallclockTime", PyRep::Integer(now_ft)),
+            ("description", PyRep::String(String::new())),
+        ]),
+    )]
+}
+
 fn emit_godma_prime_location_and_ship_state(
     ctx: &ServerContext,
     session: &SessionState,
@@ -832,9 +907,12 @@ fn emit_godma_prime_location_and_ship_state(
     now_ft: i64,
     header: &eve_proto::DBRowDescriptor,
 ) -> (Vec<(PyRep, PyRep)>, PyRep) {
-    let ship_inv_row = if let Some(mut it) = ctx.db.get_item(ship_id) {
+    let (ship_location_id, ship_inv_row) = if let Some(mut it) = ctx.db.get_item(ship_id) {
         it.singleton = true;
-        header.build_dbrow(super::super::item_to_packed_cells(ctx, &it))
+        (
+            it.location_id,
+            header.build_dbrow(super::super::item_to_packed_cells(ctx, &it)),
+        )
     } else {
         let (grp, cat) = ctx
             .sde
@@ -847,7 +925,7 @@ fn emit_godma_prime_location_and_ship_state(
             .or(session.structure_id)
             .or(session.solar_system_id.map(i64::from))
             .unwrap_or(0);
-        header.build_dbrow(vec![
+        let row = header.build_dbrow(vec![
             PyRep::Integer(ship_id),
             PyRep::Integer(i64::from(ship_type_id)),
             PyRep::Integer(char_id),
@@ -857,7 +935,8 @@ fn emit_godma_prime_location_and_ship_state(
             PyRep::Integer(grp),
             PyRep::Integer(cat),
             PyRep::String(String::new()),
-        ])
+        ]);
+        (loc, row)
     };
     let mut ship_info_entries = vec![(
         PyRep::Integer(ship_id),
@@ -1003,11 +1082,29 @@ fn emit_godma_prime_location_and_ship_state(
         subloc_cache.insert(flag_u16, (c_item.type_id, c_item.quantity));
     }
 
-    ctx.notify(
+    if session.structure_id == Some(ship_location_id) && ship_location_id > 0 {
+        let structure_entries = build_structure_info_entries(
+            ctx,
+            session,
+            ship_location_id,
+            now_ft,
+            header,
+        );
+        ctx.emit_typed(
+            crate::router::NotificationTarget::Character(char_id),
+            crate::router::notify_registry::ProcessGodmaPrimeLocation {
+                location_id: ship_location_id,
+                data: PyRep::Dict(structure_entries),
+            },
+        );
+    }
+
+    ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
-        "ProcessGodmaPrimeLocation",
-        "charid",
-        vec![PyRep::Integer(ship_id), PyRep::Dict(ship_info_entries.clone())],
+        crate::router::notify_registry::ProcessGodmaPrimeLocation {
+            location_id: ship_id,
+            data: PyRep::Dict(ship_info_entries.clone()),
+        },
     );
 
     let subloc_cache_dict = if subloc_cache.is_empty() {
@@ -1098,6 +1195,17 @@ pub(crate) fn build_all_info(
     let header = eve_proto::DBRowDescriptor::inv_item_header();
     let prime_char = !matches!(args.first(), Some(PyRep::Bool(false) | PyRep::Integer(0) | PyRep::None));
     let prime_ship = !matches!(args.get(1), Some(PyRep::Bool(false) | PyRep::Integer(0) | PyRep::None));
+    let requested_structure_ok = match args.get(2) {
+        None | Some(PyRep::Bool(true)) => true,
+        Some(PyRep::Integer(id)) if *id > 0 => session.structure_id == Some(*id),
+        _ => false,
+    };
+    let structure_info = match session.structure_id.filter(|_| requested_structure_ok) {
+        Some(struct_id) => PyRep::Dict(build_structure_info_entries(
+            ctx, session, struct_id, now_ft, &header,
+        )),
+        None => PyRep::None,
+    };
 
     let (ship_info_entries, ship_state) = emit_godma_prime_location_and_ship_state(
         ctx,
@@ -1205,7 +1313,7 @@ pub(crate) fn build_all_info(
         ("activeStance", active_stance),
         ("shipAttributes", PyRep::Dict(entries)),
         ("moduleAttributes", PyRep::Dict(module_entries)),
-        ("structureInfo", PyRep::None),
+        ("structureInfo", structure_info),
         ("shipInfo", ship_info),
         ("charInfo", char_info),
         ("shipModifiedCharAttribs", PyRep::None),

@@ -602,3 +602,152 @@ fn issue_803_invbroker_destroyed_dynamic_ship_stub_auth_verify_and_invalidation(
         ));
     }
 }
+
+#[test]
+fn invbroker_solar_system_binding_and_invalidation_for_upwell_structures() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let other_sys = 30_000_144_u32;
+    let st_id = 60_003_760_i64;
+    let struct_here = 1_000_991_062_i64;
+    let struct_away = 1_000_991_063_i64;
+    let space_item_in_sys = 1_000_991_064_i64;
+    let hangar_item_in_struct = 1_000_991_065_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (sid, s_sys) in [(struct_here, sys_id), (struct_away, other_sys)] {
+            snap.structures.insert(
+                sid,
+                UpwellStructureRecord {
+                    structure_id: sid,
+                    type_id: 35_832,
+                    owner_corp_id: 98_999_001,
+                    solar_system_id: s_sys,
+                    name: format!("Struct {sid}"),
+                    state: "ShieldVulnerable".into(),
+                    ..Default::default()
+                },
+            );
+        }
+        snap.items.insert(
+            space_item_in_sys,
+            InventoryItemRecord {
+                item_id: space_item_in_sys,
+                type_id: 23,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            hangar_item_in_struct,
+            InventoryItemRecord {
+                item_id: hangar_item_in_struct,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: struct_here,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut sess = SessionState {
+        session_id: 1062,
+        user_id: Some(1),
+        character_id: Some(char_id),
+        corporation_id: Some(1_000_170),
+        solar_system_id: Some(sys_id),
+        station_id: None,
+        structure_id: Some(struct_here),
+        ship_id: Some(100_000_001),
+        ..Default::default()
+    };
+
+    // #1062: while docked in an Upwell structure (`station_id == None`), V24 `invbroker` binds
+    // to `solar_system_id` and accepts items in `structure_id`, while blocking space cans
+    // floating in `solar_system_id` and foreign-system bindings.
+    assert!(authorize_service_binding(
+        &ctx,
+        &sess,
+        char_id,
+        "invbroker",
+        i64::from(sys_id)
+    ));
+    assert!(authorize_service_binding(
+        &ctx,
+        &sess,
+        char_id,
+        "invbroker",
+        struct_here
+    ));
+    assert!(authorize_service_binding(
+        &ctx,
+        &sess,
+        char_id,
+        "invbroker",
+        hangar_item_in_struct
+    ));
+    assert!(!authorize_service_binding(
+        &ctx,
+        &sess,
+        char_id,
+        "invbroker",
+        i64::from(other_sys)
+    ));
+    assert!(!authorize_service_binding(
+        &ctx,
+        &sess,
+        char_id,
+        "invbroker",
+        space_item_in_sys
+    ));
+
+    // Docking at an Upwell structure keeps `invbroker(sys_id)` valid while invalidating space
+    // cans in `sys_id`; docking at an NPC station invalidates `invbroker(sys_id)`.
+    assert!(!should_invalidate_bound_object(
+        &ctx,
+        &make_entry("invbroker", i64::from(sys_id), char_id),
+        sys_id,
+        Some(struct_here),
+        "dock"
+    ));
+    assert!(should_invalidate_bound_object(
+        &ctx,
+        &make_entry("invbroker", space_item_in_sys, char_id),
+        sys_id,
+        Some(struct_here),
+        "dock"
+    ));
+    assert!(should_invalidate_bound_object(
+        &ctx,
+        &make_entry("invbroker", i64::from(sys_id), char_id),
+        sys_id,
+        Some(st_id),
+        "dock"
+    ));
+    assert!(should_invalidate_bound_object(
+        &ctx,
+        &make_entry("invbroker", i64::from(sys_id), char_id),
+        other_sys,
+        Some(struct_away),
+        "jump"
+    ));
+
+    // NPC station docking still blocks `invbroker` binding directly to `solar_system_id`.
+    sess.station_id = Some(st_id);
+    sess.structure_id = None;
+    assert!(!authorize_service_binding(
+        &ctx,
+        &sess,
+        char_id,
+        "invbroker",
+        i64::from(sys_id)
+    ));
+}

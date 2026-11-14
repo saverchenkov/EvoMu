@@ -2132,4 +2132,326 @@ async fn live_client_hotfixes_1054_1058_1060_wire_harness() {
         "valid module /fit must succeed: {mod_fit:?}"
     );
 }
+
+#[tokio::test]
+async fn live_client_hotfixes_1062_1063_structure_dock_invbroker_and_godma_wire_harness() {
+    use eve_testkit::client_harness::{extract_bound_id_from_wire_rep, ContractValidationMode};
+
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let other_sys = 30_000_144_u32;
+    let structure_id = 1_000_991_062_i64;
+    let foreign_structure_id = 1_000_991_063_i64;
+
+    let (ship_id, corp_id) = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters[&char_id].clone();
+        for (sid, s_sys, s_pos) in [
+            (structure_id, sys_id, [1_000_000.0, 0.0, 0.0]),
+            (foreign_structure_id, other_sys, [2_000_000.0, 0.0, 0.0]),
+        ] {
+            snap.structures.insert(
+                sid,
+                UpwellStructureRecord {
+                    structure_id: sid,
+                    type_id: 35_832,
+                    owner_corp_id: ch.corporation_id,
+                    solar_system_id: s_sys,
+                    name: format!("Hotfix Structure {sid}"),
+                    position: s_pos,
+                    state: "ShieldVulnerable".into(),
+                    quantum_core_installed: true,
+                    fuel_blocks: 100,
+                    shield_hp: 10_000.0,
+                    armor_hp: 10_000.0,
+                    hull_hp: 10_000.0,
+                    ..Default::default()
+                },
+            );
+        }
+        (ch.active_ship_id, ch.corporation_id)
+    });
+    assert!(corp_id > 0);
+
+    let mut harness =
+        common::new_wire_harness(&ctx, 77_992).with_mode(ContractValidationMode::Ratcheted);
+    harness
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[
+                PyRep::String("demo".into()),
+                PyRep::String("demo-secret".into()),
+            ],
+            &kw,
+        )
+        .await;
+    harness
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_id)],
+            &kw,
+        )
+        .await;
+
+    // Undock from NPC station into space, clear session-change timer, and position near the Upwell structure.
+    harness
+        .call_ok("stationSvc", None, "Undock", &[], &kw)
+        .await;
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, char_id);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    if let Some((_, mut ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.unwrap() {
+        ship_ball.position = DVec3::new(1_000_100.0, 0.0, 0.0);
+        ship_ball.velocity = DVec3::ZERO;
+        ship_ball.mode = MovementMode::Stop;
+        sys_handle.spawn_ball(ship_ball).await.expect("reposition near structure");
+    }
+
+    // Bind `invbroker` on `solar_system_id` in space before docking, matching V24 `invCache.inventorymgr`.
+    let pre_bind_rep = harness
+        .call_ok(
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[
+                PyRep::Tuple(vec![PyRep::Integer(i64::from(sys_id)), PyRep::Integer(5)]),
+                PyRep::None,
+            ],
+            &kw,
+        )
+        .await;
+    let pre_inv_bid = extract_bound_id_from_wire_rep(&pre_bind_rep)
+        .expect("pre-dock solar-system invbroker bound ID");
+    let _ = harness.drain_notifications();
+
+    // Dock into the Upwell structure (`station_id = None`, `structure_id = Some(structure_id)`,
+    // `solar_system_id` unchanged). Wire transport converts `OnSessionChanged` into a
+    // MachoNet `SessionChangeNotification` frame.
+    let dock_out = harness
+        .call_exchange(
+            "structureDocking",
+            None,
+            "Dock",
+            &[PyRep::Integer(structure_id)],
+            &kw,
+        )
+        .await;
+    assert!(dock_out.violations.is_empty(), "Dock contract violations: {:?}", dock_out.violations);
+    let dock_rep = dock_out.result.expect("structureDocking.Dock must succeed");
+    assert_eq!(dock_rep.dict_get("locationID"), Some(&PyRep::Integer(structure_id)));
+    assert_eq!(dock_rep.dict_get("isStructure"), Some(&PyRep::Bool(true)));
+    assert_eq!(dock_out.session_change_packets.len(), 1);
+    let dock_pkt = eve_machonet::MachoPacket::from_pyrep(&dock_out.session_change_packets[0])
+        .expect("SessionChangeNotification MachoPacket");
+    let PyRep::Tuple(sc_outer) = dock_pkt.payload else {
+        panic!("expected Tuple SessionChangeNotification payload, got {:?}", dock_pkt.payload);
+    };
+    let PyRep::Tuple(sc_inner) = &sc_outer[1] else {
+        panic!("expected inner tuple SessionChangeNotification payload, got {:?}", sc_outer[1]);
+    };
+    let PyRep::Dict(sc_entries) = &sc_inner[1] else {
+        panic!("expected Dict SessionChangeNotification changes, got {:?}", sc_inner[1]);
+    };
+    let dock_changes: HashMap<String, PyRep> = sc_entries
+        .iter()
+        .filter_map(|(k, v)| k.as_str().map(|ks| (ks.to_string(), v.clone())))
+        .collect();
+    assert_eq!(
+        dock_changes.get("structureid"),
+        Some(&PyRep::Tuple(vec![PyRep::None, PyRep::Integer(structure_id)]))
+    );
+    assert_eq!(dock_changes.get("solarsystemid"), None);
+    let _ = harness.drain_notifications();
+
+    // #1062: pre-dock `invbroker(sys_id)` remains valid AND a fresh `MachoBindObject` on
+    // `(solarsystemid, groupSolarSystem=5)` while docked in the Upwell structure succeeds.
+    let pre_struct_inv_rep = harness
+        .call_ok(
+            "invbroker",
+            Some(pre_inv_bid),
+            "GetInventoryFromId",
+            &[PyRep::Integer(structure_id), PyRep::Integer(1)],
+            &kw,
+        )
+        .await;
+    assert!(extract_bound_id_from_wire_rep(&pre_struct_inv_rep).is_some());
+
+    let post_bind_rep = harness
+        .call_ok(
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[
+                PyRep::Tuple(vec![PyRep::Integer(i64::from(sys_id)), PyRep::Integer(5)]),
+                PyRep::None,
+            ],
+            &kw,
+        )
+        .await;
+    let sys_inv_bid = extract_bound_id_from_wire_rep(&post_bind_rep)
+        .expect("post-dock solar-system invbroker bound ID");
+    assert!(sys_inv_bid > pre_inv_bid);
+
+    // #1062: `GetInventoryFromId(structure_id, 1)` & `GetInventory(10014, None)` (`containerStructure`)
+    // & `GetInventoryFromId(ship_id, 0)` all work through the solar-system-bound `invbroker`.
+    let struct_inv_rep = harness
+        .call_ok(
+            "invbroker",
+            Some(sys_inv_bid),
+            "GetInventoryFromId",
+            &[PyRep::Integer(structure_id), PyRep::Integer(1)],
+            &kw,
+        )
+        .await;
+    let struct_inv_bid =
+        extract_bound_id_from_wire_rep(&struct_inv_rep).expect("structure inventory bound ID");
+    let self_item_rep = harness
+        .call_ok("invbroker", Some(struct_inv_bid), "GetSelfInvItem", &[], &kw)
+        .await;
+    assert_eq!(
+        self_item_rep.dbrow_get("itemID"),
+        Some(&PyRep::Integer(structure_id))
+    );
+
+    let ship_inv_rep = harness
+        .call_ok(
+            "invbroker",
+            Some(sys_inv_bid),
+            "GetInventoryFromId",
+            &[PyRep::Integer(ship_id), PyRep::Integer(0)],
+            &kw,
+        )
+        .await;
+    assert!(extract_bound_id_from_wire_rep(&ship_inv_rep).is_some());
+
+    let struct_hangar_rep = harness
+        .call_ok(
+            "invbroker",
+            Some(sys_inv_bid),
+            "GetInventory",
+            &[PyRep::Integer(10_014), PyRep::None],
+            &kw,
+        )
+        .await;
+    let struct_hangar_bid = extract_bound_id_from_wire_rep(&struct_hangar_rep)
+        .expect("containerStructure(10014) bound ID");
+    let hangar_list_rep = harness
+        .call_ok(
+            "invbroker",
+            Some(struct_hangar_bid),
+            "List",
+            &[PyRep::Integer(i64::from(InventoryFlag::Hangar as u16))],
+            &kw,
+        )
+        .await;
+    assert!(
+        hangar_list_rep
+            .crowset_rows()
+            .expect("CRowset")
+            .iter()
+            .any(|r| r.dbrow_get("itemID") == Some(&PyRep::Integer(ship_id))),
+        "structure hangar List(Hangar) must contain docked ship"
+    );
+
+    // #1063: `dogmaIM` binds `(solarsystemid, groupSolarSystem=5)` and `GetAllInfo(False, True, structure_id)`
+    // returns non-None `structureInfo` and emits `ProcessGodmaPrimeLocation(structure_id, ...)` BEFORE
+    // `ProcessGodmaPrimeLocation(ship_id, ...)`.
+    let dogma_bind_rep = harness
+        .call_ok(
+            "dogmaIM",
+            None,
+            "MachoBindObject",
+            &[
+                PyRep::Tuple(vec![PyRep::Integer(i64::from(sys_id)), PyRep::Integer(5)]),
+                PyRep::None,
+            ],
+            &kw,
+        )
+        .await;
+    let dogma_bid =
+        extract_bound_id_from_wire_rep(&dogma_bind_rep).expect("dogmaIM bound ID");
+    let _ = harness.drain_notifications();
+    let all_info = harness
+        .call_ok(
+            "dogmaIM",
+            Some(dogma_bid),
+            "GetAllInfo",
+            &[PyRep::Bool(false), PyRep::Bool(true), PyRep::Integer(structure_id)],
+            &kw,
+        )
+        .await;
+    let PyRep::Dict(structure_info) = all_info
+        .dict_get("structureInfo")
+        .expect("structureInfo key")
+    else {
+        panic!("GetAllInfo.structureInfo must be a Dict when docked in Upwell structure");
+    };
+    let (_, struct_info_row) = structure_info
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(structure_id))
+        .expect("structureInfo must contain structure_id");
+    let struct_info_inv = struct_info_row.dict_get("invItem").expect("structure invItem");
+    assert_eq!(
+        struct_info_inv.dbrow_get("categoryID"),
+        Some(&PyRep::Integer(65))
+    );
+    assert_eq!(
+        struct_info_inv.dbrow_get("locationID"),
+        Some(&PyRep::Integer(i64::from(sys_id)))
+    );
+    let PyRep::Dict(ship_info) = all_info.dict_get("shipInfo").expect("shipInfo key") else {
+        panic!("shipInfo Dict");
+    };
+    let (_, ship_info_row) = ship_info
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(ship_id))
+        .expect("shipInfo must contain ship_id");
+    assert_eq!(
+        ship_info_row
+            .dict_get("invItem")
+            .and_then(|r| r.dbrow_get("locationID").cloned()),
+        Some(PyRep::Integer(structure_id))
+    );
+
+    let prime_locs: Vec<i64> = harness
+        .drain_notifications()
+        .into_iter()
+        .filter(|(ev, _)| ev == "ProcessGodmaPrimeLocation")
+        .filter_map(|(_, args)| args.first().and_then(PyRep::as_i64))
+        .collect();
+    assert_eq!(prime_locs, vec![structure_id, ship_id]);
+
+    // Negative wire checks: cross-system `invbroker` bind and foreign-system structure access fail.
+    let bad_bind_err = harness
+        .call(
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[
+                PyRep::Tuple(vec![PyRep::Integer(i64::from(other_sys)), PyRep::Integer(5)]),
+                PyRep::None,
+            ],
+            &kw,
+        )
+        .await
+        .expect_err("foreign solar-system invbroker bind must fail");
+    assert_eq!(bad_bind_err.code, "BindAuthorizationDenied"); // rpc-lint: allow error code assertion
+
+    let bad_inv_err = harness
+        .call(
+            "invbroker",
+            Some(sys_inv_bid),
+            "GetInventoryFromId",
+            &[PyRep::Integer(foreign_structure_id), PyRep::Integer(0)],
+            &kw,
+        )
+        .await
+        .expect_err("foreign-system structure GetInventoryFromId must fail");
+    assert_eq!(bad_inv_err.code, "InventoryNotAccessible"); // rpc-lint: allow error code assertion
+}
 }

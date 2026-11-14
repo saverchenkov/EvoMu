@@ -852,3 +852,145 @@ fn get_all_info_and_prime_ship_include_loaded_charges_941_948() {
         "prime_ship_on_board must include loaded charge sublocation in ProcessGodmaPrimeLocation (#948/#962)"
     );
 }
+
+#[test]
+fn build_all_info_primes_structure_info_and_orders_godma_prime_notifications() {
+    let ctx = test_ctx();
+    let char_id = 93_001_063;
+    let corp_id = 98_001_063;
+    let sys_id = 30_000_142u32;
+    let struct_id = 1_000_991_063_i64;
+    let other_struct_id = 1_000_991_999_i64;
+    let ship_id = 1_000_301_063_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            struct_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35_832,
+                owner_corp_id: 98_999_001,
+                solar_system_id: sys_id,
+                name: "Perimeter Astrahus".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+    });
+    ensure_char(&ctx, char_id, corp_id, sys_id, ship_id);
+    insert_item(&ctx, ship_id, 587, char_id, struct_id, InventoryFlag::Hangar, 1, true);
+
+    let struct_sess = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(corp_id),
+        ship_id: Some(ship_id),
+        solar_system_id: Some(sys_id),
+        station_id: None,
+        structure_id: Some(struct_id),
+        ..Default::default()
+    };
+
+    // 1. V24 client calls `dogmaIM.GetAllInfo(False, True, structure_id)` after structure dock.
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let info = build_all_info(
+        &ctx,
+        &struct_sess,
+        char_id,
+        ship_id,
+        587,
+        PyRep::None,
+        vec![(PyRep::Integer(37), PyRep::Real(320.0))],
+        Vec::new(),
+        &[PyRep::Bool(false), PyRep::Bool(true), PyRep::Integer(struct_id)],
+    );
+    assert_eq!(info.dict_get("charInfo"), Some(&PyRep::None));
+    let PyRep::Dict(struct_info) = info.dict_get("structureInfo").expect("structureInfo key") else {
+        panic!("structureInfo must be a Dict when docked in Upwell structure (#1063)");
+    };
+    let (_, struct_entry) = struct_info
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(struct_id))
+        .expect("structureInfo must contain docked structure_id");
+    let struct_inv = struct_entry.dict_get("invItem").expect("structure invItem");
+    assert_eq!(struct_inv.dbrow_get("itemID"), Some(&PyRep::Integer(struct_id)));
+    assert_eq!(struct_inv.dbrow_get("categoryID"), Some(&PyRep::Integer(65)));
+    assert_eq!(
+        struct_inv.dbrow_get("locationID"),
+        Some(&PyRep::Integer(i64::from(sys_id)))
+    );
+    assert_eq!(struct_inv.dbrow_get("quantity"), Some(&PyRep::Integer(-1)));
+
+    // ProcessGodmaPrimeLocation must prime `struct_id` BEFORE `ship_id` so godma.UpdateItem
+    // has `itemsByLocationID[struct_id]` initialized before inserting `ship_id`.
+    let prime_locs: Vec<i64> = ctx
+        .drain_notifications_for_char(char_id)
+        .into_iter()
+        .filter(|n| n.event == "ProcessGodmaPrimeLocation")
+        .filter_map(|n| n.args.first().and_then(|a| a.as_i64()))
+        .collect();
+    assert_eq!(prime_locs, vec![struct_id, ship_id]);
+
+    // 2. Negative: explicit `false` or foreign structure ID does not populate `structureInfo`,
+    //    and NPC station dock keeps `structureInfo = None` and emits only `ship_id`.
+    let no_struct_arg = build_all_info(
+        &ctx,
+        &struct_sess,
+        char_id,
+        ship_id,
+        587,
+        PyRep::None,
+        Vec::new(),
+        Vec::new(),
+        &[PyRep::Bool(true), PyRep::Bool(true), PyRep::Bool(false)],
+    );
+    assert_eq!(no_struct_arg.dict_get("structureInfo"), Some(&PyRep::None));
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let foreign_struct_arg = build_all_info(
+        &ctx,
+        &struct_sess,
+        char_id,
+        ship_id,
+        587,
+        PyRep::None,
+        Vec::new(),
+        Vec::new(),
+        &[
+            PyRep::Bool(false),
+            PyRep::Bool(true),
+            PyRep::Integer(other_struct_id),
+        ],
+    );
+    assert_eq!(foreign_struct_arg.dict_get("structureInfo"), Some(&PyRep::None));
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let station_sess = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        ship_id: Some(ship_id),
+        solar_system_id: Some(sys_id),
+        station_id: Some(60_003_760),
+        structure_id: None,
+        ..Default::default()
+    };
+    let station_info = build_all_info(
+        &ctx,
+        &station_sess,
+        char_id,
+        ship_id,
+        587,
+        PyRep::None,
+        Vec::new(),
+        Vec::new(),
+        &[PyRep::Bool(true), PyRep::Bool(true), PyRep::Bool(true)],
+    );
+    assert_eq!(station_info.dict_get("structureInfo"), Some(&PyRep::None));
+    let station_prime_locs: Vec<i64> = ctx
+        .drain_notifications_for_char(char_id)
+        .into_iter()
+        .filter(|n| n.event == "ProcessGodmaPrimeLocation")
+        .filter_map(|n| n.args.first().and_then(|a| a.as_i64()))
+        .collect();
+    assert_eq!(station_prime_locs, vec![ship_id]);
+}

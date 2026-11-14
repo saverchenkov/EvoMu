@@ -30,6 +30,8 @@ const CONTAINER_GLOBAL: i64 = 10_002;
 const CONTAINER_HANGAR: i64 = 10_004;
 /// `inventorycommon/const.pyj: containerCorpMarket` — corporation deliveries at the docked station.
 const CONTAINER_CORP_MARKET: i64 = 10_012;
+/// `inventorycommon/const.pyj: containerStructure` — character/corp hangar container inside an Upwell structure.
+const CONTAINER_STRUCTURE: i64 = 10_014;
 /// `inventorycommon/const.pyj: containerCapsuleerDeliveries` — corporation item deliveries at the docked station.
 const CONTAINER_CAPSULEER_DELIVERIES: i64 = 10_015;
 
@@ -147,8 +149,10 @@ pub fn handle(
                 return err("InvalidArguments", "invbroker.GetInventoryFromId expects (itemID, passive)".into());
             };
             let docked = session.station_id.or(session.structure_id);
-            let at_location = docked == Some(location_id)
-                || (docked.is_none() && session.solar_system_id.map(i64::from) == Some(location_id));
+            let in_bound_system = session.station_id.is_none()
+                && session.solar_system_id.map(i64::from) == Some(location_id);
+            let at_location = docked == Some(location_id) || in_bound_system;
+            let hangar_loc_id = docked.filter(|_| at_location).unwrap_or(location_id);
             let is_storage_auth = if docked.is_none() && session.solar_system_id.is_some() {
                 let sys_id = session.solar_system_id.unwrap();
                 let authorized = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
@@ -187,9 +191,13 @@ pub fn handle(
                     item_id,
                 )
                 .is_some();
+            let is_structure = ctx
+                .db
+                .with_snapshot(|snap| snap.structures.contains_key(&item_id));
             let item_exists = item_id == char_id
                 || is_storage_auth
                 || is_missing_dynamic_ship_stub
+                || is_structure
                 || ctx.db.with_snapshot(|snap| snap.items.contains_key(&item_id));
             if !item_exists {
                 return Some(Err(BridgeRpcError::user_error("FakeItemNotFound")));
@@ -208,6 +216,16 @@ pub fn handle(
                 || is_storage_auth
                 || is_missing_dynamic_ship_stub
                 || ctx.db.with_snapshot(|snap| {
+                    if let Some(st) = snap.structures.get(&item_id) {
+                        let is_corp_owned = session
+                            .corporation_id
+                            .is_some_and(|cid| cid > 0 && st.owner_corp_id == cid);
+                        let docked_here = session.structure_id == Some(item_id) && at_location;
+                        let corp_in_sys = (is_corp_owned || session.has_gm_role())
+                            && Some(st.solar_system_id) == session.solar_system_id
+                            && at_location;
+                        return docked_here || corp_in_sys;
+                    }
                     snap.items.get(&item_id).is_some_and(|it| {
                         let has_inventory = crab_allowed
                             || ctx
@@ -233,9 +251,9 @@ pub fn handle(
                                 && snap
                                     .items
                                     .get(&it.location_id)
-                                    .is_some_and(|p| p.location_id == location_id);
+                                    .is_some_and(|p| p.location_id == hangar_loc_id);
                             let in_reach = it.item_id == session.ship_id.unwrap_or(0)
-                                || (it.location_id == location_id && at_location)
+                                || (it.location_id == hangar_loc_id && at_location)
                                 || in_corp_office_here
                                 || Some(it.location_id) == session.ship_id;
                             in_reach
@@ -259,6 +277,7 @@ pub fn handle(
                 CONTAINER_HANGAR
                     | CONTAINER_CORP_MARKET
                     | CONTAINER_GLOBAL
+                    | CONTAINER_STRUCTURE
                     | CONTAINER_CAPSULEER_DELIVERIES
             ) {
                 return err(
@@ -267,12 +286,27 @@ pub fn handle(
                 );
             }
             let docked = session.station_id.or(session.structure_id);
-            if docked != Some(location_id) {
+            let valid_structure_location = session.station_id.is_none()
+                && session.structure_id.is_some()
+                && (docked == Some(location_id)
+                    || session.solar_system_id.map(i64::from) == Some(location_id));
+            let target_loc_id = if container_id == CONTAINER_STRUCTURE {
+                if valid_structure_location {
+                    session.structure_id.unwrap()
+                } else {
+                    return err(
+                        "CharacterNotAtStation",
+                        format!("character {char_id} is not docked at structure {location_id}"),
+                    );
+                }
+            } else if docked == Some(location_id) || valid_structure_location {
+                docked.unwrap()
+            } else {
                 return err(
                     "CharacterNotAtStation",
                     format!("character {char_id} is not docked at {location_id}"),
                 );
-            }
+            };
             if matches!(container_id, CONTAINER_CORP_MARKET | CONTAINER_CAPSULEER_DELIVERIES) {
                 let caller_corp_id = session
                     .corporation_id
@@ -297,7 +331,7 @@ pub fn handle(
                     }
                 }
             }
-            Some(ctx.bind_verified_sub_object(session, "invbroker", location_id).map(|bid| ctx.bound_object_rep(bid, caller_trace)))
+            Some(ctx.bind_verified_sub_object(session, "invbroker", target_loc_id).map(|bid| ctx.bound_object_rep(bid, caller_trace)))
         }
     }
 }
