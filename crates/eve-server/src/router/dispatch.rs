@@ -390,6 +390,7 @@ impl ServerContext {
                                         "PersistenceFailure"
                                             | "DatabasePersistenceError"
                                             | "ValidationError"
+                                            | "InternalError"
                                     )
                                 );
                                 if !preserve_existing_err {
@@ -408,6 +409,7 @@ impl ServerContext {
                                 "PersistenceFailure"
                                     | "DatabasePersistenceError"
                                     | "ValidationError"
+                                    | "InternalError"
                             )
                         ) {
                             tx_poisoned = true;
