@@ -3653,3 +3653,311 @@ async fn test_1051_live_tcp_macho_dock_splits_warp_stop_and_session_change_settl
         Some(st_id)
     );
 }
+
+#[tokio::test]
+async fn it_titan_keepstar_docking_and_fax_stargate_jump_use_ship_ball_radius() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(9877);
+    sess.address = "tcp:127.0.0.1:41235".to_string();
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(90_000_001)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("select char");
+    let char_id = sess.character_id.unwrap();
+    let ship_id = sess.ship_id.unwrap();
+    let sys_id = sess.solar_system_id.unwrap_or(30_000_142);
+
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("undock");
+    ctx.advance_secs(15);
+
+    let titan_type_id = 11_567_u32;
+    let keepstar_type_id = 35_834_u32;
+    let titan_radius = ctx
+        .sde
+        .types
+        .get(&titan_type_id)
+        .map(|t| t.radius)
+        .filter(|&r| r > 0.0)
+        .unwrap_or(6_800.0);
+    let keepstar_radius = ctx
+        .sde
+        .types
+        .get(&keepstar_type_id)
+        .map(|t| t.radius)
+        .filter(|&r| r > 0.0)
+        .unwrap_or(150_000.0);
+    assert!(titan_radius > 2_500.0);
+
+    let keepstar_id = 1_099_774_101_i64;
+    let keepstar_pos = DVec3::new(20_000_000.0, 0.0, 0.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship_it) = snap.items.get_mut(&ship_id) {
+            ship_it.type_id = titan_type_id;
+        }
+        snap.structures.insert(
+            keepstar_id,
+            UpwellStructureRecord {
+                structure_id: keepstar_id,
+                type_id: keepstar_type_id,
+                owner_corp_id: sess.corporation_id.unwrap_or(1_000_009),
+                solar_system_id: sys_id,
+                name: "1DQ1-A - Citadel".into(),
+                position: keepstar_pos.to_array(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 50,
+                shield_hp: 100_000.0,
+                armor_hp: 100_000.0,
+                hull_hp: 100_000.0,
+                ..Default::default()
+            },
+        );
+    });
+
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_h
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: keepstar_id,
+                type_id: keepstar_type_id,
+                position: keepstar_pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 50_000_000_000.0,
+                radius: keepstar_radius,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            eve_destiny::CombatState::new(),
+        )
+        .await;
+    let _ = sys_h
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: titan_type_id,
+                position: keepstar_pos
+                    + DVec3::new(keepstar_radius + titan_radius + 2_501.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 60.0,
+                inertia: 0.5,
+                mass: 2_400_000_000.0,
+                radius: titan_radius,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            eve_destiny::CombatState::new(),
+        )
+        .await;
+
+    // 2,501 m surface distance -> OutsideDockingPerimeter + DockingApproach
+    let far_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "structureDocking",
+            None,
+            "Dock",
+            &[PyRep::Integer(keepstar_id), PyRep::Integer(ship_id)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(far_err.code, "OutsideDockingPerimeter");
+    assert_eq!(
+        far_err.client_error.as_deref(),
+        Some(&eve_proto::ClientError::user(
+            eve_proto::UserErrorKey::DockingApproach
+        ))
+    );
+
+    // 725 m surface distance (GH #1072 repro) -> structureDocking.Dock succeeds
+    assert!(
+        sys_h
+            .set_ball_position(
+                ship_id,
+                keepstar_pos + DVec3::new(keepstar_radius + titan_radius + 725.0, 0.0, 0.0),
+            )
+            .await
+    );
+    ctx.dispatch_rpc(
+        &mut sess,
+        "structureDocking",
+        None,
+        "Dock",
+        &[PyRep::Integer(keepstar_id), PyRep::Integer(ship_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Avatar Titan at 725 m surface distance must dock at Keepstar");
+    assert_eq!(sess.structure_id, Some(keepstar_id));
+
+    // Undock Titan from Keepstar and verify beyonce.CmdDock also succeeds at 725 m surface distance.
+    ctx.advance_secs(15);
+    ctx.dispatch_rpc(&mut sess, "structureDocking", None, "Undock", &[], &kw, None)
+        .await
+        .expect("undock from Keepstar");
+    ctx.advance_secs(15);
+    assert!(
+        sys_h
+            .set_ball_position(
+                ship_id,
+                keepstar_pos + DVec3::new(keepstar_radius + titan_radius + 725.0, 0.0, 0.0),
+            )
+            .await
+    );
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        None,
+        "CmdDock",
+        &[PyRep::Integer(keepstar_id), PyRep::Integer(ship_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("beyonce.CmdDock at 725 m surface distance must succeed for Avatar Titan");
+    assert_eq!(sess.structure_id, Some(keepstar_id));
+
+    // Verify Force Auxiliary (Apostle 37,604, radius 3,000 m > 2,500 m) jumps lowsec/nullsec stargate.
+    ctx.advance_secs(15);
+    ctx.dispatch_rpc(&mut sess, "structureDocking", None, "Undock", &[], &kw, None)
+        .await
+        .expect("undock before gate jump check");
+    ctx.advance_secs(15);
+
+    let gate = ctx
+        .sde
+        .jumps
+        .values()
+        .find(|j| {
+            j.from_solar_system_id != 30_100_000
+                && j.to_solar_system_id != 30_100_000
+                && ctx
+                    .sde
+                    .solar_systems
+                    .get(&j.from_solar_system_id)
+                    .is_some_and(|s| s.security_status < 0.45 && s.region_id != 10_000_070)
+                && ctx
+                    .sde
+                    .solar_systems
+                    .get(&j.to_solar_system_id)
+                    .is_some_and(|s| s.security_status < 0.45 && s.region_id != 10_000_070)
+        })
+        .cloned()
+        .expect("SDE must contain a non-Zarzakh non-Pochven lowsec/nullsec stargate");
+    let fax_type_id = 37_604_u32;
+    let fax_radius = ctx
+        .sde
+        .types
+        .get(&fax_type_id)
+        .map(|t| t.radius)
+        .filter(|&r| r > 0.0)
+        .unwrap_or(3_000.0);
+    assert!(fax_radius > 2_500.0);
+
+    let _ = sys_h.take_ball(ship_id).await;
+    let low_sys = gate.from_solar_system_id;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = low_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        if let Some(ship_it) = snap.items.get_mut(&ship_id) {
+            ship_it.type_id = fax_type_id;
+            ship_it.location_id = i64::from(low_sys);
+        }
+    });
+    sess.solar_system_id = Some(low_sys);
+    sess.station_id = None;
+    sess.structure_id = None;
+
+    let low_h = ctx.systems.get_or_spawn(low_sys);
+    let gate_radius = low_h
+        .get_ball_snapshot(gate.stargate_id)
+        .await
+        .unwrap()
+        .map(|(_, b)| b.radius)
+        .filter(|&r| r > 0.0)
+        .unwrap_or_else(|| {
+            ctx.sde
+                .types
+                .get(&16)
+                .map(|t| t.radius)
+                .filter(|&r| r > 0.0)
+                .unwrap_or(14_051.0)
+        });
+    let _ = low_h
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: fax_type_id,
+                position: gate.position + DVec3::new(gate_radius + fax_radius + 2_501.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 60.0,
+                inertia: 0.5,
+                mass: 1_200_000_000.0,
+                radius: fax_radius,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            eve_destiny::CombatState::new(),
+        )
+        .await;
+
+    let far_gate_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            None,
+            "CmdStargateJump",
+            &[PyRep::Integer(gate.stargate_id)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(far_gate_err.code, "OutsideStargateJumpRange");
+
+    assert!(
+        low_h
+            .set_ball_position(
+                ship_id,
+                gate.position + DVec3::new(gate_radius + fax_radius + 725.0, 0.0, 0.0),
+            )
+            .await
+    );
+    let jump_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            None,
+            "CmdStargateJump",
+            &[PyRep::Integer(gate.stargate_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Apostle FAX at 725 m surface distance must jump stargate");
+    assert_eq!(
+        jump_res.dict_get("solarSystemID"),
+        Some(&PyRep::Integer(gate.to_solar_system_id as i64))
+    );
+    assert_eq!(sess.solar_system_id, Some(gate.to_solar_system_id));
+}

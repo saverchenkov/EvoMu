@@ -1567,3 +1567,431 @@ async fn dock_warp_settle_plan_handles_arriving_warp_post_exit_race_and_rejectio
     assert_ne!(struct_dock_res, PyRep::None);
     assert_eq!(sess.structure_id, Some(struct_id));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn supercapital_dock_and_gate_perimeters_include_ship_ball_radius() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let ship_id = 895_201_i64;
+    let sys_id = 30_000_142_u32;
+    let keepstar_pos = DVec3::new(1_000_000.0, 0.0, 0.0);
+    let keepstar_radius = 150_000.0;
+    let avatar_radius = 6_800.0;
+    let aeon_radius = 4_674.0;
+
+    // 1. Avatar Titan (radius 6,800 m) at Keepstar (radius 150,000 m):
+    //    GH #1072 repro had surface_dist = 725 m (center_dist = 157,525 m).
+    let mut titan = Ball {
+        id: ship_id,
+        type_id: 11_567,
+        position: keepstar_pos + DVec3::new(keepstar_radius + avatar_radius + 725.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 60.0,
+        inertia: 0.5,
+        mass: 2_400_000_000.0,
+        radius: avatar_radius,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    assert_eq!(
+        evaluate_dock_perimeter(&titan, keepstar_pos, keepstar_radius).unwrap(),
+        false,
+        "Titan at 725 m surface distance from Keepstar must be inside docking perimeter"
+    );
+
+    // Exact 2,500.0 m surface boundary passes; 2,501.0 m rejects with OutsideDockingPerimeter / DockingApproach.
+    titan.position =
+        keepstar_pos + DVec3::new(keepstar_radius + avatar_radius + 2_500.0, 0.0, 0.0);
+    assert_eq!(
+        evaluate_dock_perimeter(&titan, keepstar_pos, keepstar_radius).unwrap(),
+        false
+    );
+    titan.position =
+        keepstar_pos + DVec3::new(keepstar_radius + avatar_radius + 2_501.0, 0.0, 0.0);
+    let outside_err = evaluate_dock_perimeter(&titan, keepstar_pos, keepstar_radius).unwrap_err();
+    assert_eq!(outside_err.code, "OutsideDockingPerimeter");
+    assert_eq!(
+        outside_err.client_error.as_deref(),
+        Some(&eve_proto::ClientError::user(
+            eve_proto::UserErrorKey::DockingApproach
+        ))
+    );
+
+    // 2. Aeon Supercarrier (radius 4,674 m) boundary check.
+    let mut aeon = titan.clone();
+    aeon.type_id = 23_919;
+    aeon.radius = aeon_radius;
+    aeon.position = keepstar_pos + DVec3::new(keepstar_radius + aeon_radius + 2_499.0, 0.0, 0.0);
+    assert_eq!(
+        evaluate_dock_perimeter(&aeon, keepstar_pos, keepstar_radius).unwrap(),
+        false
+    );
+    aeon.position = keepstar_pos + DVec3::new(keepstar_radius + aeon_radius + 2_501.0, 0.0, 0.0);
+    assert_eq!(
+        evaluate_dock_perimeter(&aeon, keepstar_pos, keepstar_radius)
+            .unwrap_err()
+            .code,
+        "OutsideDockingPerimeter"
+    );
+
+    // 3. Arriving warp & stop_arriving_warp_for_dock for Avatar Titan:
+    //    3a. Already inside max_dock_dist (725 m surface dist, > keepstar_radius + 2,500 m) -> no snap.
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let far_origin = keepstar_pos + DVec3::new(1_000_000_000.0, 0.0, 0.0);
+    let warp_dest = keepstar_pos + DVec3::new(keepstar_radius + avatar_radius + 200.0, 0.0, 0.0);
+    let inside_warp_pos =
+        keepstar_pos + DVec3::new(keepstar_radius + avatar_radius + 725.0, 0.0, 0.0);
+    titan.position = inside_warp_pos;
+    titan.mode = MovementMode::Warp {
+        origin: far_origin,
+        destination: warp_dest,
+        warp_speed_au_s: 1.5,
+        total_distance: far_origin.distance(warp_dest),
+        phase: eve_destiny::WarpPhase::Decelerating,
+        elapsed_warp_time: 5.0,
+    };
+    assert_eq!(
+        evaluate_dock_perimeter(&titan, keepstar_pos, keepstar_radius).unwrap(),
+        true
+    );
+    sys_handle.spawn_ball(titan.clone()).await.unwrap();
+    ctx.active_warps
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(ship_id, char_id);
+    stop_arriving_warp_for_dock(&ctx, &sys_handle, &titan, keepstar_pos, keepstar_radius);
+    let after_inside_stop = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
+    assert_eq!(after_inside_stop.mode, MovementMode::Stop);
+    assert!(
+        after_inside_stop.position.distance(inside_warp_pos) < 1e-6,
+        "stop_arriving_warp_for_dock must not snap when Titan is already inside max_dock_dist"
+    );
+    assert!(!ctx
+        .active_warps
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(&ship_id));
+    assert_eq!(
+        evaluate_dock_perimeter(&after_inside_stop, keepstar_pos, keepstar_radius).unwrap(),
+        false
+    );
+
+    //    3b. 300 m outside max_dock_dist within <= 4.0 s deceleration -> snaps to warp_dest.
+    titan.position =
+        keepstar_pos + DVec3::new(keepstar_radius + avatar_radius + 2_800.0, 0.0, 0.0);
+    titan.velocity = DVec3::new(-10_000.0, 0.0, 0.0);
+    titan.mode = MovementMode::Warp {
+        origin: far_origin,
+        destination: warp_dest,
+        warp_speed_au_s: 5.0,
+        total_distance: far_origin.distance(warp_dest),
+        phase: eve_destiny::WarpPhase::Decelerating,
+        elapsed_warp_time: 5.0,
+    };
+    assert_eq!(
+        evaluate_dock_perimeter(&titan, keepstar_pos, keepstar_radius).unwrap(),
+        true
+    );
+    sys_handle.spawn_ball(titan.clone()).await.unwrap();
+    stop_arriving_warp_for_dock(&ctx, &sys_handle, &titan, keepstar_pos, keepstar_radius);
+    let after_snap = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
+    assert!(after_snap.position.distance(warp_dest) < 1e-3);
+    assert_eq!(
+        evaluate_dock_perimeter(&after_snap, keepstar_pos, keepstar_radius).unwrap(),
+        false
+    );
+
+    // 4. Stargate jump perimeter with Avatar Titan (radius 6,800 m) and Stargate (radius 14,051 m):
+    let gate_pos = DVec3::new(-5_000_000.0, 0.0, 0.0);
+    let gate_radius = 14_051.0;
+    titan.mode = MovementMode::Stop;
+    titan.velocity = DVec3::ZERO;
+    titan.position = gate_pos + DVec3::new(gate_radius + avatar_radius + 500.0, 0.0, 0.0);
+    assert_eq!(
+        evaluate_stargate_jump_perimeter(&titan, gate_pos, gate_radius).unwrap(),
+        false
+    );
+    titan.position = gate_pos + DVec3::new(gate_radius + avatar_radius + 2_500.0, 0.0, 0.0);
+    assert_eq!(
+        evaluate_stargate_jump_perimeter(&titan, gate_pos, gate_radius).unwrap(),
+        false
+    );
+    titan.position = gate_pos + DVec3::new(gate_radius + avatar_radius + 2_600.0, 0.0, 0.0);
+    let gate_err = evaluate_stargate_jump_perimeter(&titan, gate_pos, gate_radius).unwrap_err();
+    assert_eq!(gate_err.code, "OutsideStargateJumpRange");
+    assert!(
+        gate_err.message.contains("2600.0"),
+        "expected surface distance 2600.0 m in message, got: {}",
+        gate_err.message
+    );
+
+    let gate_warp_dest = gate_pos + DVec3::new(gate_radius + avatar_radius + 725.0, 0.0, 0.0);
+    titan.position = gate_warp_dest;
+    titan.mode = MovementMode::Warp {
+        origin: far_origin,
+        destination: gate_warp_dest,
+        warp_speed_au_s: 1.5,
+        total_distance: far_origin.distance(gate_warp_dest),
+        phase: eve_destiny::WarpPhase::Decelerating,
+        elapsed_warp_time: 5.0,
+    };
+    assert_eq!(
+        evaluate_stargate_jump_perimeter(&titan, gate_pos, gate_radius).unwrap(),
+        true
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn titan_keepstar_dock_and_fax_gate_jump_succeed_within_surface_perimeter() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let titan_ship_id = 895_301_i64;
+    let fax_ship_id = 895_302_i64;
+    let keepstar_id = 1_040_000_895_301_i64;
+    let kw = HashMap::new();
+
+    // Pick a real non-Pochven, non-Zarzakh lowsec/nullsec stargate pair so capital gate jump is legal.
+    let gate = ctx
+        .sde
+        .jumps
+        .values()
+        .find(|j| {
+            j.from_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                && j.to_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                && ctx.sde.solar_systems.get(&j.from_solar_system_id).is_some_and(|s| {
+                    s.security_status < 0.45 && s.region_id != 10_000_070
+                })
+                && ctx.sde.solar_systems.get(&j.to_solar_system_id).is_some_and(|s| {
+                    s.security_status < 0.45 && s.region_id != 10_000_070
+                })
+        })
+        .cloned()
+        .expect("SDE must contain a non-Zarzakh non-Pochven lowsec/nullsec stargate");
+    let sys_id = gate.from_solar_system_id;
+    let keepstar_pos = DVec3::new(2_000_000.0, 0.0, 0.0);
+    let keepstar_radius = ctx
+        .sde
+        .types
+        .get(&35_834)
+        .map(|t| t.radius)
+        .filter(|&r| r > 0.0)
+        .unwrap_or(150_000.0);
+    let titan_radius = ctx
+        .sde
+        .types
+        .get(&11_567)
+        .map(|t| t.radius)
+        .filter(|&r| r > 0.0)
+        .unwrap_or(6_800.0);
+    assert!(titan_radius > 2_500.0, "Titan radius must exceed 2,500 m");
+
+    let corp_id = ctx.db.with_mut_snapshot(|snap| {
+        let corp_id = snap.characters[&char_id].corporation_id;
+        snap.structures.insert(
+            keepstar_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: keepstar_id,
+                type_id: 35_834,
+                solar_system_id: sys_id,
+                owner_corp_id: corp_id,
+                name: "1DQ1-A - Citadel".into(),
+                position: keepstar_pos.to_array(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 100_000.0,
+                armor_hp: 100_000.0,
+                hull_hp: 100_000.0,
+                ..Default::default()
+            },
+        );
+        corp_id
+    });
+    ctx.session_change_timers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball(Ball {
+            id: keepstar_id,
+            type_id: 35_834,
+            position: keepstar_pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 50_000_000_000.0,
+            radius: keepstar_radius,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+
+    // Spawn Avatar Titan at 2,501 m surface distance -> structureDocking.Dock rejects;
+    // move to 725 m surface distance -> prepare_dock_warp_settle + structureDocking.Dock succeed.
+    spawn_ship_in_space(
+        &ctx,
+        char_id,
+        titan_ship_id,
+        11_567,
+        sys_id,
+        keepstar_pos + DVec3::new(keepstar_radius + titan_radius + 2_501.0, 0.0, 0.0),
+    );
+    let mut titan_ball = sys_handle.get_ball_snapshot(titan_ship_id).await.unwrap().unwrap().1;
+    titan_ball.radius = titan_radius;
+    sys_handle.spawn_ball(titan_ball.clone()).await.unwrap();
+
+    let mut sess = SessionState {
+        session_id: 77,
+        user_id: Some(1),
+        character_id: Some(char_id),
+        corporation_id: Some(corp_id),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(titan_ship_id),
+        address: "tcp:127.0.0.1:44477".to_string(),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        crate::services::station_structure::handle(
+            &ctx,
+            &mut sess,
+            "structureDocking",
+            "Dock",
+            &[PyRep::Integer(keepstar_id), PyRep::Integer(titan_ship_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "OutsideDockingPerimeter"
+    );
+
+    let dock_pos = keepstar_pos + DVec3::new(keepstar_radius + titan_radius + 725.0, 0.0, 0.0);
+    let far_origin = keepstar_pos + DVec3::new(1_000_000_000.0, 0.0, 0.0);
+    titan_ball.position = dock_pos;
+    titan_ball.mode = MovementMode::Warp {
+        origin: far_origin,
+        destination: dock_pos,
+        warp_speed_au_s: 1.5,
+        total_distance: far_origin.distance(dock_pos),
+        phase: eve_destiny::WarpPhase::Decelerating,
+        elapsed_warp_time: 5.0,
+    };
+    sys_handle.spawn_ball(titan_ball).await.unwrap();
+
+    let settle = prepare_dock_warp_settle(
+        &ctx,
+        &sess,
+        "structureDocking",
+        "Dock",
+        &[PyRep::Integer(keepstar_id), PyRep::Integer(titan_ship_id)],
+    )
+    .await
+    .expect("Titan arriving warp inside 2,500 m surface perimeter must produce settle plan");
+    assert!(settle.stopped_now);
+
+    let docked = crate::services::station_structure::handle(
+        &ctx,
+        &mut sess,
+        "structureDocking",
+        "Dock",
+        &[PyRep::Integer(keepstar_id), PyRep::Integer(titan_ship_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("Avatar Titan at 725 m surface distance must dock at Keepstar");
+    assert_eq!(docked.dict_get("locationID"), Some(&PyRep::Integer(keepstar_id)));
+    assert_eq!(sess.structure_id, Some(keepstar_id));
+
+    // Also verify Apostle Force Auxiliary (radius 3,000 m > 2,500 m) jumps stargate at 725 m surface dist.
+    ctx.session_change_timers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    let fax_radius = ctx
+        .sde
+        .types
+        .get(&37_604)
+        .map(|t| t.radius)
+        .filter(|&r| r > 0.0)
+        .unwrap_or(3_000.0);
+    assert!(fax_radius > 2_500.0, "FAX radius must exceed 2,500 m");
+    let gate_radius = sys_handle
+        .get_ball_snapshot(gate.stargate_id)
+        .await
+        .unwrap()
+        .map(|(_, b)| b.radius)
+        .filter(|&r| r > 0.0)
+        .unwrap_or_else(|| {
+            ctx.sde
+                .types
+                .get(&16)
+                .map(|t| t.radius)
+                .filter(|&r| r > 0.0)
+                .unwrap_or(14_051.0)
+        });
+
+    sess.structure_id = None;
+    sess.station_id = None;
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(fax_ship_id);
+    spawn_ship_in_space(
+        &ctx,
+        char_id,
+        fax_ship_id,
+        37_604,
+        sys_id,
+        gate.position + DVec3::new(gate_radius + fax_radius + 2_501.0, 0.0, 0.0),
+    );
+    let mut fax_ball = sys_handle.get_ball_snapshot(fax_ship_id).await.unwrap().unwrap().1;
+    fax_ball.radius = fax_radius;
+    sys_handle.spawn_ball(fax_ball).await.unwrap();
+
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            None,
+            "beyonce",
+            "CmdStargateJump",
+            &[PyRep::Integer(gate.stargate_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "OutsideStargateJumpRange"
+    );
+
+    assert!(
+        sys_handle
+            .set_ball_position(
+                fax_ship_id,
+                gate.position + DVec3::new(gate_radius + fax_radius + 725.0, 0.0, 0.0),
+            )
+            .await
+    );
+    let jump_ok = handle(
+        &ctx,
+        &mut sess,
+        None,
+        "beyonce",
+        "CmdStargateJump",
+        &[PyRep::Integer(gate.stargate_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("Apostle FAX at 725 m surface distance must jump stargate");
+    assert_eq!(
+        jump_ok.dict_get("solarSystemID"),
+        Some(&PyRep::Integer(gate.to_solar_system_id as i64))
+    );
+    assert_eq!(sess.solar_system_id, Some(gate.to_solar_system_id));
+}
