@@ -270,11 +270,22 @@ pub fn register_achievement_admin_handlers(
     );
 }
 
+fn seed_client_achievements_storage(mgr: &AchievementManager) {
+    let fb = mgr.flatbuffer_bytes();
+    let count = mgr.definitions.len().max(mgr.sde_achievement_count);
+    let version = format!("24.2.{count}");
+    super::quasar_achievements::seed_or_upgrade_achievements_flatbuffer(&version, &fb);
+}
+
 pub fn register_achievement_handlers(
     router: &PublicGatewayRouter,
     db: Arc<WorldRepository>,
     manager: Arc<AchievementManager>,
 ) {
+    if manager.sde_achievement_count > 0 {
+        seed_client_achievements_storage(&manager);
+    }
+
     // 1. eve_public.achievement.api.GetRequest -> GetResponse
     let mgr = Arc::clone(&manager);
     router.register_handler(
@@ -473,8 +484,7 @@ pub fn register_achievement_handlers(
                     .filter(|s| !s.trim().is_empty())
                     .is_none()
             {
-                let fb = super::quasar_achievements::empty_achievement_flatbuffer();
-                super::quasar_achievements::ensure_client_flatbuffer_storage_seeded("achievements", "24.1.60", &fb);
+                seed_client_achievements_storage(&mgr_cdn);
                 return Ok(GoogleAny {
                     type_url: String::new(),
                     value: Vec::new(),

@@ -122,6 +122,7 @@ pub(crate) mod r6_t1_p0_helpers;
 pub mod pvp_filament_arena;
 pub mod pvp_filament_mgr;
 pub mod quasar_achievements;
+pub(crate) mod quasar_achievements_flatbuffer;
 pub mod quasar_achievements_ops;
 pub mod quasar_assetholding_entitlements;
 pub mod quasar_entitlement_ledger;
