@@ -375,12 +375,14 @@ impl ServerContext {
                             }
                         }
 
+                        let mut tx_poisoned = false;
                         if is_outer_tx_scope {
                             if let Some((code, msg)) = DISPATCH_TX_ERROR
                                 .try_with(|cell| cell.borrow_mut().take())
                                 .ok()
                                 .flatten()
                             {
+                                tx_poisoned = true;
                                 let preserve_existing_err = matches!(
                                     &res,
                                     Err(e) if matches!(
@@ -399,8 +401,19 @@ impl ServerContext {
                                 }
                             }
                         }
+                        if matches!(
+                            &res,
+                            Err(e) if matches!(
+                                e.code.as_str(),
+                                "PersistenceFailure"
+                                    | "DatabasePersistenceError"
+                                    | "ValidationError"
+                            )
+                        ) {
+                            tx_poisoned = true;
+                        }
 
-                        if res.is_err() {
+                        if tx_poisoned {
                             session.notifications.truncate(pre_session_notif_len);
                         } else if is_outer_notify_scope {
                             crate::router::cache_notifications::set_active_dispatch_char(
@@ -412,12 +425,13 @@ impl ServerContext {
                             );
                         }
 
-                        res
+                        (res, tx_poisoned)
                     }),
                 ),
             ),
         )
         .await;
+        let (res, tx_poisoned) = res;
         let duration = start_time.elapsed();
 
         let status_desc = match &res {
@@ -435,14 +449,14 @@ impl ServerContext {
             &status_desc,
         );
 
-        if res.is_ok() {
+        if !tx_poisoned {
             if let Some(cid) = session.character_id {
                 let post_rpc_loc = (
                     session.solar_system_id,
                     session.station_id,
                     session.structure_id,
                 );
-                if post_sync_loc.0.is_some() && post_rpc_loc != post_sync_loc {
+                if res.is_ok() && post_sync_loc.0.is_some() && post_rpc_loc != post_sync_loc {
                     if let Some(sys_id) = session.solar_system_id {
                         self.invalidate_bound_objects_for_session_transition(
                             cid,
