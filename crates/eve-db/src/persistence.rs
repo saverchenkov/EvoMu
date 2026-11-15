@@ -820,7 +820,6 @@ impl WorldRepository {
             moon_extractions: HashMap::new(),
             auto_moon_miners: HashMap::new(),
             observer_mining_ledger: HashMap::new(),
-            owner_notes: HashMap::new(),
             paused_skill_queues: HashSet::new(),
             cosmic_anomalies: HashMap::new(),
             sov_prospecting_levels: HashMap::new(),

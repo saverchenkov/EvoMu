@@ -719,7 +719,7 @@ pub struct WorldStateSnapshot {
     #[serde(default)]
     pub observer_mining_ledger: HashMap<i64, Vec<ObserverMiningRecord>>,
     #[serde(default)]
-    pub owner_notes: HashMap<i64, OwnerNoteRecord>,
+    pub owner_notes: crate::cow::CowMap<i64, OwnerNoteRecord>,
     #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
     pub paused_skill_queues: HashSet<i64>,
     #[serde(default)]
@@ -837,10 +837,10 @@ pub struct WorldStateSnapshot {
     pub corp_vote_ballots: HashMap<(i64, i64), CorpVoteBallotRecord>,
     #[serde(default)]
     pub orbital_provision_types: HashMap<i64, i64>,
-    #[serde(default, with = "tuple_map_serde")]
-    pub corp_lp_balances: HashMap<(i64, i64), i64>,
+    #[serde(default, with = "crate::durable_domain_types::cow_tuple_map_serde")]
+    pub corp_lp_balances: crate::cow::CowMap<(i64, i64), i64>,
     #[serde(default)]
-    pub char_lp_logs: HashMap<i64, Vec<LpRewardLogEntry>>,
+    pub char_lp_logs: crate::cow::CowMap<i64, Vec<LpRewardLogEntry>>,
     #[serde(default)]
     pub next_alliance_id: i64,
     #[serde(default)]

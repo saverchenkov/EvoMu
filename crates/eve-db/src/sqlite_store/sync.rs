@@ -52,6 +52,7 @@ pub fn sync_dirty_to_sqlite(
 
     cold_changed |= super::sync_ext::sync_extension_tables(tx, snap, fp)?;
     cold_changed |= super::domain_rows::sync_ledger_domain_rows(tx, snap)?;
+    cold_changed |= super::domain_rows::sync_notes_lp_domain_rows(tx, snap)?;
     cold_changed |= super::notes_lp_sequence_store::sync_d6(tx, snap, fp)?;
     cold_changed |= super::social_store::sync_d6_social(tx, snap, fp)?;
     cold_changed |= super::corp_crimewatch_store::sync_d6_corp_crimewatch(tx, snap, fp)?;
@@ -1407,9 +1408,6 @@ pub fn replace_sqlite_from_snapshot(
          DELETE FROM skill_history;
          DELETE FROM character_doll_info;
          DELETE FROM domain_rows;
-         DELETE FROM owner_notes;
-         DELETE FROM corp_lp_balances;
-         DELETE FROM char_lp_logs;
          DELETE FROM read_mails;
          DELETE FROM deleted_mails;
          DELETE FROM trashed_mails;

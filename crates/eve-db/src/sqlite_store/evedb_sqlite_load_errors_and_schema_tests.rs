@@ -7,7 +7,8 @@
 use super::evedb_sqlite_cov_tests::build_populated_snapshot;
 use crate::sqlite_store::corp_crimewatch_store::load_d6_corp_crimewatch;
 use crate::sqlite_store::domain_rows::{
-    load_ledger_domain_rows, sync_ledger_domain_rows, DOMAIN_MARKET_TRANSACTIONS,
+    load_ledger_domain_rows, load_notes_lp_domain_rows, sync_ledger_domain_rows,
+    sync_notes_lp_domain_rows, DOMAIN_CHAR_LP_LOGS, DOMAIN_MARKET_TRANSACTIONS,
     DOMAIN_WALLET_JOURNAL_META,
 };
 use crate::sqlite_store::industry_market_pve_store::load_d6_batch4;
@@ -198,33 +199,28 @@ fn sqlite_store_malformed_json_and_unknown_kv_keys_coverage() {
     )
     .expect("insert unknown and corrupt world_kv_blobs");
     conn.execute(
-        "INSERT INTO domain_rows (domain, key, value) VALUES (?1, '999', '{bad'), (?2, '999', '{bad')",
-        params![DOMAIN_WALLET_JOURNAL_META, DOMAIN_MARKET_TRANSACTIONS],
+        "INSERT INTO domain_rows (domain, key, value) VALUES (?1, '999', '{bad'), (?2, '999', '{bad'), (?3, '999', '{bad')",
+        params![DOMAIN_WALLET_JOURNAL_META, DOMAIN_MARKET_TRANSACTIONS, DOMAIN_CHAR_LP_LOGS],
     )
-    .expect("insert corrupt ledger domain_rows");
-    conn.execute(
-        "INSERT INTO char_lp_logs (character_id, logs_json) VALUES (999, '{bad')",
-        [],
-    )
-    .expect("insert corrupt char_lp_logs");
+    .expect("insert corrupt ledger and notes_lp domain_rows");
 
     let mut dst = WorldStateSnapshot::default();
     load_d6(&conn, &mut dst);
     let _ = load_ledger_domain_rows(&conn, &mut dst, &mut LoadContext::quarantine_in_memory())
-        .expect("quarantine corrupt domain_rows");
+        .expect("quarantine corrupt ledger domain_rows");
+    let _ = load_notes_lp_domain_rows(&conn, &mut dst, &mut LoadContext::quarantine_in_memory())
+        .expect("quarantine corrupt notes_lp domain_rows");
     load_d6_corp_crimewatch(&conn, &mut dst);
     load_d6_batch4(&conn, &mut dst);
     assert!(dst.killmail_details.is_empty());
     assert!(dst.wallet_journal_meta.is_empty());
     assert!(dst.market_transactions.is_empty());
+    assert!(dst.char_lp_logs.is_empty());
 
     // Dropping optional KV and domain_rows tables exercises graceful load fallback branches
     let drop_optional_conn = open_migrated_conn();
     for tbl in [
         "world_meta",
-        "owner_notes",
-        "corp_lp_balances",
-        "char_lp_logs",
         "domain_rows",
         "d6_corp_crimewatch_kv",
         "world_kv_blobs",
@@ -242,6 +238,12 @@ fn sqlite_store_malformed_json_and_unknown_kv_keys_coverage() {
         &mut LoadContext::quarantine_in_memory(),
     )
     .expect("load with dropped domain_rows");
+    let _ = load_notes_lp_domain_rows(
+        &drop_optional_conn,
+        &mut empty_dst,
+        &mut LoadContext::quarantine_in_memory(),
+    )
+    .expect("load notes_lp with dropped domain_rows");
     load_d6_corp_crimewatch(&drop_optional_conn, &mut empty_dst);
     load_d6_batch4(&drop_optional_conn, &mut empty_dst);
 
@@ -306,10 +308,11 @@ fn sqlite_store_schema_and_jwt_secret_error_and_edge_branches() {
     {
         let tx = mut_conn.transaction().expect("begin tx");
         assert!(sync_ledger_domain_rows(&tx, &snap).is_err());
+        assert!(sync_notes_lp_domain_rows(&tx, &snap).is_err());
     }
     mut_conn
-        .execute("DROP TABLE owner_notes", [])
-        .expect("drop owner_notes");
+        .execute("DROP TABLE sp6_lifecycle_state", [])
+        .expect("drop sp6_lifecycle_state");
     {
         let tx = mut_conn.transaction().expect("begin tx");
         assert!(sync_d6(&tx, &snap, &mut fp).is_err());

@@ -20,6 +20,11 @@ pub const DOMAIN_WALLET_JOURNAL_META: &str = "ledger.wallet_journal_meta";
 pub const DOMAIN_MARKET_TRANSACTIONS: &str = "ledger.market_transactions";
 pub const DOMAIN_ACCOUNT_PLEX_VAULT: &str = "ledger.account_plex_vault";
 
+/// Family 2 (`notes_lp`) canonical `domain_rows.domain` names.
+pub const DOMAIN_OWNER_NOTES: &str = "notes_lp.owner_notes";
+pub const DOMAIN_CORP_LP_BALANCES: &str = "notes_lp.corp_lp_balances";
+pub const DOMAIN_CHAR_LP_LOGS: &str = "notes_lp.char_lp_logs";
+
 /// Idempotent schema DDL for the generic `domain_rows` key/value table.
 pub fn apply_domain_rows_migration(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
@@ -1657,6 +1662,179 @@ pub(crate) fn sync_ledger_domain_rows(
     Ok(dirty)
 }
 
+// ============================================================================
+// Family 2 (`notes_lp`) Helpers & Legacy Table -> `domain_rows` Migration
+// ============================================================================
+
+/// Loads Family 2 (`owner_notes`, `corp_lp_balances`, `char_lp_logs`) from `domain_rows` and
+/// migrates any remaining legacy `owner_notes` / `corp_lp_balances` / `char_lp_logs` tables
+/// if present.
+///
+/// Returns `true` if any legacy Family 2 table was present and needs dropping once committed.
+pub(crate) fn load_notes_lp_domain_rows(
+    conn: &Connection,
+    snap: &mut crate::WorldStateSnapshot,
+    ctx: &mut super::quarantine::LoadContext,
+) -> Result<bool, String> {
+    let mut owner_notes: CowMap<i64, crate::types::OwnerNoteRecord> =
+        CowMap::load_domain(conn, DOMAIN_OWNER_NOTES, ctx)?;
+    let mut corp_lp_balances: CowMap<(i64, i64), i64> =
+        CowMap::load_domain(conn, DOMAIN_CORP_LP_BALANCES, ctx)?;
+    let mut char_lp_logs: CowMap<i64, Vec<crate::snapshot_ext::LpRewardLogEntry>> =
+        CowMap::load_domain(conn, DOMAIN_CHAR_LP_LOGS, ctx)?;
+
+    let mut had_legacy = false;
+
+    if table_exists(conn, "owner_notes")? {
+        had_legacy = true;
+        let mut stmt = conn
+            .prepare(
+                "SELECT rowid, note_id, character_id, item_id, label, note, timestamp_unix FROM owner_notes",
+            )
+            .map_err(|e| format!("legacy owner_notes prepare: {e}"))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| format!("legacy owner_notes query: {e}"))?;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let rowid: i64 = row.get(0).map_err(|e| e.to_string())?;
+            let key = super::quarantine::row_col_string(row, 1);
+            let payload = super::quarantine::row_payload_summary(row, 1, 7);
+            match (|| -> Result<crate::types::OwnerNoteRecord, String> {
+                Ok(crate::types::OwnerNoteRecord {
+                    note_id: row.get(1).map_err(|e| e.to_string())?,
+                    character_id: row.get(2).map_err(|e| e.to_string())?,
+                    item_id: row.get(3).map_err(|e| e.to_string())?,
+                    label: row.get(4).map_err(|e| e.to_string())?,
+                    note: row.get(5).map_err(|e| e.to_string())?,
+                    timestamp_unix: row.get::<_, i64>(6).map_err(|e| e.to_string())? as u64,
+                })
+            })() {
+                Ok(note) => {
+                    if !owner_notes.contains_key(&note.note_id) {
+                        owner_notes.insert(note.note_id, note);
+                    }
+                }
+                Err(err) => {
+                    ctx.record_bad_row(
+                        "owner_notes",
+                        "owner_notes",
+                        key,
+                        payload,
+                        err,
+                        Some(rowid),
+                    )?;
+                }
+            }
+        }
+    }
+
+    if table_exists(conn, "corp_lp_balances")? {
+        had_legacy = true;
+        let mut stmt = conn
+            .prepare("SELECT rowid, corporation_id, issuer_corp_id, lp_balance FROM corp_lp_balances")
+            .map_err(|e| format!("legacy corp_lp_balances prepare: {e}"))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| format!("legacy corp_lp_balances query: {e}"))?;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let rowid: i64 = row.get(0).map_err(|e| e.to_string())?;
+            let key = super::quarantine::row_composite_key_string(row, 1, 2);
+            let payload = super::quarantine::row_payload_summary(row, 1, 4);
+            match (|| -> Result<(i64, i64, i64), String> {
+                Ok((
+                    row.get(1).map_err(|e| e.to_string())?,
+                    row.get(2).map_err(|e| e.to_string())?,
+                    row.get(3).map_err(|e| e.to_string())?,
+                ))
+            })() {
+                Ok((corp_id, issuer_corp_id, lp)) => {
+                    if !corp_lp_balances.contains_key(&(corp_id, issuer_corp_id)) {
+                        corp_lp_balances.insert((corp_id, issuer_corp_id), lp);
+                    }
+                }
+                Err(err) => {
+                    ctx.record_bad_row(
+                        "corp_lp_balances",
+                        "corp_lp_balances",
+                        key,
+                        payload,
+                        err,
+                        Some(rowid),
+                    )?;
+                }
+            }
+        }
+    }
+
+    if table_exists(conn, "char_lp_logs")? {
+        had_legacy = true;
+        let mut stmt = conn
+            .prepare("SELECT rowid, character_id, logs_json FROM char_lp_logs")
+            .map_err(|e| format!("legacy char_lp_logs prepare: {e}"))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| format!("legacy char_lp_logs query: {e}"))?;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let rowid: i64 = row.get(0).map_err(|e| e.to_string())?;
+            let key = super::quarantine::row_col_string(row, 1);
+            let payload = super::quarantine::row_col_string(row, 2);
+            match (|| -> Result<(i64, Vec<crate::snapshot_ext::LpRewardLogEntry>), String> {
+                let cid: i64 = row.get(1).map_err(|e| e.to_string())?;
+                let raw_json: String = row.get(2).map_err(|e| e.to_string())?;
+                let entries =
+                    from_checked_domain_json::<Vec<crate::snapshot_ext::LpRewardLogEntry>>(&raw_json)?;
+                Ok((cid, entries))
+            })() {
+                Ok((cid, entries)) => {
+                    if !char_lp_logs.contains_key(&cid) {
+                        char_lp_logs.insert(cid, entries);
+                    }
+                }
+                Err(err) => {
+                    ctx.record_bad_row(
+                        "char_lp_logs",
+                        "char_lp_logs",
+                        key,
+                        payload,
+                        err,
+                        Some(rowid),
+                    )?;
+                }
+            }
+        }
+    }
+
+    snap.owner_notes = owner_notes;
+    snap.corp_lp_balances = corp_lp_balances;
+    snap.char_lp_logs = char_lp_logs;
+
+    Ok(had_legacy)
+}
+
+/// Drops the retired legacy Family 2 tables once migrated rows are flushed into `domain_rows`.
+pub(crate) fn drop_legacy_notes_lp_tables(tx: &Transaction<'_>) -> Result<(), String> {
+    tx.execute_batch(
+        "DROP TABLE IF EXISTS owner_notes;
+         DROP TABLE IF EXISTS corp_lp_balances;
+         DROP TABLE IF EXISTS char_lp_logs;",
+    )
+    .map_err(|e| format!("drop legacy notes_lp tables: {e}"))
+}
+
+/// Synchronizes all Family 2 (`notes_lp`) domains into `domain_rows`.
+pub(crate) fn sync_notes_lp_domain_rows(
+    tx: &Transaction<'_>,
+    snap: &crate::WorldStateSnapshot,
+) -> Result<bool, String> {
+    let mut dirty = false;
+    dirty |= snap.owner_notes.sync_full(tx, DOMAIN_OWNER_NOTES)?;
+    dirty |= snap
+        .corp_lp_balances
+        .sync_full(tx, DOMAIN_CORP_LP_BALANCES)?;
+    dirty |= snap.char_lp_logs.sync_full(tx, DOMAIN_CHAR_LP_LOGS)?;
+    Ok(dirty)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2136,5 +2314,322 @@ mod tests {
         assert!(!snap.wallet_journal_meta.contains_key(&10));
         assert!(snap.market_transactions.contains_key(&88));
         assert_eq!(snap.account_plex_vault.get(&77), Some(&777));
+    }
+
+    #[test]
+    fn legacy_notes_lp_tables_migrate_to_domain_rows_and_drop_legacy_tables() {
+        let dir = TempDirGuard::new("legacy_notes_lp");
+        let db_path = dir.0.join("world.sqlite");
+
+        {
+            let conn = Connection::open(&db_path).expect("open sqlite");
+            crate::sqlite_store::apply_migrations(&conn).expect("migrations");
+            conn.execute_batch(
+                "CREATE TABLE owner_notes (
+                    note_id INTEGER PRIMARY KEY,
+                    character_id INTEGER NOT NULL,
+                    item_id INTEGER NOT NULL,
+                    label TEXT NOT NULL,
+                    note TEXT NOT NULL,
+                    timestamp_unix INTEGER NOT NULL
+                );
+                CREATE TABLE corp_lp_balances (
+                    corporation_id INTEGER NOT NULL,
+                    issuer_corp_id INTEGER NOT NULL,
+                    lp_balance INTEGER NOT NULL,
+                    PRIMARY KEY (corporation_id, issuer_corp_id)
+                );
+                CREATE TABLE char_lp_logs (
+                    character_id INTEGER PRIMARY KEY,
+                    logs_json TEXT NOT NULL
+                );",
+            )
+            .expect("create legacy tables");
+
+            conn.execute(
+                "INSERT INTO owner_notes (note_id, character_id, item_id, label, note, timestamp_unix)
+                 VALUES (501, 90000011, 60003760, 'FitLabel', 'NoteText', 1700000123)",
+                [],
+            )
+            .expect("insert legacy owner_notes");
+            conn.execute(
+                "INSERT INTO corp_lp_balances (corporation_id, issuer_corp_id, lp_balance)
+                 VALUES (98000010, 1000125, 4200)",
+                [],
+            )
+            .expect("insert legacy corp_lp_balances");
+            let logs_json = serde_json::to_string(&vec![crate::snapshot_ext::LpRewardLogEntry {
+                log_id: 7,
+                corp_id: 1_000_125,
+                amount: 850,
+                reason: "plex_capture".into(),
+                timestamp_unix: 1_700_000_200,
+            }])
+            .expect("serialize logs");
+            conn.execute(
+                "INSERT INTO char_lp_logs (character_id, logs_json) VALUES (90000011, ?1)",
+                rusqlite::params![logs_json],
+            )
+            .expect("insert legacy char_lp_logs");
+        }
+
+        let repo = WorldRepository::open_sqlite(&db_path).expect("open migrated repo");
+        repo.with_snapshot(|snap| {
+            let note = snap.owner_notes.get(&501).expect("migrated owner_note");
+            assert_eq!(note.character_id, 90_000_011);
+            assert_eq!(note.item_id, 60_003_760);
+            assert_eq!(note.label, "FitLabel");
+            assert_eq!(note.note, "NoteText");
+            assert_eq!(note.timestamp_unix, 1_700_000_123);
+            assert_eq!(
+                snap.corp_lp_balances.get(&(98_000_010, 1_000_125)),
+                Some(&4_200)
+            );
+            let logs = snap.char_lp_logs.get(&90_000_011).expect("migrated logs");
+            assert_eq!(logs.len(), 1);
+            assert_eq!(logs[0].log_id, 7);
+            assert_eq!(logs[0].amount, 850);
+        });
+
+        repo.with_sqlite_conn(|conn| {
+            for legacy_tbl in ["owner_notes", "corp_lp_balances", "char_lp_logs"] {
+                let exists: bool = conn
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                        rusqlite::params![legacy_tbl],
+                        |r| r.get(0),
+                    )
+                    .expect("check legacy table dropped");
+                assert!(!exists, "legacy table {legacy_tbl} should have been dropped");
+            }
+            let domain_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM domain_rows WHERE domain IN (?1, ?2, ?3)",
+                    rusqlite::params![
+                        DOMAIN_OWNER_NOTES,
+                        DOMAIN_CORP_LP_BALANCES,
+                        DOMAIN_CHAR_LP_LOGS
+                    ],
+                    |r| r.get(0),
+                )
+                .expect("count domain_rows");
+            assert_eq!(domain_count, 3);
+        });
+        drop(repo);
+
+        let reopened = WorldRepository::open_sqlite(&db_path).expect("reopen after migration");
+        reopened.with_snapshot(|snap| {
+            assert_eq!(snap.owner_notes[&501].note, "NoteText");
+            assert_eq!(snap.corp_lp_balances[&(98_000_010, 1_000_125)], 4_200);
+            assert_eq!(snap.char_lp_logs[&90_000_011][0].amount, 850);
+        });
+    }
+
+    #[test]
+    fn notes_lp_domain_rows_write_single_row_per_cowmap_delta() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        crate::sqlite_store::apply_migrations(&conn).expect("migrations");
+
+        let mut snap = crate::WorldStateSnapshot::default();
+        for i in 1..=20i64 {
+            snap.owner_notes.insert(
+                i,
+                crate::types::OwnerNoteRecord {
+                    note_id: i,
+                    character_id: 90_000_001,
+                    item_id: 60_003_760,
+                    label: format!("L{i}"),
+                    note: format!("Body{i}"),
+                    timestamp_unix: 1_700_000_000 + i as u64,
+                },
+            );
+            snap.corp_lp_balances.insert((98_000_001, 1_000_000 + i), i * 100);
+            snap.char_lp_logs.insert(
+                90_000_000 + i,
+                vec![crate::snapshot_ext::LpRewardLogEntry {
+                    log_id: i,
+                    corp_id: 1_000_035,
+                    amount: i * 10,
+                    reason: "mission".into(),
+                    timestamp_unix: 1_700_000_000 + i as u64,
+                }],
+            );
+        }
+        {
+            let tx = conn.transaction().expect("seed tx");
+            assert!(sync_notes_lp_domain_rows(&tx, &snap).expect("seed sync"));
+            assert!(!sync_notes_lp_domain_rows(&tx, &snap).expect("idempotent sync"));
+            tx.commit().expect("seed commit");
+        }
+
+        let base_fp = crate::sqlite_store::compute_fingerprints(&snap);
+
+        // 1. Mutate strictly ONE `corp_lp_balances` composite-key entry.
+        let before_lp = snap.clone();
+        snap.corp_lp_balances.insert((98_000_001, 1_000_010), 99_999);
+        let changes_lp = crate::tx_engine::ChangeSet::diff(1, &before_lp, &snap);
+        assert_eq!(changes_lp.domain_rows.len(), 1);
+        assert!(!changes_lp.cold_domains.any());
+
+        let total_before_lp = conn.total_changes();
+        {
+            let sql_tx = conn.transaction().expect("lp tx");
+            let mut exec = crate::tx_engine::TxSqlExecutor::new(
+                &sql_tx,
+                crate::tx_engine::TxFaultPlan::None,
+            );
+            let mut staged_fp = base_fp.clone();
+            let (_delta, _hot) = crate::tx_engine::apply_changeset_to_sqlite(
+                &mut exec,
+                &snap,
+                &changes_lp,
+                &base_fp,
+                &mut staged_fp,
+                false,
+            )
+            .expect("apply lp update");
+            sql_tx.commit().expect("commit lp update");
+        }
+        assert_eq!(
+            conn.total_changes() - total_before_lp,
+            1,
+            "mutating one corp_lp_balances CowMap entry must write strictly 1 SQLite row"
+        );
+
+        // 2. Mutate strictly ONE `owner_notes` entry.
+        let before_note = snap.clone();
+        snap.owner_notes.get_mut(&12).unwrap().note = "UpdatedNote12".into();
+        let changes_note = crate::tx_engine::ChangeSet::diff(2, &before_note, &snap);
+        assert_eq!(changes_note.domain_rows.len(), 1);
+
+        let total_before_note = conn.total_changes();
+        {
+            let sql_tx = conn.transaction().expect("note tx");
+            let mut exec = crate::tx_engine::TxSqlExecutor::new(
+                &sql_tx,
+                crate::tx_engine::TxFaultPlan::None,
+            );
+            let mut staged_fp = base_fp.clone();
+            let (_delta, _hot) = crate::tx_engine::apply_changeset_to_sqlite(
+                &mut exec,
+                &snap,
+                &changes_note,
+                &base_fp,
+                &mut staged_fp,
+                false,
+            )
+            .expect("apply note update");
+            sql_tx.commit().expect("commit note update");
+        }
+        assert_eq!(
+            conn.total_changes() - total_before_note,
+            1,
+            "mutating one owner_notes CowMap entry must write strictly 1 SQLite row"
+        );
+
+        // 3. Delete strictly ONE `char_lp_logs` entry.
+        let before_log = snap.clone();
+        snap.char_lp_logs.remove(&90_000_005);
+        let changes_log = crate::tx_engine::ChangeSet::diff(3, &before_log, &snap);
+        assert_eq!(changes_log.domain_rows.len(), 1);
+
+        let total_before_log = conn.total_changes();
+        {
+            let sql_tx = conn.transaction().expect("log del tx");
+            let mut exec = crate::tx_engine::TxSqlExecutor::new(
+                &sql_tx,
+                crate::tx_engine::TxFaultPlan::None,
+            );
+            let mut staged_fp = base_fp.clone();
+            let (_delta, _hot) = crate::tx_engine::apply_changeset_to_sqlite(
+                &mut exec,
+                &snap,
+                &changes_log,
+                &base_fp,
+                &mut staged_fp,
+                false,
+            )
+            .expect("apply log delete");
+            sql_tx.commit().expect("commit log delete");
+        }
+        assert_eq!(
+            conn.total_changes() - total_before_log,
+            1,
+            "deleting one char_lp_logs CowMap entry must delete strictly 1 SQLite row"
+        );
+
+        // Reload and verify persisted state matches.
+        let mut reloaded = crate::WorldStateSnapshot::default();
+        let had_legacy = load_notes_lp_domain_rows(
+            &conn,
+            &mut reloaded,
+            &mut crate::sqlite_store::LoadContext::quarantine_in_memory(),
+        )
+        .expect("reload");
+        assert!(!had_legacy);
+        assert_eq!(reloaded.corp_lp_balances[&(98_000_001, 1_000_010)], 99_999);
+        assert_eq!(reloaded.owner_notes[&12].note, "UpdatedNote12");
+        assert!(!reloaded.char_lp_logs.contains_key(&90_000_005));
+    }
+
+    #[test]
+    fn load_notes_lp_domain_rows_fails_closed_without_overwriting_existing_snapshot_maps() {
+        let conn = Connection::open_in_memory().expect("open");
+        crate::sqlite_store::apply_migrations(&conn).expect("migrations");
+
+        conn.execute(
+            "INSERT INTO domain_rows (domain, key, value) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                DOMAIN_OWNER_NOTES,
+                "10",
+                serde_json::to_string(&crate::types::OwnerNoteRecord {
+                    note_id: 10,
+                    character_id: 90_000_001,
+                    item_id: 60_003_760,
+                    label: "L".into(),
+                    note: "N".into(),
+                    timestamp_unix: 1_700_000_010,
+                })
+                .expect("json")
+            ],
+        )
+        .expect("insert valid owner_notes");
+        conn.execute(
+            "INSERT INTO domain_rows (domain, key, value) VALUES (?1, ?2, ?3)",
+            rusqlite::params![DOMAIN_CHAR_LP_LOGS, "90000020", "{corrupt-json"],
+        )
+        .expect("insert corrupt char_lp_logs");
+
+        let mut snap = crate::WorldStateSnapshot::default();
+        snap.owner_notes.insert(
+            99,
+            crate::types::OwnerNoteRecord {
+                note_id: 99,
+                character_id: 1,
+                item_id: 2,
+                label: "Live".into(),
+                note: "Keep".into(),
+                timestamp_unix: 100,
+            },
+        );
+        snap.corp_lp_balances.insert((98_000_001, 1_000_035), 777);
+        snap.char_lp_logs.insert(
+            90_000_001,
+            vec![crate::snapshot_ext::LpRewardLogEntry {
+                log_id: 1,
+                corp_id: 1_000_035,
+                amount: 50,
+                reason: "keep".into(),
+                timestamp_unix: 100,
+            }],
+        );
+
+        let mut load_ctx = crate::sqlite_store::LoadContext::new(false);
+        let err = load_notes_lp_domain_rows(&conn, &mut snap, &mut load_ctx).unwrap_err();
+        assert!(err.contains(DOMAIN_CHAR_LP_LOGS), "unexpected err: {err}");
+        assert!(snap.owner_notes.contains_key(&99));
+        assert!(!snap.owner_notes.contains_key(&10));
+        assert_eq!(snap.corp_lp_balances.get(&(98_000_001, 1_000_035)), Some(&777));
+        assert!(snap.char_lp_logs.contains_key(&90_000_001));
     }
 }

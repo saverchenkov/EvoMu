@@ -1,47 +1,26 @@
 //! SQLite persistence for `D-3` / `D-6`:
-//! - `owner_notes` (`MarketOrderMeta`, `IndustryJobCostMeta`, `PiColonyNetworkState`, user notes, reports)
-//! - `corp_lp_balances` and `char_lp_logs` (`feat:lifecycle.lp-durable`)
+//! - `sp6_lifecycle_state` (`Sp6PersistedState`)
 //! - `world_meta` monotonic ID sequence counters (`feat:invariant.ids-monotonic-across-restart`)
+//!
+//! (`owner_notes`, `corp_lp_balances`, and `char_lp_logs` moved to `domain_rows` in `#916`.)
 
-use crate::snapshot_ext::{LpRewardLogEntry, Sp6PersistedState};
-use crate::sqlite_store::fingerprints::{fp_json, TableFingerprints};
-use crate::types::{OwnerNoteRecord, WorldStateSnapshot};
+use crate::snapshot_ext::Sp6PersistedState;
+use crate::sqlite_store::fingerprints::TableFingerprints;
+use crate::types::WorldStateSnapshot;
 use rusqlite::{params, Connection, Transaction};
-use std::collections::HashMap;
 
 pub const D6_SCHEMA_VERSION: i64 = 3;
 
 const D6_SCHEMA_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS owner_notes (
-    note_id INTEGER PRIMARY KEY,
-    character_id INTEGER NOT NULL,
-    item_id INTEGER NOT NULL,
-    label TEXT NOT NULL,
-    note TEXT NOT NULL,
-    timestamp_unix INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS corp_lp_balances (
-    corporation_id INTEGER NOT NULL,
-    issuer_corp_id INTEGER NOT NULL,
-    lp_balance INTEGER NOT NULL,
-    PRIMARY KEY (corporation_id, issuer_corp_id)
-);
-CREATE TABLE IF NOT EXISTS char_lp_logs (
-    character_id INTEGER PRIMARY KEY,
-    logs_json TEXT NOT NULL
-);
 CREATE TABLE IF NOT EXISTS sp6_lifecycle_state (
     singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
     state_json TEXT NOT NULL
 );
 "#;
 
-/// Fingerprints of the `D-6` persistence tables and monotonic ID counters.
+/// Fingerprints of the `D-6` sequence counters and `sp6_lifecycle_state`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct D6Fingerprints {
-    pub owner_notes: HashMap<i64, u64>,
-    pub corp_lp_balances: HashMap<(i64, i64), i64>,
-    pub char_lp_logs: HashMap<i64, u64>,
     pub next_alliance_id: i64,
     pub next_corporation_id: i64,
     pub next_notification_id: i64,
@@ -68,55 +47,14 @@ pub fn apply_d6_migration(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-#[inline]
-pub fn fp_owner_note(n: &OwnerNoteRecord) -> u64 {
-    let mut h = super::fingerprints::FnvHasher::new();
-    h.write_i64(n.note_id);
-    h.write_i64(n.character_id);
-    h.write_i64(n.item_id);
-    h.write_str(&n.label);
-    h.write_str(&n.note);
-    h.write_u64(n.timestamp_unix);
-    h.0
-}
-
 pub fn compute_d6_fingerprints(snap: &WorldStateSnapshot) -> D6Fingerprints {
     D6Fingerprints {
-        owner_notes: snap.owner_notes.iter().map(|(&k, v)| (k, fp_owner_note(v))).collect(),
-        corp_lp_balances: snap.corp_lp_balances.clone(),
-        char_lp_logs: snap.char_lp_logs.iter().map(|(&k, v)| (k, fp_json(v))).collect(),
         next_alliance_id: snap.next_alliance_id,
         next_corporation_id: snap.next_corporation_id,
         next_notification_id: snap.next_notification_id,
         next_report_id: snap.next_report_id,
         sp6_lifecycle_fp: super::fingerprints::fp_sp6_lifecycle(&snap.sp6_lifecycle),
     }
-}
-
-fn parse_owner_note_row(r: &rusqlite::Row<'_>) -> Result<OwnerNoteRecord, String> {
-    Ok(OwnerNoteRecord {
-        note_id: r.get(1).map_err(|e| e.to_string())?,
-        character_id: r.get(2).map_err(|e| e.to_string())?,
-        item_id: r.get(3).map_err(|e| e.to_string())?,
-        label: r.get(4).map_err(|e| e.to_string())?,
-        note: r.get(5).map_err(|e| e.to_string())?,
-        timestamp_unix: r.get::<_, i64>(6).map_err(|e| e.to_string())? as u64,
-    })
-}
-
-fn parse_corp_lp_row(r: &rusqlite::Row<'_>) -> Result<(i64, i64, i64), String> {
-    Ok((
-        r.get(1).map_err(|e| e.to_string())?,
-        r.get(2).map_err(|e| e.to_string())?,
-        r.get(3).map_err(|e| e.to_string())?,
-    ))
-}
-
-fn parse_char_lp_logs_row(r: &rusqlite::Row<'_>) -> Result<(i64, Vec<LpRewardLogEntry>), String> {
-    let cid: i64 = r.get(1).map_err(|e| e.to_string())?;
-    let js: String = r.get(2).map_err(|e| e.to_string())?;
-    let entries: Vec<LpRewardLogEntry> = serde_json::from_str(&js).map_err(|e| e.to_string())?;
-    Ok((cid, entries))
 }
 
 fn parse_sp6_lifecycle_row(r: &rusqlite::Row<'_>) -> Result<Sp6PersistedState, String> {
@@ -151,77 +89,6 @@ pub fn load_d6_checked(
                     },
                     Err(err) => {
                         ctx.record_bad_row("world_meta", "world_meta", key, payload, err, rowid)?;
-                    }
-                }
-            }
-        }
-    }
-    if let Ok(mut stmt) = conn.prepare(
-        "SELECT rowid, note_id, character_id, item_id, label, note, timestamp_unix FROM owner_notes",
-    ) {
-        if let Ok(mut rows) = stmt.query([]) {
-            while let Some(r) = rows.next().map_err(|e| e.to_string())? {
-                let rowid = r.get::<_, i64>(0).ok();
-                let key = super::quarantine::row_col_string(r, 1);
-                let payload = super::quarantine::row_payload_summary(r, 1, 7);
-                match parse_owner_note_row(r) {
-                    Ok(note) => {
-                        snap.owner_notes.insert(note.note_id, note);
-                    }
-                    Err(err) => {
-                        ctx.record_bad_row("owner_notes", "owner_notes", key, payload, err, rowid)?;
-                    }
-                }
-            }
-        }
-    }
-    if let Ok(mut stmt) = conn.prepare(
-        "SELECT rowid, corporation_id, issuer_corp_id, lp_balance FROM corp_lp_balances",
-    ) {
-        if let Ok(mut rows) = stmt.query([]) {
-            while let Some(r) = rows.next().map_err(|e| e.to_string())? {
-                let rowid = r.get::<_, i64>(0).ok();
-                let key = super::quarantine::row_composite_key_string(r, 1, 2);
-                let payload = super::quarantine::row_payload_summary(r, 1, 4);
-                match parse_corp_lp_row(r) {
-                    Ok((corp_id, issuer_corp_id, lp)) => {
-                        snap.corp_lp_balances.insert((corp_id, issuer_corp_id), lp);
-                    }
-                    Err(err) => {
-                        ctx.record_bad_row(
-                            "corp_lp_balances",
-                            "corp_lp_balances",
-                            key,
-                            payload,
-                            err,
-                            rowid,
-                        )?;
-                    }
-                }
-            }
-        }
-    }
-    if let Ok(mut stmt) =
-        conn.prepare("SELECT rowid, character_id, logs_json FROM char_lp_logs")
-    {
-        if let Ok(mut rows) = stmt.query([]) {
-            while let Some(r) = rows.next().map_err(|e| e.to_string())? {
-                let rowid = r.get::<_, i64>(0).ok();
-                let key = super::quarantine::row_col_string(r, 1);
-                let payload = super::quarantine::row_col_string(r, 2);
-                match parse_char_lp_logs_row(r) {
-                    Ok((cid, entries)) => {
-                        snap.char_lp_logs.insert(cid, entries);
-                    }
-                    Err(err) => {
-                        ctx.record_bad_row(
-                            "char_lp_logs",
-                            "char_lp_logs",
-                            key,
-                            payload,
-                            err,
-                            rowid,
-                        )?;
                     }
                 }
             }
@@ -265,8 +132,7 @@ pub fn load_d6(conn: &Connection, snap: &mut WorldStateSnapshot) {
     );
 }
 
-/// Writes changed `D-6` rows (`owner_notes`, `corp_lp_balances`, `char_lp_logs`, and ID counters);
-/// returns `true` if anything changed.
+/// Writes changed `D-6` ID counters and `sp6_lifecycle_state`; returns `true` if anything changed.
 pub fn sync_d6(
     tx: &Transaction<'_>,
     snap: &WorldStateSnapshot,
@@ -292,91 +158,6 @@ pub fn sync_d6(
         }
     }
 
-    let gone_notes: Vec<i64> = df
-        .owner_notes
-        .keys()
-        .filter(|k| !snap.owner_notes.contains_key(*k))
-        .copied()
-        .collect();
-    for nid in gone_notes {
-        changed = true;
-        tx.execute("DELETE FROM owner_notes WHERE note_id = ?1", params![nid])
-            .map_err(|e| e.to_string())?;
-        df.owner_notes.remove(&nid);
-    }
-    for (&nid, note) in &snap.owner_notes {
-        let h = fp_owner_note(note);
-        if df.owner_notes.get(&nid) != Some(&h) {
-            changed = true;
-            tx.execute(
-                "INSERT OR REPLACE INTO owner_notes (note_id, character_id, item_id, label, note, timestamp_unix) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    note.note_id,
-                    note.character_id,
-                    note.item_id,
-                    note.label,
-                    note.note,
-                    note.timestamp_unix as i64
-                ],
-            )
-            .map_err(|e| e.to_string())?;
-            df.owner_notes.insert(nid, h);
-        }
-    }
-
-    let gone_lp: Vec<(i64, i64)> = df
-        .corp_lp_balances
-        .keys()
-        .filter(|k| !snap.corp_lp_balances.contains_key(*k))
-        .copied()
-        .collect();
-    for (corp_id, issuer_id) in gone_lp {
-        changed = true;
-        tx.execute(
-            "DELETE FROM corp_lp_balances WHERE corporation_id = ?1 AND issuer_corp_id = ?2",
-            params![corp_id, issuer_id],
-        )
-        .map_err(|e| e.to_string())?;
-        df.corp_lp_balances.remove(&(corp_id, issuer_id));
-    }
-    for (&(corp_id, issuer_id), &lp) in &snap.corp_lp_balances {
-        if df.corp_lp_balances.get(&(corp_id, issuer_id)) != Some(&lp) {
-            changed = true;
-            tx.execute(
-                "INSERT OR REPLACE INTO corp_lp_balances (corporation_id, issuer_corp_id, lp_balance) VALUES (?1, ?2, ?3)",
-                params![corp_id, issuer_id, lp],
-            )
-            .map_err(|e| e.to_string())?;
-            df.corp_lp_balances.insert((corp_id, issuer_id), lp);
-        }
-    }
-
-    let gone_logs: Vec<i64> = df
-        .char_lp_logs
-        .keys()
-        .filter(|k| !snap.char_lp_logs.contains_key(*k))
-        .copied()
-        .collect();
-    for cid in gone_logs {
-        changed = true;
-        tx.execute("DELETE FROM char_lp_logs WHERE character_id = ?1", params![cid])
-            .map_err(|e| e.to_string())?;
-        df.char_lp_logs.remove(&cid);
-    }
-    for (&cid, entries) in &snap.char_lp_logs {
-        let h = fp_json(entries);
-        if df.char_lp_logs.get(&cid) != Some(&h) {
-            changed = true;
-            let js = super::fingerprints::to_checked_json_string(entries)?;
-            tx.execute(
-                "INSERT OR REPLACE INTO char_lp_logs (character_id, logs_json) VALUES (?1, ?2)",
-                params![cid, js],
-            )
-            .map_err(|e| e.to_string())?;
-            df.char_lp_logs.insert(cid, h);
-        }
-    }
-
     let sp6_h = super::fingerprints::fp_sp6_lifecycle(&snap.sp6_lifecycle);
     if df.sp6_lifecycle_fp != sp6_h {
         changed = true;
@@ -390,39 +171,6 @@ pub fn sync_d6(
     }
 
     Ok(changed)
-}
-
-fn reload_table_map_strict<K, V, F>(
-    conn: &Connection,
-    table: &str,
-    sql: &str,
-    expected_non_empty: bool,
-    mut parse_row: F,
-) -> Result<HashMap<K, V>, String>
-where
-    K: Eq + std::hash::Hash,
-    F: FnMut(&rusqlite::Row<'_>) -> Result<(K, V), String>,
-{
-    let mut stmt = conn
-        .prepare(sql)
-        .map_err(|e| format!("rollback {table} prepare failed: {e}"))?;
-    let mut rows = stmt
-        .query([])
-        .map_err(|e| format!("rollback {table} query failed: {e}"))?;
-    let mut out = HashMap::new();
-    while let Some(r) = rows
-        .next()
-        .map_err(|e| format!("rollback {table} row failed: {e}"))?
-    {
-        let (k, v) = parse_row(r).map_err(|e| format!("rollback {table} parse failed: {e}"))?;
-        out.insert(k, v);
-    }
-    if out.is_empty() && expected_non_empty {
-        return Err(format!(
-            "rollback {table} returned empty table for non-empty baseline"
-        ));
-    }
-    Ok(out)
 }
 
 fn reload_sp6_lifecycle_strict(conn: &Connection, expected_fp: u64) -> Result<Sp6PersistedState, String> {
@@ -453,26 +201,15 @@ fn reload_sp6_lifecycle_strict(conn: &Connection, expected_fp: u64) -> Result<Sp
 /// Restores `D-6` state from SQLite after a failed write (`try_with_mut_snapshot` rollback).
 ///
 /// Builds every dirty table reload into temporaries before mutating `snap`, failing closed
-/// without wiping live maps or partially reverting counters if any SQLite query or parse fails.
+/// without wiping live state or partially reverting counters if any SQLite query or parse fails.
 pub fn rollback_d6(
     conn: &Connection,
     snap: &mut WorldStateSnapshot,
     fp: &TableFingerprints,
 ) -> Result<(), String> {
     let df = &fp.d6;
-    let dirty_notes = snap.owner_notes.len() != df.owner_notes.len()
-        || snap
-            .owner_notes
-            .iter()
-            .any(|(k, v)| df.owner_notes.get(k) != Some(&fp_owner_note(v)));
-    let dirty_lp = snap.corp_lp_balances != df.corp_lp_balances;
-    let dirty_logs = snap.char_lp_logs.len() != df.char_lp_logs.len()
-        || snap
-            .char_lp_logs
-            .iter()
-            .any(|(k, v)| df.char_lp_logs.get(k) != Some(&fp_json(v)));
     let dirty_sp6 = super::fingerprints::fp_sp6_lifecycle(&snap.sp6_lifecycle) != df.sp6_lifecycle_fp;
-    if !(dirty_notes || dirty_lp || dirty_logs || dirty_sp6) {
+    if !dirty_sp6 {
         snap.next_alliance_id = df.next_alliance_id;
         snap.next_corporation_id = df.next_corporation_id;
         snap.next_notification_id = df.next_notification_id;
@@ -480,55 +217,7 @@ pub fn rollback_d6(
         return Ok(());
     }
 
-    let reload_res = (|| -> Result<_, String> {
-        let fresh_notes = if dirty_notes {
-            Some(reload_table_map_strict(
-                conn,
-                "owner_notes",
-                "SELECT rowid, note_id, character_id, item_id, label, note, timestamp_unix FROM owner_notes",
-                !df.owner_notes.is_empty(),
-                |r| {
-                    let note = parse_owner_note_row(r)?;
-                    Ok((note.note_id, note))
-                },
-            )?)
-        } else {
-            None
-        };
-        let fresh_lp = if dirty_lp {
-            Some(reload_table_map_strict(
-                conn,
-                "corp_lp_balances",
-                "SELECT rowid, corporation_id, issuer_corp_id, lp_balance FROM corp_lp_balances",
-                !df.corp_lp_balances.is_empty(),
-                |r| {
-                    let (corp_id, issuer_corp_id, lp) = parse_corp_lp_row(r)?;
-                    Ok(((corp_id, issuer_corp_id), lp))
-                },
-            )?)
-        } else {
-            None
-        };
-        let fresh_logs = if dirty_logs {
-            Some(reload_table_map_strict(
-                conn,
-                "char_lp_logs",
-                "SELECT rowid, character_id, logs_json FROM char_lp_logs",
-                !df.char_lp_logs.is_empty(),
-                parse_char_lp_logs_row,
-            )?)
-        } else {
-            None
-        };
-        let fresh_sp6 = if dirty_sp6 {
-            Some(reload_sp6_lifecycle_strict(conn, df.sp6_lifecycle_fp)?)
-        } else {
-            None
-        };
-        Ok((fresh_notes, fresh_lp, fresh_logs, fresh_sp6))
-    })();
-
-    let (fresh_notes, fresh_lp, fresh_logs, fresh_sp6) = match reload_res {
+    let fresh_sp6 = match reload_sp6_lifecycle_strict(conn, df.sp6_lifecycle_fp) {
         Ok(staged) => staged,
         Err(err) => {
             crate::persistence::record_persist_failure();
@@ -541,17 +230,6 @@ pub fn rollback_d6(
     snap.next_corporation_id = df.next_corporation_id;
     snap.next_notification_id = df.next_notification_id;
     snap.next_report_id = df.next_report_id;
-    if let Some(notes) = fresh_notes {
-        snap.owner_notes = notes;
-    }
-    if let Some(lp) = fresh_lp {
-        snap.corp_lp_balances = lp;
-    }
-    if let Some(logs) = fresh_logs {
-        snap.char_lp_logs = logs;
-    }
-    if let Some(sp6) = fresh_sp6 {
-        snap.sp6_lifecycle = sp6;
-    }
+    snap.sp6_lifecycle = fresh_sp6;
     Ok(())
 }

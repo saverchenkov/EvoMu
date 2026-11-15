@@ -37,6 +37,39 @@ pub mod tuple_map_serde {
     }
 }
 
+pub mod cow_tuple_map_serde {
+    use crate::cow::CowMap;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S, K1, K2, V>(
+        map: &CowMap<(K1, K2), V>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        K1: Serialize + Copy + Ord,
+        K2: Serialize + Copy + Ord,
+        V: Serialize,
+    {
+        let entries: Vec<((K1, K2), &V)> =
+            map.iter().map(|(&(k1, k2), v)| ((k1, k2), v)).collect();
+        entries.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D, K1, K2, V>(
+        deserializer: D,
+    ) -> Result<CowMap<(K1, K2), V>, D::Error>
+    where
+        D: Deserializer<'de>,
+        K1: Deserialize<'de> + Ord + Clone,
+        K2: Deserialize<'de> + Ord + Clone,
+        V: Deserialize<'de> + Clone,
+    {
+        let entries: Vec<((K1, K2), V)> = Vec::deserialize(deserializer)?;
+        Ok(entries.into_iter().collect())
+    }
+}
+
 pub mod sorted_set_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::collections::HashSet;
