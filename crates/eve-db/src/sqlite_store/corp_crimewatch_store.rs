@@ -409,6 +409,10 @@ pub fn load_d6_corp_crimewatch_checked(
     snap: &mut WorldStateSnapshot,
     ctx: &mut super::quarantine::LoadContext,
 ) -> Result<(), String> {
+    let mut staged_corp = None;
+    let mut staged_cw = None;
+    let mut staged_war = None;
+
     if let Ok(mut stmt) =
         conn.prepare("SELECT rowid, store_key, payload_json FROM d6_corp_crimewatch_kv")
     {
@@ -421,7 +425,7 @@ pub fn load_d6_corp_crimewatch_checked(
                 match (key.as_str(), js_res) {
                     (KEY_CORP_GOV, Ok(js)) => {
                         match serde_json::from_str::<CorpGovernanceDomainPayload>(&js) {
-                            Ok(p) => p.apply_to_snapshot(snap),
+                            Ok(p) => staged_corp = Some(p),
                             Err(e) => ctx.record_bad_row(
                                 "d6_corp_crimewatch_kv",
                                 "d6_corp_crimewatch_kv",
@@ -434,7 +438,7 @@ pub fn load_d6_corp_crimewatch_checked(
                     }
                     (KEY_CRIMEWATCH, Ok(js)) => {
                         match serde_json::from_str::<CrimewatchDomainPayload>(&js) {
-                            Ok(p) => p.apply_to_snapshot(snap),
+                            Ok(p) => staged_cw = Some(p),
                             Err(e) => ctx.record_bad_row(
                                 "d6_corp_crimewatch_kv",
                                 "d6_corp_crimewatch_kv",
@@ -447,7 +451,7 @@ pub fn load_d6_corp_crimewatch_checked(
                     }
                     (KEY_WARFARE, Ok(js)) => {
                         match serde_json::from_str::<WarfareDomainPayload>(&js) {
-                            Ok(p) => p.apply_to_snapshot(snap),
+                            Ok(p) => staged_war = Some(p),
                             Err(e) => ctx.record_bad_row(
                                 "d6_corp_crimewatch_kv",
                                 "d6_corp_crimewatch_kv",
@@ -472,6 +476,15 @@ pub fn load_d6_corp_crimewatch_checked(
                 }
             }
         }
+    }
+    if let Some(p) = staged_corp {
+        p.apply_to_snapshot(snap);
+    }
+    if let Some(p) = staged_cw {
+        p.apply_to_snapshot(snap);
+    }
+    if let Some(p) = staged_war {
+        p.apply_to_snapshot(snap);
     }
     Ok(())
 }

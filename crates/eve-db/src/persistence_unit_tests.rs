@@ -1025,3 +1025,346 @@ fn issue_874_tx_error_hooks_poison_short_circuit_and_next_entity_id_monotonicity
     drop(repo);
     let _ = std::fs::remove_file(&db_path);
 }
+
+#[test]
+fn issue_857_rollback_is_failsafe_across_all_abort_modes_and_partial_loads() {
+    let dir = std::env::temp_dir();
+    let db_path = dir.join(format!("evomu_issue_857_rollback_{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&db_path);
+    let repo = WorldRepository::open_sqlite(&db_path).expect("open_sqlite");
+
+    let cid = 90_000_001_i64;
+    let base_item_id = 200_500_001_i64;
+    repo.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            base_item_id,
+            InventoryItemRecord {
+                item_id: base_item_id,
+                type_id: 34,
+                owner_id: cid,
+                location_id: 60_003_760,
+                flag: InventoryFlag::Hangar,
+                quantity: 100,
+                ..Default::default()
+            },
+        );
+        snap.owner_notes.insert(
+            1,
+            OwnerNoteRecord {
+                note_id: 1,
+                character_id: cid,
+                item_id: base_item_id,
+                label: "Base".into(),
+                note: "KeepMe".into(),
+                timestamp_unix: 1_700_000_000,
+            },
+        );
+        snap.char_notes.insert((cid, 1), "BaseCharNote".into());
+    });
+
+    let before_published = repo.read_state();
+
+    // 1. Validation error (NaN float) after allocating an entity ID must keep `published` pointer-identical.
+    let val_err: Result<(), crate::TxError> = repo.tx("nan_validation_abort", |wtx| {
+        let burned = wtx.alloc_entity_id()?;
+        wtx.snap.items.insert(
+            burned,
+            InventoryItemRecord {
+                item_id: burned,
+                type_id: 34,
+                owner_id: cid,
+                location_id: 60_003_760,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                insured_payout_isk: f64::NAN,
+                ..Default::default()
+            },
+        );
+        wtx.snap.owner_notes.remove(&1);
+        Ok(())
+    });
+    assert!(matches!(val_err, Err(crate::TxError::NonFinite { .. })));
+    assert!(
+        std::sync::Arc::ptr_eq(&repo.read_state(), &before_published),
+        "validation-rejected tx must leave published snapshot pointer-identical (#857)"
+    );
+
+    // 2. Closure panic, user Err, FailNthStatement, and FailAtCommit must all leave `published` untouched.
+    let panic_res: Result<(), crate::TxError> = repo.tx("panic_abort", |wtx| {
+        let _ = wtx.alloc_entity_id()?;
+        wtx.snap.items.clear();
+        panic!("simulated panic in tx");
+    });
+    assert!(matches!(panic_res, Err(crate::TxError::Panicked { .. })));
+    assert!(std::sync::Arc::ptr_eq(&repo.read_state(), &before_published));
+
+    repo.set_fault_plan_for_test(crate::TxFaultPlan::FailAtCommit);
+    let commit_err: Result<(), crate::TxError> = repo.tx("commit_fault_abort", |wtx| {
+        let _ = wtx.alloc_entity_id()?;
+        wtx.snap.items.get_mut(&base_item_id).unwrap().quantity = 999;
+        wtx.snap.char_notes.insert((cid, 2), "AbortedNote".into());
+        Ok(())
+    });
+    assert!(commit_err.is_err());
+    assert!(std::sync::Arc::ptr_eq(&repo.read_state(), &before_published));
+
+    // Next committed write must NOT delete baseline rows from SQLite.
+    repo.with_mut_snapshot(|snap| {
+        snap.char_notes.insert((cid, 3), "CommittedAfterRollback".into());
+    });
+    let reloaded = repo.reload_snapshot_from_sqlite().expect("reload_snapshot_from_sqlite");
+    assert_eq!(reloaded.items.get(&base_item_id).map(|i| i.quantity), Some(100));
+    assert_eq!(reloaded.owner_notes.get(&1).map(|n| n.note.as_str()), Some("KeepMe"));
+    assert_eq!(reloaded.char_notes.get(&(cid, 1)).map(String::as_str), Some("BaseCharNote"));
+    assert_eq!(
+        reloaded.char_notes.get(&(cid, 3)).map(String::as_str),
+        Some("CommittedAfterRollback")
+    );
+
+    // 3. Partial baseline row deletion in `char_mining_ledger` and `entity_kv` must fail closed on rollback.
+    let mut mem_conn = rusqlite::Connection::open_in_memory().unwrap();
+    sqlite_store::apply_migrations(&mem_conn).unwrap();
+    let mut base_snap = WorldStateSnapshot::default();
+    base_snap.mining_ledger.push(MiningLedgerRecord {
+        character_id: cid,
+        solar_system_id: 30_000_142,
+        type_id: 1230,
+        quantity: 100,
+        date: "2026-01-01".into(),
+        timestamp_unix: 1_700_000_001,
+    });
+    base_snap.mining_ledger.push(MiningLedgerRecord {
+        character_id: cid,
+        solar_system_id: 30_000_142,
+        type_id: 1228,
+        quantity: 200,
+        date: "2026-01-02".into(),
+        timestamp_unix: 1_700_000_002,
+    });
+    base_snap
+        .kv_mut(crate::service_domains::Ns::XmppAuthToken)
+        .set_with_unix(cid, "k1", &"v1", 1_700_000_001)
+        .unwrap();
+    base_snap
+        .kv_mut(crate::service_domains::Ns::XmppAuthToken)
+        .set_with_unix(cid, "k2", &"v2", 1_700_000_002)
+        .unwrap();
+    let mem_fp = sqlite_store::replace_sqlite_from_snapshot(&mut mem_conn, &base_snap).unwrap();
+
+    // Delete 1 of 2 rows from `char_mining_ledger` and 1 of 2 rows from `entity_kv`:
+    // rollback must fail closed rather than replacing live state with a partial reload.
+    mem_conn
+        .execute("DELETE FROM char_mining_ledger WHERE type_id = 1228", [])
+        .unwrap();
+    mem_conn
+        .execute("DELETE FROM entity_kv WHERE sub_key = 'k2'", [])
+        .unwrap();
+    let mut dirty_snap = base_snap.clone();
+    dirty_snap.mining_ledger.clear();
+    dirty_snap.entity_kv.clear();
+    assert!(
+        sqlite_store::industry_market_pve_store::rollback_d6_batch4(
+            &mem_conn,
+            &mut dirty_snap,
+            &mem_fp,
+        )
+        .is_err(),
+        "partial char_mining_ledger reload must fail closed (#857)"
+    );
+    assert!(
+        sqlite_store::service_domains_store::rollback_service_domains(
+            &mem_conn,
+            &mut dirty_snap,
+            &mem_fp,
+        )
+        .is_err(),
+        "partial entity_kv reload must fail closed (#857)"
+    );
+
+    drop(repo);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn issue_826_with_mut_snapshot_cowmap_and_domain_rows_zero_cold_clones_and_zero_fingerprinting() {
+    let dir = std::env::temp_dir();
+    let db_path = dir.join(format!("evomu_issue_826_zero_fp_{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&db_path);
+    let repo = WorldRepository::open_sqlite(&db_path).expect("open_sqlite");
+
+    let cid = 90_000_001_i64;
+    let item_id = 200_600_001_i64;
+    let order_id = 300_600_001_i64;
+
+    // Seed initial rows across all 5 hot CowMaps, all 6 domain_rows CowMaps, and a cold table.
+    repo.with_mut_snapshot(|snap| {
+        snap.characters.insert(
+            cid,
+            CharacterRecord {
+                character_id: cid,
+                user_id: 1,
+                name: "Pilot826".into(),
+                balance: IskCents(500_000),
+                version: 1,
+                ..Default::default()
+            },
+        );
+        let mut sk = HashMap::new();
+        sk.insert(
+            3300,
+            TrainedSkillRecord {
+                type_id: 3300,
+                level: 3,
+                skill_points: 8_000,
+            },
+        );
+        snap.skills.insert(cid, sk);
+        snap.skill_queues.insert(
+            cid,
+            vec![SkillQueueEntry {
+                type_id: 3300,
+                target_level: 4,
+                start_sp: 8_000,
+                end_sp: 45_255,
+                duration_seconds: 1_200,
+                started_at_unix: Some(1_700_000_000),
+            }],
+        );
+        snap.items.insert(
+            item_id,
+            InventoryItemRecord {
+                item_id,
+                type_id: 34,
+                owner_id: cid,
+                location_id: 60_003_760,
+                flag: InventoryFlag::Hangar,
+                quantity: 50,
+                ..Default::default()
+            },
+        );
+        snap.market_orders.insert(
+            order_id,
+            MarketOrderRecord {
+                order_id,
+                owner_id: cid,
+                station_id: 60_003_760,
+                region_id: 10_000_002,
+                type_id: 34,
+                is_bid: false,
+                price: IskCents(600),
+                vol_entered: 100,
+                vol_remaining: 100,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(0),
+            },
+        );
+        snap.wallet_journal_meta
+            .insert(1, crate::ledger::JournalMeta::new(10, cid, cid, 1_700_000_000));
+        snap.market_transactions.insert(
+            1,
+            crate::ledger::MarketTransactionRecord {
+                transaction_id: 1,
+                date_unix: 1_700_000_000,
+                type_id: 34,
+                quantity: 10,
+                price: IskCents(600),
+                location_id: 60_003_760,
+                buyer_id: cid,
+                seller_id: cid,
+                buyer_account_key: 1000,
+                seller_account_key: 1000,
+                journal_ref_id: 1,
+            },
+        );
+        snap.account_plex_vault.insert(1, 100);
+        snap.owner_notes.insert(
+            1,
+            OwnerNoteRecord {
+                note_id: 1,
+                character_id: cid,
+                item_id,
+                label: "L1".into(),
+                note: "N1".into(),
+                timestamp_unix: 1_700_000_000,
+            },
+        );
+        snap.corp_lp_balances.insert((98_000_001, 1_000_035), 250);
+        snap.char_lp_logs.insert(
+            cid,
+            vec![crate::snapshot_ext::LpRewardLogEntry {
+                log_id: 1,
+                corp_id: 1_000_035,
+                amount: 250,
+                reason: "mission".into(),
+                timestamp_unix: 1_700_000_000,
+            }],
+        );
+        snap.char_notes.insert((cid, 1), "SeededColdNote".into());
+    });
+
+    super::reset_thread_cold_fp_clones_for_test();
+    sqlite_store::fingerprints::reset_thread_fingerprint_calls_for_test();
+
+    // Mutate all 5 hot CowMap domains and all 6 domain_rows CowMap domains via `with_mut_snapshot`.
+    repo.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&cid).unwrap().balance = IskCents(750_000);
+        let sk_map = snap.skills.get_mut(&cid).unwrap();
+        sk_map.get_mut(&3300).unwrap().level = 4;
+        sk_map.insert(
+            3301,
+            TrainedSkillRecord {
+                type_id: 3301,
+                level: 2,
+                skill_points: 1_415,
+            },
+        );
+        snap.skill_queues.get_mut(&cid).unwrap()[0].target_level = 5;
+        snap.items.get_mut(&item_id).unwrap().quantity = 75;
+        snap.market_orders.get_mut(&order_id).unwrap().vol_remaining = 60;
+        snap.wallet_journal_meta.insert(
+            2,
+            crate::ledger::JournalMeta::new(10, cid, cid, 1_700_000_010),
+        );
+        snap.market_transactions.get_mut(&1).unwrap().quantity = 25;
+        snap.account_plex_vault.insert(1, 250);
+        snap.owner_notes.get_mut(&1).unwrap().note = "N1-updated".into();
+        snap.corp_lp_balances.insert((98_000_001, 1_000_035), 500);
+        snap.char_lp_logs.get_mut(&cid).unwrap()[0].amount = 500;
+    });
+
+    assert_eq!(
+        super::thread_cold_fp_clones_for_test(),
+        0,
+        "CowMap and domain_rows mutations must not clone cold TableFingerprints maps (#826)"
+    );
+    assert_eq!(
+        sqlite_store::fingerprints::thread_fingerprint_calls_for_test(),
+        0,
+        "CowMap and domain_rows mutations must perform zero FNV row re-fingerprinting (#826)"
+    );
+
+    let reloaded = repo.reload_snapshot_from_sqlite().expect("reload_snapshot_from_sqlite");
+    assert_eq!(reloaded.characters[&cid].balance, IskCents(750_000));
+    assert_eq!(reloaded.skills[&cid][&3300].level, 4);
+    assert_eq!(reloaded.skills[&cid][&3301].level, 2);
+    assert_eq!(reloaded.skill_queues[&cid][0].target_level, 5);
+    assert_eq!(reloaded.items[&item_id].quantity, 75);
+    assert_eq!(reloaded.market_orders[&order_id].vol_remaining, 60);
+    assert!(reloaded.wallet_journal_meta.contains_key(&2));
+    assert_eq!(reloaded.market_transactions[&1].quantity, 25);
+    assert_eq!(reloaded.account_plex_vault.get(&1), Some(&250));
+    assert_eq!(reloaded.owner_notes[&1].note, "N1-updated");
+    assert_eq!(reloaded.corp_lp_balances.get(&(98_000_001, 1_000_035)), Some(&500));
+    assert_eq!(reloaded.char_lp_logs[&cid][0].amount, 500);
+
+    // Mutating a cold domain stages cold fingerprints exactly once.
+    repo.with_mut_snapshot(|snap| {
+        snap.char_notes.insert((cid, 2), "ColdMutation".into());
+    });
+    assert_eq!(super::thread_cold_fp_clones_for_test(), 1);
+    assert!(sqlite_store::fingerprints::thread_fingerprint_calls_for_test() > 0);
+
+    drop(repo);
+    let _ = std::fs::remove_file(&db_path);
+}

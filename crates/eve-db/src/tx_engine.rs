@@ -462,6 +462,23 @@ fn compute_cold_domain_diff(before: &WorldStateSnapshot, after: &WorldStateSnaps
     }
 }
 
+struct ByteCountingWriter {
+    bytes: usize,
+}
+
+impl std::io::Write for ByteCountingWriter {
+    #[inline]
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.bytes = self.bytes.saturating_add(buf.len());
+        Ok(buf.len())
+    }
+
+    #[inline]
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn validate_row<T: Serialize + ?Sized>(
     table: &'static str,
     key: String,
@@ -471,9 +488,9 @@ fn validate_row<T: Serialize + ?Sized>(
     if val.serialize(FiniteFloatChecker).is_err() {
         return Err(TxError::NonFinite { table, key });
     }
-    let bytes = serde_json::to_vec(val)
-        .map_err(|e| TxError::Persist(e.to_string()))?
-        .len();
+    let mut counter = ByteCountingWriter { bytes: 0 };
+    serde_json::to_writer(&mut counter, val).map_err(|e| TxError::Persist(e.to_string()))?;
+    let bytes = counter.bytes;
     if bytes > max_row_bytes {
         return Err(TxError::RowLimit { table, key, bytes });
     }
@@ -893,90 +910,37 @@ impl<'a, 'conn> TxSqlExecutor<'a, 'conn> {
     }
 }
 
-/// Deferred `O(k)` hot-table fingerprint updates applied only after SQLite `COMMIT`.
+/// Placeholder for hot-table fingerprint updates.
+///
+/// Hot `CowMap` tables (`items`, `characters`, `skills`, `skill_queues`, `market_orders`) are
+/// diffed in `O(k log N)` via structural sharing in `ChangeSet::diff`, so `WorldRepository::tx`
+/// never re-fingerprints mutated `CowMap` rows (`#826`).
 #[derive(Default)]
-pub(crate) struct HotFpDelta {
-    chars_upserted: Vec<(i64, u64)>,
-    chars_removed: Vec<i64>,
-    skills_upserted: Vec<(i64, TypeId, u64)>,
-    skills_removed_chars: Vec<i64>,
-    skills_removed_rows: Vec<(i64, TypeId)>,
-    queues_upserted: Vec<(i64, u64)>,
-    queues_removed: Vec<i64>,
-    items_upserted: Vec<(i64, u64)>,
-    items_removed: Vec<i64>,
-    orders_upserted: Vec<(i64, u64)>,
-    orders_removed: Vec<i64>,
-    next_market_orders_digest: Option<u64>,
-}
+pub(crate) struct HotFpDelta;
 
 impl HotFpDelta {
-    pub(crate) fn apply_to(self, fp: &mut TableFingerprints) {
-        for id in self.chars_removed {
-            fp.characters.remove(&id);
-        }
-        for (id, h) in self.chars_upserted {
-            fp.characters.insert(id, h);
-        }
-        for cid in self.skills_removed_chars {
-            fp.skills.remove(&cid);
-        }
-        for (cid, tid) in self.skills_removed_rows {
-            if let Some(m) = fp.skills.get_mut(&cid) {
-                m.remove(&tid);
-            }
-        }
-        for (cid, tid, digest) in self.skills_upserted {
-            fp.skills.entry(cid).or_default().insert(tid, digest);
-        }
-        for cid in self.queues_removed {
-            fp.skill_queues.remove(&cid);
-        }
-        for (cid, h) in self.queues_upserted {
-            fp.skill_queues.insert(cid, h);
-        }
-        for id in self.items_removed {
-            fp.items.remove(&id);
-        }
-        for (id, h) in self.items_upserted {
-            fp.items.insert(id, h);
-        }
-        if !self.orders_removed.is_empty() || !self.orders_upserted.is_empty() {
-            let fp_orders = Arc::make_mut(&mut fp.market_orders);
-            for oid in self.orders_removed {
-                fp_orders.remove(&oid);
-            }
-            for (oid, h) in self.orders_upserted {
-                fp_orders.insert(oid, h);
-            }
-        }
-        if let Some(digest) = self.next_market_orders_digest {
-            fp.market_orders_digest = digest;
-        }
-    }
+    #[inline]
+    pub(crate) fn apply_to(self, _fp: &mut TableFingerprints) {}
 }
 
 /// Applies `changes` inside an already-started SQLite `Transaction` in `O(k)` for `CowMap` hot
-/// tables, recording deferred hot fingerprint updates in `HotFpDelta` without cloning hot maps.
+/// tables and `domain_rows` without re-fingerprinting `CowMap` rows (`#826`).
 pub(crate) fn apply_changeset_to_sqlite(
     exec: &mut TxSqlExecutor<'_, '_>,
     snap: &WorldStateSnapshot,
     changes: &ChangeSet,
-    base_fp: &TableFingerprints,
+    _base_fp: &TableFingerprints,
     staged_cold_fp: &mut TableFingerprints,
     need_wal_delta: bool,
 ) -> Result<(crate::persistence::WorldStateWalDelta, HotFpDelta), TxError> {
-    use crate::sqlite_store::fingerprints::{
-        fp_character, fp_item, fp_market_order, fp_market_orders_digest_entry, fp_skill_queue,
-        to_checked_json_string,
-    };
+    use crate::sqlite_store::fingerprints::to_checked_json_string;
 
     let mut delta = Box::new(crate::persistence::WorldStateWalDelta {
         seq: snap.wal_seq,
         next_entity_id: snap.next_entity_id,
         ..Default::default()
     });
-    let mut hot_fp = HotFpDelta::default();
+    let hot_fp = HotFpDelta;
 
     if changes.meta_changed {
         exec.execute(
@@ -993,7 +957,7 @@ pub(crate) fn apply_changeset_to_sqlite(
         staged_cold_fp.markets_seeded = snap.markets_seeded;
     }
 
-    // Hot CowMap tables: O(k) SQL updates directly from ChangeSet!
+    // Hot CowMap tables: O(k) SQL updates directly from ChangeSet with zero row re-fingerprinting!
     for ch in &changes.characters {
         match &ch.after {
             None => {
@@ -1002,7 +966,6 @@ pub(crate) fn apply_changeset_to_sqlite(
                     "DELETE FROM characters WHERE character_id = ?1",
                     params![ch.key],
                 )?;
-                hot_fp.chars_removed.push(ch.key);
             }
             Some(v) => {
                 let rec_json = to_checked_json_string(&**v).map_err(TxError::Persist)?;
@@ -1039,7 +1002,6 @@ pub(crate) fn apply_changeset_to_sqlite(
                         rec_json,
                     ],
                 )?;
-                hot_fp.chars_upserted.push((ch.key, fp_character(v)));
                 if need_wal_delta {
                     delta.upserted_characters.push((**v).clone());
                 }
@@ -1055,36 +1017,38 @@ pub(crate) fn apply_changeset_to_sqlite(
                     "DELETE FROM skills WHERE character_id = ?1",
                     params![ch.key],
                 )?;
-                hot_fp.skills_removed_chars.push(ch.key);
             }
             Some(sk_map) => {
-                let empty_map = HashMap::new();
-                let fp_map = base_fp.skills.get(&ch.key).unwrap_or(&empty_map);
-                let rem_tids: Vec<TypeId> = fp_map
-                    .keys()
-                    .filter(|tid| !sk_map.contains_key(*tid))
-                    .copied()
-                    .collect();
-                for tid in rem_tids {
-                    exec.execute(
-                        "skills:delete_row",
-                        "DELETE FROM skills WHERE character_id = ?1 AND type_id = ?2",
-                        params![ch.key, tid as i64],
-                    )?;
-                    hot_fp.skills_removed_rows.push((ch.key, tid));
-                }
-                for (&tid, sk) in sk_map.iter() {
-                    let digest = crate::sqlite_store::fingerprints::canonical_fp(sk);
-                    if fp_map.get(&tid) != Some(&digest) {
+                let before_map = ch.before.as_deref();
+                if let Some(prev) = before_map {
+                    let mut rem_tids: Vec<TypeId> = prev
+                        .keys()
+                        .filter(|tid| !sk_map.contains_key(*tid))
+                        .copied()
+                        .collect();
+                    rem_tids.sort_unstable();
+                    for tid in rem_tids {
                         exec.execute(
-                            "skills:upsert",
-                            "INSERT OR REPLACE INTO skills (character_id, type_id, level, skill_points) VALUES (?1, ?2, ?3, ?4)",
-                            params![ch.key, tid as i64, sk.level as i64, sk.skill_points],
+                            "skills:delete_row",
+                            "DELETE FROM skills WHERE character_id = ?1 AND type_id = ?2",
+                            params![ch.key, tid as i64],
                         )?;
-                        hot_fp.skills_upserted.push((ch.key, tid, digest));
-                        if need_wal_delta {
-                            delta.upserted_skills.push((ch.key, sk.clone()));
-                        }
+                    }
+                }
+                let mut upserts: Vec<(TypeId, &TrainedSkillRecord)> = sk_map
+                    .iter()
+                    .filter(|(tid, sk)| before_map.and_then(|m| m.get(*tid)) != Some(*sk))
+                    .map(|(&tid, sk)| (tid, sk))
+                    .collect();
+                upserts.sort_unstable_by_key(|(tid, _)| *tid);
+                for (tid, sk) in upserts {
+                    exec.execute(
+                        "skills:upsert",
+                        "INSERT OR REPLACE INTO skills (character_id, type_id, level, skill_points) VALUES (?1, ?2, ?3, ?4)",
+                        params![ch.key, tid as i64, sk.level as i64, sk.skill_points],
+                    )?;
+                    if need_wal_delta {
+                        delta.upserted_skills.push((ch.key, sk.clone()));
                     }
                 }
             }
@@ -1099,7 +1063,6 @@ pub(crate) fn apply_changeset_to_sqlite(
                     "DELETE FROM skill_queues WHERE character_id = ?1",
                     params![ch.key],
                 )?;
-                hot_fp.queues_removed.push(ch.key);
             }
             Some(q) => {
                 exec.execute(
@@ -1124,7 +1087,6 @@ pub(crate) fn apply_changeset_to_sqlite(
                         ],
                     )?;
                 }
-                hot_fp.queues_upserted.push((ch.key, fp_skill_queue(q)));
                 if need_wal_delta {
                     delta.upserted_skill_queues.push((ch.key, (**q).clone()));
                 }
@@ -1140,7 +1102,6 @@ pub(crate) fn apply_changeset_to_sqlite(
                     "DELETE FROM items WHERE item_id = ?1",
                     params![ch.key],
                 )?;
-                hot_fp.items_removed.push(ch.key);
                 if need_wal_delta {
                     delta.removed_items.push(ch.key);
                 }
@@ -1163,7 +1124,6 @@ pub(crate) fn apply_changeset_to_sqlite(
                         rec_json,
                     ],
                 )?;
-                hot_fp.items_upserted.push((ch.key, fp_item(item)));
                 if need_wal_delta {
                     delta.upserted_items.push((**item).clone());
                 }
@@ -1172,7 +1132,6 @@ pub(crate) fn apply_changeset_to_sqlite(
     }
 
     if !changes.market_orders.is_empty() {
-        let mut digest = base_fp.market_orders_digest;
         for ch in &changes.market_orders {
             match &ch.after {
                 None => {
@@ -1181,10 +1140,6 @@ pub(crate) fn apply_changeset_to_sqlite(
                         "DELETE FROM market_orders WHERE order_id = ?1",
                         params![ch.key],
                     )?;
-                    if let Some(&old_fp) = base_fp.market_orders.get(&ch.key) {
-                        digest ^= fp_market_orders_digest_entry(ch.key, old_fp);
-                    }
-                    hot_fp.orders_removed.push(ch.key);
                     if need_wal_delta {
                         delta.removed_market_orders.push(ch.key);
                     }
@@ -1209,19 +1164,12 @@ pub(crate) fn apply_changeset_to_sqlite(
                             ord.escrow.0,
                         ],
                     )?;
-                    let new_fp = fp_market_order(ord);
-                    if let Some(&old_fp) = base_fp.market_orders.get(&ch.key) {
-                        digest ^= fp_market_orders_digest_entry(ch.key, old_fp);
-                    }
-                    digest ^= fp_market_orders_digest_entry(ch.key, new_fp);
-                    hot_fp.orders_upserted.push((ch.key, new_fp));
                     if need_wal_delta {
                         delta.upserted_market_orders.push((**ord).clone());
                     }
                 }
             }
         }
-        hot_fp.next_market_orders_digest = Some(digest);
     }
 
     if !changes.domain_rows.is_empty() {

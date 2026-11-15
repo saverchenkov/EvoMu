@@ -14,6 +14,21 @@ use std::path::Path;
 
 pub(crate) const WAL_CHECKPOINT_INTERVAL: usize = 64;
 
+#[cfg(test)]
+thread_local! {
+    static THREAD_COLD_FP_CLONES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_thread_cold_fp_clones_for_test() {
+    THREAD_COLD_FP_CLONES.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn thread_cold_fp_clones_for_test() -> usize {
+    THREAD_COLD_FP_CLONES.with(|c| c.get())
+}
+
 /// Incremental Write-Ahead Log (WAL) delta record for hot-path mutations (`OF-06` / `OF-23` / `R21-P1-5`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorldStateWalDelta {
@@ -1079,10 +1094,13 @@ impl WorldRepository {
             st.solar_system_id = sid;
         }
         writer.fp = sqlite_store::replace_sqlite_from_snapshot(&mut writer.conn, &snap)?;
-        let _ = writer.conn.execute(
-            "INSERT OR REPLACE INTO world_meta (meta_key, meta_value) VALUES ('next_entity_block', ?1)",
-            rusqlite::params![snap.next_entity_id.max(200_000_000)],
-        );
+        writer
+            .conn
+            .execute(
+                "INSERT OR REPLACE INTO world_meta (meta_key, meta_value) VALUES ('next_entity_block', ?1)",
+                rusqlite::params![snap.next_entity_id.max(200_000_000)],
+            )
+            .map_err(|e| e.to_string())?;
         self.entity_ids
             .reset_from_load(snap.next_entity_id, snap.next_entity_id);
         writer.seq = snap.wal_seq;
@@ -1242,10 +1260,6 @@ impl WorldRepository {
                     writer.working = before;
                     writer.working.next_entity_id =
                         writer.working.next_entity_id.max(self.entity_ids.current());
-                    if writer.working.next_entity_id > pre_alloc_snap_id {
-                        *self.published.write().unwrap_or_else(|e| e.into_inner()) =
-                            std::sync::Arc::new(writer.working.clone());
-                    }
                     drop(effects);
                     record_tx_error(&val_err);
                     return Err(E::from_tx_error(val_err));
@@ -1259,10 +1273,12 @@ impl WorldRepository {
                 }
 
                 need_wal_delta = self.snapshot_path.is_some() && self.sqlite_path.is_none();
-                let has_cold_or_meta = changes.meta_changed || changes.cold_domains.any();
 
-                // Stage cold fingerprints without cloning O(N) hot CowMap fingerprint HashMaps.
-                staged_cold_fp = if has_cold_or_meta {
+                // Only stage/clone cold TableFingerprints maps when at least one cold domain
+                // actually changed (#826); hot CowMap and domain_rows mutations update meta in O(1).
+                staged_cold_fp = if changes.cold_domains.any() {
+                    #[cfg(test)]
+                    THREAD_COLD_FP_CLONES.with(|c| c.set(c.get().saturating_add(1)));
                     let hot_items = std::mem::take(&mut writer.fp.items);
                     let hot_chars = std::mem::take(&mut writer.fp.characters);
                     let hot_skills = std::mem::take(&mut writer.fp.skills);
@@ -1344,6 +1360,9 @@ impl WorldRepository {
                             next_fp.market_orders_digest = writer.fp.market_orders_digest;
                             writer.fp = next_fp;
                         }
+                        writer.fp.next_entity_id = writer.working.next_entity_id;
+                        writer.fp.wal_seq = writer.working.wal_seq;
+                        writer.fp.markets_seeded = writer.working.markets_seeded;
                         if let Some(hot_fp) = hot_fp_opt {
                             hot_fp.apply_to(&mut writer.fp);
                         }
