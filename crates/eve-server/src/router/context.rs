@@ -450,6 +450,7 @@ pub struct ActiveMoonSurveyProbe {
     pub probe_id: i64, pub probe_type_id: u32, pub owner_char_id: i64, pub solar_system_id: u32, pub hit_moon_id: Option<i64>, pub arrival_unix_secs: u64,
 }
 
+#[cfg(any(test, feature = "testkit"))]
 impl Default for ServerContext { fn default() -> Self { Self::new() } }
 
 impl ServerContext {
@@ -584,8 +585,13 @@ impl ServerContext {
         }
     }
 
-    /// Initializes a `ServerContext` with the provided `WorldRepository` and `SdeRegistry`, and seeds NPC regional markets.
-    pub fn with_sde_and_repository(sde: Arc<SdeRegistry>, db: Arc<WorldRepository>) -> Self {
+    /// Initializes a `ServerContext` with explicit `SdeRegistry`, `WorldRepository`, and
+    /// `QuasarDescriptorRegistry`, and seeds NPC regional markets.
+    pub fn with_sde_repository_and_descriptors(
+        sde: Arc<SdeRegistry>,
+        db: Arc<WorldRepository>,
+        quasar_descriptors: Arc<eve_proto::quasar::QuasarDescriptorRegistry>,
+    ) -> Self {
         let _ = world_seeder::seed_dual_anchor_markets(&db, &sde);
         let clock = db.clock();
         let unrebased_clock_offset_secs = db
@@ -619,7 +625,7 @@ impl ServerContext {
             Arc::new(RankedRwLock::new(rt))
         };
         let quasar_gateway = Arc::new(crate::quasar_gateway::PublicGatewayRouter::new(
-            eve_proto::quasar::QuasarDescriptorRegistry::open_default_or_empty(),
+            quasar_descriptors,
             Arc::clone(&db),
             Arc::clone(&sde),
         ));
@@ -902,13 +908,26 @@ impl ServerContext {
         ctx
     }
 
+    /// Test-only helper initializing `ServerContext` with `SdeRegistry`, `WorldRepository`, and
+    /// `QuasarDescriptorRegistry::open_default_or_empty()`.
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn with_sde_and_repository(sde: Arc<SdeRegistry>, db: Arc<WorldRepository>) -> Self {
+        Self::with_sde_repository_and_descriptors(
+            sde,
+            db,
+            eve_proto::quasar::QuasarDescriptorRegistry::open_default_or_empty(),
+        )
+    }
+
     /// Initializes a `ServerContext` with the provided `WorldRepository` and seeds the NPC regional markets.
+    #[cfg(any(test, feature = "testkit"))]
     pub fn with_repository(db: Arc<WorldRepository>) -> Self {
         let sde = Arc::new(SdeRegistry::with_canonical_seed());
         Self::with_sde_and_repository(sde, db)
     }
 
     /// Initializes a default `ServerContext` for unit tests.
+    #[cfg(any(test, feature = "testkit"))]
     pub fn for_tests() -> Self {
         Self::new()
     }
@@ -935,6 +954,7 @@ impl ServerContext {
     }
 
     /// Initializes a `ServerContext` backed by a SQLite world database at `path`.
+    #[cfg(any(test, feature = "testkit"))]
     pub fn from_sqlite(path: impl AsRef<std::path::Path>) -> Result<Self, String> {
         let p = path.as_ref();
         let ext = p
@@ -953,16 +973,14 @@ impl ServerContext {
         Ok(Self::with_repository(db))
     }
 
-    /// Initializes a `ServerContext` from a [`crate::config::ServerConfig`] (`D-5`, `#877`).
-    pub fn from_config(cfg: &crate::config::ServerConfig) -> Result<Self, String> {
+    /// Initializes a `ServerContext` from a [`crate::config::ServerConfig`] (`D-5`, `#877`) using
+    /// pre-validated `SdeRegistry` and `QuasarDescriptorRegistry` instances.
+    pub fn from_config_with_static_data(
+        cfg: &crate::config::ServerConfig,
+        sde: Arc<SdeRegistry>,
+        quasar_descriptors: Arc<eve_proto::quasar::QuasarDescriptorRegistry>,
+    ) -> Result<Self, String> {
         let backend = cfg.validate_storage_backend()?;
-        let sde = match SdeRegistry::open(&cfg.sde_path) {
-            Ok(s) => Arc::new(s),
-            Err(_) if cfg!(test) && cfg.sde_path == "data/evomu_sde.sqlite" => {
-                Arc::new(SdeRegistry::with_canonical_seed())
-            }
-            Err(e) => return Err(e.to_string()),
-        };
         let db = match backend {
             "sqlite" => {
                 tracing::info!(
@@ -995,7 +1013,7 @@ impl ServerContext {
                 db.provision_gm_account(a.username.trim(), a.password_token.trim(), a.character_id, a.character_name.trim());
             }
         }
-        let ctx = Self::with_sde_and_repository(sde, db);
+        let ctx = Self::with_sde_repository_and_descriptors(sde, db, quasar_descriptors);
         ctx.systems.set_belt_respawn_interval_secs(cfg.belt_respawn_interval_secs);
         ctx.systems.set_downtime_utc_secs_of_day(cfg.downtime_utc_secs_of_day);
         *ctx.feature_flags.write().unwrap_or_else(|e| e.into_inner()) = cfg.feature_flags.clone();
@@ -1026,6 +1044,23 @@ impl ServerContext {
             });
         }
         Ok(ctx)
+    }
+
+    /// Initializes a `ServerContext` from a [`crate::config::ServerConfig`] (`D-5`, `#877`).
+    pub fn from_config(cfg: &crate::config::ServerConfig) -> Result<Self, String> {
+        let sde = match SdeRegistry::open(&cfg.sde_path) {
+            Ok(s) => Arc::new(s),
+            Err(_) if cfg!(test) && cfg.sde_path == "data/evomu_sde.sqlite" => {
+                Arc::new(SdeRegistry::with_canonical_seed())
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+        #[cfg(any(test, feature = "testkit"))]
+        let quasar_descriptors = eve_proto::quasar::QuasarDescriptorRegistry::open_default_or_empty();
+        #[cfg(not(any(test, feature = "testkit")))]
+        let quasar_descriptors = eve_proto::quasar::QuasarDescriptorRegistry::open_default()
+            .map_err(|e| e.to_string())?;
+        Self::from_config_with_static_data(cfg, sde, quasar_descriptors)
     }
 
     pub fn set_free_fast_checkout_plex(&mut self, enabled: bool) {
@@ -1092,6 +1127,7 @@ impl ServerContext {
     /// Initializes the production server context (`R22-P1-5`, `D-4`): always starts with an empty
     /// account/character table (`WorldRepository::new_empty()`) without demo secrets, and provisions
     /// operator-supplied player and admin accounts from `EVOMU_ACCOUNTS` / `EVOMU_GM_ACCOUNT`.
+    #[cfg(any(test, feature = "testkit"))]
     pub fn new_production() -> Self {
         let _env_read_guard = acquire_test_env_read_guard();
         let db = Arc::new(WorldRepository::new_empty());
@@ -1118,6 +1154,7 @@ impl ServerContext {
         Self::with_repository(db)
     }
 
+    #[cfg(any(test, feature = "testkit"))]
     pub fn new() -> Self {
         let _env_read_guard = acquire_test_env_read_guard();
         #[cfg(any(test, feature = "demo-seed"))]
@@ -2929,7 +2966,7 @@ impl ServerContext {
     }
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), feature = "testkit"))]
 #[inline]
 fn acquire_test_env_read_guard() {}
 

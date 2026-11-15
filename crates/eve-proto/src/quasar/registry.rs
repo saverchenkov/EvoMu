@@ -236,6 +236,22 @@ fn builtin_google_descriptors() -> Vec<DescriptorProto> {
 }
 
 impl QuasarDescriptorRegistry {
+    /// Resolves the default `(sqlite_path, manifest_path)` pair for Quasar descriptor loading.
+    pub fn default_paths() -> (PathBuf, PathBuf) {
+        let root = workspace_root();
+        let sqlite_path = std::env::var("EVOMU_QUASAR_DESCRIPTORS_PATH")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| root.join("data").join("quasar_descriptors.sqlite"));
+        let manifest_path = std::env::var("EVOMU_QUASAR_MANIFEST_PATH")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| root.join("data").join("quasar_descriptor_manifest.json"));
+        (sqlite_path, manifest_path)
+    }
+
     pub fn open_default() -> Result<Arc<Self>, QuasarError> {
         if let Some(reg) = DEFAULT_QUASAR_REGISTRY.get() {
             return Ok(Arc::clone(reg));
@@ -245,20 +261,16 @@ impl QuasarDescriptorRegistry {
         if let Some(reg) = DEFAULT_QUASAR_REGISTRY.get() {
             return Ok(Arc::clone(reg));
         }
-        let root = workspace_root();
-        let sqlite_path = std::env::var("EVOMU_QUASAR_DESCRIPTORS_PATH")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| root.join("data").join("quasar_descriptors.sqlite"));
-        let manifest_path = root.join("data").join("quasar_descriptor_manifest.json");
+        let (sqlite_path, manifest_path) = Self::default_paths();
 
         let reg = Arc::new(Self::open(&sqlite_path, &manifest_path)?);
         let _ = DEFAULT_QUASAR_REGISTRY.set(Arc::clone(&reg));
         Ok(reg)
     }
 
-    /// Opens the default `QuasarDescriptorRegistry` if `data/quasar_descriptors.sqlite` is present,
-    /// or returns an empty registry containing the built-in Google Well-Known Types so server startup
-    /// never panics when the local gitignored descriptor DB has not been extracted yet.
+    /// Test-only fallback returning built-in Google Well-Known Types when the local descriptor DB
+    /// is unavailable; production paths must use `open_default()` or explicit startup validation.
+    #[cfg(any(test, feature = "testkit"))]
     pub fn open_default_or_empty() -> Arc<Self> {
         Self::open_default().unwrap_or_else(|err| {
             eprintln!("[eve-proto] QuasarDescriptorRegistry::open_default_or_empty fallback: {err}");

@@ -70,7 +70,7 @@ pub enum QuasarError {
     UnknownMessageType(String),
     #[error("Protobuf type URL mismatch: expected '{expected}', got '{actual}'")]
     TypeUrlMismatch { expected: String, actual: String },
-    #[error("Missing Quasar descriptor database at '{0}': run `python3 tools/quasar-import/extract_quasar_descriptors.py`")]
+    #[error("Missing Quasar descriptor database at '{0}': run `python3 tools/sde-import/import_sde.py`")]
     MissingDescriptorDatabase(String),
     #[error("Quasar descriptor database error: {0}")]
     DatabaseError(String),

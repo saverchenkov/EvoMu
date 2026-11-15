@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# Exposes test-only fallback constructors such as `QuasarDescriptorRegistry::open_default_or_empty`
+# to downstream crates' unit and integration test targets.
+testkit = []
+
 [dependencies]
 bytes.workspace = true
 serde.workspace = true

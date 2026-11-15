@@ -281,3 +281,28 @@ fn storage_backend_validation_and_server_context_initialization_877_907() {
     assert!(ServerConfig::load_default_or_env().is_err());
     std::env::remove_var("EVOMU_STORAGE_BACKEND");
 }
+
+#[test]
+fn static_data_override_cli_and_env_flags() {
+    let _env_guard = crate::lock_test_env_write();
+    let _guard = EnvVarGuard::capture(&["EVOMU_ALLOW_STALE_STATIC_DATA"]);
+    assert!(ServerConfig::parse_cli_allow_stale_static_data([
+        "--gm",
+        "--allow-stale-static-data"
+    ]));
+    assert!(!ServerConfig::parse_cli_allow_stale_static_data([
+        "--",
+        "--allow-stale-static-data"
+    ]));
+    assert!(!ServerConfig::parse_cli_allow_stale_static_data(["--gm"]));
+
+    std::env::remove_var("EVOMU_ALLOW_STALE_STATIC_DATA");
+    assert!(!ServerConfig::env_allow_stale_static_data());
+    std::env::set_var("EVOMU_ALLOW_STALE_STATIC_DATA", "1");
+    assert!(ServerConfig::env_allow_stale_static_data());
+    std::env::set_var("EVOMU_ALLOW_STALE_STATIC_DATA", "true");
+    assert!(ServerConfig::env_allow_stale_static_data());
+    std::env::set_var("EVOMU_ALLOW_STALE_STATIC_DATA", "0");
+    assert!(!ServerConfig::env_allow_stale_static_data());
+    std::env::remove_var("EVOMU_ALLOW_STALE_STATIC_DATA");
+}

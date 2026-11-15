@@ -17,6 +17,7 @@ with zero hand-written literals.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import pickle
@@ -39,14 +40,37 @@ from sde_extractors import (
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
-DEFAULT_SHARED_CACHE = (
-    Path("C:/Games/EVE")
-    if sys.platform == "win32" and Path("C:/Games/EVE/tq/resfileindex.txt").exists()
-    else Path(os.path.expanduser("~/Library/Application Support/EVE Online/SharedCache"))
+QUASAR_IMPORT_DIR = REPO_ROOT / "tools" / "quasar-import"
+if str(QUASAR_IMPORT_DIR) not in sys.path:
+    sys.path.insert(0, str(QUASAR_IMPORT_DIR))
+
+from extract_quasar_descriptors import (  # noqa: E402
+    _discover_default_shared_cache,
+    extract_all_descriptors,
+    resolve_code_ccp_from_shared_cache,
+    verify_descriptors_db,
 )
+
+DEFAULT_SHARED_CACHE = Path(_discover_default_shared_cache())
 DEFAULT_OUT_DB = REPO_ROOT / "data" / "evomu_sde.sqlite"
 DEFAULT_MANIFEST = REPO_ROOT / "data" / "sde_import_manifest.json"
+DEFAULT_QUASAR_OUT = REPO_ROOT / "data" / "quasar_descriptors.sqlite"
+DEFAULT_QUASAR_MANIFEST = REPO_ROOT / "data" / "quasar_descriptor_manifest.json"
+DEFAULT_QUASAR_CATALOG = REPO_ROOT / "docs" / "index" / "quasar_protobuf_catalog.json"
 STATIC_CATALOG = REPO_ROOT / "docs" / "index" / "staticdata_catalog.json"
+
+
+def compute_sde_resources_sha256(resources: list[dict[str, object]]) -> str:
+    """Computes a deterministic SHA-256 digest over manifest resource entries."""
+    digest = hashlib.sha256()
+    entries = sorted(
+        resources,
+        key=lambda r: (str(r["res_path"]), str(r["md5"]), int(r["byte_size"])),
+    )
+    for entry in entries:
+        line = f"{entry['res_path']}:{entry['md5']}:{int(entry['byte_size'])}\n"
+        digest.update(line.encode("utf-8"))
+    return digest.hexdigest()
 
 
 def parse_start_ini(ini_path: Path) -> dict[str, str]:
@@ -1238,6 +1262,40 @@ def run_import(
             ],
         )
 
+    manifest_resources = [
+        {
+            "res_path": r["res_path"],
+            "cdn_relative_path": r["cdn_relative_path"],
+            "md5": r["md5"],
+            "byte_size": r["byte_size"],
+            "format": r["format"],
+            "record_count": r["record_count"],
+        }
+        for r in verified_resources
+    ]
+    resource_count = len(manifest_resources)
+    combined_resource_sha256 = compute_sde_resources_sha256(manifest_resources)
+
+    with conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS _evomu_sde_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT OR REPLACE INTO _evomu_sde_meta (key, value) VALUES (?, ?)",
+            [
+                ("schema_version", "1"),
+                ("client_build", str(client_build)),
+                ("client_release", str(client_release)),
+                ("resource_count", str(resource_count)),
+                ("combined_resource_sha256", combined_resource_sha256),
+            ],
+        )
+
     table_counts = {}
     for (tname,) in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
@@ -1250,21 +1308,12 @@ def run_import(
     conn.execute("PRAGMA journal_mode = DELETE")
     conn.close()
 
-    manifest_resources = [
-        {
-            "res_path": r["res_path"],
-            "cdn_relative_path": r["cdn_relative_path"],
-            "md5": r["md5"],
-            "byte_size": r["byte_size"],
-            "format": r["format"],
-            "record_count": r["record_count"],
-        }
-        for r in verified_resources
-    ]
     manifest = {
         "schema_version": 1,
         "client_build": client_build,
         "client_release": client_release,
+        "resource_count": resource_count,
+        "combined_resource_sha256": combined_resource_sha256,
         "table_counts": table_counts,
         "resources": manifest_resources,
     }
@@ -1306,14 +1355,211 @@ def write_belt_asteroid_tables(
     )
 
 
+def verify_sde_db(out_db: Path, manifest_path: Path) -> dict[str, object]:
+    """Verifies `evomu_sde.sqlite` metadata and table row counts against `sde_import_manifest.json`."""
+    if not out_db.exists():
+        raise FileNotFoundError(f"SDE SQLite database not found: {out_db}")
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"SDE manifest JSON not found: {manifest_path}")
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    conn = sqlite3.connect(f"file:{out_db}?mode=ro", uri=True)
+    try:
+        meta = dict(conn.execute("SELECT key, value FROM sde_meta").fetchall())
+        expected_schema = str(manifest.get("schema_version", ""))
+        if expected_schema and meta.get("schema_version") != expected_schema:
+            raise ValueError(
+                f"SDE schema_version mismatch in {out_db}: "
+                f"got {meta.get('schema_version')!r}, expected {expected_schema!r}"
+            )
+        expected_build = str(manifest.get("client_build", ""))
+        if expected_build and meta.get("client_build") != expected_build:
+            raise ValueError(
+                f"SDE client_build mismatch in {out_db}: "
+                f"got {meta.get('client_build')!r}, expected {expected_build!r}"
+            )
+        expected_release = str(manifest.get("client_release", ""))
+        if expected_release and meta.get("client_release") != expected_release:
+            raise ValueError(
+                f"SDE client_release mismatch in {out_db}: "
+                f"got {meta.get('client_release')!r}, expected {expected_release!r}"
+            )
+
+        existing_tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "_evomu_sde_meta" not in existing_tables:
+            raise ValueError(f"Missing _evomu_sde_meta table in {out_db}")
+        evomu_meta = dict(conn.execute("SELECT key, value FROM _evomu_sde_meta").fetchall())
+        if expected_build and evomu_meta.get("client_build") != expected_build:
+            raise ValueError(
+                f"SDE _evomu_sde_meta client_build mismatch in {out_db}: "
+                f"got {evomu_meta.get('client_build')!r}, expected {expected_build!r}"
+            )
+        resources = manifest.get("resources", [])
+        expected_res_count = str(manifest.get("resource_count", len(resources)))
+        if evomu_meta.get("resource_count") != expected_res_count:
+            raise ValueError(
+                f"SDE _evomu_sde_meta resource_count mismatch in {out_db}: "
+                f"got {evomu_meta.get('resource_count')!r}, expected {expected_res_count!r}"
+            )
+        expected_res_sha256 = str(
+            manifest.get("combined_resource_sha256")
+            or compute_sde_resources_sha256(resources)
+        )
+        if evomu_meta.get("combined_resource_sha256") != expected_res_sha256:
+            raise ValueError(
+                f"SDE _evomu_sde_meta combined_resource_sha256 mismatch in {out_db}: "
+                f"got {evomu_meta.get('combined_resource_sha256')!r}, expected {expected_res_sha256!r}"
+            )
+
+        table_counts = manifest.get("table_counts", {})
+        if not isinstance(table_counts, dict):
+            raise ValueError(f"Invalid table_counts object in {manifest_path}")
+        for tname, expected_cnt in table_counts.items():
+            if not tname.replace("_", "").isalnum():
+                raise ValueError(f"Unsafe table name in manifest {manifest_path}: {tname!r}")
+            if tname not in existing_tables:
+                raise ValueError(f"Missing expected SDE table {tname!r} in {out_db}")
+            actual_cnt = int(conn.execute(f'SELECT count(*) FROM "{tname}"').fetchone()[0])
+            if actual_cnt != int(expected_cnt):
+                raise ValueError(
+                    f"SDE table '{tname}' row count mismatch in {out_db}: "
+                    f"got {actual_cnt}, expected {expected_cnt} from {manifest_path}"
+                )
+    finally:
+        conn.close()
+    return manifest
+
+
+def resolve_quasar_out_path(sde_out: Path, quasar_out: Path | None) -> Path:
+    """Resolves the Quasar descriptor output DB path next to `sde_out` or `DEFAULT_QUASAR_OUT`."""
+    if quasar_out is not None:
+        return quasar_out
+    env_path = os.environ.get("EVOMU_QUASAR_DESCRIPTORS_PATH")
+    if env_path:
+        return Path(env_path)
+    if sde_out == DEFAULT_OUT_DB:
+        return DEFAULT_QUASAR_OUT
+    return sde_out.parent / "quasar_descriptors.sqlite"
+
+
+def run_quasar_import(
+    shared_cache: Path,
+    quasar_out: Path,
+    quasar_manifest: Path,
+    quasar_catalog: Path,
+    *,
+    update_manifest: bool = False,
+    verify_manifest: bool = True,
+) -> dict[str, object]:
+    """Generates `quasar_descriptors.sqlite` from `shared_cache` and verifies its manifest."""
+    code_ccp_path = resolve_code_ccp_from_shared_cache(str(shared_cache))
+    manifest_out_path: str | None = (
+        str(quasar_manifest) if (update_manifest or not quasar_manifest.exists()) else None
+    )
+    manifest = extract_all_descriptors(
+        code_ccp_path=code_ccp_path,
+        catalog_path=str(quasar_catalog),
+        sqlite_out_path=str(quasar_out),
+        manifest_out_path=manifest_out_path,
+    )
+    if verify_manifest:
+        verify_descriptors_db(quasar_out, quasar_manifest)
+    print(
+        f"[quasar-import] Output SQLite DB: {quasar_out} "
+        f"({quasar_out.stat().st_size:,} bytes, "
+        f"{manifest['descriptor_file_count']} descriptors across "
+        f"{manifest['domain_count']} domains, "
+        f"sha256={manifest['combined_serialized_pb_sha256']})"
+    )
+    return manifest
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Import EVE Client Static Data into SQLite")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Import EVE Client Static Data (data/evomu_sde.sqlite) and "
+            "Quasar protobuf descriptors (data/quasar_descriptors.sqlite) from SharedCache"
+        )
+    )
     parser.add_argument("--shared-cache", type=Path, default=DEFAULT_SHARED_CACHE)
     parser.add_argument("--out", "--out-db", dest="out", type=Path, default=DEFAULT_OUT_DB)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument(
+        "--quasar-out",
+        type=Path,
+        default=None,
+        help="Output path for quasar_descriptors.sqlite (defaults beside --out or data/quasar_descriptors.sqlite)",
+    )
+    parser.add_argument(
+        "--quasar-manifest",
+        type=Path,
+        default=DEFAULT_QUASAR_MANIFEST,
+        help="Path to tracked quasar_descriptor_manifest.json",
+    )
+    parser.add_argument(
+        "--quasar-catalog",
+        type=Path,
+        default=DEFAULT_QUASAR_CATALOG,
+        help="Path to docs/index/quasar_protobuf_catalog.json",
+    )
+    parser.add_argument(
+        "--skip-quasar",
+        action="store_true",
+        help="Skip generating and verifying data/quasar_descriptors.sqlite",
+    )
+    parser.add_argument(
+        "--update-quasar-manifest",
+        action="store_true",
+        help="Overwrite --quasar-manifest with newly extracted checksums/counts",
+    )
+    parser.add_argument(
+        "--no-verify-manifests",
+        action="store_true",
+        help="Skip post-import read-back verification against manifests",
+    )
+    parser.add_argument(
+        "--verify-only",
+        action="store_true",
+        help="Verify existing SDE and Quasar SQLite databases against their manifests without importing",
+    )
     parser.add_argument("--force-extract", action="store_true")
     args = parser.parse_args()
+
+    quasar_out = resolve_quasar_out_path(args.out, args.quasar_out)
+    if args.verify_only:
+        sde_manifest = verify_sde_db(args.out, args.manifest)
+        print(
+            f"[sde-verify] Verified {args.out} "
+            f"(build={sde_manifest.get('client_build')}, release={sde_manifest.get('client_release')})"
+        )
+        if not args.skip_quasar:
+            q_manifest = verify_descriptors_db(quasar_out, args.quasar_manifest)
+            print(
+                f"[quasar-verify] Verified {quasar_out} "
+                f"({q_manifest.get('descriptor_file_count')} descriptors across "
+                f"{q_manifest.get('domain_count')} domains)"
+            )
+        return 0
+
+    verify = not args.no_verify_manifests
     run_import(args.shared_cache, args.out, args.manifest, args.force_extract)
+    if verify:
+        verify_sde_db(args.out, args.manifest)
+
+    if not args.skip_quasar:
+        run_quasar_import(
+            args.shared_cache,
+            quasar_out,
+            args.quasar_manifest,
+            args.quasar_catalog,
+            update_manifest=args.update_quasar_manifest,
+            verify_manifest=verify,
+        )
     return 0
 
 

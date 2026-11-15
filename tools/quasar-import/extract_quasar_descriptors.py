@@ -466,6 +466,89 @@ def extract_all_descriptors(
     return manifest
 
 
+def verify_descriptors_db(
+    sqlite_path: str | os.PathLike[str],
+    manifest_path: str | os.PathLike[str],
+) -> dict[str, Any]:
+    """Verifies a generated `quasar_descriptors.sqlite` against its JSON manifest."""
+    sqlite_p = os.fspath(sqlite_path)
+    manifest_p = os.fspath(manifest_path)
+    if not os.path.exists(sqlite_p):
+        raise FileNotFoundError(f"Quasar descriptor SQLite database not found: {sqlite_p}")
+    if not os.path.exists(manifest_p):
+        raise FileNotFoundError(f"Quasar descriptor manifest not found: {manifest_p}")
+
+    with open(manifest_p, "r", encoding="utf-8") as mf:
+        expected = json.load(mf)
+
+    conn = sqlite3.connect(f"file:{sqlite_p}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT pyj_path, domain, sha256, md5, serialized_pb "
+            "FROM quasar_file_descriptors ORDER BY domain ASC, pyj_path ASC"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    actual_per_domain: dict[str, int] = {}
+    combined_sha256 = hashlib.sha256()
+    combined_md5 = hashlib.md5()
+    for pyj_path, domain, row_sha256, row_md5, serialized_pb in rows:
+        blob = bytes(serialized_pb)
+        actual_sha256 = hashlib.sha256(blob).hexdigest()
+        actual_md5 = hashlib.md5(blob).hexdigest()
+        if actual_sha256 != row_sha256 or actual_md5 != row_md5:
+            raise ValueError(
+                f"Corrupt descriptor payload for {pyj_path} in {sqlite_p}: "
+                f"sha256 {actual_sha256} != {row_sha256}"
+            )
+        path_bytes = pyj_path.encode("utf-8")
+        header = struct.pack("<I", len(path_bytes)) + path_bytes + struct.pack("<I", len(blob))
+        combined_sha256.update(header)
+        combined_sha256.update(blob)
+        combined_md5.update(header)
+        combined_md5.update(blob)
+        actual_per_domain[domain] = actual_per_domain.get(domain, 0) + 1
+
+    expected_count = expected.get("descriptor_file_count")
+    if len(rows) != expected_count:
+        raise ValueError(
+            f"Quasar descriptor count mismatch for {sqlite_p}: "
+            f"got {len(rows)}, expected {expected_count} from {manifest_p}"
+        )
+
+    expected_domains = expected.get("domain_count")
+    if len(actual_per_domain) != expected_domains:
+        raise ValueError(
+            f"Quasar domain count mismatch for {sqlite_p}: "
+            f"got {len(actual_per_domain)}, expected {expected_domains} from {manifest_p}"
+        )
+
+    expected_per_domain = expected.get("per_domain_file_counts")
+    if expected_per_domain is not None and actual_per_domain != expected_per_domain:
+        raise ValueError(
+            f"Quasar per-domain file count mismatch between {sqlite_p} and {manifest_p}"
+        )
+
+    actual_combined_sha256 = combined_sha256.hexdigest()
+    expected_combined_sha256 = expected.get("combined_serialized_pb_sha256")
+    if expected_combined_sha256 and actual_combined_sha256 != expected_combined_sha256:
+        raise ValueError(
+            f"Quasar descriptor combined SHA-256 mismatch for {sqlite_p}: "
+            f"got {actual_combined_sha256}, expected {expected_combined_sha256} from {manifest_p}"
+        )
+
+    actual_combined_md5 = combined_md5.hexdigest()
+    expected_combined_md5 = expected.get("combined_serialized_pb_md5")
+    if expected_combined_md5 and actual_combined_md5 != expected_combined_md5:
+        raise ValueError(
+            f"Quasar descriptor combined MD5 mismatch for {sqlite_p}: "
+            f"got {actual_combined_md5}, expected {expected_combined_md5} from {manifest_p}"
+        )
+
+    return expected
+
+
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -502,6 +585,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--out",
+        "--sqlite",
+        dest="out",
         default=os.environ.get("EVOMU_QUASAR_DESCRIPTORS_PATH", default_sqlite),
         help="Output SQLite database path (gitignored)",
     )
@@ -515,7 +600,21 @@ def main() -> int:
         action="store_true",
         help="Do not overwrite the tracked manifest file",
     )
+    parser.add_argument(
+        "--verify-only",
+        action="store_true",
+        help="Verify existing SQLite DB against --manifest without re-extracting from code.ccp",
+    )
     args = parser.parse_args()
+
+    if args.verify_only:
+        manifest = verify_descriptors_db(args.out, args.manifest)
+        print(
+            f"[quasar-import] Verified {args.out} ({manifest['descriptor_file_count']} "
+            f"FileDescriptorProtos across {manifest['domain_count']} domains, "
+            f"sha256={manifest['combined_serialized_pb_sha256']})"
+        )
+        return 0
 
     if args.code_ccp:
         code_ccp_path = args.code_ccp
@@ -531,6 +630,8 @@ def main() -> int:
         sqlite_out_path=args.out,
         manifest_out_path=manifest_path,
     )
+    if args.manifest and os.path.exists(args.manifest):
+        verify_descriptors_db(args.out, args.manifest)
     print(
         f"[quasar-import] Extracted {manifest['descriptor_file_count']} FileDescriptorProtos "
         f"across {manifest['domain_count']} domains ({manifest['unique_package_count']} packages, "
