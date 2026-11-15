@@ -215,7 +215,7 @@ async fn test_break_plastic_wrap_requires_colocation_and_fails_courier_collatera
         s.fleet_and_social_ops
             .contract_deposits
             .get(&contract_id)
-            .map(|c| c.to_wire_f64())
+            .map(|&c| (c as f64) / 100.0)
             .unwrap_or(0.0)
     });
     let p1_bal_after_create = ctx.db.get_character(P1).unwrap().balance.0;

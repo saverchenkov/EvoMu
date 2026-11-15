@@ -1626,9 +1626,9 @@ fn contract_handlers_emit_canonical_v24_wire_shapes_without_hardcoded_domains() 
 
     // 5. Wire passthrough: normalize_macho_rpc_reply is an exact identity for contractProxy & account RPCs.
     for (svc, method, payload) in [
-        ("contractProxy", "GetContract", &contract_rep),
-        ("contractProxy", "GetContractListForOwner", &owner_list),
-        ("contractProxy", "GetMyCurrentContractList", &my_cur),
+        ("contractProxy", "GetContract", &detail),
+        ("contractProxy", "GetContractListForOwner", &my_bids),
+        ("contractProxy", "GetMyCurrentContractList", &my_bids),
         ("contractProxy", "GetMyBids", &my_bids),
         ("contractProxy", "GetMyExpiredContractList", &empty_expired),
         ("contractProxy", "SearchContracts", &search),

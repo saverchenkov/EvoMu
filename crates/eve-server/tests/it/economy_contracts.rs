@@ -1141,7 +1141,7 @@ async fn test_contracts_visibility_search_fees_limits_reject_blueprints_and_gm_e
     ).await.expect("CreateContract with BPC and Abyssal module");
     let bp_cid = created_cid(&c_bp);
     let (deposit_fee, broker_fee) = ctx.db.with_snapshot(|s| {
-        let dep = s.fleet_and_social_ops.contract_deposits[&bp_cid].to_wire_f64();
+        let dep = (s.fleet_and_social_ops.contract_deposits[&bp_cid] as f64) / 100.0;
         let brk = s
             .wallet_journal
             .iter()
@@ -1522,7 +1522,7 @@ async fn test_r3_track3_industry_contracts_market_and_pi_regressions() {
     let corp_cid = created_cid(&c_corp);
     let dep_isk = ctx
         .db
-        .with_snapshot(|s| s.fleet_and_social_ops.contract_deposits[&corp_cid].to_wire_f64());
+        .with_snapshot(|s| (s.fleet_and_social_ops.contract_deposits[&corp_cid] as f64) / 100.0);
     assert!(dep_isk >= 100_000.0);
 
     let corp_bal_after_create = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet_balance());
