@@ -254,7 +254,7 @@ impl ServerContext {
         let is_outer_notify_scope =
             !crate::router::cache_notifications::has_staged_dispatch_notifications_scope();
         let start_time = std::time::Instant::now();
-        let mut res = maybe_with_dispatch_tx_error(
+        let (mut res, tx_poisoned) = maybe_with_dispatch_tx_error(
             is_outer_tx_scope,
             maybe_with_staged_dispatch_notifications(
                 is_outer_notify_scope,
@@ -431,7 +431,6 @@ impl ServerContext {
             ),
         )
         .await;
-        let (res, tx_poisoned) = res;
         let duration = start_time.elapsed();
 
         let status_desc = match &res {
