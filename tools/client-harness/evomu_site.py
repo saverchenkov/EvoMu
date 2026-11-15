@@ -9,6 +9,7 @@ as `__builtin__.sm` and `machoNet` are running.
 """
 
 import __builtin__
+import math
 import os
 import sys
 import time
@@ -21,10 +22,12 @@ _HOOKED_TARGETS = set()
 _HOOKED_XMPP_PREFS = False
 _HOOKED_XMPP_PORT = False
 _HOOKED_TYPELIST_PRELOAD = False
+_HOOKED_CAMERA_GUARD_TARGETS = set()
 _DRIVER_SCHEDULED = False
 _META_HOOK_INSTALLED = False
 _RECENT_EXCEPTIONS = []
 _EXC_SEQ = 0
+_CAMERA_MAX_SAFE_COORD = 1e16
 
 
 def _log_exc_line(msg):
@@ -307,6 +310,249 @@ def _install_fsd_typelist_preload_hook():
                 pass
 
 
+def _is_finite_safe_vec3(vec, limit=_CAMERA_MAX_SAFE_COORD):
+    if vec is None:
+        return False
+    try:
+        if len(vec) != 3:
+            return False
+        for c in vec:
+            val = float(c)
+            if math.isnan(val) or math.isinf(val) or abs(val) > limit:
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def _vec3_tuple(vec, fallback):
+    try:
+        if vec is not None and len(vec) == 3:
+            vals = (float(vec[0]), float(vec[1]), float(vec[2]))
+            if not any(math.isnan(c) or math.isinf(c) for c in vals):
+                return vals
+    except Exception:
+        pass
+    return (float(fallback[0]), float(fallback[1]), float(fallback[2]))
+
+
+def _safe_direction_vec3(from_pos, to_pos, fallback=(0.0, 0.0, 1.0)):
+    fx, fy, fz = _vec3_tuple(from_pos, (0.0, 0.0, 0.0))
+    tx, ty, tz = _vec3_tuple(to_pos, fallback)
+    dx = tx - fx
+    dy = ty - fy
+    dz = tz - fz
+    scale = max(abs(dx), abs(dy), abs(dz))
+    if scale <= 0.0 or math.isnan(scale) or math.isinf(scale):
+        return _safe_direction_vec3((0.0, 0.0, 0.0), fallback, (0.0, 0.0, 1.0)) if fallback != (0.0, 0.0, 1.0) else (0.0, 0.0, 1.0)
+    sx = dx / scale
+    sy = dy / scale
+    sz = dz / scale
+    length = math.sqrt(sx * sx + sy * sy + sz * sz)
+    if length <= 0.0 or math.isnan(length) or math.isinf(length):
+        return (0.0, 0.0, 1.0)
+    return (sx / length, sy / length, sz / length)
+
+
+def _safe_tactical_new_direction(direction):
+    if direction is None or len(direction) != 3:
+        return (0.0, 0.7071067811865475, 0.7071067811865475)
+    try:
+        dx = float(direction[0])
+        dz = float(direction[2])
+    except Exception:
+        return (0.0, 0.7071067811865475, 0.7071067811865475)
+    if any(math.isnan(c) or math.isinf(c) for c in (dx, dz)):
+        return (0.0, 0.7071067811865475, 0.7071067811865475)
+    scale2 = max(abs(dx), abs(dz))
+    if scale2 <= 0.0:
+        return (0.0, 0.7071067811865475, 0.7071067811865475)
+    y = scale2 * math.sqrt((dx / scale2) ** 2 + (dz / scale2) ** 2)
+    return _safe_direction_vec3((0.0, 0.0, 0.0), (dx, y, dz), (0.0, 0.7071067811865475, 0.7071067811865475))
+
+
+def _sanitize_camera_state(cam):
+    changed = False
+    default_at = _vec3_tuple(getattr(cam, "default_atPosition", (0.0, 0.0, 0.0)), (0.0, 0.0, 0.0))
+    default_eye = _vec3_tuple(getattr(cam, "default_eyePosition", (0.0, 500.0, 1000.0)), (0.0, 500.0, 1000.0))
+    at_pos = getattr(cam, "_atPosition", None)
+    eye_pos = getattr(cam, "_eyePosition", None)
+    if not _is_finite_safe_vec3(at_pos):
+        cam._atPosition = list(default_at)
+        at_pos = cam._atPosition
+        changed = True
+    if not _is_finite_safe_vec3(eye_pos):
+        new_eye = list(default_eye)
+        if _vec3_tuple(new_eye, default_eye) == _vec3_tuple(at_pos, default_at):
+            new_eye = [at_pos[0], at_pos[1] + 500.0, at_pos[2] + 1000.0]
+        cam._eyePosition = new_eye
+        eye_pos = cam._eyePosition
+        changed = True
+    if _vec3_tuple(eye_pos, default_eye) == _vec3_tuple(at_pos, default_at):
+        cam._eyePosition = [float(at_pos[0]), float(at_pos[1]) + 500.0, float(at_pos[2]) + 1000.0]
+        changed = True
+    for attr in ("_eyeOffset", "_atOffset", "_eyeTransitOffset", "_atTransitOffset"):
+        val = getattr(cam, attr, None)
+        if val is not None and not _is_finite_safe_vec3(val):
+            setattr(cam, attr, None)
+            changed = True
+    return changed
+
+
+def _install_camera_dock_guard():
+    """Guard against V24.01 TacticalCamera NaN/1e35 overflow and secondary-view dock races (#996)."""
+    vss_mod = sys.modules.get("eve.client.script.ui.services.viewStateSvc")
+    if vss_mod is not None and "viewStateSvc" not in _HOOKED_CAMERA_GUARD_TARGETS:
+        vss_cls = getattr(vss_mod, "ViewStateSvc", None)
+        orig_open_view = getattr(vss_cls, "_OpenView", None) if vss_cls is not None else None
+        if orig_open_view is not None and not getattr(orig_open_view, "_evomu_camera_guard", False):
+            def _wrapped_open_view(self, viewInfo, reopen=False, cameraID=None, **kwargs):
+                view_type_enum = getattr(vss_mod, "ViewType", None)
+                view_type_primary = getattr(view_type_enum, "Primary", None) if view_type_enum is not None else None
+                view_type_secondary = getattr(view_type_enum, "Secondary", None) if view_type_enum is not None else None
+                old_view = getattr(self, "primaryInfo", None)
+                active_view = getattr(self, "activeViewInfo", None)
+                is_secondary_active = (
+                    view_type_secondary is not None
+                    and active_view is not None
+                    and hasattr(active_view, "GetViewType")
+                    and active_view.GetViewType() == view_type_secondary
+                )
+                if (
+                    is_secondary_active
+                    and view_type_primary is not None
+                    and viewInfo is not None
+                    and hasattr(viewInfo, "GetViewType")
+                    and viewInfo.GetViewType() == view_type_primary
+                    and getattr(old_view, "name", None) == "inflight"
+                    and getattr(viewInfo, "name", None) != "inflight"
+                ):
+                    sm = getattr(__builtin__, "sm", None)
+                    if sm is not None and hasattr(sm, "IsServiceRunning") and sm.IsServiceRunning("sceneManager"):
+                        scene_mgr = sm.GetService("sceneManager")
+                        curr_cam = scene_mgr.GetActivePrimaryCamera() if hasattr(scene_mgr, "GetActivePrimaryCamera") else None
+                        if curr_cam is not None and getattr(curr_cam, "isActive", False) and hasattr(scene_mgr, "DeactivateFISCamera"):
+                            scene_mgr.DeactivateFISCamera()
+                return orig_open_view(self, viewInfo, reopen=reopen, cameraID=cameraID, **kwargs)
+            _wrapped_open_view._evomu_camera_guard = True
+            vss_cls._OpenView = _wrapped_open_view
+        _HOOKED_CAMERA_GUARD_TARGETS.add("viewStateSvc")
+
+    base_cam_mod = sys.modules.get("eve.client.script.ui.camera.baseCamera")
+    if base_cam_mod is not None and "baseCamera" not in _HOOKED_CAMERA_GUARD_TARGETS:
+        cam_cls = getattr(base_cam_mod, "Camera", None)
+        if cam_cls is not None:
+            orig_dir_offset = getattr(cam_cls, "GetLookAtDirectionWithOffset", None)
+            if orig_dir_offset is not None and not getattr(orig_dir_offset, "_evomu_camera_guard", False):
+                def _wrapped_get_look_at_dir_with_offset(self):
+                    _sanitize_camera_state(self)
+                    eye_pos = getattr(self, "_eyePosition", (0.0, 500.0, 1000.0))
+                    at_pos = getattr(self, "_atPosition", (0.0, 0.0, 0.0))
+                    eye_off = getattr(self, "_eyeOffset", None)
+                    at_off = getattr(self, "_atOffset", None)
+                    if not (
+                        _is_finite_safe_vec3(eye_pos)
+                        and _is_finite_safe_vec3(at_pos)
+                        and (eye_off is None or _is_finite_safe_vec3(eye_off))
+                        and (at_off is None or _is_finite_safe_vec3(at_off))
+                    ):
+                        return _safe_direction_vec3(eye_pos, at_pos)
+                    res = orig_dir_offset(self)
+                    if not _is_finite_safe_vec3(res, limit=2.0):
+                        return _safe_direction_vec3(eye_pos, at_pos)
+                    return res
+                _wrapped_get_look_at_dir_with_offset._evomu_camera_guard = True
+                cam_cls.GetLookAtDirectionWithOffset = _wrapped_get_look_at_dir_with_offset
+
+            orig_dir = getattr(cam_cls, "GetLookAtDirection", None)
+            if orig_dir is not None and not getattr(orig_dir, "_evomu_camera_guard", False):
+                def _wrapped_get_look_at_dir(self):
+                    _sanitize_camera_state(self)
+                    eye_pos = getattr(self, "_eyePosition", (0.0, 500.0, 1000.0))
+                    zoom_pt = self.GetZoomToPoint() if hasattr(self, "GetZoomToPoint") else getattr(self, "_atPosition", (0.0, 0.0, 0.0))
+                    if not (_is_finite_safe_vec3(eye_pos) and _is_finite_safe_vec3(zoom_pt)):
+                        return _safe_direction_vec3(eye_pos, getattr(self, "_atPosition", (0.0, 0.0, 0.0)))
+                    res = orig_dir(self)
+                    if not _is_finite_safe_vec3(res, limit=2.0):
+                        return _safe_direction_vec3(eye_pos, zoom_pt)
+                    return res
+                _wrapped_get_look_at_dir._evomu_camera_guard = True
+                cam_cls.GetLookAtDirection = _wrapped_get_look_at_dir
+        _HOOKED_CAMERA_GUARD_TARGETS.add("baseCamera")
+
+    tac_mod = sys.modules.get("eve.client.script.ui.camera.tacticalCamera")
+    if tac_mod is not None and "tacticalCamera" not in _HOOKED_CAMERA_GUARD_TARGETS:
+        tac_cls = getattr(tac_mod, "TacticalCamera", None)
+        if tac_cls is not None:
+            orig_on_activated = getattr(tac_cls, "OnActivated", None)
+            if orig_on_activated is not None and not getattr(orig_on_activated, "_evomu_camera_guard", False):
+                def _wrapped_on_activated(self, **kwargs):
+                    _sanitize_camera_state(self)
+                    last_cam = kwargs.get("lastCamera")
+                    if last_cam is not None:
+                        _sanitize_camera_state(last_cam)
+                    return orig_on_activated(self, **kwargs)
+                _wrapped_on_activated._evomu_camera_guard = True
+                tac_cls.OnActivated = _wrapped_on_activated
+
+            orig_on_deactivated = getattr(tac_cls, "OnDeactivated", None)
+            if orig_on_deactivated is not None and not getattr(orig_on_deactivated, "_evomu_camera_guard", False):
+                def _wrapped_on_deactivated(self):
+                    res = orig_on_deactivated(self)
+                    _sanitize_camera_state(self)
+                    return res
+                _wrapped_on_deactivated._evomu_camera_guard = True
+                tac_cls.OnDeactivated = _wrapped_on_deactivated
+
+            orig_get_new_dir = getattr(tac_cls, "_GetNewDirection", None)
+            if orig_get_new_dir is not None and not getattr(orig_get_new_dir, "_evomu_camera_guard", False):
+                def _wrapped_get_new_direction(self, direction):
+                    if not _is_finite_safe_vec3(direction):
+                        return _safe_tactical_new_direction(direction)
+                    res = orig_get_new_dir(self, direction)
+                    if not _is_finite_safe_vec3(res, limit=2.0):
+                        return _safe_tactical_new_direction(direction)
+                    return res
+                _wrapped_get_new_direction._evomu_camera_guard = True
+                tac_cls._GetNewDirection = _wrapped_get_new_direction
+
+            orig_reset_eye_at = getattr(tac_cls, "_ResetEyeAndAtPosition", None)
+            if orig_reset_eye_at is not None and not getattr(orig_reset_eye_at, "_evomu_camera_guard", False):
+                def _wrapped_reset_eye_and_at(self, eyePos0, atPos0, distance, animate=True, duration=None):
+                    _sanitize_camera_state(self)
+                    if not _is_finite_safe_vec3(atPos0):
+                        atPos0 = list(_vec3_tuple(getattr(self, "default_atPosition", (0.0, 0.0, 0.0)), (0.0, 0.0, 0.0)))
+                        animate = False
+                    if not _is_finite_safe_vec3(eyePos0):
+                        eyePos0 = list(_vec3_tuple(getattr(self, "default_eyePosition", (0.0, 500.0, 1000.0)), (0.0, 500.0, 1000.0)))
+                        animate = False
+                    if _vec3_tuple(eyePos0, (0.0, 500.0, 1000.0)) == _vec3_tuple(atPos0, (0.0, 0.0, 0.0)):
+                        eyePos0 = [atPos0[0], atPos0[1] + 500.0, atPos0[2] + 1000.0]
+                        animate = False
+                    return orig_reset_eye_at(self, eyePos0, atPos0, distance, animate, duration)
+                _wrapped_reset_eye_and_at._evomu_camera_guard = True
+                tac_cls._ResetEyeAndAtPosition = _wrapped_reset_eye_and_at
+
+            orig_set_fixed = getattr(tac_cls, "SetAtPosToFixedDistance", None)
+            if orig_set_fixed is not None and not getattr(orig_set_fixed, "_evomu_camera_guard", False):
+                def _wrapped_set_fixed_dist(self):
+                    _sanitize_camera_state(self)
+                    return orig_set_fixed(self)
+                _wrapped_set_fixed_dist._evomu_camera_guard = True
+                tac_cls.SetAtPosToFixedDistance = _wrapped_set_fixed_dist
+
+            orig_set_rot = getattr(tac_cls, "SetAppropriateAtPositionForRotation", None)
+            if orig_set_rot is not None and not getattr(orig_set_rot, "_evomu_camera_guard", False):
+                def _wrapped_set_appropriate_at_pos(self, atPos):
+                    _sanitize_camera_state(self)
+                    if not _is_finite_safe_vec3(atPos):
+                        atPos = getattr(self, "_atPosition", [0.0, 0.0, 0.0])
+                    return orig_set_rot(self, atPos)
+                _wrapped_set_appropriate_at_pos._evomu_camera_guard = True
+                tac_cls.SetAppropriateAtPositionForRotation = _wrapped_set_appropriate_at_pos
+        _HOOKED_CAMERA_GUARD_TARGETS.add("tacticalCamera")
+
+
 def _maybe_schedule_driver_on_main_thread():
     global _DRIVER_SCHEDULED
     if _DRIVER_SCHEDULED:
@@ -322,6 +568,7 @@ def _maybe_schedule_driver_on_main_thread():
     except Exception:
         return
     _install_fsd_typelist_preload_hook()
+    _install_camera_dock_guard()
     _DRIVER_SCHEDULED = True
     try:
         if os.environ.get("EVOMU_PLAYTESTER_PORT") or os.environ.get("EVOMU_PLAYTESTER_CFG"):
@@ -340,6 +587,7 @@ class _EvomuMetaHook(object):
         _install_xmpp_plaintext_guard()
         _install_xmpp_port_guard()
         _install_fsd_typelist_preload_hook()
+        _install_camera_dock_guard()
         _maybe_schedule_driver_on_main_thread()
         return None
 

@@ -524,6 +524,7 @@ async fn test_z1_to_z8_real_client_session_diff_and_journey_contract() {
         site_src.contains("schedule_startup")
             && site_src.contains("_install_logmodule_hook")
             && site_src.contains("_install_xmpp_port_guard")
+            && site_src.contains("_install_camera_dock_guard")
     );
     for j in journeys {
         let jid = j["id"].as_str().expect("journey id string");
