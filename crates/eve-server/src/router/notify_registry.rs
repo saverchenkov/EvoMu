@@ -3225,6 +3225,10 @@ define_notifications! {
             PyRep::String("attack".into()),
         ]],
     },
+    OnDroneControlLost => "OnDroneControlLost" ("charid") {
+        fields: { drone_id: i64 },
+        samples: || vec![vec![PyRep::Integer(100_000_020)]],
+    },
     OnDroneStateChange => "OnDroneStateChange" ("charid") {
         fields: {
             drone_id: i64,
@@ -3866,6 +3870,16 @@ define_notifications! {
     },
     OnSafeLogoffActivated => "OnSafeLogoffActivated" ("charid") {
         samples: || vec![vec![]],
+    },
+    OnSafeLogoffFailed => "OnSafeLogoffFailed" ("charid") {
+        fields: { failed_conditions: Vec<String> },
+        samples: || vec![vec![PyRep::List(vec![PyRep::String(
+            "SAFE_LOGOFF_DOCKED".into(),
+        )])]],
+    },
+    OnSafeLogoffTimerStarted => "OnSafeLogoffTimerStarted" ("charid") {
+        fields: { safe_logoff_time: i64 },
+        samples: || vec![vec![PyRep::Integer(1_335_000_000_000_000_00)]],
     },
     ProcessGodmaPrimeLocation => "ProcessGodmaPrimeLocation" ("charid") {
         fields: { location_id: i64, data: PyRep },

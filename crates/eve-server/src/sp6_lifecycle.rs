@@ -40,6 +40,10 @@ pub use drone_return::{
     step_returning_drones,
 };
 
+use crate::router::notify_registry::{
+    push_typed_session_notification, OnDroneControlLost, OnSafeLogoffAborted, OnSafeLogoffFailed,
+    OnSafeLogoffTimerStarted,
+};
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime};
 pub use eve_db::{
@@ -1504,10 +1508,10 @@ pub async fn handle_safe_logoff(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let now_unix = ctx.now_unix();
-    let mut failed_conditions: Vec<PyRep> = Vec::new();
+    let mut failed_conditions: Vec<String> = Vec::new();
 
     if session.station_id.is_some() || session.structure_id.is_some() {
-        failed_conditions.push(PyRep::String("SAFE_LOGOFF_DOCKED".into()));
+        failed_conditions.push("SAFE_LOGOFF_DOCKED".to_string());
     }
     let ship_id = session.ship_id.unwrap_or_else(|| {
         ctx.db
@@ -1536,26 +1540,26 @@ pub async fn handle_safe_logoff(
     if ship_id > 0 && sys_id > 0 && session.station_id.is_none() && session.structure_id.is_none() {
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
         if sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
-            failed_conditions.push(PyRep::String("SAFE_LOGOFF_WARP_SCRAMBLED".into()));
+            failed_conditions.push("SAFE_LOGOFF_WARP_SCRAMBLED".to_string());
         }
         for code in safe_logoff_blocking_space_conditions(ctx, char_id, ship_id, sys_id) {
-            failed_conditions.push(PyRep::String(code.into()));
+            failed_conditions.push(code.to_string());
         }
     }
 
     let (weap_until, npc_until, pvp_until, crim_until) =
         active_timers_for_char(ctx, char_id, now_unix);
     if weap_until > now_unix {
-        failed_conditions.push(PyRep::String("SAFE_LOGOFF_WEAPONS_TIMER".into()));
+        failed_conditions.push("SAFE_LOGOFF_WEAPONS_TIMER".to_string());
     }
     if npc_until > now_unix {
-        failed_conditions.push(PyRep::String("SAFE_LOGOFF_NPC_TIMER".into()));
+        failed_conditions.push("SAFE_LOGOFF_NPC_TIMER".to_string());
     }
     if pvp_until > now_unix {
-        failed_conditions.push(PyRep::String("SAFE_LOGOFF_PVP_TIMER".into()));
+        failed_conditions.push("SAFE_LOGOFF_PVP_TIMER".to_string());
     }
     if crim_until > now_unix {
-        failed_conditions.push(PyRep::String("SAFE_LOGOFF_CRIMINAL_TIMER".into()));
+        failed_conditions.push("SAFE_LOGOFF_CRIMINAL_TIMER".to_string());
     }
 
     let self_destruct_active = with_combat_runtime(ctx, |rt| {
@@ -1568,19 +1572,20 @@ pub async fn handle_safe_logoff(
             .is_some_and(|cd| now_unix < cd.detonate_at_unix)
     });
     if self_destruct_active {
-        failed_conditions.push(PyRep::String("SAFE_LOGOFF_SELF_DESTRUCT_ACTIVE".into()));
+        failed_conditions.push("SAFE_LOGOFF_SELF_DESTRUCT_ACTIVE".to_string());
     }
 
     if !failed_conditions.is_empty() {
-        let list_rep = PyRep::List(failed_conditions);
-        let notif_args = vec![list_rep.clone()];
-        ctx.notify(
-            NotificationTarget::Character(char_id),
-            "OnSafeLogoffFailed",
-            "charid",
-            notif_args.clone(),
+        let list_rep = PyRep::List(
+            failed_conditions
+                .iter()
+                .cloned()
+                .map(PyRep::String)
+                .collect(),
         );
-        session.push_notification("OnSafeLogoffFailed", notif_args);
+        let fail_notif = OnSafeLogoffFailed { failed_conditions };
+        ctx.emit_typed(NotificationTarget::Character(char_id), fail_notif.clone());
+        push_typed_session_notification(session, fail_notif);
         return Ok(list_rep);
     }
 
@@ -1606,14 +1611,11 @@ pub async fn handle_safe_logoff(
     });
 
     let safe_logoff_ft = unix_to_filetime(complete_at_unix);
-    let started_args = vec![PyRep::Integer(safe_logoff_ft)];
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnSafeLogoffTimerStarted",
-        "charid",
-        started_args.clone(),
-    );
-    session.push_notification("OnSafeLogoffTimerStarted", started_args);
+    let started_notif = OnSafeLogoffTimerStarted {
+        safe_logoff_time: safe_logoff_ft,
+    };
+    ctx.emit_typed(NotificationTarget::Character(char_id), started_notif.clone());
+    push_typed_session_notification(session, started_notif);
 
     Ok(PyRep::List(vec![]))
 }
@@ -1630,14 +1632,11 @@ pub fn handle_abort_safe_logoff(
     with_mut_sp6_state(&ctx.db, |st, _snap| {
         st.safe_logoffs.remove(&char_id);
     });
-    let abort_args = vec![PyRep::String(reason_code.to_string())];
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnSafeLogoffAborted",
-        "charid",
-        abort_args.clone(),
-    );
-    session.push_notification("OnSafeLogoffAborted", abort_args);
+    let abort_notif = OnSafeLogoffAborted {
+        reason_code: reason_code.to_string(),
+    };
+    ctx.emit_typed(NotificationTarget::Character(char_id), abort_notif.clone());
+    push_typed_session_notification(session, abort_notif);
     Ok(PyRep::Bool(true))
 }
 
@@ -1659,11 +1658,11 @@ pub fn maybe_abort_safe_logoff_on_action(
             .is_some_and(|entry| !entry.completed)
     });
     if aborted {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnSafeLogoffAborted",
-            "charid",
-            vec![PyRep::String(reason_code.to_string())],
+            OnSafeLogoffAborted {
+                reason_code: reason_code.to_string(),
+            },
         );
     }
     aborted
@@ -2244,14 +2243,9 @@ pub async fn handle_cmd_abandon_drone(
     }
 
     for &(bid, _) in &abandoned_balls {
-        let abandon_args = vec![PyRep::Integer(bid)];
-        ctx.notify(
-            crate::router::NotificationTarget::Character(char_id),
-            "OnDroneControlLost",
-            "charid",
-            abandon_args.clone(),
-        );
-        session.push_notification("OnDroneControlLost", abandon_args);
+        let abandon_notif = OnDroneControlLost { drone_id: bid };
+        ctx.emit_typed(NotificationTarget::Character(char_id), abandon_notif.clone());
+        push_typed_session_notification(session, abandon_notif);
     }
 
     Ok(PyRep::Dict(vec![]))

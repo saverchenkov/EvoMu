@@ -911,15 +911,21 @@ pub async fn activate_superweapon_with_args(
         None,
     )
     .unwrap_or(if is_slash { 6472 } else { 4489 });
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnGodmaShipEffect",
-        "charid",
-        vec![
-            PyRep::Integer(module_id),
-            PyRep::Integer(godma_effect_id),
-            PyRep::Bool(true),
-        ],
+        crate::router::notify_registry::OnGodmaShipEffect {
+            item_id: module_id,
+            effect: PyRep::Integer(godma_effect_id),
+            start_or_time: PyRep::Bool(true),
+            start: None,
+            active: None,
+            environment: None,
+            start_time: None,
+            duration: None,
+            repeat: None,
+            error: None,
+            actual_stop_time: None,
+        },
     );
     if !is_slash {
         let tgt_id = hit_targets.first().copied().unwrap_or(0);
@@ -939,20 +945,20 @@ pub async fn activate_superweapon_with_args(
             (PyRep::String("isWrecking".into()), PyRep::Bool(false)),
             (PyRep::String("isBanked".into()), PyRep::Bool(false)),
         ]);
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnDamageMessage",
-            "charid",
-            vec![dmg_dict.clone()],
+            crate::router::notify_registry::OnDamageMessage {
+                damage_messages_args: dmg_dict.clone(),
+            },
         );
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnDamageMessages",
-            "charid",
-            vec![PyRep::List(vec![PyRep::Tuple(vec![
-                PyRep::String("AttackHit".into()),
-                dmg_dict,
-            ])])],
+            crate::router::notify_registry::OnDamageMessages {
+                dmgmsgs: vec![PyRep::Tuple(vec![
+                    PyRep::String("AttackHit".into()),
+                    dmg_dict,
+                ])],
+            },
         );
     }
 

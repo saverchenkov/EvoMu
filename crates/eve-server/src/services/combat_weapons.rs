@@ -4,6 +4,24 @@
 
 use super::*;
 
+fn emit_limited_engagement_created(ctx: &ServerContext, char_a: i64, char_b: i64) {
+    let timeout_ft = ctx.now_blueos_filetime_ticks() + 3_000_000_000;
+    ctx.emit_typed(
+        NotificationTarget::Character(char_a),
+        crate::router::notify_registry::OnCrimewatchEngagementCreated {
+            other_char_id: char_b,
+            timeout: timeout_ft,
+        },
+    );
+    ctx.emit_typed(
+        NotificationTarget::Character(char_b),
+        crate::router::notify_registry::OnCrimewatchEngagementCreated {
+            other_char_id: char_a,
+            timeout: timeout_ft,
+        },
+    );
+}
+
 pub async fn handle_weapons(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -280,9 +298,7 @@ pub async fn handle_weapons(
                                 rt.add_limited_engagement(char_id, vc, now_unix);
                                 rt.add_limited_engagement(vc, char_id, now_unix);
                             });
-                            let timeout_ft = ctx.now_blueos_filetime_ticks() + 3_000_000_000;
-                            ctx.notify(NotificationTarget::Character(char_id), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(vc), PyRep::Integer(timeout_ft)]);
-                            ctx.notify(NotificationTarget::Character(vc), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(char_id), PyRep::Integer(timeout_ft)]);
+                            emit_limited_engagement_created(ctx, char_id, vc);
                         }
                         let is_new_agg = crate::services::combat_crimewatch::crimewatch_timers::is_new_pvp_aggression(ctx, char_id, vc, is_pod_target, now_unix);
                         let c_stage = crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id);
@@ -793,20 +809,20 @@ pub async fn handle_weapons(
                                 );
                             }
                         }
-                        ctx.notify(
+                        ctx.emit_typed(
                             NotificationTarget::Character(char_id),
-                            "OnModuleAttributeChanges",
-                            "charid",
-                            vec![PyRep::List(vec![PyRep::Tuple(vec![
-                                PyRep::String("OnModuleAttributeChange".into()),
-                                PyRep::Integer(char_id),
-                                PyRep::Integer(charge_item_id),
-                                PyRep::Integer(eve_sde::attr_ids::DAMAGE as i64),
-                                PyRep::Integer(ctx.now_client_sim_filetime_ticks()),
-                                PyRep::Real(next_dmg),
-                                PyRep::Real(prev_dmg),
-                                PyRep::None,
-                            ])])],
+                            crate::router::notify_registry::OnModuleAttributeChanges {
+                                changes: PyRep::List(vec![PyRep::Tuple(vec![
+                                    PyRep::String("OnModuleAttributeChange".into()),
+                                    PyRep::Integer(char_id),
+                                    PyRep::Integer(charge_item_id),
+                                    PyRep::Integer(eve_sde::attr_ids::DAMAGE as i64),
+                                    PyRep::Integer(ctx.now_client_sim_filetime_ticks()),
+                                    PyRep::Real(next_dmg),
+                                    PyRep::Real(prev_dmg),
+                                    PyRep::None,
+                                ])]),
+                            },
                         );
                     } else {
                         crystal_damage_after = ctx.db.with_snapshot(|snap| {
@@ -1341,9 +1357,7 @@ pub async fn handle_weapons(
                     }
                 });
                 if le_created_or_refreshed {
-                    let timeout_ft = ctx.now_blueos_filetime_ticks() + 3_000_000_000;
-                    ctx.notify(NotificationTarget::Character(char_id), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(victim_char_id), PyRep::Integer(timeout_ft)]);
-                    ctx.notify(NotificationTarget::Character(victim_char_id), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(char_id), PyRep::Integer(timeout_ft)]);
+                    emit_limited_engagement_created(ctx, char_id, victim_char_id);
                 }
                 if !is_legal && sys_sec > 0.0 && !is_mobile_struct && is_new_agg {
                     crate::services::combat_crimewatch::crimewatch_timers::record_illegal_pvp_penalties_if_new(
