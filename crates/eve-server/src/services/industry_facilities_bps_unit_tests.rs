@@ -598,7 +598,7 @@ fn facility_manager_c9_typed_replies_and_wire_passthrough() {
     assert_eq!(by_id_list.len(), 1);
     assert_canonical_facility_rep(&by_id_list[0]);
 
-    // 2. GetFacility returns canonical facility KeyVal or None for missing ID
+    // 2. GetFacility returns canonical facility KeyVal or FacilityNotFound error for missing ID
     let single = call_ind_wire_roundtrip(
         &ctx,
         &mut sess,
@@ -608,15 +608,17 @@ fn facility_manager_c9_typed_replies_and_wire_passthrough() {
         &kw,
     );
     assert_canonical_facility_rep(&single);
-    let missing = call_ind_wire_roundtrip(
+    let missing_err = handle_industry_facilities_bps(
         &ctx,
         &mut sess,
         "facilityManager",
         "GetFacility",
         &[PyRep::Integer(999_999_999)],
         &kw,
-    );
-    assert_eq!(missing, PyRep::None);
+    )
+    .expect("handled")
+    .expect_err("missing facility should return FacilityNotFound");
+    assert_eq!(missing_err.code, "FacilityNotFound");
 
     let expected_st_type = ctx
         .sde
