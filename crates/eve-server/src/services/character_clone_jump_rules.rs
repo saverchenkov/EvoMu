@@ -991,6 +991,7 @@ pub async fn activate_clone_vat_bay(
     });
     consumed?;
 
+    let _ = sys.remove_module_cycle(ship_id, module_id).await;
     if let Err(e) = sys.add_module_cycle(crate::system_actor::ActiveModuleCycle {
         ship_id,
         module_id,

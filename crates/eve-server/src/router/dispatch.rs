@@ -390,7 +390,6 @@ impl ServerContext {
                                         "PersistenceFailure"
                                             | "DatabasePersistenceError"
                                             | "ValidationError"
-                                            | "InternalError"
                                     )
                                 );
                                 if !preserve_existing_err {
