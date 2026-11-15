@@ -170,6 +170,7 @@ async fn maybe_with_dispatch_tx_error<F, R>(outer: bool, fut: F) -> R
 where
     F: std::future::Future<Output = R>,
 {
+    let fut = Box::pin(fut);
     if outer {
         DISPATCH_TX_ERROR
             .scope(std::cell::RefCell::new(None), fut)
@@ -193,6 +194,7 @@ async fn maybe_with_staged_dispatch_notifications<F, R>(
 where
     F: std::future::Future<Output = R>,
 {
+    let fut = Box::pin(fut);
     if outer {
         crate::router::cache_notifications::with_staged_dispatch_notifications(
             pend, notify_tx, fut,
@@ -260,7 +262,7 @@ impl ServerContext {
                 &self.notify_tx,
                 crate::router::cache_notifications::with_active_dispatch_char(
                     initial_active_char_id,
-                    async {
+                    Box::pin(async {
                         let mut res = match CatchUnwindFuture(dispatch_rpc_inner_boxed(
                             self,
                             session,
@@ -411,7 +413,7 @@ impl ServerContext {
                         }
 
                         res
-                    },
+                    }),
                 ),
             ),
         )
