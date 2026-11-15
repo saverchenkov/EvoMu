@@ -23,6 +23,7 @@ pub mod services;
 pub mod sp6_lifecycle;
 pub mod sso;
 pub mod starter_characters;
+pub mod static_data;
 pub mod system_actor;
 pub mod world_seeder;
 

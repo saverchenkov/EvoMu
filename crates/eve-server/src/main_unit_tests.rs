@@ -704,3 +704,139 @@ async fn clean_shutdown_sequence_stops_accepting_drains_and_persists_clock_and_w
     assert_eq!(persisted_offset, 7_200);
     assert!(clean_marker);
 }
+
+fn write_test_sde_db(
+    db_path: &std::path::Path,
+    client_build: &str,
+    client_release: &str,
+    resource_count: &str,
+    combined_sha256: &str,
+) {
+    let conn = rusqlite::Connection::open(db_path).expect("open temp sde sqlite");
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS _evomu_sde_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+    )
+    .expect("create _evomu_sde_meta");
+    for (k, v) in [
+        ("schema_version", "1"),
+        ("client_build", client_build),
+        ("client_release", client_release),
+        ("resource_count", resource_count),
+        ("combined_resource_sha256", combined_sha256),
+    ] {
+        conn.execute(
+            "INSERT OR REPLACE INTO _evomu_sde_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![k, v],
+        )
+        .expect("insert _evomu_sde_meta");
+    }
+}
+
+#[test]
+fn static_data_startup_validation_fails_fast_and_honors_override() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "evomu_static_data_1119_{}_{}",
+        std::process::id(),
+        nonce
+    ));
+    std::fs::create_dir_all(&tmp_dir).expect("create temp dir");
+
+    let sde_db = tmp_dir.join("evomu_sde.sqlite");
+    let sde_manifest = tmp_dir.join("sde_import_manifest.json");
+    let quasar_db = tmp_dir.join("quasar_descriptors.sqlite");
+    let quasar_manifest = tmp_dir.join("quasar_descriptor_manifest.json");
+
+    let sample_resources_line = b"res:/staticdata/types.static:abc123:42\n";
+    let expected_res_sha256 = eve_proto::quasar::sha256_hex(sample_resources_line);
+    let manifest_json = serde_json::json!({
+        "schema_version": 1,
+        "client_build": 3698585u64,
+        "client_release": "V24.02",
+        "resources": [
+            {
+                "res_path": "res:/staticdata/types.static",
+                "md5": "abc123",
+                "byte_size": 42u64
+            }
+        ]
+    });
+    std::fs::write(
+        &sde_manifest,
+        serde_json::to_string_pretty(&manifest_json).expect("serialize sde manifest"),
+    )
+    .expect("write sde manifest");
+
+    // 1. Missing SDE DB fails fast with actionable import_sde.py instructions (macOS + Windows)
+    let missing_sde_err =
+        eve_server::static_data::validate_sde_metadata(&sde_db, &sde_manifest).unwrap_err();
+    assert!(missing_sde_err.contains("missing SDE SQLite database"));
+    assert!(missing_sde_err.contains("tools/sde-import/import_sde.py"));
+    assert!(missing_sde_err.contains("--shared-cache"));
+    assert!(missing_sde_err.contains("--allow-stale-static-data"));
+    assert!(missing_sde_err.contains("EVOMU_ALLOW_STALE_STATIC_DATA=1"));
+
+    // 2. DB missing `_evomu_sde_meta` is rejected cleanly
+    {
+        let conn = rusqlite::Connection::open(&sde_db).expect("open empty sde");
+        conn.execute_batch("CREATE TABLE sde_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .expect("create sde_meta");
+    }
+    let no_meta_err =
+        eve_server::static_data::validate_sde_metadata(&sde_db, &sde_manifest).unwrap_err();
+    assert!(no_meta_err.contains("_evomu_sde_meta"));
+    assert!(no_meta_err.contains("import_sde.py"));
+
+    // 3. Stale client_build, resource_count, and combined_resource_sha256 are caught
+    write_test_sde_db(&sde_db, "3690000", "V24.02", "1", &expected_res_sha256);
+    let stale_build_err =
+        eve_server::static_data::validate_sde_metadata(&sde_db, &sde_manifest).unwrap_err();
+    assert!(stale_build_err.contains("client_build mismatch"));
+
+    write_test_sde_db(&sde_db, "3698585", "V24.02", "99", &expected_res_sha256);
+    let stale_count_err =
+        eve_server::static_data::validate_sde_metadata(&sde_db, &sde_manifest).unwrap_err();
+    assert!(stale_count_err.contains("resource_count mismatch"));
+
+    write_test_sde_db(&sde_db, "3698585", "V24.02", "1", &"0".repeat(64));
+    let stale_hash_err =
+        eve_server::static_data::validate_sde_metadata(&sde_db, &sde_manifest).unwrap_err();
+    assert!(stale_hash_err.contains("combined_resource_sha256 mismatch"));
+
+    // 4. Matching `_evomu_sde_meta` passes O(1) verification
+    write_test_sde_db(&sde_db, "3698585", "V24.02", "1", &expected_res_sha256);
+    eve_server::static_data::validate_sde_metadata(&sde_db, &sde_manifest)
+        .expect("matching _evomu_sde_meta should pass");
+
+    // 5. Missing Quasar DB fails fast with actionable import_sde.py instructions
+    let missing_quasar_err =
+        eve_server::static_data::validate_quasar_descriptors(&quasar_db, &quasar_manifest)
+            .unwrap_err();
+    assert!(missing_quasar_err.contains("tools/sde-import/import_sde.py"));
+
+    // 6. Full startup validator rejects stale/missing DBs when `allow_stale == false`,
+    //    and succeeds with fallback fixtures when `allow_stale == true`
+    let blocked = eve_server::static_data::validate_and_load_startup_static_data_with_paths(
+        &sde_db,
+        &sde_manifest,
+        &quasar_db,
+        &quasar_manifest,
+        false,
+    );
+    assert!(blocked.is_err());
+
+    let bypassed = eve_server::static_data::validate_and_load_startup_static_data_with_paths(
+        &tmp_dir.join("absent_sde.sqlite"),
+        &sde_manifest,
+        &quasar_db,
+        &quasar_manifest,
+        true,
+    )
+    .expect("allow_stale should allow synthetic fallback startup");
+    assert!(bypassed.quasar_descriptors.get_message("google.protobuf.Empty").is_some());
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

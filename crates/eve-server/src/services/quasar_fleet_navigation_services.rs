@@ -204,6 +204,7 @@ struct ParsedLpOperation {
 fn parse_lp_operation_request(
     dyn_msg: &DynamicQuasarMessage,
     default_cid: Option<u32>,
+    descriptors: &eve_proto::quasar::QuasarDescriptorRegistry,
 ) -> Result<ParsedLpOperation, (u32, String)> {
     let op_uuid = extract_uuid(dyn_msg, 1)
         .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing operation Identifier.uuid".into()))?;
@@ -249,14 +250,12 @@ fn parse_lp_operation_request(
 
     let context_bytes = match dyn_msg.get(3) {
         Some(DynamicValue::Message(m)) => {
-            static CTX_REG: std::sync::OnceLock<Arc<eve_proto::quasar::QuasarDescriptorRegistry>> =
-                std::sync::OnceLock::new();
-            let reg = CTX_REG.get_or_init(eve_proto::quasar::QuasarDescriptorRegistry::open_default_or_empty);
             let mut ctx_msg = (**m).clone();
             if ctx_msg.full_name.is_empty() {
                 ctx_msg.full_name = "eve.assetholding.Context".to_string();
             }
-            reg.encode_dynamic(&ctx_msg)
+            descriptors
+                .encode_dynamic(&ctx_msg)
                 .map_err(|e| (STATUS_BAD_REQUEST, format!("Invalid LP operation context: {e}")))?
         }
         Some(DynamicValue::Bytes(b)) => b.clone(),
@@ -646,11 +645,12 @@ pub fn register_handlers(
 
     // 6. eve.loyaltypoints.assetholding.operation.api.DepositRequest -> DepositResponse
     let db_dep = Arc::clone(&db);
+    let desc_dep = Arc::clone(&router.descriptors);
     router.register_handler(
         "eve.loyaltypoints.assetholding.operation.api.DepositRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             crate::quasar_gateway::require_admin_role(ctx)?;
-            let op = parse_lp_operation_request(dyn_msg, ctx.effective_character_id())?;
+            let op = parse_lp_operation_request(dyn_msg, ctx.effective_character_id(), &desc_dep)?;
             let hex = op_uuid_hex(&op.op_uuid);
             let now_unix = ctx.now_unix();
 
@@ -760,11 +760,12 @@ pub fn register_handlers(
 
     // 7. eve.loyaltypoints.assetholding.operation.api.WithdrawRequest -> WithdrawResponse
     let db_wd = Arc::clone(&db);
+    let desc_wd = Arc::clone(&router.descriptors);
     router.register_handler(
         "eve.loyaltypoints.assetholding.operation.api.WithdrawRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             crate::quasar_gateway::require_admin_role(ctx)?;
-            let op = parse_lp_operation_request(dyn_msg, ctx.effective_character_id())?;
+            let op = parse_lp_operation_request(dyn_msg, ctx.effective_character_id(), &desc_wd)?;
             let hex = op_uuid_hex(&op.op_uuid);
             let now_unix = ctx.now_unix();
 

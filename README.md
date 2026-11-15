@@ -49,7 +49,7 @@ EvoMu is under active development. With the real client, some of the features ab
 
 ### Import static data
 
-The server needs the game's static data: item types, solar systems, stations, missions. The importer reads it from your client and writes `data/evomu_sde.sqlite`.
+The server needs the game's static data (item types, solar systems, stations, missions) and Quasar protobuf descriptors. The unified importer reads both from your EVE client `SharedCache`, writes `data/evomu_sde.sqlite` and `data/quasar_descriptors.sqlite`, and verifies both against their tracked manifests (`data/sde_import_manifest.json` and `data/quasar_descriptor_manifest.json`):
 
 ```bash
 git clone https://github.com/saverchenkov/EvoMu.git

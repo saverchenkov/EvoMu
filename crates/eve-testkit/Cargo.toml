@@ -20,7 +20,7 @@ eve-destiny = { path = "../eve-destiny" }
 eve-dogma = { path = "../eve-dogma" }
 eve-db = { path = "../eve-db", features = ["demo-seed"] }
 eve-sde = { path = "../eve-sde" }
-eve-server = { path = "../eve-server", features = ["demo-seed"] }
+eve-server = { path = "../eve-server", features = ["demo-seed", "testkit"] }
 proptest = { workspace = true }
 tokio = { workspace = true }
 glam = { workspace = true }

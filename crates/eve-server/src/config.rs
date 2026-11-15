@@ -389,11 +389,8 @@ impl ServerConfig {
             })?;
         }
         if let Ok(dev_jwt_str) = std::env::var("EVOMU_ALLOW_LOCAL_DEV_JWT") {
-            let v = dev_jwt_str.trim().to_ascii_lowercase();
-            if matches!(v.as_str(), "1" | "true" | "yes" | "on") {
-                cfg.feature_flags.allow_local_dev_gateway_jwt = true;
-            } else if matches!(v.as_str(), "0" | "false" | "no" | "off") {
-                cfg.feature_flags.allow_local_dev_gateway_jwt = false;
+            if let Some(enabled) = parse_bool_flag(&dev_jwt_str) {
+                cfg.feature_flags.allow_local_dev_gateway_jwt = enabled;
             }
         }
         Ok(cfg)
@@ -438,17 +435,54 @@ impl ServerConfig {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        for raw in args {
-            let arg = raw.as_ref();
-            if arg == "--" {
-                break;
-            }
-            if arg == "--gm" {
-                return true;
-            }
-        }
-        false
+        has_cli_flag(args, "--gm")
     }
+
+    /// Parses optional `--allow-stale-static-data` CLI flag bypassing startup SDE/Quasar validation
+    /// for synthetic test fixtures (`#1119`).
+    pub fn parse_cli_allow_stale_static_data<I, S>(args: I) -> bool
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        has_cli_flag(args, "--allow-stale-static-data")
+    }
+
+    /// Returns `true` when `EVOMU_ALLOW_STALE_STATIC_DATA` is set to a truthy boolean (`1/true/yes/on`).
+    pub fn env_allow_stale_static_data() -> bool {
+        std::env::var("EVOMU_ALLOW_STALE_STATIC_DATA")
+            .ok()
+            .and_then(|v| parse_bool_flag(&v))
+            .unwrap_or(false)
+    }
+}
+
+fn parse_bool_flag(raw: &str) -> Option<bool> {
+    let v = raw.trim().to_ascii_lowercase();
+    if matches!(v.as_str(), "1" | "true" | "yes" | "on") {
+        Some(true)
+    } else if matches!(v.as_str(), "0" | "false" | "no" | "off") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn has_cli_flag<I, S>(args: I, flag: &str) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    for raw in args {
+        let arg = raw.as_ref();
+        if arg == "--" {
+            break;
+        }
+        if arg == flag {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]

@@ -61,12 +61,25 @@ async fn main() -> Result<()> {
     if eve_server::config::ServerConfig::parse_cli_gm_flag(std::env::args().skip(1)) {
         cfg.feature_flags.gm_mode = true;
     }
+    let allow_stale_static_data =
+        eve_server::config::ServerConfig::parse_cli_allow_stale_static_data(std::env::args().skip(1))
+            || eve_server::config::ServerConfig::env_allow_stale_static_data();
+    let static_data =
+        eve_server::static_data::validate_and_load_startup_static_data(&cfg, allow_stale_static_data)
+            .map_err(|e| anyhow::anyhow!(e))?;
     let xmpp_listener = TcpListener::bind((cfg.bind_address.as_str(), cfg.xmpp_port))
         .await
         .map_err(|e| anyhow::anyhow!("failed to bind XMPP listener on {}:{}: {e}", cfg.bind_address, cfg.xmpp_port))?;
     let bound_xmpp_port = xmpp_listener.local_addr()?.port();
     cfg.xmpp_port = bound_xmpp_port;
-    let ctx = Arc::new(ServerContext::from_config(&cfg).map_err(|e| anyhow::anyhow!(e))?);
+    let ctx = Arc::new(
+        ServerContext::from_config_with_static_data(
+            &cfg,
+            static_data.sde,
+            static_data.quasar_descriptors,
+        )
+        .map_err(|e| anyhow::anyhow!(e))?,
+    );
     eve_server::starter_characters::provision_starter_characters(&ctx, &cfg).await;
     if let Some(token) = parse_admin_token(std::env::var("EVOMU_ADMIN_TOKEN").ok().as_deref()) {
         ctx.db
