@@ -365,7 +365,10 @@ fn test_issue_874_rehydrate_preserves_live_runtime_maps_on_checkpoint_sql_error(
         .unwrap()
         .system_sim_time_s
         .insert((0, 30_000_142), 123.5);
-    ctx.location_change_invulns.write().unwrap().insert(98_874);
+    ctx.location_change_invuln
+        .lock()
+        .unwrap()
+        .insert(98_874, 1_800_000_060);
 
     // Replace `system_checkpoint` with an incompatible view so `load_checkpoints_into_ctx` errors.
     ctx.db.with_sqlite_conn(|conn| {
@@ -395,7 +398,10 @@ fn test_issue_874_rehydrate_preserves_live_runtime_maps_on_checkpoint_sql_error(
         "checkpoint read error must not reset tactical_state (#874)"
     );
     assert!(
-        ctx.location_change_invulns.read().unwrap().contains(&98_874),
+        ctx.location_change_invuln
+            .lock()
+            .unwrap()
+            .contains_key(&98_874),
         "checkpoint read error must not clear live invuln map via fallback default apply (#874)"
     );
 
