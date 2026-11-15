@@ -12,6 +12,7 @@ use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::esi::{EsiHttpRequest, EsiRouter};
 use eve_server::router::ServerContext;
+use eve_testkit::client_harness::ContractValidationMode;
 
 const JITA_SOLAR_SYSTEM: u32 = 30_000_142;
 const JITA_STATION: i64 = 60_003_760;
@@ -50,7 +51,8 @@ async fn login_and_select(ctx: &ServerContext, session_id: u64, char_id: i64) ->
     let mut sess = SessionState::new(session_id);
     common::login_pilot(ctx, &mut sess, "demo", "demo-secret").await;
     let kw = HashMap::new();
-    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw, None)
+    common::borrow_wire_harness(ctx, &mut sess)
+        .call("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw)
         .await
         .expect("SelectCharacterID");
     sess
@@ -67,7 +69,8 @@ async fn test_hypernet_hypercore_sizing_and_expiry_refund_lifecycle() {
     let mut s2 = SessionState::new(2102);
     common::login_pilot(&ctx, &mut s2, "other", "other-secret").await;
     let kw = HashMap::new();
-    ctx.dispatch_rpc(&mut s2, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(p2)], &kw, None)
+    common::borrow_wire_harness(&ctx, &mut s2)
+        .call("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(p2)], &kw)
         .await
         .expect("SelectCharacterID p2");
 
@@ -95,11 +98,20 @@ async fn test_hypernet_hypercore_sizing_and_expiry_refund_lifecycle() {
     });
 
     // 1. Verify node count validation: 8, 16, 48, 512 allowed; others rejected
-    let bad_nodes = ctx.dispatch_rpc(&mut s1, "raffleProxy", None, "CreateRaffle", &[PyRep::Dict(vec![
-        (PyRep::String("itemID".into()), PyRep::Integer(valid_item)),
-        (PyRep::String("ticketCount".into()), PyRep::Integer(20)),
-        (PyRep::String("ticketPrice".into()), PyRep::Real(1_000_000.0)),
-    ])], &kw, None).await.unwrap_err();
+    let bad_nodes = common::borrow_wire_harness(&ctx, &mut s1)
+        .call(
+            "raffleProxy",
+            None,
+            "CreateRaffle",
+            &[PyRep::Dict(vec![
+                (PyRep::String("itemID".into()), PyRep::Integer(valid_item)),
+                (PyRep::String("ticketCount".into()), PyRep::Integer(20)),
+                (PyRep::String("ticketPrice".into()), PyRep::Real(1_000_000.0)),
+            ])],
+            &kw,
+        )
+        .await
+        .expect_err("invalid raffle ticket count 20 must fail");
     assert_eq!(bad_nodes.code, "InvalidRaffleTicketCount");
 
     // 1b. Reject zero, negative, sub-1 ISK, NaN, and omitted ticketPrice (#554)
@@ -109,15 +121,14 @@ async fn test_hypernet_hypercore_sizing_and_expiry_refund_lifecycle() {
         vec![PyRep::Integer(valid_item), PyRep::Integer(8), PyRep::Real(-500.0)],
         vec![PyRep::Integer(valid_item), PyRep::Integer(8), PyRep::Real(f64::NAN)],
     ] {
-        let err = ctx
-            .dispatch_rpc(&mut s1, "raffleProxy", None, "CreateRaffle", &bad_price_args, &kw, None)
+        let err = common::borrow_wire_harness(&ctx, &mut s1)
+            .call("raffleProxy", None, "CreateRaffle", &bad_price_args, &kw)
             .await
-            .unwrap_err();
+            .expect_err("invalid ticket price must fail");
         assert_eq!(err.code, "InvalidTicketPrice");
     }
-    let wrapped_count = ctx
-        .dispatch_rpc(
-            &mut s1,
+    let wrapped_count = common::borrow_wire_harness(&ctx, &mut s1)
+        .call(
             "raffleProxy",
             None,
             "CreateRaffle",
@@ -127,31 +138,49 @@ async fn test_hypernet_hypercore_sizing_and_expiry_refund_lifecycle() {
                 PyRep::Real(1_000.0),
             ],
             &kw,
-            None,
         )
         .await
-        .unwrap_err();
+        .expect_err("wrapped u32 ticket count must fail");
     assert_eq!(wrapped_count.code, "InvalidRaffleTicketCount");
 
     // 2. Verify HyperCore requirement scaling with total price (V24 node-count invariant)
-    let cores_8 = eve_server::services::hypernet_raffle_ops::compute_required_hypercores(100_000_000.0, 8).unwrap();
-    let cores_16 = eve_server::services::hypernet_raffle_ops::compute_required_hypercores(100_000_000.0, 16).unwrap();
-    let cores_48 = eve_server::services::hypernet_raffle_ops::compute_required_hypercores(100_000_000.0, 48).unwrap();
-    let cores_512 = eve_server::services::hypernet_raffle_ops::compute_required_hypercores(100_000_000.0, 512).unwrap();
+    let cores_8 = eve_server::services::hypernet_raffle_ops::compute_required_hypercores(100_000_000.0, 8)
+        .expect("compute_required_hypercores 8");
+    let cores_16 = eve_server::services::hypernet_raffle_ops::compute_required_hypercores(100_000_000.0, 16)
+        .expect("compute_required_hypercores 16");
+    let cores_48 = eve_server::services::hypernet_raffle_ops::compute_required_hypercores(100_000_000.0, 48)
+        .expect("compute_required_hypercores 48");
+    let cores_512 = eve_server::services::hypernet_raffle_ops::compute_required_hypercores(100_000_000.0, 512)
+        .expect("compute_required_hypercores 512");
     assert_eq!(cores_8, 14);
     assert_eq!(cores_16, 14);
     assert_eq!(cores_48, 14);
     assert_eq!(cores_512, 14);
 
     // 3. Create 48-node raffle and verify HyperCores consumed from hangar
-    let create_rep = ctx.dispatch_rpc(&mut s1, "raffleProxy", None, "CreateRaffle", &[PyRep::Dict(vec![
-        (PyRep::String("itemID".into()), PyRep::Integer(valid_item)),
-        (PyRep::String("ticketCount".into()), PyRep::Integer(48)),
-        (PyRep::String("ticketPrice".into()), PyRep::Real(1_000_000.0)),
-    ])], &kw, None).await.expect("CreateRaffle 48 nodes");
+    let create_rep = common::borrow_wire_harness(&ctx, &mut s1)
+        .call(
+            "raffleProxy",
+            None,
+            "CreateRaffle",
+            &[PyRep::Dict(vec![
+                (PyRep::String("itemID".into()), PyRep::Integer(valid_item)),
+                (PyRep::String("ticketCount".into()), PyRep::Integer(48)),
+                (PyRep::String("ticketPrice".into()), PyRep::Real(1_000_000.0)),
+            ])],
+            &kw,
+        )
+        .await
+        .expect("CreateRaffle 48 nodes");
     let PyRep::KeyVal(r_kv) = create_rep else { panic!("expected KeyVal") };
-    let raffle_id = r_kv.get("raffle_id").and_then(|v| v.as_i64()).unwrap();
-    let cores_used = r_kv.get("hypercores_used").and_then(|v| v.as_i64()).unwrap();
+    let raffle_id = r_kv
+        .get("raffle_id")
+        .and_then(|v| v.as_i64())
+        .expect("raffle_id");
+    let cores_used = r_kv
+        .get("hypercores_used")
+        .and_then(|v| v.as_i64())
+        .expect("hypercores_used");
     assert!(cores_used > 0);
 
     let cores_remaining = ctx.db.with_snapshot(|s| s.items[&hypercore_item].quantity);
@@ -164,9 +193,16 @@ async fn test_hypernet_hypercore_sizing_and_expiry_refund_lifecycle() {
 
     // 4. P2 buys 2 tickets (2,000,000 ISK)
     let p2_bal_before = ctx.db.with_snapshot(|s| s.characters[&p2].balance);
-    let buy_rep = ctx.dispatch_rpc(&mut s2, "raffleProxy", None, "BuyRandomTickets", &[
-        PyRep::Integer(raffle_id), PyRep::Integer(2),
-    ], &kw, None).await.expect("BuyRandomTickets");
+    let buy_rep = common::borrow_wire_harness(&ctx, &mut s2)
+        .call(
+            "raffleProxy",
+            None,
+            "BuyRandomTickets",
+            &[PyRep::Integer(raffle_id), PyRep::Integer(2)],
+            &kw,
+        )
+        .await
+        .expect("BuyRandomTickets");
     assert!(matches!(buy_rep, PyRep::KeyVal(_)));
 
     let p2_bal_after_buy = ctx.db.with_snapshot(|s| s.characters[&p2].balance);
@@ -204,7 +240,8 @@ async fn test_item_trader_atomic_exchange_per_recipe() {
     let mut sess = login_and_select(&ctx, 2103, char_id).await;
 
     let kw = HashMap::new();
-    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+    common::borrow_wire_harness(&ctx, &mut sess)
+        .call("stationSvc", None, "Undock", &[], &kw)
         .await
         .expect("Undock into space");
     let ship_id = sess.ship_id.expect("Active ship in space");
@@ -223,27 +260,63 @@ async fn test_item_trader_atomic_exchange_per_recipe() {
     });
 
     // 1. Out of range check (> 30km interactionRange)
-    let out_of_range = ctx.dispatch_rpc(&mut sess, "beyonce", None, "CallComponentFromClient", &[
-        PyRep::Integer(trader_entity_id), PyRep::String("itemTrader".into()),
-        PyRep::String("ProcessTrade".into()), PyRep::Integer(67), PyRep::Integer(1),
-    ], &kw, None).await.unwrap_err();
+    let out_of_range = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
+            "beyonce",
+            None,
+            "CallComponentFromClient",
+            &[
+                PyRep::Integer(trader_entity_id),
+                PyRep::String("itemTrader".into()),
+                PyRep::String("ProcessTrade".into()),
+                PyRep::Integer(67),
+                PyRep::Integer(1),
+            ],
+            &kw,
+        )
+        .await
+        .expect_err("out of range item trader call must fail");
     assert_eq!(out_of_range.code, "ItemTraderOutOfRange");
 
     // Move ship within interaction range (15km position => 25km distance to trader)
     assert!(sys_handle.set_ball_position(ship_id, glam::DVec3::new(15_000.0, 0.0, 0.0)).await);
 
     // 2. Invalid recipe ID rejected
-    let bad_recipe = ctx.dispatch_rpc(&mut sess, "beyonce", None, "CallComponentFromClient", &[
-        PyRep::Integer(trader_entity_id), PyRep::String("itemTrader".into()),
-        PyRep::String("ProcessTrade".into()), PyRep::Integer(99999), PyRep::Integer(1),
-    ], &kw, None).await.unwrap_err();
+    let bad_recipe = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
+            "beyonce",
+            None,
+            "CallComponentFromClient",
+            &[
+                PyRep::Integer(trader_entity_id),
+                PyRep::String("itemTrader".into()),
+                PyRep::String("ProcessTrade".into()),
+                PyRep::Integer(99999),
+                PyRep::Integer(1),
+            ],
+            &kw,
+        )
+        .await
+        .expect_err("invalid recipe ID must fail");
     assert!(bad_recipe.code == "RecipeNotFound" || bad_recipe.code == "RecipeNotAvailableAtTrader");
 
     // 3. Insufficient input items rejected
-    let missing_inputs = ctx.dispatch_rpc(&mut sess, "beyonce", None, "CallComponentFromClient", &[
-        PyRep::Integer(trader_entity_id), PyRep::String("itemTrader".into()),
-        PyRep::String("ProcessTrade".into()), PyRep::Integer(67), PyRep::Integer(1),
-    ], &kw, None).await.unwrap_err();
+    let missing_inputs = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
+            "beyonce",
+            None,
+            "CallComponentFromClient",
+            &[
+                PyRep::Integer(trader_entity_id),
+                PyRep::String("itemTrader".into()),
+                PyRep::String("ProcessTrade".into()),
+                PyRep::Integer(67),
+                PyRep::Integer(1),
+            ],
+            &kw,
+        )
+        .await
+        .expect_err("insufficient input items must fail");
     assert_eq!(missing_inputs.code, "InsufficientInputItems");
 
     // 4. Seed input items: recipe 67 requires type 85316 (15 units per trade)
@@ -262,10 +335,36 @@ async fn test_item_trader_atomic_exchange_per_recipe() {
     let bal_before = ctx.db.with_snapshot(|s| s.characters[&char_id].balance);
 
     // 5. Execute valid trade with multiplier 2
-    let trade_res = ctx.dispatch_rpc(&mut sess, "beyonce", None, "CallComponentFromClient", &[
-        PyRep::Integer(trader_entity_id), PyRep::String("itemTrader".into()),
-        PyRep::String("ProcessTrade".into()), PyRep::Integer(67), PyRep::Integer(2),
-    ], &kw, None).await.expect("ProcessTrade x2");
+    // ReportOnly: `beyonce.CallComponentFromClient` (`itemTrader.ProcessTrade` at
+    // `crates/eve-server/src/services/space_destiny.rs:1393-1396`) returns `(True, delivered_ids)`
+    // (`unpack:2`), whereas `client_expectations.json:64242-64253` merges unrelated space component
+    // shapes (`attr:sim_timestamp`, `attr:structure_capacitor`, `method:iteritems`, `unpack:2`) on
+    // `beyonce.CallComponentFromClient` without component-level dispatch or ratchet allowlisting.
+    let trade_out = common::borrow_wire_harness(&ctx, &mut sess)
+        .with_mode(ContractValidationMode::ReportOnly)
+        .call_exchange(
+            "beyonce",
+            None,
+            "CallComponentFromClient",
+            &[
+                PyRep::Integer(trader_entity_id),
+                PyRep::String("itemTrader".into()),
+                PyRep::String("ProcessTrade".into()),
+                PyRep::Integer(67),
+                PyRep::Integer(2),
+            ],
+            &kw,
+        )
+        .await;
+    assert!(
+        trade_out
+            .violations
+            .iter()
+            .all(|v| !v.starts_with("wire:marshal:")),
+        "unexpected wire marshal violations on ProcessTrade: {:?}",
+        trade_out.violations
+    );
+    let trade_res = trade_out.result.expect("ProcessTrade x2");
     assert!(matches!(trade_res, PyRep::Tuple(ref items) if items.first() == Some(&PyRep::Bool(true))));
 
     // Verify atomic consumption: 30 units consumed from cargo, 15 remaining; 2 output items produced
@@ -408,7 +507,8 @@ async fn test_map_visited_systems_tracking_on_system_entry() {
     let amamake = 30_002_537_u32;
     let poitot = 30_003_271_u32;
 
-    let init_res = ctx.dispatch_rpc(&mut sess, "map", None, "GetSolarSystemVisits", &[], &kw, None)
+    let init_res = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("map", None, "GetSolarSystemVisits", &[], &kw)
         .await
         .expect("initial GetSolarSystemVisits");
     let PyRep::List(ref init_list) = init_res else { panic!("expected List") };
@@ -420,7 +520,8 @@ async fn test_map_visited_systems_tracking_on_system_entry() {
     // 2. Record first visit to Amamake
     eve_server::services::map_service::record_solar_system_jump(&ctx, char_id, amamake);
 
-    let res_after_first = ctx.dispatch_rpc(&mut sess, "map", None, "GetSolarSystemVisits", &[], &kw, None)
+    let res_after_first = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("map", None, "GetSolarSystemVisits", &[], &kw)
         .await
         .expect("GetSolarSystemVisits after 1st visit");
     let PyRep::List(ref list1) = res_after_first else { panic!("expected List") };
@@ -429,14 +530,18 @@ async fn test_map_visited_systems_tracking_on_system_entry() {
     }).expect("Amamake record present after 1st visit");
     let PyRep::KeyVal(ref kv1) = amamake_first else { panic!("expected KeyVal") };
     assert_eq!(kv1.get("visits"), Some(&PyRep::Integer(1)), "First visit count must be 1");
-    let dt1 = kv1.get("lastDateTime").and_then(|v| v.as_i64()).unwrap();
+    let dt1 = kv1
+        .get("lastDateTime")
+        .and_then(|v| v.as_i64())
+        .expect("first visit lastDateTime");
     assert!(dt1 > 0);
 
     // 3. Advance clock and record 2nd visit to Amamake
     ctx.advance_virtual_clock(300);
     eve_server::services::map_service::record_solar_system_visit(&ctx, char_id, amamake);
 
-    let res_after_second = ctx.dispatch_rpc(&mut sess, "map", None, "GetSolarSystemVisits", &[], &kw, None)
+    let res_after_second = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("map", None, "GetSolarSystemVisits", &[], &kw)
         .await
         .expect("GetSolarSystemVisits after 2nd visit");
     let PyRep::List(ref list2) = res_after_second else { panic!("expected List") };
@@ -445,13 +550,17 @@ async fn test_map_visited_systems_tracking_on_system_entry() {
     }).expect("Amamake record present after 2nd visit");
     let PyRep::KeyVal(ref kv2) = amamake_second else { panic!("expected KeyVal") };
     assert_eq!(kv2.get("visits"), Some(&PyRep::Integer(2)), "Visits count must increment to 2");
-    let dt2 = kv2.get("lastDateTime").and_then(|v| v.as_i64()).unwrap();
+    let dt2 = kv2
+        .get("lastDateTime")
+        .and_then(|v| v.as_i64())
+        .expect("second visit lastDateTime");
     assert!(dt2 > dt1, "lastDateTime must advance with virtual clock");
 
     // 4. Enter a second solar system (Poitot)
     eve_server::services::map_service::record_solar_system_jump(&ctx, char_id, poitot);
 
-    let res_both = ctx.dispatch_rpc(&mut sess, "map", None, "GetSolarSystemVisits", &[], &kw, None)
+    let res_both = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("map", None, "GetSolarSystemVisits", &[], &kw)
         .await
         .expect("GetSolarSystemVisits with both systems");
     let PyRep::List(ref list_both) = res_both else { panic!("expected List") };

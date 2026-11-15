@@ -11,6 +11,7 @@ use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
     with_combat_runtime, with_mut_combat_runtime, DroneSpaceState,
 };
+use eve_testkit::client_harness::extract_bound_id_from_wire_rep;
 use std::collections::HashMap;
 
 fn new_ctx() -> ServerContext {
@@ -44,7 +45,7 @@ async fn test_crimewatch_states_timer_updates() {
     let _ = ctx.db.acquire_online_lock(1, 7111, Some(char_id), true, now);
 
     {
-        let mut cw = ctx.crimewatch.write().unwrap();
+        let mut cw = ctx.crimewatch.write().expect("crimewatch write lock");
         let st = cw.get_or_create(char_id);
         st.weapon_timer_until_unix = now + 60;
         st.pvp_timer_until_unix = now + 300;
@@ -193,83 +194,81 @@ async fn test_drones_recall_reconnect_abandon_control() {
     }
 
     // 1. Abandon ONLY d2
-    let abandon_res = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let abandon_res = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "entity",
             None,
             "CmdAbandonDrone",
             &[PyRep::List(vec![PyRep::Integer(d2)])],
             &kw,
-            None,
         )
         .await
         .expect("CmdAbandonDrone");
     assert_eq!(abandon_res, PyRep::Dict(Vec::new()));
 
     with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.active_drones_in_space.get(&d1).unwrap().is_abandoned);
-        assert!(rt.active_drones_in_space.get(&d2).unwrap().is_abandoned);
-        assert!(!rt.active_drones_in_space.get(&d3).unwrap().is_abandoned);
+        assert!(!rt.active_drones_in_space.get(&d1).expect("d1 active drone").is_abandoned);
+        assert!(rt.active_drones_in_space.get(&d2).expect("d2 active drone").is_abandoned);
+        assert!(!rt.active_drones_in_space.get(&d3).expect("d3 active drone").is_abandoned);
     });
 
     // 2. Reconnect ONLY d2
-    let reconn_res = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let reconn_res = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "entity",
             None,
             "CmdReconnectToDrones",
             &[PyRep::List(vec![PyRep::Integer(d2)])],
             &kw,
-            None,
         )
         .await
         .expect("CmdReconnectToDrones");
     assert_eq!(reconn_res, PyRep::Dict(vec![]));
 
     with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.active_drones_in_space.get(&d2).unwrap().is_abandoned);
+        assert!(!rt.active_drones_in_space.get(&d2).expect("d2 active drone").is_abandoned);
     });
 
     // 3. Stargate jump / dock abandons drones in space
     eve_server::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(&ctx, char_id, ship_id, sys_id);
     with_combat_runtime(&ctx, |rt| {
-        assert!(rt.active_drones_in_space.get(&d1).unwrap().is_abandoned);
-        assert!(rt.active_drones_in_space.get(&d2).unwrap().is_abandoned);
-        assert!(rt.active_drones_in_space.get(&d3).unwrap().is_abandoned);
-        assert_eq!(rt.active_drones_in_space.get(&d1).unwrap().original_owner_char_id, char_id);
+        assert!(rt.active_drones_in_space.get(&d1).expect("d1 active drone").is_abandoned);
+        assert!(rt.active_drones_in_space.get(&d2).expect("d2 active drone").is_abandoned);
+        assert!(rt.active_drones_in_space.get(&d3).expect("d3 active drone").is_abandoned);
+        assert_eq!(
+            rt.active_drones_in_space
+                .get(&d1)
+                .expect("d1 active drone")
+                .original_owner_char_id,
+            char_id
+        );
     });
 
     // Reconnect d1
-    let reconn_d1 = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let reconn_d1 = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "entity",
             None,
             "CmdReconnectToDrones",
             &[PyRep::List(vec![PyRep::Integer(d1)])],
             &kw,
-            None,
         )
         .await
         .expect("CmdReconnectToDrones d1");
     assert_eq!(reconn_d1, PyRep::Dict(vec![]));
     with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.active_drones_in_space.get(&d1).unwrap().is_abandoned);
-        assert!(rt.active_drones_in_space.get(&d2).unwrap().is_abandoned);
+        assert!(!rt.active_drones_in_space.get(&d1).expect("d1 active drone").is_abandoned);
+        assert!(rt.active_drones_in_space.get(&d2).expect("d2 active drone").is_abandoned);
     });
 
     // 4. Return to bay
-    let recall_res = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let recall_res = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "entity",
             None,
             "CmdReturnBay",
             &[PyRep::List(vec![PyRep::Integer(d1)])],
             &kw,
-            None,
         )
         .await
         .expect("CmdReturnBay");
@@ -328,28 +327,26 @@ async fn test_drone_mine_repeatedly_and_shipping_storage() {
         .await;
 
     // 1. Behavior debugging GM check
-    let err_non_gm = ctx
-        .dispatch_rpc(&mut sess, "entity", None, "EnableBehaviorDebugging", &[], &kw, None)
+    let err_non_gm = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("entity", None, "EnableBehaviorDebugging", &[], &kw)
         .await
         .expect_err("Non-GM must fail");
     assert_eq!(err_non_gm.code, "InsufficientRole");
 
     sess.role |= eve_db::service_roles::ROLE_GMS;
-    let ok_gm = ctx
-        .dispatch_rpc(&mut sess, "entity", None, "EnableBehaviorDebugging", &[], &kw, None)
+    let ok_gm = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("entity", None, "EnableBehaviorDebugging", &[], &kw)
         .await
         .expect("GM can enable behavior debugging");
     assert_eq!(ok_gm.dict_get("behaviorDebuggingEnabled").and_then(|v| v.as_bool()), Some(true));
 
-    let disable_res = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let disable_res = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "entity",
             None,
             "DisableBehaviorDebugging",
             &[PyRep::Integer(char_id)],
             &kw,
-            None,
         )
         .await
         .expect("GM can disable behavior debugging");
@@ -377,51 +374,57 @@ async fn test_drone_mine_repeatedly_and_shipping_storage() {
         .await;
 
     sess.role = 0;
-    let access_err = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let access_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "entity",
             None,
             "OpenShippingUnitStorage",
             &[PyRep::Integer(unit_id)],
             &kw,
-            None,
         )
         .await
         .expect_err("Unauthorized caller denied");
     assert_eq!(access_err.code, "AccessDenied");
 
     sess.role |= eve_db::service_roles::ROLE_GMS;
-    let open_res = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let open_res = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "entity",
             None,
             "OpenShippingUnitStorage",
             &[PyRep::Integer(unit_id)],
             &kw,
-            None,
         )
         .await
         .expect("Authorized open");
     assert_eq!(open_res.dict_get("storageOpened").and_then(|v| v.as_bool()), Some(true));
 
-    let bind = ctx.dispatch_rpc(
-        &mut sess, "invbroker", None, "MachoBindObject",
-        &[PyRep::Tuple(vec![PyRep::Integer(sys_id as i64), PyRep::Integer(15)]), PyRep::None], &kw, None,
-    ).await.expect("bind invbroker");
-    let mgr = match bind {
-        PyRep::Tuple(parts) => parts[0].as_i64().unwrap() as u64,
-        PyRep::Integer(i) => i as u64,
-        _ => panic!("unexpected bind rep"),
-    };
-    let inv_rep = ctx.dispatch_rpc(
-        &mut sess, "invbroker", Some(mgr), "GetInventoryFromId",
-        &[PyRep::Integer(unit_id), PyRep::Integer(0)], &kw, None,
-    ).await.expect("GetInventoryFromId");
-    let inv_bid = inv_rep.as_i64().expect("inv bound id") as u64;
-    let unit_items = ctx.dispatch_rpc(&mut sess, "invbroker", Some(inv_bid), "List", &[], &kw, None)
-        .await.expect("List shipping unit storage");
+    let bind = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[PyRep::Tuple(vec![PyRep::Integer(sys_id as i64), PyRep::Integer(15)]), PyRep::None],
+            &kw,
+        )
+        .await
+        .expect("bind invbroker");
+    let mgr = extract_bound_id_from_wire_rep(&bind).expect("invbroker bound id");
+    let inv_rep = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
+            "invbroker",
+            Some(mgr),
+            "GetInventoryFromId",
+            &[PyRep::Integer(unit_id), PyRep::Integer(0)],
+            &kw,
+        )
+        .await
+        .expect("GetInventoryFromId");
+    let inv_bid = extract_bound_id_from_wire_rep(&inv_rep).expect("inv bound id");
+    let unit_items = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("invbroker", Some(inv_bid), "List", &[], &kw)
+        .await
+        .expect("List shipping unit storage");
     assert!(matches!(unit_items, PyRep::ObjectEx { .. } | PyRep::List(_)));
 
     // 3. CmdMineRepeatedly
@@ -548,38 +551,43 @@ async fn test_drone_mine_repeatedly_and_shipping_storage() {
         );
     });
 
-    let alien_err = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let alien_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "entity",
             None,
             "CmdMineRepeatedly",
             &[PyRep::List(vec![PyRep::Integer(alien_drone_id)]), PyRep::Integer(asteroid_id)],
             &kw,
-            None,
         )
         .await
         .expect_err("Non-owned drone rejected");
     assert_eq!(alien_err.code, "InvalidDroneOwner");
 
-    let mine_res = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let mine_res = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
             "entity",
             None,
             "CmdMineRepeatedly",
             &[PyRep::List(vec![PyRep::Integer(miner_drone_id)]), PyRep::Integer(asteroid_id)],
             &kw,
-            None,
         )
         .await
         .expect("CmdMineRepeatedly");
     assert_eq!(mine_res, PyRep::Dict(vec![]));
 
     let (initial_ast_qty, next_tick) = with_combat_runtime(&ctx, |rt| {
-        let miner_st = rt.active_drone_miners.get(&miner_drone_id).unwrap();
+        let miner_st = rt
+            .active_drone_miners
+            .get(&miner_drone_id)
+            .expect("miner_st active_drone_miners");
         assert_eq!(miner_st.asteroid_id, asteroid_id);
-        assert_eq!(rt.active_drones_in_space.get(&miner_drone_id).unwrap().activity_state, 2);
+        assert_eq!(
+            rt.active_drones_in_space
+                .get(&miner_drone_id)
+                .expect("miner drone in space")
+                .activity_state,
+            2
+        );
         (
             ctx.db.with_snapshot(|s| s.asteroids.get(&asteroid_id).map(|a| a.quantity)).unwrap_or(0),
             miner_st.next_cycle_unix,
@@ -659,20 +667,37 @@ async fn test_drone_mine_repeatedly_duplicate_ids_dedup_and_reject_active() {
     ).await;
 
     // Call with duplicate IDs [drone_id, drone_id, drone_id]
-    let res = ctx.dispatch_rpc(
-        &mut sess, "entity", None, "CmdMineRepeatedly",
-        &[PyRep::List(vec![PyRep::Integer(drone_id), PyRep::Integer(drone_id), PyRep::Integer(drone_id)]), PyRep::Integer(ast_id)],
-        &kw, None,
-    ).await.expect("CmdMineRepeatedly with duplicate IDs");
+    let res = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
+            "entity",
+            None,
+            "CmdMineRepeatedly",
+            &[
+                PyRep::List(vec![
+                    PyRep::Integer(drone_id),
+                    PyRep::Integer(drone_id),
+                    PyRep::Integer(drone_id),
+                ]),
+                PyRep::Integer(ast_id),
+            ],
+            &kw,
+        )
+        .await
+        .expect("CmdMineRepeatedly with duplicate IDs");
     assert_eq!(res, PyRep::Dict(vec![]));
 
     assert_eq!(with_combat_runtime(&ctx, |rt| rt.active_drone_miners.len()), 1, "Duplicate drone IDs must be de-duplicated to 1 miner");
 
     // Calling again while already mining must fail
-    let err = ctx.dispatch_rpc(
-        &mut sess, "entity", None, "CmdMineRepeatedly",
-        &[PyRep::List(vec![PyRep::Integer(drone_id)]), PyRep::Integer(ast_id)],
-        &kw, None,
-    ).await.expect_err("Already mining drone must be rejected");
+    let err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
+            "entity",
+            None,
+            "CmdMineRepeatedly",
+            &[PyRep::List(vec![PyRep::Integer(drone_id)]), PyRep::Integer(ast_id)],
+            &kw,
+        )
+        .await
+        .expect_err("Already mining drone must be rejected");
     assert_eq!(err.code, "DroneAlreadyMining");
 }

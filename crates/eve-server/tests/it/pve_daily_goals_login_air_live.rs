@@ -19,6 +19,7 @@ use eve_server::router::ServerContext;
 use eve_server::services::agents_missions::*;
 
 use crate::common::{self, pin_clock, slash_cmd};
+use eve_testkit::client_harness::extract_bound_id_from_wire_rep;
 
 fn make_uuid_request(uuid: [u8; 16]) -> Vec<u8> {
     let mut id_bytes = Vec::new();
@@ -43,17 +44,16 @@ async fn gm_pilot_docked(ctx: &ServerContext, sess_id: u64, char_id: i64) -> Ses
     ctx.db.provision_gm_account(&user, &pass, char_id, &format!("Live Pilot {char_id}"));
     let mut sess = SessionState::new(sess_id);
     common::login_pilot(ctx, &mut sess, &user, &pass).await;
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
+    common::borrow_wire_harness(ctx, &mut sess)
+        .call(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_id)],
+            &kw,
+        )
+        .await
+        .expect("SelectCharacterID");
     sess
 }
 
@@ -77,9 +77,8 @@ async fn test_live_pve_daily_goals_and_air_career_program() {
     ctx.advance_secs(11);
 
     // Pilot creates a player corporation
-    let add_corp_rep = ctx
-        .dispatch_rpc(
-            &mut pilot,
+    let add_corp_rep = common::borrow_wire_harness(&ctx, &mut pilot)
+        .call(
             "corpRegistry",
             None,
             "AddCorporation",
@@ -89,7 +88,6 @@ async fn test_live_pve_daily_goals_and_air_career_program() {
                 PyRep::Real(0.05),
             ],
             &HashMap::new(),
-            None,
         )
         .await
         .expect("AddCorporation");
@@ -100,17 +98,16 @@ async fn test_live_pve_daily_goals_and_air_career_program() {
     pilot.corporation_id = Some(corp_id);
 
     // Subscribe to publicGatewaySvc for Quasar push notices
-    ctx.dispatch_rpc(
-        &mut pilot,
-        "publicGatewaySvc",
-        None,
-        "Subscribe",
-        &[],
-        &HashMap::new(),
-        None,
-    )
-    .await
-    .expect("Subscribe publicGatewaySvc");
+    common::borrow_wire_harness(&ctx, &mut pilot)
+        .call(
+            "publicGatewaySvc",
+            None,
+            "Subscribe",
+            &[],
+            &HashMap::new(),
+        )
+        .await
+        .expect("Subscribe publicGatewaySvc");
     let mut stream_rx = ctx
         .quasar_gateway
         .take_stream_receiver(pilot.session_id)
@@ -200,9 +197,18 @@ async fn test_live_pve_daily_goals_and_air_career_program() {
         .progression
         .daily_goals
         .get_or_init_goals(char_id as u32);
-    let g1 = goals_after.iter().find(|g| g.uuid == combat_goal.uuid).unwrap();
-    let g2 = goals_after.iter().find(|g| g.uuid == mining_goal.uuid).unwrap();
-    let gb = goals_after.iter().find(|g| g.uuid == bonus_goal.uuid).unwrap();
+    let g1 = goals_after
+        .iter()
+        .find(|g| g.uuid == combat_goal.uuid)
+        .expect("combat goal after completion");
+    let g2 = goals_after
+        .iter()
+        .find(|g| g.uuid == mining_goal.uuid)
+        .expect("mining goal after completion");
+    let gb = goals_after
+        .iter()
+        .find(|g| g.uuid == bonus_goal.uuid)
+        .expect("bonus goal after completion");
     assert!(g1.completed && !g1.claimed);
     assert!(g2.completed && !g2.claimed);
     assert!(gb.completed && !gb.claimed);
@@ -347,30 +353,26 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
 
     // 1. Unauthenticated or unselected character queries return error / PyRep::None
     let mut anon_sess = SessionState::new(33_001);
-    let unauth_res = ctx
-        .dispatch_rpc(
-            &mut anon_sess,
+    let unauth_res = common::borrow_wire_harness(&ctx, &mut anon_sess)
+        .call(
             "loginCampaignManager",
             None,
             "get_client_campaign_state",
             &[],
             &HashMap::new(),
-            None,
         )
         .await;
     assert!(unauth_res.is_err());
 
     let mut charless_sess = SessionState::new(33_002);
     charless_sess.user_id = Some(444);
-    let charless_res = ctx
-        .dispatch_rpc(
-            &mut charless_sess,
+    let charless_res = common::borrow_wire_harness(&ctx, &mut charless_sess)
+        .call(
             "loginCampaignManager",
             None,
             "get_client_campaign_state",
             &[],
             &HashMap::new(),
-            None,
         )
         .await
         .expect("charless query");
@@ -380,15 +382,13 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
     let char_id = 93_000_002i64;
     let mut pilot = gm_pilot_docked(&ctx, 33_003, char_id).await;
 
-    let state_day0 = ctx
-        .dispatch_rpc(
-            &mut pilot,
+    let state_day0 = common::borrow_wire_harness(&ctx, &mut pilot)
+        .call(
             "loginCampaignManager",
             None,
             "get_client_campaign_state",
             &[],
             &HashMap::new(),
-            None,
         )
         .await
         .expect("get_client_campaign_state day 0");
@@ -408,18 +408,16 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
     );
 
     // Claim Day 0 reward while docked: delivers to station hangar and emits OnRedeemingTokensUpdated
-    let claim_day0 = ctx
-        .dispatch_rpc(
-            &mut pilot,
+    let claim_out = common::borrow_wire_harness(&ctx, &mut pilot)
+        .call_exchange(
             "loginCampaignManager",
             None,
             "claim_reward",
             &[],
             &HashMap::new(),
-            None,
         )
-        .await
-        .expect("claim_reward day 0");
+        .await;
+    let claim_day0 = claim_out.result.expect("claim_reward day 0");
     let PyRep::Tuple(tuple0) = claim_day0 else { panic!("Expected 4-tuple") };
     assert_eq!(tuple0.len(), 4);
     let delivered_item_id = tuple0[0]
@@ -434,22 +432,22 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
     });
     assert!(is_in_hangar, "Delivered reward item must be placed into docked station hangar");
 
-    let notifs_d0 = pilot.drain_notifications();
     assert!(
-        notifs_d0.iter().any(|(ev, _)| ev == "OnRedeemingTokensUpdated"),
+        claim_out
+            .notifications
+            .iter()
+            .any(|(ev, _)| ev == "OnRedeemingTokensUpdated"),
         "OnRedeemingTokensUpdated notification must be emitted on reward claim"
     );
 
     // Duplicate claim on the same downtime bucket raises DailyRewardAlreadyClaimedToday
-    let dup_claim = ctx
-        .dispatch_rpc(
-            &mut pilot,
+    let dup_claim = common::borrow_wire_harness(&ctx, &mut pilot)
+        .call(
             "loginCampaignManager",
             None,
             "claim_reward",
             &[],
             &HashMap::new(),
-            None,
         )
         .await
         .expect_err("dup claim");
@@ -457,29 +455,26 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
 
     // 3. Advance clock past downtime (86,400s) and undock into space (with home_station_id cleared to test redeem queue)
     ctx.advance_secs(86_400);
-    ctx.dispatch_rpc(
-        &mut pilot,
-        "stationSvc",
-        None,
-        "Undock",
-        &[],
-        &HashMap::new(),
-        None,
-    )
-    .await
-    .expect("Undock into space");
+    common::borrow_wire_harness(&ctx, &mut pilot)
+        .call(
+            "stationSvc",
+            None,
+            "Undock",
+            &[],
+            &HashMap::new(),
+        )
+        .await
+        .expect("Undock into space");
     pilot.station_id = None;
     pilot.structure_id = None;
 
-    let state_day1 = ctx
-        .dispatch_rpc(
-            &mut pilot,
+    let state_day1 = common::borrow_wire_harness(&ctx, &mut pilot)
+        .call(
             "loginCampaignManager",
             None,
             "get_client_campaign_state",
             &[],
             &HashMap::new(),
-            None,
         )
         .await
         .expect("get_client_campaign_state day 1");
@@ -492,15 +487,13 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
     );
 
     // Claim Day 1 reward while undocked in space: delivers into character redeeming bay
-    let claim_day1 = ctx
-        .dispatch_rpc(
-            &mut pilot,
+    let claim_day1 = common::borrow_wire_harness(&ctx, &mut pilot)
+        .call(
             "loginCampaignManager",
             None,
             "claim_reward",
             &[],
             &HashMap::new(),
-            None,
         )
         .await
         .expect("claim_reward day 1 in space");
@@ -510,7 +503,7 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
         let store = eve_server::services::account_services::load_store(s);
         store
             .redeem_tokens
-            .get(&pilot.user_id.unwrap())
+            .get(&pilot.user_id.expect("pilot user_id"))
             .map(|toks| !toks.is_empty())
             .unwrap_or(false)
     });
@@ -528,23 +521,21 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
     pilot.solar_system_id = Some(30_000_142);
 
     let kw = HashMap::new();
-    let agents_rep = ctx
-        .dispatch_rpc(
-            &mut pilot,
+    let agents_rep = common::borrow_wire_harness(&ctx, &mut pilot)
+        .call(
             "agentMgr",
             None,
             "GetAgents",
             &[PyRep::Integer(1), PyRep::Integer(24)],
             &kw,
-            None,
         )
         .await
         .expect("GetAgents");
     let PyRep::Rowset { rows, .. } = agents_rep else { panic!("Expected rowset") };
     let (agent_id, corp_id, agent_sys) = (
-        rows[0][0].as_i64().unwrap(),
-        rows[0][3].as_i64().unwrap(),
-        rows[0][5].as_i64().unwrap() as u32,
+        rows[0][0].as_i64().expect("agent_id"),
+        rows[0][3].as_i64().expect("corp_id"),
+        rows[0][5].as_i64().expect("agent_sys") as u32,
     );
     let agent_station = ctx.sde.agents.get(&agent_id).and_then(|a| a.station_id).unwrap_or(60_003_760);
     ctx.db.with_mut_snapshot(|s| {
@@ -559,42 +550,50 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
     pilot.structure_id = None;
 
     // Bind agent on agentMgr
-    let bind_rep = ctx
-        .dispatch_rpc(
-            &mut pilot,
+    let bind_rep = common::borrow_wire_harness(&ctx, &mut pilot)
+        .call(
             "agentMgr",
             None,
             "MachoBindObject",
             &[PyRep::Integer(agent_id), PyRep::None],
             &kw,
-            None,
         )
         .await
         .expect("MachoBindObject agentMgr");
-    let PyRep::Tuple(bind_tuple) = bind_rep else { panic!("Expected bind tuple") };
-    let agent_oid = bind_tuple[0].as_i64().expect("agent_oid") as u64;
+    let agent_oid = extract_bound_id_from_wire_rep(&bind_rep).expect("agent_oid");
 
-    // Request mission offer (DoAction 2)
-    let offer_rep = ctx
-        .dispatch_rpc(
-            &mut pilot,
+    // Request mission offer (DoAction 2): wire shape is `((agentSaysMsg, availableActions), lastActionInfo)`
+    let offer_rep = common::borrow_wire_harness(&ctx, &mut pilot)
+        .call(
             "agentMgr",
             Some(agent_oid),
             "DoAction",
             &[PyRep::Integer(2)],
             &kw,
-            None,
         )
         .await
         .expect("DoAction(RequestMission)");
-    let mission_id = offer_rep
+    let PyRep::Tuple(offer_parts) = offer_rep else {
+        panic!("Expected DoAction 2-tuple on wire")
+    };
+    let offer_info = &offer_parts[1];
+    let mission_id = offer_info
         .dict_get("missionID")
         .and_then(|v| v.as_i64())
         .expect("missionID") as u32;
 
-    let offer_isk = offer_rep.dict_get("iskReward").and_then(|v| v.as_i64()).unwrap();
-    let offer_lp = offer_rep.dict_get("lpReward").and_then(|v| v.as_i64()).unwrap();
-    let offer_bonus = offer_rep.dict_get("bonusReward").and_then(|v| v.as_i64()).unwrap();
+    let offer_isk = offer_info
+        .dict_get("iskReward")
+        .and_then(|v| v.as_i64())
+        .expect("iskReward");
+    let offer_lp = offer_info
+        .dict_get("lpReward")
+        .and_then(|v| v.as_i64())
+        .expect("lpReward");
+    let offer_bonus = offer_info
+        .dict_get("bonusReward")
+        .and_then(|v| v.as_i64())
+        .expect("bonusReward");
 
     let CharacterMissionRewards {
         isk_reward: calc_isk,
@@ -633,19 +632,20 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
     assert_eq!(calc_isk, expected_isk, "ISK reward must match Negotiation skill formula");
 
     // Accept mission (DoAction 3)
-    let accept_rep = ctx
-        .dispatch_rpc(
-            &mut pilot,
+    let accept_rep = common::borrow_wire_harness(&ctx, &mut pilot)
+        .call(
             "agentMgr",
             Some(agent_oid),
             "DoAction",
             &[PyRep::Integer(3)],
             &kw,
-            None,
         )
         .await
         .expect("DoAction(Accept)");
-    assert_eq!(accept_rep.dict_get("state").and_then(|v| v.as_str()), Some("Accepted"));
+    let PyRep::Tuple(accept_parts) = accept_rep else {
+        panic!("Expected DoAction(Accept) 2-tuple on wire")
+    };
+    assert_eq!(accept_parts[1].dict_get("state").and_then(|v| v.as_str()), Some("Accepted"));
 
     // Spawn required delivery item in station hangar if mission requires delivery
     let req_item = ctx.db.with_snapshot(|s| {
@@ -665,20 +665,21 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
 
     // Complete mission (DoAction 6): verifies crediting of ISK and LP rewards
     let bal_before = ctx.db.with_snapshot(|s| s.characters[&char_id].balance.0);
-    let complete_rep = ctx
-        .dispatch_rpc(
-            &mut pilot,
+    let complete_rep = common::borrow_wire_harness(&ctx, &mut pilot)
+        .call(
             "agentMgr",
             Some(agent_oid),
             "DoAction",
             &[PyRep::Integer(6)],
             &kw,
-            None,
         )
         .await
         .expect("DoAction(Complete)");
+    let PyRep::Tuple(complete_parts) = complete_rep else {
+        panic!("Expected DoAction(Complete) 2-tuple on wire")
+    };
     assert_eq!(
-        complete_rep.dict_get("missionID").and_then(|v| v.as_i64()),
+        complete_parts[1].dict_get("missionID").and_then(|v| v.as_i64()),
         Some(mission_id as i64)
     );
 
