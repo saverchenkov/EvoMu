@@ -993,8 +993,12 @@ fn lifecycle_cancel_paused_ceo_refund_stacking_and_complete_edge_paths() {
     )
     .unwrap()
     .unwrap();
-    let PyRep::List(ref owner_rows) = bp_owner_svc else {
-        panic!("expected List from service-level GetBlueprintDataByOwner");
+    let PyRep::Tuple(ref bp_owner_pair) = bp_owner_svc else {
+        panic!("expected (bps, bpCounts) Tuple from service-level GetBlueprintDataByOwner");
+    };
+    assert_eq!(bp_owner_pair.len(), 2);
+    let PyRep::List(ref owner_rows) = bp_owner_pair[0] else {
+        panic!("expected List at tuple[0] from service-level GetBlueprintDataByOwner");
     };
     assert!(owner_rows.iter().all(|r| r.dict_get("solarSystemID") == Some(&PyRep::Integer(30_000_142))));
 

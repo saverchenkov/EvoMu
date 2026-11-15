@@ -22,17 +22,8 @@ const CORP_1: i64 = 98_000_001;
 const JITA: u32 = 30_000_142;
 
 fn field<'a>(rep: &'a PyRep, key: &str) -> &'a PyRep {
-    match rep {
-        PyRep::KeyVal(entries) => entries
-            .get(key)
-            .unwrap_or_else(|| panic!("missing keyval field: {key}")),
-        PyRep::Dict(entries) => entries
-            .iter()
-            .find(|(k, _)| k.as_str() == Some(key))
-            .map(|(_, v)| v)
-            .unwrap_or_else(|| panic!("missing dict field: {key}")),
-        other => panic!("expected KeyVal or Dict, got {other:?}"),
-    }
+    rep.dict_get(key)
+        .unwrap_or_else(|| panic!("missing field `{key}` in {rep:?}"))
 }
 
 async fn rpc(
@@ -446,6 +437,14 @@ async fn test_facility_manager_and_macho_stats() {
         PyRep::List(list) => list,
         other => panic!("expected List, got {other:?}"),
     };
+    assert!(
+        loc_list.iter().all(|l| matches!(
+            l,
+            PyRep::ObjectEx { is_type_2: true, header, .. }
+                if matches!(header.as_ref(), PyRep::Tuple(h) if h.first() == Some(&PyRep::Tuple(vec![PyRep::Token("industry.job.Location".into())])))
+        )),
+        "GetFacilityLocations must return industry.job.Location ObjectEx entries"
+    );
     assert!(
         loc_list.iter().any(|l| field(l, "ownerID") == &PyRep::Integer(PILOT_1) && field(l, "flagID") == &PyRep::Integer(4)),
         "GetFacilityLocations must include personal hangar (flagID 4)"

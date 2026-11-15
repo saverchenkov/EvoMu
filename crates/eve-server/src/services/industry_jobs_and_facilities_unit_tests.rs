@@ -218,10 +218,15 @@ fn blueprint_facility_and_industry_manager_rpc_end_to_end_branches() {
     assert_eq!(bp_data.dict_get("materialEfficiency").and_then(|v| v.as_i64()), Some(2));
     assert_eq!(bp_data.dict_get("timeEfficiency").and_then(|v| v.as_i64()), Some(4));
 
-    let bp_list = handle(&ctx, &mut sess, "blueprintManager", "GetBlueprintDataByOwner", &[PyRep::Integer(char_id)], &kw, None)
+    let bp_owner = handle(&ctx, &mut sess, "blueprintManager", "GetBlueprintDataByOwner", &[PyRep::Integer(char_id)], &kw, None)
         .unwrap()
         .unwrap();
-    assert!(matches!(bp_list, PyRep::List(ref l) if l.len() >= 2));
+    let PyRep::Tuple(ref bp_parts) = bp_owner else {
+        panic!("expected (bps, bpCounts) Tuple from GetBlueprintDataByOwner");
+    };
+    assert_eq!(bp_parts.len(), 2);
+    assert!(matches!(&bp_parts[0], PyRep::List(l) if l.len() >= 2));
+    assert!(matches!(&bp_parts[1], PyRep::Dict(_)));
 
     let limits = handle(&ctx, &mut sess, "blueprintManager", "GetLimits", &[], &kw, None)
         .unwrap()

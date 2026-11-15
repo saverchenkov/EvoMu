@@ -1117,7 +1117,7 @@ fn w4_mutant_killers_untouched_services_helpers_and_defaults() {
     let PyRep::List(c_items) = c_def.dict_get("items").unwrap() else { panic!() };
     assert_eq!(c_items[0].dict_get("itemTypeID"), Some(&PyRep::Integer(0)));
 
-    // 4. Untouched service/method pairs: fleetProxy.GetFleetAdsForChar, facilityManager.GetFacilitiesByID/GetFacility,
+    // 4. Untouched service/method pairs: fleetProxy.GetFleetAdsForChar,
     //    map.GetIncursionGlobalReport, paperDollServer.GetPaperDollData, storeManager.get_categories/get_offers,
     //    agentMgr.GetOffer / GetAgentLocationWrap / GetMissionBriefingInfo / GetMissionObjectiveInfo
     let fleet_ads = normalize_macho_rpc_reply(
@@ -1130,34 +1130,6 @@ fn w4_mutant_killers_untouched_services_helpers_and_defaults() {
     )
     .unwrap();
     assert!(matches!(fleet_ads, PyRep::Dict(ref d) if d.len() == 1));
-
-    let fac_list = normalize_macho_rpc_reply(
-        "facilityManager",
-        "GetFacilitiesByID",
-        Ok(PyRep::List(vec![
-            PyRep::keyval([
-                ("facilityID", PyRep::Integer(60_003_760)),
-                ("activities", PyRep::List(vec![PyRep::Integer(1), PyRep::Integer(9)])),
-            ]),
-            PyRep::Integer(123),
-        ])),
-    )
-    .unwrap();
-    let PyRep::List(facs) = fac_list else { panic!() };
-    assert_eq!(facs[0].dict_get("sccTaxModifier"), Some(&PyRep::Real(1.0)));
-    assert!(matches!(facs[0].dict_get("activities"), Some(PyRep::Dict(d)) if d.len() == 2));
-    assert!(facs[0].dict_get("serviceAccess").is_some());
-    assert!(facs[0].dict_get("rigModifiers").is_some());
-    assert!(facs[0].dict_get("globalModifiers").is_some());
-    assert_eq!(facs[1], PyRep::Integer(123));
-
-    let single_fac = normalize_macho_rpc_reply(
-        "facilityManager",
-        "GetFacility",
-        Ok(PyRep::keyval([("facilityID", PyRep::Integer(1))])),
-    )
-    .unwrap();
-    assert_eq!(single_fac.dict_get("sccTaxModifier"), Some(&PyRep::Real(1.0)));
 
     let incs = normalize_macho_rpc_reply(
         "map",

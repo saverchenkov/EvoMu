@@ -657,28 +657,6 @@ pub fn normalize_macho_rpc_reply_at(
             return Ok(desc.build_crowset(rows));
         }
     }
-    if service == "facilityManager" && matches!(method, "GetFacilities" | "GetFacilitiesByID") {
-        if let Ok(PyRep::List(items)) = rpc_res {
-            return Ok(PyRep::List(
-                items.into_iter().map(normalize_facility_rep).collect(),
-            ));
-        }
-    }
-    if service == "facilityManager" && method == "GetFacility" {
-        if let Ok(rep) = rpc_res {
-            return Ok(normalize_facility_rep(rep));
-        }
-    }
-    if service == "facilityManager" && method == "GetFacilityLocations" {
-        if let Ok(PyRep::List(items)) = rpc_res {
-            return Ok(PyRep::List(
-                items
-                    .into_iter()
-                    .map(normalize_facility_location_rep)
-                    .collect(),
-            ));
-        }
-    }
     if service == "map" && method == "GetIncursionGlobalReport" {
         if let Ok(PyRep::List(items)) = rpc_res {
             return Ok(PyRep::List(
@@ -982,40 +960,6 @@ pub fn normalize_macho_rpc_reply_at(
                 ("capacity", PyRep::Real(1_000.0)),
                 ("used", PyRep::Real(frac * 1_000.0)),
             ]));
-        }
-    } else if service == "blueprintManager" && method == "GetBlueprintDataByOwner" {
-        match rpc_res {
-            Ok(PyRep::List(bps)) => {
-                let norm_bps: Vec<PyRep> = bps
-                    .into_iter()
-                    .map(normalize_single_blueprint_keyval)
-                    .collect();
-                let mut seen_locs = std::collections::HashSet::new();
-                let mut locs = Vec::new();
-                for bp in &norm_bps {
-                    if let Some(loc_id) = bp.dict_get("locationID").and_then(PyRep::as_i64) {
-                        if seen_locs.insert(loc_id) {
-                            locs.push((PyRep::Integer(loc_id), PyRep::Integer(loc_id)));
-                        }
-                    }
-                }
-                return Ok(PyRep::Tuple(vec![PyRep::List(norm_bps), PyRep::Dict(locs)]));
-            }
-            Ok(PyRep::Tuple(mut pair)) if pair.len() == 2 => {
-                if let PyRep::List(bps) = std::mem::replace(&mut pair[0], PyRep::None) {
-                    pair[0] = PyRep::List(
-                        bps.into_iter()
-                            .map(normalize_single_blueprint_keyval)
-                            .collect(),
-                    );
-                }
-                return Ok(PyRep::Tuple(pair));
-            }
-            other => return other,
-        }
-    } else if service == "blueprintManager" && method == "GetBlueprintData" {
-        if let Ok(rep) = rpc_res {
-            return Ok(normalize_single_blueprint_keyval(rep));
         }
     } else if service == "charMgr" && method == "GetOwnerNoteLabels" {
         if let Ok(PyRep::List(items)) = rpc_res {
@@ -2354,90 +2298,6 @@ fn normalize_agent_mission_objective_rep(rep: PyRep) -> PyRep {
     ])
 }
 
-fn normalize_single_blueprint_keyval(rep: PyRep) -> PyRep {
-    let mut map = match rep {
-        PyRep::KeyVal(m) => m,
-        PyRep::Dict(entries) => {
-            let mut m = HashMap::new();
-            for (k, v) in entries {
-                if let Some(ks) = k.as_str() {
-                    m.insert(ks.to_string(), v);
-                }
-            }
-            m
-        }
-        other => return other,
-    };
-    let bp_id = map
-        .get("itemID")
-        .or_else(|| map.get("blueprintID"))
-        .cloned()
-        .unwrap_or(PyRep::Integer(0));
-    let type_id = map
-        .get("typeID")
-        .or_else(|| map.get("blueprintTypeID"))
-        .cloned()
-        .unwrap_or(PyRep::Integer(0));
-    let loc_id = map
-        .get("locationID")
-        .and_then(PyRep::as_i64)
-        .filter(|&v| v > 0)
-        .or_else(|| map.get("facilityID").and_then(PyRep::as_i64).filter(|&v| v > 0))
-        .unwrap_or(60_003_760);
-    let fac_id = map
-        .get("facilityID")
-        .and_then(PyRep::as_i64)
-        .filter(|&v| v > 0)
-        .unwrap_or(loc_id);
-    let sys_id = map
-        .get("solarSystemID")
-        .or_else(|| map.get("solarsystemID"))
-        .and_then(PyRep::as_i64)
-        .filter(|&v| v > 0)
-        .unwrap_or(30_000_142);
-    let flag_id = map
-        .get("flagID")
-        .or_else(|| map.get("locationFlagID"))
-        .cloned()
-        .unwrap_or(PyRep::Integer(4));
-    let original = map
-        .get("original")
-        .and_then(PyRep::as_bool)
-        .unwrap_or_else(|| !map.get("copy").and_then(PyRep::as_bool).unwrap_or(false));
-    let runs = map
-        .get("runs")
-        .or_else(|| map.get("runsRemaining"))
-        .cloned()
-        .unwrap_or(PyRep::Integer(if original { -1 } else { 1 }));
-    let qty = map
-        .get("quantity")
-        .cloned()
-        .unwrap_or(PyRep::Integer(if original { -1 } else { -2 }));
-    map.entry("itemID".into()).or_insert_with(|| bp_id.clone());
-    map.entry("blueprintID".into()).or_insert(bp_id);
-    map.entry("typeID".into()).or_insert_with(|| type_id.clone());
-    map.entry("blueprintTypeID".into()).or_insert(type_id);
-    map.entry("ownerID".into()).or_insert(PyRep::Integer(0));
-    map.insert("locationID".into(), PyRep::Integer(loc_id));
-    if matches!(map.get("facilityID"), None | Some(PyRep::None)) {
-        map.insert("facilityID".into(), PyRep::Integer(fac_id));
-    }
-    map.insert("solarSystemID".into(), PyRep::Integer(sys_id));
-    map.entry("locationTypeID".into()).or_insert(PyRep::Integer(1529));
-    map.entry("locationFlagID".into()).or_insert_with(|| flag_id.clone());
-    map.entry("flagID".into()).or_insert(flag_id);
-    map.entry("original".into()).or_insert(PyRep::Bool(original));
-    map.entry("copy".into()).or_insert(PyRep::Bool(!original));
-    map.entry("materialEfficiency".into()).or_insert(PyRep::Integer(0));
-    map.entry("timeEfficiency".into()).or_insert(PyRep::Integer(0));
-    map.entry("runs".into()).or_insert_with(|| runs.clone());
-    map.entry("runsRemaining".into()).or_insert(runs);
-    map.entry("quantity".into()).or_insert(qty);
-    map.entry("jobID".into()).or_insert(PyRep::None);
-    map.entry("isImpounded".into()).or_insert(PyRep::Bool(false));
-    PyRep::KeyVal(map)
-}
-
 fn normalize_mission_objective_entry(
     entry: PyRep,
     default_agent_id: i64,
@@ -2989,58 +2849,6 @@ fn market_tx_column_type(col: &str) -> DbColumnType {
     }
 }
 
-fn normalize_facility_rep(rep: PyRep) -> PyRep {
-    let PyRep::KeyVal(mut entries) = rep else {
-        return rep;
-    };
-    const INDUSTRY_CATEGORIES: &[i64] = &[
-        4, 5, 6, 7, 8, 9, 16, 17, 18, 20, 22, 23, 24, 25, 32, 34, 35, 39, 40, 41, 42, 43, 46, 65,
-        66, 87, 91,
-    ];
-    if let Some(acts) = entries.get("activities").cloned() {
-        if let PyRep::List(act_list) = acts {
-            let cats: Vec<PyRep> = INDUSTRY_CATEGORIES
-                .iter()
-                .map(|&c| PyRep::Integer(c))
-                .collect();
-            let act_dict = act_list
-                .into_iter()
-                .filter_map(|v| v.as_i64())
-                .map(|act_id| {
-                    let tuple = PyRep::Tuple(vec![
-                        PyRep::List(Vec::new()),
-                        PyRep::List(Vec::new()),
-                        PyRep::List(Vec::new()),
-                        PyRep::List(cats.clone()),
-                        PyRep::List(Vec::new()),
-                        PyRep::List(Vec::new()),
-                    ]);
-                    (PyRep::Integer(act_id), tuple)
-                })
-                .collect();
-            entries.insert("activities".into(), PyRep::Dict(act_dict));
-        }
-    }
-    entries
-        .entry("serviceAccess".into())
-        .or_insert_with(|| PyRep::Dict(Vec::new()));
-    entries
-        .entry("sccTaxModifier".into())
-        .or_insert(PyRep::Real(1.0));
-    entries
-        .entry("rigModifiers".into())
-        .or_insert_with(|| PyRep::Dict(Vec::new()));
-    entries
-        .entry("globalModifiers".into())
-        .or_insert_with(|| {
-            PyRep::Dict(vec![
-                (PyRep::String("faction".into()), PyRep::Real(1.0)),
-                (PyRep::String("system".into()), PyRep::Dict(Vec::new())),
-            ])
-        });
-    PyRep::KeyVal(entries)
-}
-
 fn normalize_industry_job_rep(rep: PyRep, now_unix: Option<u64>) -> PyRep {
     let mut entries = match rep {
         PyRep::KeyVal(m) => m,
@@ -3187,69 +2995,6 @@ fn normalize_industry_job_rep(rep: PyRep, now_unix: Option<u64>) -> PyRep {
         .entry("outputFlagID".into())
         .or_insert(PyRep::Integer(4));
     PyRep::KeyVal(entries)
-}
-
-fn normalize_facility_location_rep(rep: PyRep) -> PyRep {
-    if !matches!(rep, PyRep::KeyVal(_) | PyRep::Dict(_)) {
-        return rep;
-    }
-    let item_id = rep
-        .dict_get("itemID")
-        .or_else(|| rep.dict_get("facilityID"))
-        .cloned()
-        .unwrap_or(PyRep::Integer(0));
-    let facility_id = rep
-        .dict_get("facilityID")
-        .cloned()
-        .unwrap_or_else(|| item_id.clone());
-    let type_id = rep
-        .dict_get("typeID")
-        .cloned()
-        .unwrap_or(PyRep::Integer(1529));
-    let owner_id = rep
-        .dict_get("ownerID")
-        .cloned()
-        .unwrap_or(PyRep::Integer(0));
-    let flag_id = rep
-        .dict_get("flagID")
-        .cloned()
-        .unwrap_or(PyRep::Integer(4));
-    let solar_system_id = rep
-        .dict_get("solarSystemID")
-        .cloned()
-        .unwrap_or(PyRep::Integer(0));
-    let region_id = rep
-        .dict_get("regionID")
-        .cloned()
-        .unwrap_or(PyRep::Integer(0));
-    let can_view = rep
-        .dict_get("canView")
-        .cloned()
-        .unwrap_or(PyRep::Bool(true));
-    let can_take = rep
-        .dict_get("canTake")
-        .cloned()
-        .unwrap_or(PyRep::Bool(true));
-    let state_dict = PyRep::Dict(vec![
-        (PyRep::String("itemID".into()), item_id),
-        (PyRep::String("facilityID".into()), facility_id),
-        (PyRep::String("typeID".into()), type_id),
-        (PyRep::String("ownerID".into()), owner_id),
-        (PyRep::String("flagID".into()), flag_id),
-        (PyRep::String("solarSystemID".into()), solar_system_id),
-        (PyRep::String("regionID".into()), region_id),
-        (PyRep::String("canView".into()), can_view),
-        (PyRep::String("canTake".into()), can_take),
-    ]);
-    PyRep::ObjectEx {
-        is_type_2: true,
-        header: Box::new(PyRep::Tuple(vec![
-            PyRep::Tuple(vec![PyRep::Token("industry.job.Location".into())]),
-            state_dict,
-        ])),
-        list: Vec::new(),
-        dict: Vec::new(),
-    }
 }
 
 fn normalize_incursion_report_rep(rep: PyRep) -> PyRep {
@@ -4641,60 +4386,6 @@ mod client_compat_tests {
         assert_eq!(
             normalize_macho_rpc_reply("marketProxy", "CharGetTransactions", Ok(PyRep::None))
                 .unwrap(),
-            PyRep::None
-        );
-    }
-
-    #[test]
-    fn facility_replies_normalize_activities_to_dict_of_six_tuples_for_live_client() {
-        let facility_kv = PyRep::keyval([
-            ("facilityID", PyRep::Integer(60_003_760)),
-            ("typeID", PyRep::Integer(35835)),
-            ("ownerID", PyRep::Integer(98_000_001)),
-            ("solarSystemID", PyRep::Integer(30_000_142)),
-            ("online", PyRep::Bool(true)),
-            ("tax", PyRep::Real(0.01)),
-            (
-                "activities",
-                PyRep::List(vec![PyRep::Integer(1), PyRep::Integer(3), PyRep::Integer(9)]),
-            ),
-        ]);
-        let list_res = normalize_macho_rpc_reply(
-            "facilityManager",
-            "GetFacilities",
-            Ok(PyRep::List(vec![facility_kv.clone()])),
-        )
-        .unwrap();
-        let PyRep::List(items) = list_res else {
-            panic!("expected List");
-        };
-        assert_eq!(items.len(), 1);
-        let single_res =
-            normalize_macho_rpc_reply("facilityManager", "GetFacility", Ok(facility_kv)).unwrap();
-        for fac in [&items[0], &single_res] {
-            assert!(matches!(fac.dict_get("rigModifiers"), Some(PyRep::Dict(_))));
-            assert!(matches!(fac.dict_get("serviceAccess"), Some(PyRep::Dict(_))));
-            assert_eq!(fac.dict_get("sccTaxModifier"), Some(&PyRep::Real(1.0)));
-            assert!(matches!(fac.dict_get("globalModifiers"), Some(PyRep::Dict(_))));
-            let Some(PyRep::Dict(acts)) = fac.dict_get("activities") else {
-                panic!("expected activities dict on live client");
-            };
-            assert_eq!(acts.len(), 3);
-            for (k, v) in acts {
-                assert!(k.as_i64().is_some());
-                let PyRep::Tuple(six) = v else {
-                    panic!("expected 6-tuple per activity");
-                };
-                assert_eq!(six.len(), 6);
-                let PyRep::List(cats) = &six[3] else {
-                    panic!("expected category list");
-                };
-                assert!(!cats.is_empty());
-            }
-        }
-        // Negative / non-KeyVal passthrough
-        assert_eq!(
-            normalize_macho_rpc_reply("facilityManager", "GetFacility", Ok(PyRep::None)).unwrap(),
             PyRep::None
         );
     }
