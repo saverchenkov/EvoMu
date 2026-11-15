@@ -252,43 +252,84 @@ pub async fn handle_jettison_structure_fuel(
 
 const CARGO_DROPOFF_EXTRA_RANGE_M: f64 = 2_500.0;
 
+fn is_structure_operational_for_cargo_dropoff(st: &eve_db::UpwellStructureRecord) -> bool {
+    !matches!(
+        st.state.as_str(),
+        ""
+            | "Unknown"
+            | life::STATE_UNANCHORED
+            | life::STATE_ANCHORING
+            | life::STATE_DEPLOY_VULNERABLE
+            | life::STATE_HULL_REINFORCED
+            | "HullReinforce"
+            | life::STATE_DESTROYED
+    )
+}
+
 pub(crate) fn handle_structure_deliver(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let structure_id = args.first().and_then(|a| a.as_i64()).ok_or_else(|| err("MissingStructureId", "structureDeliveries.Deliver requires structureID"))?;
-    let item_id = args.get(1).and_then(|a| a.as_i64()).ok_or_else(|| err("MissingItemId", "structureDeliveries.Deliver requires itemID"))?;
-    let recipient_id = args.get(2).and_then(|a| a.as_i64()).ok_or_else(|| err("MissingRecipientId", "structureDeliveries.Deliver requires recipient characterID"))?;
+    let (item_ids, recipient_id) = match args.get(2) {
+        Some(PyRep::List(items) | PyRep::Tuple(items)) => {
+            let recipient_id = args.get(1).and_then(|a| a.as_i64()).ok_or_else(|| err("MissingRecipientId", "structureDeliveries.Deliver requires recipient characterID"))?;
+            let ids: Vec<i64> = items.iter().filter_map(|x| x.as_i64()).collect();
+            if ids.is_empty() {
+                return Err(err("MissingItemId", "structureDeliveries.Deliver requires at least one itemID"));
+            }
+            (ids, recipient_id)
+        }
+        _ => {
+            let item_id = args.get(1).and_then(|a| a.as_i64()).ok_or_else(|| err("MissingItemId", "structureDeliveries.Deliver requires itemID"))?;
+            let recipient_id = args.get(2).and_then(|a| a.as_i64()).ok_or_else(|| err("MissingRecipientId", "structureDeliveries.Deliver requires recipient characterID"))?;
+            (vec![item_id], recipient_id)
+        }
+    };
     if session.structure_id != Some(structure_id) {
         return Err(err("NotDockedInStructure", format!("Must be docked in structure {structure_id} to deliver items")));
     }
-    if session.ship_id == Some(item_id) {
+    if item_ids.iter().any(|&item_id| session.ship_id == Some(item_id)) {
         return Err(err("CannotDeliverActiveShip", "Cannot deliver your active boarded ship"));
     }
-    ctx.db.try_with_mut_snapshot(|snap| {
-        if snap.is_character_boarded_or_saved_ship(char_id, session.ship_id, item_id) {
-            return Err(err("CannotDeliverActiveShip", "Cannot deliver your active boarded ship"));
+    let mutations = ctx.db.try_with_mut_snapshot(|snap| {
+        for &item_id in &item_ids {
+            if snap.is_character_boarded_or_saved_ship(char_id, session.ship_id, item_id) {
+                return Err(err("CannotDeliverActiveShip", "Cannot deliver your active boarded ship"));
+            }
         }
         if !snap.characters.contains_key(&recipient_id) {
             return Err(err("RecipientNotFound", format!("Recipient character {recipient_id} not found")));
         }
-        let Some(it) = snap.items.get(&item_id) else {
-            return Err(err("ItemNotFound", format!("Item {item_id} not found")));
-        };
-        if it.owner_id != char_id || it.location_id != structure_id || it.flag != InventoryFlag::Hangar {
-            return Err(err("ItemNotInStructureHangar", format!("Item {item_id} must be owned by {char_id} inside structure {structure_id}")));
+        for &item_id in &item_ids {
+            let Some(it) = snap.items.get(&item_id) else {
+                return Err(err("ItemNotFound", format!("Item {item_id} not found")));
+            };
+            if it.owner_id != char_id || it.location_id != structure_id || it.flag != InventoryFlag::Hangar {
+                return Err(err("ItemNotInStructureHangar", format!("Item {item_id} must be owned by {char_id} inside structure {structure_id}")));
+            }
+            if snap.is_item_locked_in_contract_or_job(item_id) {
+                return Err(err("ItemLocked", format!("Item {item_id} is locked in a contract or job")));
+            }
+            if snap.items.values().any(|child| child.location_id == item_id) {
+                return Err(err("CannotDeliverNonEmptyContainer", format!("Item {item_id} contains nested items and must be repackaged or emptied before delivery")));
+            }
         }
-        if snap.is_item_locked_in_contract_or_job(item_id) {
-            return Err(err("ItemLocked", format!("Item {item_id} is locked in a contract or job")));
+        let mut mutations = Vec::with_capacity(item_ids.len());
+        for &item_id in &item_ids {
+            if let Some(it) = snap.items.get_mut(&item_id) {
+                let pre = it.clone();
+                it.owner_id = recipient_id;
+                it.flag = InventoryFlag::Deliveries;
+                it.version += 1;
+                let post = it.clone();
+                mutations.push((pre, post));
+            }
         }
-        if snap.items.values().any(|child| child.location_id == item_id) {
-            return Err(err("CannotDeliverNonEmptyContainer", format!("Item {item_id} contains nested items and must be repackaged or emptied before delivery")));
-        }
-        if let Some(it) = snap.items.get_mut(&item_id) {
-            it.owner_id = recipient_id;
-            it.flag = InventoryFlag::Deliveries;
-            it.version += 1;
-        }
-        Ok(PyRep::None)
-    })
+        Ok(mutations)
+    })?;
+    for (pre, post) in &mutations {
+        ctx.notify_item_mutation(char_id, Some(pre), Some(post));
+    }
+    Ok(PyRep::None)
 }
 
 pub(crate) async fn handle_cargo_dropoff(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
@@ -297,23 +338,46 @@ pub(crate) async fn handle_cargo_dropoff(ctx: &ServerContext, session: &mut Sess
         return Err(err("MustBeInSpace", "structureCargoDelivery.DropOffItems requires a ship in space"));
     }
     let ship_id = session.ship_id.ok_or_else(|| err("NoActiveShip", "No active ship in space"))?;
-    let structure_id = args
-        .get(2)
-        .and_then(|a| a.as_i64())
-        .ok_or_else(|| err("MissingStructureId", "DropOffItems requires (itemIDs, sourceLocationID, structureID)"))?;
-    if let Some(source_location_id) = args.get(1).and_then(|a| a.as_i64()) {
-        if source_location_id != ship_id {
+    let (item_ids, source_location_id, structure_id) = if args.len() == 2 {
+        match (args.first(), args.get(1)) {
+            (Some(PyRep::Integer(st_id)), Some(PyRep::List(items) | PyRep::Tuple(items))) => (
+                items.iter().filter_map(|x| x.as_i64()).collect::<Vec<_>>(),
+                None,
+                *st_id,
+            ),
+            (Some(PyRep::List(items) | PyRep::Tuple(items)), Some(PyRep::Integer(st_id))) => (
+                items.iter().filter_map(|x| x.as_i64()).collect::<Vec<_>>(),
+                None,
+                *st_id,
+            ),
+            _ => {
+                return Err(err(
+                    "MissingStructureId",
+                    "DropOffItems requires (itemIDs, sourceLocationID, structureID)",
+                ));
+            }
+        }
+    } else {
+        let structure_id = args
+            .get(2)
+            .and_then(|a| a.as_i64())
+            .ok_or_else(|| err("MissingStructureId", "DropOffItems requires (itemIDs, sourceLocationID, structureID)"))?;
+        let source_location_id = args.get(1).and_then(|a| a.as_i64());
+        let item_ids: Vec<i64> = match args.first() {
+            Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => items.iter().filter_map(|x| x.as_i64()).collect(),
+            Some(PyRep::Integer(id)) => vec![*id],
+            _ => Vec::new(),
+        };
+        (item_ids, source_location_id, structure_id)
+    };
+    if let Some(src_loc_id) = source_location_id {
+        if src_loc_id != ship_id {
             return Err(err(
                 "InvalidSourceLocation",
-                format!("DropOffItems sourceLocationID {source_location_id} does not match active ship {ship_id}"),
+                format!("DropOffItems sourceLocationID {src_loc_id} does not match active ship {ship_id}"),
             ));
         }
     }
-    let item_ids: Vec<i64> = match args.first() {
-        Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => items.iter().filter_map(|x| x.as_i64()).collect(),
-        Some(PyRep::Integer(id)) => vec![*id],
-        _ => Vec::new(),
-    };
     if item_ids.is_empty() {
         return Err(err("NoItemsSpecified", "DropOffItems requires at least one itemID"));
     }
@@ -329,9 +393,7 @@ pub(crate) async fn handle_cargo_dropoff(ctx: &ServerContext, session: &mut Sess
         if prof.as_ref().is_some_and(|p| p.hull_class == life::HullClass::Flex) {
             return Err(err("StructureNotDockable", format!("Structure {structure_id} is a FLEX structure and has no cargo dropoff bay")));
         }
-        if !crate::services::structure_control_ops::is_structure_combat_operational(Some(ctx), st)
-            || st.state == life::STATE_HULL_REINFORCED
-        {
+        if !is_structure_operational_for_cargo_dropoff(st) {
             return Err(err("StructureNotOperational", format!("Structure {structure_id} is in state '{}' (cored={}) and cannot accept cargo dropoff", st.state, st.quantum_core_installed)));
         }
         if !ops::evaluate_character_structure_access(ctx, snap, structure_id, char_id) {
@@ -344,7 +406,7 @@ pub(crate) async fn handle_cargo_dropoff(ctx: &ServerContext, session: &mut Sess
     if ship_ball.position.distance(st_pos) > st_radius + CARGO_DROPOFF_EXTRA_RANGE_M {
         return Err(err("OutsideCargoDropoffRange", "Ship is too far from the structure to drop off cargo"));
     }
-    ctx.db.try_with_mut_snapshot(|snap| {
+    let mutations = ctx.db.try_with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get(&char_id) {
             if ch.station_id.is_some()
                 || ch.structure_id.is_some()
@@ -358,9 +420,7 @@ pub(crate) async fn handle_cargo_dropoff(ctx: &ServerContext, session: &mut Sess
             .structures
             .get(&structure_id)
             .ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found")))?;
-        if !crate::services::structure_control_ops::is_structure_combat_operational(Some(ctx), st)
-            || st.state == life::STATE_HULL_REINFORCED
-        {
+        if !is_structure_operational_for_cargo_dropoff(st) {
             return Err(err("StructureNotOperational", format!("Structure {structure_id} is not operational for cargo dropoff")));
         }
         if !ops::evaluate_character_structure_access(ctx, snap, structure_id, char_id) {
@@ -388,15 +448,23 @@ pub(crate) async fn handle_cargo_dropoff(ctx: &ServerContext, session: &mut Sess
                 return Err(err("ItemLocked", format!("Item {iid} is locked in a contract or job")));
             }
         }
+        let mut mutations = Vec::with_capacity(item_ids.len());
         for &iid in &item_ids {
             if let Some(it) = snap.items.get_mut(&iid) {
+                let pre = it.clone();
                 it.location_id = structure_id;
                 it.flag = InventoryFlag::Deliveries;
                 it.version += 1;
+                let post = it.clone();
+                mutations.push((pre, post));
             }
         }
-        Ok(PyRep::List(item_ids.iter().map(|&id| PyRep::Integer(id)).collect()))
-    })
+        Ok(mutations)
+    })?;
+    for (pre, post) in &mutations {
+        ctx.notify_item_mutation(char_id, Some(pre), Some(post));
+    }
+    Ok(PyRep::List(item_ids.iter().map(|&id| PyRep::Integer(id)).collect()))
 }
 
 #[cfg(test)]

@@ -947,4 +947,124 @@ async fn cargo_dropoff_covers_space_range_acl_flex_state_locks_and_specialized_h
             assert_eq!(it.version, 2);
         }
     });
+
+    // GH #1057: Uncored structures (quantum_core_installed = false) in ShieldVulnerable, NoCore,
+    // and AnchorVulnerable states accept cargo dropoff (e.g. Keepstar / Astrahus Quantum Cores)
+    // and emit OnItemChange notifications. Also verify 2-arg legacy forms and V24 Deliver list form.
+    ctx.db.with_mut_snapshot(|snap| {
+        let st = snap.structures.get_mut(&st_id).unwrap();
+        st.quantum_core_installed = false;
+        st.state = life::STATE_SHIELD_VULNERABLE.into();
+        for (iid, tid) in [(610_010, 56_207), (610_011, 56_201), (610_012, 34)] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::Cargo,
+                    quantity: 1,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(
+        handle_cargo_dropoff(
+            &ctx,
+            &mut s,
+            &[
+                PyRep::List(vec![PyRep::Integer(610_010)]),
+                PyRep::Integer(ship_id),
+                PyRep::Integer(st_id),
+            ]
+        )
+        .await
+        .expect("uncored ShieldVulnerable dropoff (#1057)"),
+        PyRep::List(vec![PyRep::Integer(610_010)])
+    );
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs.iter().any(|n| n.event == "OnItemChange"),
+        "expected OnItemChange notification after DropOffItems"
+    );
+
+    // NoCore + 2-arg ([itemIDs], structureID) and AnchorVulnerable + 2-arg (structureID, [itemIDs])
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.get_mut(&st_id).unwrap().state = life::STATE_NO_CORE.into();
+    });
+    assert_eq!(
+        handle_cargo_dropoff(
+            &ctx,
+            &mut s,
+            &[PyRep::List(vec![PyRep::Integer(610_011)]), PyRep::Integer(st_id)]
+        )
+        .await
+        .expect("uncored NoCore 2-arg dropoff"),
+        PyRep::List(vec![PyRep::Integer(610_011)])
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.get_mut(&st_id).unwrap().state = life::STATE_ANCHOR_VULNERABLE.into();
+    });
+    assert_eq!(
+        handle_cargo_dropoff(
+            &ctx,
+            &mut s,
+            &[PyRep::Integer(st_id), PyRep::List(vec![PyRep::Integer(610_012)])]
+        )
+        .await
+        .expect("uncored AnchorVulnerable 2-arg dropoff"),
+        PyRep::List(vec![PyRep::Integer(610_012)])
+    );
+
+    // V24 structureDeliveries.Deliver(structureID, recipientCharacterID, [itemIDs]) list form
+    ctx.db.with_mut_snapshot(|snap| {
+        for iid in [610_020, 610_021] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: 34,
+                    owner_id: char_id,
+                    location_id: st_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 5,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+    s.structure_id = Some(st_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(
+        handle_structure_deliver(
+            &ctx,
+            &mut s,
+            &[
+                PyRep::Integer(st_id),
+                PyRep::Integer(char_id),
+                PyRep::List(vec![PyRep::Integer(610_020), PyRep::Integer(610_021)]),
+            ],
+        )
+        .expect("V24 Deliver list form"),
+        PyRep::None
+    );
+    ctx.db.with_snapshot(|snap| {
+        for iid in [610_020, 610_021] {
+            assert_eq!(snap.items[&iid].flag, InventoryFlag::Deliveries);
+            assert_eq!(snap.items[&iid].owner_id, char_id);
+        }
+    });
+    assert!(
+        ctx.drain_notifications_for_char(char_id)
+            .iter()
+            .any(|n| n.event == "OnItemChange"),
+        "expected OnItemChange notification after structureDeliveries.Deliver"
+    );
 }

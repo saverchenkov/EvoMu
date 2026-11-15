@@ -944,7 +944,7 @@ async fn test_live_playtest_upwell_1055_1056_1057_1059_wire_ratcheted() {
                 name: "Playtest Astrahus".into(),
                 position: st_pos,
                 state: "ShieldVulnerable".into(),
-                quantum_core_installed: true,
+                quantum_core_installed: false,
                 fuel_blocks: 120,
                 shield_hp: 100_000.0,
                 armor_hp: 100_000.0,
@@ -1055,7 +1055,8 @@ async fn test_live_playtest_upwell_1055_1056_1057_1059_wire_ratcheted() {
     }
 
     // #1057: structureCargoDelivery.DropOffItems accepts V24 3-arg ([itemIDs], sourceLoc, structureID)
-    // and returns movedItemIDs list
+    // on uncored (quantum_core_installed=false) structures, returns movedItemIDs list, and emits OnItemChange
+    let _ = ctx.drain_notifications_for_char(char_id);
     let drop_rep = harness
         .call_ok(
             "structureCargoDelivery",
@@ -1075,6 +1076,12 @@ async fn test_live_playtest_upwell_1055_1056_1057_1059_wire_ratcheted() {
         assert_eq!(core.location_id, st_id);
         assert_eq!(core.flag, InventoryFlag::Deliveries);
     });
+    assert!(
+        ctx.drain_notifications_for_char(char_id)
+            .iter()
+            .any(|n| n.event == "OnItemChange"),
+        "expected OnItemChange notification after DropOffItems"
+    );
 
     // #1059: structureDirectory.GetStructureMapData returns 12-column CRowset.InsertNew sequences
     let map_rep = harness
