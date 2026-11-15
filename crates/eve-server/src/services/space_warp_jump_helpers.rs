@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::router::{BoundObjectEntry, NotificationTarget, ServerContext};
+use crate::router::{BoundObjectEntry, ServerContext};
 use super::super::{check_session_change_timer_active, record_session_change_timer};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -52,27 +52,15 @@ pub(crate) fn emit_structure_dock_notifications(
     st_type_id: u32,
     ship_id: i64,
 ) {
-    ctx.emit_typed(
-        NotificationTarget::Station(dock_id),
-        crate::router::notify_registry::OnCharacterEnteredStructure {
-            character_id: char_id,
-            corporation_id: corp_id,
-            alliance_id: ally_id,
-            faction_id: fac_id,
-        },
-    );
-    let hv_state = PyRep::keyval([
-        ("characterID", PyRep::Integer(char_id)),
-        ("structureID", PyRep::Integer(dock_id)),
-        ("structureTypeID", PyRep::Integer(i64::from(st_type_id))),
-        ("shipID", PyRep::Integer(ship_id)),
-    ]);
-    ctx.emit_typed(
-        NotificationTarget::Character(char_id),
-        crate::router::notify_registry::OnHangarViewStateUpdated {
-            structure_id: dock_id,
-            hangar_view_state: hv_state,
-        },
+    crate::services::station_structure::structure_upwell_ops::emit_structure_dock_notifications(
+        ctx,
+        dock_id,
+        char_id,
+        corp_id,
+        ally_id,
+        fac_id,
+        st_type_id,
+        ship_id,
     );
 }
 

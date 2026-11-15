@@ -963,17 +963,234 @@ fn handle_structure_get_guests(ctx: &ServerContext, session: &mut SessionState, 
     })
 }
 
+fn hangar_view_timer_fields(
+    st: &UpwellStructureRecord,
+    ext: &StructureExtendedState,
+    now_unix: u64,
+) -> (PyRep, bool, bool, PyRep) {
+    use super::structure_lifecycle as life;
+
+    if let Some(repair_until) = ext
+        .lifecycle
+        .get(&st.structure_id)
+        .and_then(|l| l.repair_until_unix)
+        .filter(|&u| u > now_unix)
+    {
+        let total_secs = if st.state == life::STATE_HULL_VULNERABLE {
+            life::REPAIR_HULL_SECS
+        } else {
+            life::REPAIR_SHIELD_ARMOR_SECS
+        };
+        let remaining = repair_until.saturating_sub(now_unix);
+        let progress = (1.0 - (remaining as f64 / total_secs.max(1) as f64)).clamp(0.0, 1.0);
+        return (
+            PyRep::Real(progress),
+            true,
+            false,
+            PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(repair_until)),
+        );
+    }
+
+    if st.reinforced_until_unix > now_unix {
+        let total_secs = match st.state.as_str() {
+            life::STATE_ANCHOR_VULNERABLE => life::ANCHOR_VULNERABLE_SECS,
+            life::STATE_ANCHORING => ext
+                .lifecycle
+                .get(&st.structure_id)
+                .and_then(|l| l.anchoring_duration_secs)
+                .unwrap_or(life::ANCHORING_SECS),
+            life::STATE_ONLINING => life::ONLINING_SECS,
+            _ => ext
+                .lifecycle
+                .get(&st.structure_id)
+                .and_then(|l| l.armor_reinforce_secs_applied)
+                .unwrap_or(86_400),
+        };
+        let remaining = st.reinforced_until_unix.saturating_sub(now_unix);
+        let progress = (1.0 - (remaining as f64 / total_secs.max(1) as f64)).clamp(0.0, 1.0);
+        return (
+            PyRep::Real(progress),
+            true,
+            false,
+            PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(st.reinforced_until_unix)),
+        );
+    }
+
+    (PyRep::None, false, false, PyRep::None)
+}
+
+/// Builds the V24 `hangarViewState` KeyVal expected by `modularHangarBehaviours.UpdateStructureState`.
+///
+/// Always includes `upkeepState`, `operatingState`, `damageState`, `timerProgress`,
+/// `timerIsProgressing` (bool), `timerIsPaused` (bool), and `timerEndAt` alongside the
+/// identity fields so client hangar scene setup never fails on missing attributes or `None` booleans.
+pub(crate) fn build_hangar_view_state_in_snap(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    char_id: i64,
+    structure_id: i64,
+    ship_id: Option<i64>,
+    fallback_structure_type_id: Option<u32>,
+) -> PyRep {
+    use super::structure_lifecycle as life;
+
+    let now_unix = ctx.now_unix();
+    let ship_type = ship_id
+        .and_then(|sid| snap.items.get(&sid))
+        .map(|i| PyRep::Integer(i64::from(i.type_id)))
+        .unwrap_or(PyRep::None);
+
+    let (
+        st_type_id,
+        upkeep_state,
+        operating_state,
+        damage_state,
+        timer_progress,
+        timer_is_progressing,
+        timer_is_paused,
+        timer_end_at,
+    ) = if let Some(st) = snap.structures.get(&structure_id) {
+        let ext = load_ext_state(snap);
+        let power = life::power_state(ctx, snap, &ext, st, now_unix);
+        let upkeep_state = life::upkeep_state_wire_code(power);
+        let state_code = life::structure_state_wire_code(&st.state);
+        let operating_state = if state_code == 0 { 110 } else { state_code };
+
+        let profile = life::structure_profile(ctx, st.type_id);
+        let (max_shield, max_armor, max_hull) = match profile.as_ref() {
+            Some(p) => (
+                life::effective_max_shield(ctx, snap, p, structure_id, power),
+                p.armor_hp,
+                p.hull_hp,
+            ),
+            None => (0.0, 0.0, 0.0),
+        };
+        let hp_frac = |hp: f64, max: f64| -> f64 {
+            if max > 0.0 && hp.is_finite() {
+                (hp / max).clamp(0.0, 1.0)
+            } else {
+                1.0
+            }
+        };
+        let damage_state = PyRep::Tuple(vec![
+            PyRep::Real(hp_frac(st.shield_hp, max_shield)),
+            PyRep::Real(hp_frac(st.armor_hp, max_armor)),
+            PyRep::Real(hp_frac(st.hull_hp, max_hull)),
+        ]);
+        let (timer_progress, timer_is_progressing, timer_is_paused, timer_end_at) =
+            hangar_view_timer_fields(st, &ext, now_unix);
+        (
+            st.type_id,
+            upkeep_state,
+            operating_state,
+            damage_state,
+            timer_progress,
+            timer_is_progressing,
+            timer_is_paused,
+            timer_end_at,
+        )
+    } else {
+        (
+            fallback_structure_type_id.unwrap_or(35_832),
+            2_i64,
+            110_i64,
+            PyRep::Tuple(vec![PyRep::Real(1.0), PyRep::Real(1.0), PyRep::Real(1.0)]),
+            PyRep::None,
+            false,
+            false,
+            PyRep::None,
+        )
+    };
+
+    PyRep::keyval([
+        ("characterID", PyRep::Integer(char_id)),
+        ("structureID", PyRep::Integer(structure_id)),
+        ("structureTypeID", PyRep::Integer(i64::from(st_type_id))),
+        ("shipID", ship_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+        ("shipTypeID", ship_type),
+        ("upkeepState", PyRep::Integer(upkeep_state)),
+        ("operatingState", PyRep::Integer(operating_state)),
+        ("state", PyRep::Integer(operating_state)),
+        ("damageState", damage_state),
+        ("timerProgress", timer_progress),
+        ("timerIsProgressing", PyRep::Bool(timer_is_progressing)),
+        ("timerIsPaused", PyRep::Bool(timer_is_paused)),
+        ("timerEndAt", timer_end_at),
+    ])
+}
+
+/// Snapshot-acquiring wrapper around [`build_hangar_view_state_in_snap`].
+pub(crate) fn build_hangar_view_state(
+    ctx: &ServerContext,
+    char_id: i64,
+    structure_id: i64,
+    ship_id: Option<i64>,
+    fallback_structure_type_id: Option<u32>,
+) -> PyRep {
+    ctx.db.with_snapshot(|snap| {
+        build_hangar_view_state_in_snap(
+            ctx,
+            snap,
+            char_id,
+            structure_id,
+            ship_id,
+            fallback_structure_type_id,
+        )
+    })
+}
+
+/// Emits `OnCharacterEnteredStructure` and `OnHangarViewStateUpdated` when a pilot docks in an Upwell structure.
+pub(crate) fn emit_structure_dock_notifications(
+    ctx: &ServerContext,
+    dock_id: i64,
+    char_id: i64,
+    corp_id: i64,
+    ally_id: Option<i64>,
+    fac_id: Option<i64>,
+    fallback_st_type_id: u32,
+    ship_id: i64,
+) {
+    ctx.emit_typed(
+        crate::router::NotificationTarget::Station(dock_id),
+        crate::router::notify_registry::OnCharacterEnteredStructure {
+            character_id: char_id,
+            corporation_id: corp_id,
+            alliance_id: ally_id,
+            faction_id: fac_id,
+        },
+    );
+    let hv_state = build_hangar_view_state(
+        ctx,
+        char_id,
+        dock_id,
+        Some(ship_id),
+        Some(fallback_st_type_id),
+    );
+    ctx.emit_typed(
+        crate::router::NotificationTarget::Character(char_id),
+        crate::router::notify_registry::OnHangarViewStateUpdated {
+            structure_id: dock_id,
+            hangar_view_state: hv_state,
+        },
+    );
+}
+
 fn handle_get_hangar_view_state(ctx: &ServerContext, session: &mut SessionState) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let structure_id = session.structure_id.ok_or_else(|| err("NotDockedInStructure", "GetMyHangarViewState requires being docked in an Upwell structure"))?;
     let ship_id = session.ship_id;
     ctx.db.with_snapshot(|snap| {
-        let st = snap.structures.get(&structure_id).ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found")))?;
-        let ship_type = ship_id.and_then(|sid| snap.items.get(&sid)).map(|i| PyRep::Integer(i64::from(i.type_id))).unwrap_or(PyRep::None);
-        Ok(PyRep::keyval([
-            ("characterID", PyRep::Integer(char_id)), ("structureID", PyRep::Integer(structure_id)),
-            ("structureTypeID", PyRep::Integer(i64::from(st.type_id))), ("shipID", ship_id.map(PyRep::Integer).unwrap_or(PyRep::None)), ("shipTypeID", ship_type),
-        ]))
+        if !snap.structures.contains_key(&structure_id) {
+            return Err(err("StructureNotFound", format!("Structure {structure_id} not found")));
+        }
+        Ok(build_hangar_view_state_in_snap(
+            ctx,
+            snap,
+            char_id,
+            structure_id,
+            ship_id,
+            None,
+        ))
     })
 }
 

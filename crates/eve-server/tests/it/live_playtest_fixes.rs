@@ -1103,3 +1103,260 @@ async fn test_live_playtest_upwell_1055_1056_1057_1059_wire_ratcheted() {
     assert_eq!(row[7], PyRep::Real(st_pos[0]));
     let _ = now;
 }
+
+/// Wire IT covering live-client Keepstar dock/undock `hangarViewState` parity (`#1069`)
+/// across `stationSvc.Dock`, `beyonce.CmdDock`, `OnHangarViewStateUpdated`, and
+/// `structureHangarViewMgr.GetMyHangarViewState` (`ContractValidationMode::Ratcheted`).
+#[tokio::test]
+async fn test_live_playtest_keepstar_dock_hangar_view_state_wire_ratcheted() {
+    use eve_destiny::{Ball, MovementMode};
+    use eve_server::services::station_structure::structure_lifecycle;
+    use eve_testkit::client_harness::ContractValidationMode;
+    use glam::DVec3;
+
+    let ctx = Arc::new(ServerContext::new());
+    common::pin_clock(&ctx);
+    let char_id = PILOT;
+    let mut sess = login_session(&ctx, 106_901).await;
+    let corp_id = sess.corporation_id.expect("corp_id");
+    let ship_id = sess.ship_id.expect("ship_id");
+    let st_id = 1_001_896_944_936_i64;
+    let svc_mod_id = 1_897_011_240_i64;
+    let st_pos = [15_000.0, 0.0, 0.0];
+    let kw = HashMap::new();
+
+    let keepstar_profile =
+        structure_lifecycle::structure_profile(&ctx, 35_834).expect("Keepstar profile");
+    let ship_type_id = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = JITA;
+            ch.active_ship_id = ship_id;
+        }
+        let ship_tid = if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = i64::from(JITA);
+            ship.flag = InventoryFlag::Hangar;
+            ship.type_id
+        } else {
+            606
+        };
+        snap.structures.insert(
+            st_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: st_id,
+                type_id: 35_834, // Keepstar
+                owner_corp_id: corp_id,
+                solar_system_id: JITA,
+                name: "Playtest Keepstar".into(),
+                position: st_pos,
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 120,
+                shield_hp: keepstar_profile.shield_hp,
+                armor_hp: keepstar_profile.armor_hp,
+                hull_hp: keepstar_profile.hull_hp,
+                ..Default::default()
+            },
+        );
+        ship_tid
+    });
+
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.solar_system_id = Some(JITA);
+
+    let sys_h = ctx.systems.get_or_spawn(JITA);
+    let _ = sys_h
+        .spawn_ball(Ball {
+            id: st_id,
+            type_id: 35_834,
+            position: DVec3::from_array(st_pos),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1.0e9,
+            radius: 5_000.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Rigid,
+        })
+        .await;
+    let _ = sys_h
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: ship_type_id,
+            position: DVec3::new(st_pos[0] + 1_500.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1.0e6,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+
+    let mut harness = common::wrap_wire_harness(&ctx, sess)
+        .with_mode(ContractValidationMode::Ratcheted);
+
+    // 1. LowPower Keepstar dock via stationSvc.Dock -> OnHangarViewStateUpdated + GetMyHangarViewState.
+    ctx.advance_secs(12);
+    let dock_out = harness
+        .call_exchange("stationSvc", None, "Dock", &[PyRep::Integer(st_id)], &kw)
+        .await;
+    assert!(dock_out.violations.is_empty(), "violations: {:?}", dock_out.violations);
+    assert!(dock_out.result.is_ok(), "stationSvc.Dock failed: {:?}", dock_out.result);
+
+    let hv_args = dock_out
+        .notifications
+        .iter()
+        .find(|(ev, _)| ev == "OnHangarViewStateUpdated")
+        .map(|(_, args)| args)
+        .expect("OnHangarViewStateUpdated notification on stationSvc.Dock");
+    assert_eq!(hv_args.len(), 2);
+    assert_eq!(hv_args[0].as_i64(), Some(st_id));
+    let PyRep::KeyVal(hv_kv) = &hv_args[1] else {
+        panic!("hangarViewState must be KeyVal, got {:?}", hv_args[1]);
+    };
+    assert_eq!(hv_kv["characterID"].as_i64(), Some(char_id));
+    assert_eq!(hv_kv["structureID"].as_i64(), Some(st_id));
+    assert_eq!(hv_kv["structureTypeID"].as_i64(), Some(35_834));
+    assert_eq!(hv_kv["shipID"].as_i64(), Some(ship_id));
+    assert_eq!(hv_kv["shipTypeID"].as_i64(), Some(i64::from(ship_type_id)));
+    assert_eq!(hv_kv["upkeepState"].as_i64(), Some(2));
+    assert_eq!(hv_kv["operatingState"].as_i64(), Some(110));
+    assert_eq!(hv_kv["state"].as_i64(), Some(110));
+    assert_eq!(
+        hv_kv["damageState"],
+        PyRep::Tuple(vec![PyRep::Real(1.0), PyRep::Real(1.0), PyRep::Real(1.0)])
+    );
+    assert_eq!(hv_kv["timerProgress"], PyRep::None);
+    assert_eq!(hv_kv["timerIsProgressing"].as_bool(), Some(false));
+    assert_eq!(hv_kv["timerIsPaused"].as_bool(), Some(false));
+    assert_eq!(hv_kv["timerEndAt"], PyRep::None);
+
+    let get_hv_out = harness
+        .call_exchange("structureHangarViewMgr", None, "GetMyHangarViewState", &[], &kw)
+        .await;
+    assert!(
+        get_hv_out.violations.is_empty(),
+        "violations: {:?}",
+        get_hv_out.violations
+    );
+    assert_eq!(get_hv_out.result.as_ref().expect("GetMyHangarViewState"), &hv_args[1]);
+
+    // 2. Undock, bring Keepstar to FullPower with an online service module, and dock via beyonce.CmdDock.
+    ctx.advance_secs(12);
+    let undock_out = harness
+        .call_exchange("stationSvc", None, "Undock", &[], &kw)
+        .await;
+    assert!(
+        undock_out.violations.is_empty(),
+        "violations: {:?}",
+        undock_out.violations
+    );
+    let undock_res = undock_out.result.expect("Undock result");
+    let PyRep::KeyVal(undock_kv) = &undock_res else {
+        panic!("Undock must return KeyVal, got {undock_res:?}");
+    };
+    let beyonce_oid = undock_kv["beyonceBoundID"].as_i64().expect("beyonceBoundID") as u64;
+
+    ctx.advance_secs(12);
+    let _ = sys_h
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: ship_type_id,
+            position: DVec3::new(st_pos[0] + 1_500.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1.0e6,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.structures.get_mut(&st_id) {
+            st.fuel_blocks = 5_000;
+        }
+        snap.items.insert(
+            svc_mod_id,
+            InventoryItemRecord {
+                item_id: svc_mod_id,
+                type_id: 35_894, // Standup Cloning Center I
+                owner_id: corp_id,
+                location_id: st_id,
+                flag: InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                ..InventoryItemRecord::default()
+            },
+        );
+        snap.module_online_states.insert(svc_mod_id, true);
+    });
+
+    let cmd_dock_out = harness
+        .call_exchange(
+            "beyonce",
+            Some(beyonce_oid),
+            "CmdDock",
+            &[PyRep::Integer(st_id), PyRep::Integer(ship_id)],
+            &kw,
+        )
+        .await;
+    assert!(
+        cmd_dock_out.violations.is_empty(),
+        "violations: {:?}",
+        cmd_dock_out.violations
+    );
+    assert!(
+        cmd_dock_out.result.is_ok(),
+        "beyonce.CmdDock failed: {:?}",
+        cmd_dock_out.result
+    );
+
+    let full_hv_args = cmd_dock_out
+        .notifications
+        .iter()
+        .find(|(ev, _)| ev == "OnHangarViewStateUpdated")
+        .map(|(_, args)| args)
+        .expect("OnHangarViewStateUpdated notification on beyonce.CmdDock");
+    assert_eq!(full_hv_args.len(), 2);
+    let PyRep::KeyVal(full_kv) = &full_hv_args[1] else {
+        panic!("hangarViewState must be KeyVal");
+    };
+    assert_eq!(full_kv["upkeepState"].as_i64(), Some(1));
+    assert_eq!(full_kv["operatingState"].as_i64(), Some(110));
+    assert_eq!(full_kv["timerIsProgressing"].as_bool(), Some(false));
+    assert_eq!(full_kv["timerIsPaused"].as_bool(), Some(false));
+
+    let get_full_out = harness
+        .call_exchange("structureHangarViewMgr", None, "GetMyHangarViewState", &[], &kw)
+        .await;
+    assert!(
+        get_full_out.violations.is_empty(),
+        "violations: {:?}",
+        get_full_out.violations
+    );
+    assert_eq!(
+        get_full_out.result.as_ref().expect("GetMyHangarViewState"),
+        &full_hv_args[1]
+    );
+
+    // 3. Final clean undock.
+    ctx.advance_secs(12);
+    let final_undock = harness
+        .call_exchange("stationSvc", None, "Undock", &[], &kw)
+        .await;
+    assert!(
+        final_undock.violations.is_empty(),
+        "violations: {:?}",
+        final_undock.violations
+    );
+    assert!(
+        final_undock.result.is_ok(),
+        "final Undock failed: {:?}",
+        final_undock.result
+    );
+}

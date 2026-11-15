@@ -949,35 +949,23 @@ pub async fn handle(
                         crate::router::notify_registry::OnDockingFinished { item_id: dock_id },
                     );
                     if is_structure {
-                        let (corp_id, ally_id, fac_id, st_type_id) = ctx.db.with_snapshot(|snap| {
+                        let (corp_id, ally_id, fac_id) = ctx.db.with_snapshot(|snap| {
                             let c = snap.characters.get(&char_id);
-                            let corp = c.map(|ch| ch.corporation_id).unwrap_or(0);
-                            let ally = c.and_then(|ch| ch.alliance_id);
-                            let fac = c.and_then(|ch| ch.war_faction_id);
-                            let st_tid = snap.structures.get(&dock_id).map(|s| s.type_id).unwrap_or(35832);
-                            (corp, ally, fac, st_tid)
+                            (
+                                c.map(|ch| ch.corporation_id).unwrap_or(0),
+                                c.and_then(|ch| ch.alliance_id),
+                                c.and_then(|ch| ch.war_faction_id),
+                            )
                         });
-                        ctx.emit_typed(
-                            crate::router::NotificationTarget::Station(dock_id),
-                            crate::router::notify_registry::OnCharacterEnteredStructure {
-                                character_id: char_id,
-                                corporation_id: corp_id,
-                                alliance_id: ally_id,
-                                faction_id: fac_id,
-                            },
-                        );
-                        let hv_state = PyRep::keyval([
-                            ("characterID", PyRep::Integer(char_id)),
-                            ("structureID", PyRep::Integer(dock_id)),
-                            ("structureTypeID", PyRep::Integer(i64::from(st_type_id))),
-                            ("shipID", PyRep::Integer(ship_id)),
-                        ]);
-                        ctx.emit_typed(
-                            crate::router::NotificationTarget::Character(char_id),
-                            crate::router::notify_registry::OnHangarViewStateUpdated {
-                                structure_id: dock_id,
-                                hangar_view_state: hv_state,
-                            },
+                        structure_upwell_ops::emit_structure_dock_notifications(
+                            ctx,
+                            dock_id,
+                            char_id,
+                            corp_id,
+                            ally_id,
+                            fac_id,
+                            35_832,
+                            ship_id,
                         );
                     }
                     ctx.quasar_gateway.on_session_changed(session, now_unix);
