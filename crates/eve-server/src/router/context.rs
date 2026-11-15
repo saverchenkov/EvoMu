@@ -942,8 +942,7 @@ impl ServerContext {
         let backend = cfg.validate_storage_backend()?;
         let sde = match SdeRegistry::open(&cfg.sde_path) {
             Ok(s) => Arc::new(s),
-            #[cfg(test)]
-            Err(_) if cfg.sde_path == "data/evomu_sde.sqlite" => {
+            Err(_) if cfg!(test) && cfg.sde_path == "data/evomu_sde.sqlite" => {
                 Arc::new(SdeRegistry::with_canonical_seed())
             }
             Err(e) => return Err(e.to_string()),

@@ -369,9 +369,6 @@ async fn payment_purchase_schedules_tokens_and_fast_checkout() {
 // parity: quasar:eveProto/generated/eve_public/freelance/project/api/notices_pb2.pyj
 // parity: quasar:eveProto/generated/eve_public/freelance/contributionmethod/itemdelivery/api/requests_pb2.pyj
 // parity: quasar:eveProto/generated/eve_public/freelance/contributionmethod/itemdelivery/api/notices_pb2.pyj
-// parity: rpc:raffleProxy.CreateRaffle
-// parity: feat:wallet.hypernet-hypercore-sizing-expiry
-// parity: feat:wallet.hypernet-relay
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn freelance_project_delete_and_hypernet_relay_lifecycle() {
     let ctx = ServerContext::new();

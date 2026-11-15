@@ -179,16 +179,14 @@ fn extract_uuid_list(raw: &[u8], entry_field: u32) -> Vec<[u8; 16]> {
 
 /// Exercises non-GM (`ROLE_PLAYER`) `raffleMgr.character_Seeding` hangar-item seeding,
 /// negative validation, `raffleProxy` ticket purchase/payout/claim, and SQLite reload persistence.
-// parity: rpc:raffleMgr.QA_SeedRaffles, rpc:raffleProxy.CreateRaffle, rpc:raffleProxy.BuyRandomTickets
-// parity: rpc:raffleProxy.AwardItem, rpc:raffleProxy.Grab, feat:wallet.hypernet-relay
-// parity: feat:wallet.hypernet-hypercore-sizing-expiry, notify:OnRaffleCreatedServer
+// parity: rpc:raffleMgr.QA_SeedRaffles, rpc:raffleProxy.BuyRandomTickets
+// parity: rpc:raffleProxy.AwardItem, rpc:raffleProxy.Grab, notify:OnRaffleCreatedServer
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn non_gm_raffle_mgr_character_seeding_hangar_e2e_and_sqlite_reload() {
     eve_testkit::attest(&[
-        "rpc:raffleMgr.QA_SeedRaffles", "rpc:raffleProxy.CreateRaffle",
+        "rpc:raffleMgr.QA_SeedRaffles",
         "rpc:raffleProxy.BuyRandomTickets", "rpc:raffleProxy.AwardItem",
-        "rpc:raffleProxy.Grab", "feat:wallet.hypernet-relay",
-        "feat:wallet.hypernet-hypercore-sizing-expiry", "notify:OnRaffleCreatedServer",
+        "rpc:raffleProxy.Grab", "notify:OnRaffleCreatedServer",
     ]);
 
     let db_path = temp_sqlite_path("raffle_char_seeding");

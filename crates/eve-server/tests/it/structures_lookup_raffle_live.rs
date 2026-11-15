@@ -426,9 +426,40 @@ async fn test_lookup_warable_corporations_and_alliances_live() {
     );
 }
 
-// parity: rpc:raffleProxy.CreateRaffle
+// parity: rpc:raffleProxy.CreateRaffle, feat:wallet.hypernet-relay
+// parity: feat:wallet.hypernet-hypercore-sizing-expiry
 #[tokio::test]
 async fn test_raffle_proxy_create_raffle_hypercores_and_expiry_live() {
+    eve_testkit::attest(&[
+        "rpc:raffleProxy.CreateRaffle",
+        "feat:wallet.hypernet-relay",
+        "feat:wallet.hypernet-hypercore-sizing-expiry",
+    ]);
+
+    async fn rpc(
+        ctx: &ServerContext,
+        sess: &mut SessionState,
+        svc: &str,
+        method: &str,
+        args: &[PyRep],
+    ) -> Result<PyRep, BridgeRpcError> {
+        let kw = HashMap::new();
+        let mut h = eve_testkit::client_harness::ClientHarness::new(
+            common::SessionBorrowWireTransport {
+                ctx,
+                session: sess,
+                preserve_char_notifications: true,
+            },
+        );
+        h.call(svc, None, method, args, &kw)
+            .await
+            .map_err(|e| BridgeRpcError {
+                code: e.code,
+                message: e.message,
+                client_error: None,
+            })
+    }
+
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
@@ -541,19 +572,17 @@ async fn test_raffle_proxy_create_raffle_hypercores_and_expiry_live() {
     )
     .await
     .expect("bind Jita beyonce");
-    let PyRep::Tuple(j_parts) = bind_jita else { panic!("expected tuple") };
-    let beyonce_jita = j_parts[0].as_i64().expect("beyonce_jita") as u64;
-    ctx.dispatch_rpc(
-        &mut creator_pilot.sess,
-        "beyonce",
-        Some(beyonce_jita),
-        "CmdWarpToStuff",
-        &[PyRep::String("station".into()), PyRep::Integer(60_003_760), PyRep::Real(0.0)],
-        &HashMap::new(),
-        None,
-    )
-    .await
-    .expect("Warp to Jita 4-4");
+    let beyonce_jita = eve_testkit::client_harness::extract_bound_id_from_wire_rep(&bind_jita)
+        .expect("beyonce_jita");
+    common::borrow_wire_harness(&ctx, &mut creator_pilot.sess)
+        .call_ok(
+            "beyonce",
+            Some(beyonce_jita),
+            "CmdWarpToStuff",
+            &[PyRep::String("station".into()), PyRep::Integer(60_003_760), PyRep::Real(0.0)],
+            &HashMap::new(),
+        )
+        .await;
     let jita_handle = ctx.systems.get_or_spawn(30_000_142);
     for _ in 0..300 {
         let _ = jita_handle.step_manual(1.0).await;

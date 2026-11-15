@@ -20,7 +20,7 @@ use eve_server::services::sov_gameplay::{
 };
 use eve_server::services::sov_services::{
     calculate_adm, scale_entosis_capture_seconds,
-    TYPE_MAGMATIC_GAS, TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_HUB,
+    TYPE_MAGMATIC_GAS, TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_HUB, TYPE_SUPERIONIC_ICE,
 };
 use glam::DVec3;
 use std::sync::Arc;
@@ -378,38 +378,99 @@ async fn test_live_sov_changed_broadcasts_on_capture_and_loss() {
     assert!(sov_structs_loss.is_some(), "OnSolarSystemSovStructuresUpdated fired on loss");
 }
 
+// parity: feat:sovereignty.skyhook-reagent-maturity
 #[tokio::test]
 async fn test_live_skyhook_harvest_split_and_reagent_maturity() {
+    eve_testkit::attest(&["feat:sovereignty.skyhook-reagent-maturity"]);
+
+    async fn wire_rpc(
+        ctx: &ServerContext,
+        sess: &mut SessionState,
+        svc: &str,
+        method: &str,
+        args: &[PyRep],
+    ) -> PyRep {
+        let kw = std::collections::HashMap::new();
+        let mut h = eve_testkit::client_harness::ClientHarness::new(
+            crate::common::SessionBorrowWireTransport {
+                ctx,
+                session: sess,
+                preserve_char_notifications: true,
+            },
+        );
+        h.call_ok(svc, None, method, args, &kw).await
+    }
+
+    async fn wire_component_call(
+        ctx: &ServerContext,
+        sess: &mut SessionState,
+        args: &[PyRep],
+    ) -> PyRep {
+        let kw = std::collections::HashMap::new();
+        let bound_id = sess
+            .solar_system_id
+            .and_then(|s| ctx.bind_object(sess, "beyonce", s as i64).ok());
+        let mut h = eve_testkit::client_harness::ClientHarness::new(
+            crate::common::SessionBorrowWireTransport {
+                ctx,
+                session: sess,
+                preserve_char_notifications: true,
+            },
+        )
+        .with_mode(eve_testkit::client_harness::ContractValidationMode::ReportOnly);
+        let out = h
+            .call_exchange("beyonce", bound_id, "CallComponentFromClient", args, &kw)
+            .await;
+        assert!(
+            out.violations.iter().all(|v| !v.starts_with("wire:marshal:")),
+            "unexpected wire marshal violations on CallComponentFromClient: {:?}",
+            out.violations
+        );
+        out.result.expect("CallComponentFromClient ok")
+    }
+
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
-    let (sys_id, _, lava_planet, _ice_planet, _) = crate::sovereignty_equinox_gameplay::find_nullsec_planets(&ctx);
+    let (sys_id, _, lava_planet, ice_planet, _) = crate::sovereignty_equinox_gameplay::find_nullsec_planets(&ctx);
     let mut sess = select_gm_pilot(&ctx, 88_006, "demo", "demo-secret", PILOT_1).await;
     let (_corp, _ally) = create_corp_and_alliance(&ctx, &mut sess, "Sky Corps", "SKYC", Some(("Sky Alliance", "SKYA"))).await;
 
-    // Anchor Sov Hub first so system has sovereign owner
+    // Anchor Sov Hub first so system has sovereign owner; ensure ship has cargo space for both 14h harvests
     let ship_id = ctx.db.with_snapshot(|s| s.characters[&PILOT_1].active_ship_id);
-    slash(&ctx, &mut sess, &format!("/tr {sys_id}")).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.dynamic_attributes.insert(38, 1_000_000.0);
+        }
+    });
+    wire_rpc(&ctx, &mut sess, "slash", "SlashCmd", &[PyRep::String(format!("/tr {sys_id}"))]).await;
     let hub_item = give_item(&ctx, &mut sess, TYPE_SOVEREIGNTY_HUB, 1).await;
-    let _ = rpc(&ctx, &mut sess, "structureDeployment", "Anchor", &[PyRep::Integer(hub_item), PyRep::String("Sov Hub Sky".into())]).await.expect("anchor hub");
+    let _ = wire_rpc(&ctx, &mut sess, "structureDeployment", "Anchor", &[PyRep::Integer(hub_item), PyRep::String("Sov Hub Sky".into())]).await;
     ctx.advance_secs(905);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
-    // Warp near the lava planet (produces Magmatic Gas 81143)
+    // Anchor Skyhook at Lava planet (Magmatic Gas 81143) and Ice planet (Superionic Ice 81144)
     let cels = ctx.sde.celestials_in_system(sys_id);
     let lava_pos = cels.iter().find(|c| c.celestial_id == lava_planet).unwrap().position;
+    let ice_pos = cels.iter().find(|c| c.celestial_id == ice_planet).unwrap().position;
+
     let _ = ctx.systems.get_or_spawn(sys_id).set_ball_position(ship_id, lava_pos + DVec3::new(100_000.0, 0.0, 0.0)).await;
+    let lava_item = give_item(&ctx, &mut sess, TYPE_ORBITAL_SKYHOOK, 1).await;
+    let lava_rep = wire_rpc(&ctx, &mut sess, "structureDeployment", "Anchor", &[PyRep::Integer(lava_item), PyRep::Integer(lava_planet)]).await;
+    let skyhook_id = lava_rep.dict_get("structureID").and_then(|v| v.as_i64()).unwrap();
 
-    // Anchor Skyhook at lava planet
-    let skyhook_item = give_item(&ctx, &mut sess, TYPE_ORBITAL_SKYHOOK, 1).await;
-    let sky_rep = rpc(&ctx, &mut sess, "structureDeployment", "Anchor", &[PyRep::Integer(skyhook_item), PyRep::Integer(lava_planet)]).await.expect("anchor Skyhook");
-    let skyhook_id = sky_rep.dict_get("structureID").and_then(|v| v.as_i64()).unwrap();
+    let _ = ctx.systems.get_or_spawn(sys_id).set_ball_position(ship_id, ice_pos + DVec3::new(100_000.0, 0.0, 0.0)).await;
+    let ice_item = give_item(&ctx, &mut sess, TYPE_ORBITAL_SKYHOOK, 1).await;
+    let ice_rep = wire_rpc(&ctx, &mut sess, "structureDeployment", "Anchor", &[PyRep::Integer(ice_item), PyRep::Integer(ice_planet)]).await;
+    let ice_skyhook_id = ice_rep.dict_get("structureID").and_then(|v| v.as_i64()).unwrap();
 
-    // Verify initial bays: 0 secure, 0 insecure
+    // Verify initial bays: 0 secure, 0 insecure for both Magmatic Gas and Superionic Ice
     ctx.db.with_snapshot(|s| {
         let (reagent_tid, sec, insec, _) = s.sov_runtime.skyhook_reagent_bays[&skyhook_id];
         assert_eq!(reagent_tid, TYPE_MAGMATIC_GAS);
-        assert_eq!(sec, 0);
-        assert_eq!(insec, 0);
+        assert_eq!((sec, insec), (0, 0));
+        let (ice_tid, ice_sec, ice_insec, _) = s.sov_runtime.skyhook_reagent_bays[&ice_skyhook_id];
+        assert_eq!(ice_tid, TYPE_SUPERIONIC_ICE);
+        assert_eq!((ice_sec, ice_insec), (0, 0));
     });
 
     let rate = eve_server::services::quasar_sov_skyhook::planet_hourly_reagent_yield(
@@ -418,6 +479,12 @@ async fn test_live_skyhook_harvest_split_and_reagent_maturity() {
         Some(sys_id),
         TYPE_MAGMATIC_GAS,
     );
+    let ice_rate = eve_server::services::quasar_sov_skyhook::planet_hourly_reagent_yield(
+        &ctx.sde,
+        Some(ice_planet),
+        Some(sys_id),
+        TYPE_SUPERIONIC_ICE,
+    );
     // Advance 2 hours: yields 2 * rate units split 50/50 between secure and insecure bays
     ctx.advance_secs(2 * 3600);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
@@ -425,13 +492,19 @@ async fn test_live_skyhook_harvest_split_and_reagent_maturity() {
     let total_2h = 2 * rate;
     let exp_sec_2h = total_2h / 2;
     let exp_insec_2h = total_2h - exp_sec_2h;
+    let ice_total_2h = 2 * ice_rate;
+    let exp_ice_sec_2h = ice_total_2h / 2;
+    let exp_ice_insec_2h = ice_total_2h - exp_ice_sec_2h;
     ctx.db.with_snapshot(|s| {
         let (_, sec, insec, _) = s.sov_runtime.skyhook_reagent_bays[&skyhook_id];
-        assert_eq!(sec, exp_sec_2h, "50% harvested directly into secure bay");
-        assert_eq!(insec, exp_insec_2h, "50% harvested into insecure bay");
+        assert_eq!(sec, exp_sec_2h, "50% Magmatic Gas harvested directly into secure bay");
+        assert_eq!(insec, exp_insec_2h, "50% Magmatic Gas harvested into insecure bay");
+        let (_, ice_sec, ice_insec, _) = s.sov_runtime.skyhook_reagent_bays[&ice_skyhook_id];
+        assert_eq!(ice_sec, exp_ice_sec_2h, "50% Superionic Ice harvested directly into secure bay");
+        assert_eq!(ice_insec, exp_ice_insec_2h, "50% Superionic Ice harvested into insecure bay");
     });
 
-    // Advance 12 hours: half of insecure bay matures into secure, plus 12 * rate new harvest
+    // Advance 12 hours: half of insecure bay matures into secure over 12h of 24h cycle, plus 12 * rate new harvest
     ctx.advance_secs(12 * 3600);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
@@ -441,30 +514,63 @@ async fn test_live_skyhook_harvest_split_and_reagent_maturity() {
     let add_insec_12h = total_12h - add_sec_12h;
     let exp_sec_14h = exp_sec_2h + matured + add_sec_12h;
     let exp_insec_14h = (exp_insec_2h - matured) + add_insec_12h;
+
+    let ice_matured = exp_ice_insec_2h / 2;
+    let ice_total_12h = 12 * ice_rate;
+    let add_ice_sec_12h = ice_total_12h / 2;
+    let add_ice_insec_12h = ice_total_12h - add_ice_sec_12h;
+    let exp_ice_sec_14h = exp_ice_sec_2h + ice_matured + add_ice_sec_12h;
+    let exp_ice_insec_14h = (exp_ice_insec_2h - ice_matured) + add_ice_insec_12h;
     ctx.db.with_snapshot(|s| {
         let (_, sec, insec, _) = s.sov_runtime.skyhook_reagent_bays[&skyhook_id];
-        assert_eq!(sec, exp_sec_14h, "matured + new secure");
-        assert_eq!(insec, exp_insec_14h, "remaining + new insecure");
+        assert_eq!(sec, exp_sec_14h, "matured + new secure Magmatic Gas");
+        assert_eq!(insec, exp_insec_14h, "remaining + new insecure Magmatic Gas");
+        let (_, ice_sec, ice_insec, _) = s.sov_runtime.skyhook_reagent_bays[&ice_skyhook_id];
+        assert_eq!(ice_sec, exp_ice_sec_14h, "matured + new secure Superionic Ice");
+        assert_eq!(ice_insec, exp_ice_insec_14h, "remaining + new insecure Superionic Ice");
     });
 
-    // Place ship within docking/linking range of the Skyhook (within 1,000m)
+    // Place ship within linking range of the Lava Skyhook (1,000m) and extract via wire CallComponentFromClient
     let skyhook_pos = ctx.db.with_snapshot(|s| DVec3::from_array(s.structures[&skyhook_id].position));
     let _ = ctx.systems.get_or_spawn(sys_id).set_ball_position(ship_id, skyhook_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
-
-    // Live Quasar component extraction to active ship
-    let ext_call = eve_server::services::sov_gameplay::handle_skyhook_component_call(
-        &ctx, &sess, sys_id, PILOT_1, ship_id, skyhook_id, "orbitalSkyhook", "ExtractReagentsToShip", &[],
-    ).await.expect("ExtractReagentsToShip");
-
+    let ext_call = wire_component_call(
+        &ctx,
+        &mut sess,
+        &[
+            PyRep::Integer(skyhook_id),
+            PyRep::String("orbitalSkyhook".into()),
+            PyRep::String("ExtractReagentsToShip".into()),
+        ],
+    )
+    .await;
     assert_eq!(keyval_get(&ext_call, "extractedQuantity").and_then(|v| v.as_i64()), Some(exp_sec_14h as i64));
 
-    // Verify reagents now in ship cargo and secure bay is 0
+    // Place ship within linking range of the Ice Skyhook (1,000m) and extract via wire CallComponentFromClient
+    let ice_skyhook_pos = ctx.db.with_snapshot(|s| DVec3::from_array(s.structures[&ice_skyhook_id].position));
+    let _ = ctx.systems.get_or_spawn(sys_id).set_ball_position(ship_id, ice_skyhook_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
+    let ice_ext_call = wire_component_call(
+        &ctx,
+        &mut sess,
+        &[
+            PyRep::Integer(ice_skyhook_id),
+            PyRep::String("orbitalSkyhook".into()),
+            PyRep::String("ExtractReagentsToShip".into()),
+        ],
+    )
+    .await;
+    assert_eq!(keyval_get(&ice_ext_call, "extractedQuantity").and_then(|v| v.as_i64()), Some(exp_ice_sec_14h as i64));
+
+    // Verify both Magmatic Gas and Superionic Ice now in ship cargo and secure bays are 0
     ctx.db.with_snapshot(|s| {
         let (_, sec, insec, _) = s.sov_runtime.skyhook_reagent_bays[&skyhook_id];
-        assert_eq!(sec, 0, "secure bay empty after extraction");
+        assert_eq!(sec, 0, "lava secure bay empty after extraction");
         assert_eq!(insec, exp_insec_14h);
-        let cargo_reagent = s.items.values().find(|i| i.location_id == ship_id && i.type_id == TYPE_MAGMATIC_GAS);
-        assert!(cargo_reagent.is_some(), "Magmatic Gas present in ship cargo");
-        assert_eq!(cargo_reagent.unwrap().quantity, exp_sec_14h as i32);
+        let (_, ice_sec, ice_insec, _) = s.sov_runtime.skyhook_reagent_bays[&ice_skyhook_id];
+        assert_eq!(ice_sec, 0, "ice secure bay empty after extraction");
+        assert_eq!(ice_insec, exp_ice_insec_14h);
+        let cargo_gas = s.items.values().find(|i| i.location_id == ship_id && i.type_id == TYPE_MAGMATIC_GAS);
+        assert_eq!(cargo_gas.map(|i| i.quantity), Some(exp_sec_14h as i32));
+        let cargo_ice = s.items.values().find(|i| i.location_id == ship_id && i.type_id == TYPE_SUPERIONIC_ICE);
+        assert_eq!(cargo_ice.map(|i| i.quantity), Some(exp_ice_sec_14h as i32));
     });
 }

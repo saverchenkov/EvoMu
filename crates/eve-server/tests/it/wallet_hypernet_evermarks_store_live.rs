@@ -127,11 +127,40 @@ async fn deposit_evermarks_quasar(
 
 #[tokio::test]
 async fn test_wallet_hypernet_relay_npc_station_enforcement_and_random_tickets_live() {
-    // parity: rpc:raffleProxy.BuyRandomTickets, rpc:raffleProxy.GetActiveHistoricPrices
+    // parity: rpc:raffleProxy.CreateRaffle, rpc:raffleProxy.BuyRandomTickets
+    // parity: rpc:raffleProxy.GetActiveHistoricPrices
+    // parity: feat:wallet.hypernet-relay, feat:wallet.hypernet-hypercore-sizing-expiry
     eve_testkit::attest(&[
+        "rpc:raffleProxy.CreateRaffle",
         "rpc:raffleProxy.BuyRandomTickets",
         "rpc:raffleProxy.GetActiveHistoricPrices",
+        "feat:wallet.hypernet-relay",
+        "feat:wallet.hypernet-hypercore-sizing-expiry",
     ]);
+
+    async fn rpc(
+        ctx: &ServerContext,
+        sess: &mut SessionState,
+        svc: &str,
+        method: &str,
+        args: &[PyRep],
+    ) -> Result<PyRep, BridgeRpcError> {
+        let kw = HashMap::new();
+        let mut h = eve_testkit::client_harness::ClientHarness::new(
+            common::SessionBorrowWireTransport {
+                ctx,
+                session: sess,
+                preserve_char_notifications: true,
+            },
+        );
+        h.call(svc, None, method, args, &kw)
+            .await
+            .map_err(|e| BridgeRpcError {
+                code: e.code,
+                message: e.message,
+                client_error: None,
+            })
+    }
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -251,7 +280,12 @@ async fn test_wallet_hypernet_relay_npc_station_enforcement_and_random_tickets_l
         "Historic price must be positive based on SDE adjusted price"
     );
 
-    // 7. Create valid 8-node raffle at 100,000 ISK/ticket
+    // 7. Create valid 8-node raffle at 100,000 ISK/ticket and verify 95% creator payout (5% fee)
+    let creator_bal_before = rpc(&ctx, &mut s1, "account", "GetCashBalance", &[])
+        .await
+        .expect("creator balance before")
+        .as_f64()
+        .unwrap();
     let create_rep = rpc(
         &ctx,
         &mut s1,
@@ -279,9 +313,9 @@ async fn test_wallet_hypernet_relay_npc_station_enforcement_and_random_tickets_l
         .get("hypercores_used")
         .and_then(|v| v.as_i64())
         .expect("hypercores_used");
-    assert!(
-        cores_used >= 1,
-        "Creating raffle must consume at least 1 HyperCore"
+    assert_eq!(
+        cores_used, 1,
+        "800k total price -> max(1, floor(800_000 / 350_000 * 0.05)) == 1 HyperCore"
     );
 
     // 8. Buyer pilot buys 8 random tickets via BuyRandomTickets (using real random draw)
@@ -306,6 +340,15 @@ async fn test_wallet_hypernet_relay_npc_station_enforcement_and_random_tickets_l
         b_kv.get("winner_id").and_then(|v| v.as_i64()),
         Some(PILOT_2),
         "Sole buyer must be the winner"
+    );
+    let creator_bal_after = rpc(&ctx, &mut s1, "account", "GetCashBalance", &[])
+        .await
+        .expect("creator balance after")
+        .as_f64()
+        .unwrap();
+    assert!(
+        ((creator_bal_after - creator_bal_before) - 760_000.0).abs() < 0.05,
+        "Creator must receive 95% of 800,000 ISK ticket sales (760,000 ISK after 5% HyperNet fee)"
     );
 
     // 9. Award item to winner
