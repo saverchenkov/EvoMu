@@ -713,20 +713,50 @@ pub async fn handle(
         }
 
         ("devIndexManager", "GetAllDevelopmentIndices") => {
+            struct DevelopmentIndexReply {
+                solar_system_id: u32,
+                military: u8,
+                industrial: u8,
+                strategic: u8,
+            }
+            impl DevelopmentIndexReply {
+                fn into_pyrep(self) -> PyRep {
+                    PyRep::keyval([
+                        ("solarSystemID", PyRep::Integer(i64::from(self.solar_system_id))),
+                        ("military", PyRep::Integer(i64::from(self.military))),
+                        ("industrial", PyRep::Integer(i64::from(self.industrial))),
+                        ("strategic", PyRep::Integer(i64::from(self.strategic))),
+                        (
+                            "militaryPoints",
+                            PyRep::Integer(i64::from(self.military) * 1_000),
+                        ),
+                        (
+                            "industrialPoints",
+                            PyRep::Integer(i64::from(self.industrial) * 1_000),
+                        ),
+                        ("claimedFor", PyRep::Integer(i64::from(self.strategic))),
+                        (
+                            "adm",
+                            PyRep::Real(calculate_adm(
+                                self.military,
+                                self.industrial,
+                                self.strategic,
+                            )),
+                        ),
+                    ])
+                }
+            }
             let res = ctx.db.with_snapshot(|snap| {
                 let mut map = Vec::new();
                 for (&sys_id, st) in &snap.system_states {
                     if st.sov_alliance_id.is_some() || st.military_index > 0 || st.industrial_index > 0 {
-                        let indices = PyRep::keyval([
-                            ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
-                            ("military", PyRep::Integer(i64::from(st.military_index))),
-                            ("industrial", PyRep::Integer(i64::from(st.industrial_index))),
-                            ("strategic", PyRep::Integer(i64::from(st.strategic_index))),
-                            ("militaryPoints", PyRep::Integer(i64::from(st.military_index) * 1_000)),
-                            ("industrialPoints", PyRep::Integer(i64::from(st.industrial_index) * 1_000)),
-                            ("claimedFor", PyRep::Integer(i64::from(st.strategic_index))),
-                            ("adm", PyRep::Real(calculate_adm(st.military_index, st.industrial_index, st.strategic_index))),
-                        ]);
+                        let indices = DevelopmentIndexReply {
+                            solar_system_id: sys_id,
+                            military: st.military_index,
+                            industrial: st.industrial_index,
+                            strategic: st.strategic_index,
+                        }
+                        .into_pyrep();
                         map.push((PyRep::Integer(i64::from(sys_id)), indices));
                     }
                 }

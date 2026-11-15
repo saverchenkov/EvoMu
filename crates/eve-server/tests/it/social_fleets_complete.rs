@@ -239,17 +239,20 @@ async fn test_so3_corporation_roles_public_info_governance_shares_votes_and_alli
         .dispatch_rpc(&mut sess2, "corpmgr", None, "GetPublicInfo", &[PyRep::Integer(corp_id)], &kw, None)
         .await
         .expect("GetPublicInfo");
-    let PyRep::KeyVal(pub_kv) = &public_info else { panic!("Expected KeyVal from GetPublicInfo") };
-    assert_eq!(pub_kv["corporationID"], PyRep::Integer(corp_id));
-    assert_eq!(pub_kv["corporationName"], PyRep::String("DeepSpace Logistics".into()));
-    assert_eq!(pub_kv["ticker"], PyRep::String("DSLOG".into()));
-    assert_eq!(pub_kv["tickerName"], PyRep::String("DSLOG".into()));
-    assert_eq!(pub_kv["ceoID"], PyRep::Integer(90_000_001));
-    assert_eq!(pub_kv["memberCount"], PyRep::Integer(1));
-    assert_eq!(pub_kv["taxRate"], PyRep::Real(0.075));
-    assert_eq!(pub_kv["allianceID"], PyRep::None);
-    assert_eq!(pub_kv["stationID"], PyRep::Integer(60_003_760));
-    assert_eq!(pub_kv["shares"], PyRep::Integer(1000));
+    assert!(matches!(
+        &public_info,
+        PyRep::Object { type_name, .. } if type_name == "util.Row"
+    ));
+    assert_eq!(public_info.dict_get("corporationID"), Some(&PyRep::Integer(corp_id)));
+    assert_eq!(public_info.dict_get("corporationName"), Some(&PyRep::String("DeepSpace Logistics".into())));
+    assert_eq!(public_info.dict_get("ticker"), Some(&PyRep::String("DSLOG".into())));
+    assert_eq!(public_info.dict_get("tickerName"), Some(&PyRep::String("DSLOG".into())));
+    assert_eq!(public_info.dict_get("ceoID"), Some(&PyRep::Integer(90_000_001)));
+    assert_eq!(public_info.dict_get("memberCount"), Some(&PyRep::Integer(1)));
+    assert_eq!(public_info.dict_get("taxRate"), Some(&PyRep::Real(0.075)));
+    assert_eq!(public_info.dict_get("allianceID"), Some(&PyRep::None));
+    assert_eq!(public_info.dict_get("stationID"), Some(&PyRep::Integer(60_003_760)));
+    assert_eq!(public_info.dict_get("shares"), Some(&PyRep::Integer(1000)));
 
     let corp_reg_info = ctx
         .dispatch_rpc(&mut sess2, "corpRegistry", None, "GetCorporation", &[PyRep::Integer(corp_id)], &kw, None)
@@ -405,10 +408,11 @@ async fn test_so3_corporation_roles_public_info_governance_shares_votes_and_alli
         )
         .await
         .expect("GetPublicInfo after UpdateApplicationOffer");
-    let PyRep::KeyVal(pm_kv) = &pub_members else {
-        panic!()
-    };
-    assert_eq!(pm_kv["memberCount"], PyRep::Integer(2));
+    assert!(matches!(
+        &pub_members,
+        PyRep::Object { type_name, .. } if type_name == "util.Row"
+    ));
+    assert_eq!(pub_members.dict_get("memberCount"), Some(&PyRep::Integer(2)));
 
     // 5. Update Member Roles via V24 corpRegistry.UpdateMember & verify role bitmask authorization + AuditMember
     let update_roles = ctx
@@ -440,7 +444,10 @@ async fn test_so3_corporation_roles_public_info_governance_shares_votes_and_alli
         )
         .await
         .expect("AuditMember");
-    assert!(is_rowset(&audit_rep));
+    assert!(matches!(
+        &audit_rep,
+        PyRep::Tuple(parts) if parts.len() == 2 && is_rowset(&parts[0]) && is_rowset(&parts[1])
+    ));
 
     // Role bitmask authorization check: Pilot 2 (Accountant, not Director/CEO) denied from changing roles
     sess2.corporation_id = Some(corp_id);

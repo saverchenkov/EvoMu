@@ -455,7 +455,7 @@ async fn test_b22_corp_settings_mail_and_structure_defaults() {
         rpc(&ctx, &mut sess1, "corpRegistry", "GetStructureReinforceDefault", &[])
             .await
             .unwrap(),
-        PyRep::Integer(18),
+        PyRep::Tuple(vec![PyRep::Integer(18), PyRep::Integer(0)]),
         "Default structure reinforce hour must remain unchanged after rejected call"
     );
     rpc(
@@ -471,7 +471,7 @@ async fn test_b22_corp_settings_mail_and_structure_defaults() {
         rpc(&ctx, &mut sess1, "corpRegistry", "GetStructureReinforceDefault", &[])
             .await
             .unwrap(),
-        PyRep::Integer(21)
+        PyRep::Tuple(vec![PyRep::Integer(21), PyRep::Integer(0)])
     );
     assert_eq!(
         rpc(&ctx, &mut sess2, "corpRegistry", "SetStructureReinforceDefault", &[PyRep::Integer(3)])
@@ -484,7 +484,7 @@ async fn test_b22_corp_settings_mail_and_structure_defaults() {
         rpc(&ctx, &mut sess1, "corpRegistry", "GetStructureReinforceDefault", &[])
             .await
             .unwrap(),
-        PyRep::Integer(21)
+        PyRep::Tuple(vec![PyRep::Integer(21), PyRep::Integer(0)])
     );
 
     let (sys_id, station_id, base_pos) = ctx

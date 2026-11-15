@@ -246,8 +246,7 @@ async fn test_sov_skyhooks_and_structures_audit() {
         .await
         .expect("sovMgr.GetSovStructuresInfoForLocalSolarSystem");
 
-    let structs_rep = sov_info.dict_get("structures").expect("structures dict in sov info");
-    let structs_list = as_list(structs_rep);
+    let structs_list = as_list(&sov_info);
     assert_eq!(
         structs_list.len(),
         1,
@@ -255,10 +254,6 @@ async fn test_sov_skyhooks_and_structures_audit() {
     );
     assert_eq!(
         structs_list[0].dict_get("structureID").and_then(|v| v.as_i64()),
-        Some(ihub_id)
-    );
-    assert_eq!(
-        sov_info.dict_get("infrastructureHubID").and_then(|v| v.as_i64()),
         Some(ihub_id)
     );
 

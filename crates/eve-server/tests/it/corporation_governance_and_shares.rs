@@ -118,8 +118,12 @@ async fn test_corporation_member_roles_and_audit_log_tracking() {
         .await
         .expect("AuditMember");
 
-    let PyRep::Rowset { rows, .. } = audit else {
-        panic!("expected Rowset from AuditMember, got {audit:?}");
+    let PyRep::Tuple(audit_parts) = audit else {
+        panic!("expected 2-tuple from AuditMember, got {audit:?}");
+    };
+    assert_eq!(audit_parts.len(), 2);
+    let PyRep::Rowset { rows, .. } = &audit_parts[0] else {
+        panic!("expected Rowset from AuditMember, got {audit_parts:?}");
     };
     assert!(rows.len() >= 2, "Expected at least 2 audit entries, got {}", rows.len());
 
@@ -442,7 +446,7 @@ async fn test_corporation_structure_default_reinforcement_and_anchoring_inherita
     )
     .await
     .expect("GetStructureReinforceDefault");
-    assert_eq!(get_rf, PyRep::Integer(19));
+    assert_eq!(get_rf, PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(0)]));
 
     let get_rf_day = rpc(
         &ctx,
@@ -801,7 +805,7 @@ async fn test_corp_governance_welcome_mails_structures_alliance() {
     )
     .await
     .expect("GetStructureReinforceDefault");
-    assert_eq!(get_rf, PyRep::Integer(19));
+    assert_eq!(get_rf, PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(0)]));
 
     // feat:corporation.corp-logo
     // Update corporation logo with custom shapes and colors

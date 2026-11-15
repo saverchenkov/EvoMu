@@ -221,7 +221,9 @@ fn audit_timestamp_normalization_and_audit_member_filters() {
     )
     .unwrap()
     .unwrap();
-    let PyRep::Rowset { rows, .. } = audit else { panic!("expected rowset") };
+    let PyRep::Tuple(parts) = audit else { panic!("expected 2-tuple of rowsets") };
+    assert_eq!(parts.len(), 2);
+    let PyRep::Rowset { rows, .. } = &parts[0] else { panic!("expected rowset") };
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0][4].as_i64(), Some(1_700_000_800));
 }
@@ -265,7 +267,10 @@ fn corpmgr_attributes_update_corp_clamping_and_logo_errors() {
     )
     .unwrap()
     .unwrap();
-    assert!(matches!(npc_info, PyRep::KeyVal(_)));
+    assert!(matches!(
+        npc_info,
+        PyRep::Object { type_name, .. } if type_name == "util.Row"
+    ));
 
     // Missing corp GetPublicInfo returns CorporationNotFound
     let missing_info = handle_corps(
@@ -596,7 +601,10 @@ fn applications_invitations_and_cash_transfer_error_edges() {
     )
     .unwrap()
     .unwrap();
-    assert_eq!(can_leave.dict_get("canLeave"), Some(&PyRep::Bool(true)));
+    assert!(matches!(
+        &can_leave,
+        PyRep::Tuple(parts) if parts.len() == 3 && parts[0] == PyRep::Bool(true)
+    ));
 
     // Direct unit checks for `promote_all_due_corp_grants` and `GetMembersPaged` (`handle_get_members_paged`)
     let now_u = ctx.now_unix();

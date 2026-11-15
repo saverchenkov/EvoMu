@@ -1594,11 +1594,11 @@ async fn test_fw_enlistment_warzone_insurgency_and_sov_ops() {
             >= 40_000
     );
 
-    // In Jita (non-FW), GetLocalVictoryPointState returns None; teleport into FW system to observe KeyVal
+    // In Jita (non-FW), GetLocalVictoryPointState returns (None, 0); teleport into FW system to observe (sys_id, KeyVal)
     let jita_vp = rpc(&ctx, &mut gm, "fwVictoryPointMgr", "GetLocalVictoryPointState", &[])
         .await
         .expect("GetLocalVictoryPointState Jita");
-    assert_eq!(jita_vp, PyRep::None);
+    assert_eq!(jita_vp, PyRep::Tuple(vec![PyRep::None, PyRep::Integer(0)]));
 
     common::slash_cmd(&ctx, &mut gm, &format!("/tr {fw_sys}")).await;
     let local_vp = rpc(

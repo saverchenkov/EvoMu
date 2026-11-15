@@ -98,7 +98,7 @@ fn corp_public_info_update_divisions_members_and_medals() {
     assert_eq!(info.get("loyaltyPointTaxRate").and_then(|v| v.as_f64()), Some(0.1));
     assert_eq!(info.get("iskTaxRate").and_then(|v| v.as_f64()), Some(0.1));
     assert_eq!(info.get("friendlyFire").and_then(|v| v.as_bool()), Some(false));
-    let PyRep::KeyVal(npc_info) = handle_corps(
+    let npc_info = handle_corps(
         &ctx,
         &mut ceo_sess,
         "corpmgr",
@@ -107,12 +107,19 @@ fn corp_public_info_update_divisions_members_and_medals() {
         &kw,
     )
     .unwrap()
-    .unwrap()
-    else {
-        panic!("expected KeyVal for NPC corp")
-    };
-    assert_eq!(npc_info.get("creatorID").and_then(|v| v.as_i64()), Some(3_004_069));
-    assert!(npc_info.get("loyaltyPointTaxRate").and_then(|v| v.as_f64()).is_some());
+    .unwrap();
+    assert!(matches!(
+        &npc_info,
+        PyRep::Object { type_name, .. } if type_name == "util.Row"
+    ));
+    assert_eq!(
+        npc_info.dict_get("creatorID").and_then(|v| v.as_i64()),
+        Some(3_004_069)
+    );
+    assert!(npc_info
+        .dict_get("loyaltyPointTaxRate")
+        .and_then(|v| v.as_f64())
+        .is_some());
     assert_eq!(
         handle_corps(&ctx, &mut ceo_sess, "corpmgr", "ceoID", &[], &kw)
             .unwrap()
@@ -322,7 +329,9 @@ fn corp_public_info_update_divisions_members_and_medals() {
     )
     .unwrap()
     .unwrap();
-    let PyRep::Rowset { rows: audit_rows, .. } = audit_filtered else { panic!() };
+    let PyRep::Tuple(audit_parts) = audit_filtered else { panic!() };
+    assert_eq!(audit_parts.len(), 2);
+    let PyRep::Rowset { rows: audit_rows, .. } = &audit_parts[0] else { panic!() };
     assert_eq!(audit_rows.len(), 1);
     assert_eq!(audit_rows[0][4], PyRep::Integer(1_800_000_500));
 
@@ -374,7 +383,7 @@ fn get_corporation_omits_zero_station_and_ceo_ids() {
     assert_eq!(info.get("allianceID"), Some(&PyRep::None), "zero allianceID must be None (#773)");
     assert_eq!(info.get("ceoID"), Some(&PyRep::Integer(90_000_001)));
 
-    let PyRep::KeyVal(npc_info) = handle_corps(
+    let npc_info = handle_corps(
         &ctx,
         &mut ceo_sess,
         "corpmgr",
@@ -383,10 +392,11 @@ fn get_corporation_omits_zero_station_and_ceo_ids() {
         &kw,
     )
     .unwrap()
-    .unwrap()
-    else {
-        panic!("expected KeyVal for NPC corp");
-    };
+    .unwrap();
+    assert!(matches!(
+        &npc_info,
+        PyRep::Object { type_name, .. } if type_name == "util.Row"
+    ));
     let expected_cn_ceo = ctx
         .sde
         .npc_corporations
@@ -395,12 +405,12 @@ fn get_corporation_omits_zero_station_and_ceo_ids() {
         .expect("Caldari Navy 1000035 ceo_id loaded from SDE");
     assert_eq!(expected_cn_ceo, 3_004_069);
     assert_eq!(
-        npc_info.get("ceoID"),
+        npc_info.dict_get("ceoID"),
         Some(&PyRep::Integer(expected_cn_ceo)),
         "NPC corp ceoID must be a valid SDE ceo_id ownerID, never None (#965)"
     );
     assert_eq!(
-        npc_info.get("creatorID"),
+        npc_info.dict_get("creatorID"),
         Some(&PyRep::Integer(expected_cn_ceo))
     );
     assert_eq!(
@@ -424,7 +434,7 @@ fn get_corporation_omits_zero_station_and_ceo_ids() {
         .get(&1_000_173)
         .and_then(|c| c.ceo_id);
     assert_eq!(polaris_ceo, None);
-    let PyRep::KeyVal(polaris_info) = handle_corps(
+    let polaris_info = handle_corps(
         &ctx,
         &mut ceo_sess,
         "corpmgr",
@@ -433,12 +443,13 @@ fn get_corporation_omits_zero_station_and_ceo_ids() {
         &kw,
     )
     .unwrap()
-    .unwrap()
-    else {
-        panic!("expected KeyVal for NPC corp 1000173");
-    };
+    .unwrap();
+    assert!(matches!(
+        &polaris_info,
+        PyRep::Object { type_name, .. } if type_name == "util.Row"
+    ));
     assert_eq!(
-        polaris_info.get("ceoID"),
+        polaris_info.dict_get("ceoID"),
         Some(&PyRep::Integer(1_000_173)),
         "NPC corp without SDE ceo_id must fall back to corporationID, never None (#965)"
     );
@@ -472,7 +483,7 @@ fn get_corporation_omits_zero_station_and_ceo_ids() {
         .unwrap_or(1_000_004);
     assert!(expected_ytiri_ceo > 0);
     for method in ["GetPublicInfo", "GetCorporations"] {
-        let PyRep::KeyVal(ytiri_info) = handle_corps(
+        let ytiri_info = handle_corps(
             &ctx,
             &mut ceo_sess,
             "corpmgr",
@@ -481,16 +492,17 @@ fn get_corporation_omits_zero_station_and_ceo_ids() {
             &kw,
         )
         .unwrap()
-        .unwrap()
-        else {
-            panic!("expected KeyVal for materialized NPC corp 1000004 in {method}");
-        };
+        .unwrap();
+        assert!(matches!(
+            &ytiri_info,
+            PyRep::Object { type_name, .. } if type_name == "util.Row"
+        ));
         assert_eq!(
-            ytiri_info.get("ceoID"),
+            ytiri_info.dict_get("ceoID"),
             Some(&PyRep::Integer(expected_ytiri_ceo)),
             "materialized NPC corp 1000004 with ceo_id=0 must resolve positive ceoID in {method} (#965)"
         );
-        assert_ne!(ytiri_info.get("ticker"), Some(&PyRep::String("NPC".into())));
+        assert_ne!(ytiri_info.dict_get("ticker"), Some(&PyRep::String("NPC".into())));
     }
     assert_eq!(
         handle_corps(

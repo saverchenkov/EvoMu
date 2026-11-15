@@ -385,7 +385,10 @@ async fn test_corp_member_tracking_roles_and_expulsion() {
     )
     .await
     .expect("CanLeaveCurrentCorporation");
-    assert_eq!(field(&can_leave2, "canLeave"), PyRep::Bool(true));
+    assert!(matches!(
+        &can_leave2,
+        PyRep::Tuple(parts) if parts.len() == 3 && parts[0] == PyRep::Bool(true)
+    ));
 
     let ceo_leave = rpc(
         &ctx,
@@ -396,7 +399,10 @@ async fn test_corp_member_tracking_roles_and_expulsion() {
     )
     .await
     .expect("CanLeaveCurrentCorporation CEO");
-    assert_eq!(field(&ceo_leave, "canLeave"), PyRep::Bool(false));
+    assert!(matches!(
+        &ceo_leave,
+        PyRep::Tuple(parts) if parts.len() == 3 && parts[0] == PyRep::Bool(false)
+    ));
 
     let can_kick2 = rpc(&ctx, &mut sess1, "corpRegistry", "CanBeKickedOut", &[PyRep::Integer(PILOT_2)]).await.expect("CanBeKickedOut with active roles");
     assert_eq!(can_kick2, PyRep::Bool(false));

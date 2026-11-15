@@ -241,7 +241,7 @@ async fn test_d6_corp_governance_and_employment_history_persist_and_rollback() {
         let welcome = rpc(&ctx2, &mut sess2, "corpRegistry", "GetCorpWelcomeMail", &[]).await;
         assert_eq!(welcome.dict_get("subject").and_then(|v| v.as_str()), Some("Welcome to D6DH"));
         assert_eq!(rpc(&ctx2, &mut sess2, "corpRegistry", "DoesCorpRestrictCorpMails", &[]).await, PyRep::Bool(true));
-        assert_eq!(rpc(&ctx2, &mut sess2, "corpRegistry", "GetStructureReinforceDefault", &[]).await, PyRep::Integer(21));
+        assert_eq!(rpc(&ctx2, &mut sess2, "corpRegistry", "GetStructureReinforceDefault", &[]).await, PyRep::Tuple(vec![PyRep::Integer(21), PyRep::Integer(0)]));
 
         // Verify ESI endpoints reflect all RPC-driven corp governance mutations after restart
         let divs = esi_get(&ctx2, "/corporations/{corporation_id}/divisions", &[("corporation_id", corp_id)]);

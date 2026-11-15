@@ -891,7 +891,10 @@ async fn run_corporation_deliveries_and_governance_suite() -> (bool, bool, i64, 
         snap.wars.insert(999_123, eve_db::WarRecord { war_id: 999_123, aggressor_corp_id: corp_id, defender_corp_id: 1_000_002, mutual: false, started_unix: 0, active: true });
     });
     let can_leave_war = ctx.dispatch_rpc(&mut sess1, "corpRegistry", None, "CanLeaveCurrentCorporation", &[], &kw, None).await.unwrap();
-    assert_eq!(field(&can_leave_war, "canLeave"), PyRep::Bool(false));
+    assert!(matches!(
+        &can_leave_war,
+        PyRep::Tuple(parts) if parts.len() == 3 && parts[0] == PyRep::Bool(false)
+    ));
     assert_eq!(ctx.dispatch_rpc(&mut sess1, "corpRegistry", None, "KickOutMember", &[PyRep::Integer(90_000_001)], &kw, None).await.unwrap_err().code, "ActiveWarsPreventClosure");
     ctx.db.with_mut_snapshot(|snap| snap.wars.get_mut(&999_123).unwrap().active = false);
     let close_rep = ctx.dispatch_rpc(&mut sess1, "corpRegistry", None, "KickOutMember", &[PyRep::Integer(90_000_001)], &kw, None).await.unwrap();

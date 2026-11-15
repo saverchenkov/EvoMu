@@ -291,7 +291,7 @@ async fn test_corp_welcome_mail_and_structures() {
     )
     .await
     .expect("GetStructureReinforceDefault");
-    assert_eq!(get_reinforce, PyRep::Integer(20));
+    assert_eq!(get_reinforce, PyRep::Tuple(vec![PyRep::Integer(20), PyRep::Integer(0)]));
 }
 
 #[tokio::test]

@@ -975,6 +975,26 @@ pub(super) fn handle_wars(
         }
 
         ("peaceTreatyMgr", "GetPeaceTreatiesForSession") => {
+            struct PeaceTreatyReply {
+                war_id: i64,
+                other_owner_id: i64,
+                expiry_unix: u64,
+            }
+            impl PeaceTreatyReply {
+                fn into_pyrep(self) -> PyRep {
+                    PyRep::keyval([
+                        ("warID", PyRep::Integer(self.war_id)),
+                        ("otherOwnerID", PyRep::Integer(self.other_owner_id)),
+                        (
+                            "expiryDate",
+                            PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(
+                                self.expiry_unix,
+                            )),
+                        ),
+                        ("peaceReason", PyRep::Integer(4)),
+                    ])
+                }
+            }
             let my_alliance = session.alliance_id.filter(|&a| a > 0);
             let (outgoing, incoming) = ctx.db.with_snapshot(|snap| {
                 let mut outgoing = Vec::new();
@@ -989,15 +1009,12 @@ pub(super) fn handle_wars(
                         continue;
                     }
                     let other_owner_id = if is_agg { t.corp_b } else { t.corp_a };
-                    let entry = PyRep::keyval([
-                        ("warID", PyRep::Integer(t.war_id)),
-                        ("otherOwnerID", PyRep::Integer(other_owner_id)),
-                        (
-                            "expiryDate",
-                            PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(t.expiry_unix)),
-                        ),
-                        ("peaceReason", PyRep::Integer(4)),
-                    ]);
+                    let entry = PeaceTreatyReply {
+                        war_id: t.war_id,
+                        other_owner_id,
+                        expiry_unix: t.expiry_unix,
+                    }
+                    .into_pyrep();
                     if is_agg {
                         outgoing.push(entry);
                     } else {

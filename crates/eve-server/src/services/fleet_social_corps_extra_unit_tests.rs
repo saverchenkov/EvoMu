@@ -211,7 +211,7 @@ fn update_corp_divisions_dict_non_director_members_and_audit_member() {
             1_800_025_000,
         ));
     });
-    let PyRep::Rowset { rows: audit_rows, .. } = call_corps(
+    let PyRep::Tuple(parts) = call_corps(
         &ctx,
         &mut ceo_sess,
         "corpmgr",
@@ -221,6 +221,10 @@ fn update_corp_divisions_dict_non_director_members_and_audit_member() {
     )
     .unwrap()
     else {
+        panic!("expected 2-tuple of Rowsets")
+    };
+    assert_eq!(parts.len(), 2);
+    let PyRep::Rowset { rows: audit_rows, .. } = &parts[0] else {
         panic!("expected Rowset")
     };
     assert_eq!(audit_rows.len(), 1);
@@ -420,13 +424,18 @@ fn applications_leave_kick_war_blockers_and_wallet_division_take_bits() {
         &kw,
     )
     .unwrap();
+    let PyRep::Tuple(war_parts) = war_leave else {
+        panic!("expected 3-tuple from CanLeaveCurrentCorporation");
+    };
+    assert_eq!(war_parts.len(), 3);
+    assert_eq!(war_parts[0], PyRep::Bool(false));
     assert_eq!(
-        war_leave.dict_get("canLeave").and_then(PyRep::as_bool),
-        Some(false)
+        war_parts[1].dict_get("msg").and_then(PyRep::as_str),
+        Some("CrpCantQuitNotInStasis")
     );
     assert_eq!(
-        war_leave.dict_get("reason").and_then(PyRep::as_str),
-        Some("Corporation has active wars")
+        war_parts[1].dict_get("__class__").and_then(PyRep::as_str),
+        Some("UserError")
     );
 
     // 4. GiveCashFromCorpAccount authorized via specific division 1 take bit (1 << 20) and InsufficientDivisionFunds

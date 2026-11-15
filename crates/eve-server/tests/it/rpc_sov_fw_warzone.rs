@@ -339,7 +339,7 @@ async fn test_sov_mgr_structures_and_fuel_access() {
         )
         .await
         .expect("GetSovStructuresInfoForLocalSolarSystem");
-    assert!(get_kv(&local_structures, "structures").is_some());
+    assert!(matches!(local_structures, PyRep::List(_)));
 
     // 4. SetSovHubFuelAccessGroup, GetSovHubFuelAccessGroup & IsOnLocalSovHubFuelAccessGroup
     let set_access = ctx

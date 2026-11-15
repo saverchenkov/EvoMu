@@ -60,7 +60,12 @@ async fn test_fw_insurgency_and_security_mgr() {
         .dispatch_rpc(&mut sess, "fwVictoryPointMgr", None, "GetLocalVictoryPointState", &[], &kw, None)
         .await
         .expect("GetLocalVictoryPointState");
-    assert!(is_keyval(&local_vp));
+    let PyRep::Tuple(vp_parts) = &local_vp else {
+        panic!("Expected 2-tuple from GetLocalVictoryPointState, got {local_vp:?}");
+    };
+    assert_eq!(vp_parts.len(), 2);
+    assert_eq!(vp_parts[0], PyRep::Integer(sys_id as i64));
+    assert!(is_keyval(&vp_parts[1]));
     assert_eq!(local_vp.dict_get("solarSystemID"), Some(&PyRep::Integer(sys_id as i64)));
     assert_eq!(local_vp.dict_get("victoryPoints"), Some(&PyRep::Integer(1_500)));
     assert_eq!(local_vp.dict_get("threshold"), Some(&PyRep::Integer(75_000)));

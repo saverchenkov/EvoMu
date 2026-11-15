@@ -104,9 +104,8 @@ async fn test_shard1_live_corp_projects_methods_audit_and_reinforce_default() {
         assert_eq!(
             rpc(&ctx, &mut s2, "corpRegistry", "GetStructureReinforceDefault", &[])
                 .await
-                .expect("GetStructureReinforceDefault")
-                .as_i64(),
-            Some(19)
+                .expect("GetStructureReinforceDefault"),
+            PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(0)])
         );
 
         // 2. Member Audit: grant ROLE_STATION_MANAGER and verify issuer, target, roles & timestamps via AuditMember
@@ -126,7 +125,11 @@ async fn test_shard1_live_corp_projects_methods_audit_and_reinforce_default() {
         let audit_res = rpc(&ctx, &mut s1, "corpmgr", "AuditMember", &[PyRep::Integer(PILOT_2)])
             .await
             .expect("corpmgr.AuditMember");
-        let PyRep::Rowset { columns, rows } = audit_res else {
+        let PyRep::Tuple(audit_parts) = audit_res else {
+            panic!("AuditMember must return 2-tuple of Rowsets");
+        };
+        assert_eq!(audit_parts.len(), 2);
+        let PyRep::Rowset { columns, rows } = audit_parts.into_iter().next().unwrap() else {
             panic!("AuditMember must return Rowset");
         };
         let col = |name: &str| {

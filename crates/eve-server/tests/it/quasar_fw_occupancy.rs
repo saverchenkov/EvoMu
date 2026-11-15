@@ -533,7 +533,11 @@ async fn test_fw_occupancy_warzone_scope_and_dynamic_threshold() {
         )
         .await
         .expect("GetLocalVictoryPointState on non-warzone system");
-    assert_eq!(non_fw_vp, PyRep::None, "Non-warzone system must return None");
+    assert_eq!(
+        non_fw_vp,
+        PyRep::Tuple(vec![PyRep::None, PyRep::Integer(0)]),
+        "Non-warzone system must return (None, 0)"
+    );
 
     let non_fw_occ = ctx
         .dispatch_rpc(

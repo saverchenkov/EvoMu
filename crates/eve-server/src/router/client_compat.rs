@@ -46,28 +46,6 @@ fn rowset_to_crowset(rep: PyRep, col_types: &[(&str, DbColumnType)]) -> PyRep {
     descriptor.build_crowset(mapped_rows)
 }
 
-fn rowset_to_dict_by_key(rep: PyRep, key_col: &str) -> PyRep {
-    let PyRep::Rowset { columns, rows } = rep else {
-        return rep;
-    };
-    let key_idx = columns.iter().position(|c| c == key_col).unwrap_or(0);
-    let mut dict = Vec::with_capacity(rows.len());
-    for row in rows {
-        let row_key = row
-            .get(key_idx)
-            .cloned()
-            .unwrap_or(PyRep::Integer(dict.len() as i64 + 1));
-        let entries: Vec<(PyRep, PyRep)> = columns
-            .iter()
-            .cloned()
-            .zip(row)
-            .map(|(k, v)| (PyRep::String(k), v))
-            .collect();
-        dict.push((row_key, PyRep::Dict(entries)));
-    }
-    PyRep::Dict(dict)
-}
-
 fn inv_keyval_to_dbrow_with_sde(rep: PyRep, sde: Option<&eve_sde::SdeRegistry>) -> PyRep {
     let PyRep::KeyVal(entries) = rep else {
         return rep;
@@ -549,11 +527,6 @@ pub fn normalize_macho_rpc_reply_at(
             }
         }
     }
-    if service == "fleetProxy" && matches!(method, "GetAvailableFleetAds" | "GetFleetAdsForChar") {
-        if let Ok(rep) = rpc_res {
-            return Ok(rowset_to_dict_by_key(rep, "fleetID"));
-        }
-    }
     if service == "account" && method == "GetTransactions" {
         if let Ok(rep) = rpc_res {
             return Ok(rowset_to_crowset(
@@ -626,19 +599,6 @@ pub fn normalize_macho_rpc_reply_at(
                 list: packed_rows,
                 dict: Vec::new(),
             });
-        }
-    }
-    if service == "sovMgr"
-        && matches!(
-            method,
-            "GetSovStructuresInfoForLocalSolarSystem" | "GetSovStructuresInfoForSolarSystem"
-        )
-    {
-        if let Ok(rep) = rpc_res {
-            if let Some(structs) = rep.dict_get("structures").cloned() {
-                return Ok(structs);
-            }
-            return Ok(PyRep::List(Vec::new()));
         }
     }
     if service == "marketProxy"
@@ -856,9 +816,7 @@ pub fn normalize_macho_rpc_reply_at(
             return Ok(PyRep::Dict(dict));
         }
     }
-    if (matches!(service, "corpRegistry" | "machoNet") && method == "GetCorporation")
-        || (service == "corpmgr" && matches!(method, "GetCorporations" | "GetPublicInfo"))
-    {
+    if matches!(service, "corpRegistry" | "machoNet") && method == "GetCorporation" {
         if let Ok(PyRep::KeyVal(mut entries)) = rpc_res {
             let cid = entries
                 .get("corporationID")
@@ -1133,33 +1091,6 @@ pub fn normalize_macho_rpc_reply_at(
                 ("searchTime", PyRep::Integer(1)),
             ]));
         }
-    } else if service == "corpRegistry" && method == "CanLeaveCurrentCorporation" {
-        if let Ok(ref rep) = rpc_res {
-            if matches!(rep, PyRep::KeyVal(_) | PyRep::Dict(_)) {
-                let can_leave = rep
-                    .dict_get("canLeave")
-                    .cloned()
-                    .unwrap_or(PyRep::Bool(false));
-                let err_kv = PyRep::keyval([
-                    ("msg", PyRep::String("CrpCantQuitNotInStasis".into())),
-                    ("dict", PyRep::Dict(Vec::new())),
-                    ("__class__", PyRep::String("UserError".into())),
-                ]);
-                return Ok(PyRep::Tuple(vec![
-                    can_leave,
-                    err_kv,
-                    PyRep::Dict(Vec::new()),
-                ]));
-            }
-        }
-    } else if service == "corpRegistry" && method == "GetStructureReinforceDefault" {
-        if let Ok(PyRep::Integer(h)) = rpc_res {
-            return Ok(PyRep::Tuple(vec![PyRep::Integer(h), PyRep::Integer(0)]));
-        }
-    } else if service == "corpmgr" && method == "AuditMember" {
-        if let Ok(rep) = rpc_res {
-            return Ok(PyRep::Tuple(vec![rep.clone(), rep]));
-        }
     } else if matches!(service, "corporationSvc" | "charMgr")
         && method == "GetEmployementRecordAndCharacterTransfers"
     {
@@ -1168,40 +1099,6 @@ pub fn normalize_macho_rpc_reply_at(
                 return Ok(rep);
             }
             return Ok(PyRep::Tuple(vec![rep, PyRep::List(Vec::new())]));
-        }
-    } else if service == "devIndexManager" && method == "GetAllDevelopmentIndices" {
-        if let Ok(PyRep::List(items)) = rpc_res {
-            let mut out = Vec::new();
-            for it in items {
-                let sys_id = it
-                    .dict_get("solarSystemID")
-                    .cloned()
-                    .unwrap_or(PyRep::Integer(0));
-                let mil = it
-                    .dict_get("militaryPoints")
-                    .or_else(|| it.dict_get("military"))
-                    .cloned()
-                    .unwrap_or(PyRep::Integer(0));
-                let ind = it
-                    .dict_get("industrialPoints")
-                    .or_else(|| it.dict_get("industrial"))
-                    .cloned()
-                    .unwrap_or(PyRep::Integer(0));
-                let claimed = it
-                    .dict_get("claimedFor")
-                    .or_else(|| it.dict_get("strategic"))
-                    .cloned()
-                    .unwrap_or(PyRep::Integer(0));
-                let adm = it.dict_get("adm").cloned().unwrap_or(PyRep::Real(0.0));
-                out.push(PyRep::keyval([
-                    ("solarSystemID", sys_id),
-                    ("militaryPoints", mil),
-                    ("industrialPoints", ind),
-                    ("claimedFor", claimed),
-                    ("adm", adm),
-                ]));
-            }
-            return Ok(PyRep::List(out));
         }
     } else if service == "dogmaIM" && method == "OverloadRack" {
         if let Ok(ref rep) = rpc_res {
@@ -1217,33 +1114,6 @@ pub fn normalize_macho_rpc_reply_at(
                         .collect(),
                 ));
             }
-        }
-    } else if service == "fwVictoryPointMgr" && method == "GetLocalVictoryPointState" {
-        if let Ok(ref rep) = rpc_res {
-            if matches!(rep, PyRep::None) {
-                return Ok(PyRep::Tuple(vec![PyRep::None, PyRep::Integer(0)]));
-            }
-            if matches!(rep, PyRep::KeyVal(_) | PyRep::Dict(_)) {
-                let sys_id = rep.dict_get("solarSystemID").cloned().unwrap_or(PyRep::None);
-                if let Some(explicit_state) = rep.dict_get("state").cloned() {
-                    return Ok(PyRep::Tuple(vec![sys_id, explicit_state]));
-                }
-                let state_kv =
-                    normalize_fw_victory_point_state_keyval(rep.clone(), Some(sys_id.clone()));
-                return Ok(PyRep::Tuple(vec![sys_id, state_kv]));
-            }
-        }
-    } else if service == "fwVictoryPointMgr" && method == "GetAllVictoryPointStates" {
-        if let Ok(PyRep::Dict(entries)) = rpc_res {
-            let out = entries
-                .into_iter()
-                .map(|(sys_key, val)| {
-                    let norm =
-                        normalize_fw_victory_point_state_keyval(val, Some(sys_key.clone()));
-                    (sys_key, norm)
-                })
-                .collect();
-            return Ok(PyRep::Dict(out));
         }
     } else if service == "invbroker" && method == "ALSCLogGet" {
         if let Ok(ref rep) = rpc_res {
@@ -1413,15 +1283,6 @@ pub fn normalize_macho_rpc_reply_at(
                 PyRep::Integer(i64::from(!locked)),
                 PyRep::List(target_ids),
             ]));
-        }
-    } else if service == "peaceTreatyMgr" && method == "GetPeaceTreatiesForSession" {
-        if let Ok(rep) = &rpc_res {
-            if !matches!(rep, PyRep::Tuple(items) if items.len() == 2) {
-                return Ok(PyRep::Tuple(vec![
-                    PyRep::List(Vec::new()),
-                    PyRep::List(Vec::new()),
-                ]));
-            }
         }
     } else if service == "petitioner" && method == "GetCategoryHierarchicalInfo" {
         if let Ok(PyRep::Tuple(mut parts)) = rpc_res {
@@ -2704,57 +2565,6 @@ fn normalize_agent_journal_details_rep(rep: PyRep) -> PyRep {
         }
     }
     PyRep::Tuple(parts)
-}
-
-fn normalize_fw_victory_point_state_keyval(rep: PyRep, fallback_sys_id: Option<PyRep>) -> PyRep {
-    let vp = rep
-        .dict_get("score")
-        .or_else(|| rep.dict_get("victoryPoints"))
-        .and_then(PyRep::as_i64)
-        .unwrap_or(0);
-    let threshold = rep
-        .dict_get("threshold")
-        .and_then(PyRep::as_i64)
-        .unwrap_or(3_000)
-        .max(1);
-    let contested_pct = rep
-        .dict_get("contestedPercentage")
-        .and_then(PyRep::as_f64)
-        .unwrap_or_else(|| ((vp as f64 / threshold as f64) * 100.0).clamp(0.0, 100.0));
-    let contested_fraction = rep
-        .dict_get("contestedFraction")
-        .and_then(PyRep::as_f64)
-        .unwrap_or_else(|| (contested_pct / 100.0).clamp(0.0, 1.0));
-    let sys_id = rep
-        .dict_get("solarSystemID")
-        .cloned()
-        .or(fallback_sys_id)
-        .unwrap_or(PyRep::Integer(0));
-    let is_contested = rep
-        .dict_get("isContested")
-        .and_then(PyRep::as_bool)
-        .unwrap_or(vp > 0);
-    let is_vulnerable = rep
-        .dict_get("isVulnerable")
-        .and_then(PyRep::as_bool)
-        .unwrap_or(vp >= threshold);
-    let mut map = match rep {
-        PyRep::KeyVal(m) => m,
-        PyRep::Dict(entries) => entries
-            .into_iter()
-            .filter_map(|(k, v)| k.as_str().map(|s| (s.to_string(), v)))
-            .collect(),
-        _ => HashMap::new(),
-    };
-    map.insert("solarSystemID".into(), sys_id);
-    map.insert("victoryPoints".into(), PyRep::Integer(vp));
-    map.insert("score".into(), PyRep::Integer(vp));
-    map.insert("threshold".into(), PyRep::Integer(threshold));
-    map.insert("contestedPercentage".into(), PyRep::Real(contested_pct));
-    map.insert("contestedFraction".into(), PyRep::Real(contested_fraction));
-    map.insert("isContested".into(), PyRep::Bool(is_contested));
-    map.insert("isVulnerable".into(), PyRep::Bool(is_vulnerable));
-    PyRep::KeyVal(map)
 }
 
 fn normalize_damage_message_dict(rep: PyRep) -> PyRep {
