@@ -945,6 +945,12 @@ async fn dogma_set_and_take_module_offline_cover_all_guards_structure_and_notifi
     let on_notifs = ctx.drain_notifications_for_char(char_id);
     assert!(on_notifs.iter().any(|n| n.event == "OnModuleAttributeChanges"));
     assert!(on_notifs.iter().any(|n| n.event == "OnGodmaShipEffect"));
+    assert!(
+        !on_notifs
+            .iter()
+            .any(|n| n.event == "OnGodmaEffectInfo" || n.event == "OnGodmaPrimeItem"),
+        "SetModuleOnline in space must not emit OnGodmaEffectInfo or OnGodmaPrimeItem (#1073): {on_notifs:?}"
+    );
 
     // Mark active with reactivation delay attr 669 & offline -> records delay, removes cycle, emits offline notifs
     ctx.db.with_mut_snapshot(|snap| {

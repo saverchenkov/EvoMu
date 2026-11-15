@@ -5,7 +5,7 @@
 
 use crate::router::notify_registry::*;
 use crate::router::{NotificationTarget, ServerContext};
-use eve_proto::{DBRowDescriptor, PyRep};
+use eve_proto::PyRep;
 
 /// Builds the V24 `OnDamageStateChange` 3-tuple (`#990`):
 /// `((shieldRatio, shieldTauMs, timestampFt), armorRatio, structureRatio)`,
@@ -513,12 +513,13 @@ pub fn emit_drone_activity_change(
     );
 }
 
-/// Emits `OnGodmaEffectInfo` and `OnGodmaPrimeItem` when a module is brought online
-/// (or for synthetic non-inventory test modules). Already-primed fitted modules in
+/// Emits `OnGodmaEffectInfo` for synthetic non-inventory test modules
+/// (`ctx.db.get_item(module_id).is_none()`). Already-primed fitted modules in
 /// `ctx.db.items` must NOT receive `OnGodmaEffectInfo` or `OnGodmaPrimeItem` on
-/// space activation (`effect_name != "online"`), because `StateManager.RefreshItemEffects`
-/// replaces the `blue.DBRow` entries in `effectsByItemEffect[itemID]` and orphans
-/// `ModuleButton.def_effect.dbrow` (`#975`).
+/// space activation or `SetModuleOnline` (`effect_name == "online"`), because
+/// `StateManager.RefreshItemEffects` replaces the `blue.DBRow` entries in
+/// `effectsByItemEffect[itemID]` and orphans `ModuleButton.def_effect.dbrow`
+/// (`#975`, `#1073`).
 #[allow(clippy::too_many_arguments)]
 pub fn emit_module_activation_godma_notifications(
     ctx: &ServerContext,
@@ -530,7 +531,7 @@ pub fn emit_module_activation_godma_notifications(
     duration_s: f64,
     target_id_opt: Option<i64>,
 ) {
-    if effect_name != "online" && ctx.db.get_item(module_id).is_some() {
+    if ctx.db.get_item(module_id).is_some() {
         return;
     }
     let Some(effect_id) = crate::router::binding::effect_id_for_module_sde(
@@ -561,82 +562,10 @@ pub fn emit_module_activation_godma_notifications(
         OnGodmaEffectInfo {
             item_id: module_id,
             type_id: i64::from(module_type_id),
-            active_effects: active_effects.clone(),
+            active_effects,
             time: now_ft,
         },
     );
-
-    if let Some(mut inv_item) = ctx.db.get_item(module_id) {
-        inv_item.singleton = true;
-        let inv_row = DBRowDescriptor::inv_item_header()
-            .build_dbrow(crate::services::inventory_fitting::item_to_packed_cells(ctx, &inv_item));
-        let mut merged_attrs: std::collections::BTreeMap<u16, f64> = ctx
-            .sde
-            .types
-            .get(&module_type_id)
-            .map(|t| t.default_attributes.iter().map(|(&k, &v)| (k, v)).collect())
-            .unwrap_or_default();
-        for (&k, &v) in &inv_item.dynamic_attributes {
-            merged_attrs.insert(k, v);
-        }
-        if ship_id > 0 {
-            let owner_cid = if char_id > 0 { char_id } else { inv_item.owner_id };
-            if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(owner_cid, ship_id) {
-                if let Some(m_state) = fit.module_state(module_id, &ctx.sde) {
-                    let modified_targets: std::collections::HashSet<u16> = m_state
-                        .modifiers
-                        .iter()
-                        .map(|m| m.target_attribute_id)
-                        .collect();
-                    let all_aids: std::collections::BTreeSet<u16> = m_state
-                        .base_attributes
-                        .keys()
-                        .copied()
-                        .chain(modified_targets.iter().copied())
-                        .collect();
-                    for aid in all_aids {
-                        if inv_item.dynamic_attributes.contains_key(&aid)
-                            && !modified_targets.contains(&aid)
-                        {
-                            continue;
-                        }
-                        merged_attrs.insert(aid, m_state.get_attribute(aid, &ctx.sde));
-                    }
-                    let mut rtc_attrs: std::collections::HashMap<u16, f64> =
-                        merged_attrs.iter().map(|(&k, &v)| (k, v)).collect();
-                    crate::services::tactical_modules::apply_projected_rtc_to_module_attrs(
-                        ctx,
-                        ship_id,
-                        &mut rtc_attrs,
-                    );
-                    merged_attrs = rtc_attrs.into_iter().collect();
-                }
-            }
-        }
-        merged_attrs.entry(73).or_insert(dur_ms_f64);
-        merged_attrs.insert(2, 1.0);
-        let attrs_dict = PyRep::Dict(
-            merged_attrs
-                .into_iter()
-                .map(|(k, v)| (PyRep::Integer(i64::from(k)), PyRep::Real(v)))
-                .collect(),
-        );
-        let prime_row = PyRep::keyval([
-            ("itemID", PyRep::Integer(module_id)),
-            ("invItem", inv_row),
-            ("attributes", attrs_dict),
-            ("activeEffects", active_effects),
-            ("time", PyRep::Integer(now_ft)),
-            ("wallclockTime", PyRep::Integer(now_ft)),
-        ]);
-        ctx.emit_typed(
-            NotificationTarget::Character(char_id),
-            OnGodmaPrimeItem {
-                location_id: ship_id,
-                row: prime_row,
-            },
-        );
-    }
 }
 
 /// Removes active/projected EWAR state for `(ship_id, module_id)` and emits

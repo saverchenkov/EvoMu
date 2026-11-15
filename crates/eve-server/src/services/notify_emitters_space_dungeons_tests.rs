@@ -159,6 +159,7 @@ fn godma_ewar_drones_cloak_pvp_deathzone_and_dungeon_trigger_emitters() {
 
     emit_drone_activity_change(&ctx, char_id, 930_001, 1, Some("guard"));
     emit_drone_activity_change(&ctx, char_id, 930_001, 0, None);
+    // Already-primed fitted module in ctx.db.items must NOT receive OnGodmaEffectInfo/OnGodmaPrimeItem (#1073).
     emit_module_activation_godma_notifications(
         &ctx,
         char_id,
@@ -169,8 +170,28 @@ fn godma_ewar_drones_cloak_pvp_deathzone_and_dungeon_trigger_emitters() {
         5.0,
         Some(999_001),
     );
+    let fitted_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        !fitted_notifs
+            .iter()
+            .any(|n| n.event == "OnGodmaEffectInfo" || n.event == "OnGodmaPrimeItem"),
+        "already-primed fitted module must not receive OnGodmaEffectInfo or OnGodmaPrimeItem: {fitted_notifs:?}"
+    );
+    // Synthetic non-inventory module not in ctx.db.items emits OnGodmaEffectInfo.
+    let synthetic_mod_id = 920_002_i64;
+    emit_module_activation_godma_notifications(
+        &ctx,
+        char_id,
+        ship_id,
+        synthetic_mod_id,
+        440,
+        "online",
+        5.0,
+        Some(999_001),
+    );
 
-    let pre_ewar_notifs = ctx.drain_notifications_for_char(char_id);
+    let mut pre_ewar_notifs = fitted_notifs;
+    pre_ewar_notifs.extend(ctx.drain_notifications_for_char(char_id));
     ctx.active_ewar_starts
         .write()
         .unwrap()
@@ -226,7 +247,7 @@ fn godma_ewar_drones_cloak_pvp_deathzone_and_dungeon_trigger_emitters() {
     let events: HashSet<&str> = drained.iter().map(|n| n.event.as_str()).collect();
     assert!(events.contains("OnDroneActivityChange"));
     assert!(events.contains("OnGodmaEffectInfo"));
-    assert!(events.contains("OnGodmaPrimeItem"));
+    assert!(!events.contains("OnGodmaPrimeItem"));
     assert!(events.contains("OnGodmaFlushLocationProfile"));
     assert!(events.contains("OnEwarEnd"));
     assert!(events.contains("OnJamStart"));
@@ -260,7 +281,7 @@ fn godma_ewar_drones_cloak_pvp_deathzone_and_dungeon_trigger_emitters() {
         .find(|n| n.event == "OnGodmaEffectInfo")
         .expect("OnGodmaEffectInfo notification");
     assert_eq!(effect_info.args.len(), 4);
-    assert_eq!(effect_info.args[0], PyRep::Integer(mod_id));
+    assert_eq!(effect_info.args[0], PyRep::Integer(synthetic_mod_id));
     assert_eq!(effect_info.args[1], PyRep::Integer(440));
     let PyRep::Dict(active_entries) = &effect_info.args[2] else {
         panic!("expected activeEffects dict in OnGodmaEffectInfo");
@@ -271,7 +292,7 @@ fn godma_ewar_drones_cloak_pvp_deathzone_and_dungeon_trigger_emitters() {
     };
     assert!(matches!(eff_key, PyRep::Integer(_)));
     assert_eq!(line.len(), 10);
-    assert_eq!(line[0], PyRep::Integer(mod_id));
+    assert_eq!(line[0], PyRep::Integer(synthetic_mod_id));
     assert_eq!(line[1], PyRep::Integer(char_id));
     assert_eq!(line[2], PyRep::Integer(ship_id));
     assert_eq!(line[3], PyRep::Integer(999_001));
@@ -281,21 +302,10 @@ fn godma_ewar_drones_cloak_pvp_deathzone_and_dungeon_trigger_emitters() {
     assert!(matches!(line[7], PyRep::Integer(ft) if ft > i32::MAX as i64));
     assert_eq!(line[8], PyRep::Integer(5000));
     assert_eq!(line[9], PyRep::Integer(0));
-
-    let prime_item = drained
-        .iter()
-        .find(|n| n.event == "OnGodmaPrimeItem")
-        .expect("OnGodmaPrimeItem notification");
-    assert_eq!(prime_item.args.len(), 2);
-    assert_eq!(prime_item.args[0], PyRep::Integer(ship_id));
-    let PyRep::KeyVal(kv) = &prime_item.args[1] else {
-        panic!("expected KeyVal in OnGodmaPrimeItem");
-    };
-    assert_eq!(kv.get("activeEffects"), Some(&effect_info.args[2]));
 }
 
 #[test]
-fn on_godma_prime_item_preserves_skill_and_ship_dogma_bonuses() {
+fn on_godma_prime_item_skipped_for_fitted_online_and_ship_prime_preserves_dogma_bonuses() {
     let (ctx, char_id) = make_online_ctx();
     let ship_id = 920_100_i64;
     let mod_id = 920_101_i64;
@@ -388,14 +398,23 @@ fn on_godma_prime_item_preserves_skill_and_ship_dogma_bonuses() {
     );
 
     let drained = ctx.drain_notifications_for_char(char_id);
-    let prime_item = drained
+    assert!(
+        !drained
+            .iter()
+            .any(|n| n.event == "OnGodmaPrimeItem" || n.event == "OnGodmaEffectInfo"),
+        "fitted online module in ctx.db.items must not emit OnGodmaPrimeItem or OnGodmaEffectInfo (#1073): {drained:?}"
+    );
+
+    let (_, _, _, module_entries) =
+        crate::services::inventory_fitting::fitting_module_cycles::evaluate_ship_dogma_attributes(
+            &ctx, char_id, ship_id,
+        )
+        .expect("evaluate_ship_dogma_attributes");
+    let (_, attrs_rep) = module_entries
         .iter()
-        .find(|n| n.event == "OnGodmaPrimeItem")
-        .expect("OnGodmaPrimeItem emitted");
-    let PyRep::KeyVal(kv) = &prime_item.args[1] else {
-        panic!("expected KeyVal in OnGodmaPrimeItem");
-    };
-    let Some(PyRep::Dict(entries)) = kv.get("attributes") else {
+        .find(|(k, _)| k.as_i64() == Some(mod_id))
+        .expect("module entry in evaluate_ship_dogma_attributes");
+    let PyRep::Dict(entries) = attrs_rep else {
         panic!("expected attributes Dict");
     };
     let attrs: std::collections::HashMap<i64, f64> = entries

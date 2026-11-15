@@ -1175,4 +1175,233 @@ async fn issue_975_module_activation_does_not_orphan_def_effect_and_item_get_inf
     );
 }
 
+#[tokio::test]
+async fn issue_1073_set_module_online_and_activate_online_do_not_emit_effect_info_or_prime_item() {
+    let mut sde = SdeRegistry::default();
+    sde.types.insert(
+        587,
+        make_type(
+            587,
+            25,
+            6,
+            2500.0,
+            400.0,
+            &[(48, 200.0), (11, 50.0), (482, 400.0), (14, 4.0), (13, 4.0), (12, 2.0)],
+        ),
+    );
+    let mut miner_type = make_type(483, 54, 7, 5.0, 0.0, &[(50, 10.0), (30, 5.0), (9, 40.0)]);
+    miner_type.effect_ids = vec![12, 16, 67];
+    miner_type.default_effect_id = Some(67);
+    sde.types.insert(483, miner_type);
+
+    let mut mwd_type = make_type(434, 46, 7, 5.0, 0.0, &[(50, 10.0), (30, 5.0), (9, 40.0)]);
+    mwd_type.effect_ids = vec![13, 16, 48];
+    mwd_type.default_effect_id = Some(48);
+    sde.types.insert(434, mwd_type);
+
+    sde.effects.insert(
+        16,
+        eve_sde::DogmaEffectType {
+            effect_id: 16,
+            name: "online".into(),
+            effect_category: 4,
+            ..Default::default()
+        },
+    );
+    sde.effects.insert(
+        48,
+        eve_sde::DogmaEffectType {
+            effect_id: 48,
+            name: "moduleBonusMicrowarpdrive".into(),
+            effect_category: 1,
+            ..Default::default()
+        },
+    );
+    sde.effects.insert(
+        67,
+        eve_sde::DogmaEffectType {
+            effect_id: 67,
+            name: "miningLaser".into(),
+            effect_category: 1,
+            ..Default::default()
+        },
+    );
+
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let char_id = 90_000_001_i64;
+    let ship_id = 200_247_073_i64;
+    let miner_id = 1_073_101_i64;
+    let mwd_id = 1_073_102_i64;
+    let sys_id = 30_000_142_u32;
+
+    db.acquire_online_lock(1, 603, Some(char_id), true, 1_800_000_000)
+        .expect("online lock");
+    let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            miner_id,
+            InventoryItemRecord {
+                item_id: miner_id,
+                type_id: 483,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mwd_id,
+            InventoryItemRecord {
+                item_id: mwd_id,
+                type_id: 434,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::MedSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(miner_id, false);
+        snap.module_online_states.insert(mwd_id, false);
+    });
+
+    let mut sess = SessionState::new(603);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.ship_id = Some(ship_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.station_id = None;
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. Direct dogmaIM.SetModuleOnline in space updates online effect without re-priming.
+    crate::services::notify_emitters_skills_trade_godma::handle_dogma_set_module_online(
+        &ctx,
+        &mut sess,
+        &[PyRep::Integer(ship_id), PyRep::Integer(miner_id)],
+    )
+    .await
+    .expect("SetModuleOnline in space");
+    let set_online_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        !set_online_notifs
+            .iter()
+            .any(|n| n.event == "OnGodmaEffectInfo" || n.event == "OnGodmaPrimeItem"),
+        "SetModuleOnline on fitted module must not emit OnGodmaEffectInfo or OnGodmaPrimeItem: {set_online_notifs:?}"
+    );
+    assert!(
+        set_online_notifs.iter().any(|n| {
+            n.event == "OnGodmaShipEffect"
+                && n.args.first() == Some(&PyRep::Integer(miner_id))
+                && n.args.get(1) == Some(&PyRep::Integer(16))
+                && n.args.get(3) == Some(&PyRep::Integer(1))
+        }),
+        "expected OnGodmaShipEffect(16, active=1) on SetModuleOnline: {set_online_notifs:?}"
+    );
+    assert!(
+        set_online_notifs.iter().any(|n| n.event == "OnModuleAttributeChanges"),
+        "expected OnModuleAttributeChanges on SetModuleOnline: {set_online_notifs:?}"
+    );
+
+    // 2. Activate(mwd_id, "online") in space routes through handle_dogma_set_module_online and also avoids re-priming.
+    crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(mwd_id), PyRep::String("online".into())],
+        &HashMap::new(),
+    )
+    .await
+    .expect("Activate(online) handled")
+    .expect("Activate(online) ok");
+    let act_online_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        !act_online_notifs
+            .iter()
+            .any(|n| n.event == "OnGodmaEffectInfo" || n.event == "OnGodmaPrimeItem"),
+        "Activate(online) on fitted module must not emit OnGodmaEffectInfo or OnGodmaPrimeItem: {act_online_notifs:?}"
+    );
+    assert!(
+        act_online_notifs.iter().any(|n| {
+            n.event == "OnGodmaShipEffect"
+                && n.args.first() == Some(&PyRep::Integer(mwd_id))
+                && n.args.get(1) == Some(&PyRep::Integer(16))
+                && n.args.get(3) == Some(&PyRep::Integer(1))
+        }),
+        "expected OnGodmaShipEffect(16, active=1) on Activate(online): {act_online_notifs:?}"
+    );
+
+    // 3. Direct emit_module_activation_godma_notifications(..., "online", ...) for ctx.db.items is a no-op.
+    crate::services::notify_emitters_space_dungeons::emit_module_activation_godma_notifications(
+        &ctx,
+        char_id,
+        ship_id,
+        miner_id,
+        483,
+        "online",
+        1.0,
+        None,
+    );
+    let direct_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        !direct_notifs
+            .iter()
+            .any(|n| n.event == "OnGodmaEffectInfo" || n.event == "OnGodmaPrimeItem"),
+        "emit_module_activation_godma_notifications must suppress OnGodmaEffectInfo/OnGodmaPrimeItem for fitted item: {direct_notifs:?}"
+    );
+
+    // 4. ItemGetInfo still exposes effectOnline (16) in activeEffects.
+    let info = crate::services::inventory_fitting::fitting_dogma_im::handle_dogma_im(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "ItemGetInfo",
+        &[PyRep::Integer(miner_id)],
+        &HashMap::new(),
+    )
+    .await
+    .expect("ItemGetInfo handled")
+    .expect("ItemGetInfo ok");
+    let PyRep::Dict(ref active_effs) = info
+        .dict_get("activeEffects")
+        .expect("activeEffects in ItemGetInfo")
+    else {
+        panic!("expected Dict for activeEffects");
+    };
+    assert!(
+        active_effs.iter().any(|(k, _)| k.as_i64() == Some(16)),
+        "expected effectOnline (16) in activeEffects: {active_effs:?}"
+    );
+}
+
+
 

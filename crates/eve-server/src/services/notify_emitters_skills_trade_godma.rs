@@ -564,8 +564,8 @@ pub fn emit_sell_repackage_errors(
     );
 }
 
-/// Extracted `dogmaIM.SetModuleOnline` handler emitting `OnGodmaPrimeItem` and `OnGodmaEffectInfo`.
-// parity: notify:OnGodmaEffectInfo, notify:OnGodmaPrimeItem
+/// Extracted `dogmaIM.SetModuleOnline` handler updating online state and emitting
+/// `OnModuleAttributeChanges` and `OnGodmaShipEffect` without re-priming `effectsByItemEffect` (`#1073`).
 pub async fn handle_dogma_set_module_online(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -722,16 +722,6 @@ pub async fn handle_dogma_set_module_online(
             true,
             0,
             0,
-        );
-        emit_module_activation_godma_notifications(
-            ctx,
-            char_id,
-            ship_id,
-            module_id,
-            eff_tid,
-            "online",
-            1.0,
-            None,
         );
     }
 
