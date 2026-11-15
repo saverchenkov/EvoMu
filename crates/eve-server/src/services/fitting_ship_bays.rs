@@ -310,16 +310,33 @@ pub(crate) async fn board_stored_ship(
             false,
         );
         let is_cap = prev_ship_id
+            .filter(|&p| p != stored_id)
             .and_then(|p| snap.items.get(&p))
-            .and_then(|i| ctx.sde.types.get(&i.type_id))
-            .is_some_and(|t| Some(t.group_id) == capsule_group);
-        let rem = if dock_id.is_none() && is_cap {
-            prev_ship_id.and_then(|p| snap.items.remove(&p)).map(|i| i.item_id)
+            .is_some_and(|i| {
+                i.type_id == 670
+                    || ctx
+                        .sde
+                        .types
+                        .get(&i.type_id)
+                        .is_some_and(|t| Some(t.group_id) == capsule_group)
+            });
+        let rem = if is_cap {
+            prev_ship_id.and_then(|p| {
+                let rec = snap.items.remove(&p);
+                if rec.is_some() {
+                    snap.item_positions.remove(&p);
+                    snap.item_custom_names.remove(&p);
+                    snap.sp6_lifecycle.ship_combat_hp.remove(&p);
+                    snap.sp6_lifecycle.ship_combat_hp.remove(&(-p));
+                }
+                rec
+            })
         } else {
             None
         };
         Ok((rem, is_cap))
     })?;
+    let removed_capsule_id = removed_capsule.as_ref().map(|r| r.item_id);
     write_container_ship_state(ctx, |st| {
         st.custom_item_flags.remove(&stored_id);
     });
@@ -333,7 +350,7 @@ pub(crate) async fn board_stored_ship(
             snap.item_positions.insert(stored_id, [pos.x, pos.y, pos.z]);
         });
         let sys = ctx.systems.get_or_spawn(sys_id);
-        if let Some(cap) = removed_capsule {
+        if let Some(cap) = removed_capsule_id {
             store_ops::cleanup_ship_leaving_space(ctx, sys_id, &sys, char_id, cap).await;
             let _ = sys.remove_ball(cap).await;
         } else if let Some(old_id) = prev_ship_id {
@@ -434,6 +451,21 @@ pub(crate) async fn board_stored_ship(
             change: PyRep::Dict(changes),
         },
     );
+    if let Some(old_rec) = removed_capsule {
+        let old_loc = old_rec.location_id;
+        let old_flag = old_rec.flag;
+        let mut junk_rec = old_rec;
+        junk_rec.location_id = 6;
+        junk_rec.flag = InventoryFlag::Hangar;
+        let mut item_changes = vec![(3, PyRep::Integer(old_loc))];
+        if old_flag != InventoryFlag::Hangar {
+            item_changes.push((4, PyRep::Integer(old_flag as i64)));
+        }
+        let row = eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(
+            crate::services::inventory_bound::item_to_packed_cells(ctx, &junk_rec),
+        );
+        ctx.notify_item_change(char_id, row, item_changes);
+    }
     crate::sp6_lifecycle::clear_safe_logoff(&ctx.db, char_id);
     Ok(PyRep::keyval([
         ("shipID", PyRep::Integer(stored_id)),

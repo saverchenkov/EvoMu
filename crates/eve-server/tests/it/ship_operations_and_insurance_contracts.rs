@@ -313,11 +313,23 @@ async fn test_ship_lifecycle_leave_ship_jettison_and_drop() {
 
     ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess, "ship", None, "Board", &[PyRep::Integer(ship_id)], &kw, None).await.unwrap();
+    assert!(
+        ctx.db.with_snapshot(|snap| !snap.items.contains_key(&capsule_id)),
+        "ship.Board from docked capsule must consume and remove the capsule from station hangar (#1070)"
+    );
     ctx.advance_secs(12);
-    let leave_reuse = ctx.dispatch_rpc(&mut sess, "ship", None, "LeaveShip", &[], &kw, None).await.unwrap();
-    assert_eq!(leave_reuse.as_i64(), Some(capsule_id), "LeaveShip must reuse character's existing capsule");
+    let leave_fresh = ctx.dispatch_rpc(&mut sess, "ship", None, "LeaveShip", &[], &kw, None).await.unwrap();
+    let second_capsule_id = leave_fresh.as_i64().expect("second capsule id");
+    assert_ne!(
+        second_capsule_id, capsule_id,
+        "LeaveShip after Board consumed prior capsule must issue a fresh capsule (#1070)"
+    );
     ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess, "ship", None, "Board", &[PyRep::Integer(ship_id)], &kw, None).await.unwrap();
+    assert!(
+        ctx.db.with_snapshot(|snap| !snap.items.contains_key(&second_capsule_id)),
+        "Second docked ship.Board must also consume the second capsule (#1070)"
+    );
     ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None).await.unwrap();
 
@@ -1068,4 +1080,230 @@ async fn test_r2_track6_quasar_esi_and_protocol() {
     assert_eq!(entries.len(), 1);
 }
 
+#[tokio::test]
+async fn test_gh_1070_docked_board_from_capsule_removes_capsule_and_refreshes_inventory() {
+    // parity: rpc:ship.Board
+    // parity: rpc:ship.LeaveShip
+    eve_testkit::attest(&["rpc:ship.Board", "rpc:ship.LeaveShip"]);
+    let ctx = new_test_ctx();
+    let kw = HashMap::new();
+    let char_id = 90_000_001i64;
+    let station_id = 60_003_760i64;
+    let ship_id = 100_000_001i64;
+
+    let mut harness = common::new_wire_harness(&ctx, 88_070)
+        .with_mode(eve_testkit::ContractValidationMode::Ratcheted);
+    harness
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[
+                PyRep::String("demo".into()),
+                PyRep::String("demo-secret".into()),
+            ],
+            &kw,
+        )
+        .await;
+    harness
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_id)],
+            &kw,
+        )
+        .await;
+
+    // 1. Station docked: LeaveShip creates capsule (type 670) in station hangar.
+    ctx.advance_secs(12);
+    let leave_rep = harness.call_ok("ship", None, "LeaveShip", &[], &kw).await;
+    let capsule_id = leave_rep.as_i64().expect("capsule_id from LeaveShip");
+    assert_ne!(capsule_id, ship_id);
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.items.get(&capsule_id).map(|i| (i.type_id, i.location_id, i.flag))),
+        Some((670, station_id, InventoryFlag::Hangar))
+    );
+
+    // Bind station ships hangar inventory (container 10002) and confirm capsule is present before Board.
+    let bind_station = harness
+        .call_ok(
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[
+                PyRep::Integer(station_id),
+                PyRep::Tuple(vec![
+                    PyRep::String("GetInventory".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(10_002)]),
+                    PyRep::Dict(Vec::new()),
+                ]),
+            ],
+            &kw,
+        )
+        .await;
+    let inv_bid = eve_testkit::client_harness::extract_bound_id_from_wire_rep(&bind_station)
+        .expect("expected bound inventory id");
+
+    let list_before = harness
+        .call_ok("invbroker", Some(inv_bid), "List", &[PyRep::Integer(4)], &kw)
+        .await;
+    let extract_row_ids_and_types = |rep: &PyRep| -> Vec<(i64, i64, i64)> {
+        let items = match rep {
+            PyRep::ObjectEx { list, .. } => list.clone(),
+            PyRep::List(items) => items.clone(),
+            _ => Vec::new(),
+        };
+        items
+            .into_iter()
+            .filter_map(|r| {
+                let item_id = r.dbrow_get("itemID")?.as_i64()?;
+                let type_id = r.dbrow_get("typeID")?.as_i64()?;
+                let loc_id = r.dbrow_get("locationID")?.as_i64()?;
+                Some((item_id, type_id, loc_id))
+            })
+            .collect()
+    };
+    let rows_before = extract_row_ids_and_types(&list_before);
+    assert!(
+        rows_before.iter().any(|&(id, tid, loc)| id == capsule_id && tid == 670 && loc == station_id),
+        "Capsule {capsule_id} should be in station hangar before boarding ship: {rows_before:?}"
+    );
+
+    let _ = harness.drain_notifications();
+    ctx.advance_secs(12);
+    let board_out = harness
+        .call_exchange("ship", None, "Board", &[PyRep::Integer(ship_id)], &kw)
+        .await;
+    assert!(board_out.result.is_ok(), "ship.Board must succeed: {:?}", board_out.result);
+
+    // Capsule must be removed from DB snapshot and from station hangar List(4).
+    assert!(
+        ctx.db.with_snapshot(|s| !s.items.contains_key(&capsule_id)),
+        "Capsule {capsule_id} must be removed from snapshot when boarding ship {ship_id}"
+    );
+    let list_after = harness
+        .call_ok("invbroker", Some(inv_bid), "List", &[PyRep::Integer(4)], &kw)
+        .await;
+    let rows_after = extract_row_ids_and_types(&list_after);
+    assert!(
+        !rows_after.iter().any(|&(id, tid, _)| id == capsule_id || tid == 670),
+        "Station hangar List(4) must not contain Capsule (670) after boarding ship: {rows_after:?}"
+    );
+    assert!(
+        rows_after.iter().any(|&(id, _, loc)| id == ship_id && loc == station_id),
+        "Boarded ship {ship_id} must remain in station hangar: {rows_after:?}"
+    );
+
+    // Verify notification ordering required by V24 Inventory.OnInvChangeAny:
+    // OnSessionChanged(shipid: (capsule_id, ship_id)) MUST precede OnItemChange moving capsule_id
+    // from station_id to locationJunkyard (6) so GetActiveShip() == ship_id when OnInvChangeAny runs.
+    let notifs = &board_out.notifications;
+    let sess_change_idx = notifs
+        .iter()
+        .position(|(ev, _)| ev == "OnSessionChanged")
+        .expect("OnSessionChanged must be emitted on ship.Board");
+    let cap_item_change_idx = notifs
+        .iter()
+        .position(|(ev, args)| {
+            if ev != "OnItemChange" {
+                return false;
+            }
+            let Some(row) = args.first() else {
+                return false;
+            };
+            let item_id = row.dbrow_get("itemID").and_then(|v| v.as_i64());
+            let type_id = row.dbrow_get("typeID").and_then(|v| v.as_i64());
+            let new_loc = row.dbrow_get("locationID").and_then(|v| v.as_i64());
+            let old_loc_ok = args
+                .get(1)
+                .and_then(|c| match c {
+                    PyRep::Dict(entries) => entries.iter().find_map(|(k, v)| {
+                        (k == &PyRep::Integer(3)).then(|| v.as_i64()).flatten()
+                    }),
+                    _ => None,
+                })
+                == Some(station_id);
+            item_id == Some(capsule_id) && type_id == Some(670) && new_loc == Some(6) && old_loc_ok
+        })
+        .expect("OnItemChange moving capsule to locationJunkyard (6) with ixLocationID (3) = station_id must be emitted");
+    assert!(
+        sess_change_idx < cap_item_change_idx,
+        "OnSessionChanged (idx {sess_change_idx}) must precede capsule OnItemChange (idx {cap_item_change_idx}) so Inventory.OnInvChangeAny sees GetActiveShip() == new ship"
+    );
+
+    // 2. Upwell structure docked: LeaveShip -> Board also removes capsule and emits OnItemChange after OnSessionChanged.
+    let structure_id = 1_030_000_001_070i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            structure_id,
+            eve_db::UpwellStructureRecord {
+                structure_id,
+                type_id: 35_832,
+                owner_corp_id: 1_000_009,
+                solar_system_id: 30_000_142,
+                name: "GH1070 Keepstar".into(),
+                position: [100_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 10_000.0,
+                armor_hp: 10_000.0,
+                hull_hp: 10_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = Some(structure_id);
+        }
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = structure_id;
+            ship.flag = InventoryFlag::Hangar;
+        }
+    });
+    harness.transport_mut().inner.session.station_id = None;
+    harness.transport_mut().inner.session.structure_id = Some(structure_id);
+
+    ctx.advance_secs(12);
+    let struct_leave_rep = harness.call_ok("ship", None, "LeaveShip", &[], &kw).await;
+    let struct_cap_id = struct_leave_rep.as_i64().expect("structure capsule id");
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.items.get(&struct_cap_id).map(|i| (i.type_id, i.location_id, i.flag))),
+        Some((670, structure_id, InventoryFlag::Hangar))
+    );
+
+    let _ = harness.drain_notifications();
+    ctx.advance_secs(12);
+    let struct_board_out = harness
+        .call_exchange("ship", None, "Board", &[PyRep::Integer(ship_id)], &kw)
+        .await;
+    assert!(struct_board_out.result.is_ok(), "structure ship.Board must succeed: {:?}", struct_board_out.result);
+    assert!(
+        ctx.db.with_snapshot(|s| !s.items.contains_key(&struct_cap_id)),
+        "Structure-docked capsule {struct_cap_id} must be removed when boarding ship {ship_id}"
+    );
+    let struct_notifs = &struct_board_out.notifications;
+    let struct_sess_idx = struct_notifs
+        .iter()
+        .position(|(ev, _)| ev == "OnSessionChanged")
+        .expect("OnSessionChanged on structure Board");
+    let struct_item_idx = struct_notifs
+        .iter()
+        .position(|(ev, args)| {
+            ev == "OnItemChange"
+                && args.first().is_some_and(|row| {
+                    row.dbrow_get("itemID").and_then(|v| v.as_i64()) == Some(struct_cap_id)
+                        && row.dbrow_get("locationID").and_then(|v| v.as_i64()) == Some(6)
+                })
+        })
+        .expect("OnItemChange moving structure capsule to locationJunkyard (6)");
+    assert!(struct_sess_idx < struct_item_idx);
 }
+
+}
+
+

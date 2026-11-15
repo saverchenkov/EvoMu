@@ -957,6 +957,47 @@ async fn ships_mastery_board_eject_launch_killmark_repair_kill_all_mutants() {
     assert_eq!(quote.dict_get("totalDamagedHP").and_then(|v| v.as_f64()), Some(340.0));
     assert_eq!(quote.dict_get("repairCostISK").and_then(|v| v.as_f64()), Some(170_000.0));
 
+    // Docked LeaveShip -> Board(ship_a) consumes capsule (and any child item) and emits OnItemChange after OnSessionChanged (#1070)
+    clear_session_change_timer(&ctx, char_id);
+    let leave_docked = handle_ships_mastery_and_fitting_ext(
+        &ctx, &mut dock_sess, None, "ship", "LeaveShip", &[], &HashMap::new(),
+    ).await.unwrap().expect("docked LeaveShip ok");
+    let docked_cap_id = leave_docked.as_i64().expect("docked capsule id");
+    let cap_child_id = 77_999i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            cap_child_id,
+            InventoryItemRecord {
+                item_id: cap_child_id,
+                type_id: 34,
+                owner_id: char_id,
+                location_id: docked_cap_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+    clear_session_change_timer(&ctx, char_id);
+    let _ = handle_ships_mastery_and_fitting_ext(
+        &ctx, &mut dock_sess, None, "ship", "Board", &[PyRep::Integer(ship_a)], &HashMap::new(),
+    ).await.unwrap().expect("docked Board from capsule ok");
+    assert_eq!(dock_sess.ship_id, Some(ship_a));
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&docked_cap_id), "docked capsule must be removed on Board (#1070)");
+        assert!(!snap.items.contains_key(&cap_child_id), "capsule child item must be removed on Board (#1070)");
+    });
+    let dock_board_notifs = ctx.drain_notifications_for_char(char_id);
+    let sess_idx = dock_board_notifs.iter().position(|n| n.event == "OnSessionChanged").expect("OnSessionChanged");
+    let cap_chg_idx = dock_board_notifs.iter().position(|n| {
+        n.event == "OnItemChange"
+            && n.args.first().and_then(|r| r.dbrow_get("itemID")).and_then(|v| v.as_i64()) == Some(docked_cap_id)
+            && n.args.first().and_then(|r| r.dbrow_get("locationID")).and_then(|v| v.as_i64()) == Some(6)
+    }).expect("OnItemChange for removed capsule");
+    assert!(sess_idx < cap_chg_idx, "OnSessionChanged must precede capsule OnItemChange (#1070)");
+
     // 5. Eject with synthetic SDE missing type 670 -> exercises fallback CombatState 17 fields & > 0.0 bounds
     let mut no_cap_sde = (*shared_sde()).clone();
     no_cap_sde.types.remove(&670);
