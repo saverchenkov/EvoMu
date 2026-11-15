@@ -399,8 +399,156 @@ def _sanitize_camera_state(cam):
     return changed
 
 
+def _michelle_ballpark_missing(michelle):
+    if michelle is None:
+        return True
+    if hasattr(michelle, "_Michelle__bp") and getattr(michelle, "_Michelle__bp", None) is None:
+        return True
+    if hasattr(michelle, "GetBallpark"):
+        try:
+            bp = michelle.GetBallpark(False)
+        except TypeError:
+            try:
+                bp = michelle.GetBallpark()
+            except Exception:
+                bp = None
+        except Exception:
+            bp = None
+        if bp is None:
+            return True
+    return False
+
+
+def _is_docked_or_ballpark_missing(svc_or_self=None, mod=None):
+    sess = getattr(__builtin__, "session", None)
+    if sess is not None and (
+        getattr(sess, "stationid", None) is not None
+        or getattr(sess, "structureid", None) is not None
+    ):
+        return True
+    if svc_or_self is not None and hasattr(svc_or_self, "GetBallpark"):
+        try:
+            if svc_or_self.GetBallpark() is None:
+                return True
+        except Exception:
+            return True
+    get_michelle = getattr(mod, "GetMichelle", None) if mod is not None else None
+    if callable(get_michelle):
+        try:
+            if _michelle_ballpark_missing(get_michelle()):
+                return True
+        except Exception:
+            return True
+    sm = getattr(__builtin__, "sm", None)
+    if sm is not None:
+        michelle = None
+        services = getattr(sm, "services", None)
+        if isinstance(services, dict):
+            michelle = services.get("michelle")
+        if michelle is None and hasattr(sm, "GetService"):
+            try:
+                if not hasattr(sm, "IsServiceRunning") or sm.IsServiceRunning("michelle"):
+                    michelle = sm.GetService("michelle")
+            except Exception:
+                michelle = None
+        if michelle is not None and _michelle_ballpark_missing(michelle):
+            return True
+    return False
+
+
+def _make_arrival_method_guard(orig_fn, mod=None, clear_tracked=False):
+    def _wrapped(self, *args, **kwargs):
+        if _is_docked_or_ballpark_missing(self, mod):
+            if clear_tracked and hasattr(self, "tracked_slim_item"):
+                self.tracked_slim_item = None
+            return None
+        try:
+            return orig_fn(self, *args, **kwargs)
+        except TypeError as exc:
+            if _is_docked_or_ballpark_missing(self, mod) or "NoneType" in str(exc):
+                if clear_tracked and hasattr(self, "tracked_slim_item"):
+                    self.tracked_slim_item = None
+                return None
+            raise
+
+    _wrapped._evomu_camera_guard = True
+    return _wrapped
+
+
+def _patch_location_arrival_cls(cls, mod=None):
+    if cls is None:
+        return False
+    patched = False
+    for method_name, clear_tracked in (
+        ("on_warp_finished", True),
+        ("check_indicate_arrival", True),
+        ("_indicate_arrival", True),
+        ("get_closest_location_slim_item", False),
+        ("get_nearest_celestial_to_player", False),
+    ):
+        orig_attr = getattr(cls, method_name, None)
+        if orig_attr is None or getattr(orig_attr, "_evomu_camera_guard", False):
+            continue
+        orig_func = getattr(orig_attr, "__func__", orig_attr)
+        wrapped = _make_arrival_method_guard(orig_func, mod=mod, clear_tracked=clear_tracked)
+        setattr(cls, method_name, wrapped)
+        patched = True
+        if method_name == "on_warp_finished":
+            new_attr = getattr(cls, method_name, wrapped)
+            new_func = getattr(new_attr, "__func__", wrapped)
+            signal_containers = []
+            if mod is not None and hasattr(mod, "warp_signals"):
+                signal_containers.append(getattr(mod, "warp_signals"))
+            ws_mod = sys.modules.get("eve.client.script.parklife.space_signals.warp_signals")
+            if ws_mod is not None and ws_mod not in signal_containers:
+                signal_containers.append(ws_mod)
+            for ws in signal_containers:
+                sig = getattr(ws, "on_warp_finished", None)
+                methods_map = getattr(sig, "_methods", None)
+                if methods_map is not None and hasattr(methods_map, "items"):
+                    for _obj, funcs in list(methods_map.items()):
+                        if orig_func in funcs:
+                            funcs.discard(orig_func)
+                            funcs.add(new_func)
+    return patched
+
+
+def _patch_location_arrival_module(mod):
+    if mod is None:
+        return False
+    patched = False
+    for cls_name in (
+        "LocationArrivalIndicationService",
+        "LocationArrivalIndicationSvc",
+    ):
+        cls = getattr(mod, cls_name, None)
+        if isinstance(cls, type) and _patch_location_arrival_cls(cls, mod=mod):
+            patched = True
+    orig_helper = getattr(mod, "get_nearest_celestial_to_player", None)
+    if (
+        orig_helper is not None
+        and callable(orig_helper)
+        and not isinstance(orig_helper, type)
+        and not getattr(orig_helper, "_evomu_camera_guard", False)
+    ):
+        def _wrapped_helper(*args, **kwargs):
+            if _is_docked_or_ballpark_missing(None, mod):
+                return None
+            try:
+                return orig_helper(*args, **kwargs)
+            except TypeError as exc:
+                if _is_docked_or_ballpark_missing(None, mod) or "NoneType" in str(exc):
+                    return None
+                raise
+
+        _wrapped_helper._evomu_camera_guard = True
+        mod.get_nearest_celestial_to_player = _wrapped_helper
+        patched = True
+    return patched
+
+
 def _install_camera_dock_guard():
-    """Guard against V24.01 TacticalCamera NaN/1e35 overflow and secondary-view dock races (#996)."""
+    """Guard against V24.01 TacticalCamera NaN/1e35 overflow, secondary-view dock races (#996), and WarpLoop dock arrival teardown races (#1051)."""
     vss_mod = sys.modules.get("eve.client.script.ui.services.viewStateSvc")
     if vss_mod is not None and "viewStateSvc" not in _HOOKED_CAMERA_GUARD_TARGETS:
         vss_cls = getattr(vss_mod, "ViewStateSvc", None)
@@ -551,6 +699,66 @@ def _install_camera_dock_guard():
                 _wrapped_set_appropriate_at_pos._evomu_camera_guard = True
                 tac_cls.SetAppropriateAtPositionForRotation = _wrapped_set_appropriate_at_pos
         _HOOKED_CAMERA_GUARD_TARGETS.add("tacticalCamera")
+
+    michelle_mod = sys.modules.get("eve.client.script.remote.michelle")
+    if michelle_mod is not None and "michelle" not in _HOOKED_CAMERA_GUARD_TARGETS:
+        michelle_cls = getattr(michelle_mod, "Michelle", None)
+        if michelle_cls is not None:
+            orig_balls_slims = getattr(michelle_cls, "GetBallsAndSlimItems", None)
+            if orig_balls_slims is not None and not getattr(orig_balls_slims, "_evomu_camera_guard", False):
+                def _wrapped_get_balls_and_slim_items(self, *args, **kwargs):
+                    if _michelle_ballpark_missing(self):
+                        return []
+                    try:
+                        res = orig_balls_slims(self, *args, **kwargs)
+                    except TypeError as exc:
+                        if _michelle_ballpark_missing(self) or "NoneType" in str(exc):
+                            return []
+                        raise
+                    return [] if res is None else res
+                _wrapped_get_balls_and_slim_items._evomu_camera_guard = True
+                michelle_cls.GetBallsAndSlimItems = _wrapped_get_balls_and_slim_items
+        _HOOKED_CAMERA_GUARD_TARGETS.add("michelle")
+
+    for target_key, mod_name in (
+        ("mining.locationArrivalIndicationService", "mining.client.location_arrival_indication_service"),
+        ("infoPanels.locationArrivalIndicationSvc", "eve.client.script.ui.shared.infoPanels.locationArrivalIndicationSvc"),
+    ):
+        arr_mod = sys.modules.get(mod_name)
+        if arr_mod is not None and target_key not in _HOOKED_CAMERA_GUARD_TARGETS:
+            _patch_location_arrival_module(arr_mod)
+            _HOOKED_CAMERA_GUARD_TARGETS.add(target_key)
+
+    sm = getattr(__builtin__, "sm", None)
+    services = getattr(sm, "services", None) if sm is not None else None
+    if isinstance(services, dict):
+        for svc_name in ("locationArrivalIndicationSvc", "locationArrivalIndication"):
+            svc = services.get(svc_name)
+            if svc is not None:
+                svc_cls = getattr(svc, "__class__", None)
+                svc_mod = sys.modules.get(getattr(svc_cls, "__module__", "")) if svc_cls is not None else None
+                if isinstance(svc_cls, type) and svc_cls is not object:
+                    _patch_location_arrival_cls(svc_cls, mod=svc_mod)
+                if "on_warp_finished" in getattr(svc, "__dict__", {}):
+                    inst_fn = svc.__dict__["on_warp_finished"]
+                    if callable(inst_fn) and not getattr(inst_fn, "_evomu_camera_guard", False):
+                        def _make_inst_guard(fn, inst, mod):
+                            def _wrapped_inst(*args, **kwargs):
+                                if _is_docked_or_ballpark_missing(inst, mod):
+                                    if hasattr(inst, "tracked_slim_item"):
+                                        inst.tracked_slim_item = None
+                                    return None
+                                try:
+                                    return fn(*args, **kwargs)
+                                except TypeError as exc:
+                                    if _is_docked_or_ballpark_missing(inst, mod) or "NoneType" in str(exc):
+                                        if hasattr(inst, "tracked_slim_item"):
+                                            inst.tracked_slim_item = None
+                                        return None
+                                    raise
+                            _wrapped_inst._evomu_camera_guard = True
+                            return _wrapped_inst
+                        svc.on_warp_finished = _make_inst_guard(inst_fn, svc, svc_mod)
 
 
 def _maybe_schedule_driver_on_main_thread():

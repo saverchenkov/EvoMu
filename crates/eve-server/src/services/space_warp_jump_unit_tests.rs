@@ -1391,6 +1391,10 @@ async fn dock_warp_settle_plan_handles_arriving_warp_post_exit_race_and_rejectio
 
     // 3. Post-OnWarpArrived coast race: ship is already stopped inside perimeter, but
     //    warp_stopped_at is still within WARP_DOCK_SETTLE_DURATION -> stopped_now == false + deadline.
+    assert!(
+        WARP_DOCK_SETTLE_DURATION >= std::time::Duration::from_millis(3_000),
+        "WARP_DOCK_SETTLE_DURATION must cover the +2.6s post-AdvanceClock WarpLoop deceleration window (#1051)"
+    );
     let race_plan = prepare_dock_warp_settle(
         &ctx,
         &sess,
