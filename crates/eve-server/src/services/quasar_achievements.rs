@@ -109,10 +109,21 @@ fn classify_achievement_category(
 
 fn build_definitions_from_sde(
     sde: &eve_sde::SdeRegistry,
-) -> (Vec<AchievementDef>, HashSet<String>, usize, String, Vec<u8>) {
+) -> (Vec<AchievementDef>, HashSet<String>, usize, String, Vec<u8>, Vec<u8>) {
     let Ok(achs) = sde.load_achievements() else {
         let empty = b"[]".to_vec();
-        return (Vec::new(), HashSet::new(), 0, sha256_hex(&empty)[..16].to_string(), empty);
+        let empty_fb = super::quasar_achievements_flatbuffer::encode_achievement_data_flatbuffer(
+            &[],
+            &HashMap::new(),
+        );
+        return (
+            Vec::new(),
+            HashSet::new(),
+            0,
+            sha256_hex(&empty)[..16].to_string(),
+            empty,
+            empty_fb,
+        );
     };
     let events = sde
         .load_cfsd_table("res:/staticdata/achievementevents.fsdbinary")
@@ -147,8 +158,10 @@ fn build_definitions_from_sde(
     let count = ids.len();
 
     let mut defs = Vec::with_capacity(ids.len());
+    let mut loc_ids: HashMap<u32, (u32, u32)> = HashMap::with_capacity(ids.len());
     for id in ids {
         let Some(info) = achs.get(&id).filter(|info| info.is_enabled) else { continue };
+        loc_ids.insert(id, (info.name_id, info.description_id));
         let conditions: Vec<AchievementConditionDef> = info
             .conditions
             .iter()
@@ -190,7 +203,9 @@ fn build_definitions_from_sde(
     }
     let json_bytes = serde_json::to_vec(&defs).unwrap_or_else(|_| b"[]".to_vec());
     let hash = sha256_hex(&json_bytes)[..16].to_string();
-    (defs, allowed_client_keys, count, hash, json_bytes)
+    let fb_bytes =
+        super::quasar_achievements_flatbuffer::encode_achievement_data_flatbuffer(&defs, &loc_ids);
+    (defs, allowed_client_keys, count, hash, json_bytes, fb_bytes)
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -221,6 +236,7 @@ pub struct AchievementManager {
     pub sde_achievement_count: usize,
     pub sde_achievement_hash: String,
     pub sde_definitions_json: Vec<u8>,
+    pub sde_definitions_flatbuffer: Vec<u8>,
     db: Option<Arc<WorldRepository>>,
     sde: Option<Arc<eve_sde::SdeRegistry>>,
 }
@@ -243,13 +259,20 @@ impl AchievementManager {
         db: Option<Arc<WorldRepository>>,
         sde: Option<Arc<eve_sde::SdeRegistry>>,
     ) -> Self {
-        type CachedDefs = (Vec<AchievementDef>, HashSet<String>, usize, String, Vec<u8>);
+        type CachedDefs = (Vec<AchievementDef>, HashSet<String>, usize, String, Vec<u8>, Vec<u8>);
         type DefsCacheKey = (std::path::PathBuf, u64, usize);
         static DEFS_CACHE: std::sync::OnceLock<
             std::sync::Mutex<HashMap<DefsCacheKey, CachedDefs>>,
         > = std::sync::OnceLock::new();
 
-        let (defs, allowed_client_counter_keys, sde_achievement_count, sde_achievement_hash, sde_definitions_json) = sde
+        let (
+            defs,
+            allowed_client_counter_keys,
+            sde_achievement_count,
+            sde_achievement_hash,
+            sde_definitions_json,
+            sde_definitions_flatbuffer,
+        ) = sde
             .as_deref()
             .map(|s| {
                 if let Some(ref p) = s.db_path {
@@ -277,7 +300,19 @@ impl AchievementManager {
             })
             .unwrap_or_else(|| {
                 let empty = b"[]".to_vec();
-                (Vec::new(), HashSet::new(), 0, sha256_hex(&empty)[..16].to_string(), empty)
+                let empty_fb =
+                    super::quasar_achievements_flatbuffer::encode_achievement_data_flatbuffer(
+                        &[],
+                        &HashMap::new(),
+                    );
+                (
+                    Vec::new(),
+                    HashSet::new(),
+                    0,
+                    sha256_hex(&empty)[..16].to_string(),
+                    empty,
+                    empty_fb,
+                )
             });
 
         let defs_by_id: HashMap<u32, &AchievementDef> = defs.iter().map(|d| (d.id, d)).collect();
@@ -334,9 +369,24 @@ impl AchievementManager {
             sde_achievement_count,
             sde_achievement_hash,
             sde_definitions_json,
+            sde_definitions_flatbuffer,
             db,
             sde,
         }
+    }
+
+    /// Returns the encoded `AchievementData` FlatBuffer matching `self.definitions`.
+    pub fn flatbuffer_bytes(&self) -> Vec<u8> {
+        if self.sde.is_none()
+            || self.sde_definitions_flatbuffer.is_empty()
+            || self.definitions.len() != self.sde_achievement_count
+        {
+            return super::quasar_achievements_flatbuffer::encode_achievement_data_flatbuffer(
+                &self.definitions,
+                &HashMap::new(),
+            );
+        }
+        self.sde_definitions_flatbuffer.clone()
     }
 
     pub fn save_to_db(&self) {
@@ -945,7 +995,7 @@ impl AchievementManager {
 // Registration
 // ============================================================================
 
-fn u32_to_uuid(id: u32) -> [u8; 16] {
+pub(crate) fn u32_to_uuid(id: u32) -> [u8; 16] {
     let mut uuid = [0u8; 16];
     uuid[12..16].copy_from_slice(&id.to_be_bytes());
     uuid
@@ -1105,14 +1155,7 @@ pub(crate) fn empty_root_table_flatbuffer() -> Vec<u8> {
     buf
 }
 
-/// Ensures `version.txt` and `data.bin` exist in any local EVE client `cache/Storage/<content_id>/`
-/// directory so `VersionCachedFlatbufferRepository._request_update_task` can read `_disk_storage.get()`
-/// when `FlatbufferContentProvider.fetch` returns `[None, None]` on first run without an external TLS CDN.
-pub(crate) fn ensure_client_flatbuffer_storage_seeded(
-    content_id: &str,
-    version_str: &str,
-    data_bytes: &[u8],
-) {
+fn client_eve_storage_dirs(content_id: &str) -> Vec<std::path::PathBuf> {
     let mut candidate_roots = Vec::new();
     if let Ok(home) = std::env::var("HOME") {
         candidate_roots.push(
@@ -1126,26 +1169,59 @@ pub(crate) fn ensure_client_flatbuffer_storage_seeded(
     if let Ok(local_appdata) = std::env::var("LOCALAPPDATA") {
         candidate_roots.push(std::path::PathBuf::from(local_appdata).join("CCP").join("EVE"));
     }
+    let mut content_dirs = Vec::new();
     for eve_root in candidate_roots {
         let Ok(entries) = std::fs::read_dir(&eve_root) else {
             continue;
         };
         for entry in entries.flatten() {
             let storage_root = entry.path().join("cache").join("Storage");
-            if !storage_root.is_dir() {
-                continue;
+            if storage_root.is_dir() {
+                content_dirs.push(storage_root.join(content_id));
             }
-            let content_dir = storage_root.join(content_id);
-            let _ = std::fs::create_dir_all(&content_dir);
-            let data_path = content_dir.join("data.bin");
-            let ver_path = content_dir.join("version.txt");
-            let needs_seed = std::fs::metadata(&data_path)
-                .map(|m| m.len() == 0)
-                .unwrap_or(true);
-            if needs_seed {
-                let _ = std::fs::write(&data_path, data_bytes);
-                let _ = std::fs::write(&ver_path, version_str.as_bytes());
-            }
+        }
+    }
+    content_dirs
+}
+
+/// Ensures `version.txt` and `data.bin` exist in any local EVE client `cache/Storage/<content_id>/`
+/// directory so `VersionCachedFlatbufferRepository._request_update_task` can read `_disk_storage.get()`
+/// when `FlatbufferContentProvider.fetch` returns `[None, None]` on first run without an external TLS CDN.
+pub(crate) fn ensure_client_flatbuffer_storage_seeded(
+    content_id: &str,
+    version_str: &str,
+    data_bytes: &[u8],
+) {
+    for content_dir in client_eve_storage_dirs(content_id) {
+        let _ = std::fs::create_dir_all(&content_dir);
+        let data_path = content_dir.join("data.bin");
+        let ver_path = content_dir.join("version.txt");
+        let needs_seed = std::fs::metadata(&data_path)
+            .map(|m| m.len() == 0)
+            .unwrap_or(true);
+        if needs_seed {
+            let _ = std::fs::write(&data_path, data_bytes);
+            let _ = std::fs::write(&ver_path, version_str.as_bytes());
+        }
+    }
+}
+
+/// Seeds `cache/Storage/achievements/` with the full `AchievementData` FlatBuffer and refreshes
+/// any stale empty/legacy-140-byte `data.bin` or mismatched `version.txt` (e.g. `"24.1.60"`).
+pub(crate) fn seed_or_upgrade_achievements_flatbuffer(version_str: &str, data_bytes: &[u8]) {
+    let legacy_empty = empty_achievement_flatbuffer();
+    for content_dir in client_eve_storage_dirs("achievements") {
+        let _ = std::fs::create_dir_all(&content_dir);
+        let data_path = content_dir.join("data.bin");
+        let ver_path = content_dir.join("version.txt");
+        let existing_data = std::fs::read(&data_path).unwrap_or_default();
+        let existing_ver = std::fs::read_to_string(&ver_path).unwrap_or_default();
+        let needs_upgrade = existing_data.is_empty()
+            || existing_data == legacy_empty
+            || existing_ver.trim() != version_str;
+        if needs_upgrade {
+            let _ = std::fs::write(&data_path, data_bytes);
+            let _ = std::fs::write(&ver_path, version_str.as_bytes());
         }
     }
 }
