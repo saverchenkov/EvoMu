@@ -621,6 +621,31 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     snap.item_positions.insert(target_ship_id, tgt_pos_arr);
                     crate::sp6_lifecycle::enter_space_in_snap(snap, target_ship_id, sys_id);
                 }
+                let mut removed_capsule_items = Vec::new();
+                if let Some(prev) = session.ship_id.filter(|&p| p != target_ship_id) {
+                    if snap.items.get(&prev).is_some_and(|it| it.type_id == 670) {
+                        let child_ids: Vec<i64> = snap
+                            .items
+                            .values()
+                            .filter(|it| it.location_id == prev)
+                            .map(|it| it.item_id)
+                            .collect();
+                        for cid in child_ids {
+                            if let Some(child_rec) = snap.items.remove(&cid) {
+                                snap.item_positions.remove(&cid);
+                                snap.item_custom_names.remove(&cid);
+                                removed_capsule_items.push(child_rec);
+                            }
+                        }
+                        if let Some(cap_rec) = snap.items.remove(&prev) {
+                            snap.item_positions.remove(&prev);
+                            snap.item_custom_names.remove(&prev);
+                            snap.sp6_lifecycle.ship_combat_hp.remove(&prev);
+                            snap.sp6_lifecycle.ship_combat_hp.remove(&(-prev));
+                            removed_capsule_items.push(cap_rec);
+                        }
+                    }
+                }
                 let _ = crate::router::apply_character_transition_in_snap(
                     snap,
                     &ctx.sde,
@@ -630,11 +655,12 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     false,
                     false,
                 );
-                Ok(target_ship_id)
+                Ok((target_ship_id, removed_capsule_items))
             });
             match res {
-                Ok(sid) => {
+                Ok((sid, removed_capsule_items)) => {
                     let prev_ship_id = session.ship_id;
+                    let was_capsule = !removed_capsule_items.is_empty();
                     if let Some(prev) = prev_ship_id {
                         ctx.invalidate_ship_fitting(prev);
                         if prev != sid {
@@ -650,21 +676,6 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                             }
                         }
                         if prev != sid && session.station_id.is_none() && session.structure_id.is_none() {
-                            let is_prev_capsule = ctx.db.with_snapshot(|snap| {
-                                snap.items.get(&prev).is_some_and(|it| it.type_id == 670)
-                            });
-                            let was_capsule = if is_prev_capsule {
-                                ctx.db.with_mut_snapshot(|snap| {
-                                    let removed = snap.items.remove(&prev).is_some();
-                                    if removed {
-                                        snap.item_positions.remove(&prev);
-                                        snap.sp6_lifecycle.ship_combat_hp.remove(&prev);
-                                    }
-                                    removed
-                                })
-                            } else {
-                                false
-                            };
                             if let Some(sys_id) = session.solar_system_id {
                                 let sys = ctx.systems.get_or_spawn(sys_id);
                                 let cycle_mods: Vec<i64> = sys
@@ -701,9 +712,6 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                                 let mut pkg_events = Vec::new();
                                 if was_capsule {
                                     let _ = sys.take_ball(prev).await;
-                                    ctx.db.with_mut_snapshot(|snap| {
-                                        snap.sp6_lifecycle.ship_combat_hp.remove(&(-prev));
-                                    });
                                 } else {
                                     if let Ok(Some((_, prev_ball))) = sys.get_ball_snapshot(prev).await {
                                         ctx.db.with_mut_snapshot(|snap| {
@@ -762,6 +770,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         }
                     }
                     ctx.invalidate_ship_fitting(sid);
+                    let _ = ctx.fit(char_id, sid);
                     let _ = ctx.execute_session_transition_sync(
                         Some(session),
                         crate::router::SessionTransitionSpec::for_kind(
@@ -807,6 +816,21 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                                 change: PyRep::Dict(changes),
                             },
                         );
+                    }
+                    for old_rec in &removed_capsule_items {
+                        let old_loc = old_rec.location_id;
+                        let old_flag = old_rec.flag;
+                        let mut junk_rec = old_rec.clone();
+                        junk_rec.location_id = 6;
+                        junk_rec.flag = InventoryFlag::Hangar;
+                        let mut item_changes = vec![(3, PyRep::Integer(old_loc))];
+                        if old_flag != InventoryFlag::Hangar {
+                            item_changes.push((4, PyRep::Integer(old_flag as i64)));
+                        }
+                        let row = eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(
+                            crate::services::inventory_bound::item_to_packed_cells(ctx, &junk_rec),
+                        );
+                        ctx.notify_item_change(char_id, row, item_changes);
                     }
                     crate::sp6_lifecycle::clear_safe_logoff(&ctx.db, char_id);
                     let ship_state = prime_ship_on_board(ctx, session, char_id, sid);
