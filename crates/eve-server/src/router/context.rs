@@ -1492,7 +1492,7 @@ impl ServerContext {
             self,
             self.now_blueos_filetime_ticks(),
         );
-        self.advance_skill_queues_for_clock(prev_unix, secs as f64);
+        self.advance_skill_queues_for_clock(prev_unix, secs as f64, is_synthetic_jump);
         crate::services::fleet_social::fleet_social_notify::tick_fleet_lifecycle(self);
         crate::services::space_mining_harvest::tick_all_ice_belt_respawns_sync(self);
         let now = self.now_unix_secs();
@@ -1770,16 +1770,16 @@ impl ServerContext {
 
     /// Advances all active character skill queues by `elapsed_secs` of virtual time (`T-7`).
     pub fn advance_skill_queues(&self, elapsed_secs: f64) {
-        self.advance_skill_queues_inner(elapsed_secs, None);
+        self.advance_skill_queues_inner(elapsed_secs, None, false);
     }
 
     /// Advances active character skill queues for a clock tick/jump, clamping against persisted
     /// `skill_queue_last_applied_unix` so restart recovery and GM jumps never double-credit SP (`#863`).
-    pub(crate) fn advance_skill_queues_for_clock(&self, prev_unix: u64, elapsed_secs: f64) {
-        self.advance_skill_queues_inner(elapsed_secs, Some(prev_unix));
+    pub(crate) fn advance_skill_queues_for_clock(&self, prev_unix: u64, elapsed_secs: f64, is_synthetic_jump: bool) {
+        self.advance_skill_queues_inner(elapsed_secs, Some(prev_unix), is_synthetic_jump);
     }
 
-    fn advance_skill_queues_inner(&self, elapsed_secs: f64, clock_prev_unix: Option<u64>) {
+    fn advance_skill_queues_inner(&self, elapsed_secs: f64, clock_prev_unix: Option<u64>, is_synthetic_jump: bool) {
         if elapsed_secs <= 0.0 || !elapsed_secs.is_finite() {
             return;
         }
@@ -1789,7 +1789,7 @@ impl ServerContext {
         let sde = self.sde.clone();
         let now_ft = self.now_blueos_filetime_ticks();
         let now_unix = self.now_unix();
-        let (invalidated_ships, completed_events, paused_chars) = self.db.with_mut_snapshot(|snap| {
+        let (invalidated_ships, completed_events, paused_chars, partial_sp_events) = self.db.with_mut_snapshot(|snap| {
             let effective_elapsed = if let Some(clock_prev) = clock_prev_unix {
                 let last_applied = snap
                     .service_state_blobs
@@ -1804,7 +1804,7 @@ impl ServerContext {
                     None => elapsed_secs,
                 };
                 if clamped <= 0.0 {
-                    return (Vec::new(), Vec::new(), Vec::new());
+                    return (Vec::new(), Vec::new(), Vec::new(), Vec::new());
                 }
                 snap.service_state_blobs
                     .insert("skill_queue_last_applied_unix".into(), now_unix.to_string());
@@ -1815,6 +1815,7 @@ impl ServerContext {
             let mut ships_to_invalidate = Vec::new();
             let mut completed_events = Vec::new();
             let mut paused_chars = Vec::new();
+            let mut partial_sp_events = Vec::new();
             let char_ids: Vec<i64> = snap.skill_queues.iter().filter(|(_, q)| !q.is_empty()).map(|(&cid, _)| cid).collect();
             for char_id in char_ids {
                 if snap.paused_skill_queues.contains(&char_id) {
@@ -1893,6 +1894,9 @@ impl ServerContext {
                         q.duration_seconds = ((q.end_sp - q.start_sp).max(0.0)) / sp_sec;
                         q.started_at_unix = Some(now_unix);
                         total_sp_gained += sp_advance;
+                        if is_synthetic_jump && sp_advance > 0.0 {
+                            partial_sp_events.push((char_id, q.type_id));
+                        }
 
                         let current_lvl = existing_lvl;
                         let mut achieved_lvl = current_lvl;
@@ -1948,7 +1952,7 @@ impl ServerContext {
                     }
                 }
             }
-            (ships_to_invalidate, completed_events, paused_chars)
+            (ships_to_invalidate, completed_events, paused_chars, partial_sp_events)
         });
         for cid in paused_chars {
             let _ = self.notify_skill_queue_paused_server(cid);
@@ -1962,12 +1966,35 @@ impl ServerContext {
                 entry.push(skill_type_id);
             }
         }
-        for (cid, skill_ids) in trained_by_char {
+        // On synthetic clock jumps (`/advancetime`, `advance_secs`), push SP & queue updates even
+        // when no level finished, while keeping 1 Hz ticks silent and avoiding duplicate emits (#1066).
+        let mut partial_only_by_char: std::collections::BTreeMap<i64, Vec<u32>> =
+            std::collections::BTreeMap::new();
+        if is_synthetic_jump {
+            for (cid, skill_type_id) in partial_sp_events {
+                if let Some(trained_ids) = trained_by_char.get_mut(&cid) {
+                    if !trained_ids.contains(&skill_type_id) {
+                        trained_ids.push(skill_type_id);
+                    }
+                } else {
+                    let entry = partial_only_by_char.entry(cid).or_default();
+                    if !entry.contains(&skill_type_id) {
+                        entry.push(skill_type_id);
+                    }
+                }
+            }
+        }
+        for (cid, skill_ids, event) in trained_by_char
+            .into_iter()
+            .map(|(cid, ids)| (cid, ids, Some("SkillTrained")))
+            .chain(
+                partial_only_by_char
+                    .into_iter()
+                    .map(|(cid, ids)| (cid, ids, None)),
+            )
+        {
             crate::services::jump_clone_names::emit_server_skills_changed(
-                self,
-                cid,
-                &skill_ids,
-                Some("SkillTrained"),
+                self, cid, &skill_ids, event,
             );
             self.push_brain_update(cid);
             let _ = self.notify_new_skill_queue_saved(

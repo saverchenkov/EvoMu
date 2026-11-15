@@ -1005,8 +1005,13 @@ pub fn lookup_effective_attr_from_tuple(attrs: (f64, f64, f64, f64, f64), attr_i
 
 /// Skill queue list of `utillib.KeyVal` entries as returned by `skillMgr2.GetSkillQueue`,
 /// `skillMgr2.GetSkillQueueAndFreePoints`, and `OnNewSkillQueueSaved` (`#658`).
+///
+/// Subtracts [`ServerContext::unrebased_clock_offset_secs`] from `trainingStartTime` /
+/// `trainingEndTime` so timestamps remain anchored to the live client's `blue.os.GetWallclockTime()`
+/// baseline across `/advancetime` jumps (`#1066`).
 pub(crate) fn skill_queue_rowset(ctx: &ServerContext, char_id: i64) -> PyRep {
     let now_unix = ctx.now_unix();
+    let unrebased_offset = ctx.unrebased_clock_offset_secs();
     let entries = ctx.db.with_snapshot(|snap| {
         let paused = snap.paused_skill_queues.contains(&char_id);
         snap.skill_queues
@@ -1017,6 +1022,7 @@ pub(crate) fn skill_queue_rowset(ctx: &ServerContext, char_id: i64) -> PyRep {
                 } else {
                     q.first()
                         .and_then(|head| head.started_at_unix.or(Some(now_unix)))
+                        .map(|u| u.saturating_sub(unrebased_offset))
                 };
                 let mut cur_ft = active_base_unix
                     .map(|u| (u as i64 * 10_000_000) + 116_444_736_000_000_000);
