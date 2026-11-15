@@ -1184,6 +1184,10 @@ impl WorldRepository {
                     writer.working = before;
                     writer.working.next_entity_id =
                         writer.working.next_entity_id.max(self.entity_ids.current());
+                    if writer.working.next_entity_id > pre_alloc_snap_id {
+                        *self.published.write().unwrap_or_else(|e| e.into_inner()) =
+                            std::sync::Arc::new(writer.working.clone());
+                    }
                     drop(effects);
                     let tx_err = TxError::Panicked { label, msg };
                     record_tx_error(&tx_err);
@@ -1198,6 +1202,10 @@ impl WorldRepository {
                     writer.working = before;
                     writer.working.next_entity_id =
                         writer.working.next_entity_id.max(self.entity_ids.current());
+                    if writer.working.next_entity_id > pre_alloc_snap_id {
+                        *self.published.write().unwrap_or_else(|e| e.into_inner()) =
+                            std::sync::Arc::new(writer.working.clone());
+                    }
                     drop(effects);
                     return Err(err);
                 }
@@ -1213,6 +1221,10 @@ impl WorldRepository {
                     writer.working = before;
                     writer.working.next_entity_id =
                         writer.working.next_entity_id.max(self.entity_ids.current());
+                    if writer.working.next_entity_id > pre_alloc_snap_id {
+                        *self.published.write().unwrap_or_else(|e| e.into_inner()) =
+                            std::sync::Arc::new(writer.working.clone());
+                    }
                     drop(effects);
                     let tx_err = TxError::Persist(err);
                     record_tx_error(&tx_err);
@@ -1243,6 +1255,10 @@ impl WorldRepository {
                     writer.working = before;
                     writer.working.next_entity_id =
                         writer.working.next_entity_id.max(self.entity_ids.current());
+                    if writer.working.next_entity_id > pre_alloc_snap_id {
+                        *self.published.write().unwrap_or_else(|e| e.into_inner()) =
+                            std::sync::Arc::new(writer.working.clone());
+                    }
                     drop(effects);
                     record_tx_error(&val_err);
                     return Err(E::from_tx_error(val_err));
@@ -1366,6 +1382,10 @@ impl WorldRepository {
                     writer.working = before;
                     writer.working.next_entity_id =
                         writer.working.next_entity_id.max(self.entity_ids.current());
+                    if writer.working.next_entity_id > pre_alloc_snap_id {
+                        *self.published.write().unwrap_or_else(|e| e.into_inner()) =
+                            std::sync::Arc::new(writer.working.clone());
+                    }
                     drop(effects);
                     record_tx_error(&persist_err);
                     return Err(E::from_tx_error(persist_err));
