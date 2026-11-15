@@ -526,13 +526,18 @@ pub fn sequence_with_events(state: &mut SessionWireState, done: RpcCompletion) -
     let in_space_ship_switch_updates = deferred_session_change.is_some()
         && state.destiny.is_live()
         && matches!(&destiny_drain, DestinyDrain::Updates(_));
+    let attach_before_call_rsp = matches!(&destiny_drain, DestinyDrain::Attach { .. });
     if !in_space_ship_switch_updates {
         if let Some(sess_frame) = deferred_session_change.take() {
             out.push(OutFrame::SessionChange { frame: sess_frame });
         }
-        // 3. CallRsp / ErrorResponse follows any SessionChangeNotification (#883, #928).
-        if let Some(rsp) = pending_call_rsp.take() {
-            out.push(rsp);
+        // 3. CallRsp / ErrorResponse follows any SessionChangeNotification (#883, #928),
+        //    except initial ballpark Attach (`DoDestinyUpdate(SetState)`) must precede CallRsp
+        //    so `beyonce.MachoBindObject` / `GetFormations` primes `michelle` first (#1083).
+        if !attach_before_call_rsp {
+            if let Some(rsp) = pending_call_rsp.take() {
+                out.push(rsp);
+            }
         }
     }
 
@@ -855,8 +860,8 @@ mod tests {
 
     #[test]
     fn session_change_precedes_call_rsp_and_docking_detach_precedes_session_change_928_883() {
-        // 1. Session-change RPC without detach (e.g. SelectCharacterID / Undock / Station Board):
-        //    SessionChangeNotification -> CallRsp -> optional Attach(SetState) -> Notification.
+        // 1. Session-change RPC with Attach (e.g. SelectCharacterID / Undock / Station Board):
+        //    SessionChangeNotification -> Attach(SetState) -> CallRsp -> Notification (#1083).
         let mut wire = SessionWireState::new(88, 883);
         let attach_ep = wire.enter_space(Some(30_000_142));
         let frames = sequence(
@@ -882,7 +887,7 @@ mod tests {
         let rsp_idx = frames.iter().position(|f| matches!(f, OutFrame::CallRsp { call_id: 1, .. })).unwrap();
         let dest_idx = frames.iter().position(|f| matches!(f, OutFrame::DoDestinyUpdate { .. })).unwrap();
         let notif_idx = frames.iter().position(|f| matches!(f, OutFrame::Notification { .. })).unwrap();
-        assert!(sess_idx < rsp_idx && rsp_idx < dest_idx && dest_idx < notif_idx);
+        assert!(sess_idx < dest_idx && dest_idx < rsp_idx && rsp_idx < notif_idx);
 
         // 2. Docking detach (space -> station):
         //    DoDestinyUpdate(OnDockingAccepted) -> SessionChangeNotification -> CallRsp -> Notification.
@@ -998,7 +1003,7 @@ mod tests {
                                 }],
                             },
                         );
-                        // #883 / #928: SessionChangeNotification precedes CallRsp, followed by Attach SetState and Notifications.
+                        // #1083: SessionChangeNotification precedes Attach SetState, which precedes CallRsp and Notifications.
                         let sess_pos = frames
                             .iter()
                             .position(|f| matches!(f, OutFrame::SessionChange { .. }))
@@ -1020,8 +1025,8 @@ mod tests {
                             .position(|f| matches!(f, OutFrame::DoDestinyUpdate { .. }))
                         {
                             assert!(
-                                rsp_pos < dest_pos && dest_pos < notif_pos,
-                                "CallRsp ({rsp_pos}) must precede Attach DoDestinyUpdate ({dest_pos}) before Notification ({notif_pos})"
+                                dest_pos < rsp_pos && rsp_pos < notif_pos,
+                                "Attach DoDestinyUpdate ({dest_pos}) must precede CallRsp ({rsp_pos}) before Notification ({notif_pos})"
                             );
                         }
                         for f in &frames {

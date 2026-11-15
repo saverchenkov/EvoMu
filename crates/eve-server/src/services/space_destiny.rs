@@ -944,6 +944,7 @@ pub(crate) async fn handle_update_state_request(
             message: e,
             client_error: None,
         })?;
+    ctx.mark_space_ballpark_bootstrapped(session.session_id, char_id, sys_id);
     crate::services::pve_incursion_lifecycle::emit_active_incursion_tale_data_for_system(ctx, sys_id);
     Ok(PyRep::None)
 }

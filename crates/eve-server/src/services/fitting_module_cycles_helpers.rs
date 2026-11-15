@@ -975,6 +975,39 @@ fn emit_godma_prime_location_and_ship_state(
             ("description", PyRep::String(String::new())),
         ]),
     )];
+    let instance_row_desc = eve_proto::DBRowDescriptor::new([
+        ("instanceID", eve_proto::DbColumnType::I8),
+        ("online", eve_proto::DbColumnType::Bool),
+        ("damage", eve_proto::DbColumnType::R8),
+        ("charge", eve_proto::DbColumnType::R8),
+        ("skillPoints", eve_proto::DbColumnType::I4),
+        ("armorDamage", eve_proto::DbColumnType::R8),
+        ("shieldCharge", eve_proto::DbColumnType::R8),
+        ("incapacitated", eve_proto::DbColumnType::Bool),
+    ]);
+    let attr_f64 = |pairs: &[(PyRep, PyRep)], aid: i64| -> f64 {
+        pairs
+            .iter()
+            .find(|(k, _)| k.as_i64() == Some(aid))
+            .and_then(|(_, v)| v.as_f64())
+            .unwrap_or(0.0)
+    };
+    let build_instance_row = |id: i64, online: bool, pairs: &[(PyRep, PyRep)]| -> PyRep {
+        instance_row_desc.build_dbrow(vec![
+            PyRep::Integer(id),
+            PyRep::Bool(online),
+            PyRep::Real(attr_f64(pairs, i64::from(attr_ids::DAMAGE))),
+            PyRep::Real(attr_f64(pairs, 18)), // attributeCharge
+            PyRep::Integer(0),
+            PyRep::Real(attr_f64(pairs, i64::from(attr_ids::ARMOR_DAMAGE))),
+            PyRep::Real(attr_f64(pairs, i64::from(attr_ids::SHIELD_CHARGE))),
+            PyRep::Bool(false),
+        ])
+    };
+    let mut instance_cache_entries = vec![
+        (PyRep::Integer(ship_id), build_instance_row(ship_id, false, entries)),
+        (PyRep::Integer(char_id), build_instance_row(char_id, false, &[])),
+    ];
     let active_states = ctx.db.with_snapshot(|snap| snap.module_active_states.clone());
     let build_active_effect_line = |mod_id: i64, effect_id: i64, dur_ms: f64| -> PyRep {
         PyRep::List(vec![
@@ -1032,18 +1065,28 @@ fn emit_godma_prime_location_and_ship_state(
                         }
                     }
                 }
-                ship_info_entries.push((
-                    PyRep::Integer(mod_id),
-                    PyRep::keyval([
-                        ("itemID", PyRep::Integer(mod_id)),
-                        ("invItem", inv_row),
-                        ("attributes", mod_attrs_rep.clone()),
-                        ("activeEffects", PyRep::Dict(active_effects)),
-                        ("time", PyRep::Integer(now_ft)),
-                        ("wallclockTime", PyRep::Integer(now_ft)),
-                        ("description", PyRep::String(String::new())),
-                    ]),
-                ));
+                if !is_charge {
+                    let mod_pairs = match mod_attrs_rep {
+                        PyRep::Dict(pairs) => pairs.as_slice(),
+                        _ => &[],
+                    };
+                    instance_cache_entries.push((
+                        PyRep::Integer(mod_id),
+                        build_instance_row(mod_id, is_online, mod_pairs),
+                    ));
+                    ship_info_entries.push((
+                        PyRep::Integer(mod_id),
+                        PyRep::keyval([
+                            ("itemID", PyRep::Integer(mod_id)),
+                            ("invItem", inv_row),
+                            ("attributes", mod_attrs_rep.clone()),
+                            ("activeEffects", PyRep::Dict(active_effects)),
+                            ("time", PyRep::Integer(now_ft)),
+                            ("wallclockTime", PyRep::Integer(now_ft)),
+                            ("description", PyRep::String(String::new())),
+                        ]),
+                    ));
+                }
             }
         } else if let PyRep::Tuple(parts) = mod_id_rep {
             if parts.len() == 3 {
@@ -1162,7 +1205,7 @@ fn emit_godma_prime_location_and_ship_state(
         )
     });
     let ship_state = PyRep::Tuple(vec![
-        PyRep::Dict(Vec::new()),
+        PyRep::Dict(instance_cache_entries),
         PyRep::Dict(subloc_cache_dict),
         wb_data,
         PyRep::Dict(Vec::new()),
@@ -1411,6 +1454,10 @@ pub(crate) fn build_all_info(
     };
 
     let ship_info = if prime_ship { PyRep::Dict(ship_info_entries) } else { PyRep::None };
+
+    if prime_char && ctx.mark_brain_primed_for_session(session.session_id, char_id) {
+        ctx.push_brain_update(char_id);
+    }
 
     PyRep::keyval([
         ("shipID", PyRep::Integer(ship_id)),

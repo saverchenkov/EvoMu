@@ -764,7 +764,7 @@ pub async fn execute_call_req_wire(
         !cross_sys_pre_ticks.is_empty() || cross_sys_pre_destiny.is_some();
     let mut was_live = matches!(wire.wire_state.destiny, DestinyStream::Live { .. });
     let is_ballpark_init_rpc = (method == "UpdateStateRequest"
-        || (service == "beyonce" && method == "MachoBindObject"))
+        || (service == "beyonce" && (method == "MachoBindObject" || method == "GetFormations")))
         && session.station_id.is_none()
         && session.structure_id.is_none();
     if is_ballpark_init_rpc

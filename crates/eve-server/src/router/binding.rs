@@ -588,6 +588,15 @@ impl ServerContext {
         active_dock_id: Option<i64>,
         reason: &str,
     ) {
+        if !matches!(reason, "set_account_key")
+            && !reason.starts_with("board")
+            && !reason.starts_with("eject")
+        {
+            self.clear_space_ballpark_bootstrapped(char_id);
+        }
+        if matches!(reason, "login" | "logout") {
+            self.clear_brain_primed_for_char(char_id);
+        }
         if matches!(reason, "set_account_key" | "login") {
             return;
         }
