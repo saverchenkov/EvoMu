@@ -1215,7 +1215,7 @@ fn issue_826_with_mut_snapshot_cowmap_and_domain_rows_zero_cold_clones_and_zero_
             TrainedSkillRecord {
                 type_id: 3300,
                 level: 3,
-                skill_points: 8_000,
+                skill_points: 8_000.0,
             },
         );
         snap.skills.insert(cid, sk);
@@ -1224,9 +1224,9 @@ fn issue_826_with_mut_snapshot_cowmap_and_domain_rows_zero_cold_clones_and_zero_
             vec![SkillQueueEntry {
                 type_id: 3300,
                 target_level: 4,
-                start_sp: 8_000,
-                end_sp: 45_255,
-                duration_seconds: 1_200,
+                start_sp: 8_000.0,
+                end_sp: 45_255.0,
+                duration_seconds: 1_200.0,
                 started_at_unix: Some(1_700_000_000),
             }],
         );
@@ -1316,7 +1316,7 @@ fn issue_826_with_mut_snapshot_cowmap_and_domain_rows_zero_cold_clones_and_zero_
             TrainedSkillRecord {
                 type_id: 3301,
                 level: 2,
-                skill_points: 1_415,
+                skill_points: 1_415.0,
             },
         );
         snap.skill_queues.get_mut(&cid).unwrap()[0].target_level = 5;
