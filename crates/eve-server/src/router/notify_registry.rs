@@ -7,7 +7,7 @@
 #![forbid(unsafe_code)]
 
 use crate::router::cache_notifications::{
-    next_notification_seq_id, push_pending_notification_capped, PendingMachoNotification,
+    next_notification_seq_id, push_or_stage_pending_notification, PendingMachoNotification,
 };
 use crate::router::{NotificationTarget, ServerContext};
 use eve_db::lock_rank::AnyRwLock;
@@ -239,17 +239,12 @@ pub fn emit_typed_to_fleet_members_core<N: TypedNotification>(
             marshaled_packet: marshaled_packet.clone(),
             created_filetime: now_ft,
         };
-        if let Some(pend) = pending_notifications {
-            let mut queues = pend.write().unwrap_or_else(|e| e.into_inner());
-            let queue = queues.entry(member_id).or_default();
-            while queue.len() >= 256 {
-                queue.remove(0);
-            }
-            queue.push(pending.clone());
-        }
-        if let Some(tx) = notify_tx {
-            let _ = tx.send((member_id, pending));
-        }
+        push_or_stage_pending_notification(
+            pending_notifications,
+            notify_tx,
+            pending,
+            Some(256),
+        );
     }
 }
 
@@ -296,17 +291,12 @@ pub fn emit_typed_to_solar_system_in_space_core<N: TypedNotification>(
             marshaled_packet,
             created_filetime: now_ft,
         };
-        {
-            let mut q_guard = pending_notifications
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            let q = q_guard.entry(cid).or_default();
-            while q.len() >= 512 {
-                q.remove(0);
-            }
-            q.push(pending.clone());
-        }
-        let _ = notify_tx.send((cid, pending));
+        push_or_stage_pending_notification(
+            Some(pending_notifications),
+            Some(notify_tx),
+            pending,
+            Some(512),
+        );
     }
 }
 
@@ -393,21 +383,12 @@ fn build_and_push_typed_notification<N: TypedNotification>(
         marshaled_packet,
         created_filetime,
     };
-    if let Some(pend) = pending_notifications {
-        let mut queues = pend.write().unwrap_or_else(|e| e.into_inner());
-        let queue = queues.entry(char_id).or_default();
-        if let Some(cap) = explicit_queue_cap {
-            while queue.len() >= cap {
-                queue.remove(0);
-            }
-            queue.push(pending.clone());
-        } else {
-            push_pending_notification_capped(queue, pending.clone());
-        }
-    }
-    if let Some(tx) = notify_tx {
-        let _ = tx.send((char_id, pending));
-    }
+    push_or_stage_pending_notification(
+        pending_notifications,
+        notify_tx,
+        pending,
+        explicit_queue_cap,
+    );
 }
 
 macro_rules! count_idents {

@@ -129,6 +129,82 @@ fn format_pyrep_summary(rep: &PyRep) -> String {
     }
 }
 
+tokio::task_local! {
+    static DISPATCH_TX_ERROR: std::cell::RefCell<Option<(String, String)>>;
+}
+
+static TX_HOOK_ONCE: std::sync::Once = std::sync::Once::new();
+
+fn dispatch_record_tx_error(err: &eve_db::TxError) {
+    let (code, msg) = match err {
+        eve_db::TxError::NonFinite { .. } | eve_db::TxError::RowLimit { .. } => {
+            ("ValidationError".to_string(), err.to_string())
+        }
+        eve_db::TxError::Persist(_) | eve_db::TxError::Panicked { .. } => {
+            ("PersistenceFailure".to_string(), err.to_string())
+        }
+    };
+    let _ = DISPATCH_TX_ERROR.try_with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            *slot = Some((code, msg));
+        }
+    });
+}
+
+fn dispatch_check_tx_poison() -> Option<String> {
+    DISPATCH_TX_ERROR
+        .try_with(|cell| cell.borrow().as_ref().map(|(_, msg)| msg.clone()))
+        .ok()
+        .flatten()
+}
+
+pub(crate) fn ensure_dispatch_tx_hooks_installed() {
+    TX_HOOK_ONCE.call_once(|| {
+        eve_db::set_tx_error_hook(Some(dispatch_record_tx_error));
+        eve_db::set_tx_poison_check_hook(Some(dispatch_check_tx_poison));
+    });
+}
+
+async fn maybe_with_dispatch_tx_error<F, R>(outer: bool, fut: F) -> R
+where
+    F: std::future::Future<Output = R>,
+{
+    let fut = Box::pin(fut);
+    if outer {
+        DISPATCH_TX_ERROR
+            .scope(std::cell::RefCell::new(None), fut)
+            .await
+    } else {
+        fut.await
+    }
+}
+
+async fn maybe_with_staged_dispatch_notifications<F, R>(
+    outer: bool,
+    pend: &dyn eve_db::lock_rank::AnyRwLock<
+        HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>,
+    >,
+    notify_tx: &tokio::sync::broadcast::Sender<(
+        i64,
+        crate::router::cache_notifications::PendingMachoNotification,
+    )>,
+    fut: F,
+) -> R
+where
+    F: std::future::Future<Output = R>,
+{
+    let fut = Box::pin(fut);
+    if outer {
+        crate::router::cache_notifications::with_staged_dispatch_notifications(
+            pend, notify_tx, fut,
+        )
+        .await
+    } else {
+        fut.await
+    }
+}
+
 impl ServerContext {
     /// Dispatches an incoming RPC call `(service, bound_id, method, args, kwargs)` across the 12
     /// modular domain handlers, enforcing authentication and ownership checks.
@@ -143,6 +219,8 @@ impl ServerContext {
         kwargs: &HashMap<String, PyRep>,
         caller_trace: Option<&str>,
     ) -> Result<PyRep, BridgeRpcError> {
+        ensure_dispatch_tx_hooks_installed();
+
         let pre_sync_loc = (
             session.solar_system_id,
             session.station_id,
@@ -168,43 +246,189 @@ impl ServerContext {
             .character_id
             .map(|cid| self.latest_notification_seq_for_char(cid))
             .unwrap_or(0);
+        let pre_session_notif_len = session.notifications.len();
 
         let prev_station_id = session.station_id;
         let initial_active_char_id = session.character_id;
+        let is_outer_tx_scope = DISPATCH_TX_ERROR.try_with(|_| ()).is_err();
+        let is_outer_notify_scope =
+            !crate::router::cache_notifications::has_staged_dispatch_notifications_scope();
         let start_time = std::time::Instant::now();
-        let mut res = crate::router::cache_notifications::with_active_dispatch_char(
-            initial_active_char_id,
-            async {
-                match CatchUnwindFuture(dispatch_rpc_inner_boxed(
-                    self,
-                    session,
-                    service,
-                    bound_id,
-                    method,
-                    args,
-                    kwargs,
-                    caller_trace,
-                ))
-                .await
-                {
-                    Ok(r) => r,
-                    Err(panic_payload) => {
-                        let panic_msg = format_panic_payload(panic_payload.as_ref());
-                        warn!(
-                            session_id = session.session_id,
+        let (mut res, tx_poisoned) = maybe_with_dispatch_tx_error(
+            is_outer_tx_scope,
+            maybe_with_staged_dispatch_notifications(
+                is_outer_notify_scope,
+                &*self.pending_notifications,
+                &self.notify_tx,
+                crate::router::cache_notifications::with_active_dispatch_char(
+                    initial_active_char_id,
+                    Box::pin(async {
+                        let mut res = match CatchUnwindFuture(dispatch_rpc_inner_boxed(
+                            self,
+                            session,
                             service,
+                            bound_id,
                             method,
-                            panic_msg = %panic_msg,
-                            "Caught panic in RPC handler; converting to ErrorResponse (ORD-2)"
-                        );
-                        Err(BridgeRpcError {
-                            code: "InternalError".into(),
-                            message: format!("RPC handler panicked in {service}.{method}: {panic_msg}"),
-                            client_error: None,
-                        })
-                    }
-                }
-            },
+                            args,
+                            kwargs,
+                            caller_trace,
+                        ))
+                        .await
+                        {
+                            Ok(r) => r,
+                            Err(panic_payload) => {
+                                let panic_msg = format_panic_payload(panic_payload.as_ref());
+                                warn!(
+                                    session_id = session.session_id,
+                                    service,
+                                    method,
+                                    panic_msg = %panic_msg,
+                                    "Caught panic in RPC handler; converting to ErrorResponse (ORD-2)"
+                                );
+                                Err(BridgeRpcError {
+                                    code: "InternalError".into(),
+                                    message: format!(
+                                        "RPC handler panicked in {service}.{method}: {panic_msg}"
+                                    ),
+                                    client_error: None,
+                                })
+                            }
+                        };
+
+                        if res.is_ok()
+                            && dispatch_check_tx_poison().is_none()
+                            && matches!(
+                                service,
+                                "stationSvc" | "ship" | "structureDocking" | "beyonce"
+                            )
+                        {
+                            if let Some(cid) = session.character_id {
+                                let guest_row = || {
+                                    self.db.with_snapshot(|snap| {
+                                        let c = snap.characters.get(&cid);
+                                        PyRep::Tuple(vec![
+                                            PyRep::Integer(cid),
+                                            c.map(|c| PyRep::Integer(c.corporation_id))
+                                                .unwrap_or(PyRep::None),
+                                            c.and_then(|c| c.alliance_id)
+                                                .map(PyRep::Integer)
+                                                .unwrap_or(PyRep::None),
+                                            c.and_then(|c| c.war_faction_id)
+                                                .map(PyRep::Integer)
+                                                .unwrap_or(PyRep::None),
+                                        ])
+                                    })
+                                };
+                                if method == "Undock" {
+                                    if let Some(st_id) =
+                                        prev_station_id.filter(|_| session.station_id.is_none())
+                                    {
+                                        let row = guest_row();
+                                        for (peer_cid, _) in self.resolve_notification_recipients(
+                                            &crate::router::NotificationTarget::Station(st_id),
+                                        ) {
+                                            if peer_cid != cid {
+                                                self.notify(
+                                                    crate::router::NotificationTarget::Character(
+                                                        peer_cid,
+                                                    ),
+                                                    "OnCharNoLongerInStation",
+                                                    "charid",
+                                                    vec![row.clone()],
+                                                );
+                                            }
+                                        }
+                                    }
+                                } else if matches!(method, "Dock" | "CmdDock") {
+                                    if let Some(st_id) =
+                                        session.station_id.filter(|_| prev_station_id.is_none())
+                                    {
+                                        let row = guest_row();
+                                        for (peer_cid, _) in self.resolve_notification_recipients(
+                                            &crate::router::NotificationTarget::Station(st_id),
+                                        ) {
+                                            if peer_cid != cid {
+                                                self.notify(
+                                                    crate::router::NotificationTarget::Character(
+                                                        peer_cid,
+                                                    ),
+                                                    "OnCharNowInStation",
+                                                    "charid",
+                                                    vec![row.clone()],
+                                                );
+                                            }
+                                        }
+                                    }
+                                    crate::services::fleet_social::execute_pending_auto_kicks_for_docked_char(
+                                        self, session, cid,
+                                    );
+                                }
+                            }
+                        } else if res.is_ok()
+                            && dispatch_check_tx_poison().is_none()
+                            && matches!(method, "Dock" | "CmdDock")
+                        {
+                            if let Some(cid) = session.character_id {
+                                crate::services::fleet_social::execute_pending_auto_kicks_for_docked_char(
+                                    self, session, cid,
+                                );
+                            }
+                        }
+
+                        let mut tx_poisoned = false;
+                        if is_outer_tx_scope {
+                            if let Some((code, msg)) = DISPATCH_TX_ERROR
+                                .try_with(|cell| cell.borrow_mut().take())
+                                .ok()
+                                .flatten()
+                            {
+                                tx_poisoned = true;
+                                let preserve_existing_err = matches!(
+                                    &res,
+                                    Err(e) if matches!(
+                                        e.code.as_str(),
+                                        "PersistenceFailure"
+                                            | "DatabasePersistenceError"
+                                            | "ValidationError"
+                                    )
+                                );
+                                if !preserve_existing_err {
+                                    res = Err(BridgeRpcError {
+                                        code,
+                                        message: msg,
+                                        client_error: None,
+                                    });
+                                }
+                            }
+                        }
+                        if matches!(
+                            &res,
+                            Err(e) if matches!(
+                                e.code.as_str(),
+                                "PersistenceFailure"
+                                    | "DatabasePersistenceError"
+                                    | "ValidationError"
+                            )
+                        ) {
+                            tx_poisoned = true;
+                        }
+
+                        if tx_poisoned {
+                            session.notifications.truncate(pre_session_notif_len);
+                        } else if is_outer_notify_scope {
+                            crate::router::cache_notifications::set_active_dispatch_char(
+                                session.character_id,
+                            );
+                            crate::router::cache_notifications::flush_staged_dispatch_notifications(
+                                &*self.pending_notifications,
+                                &self.notify_tx,
+                            );
+                        }
+
+                        (res, tx_poisoned)
+                    }),
+                ),
+            ),
         )
         .await;
         let duration = start_time.elapsed();
@@ -224,91 +448,35 @@ impl ServerContext {
             &status_desc,
         );
 
-        if res.is_ok() && matches!(service, "stationSvc" | "ship" | "structureDocking" | "beyonce") {
+        if !tx_poisoned {
             if let Some(cid) = session.character_id {
-                let guest_row = || {
-                    self.db.with_snapshot(|snap| {
-                        let c = snap.characters.get(&cid);
-                        PyRep::Tuple(vec![
-                            PyRep::Integer(cid),
-                            c.map(|c| PyRep::Integer(c.corporation_id)).unwrap_or(PyRep::None),
-                            c.and_then(|c| c.alliance_id).map(PyRep::Integer).unwrap_or(PyRep::None),
-                            c.and_then(|c| c.war_faction_id).map(PyRep::Integer).unwrap_or(PyRep::None),
-                        ])
-                    })
-                };
-                if method == "Undock" {
-                    if let Some(st_id) = prev_station_id.filter(|_| session.station_id.is_none()) {
-                        let row = guest_row();
-                        for (peer_cid, _) in self.resolve_notification_recipients(
-                            &crate::router::NotificationTarget::Station(st_id),
-                        ) {
-                            if peer_cid != cid {
-                                self.notify(
-                                    crate::router::NotificationTarget::Character(peer_cid),
-                                    "OnCharNoLongerInStation",
-                                    "charid",
-                                    vec![row.clone()],
-                                );
-                            }
-                        }
-                    }
-                } else if matches!(method, "Dock" | "CmdDock") {
-                    if let Some(st_id) = session.station_id.filter(|_| prev_station_id.is_none()) {
-                        let row = guest_row();
-                        for (peer_cid, _) in self.resolve_notification_recipients(
-                            &crate::router::NotificationTarget::Station(st_id),
-                        ) {
-                            if peer_cid != cid {
-                                self.notify(
-                                    crate::router::NotificationTarget::Character(peer_cid),
-                                    "OnCharNowInStation",
-                                    "charid",
-                                    vec![row.clone()],
-                                );
-                            }
-                        }
-                    }
-                    crate::services::fleet_social::execute_pending_auto_kicks_for_docked_char(
-                        self, session, cid,
-                    );
-                }
-            }
-        } else if res.is_ok() && matches!(method, "Dock" | "CmdDock") {
-            if let Some(cid) = session.character_id {
-                crate::services::fleet_social::execute_pending_auto_kicks_for_docked_char(
-                    self, session, cid,
+                let post_rpc_loc = (
+                    session.solar_system_id,
+                    session.station_id,
+                    session.structure_id,
                 );
-            }
-        }
-
-        if let Some(cid) = session.character_id {
-            let post_rpc_loc = (
-                session.solar_system_id,
-                session.station_id,
-                session.structure_id,
-            );
-            if post_sync_loc.0.is_some() && post_rpc_loc != post_sync_loc {
-                if let Some(sys_id) = session.solar_system_id {
-                    self.invalidate_bound_objects_for_session_transition(
-                        cid,
-                        sys_id,
-                        session.station_id.or(session.structure_id),
-                        "session_location_change",
-                    );
+                if res.is_ok() && post_sync_loc.0.is_some() && post_rpc_loc != post_sync_loc {
+                    if let Some(sys_id) = session.solar_system_id {
+                        self.invalidate_bound_objects_for_session_transition(
+                            cid,
+                            sys_id,
+                            session.station_id.or(session.structure_id),
+                            "session_location_change",
+                        );
+                    }
                 }
-            }
-            if !session.live_notify_listener {
-                if let Some(notifs) = self.pending_notifications.read().ok().and_then(|q| {
-                    q.get(&cid).map(|v| {
-                        v.iter()
-                            .filter(|n| n.seq_id > pre_seq)
-                            .cloned()
-                            .collect::<Vec<_>>()
-                    })
-                }) {
-                    for notif in notifs {
-                        session.push_notification(notif.event, notif.args);
+                if !session.live_notify_listener {
+                    if let Some(notifs) = self.pending_notifications.read().ok().and_then(|q| {
+                        q.get(&cid).map(|v| {
+                            v.iter()
+                                .filter(|n| n.seq_id > pre_seq)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                        })
+                    }) {
+                        for notif in notifs {
+                            session.push_notification(notif.event, notif.args);
+                        }
                     }
                 }
             }

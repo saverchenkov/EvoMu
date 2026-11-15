@@ -230,6 +230,207 @@ where
         .await
 }
 
+#[derive(Debug, Clone)]
+struct StagedDispatchNotification {
+    write_queue: bool,
+    send_tx: bool,
+    notif: PendingMachoNotification,
+    explicit_queue_cap: Option<usize>,
+}
+
+struct DispatchNotificationStage {
+    target_pend_ptr: usize,
+    target_notify_tx: tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>,
+    staged: Vec<StagedDispatchNotification>,
+}
+
+tokio::task_local! {
+    static DISPATCH_STAGED_NOTIFICATIONS: std::cell::RefCell<DispatchNotificationStage>;
+}
+
+#[inline]
+fn pending_notifications_ptr(
+    pend: &dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
+) -> usize {
+    pend as *const dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>
+        as *const () as usize
+}
+
+pub(crate) fn has_staged_dispatch_notifications_scope() -> bool {
+    DISPATCH_STAGED_NOTIFICATIONS.try_with(|_| ()).is_ok()
+}
+
+pub(crate) async fn with_staged_dispatch_notifications<F, R>(
+    pend: &dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
+    notify_tx: &tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>,
+    fut: F,
+) -> R
+where
+    F: std::future::Future<Output = R>,
+{
+    let stage = DispatchNotificationStage {
+        target_pend_ptr: pending_notifications_ptr(pend),
+        target_notify_tx: notify_tx.clone(),
+        staged: Vec::new(),
+    };
+    DISPATCH_STAGED_NOTIFICATIONS
+        .scope(std::cell::RefCell::new(stage), fut)
+        .await
+}
+
+pub(crate) fn is_staging_dispatch_notifications(
+    pend: Option<&dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>>,
+    notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>>,
+) -> bool {
+    let pend_ptr = pend.map(pending_notifications_ptr);
+    DISPATCH_STAGED_NOTIFICATIONS
+        .try_with(|cell| {
+            let stage = cell.borrow();
+            match (pend_ptr, notify_tx) {
+                (Some(p), _) => p == stage.target_pend_ptr,
+                (None, Some(tx)) => tx.same_channel(&stage.target_notify_tx),
+                (None, None) => false,
+            }
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn try_stage_dispatch_notification(
+    pend: Option<&dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>>,
+    notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>>,
+    notif: &PendingMachoNotification,
+    explicit_queue_cap: Option<usize>,
+) -> bool {
+    let pend_ptr = pend.map(pending_notifications_ptr);
+    DISPATCH_STAGED_NOTIFICATIONS
+        .try_with(|cell| {
+            let mut stage = cell.borrow_mut();
+            let matches_target = match (pend_ptr, notify_tx) {
+                (Some(p), _) => p == stage.target_pend_ptr,
+                (None, Some(tx)) => tx.same_channel(&stage.target_notify_tx),
+                (None, None) => false,
+            };
+            if !matches_target {
+                return false;
+            }
+            stage.staged.push(StagedDispatchNotification {
+                write_queue: pend.is_some(),
+                send_tx: notify_tx.is_some(),
+                notif: notif.clone(),
+                explicit_queue_cap,
+            });
+            true
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn clear_staged_notifications_for_char(
+    pend: &dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
+    char_id: i64,
+) {
+    let pend_ptr = pending_notifications_ptr(pend);
+    let _ = DISPATCH_STAGED_NOTIFICATIONS.try_with(|cell| {
+        let mut stage = cell.borrow_mut();
+        if stage.target_pend_ptr == pend_ptr {
+            stage
+                .staged
+                .retain(|item| item.notif.recipient_char_id != char_id);
+        }
+    });
+}
+
+fn has_staged_notification_for_char_and_id(
+    pend: &dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
+    char_id: i64,
+    event: &str,
+    notification_id: i64,
+) -> bool {
+    let pend_ptr = pending_notifications_ptr(pend);
+    DISPATCH_STAGED_NOTIFICATIONS
+        .try_with(|cell| {
+            let stage = cell.borrow();
+            stage.target_pend_ptr == pend_ptr
+                && stage.staged.iter().any(|item| {
+                    item.notif.recipient_char_id == char_id
+                        && item.notif.event == event
+                        && item.notif.args.first() == Some(&PyRep::Integer(notification_id))
+                })
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn flush_staged_dispatch_notifications(
+    pend: &dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
+    notify_tx: &tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>,
+) {
+    let pend_ptr = pending_notifications_ptr(pend);
+    let items = DISPATCH_STAGED_NOTIFICATIONS
+        .try_with(|cell| {
+            let mut stage = cell.borrow_mut();
+            if stage.target_pend_ptr == pend_ptr {
+                std::mem::take(&mut stage.staged)
+            } else {
+                Vec::new()
+            }
+        })
+        .unwrap_or_default();
+    if items.is_empty() {
+        return;
+    }
+    let has_queue_writes = items.iter().any(|item| item.write_queue);
+    let mut queues = has_queue_writes.then(|| pend.write().unwrap_or_else(|e| e.into_inner()));
+    for item in items {
+        if item.write_queue {
+            if let Some(queues) = queues.as_mut() {
+                let queue = queues.entry(item.notif.recipient_char_id).or_default();
+                push_pending_notification_with_cap(
+                    queue,
+                    item.notif.clone(),
+                    item.explicit_queue_cap,
+                );
+            }
+        }
+        if item.send_tx {
+            let _ = notify_tx.send((item.notif.recipient_char_id, item.notif));
+        }
+    }
+}
+
+fn push_pending_notification_with_cap(
+    queue: &mut Vec<PendingMachoNotification>,
+    notif: PendingMachoNotification,
+    explicit_queue_cap: Option<usize>,
+) {
+    if let Some(cap) = explicit_queue_cap {
+        while queue.len() >= cap {
+            queue.remove(0);
+        }
+        queue.push(notif);
+    } else {
+        push_pending_notification_capped(queue, notif);
+    }
+}
+
+pub(crate) fn push_or_stage_pending_notification(
+    pend: Option<&dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>>,
+    notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>>,
+    notif: PendingMachoNotification,
+    explicit_queue_cap: Option<usize>,
+) {
+    if try_stage_dispatch_notification(pend, notify_tx, &notif, explicit_queue_cap) {
+        return;
+    }
+    let cid = notif.recipient_char_id;
+    if let Some(pend) = pend {
+        let mut queues = pend.write().unwrap_or_else(|e| e.into_inner());
+        let queue = queues.entry(cid).or_default();
+        push_pending_notification_with_cap(queue, notif.clone(), explicit_queue_cap);
+    }
+    if let Some(tx) = notify_tx {
+        let _ = tx.send((cid, notif));
+    }
+}
+
 /// Pushes `notif` into `queue`, evicting the oldest entry if the per-character cap is reached.
 /// When `notif.recipient_char_id` is the active `dispatch_rpc` caller (`#850`), all notifications emitted
 /// by the in-flight RPC are preserved up to [`MAX_ACTIVE_RPC_NOTIFICATIONS_PER_CHAR`] until the post-RPC drain.
@@ -847,10 +1048,15 @@ impl ServerContext {
         let recipients = self.resolve_notification_recipients(&target);
         let now_ft = self.now_blueos_filetime_ticks();
         let mut emitted = Vec::with_capacity(recipients.len());
-        let mut queues = self
-            .pending_notifications
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+        let stage_in_dispatch = is_staging_dispatch_notifications(
+            Some(&*self.pending_notifications),
+            Some(&self.notify_tx),
+        );
+        let mut queues = (!stage_in_dispatch).then(|| {
+            self.pending_notifications
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+        });
         for (cid, uid) in recipients {
             let mut recipient_args = args.clone();
             if event == "OnModuleAttributeChanges" {
@@ -885,9 +1091,18 @@ impl ServerContext {
                 marshaled_packet,
                 now_ft,
             );
-            let q = queues.entry(cid).or_default();
-            push_pending_notification_capped(q, notif.clone());
-            let _ = self.notify_tx.send((cid, notif.clone()));
+            if let Some(queues) = queues.as_mut() {
+                let q = queues.entry(cid).or_default();
+                push_pending_notification_capped(q, notif.clone());
+                let _ = self.notify_tx.send((cid, notif.clone()));
+            } else {
+                let _ = try_stage_dispatch_notification(
+                    Some(&*self.pending_notifications),
+                    Some(&self.notify_tx),
+                    &notif,
+                    None,
+                );
+            }
             emitted.push(notif);
         }
         emitted
@@ -918,6 +1133,7 @@ impl ServerContext {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&char_id);
+        clear_staged_notifications_for_char(&*self.pending_notifications, char_id);
     }
 
     /// Re-queues system shutdown/maintenance notifications after `logoff_character_sync` clears stale per-character queues.
@@ -1129,10 +1345,42 @@ impl ServerContext {
             .iter().filter(|r| r.receiver_id == char_id && !r.deleted && !r.processed).cloned().collect();
         if unprocessed.is_empty() { return; }
         let now_ft = self.now_blueos_filetime_ticks();
-        let mut queues = self.pending_notifications.write().unwrap_or_else(|e| e.into_inner());
-        let q = queues.entry(char_id).or_default();
+        let stage_in_dispatch = is_staging_dispatch_notifications(
+            Some(&*self.pending_notifications),
+            Some(&self.notify_tx),
+        );
+        let mut queues = (!stage_in_dispatch).then(|| {
+            self.pending_notifications
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+        });
         for rec in unprocessed {
-            if q.iter().any(|n| n.event == "OnNotificationReceived" && n.args.first() == Some(&PyRep::Integer(rec.notification_id))) {
+            let already_queued = if let Some(queues) = queues.as_ref() {
+                queues.get(&char_id).is_some_and(|q| {
+                    q.iter().any(|n| {
+                        n.event == "OnNotificationReceived"
+                            && n.args.first() == Some(&PyRep::Integer(rec.notification_id))
+                    })
+                })
+            } else {
+                self.pending_notifications
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&char_id)
+                    .is_some_and(|q| {
+                        q.iter().any(|n| {
+                            n.event == "OnNotificationReceived"
+                                && n.args.first() == Some(&PyRep::Integer(rec.notification_id))
+                        })
+                    })
+                    || has_staged_notification_for_char_and_id(
+                        &*self.pending_notifications,
+                        char_id,
+                        "OnNotificationReceived",
+                        rec.notification_id,
+                    )
+            };
+            if already_queued {
                 continue;
             }
             let args = vec![
@@ -1149,8 +1397,18 @@ impl ServerContext {
                 marshaled_packet,
                 now_ft,
             );
-            push_pending_notification_capped(q, notif.clone());
-            let _ = self.notify_tx.send((char_id, notif));
+            if let Some(queues) = queues.as_mut() {
+                let q = queues.entry(char_id).or_default();
+                push_pending_notification_capped(q, notif.clone());
+                let _ = self.notify_tx.send((char_id, notif));
+            } else {
+                let _ = try_stage_dispatch_notification(
+                    Some(&*self.pending_notifications),
+                    Some(&self.notify_tx),
+                    &notif,
+                    None,
+                );
+            }
         }
     }
 
@@ -2033,7 +2291,10 @@ impl ServerContext {
                     if recipients.is_empty() {
                         continue;
                     }
-                    let mut queues = pend.write().unwrap_or_else(|e| e.into_inner());
+                    let stage_in_dispatch =
+                        is_staging_dispatch_notifications(Some(&*pend), Some(&notify_tx));
+                    let mut queues = (!stage_in_dispatch)
+                        .then(|| pend.write().unwrap_or_else(|e| e.into_inner()));
                     for (cid, uid) in recipients {
                         let recipient_args = effect.args.clone();
                         let (packet, marshaled_packet) = Self::build_macho_notification_packet(
@@ -2052,9 +2313,18 @@ impl ServerContext {
                             marshaled_packet,
                             now_ft,
                         );
-                        let q = queues.entry(cid).or_default();
-                        push_pending_notification_capped(q, notif.clone());
-                        let _ = notify_tx.send((cid, notif));
+                        if let Some(queues) = queues.as_mut() {
+                            let q = queues.entry(cid).or_default();
+                            push_pending_notification_capped(q, notif.clone());
+                            let _ = notify_tx.send((cid, notif));
+                        } else {
+                            let _ = try_stage_dispatch_notification(
+                                Some(&*pend),
+                                Some(&notify_tx),
+                                &notif,
+                                None,
+                            );
+                        }
                     }
                 }
             },

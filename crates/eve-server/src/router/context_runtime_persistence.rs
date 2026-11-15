@@ -992,7 +992,13 @@ fn collect_checkpoint_batch_from_ctx(ctx: &ServerContext) -> Vec<(&'static str, 
     ]
 }
 
-fn load_checkpoints_into_ctx(ctx: &ServerContext) -> bool {
+enum CheckpointLoadOutcome {
+    Loaded,
+    Empty,
+    Error(String),
+}
+
+fn load_checkpoints_into_ctx(ctx: &ServerContext) -> CheckpointLoadOutcome {
     let loaded = ctx.db.with_sqlite_conn(|conn| -> Result<Option<_>, String> {
         ensure_system_checkpoint_schema(conn)?;
         let _ = purge_crash_lost_checkpoints(conn);
@@ -1048,7 +1054,7 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext) -> bool {
         )))
     });
 
-    let Ok(Some((
+    let (
         moon_probes,
         sigs,
         prog,
@@ -1062,9 +1068,10 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext) -> bool {
         module_cooldowns,
         fleet_extras,
         social_extras,
-    ))) = loaded
-    else {
-        return false;
+    ) = match loaded {
+        Ok(Some(data)) => data,
+        Ok(None) => return CheckpointLoadOutcome::Empty,
+        Err(err) => return CheckpointLoadOutcome::Error(err),
     };
 
     *ctx.active_moon_probes
@@ -1172,7 +1179,7 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext) -> bool {
         PersistedSocialExtrasRuntimePayload::default().apply_to_ctx(ctx);
     }
     clear_crash_lost_runtime_maps(ctx);
-    true
+    CheckpointLoadOutcome::Loaded
 }
 
 impl ServerContext {
@@ -1270,9 +1277,18 @@ impl ServerContext {
                     .and_then(|s| serde_json::from_str::<PersistedServerRuntimeState>(&s).ok())
             });
 
-        if load_checkpoints_into_ctx(self) {
-            self.retire_legacy_runtime_monolith_in_db();
-            return;
+        match load_checkpoints_into_ctx(self) {
+            CheckpointLoadOutcome::Loaded => {
+                self.retire_legacy_runtime_monolith_in_db();
+                return;
+            }
+            CheckpointLoadOutcome::Error(err) => {
+                tracing::error!(
+                    "hydrate_server_runtime_from_db aborted due to system_checkpoint read error (preserving live runtime state): {err}"
+                );
+                return;
+            }
+            CheckpointLoadOutcome::Empty => {}
         }
 
         if let Some(legacy_state) = state {

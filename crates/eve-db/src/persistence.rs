@@ -401,6 +401,40 @@ pub fn tx_panics_total() -> u64 {
     PERSIST_TX_PANICS_TOTAL.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+static TX_ERROR_HOOK: std::sync::RwLock<Option<fn(&TxError)>> = std::sync::RwLock::new(None);
+static TX_POISON_CHECK_HOOK: std::sync::RwLock<Option<fn() -> Option<String>>> =
+    std::sync::RwLock::new(None);
+
+/// Registers a callback invoked whenever `WorldRepository::tx` aborts due to an
+/// infrastructure/transaction error (`TxError::Persist`, `TxError::Panicked`,
+/// `TxError::NonFinite`, `TxError::RowLimit`). User closure business errors do not trigger it.
+pub fn set_tx_error_hook(hook: Option<fn(&TxError)>) {
+    *TX_ERROR_HOOK.write().unwrap_or_else(|e| e.into_inner()) = hook;
+}
+
+/// Registers a callback queried at the start of `WorldRepository::tx` to detect whether the
+/// active dispatch transaction scope is already poisoned by an earlier transaction failure.
+pub fn set_tx_poison_check_hook(hook: Option<fn() -> Option<String>>) {
+    *TX_POISON_CHECK_HOOK
+        .write()
+        .unwrap_or_else(|e| e.into_inner()) = hook;
+}
+
+#[inline]
+pub(crate) fn record_tx_error(err: &TxError) {
+    if let Some(hook) = *TX_ERROR_HOOK.read().unwrap_or_else(|e| e.into_inner()) {
+        hook(err);
+    }
+}
+
+#[inline]
+pub(crate) fn check_tx_poison() -> Option<String> {
+    let hook = *TX_POISON_CHECK_HOOK
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    hook.and_then(|f| f())
+}
+
 fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_string()
@@ -1102,6 +1136,12 @@ impl WorldRepository {
     where
         E: crate::tx_engine::FromTxError,
     {
+        if let Some(prev_err) = check_tx_poison() {
+            return Err(E::from_tx_error(TxError::Persist(format!(
+                "dispatch transaction aborted due to earlier persistence failure: {prev_err}"
+            ))));
+        }
+
         let mut writer_guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         let writer: &mut WorldWriter = &mut *writer_guard;
         let _write_depth_guard = DbWriteLockDepthGuard::enter();
@@ -1144,7 +1184,9 @@ impl WorldRepository {
                     writer.working.next_entity_id =
                         writer.working.next_entity_id.max(self.entity_ids.current());
                     drop(effects);
-                    return Err(E::from_tx_error(TxError::Panicked { label, msg }));
+                    let tx_err = TxError::Panicked { label, msg };
+                    record_tx_error(&tx_err);
+                    return Err(E::from_tx_error(tx_err));
                 }
                 Ok(Err(err)) => {
                     if writer.working.next_entity_id > pre_alloc_snap_id {
@@ -1171,7 +1213,9 @@ impl WorldRepository {
                     writer.working.next_entity_id =
                         writer.working.next_entity_id.max(self.entity_ids.current());
                     drop(effects);
-                    return Err(E::from_tx_error(TxError::Persist(err)));
+                    let tx_err = TxError::Persist(err);
+                    record_tx_error(&tx_err);
+                    return Err(E::from_tx_error(tx_err));
                 }
             }
 
@@ -1198,7 +1242,12 @@ impl WorldRepository {
                     writer.working = before;
                     writer.working.next_entity_id =
                         writer.working.next_entity_id.max(self.entity_ids.current());
+                    if writer.working.next_entity_id > pre_alloc_snap_id {
+                        *self.published.write().unwrap_or_else(|e| e.into_inner()) =
+                            std::sync::Arc::new(writer.working.clone());
+                    }
                     drop(effects);
+                    record_tx_error(&val_err);
                     return Err(E::from_tx_error(val_err));
                 }
 
@@ -1321,6 +1370,7 @@ impl WorldRepository {
                     writer.working.next_entity_id =
                         writer.working.next_entity_id.max(self.entity_ids.current());
                     drop(effects);
+                    record_tx_error(&persist_err);
                     return Err(E::from_tx_error(persist_err));
                 }
             }
