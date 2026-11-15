@@ -249,7 +249,7 @@ fn test_tourney_common_deep_helpers_telemetry_bans_and_countdowns() {
             },
         );
         // Fit turret/DPS (attr 64, 114, 51), rep (attr 84, 73), control (attr 105, 20)
-        let mod_type_id = ctx.sde.types.keys().copied().next().unwrap();
+        let mod_type_id = ctx.sde.types.keys().copied().min().unwrap();
         let mut da1 = HashMap::new();
         da1.insert(64, 3.0);
         da1.insert(114, 50.0);
@@ -267,6 +267,7 @@ fn test_tourney_common_deep_helpers_telemetry_bans_and_countdowns() {
             },
         );
         let mut da2 = HashMap::new();
+        da2.insert(51, 0.0);
         da2.insert(84, 120.0);
         da2.insert(73, 4000.0);
         snap.items.insert(
