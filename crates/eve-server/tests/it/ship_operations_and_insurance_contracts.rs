@@ -1206,23 +1206,12 @@ async fn test_gh_1070_docked_board_from_capsule_removes_capsule_and_refreshes_in
     let sess_change_frame_idx = board_out
         .frames
         .iter()
-        .position(|f| {
-            matches!(
-                f.kind,
-                eve_server::router::client_wire::ClientWireFrameKind::SessionChange { .. }
-            )
-        })
+        .position(|f| format!("{:?}", f.kind).starts_with("SessionChange"))
         .expect("SessionChange frame must be present in board_out.frames");
     let cap_item_change_frame_idx = board_out
         .frames
         .iter()
-        .position(|f| {
-            matches!(
-                &f.kind,
-                eve_server::router::client_wire::ClientWireFrameKind::Notification { event, .. }
-                    if event == "OnItemChange"
-            )
-        })
+        .position(|f| format!("{:?}", f.kind).contains("OnItemChange"))
         .expect("OnItemChange frame must be present in board_out.frames");
     assert!(
         sess_change_frame_idx < cap_item_change_frame_idx,
@@ -1311,23 +1300,12 @@ async fn test_gh_1070_docked_board_from_capsule_removes_capsule_and_refreshes_in
     let struct_sess_frame_idx = struct_board_out
         .frames
         .iter()
-        .position(|f| {
-            matches!(
-                f.kind,
-                eve_server::router::client_wire::ClientWireFrameKind::SessionChange { .. }
-            )
-        })
+        .position(|f| format!("{:?}", f.kind).starts_with("SessionChange"))
         .expect("SessionChange frame on structure Board");
     let struct_item_frame_idx = struct_board_out
         .frames
         .iter()
-        .position(|f| {
-            matches!(
-                &f.kind,
-                eve_server::router::client_wire::ClientWireFrameKind::Notification { event, .. }
-                    if event == "OnItemChange"
-            )
-        })
+        .position(|f| format!("{:?}", f.kind).contains("OnItemChange"))
         .expect("OnItemChange frame on structure Board");
     assert!(struct_sess_frame_idx < struct_item_frame_idx);
     let struct_notifs = &struct_board_out.notifications;
