@@ -1491,6 +1491,9 @@ fn issue_935_create_contract_accepts_object_ex_contract_struct_from_wizard() {
 fn contract_handlers_emit_canonical_v24_wire_shapes_without_hardcoded_domains() {
     let (ctx, mut issuer_sess, issuer_id, mut acc_sess, acceptor_id, station_id, _dest_station_id) =
         setup_contracts_ctx();
+    ctx.set_clock(std::sync::Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(
+        1_794_485_600,
+    )));
     let kw = HashMap::new();
     let unknown_station = 999_123_456_i64;
     let offered_item_id = 990_001_i64;
