@@ -82,20 +82,59 @@ pub(crate) fn check_module_reloading(
     ship_id: i64,
     module_id: i64,
 ) -> Result<(), BridgeRpcError> {
-    let now_unix = ctx.now_unix_secs();
-    let reloading_until = ctx.db.with_snapshot(|snap| {
-        let map = &snap.cluster_and_runtime.module_reload_until_unix;
-        if let Some(&until) = map.get(&module_id) {
-            if now_unix < until {
-                return Some(until);
-            }
-        }
+    let check_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
+        let mut ids = vec![module_id];
         if let Some(bank) = snap.weapon_banks.get(&ship_id).and_then(|b| b.get(&module_id)) {
             for &mid in bank {
-                if let Some(&until) = map.get(&mid) {
-                    if now_unix < until {
-                        return Some(until);
-                    }
+                if mid != module_id {
+                    ids.push(mid);
+                }
+            }
+        }
+        ids
+    });
+    let now_unix = ctx.now_unix_secs();
+    let mut sim_cleared_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    for &mid in &check_ids {
+        if let Some((sys_id, sim_start_s, sim_deadline_s)) =
+            ctx.systems.check_module_reload_sim_deadline(mid)
+        {
+            let sim_now = ctx.systems.get_system_sim_elapsed(sys_id);
+            let tidi = ctx.systems.get_system_tidi_factor(sys_id);
+            let wall_expired = tidi >= 1.0 - 1e-6
+                && ctx.db.with_snapshot(|snap| {
+                    snap.cluster_and_runtime
+                        .module_reload_until_unix
+                        .get(&mid)
+                        .is_some_and(|&until| now_unix >= until)
+                });
+            if wall_expired {
+                ctx.systems.clear_module_reload_sim_deadline(mid);
+                sim_cleared_ids.insert(mid);
+            } else if tidi < 1.0 - 1e-6 || sim_now > sim_start_s + 1e-6 {
+                if sim_now + 1e-6 < sim_deadline_s {
+                    return Err(BridgeRpcError {
+                        code: "ModuleIsReloading".into(),
+                        message: format!(
+                            "Module {module_id} is reloading until sim {sim_deadline_s:.2}s (now {sim_now:.2}s)"
+                        ),
+                        client_error: None,
+                    });
+                }
+                ctx.systems.clear_module_reload_sim_deadline(mid);
+                sim_cleared_ids.insert(mid);
+            }
+        }
+    }
+    let reloading_until = ctx.db.with_snapshot(|snap| {
+        let map = &snap.cluster_and_runtime.module_reload_until_unix;
+        for &mid in &check_ids {
+            if sim_cleared_ids.contains(&mid) {
+                continue;
+            }
+            if let Some(&until) = map.get(&mid) {
+                if now_unix < until {
+                    return Some(until);
                 }
             }
         }
@@ -2390,6 +2429,55 @@ pub(crate) async fn execute_pending_cycle_actions_list(
                 diffs,
             } => {
                 emit_ship_charge_item_diffs(ctx, char_id, ship_id, &diffs);
+            }
+            crate::system_actor::PendingCycleAction::AutoReloadStarted {
+                char_id,
+                module_ids,
+                charge_type_id,
+                time_ms,
+                sim_deadline_s,
+                notified,
+                ..
+            } => {
+                let sim_now = ctx.systems.get_system_sim_elapsed(sys_id);
+                ctx.systems.record_module_reload_sim_deadlines(
+                    &module_ids,
+                    sys_id,
+                    sim_now,
+                    sim_deadline_s,
+                );
+                if !notified && char_id > 0 && !module_ids.is_empty() {
+                    let _ = ctx.emit_typed(
+                        crate::router::NotificationTarget::Character(char_id),
+                        crate::router::notify_registry::OnChargeBeingLoadedToModule {
+                            item_ids: module_ids,
+                            charge_type_id: i64::from(charge_type_id),
+                            time_ms,
+                        },
+                    );
+                }
+            }
+            crate::system_actor::PendingCycleAction::NoChargesDeactivated {
+                char_id,
+                module_type_id,
+                notified,
+            } => {
+                if !notified && char_id > 0 {
+                    let _ = ctx.emit_typed(
+                        crate::router::NotificationTarget::Character(char_id),
+                        crate::router::notify_registry::OnRemoteMessage {
+                            msg_id: "NoCharges".into(),
+                            dict: Some(PyRep::Dict(vec![(
+                                PyRep::String("type".into()),
+                                PyRep::Tuple(vec![
+                                    PyRep::Integer(4),
+                                    PyRep::Integer(i64::from(module_type_id)),
+                                ]),
+                            )])),
+                            kw: None,
+                        },
+                    );
+                }
             }
             crate::system_actor::PendingCycleAction::ShipCapacitorChanged {
                 char_id,

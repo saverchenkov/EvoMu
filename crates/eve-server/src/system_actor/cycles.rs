@@ -167,6 +167,146 @@ pub(crate) fn sync_cycle_from_fit_projection_with_shield_boost_mult(
     }
 }
 
+pub(crate) fn compute_missile_effective_damage(
+    base_damage: eve_destiny::DamageVector,
+    explosion_radius_m: f64,
+    explosion_velocity_ms: f64,
+    drf: f64,
+    target_id: BallId,
+    ballpark: &Ballpark,
+) -> eve_destiny::DamageVector {
+    let Some(tb) = ballpark.balls.get(&target_id) else {
+        return eve_destiny::DamageVector::default();
+    };
+    let target_sig = ballpark
+        .combat_states
+        .get(&target_id)
+        .map(|cs| {
+            if cs.signature_radius > 0.0 {
+                cs.signature_radius
+            } else {
+                cs.base_signature_radius.unwrap_or(0.0)
+            }
+        })
+        .filter(|&s| s > 0.0)
+        .unwrap_or_else(|| tb.radius.max(35.0));
+    let target_speed = if tb.velocity.length() > 0.0 {
+        tb.velocity.length()
+    } else {
+        tb.max_velocity * tb.speed_fraction
+    };
+    let exp_rad = if explosion_radius_m > 0.0 { explosion_radius_m } else { 40.0 };
+    let exp_vel = if explosion_velocity_ms > 0.0 { explosion_velocity_ms } else { 170.0 };
+    let drf_eff = if drf > 0.0 { drf } else { 0.604 };
+    let factor = crate::formulas::missile_damage_factor(
+        target_sig,
+        target_speed,
+        exp_rad,
+        exp_vel,
+        drf_eff,
+    );
+    base_damage.scaled(factor)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_resolved_weapon_damage(
+    ship_id: BallId,
+    owner_char_id: Option<CharacterId>,
+    module_type_id: u32,
+    target_id: BallId,
+    effective_damage: eve_destiny::DamageVector,
+    ballpark: &mut Ballpark,
+    rah_incoming_damage: &mut HashMap<BallId, [f64; 4]>,
+    sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    pending_cycle_actions: &mut Vec<PendingCycleAction>,
+    destroyed_balls: &mut Vec<(BallId, Option<CharacterId>)>,
+) {
+    if effective_damage.total() <= 0.0 {
+        return;
+    }
+    let now_unix = db_opt.as_ref().map_or(0, |db| db.clock().now_unix_secs());
+    let sys_id = ballpark.solar_system_id;
+    let dmg_res = crate::services::mobile_deployables::handle_ball_damage_in_actor(
+        db_opt,
+        sde_opt,
+        sys_id,
+        target_id,
+        effective_damage,
+        ballpark,
+        now_unix,
+    )
+    .or_else(|| ballpark.apply_damage_to_ball(target_id, effective_damage));
+    let entry = rah_incoming_damage.entry(target_id).or_insert([0.0; 4]);
+    entry[0] += effective_damage.em;
+    entry[1] += effective_damage.thermal;
+    entry[2] += effective_damage.kinetic;
+    entry[3] += effective_damage.explosive;
+    if let Some((applied_dmg, is_destroyed, _)) = dmg_res {
+        let attacker_char_id = owner_char_id
+            .or_else(|| {
+                ballpark
+                    .ball_slim_meta
+                    .get(&ship_id)
+                    .and_then(|m| m.char_id.or(Some(m.owner_id)))
+            })
+            .or_else(|| {
+                db_opt.as_ref().and_then(|db| {
+                    db.with_snapshot(|s| {
+                        s.characters
+                            .values()
+                            .find(|c| c.active_ship_id == ship_id)
+                            .map(|c| c.character_id)
+                            .or_else(|| s.items.get(&ship_id).map(|it| it.owner_id))
+                    })
+                })
+            });
+        let target_char_id = ballpark
+            .ball_slim_meta
+            .get(&target_id)
+            .and_then(|m| m.char_id)
+            .or_else(|| {
+                db_opt.as_ref().and_then(|db| {
+                    db.with_snapshot(|s| {
+                        s.characters
+                            .values()
+                            .find(|c| c.active_ship_id == target_id)
+                            .map(|c| c.character_id)
+                            .or_else(|| {
+                                s.items
+                                    .get(&target_id)
+                                    .map(|it| it.owner_id)
+                                    .filter(|oid| s.characters.contains_key(oid))
+                            })
+                    })
+                })
+            })
+            .filter(|&cid| cid > 0 && Some(cid) != attacker_char_id);
+        let attacker_ship_type_id = ballpark
+            .balls
+            .get(&ship_id)
+            .map(|b| b.type_id)
+            .unwrap_or(0);
+        if applied_dmg > 0.0
+            && (attacker_char_id.is_some_and(|c| c > 0) || target_char_id.is_some_and(|c| c > 0))
+        {
+            pending_cycle_actions.push(super::PendingCycleAction::CycleWeaponDamage {
+                attacker_char_id,
+                attacker_ship_id: ship_id,
+                attacker_ship_type_id,
+                target_id,
+                target_char_id,
+                module_type_id,
+                applied_dmg,
+                notified: false,
+            });
+        }
+        if is_destroyed {
+            destroyed_balls.push((target_id, attacker_char_id));
+        }
+    }
+}
+
 pub(crate) fn apply_weapon_cycle_damage(
     cycle: &ActiveModuleCycle,
     ballpark: &mut Ballpark,
@@ -249,46 +389,14 @@ pub(crate) fn apply_weapon_cycle_damage(
             if out_of_range {
                 eve_destiny::DamageVector::default()
             } else {
-                let target_sig = ballpark
-                    .combat_states
-                    .get(&target_id)
-                    .map(|cs| {
-                        if cs.signature_radius > 0.0 {
-                            cs.signature_radius
-                        } else {
-                            cs.base_signature_radius.unwrap_or(0.0)
-                        }
-                    })
-                    .filter(|&s| s > 0.0)
-                    .unwrap_or_else(|| tb.radius.max(35.0));
-                let target_speed = if tb.velocity.length() > 0.0 {
-                    tb.velocity.length()
-                } else {
-                    tb.max_velocity * tb.speed_fraction
-                };
-                let exp_rad = if cycle.missile_explosion_radius_m > 0.0 {
-                    cycle.missile_explosion_radius_m
-                } else {
-                    40.0
-                };
-                let exp_vel = if cycle.missile_explosion_velocity_ms > 0.0 {
-                    cycle.missile_explosion_velocity_ms
-                } else {
-                    170.0
-                };
-                let drf = if cycle.missile_drf > 0.0 {
-                    cycle.missile_drf
-                } else {
-                    0.604
-                };
-                let factor = crate::formulas::missile_damage_factor(
-                    target_sig,
-                    target_speed,
-                    exp_rad,
-                    exp_vel,
-                    drf,
-                );
-                cycle.damage_vector.scaled(factor)
+                compute_missile_effective_damage(
+                    cycle.damage_vector,
+                    cycle.missile_explosion_radius_m,
+                    cycle.missile_explosion_velocity_ms,
+                    cycle.missile_drf,
+                    target_id,
+                    ballpark,
+                )
             }
         } else {
             eve_destiny::DamageVector::default()
@@ -296,89 +404,19 @@ pub(crate) fn apply_weapon_cycle_damage(
     } else {
         cycle.damage_vector
     };
-    if effective_damage.total() > 0.0 {
-        let now_unix = db_opt.as_ref().map_or(0, |db| db.clock().now_unix_secs());
-        let sys_id = ballpark.solar_system_id;
-        let dmg_res = crate::services::mobile_deployables::handle_ball_damage_in_actor(
-            db_opt,
-            sde_opt,
-            sys_id,
-            target_id,
-            effective_damage,
-            ballpark,
-            now_unix,
-        )
-        .or_else(|| ballpark.apply_damage_to_ball(target_id, effective_damage));
-        let entry = rah_incoming_damage.entry(target_id).or_insert([0.0; 4]);
-        entry[0] += effective_damage.em;
-        entry[1] += effective_damage.thermal;
-        entry[2] += effective_damage.kinetic;
-        entry[3] += effective_damage.explosive;
-        if let Some((applied_dmg, is_destroyed, _)) = dmg_res {
-            let attacker_char_id = cycle
-                .owner_char_id
-                .or_else(|| {
-                    ballpark
-                        .ball_slim_meta
-                        .get(&cycle.ship_id)
-                        .and_then(|m| m.char_id.or(Some(m.owner_id)))
-                })
-                .or_else(|| {
-                    db_opt.as_ref().and_then(|db| {
-                        db.with_snapshot(|s| {
-                            s.characters
-                                .values()
-                                .find(|c| c.active_ship_id == cycle.ship_id)
-                                .map(|c| c.character_id)
-                                .or_else(|| s.items.get(&cycle.ship_id).map(|it| it.owner_id))
-                        })
-                    })
-                });
-            let target_char_id = ballpark
-                .ball_slim_meta
-                .get(&target_id)
-                .and_then(|m| m.char_id)
-                .or_else(|| {
-                    db_opt.as_ref().and_then(|db| {
-                        db.with_snapshot(|s| {
-                            s.characters
-                                .values()
-                                .find(|c| c.active_ship_id == target_id)
-                                .map(|c| c.character_id)
-                                .or_else(|| {
-                                    s.items
-                                        .get(&target_id)
-                                        .map(|it| it.owner_id)
-                                        .filter(|oid| s.characters.contains_key(oid))
-                                })
-                        })
-                    })
-                })
-                .filter(|&cid| cid > 0 && Some(cid) != attacker_char_id);
-            let attacker_ship_type_id = ballpark
-                .balls
-                .get(&cycle.ship_id)
-                .map(|b| b.type_id)
-                .unwrap_or(0);
-            if applied_dmg > 0.0
-                && (attacker_char_id.is_some_and(|c| c > 0) || target_char_id.is_some_and(|c| c > 0))
-            {
-                pending_cycle_actions.push(super::PendingCycleAction::CycleWeaponDamage {
-                    attacker_char_id,
-                    attacker_ship_id: cycle.ship_id,
-                    attacker_ship_type_id,
-                    target_id,
-                    target_char_id,
-                    module_type_id: cycle.module_type_id,
-                    applied_dmg,
-                    notified: false,
-                });
-            }
-            if is_destroyed {
-                destroyed_balls.push((target_id, attacker_char_id));
-            }
-        }
-    }
+    apply_resolved_weapon_damage(
+        cycle.ship_id,
+        cycle.owner_char_id,
+        cycle.module_type_id,
+        target_id,
+        effective_damage,
+        ballpark,
+        rah_incoming_damage,
+        sde_opt,
+        db_opt,
+        pending_cycle_actions,
+        destroyed_balls,
+    );
 }
 
 #[cfg(test)]
@@ -425,6 +463,7 @@ pub(crate) fn step_cycles_and_capacitor(
     )
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn step_cycles_and_capacitor_with_epochs(
     ballpark: &mut Ballpark,
@@ -443,6 +482,54 @@ pub(crate) fn step_cycles_and_capacitor_with_epochs(
     mechanic_rng_opt: &Option<Arc<crate::rng::MechanicRng>>,
     tactical_state: &dyn AnyRwLock<crate::services::tactical_modules::TacticalModulesState>,
     pending_cycle_actions: &mut Vec<PendingCycleAction>,
+    dt: f64,
+    deactivation_hook: Option<&ModuleDeactivationHook>,
+) -> Vec<(BallId, Option<CharacterId>)> {
+    let mut unused_launches = Vec::new();
+    step_cycles_and_capacitor_with_missiles(
+        ballpark,
+        active_module_cycles,
+        pending_anchoring_disruptors,
+        active_nanite_repairs,
+        ship_rack_heat,
+        rah_incoming_damage,
+        base_scramble_strengths,
+        base_core_strengths,
+        sde_opt,
+        db_opt,
+        ball_space_entry_epochs,
+        fit_projections,
+        weapon_cycle_start_modules,
+        &mut unused_launches,
+        mechanic_rng_opt,
+        tactical_state,
+        pending_cycle_actions,
+        0.0,
+        dt,
+        deactivation_hook,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn step_cycles_and_capacitor_with_missiles(
+    ballpark: &mut Ballpark,
+    active_module_cycles: &mut Vec<ActiveModuleCycle>,
+    pending_anchoring_disruptors: &mut Vec<PendingAnchoringDisruptor>,
+    active_nanite_repairs: &mut Vec<ActiveNaniteRepair>,
+    ship_rack_heat: &mut HashMap<BallId, [f64; 3]>,
+    rah_incoming_damage: &mut HashMap<BallId, [f64; 4]>,
+    base_scramble_strengths: &HashMap<BallId, i32>,
+    base_core_strengths: &HashMap<BallId, i32>,
+    sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    ball_space_entry_epochs: &HashMap<BallId, u64>,
+    fit_projections: &HashMap<BallId, eve_dogma::FitProjection>,
+    weapon_cycle_start_modules: &mut std::collections::HashSet<(BallId, i64)>,
+    pending_missile_launches: &mut Vec<super::PendingMissileLaunch>,
+    mechanic_rng_opt: &Option<Arc<crate::rng::MechanicRng>>,
+    tactical_state: &dyn AnyRwLock<crate::services::tactical_modules::TacticalModulesState>,
+    pending_cycle_actions: &mut Vec<PendingCycleAction>,
+    sim_elapsed_secs: f64,
     dt: f64,
     deactivation_hook: Option<&ModuleDeactivationHook>,
 ) -> Vec<(BallId, Option<CharacterId>)> {
@@ -621,8 +708,14 @@ pub(crate) fn step_cycles_and_capacitor_with_epochs(
             let source_ball = ballpark.balls.get(&cycle.ship_id);
             let target_ball = ballpark.balls.get(&target_id);
             let target_warping = target_ball.is_some_and(|b| matches!(b.mode, MovementMode::Warp { .. }));
-            let out_of_range = matches!((source_ball, target_ball, cycle.max_effective_range_m), (Some(sb), Some(tb), Some(max_r)) if (sb.position - tb.position).length() > max_r);
-            if target_ball.is_none() || target_warping || out_of_range {
+            let target_dead_or_cloaked = cycle.weapon_is_guided_missile
+                && ballpark
+                    .combat_states
+                    .get(&target_id)
+                    .is_some_and(|cs| cs.structure_hp <= 0.0 || cs.is_cloaked);
+            let out_of_range = !cycle.weapon_is_guided_missile
+                && matches!((source_ball, target_ball, cycle.max_effective_range_m), (Some(sb), Some(tb), Some(max_r)) if (sb.position - tb.position).length() > max_r);
+            if target_ball.is_none() || target_warping || target_dead_or_cloaked || out_of_range {
                 finished_indices.push(idx);
                 continue;
             }
@@ -669,6 +762,128 @@ pub(crate) fn step_cycles_and_capacitor_with_epochs(
                     }
                 }
             }
+        }
+        if cycle.weapon_is_guided_missile && cycle.reload_remaining_sim_s > 0.0 {
+            cycle.reload_remaining_sim_s -= dt;
+            if cycle.reload_remaining_sim_s > 1e-6 {
+                continue;
+            }
+            cycle.reload_remaining_sim_s = 0.0;
+            cycle.elapsed_s = 0.0;
+            if cycle.repeat == 0 {
+                finished_indices.push(idx);
+                continue;
+            }
+            let out_of_range_now = matches!(
+                (
+                    ballpark.balls.get(&cycle.ship_id),
+                    cycle.target_id.and_then(|tid| ballpark.balls.get(&tid)),
+                    cycle.max_effective_range_m,
+                ),
+                (Some(sb), Some(tb), Some(max_r)) if (sb.position - tb.position).length() > max_r
+            );
+            if out_of_range_now {
+                finished_indices.push(idx);
+                continue;
+            }
+            if cycle.cap_need_per_cycle > 0.0 {
+                let mut has_cap = true;
+                if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
+                    if cs.capacitor >= cycle.cap_need_per_cycle {
+                        cs.capacitor -= cycle.cap_need_per_cycle;
+                    } else {
+                        has_cap = false;
+                    }
+                }
+                if !has_cap {
+                    finished_indices.push(idx);
+                    continue;
+                }
+            }
+            let mut consumed_ok = true;
+            if let Some(db_ref) = db_opt {
+                let launchers: Vec<i64> = if cycle.linked_turrets.is_empty() {
+                    vec![cycle.module_id]
+                } else {
+                    cycle.linked_turrets.clone()
+                };
+                let mut reload_fire_diffs = Vec::new();
+                db_ref.with_mut_snapshot(|snap| {
+                    let mut pre_items: HashMap<i64, Option<eve_db::InventoryItemRecord>> =
+                        HashMap::new();
+                    let mut chosen: Vec<i64> = Vec::with_capacity(launchers.len());
+                    for &lid in &launchers {
+                        let Some(l_flag) = snap.items.get(&lid).map(|i| i.flag) else {
+                            consumed_ok = false;
+                            break;
+                        };
+                        let cid_opt = snap
+                            .items
+                            .values()
+                            .find(|i| {
+                                i.location_id == cycle.ship_id
+                                    && i.flag == l_flag
+                                    && i.item_id != lid
+                                    && (cycle.ammo_type_id.is_none()
+                                        || Some(i.type_id) == cycle.ammo_type_id)
+                                    && i.quantity > 0
+                            })
+                            .map(|i| i.item_id);
+                        if let Some(cid) = cid_opt {
+                            chosen.push(cid);
+                        } else {
+                            consumed_ok = false;
+                            break;
+                        }
+                    }
+                    if consumed_ok {
+                        for cid in chosen {
+                            pre_items
+                                .entry(cid)
+                                .or_insert_with(|| snap.items.get(&cid).cloned());
+                            if let Some(ci) = snap.items.get_mut(&cid) {
+                                ci.quantity = ci.quantity.saturating_sub(1);
+                                if ci.quantity == 0 {
+                                    snap.items.remove(&cid);
+                                }
+                            }
+                        }
+                        for (id, pre) in pre_items {
+                            let post = snap.items.get(&id).cloned();
+                            if pre != post {
+                                reload_fire_diffs.push((pre, post));
+                            }
+                        }
+                    }
+                });
+                if !reload_fire_diffs.is_empty() {
+                    if let Some(cid) = cycle.owner_char_id.filter(|&c| c > 0) {
+                        pending_cycle_actions.push(PendingCycleAction::CycleChargeItemMutations {
+                            char_id: cid,
+                            ship_id: cycle.ship_id,
+                            diffs: reload_fire_diffs,
+                        });
+                    }
+                }
+            }
+            if !consumed_ok {
+                if let Some(cid) = cycle.owner_char_id.filter(|&c| c > 0) {
+                    pending_cycle_actions.push(PendingCycleAction::NoChargesDeactivated {
+                        char_id: cid,
+                        module_type_id: cycle.module_type_id,
+                        notified: false,
+                    });
+                }
+                finished_indices.push(idx);
+                continue;
+            }
+            super::missiles::enqueue_missile_launches_for_cycle(
+                cycle,
+                ballpark,
+                db_opt,
+                pending_missile_launches,
+            );
+            continue;
         }
         cycle.elapsed_s += dt;
         if cycle.elapsed_s + 1e-6 >= cycle.duration_s {
@@ -774,6 +989,7 @@ pub(crate) fn step_cycles_and_capacitor_with_epochs(
             // 2. Target interactions: damage, cap drain, Nosferatu cap transfer, remote shield/armor/hull/cap (`DG-4`, `DG-5`)
             if let Some(target_id) = cycle.target_id {
                 if cycle.damage_vector.total() > 0.0
+                    && !cycle.weapon_is_guided_missile
                     && !weapon_cycle_start_modules.contains(&(cycle.ship_id, cycle.module_id))
                 {
                     apply_weapon_cycle_damage(
@@ -934,6 +1150,18 @@ pub(crate) fn step_cycles_and_capacitor_with_epochs(
                         .is_some_and(|cs| cs.structure_hp <= 0.0)
             });
             let mut crystal_shattered_empty = false;
+            let mut guided_reload_started = false;
+            let mut guided_reload_ms = 0.0_f64;
+            let guided_next_out_of_range = cycle.weapon_is_guided_missile
+                && cycle.repeat > 0
+                && matches!(
+                    (
+                        ballpark.balls.get(&cycle.ship_id),
+                        cycle.target_id.and_then(|tid| ballpark.balls.get(&tid)),
+                        cycle.max_effective_range_m,
+                    ),
+                    (Some(sb), Some(tb), Some(max_r)) if (sb.position - tb.position).length() > max_r
+                );
             let mut cycle_item_diffs: Vec<(
                 Option<eve_db::InventoryItemRecord>,
                 Option<eve_db::InventoryItemRecord>,
@@ -947,6 +1175,7 @@ pub(crate) fn step_cycles_and_capacitor_with_epochs(
                 if !cycle.linked_turrets.is_empty()
                     && cycle.crystal_volatility_damage >= 0.0
                     && !ammo_is_non_volatile_crystal
+                    && !guided_next_out_of_range
                 {
                     db_ref.with_mut_snapshot(|snap| {
                         let mut pre_items: HashMap<i64, Option<eve_db::InventoryItemRecord>> =
@@ -1036,7 +1265,7 @@ pub(crate) fn step_cycles_and_capacitor_with_epochs(
                                             }
                                         }
                                     }
-                                } else if cycle.ammo_type_id.is_some()
+                                } else if cycle.ammo_type_id.or(cycle.missile_charge_type_id).is_some()
                                     && cycle.damage_vector.total() > 0.0
                                 {
                                     snap.items.retain(|_, i| {
@@ -1051,11 +1280,12 @@ pub(crate) fn step_cycles_and_capacitor_with_epochs(
                             }
                         }
                         if crystal_shattered_empty && cycle.crystal_volatility_damage == 0.0 {
-                            if let Some(ammo_tid) = cycle.ammo_type_id {
+                            if let Some(ammo_tid) = cycle.ammo_type_id.or(cycle.missile_charge_type_id) {
+                                let num_mods = cycle.linked_turrets.len().max(1) as i32;
                                 let cargo_stack_opt = snap
                                     .items
                                     .values()
-                                    .find(|i| {
+                                    .filter(|i| {
                                         i.location_id == cycle.ship_id
                                             && matches!(
                                                 i.flag,
@@ -1065,8 +1295,8 @@ pub(crate) fn step_cycles_and_capacitor_with_epochs(
                                             && i.type_id == ammo_tid
                                             && i.quantity > 0
                                     })
+                                    .max_by_key(|i| i.quantity)
                                     .map(|i| (i.item_id, i.owner_id, i.quantity));
-                                let num_mods = cycle.linked_turrets.len().max(1) as i32;
                                 if let Some((stack_id, owner_id, avail_qty)) = cargo_stack_opt {
                                     if avail_qty >= num_mods {
                                         pre_items
@@ -1081,19 +1311,40 @@ pub(crate) fn step_cycles_and_capacitor_with_epochs(
                                             .as_ref()
                                             .and_then(|sde| sde.types.get(&cycle.module_type_id))
                                             .map(|mt| {
-                                                let r = if mt.capacity > 0.0 {
-                                                    (mt.capacity / charge_vol).floor() as i32
+                                                let r = if cycle.missile_charge_capacity > 0 {
+                                                    cycle.missile_charge_capacity as i32
+                                                } else if mt.capacity > 0.0 {
+                                                    ((mt.capacity / charge_vol) + 1e-9).floor() as i32
                                                 } else {
                                                     1
                                                 };
-                                                let rt = mt
-                                                    .default_attributes
-                                                    .get(&1795)
-                                                    .copied()
-                                                    .unwrap_or(10_000.0);
+                                                let rt = if cycle.weapon_is_guided_missile
+                                                    && cycle.missile_reload_ms > 0.0
+                                                {
+                                                    cycle.missile_reload_ms
+                                                } else if matches!(mt.group_id, 511 | 1245) {
+                                                    mt.default_attributes
+                                                        .get(&1795)
+                                                        .copied()
+                                                        .filter(|&v| v > 0.0)
+                                                        .unwrap_or(35_000.0)
+                                                } else {
+                                                    mt.default_attributes
+                                                        .get(&1795)
+                                                        .copied()
+                                                        .unwrap_or(10_000.0)
+                                                };
                                                 (r.max(1), rt)
                                             })
-                                            .unwrap_or((1, 10_000.0));
+                                            .unwrap_or_else(|| {
+                                                let r = (cycle.missile_charge_capacity as i32).max(1);
+                                                let rt = if cycle.missile_reload_ms > 0.0 {
+                                                    cycle.missile_reload_ms
+                                                } else {
+                                                    10_000.0
+                                                };
+                                                (r, rt)
+                                            });
                                         let actual_per_mod =
                                             rounds_per_mod.min(avail_qty / num_mods).max(1);
                                         let total_needed = actual_per_mod * num_mods;
@@ -1126,6 +1377,7 @@ pub(crate) fn step_cycles_and_capacitor_with_epochs(
                                                         ..Default::default()
                                                     },
                                                 );
+                                                snap.module_active_charges.insert(tid, ammo_tid);
                                             }
                                         }
                                         let now_unix = db_ref.clock().now_unix_secs();
@@ -1143,6 +1395,57 @@ pub(crate) fn step_cycles_and_capacitor_with_epochs(
                                                 ammo_tid,
                                                 reload_time_ms,
                                             ),
+                                        );
+                                        if cycle.weapon_is_guided_missile
+                                            && cycle.repeat > 0
+                                            && !burned_out
+                                            && !target_destroyed_in_cycle
+                                        {
+                                            guided_reload_started = true;
+                                            guided_reload_ms = reload_time_ms;
+                                            if let Some(cid) = cycle.owner_char_id.filter(|&c| c > 0)
+                                            {
+                                                pending_cycle_actions.push(
+                                                    PendingCycleAction::AutoReloadStarted {
+                                                        char_id: cid,
+                                                        module_ids: cycle.linked_turrets.clone(),
+                                                        charge_type_id: ammo_tid,
+                                                        time_ms: reload_time_ms,
+                                                        reload_until_unix: reload_until,
+                                                        sim_deadline_s: sim_elapsed_secs
+                                                            + (reload_time_ms / 1000.0),
+                                                        notified: false,
+                                                    },
+                                                );
+                                            }
+                                        }
+                                    } else if cycle.weapon_is_guided_missile
+                                        && cycle.repeat > 0
+                                        && !burned_out
+                                        && !target_destroyed_in_cycle
+                                    {
+                                        if let Some(cid) = cycle.owner_char_id.filter(|&c| c > 0) {
+                                            pending_cycle_actions.push(
+                                                PendingCycleAction::NoChargesDeactivated {
+                                                    char_id: cid,
+                                                    module_type_id: cycle.module_type_id,
+                                                    notified: false,
+                                                },
+                                            );
+                                        }
+                                    }
+                                } else if cycle.weapon_is_guided_missile
+                                    && cycle.repeat > 0
+                                    && !burned_out
+                                    && !target_destroyed_in_cycle
+                                {
+                                    if let Some(cid) = cycle.owner_char_id.filter(|&c| c > 0) {
+                                        pending_cycle_actions.push(
+                                            PendingCycleAction::NoChargesDeactivated {
+                                                char_id: cid,
+                                                module_type_id: cycle.module_type_id,
+                                                notified: false,
+                                            },
                                         );
                                     }
                                 }
@@ -1168,7 +1471,11 @@ pub(crate) fn step_cycles_and_capacitor_with_epochs(
 
             let mut salvage_next_cap_deducted = false;
             let mut salvage_deducted_cap_gj = 0.0;
-            let mut stop_cycle = cycle.repeat == 0 || burned_out || crystal_shattered_empty || matches!(cycle.effect_name.as_str(), "superWeaponLanceWarmup" | "superWeaponLanceBeam");
+            let mut stop_cycle = cycle.repeat == 0
+                || burned_out
+                || guided_next_out_of_range
+                || (crystal_shattered_empty && !guided_reload_started)
+                || matches!(cycle.effect_name.as_str(), "superWeaponLanceWarmup" | "superWeaponLanceBeam");
             if stop_cycle {
                 finished_indices.push(idx);
             } else {
@@ -1303,7 +1610,7 @@ pub(crate) fn step_cycles_and_capacitor_with_epochs(
                     }
                 }
 
-                if !stop_cycle && cycle.cap_need_per_cycle > 0.0 {
+                if !stop_cycle && !guided_reload_started && cycle.cap_need_per_cycle > 0.0 {
                     let mut has_cap = true;
                     if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
                         if cs.capacitor >= cycle.cap_need_per_cycle {
@@ -1346,7 +1653,19 @@ pub(crate) fn step_cycles_and_capacitor_with_epochs(
                         fit_projections,
                         shield_boost_mult,
                     );
-                    if weapon_cycle_start_modules.contains(&(cycle.ship_id, cycle.module_id))
+                    if cycle.weapon_is_guided_missile {
+                        if guided_reload_started {
+                            cycle.reload_remaining_sim_s = (guided_reload_ms / 1000.0).max(0.001);
+                            cycle.elapsed_s = 0.0;
+                        } else {
+                            super::missiles::enqueue_missile_launches_for_cycle(
+                                cycle,
+                                ballpark,
+                                db_opt,
+                                pending_missile_launches,
+                            );
+                        }
+                    } else if weapon_cycle_start_modules.contains(&(cycle.ship_id, cycle.module_id))
                         && cycle.damage_vector.total() > 0.0
                     {
                         apply_weapon_cycle_damage(
@@ -1757,7 +2076,9 @@ impl SystemHandle {
             asteroids, asteroid_templates, sde_opt, db_opt, mechanic_rng_opt,
             sim_elapsed_secs, pending_cycle_actions, tactical_state,
             pending_notifications_opt, notify_tx_opt, ball_space_entry_epochs,
-            fit_projections, weapon_cycle_start_modules, ..
+            fit_projections, weapon_cycle_start_modules,
+            pending_missile_launches, pending_missile_deploy_fx,
+            active_guided_missiles, next_missile_ball_id, ..
         } = &mut *st;
         if dt > 0.0 && dt.is_finite() {
             *sim_elapsed_secs += dt;
@@ -1771,7 +2092,10 @@ impl SystemHandle {
             }
         }
         let pre_tick_caps = snapshot_player_ship_capacitors(&bp, db_opt.as_ref());
+        let pre_missile_positions =
+            super::missiles::snapshot_missile_positions(&bp, active_guided_missiles);
         let events = bp.step(dt);
+        super::missiles::flush_pending_missile_deploy_fx(&mut bp, pending_missile_deploy_fx);
         super::persist_landed_warps_in_db(&bp, &events, db_opt, ball_space_entry_epochs);
         flush_target_lost_notifications(
             &bp,
@@ -1840,11 +2164,32 @@ impl SystemHandle {
             sde_opt.as_deref(), db_opt.as_ref(), mechanic_rng_opt.as_deref(), self.solar_system_id, dt, step_now_unix,
         );
         let hook_guard = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
-        let mut destroyed = step_cycles_and_capacitor_with_epochs(
+        let mut destroyed = Vec::new();
+        super::missiles::step_guided_missiles_in_actor(
+            &mut bp,
+            active_guided_missiles,
+            &pre_missile_positions,
+            rah_incoming_damage,
+            sde_opt,
+            db_opt,
+            pending_cycle_actions,
+            &mut destroyed,
+            dt,
+        );
+        destroyed.extend(step_cycles_and_capacitor_with_missiles(
             &mut bp, active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
             sde_opt, db_opt, ball_space_entry_epochs, fit_projections, weapon_cycle_start_modules,
-            mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions, dt, deact_hook_guard.as_ref(),
+            pending_missile_launches,
+            mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions, *sim_elapsed_secs, dt, deact_hook_guard.as_ref(),
+        ));
+        super::missiles::flush_pending_missile_launches(
+            &mut bp,
+            pending_missile_launches,
+            active_guided_missiles,
+            pending_missile_deploy_fx,
+            next_missile_ball_id,
+            sde_opt,
         );
         record_player_ship_capacitor_deltas(&bp, &pre_tick_caps, pending_cycle_actions);
         flush_pending_cycle_damage_notifications_with_ballpark(
@@ -2484,6 +2829,63 @@ pub(crate) fn flush_pending_cycle_damage_notifications(
                         if old_cap.is_finite() { *old_cap } else { *new_cap },
                     ),
                 ])],
+            );
+            continue;
+        }
+        if let super::PendingCycleAction::AutoReloadStarted {
+            char_id,
+            module_ids,
+            charge_type_id,
+            time_ms,
+            notified,
+            ..
+        } = action
+        {
+            if *notified || *char_id <= 0 || module_ids.is_empty() {
+                continue;
+            }
+            *notified = true;
+            enqueue_notif(
+                *char_id,
+                "OnChargeBeingLoadedToModule",
+                vec![
+                    eve_proto::PyRep::List(
+                        module_ids
+                            .iter()
+                            .copied()
+                            .map(eve_proto::PyRep::Integer)
+                            .collect(),
+                    ),
+                    eve_proto::PyRep::Integer(i64::from(*charge_type_id)),
+                    eve_proto::PyRep::Real(*time_ms),
+                ],
+            );
+            continue;
+        }
+        if let super::PendingCycleAction::NoChargesDeactivated {
+            char_id,
+            module_type_id,
+            notified,
+        } = action
+        {
+            if *notified || *char_id <= 0 {
+                continue;
+            }
+            *notified = true;
+            let dict = eve_proto::PyRep::Dict(vec![(
+                eve_proto::PyRep::String("type".into()),
+                eve_proto::PyRep::Tuple(vec![
+                    eve_proto::PyRep::Integer(4),
+                    eve_proto::PyRep::Integer(i64::from(*module_type_id)),
+                ]),
+            )]);
+            enqueue_notif(
+                *char_id,
+                "OnRemoteMessage",
+                vec![
+                    eve_proto::PyRep::String("NoCharges".into()),
+                    dict,
+                ],
             );
             continue;
         }

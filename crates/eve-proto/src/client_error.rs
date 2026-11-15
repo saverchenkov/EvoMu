@@ -109,6 +109,8 @@ pub enum UserErrorKey {
     TargetingAptitudeAlreadyFullyUtilized,
     TargetingSystemsAlreadyFullyUtilized,
     TargetingSystemsBeingJammed,
+    TargetTooFar,
+    NoCharges,
     InvalidTargetGroup,
     ShipHasNoFighterBay,
     CannotLaunchFighterNotEnoughTubesAvailableForClass,
@@ -139,7 +141,7 @@ pub enum UserErrorKey {
 }
 
 impl UserErrorKey {
-    /// Exhaustive slice of all 92 typed [`UserErrorKey`] variants.
+    /// Exhaustive slice of all 94 typed [`UserErrorKey`] variants.
     pub const ALL: &[Self] = &[
         Self::InsureShipFailedSingleContract,
         Self::InsureShipFailedMultipleContracts,
@@ -210,6 +212,8 @@ impl UserErrorKey {
         Self::TargetingAptitudeAlreadyFullyUtilized,
         Self::TargetingSystemsAlreadyFullyUtilized,
         Self::TargetingSystemsBeingJammed,
+        Self::TargetTooFar,
+        Self::NoCharges,
         Self::InvalidTargetGroup,
         Self::ShipHasNoFighterBay,
         Self::CannotLaunchFighterNotEnoughTubesAvailableForClass,
@@ -309,6 +313,8 @@ impl UserErrorKey {
             Self::TargetingAptitudeAlreadyFullyUtilized => "TargetingAptitudeAlreadyFullyUtilized",
             Self::TargetingSystemsAlreadyFullyUtilized => "TargetingSystemsAlreadyFullyUtilized",
             Self::TargetingSystemsBeingJammed => "TargetingSystemsBeingJammed",
+            Self::TargetTooFar => "TargetTooFar",
+            Self::NoCharges => "NoCharges",
             Self::InvalidTargetGroup => "InvalidTargetGroup",
             Self::ShipHasNoFighterBay => "ShipHasNoFighterBay",
             Self::CannotLaunchFighterNotEnoughTubesAvailableForClass => {
@@ -417,6 +423,8 @@ impl UserErrorKey {
             Self::TargetingAptitudeAlreadyFullyUtilized => Some(1634),
             Self::TargetingSystemsAlreadyFullyUtilized => Some(1636),
             Self::TargetingSystemsBeingJammed => Some(1637),
+            Self::TargetTooFar => Some(1632),
+            Self::NoCharges => Some(1291),
             Self::InvalidTargetGroup => Some(987),
             Self::ShipHasNoFighterBay => Some(4890),
             Self::CannotLaunchFighterNotEnoughTubesAvailableForClass => Some(5112),

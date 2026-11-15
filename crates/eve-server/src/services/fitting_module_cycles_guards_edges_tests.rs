@@ -678,7 +678,7 @@ async fn w4_mutant_killers_handle_module_cycles_turrets_missiles_cap_crystals_an
                 (attr_ids::THERMAL_DAMAGE, 20.0),
                 (attr_ids::KINETIC_DAMAGE, 10.0),
                 (attr_ids::EXPLOSIVE_DAMAGE, 10.0),
-                (attr_ids::MAX_VELOCITY, 2_000.0),
+                (attr_ids::MAX_VELOCITY, 4_000.0),
                 (2811, 5_000.0),
                 (653, 50.0),
                 (654, 100.0),

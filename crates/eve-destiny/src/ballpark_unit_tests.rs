@@ -1395,3 +1395,58 @@ fn in_space_ship_handoff_queues_incremental_events_without_set_state() {
     );
 }
 
+#[test]
+fn remove_ball_and_batch_prune_special_fx_meta() {
+    use crate::SpecialFxWireMeta;
+
+    let mut bp = Ballpark::new(30_000_142);
+    for id in [100_i64, 200, 300, 400] {
+        assert!(bp.add_ball(make_ship(id, DVec3::new(id as f64 * 100.0, 0.0, 0.0))));
+    }
+    bp.special_fx_meta.insert(
+        (100, Some(9001), "effects.MissileDeployment".to_string()),
+        SpecialFxWireMeta {
+            module_type_id: Some(2410),
+            target_id: Some(200),
+            other_type_id: Some(209),
+            is_offensive: true,
+            duration_ms: Some(4000.0),
+            repeat: Some(1),
+        },
+    );
+    bp.special_fx_meta.insert(
+        (300, Some(9002), "effects.MissileDeployment".to_string()),
+        SpecialFxWireMeta {
+            module_type_id: Some(2410),
+            target_id: Some(100),
+            other_type_id: Some(209),
+            is_offensive: true,
+            duration_ms: Some(4000.0),
+            repeat: Some(1),
+        },
+    );
+    bp.special_fx_meta.insert(
+        (300, Some(9003), "effects.MissileDeployment".to_string()),
+        SpecialFxWireMeta {
+            module_type_id: Some(2410),
+            target_id: Some(400),
+            other_type_id: Some(209),
+            is_offensive: true,
+            duration_ms: Some(4000.0),
+            repeat: Some(1),
+        },
+    );
+
+    // Removing ball 100 must prune both its own cast entry and the entry targeting it, while leaving (300 -> 400).
+    assert!(bp.remove_ball(100).is_some());
+    assert_eq!(bp.special_fx_meta.len(), 1);
+    assert!(bp.special_fx_meta.contains_key(&(300, Some(9003), "effects.MissileDeployment".to_string())));
+
+    // Batch removing target ball 400 must prune the remaining entry targeting 400.
+    assert_eq!(bp.remove_balls_batch(&[400]).len(), 1);
+    assert!(
+        bp.special_fx_meta.is_empty(),
+        "remove_balls_batch must prune special_fx_meta entries for removed balls"
+    );
+}
+

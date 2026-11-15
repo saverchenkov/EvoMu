@@ -126,6 +126,7 @@ pub struct ActiveModuleCycle {
     pub grappler_speed_factor_pct: f64,
     pub weapon_is_turret: bool,
     pub weapon_is_missile: bool,
+    pub weapon_is_guided_missile: bool,
     pub weapon_optimal_m: f64,
     pub weapon_falloff_m: f64,
     pub weapon_tracking_speed: f64,
@@ -133,6 +134,13 @@ pub struct ActiveModuleCycle {
     pub missile_explosion_radius_m: f64,
     pub missile_explosion_velocity_ms: f64,
     pub missile_drf: f64,
+    pub missile_max_velocity_ms: f64,
+    pub missile_flight_time_s: f64,
+    pub missile_ball_radius: f64,
+    pub missile_reload_ms: f64,
+    pub missile_charge_type_id: Option<TypeId>,
+    pub missile_charge_capacity: u32,
+    pub reload_remaining_sim_s: f64,
     /// Unix timestamp (seconds) when this module cycle was added or began its current cycle (`#498`).
     pub started_at_unix: u64,
 }
@@ -239,6 +247,79 @@ pub enum PendingCycleAction {
         old_cap: f64,
         notified: bool,
     },
+    AutoReloadStarted {
+        char_id: CharacterId,
+        module_ids: Vec<ItemId>,
+        charge_type_id: TypeId,
+        time_ms: f64,
+        reload_until_unix: u64,
+        sim_deadline_s: f64,
+        notified: bool,
+    },
+    NoChargesDeactivated {
+        char_id: CharacterId,
+        module_type_id: TypeId,
+        notified: bool,
+    },
+}
+
+/// Queued guided missile launch awaiting next-tick `AddBalls2` acquisition batching.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingMissileLaunch {
+    pub queued_tick: u64,
+    pub char_id: CharacterId,
+    pub owner_id: i64,
+    pub corp_id: i64,
+    pub alliance_id: i64,
+    pub attacker_ship_id: BallId,
+    pub target_ball_id: BallId,
+    pub master_module_id: ItemId,
+    pub launcher_module_id: ItemId,
+    pub module_type_id: TypeId,
+    pub ammo_type_id: TypeId,
+    pub max_velocity_ms: f64,
+    pub flight_time_s: f64,
+    pub ball_radius: f64,
+    pub explosion_radius_m: f64,
+    pub explosion_velocity_ms: f64,
+    pub drf: f64,
+    pub damage_vector: DamageVector,
+    pub duration_ms: f64,
+}
+
+/// Queued deployment `OnSpecialFX` emitted on the tick after missile `AddBalls2`.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingMissileDeployFx {
+    pub emit_at_tick: u64,
+    pub attacker_ship_id: BallId,
+    pub target_ball_id: BallId,
+    pub master_module_id: ItemId,
+    pub module_type_id: TypeId,
+    pub ammo_type_id: TypeId,
+    pub duration_ms: f64,
+}
+
+/// Live in-flight guided missile ball tracked in `SystemActorState`.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct ActiveGuidedMissile {
+    pub ball_id: BallId,
+    pub spawn_tick: u64,
+    pub char_id: CharacterId,
+    pub attacker_ship_id: BallId,
+    pub target_ball_id: BallId,
+    pub module_id: ItemId,
+    pub module_type_id: TypeId,
+    pub ammo_type_id: TypeId,
+    pub max_velocity_ms: f64,
+    pub flight_time_s: f64,
+    pub elapsed_sim_s: f64,
+    pub min_visual_sim_s: f64,
+    pub impacted: bool,
+    pub explosion_radius_m: f64,
+    pub explosion_velocity_ms: f64,
+    pub drf: f64,
+    pub damage_vector: DamageVector,
 }
 
 /// Staggered 10-tick cadence for per-system condition checkpoints (`RFC-1 E-4`, `T-5`, `#919`).
@@ -303,6 +384,7 @@ pub(crate) struct SystemActorState {
     pub sim_elapsed_secs: f64,
     pub pending_cycle_actions: Vec<PendingCycleAction>,
     pub tactical_state: Arc<RankedRwLock<crate::services::tactical_modules::TacticalModulesState, RANK_LEAF>>,
+    pub module_reload_sim_deadlines: Arc<RankedRwLock<HashMap<i64, (SolarSystemId, f64, f64)>, RANK_LEAF>>,
     pub pending_notifications_opt: Option<Arc<RankedRwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>, RANK_LEAF>>>,
     pub notify_tx_opt: Option<tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
     pub ball_space_entry_epochs: HashMap<BallId, u64>,
@@ -313,6 +395,10 @@ pub(crate) struct SystemActorState {
     pub hibernated_since_unix: Arc<std::sync::atomic::AtomicU64>,
     pub idle_ticks: Arc<std::sync::atomic::AtomicU64>,
     pub dynamic_ball_count: Arc<std::sync::atomic::AtomicUsize>,
+    pub pending_missile_launches: Vec<PendingMissileLaunch>,
+    pub pending_missile_deploy_fx: Vec<PendingMissileDeployFx>,
+    pub active_guided_missiles: Vec<ActiveGuidedMissile>,
+    pub next_missile_ball_id: i64,
 }
 
 /// Atomic snapshot of a ball removed from a solar system (`#842`, `#917` E-2).
@@ -698,6 +784,8 @@ pub enum SystemCommand {
 }
 
 pub type CharacterId = i64;
+pub type ItemId = i64;
+pub type TypeId = u32;
 pub type NpcDeathFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 pub type NpcDeathHook = Arc<dyn Fn(SolarSystemId, BallId, Option<CharacterId>) -> NpcDeathFuture + Send + Sync>;
 pub type ModuleDeactivationHook = Arc<dyn Fn(CharacterId, &ActiveModuleCycle) + Send + Sync>;

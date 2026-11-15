@@ -800,6 +800,11 @@ pub(crate) fn handle_load_ammo(
                     first_mod_group_id = mod_t.group_id;
                     if let Some(&rt) = mod_t.default_attributes.get(&1795) {
                         reload_time_ms = rt;
+                    } else if matches!(mod_t.group_id, 511 | 1245) {
+                        reload_time_ms = 35_000.0;
+                    }
+                    if matches!(mod_t.group_id, 511 | 1245) && reload_time_ms <= 0.0 {
+                        reload_time_ms = 35_000.0;
                     }
                     if mod_t.group_id == 1770 {
                         let cbs_lvl = ctx
@@ -818,7 +823,7 @@ pub(crate) fn handle_load_ammo(
                 }
                 .max(0.0);
                 if cap > 0.0 {
-                    cap_rounds = (cap / charge_vol).floor() as i32;
+                    cap_rounds = ((cap / charge_vol) + 1e-9).floor() as i32;
                 }
             }
         }
@@ -1071,6 +1076,17 @@ pub(crate) fn handle_load_ammo(
             &all_target_modules,
             ctx.now_unix_secs() + reload_secs,
         );
+        if let Some(sys_id) = session.solar_system_id {
+            if ctx.systems.get_handle(sys_id).is_some() {
+                let sim_now = ctx.systems.get_system_sim_elapsed(sys_id);
+                ctx.systems.record_module_reload_sim_deadlines(
+                    &all_target_modules,
+                    sys_id,
+                    sim_now,
+                    sim_now + (reload_time_ms / 1000.0),
+                );
+            }
+        }
     }
 
     ctx.invalidate_ship_fitting(ship_id);

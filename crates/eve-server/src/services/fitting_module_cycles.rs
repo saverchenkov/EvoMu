@@ -1355,7 +1355,19 @@ pub(crate) async fn handle_module_cycles(
                 mod_type.group_id,
                 506..=512 | 524 | 771 | 862 | 1245
             );
+            let is_guided_missile =
+                crate::system_actor::is_guided_missile_launcher_group(i64::from(mod_type.group_id));
             let is_vorton_group = mod_type.group_id == 4060;
+            if is_guided_missile
+                && (active_burst_charge_tid.is_none()
+                    || (!linked_turrets.is_empty()
+                        && deferred_post_cycle.turret_charge_consumptions.len()
+                            < linked_turrets.len()))
+            {
+                return Some(Err(BridgeRpcError::from_client_error(
+                    eve_proto::ClientError::user(eve_proto::UserErrorKey::NoCharges),
+                )));
+            }
             let weapon_dark_mult = crate::services::pve_abyssal_hazards::dark_weather_midpocket_turret_mult(
                 ctx,
                 char_id,
@@ -1374,24 +1386,7 @@ pub(crate) async fn handle_module_cycles(
                             .is_some_and(|eid| active_charge_sde.is_some_and(|ct| ct.effect_ids.contains(&eid)))
                 })
             };
-            let weapon_optimal_m = if is_turret_group {
-                let range_mult = active_charge_sde
-                    .and_then(|ct| ct.default_attributes.get(&120).copied())
-                    .unwrap_or(1.0);
-                let base_opt = {
-                    let v = mod_state.get_attribute(54, &ctx.sde);
-                    if v > 0.0 {
-                        v
-                    } else {
-                        mod_type.default_attributes.get(&54).copied().unwrap_or(5_000.0)
-                    }
-                };
-                (if has_mod_charge_modifier(54) {
-                    base_opt
-                } else {
-                    base_opt * range_mult
-                }) * weapon_dark_mult
-            } else if is_missile_group {
+            let (missile_max_velocity_ms, missile_flight_time_s) = if is_missile_group {
                 let vel = {
                     let v = fit.get_charge_effective_attribute(module_id, 37, &ctx.sde);
                     if v > 0.0 {
@@ -1412,7 +1407,29 @@ pub(crate) async fn handle_module_cycles(
                             .unwrap_or(5_000.0)
                     }
                 };
-                vel * (delay_ms / 1_000.0)
+                (vel, delay_ms / 1_000.0)
+            } else {
+                (0.0, 0.0)
+            };
+            let weapon_optimal_m = if is_turret_group {
+                let range_mult = active_charge_sde
+                    .and_then(|ct| ct.default_attributes.get(&120).copied())
+                    .unwrap_or(1.0);
+                let base_opt = {
+                    let v = mod_state.get_attribute(54, &ctx.sde);
+                    if v > 0.0 {
+                        v
+                    } else {
+                        mod_type.default_attributes.get(&54).copied().unwrap_or(5_000.0)
+                    }
+                };
+                (if has_mod_charge_modifier(54) {
+                    base_opt
+                } else {
+                    base_opt * range_mult
+                }) * weapon_dark_mult
+            } else if is_missile_group {
+                missile_max_velocity_ms * missile_flight_time_s
             } else if is_vorton_group {
                 let v = mod_state.get_attribute(54, &ctx.sde);
                 if v > 0.0 {
@@ -1526,6 +1543,61 @@ pub(crate) async fn handle_module_cycles(
                     (0.0, 0.0, 0.0)
                 };
 
+            let missile_ball_radius = active_charge_sde
+                .map(|ct| ct.radius)
+                .filter(|&r| r > 0.0)
+                .unwrap_or(300.0);
+            let missile_reload_ms = if is_guided_missile {
+                let v = mod_state.get_attribute(1795, &ctx.sde);
+                if v > 0.0 {
+                    v
+                } else if let Some(&d) = mod_type.default_attributes.get(&1795).filter(|&&x| x > 0.0) {
+                    d
+                } else if matches!(mod_type.group_id, 511 | 1245) {
+                    35_000.0
+                } else {
+                    10_000.0
+                }
+            } else {
+                0.0
+            };
+            let missile_charge_capacity = if is_guided_missile {
+                let charge_vol = active_charge_sde
+                    .map(|t| t.volume.max(0.0001))
+                    .unwrap_or(0.0025);
+                let mod_cap = if mod_type.capacity > 0.0 {
+                    mod_type.capacity
+                } else {
+                    mod_type.default_attributes.get(&38).copied().unwrap_or(0.0)
+                };
+                if mod_cap > 0.0 {
+                    (((mod_cap / charge_vol) + 1e-9).floor() as i32).max(1) as u32
+                } else {
+                    1
+                }
+            } else {
+                0
+            };
+            let mut missile_launch_range_comp_m = 0.0_f64;
+            if is_guided_missile {
+                if let Some(tid) = target_id_opt {
+                    if let (Ok(Some((_, atk_ball))), Ok(Some((_, tgt_ball)))) = (
+                        sys.get_ball_snapshot(ship_id).await,
+                        sys.get_ball_snapshot(tid).await,
+                    ) {
+                        missile_launch_range_comp_m =
+                            atk_ball.radius.max(0.0) + tgt_ball.radius.max(0.0);
+                        let center_dist = atk_ball.position.distance(tgt_ball.position);
+                        let max_launch_range = weapon_optimal_m + missile_launch_range_comp_m;
+                        if weapon_optimal_m > 0.0 && center_dist > max_launch_range + 1e-6 {
+                            return Some(Err(BridgeRpcError::from_client_error(
+                                eve_proto::ClientError::user(eve_proto::UserErrorKey::TargetTooFar),
+                            )));
+                        }
+                    }
+                }
+            }
+
             let cycle = crate::system_actor::ActiveModuleCycle {
                 ship_id,
                 module_id,
@@ -1635,6 +1707,7 @@ pub(crate) async fn handle_module_cycles(
                 grappler_speed_factor_pct,
                 weapon_is_turret: is_turret_group,
                 weapon_is_missile: is_missile_group || is_vorton_group,
+                weapon_is_guided_missile: is_guided_missile,
                 weapon_optimal_m,
                 weapon_falloff_m,
                 weapon_tracking_speed,
@@ -1642,6 +1715,13 @@ pub(crate) async fn handle_module_cycles(
                 missile_explosion_radius_m,
                 missile_explosion_velocity_ms,
                 missile_drf,
+                missile_max_velocity_ms,
+                missile_flight_time_s,
+                missile_ball_radius,
+                missile_reload_ms,
+                missile_charge_type_id: active_burst_charge_tid,
+                missile_charge_capacity,
+                reload_remaining_sim_s: 0.0,
                 target_velocity_multiplier,
                 immobilize_self,
                 self_disallow_assistance,
@@ -1674,7 +1754,9 @@ pub(crate) async fn handle_module_cycles(
                         opt_range *= dark_mult;
                         falloff *= dark_mult;
                     }
-                    let eff = if opt_range > 0.0 {
+                    let eff = if is_guided_missile && weapon_optimal_m > 0.0 {
+                        weapon_optimal_m + missile_launch_range_comp_m
+                    } else if opt_range > 0.0 {
                         opt_range + 3.0 * falloff.max(0.0)
                     } else if is_missile_group && weapon_optimal_m > 0.0 {
                         weapon_optimal_m
@@ -1782,7 +1864,7 @@ pub(crate) async fn handle_module_cycles(
             let is_cycle_gated = matches!(
                 mod_type.group_id,
                 72 | 40 | 1156 | 41 | 1697 | 67 | 71 | 76 | 1122 | 650 | 80 | 353
-                    | 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807
+                    | 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 771 | 1245 | 1674 | 4500 | 4805 | 4807
             );
             if is_cycle_gated || (repeat == 0 && reactivation_delay_s > 0.0) {
                 let total_delay = if mod_type.group_id == 40 {
@@ -1834,38 +1916,51 @@ pub(crate) async fn handle_module_cycles(
             } else {
                 (duration_s * 1_000.0).max(0.0)
             };
-            let _ = ctx.notify_module_effect_started_with_cycle_and_charge(
-                char_id,
-                ship_id,
-                module_id,
-                m.type_id,
-                Some(effect_name.as_str()),
-                target_id_opt,
-                Some(godma_repeat),
-                Some(godma_duration_ms),
-                active_burst_charge_tid,
-            );
-            for &slave_mod_id in &linked_turrets {
-                if slave_mod_id == module_id {
-                    continue;
-                }
-                let slave_type_id = fit
-                    .modules
-                    .get(&slave_mod_id)
-                    .map(|fm| fm.type_id)
-                    .or_else(|| ctx.db.with_snapshot(|snap| snap.items.get(&slave_mod_id).map(|i| i.type_id)))
-                    .unwrap_or(m.type_id);
-                ctx.notify_module_special_fx_started(
+            if is_guided_missile {
+                let _ = ctx.notify_module_godma_effect_started_only(
                     char_id,
                     ship_id,
-                    slave_mod_id,
-                    slave_type_id,
+                    module_id,
+                    m.type_id,
                     Some(effect_name.as_str()),
                     target_id_opt,
-                    godma_repeat,
-                    godma_duration_ms,
+                    Some(godma_repeat),
+                    Some(godma_duration_ms),
+                );
+            } else {
+                let _ = ctx.notify_module_effect_started_with_cycle_and_charge(
+                    char_id,
+                    ship_id,
+                    module_id,
+                    m.type_id,
+                    Some(effect_name.as_str()),
+                    target_id_opt,
+                    Some(godma_repeat),
+                    Some(godma_duration_ms),
                     active_burst_charge_tid,
                 );
+                for &slave_mod_id in &linked_turrets {
+                    if slave_mod_id == module_id {
+                        continue;
+                    }
+                    let slave_type_id = fit
+                        .modules
+                        .get(&slave_mod_id)
+                        .map(|fm| fm.type_id)
+                        .or_else(|| ctx.db.with_snapshot(|snap| snap.items.get(&slave_mod_id).map(|i| i.type_id)))
+                        .unwrap_or(m.type_id);
+                    ctx.notify_module_special_fx_started(
+                        char_id,
+                        ship_id,
+                        slave_mod_id,
+                        slave_type_id,
+                        Some(effect_name.as_str()),
+                        target_id_opt,
+                        godma_repeat,
+                        godma_duration_ms,
+                        active_burst_charge_tid,
+                    );
+                }
             }
             if cap_need > 0.0 || cap_booster_inject_amount > 0.0 || effective_max_capacitor.is_some() {
                 if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
