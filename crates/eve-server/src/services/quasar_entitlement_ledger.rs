@@ -21,10 +21,10 @@ use super::quasar_cosmetics_skinr::{
 use super::quasar_social_chat::ctx_queue_notice;
 use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
-    STATUS_NOT_FOUND,
+    STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
 };
 use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository, WorldStateSnapshot};
-use eve_proto::pb;
+use eve_proto::pb::{self, PbError};
 use eve_proto::quasar::{
     AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
 };
@@ -124,7 +124,10 @@ pub fn redeemed_skin_licenses_for_char(db: &WorldRepository, char_id: u32) -> Ve
     out
 }
 
-pub(super) fn encode_asset_attributes(asset: &AssetRecord, is_public: bool) -> Vec<u8> {
+pub(super) fn try_encode_asset_attributes(
+    asset: &AssetRecord,
+    is_public: bool,
+) -> Result<Vec<u8>, PbError> {
     if is_public {
         let mut msg = pb::message("eve_public.assetholding.asset.Attributes");
         if let Some(cid) = asset.benefactor_char_id {
@@ -136,7 +139,7 @@ pub(super) fn encode_asset_attributes(asset: &AssetRecord, is_public: bool) -> V
                 .set("capacity.finite.remaining", rem),
             None => msg.set("capacity.infinite", true),
         };
-        return msg.must_encode();
+        return msg.encode();
     }
 
     let mut msg = pb::message("eve.assetholding.asset.Attributes")
@@ -164,7 +167,15 @@ pub(super) fn encode_asset_attributes(asset: &AssetRecord, is_public: bool) -> V
             .set("capacity.finite.remaining", rem),
         None => msg.set("capacity.infinite", true),
     };
-    msg.set("no_auto_release", true).must_encode()
+    msg.set("no_auto_release", true).encode()
+}
+
+#[cfg(test)]
+pub(super) fn encode_asset_attributes(asset: &AssetRecord, is_public: bool) -> Vec<u8> {
+    try_encode_asset_attributes(asset, is_public).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, is_public, "Failed to encode assetholding asset attributes");
+        Vec::new()
+    })
 }
 
 fn sub(msg: &DynamicQuasarMessage, field: u32) -> Option<&DynamicQuasarMessage> {
@@ -236,20 +247,43 @@ impl EntitlementKey {
 }
 
 /// Encodes the public `eve_public.assetholding.entitlement.Identifier`.
-pub(super) fn public_identifier(e: &EntitlementRecord) -> Vec<u8> {
+pub(super) fn try_public_identifier(e: &EntitlementRecord) -> Result<Vec<u8>, PbError> {
     pb::message("eve_public.assetholding.entitlement.Identifier")
         .set("holder.character.sequential", e.holder)
         .set("asset.uuid", e.asset)
         .set("group_by.name", &e.group_name)
         .set_opt("group_by.uuid", e.group_uuid.as_ref().map(|u| u.as_slice()))
-        .must_encode()
+        .encode()
 }
 
-fn entitlement_notice(type_name: &str, e: &EntitlementRecord, quantity: u64) -> GoogleAny {
-    pb::message(type_name)
-        .set_raw_message("entitlement", public_identifier(e))
+/// Encodes the public `eve_public.assetholding.entitlement.Identifier`.
+#[cfg(test)]
+pub(super) fn public_identifier(e: &EntitlementRecord) -> Vec<u8> {
+    try_public_identifier(e).unwrap_or_else(|err| {
+        tracing::warn!(error = %err, holder = e.holder, "Failed to encode entitlement public identifier");
+        Vec::new()
+    })
+}
+
+fn entitlement_notice(type_name: &str, e: &EntitlementRecord, quantity: u64) -> Option<GoogleAny> {
+    let id_bytes = match try_public_identifier(e) {
+        Ok(b) => b,
+        Err(err) => {
+            tracing::warn!(error = %err, type_name, holder = e.holder, "Failed to encode entitlement identifier for notice");
+            return None;
+        }
+    };
+    match pb::message(type_name)
+        .set_raw_message("entitlement", id_bytes)
         .set("quantity", quantity)
-        .must_to_any()
+        .to_any()
+    {
+        Ok(msg) => Some(msg),
+        Err(err) => {
+            tracing::warn!(error = %err, type_name, holder = e.holder, "Failed to encode entitlement notice");
+            None
+        }
+    }
 }
 
 /// Registers the ledger-backed handlers (after the generic asset holding registrations).
@@ -434,15 +468,17 @@ fn spawn(db: &WorldRepository, sde: &SdeRegistry, ctx: &AuthoritativeContext, ms
             capacity,
             benefactor_char_id,
         };
-        let attrs = encode_asset_attributes(&record, false);
+        let attrs = try_encode_asset_attributes(&record, false)
+            .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))?;
         ledger.assets.insert(hex(&uuid), record);
         save_to_snap(s, &ledger)?;
         Ok((uuid, attrs))
     })?;
-    Ok(pb::message("eve.assetholding.asset.api.SpawnResponse")
+    pb::message("eve.assetholding.asset.api.SpawnResponse")
         .set("asset.uuid", uuid)
         .set_raw_message("attributes", attrs)
-        .must_to_any())
+        .to_any()
+        .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
 /// `HoldRequest { creator = 2, itemstack = 7 | ship_skin_license = 11 { license = 1 { skin = 1 { hex = 1 } }, capacity = 2 } }`.
@@ -502,15 +538,17 @@ fn hold(db: &WorldRepository, sde: &SdeRegistry, ctx: &AuthoritativeContext, msg
             capacity,
             benefactor_char_id: creator_cid,
         };
-        let attrs = encode_asset_attributes(&record, false);
+        let attrs = try_encode_asset_attributes(&record, false)
+            .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))?;
         ledger.assets.insert(hex(&uuid), record);
         save_to_snap(s, &ledger)?;
         Ok((uuid, attrs))
     })?;
-    Ok(pb::message("eve.assetholding.asset.api.HoldResponse")
+    pb::message("eve.assetholding.asset.api.HoldResponse")
         .set("asset.uuid", uuid)
         .set_raw_message("attributes", attrs)
-        .must_to_any())
+        .to_any()
+        .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
 /// `CreateRequest { creator = 2, benefactor = 3, unit = 4, infinite = 5, finite = 6 }`.
@@ -567,9 +605,10 @@ fn create_asset(db: &WorldRepository, sde: &SdeRegistry, ctx: &AuthoritativeCont
         save_to_snap(s, &ledger)?;
         Ok(uuid)
     })?;
-    Ok(pb::message("eve.assetholding.asset.api.CreateResponse")
+    pb::message("eve.assetholding.asset.api.CreateResponse")
         .set("asset.uuid", uuid)
-        .must_to_any())
+        .to_any()
+        .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
 /// GM: `DirectDeliveryRequest { entitlements = 2 [{ entitlement = 2, quantity = 10 }] }` grants
@@ -634,11 +673,17 @@ fn direct_delivery(
         Ok(granted)
     })?;
     for (rec, quantity) in granted {
-        ctx_queue_notice(
-            NoticeScope::Character(rec.holder),
-            entitlement_notice("eve_public.assetholding.entitlement.api.GrantedNotice", &rec, quantity),
-            ctx.now_unix(),
-        );
+        if let Some(notice) = entitlement_notice(
+            "eve_public.assetholding.entitlement.api.GrantedNotice",
+            &rec,
+            quantity,
+        ) {
+            ctx_queue_notice(
+                NoticeScope::Character(rec.holder),
+                notice,
+                ctx.now_unix(),
+            );
+        }
     }
     Ok(any("eve.assetholding.entitlement.api.DirectDeliveryResponse", Vec::new()))
 }
@@ -662,16 +707,18 @@ fn owned_entitlement(ledger: &EntitlementLedger, ctx: &AuthoritativeContext, msg
 fn get(db: &WorldRepository, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage, is_public: bool) -> Result<GoogleAny, (u32, String)> {
     let (_, rec) = owned_entitlement(&load(db), ctx, msg, !is_public)?;
     if !is_public {
-        Ok(pb::message("eve.assetholding.entitlement.api.GetResponse")
+        pb::message("eve.assetholding.entitlement.api.GetResponse")
             .set("entitlement.quantity.total", rec.total)
             .set("entitlement.quantity.redeemed", rec.redeemed)
             .set("entitlement.no_last_modified_timestamp", true)
-            .must_to_any())
+            .to_any()
+            .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
     } else {
-        Ok(pb::message("eve_public.assetholding.entitlement.api.GetResponse")
+        pb::message("eve_public.assetholding.entitlement.api.GetResponse")
             .set("entitlement.quantity.total", rec.total)
             .set("entitlement.quantity.redeemed", rec.redeemed)
-            .must_to_any())
+            .to_any()
+            .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
     }
 }
 
@@ -830,22 +877,24 @@ fn redeem_record_in_snap(
     ledger.assets.insert(asset_key, asset.clone());
     ledger.entitlements.insert(key.to_string(), updated.clone());
     if let Some((prev_rem, cur_rem)) = cap_claimed {
-        notices.push((
-            updated.holder,
-            pb::message("eve_public.assetholding.asset.api.FiniteCapacityClaimedNotice")
-                .set("asset.uuid", asset.uuid)
-                .set("previous_remaining", prev_rem)
-                .set("current_remaining", cur_rem)
-                .must_to_any(),
-        ));
+        match pb::message("eve_public.assetholding.asset.api.FiniteCapacityClaimedNotice")
+            .set("asset.uuid", asset.uuid)
+            .set("previous_remaining", prev_rem)
+            .set("current_remaining", cur_rem)
+            .to_any()
+        {
+            Ok(notice) => notices.push((updated.holder, notice)),
+            Err(e) => tracing::warn!(error = %e, holder = updated.holder, "Failed to encode FiniteCapacityClaimedNotice"),
+        }
     }
     if let Some(tid) = asset.character_title_id {
-        notices.push((
-            updated.holder,
-            pb::message("eve_public.cosmetic.character.title.api.GrantedNotice")
-                .set("title.uuid", super::quasar_cosmetics_drafts::id_to_uuid_bytes(tid))
-                .must_to_any(),
-        ));
+        match pb::message("eve_public.cosmetic.character.title.api.GrantedNotice")
+            .set("title.uuid", super::quasar_cosmetics_drafts::id_to_uuid_bytes(tid))
+            .to_any()
+        {
+            Ok(notice) => notices.push((updated.holder, notice)),
+            Err(e) => tracing::warn!(error = %e, holder = updated.holder, "Failed to encode GrantedNotice"),
+        }
     }
     let mut redeemed_skin = false;
     if let Some(ref skin_hex) = asset.ship_skin_license_hex {
@@ -874,12 +923,18 @@ fn redeem_record_in_snap(
                 .set("previous_attributes.unactivated", prev_lic.unactivated)
                 .set("previous_attributes.escrowed", prev_lic.escrowed);
         }
-        notices.push((updated.holder, msg.must_to_any()));
+        match msg.to_any() {
+            Ok(notice) => notices.push((updated.holder, notice)),
+            Err(e) => tracing::warn!(error = %e, notice_type, holder = updated.holder, "Failed to encode skin license notice"),
+        }
     }
-    notices.push((
-        updated.holder,
-        entitlement_notice("eve_public.assetholding.entitlement.api.RedeemedNotice", &updated, units),
-    ));
+    if let Some(notice) = entitlement_notice(
+        "eve_public.assetholding.entitlement.api.RedeemedNotice",
+        &updated,
+        units,
+    ) {
+        notices.push((updated.holder, notice));
+    }
     Ok(redeemed_skin)
 }
 
@@ -928,13 +983,17 @@ fn delete_or_expire(db: &WorldRepository, ctx: &AuthoritativeContext, msg: &Dyna
         save_to_snap(s, &ledger)?;
         Ok(rec)
     })?;
-    ctx_queue_notice(
-        NoticeScope::Character(rec.holder),
-        pb::message("eve_public.assetholding.asset.api.DeletedNotice")
-            .set("asset.uuid", rec.asset)
-            .must_to_any(),
-        ctx.now_unix(),
-    );
+    match pb::message("eve_public.assetholding.asset.api.DeletedNotice")
+        .set("asset.uuid", rec.asset)
+        .to_any()
+    {
+        Ok(notice) => ctx_queue_notice(
+            NoticeScope::Character(rec.holder),
+            notice,
+            ctx.now_unix(),
+        ),
+        Err(e) => tracing::warn!(error = %e, holder = rec.holder, "Failed to encode DeletedNotice"),
+    }
     Ok(any(rsp_type, Vec::new()))
 }
 
@@ -1004,11 +1063,17 @@ fn redeliver_stale(db: &WorldRepository, ctx: &AuthoritativeContext, msg: &Dynam
     for rec in ledger.entitlements.values() {
         let rem = rec.total.saturating_sub(rec.redeemed);
         if rem > 0 && target_holder.is_none_or(|th| rec.holder == th) {
-            ctx_queue_notice(
-                NoticeScope::Character(rec.holder),
-                entitlement_notice("eve_public.assetholding.entitlement.api.GrantedNotice", rec, rem),
-                ctx.now_unix(),
-            );
+            if let Some(notice) = entitlement_notice(
+                "eve_public.assetholding.entitlement.api.GrantedNotice",
+                rec,
+                rem,
+            ) {
+                ctx_queue_notice(
+                    NoticeScope::Character(rec.holder),
+                    notice,
+                    ctx.now_unix(),
+                );
+            }
         }
     }
     Ok(any("eve.assetholding.entitlement.api.admin.RedeliverStaleEntitlementsResponse", Vec::new()))

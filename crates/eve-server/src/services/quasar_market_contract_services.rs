@@ -10,8 +10,8 @@ use super::quasar_cosmetics_market_types::{
 };
 use super::quasar_cosmetics_services::QuasarCosmeticsState;
 use crate::quasar_gateway::{
-    require_admin_role, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
-    STATUS_UNAUTHORIZED,
+    require_admin_role, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
+    STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND, STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
 use eve_proto::pb;
@@ -43,7 +43,9 @@ fn hex_uuid(bytes: &[u8]) -> String {
     s
 }
 
-fn encode_transaction_attributes(tx: &CosmeticTransactionRecord) -> Vec<u8> {
+fn try_encode_transaction_attributes(
+    tx: &CosmeticTransactionRecord,
+) -> Result<Vec<u8>, pb::PbError> {
     pb::message("eve_public.cosmetic.market.transaction.Attributes")
         .set("last_updated.seconds", tx.last_updated_unix as i64)
         .set("status", tx.status as i32)
@@ -56,7 +58,15 @@ fn encode_transaction_attributes(tx: &CosmeticTransactionRecord) -> Vec<u8> {
                 d.set_with("creating_skin_listing", |b| b)
             }
         })
-        .must_encode()
+        .encode()
+}
+
+#[cfg(test)]
+fn encode_transaction_attributes(tx: &CosmeticTransactionRecord) -> Vec<u8> {
+    try_encode_transaction_attributes(tx).unwrap_or_else(|e| {
+        tracing::warn!("failed to encode cosmetic transaction attributes: {e}");
+        Vec::new()
+    })
 }
 
 fn extract_uint64_field(raw_bytes: &[u8], field_num: u32) -> Option<u64> {
@@ -160,11 +170,12 @@ pub fn register_handlers(
                 drop(data);
                 let _ = caller;
                 let attrs = encode_draft_attributes(&record);
-                Ok(pb::message(
+                pb::message(
                     "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSharedResponse",
                 )
                 .set_raw_message("draft", attrs)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -200,10 +211,12 @@ pub fn register_handlers(
                         "Transaction belongs to another character".to_string(),
                     ));
                 }
-                let attrs = encode_transaction_attributes(&tx);
-                Ok(pb::message("eve_public.cosmetic.market.transaction.api.GetResponse")
+                let attrs = try_encode_transaction_attributes(&tx)
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))?;
+                pb::message("eve_public.cosmetic.market.transaction.api.GetResponse")
                     .set_raw_message("status", attrs)
-                    .must_to_any())
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -232,7 +245,7 @@ pub fn register_handlers(
                 for u in uuids {
                     resp = resp.add_with("transactions", |t| t.set("uuid", u.to_vec()));
                 }
-                Ok(resp.must_to_any())
+                resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -242,9 +255,10 @@ pub fn register_handlers(
         router.register_handler(
             "eve.cdn.api.GetActiveURLSigningKeyRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                Ok(pb::message("eve.cdn.api.GetActiveURLSigningKeyResponse")
+                pb::message("eve.cdn.api.GetActiveURLSigningKeyResponse")
                     .set("key_id", "evomu-cdn-v24")
-                    .must_to_any())
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
         router.register_handler(
@@ -269,11 +283,12 @@ pub fn register_handlers(
                 } else {
                     format!("{url}?sig=evomu_v24_signed")
                 };
-                Ok(pb::message("eve.cdn.api.SignURLResponse")
+                pb::message("eve.cdn.api.SignURLResponse")
                     .set("signed_url", signed)
                     .set("valid_until.seconds", 1_800_000_000i64)
                     .set("key_id", "evomu-cdn-v24")
-                    .must_to_any())
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -283,7 +298,7 @@ pub fn register_handlers(
         router.register_handler(
             "eve.client.host.GetRequest",
             Arc::new(move |_ctx, _req_any, _dyn_msg| {
-                Ok(pb::message("eve.client.host.GetResponse")
+                pb::message("eve.client.host.GetResponse")
                     .set_with("host", |h| {
                         h.set("legacy_hash", 12345678i64)
                             .set("locale", "en_US")
@@ -293,7 +308,8 @@ pub fn register_handlers(
                                 format!("{:.2}.2024", eve_machonet::V24_VERSION_NUMBER),
                             )
                     })
-                    .must_to_any())
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
         router.register_handler(
@@ -327,18 +343,19 @@ pub fn register_handlers(
                     }
                     r
                 });
-                Ok(resp.must_to_any())
+                resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
         router.register_handler(
             "eve.contact.label.GetForAllianceRequest",
             Arc::new(move |_ctx, _req_any, _dyn_msg| {
-                Ok(pb::message("eve.contact.label.GetForAllianceResponse")
+                pb::message("eve.contact.label.GetForAllianceResponse")
                     .add_with("labels", |inst| {
                         inst.set("id.bit", 1u64)
                             .set("label.name", "Alliance Contacts")
                     })
-                    .must_to_any())
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -352,14 +369,14 @@ pub fn register_handlers(
                 for id in 1..=3u32 {
                     resp = resp.add_with("id", |i| i.set("sequential", id));
                 }
-                Ok(resp.must_to_any())
+                resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
         router.register_handler(
             "eve.content.GetRequest",
             Arc::new(move |_ctx, req_any, _dyn_msg| {
                 let cid = extract_uint64_field(&req_any.value, 1).unwrap_or(1);
-                Ok(pb::message("eve.content.GetResponse")
+                pb::message("eve.content.GetResponse")
                     .set_with("attributes", |attrs| {
                         attrs
                             .set("content.operation.sequential", 100u32)
@@ -371,7 +388,8 @@ pub fn register_handlers(
                             .set("description", format!("Article #{cid}: News from New Eden"))
                     })
                     .set("user", "ccp-content")
-                    .must_to_any())
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }

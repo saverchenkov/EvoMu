@@ -2,7 +2,8 @@
 
 use super::quasar_auth_user::{read_identity_store, with_identity_store};
 use crate::quasar_gateway::{
-    require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_UNAUTHORIZED,
+    require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_INTERNAL_ERROR,
+    STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
 use eve_proto::pb;
@@ -54,7 +55,11 @@ pub fn encode_logo_identifier(char_id: u64, ship_type_id: u64) -> Vec<u8> {
     pb::message("eve_public.entitlement.character.ship.corplogo.Identifier")
         .set("character.sequential", char_id as u32)
         .set("ship_type.sequential", ship_type_id)
-        .must_encode()
+        .encode()
+        .unwrap_or_else(|e| {
+            tracing::warn!(char_id, ship_type_id, error = %e, "failed to encode logo Identifier");
+            Vec::new()
+        })
 }
 
 pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
@@ -103,7 +108,9 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 }
                 fields.push(WireField {
                     field_number: 1,
-                    value: WireValue::LengthDelimited(ent.must_encode()),
+                    value: WireValue::LengthDelimited(
+                        ent.encode().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))?,
+                    ),
                 });
             }
             Ok(GoogleAny {
@@ -176,7 +183,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                         })
                     });
                 }
-                Ok(resp.must_to_any())
+                resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -326,23 +333,28 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 } else {
                     "eve_public.entitlement.character.ship.corplogo"
                 };
-                let notice = if is_grant {
+                let notice_res = if is_grant {
                     pb::message(&format!("{pkg}.GrantedNotice"))
                         .set("entitlement.character.sequential", target_cid as u32)
                         .set("entitlement.ship_type.sequential", ship_type_id)
-                        .must_to_any()
+                        .to_any()
                 } else {
                     pb::message(&format!("{pkg}.RevokedNotice"))
                         .set("revoker.sequential", caller_cid as u32)
                         .set("entitlement.character.sequential", target_cid as u32)
                         .set("entitlement.ship_type.sequential", ship_type_id)
-                        .must_to_any()
+                        .to_any()
                 };
-                pending_logo
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push((NoticeScope::Character(target_cid as u32), notice));
-                Ok(pb::message(rsp_name).must_to_any())
+                match notice_res {
+                    Ok(notice) => pending_logo
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push((NoticeScope::Character(target_cid as u32), notice)),
+                    Err(e) => tracing::warn!(target_cid, ship_type_id, error = %e, "failed to encode logo entitlement notice"),
+                }
+                pb::message(rsp_name)
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -404,14 +416,16 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                     .unwrap_or(30 * 86_400)
                     .max(1);
                 let (_next_exp, activated_notice) = db_ent_grant.with_mut_snapshot(|snap| {
-                    super::quasar_auth_user::activate_user_omega_license_in_snapshot(
+                    super::quasar_auth_user::try_activate_user_omega_license_in_snapshot(
                         snap, uid, dur_secs, now_unix,
                     )
                 });
-                router_pending
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push((NoticeScope::User(uid as i32), activated_notice));
+                if let Some(notice) = activated_notice {
+                    router_pending
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push((NoticeScope::User(uid as i32), notice));
+                }
             } else {
                 with_identity_store(&db_ent_grant, |guard| {
                     let list = guard.user_entitlements.entry(uid).or_default();
@@ -428,15 +442,20 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 });
             }
 
-            let granted_notice = pb::message("eve_public.assetholding.entitlement.api.GrantedNotice")
+            match pb::message("eve_public.assetholding.entitlement.api.GrantedNotice")
                 .set("entitlement.group_by.name", &ent_name)
-                .must_to_any();
-            router_pending
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .push((NoticeScope::User(uid as i32), granted_notice));
+                .to_any()
+            {
+                Ok(granted_notice) => router_pending
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((NoticeScope::User(uid as i32), granted_notice)),
+                Err(e) => tracing::warn!(uid, ent_name, error = %e, "failed to encode entitlement GrantedNotice"),
+            }
 
-            Ok(pb::message("eve.entitlement.user.api.GrantResponse").must_to_any())
+            pb::message("eve.entitlement.user.api.GrantResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -471,20 +490,29 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 _ => "omega".to_string(),
             };
             let (_next_exp, activated_notice) = db_sub_grant.with_mut_snapshot(|snap| {
-                super::quasar_auth_user::activate_user_omega_license_in_snapshot(
+                super::quasar_auth_user::try_activate_user_omega_license_in_snapshot(
                     snap,
                     uid,
                     days.saturating_mul(86_400),
                     now_unix,
                 )
             });
-            let granted_notice = pb::message("eve_public.assetholding.entitlement.api.GrantedNotice")
-                .set("entitlement.group_by.name", &sub_name)
-                .must_to_any();
-            let mut q = pending_sub.write().unwrap_or_else(|e| e.into_inner());
-            q.push((NoticeScope::User(uid as i32), activated_notice));
-            q.push((NoticeScope::User(uid as i32), granted_notice));
-            Ok(pb::message("eve.entitlement.user.subscription.api.GrantResponse").must_to_any())
+            {
+                let mut q = pending_sub.write().unwrap_or_else(|e| e.into_inner());
+                if let Some(notice) = activated_notice {
+                    q.push((NoticeScope::User(uid as i32), notice));
+                }
+                match pb::message("eve_public.assetholding.entitlement.api.GrantedNotice")
+                    .set("entitlement.group_by.name", &sub_name)
+                    .to_any()
+                {
+                    Ok(granted_notice) => q.push((NoticeScope::User(uid as i32), granted_notice)),
+                    Err(e) => tracing::warn!(uid, sub_name, error = %e, "failed to encode subscription GrantedNotice"),
+                }
+            }
+            pb::message("eve.entitlement.user.subscription.api.GrantResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -504,7 +532,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 }
             });
 
-            Ok(pb::message("eve.membership.GetCharacterAllResponse")
+            pb::message("eve.membership.GetCharacterAllResponse")
                 .set_with("membership", |m| {
                     m.set("corporation_id.sequential", corp_id as u32)
                         .set_with("alliance_membership", |am| {
@@ -516,7 +544,8 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                         })
                         .set("faction_membership.unaffiliated", true)
                 })
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -566,10 +595,11 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 }
             });
 
-            Ok(pb::message("eve.membership.corporation.GetCharacterResponse")
+            pb::message("eve.membership.corporation.GetCharacterResponse")
                 .set("corporation_id.sequential", corp_id as u32)
                 .set("attributes.title", title)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 

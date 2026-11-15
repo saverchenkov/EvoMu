@@ -11,8 +11,8 @@
 
 use super::quasar_social_chat::{ctx_now_unix, ctx_queue_notice};
 use crate::quasar_gateway::{
-    NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
-    STATUS_PRECONDITION_FAILED, STATUS_UNAUTHORIZED,
+    NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
+    STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND, STATUS_PRECONDITION_FAILED, STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
 use eve_proto::pb;
@@ -383,11 +383,14 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 .set_opt("description", extra),
             other => panic!("unexpected corp_sp_notice suffix: {other}"),
         };
-        ctx_queue_notice(
-            NoticeScope::Corporation(corpid),
-            b.must_to_any(),
-            ctx_now_unix(ctx),
-        );
+        match b.to_any() {
+            Ok(notice) => ctx_queue_notice(
+                NoticeScope::Corporation(corpid),
+                notice,
+                ctx_now_unix(ctx),
+            ),
+            Err(e) => tracing::warn!("failed to encode corp_sp_notice ({suffix}): {e}"),
+        }
     }
 
     fn parse_corp_skill_reqs(val: Option<&DynamicValue>, sde: &eve_sde::SdeRegistry) -> Result<Vec<(u32, i32)>, (u32, String)> {
@@ -455,17 +458,22 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             state_sp_create.sync_to_db();
 
             let plan_uuid = corp_sp_uuid(plan_id);
-            ctx_queue_notice(
-                NoticeScope::Corporation(corpid),
-                pb::message("eve_public.corporation.skill.plan.CreatedNotice")
-                    .set("identifier.uuid", plan_uuid.as_slice())
-                    .must_to_any(),
-                ctx_now_unix(ctx),
-            );
+            match pb::message("eve_public.corporation.skill.plan.CreatedNotice")
+                .set("identifier.uuid", plan_uuid.as_slice())
+                .to_any()
+            {
+                Ok(notice) => ctx_queue_notice(
+                    NoticeScope::Corporation(corpid),
+                    notice,
+                    ctx_now_unix(ctx),
+                ),
+                Err(e) => tracing::warn!("failed to encode corp skill plan CreatedNotice: {e}"),
+            }
 
-            Ok(pb::message("eve_public.corporation.skill.plan.CreateResponse")
+            pb::message("eve_public.corporation.skill.plan.CreateResponse")
                 .set("skill_plan.uuid", plan_uuid.as_slice())
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -485,7 +493,8 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                         .set("skill_plan.description", &plan.description)
                 });
             }
-            Ok(resp.must_to_any())
+            resp.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -518,9 +527,10 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             attr = attr.set("category.uuid", cat_uuid.as_slice());
         }
 
-        Ok(pb::message("eve_public.corporation.skill.plan.GetResponse")
+        pb::message("eve_public.corporation.skill.plan.GetResponse")
             .set("skill_plan", attr)
-            .must_to_any())
+            .to_any()
+            .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
     });
     router.register_handler("eve_public.corporation.skill.plan.GetRequest", Arc::clone(&get_plan_fn));
     router.register_handler("eve_public.corporation.skill.plan.GetSharedRequest", get_plan_fn);
@@ -539,7 +549,9 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             }
             state_sp_del.sync_to_db();
             queue_corp_sp_notice(ctx, corpid, "DeletedNotice", plan_id, None, None);
-            Ok(pb::message("eve_public.corporation.skill.plan.DeleteResponse").must_to_any())
+            pb::message("eve_public.corporation.skill.plan.DeleteResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -560,7 +572,9 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             }
             state_sp_name.sync_to_db();
             queue_corp_sp_notice(ctx, corpid, "NameUpdatedNotice", plan_id, Some(&new_name), None);
-            Ok(pb::message("eve_public.corporation.skill.plan.SetNameResponse").must_to_any())
+            pb::message("eve_public.corporation.skill.plan.SetNameResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -582,7 +596,9 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             }
             state_sp_desc.sync_to_db();
             queue_corp_sp_notice(ctx, corpid, "DescriptionUpdatedNotice", plan_id, Some(&new_desc), None);
-            Ok(pb::message("eve_public.corporation.skill.plan.SetDescriptionResponse").must_to_any())
+            pb::message("eve_public.corporation.skill.plan.SetDescriptionResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -600,7 +616,9 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             }
             state_sp_cat.sync_to_db();
             queue_corp_sp_notice(ctx, corpid, "CategoryUpdatedNotice", plan_id, None, Some(cat_id));
-            Ok(pb::message("eve_public.corporation.skill.plan.SetCategoryResponse").must_to_any())
+            pb::message("eve_public.corporation.skill.plan.SetCategoryResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -619,7 +637,9 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             }
             state_sp_req.sync_to_db();
             queue_corp_sp_notice(ctx, corpid, "SkillRequirementsUpdatedNotice", plan_id, None, None);
-            Ok(pb::message("eve_public.corporation.skill.plan.SetSkillRequirementsResponse").must_to_any())
+            pb::message("eve_public.corporation.skill.plan.SetSkillRequirementsResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -707,11 +727,10 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
         state_ms_create.sync_to_db();
         queue_corp_sp_notice(ctx, corpid, "milestone.CreatedNotice", mid, Some(&desc), None);
         let mid_uuid = corp_sp_uuid(mid);
-        Ok(
-            pb::message("eve_public.corporation.skill.plan.milestone.CreateResponse")
-                .set("milestone.uuid", mid_uuid.as_slice())
-                .must_to_any(),
-        )
+        pb::message("eve_public.corporation.skill.plan.milestone.CreateResponse")
+            .set("milestone.uuid", mid_uuid.as_slice())
+            .to_any()
+            .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
     });
     router.register_handler("eve_public.corporation.skill.plan.milestone.CreateRequest", ms_create_fn);
 
@@ -733,7 +752,9 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             }
             state_ms_del.sync_to_db();
             queue_corp_sp_notice(ctx, corpid, "milestone.DeletedNotice", mid, None, None);
-            Ok(pb::message("eve_public.corporation.skill.plan.milestone.DeleteResponse").must_to_any())
+            pb::message("eve_public.corporation.skill.plan.milestone.DeleteResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -763,7 +784,9 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             }
             state_ms_desc.sync_to_db();
             queue_corp_sp_notice(ctx, corpid, "milestone.DescriptionSetNotice", mid, Some(&desc), None);
-            Ok(pb::message("eve_public.corporation.skill.plan.milestone.SetDescriptionResponse").must_to_any())
+            pb::message("eve_public.corporation.skill.plan.milestone.SetDescriptionResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -807,7 +830,8 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 let uuid = corp_goal_uuid(gid);
                 resp = resp.add_with("goal_ids", |m| m.set("uuid", uuid.as_slice()));
             }
-            Ok(resp.must_to_any())
+            resp.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -840,7 +864,8 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 let uuid = corp_goal_uuid(gid);
                 resp = resp.add_with("goal_ids", |m| m.set("uuid", uuid.as_slice()));
             }
-            Ok(resp.must_to_any())
+            resp.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -873,7 +898,8 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 let uuid = corp_goal_uuid(gid);
                 resp = resp.add_with("goal_ids", |m| m.set("uuid", uuid.as_slice()));
             }
-            Ok(resp.must_to_any())
+            resp.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -924,7 +950,8 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                         .set("goal.uuid", goal_uuid.as_slice())
                 });
             }
-            Ok(resp.must_to_any())
+            resp.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -956,13 +983,14 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             })?;
 
             let goal_uuid = corp_goal_uuid(goal_id);
-            Ok(pb::message(
+            pb::message(
                 "eve_public.corporationgoal.api.GetMyContributorSummaryForGoalResponse",
             )
             .set("summary.contributor.sequential", cid)
             .set("summary.progress", prog)
             .set("summary.goal.uuid", goal_uuid.as_slice())
-            .must_to_any())
+            .to_any()
+            .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -1004,7 +1032,8 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                         .set("goal.uuid", goal_uuid.as_slice())
                 });
             }
-            Ok(resp.must_to_any())
+            resp.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -1041,7 +1070,8 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 let uuid = corp_goal_uuid(gid);
                 resp = resp.add_with("identifiers", |m| m.set("uuid", uuid.as_slice()));
             }
-            Ok(resp.must_to_any())
+            resp.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -1067,16 +1097,18 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             )?;
 
             let goal_uuid = corp_goal_uuid(goal_id);
-            ctx_queue_notice(
-                NoticeScope::Character(cid),
-                pb::message("eve_public.corporationgoal.api.RedeemedNotice")
-                    .set("goal.uuid", goal_uuid.as_slice())
-                    .set("quantity", payout as u64)
-                    .must_to_any(),
-                now,
-            );
+            match pb::message("eve_public.corporationgoal.api.RedeemedNotice")
+                .set("goal.uuid", goal_uuid.as_slice())
+                .set("quantity", payout as u64)
+                .to_any()
+            {
+                Ok(notice) => ctx_queue_notice(NoticeScope::Character(cid), notice, now),
+                Err(e) => tracing::warn!("failed to encode RedeemedNotice: {e}"),
+            }
 
-            Ok(pb::message("eve_public.corporationgoal.api.RedeemMyRewardsResponse").must_to_any())
+            pb::message("eve_public.corporationgoal.api.RedeemMyRewardsResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -1096,20 +1128,19 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 corp_projects::redeem_all_corp_goal_rewards_for_char(db, cid as i64, now)?;
             for (pid, payout) in redeemed_goals {
                 let goal_uuid = corp_goal_uuid(pid as u64);
-                ctx_queue_notice(
-                    NoticeScope::Character(cid),
-                    pb::message("eve_public.corporationgoal.api.RedeemedNotice")
-                        .set("goal.uuid", goal_uuid.as_slice())
-                        .set("quantity", payout as u64)
-                        .must_to_any(),
-                    now,
-                );
+                match pb::message("eve_public.corporationgoal.api.RedeemedNotice")
+                    .set("goal.uuid", goal_uuid.as_slice())
+                    .set("quantity", payout as u64)
+                    .to_any()
+                {
+                    Ok(notice) => ctx_queue_notice(NoticeScope::Character(cid), notice, now),
+                    Err(e) => tracing::warn!("failed to encode RedeemedNotice: {e}"),
+                }
             }
 
-            Ok(
-                pb::message("eve_public.corporationgoal.api.RedeemAllMyRewardsResponse")
-                    .must_to_any(),
-            )
+            pb::message("eve_public.corporationgoal.api.RedeemAllMyRewardsResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -1142,7 +1173,8 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 let uuid = corp_goal_uuid(gid);
                 resp = resp.add_with("goals", |m| m.set("uuid", uuid.as_slice()));
             }
-            Ok(resp.must_to_any())
+            resp.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -1177,12 +1209,13 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                     Ok((p.name.clone(), d, p.target_quantity, p.current_quantity))
                 })?;
 
-            Ok(pb::message("eve.corporationgoal.api.GetResponse")
+            pb::message("eve.corporationgoal.api.GetResponse")
                 .set("goal.user_input_name", &name)
                 .set("goal.user_input_description", &desc)
                 .set("goal.progress.desired", target_q)
                 .set("goal.progress.current", cur_q)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -1211,10 +1244,11 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                     })
                 })
                 .unwrap_or(0);
-            Ok(pb::message("eve.corporationgoal.api.GetCapacityResponse")
+            pb::message("eve.corporationgoal.api.GetCapacityResponse")
                 .set("count", count)
                 .set("capacity", 20u32)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -1249,13 +1283,14 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                     .unwrap_or(0))
             })?;
             let goal_uuid = corp_goal_uuid(goal_id);
-            Ok(pb::message(
+            pb::message(
                 "eve.corporationgoal.contribution.api.GetContributorSummaryForGoalResponse",
             )
             .set("summary.contributor.sequential", cid)
             .set("summary.total_sum_of_progress_added", prog)
             .set("summary.goal.uuid", goal_uuid.as_slice())
-            .must_to_any())
+            .to_any()
+            .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 }

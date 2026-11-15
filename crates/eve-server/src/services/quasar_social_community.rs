@@ -267,9 +267,10 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 .insert(mail_id, (sender, recipients, subject, body, ctx_now_unix(ctx)));
             state_mail.sync_to_db(&db_mail);
 
-            Ok(pb::message("eve.mail.CCPSendMailResponse")
+            pb::message("eve.mail.CCPSendMailResponse")
                 .add_with("successes", |m| m.set("sequential", mail_id as u32))
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -519,7 +520,9 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             *entry = (*entry + 1.0).min(10.0);
         }
         state_st.sync_to_db(&db_st);
-        Ok(pb::message("google.protobuf.Empty").must_to_any())
+        pb::message("google.protobuf.Empty")
+            .to_any()
+            .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
     });
     router.register_handler("eve.standing.api.IncreaseCommanded", Arc::clone(&inc_handler));
     router.register_handler("eve.standing.api.commands.IncreaseCommanded", inc_handler);
@@ -545,7 +548,9 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             *entry = (*entry - 1.0).max(-10.0);
         }
         state_std.sync_to_db(&db_std);
-        Ok(pb::message("google.protobuf.Empty").must_to_any())
+        pb::message("google.protobuf.Empty")
+            .to_any()
+            .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
     });
     router.register_handler("eve.standing.api.DecreaseCommanded", Arc::clone(&dec_handler));
     router.register_handler("eve.standing.api.commands.DecreaseCommanded", dec_handler);
@@ -616,7 +621,8 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             for wid in war_ids {
                 resp = resp.add_with("wars", |m| m.set("sequential", wid));
             }
-            Ok(resp.must_to_any())
+            resp.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -652,10 +658,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 })
                 .ok_or_else(|| (STATUS_NOT_FOUND, "War not found".to_string()))?;
 
-            Ok(pb::message("eve.war.GetDestructionStatisticsResponse")
+            pb::message("eve.war.GetDestructionStatisticsResponse")
                 .set("by_aggressor.ships", k_agg)
                 .set("by_defender.ships", k_def)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -704,9 +711,10 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve.war.GetKillMailsRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(pb::message("eve.war.GetKillMailsResponse")
+            pb::message("eve.war.GetKillMailsResponse")
                 .add_with("killmails", |m| m.set("id.sequential", 100_001u32))
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -726,13 +734,17 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             };
             state_tag.tags.write().unwrap_or_else(|e| e.into_inner()).insert(name, "1.0.0".into());
             state_tag.sync_to_db(&db_tag);
-            Ok(pb::message("eve.tag.api.RegisterResponse").must_to_any())
+            pb::message("eve.tag.api.RegisterResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
     router.register_handler(
         "eve.tag.api.EditRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(pb::message("eve.tag.api.EditResponse").must_to_any())
+            pb::message("eve.tag.api.EditResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -740,11 +752,12 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve.tag.api.ValidateRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(pb::message("eve.tag.api.ValidateResponse")
+            pb::message("eve.tag.api.ValidateResponse")
                 .add_with("results", |m| {
                     m.set("tag.name", "default").set("attributes.public", true)
                 })
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -760,7 +773,8 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     m.set("tag.name", t).set("attributes.description", v)
                 });
             }
-            Ok(resp.must_to_any())
+            resp.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -768,25 +782,30 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve.tag.version.api.ListRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(pb::message("eve.tag.version.api.ListResponse")
+            pb::message("eve.tag.version.api.ListResponse")
                 .add_with("results", |m| {
                     m.set("versions.major", 1u32)
                         .set("versions.minor", 0u32)
                         .set("versions.patch", 0u32)
                 })
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
     router.register_handler(
         "eve.tag.version.api.CreateRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(pb::message("eve.tag.version.api.CreateResponse").must_to_any())
+            pb::message("eve.tag.version.api.CreateResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
     router.register_handler(
         "eve.tag.version.api.PromoteRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(pb::message("eve.tag.version.api.PromoteResponse").must_to_any())
+            pb::message("eve.tag.version.api.PromoteResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 }
@@ -823,6 +842,19 @@ fn extract_ids(val: Option<&DynamicValue>) -> Vec<u32> {
     }
 }
 
+fn publish_proto_notice(
+    gateway: &PublicGatewayRouter,
+    scope: crate::quasar_gateway::NoticeScope,
+    builder: pb::ProtoBuilder,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let any_msg = builder
+        .to_any()
+        .map_err(|e| eve_proto::BridgeRpcError::user_error(e.to_string()))?;
+    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
+    Ok(delivered)
+}
+
 /// Helper to publish `eve.medal.issued.Awarded` notice to a target session or broadcast.
 pub fn publish_medal_awarded_notice(
     gateway: &PublicGatewayRouter,
@@ -843,8 +875,7 @@ pub fn publish_medal_awarded_notice(
     } else {
         b.set("issuer_character.sequential", issuer_char_id as u32)
     };
-    let (_, delivered) = gateway.publish_notice(scope, b.must_to_any(), now_unix)?;
-    Ok(delivered)
+    publish_proto_notice(gateway, scope, b, now_unix)
 }
 
 /// Helper to publish `eve.narrative.api.WarpVectorItemActivated` notice to a target session or broadcast.
@@ -855,12 +886,10 @@ pub fn publish_narrative_warp_vector_notice(
     solar_system_id: u64,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let any_msg = pb::message("eve.narrative.api.WarpVectorItemActivated")
+    let builder = pb::message("eve.narrative.api.WarpVectorItemActivated")
         .set("character_id.sequential", character_id as u32)
-        .set("solar_system.sequential", solar_system_id)
-        .must_to_any();
-    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
-    Ok(delivered)
+        .set("solar_system.sequential", solar_system_id);
+    publish_proto_notice(gateway, scope, builder, now_unix)
 }
 
 /// Helper to publish `eve.notification.Attributes` notice to a target session or broadcast.
@@ -872,7 +901,7 @@ pub fn publish_notification_notice(
     was_read: bool,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let any_msg = pb::message("eve.notification.Attributes")
+    let builder = pb::message("eve.notification.Attributes")
         .set("type.sequential", notification_type_id as u32)
         .set("sender.character_id.sequential", sender_char_id as u32)
         .set(
@@ -882,10 +911,8 @@ pub fn publish_notification_notice(
                 nanos: 0,
             },
         )
-        .set("was_read", was_read)
-        .must_to_any();
-    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
-    Ok(delivered)
+        .set("was_read", was_read);
+    publish_proto_notice(gateway, scope, builder, now_unix)
 }
 
 #[cfg(test)]

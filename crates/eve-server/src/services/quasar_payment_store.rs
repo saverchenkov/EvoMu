@@ -2,7 +2,7 @@
 
 use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
-    STATUS_NOT_FOUND, STATUS_NOT_IMPLEMENTED, STATUS_UNAUTHORIZED,
+    STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND, STATUS_NOT_IMPLEMENTED, STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
 use eve_proto::pb::{self, enum_name};
@@ -98,9 +98,10 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 as u64;
             let bal = db_plex_bal.with_snapshot(|snap| snap.unified_plex_balance_for_user(uid));
 
-            Ok(pb::message("eve_public.plex.vault.api.BalanceResponse")
+            pb::message("eve_public.plex.vault.api.BalanceResponse")
                 .set("balance.total_in_cents", bal * 100)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -256,7 +257,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                         .set("catalog", enum_name("CATALOG_NES"))
                 });
             }
-            Ok(msg.must_to_any())
+            msg.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -286,11 +287,12 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 .find(|c| c.id == cat_id)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Category not found".to_string()))?;
 
-            Ok(pb::message("eve_public.store.category.api.GetResponse")
+            pb::message("eve_public.store.category.api.GetResponse")
                 .set("attributes.name", &category.name)
                 .set("attributes.no_parent", true)
                 .set("attributes.no_subcategories", true)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -321,11 +323,12 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 .find(|p| p.id == prod_id)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Product not found".to_string()))?;
 
-            Ok(pb::message("eve_public.store.product.api.GetResponse")
+            pb::message("eve_public.store.product.api.GetResponse")
                 .set("attributes.name", &product.name)
                 .set("attributes.item.type.sequential", u64::from(product.type_id))
                 .set("attributes.item.soulbound", false)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -339,7 +342,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
             for off in cat.offers.iter().filter(|o| !o.targeted) {
                 msg = msg.add_with("offers", |o| o.set("store_offer", off.id.to_string()));
             }
-            Ok(msg.must_to_any())
+            msg.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -387,7 +390,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                     msg = msg.add("attributes.tags", t);
                 }
             }
-            Ok(msg.must_to_any())
+            msg.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -401,7 +404,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
             for off in cat.offers.iter().filter(|o| o.targeted) {
                 msg = msg.add_with("offers", |o| o.set("store_offer", off.id.to_string()));
             }
-            Ok(msg.must_to_any())
+            msg.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -462,16 +465,15 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 .find(|o| o.id == offer_id)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Targeted offer not found".to_string()))?;
 
-            Ok(
-                pb::message("eve_public.store.targetaudience.offer.api.GetResponse")
-                    .add_with("offer.title.entries", |e| {
-                        e.set("id", enum_name("EN")).set("text", &offer.name)
-                    })
-                    .add_with("offer.description.entries", |e| {
-                        e.set("id", enum_name("EN")).set("text", &offer.description)
-                    })
-                    .must_to_any(),
-            )
+            pb::message("eve_public.store.targetaudience.offer.api.GetResponse")
+                .add_with("offer.title.entries", |e| {
+                    e.set("id", enum_name("EN")).set("text", &offer.name)
+                })
+                .add_with("offer.description.entries", |e| {
+                    e.set("id", enum_name("EN")).set("text", &offer.description)
+                })
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -507,7 +509,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 (STATUS_NOT_FOUND, "Payment schedule not found".to_string())
             })?;
 
-            Ok(pb::message("eve_public.payment.schedule.api.GetResponse")
+            pb::message("eve_public.payment.schedule.api.GetResponse")
                 .set("attributes.type", sched.schedule_type as i32)
                 .set(
                     "attributes.next_payment",
@@ -515,7 +517,8 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 )
                 .set("attributes.offer.store_offer", &sched.offer_id)
                 .set("attributes.recurring_interval_days", sched.interval_days)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -549,11 +552,10 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 }
             };
 
-            Ok(
-                pb::message("eve_public.payment.schedule.api.GetActiveByTypeResponse")
-                    .set("schedule.sequential", sched.id)
-                    .must_to_any(),
-            )
+            pb::message("eve_public.payment.schedule.api.GetActiveByTypeResponse")
+                .set("schedule.sequential", sched.id)
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -583,7 +585,7 @@ fn register_payment_token_and_purchase_handlers(
             for tok in &tokens {
                 msg = msg.add_with("tokens", |t| t.set("sequential", tok.id));
             }
-            Ok(msg.must_to_any())
+            msg.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -627,10 +629,11 @@ fn register_payment_token_and_purchase_handlers(
                 }
             };
 
-            Ok(pb::message("eve_public.payment.token.api.GetResponse")
+            pb::message("eve_public.payment.token.api.GetResponse")
                 .set("token.credit_card.alias", &token.token_str)
                 .set("token.credit_card.expiry", "12/2030")
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -656,13 +659,21 @@ fn register_payment_token_and_purchase_handlers(
             });
 
             for tid in disabled_ids {
-                let notice = pb::message("eve_public.payment.token.api.QuickPayRemovedNotice")
+                match pb::message("eve_public.payment.token.api.QuickPayRemovedNotice")
                     .set("token.sequential", tid)
-                    .must_to_any();
-                router_pending_dis
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push((NoticeScope::User(uid as i32), notice));
+                    .to_any()
+                {
+                    Ok(notice) => router_pending_dis
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push((NoticeScope::User(uid as i32), notice)),
+                    Err(e) => tracing::warn!(
+                        user_id = uid,
+                        token_id = tid,
+                        error = %e,
+                        "failed to encode QuickPayRemovedNotice"
+                    ),
+                }
             }
 
             Ok(GoogleAny {
@@ -822,13 +833,14 @@ fn register_payment_token_and_purchase_handlers(
             let currency = offer.currency.as_deref().unwrap_or("USD");
 
             let amount_u32 = amount_in_cents.min(u64::from(u32::MAX)) as u32;
-            Ok(pb::message("eve_public.payment.purchase.api.CostResponse")
+            pb::message("eve_public.payment.purchase.api.CostResponse")
                 .set("cost.catalog_amount_in_cents", amount_u32)
                 .set("cost.tax_amount_in_cents", 0u32)
                 .set("cost.total_amount_in_cents", amount_u32)
                 .set("cost.tax_rate_points", 0u32)
                 .set("cost.currency", currency)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -1042,7 +1054,7 @@ fn register_payment_token_and_purchase_handlers(
                     let mut omega_notice = None;
                     let mut sched_id_opt = None;
                     if is_omega {
-                        let (new_expiry, notice) = crate::services::quasar_auth_user::activate_user_omega_license_in_snapshot(
+                        let (new_expiry, notice) = crate::services::quasar_auth_user::try_activate_user_omega_license_in_snapshot(
                             snap,
                             uid,
                             30 * 86_400 * u64::from(qty),
@@ -1050,7 +1062,7 @@ fn register_payment_token_and_purchase_handlers(
                         );
                         let sched_id = upsert_user_payment_schedule_in_snapshot(snap, uid, 1, new_expiry, &format!("VEVC-{}", offer.id), 30 * qty, now_unix);
                         sched_id_opt = Some(sched_id);
-                        omega_notice = Some(notice);
+                        omega_notice = notice;
                     }
 
                     snap.next_entity_id += 1;
@@ -1085,14 +1097,15 @@ fn register_payment_token_and_purchase_handlers(
                 publish_schedule_set_notice(&router_pending_purchase, uid, sched_id, 1);
             }
 
-            Ok(pb::message("eve_public.payment.purchase.api.TokenResponse")
+            pb::message("eve_public.payment.purchase.api.TokenResponse")
                 .set(
                     "receipt.payment_identifier.sequential",
                     receipt_id.min(u64::from(u32::MAX)) as u32,
                 )
                 .set("receipt.payment_method", enum_name("PM_CREDIT_CARD"))
                 .set("receipt.description", "Payment completed successfully")
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -1113,7 +1126,7 @@ fn register_payment_token_and_purchase_handlers(
             for t in txs {
                 msg = msg.add_with("transactions", |id| id.set("sequential", t.id as i64));
             }
-            Ok(msg.must_to_any())
+            msg.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -1135,23 +1148,22 @@ fn register_payment_token_and_purchase_handlers(
                 (STATUS_NOT_FOUND, "Transaction not found".to_string())
             })?;
 
-            Ok(
-                pb::message("eve_public.plex.vault.transaction.api.GetLogResponse")
-                    .set(
-                        "transaction.timestamp",
-                        GoogleTimestamp::from_unix(tx.timestamp_unix as i64, 0),
-                    )
-                    .set(
-                        "transaction.amount_transferred.total_in_cents",
-                        tx.amount * 100,
-                    )
-                    .set(
-                        "transaction.resulting_balance.total_in_cents",
-                        tx.balance_after * 100,
-                    )
-                    .set("unavailable", true)
-                    .must_to_any(),
-            )
+            pb::message("eve_public.plex.vault.transaction.api.GetLogResponse")
+                .set(
+                    "transaction.timestamp",
+                    GoogleTimestamp::from_unix(tx.timestamp_unix as i64, 0),
+                )
+                .set(
+                    "transaction.amount_transferred.total_in_cents",
+                    tx.amount * 100,
+                )
+                .set(
+                    "transaction.resulting_balance.total_in_cents",
+                    tx.balance_after * 100,
+                )
+                .set("unavailable", true)
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -1179,20 +1191,19 @@ fn register_payment_token_and_purchase_handlers(
                 (earliest, count, inc, exp)
             });
 
-            Ok(
-                pb::message("eve_public.plex.vault.transaction.api.GetStatisticsResponse")
-                    .add_with("entries", |e| {
-                        e.set("no_classification", true)
-                            .set("incomes.total_in_cents", incomes * 100)
-                            .set("expenses.total_in_cents", expenses * 100)
-                            .set("transactions_count", count.min(u64::from(u32::MAX)) as u32)
-                    })
-                    .set(
-                        "earliest_transaction",
-                        GoogleTimestamp::from_unix(earliest as i64, 0),
-                    )
-                    .must_to_any(),
-            )
+            pb::message("eve_public.plex.vault.transaction.api.GetStatisticsResponse")
+                .add_with("entries", |e| {
+                    e.set("no_classification", true)
+                        .set("incomes.total_in_cents", incomes * 100)
+                        .set("expenses.total_in_cents", expenses * 100)
+                        .set("transactions_count", count.min(u64::from(u32::MAX)) as u32)
+                })
+                .set(
+                    "earliest_transaction",
+                    GoogleTimestamp::from_unix(earliest as i64, 0),
+                )
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 

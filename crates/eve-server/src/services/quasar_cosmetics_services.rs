@@ -435,7 +435,8 @@ pub fn publish_cosmetic_title_granted_notice(
 ) -> Result<usize, eve_proto::BridgeRpcError> {
     let any = pb::message("eve_public.cosmetic.character.title.api.GrantedNotice")
         .set("title.uuid", id_to_uuid(title_id))
-        .must_to_any();
+        .to_any()
+        .map_err(|e| eve_proto::BridgeRpcError::user_error(format!("ProtoBuilder encode failed: {e}")))?;
     gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix).map(|(_, n)| n)
 }
 
@@ -448,7 +449,8 @@ pub fn publish_cosmetic_market_transaction_notice(
 ) -> Result<usize, eve_proto::BridgeRpcError> {
     let any = pb::message("eve_public.cosmetic.market.transaction.api.TransactionSucceededNotice")
         .set("transaction.uuid", id_to_uuid(transaction_id))
-        .must_to_any();
+        .to_any()
+        .map_err(|e| eve_proto::BridgeRpcError::user_error(format!("ProtoBuilder encode failed: {e}")))?;
     gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix).map(|(_, n)| n)
 }
 

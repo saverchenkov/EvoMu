@@ -15,7 +15,8 @@
 #![forbid(unsafe_code)]
 
 use crate::quasar_gateway::{
-    NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_UNAUTHORIZED,
+    NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
+    STATUS_INTERNAL_ERROR, STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
 use eve_proto::pb;
@@ -223,7 +224,7 @@ pub fn register_economy_planetary_industry_handlers(
                 });
             }
 
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -268,7 +269,7 @@ pub fn register_economy_planetary_industry_handlers(
                 });
             }
 
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -288,7 +289,7 @@ pub fn register_economy_planetary_industry_handlers(
                     et.set("id.sequential", id).set("attributes.name", name)
                 });
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -304,8 +305,9 @@ pub fn register_economy_planetary_industry_handlers(
                     "Authentication required for loyaltypoints assetholding WithdrawRequest".into(),
                 ));
             }
-            Ok(pb::message("eve.loyaltypoints.assetholding.operation.api.WithdrawResponse")
-                .must_to_any())
+            pb::message("eve.loyaltypoints.assetholding.operation.api.WithdrawResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -321,8 +323,9 @@ pub fn register_economy_planetary_industry_handlers(
                     "Authentication required for loyaltypoints assetholding DepositRequest".into(),
                 ));
             }
-            Ok(pb::message("eve.loyaltypoints.assetholding.operation.api.DepositResponse")
-                .must_to_any())
+            pb::message("eve.loyaltypoints.assetholding.operation.api.DepositResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -374,7 +377,7 @@ pub fn register_economy_planetary_industry_handlers(
                 Ok(Some(c))
             })?;
 
-            Ok(pb::message("eve.contract.item_exchange.GetResponse")
+            pb::message("eve.contract.item_exchange.GetResponse")
                 .set_with("contract", |attrs| {
                     if let Some(c) = contract {
                         attrs
@@ -391,7 +394,8 @@ pub fn register_economy_planetary_industry_handlers(
                             .set_with("price", |p| set_isk_currency(p, 1_000_000))
                     }
                 })
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -413,16 +417,19 @@ pub fn register_economy_planetary_industry_handlers(
         router.register_handler(
             req_name,
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                Ok(pb::message(resp_name)
+                pb::message(resp_name)
                     .add_with("jobs", |j| j.set("id.sequential", 80001u32))
-                    .must_to_any())
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
     router.register_handler(
         "eve.character.industry.blueprints.GetRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(pb::message("eve.character.industry.blueprints.GetResponse").must_to_any())
+            pb::message("eve.character.industry.blueprints.GetResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -432,7 +439,7 @@ pub fn register_economy_planetary_industry_handlers(
         "eve.industry.facility.GetRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
             let (station_id, sys_id) = caller_station_and_solar_system(ctx, &db_fac);
-            Ok(pb::message("eve.industry.facility.GetResponse")
+            pb::message("eve.industry.facility.GetResponse")
                 .add_with("facilities", |fac| {
                     fac.set("id.sequential", station_id)
                         .set_with("attributes", |attrs| {
@@ -443,7 +450,8 @@ pub fn register_economy_planetary_industry_handlers(
                                 .set("online", true)
                         })
                 })
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -453,9 +461,10 @@ pub fn register_economy_planetary_industry_handlers(
         "eve.industry.system.GetCostIndicesRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
             let sys_id = caller_solar_system(ctx, &db_cost);
-            Ok(pb::message("eve.industry.system.GetCostIndicesResponse")
+            pb::message("eve.industry.system.GetCostIndicesResponse")
                 .add_with("cost_indices", |idx| idx.set("solar_system.sequential", sys_id))
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -466,14 +475,15 @@ pub fn register_economy_planetary_industry_handlers(
         Arc::new(move |ctx, _any, dyn_msg| {
             let sys_id = caller_solar_system(ctx, &db_planet);
             let planet_id = extract_u64_from_field(dyn_msg, 1);
-            Ok(pb::message("eve.planet.GetResponse")
+            pb::message("eve.planet.GetResponse")
                 .set_with("planet", |attrs| {
                     attrs
                         .set("solarsystem.sequential", sys_id)
                         .set("name", format!("Planet #{planet_id}"))
                         .set("type.sequential", 11u64)
                 })
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -487,7 +497,7 @@ pub fn register_economy_planetary_industry_handlers(
                 let planet_id = sys_id * 100 + i;
                 resp = resp.add_with("planets", |p| p.set("sequential", planet_id));
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -496,7 +506,9 @@ pub fn register_economy_planetary_industry_handlers(
         "eve.planet.skyhook.admin.api.ChangeOwnerRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
             crate::quasar_gateway::require_admin_role(ctx)?;
-            Ok(pb::message("eve.planet.skyhook.admin.api.ChangeOwnerResponse").must_to_any())
+            pb::message("eve.planet.skyhook.admin.api.ChangeOwnerResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -504,9 +516,10 @@ pub fn register_economy_planetary_industry_handlers(
     router.register_handler(
         "eve.planet.skyhook.api.GetReinforcementExitHourRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(pb::message("eve.planet.skyhook.api.GetReinforcementExitHourResponse")
+            pb::message("eve.planet.skyhook.api.GetReinforcementExitHourResponse")
                 .set("reinforcement_exit_hour", 18u32) // 18:00 UTC
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -514,10 +527,11 @@ pub fn register_economy_planetary_industry_handlers(
     router.register_handler(
         "eve.planet.skyhook.api.GetStateRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(pb::message("eve.planet.skyhook.api.GetStateResponse")
+            pb::message("eve.planet.skyhook.api.GetStateResponse")
                 .set("state", pb::enum_name("STATE_SHIELD_VULNERABLE"))
                 .set("no_timer", true)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -527,13 +541,14 @@ pub fn register_economy_planetary_industry_handlers(
         Arc::new(move |ctx, _any, dyn_msg| {
             let col_id = extract_u64_from_field(dyn_msg, 1);
             let cid = ctx.effective_character_id().unwrap_or(0) as u32;
-            Ok(pb::message("eve.planetinteraction.collector.GetResponse")
+            pb::message("eve.planetinteraction.collector.GetResponse")
                 .set_with("collector", |attrs| {
                     attrs
                         .set("character.sequential", cid)
                         .set("planet.sequential", col_id.max(1))
                 })
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -543,13 +558,14 @@ pub fn register_economy_planetary_industry_handlers(
         Arc::new(move |ctx, _any, dyn_msg| {
             let fact_id = extract_u64_from_field(dyn_msg, 1);
             let cid = ctx.effective_character_id().unwrap_or(0) as u32;
-            Ok(pb::message("eve.planetinteraction.factory.GetResponse")
+            pb::message("eve.planetinteraction.factory.GetResponse")
                 .set_with("factory", |attrs| {
                     attrs
                         .set("character.sequential", cid)
                         .set("planet.sequential", fact_id.max(1))
                 })
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -558,13 +574,14 @@ pub fn register_economy_planetary_industry_handlers(
         "eve.planetinteraction.schematic.GetRequest",
         Arc::new(move |_ctx, _any, dyn_msg| {
             let sch_id = extract_u64_from_field(dyn_msg, 1);
-            Ok(pb::message("eve.planetinteraction.schematic.GetResponse")
+            pb::message("eve.planetinteraction.schematic.GetResponse")
                 .set_with("schematic", |attrs| {
                     attrs
                         .set("cycle_time_sec", 3600u32) // 1h cycle
                         .set("schematic_name", format!("PI Schematic #{sch_id}"))
                 })
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -574,13 +591,14 @@ pub fn register_economy_planetary_industry_handlers(
         Arc::new(move |ctx, _any, dyn_msg| {
             let store_id = extract_u64_from_field(dyn_msg, 1);
             let cid = ctx.effective_character_id().unwrap_or(0) as u32;
-            Ok(pb::message("eve.planetinteraction.storage.GetResponse")
+            pb::message("eve.planetinteraction.storage.GetResponse")
                 .set_with("storage", |attrs| {
                     attrs
                         .set("character.sequential", cid)
                         .set("planet.sequential", store_id.max(1))
                 })
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -591,13 +609,14 @@ pub fn register_economy_planetary_industry_handlers(
         Arc::new(move |ctx, _any, dyn_msg| {
             let sys_id = caller_solar_system(ctx, &db_moon);
             let moon_id = extract_u64_from_field(dyn_msg, 1);
-            Ok(pb::message("eve.moon.GetResponse")
+            pb::message("eve.moon.GetResponse")
                 .set_with("attributes", |attrs| {
                     attrs
                         .set("name", format!("Moon #{moon_id}"))
                         .set("solar_system.sequential", sys_id)
                 })
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -610,7 +629,7 @@ pub fn register_economy_planetary_industry_handlers(
             for i in 1..=4 {
                 resp = resp.add_with("moons", |m| m.set("sequential", planet_id * 10 + i));
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -621,13 +640,14 @@ pub fn register_economy_planetary_industry_handlers(
         Arc::new(move |ctx, _any, dyn_msg| {
             let sys_id = caller_solar_system(ctx, &db_belt);
             let belt_id = extract_u64_from_field(dyn_msg, 1);
-            Ok(pb::message("eve.asteroidbelt.GetResponse")
+            pb::message("eve.asteroidbelt.GetResponse")
                 .set_with("attributes", |attrs| {
                     attrs
                         .set("name", format!("Asteroid Belt #{belt_id}"))
                         .set("solar_system.sequential", sys_id)
                 })
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -640,7 +660,7 @@ pub fn register_economy_planetary_industry_handlers(
             for i in 1..=2 {
                 resp = resp.add_with("belts", |b| b.set("sequential", planet_id * 100 + i));
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -672,7 +692,7 @@ pub fn register_economy_planetary_industry_handlers(
                     });
                 }
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -704,15 +724,24 @@ pub fn register_economy_planetary_industry_handlers(
                 }
                 Ok(())
             })?;
-            let notice = pb::message("eve.isk.wallet.api.GrantCommanded")
+            match pb::message("eve.isk.wallet.api.GrantCommanded")
                 .set("from_wallet_owner", true)
                 .set_with("amount", |a| a.set("units", amount.max(0)).set("nanos", 0i32))
-                .must_to_any();
-            isk_notices
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .push((NoticeScope::Character(caller as u32), notice));
-            Ok(pb::message("eve.isk.wallet.api.TransferByOwnerResponse").must_to_any())
+                .to_any()
+            {
+                Ok(notice) => isk_notices
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((NoticeScope::Character(caller as u32), notice)),
+                Err(e) => tracing::warn!(
+                    character_id = caller,
+                    error = %e,
+                    "failed to encode GrantCommanded notice"
+                ),
+            }
+            pb::message("eve.isk.wallet.api.TransferByOwnerResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -728,9 +757,10 @@ pub fn register_economy_planetary_industry_handlers(
                 },
                 _ => 1,
             };
-            Ok(pb::message("eve.localization.message.api.GetLocalizedTextResponse")
+            pb::message("eve.localization.message.api.GetLocalizedTextResponse")
                 .set("text", format!("LocalizedText#{seq}"))
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -738,9 +768,10 @@ pub fn register_economy_planetary_industry_handlers(
     router.register_handler(
         "eve.localization.cerberus.api.GetLocalizedTextRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(pb::message("eve.localization.cerberus.api.GetLocalizedTextResponse")
+            pb::message("eve.localization.cerberus.api.GetLocalizedTextResponse")
                 .set("text", "CerberusLocalizedText")
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -748,7 +779,9 @@ pub fn register_economy_planetary_industry_handlers(
     router.register_handler(
         "eve.killmail.Attributes",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(pb::message("eve.killmail.Attributes").must_to_any())
+            pb::message("eve.killmail.Attributes")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -757,9 +790,10 @@ pub fn register_economy_planetary_industry_handlers(
         "eve.id.api.GetRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
             let uid = ctx.effective_user_id().unwrap_or(1) as i32;
-            Ok(pb::message("eve.id.api.GetResponse")
+            pb::message("eve.id.api.GetResponse")
                 .set_with("id", |attrs| attrs.add_with("users", |u| u.set("sequential", uid)))
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -775,9 +809,10 @@ pub fn register_economy_planetary_industry_handlers(
                 _ => ctx.effective_user_id().unwrap_or(1) as u64,
             };
             let uuid_str = format!("usr-{:016x}", uid);
-            Ok(pb::message("eve.id.api.GetByUserResponse")
+            pb::message("eve.id.api.GetByUserResponse")
                 .set("id.uuid", uuid_str.into_bytes())
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -797,7 +832,7 @@ pub fn register_economy_planetary_industry_handlers(
             let username = db_id_legacy.with_snapshot(|snap| {
                 snap.accounts.values().find(|a| a.user_id == uid).map(|a| a.username.clone())
             }).unwrap_or_else(|| format!("pilot_{uid}"));
-            Ok(pb::message("eve.id.legacy.api.GetUserResponse")
+            pb::message("eve.id.legacy.api.GetUserResponse")
                 .set("username", &username)
                 .set_with("email", |email| {
                     email
@@ -805,7 +840,8 @@ pub fn register_economy_planetary_industry_handlers(
                         .set("verified", true)
                 })
                 .set("eula_agreed", true)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 }

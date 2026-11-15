@@ -628,7 +628,8 @@ pub fn register_handlers(
                 } else {
                     msg = msg.set("no_expiry", true);
                 }
-                Ok(msg.must_to_any())
+                msg.to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -655,7 +656,8 @@ pub fn register_handlers(
                 for cid in camp_ids {
                     msg = msg.add_with("campaigns", |c| c.set("sequential", cid));
                 }
-                Ok(msg.must_to_any())
+                msg.to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -674,7 +676,8 @@ pub fn register_handlers(
                 for sys_id in systems {
                     msg = msg.add_with("systems", |s| s.set("sequential", sys_id as u64));
                 }
-                Ok(msg.must_to_any())
+                msg.to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -705,7 +708,8 @@ pub fn register_handlers(
                     pb::message("eve.pirate.insurgency.api.GetForWarzoneResponse")
                         .set("no_campaign", true)
                 };
-                Ok(msg.must_to_any())
+                msg.to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -737,17 +741,16 @@ pub fn register_handlers(
                     (pts, stage)
                 });
                 let pts_num = c_pts.max(0) as u64;
-                Ok(
-                    pb::message("eve_public.pirate.corruption.api.GetSystemInfoResponse")
-                        .set("total_progress.numerator", pts_num)
-                        .set("total_progress.denominator", 1000u64)
-                        .set("eve_contribution.numerator", pts_num)
-                        .set("eve_contribution.denominator", 1000u64)
-                        .set("vanguard_contribution.numerator", 0u64)
-                        .set("vanguard_contribution.denominator", 1000u64)
-                        .set("stage", c_stage)
-                        .must_to_any(),
-                )
+                pb::message("eve_public.pirate.corruption.api.GetSystemInfoResponse")
+                    .set("total_progress.numerator", pts_num)
+                    .set("total_progress.denominator", 1000u64)
+                    .set("eve_contribution.numerator", pts_num)
+                    .set("eve_contribution.denominator", 1000u64)
+                    .set("vanguard_contribution.numerator", 0u64)
+                    .set("vanguard_contribution.denominator", 1000u64)
+                    .set("stage", c_stage)
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -762,7 +765,8 @@ pub fn register_handlers(
                         f.set("numerator", threshold).set("denominator", 1000u64)
                     });
                 }
-                Ok(msg.must_to_any())
+                msg.to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -794,17 +798,16 @@ pub fn register_handlers(
                     (pts, stage)
                 });
                 let pts_num = s_pts.max(0) as u64;
-                Ok(
-                    pb::message("eve_public.pirate.suppression.api.GetSystemInfoResponse")
-                        .set("total_progress.numerator", pts_num)
-                        .set("total_progress.denominator", 1000u64)
-                        .set("stage", s_stage)
-                        .set("eve_contribution.numerator", pts_num)
-                        .set("eve_contribution.denominator", 1000u64)
-                        .set("vanguard_contribution.numerator", 0u64)
-                        .set("vanguard_contribution.denominator", 1000u64)
-                        .must_to_any(),
-                )
+                pb::message("eve_public.pirate.suppression.api.GetSystemInfoResponse")
+                    .set("total_progress.numerator", pts_num)
+                    .set("total_progress.denominator", 1000u64)
+                    .set("stage", s_stage)
+                    .set("eve_contribution.numerator", pts_num)
+                    .set("eve_contribution.denominator", 1000u64)
+                    .set("vanguard_contribution.numerator", 0u64)
+                    .set("vanguard_contribution.denominator", 1000u64)
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -819,7 +822,8 @@ pub fn register_handlers(
                         f.set("numerator", threshold).set("denominator", 1000u64)
                     });
                 }
-                Ok(msg.must_to_any())
+                msg.to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -993,7 +997,8 @@ pub fn register_handlers(
                 } else {
                     pb::message("eve_public.stargate.lock.api.GetResponse")
                 };
-                Ok(msg.must_to_any())
+                msg.to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -1020,7 +1025,8 @@ pub fn register_handlers(
                             )
                         })
                     });
-                Ok(msg.must_to_any())
+                msg.to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -1110,17 +1116,21 @@ pub fn register_handlers(
                     Some(cid) => NoticeScope::Character(cid),
                     None => NoticeScope::Broadcast,
                 };
-                let notice = pb::message("eve.ai.assistant.chat.api.Queried")
+                match pb::message("eve.ai.assistant.chat.api.Queried")
                     .set("message", &query)
                     .set("response", &response_text)
                     .set("fallback", is_fallback)
-                    .must_to_any();
-                pending_ai
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push((scope, notice));
+                    .to_any()
+                {
+                    Ok(notice) => pending_ai
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push((scope, notice)),
+                    Err(e) => tracing::warn!("failed to encode AI chat Queried notice: {e}"),
+                }
 
-                Ok(resp.must_to_any())
+                resp.to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -1194,7 +1204,8 @@ pub fn register_handlers(
                 } else {
                     pb::message("eve_public.space.api.cdn.GetUpdateResponse")
                 };
-                Ok(msg.must_to_any())
+                msg.to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }

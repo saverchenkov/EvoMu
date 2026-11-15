@@ -14,8 +14,8 @@ use super::quasar_freelance_defs::{
 };
 use super::quasar_social_chat::{ctx_now_unix, ctx_queue_notice};
 use crate::quasar_gateway::{
-    NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
-    STATUS_UNAUTHORIZED,
+    NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
+    STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND, STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
 use eve_proto::pb;
@@ -189,7 +189,7 @@ impl QuasarFreelanceState {
     }
 }
 
-fn encode_project_attributes(proj: &FreelanceProjectRecord) -> Vec<u8> {
+fn try_encode_project_attributes(proj: &FreelanceProjectRecord) -> Result<Vec<u8>, pb::PbError> {
     pb::message("eve_public.freelance.project.Attributes")
         .set("owner.sequential", proj.owner_corp_id)
         .set("creator.sequential", proj.creator_char_id)
@@ -204,7 +204,22 @@ fn encode_project_attributes(proj: &FreelanceProjectRecord) -> Vec<u8> {
             proj.committed_participants.len().max(proj.contributors.len()) as u32,
         )
         .set("total_contributors", proj.contributors.len() as u32)
-        .must_encode()
+        .encode()
+}
+
+#[cfg(test)]
+fn encode_project_attributes(proj: &FreelanceProjectRecord) -> Vec<u8> {
+    try_encode_project_attributes(proj).unwrap_or_else(|e| {
+        tracing::warn!("failed to encode freelance project attributes: {e}");
+        Vec::new()
+    })
+}
+
+fn queue_freelance_notice(scope: NoticeScope, builder: pb::ProtoBuilder, now_unix: u64) {
+    match builder.to_any() {
+        Ok(notice_any) => ctx_queue_notice(scope, notice_any, now_unix),
+        Err(e) => tracing::warn!("failed to encode freelance notice: {e}"),
+    }
 }
 
 fn check_corp_admin_role(
@@ -450,18 +465,24 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
                 .get(&uuid_vec)
-                .map(encode_project_attributes);
+                .and_then(|proj| match try_encode_project_attributes(proj) {
+                    Ok(attr) => Some(attr),
+                    Err(e) => {
+                        tracing::warn!("failed to encode CreatedNotice project attributes: {e}");
+                        None
+                    }
+                });
             let mut notice = pb::message("eve_public.freelance.project.api.CreatedNotice")
                 .set("project.uuid", uuid_vec.as_slice());
             if let Some(attr) = created_proj.as_deref() {
                 notice = notice.set_raw_message("attributes", attr);
             }
-            let notice_any = notice.must_to_any();
-            ctx_queue_notice(NoticeScope::Corporation(corpid), notice_any, now_u);
+            queue_freelance_notice(NoticeScope::Corporation(corpid), notice, now_u);
 
-            Ok(pb::message("eve_public.freelance.project.api.CreateResponse")
+            pb::message("eve_public.freelance.project.api.CreateResponse")
                 .set("created.project.uuid", uuid_vec.as_slice())
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -483,14 +504,16 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             let (char_prog, unredeemed) = proj.contributors.get(&cid).copied().unwrap_or((0, 0));
             // V24 `ParticipationState`: 1 = COMMITTED, 0 = UNSPECIFIED (not participating).
             let participant_state = i32::from(proj.committed_participants.contains(&cid));
-            let attr = encode_project_attributes(&proj);
+            let attr = try_encode_project_attributes(&proj)
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))?;
 
-            Ok(pb::message("eve_public.freelance.project.api.GetResponse")
+            pb::message("eve_public.freelance.project.api.GetResponse")
                 .set_raw_message("project", &attr)
                 .set("state", participant_state)
                 .set("progress", char_prog.max(0) as u64)
                 .set("units_unredeemed", unredeemed.max(0) as u64)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -515,14 +538,16 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 check_corp_admin_role(ctx, state_mgr.db.as_ref(), cid, proj.owner_corp_id)?;
             }
             let (char_prog, unredeemed) = proj.contributors.get(&cid).copied().unwrap_or((0, 0));
-            let attr = encode_project_attributes(&proj);
-            Ok(pb::message("eve_public.freelance.project.api.GetForManagerResponse")
+            let attr = try_encode_project_attributes(&proj)
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))?;
+            pb::message("eve_public.freelance.project.api.GetForManagerResponse")
                 .set_raw_message("project", &attr)
                 .set("admin_project_details.no_acl", true)
                 .set("state", i32::from(proj.committed_participants.contains(&cid)))
                 .set("progress", char_prog.max(0) as u64)
                 .set("units_unredeemed", unredeemed.max(0) as u64)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -548,7 +573,8 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             for u in &uuids {
                 b = b.add_with("projects", |m| m.set("uuid", u.as_slice()));
             }
-            Ok(b.must_to_any())
+            b.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -569,7 +595,8 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             for u in &uuids {
                 b = b.add_with("projects", |m| m.set("uuid", u.as_slice()));
             }
-            Ok(b.must_to_any())
+            b.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -591,7 +618,9 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             for u in &slice {
                 b = b.add_with("projects", |m| m.set("uuid", u.as_slice()));
             }
-            Ok(b.set_opt("next_page.token", next_tok.as_deref()).must_to_any())
+            b.set_opt("next_page.token", next_tok.as_deref())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -621,7 +650,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 .map(|p| p.uuid.clone())
                 .collect();
             uuids.sort();
-            Ok(pb::message("eve_public.freelance.project.api.GetAllBroadcastedResponse")
+            pb::message("eve_public.freelance.project.api.GetAllBroadcastedResponse")
                 .add_with("broadcasted", |mut b| {
                     b = b.set("solar_system.sequential", sys_id);
                     for u in &uuids {
@@ -629,7 +658,8 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     }
                     b
                 })
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -654,7 +684,8 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             for u in &uuids {
                 b = b.add_with("projects", |m| m.set("uuid", u.as_slice()));
             }
-            Ok(b.must_to_any())
+            b.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -680,7 +711,9 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             for u in &slice {
                 b = b.add_with("projects", |m| m.set("uuid", u.as_slice()));
             }
-            Ok(b.set_opt("next_page.token", next_tok.as_deref()).must_to_any())
+            b.set_opt("next_page.token", next_tok.as_deref())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -716,7 +749,9 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                         .set_opt("progress", contrib.map(|(prog, _)| prog.max(0) as u64))
                 });
             }
-            Ok(b.set_opt("next_page.token", next_tok.as_deref()).must_to_any())
+            b.set_opt("next_page.token", next_tok.as_deref())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -756,7 +791,8 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 });
             }
 
-            Ok(b.must_to_any())
+            b.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -764,13 +800,14 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.freelance.project.api.GetCreationLimitsRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(pb::message("eve_public.freelance.project.api.GetCreationLimitsResponse")
+            pb::message("eve_public.freelance.project.api.GetCreationLimitsResponse")
                 .set("max_active_projects_per_corporation", 100u32)
                 .set("max_active_projects_broadcast_per_system", 50u32)
                 .set("max_character_age_days", 30u32)
                 .set("max_broadcasting_locations_per_project", 10u32)
                 .set("max_committed_participants_per_project", 500u32)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -778,9 +815,10 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.freelance.project.api.GetCreationPricesRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(pb::message("eve_public.freelance.project.api.GetCreationPricesResponse")
+            pb::message("eve_public.freelance.project.api.GetCreationPricesResponse")
                 .set("prices.base_fee_per_day.units", 10_000_000i64)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -788,10 +826,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.freelance.project.api.GetCommitLimitsRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(pb::message("eve_public.freelance.project.api.GetCommitLimitsResponse")
+            pb::message("eve_public.freelance.project.api.GetCommitLimitsResponse")
                 .set("max_active_projects_per_participant", 10u32)
                 .set("max_committed_participants_per_project", 500u32)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -827,9 +866,10 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             }
             if !active {
                 // V24 `CommitResponse.invalid_project_state = 3`.
-                return Ok(pb::message("eve_public.freelance.project.api.CommitResponse")
+                return pb::message("eve_public.freelance.project.api.CommitResponse")
                     .set_with("invalid_project_state", |m| m)
-                    .must_to_any());
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()));
             }
             state_commit.refresh_from_db(now_u);
 
@@ -843,19 +883,19 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     (c as u32, c.max(p.contributors.len()) as u32)
                 })
                 .unwrap_or((1, 1));
-            ctx_queue_notice(
+            queue_freelance_notice(
                 NoticeScope::Corporation(corpid),
                 pb::message("eve_public.freelance.project.api.ParticipantAddedNotice")
                     .set("project.uuid", uuid.as_slice())
                     .set("committed_participants", comm_cnt)
-                    .set("total_participants", tot_cnt)
-                    .must_to_any(),
+                    .set("total_participants", tot_cnt),
                 now_u,
             );
 
-            Ok(pb::message("eve_public.freelance.project.api.CommitResponse")
+            pb::message("eve_public.freelance.project.api.CommitResponse")
                 .set_with("committed", |m| m)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -886,18 +926,18 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 .get(&uuid)
                 .map(|p| p.committed_participants.len() as u32)
                 .unwrap_or(0);
-            ctx_queue_notice(
+            queue_freelance_notice(
                 NoticeScope::Corporation(corpid),
                 pb::message("eve_public.freelance.project.api.ParticipantRemovedNotice")
                     .set("project.uuid", uuid.as_slice())
-                    .set("committed_participants", comm_cnt)
-                    .must_to_any(),
+                    .set("committed_participants", comm_cnt),
                 now_u,
             );
 
-            Ok(pb::message("eve_public.freelance.project.api.ResignResponse")
+            pb::message("eve_public.freelance.project.api.ResignResponse")
                 .set_with("resigned", |m| m)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -927,18 +967,18 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             }
             state_kick.refresh_from_db(now_u);
 
-            ctx_queue_notice(
+            queue_freelance_notice(
                 NoticeScope::Character(target_cid),
                 pb::message("eve_public.freelance.project.api.ParticipantKickedNotice")
                     .set("project.uuid", uuid.as_slice())
-                    .set("participant.sequential", target_cid)
-                    .must_to_any(),
+                    .set("participant.sequential", target_cid),
                 now_u,
             );
 
-            Ok(pb::message("eve_public.freelance.project.api.KickResponse")
+            pb::message("eve_public.freelance.project.api.KickResponse")
                 .set_with("kicked", |m| m)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -975,16 +1015,16 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             }
             state_close_cmd.refresh_from_db(now_u);
 
-            ctx_queue_notice(
+            queue_freelance_notice(
                 NoticeScope::Corporation(corpid),
                 pb::message("eve_public.freelance.project.api.ClosedNotice")
-                    .set("project.uuid", uuid.as_slice())
-                    .must_to_any(),
+                    .set("project.uuid", uuid.as_slice()),
                 now_u,
             );
-            Ok(pb::message("eve_public.freelance.project.api.CloseResponse")
+            pb::message("eve_public.freelance.project.api.CloseResponse")
                 .set_with("closed", |m| m)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -1011,24 +1051,29 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
 
             // Synthetic wire wrapper: `eve_public.freelance.project.api.DeletedNotice` and
             // `DeleteResponse` are not present in `data/quasar_descriptors.sqlite`.
-            let project_id_bytes = pb::message("eve_public.freelance.project.Identifier")
+            match pb::message("eve_public.freelance.project.Identifier")
                 .set("uuid", uuid.as_slice())
-                .must_encode();
-            let notice_bytes = WireMessage {
-                fields: vec![WireField {
-                    field_number: 1,
-                    value: WireValue::LengthDelimited(project_id_bytes),
-                }],
+                .encode()
+            {
+                Ok(project_id_bytes) => {
+                    let notice_bytes = WireMessage {
+                        fields: vec![WireField {
+                            field_number: 1,
+                            value: WireValue::LengthDelimited(project_id_bytes),
+                        }],
+                    }
+                    .encode();
+                    ctx_queue_notice(
+                        NoticeScope::Corporation(corpid),
+                        GoogleAny {
+                            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.DeletedNotice"),
+                            value: notice_bytes,
+                        },
+                        now_u,
+                    );
+                }
+                Err(e) => tracing::warn!("failed to encode freelance DeletedNotice identifier: {e}"),
             }
-            .encode();
-            ctx_queue_notice(
-                NoticeScope::Corporation(corpid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.DeletedNotice"),
-                    value: notice_bytes,
-                },
-                now_u,
-            );
             let out = WireMessage {
                 fields: vec![WireField {
                     field_number: 1,
@@ -1142,16 +1187,17 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             let _ = corp_projects::redeem_freelance_reward_for_char(db, pid, cid as i64, now_u)?;
             state_redeem.refresh_from_db(now_u);
 
-            ctx_queue_notice(
+            queue_freelance_notice(
                 NoticeScope::Character(cid),
                 pb::message("eve_public.freelance.project.api.ParticipantRewardRedeemedNotice")
                     .set("project.uuid", uuid.as_slice())
-                    .set("participant.sequential", cid)
-                    .must_to_any(),
+                    .set("participant.sequential", cid),
                 now_u,
             );
 
-            Ok(pb::message("eve_public.freelance.project.api.RedeemRewardResponse").must_to_any())
+            pb::message("eve_public.freelance.project.api.RedeemRewardResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 

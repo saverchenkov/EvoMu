@@ -75,6 +75,11 @@ NON_HEX_B64_RE = re.compile(r"[G-Zg-z+/=]")
 UNIX_USER_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.\-/])/(?:Users|home)/[A-Za-z0-9_.-]+")
 WIN_USER_PATH_RE = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z]:\\+Users\\+[A-Za-z0-9_.-]+")
 
+# Non-test production Rust code must use fallible ProtoBuilder methods instead of panicking `.must_*`.
+PROTO_MUST_RE = re.compile(r"\.must_(?:to_any|encode|encode_into|to_dynamic)\s*\(")
+CFG_TEST_ATTR_RE = re.compile(r"#\[\s*cfg\([^)]*\btest\b[^)]*\)\s*\]")
+RAW_STR_PREFIX_RE = re.compile(r'(?:br|cr|r)(#*)(")')
+
 # Skip content scans on binary extensions that aren't already forbidden (e.g. PNG).
 BINARY_CONTENT_SKIP_EXTS: frozenset[str] = frozenset(
     {
@@ -139,6 +144,119 @@ def _find_large_base64(line: str) -> str | None:
     return None
 
 
+def _is_prod_rust_path(norm_path: str) -> bool:
+    if not (norm_path.startswith("crates/") and norm_path.endswith(".rs")):
+        return False
+    if "/tests/" in norm_path or norm_path.endswith("_tests.rs") or norm_path.endswith("/tests.rs"):
+        return False
+    return True
+
+
+def _iter_prod_rust_lines(text: str) -> Iterable[tuple[int, str]]:
+    """Yields (1-based lineno, comment-and-string-stripped code) outside #[cfg(test)] items."""
+    brace_depth = 0
+    block_comment_depth = 0
+    in_string = False
+    raw_hashes: int | None = None
+    cfg_test_pending = False
+    cfg_test_target_depth = 0
+    cfg_test_active_depth: int | None = None
+
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        out: list[str] = []
+        i = 0
+        n = len(line)
+        line_in_cfg_test = cfg_test_pending or cfg_test_active_depth is not None
+        while i < n:
+            ch = line[i]
+            nxt = line[i + 1] if i + 1 < n else ""
+            if block_comment_depth > 0:
+                if ch == "/" and nxt == "*":
+                    block_comment_depth += 1
+                    i += 2
+                elif ch == "*" and nxt == "/":
+                    block_comment_depth -= 1
+                    i += 2
+                else:
+                    i += 1
+                continue
+            if raw_hashes is not None:
+                if ch == '"' and line[i + 1 : i + 1 + raw_hashes] == "#" * raw_hashes:
+                    i += 1 + raw_hashes
+                    raw_hashes = None
+                    out.append('"')
+                else:
+                    i += 1
+                continue
+            if in_string:
+                if ch == "\\" and i + 1 < n:
+                    i += 2
+                elif ch == '"':
+                    in_string = False
+                    i += 1
+                    out.append('"')
+                else:
+                    i += 1
+                continue
+            if ch == "/" and nxt == "/":
+                break
+            if ch == "/" and nxt == "*":
+                block_comment_depth += 1
+                i += 2
+                continue
+            if ch in ("r", "b", "c"):
+                raw_match = RAW_STR_PREFIX_RE.match(line[i:])
+                if raw_match:
+                    raw_hashes = len(raw_match.group(1))
+                    i += len(raw_match.group(0))
+                    out.append('"')
+                    continue
+            if ch == '"':
+                in_string = True
+                i += 1
+                out.append('"')
+                continue
+            if ch == "'":
+                if i + 1 < n and line[i + 1] == "\\":
+                    j = i + 2
+                    if j < n:
+                        j += 1
+                    while j < n and line[j] != "'":
+                        j += 1
+                    i = min(j + 1, n)
+                    out.append("''")
+                    continue
+                if i + 2 < n and line[i + 2] == "'":
+                    i += 3
+                    out.append("''")
+                    continue
+            if ch == "{":
+                brace_depth += 1
+                if cfg_test_pending and brace_depth > cfg_test_target_depth:
+                    cfg_test_active_depth = cfg_test_target_depth
+                    cfg_test_pending = False
+                    line_in_cfg_test = True
+            elif ch == "}":
+                brace_depth = max(0, brace_depth - 1)
+                if cfg_test_active_depth is not None and brace_depth <= cfg_test_active_depth:
+                    cfg_test_active_depth = None
+                    line_in_cfg_test = True
+            elif ch == ";":
+                if cfg_test_pending and brace_depth <= cfg_test_target_depth:
+                    cfg_test_pending = False
+                    line_in_cfg_test = True
+            out.append(ch)
+            i += 1
+
+        code = "".join(out)
+        if not line_in_cfg_test and cfg_test_active_depth is None and CFG_TEST_ATTR_RE.search(code):
+            cfg_test_pending = True
+            cfg_test_target_depth = brace_depth
+            line_in_cfg_test = True
+        if not line_in_cfg_test:
+            yield lineno, code
+
+
 def scan_tracked_file(root: Path, rel_path: str) -> list[Violation]:
     """Scans a single tracked file for path-level and content-level violations."""
     violations: list[Violation] = []
@@ -190,9 +308,10 @@ def scan_tracked_file(root: Path, rel_path: str) -> list[Violation]:
     # If the file looks binary (contains NUL bytes), only scan ASCII lines for keys/paths
     # rather than skipping; private keys or hardcoded paths in blobs should still be caught.
     text = raw_bytes.decode("utf-8", errors="replace")
+    lines = text.splitlines()
     check_user_paths = not _is_user_path_allowlisted(norm_path)
 
-    for lineno, line in enumerate(text.splitlines(), start=1):
+    for lineno, line in enumerate(lines, start=1):
         key_match = PRIVATE_KEY_RE.search(line)
         if key_match:
             violations.append(
@@ -238,6 +357,22 @@ def scan_tracked_file(root: Path, rel_path: str) -> list[Violation]:
                         path=norm_path,
                         line=lineno,
                         detail=f"found hardcoded Windows user path '{win_match.group(0)}'",
+                    )
+                )
+
+    if _is_prod_rust_path(norm_path) and ".must_" in text:
+        for lineno, code in _iter_prod_rust_lines(text):
+            raw_line = lines[lineno - 1]
+            if ALLOW_MARKER in raw_line:
+                continue
+            must_match = PROTO_MUST_RE.search(code)
+            if must_match:
+                violations.append(
+                    Violation(
+                        rule="proto_must_in_prod",
+                        path=norm_path,
+                        line=lineno,
+                        detail=f"production code calls panicking ProtoBuilder method '{must_match.group(0)}...'",
                     )
                 )
 

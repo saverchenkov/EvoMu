@@ -7,7 +7,8 @@
 
 use super::quasar_social_chat::ctx_queue_notice;
 use crate::quasar_gateway::{
-    require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_NOT_FOUND,
+    require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST,
+    STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
 };
 use eve_db::WorldRepository;
 use eve_proto::pb;
@@ -130,7 +131,12 @@ pub fn encode_space_location(
     constellation_id: Option<u32>,
     solar_system_id: Option<u32>,
 ) -> Vec<u8> {
-    build_space_location(region_id, constellation_id, solar_system_id).must_encode()
+    build_space_location(region_id, constellation_id, solar_system_id)
+        .encode()
+        .unwrap_or_else(|e| {
+            tracing::warn!("failed to encode space location: {e}");
+            Vec::new()
+        })
 }
 
 fn raw_field_bytes(raw: &[u8], field_number: u32) -> Option<Vec<u8>> {
@@ -218,7 +224,8 @@ pub fn register_handlers(
                             locs
                         })
                 };
-                Ok(rsp.must_to_any())
+                rsp.to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -235,7 +242,8 @@ pub fn register_handlers(
                 for sid in ids {
                     out = out.add_with("solar_systems", |s| s.set("sequential", sid as u64));
                 }
-                Ok(out.must_to_any())
+                out.to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -266,7 +274,8 @@ pub fn register_handlers(
                         build_space_location(s.region_id, Some(s.constellation_id), Some(sid)),
                     );
                 }
-                Ok(out.must_to_any())
+                out.to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -288,7 +297,7 @@ pub fn register_handlers(
                 let sys = sde_st.solar_systems.get(&st.solar_system_id).ok_or_else(|| {
                     (STATUS_NOT_FOUND, format!("Solar system {} not found", st.solar_system_id))
                 })?;
-                Ok(pb::message("eve.space.npcstation.api.GetResponse")
+                pb::message("eve.space.npcstation.api.GetResponse")
                     .set(
                         "location",
                         build_space_location(
@@ -298,7 +307,8 @@ pub fn register_handlers(
                         ),
                     )
                     .set("owner.sequential", st.owner_corporation_id as u32)
-                    .must_to_any())
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -318,9 +328,10 @@ pub fn register_handlers(
                     .stations
                     .get(&(st_id as i64))
                     .ok_or_else(|| (STATUS_NOT_FOUND, format!("Station {st_id} not found")))?;
-                Ok(pb::message("eve_public.station.api.GetResponse")
+                pb::message("eve_public.station.api.GetResponse")
                     .set("station.name", &st.name)
-                    .must_to_any())
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -340,12 +351,13 @@ pub fn register_handlers(
                     .stations
                     .get(&(st_id as i64))
                     .ok_or_else(|| (STATUS_NOT_FOUND, format!("Station {st_id} not found")))?;
-                Ok(pb::message("eve.station.GetResponse")
+                pb::message("eve.station.GetResponse")
                     .set("attributes.name", &st.name)
                     .set("attributes.solar_system.sequential", st.solar_system_id as u64)
                     .set("attributes.type.sequential", st.station_type_id as u64)
                     .set("attributes.owner.sequential", st.owner_corporation_id as u32)
-                    .must_to_any())
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -365,9 +377,10 @@ pub fn register_handlers(
                     .stations
                     .get(&(st_id as i64))
                     .ok_or_else(|| (STATUS_NOT_FOUND, format!("Station {st_id} not found")))?;
-                Ok(pb::message("eve.station.GetNameResponse")
+                pb::message("eve.station.GetNameResponse")
                     .set("name", &st.name)
-                    .must_to_any())
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -389,7 +402,8 @@ pub fn register_handlers(
                         out = out.add_with("stations", |s| s.set("sequential", st.station_id as u64));
                     }
                 }
-                Ok(out.must_to_any())
+                out.to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -441,14 +455,17 @@ pub fn register_handlers(
                 }
                 save(&db_m, &state);
 
-                let not_msg = pb::message("eve.space.measurement.api.Recorded")
+                match pb::message("eve.space.measurement.api.Recorded")
                     .set("identifier.name", &name)
                     .when(!loc_bytes.is_empty(), |m| {
                         m.set_raw_message("measurement.location", &loc_bytes)
                     })
                     .set("measurement.value", val)
-                    .must_to_any();
-                ctx_queue_notice(NoticeScope::Broadcast, not_msg, ctx.now_unix());
+                    .to_any()
+                {
+                    Ok(not_msg) => ctx_queue_notice(NoticeScope::Broadcast, not_msg, ctx.now_unix()),
+                    Err(e) => tracing::warn!("failed to encode measurement Recorded notice: {e}"),
+                }
                 Ok(any(rsp_name, Vec::new()))
             }),
         );
@@ -488,7 +505,8 @@ pub fn register_handlers(
                             .set("value", v)
                     });
                 }
-                Ok(out.must_to_any())
+                out.to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -535,7 +553,10 @@ pub fn register_handlers(
                 for t in &tags {
                     not = not.add_with("tags", |tb| tb.set("name", t));
                 }
-                ctx_queue_notice(NoticeScope::Broadcast, not.must_to_any(), ctx.now_unix());
+                match not.to_any() {
+                    Ok(notice) => ctx_queue_notice(NoticeScope::Broadcast, notice, ctx.now_unix()),
+                    Err(e) => tracing::warn!("failed to encode space tag notice: {e}"),
+                }
                 Ok(any("eve.space.tag.admin.api.ApplyResponse", Vec::new()))
             }),
         );
@@ -565,7 +586,10 @@ pub fn register_handlers(
                 for t in &tags {
                     not = not.add_with("tags", |tb| tb.set("name", t));
                 }
-                ctx_queue_notice(NoticeScope::Broadcast, not.must_to_any(), ctx.now_unix());
+                match not.to_any() {
+                    Ok(notice) => ctx_queue_notice(NoticeScope::Broadcast, notice, ctx.now_unix()),
+                    Err(e) => tracing::warn!("failed to encode space tag notice: {e}"),
+                }
                 Ok(any("eve.space.tag.admin.api.RemoveResponse", Vec::new()))
             }),
         );
@@ -577,7 +601,7 @@ pub fn register_handlers(
             "eve.space.location.api.GetTagsRequest",
             Arc::new(move |_ctx, _any, msg| {
                 let state = load(&db_gt);
-                Ok(pb::message("eve.space.location.api.GetTagsResponse")
+                pb::message("eve.space.location.api.GetTagsResponse")
                     .set_with("locations", |mut locs| {
                         for req_loc in repeated(msg, 1) {
                             if let Some(loc_bytes) = resolve_location_from_req(&sde_gt, req_loc) {
@@ -597,7 +621,8 @@ pub fn register_handlers(
                         }
                         locs
                     })
-                    .must_to_any())
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -622,7 +647,8 @@ pub fn register_handlers(
                         });
                     }
                 }
-                Ok(out.must_to_any())
+                out.to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -646,7 +672,8 @@ pub fn register_handlers(
                         out = out.add("locations", pb::raw_message(hex_decode(lh)));
                     }
                 }
-                Ok(out.must_to_any())
+                out.to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }

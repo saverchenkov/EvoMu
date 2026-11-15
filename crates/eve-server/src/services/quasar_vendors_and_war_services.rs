@@ -15,7 +15,7 @@
 #![forbid(unsafe_code)]
 
 use crate::quasar_gateway::{
-    NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST,
+    NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_INTERNAL_ERROR,
 };
 use eve_db::{IskCents, WorldRepository};
 use eve_proto::pb::{self, ProtoBuilder};
@@ -45,6 +45,33 @@ fn wrap_wire_bytes(field_num: u32, inner: Vec<u8>, out: &mut Vec<u8>) {
     out.extend_from_slice(&msg.encode());
 }
 
+fn wrap_builder_field(field_num: u32, builder: ProtoBuilder, label: &str, out: &mut Vec<u8>) {
+    match builder.encode() {
+        Ok(inner) => wrap_wire_bytes(field_num, inner, out),
+        Err(e) => tracing::warn!("failed to encode {label}: {e}"),
+    }
+}
+
+fn encode_or_warn(builder: ProtoBuilder, label: &str) -> Vec<u8> {
+    builder.encode().unwrap_or_else(|e| {
+        tracing::warn!("failed to encode {label}: {e}");
+        Vec::new()
+    })
+}
+
+fn publish_proto_notice(
+    gateway: &PublicGatewayRouter,
+    scope: NoticeScope,
+    builder: ProtoBuilder,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let any_msg = builder
+        .to_any()
+        .map_err(|e| eve_proto::BridgeRpcError::user_error(e.to_string()))?;
+    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
+    Ok(delivered)
+}
+
 fn ts_unix(unix_secs: u64) -> GoogleTimestamp {
     GoogleTimestamp::from_unix(unix_secs as i64, 0)
 }
@@ -58,11 +85,21 @@ fn isk_currency_builder(cents: IskCents) -> ProtoBuilder {
 }
 
 pub fn encode_id_msg(field_num: u32, id: u64, out: &mut Vec<u8>) {
-    wrap_wire_bytes(field_num, pb::message("eve.solarsystem.Identifier").set("sequential", id).must_encode(), out);
+    wrap_builder_field(
+        field_num,
+        pb::message("eve.solarsystem.Identifier").set("sequential", id),
+        "eve.solarsystem.Identifier",
+        out,
+    );
 }
 
 pub fn encode_uuid_msg(field_num: u32, uuid: &[u8], out: &mut Vec<u8>) {
-    wrap_wire_bytes(field_num, pb::message("eve.tournament.arena.Identifier").set("uuid", uuid).must_encode(), out);
+    wrap_builder_field(
+        field_num,
+        pb::message("eve.tournament.arena.Identifier").set("uuid", uuid),
+        "eve.tournament.arena.Identifier",
+        out,
+    );
 }
 
 pub fn encode_timestamp_field(field_num: u32, unix_secs: u64, out: &mut Vec<u8>) {
@@ -74,7 +111,7 @@ pub fn encode_timestamp_field(field_num: u32, unix_secs: u64, out: &mut Vec<u8>)
 }
 
 pub fn encode_isk_currency(field_num: u32, cents: IskCents, out: &mut Vec<u8>) {
-    wrap_wire_bytes(field_num, isk_currency_builder(cents).must_encode(), out);
+    wrap_builder_field(field_num, isk_currency_builder(cents), "eve.isk.Currency", out);
 }
 
 fn extract_u64_checked(msg: &DynamicQuasarMessage, field_num: u32) -> Result<Option<u64>, (u32, String)> {
@@ -134,6 +171,23 @@ fn extract_uuid_bytes(msg: &DynamicQuasarMessage, field_num: u32) -> Option<Vec<
 // 1. ThirdPartyApi Domain Encoders & Notice Publishers
 // ============================================================================
 
+fn thirdpartyapi_request_received_builder(
+    char_id: i32,
+    datasource: &str,
+    route: &str,
+    http_verb: u32,
+    user_agent: &str,
+    now_unix: u64,
+) -> ProtoBuilder {
+    pb::message("eve.thirdpartyapi.RequestReceived")
+        .set("timestamp", ts_unix(now_unix))
+        .when(char_id != 0, |b| b.set("character_id", char_id))
+        .when(!datasource.is_empty(), |b| b.set("datasource", datasource))
+        .when(!route.is_empty(), |b| b.set("route", route))
+        .when(http_verb != 0, |b| b.set("http_verb", http_verb as i32))
+        .when(!user_agent.is_empty(), |b| b.set("user_agent", user_agent))
+}
+
 /// Wire encoder for `eve.thirdpartyapi.RequestReceived`.
 pub fn encode_thirdpartyapi_request_received(
     char_id: i32,
@@ -143,14 +197,12 @@ pub fn encode_thirdpartyapi_request_received(
     user_agent: &str,
     now_unix: u64,
 ) -> Vec<u8> {
-    pb::message("eve.thirdpartyapi.RequestReceived")
-        .set("timestamp", ts_unix(now_unix))
-        .when(char_id != 0, |b| b.set("character_id", char_id))
-        .when(!datasource.is_empty(), |b| b.set("datasource", datasource))
-        .when(!route.is_empty(), |b| b.set("route", route))
-        .when(http_verb != 0, |b| b.set("http_verb", http_verb as i32))
-        .when(!user_agent.is_empty(), |b| b.set("user_agent", user_agent))
-        .must_encode()
+    encode_or_warn(
+        thirdpartyapi_request_received_builder(
+            char_id, datasource, route, http_verb, user_agent, now_unix,
+        ),
+        "eve.thirdpartyapi.RequestReceived",
+    )
 }
 
 pub fn publish_thirdpartyapi_request_received(
@@ -163,12 +215,14 @@ pub fn publish_thirdpartyapi_request_received(
     user_agent: &str,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let payload = encode_thirdpartyapi_request_received(
-        char_id, datasource, route, http_verb, user_agent, now_unix,
-    );
-    let any_msg = any("eve.thirdpartyapi.RequestReceived", payload);
-    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
-    Ok(delivered)
+    publish_proto_notice(
+        gateway,
+        scope,
+        thirdpartyapi_request_received_builder(
+            char_id, datasource, route, http_verb, user_agent, now_unix,
+        ),
+        now_unix,
+    )
 }
 
 // ============================================================================
@@ -176,7 +230,10 @@ pub fn publish_thirdpartyapi_request_received(
 // ============================================================================
 
 pub fn encode_tournament_identifier(uuid: &[u8]) -> Vec<u8> {
-    pb::message("eve.tournament.arena.Identifier").set("uuid", uuid).must_encode()
+    encode_or_warn(
+        pb::message("eve.tournament.arena.Identifier").set("uuid", uuid),
+        "eve.tournament.arena.Identifier",
+    )
 }
 
 fn tournament_arena_builder(
@@ -207,7 +264,17 @@ pub fn encode_tournament_arena(
     tournament_uuid: &[u8],
     ruleset_uuid: &[u8],
 ) -> Vec<u8> {
-    tournament_arena_builder(arena_uuid, name, solar_system_id, radius, tournament_uuid, ruleset_uuid).must_encode()
+    encode_or_warn(
+        tournament_arena_builder(
+            arena_uuid,
+            name,
+            solar_system_id,
+            radius,
+            tournament_uuid,
+            ruleset_uuid,
+        ),
+        "eve.tournament.arena.api.GetAllResponse.Arena",
+    )
 }
 
 fn tournament_layout_builder(name: &str, version: u64, radius: u64) -> ProtoBuilder {
@@ -218,7 +285,10 @@ fn tournament_layout_builder(name: &str, version: u64, radius: u64) -> ProtoBuil
 }
 
 pub fn encode_tournament_layout(_layout_uuid: &[u8], name: &str, version: u64, radius: u64) -> Vec<u8> {
-    tournament_layout_builder(name, version, radius).must_encode()
+    encode_or_warn(
+        tournament_layout_builder(name, version, radius),
+        "eve.tournament.arena.layout.Attributes",
+    )
 }
 
 fn tournament_ruleset_builder(name: &str, max_points: i64, max_players: i64) -> ProtoBuilder {
@@ -234,7 +304,10 @@ pub fn encode_tournament_ruleset(
     max_points: i64,
     max_players: i64,
 ) -> Vec<u8> {
-    tournament_ruleset_builder(name, max_points, max_players).must_encode()
+    encode_or_warn(
+        tournament_ruleset_builder(name, max_points, max_players),
+        "eve.tournament.ruleset.Attributes",
+    )
 }
 
 // (Tournament arena lifecycle is exposed via CreateRequest / DeleteRequest / GetAllRequest.)
@@ -244,22 +317,26 @@ pub fn encode_tournament_ruleset(
 // ============================================================================
 
 pub fn encode_ui_annotation(key: &str, value: &str) -> Vec<u8> {
-    pb::message("eve.ui.Annotation")
-        .when(!key.is_empty(), |b| b.set("key", key))
-        .when(!value.is_empty(), |b| b.set("value", value))
-        .must_encode()
+    encode_or_warn(
+        pb::message("eve.ui.Annotation")
+            .when(!key.is_empty(), |b| b.set("key", key))
+            .when(!value.is_empty(), |b| b.set("value", value)),
+        "eve.ui.Annotation",
+    )
 }
 
 pub fn encode_ui_contenttag(name: &str) -> Vec<u8> {
-    pb::message("eve.ui.contenttag.Identifier")
-        .when(!name.is_empty(), |b| b.set("name", name))
-        .must_encode()
+    encode_or_warn(
+        pb::message("eve.ui.contenttag.Identifier").when(!name.is_empty(), |b| b.set("name", name)),
+        "eve.ui.contenttag.Identifier",
+    )
 }
 
 pub fn encode_ui_icon(name: &str) -> Vec<u8> {
-    pb::message("eve.ui.icon.Identifier")
-        .when(!name.is_empty(), |b| b.set("name", name))
-        .must_encode()
+    encode_or_warn(
+        pb::message("eve.ui.icon.Identifier").when(!name.is_empty(), |b| b.set("name", name)),
+        "eve.ui.icon.Identifier",
+    )
 }
 
 /// Synthetic UI image pair wrapper (no outer `eve.ui.image.Image` message in descriptors;
@@ -267,8 +344,12 @@ pub fn encode_ui_icon(name: &str) -> Vec<u8> {
 pub fn encode_ui_image(path: &str, display_width: u32, display_height: u32) -> Vec<u8> {
     let mut out = Vec::new();
     if !path.is_empty() {
-        let id = pb::message("eve.ui.image.Identifier").set("path", path).must_encode();
-        wrap_wire_bytes(1, id, &mut out);
+        wrap_builder_field(
+            1,
+            pb::message("eve.ui.image.Identifier").set("path", path),
+            "eve.ui.image.Identifier",
+            &mut out,
+        );
     }
     let attrs = encode_ui_image_attributes(display_width, display_height);
     if !attrs.is_empty() {
@@ -278,10 +359,12 @@ pub fn encode_ui_image(path: &str, display_width: u32, display_height: u32) -> V
 }
 
 pub fn encode_ui_image_attributes(display_width: u32, display_height: u32) -> Vec<u8> {
-    pb::message("eve.ui.image.Attributes")
-        .when(display_width > 0, |b| b.set("display_width", display_width))
-        .when(display_height > 0, |b| b.set("display_height", display_height))
-        .must_encode()
+    encode_or_warn(
+        pb::message("eve.ui.image.Attributes")
+            .when(display_width > 0, |b| b.set("display_width", display_width))
+            .when(display_height > 0, |b| b.set("display_height", display_height)),
+        "eve.ui.image.Attributes",
+    )
 }
 
 // ============================================================================
@@ -291,9 +374,10 @@ pub fn encode_ui_image_attributes(display_width: u32, display_height: u32) -> Ve
 /// Synthetic single-field wrapper around `eve.solarsystem.Identifier` (no outer `eve.universe.Location` in descriptors).
 pub fn encode_universe_location(solar_system_id: u32) -> Vec<u8> {
     let mut out = Vec::new();
-    wrap_wire_bytes(
+    wrap_builder_field(
         1,
-        pb::message("eve.solarsystem.Identifier").set("sequential", u64::from(solar_system_id)).must_encode(),
+        pb::message("eve.solarsystem.Identifier").set("sequential", u64::from(solar_system_id)),
+        "eve.solarsystem.Identifier",
         &mut out,
     );
     out
@@ -302,9 +386,10 @@ pub fn encode_universe_location(solar_system_id: u32) -> Vec<u8> {
 /// Synthetic single-field wrapper around `eve.station.Identifier`.
 pub fn encode_universe_station(station_id: u32) -> Vec<u8> {
     let mut out = Vec::new();
-    wrap_wire_bytes(
+    wrap_builder_field(
         1,
-        pb::message("eve.station.Identifier").set("sequential", u64::from(station_id)).must_encode(),
+        pb::message("eve.station.Identifier").set("sequential", u64::from(station_id)),
+        "eve.station.Identifier",
         &mut out,
     );
     out
@@ -313,9 +398,10 @@ pub fn encode_universe_station(station_id: u32) -> Vec<u8> {
 /// Synthetic single-field wrapper around `eve.constellation.Identifier`.
 pub fn encode_universe_constellation(constellation_id: u32) -> Vec<u8> {
     let mut out = Vec::new();
-    wrap_wire_bytes(
+    wrap_builder_field(
         1,
-        pb::message("eve.constellation.Identifier").set("sequential", u64::from(constellation_id)).must_encode(),
+        pb::message("eve.constellation.Identifier").set("sequential", u64::from(constellation_id)),
+        "eve.constellation.Identifier",
         &mut out,
     );
     out
@@ -326,7 +412,10 @@ pub fn encode_universe_constellation(constellation_id: u32) -> Vec<u8> {
 // ============================================================================
 
 pub fn encode_vanguard_commission(commission_uuid: &[u8]) -> Vec<u8> {
-    pb::message("eve.vanguard.commission.Identifier").set("uuid", commission_uuid).must_encode()
+    encode_or_warn(
+        pb::message("eve.vanguard.commission.Identifier").set("uuid", commission_uuid),
+        "eve.vanguard.commission.Identifier",
+    )
 }
 
 fn vanguard_assignment_builder(commission_uuid: &[u8], assignment_type: &str) -> ProtoBuilder {
@@ -336,7 +425,10 @@ fn vanguard_assignment_builder(commission_uuid: &[u8], assignment_type: &str) ->
 }
 
 pub fn encode_vanguard_assignment(commission_uuid: &[u8], assignment_type: &str) -> Vec<u8> {
-    vanguard_assignment_builder(commission_uuid, assignment_type).must_encode()
+    encode_or_warn(
+        vanguard_assignment_builder(commission_uuid, assignment_type),
+        "eve.vanguard.commission.assignment.Identifier",
+    )
 }
 
 pub fn publish_vanguard_commission_completed(
@@ -349,14 +441,12 @@ pub fn publish_vanguard_commission_completed(
     faction_id: u64,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let any_msg = pb::message("eve.vanguard.commission.assignment.api.Completed")
+    let builder = pb::message("eve.vanguard.commission.assignment.api.Completed")
         .set("user.sequential", user_id as i32)
         .set("assignment", vanguard_assignment_builder(commission_uuid, assignment_type))
         .when(!commission_type.is_empty(), |b| b.set("commission_type", commission_type))
-        .when(faction_id > 0, |b| b.set("enlisted_faction.sequential", faction_id))
-        .must_to_any();
-    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
-    Ok(delivered)
+        .when(faction_id > 0, |b| b.set("enlisted_faction.sequential", faction_id));
+    publish_proto_notice(gateway, scope, builder, now_unix)
 }
 
 pub fn publish_vanguard_skirmish_completed(
@@ -366,12 +456,10 @@ pub fn publish_vanguard_skirmish_completed(
     outcome: u32,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let any_msg = pb::message("eve.vanguard.insurgency.api.SkirmishCompleted")
+    let builder = pb::message("eve.vanguard.insurgency.api.SkirmishCompleted")
         .set("campaign.sequential", campaign_id)
-        .set("outcome", outcome as i32)
-        .must_to_any();
-    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
-    Ok(delivered)
+        .set("outcome", outcome as i32);
+    publish_proto_notice(gateway, scope, builder, now_unix)
 }
 
 pub fn publish_vanguard_contract_completed(
@@ -385,9 +473,7 @@ pub fn publish_vanguard_contract_completed(
     } else {
         "eve.vanguard.contract.api.SuppressionContractCompleted"
     };
-    let any_msg = pb::message(type_name).must_to_any();
-    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
-    Ok(delivered)
+    publish_proto_notice(gateway, scope, pb::message(type_name), now_unix)
 }
 
 // ============================================================================
@@ -395,9 +481,11 @@ pub fn publish_vanguard_contract_completed(
 // ============================================================================
 
 pub fn encode_epic_user(epic_user_id: &str) -> Vec<u8> {
-    pb::message("eve.vendors.epic.user.Identifier")
-        .when(!epic_user_id.is_empty(), |b| b.set("epic_user_id", epic_user_id))
-        .must_encode()
+    encode_or_warn(
+        pb::message("eve.vendors.epic.user.Identifier")
+            .when(!epic_user_id.is_empty(), |b| b.set("epic_user_id", epic_user_id)),
+        "eve.vendors.epic.user.Identifier",
+    )
 }
 
 fn epic_entitlement_builder(
@@ -422,34 +510,47 @@ pub fn encode_epic_entitlement(
     status: &str,
     grant_unix: u64,
 ) -> Vec<u8> {
-    epic_entitlement_builder(entitlement_id, name, status, grant_unix).must_encode()
+    encode_or_warn(
+        epic_entitlement_builder(entitlement_id, name, status, grant_unix),
+        "eve.vendors.epic.api.GetEntitlementsResponse.Entitlement",
+    )
 }
 
 pub fn encode_steam_user(steam_id: &str, user_name: &str, country_code: &str) -> Vec<u8> {
-    pb::message("eve.vendors.steam.user.api.GetByEveUserResponse")
-        .set("steam_user.steam_id", steam_id)
-        .set("steam_user_attributes.user_name", user_name)
-        .set("steam_user_attributes.country_code", country_code)
-        .must_encode()
+    encode_or_warn(
+        pb::message("eve.vendors.steam.user.api.GetByEveUserResponse")
+            .set("steam_user.steam_id", steam_id)
+            .set("steam_user_attributes.user_name", user_name)
+            .set("steam_user_attributes.country_code", country_code),
+        "eve.vendors.steam.user.api.GetByEveUserResponse",
+    )
 }
 
 /// Synthetic wrapper around `eve.vendors.twitch.entitlement.{Identifier,Attributes}` (no combined message in descriptors).
 pub fn encode_twitch_entitlement(uuid: &[u8], status: &str, last_updated_unix: u64) -> Vec<u8> {
     let mut out = Vec::new();
-    let id = pb::message("eve.vendors.twitch.entitlement.Identifier").set("uuid", uuid).must_encode();
-    wrap_wire_bytes(1, id, &mut out);
-    let attrs = pb::message("eve.vendors.twitch.entitlement.Attributes")
-        .set("fulfillment_status", status)
-        .set("last_updated", ts_unix(last_updated_unix))
-        .must_encode();
-    wrap_wire_bytes(2, attrs, &mut out);
+    wrap_builder_field(
+        1,
+        pb::message("eve.vendors.twitch.entitlement.Identifier").set("uuid", uuid),
+        "eve.vendors.twitch.entitlement.Identifier",
+        &mut out,
+    );
+    wrap_builder_field(
+        2,
+        pb::message("eve.vendors.twitch.entitlement.Attributes")
+            .set("fulfillment_status", status)
+            .set("last_updated", ts_unix(last_updated_unix)),
+        "eve.vendors.twitch.entitlement.Attributes",
+        &mut out,
+    );
     out
 }
 
 pub fn encode_contentful_asset(contentful_id: &str) -> Vec<u8> {
-    pb::message("eve.vendors.contentful.asset.Identifier")
-        .set("contentful_id", contentful_id)
-        .must_encode()
+    encode_or_warn(
+        pb::message("eve.vendors.contentful.asset.Identifier").set("contentful_id", contentful_id),
+        "eve.vendors.contentful.asset.Identifier",
+    )
 }
 
 fn payletter_receipt_builder(tx_id: &str, auth_info: &str) -> ProtoBuilder {
@@ -459,7 +560,10 @@ fn payletter_receipt_builder(tx_id: &str, auth_info: &str) -> ProtoBuilder {
 }
 
 pub fn encode_payletter_receipt(tx_id: &str, auth_info: &str) -> Vec<u8> {
-    payletter_receipt_builder(tx_id, auth_info).must_encode()
+    encode_or_warn(
+        payletter_receipt_builder(tx_id, auth_info),
+        "eve.vendors.payletter.IdentityVerificationReceipt",
+    )
 }
 
 pub fn publish_twitch_drop_received(
@@ -470,13 +574,11 @@ pub fn publish_twitch_drop_received(
     offer_id: u64,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let any_msg = pb::message("eve.vendors.twitch.entitlement.api.DropEventReceived")
+    let builder = pb::message("eve.vendors.twitch.entitlement.api.DropEventReceived")
         .set("entitlement.uuid", entitlement_uuid)
         .set("user.sequential", user_id as i32)
-        .set("offer.sequential", offer_id as u32)
-        .must_to_any();
-    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
-    Ok(delivered)
+        .set("offer.sequential", offer_id as u32);
+    publish_proto_notice(gateway, scope, builder, now_unix)
 }
 
 pub fn publish_fusionauth_user_linked(
@@ -486,12 +588,10 @@ pub fn publish_fusionauth_user_linked(
     eve_user_id: u64,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let any_msg = pb::message("eve.vendors.fusionauth.api.UserLinked")
+    let builder = pb::message("eve.vendors.fusionauth.api.UserLinked")
         .set("user.uuid", fa_uuid)
-        .set("eve_user.sequential", eve_user_id as i32)
-        .must_to_any();
-    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
-    Ok(delivered)
+        .set("eve_user.sequential", eve_user_id as i32);
+    publish_proto_notice(gateway, scope, builder, now_unix)
 }
 
 // ============================================================================
@@ -499,7 +599,10 @@ pub fn publish_fusionauth_user_linked(
 // ============================================================================
 
 pub fn encode_war_identifier(war_id: u64) -> Vec<u8> {
-    pb::message("eve.war.Identifier").set("sequential", war_id).must_encode()
+    encode_or_warn(
+        pb::message("eve.war.Identifier").set("sequential", war_id),
+        "eve.war.Identifier",
+    )
 }
 
 fn war_entity_identifier_builder(alliance_id: Option<u64>, corp_id: Option<u64>) -> ProtoBuilder {
@@ -514,7 +617,10 @@ fn war_entity_identifier_builder(alliance_id: Option<u64>, corp_id: Option<u64>)
 }
 
 pub fn encode_war_entity_identifier(alliance_id: Option<u64>, corp_id: Option<u64>) -> Vec<u8> {
-    war_entity_identifier_builder(alliance_id, corp_id).must_encode()
+    encode_or_warn(
+        war_entity_identifier_builder(alliance_id, corp_id),
+        "eve.war.entity.Identifier",
+    )
 }
 
 fn war_attributes_builder(
@@ -542,7 +648,10 @@ pub fn encode_war_attributes(
     open_allies: bool,
     now_unix: u64,
 ) -> Vec<u8> {
-    war_attributes_builder(aggressor_corp, defender_corp, mutual, open_allies, now_unix).must_encode()
+    encode_or_warn(
+        war_attributes_builder(aggressor_corp, defender_corp, mutual, open_allies, now_unix),
+        "eve.war.Attributes",
+    )
 }
 
 fn war_destruction_statistics_builder(ships: u64, isk: u64) -> ProtoBuilder {
@@ -552,7 +661,10 @@ fn war_destruction_statistics_builder(ships: u64, isk: u64) -> ProtoBuilder {
 }
 
 pub fn encode_war_destruction_statistics(ships: u64, isk: u64) -> Vec<u8> {
-    war_destruction_statistics_builder(ships, isk).must_encode()
+    encode_or_warn(
+        war_destruction_statistics_builder(ships, isk),
+        "eve.war.DestructionStatistics",
+    )
 }
 
 pub fn publish_war_declared_notice(
@@ -563,12 +675,10 @@ pub fn publish_war_declared_notice(
     defender_corp: u64,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let any_msg = pb::message("eve.war.Declared")
+    let builder = pb::message("eve.war.Declared")
         .set("war.sequential", war_id)
-        .set("war_info", war_attributes_builder(aggressor_corp, defender_corp, false, true, now_unix))
-        .must_to_any();
-    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
-    Ok(delivered)
+        .set("war_info", war_attributes_builder(aggressor_corp, defender_corp, false, true, now_unix));
+    publish_proto_notice(gateway, scope, builder, now_unix)
 }
 
 pub fn publish_war_end_scheduled_notice(
@@ -578,12 +688,10 @@ pub fn publish_war_end_scheduled_notice(
     ending_unix: u64,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let any_msg = pb::message("eve.war.EndScheduled")
+    let builder = pb::message("eve.war.EndScheduled")
         .set("war.sequential", war_id)
-        .set("ending", ts_unix(ending_unix))
-        .must_to_any();
-    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
-    Ok(delivered)
+        .set("ending", ts_unix(ending_unix));
+    publish_proto_notice(gateway, scope, builder, now_unix)
 }
 
 // ============================================================================
@@ -591,7 +699,10 @@ pub fn publish_war_end_scheduled_notice(
 // ============================================================================
 
 pub fn encode_wormhole_identifier(wormhole_id: u64) -> Vec<u8> {
-    pb::message("eve.wormhole.Identifier").set("sequential", wormhole_id).must_encode()
+    encode_or_warn(
+        pb::message("eve.wormhole.Identifier").set("sequential", wormhole_id),
+        "eve.wormhole.Identifier",
+    )
 }
 
 // ============================================================================
@@ -614,8 +725,9 @@ pub fn register_handlers(
             let route = extract_string_field(msg, 5).unwrap_or("/");
             let verb = extract_u64_checked(msg, 6)?.unwrap_or(1);
             let ua = extract_string_field(msg, 7).unwrap_or("EvoMu-Client");
-            let payload = encode_thirdpartyapi_request_received(char_id as i32, ds, route, verb as u32, ua, 1_700_000_000);
-            Ok(any("eve.thirdpartyapi.RequestReceived", payload))
+            thirdpartyapi_request_received_builder(char_id as i32, ds, route, verb as u32, ua, 1_700_000_000)
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -631,18 +743,20 @@ pub fn register_handlers(
                 .and_then(|cid| db_arena.with_snapshot(|s| s.characters.get(&(cid as i64)).map(|c| c.solar_system_id)))
                 .filter(|&s| s > 0);
             let sys_id = req_sys.or(caller_sys).unwrap_or(0);
-            Ok(pb::message("eve.tournament.arena.api.GetAllResponse")
+            pb::message("eve.tournament.arena.api.GetAllResponse")
                 .add("arenas", tournament_arena_builder(b"arena-alpha-1234", "Amarr Championship Arena", sys_id, 200_000, b"tourney-2024", b"ruleset-v1"))
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
     router.register_handler(
         "eve.tournament.arena.api.GetSettingsRequest",
         Arc::new(move |_ctx, _any, _msg| {
-            Ok(pb::message("eve.tournament.arena.api.GetSettingsResponse")
+            pb::message("eve.tournament.arena.api.GetSettingsResponse")
                 .set("tenant_settings.boundary_violation_killer.sequential", 90_000_001u32)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -650,19 +764,21 @@ pub fn register_handlers(
         "eve.tournament.arena.layout.api.GetRequest",
         Arc::new(move |_ctx, _any, msg| {
             let _uuid = extract_uuid_bytes(msg, 1).unwrap_or_else(|| b"layout-default".to_vec());
-            Ok(pb::message("eve.tournament.arena.layout.api.GetResponse")
+            pb::message("eve.tournament.arena.layout.api.GetResponse")
                 .set("layout", tournament_layout_builder("Standard 10v10 Crucible Layout", 1, 150_000))
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
     router.register_handler(
         "eve.tournament.ruleset.api.GetAllRequest",
         Arc::new(move |_ctx, _any, _msg| {
-            Ok(pb::message("eve.tournament.ruleset.api.GetAllResponse")
+            pb::message("eve.tournament.ruleset.api.GetAllResponse")
                 .add_with("rulesets", |r| r.set("uuid", b"ruleset-standard-v1"))
                 .add_with("rulesets", |r| r.set("uuid", b"ruleset-alliance-cup"))
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -670,9 +786,10 @@ pub fn register_handlers(
         "eve.tournament.ruleset.api.GetRequest",
         Arc::new(move |_ctx, _any, msg| {
             let _uuid = extract_uuid_bytes(msg, 1).unwrap_or_else(|| b"ruleset-standard-v1".to_vec());
-            Ok(pb::message("eve.tournament.ruleset.api.GetResponse")
+            pb::message("eve.tournament.ruleset.api.GetResponse")
                 .set("ruleset", tournament_ruleset_builder("Crucible Competitive Ruleset", 100, 10))
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -680,9 +797,10 @@ pub fn register_handlers(
         "eve.tournament.arena.api.CreateRequest",
         Arc::new(move |ctx, _any, _msg| {
             crate::quasar_gateway::require_admin_role(ctx)?;
-            Ok(pb::message("eve.tournament.arena.api.CreateResponse")
+            pb::message("eve.tournament.arena.api.CreateResponse")
                 .set("arena.uuid", b"arena-alpha-1234")
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -691,7 +809,9 @@ pub fn register_handlers(
         Arc::new(move |ctx, _any, msg| {
             crate::quasar_gateway::require_admin_role(ctx)?;
             let _uuid = extract_uuid_bytes(msg, 1).unwrap_or_else(|| b"arena-alpha-1234".to_vec());
-            Ok(pb::message("eve.tournament.arena.api.DeleteResponse").must_to_any())
+            pb::message("eve.tournament.arena.api.DeleteResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -704,9 +824,10 @@ pub fn register_handlers(
             let origin = extract_required_u32(msg, 1, "origin")?;
             let dest = extract_required_u32(msg, 2, "destination")?;
             let jump_count = if origin == dest { 0u64 } else { 3u64 };
-            Ok(pb::message("eve.universe.navigation.GetShortestGateJumpCountResponse")
+            pb::message("eve.universe.navigation.GetShortestGateJumpCountResponse")
                 .set("jump_count", jump_count)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -716,9 +837,10 @@ pub fn register_handlers(
             let start = extract_required_u32(msg, 1, "start")?;
             let end = extract_required_u32(msg, 2, "end")?;
             let jump_count = if start == end { 0u64 } else { 4u64 };
-            Ok(pb::message("eve.universe.navigation.GetShortestSystemJumpCountResponse")
+            pb::message("eve.universe.navigation.GetShortestSystemJumpCountResponse")
                 .set("jump_count", jump_count)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -738,7 +860,8 @@ pub fn register_handlers(
             if !found {
                 b = b.add_with("constellations", |c| c.set("sequential", 20_000_001u64));
             }
-            Ok(b.must_to_any())
+            b.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -750,7 +873,9 @@ pub fn register_handlers(
         Arc::new(move |ctx, _any, msg| {
             crate::quasar_gateway::require_admin_role(ctx)?;
             let _user = extract_required_u64(msg, 1, "user")?;
-            Ok(pb::message("eve.vanguard.commission.assignment.admin.api.TriggerCompletedEventResponse").must_to_any())
+            pb::message("eve.vanguard.commission.assignment.admin.api.TriggerCompletedEventResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -762,11 +887,12 @@ pub fn register_handlers(
         Arc::new(move |ctx, _any, msg| {
             crate::quasar_gateway::require_admin_role(ctx)?;
             let user_id = extract_required_u64(msg, 1, "user")?;
-            Ok(pb::message("eve.vendors.epic.api.GetUserByEveUserIDResponse")
+            pb::message("eve.vendors.epic.api.GetUserByEveUserIDResponse")
                 .set("user.sequential", user_id as i32)
                 .set("epic_user.epic_user_id", "epic_usr_998877")
                 .set("is_logged_in", true)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -778,9 +904,10 @@ pub fn register_handlers(
         Arc::new(move |ctx, _any, msg| {
             crate::quasar_gateway::require_admin_role(ctx)?;
             let _user = extract_required_u64(msg, 1, "user")?;
-            Ok(pb::message("eve.vendors.epic.api.GetEntitlementsResponse")
+            pb::message("eve.vendors.epic.api.GetEntitlementsResponse")
                 .add("entitlements", epic_entitlement_builder("epic_ent_omega_30d", "Omega 30 Days Game Time", "active", 1_700_000_000))
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -789,11 +916,12 @@ pub fn register_handlers(
         Arc::new(move |ctx, _any, msg| {
             crate::quasar_gateway::require_admin_role(ctx)?;
             let _steam_id = extract_string_field(msg, 1).unwrap_or("76561198000000000");
-            Ok(pb::message("eve.vendors.steam.user.api.GetResponse")
+            pb::message("eve.vendors.steam.user.api.GetResponse")
                 .set("user.sequential", 1001i32)
                 .set("steam_user_attributes.user_name", "CapsuleerSteamPilot")
                 .set("steam_user_attributes.country_code", "IS")
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -802,11 +930,12 @@ pub fn register_handlers(
         Arc::new(move |ctx, _any, msg| {
             crate::quasar_gateway::require_admin_role(ctx)?;
             let _user_id = extract_required_u64(msg, 1, "user")?;
-            Ok(pb::message("eve.vendors.steam.user.api.GetByEveUserResponse")
+            pb::message("eve.vendors.steam.user.api.GetByEveUserResponse")
                 .set("steam_user.steam_id", "76561198000000000")
                 .set("steam_user_attributes.user_name", "CapsuleerSteamPilot")
                 .set("steam_user_attributes.country_code", "IS")
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -814,10 +943,11 @@ pub fn register_handlers(
         "eve.vendors.steam.user.api.CreateRequest",
         Arc::new(move |ctx, _any, _msg| {
             crate::quasar_gateway::require_admin_role(ctx)?;
-            Ok(pb::message("eve.vendors.steam.user.api.CreateResponse")
+            pb::message("eve.vendors.steam.user.api.CreateResponse")
                 .set("user.sequential", 1002i32)
                 .set("already_existed", false)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -825,9 +955,10 @@ pub fn register_handlers(
         "eve.vendors.fusionauth.api.LinkUserRequest",
         Arc::new(move |ctx, _any, _msg| {
             crate::quasar_gateway::require_admin_role(ctx)?;
-            Ok(pb::message("eve.vendors.fusionauth.api.LinkUserResponse")
+            pb::message("eve.vendors.fusionauth.api.LinkUserResponse")
                 .set("user.sequential", 1001i32)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -836,9 +967,10 @@ pub fn register_handlers(
         Arc::new(move |ctx, _any, msg| {
             crate::quasar_gateway::require_admin_role(ctx)?;
             let _user_id = extract_required_u64(msg, 1, "user")?;
-            Ok(pb::message("eve.vendors.payletter.GetUserIdentityVerificationReceiptResponse")
+            pb::message("eve.vendors.payletter.GetUserIdentityVerificationReceiptResponse")
                 .set("receipt", payletter_receipt_builder("payletter_tx_889900", "AUTH_VERIFIED_KR"))
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -857,9 +989,10 @@ pub fn register_handlers(
                     (1_000_170, 1_000_171, false, true)
                 }
             });
-            Ok(pb::message("eve.war.GetResponse")
+            pb::message("eve.war.GetResponse")
                 .set("war_info", war_attributes_builder(agg, def, mut_war, open, 1_700_000_000))
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -878,7 +1011,8 @@ pub fn register_handlers(
                     b = b.add_with("wars", |w| w.set("sequential", wid));
                 }
             }
-            Ok(b.must_to_any())
+            b.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -886,10 +1020,11 @@ pub fn register_handlers(
         "eve.war.GetDestructionStatisticsRequest",
         Arc::new(move |_ctx, _any, msg| {
             let _war_id = extract_required_u64(msg, 1, "war")?;
-            Ok(pb::message("eve.war.GetDestructionStatisticsResponse")
+            pb::message("eve.war.GetDestructionStatisticsResponse")
                 .set("by_aggressor", war_destruction_statistics_builder(12, 1_500_000_000))
                 .set("by_defender", war_destruction_statistics_builder(8, 850_000_000))
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -897,10 +1032,11 @@ pub fn register_handlers(
         "eve.war.GetAlliesRequest",
         Arc::new(move |_ctx, _any, msg| {
             let _war_id = extract_required_u64(msg, 1, "war")?;
-            Ok(pb::message("eve.war.GetAlliesResponse")
+            pb::message("eve.war.GetAlliesResponse")
                 .add("allies", war_entity_identifier_builder(Some(99_000_001), None))
                 .add("allies", war_entity_identifier_builder(None, Some(1_000_172)))
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 

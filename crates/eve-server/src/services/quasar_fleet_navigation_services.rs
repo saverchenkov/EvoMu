@@ -7,7 +7,7 @@
 
 use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST,
-    STATUS_NOT_FOUND, STATUS_NOT_IMPLEMENTED, STATUS_PRECONDITION_FAILED,
+    STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND, STATUS_NOT_IMPLEMENTED, STATUS_PRECONDITION_FAILED,
 };
 use crate::services::quasar_daily_goals::{
     daily_goal_day_bucket, encode_goal_attributes_for_day_bucket, encode_goal_earnings,
@@ -97,38 +97,72 @@ fn goal_earning_items(goal: &CharacterDailyGoal) -> Vec<Vec<u8>> {
 // Daily Goal Event Encoders (`eve.dailygoal.api.*`)
 // ============================================================================
 
-fn encode_daily_goal_created(goal: &CharacterDailyGoal) -> Vec<u8> {
+fn queue_encoded_notice(
+    scope: NoticeScope,
+    type_name: &str,
+    encoded: Result<Vec<u8>, pb::PbError>,
+    now_unix: u64,
+) {
+    match encoded {
+        Ok(value) => ctx_queue_notice(
+            scope,
+            GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"),
+                value,
+            },
+            now_unix,
+        ),
+        Err(e) => tracing::warn!(type_name, error = %e, "failed to encode Quasar notice"),
+    }
+}
+
+fn queue_any_notice(
+    scope: NoticeScope,
+    label: &str,
+    built: Result<GoogleAny, pb::PbError>,
+    now_unix: u64,
+) {
+    match built {
+        Ok(notice) => ctx_queue_notice(scope, notice, now_unix),
+        Err(e) => tracing::warn!(notice = label, error = %e, "failed to encode Quasar notice"),
+    }
+}
+
+fn try_encode_daily_goal_created(goal: &CharacterDailyGoal) -> Result<Vec<u8>, pb::PbError> {
     let (id_bytes, attr_bytes) = goal_id_and_attrs(goal);
     pb::message("eve.dailygoal.api.Created")
         .set_raw_message("id", &id_bytes)
         .set_raw_message("goal", &attr_bytes)
-        .must_encode()
+        .encode()
 }
 
-fn encode_daily_goal_prematurely_deactivated(uuid: &[u8; 16], now_unix: u64) -> Vec<u8> {
+fn try_encode_daily_goal_prematurely_deactivated(
+    uuid: &[u8; 16],
+    now_unix: u64,
+) -> Result<Vec<u8>, pb::PbError> {
     let mut id_bytes = Vec::new();
     encode_goal_identifier(uuid, &mut id_bytes);
     pb::message("eve.dailygoal.api.PrematurelyDeactivated")
         .set_raw_message("id", &id_bytes)
         .set("deactivated", GoogleTimestamp { seconds: now_unix as i64, nanos: 0 })
-        .must_encode()
+        .encode()
 }
 
-fn encode_daily_goal_removed(uuid: &[u8; 16]) -> Vec<u8> {
+fn try_encode_daily_goal_removed(uuid: &[u8; 16]) -> Result<Vec<u8>, pb::PbError> {
     let mut id_bytes = Vec::new();
     encode_goal_identifier(uuid, &mut id_bytes);
     pb::message("eve.dailygoal.api.Removed")
         .set_raw_message("id", &id_bytes)
-        .must_encode()
+        .encode()
 }
 
-fn encode_daily_goal_progressed(
+fn try_encode_daily_goal_progressed(
     cid: u32,
     uuid: &[u8; 16],
     prev: u64,
     curr: u64,
     now_unix: u64,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, pb::PbError> {
     let mut id_bytes = Vec::new();
     encode_goal_identifier(uuid, &mut id_bytes);
     pb::message("eve.dailygoal.api.Progressed")
@@ -137,10 +171,14 @@ fn encode_daily_goal_progressed(
         .set_raw_message("goal", &id_bytes)
         .set("previous_progress", prev)
         .set("current_progress", curr)
-        .must_encode()
+        .encode()
 }
 
-fn encode_daily_goal_completed(cid: u32, goal: &CharacterDailyGoal, paid: bool) -> Vec<u8> {
+fn try_encode_daily_goal_completed(
+    cid: u32,
+    goal: &CharacterDailyGoal,
+    paid: bool,
+) -> Result<Vec<u8>, pb::PbError> {
     let mut id_bytes = Vec::new();
     encode_goal_identifier(&goal.uuid, &mut id_bytes);
     let mut b = pb::message("eve.dailygoal.api.Completed")
@@ -151,10 +189,14 @@ fn encode_daily_goal_completed(cid: u32, goal: &CharacterDailyGoal, paid: bool) 
     for item in goal_earning_items(goal) {
         b = b.add("earnings", pb::raw_message(item));
     }
-    b.must_encode()
+    b.encode()
 }
 
-fn encode_daily_goal_redeemed(cid: u32, goal: &CharacterDailyGoal, autoredeemed: bool) -> Vec<u8> {
+fn try_encode_daily_goal_redeemed(
+    cid: u32,
+    goal: &CharacterDailyGoal,
+    autoredeemed: bool,
+) -> Result<Vec<u8>, pb::PbError> {
     let mut id_bytes = Vec::new();
     encode_goal_identifier(&goal.uuid, &mut id_bytes);
     let mut b = pb::message("eve.dailygoal.api.Redeemed")
@@ -164,10 +206,10 @@ fn encode_daily_goal_redeemed(cid: u32, goal: &CharacterDailyGoal, autoredeemed:
     for item in goal_earning_items(goal) {
         b = b.add("earnings", pb::raw_message(item));
     }
-    b.must_encode()
+    b.encode()
 }
 
-fn encode_period_regenerated(category: u64, now_unix: u64) -> Vec<u8> {
+fn try_encode_period_regenerated(category: u64, now_unix: u64) -> Result<Vec<u8>, pb::PbError> {
     let duration = if category == 2 { 30 * 86_400 } else { 86_400 };
     pb::message("eve.dailygoal.api.PeriodRegenerated")
         .set("period.start", GoogleTimestamp { seconds: now_unix as i64, nanos: 0 })
@@ -180,7 +222,52 @@ fn encode_period_regenerated(category: u64, now_unix: u64) -> Vec<u8> {
         )
         .set("period.category", category as i32)
         .set("timestamp", GoogleTimestamp { seconds: now_unix as i64, nanos: 0 })
-        .must_encode()
+        .encode()
+}
+
+#[cfg(test)]
+fn encode_daily_goal_created(goal: &CharacterDailyGoal) -> Vec<u8> {
+    try_encode_daily_goal_created(goal).unwrap_or_default()
+}
+
+#[cfg(test)]
+fn encode_daily_goal_prematurely_deactivated(uuid: &[u8; 16], now_unix: u64) -> Vec<u8> {
+    try_encode_daily_goal_prematurely_deactivated(uuid, now_unix).unwrap_or_default()
+}
+
+#[cfg(test)]
+fn encode_daily_goal_removed(uuid: &[u8; 16]) -> Vec<u8> {
+    try_encode_daily_goal_removed(uuid).unwrap_or_default()
+}
+
+#[cfg(test)]
+fn encode_daily_goal_progressed(
+    cid: u32,
+    uuid: &[u8; 16],
+    prev: u64,
+    curr: u64,
+    now_unix: u64,
+) -> Vec<u8> {
+    try_encode_daily_goal_progressed(cid, uuid, prev, curr, now_unix).unwrap_or_default()
+}
+
+#[cfg(test)]
+fn encode_daily_goal_completed(cid: u32, goal: &CharacterDailyGoal, paid: bool) -> Vec<u8> {
+    try_encode_daily_goal_completed(cid, goal, paid).unwrap_or_default()
+}
+
+#[cfg(test)]
+fn encode_daily_goal_redeemed(
+    cid: u32,
+    goal: &CharacterDailyGoal,
+    autoredeemed: bool,
+) -> Vec<u8> {
+    try_encode_daily_goal_redeemed(cid, goal, autoredeemed).unwrap_or_default()
+}
+
+#[cfg(test)]
+fn encode_period_regenerated(category: u64, now_unix: u64) -> Vec<u8> {
+    try_encode_period_regenerated(category, now_unix).unwrap_or_default()
 }
 
 // ============================================================================
@@ -285,7 +372,7 @@ fn build_lp_wallet_id(b: ProtoBuilder, owner: LpWalletOwner, issuer_corp_id: u32
     b.set_with("issuer", |c| build_u32_id(c, issuer_corp_id))
 }
 
-fn encode_lp_op_event(type_name: &str, op: &ParsedLpOperation) -> Vec<u8> {
+fn encode_lp_op_event(type_name: &str, op: &ParsedLpOperation) -> Result<Vec<u8>, pb::PbError> {
     pb::message(type_name)
         .set("identifier.uuid", op.op_uuid.as_slice())
         .set_with("operation", |b| {
@@ -297,13 +384,13 @@ fn encode_lp_op_event(type_name: &str, op: &ParsedLpOperation) -> Vec<u8> {
         .when(!op.context_bytes.is_empty(), |b| {
             b.set_raw_message("context", &op.context_bytes)
         })
-        .must_encode()
+        .encode()
 }
 
-fn encode_lp_op_ended(op_uuid: &[u8; 16]) -> Vec<u8> {
+fn encode_lp_op_ended(op_uuid: &[u8; 16]) -> Result<Vec<u8>, pb::PbError> {
     pb::message("eve.loyaltypoints.assetholding.operation.api.Ended")
         .set("operation.uuid", op_uuid.as_slice())
-        .must_encode()
+        .encode()
 }
 
 fn op_uuid_hex(uuid: &[u8; 16]) -> String {
@@ -314,17 +401,34 @@ fn op_uuid_hex(uuid: &[u8; 16]) -> String {
 // ESS & SolarSystem Bounty Notice Emitters (`eve.solarsystem.bounty.*`)
 // ============================================================================
 
+fn publish_ess_notice(
+    router: &PublicGatewayRouter,
+    sys_id: u32,
+    builder: ProtoBuilder,
+    now_unix: u64,
+) {
+    match builder.to_any() {
+        Ok(any_msg) => {
+            let _ = router.publish_notice(NoticeScope::SolarSystem(sys_id), any_msg, now_unix);
+        }
+        Err(e) => tracing::warn!(sys_id, error = %e, "failed to encode ESS bounty notice"),
+    }
+}
+
 pub fn emit_ess_main_bank_primed(
     router: &PublicGatewayRouter,
     sys_id: u32,
     main_cents: IskCents,
     now_unix: u64,
 ) {
-    let any_msg = pb::message("eve.solarsystem.bounty.bank.main.MainBankPrimed")
-        .set_with("solar_system", |b| build_u64_id(b, sys_id))
-        .set_with("ess_main_value", |b| build_isk_currency(b, main_cents))
-        .must_to_any();
-    let _ = router.publish_notice(NoticeScope::SolarSystem(sys_id), any_msg, now_unix);
+    publish_ess_notice(
+        router,
+        sys_id,
+        pb::message("eve.solarsystem.bounty.bank.main.MainBankPrimed")
+            .set_with("solar_system", |b| build_u64_id(b, sys_id))
+            .set_with("ess_main_value", |b| build_isk_currency(b, main_cents)),
+        now_unix,
+    );
 }
 
 pub fn emit_ess_reserve_bank_primed(
@@ -333,11 +437,14 @@ pub fn emit_ess_reserve_bank_primed(
     reserve_cents: IskCents,
     now_unix: u64,
 ) {
-    let any_msg = pb::message("eve.solarsystem.bounty.bank.reserve.ReserveBankPrimed")
-        .set_with("solar_system", |b| build_u64_id(b, sys_id))
-        .set_with("ess_reserve_value", |b| build_isk_currency(b, reserve_cents))
-        .must_to_any();
-    let _ = router.publish_notice(NoticeScope::SolarSystem(sys_id), any_msg, now_unix);
+    publish_ess_notice(
+        router,
+        sys_id,
+        pb::message("eve.solarsystem.bounty.bank.reserve.ReserveBankPrimed")
+            .set_with("solar_system", |b| build_u64_id(b, sys_id))
+            .set_with("ess_reserve_value", |b| build_isk_currency(b, reserve_cents)),
+        now_unix,
+    );
 }
 
 pub fn emit_ess_main_bank_link_established(
@@ -349,14 +456,17 @@ pub fn emit_ess_main_bank_link_established(
     reserve_cents: IskCents,
     now_unix: u64,
 ) {
-    let any_msg = pb::message("eve.solarsystem.bounty.bank.main.MainBankLinkEstablished")
-        .set_with("linked_character", |b| build_u32_id(b, char_id))
-        .set_with("solar_system", |b| build_u64_id(b, sys_id))
-        .set_with("ess_main_value", |b| build_isk_currency(b, main_cents))
-        .set_with("ess_reserve_value", |b| build_isk_currency(b, reserve_cents))
-        .when(ship_id != 0, |b| b.set("ship.sequential", ship_id))
-        .must_to_any();
-    let _ = router.publish_notice(NoticeScope::SolarSystem(sys_id), any_msg, now_unix);
+    publish_ess_notice(
+        router,
+        sys_id,
+        pb::message("eve.solarsystem.bounty.bank.main.MainBankLinkEstablished")
+            .set_with("linked_character", |b| build_u32_id(b, char_id))
+            .set_with("solar_system", |b| build_u64_id(b, sys_id))
+            .set_with("ess_main_value", |b| build_isk_currency(b, main_cents))
+            .set_with("ess_reserve_value", |b| build_isk_currency(b, reserve_cents))
+            .when(ship_id != 0, |b| b.set("ship.sequential", ship_id)),
+        now_unix,
+    );
 }
 
 pub fn emit_ess_main_bank_theft_completed(
@@ -368,14 +478,17 @@ pub fn emit_ess_main_bank_theft_completed(
     destroyed_cents: IskCents,
     now_unix: u64,
 ) {
-    let any_msg = pb::message("eve.solarsystem.bounty.bank.main.MainBankTheftCompleted")
-        .set_with("paid_character", |b| build_u32_id(b, char_id))
-        .set_with("solar_system", |b| build_u64_id(b, sys_id))
-        .set_with("ess_reserve_value", |b| build_isk_currency(b, reserve_cents))
-        .set_with("amount_stolen", |b| build_isk_currency(b, stolen_cents))
-        .set_with("amount_destroyed", |b| build_isk_currency(b, destroyed_cents))
-        .must_to_any();
-    let _ = router.publish_notice(NoticeScope::SolarSystem(sys_id), any_msg, now_unix);
+    publish_ess_notice(
+        router,
+        sys_id,
+        pb::message("eve.solarsystem.bounty.bank.main.MainBankTheftCompleted")
+            .set_with("paid_character", |b| build_u32_id(b, char_id))
+            .set_with("solar_system", |b| build_u64_id(b, sys_id))
+            .set_with("ess_reserve_value", |b| build_isk_currency(b, reserve_cents))
+            .set_with("amount_stolen", |b| build_isk_currency(b, stolen_cents))
+            .set_with("amount_destroyed", |b| build_isk_currency(b, destroyed_cents)),
+        now_unix,
+    );
 }
 
 pub fn emit_ess_solar_system_persisted(
@@ -385,12 +498,15 @@ pub fn emit_ess_solar_system_persisted(
     reserve_cents: IskCents,
     now_unix: u64,
 ) {
-    let any_msg = pb::message("eve.solarsystem.bounty.bank.SolarSystemPersisted")
-        .set_with("solar_system", |b| build_u64_id(b, sys_id))
-        .set_with("ess_main_value", |b| build_isk_currency(b, main_cents))
-        .set_with("ess_reserve_value", |b| build_isk_currency(b, reserve_cents))
-        .must_to_any();
-    let _ = router.publish_notice(NoticeScope::SolarSystem(sys_id), any_msg, now_unix);
+    publish_ess_notice(
+        router,
+        sys_id,
+        pb::message("eve.solarsystem.bounty.bank.SolarSystemPersisted")
+            .set_with("solar_system", |b| build_u64_id(b, sys_id))
+            .set_with("ess_main_value", |b| build_isk_currency(b, main_cents))
+            .set_with("ess_reserve_value", |b| build_isk_currency(b, reserve_cents)),
+        now_unix,
+    );
 }
 
 // ============================================================================
@@ -436,26 +552,20 @@ pub fn register_handlers(
             }
             mgr.save_to_db();
 
-            let regen_bytes = encode_period_regenerated(1, now_unix);
-            ctx_queue_notice(
+            queue_encoded_notice(
                 NoticeScope::Character(cid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.dailygoal.api.PeriodRegenerated"),
-                    value: regen_bytes,
-                },
+                "eve.dailygoal.api.PeriodRegenerated",
+                try_encode_period_regenerated(1, now_unix),
                 now_unix,
             );
 
             let mut resp = pb::message("eve.dailygoal.api.admin.RegenerateCurrentGoalsResponse");
             for g in &new_goals {
                 let (id_bytes, attr_bytes) = goal_id_and_attrs(g);
-                let created_bytes = encode_daily_goal_created(g);
-                ctx_queue_notice(
+                queue_encoded_notice(
                     NoticeScope::Character(cid),
-                    GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.dailygoal.api.Created"),
-                        value: created_bytes,
-                    },
+                    "eve.dailygoal.api.Created",
+                    try_encode_daily_goal_created(g),
                     now_unix,
                 );
                 resp = resp.add_with("goals", |b| {
@@ -464,7 +574,7 @@ pub fn register_handlers(
                 });
             }
 
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -523,23 +633,17 @@ pub fn register_handlers(
             let _ = &db_prog;
             mgr.save_to_db();
 
-            let prog_bytes = encode_daily_goal_progressed(target_cid, &goal_uuid, prev, curr, now_unix);
-            ctx_queue_notice(
+            queue_encoded_notice(
                 NoticeScope::Character(target_cid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.dailygoal.api.Progressed"),
-                    value: prog_bytes,
-                },
+                "eve.dailygoal.api.Progressed",
+                try_encode_daily_goal_progressed(target_cid, &goal_uuid, prev, curr, now_unix),
                 now_unix,
             );
             if just_completed {
-                let comp_bytes = encode_daily_goal_completed(target_cid, &goal_opt, false);
-                ctx_queue_notice(
+                queue_encoded_notice(
                     NoticeScope::Character(target_cid),
-                    GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.dailygoal.api.Completed"),
-                        value: comp_bytes,
-                    },
+                    "eve.dailygoal.api.Completed",
+                    try_encode_daily_goal_completed(target_cid, &goal_opt, false),
                     now_unix,
                 );
             }
@@ -583,24 +687,16 @@ pub fn register_handlers(
             }
             mgr.save_to_db();
 
-            let deact_bytes = encode_daily_goal_prematurely_deactivated(&goal_uuid, now_unix);
-            ctx_queue_notice(
+            queue_encoded_notice(
                 NoticeScope::Character(target_cid),
-                GoogleAny {
-                    type_url: format!(
-                        "{TYPE_GOOGLEAPIS_PREFIX}eve.dailygoal.api.PrematurelyDeactivated"
-                    ),
-                    value: deact_bytes,
-                },
+                "eve.dailygoal.api.PrematurelyDeactivated",
+                try_encode_daily_goal_prematurely_deactivated(&goal_uuid, now_unix),
                 now_unix,
             );
-            let rem_bytes = encode_daily_goal_removed(&goal_uuid);
-            ctx_queue_notice(
+            queue_encoded_notice(
                 NoticeScope::Character(target_cid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.dailygoal.api.Removed"),
-                    value: rem_bytes,
-                },
+                "eve.dailygoal.api.Removed",
+                try_encode_daily_goal_removed(&goal_uuid),
                 now_unix,
             );
 
@@ -623,13 +719,10 @@ pub fn register_handlers(
                 let goals = mgr.get_or_init_goals_at(cid, now_unix);
                 for g in goals.iter().filter(|g| g.completed && !g.claimed) {
                     if mgr.redeem_goal(cid, &g.uuid, now_unix, &db_auto).is_ok() {
-                        let red_bytes = encode_daily_goal_redeemed(cid, g, true);
-                        ctx_queue_notice(
+                        queue_encoded_notice(
                             NoticeScope::Character(cid),
-                            GoogleAny {
-                                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.dailygoal.api.Redeemed"),
-                                value: red_bytes,
-                            },
+                            "eve.dailygoal.api.Redeemed",
+                            try_encode_daily_goal_redeemed(cid, g, true),
                             now_unix,
                         );
                     }
@@ -716,45 +809,39 @@ pub fn register_handlers(
                     LpWalletOwner::Corporation(corp_id) => NoticeScope::Corporation(corp_id),
                 };
 
-                ctx_queue_notice(
+                queue_any_notice(
                     scope.clone(),
+                    "eve.loyaltypoints.wallet.api.BalanceAdded",
                     pb::message("eve.loyaltypoints.wallet.api.BalanceAdded")
                         .set_with("wallet", |w| build_lp_wallet_id(w, op.owner, op.issuer_corp_id))
                         .set("increase", op.amount as u64)
                         .set("new_balance", new_balance)
                         .set("taxed_amount", 0u64)
-                        .must_to_any(),
+                        .to_any(),
                     now_unix,
                 );
 
-                ctx_queue_notice(
+                queue_encoded_notice(
                     scope.clone(),
-                    GoogleAny {
-                        type_url: format!(
-                            "{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.assetholding.operation.api.Deposited"
-                        ),
-                        value: encode_lp_op_event(
-                            "eve.loyaltypoints.assetholding.operation.api.Deposited",
-                            &op,
-                        ),
-                    },
+                    "eve.loyaltypoints.assetholding.operation.api.Deposited",
+                    encode_lp_op_event(
+                        "eve.loyaltypoints.assetholding.operation.api.Deposited",
+                        &op,
+                    ),
                     now_unix,
                 );
 
-                ctx_queue_notice(
+                queue_encoded_notice(
                     scope,
-                    GoogleAny {
-                        type_url: format!(
-                            "{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.assetholding.operation.api.Ended"
-                        ),
-                        value: encode_lp_op_ended(&op.op_uuid),
-                    },
+                    "eve.loyaltypoints.assetholding.operation.api.Ended",
+                    encode_lp_op_ended(&op.op_uuid),
                     now_unix,
                 );
             }
 
-            Ok(pb::message("eve.loyaltypoints.assetholding.operation.api.DepositResponse")
-                .must_to_any())
+            pb::message("eve.loyaltypoints.assetholding.operation.api.DepositResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -835,44 +922,38 @@ pub fn register_handlers(
                     LpWalletOwner::Corporation(corp_id) => NoticeScope::Corporation(corp_id),
                 };
 
-                ctx_queue_notice(
+                queue_any_notice(
                     scope.clone(),
+                    "eve.loyaltypoints.wallet.api.BalanceRemoved",
                     pb::message("eve.loyaltypoints.wallet.api.BalanceRemoved")
                         .set_with("wallet", |w| build_lp_wallet_id(w, op.owner, op.issuer_corp_id))
                         .set("decrease", op.amount as u64)
                         .set("new_balance", new_balance)
-                        .must_to_any(),
+                        .to_any(),
                     now_unix,
                 );
 
-                ctx_queue_notice(
+                queue_encoded_notice(
                     scope.clone(),
-                    GoogleAny {
-                        type_url: format!(
-                            "{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.assetholding.operation.api.Withdrawn"
-                        ),
-                        value: encode_lp_op_event(
-                            "eve.loyaltypoints.assetholding.operation.api.Withdrawn",
-                            &op,
-                        ),
-                    },
+                    "eve.loyaltypoints.assetholding.operation.api.Withdrawn",
+                    encode_lp_op_event(
+                        "eve.loyaltypoints.assetholding.operation.api.Withdrawn",
+                        &op,
+                    ),
                     now_unix,
                 );
 
-                ctx_queue_notice(
+                queue_encoded_notice(
                     scope,
-                    GoogleAny {
-                        type_url: format!(
-                            "{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.assetholding.operation.api.Ended"
-                        ),
-                        value: encode_lp_op_ended(&op.op_uuid),
-                    },
+                    "eve.loyaltypoints.assetholding.operation.api.Ended",
+                    encode_lp_op_ended(&op.op_uuid),
                     now_unix,
                 );
             }
 
-            Ok(pb::message("eve.loyaltypoints.assetholding.operation.api.WithdrawResponse")
-                .must_to_any())
+            pb::message("eve.loyaltypoints.assetholding.operation.api.WithdrawResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -918,8 +999,9 @@ pub fn register_handlers(
                     Ok((st.ess_main_bank, st.ess_reserve_bank))
                 })?;
 
-            ctx_queue_notice(
+            queue_any_notice(
                 NoticeScope::SolarSystem(sys_id),
+                "eve.solarsystem.bounty.npc.MultiplierFactorCalculated",
                 pb::message("eve.solarsystem.bounty.npc.MultiplierFactorCalculated")
                     .set_with("solar_system", |b| build_u64_id(b, sys_id))
                     .set("input_multiplier_percentage_value", input_pct)
@@ -927,22 +1009,24 @@ pub fn register_handlers(
                         b.when(units != 0, |b| b.set("units", units))
                             .when(nanos != 0, |b| b.set("nanos", nanos))
                     })
-                    .must_to_any(),
+                    .to_any(),
                 now_unix,
             );
 
-            ctx_queue_notice(
+            queue_any_notice(
                 NoticeScope::SolarSystem(sys_id),
+                "eve.solarsystem.bounty.bank.SolarSystemPersisted",
                 pb::message("eve.solarsystem.bounty.bank.SolarSystemPersisted")
                     .set_with("solar_system", |b| build_u64_id(b, sys_id))
                     .set_with("ess_main_value", |b| build_isk_currency(b, main_cents))
                     .set_with("ess_reserve_value", |b| build_isk_currency(b, reserve_cents))
-                    .must_to_any(),
+                    .to_any(),
                 now_unix,
             );
 
-            Ok(pb::message("eve.solarsystem.bounty.npc.ApplyMultiplierFactorResponse")
-                .must_to_any())
+            pb::message("eve.solarsystem.bounty.npc.ApplyMultiplierFactorResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 }

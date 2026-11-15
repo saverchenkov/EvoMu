@@ -517,11 +517,159 @@ def lint_merge_conflicts_and_docs(root, added):
     return out
 
 
+PROTO_MUST_RE = re.compile(r"\.must_(?:to_any|encode|encode_into|to_dynamic)\s*\(")
+CFG_TEST_ATTR_RE = re.compile(r"#\[\s*cfg\([^)]*\btest\b[^)]*\)\s*\]")
+
+
+def is_prod_rust_path(fpath):
+    norm = fpath.replace("\\", "/")
+    if not (norm.startswith("crates/") and norm.endswith(".rs")):
+        return False
+    if "/tests/" in norm or norm.endswith("_tests.rs") or norm.endswith("/tests.rs"):
+        return False
+    return True
+
+
+def iter_prod_rust_lines(text):
+    """Yields (1-based lineno, code_without_comments_or_strings) for non-#[cfg(test)] Rust code."""
+    brace_depth = 0
+    block_comment_depth = 0
+    in_string = False
+    raw_hashes = None  # int when inside r#"..."# raw string
+    cfg_test_pending = False
+    cfg_test_target_depth = 0
+    cfg_test_active_depth = None
+
+    for lineno, line in enumerate(text.splitlines(), 1):
+        out = []
+        i = 0
+        n = len(line)
+        line_in_cfg_test = cfg_test_pending or cfg_test_active_depth is not None
+        while i < n:
+            ch = line[i]
+            nxt = line[i + 1] if i + 1 < n else ""
+            if block_comment_depth > 0:
+                if ch == "/" and nxt == "*":
+                    block_comment_depth += 1
+                    i += 2
+                elif ch == "*" and nxt == "/":
+                    block_comment_depth -= 1
+                    i += 2
+                else:
+                    i += 1
+                continue
+            if raw_hashes is not None:
+                if ch == '"' and line[i + 1:i + 1 + raw_hashes] == "#" * raw_hashes:
+                    i += 1 + raw_hashes
+                    raw_hashes = None
+                    out.append('"')
+                else:
+                    i += 1
+                continue
+            if in_string:
+                if ch == "\\" and i + 1 < n:
+                    i += 2
+                elif ch == '"':
+                    in_string = False
+                    i += 1
+                    out.append('"')
+                else:
+                    i += 1
+                continue
+            if ch == "/" and nxt == "/":
+                break
+            if ch == "/" and nxt == "*":
+                block_comment_depth += 1
+                i += 2
+                continue
+            if ch in ("r", "b", "c"):
+                # Match raw string prefixes: r#"..."#, br#"..."#, cr#"..."#
+                m = re.match(r'(?:br|cr|r)(#*)(")', line[i:])
+                if m:
+                    raw_hashes = len(m.group(1))
+                    i += len(m.group(0))
+                    out.append('"')
+                    continue
+            if ch == '"':
+                in_string = True
+                i += 1
+                out.append('"')
+                continue
+            if ch == "'":
+                if i + 1 < n and line[i + 1] == "\\":
+                    j = i + 2
+                    if j < n:
+                        j += 1
+                    while j < n and line[j] != "'":
+                        j += 1
+                    i = min(j + 1, n)
+                    out.append("''")
+                    continue
+                if i + 2 < n and line[i + 2] == "'":
+                    i += 3
+                    out.append("''")
+                    continue
+            if ch == "{":
+                brace_depth += 1
+                if cfg_test_pending and brace_depth > cfg_test_target_depth:
+                    cfg_test_active_depth = cfg_test_target_depth
+                    cfg_test_pending = False
+                    line_in_cfg_test = True
+            elif ch == "}":
+                brace_depth = max(0, brace_depth - 1)
+                if cfg_test_active_depth is not None and brace_depth <= cfg_test_active_depth:
+                    cfg_test_active_depth = None
+                    line_in_cfg_test = True
+            elif ch == ";":
+                if cfg_test_pending and brace_depth <= cfg_test_target_depth:
+                    cfg_test_pending = False
+                    line_in_cfg_test = True
+            out.append(ch)
+            i += 1
+
+        code = "".join(out)
+        if not line_in_cfg_test and cfg_test_active_depth is None and CFG_TEST_ATTR_RE.search(code):
+            cfg_test_pending = True
+            cfg_test_target_depth = brace_depth
+            line_in_cfg_test = True
+        if not line_in_cfg_test:
+            yield lineno, code
+
+
+def lint_proto_must_calls(root, added):
+    """Block ProtoBuilder.must_* panicking encoders in touched non-test Rust files."""
+    out = []
+    for fpath in sorted(added):
+        if not is_prod_rust_path(fpath):
+            continue
+        full = os.path.join(root, fpath)
+        if not os.path.isfile(full):
+            continue
+        try:
+            text = open(full, errors="replace").read()
+        except OSError:
+            continue
+        for lineno, code in iter_prod_rust_lines(text):
+            m = PROTO_MUST_RE.search(code)
+            if m:
+                out.append((
+                    "PROTO_MUST_IN_PROD",
+                    "Production code calls `%s...`; use the fallible `.encode()` / `.to_any()` / `.to_dynamic()` method instead"
+                    % m.group(0),
+                    fpath,
+                    lineno,
+                ))
+    return out
+
+
 def run_early_gate(root, base, added, claims_path):
     violations = []
 
     # 0. Merge conflict markers and contradictory S-10 doc counts
     violations += lint_merge_conflicts_and_docs(root, added)
+
+    # 0b. Panicking ProtoBuilder.must_* calls in touched production Rust files
+    violations += lint_proto_must_calls(root, added)
 
     # 1. RPC-name check (names must exist in the real client)
     all_viol, have_client = rpc_names.run()

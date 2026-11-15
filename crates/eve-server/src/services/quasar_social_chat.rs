@@ -10,7 +10,7 @@
 
 use crate::quasar_gateway::{
     require_admin_role, GatewaySubscriber, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST,
-    STATUS_FORBIDDEN, STATUS_NOT_FOUND,
+    STATUS_FORBIDDEN, STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
 };
 use eve_db::lock_rank::AnyRwLock;
 use eve_db::WorldRepository;
@@ -208,7 +208,12 @@ pub fn encode_chat_member(
     alliance_id: Option<u32>,
     faction_id: Option<u32>,
 ) -> Vec<u8> {
-    chat_member_builder(cid, corpid, alliance_id, faction_id).must_encode()
+    chat_member_builder(cid, corpid, alliance_id, faction_id)
+        .encode()
+        .unwrap_or_else(|e| {
+            tracing::warn!("failed to encode chat member {cid}: {e}");
+            Vec::new()
+        })
 }
 
 pub fn is_wormhole_system(sys_id: u32) -> bool {
@@ -356,7 +361,8 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             for m in &member_bytes_list {
                 resp = resp.add("members", pb::raw_message(m));
             }
-            Ok(resp.must_to_any())
+            resp.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -427,11 +433,16 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     save_wormhole_speakers_to_db(&db_bcast, &sp);
                 }
                 if is_new {
-                    let join_any = pb::message("eve_public.chat.local.api.JoinNotice")
+                    match pb::message("eve_public.chat.local.api.JoinNotice")
                         .set("member", chat_member_builder(cid, corpid, aid, fid))
                         .set("solar_system.sequential", sys_id as u64)
-                        .must_to_any();
-                    ctx_queue_notice(NoticeScope::SolarSystem(sys_id), join_any, now);
+                        .to_any()
+                    {
+                        Ok(join_any) => {
+                            ctx_queue_notice(NoticeScope::SolarSystem(sys_id), join_any, now);
+                        }
+                        Err(e) => tracing::warn!("failed to encode local chat JoinNotice: {e}"),
+                    }
                 }
             } else {
                 let (_, member_ids) = get_solar_system_members(
@@ -455,12 +466,15 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 .set("author.sequential", cid)
                 .set("solar_system.sequential", sys_id as u64)
                 .set("message", &msg_text)
-                .must_to_any();
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))?;
 
             // Queue notice to solar system scope
             ctx_queue_notice(NoticeScope::SolarSystem(sys_id), notice_any, now);
 
-            Ok(pb::message("eve_public.chat.local.api.BroadcastMessageResponse").must_to_any())
+            pb::message("eve_public.chat.local.api.BroadcastMessageResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -519,15 +533,23 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     .unwrap_or_else(|e| e.into_inner())
                     .contains(&(sys_id, char_id));
             if is_revealed {
-                let notice_any =
-                    pb::message("eve_public.chat.local.api.MembershipRefreshedNotice")
-                        .set("member", chat_member_builder(char_id, corpid, aid, fid))
-                        .set("solar_system.sequential", sys_id as u64)
-                        .must_to_any();
-                ctx_queue_notice(NoticeScope::SolarSystem(sys_id), notice_any, now);
+                match pb::message("eve_public.chat.local.api.MembershipRefreshedNotice")
+                    .set("member", chat_member_builder(char_id, corpid, aid, fid))
+                    .set("solar_system.sequential", sys_id as u64)
+                    .to_any()
+                {
+                    Ok(notice_any) => {
+                        ctx_queue_notice(NoticeScope::SolarSystem(sys_id), notice_any, now);
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to encode local chat MembershipRefreshedNotice: {e}");
+                    }
+                }
             }
 
-            Ok(pb::message("eve_public.chat.local.api.admin.MuteResponse").must_to_any())
+            pb::message("eve_public.chat.local.api.admin.MuteResponse")
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -545,9 +567,10 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 Err(_) => return Err((STATUS_NOT_FOUND, "Character not found".into())),
             };
 
-            Ok(pb::message("eve_public.presence.api.GetCorporationResponse")
+            pb::message("eve_public.presence.api.GetCorporationResponse")
                 .set("corporation.sequential", corpid)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -570,7 +593,8 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 Some(aid) => resp.set("alliance.sequential", aid as i32),
                 None => resp.set("no_alliance", true),
             };
-            Ok(resp.must_to_any())
+            resp.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -597,7 +621,8 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 Some(fid) => resp.set("faction.sequential", fid as u64),
                 None => resp.set("no_faction", true),
             };
-            Ok(resp.must_to_any())
+            resp.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 }
@@ -672,7 +697,8 @@ pub fn on_character_enter_local_chat(
         let join_any = pb::message("eve_public.chat.local.api.JoinNotice")
             .set("member", chat_member_builder(char_id, corpid, aid, fid))
             .set("solar_system.sequential", solar_system_id as u64)
-            .must_to_any();
+            .to_any()
+            .map_err(|e| eve_proto::BridgeRpcError::user_error(e.to_string()))?;
         let (_, count) = gateway.publish_notice(
             NoticeScope::SolarSystem(solar_system_id),
             join_any,
@@ -698,7 +724,9 @@ pub fn on_character_enter_local_chat(
     for m in &members {
         list_notice = list_notice.add("members", pb::raw_message(m));
     }
-    let list_any = list_notice.must_to_any();
+    let list_any = list_notice
+        .to_any()
+        .map_err(|e| eve_proto::BridgeRpcError::user_error(e.to_string()))?;
     let (_, d2) = gateway.publish_notice(
         NoticeScope::Character(char_id),
         list_any,
@@ -736,7 +764,8 @@ pub fn on_character_leave_local_chat(
     let leave_any = pb::message("eve_public.chat.local.api.LeaveNotice")
         .set("character.sequential", char_id)
         .set("solar_system.sequential", solar_system_id as u64)
-        .must_to_any();
+        .to_any()
+        .map_err(|e| eve_proto::BridgeRpcError::user_error(e.to_string()))?;
     let (_, delivered) = gateway.publish_notice(
         NoticeScope::SolarSystem(solar_system_id),
         leave_any,
@@ -782,7 +811,8 @@ pub fn on_character_local_chat_membership_refreshed(
     let notice_any = pb::message("eve_public.chat.local.api.MembershipRefreshedNotice")
         .set("member", chat_member_builder(char_id, corpid, aid, fid))
         .set("solar_system.sequential", sys_id as u64)
-        .must_to_any();
+        .to_any()
+        .map_err(|e| eve_proto::BridgeRpcError::user_error(e.to_string()))?;
     let (_, delivered) = gateway.publish_notice(
         NoticeScope::SolarSystem(sys_id),
         notice_any,
