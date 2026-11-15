@@ -4,7 +4,6 @@
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
-use std::path::Path;
 
 use eve_dogma::{
     DogmaExpressionNode, DogmaVmOpcode, ModuleState, ShipFittingEngine,
@@ -20,7 +19,7 @@ mod dbuff_and_vm_opcodes_tests;
 pub(crate) fn load_sde() -> SdeRegistry {
     let p = std::env::var("EVOMU_SDE_PATH")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| Path::new("/Users/sergeya/ai/EvoMu/data/evomu_sde.sqlite").to_path_buf());
+        .unwrap_or_else(|_| SdeRegistry::default_db_path());
     SdeRegistry::open(p).expect("SDE sqlite")
 }
 

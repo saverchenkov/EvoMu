@@ -6,7 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
-eve-db = { path = "../eve-db" }
+eve-db = { path = "../eve-db", features = ["testkit"] }
 eve-proto = { path = "../eve-proto" }
 eve-sde = { path = "../eve-sde" }
 rusqlite = { workspace = true }

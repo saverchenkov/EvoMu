@@ -23,7 +23,6 @@ fn shared_sde() -> Arc<SdeRegistry> {
         for p in [
             SdeRegistry::default_db_path(),
             std::path::PathBuf::from("../../data/evomu_sde.sqlite"),
-            std::path::PathBuf::from("/Users/sergeya/ai/EvoMu/data/evomu_sde.sqlite"),
         ] {
             if let Ok(sde) = SdeRegistry::open(&p) {
                 return Arc::new(sde);

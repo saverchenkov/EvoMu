@@ -20,6 +20,7 @@ imbl.workspace = true
 default = []
 demo-seed = []
 lock-rank = []
+testkit = []
 
 [dev-dependencies]
 eve-testkit = { path = "../eve-testkit" }

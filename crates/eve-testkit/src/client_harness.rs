@@ -116,6 +116,12 @@ pub trait ClientWireTransport {
     fn semantic_lookup(&self) -> Option<SemanticLookupContext<'_>> {
         None
     }
+
+    /// Drains any pending asynchronous frames queued on the transport (e.g., background
+    /// `TickBroadcast` destiny updates or out-of-band notifications) without issuing an RPC.
+    fn drain_pending_frames(&mut self) -> Vec<ClientWireFrame> {
+        Vec::new()
+    }
 }
 
 /// Wire-path client harness wrapping a [`ClientWireTransport`] and enforcing strict `#912` (`C-1`)
@@ -274,67 +280,13 @@ impl<T: ClientWireTransport> ClientHarness<T> {
         std::mem::take(&mut self.buffered_frames)
     }
 
-    /// Dispatches `service.method` over the full wire transport path, validates the reply and every
-    /// emitted notification against `#912` client expectations, and returns all emitted wire artifacts.
-    ///
-    /// Panics if an unratcheted contract violation or marshal round-trip failure occurs (unless
-    /// [`ContractValidationMode::ReportOnly`] is set).
-    pub async fn call_exchange(
+    fn validate_and_ingest_non_rpc_frames(
         &mut self,
-        service: &str,
-        bound_id: Option<u64>,
-        method: &str,
-        args: &[PyRep],
-        kwargs: &HashMap<String, PyRep>,
-    ) -> ClientCallOutput {
-        let commits_before = self
-            .transport
-            .semantic_lookup()
-            .map(|l| l.db.tx_commit_count());
-        let exchange = self
-            .transport
-            .send_wire_call(service, bound_id, method, args, kwargs)
-            .await;
+        frames: &[ClientWireFrame],
+        check_marshal_roundtrip: bool,
+        violations: &mut Vec<String>,
+    ) -> (Vec<(String, Vec<PyRep>)>, Vec<PyRep>, Vec<PyRep>) {
         let lookup = self.transport.semantic_lookup();
-        let tx_commits = match (commits_before, lookup.as_ref().map(|l| l.db.tx_commit_count())) {
-            (Some(before), Some(after)) => after.saturating_sub(before),
-            _ => 0,
-        };
-        let rpc_name = format!("{service}.{method}");
-        self.recorded_commits.push((rpc_name.clone(), tx_commits));
-        if let Some(ref ratchet) = self.multi_commit_ratchet {
-            ratchet
-                .assert_call(&rpc_name, tx_commits)
-                .unwrap_or_else(|e| panic!("{e}"));
-        }
-
-        let mut violations = Vec::new();
-        for err in &exchange.marshal_errors {
-            violations.push(format!("wire:marshal: {err}"));
-        }
-
-        if let Ok(ref reply) = exchange.rpc_result {
-            let outcome = validate_rpc_reply_for_call(
-                lookup.as_ref(),
-                &self.contracts.expectations,
-                service,
-                method,
-                args,
-                reply,
-            );
-            for v in outcome.violations {
-                let keep = match self.mode {
-                    ContractValidationMode::Ratcheted => {
-                        !self.contracts.is_shape_violation_allowed(&v)
-                    }
-                    ContractValidationMode::Strict | ContractValidationMode::ReportOnly => true,
-                };
-                if keep {
-                    violations.push(v);
-                }
-            }
-        }
-
         let notify_map = self
             .contracts
             .expectations
@@ -343,7 +295,15 @@ impl<T: ClientWireTransport> ClientHarness<T> {
         let mut notifications = Vec::new();
         let mut session_change_packets = Vec::new();
         let mut destiny_batches = Vec::new();
-        for frame in &exchange.frames {
+        for (idx, frame) in frames.iter().enumerate() {
+            if check_marshal_roundtrip {
+                let bytes = eve_proto::marshal::encode(&frame.wire_packet);
+                if let Err(err) = eve_proto::marshal::decode(&bytes) {
+                    violations.push(format!(
+                        "wire:marshal: pending frame[{idx}] failed marshal round-trip: {err}"
+                    ));
+                }
+            }
             match &frame.kind {
                 ClientWireFrameKind::Notification { event, args: n_args } => {
                     if let Some(map) = notify_map {
@@ -379,36 +339,15 @@ impl<T: ClientWireTransport> ClientHarness<T> {
         }
 
         self.buffered_notifications.extend(notifications.iter().cloned());
-        self.buffered_frames.extend(exchange.frames.iter().cloned());
+        self.buffered_frames.extend(frames.iter().cloned());
 
-        if service == "charUnboundMgr"
-            && method == "SelectCharacterID"
-            && exchange.rpc_result.is_ok()
-        {
-            if let Some(cid) = args.first().and_then(|v| v.as_i64()) {
-                let mut sc = ShadowClient::new(cid);
-                if let Some(ref l) = lookup {
-                    sc.seed_sde(l.sde);
-                }
-                self.shadow = Some(sc);
-            }
-        }
-        if service == "invbroker" && method == "MachoBindObject" {
-            if let Ok(ref reply) = exchange.rpc_result {
-                if let Some(bid) = extract_bound_id_from_wire_rep(reply) {
-                    if let Some(cid) = args.first().and_then(|v| v.as_i64()) {
-                        self.bound_inv_containers.insert(bid, cid);
-                    }
-                }
-            }
-        }
         if let Some(ref mut shadow) = self.shadow {
             if let Some(ref l) = lookup {
                 if shadow.module_states.known_effect_names.is_empty() {
                     shadow.seed_sde(l.sde);
                 }
             }
-            for frame in &exchange.frames {
+            for frame in frames {
                 match &frame.kind {
                     ClientWireFrameKind::Notification { event, args: n_args } => {
                         shadow.apply_notification(event, n_args);
@@ -429,6 +368,132 @@ impl<T: ClientWireTransport> ClientHarness<T> {
                     | ClientWireFrameKind::ErrorResponse { .. } => {}
                 }
             }
+        }
+
+        (notifications, session_change_packets, destiny_batches)
+    }
+
+    /// Drains any asynchronous frames queued on the underlying transport without issuing an RPC,
+    /// validating notification contracts, updating `ShadowClient`, and buffering frames/notifications.
+    pub fn drain_pending_frames(&mut self) -> Vec<ClientWireFrame> {
+        let frames = self.transport.drain_pending_frames();
+        if frames.is_empty() {
+            return frames;
+        }
+        let mut violations = Vec::new();
+        let _ = self.validate_and_ingest_non_rpc_frames(&frames, true, &mut violations);
+        if let Some(ref shadow) = self.shadow {
+            if self.shadow_enforce {
+                let lookup = self.transport.semantic_lookup();
+                for div in &shadow.recorded_divergences {
+                    violations.push(format!("shadow:recorded:{div}"));
+                }
+                if let Some(ref l) = lookup {
+                    for div in shadow.compare_all_against_world(l.db, Some(l.sde)) {
+                        violations.push(format!("shadow:world_diff:{div}"));
+                    }
+                }
+            }
+        }
+        if !violations.is_empty() && self.mode != ContractValidationMode::ReportOnly {
+            panic!(
+                "ClientHarness wire contract violation on drain_pending_frames:\n  - {}",
+                violations.join("\n  - ")
+            );
+        }
+        frames
+    }
+
+    /// Dispatches `service.method` over the full wire transport path, validates the reply and every
+    /// emitted notification against `#912` client expectations, and returns all emitted wire artifacts.
+    ///
+    /// Panics if an unratcheted contract violation or marshal round-trip failure occurs (unless
+    /// [`ContractValidationMode::ReportOnly`] is set).
+    pub async fn call_exchange(
+        &mut self,
+        service: &str,
+        bound_id: Option<u64>,
+        method: &str,
+        args: &[PyRep],
+        kwargs: &HashMap<String, PyRep>,
+    ) -> ClientCallOutput {
+        let commits_before = self
+            .transport
+            .semantic_lookup()
+            .map(|l| l.db.tx_commit_count());
+        let exchange = self
+            .transport
+            .send_wire_call(service, bound_id, method, args, kwargs)
+            .await;
+        let tx_commits = {
+            let lookup = self.transport.semantic_lookup();
+            match (commits_before, lookup.as_ref().map(|l| l.db.tx_commit_count())) {
+                (Some(before), Some(after)) => after.saturating_sub(before),
+                _ => 0,
+            }
+        };
+        let rpc_name = format!("{service}.{method}");
+        self.recorded_commits.push((rpc_name.clone(), tx_commits));
+        if let Some(ref ratchet) = self.multi_commit_ratchet {
+            ratchet
+                .assert_call(&rpc_name, tx_commits)
+                .unwrap_or_else(|e| panic!("{e}"));
+        }
+
+        let mut violations = Vec::new();
+        for err in &exchange.marshal_errors {
+            violations.push(format!("wire:marshal: {err}"));
+        }
+
+        if let Ok(ref reply) = exchange.rpc_result {
+            let lookup = self.transport.semantic_lookup();
+            let outcome = validate_rpc_reply_for_call(
+                lookup.as_ref(),
+                &self.contracts.expectations,
+                service,
+                method,
+                args,
+                reply,
+            );
+            for v in outcome.violations {
+                let keep = match self.mode {
+                    ContractValidationMode::Ratcheted => {
+                        !self.contracts.is_shape_violation_allowed(&v)
+                    }
+                    ContractValidationMode::Strict | ContractValidationMode::ReportOnly => true,
+                };
+                if keep {
+                    violations.push(v);
+                }
+            }
+        }
+
+        if service == "charUnboundMgr"
+            && method == "SelectCharacterID"
+            && exchange.rpc_result.is_ok()
+        {
+            if let Some(cid) = args.first().and_then(|v| v.as_i64()) {
+                let mut sc = ShadowClient::new(cid);
+                if let Some(l) = self.transport.semantic_lookup() {
+                    sc.seed_sde(l.sde);
+                }
+                self.shadow = Some(sc);
+            }
+        }
+        if service == "invbroker" && method == "MachoBindObject" {
+            if let Ok(ref reply) = exchange.rpc_result {
+                if let Some(bid) = extract_bound_id_from_wire_rep(reply) {
+                    if let Some(cid) = args.first().and_then(|v| v.as_i64()) {
+                        self.bound_inv_containers.insert(bid, cid);
+                    }
+                }
+            }
+        }
+
+        let (notifications, session_change_packets, destiny_batches) =
+            self.validate_and_ingest_non_rpc_frames(&exchange.frames, false, &mut violations);
+
+        if let Some(ref mut shadow) = self.shadow {
             if let Ok(ref reply) = exchange.rpc_result {
                 if service == "dogmaIM" && method == "GetAllInfo" {
                     shadow.sync_from_get_all_info(reply);
@@ -455,7 +520,7 @@ impl<T: ClientWireTransport> ClientHarness<T> {
                 for div in &shadow.recorded_divergences {
                     violations.push(format!("shadow:recorded:{div}"));
                 }
-                if let Some(ref l) = lookup {
+                if let Some(l) = self.transport.semantic_lookup() {
                     for div in shadow.compare_all_against_world(l.db, Some(l.sde)) {
                         violations.push(format!("shadow:world_diff:{div}"));
                     }

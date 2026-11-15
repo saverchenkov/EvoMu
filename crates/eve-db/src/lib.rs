@@ -55,6 +55,8 @@ mod sqlite_error_and_wal_delta_tests;
 pub use accounts::service_roles;
 pub use accounts::{base64url_decode_no_pad, base64url_encode_no_pad};
 pub use clock::{ServerClock, VirtualServerClock};
+#[cfg(any(test, feature = "testkit"))]
+pub use persistence::WorldTablesSnapshot;
 pub use cow::{
     cow_full_touch_by_site, cow_full_touch_total, reset_cow_full_touch_for_test, CowCell,
     CowDiffItem, CowDiffIter, CowInlineDiffItem, CowInlineDiffIter, CowMap, CowMapInline,

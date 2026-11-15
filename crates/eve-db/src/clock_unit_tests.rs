@@ -167,12 +167,12 @@ fn wall_anchored_clock_pause_accumulation_and_tick_wall_second() {
 
     // 1x tick_wall_second on wall-anchored clock does not add extra offset
     assert_eq!(c.tick_wall_second(), 1);
-    assert_eq!(c.offset_secs.load(Ordering::SeqCst), 0);
+    assert_eq!(c.offset_secs(), 0);
 
     // 4x tick_wall_second on wall-anchored clock adds (4 - 1) = 3 offset seconds
     c.set_acceleration_multiplier(4);
     assert_eq!(c.tick_wall_second(), 4);
-    assert_eq!(c.offset_secs.load(Ordering::SeqCst), 3);
+    assert_eq!(c.offset_secs(), 3);
 
     // pause_on_tick on wall-anchored tick_wall_second
     c.set_pause_on_tick(true);
@@ -189,7 +189,7 @@ fn wall_anchored_clock_pause_accumulation_and_tick_wall_second() {
     let frozen_reading = c.now_unix_secs();
     assert_eq!(
         frozen_reading,
-        paused_wall.saturating_sub(25) + c.offset_secs.load(Ordering::SeqCst)
+        paused_wall.saturating_sub(25) + c.offset_secs()
     );
 
     // If paused_at_wall_secs is 0 while paused, falls back to host_wall_unix_secs_and_nanos
@@ -360,4 +360,30 @@ fn sqlite_tx_persists_rolls_back_and_exports_unrebased_clock_offset() {
     drop(exported);
     drop(reopened);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn virtual_clock_advance_millis_and_set_wall_now_for_tests() {
+    let clock = VirtualServerClock::with_fixed_base(1_760_000_000);
+    assert_eq!(clock.now_unix_secs(), 1_760_000_000);
+    assert_eq!(clock.now_unix_millis(), 1_760_000_000_000);
+
+    clock.advance_millis(450);
+    assert_eq!(clock.now_unix_secs(), 1_760_000_000);
+    assert_eq!(clock.now_subsec_nanos(), 450_000_000);
+    assert_eq!(clock.now_unix_millis(), 1_760_000_000_450);
+
+    clock.advance_millis(600);
+    assert_eq!(clock.now_unix_secs(), 1_760_000_001);
+    assert_eq!(clock.now_subsec_nanos(), 50_000_000);
+    assert_eq!(clock.offset_secs(), 1);
+
+    let dyn_clock: &dyn ServerClock = &clock;
+    dyn_clock.set_wall_now_for_tests(1_800_000_000);
+    assert_eq!(dyn_clock.now_unix_secs(), 1_800_000_000);
+    assert_eq!(dyn_clock.now_subsec_nanos(), 0);
+
+    dyn_clock.set_wall_now_ms_for_tests(1_800_000_123_456);
+    assert_eq!(dyn_clock.now_unix_secs(), 1_800_000_123);
+    assert_eq!(dyn_clock.now_subsec_nanos(), 456_000_000);
 }

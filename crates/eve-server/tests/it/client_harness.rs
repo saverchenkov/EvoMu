@@ -7,7 +7,8 @@
 
 use eve_machonet::SessionState;
 use eve_proto::{BridgeEnvelope, PyRep, MAX_FRAME_SIZE};
-use eve_server::router::ServerContext;
+use eve_server::router::{NotificationTarget, ServerContext};
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
@@ -558,5 +559,77 @@ async fn test_z1_to_z8_real_client_session_diff_and_journey_contract() {
         first_name,
         Some(PyRep::String("Aura Capsuleer".into())),
         "charUnboundMgr must return seeded Aura Capsuleer row"
+    );
+}
+
+#[tokio::test]
+async fn test_c_drain_pending_frames_emits_session_change_detaches_space_and_updates_shadow() {
+    let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
+    let sess = SessionState::new(70_099);
+    let mut harness = crate::common::wrap_wire_harness(&ctx, sess);
+    harness
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())],
+            &HashMap::new(),
+        )
+        .await;
+    harness
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(90_000_001)],
+            &HashMap::new(),
+        )
+        .await;
+    harness
+        .call_ok("stationSvc", None, "Undock", &[], &HashMap::new())
+        .await;
+    harness
+        .call_ok(
+            "beyonce",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(30_000_142), PyRep::None],
+            &HashMap::new(),
+        )
+        .await;
+    assert_eq!(harness.shadow().and_then(|s| s.session.station_id), None);
+    let _ = harness.drain_frames();
+
+    // Simulate out-of-band docking/respawn state change + char notification while client is idle.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.station_id = Some(60_003_760);
+        }
+    });
+    let _ = ctx.notify(
+        NotificationTarget::Character(90_000_001),
+        "OnSessionChanged",
+        "charid",
+        vec![PyRep::None],
+    );
+    ctx.advance_sim_ms(1_000).await;
+
+    let drained = harness.drain_pending_frames();
+    assert!(
+        drained.iter().any(|f| matches!(
+            f.kind,
+            eve_testkit::client_harness::ClientWireFrameKind::SessionChange { .. }
+        )),
+        "drain_pending_frames must emit SessionChangeNotification on out-of-band station respawn: {drained:?}"
+    );
+    assert_eq!(
+        harness.shadow().and_then(|s| s.session.station_id),
+        Some(60_003_760),
+        "drain_pending_frames must update ShadowClient via SessionChangeNotification"
+    );
+    assert!(
+        !harness.drain_frames().is_empty(),
+        "drain_pending_frames must append frames to buffered_frames"
     );
 }

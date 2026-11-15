@@ -127,6 +127,31 @@ impl<'c> ClientWireSession<'c> {
         )
         .await
     }
+
+    /// Drains any pending background tick `DoDestinyUpdate` frames, session changes, and queued
+    /// notifications without issuing a dummy RPC (`GH #1077 §C`).
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn drain_pending_frames(&mut self) -> (Vec<OutFrame>, Vec<PyRep>) {
+        let mut wire_refs = CallReqWireRefs {
+            client_id: self.client_id,
+            sys_rx: &mut self.sys_rx,
+            subscribed_sys_id: &mut self.subscribed_sys_id,
+            wire_state: &mut self.wire_state,
+        };
+        let (out_frames, wire_packets) =
+            crate::macho_listener::drain_pending_tick_frames_for_wire_session(
+                self.ctx,
+                &mut self.session,
+                &mut wire_refs,
+            );
+        for (idx, pkt) in wire_packets.iter().enumerate() {
+            let bytes = marshal::encode(pkt);
+            if let Err(err) = marshal::decode(&bytes) {
+                panic!("pending frame[{idx}] failed marshal round-trip: {err}");
+            }
+        }
+        (out_frames, wire_packets)
+    }
 }
 
 /// Stateless one-shot helper that routes a single `(&ServerContext, &mut SessionState)` RPC call

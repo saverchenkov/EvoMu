@@ -1182,12 +1182,28 @@ def main():
             xmpp_port = args.xmpp_port if args.xmpp_port > 0 else find_free_port()
             sde_path = os.environ.get("EVOMU_SDE_PATH", "")
             if not sde_path or not os.path.exists(sde_path):
-                cand = os.path.join(REPO_ROOT, "data", "evomu_sde.sqlite")
-                sde_path = cand if os.path.exists(cand) else "/Users/sergeya/ai/EvoMu/data/evomu_sde.sqlite"
+                for cand in (
+                    os.path.join(REPO_ROOT, "data", "evomu_sde.sqlite"),
+                    os.path.join(os.path.dirname(os.path.dirname(REPO_ROOT)), "data", "evomu_sde.sqlite"),
+                    os.path.join(os.path.dirname(REPO_ROOT), "EvoMu", "data", "evomu_sde.sqlite"),
+                ):
+                    if os.path.exists(cand):
+                        sde_path = cand
+                        break
+                else:
+                    sde_path = os.path.join(REPO_ROOT, "data", "evomu_sde.sqlite")
             qdesc_path = os.environ.get("EVOMU_QUASAR_DESCRIPTORS_PATH", "")
             if not qdesc_path or not os.path.exists(qdesc_path):
-                cand_q = os.path.join(REPO_ROOT, "data", "quasar_descriptors.sqlite")
-                qdesc_path = cand_q if os.path.exists(cand_q) else "/Users/sergeya/ai/EvoMu/data/quasar_descriptors.sqlite"
+                for cand_q in (
+                    os.path.join(REPO_ROOT, "data", "quasar_descriptors.sqlite"),
+                    os.path.join(os.path.dirname(os.path.dirname(REPO_ROOT)), "data", "quasar_descriptors.sqlite"),
+                    os.path.join(os.path.dirname(REPO_ROOT), "EvoMu", "data", "quasar_descriptors.sqlite"),
+                ):
+                    if os.path.exists(cand_q):
+                        qdesc_path = cand_q
+                        break
+                else:
+                    qdesc_path = os.path.join(REPO_ROOT, "data", "quasar_descriptors.sqlite")
 
             cfg_path = os.path.join(out_dir, "evomu_harness.toml")
             db_path = os.path.join(out_dir, "harness_world.sqlite")

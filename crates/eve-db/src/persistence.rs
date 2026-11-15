@@ -1529,6 +1529,88 @@ impl WorldRepository {
             snap.asteroids.insert(record.asteroid_id, record);
         });
     }
+
+    /// Captures a complete logical snapshot of all `WorldRepository` tables for negative-test
+    /// assertions ("no rows changed") and deterministic rollback (`restore`).
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn snapshot_tables(&self) -> WorldTablesSnapshot {
+        let snapshot = self.with_snapshot(|s| s.clone());
+        let tx_commit_count = self
+            .tx_commit_count
+            .load(std::sync::atomic::Ordering::SeqCst);
+        WorldTablesSnapshot {
+            snapshot,
+            tx_commit_count,
+        }
+    }
+
+    /// Restores the repository's in-memory snapshot, `TableFingerprints`, and SQLite relational
+    /// tables back to a previously captured [`WorldTablesSnapshot`].
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn restore(&self, saved: &WorldTablesSnapshot) -> Result<(), String> {
+        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        let fp = sqlite_store::replace_sqlite_from_snapshot(&mut writer.conn, &saved.snapshot)?;
+        writer.working = saved.snapshot.clone();
+        writer.fp = fp;
+        writer.seq = saved.snapshot.wal_seq;
+        *self.published.write().unwrap_or_else(|e| e.into_inner()) =
+            std::sync::Arc::new(saved.snapshot.clone());
+        self.tx_commit_count
+            .store(saved.tx_commit_count, std::sync::atomic::Ordering::SeqCst);
+        self.pending_wal_records
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        self.bump_state_epoch();
+        self.bump_combat_state_epoch();
+        Ok(())
+    }
+}
+
+/// Captured snapshot of every domain table in [`WorldRepository`] for negative-test diffing and
+/// rollback (`#[cfg(any(test, feature = "testkit"))]`).
+#[cfg(any(test, feature = "testkit"))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorldTablesSnapshot {
+    pub snapshot: WorldStateSnapshot,
+    pub tx_commit_count: u64,
+}
+
+#[cfg(any(test, feature = "testkit"))]
+impl WorldTablesSnapshot {
+    /// Returns the sorted list of top-level `WorldStateSnapshot` table/field names that differ
+    /// between `self` and `other`.
+    pub fn changed_tables(&self, other: &Self) -> Vec<String> {
+        if self.snapshot == other.snapshot {
+            return Vec::new();
+        }
+        let lhs = serde_json::to_value(&self.snapshot).unwrap_or(serde_json::Value::Null);
+        let rhs = serde_json::to_value(&other.snapshot).unwrap_or(serde_json::Value::Null);
+        match (lhs, rhs) {
+            (serde_json::Value::Object(a), serde_json::Value::Object(b)) => {
+                let mut changed: Vec<String> = a
+                    .iter()
+                    .filter_map(|(k, v)| (b.get(k) != Some(v)).then(|| k.clone()))
+                    .collect();
+                for k in b.keys() {
+                    if !a.contains_key(k) {
+                        changed.push(k.clone());
+                    }
+                }
+                changed.sort();
+                changed
+            }
+            _ => vec!["<root>".to_string()],
+        }
+    }
+
+    /// Asserts that no domain table/field changed between `self` (before) and `after`.
+    pub fn assert_unchanged(&self, after: &Self, context: &str) {
+        let changed = self.changed_tables(after);
+        assert!(
+            changed.is_empty(),
+            "{context}: expected no database tables to change, but modified: {:?}",
+            changed
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1610,6 +1692,35 @@ mod r4_persistence_tests {
             res.is_err(),
             "world transaction entry while holding RANK_LEAF must panic"
         );
+    }
+
+    #[test]
+    fn test_snapshot_tables_diff_and_restore_roundtrip() {
+        let tmp_path = std::env::temp_dir().join(format!(
+            "evomu_snapshot_restore_{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&tmp_path);
+        let repo = WorldRepository::open_sqlite(&tmp_path).expect("open_sqlite");
+        let before = repo.snapshot_tables();
+        assert!(before.changed_tables(&repo.snapshot_tables()).is_empty());
+
+        repo.with_mut_snapshot(|snap| {
+            snap.next_entity_id += 5;
+            snap.service_state_blobs
+                .insert("test:restore".into(), "mutated".into());
+        });
+        let after_mut = repo.snapshot_tables();
+        let changed = before.changed_tables(&after_mut);
+        assert!(changed.contains(&"next_entity_id".to_string()));
+        assert!(changed.contains(&"service_state_blobs".to_string()));
+
+        repo.restore(&before).expect("restore snapshot");
+        let restored = repo.snapshot_tables();
+        before.assert_unchanged(&restored, "after WorldRepository::restore");
+
+        drop(repo);
+        let _ = std::fs::remove_file(&tmp_path);
     }
 }
 #[cfg(test)] #[path = "persistence_unit_tests.rs"] mod persistence_unit_tests;

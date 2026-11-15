@@ -1301,19 +1301,25 @@ impl ServerContext {
         (entry.delay_s - wall_elapsed.max(sim_elapsed)).max(0.0)
     }
 
-    /// Checks if a module on a ship is currently under reactivation delay (`feat:dogma.reactivation-delay`, `DG-4`).
-    pub fn is_module_in_reactivation_delay(&self, ship_id: i64, module_id: i64) -> bool {
+    /// Resolves the Unix expiry timestamp (`f64`) of `(ship_id, module_id)`'s active reactivation
+    /// cooldown, returning `None` if no cooldown exists or it has already elapsed.
+    fn resolve_active_reactivation_cooldown(&self, ship_id: i64, module_id: i64) -> Option<f64> {
         let now = self.now_unix_secs() as f64;
         let (type_id, sys_opt, cur_sys_sim_s) = self.resolve_ship_cooldown_clock(ship_id, module_id);
         let guard = self
             .module_reactivation_cooldowns
             .read()
             .unwrap_or_else(|e| e.into_inner());
-        if let Some(entry) = guard.get(&(ship_id, module_id, type_id)) {
-            Self::remaining_cooldown_secs(entry, now, sys_opt, cur_sys_sim_s) > 1e-6
-        } else {
-            false
-        }
+        guard.get(&(ship_id, module_id, type_id)).and_then(|entry| {
+            let rem = Self::remaining_cooldown_secs(entry, now, sys_opt, cur_sys_sim_s);
+            (rem > 1e-6).then_some(entry.recorded_unix_f64 + entry.delay_s)
+        })
+    }
+
+    /// Checks if a module on a ship is currently under reactivation delay (`feat:dogma.reactivation-delay`, `DG-4`).
+    pub fn is_module_in_reactivation_delay(&self, ship_id: i64, module_id: i64) -> bool {
+        self.resolve_active_reactivation_cooldown(ship_id, module_id)
+            .is_some()
     }
 
     /// Records module reactivation delay until `now + delay_s` (`feat:dogma.reactivation-delay`, `DG-4`).
@@ -2761,6 +2767,149 @@ impl ServerContext {
             || ex.fleet_names.contains_key(&fleet_id) || ex.max_sizes.contains_key(&fleet_id)
             || ex.invite_details.keys().any(|&(fid, _)| fid == fleet_id)
             || ex.invite_timestamps.keys().any(|&(fid, _)| fid == fleet_id)
+    }
+
+    /// Deterministically advances the injected server clock and steps every active `SystemActor`
+    /// in increments of `<= 100 ms` (`GH #1077 §C`).
+    ///
+    /// Whenever a step crosses one or more whole Unix seconds, the unified synchronous clock
+    /// pipeline (`persist_clock_advance_meta` + `run_clock_advanced_sync_pipeline`) is invoked
+    /// before stepping the `Ballpark` actors for that sub-second slice.
+    #[cfg(any(test, feature = "testkit"))]
+    pub async fn advance_sim_ms(&self, ms: u64) {
+        let mut remaining = ms;
+        while remaining > 0 {
+            let step_ms = remaining.min(100);
+            remaining -= step_ms;
+
+            let prev_unix = self.clock().now_unix_secs();
+            self.clock().advance_millis(step_ms);
+            let cur_unix = self.clock().now_unix_secs();
+            if cur_unix > prev_unix {
+                let secs = cur_unix - prev_unix;
+                let offset_secs = self.clock().offset_secs();
+                self.persist_clock_advance_meta(cur_unix, offset_secs);
+                self.run_clock_advanced_sync_pipeline(prev_unix, secs, true, true);
+            }
+
+            let dt = step_ms as f64 / 1_000.0;
+            for (_sys_id, handle) in self.systems.active_system_handles() {
+                let _ = handle.step_manual_tick_only(dt).await;
+            }
+        }
+    }
+
+    /// Advances simulation time in `<= 100 ms` steps via [`Self::advance_sim_ms`] until `pred()`
+    /// returns `true` or `max_ms` elapses (`GH #1077 §C`).
+    #[cfg(any(test, feature = "testkit"))]
+    pub async fn advance_until<F>(&self, mut pred: F, max_ms: u64) -> Result<u64, String>
+    where
+        F: FnMut() -> bool,
+    {
+        if pred() {
+            return Ok(0);
+        }
+        let mut elapsed_ms = 0u64;
+        while elapsed_ms < max_ms {
+            let step_ms = (max_ms - elapsed_ms).min(100);
+            self.advance_sim_ms(step_ms).await;
+            elapsed_ms += step_ms;
+            if pred() {
+                return Ok(elapsed_ms);
+            }
+        }
+        Err(format!(
+            "advance_until timed out after {elapsed_ms} ms without predicate becoming true"
+        ))
+    }
+
+    /// Async variant of [`Self::advance_until`] for predicates that query async actors or drain
+    /// test harness frames (`GH #1077 §C`).
+    #[cfg(any(test, feature = "testkit"))]
+    pub async fn advance_until_async<F, Fut>(
+        &self,
+        mut pred: F,
+        max_ms: u64,
+    ) -> Result<u64, String>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        if pred().await {
+            return Ok(0);
+        }
+        let mut elapsed_ms = 0u64;
+        while elapsed_ms < max_ms {
+            let step_ms = (max_ms - elapsed_ms).min(100);
+            self.advance_sim_ms(step_ms).await;
+            elapsed_ms += step_ms;
+            if pred().await {
+                return Ok(elapsed_ms);
+            }
+        }
+        Err(format!(
+            "advance_until_async timed out after {elapsed_ms} ms without predicate becoming true"
+        ))
+    }
+
+    /// Returns the Unix timestamp when `module_id`'s pending reload completes, if scheduled (`§C`).
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn pending_reload_complete_at(&self, module_id: i64) -> Option<u64> {
+        let now = self.now_unix_secs();
+        self.db
+            .with_snapshot(|s| s.cluster_and_runtime.module_reload_until_unix.get(&module_id).copied())
+            .filter(|&until| now < until)
+    }
+
+    /// Returns the Unix timestamp (`f64`) when `(ship_id, module_id)` finishes its
+    /// reactivation cooldown, if active (`§C`).
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn module_reactivation_cooldown_until_unix(
+        &self,
+        ship_id: i64,
+        module_id: i64,
+    ) -> Option<f64> {
+        self.resolve_active_reactivation_cooldown(ship_id, module_id)
+    }
+
+    /// Returns the Unix timestamp when `char_id`'s session-change timer expires, if active (`§C`).
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn session_change_timer_until(&self, char_id: i64) -> Option<u64> {
+        let now = self.now_unix_secs();
+        self.session_change_timers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&char_id)
+            .map(|st| st.expires_unix)
+            .filter(|&until| now < until)
+    }
+
+    /// Returns the Unix timestamp when `char_id`'s location-change/undock invulnerability expires (`§C`).
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn location_change_invuln_until(&self, char_id: i64) -> Option<u64> {
+        let now = self.now_unix_secs();
+        self.location_change_invuln
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&char_id)
+            .copied()
+            .filter(|&until| now < until)
+    }
+
+    /// Returns the remaining lock acquisition milliseconds for `ship_id -> target_id`, if locking (`§C`).
+    #[cfg(any(test, feature = "testkit"))]
+    pub async fn pending_lock_remaining_ms(
+        &self,
+        solar_system_id: u32,
+        ship_id: i64,
+        target_id: i64,
+    ) -> Option<f64> {
+        let handle = self.systems.get_handle(solar_system_id)?;
+        let locks = handle.get_target_locks(ship_id).await.ok()?;
+        locks
+            .into_iter()
+            .find(|l| l.target_id == target_id && !l.locked)
+            .map(|l| l.remaining_lock_ms)
     }
 }
 

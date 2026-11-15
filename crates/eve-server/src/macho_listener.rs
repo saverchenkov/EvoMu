@@ -765,35 +765,8 @@ pub async fn execute_call_req_wire(
         }
     }
 
-    let session_change_frame = prev_session
-        .to_session_change_pyrep(session, vec![MACHO_PROXY_NODE_ID as i64])
-        .map(|mut sess_change_payload| {
-            enrich_session_change_scoped_roles(
-                ctx,
-                &prev_session,
-                session,
-                &mut sess_change_payload,
-            );
-            let mut named_payload = HashMap::new();
-            named_payload.insert("channel".into(), PyRep::ascii_bytes("sessionchange"));
-            let sess_pkt = MachoPacket {
-                packet_type: MachoPacketType::SessionChangeNotification,
-                source: MachoAddress::Node {
-                    node_id: MACHO_PROXY_NODE_ID,
-                    service: None,
-                    call_id: 0,
-                },
-                destination: MachoAddress::Client {
-                    client_id: wire.client_id,
-                    call_id: 0,
-                    service: None,
-                },
-                user_id: session.user_id,
-                payload: sess_change_payload,
-                named_payload,
-            };
-            sess_pkt.to_pyrep()
-        });
+    let session_change_frame =
+        build_session_change_wire_frame(ctx, wire.client_id, &prev_session, session);
 
     let mut pending_tick_batches = cross_sys_pre_ticks;
     let mut post_rpc_direct_batch = None;
@@ -2024,6 +1997,137 @@ pub(crate) fn enrich_session_change_scoped_roles(
 }
 
 pub use eve_machonet::extract_macho_call_req;
+
+fn build_session_change_wire_frame(
+    ctx: &ServerContext,
+    client_id: u64,
+    prev_session: &SessionState,
+    session: &SessionState,
+) -> Option<PyRep> {
+    prev_session
+        .to_session_change_pyrep(session, vec![MACHO_PROXY_NODE_ID as i64])
+        .map(|mut sess_change_payload| {
+            enrich_session_change_scoped_roles(
+                ctx,
+                prev_session,
+                session,
+                &mut sess_change_payload,
+            );
+            let mut named_payload = HashMap::new();
+            named_payload.insert("channel".into(), PyRep::ascii_bytes("sessionchange"));
+            let sess_pkt = MachoPacket {
+                packet_type: MachoPacketType::SessionChangeNotification,
+                source: MachoAddress::Node {
+                    node_id: MACHO_PROXY_NODE_ID,
+                    service: None,
+                    call_id: 0,
+                },
+                destination: MachoAddress::Client {
+                    client_id,
+                    call_id: 0,
+                    service: None,
+                },
+                user_id: session.user_id,
+                payload: sess_change_payload,
+                named_payload,
+            };
+            sess_pkt.to_pyrep()
+        })
+}
+
+/// Drains any pending `TickBroadcast` destiny updates, session changes, and queued notifications
+/// for an idle `ClientWireSession` without issuing an RPC (`GH #1077 §C`).
+#[cfg(any(test, feature = "testkit"))]
+pub(crate) fn drain_pending_tick_frames_for_wire_session(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    wire: &mut CallReqWireRefs<'_>,
+) -> (Vec<crate::outbound_sequencer::OutFrame>, Vec<PyRep>) {
+    let was_in_space = session.character_id.is_some()
+        && session.station_id.is_none()
+        && session.structure_id.is_none()
+        && session.solar_system_id.is_some();
+    let prev_session = session.clone();
+    if session.character_id.is_some() {
+        ctx.sync_session(session);
+    }
+    let mut out_frames = Vec::new();
+    let session_change_frame =
+        build_session_change_wire_frame(ctx, wire.client_id, &prev_session, session);
+    let sess_change_sent = session_change_frame.is_some();
+    if let Some(frame) = session_change_frame {
+        out_frames.push(crate::outbound_sequencer::OutFrame::SessionChange { frame });
+    }
+    let is_in_space = session.character_id.is_some()
+        && session.station_id.is_none()
+        && session.structure_id.is_none()
+        && session.solar_system_id.is_some();
+    if was_in_space && (!is_in_space || prev_session.solar_system_id != session.solar_system_id) {
+        wire.wire_state.leave_space();
+    }
+    if is_in_space {
+        let sys_id = session.solar_system_id.unwrap();
+        if *wire.subscribed_sys_id != Some(sys_id) {
+            *wire.sys_rx = ctx.systems.get_or_spawn(sys_id).subscribe();
+            *wire.subscribed_sys_id = Some(sys_id);
+        }
+        if let Some(ship_id) = session.ship_id {
+            let mut pending_batches = Vec::new();
+            let (_ep, effective_was_live) = drain_pending_tick_batches_for_sys(
+                ctx,
+                wire.sys_rx,
+                sys_id,
+                ship_id,
+                wire.wire_state,
+                &mut pending_batches,
+                session.session_id,
+            );
+            if effective_was_live {
+                for batch in pending_batches {
+                    if let Some(frame) =
+                        crate::outbound_sequencer::sequence_tick(wire.wire_state, batch)
+                    {
+                        out_frames.push(frame);
+                    }
+                }
+            }
+        }
+    }
+    let mut notifs = Vec::new();
+    if let Some(cid) = session.character_id {
+        for n in ctx.drain_notifications_for_char(cid) {
+            notifs.push((n.event, n.args));
+        }
+    }
+    for (ev, args) in session.drain_notifications() {
+        if !notifs.iter().any(|(e, a)| e == &ev && a == &args) {
+            notifs.push((ev, args));
+        }
+    }
+    for (event, args) in notifs {
+        if sess_change_sent && event == "OnSessionChanged" {
+            continue;
+        }
+        if let Some(tn) = build_typed_notification(ctx, event, args) {
+            out_frames.push(crate::outbound_sequencer::OutFrame::Notification {
+                event: tn.event,
+                args: tn.args,
+            });
+        }
+    }
+    let wire_packets = out_frames
+        .iter()
+        .map(|frame| {
+            out_frame_to_wire_pyrep(
+                MACHO_PROXY_NODE_ID,
+                wire.client_id,
+                session.user_id,
+                frame,
+            )
+        })
+        .collect();
+    (out_frames, wire_packets)
+}
 
 #[cfg(test)]
 #[path = "macho_listener_tests.rs"]
