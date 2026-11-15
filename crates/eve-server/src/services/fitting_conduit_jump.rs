@@ -348,6 +348,7 @@ pub(crate) async fn bridge_to_resolved_beacon(
             st.bridges.remove(&(ctx_key(ctx), ship_id));
         }
     };
+    let _ = sys.remove_module_cycle(ship_id, portal_id).await;
     if let Err(e) = sys.add_module_cycle(self_immobilizing_cycle(
         ship_id,
         portal_id,

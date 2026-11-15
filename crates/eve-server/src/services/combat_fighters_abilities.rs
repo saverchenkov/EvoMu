@@ -724,6 +724,7 @@ async fn activate_single_fighter_ability(
                 ewar_strength_applied = scram_pts as f64;
                 let synth_id = -(fighter_ball_id * 10 + slot_id as i64);
                 let dur_s = (attr(2203).unwrap_or(5_000.0) / 1_000.0).max(5.0);
+                let _ = sys_handle.remove_module_cycle(fighter_ball_id, synth_id).await;
                 let _ = sys_handle
                     .add_module_cycle(crate::system_actor::ActiveModuleCycle {
                         ship_id: fighter_ball_id,

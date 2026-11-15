@@ -737,6 +737,7 @@ async fn light_cyno(
         }
         st.beacon_cycles.remove(&(ctx_key(ctx), ship_id));
     };
+    let _ = sys.remove_module_cycle(ship_id, module_id).await;
     if let Err(e) = sys.add_module_cycle(self_immobilizing_cycle(
         ship_id,
         module_id,
