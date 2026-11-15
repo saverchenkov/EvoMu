@@ -410,5 +410,264 @@ class TestEvomuSiteCameraGuard(unittest.TestCase):
             cam.SetAtPosition([float("nan"), 0.0, 0.0])
 
 
+class _FakeSignal(object):
+    """Emulates V24.01 signals.signal.Signal bound-method storage (_methods[obj].add(func))."""
+
+    def __init__(self):
+        self._methods = {}
+        self._functions = set()
+
+    def connect(self, slot):
+        if hasattr(slot, "__self__") and slot.__self__ is not None and hasattr(slot, "__func__"):
+            self._methods.setdefault(slot.__self__, set()).add(slot.__func__)
+        else:
+            self._functions.add(slot)
+
+    def __call__(self, *args, **kwargs):
+        calls = []
+        for obj, funcs in list(self._methods.items()):
+            for func in list(funcs):
+                calls.append(types.MethodType(func, obj))
+        for fn in list(self._functions):
+            calls.append(fn)
+        for c in calls:
+            c(*args, **kwargs)
+
+
+class TestEvomuSiteLocationArrivalGuard(unittest.TestCase):
+    """Tests for LocationArrivalIndicationService.on_warp_finished dock/ballpark teardown guard (#1051)."""
+
+    def setUp(self):
+        self._saved_modules = {
+            k: sys.modules.get(k)
+            for k in (
+                "eve.client.script.remote.michelle",
+                "eve.client.script.parklife.space_signals.warp_signals",
+                "mining.client.location_arrival_indication_service",
+                "eve.client.script.ui.shared.infoPanels.locationArrivalIndicationSvc",
+            )
+        }
+        self._saved_sm = getattr(builtins, "sm", None)
+        self._saved_session = getattr(builtins, "session", None)
+        evomu_site._HOOKED_CAMERA_GUARD_TARGETS = set()
+        self._setup_fake_modules()
+
+    def tearDown(self):
+        for k, v in self._saved_modules.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+        if self._saved_sm is None:
+            if hasattr(builtins, "sm"):
+                delattr(builtins, "sm")
+        else:
+            builtins.sm = self._saved_sm
+        if self._saved_session is None:
+            if hasattr(builtins, "session"):
+                delattr(builtins, "session")
+        else:
+            builtins.session = self._saved_session
+        evomu_site._HOOKED_CAMERA_GUARD_TARGETS = set()
+
+    def _setup_fake_modules(self):
+        class _Session(object):
+            def __init__(self):
+                self.stationid = None
+                self.structureid = None
+                self.shipid = 100000100
+
+        self.session = _Session()
+        builtins.session = self.session
+
+        class _Michelle(object):
+            def __init__(self):
+                self._Michelle__bp = None
+                self._slim_items = {}
+                self._balls_and_slims = []
+
+            def GetBallpark(self, doWait=True):
+                return self._Michelle__bp
+
+            def GetSlimItem(self, item_id):
+                if self._Michelle__bp is None:
+                    return None
+                return self._slim_items.get(item_id)
+
+            def GetBallsAndSlimItems(self):
+                # Exact V24.01 michelle.pyj behavior: returns None when __bp is None!
+                if self._Michelle__bp is None:
+                    return None
+                return list(self._balls_and_slims)
+
+        self.Michelle = _Michelle
+        self.michelle = _Michelle()
+
+        michelle_mod = types.ModuleType("eve.client.script.remote.michelle")
+        michelle_mod.Michelle = _Michelle
+        sys.modules["eve.client.script.remote.michelle"] = michelle_mod
+
+        ws_mod = types.ModuleType("eve.client.script.parklife.space_signals.warp_signals")
+        ws_mod.on_warp_activated = _FakeSignal()
+        ws_mod.on_warp_arrived_at = _FakeSignal()
+        ws_mod.on_warp_finished = _FakeSignal()
+        self.warp_signals = ws_mod
+        sys.modules["eve.client.script.parklife.space_signals.warp_signals"] = ws_mod
+
+        michelle_ref = self.michelle
+        indicated = []
+        self.indicated = indicated
+
+        class _LocationArrivalIndicationService(object):
+            _instance = None
+
+            @classmethod
+            def initialize(cls):
+                if not cls._instance:
+                    cls._instance = cls()
+
+            def __init__(self):
+                self.tracked_slim_item = "prev_slim"
+                ws_mod.on_warp_activated.connect(self.on_warp_activated)
+                ws_mod.on_warp_arrived_at.connect(self.on_warp_arrived_at)
+                ws_mod.on_warp_finished.connect(self.on_warp_finished)
+
+            def on_warp_activated(self, item_id, bookmark_id):
+                self.tracked_slim_item = None
+
+            def on_warp_arrived_at(self, item_id):
+                self._indicate_arrival(item_id)
+
+            def on_warp_finished(self, item_id):
+                self.check_indicate_arrival(item_id)
+
+            def check_indicate_arrival(self, item_id):
+                if self.tracked_slim_item is None or getattr(self.tracked_slim_item, "itemID", None) != item_id:
+                    self._indicate_arrival(item_id)
+
+            def _indicate_arrival(self, item_id):
+                slim_item = michelle_ref.GetSlimItem(item_id)
+                if slim_item is None:
+                    slim_item = self.get_closest_location_slim_item()
+                if slim_item is None:
+                    self.tracked_slim_item = None
+                    return
+                self.tracked_slim_item = slim_item
+                indicated.append(slim_item)
+
+            def get_closest_location_slim_item(self):
+                closest = None
+                for _ball, slim_item in michelle_ref.GetBallsAndSlimItems():
+                    closest = slim_item
+                return closest
+
+        self.LocationArrivalIndicationService = _LocationArrivalIndicationService
+        mining_mod = types.ModuleType("mining.client.location_arrival_indication_service")
+        mining_mod.LocationArrivalIndicationService = _LocationArrivalIndicationService
+        mining_mod.GetMichelle = lambda: michelle_ref
+        mining_mod.warp_signals = ws_mod
+        sys.modules["mining.client.location_arrival_indication_service"] = mining_mod
+
+        class _InfoPanelArrivalSvc(object):
+            def __init__(self):
+                self.tracked_slim_item = "prev"
+
+            def GetBallpark(self):
+                return michelle_ref.GetBallpark(False)
+
+            def get_nearest_celestial_to_player(self):
+                if self.GetBallpark() is None:
+                    return None
+                return ("celestial", 60003760)
+
+            def on_warp_finished(self, item_id):
+                for _item in self.get_nearest_celestial_to_player():
+                    pass
+
+        self.InfoPanelArrivalSvc = _InfoPanelArrivalSvc
+        info_mod = types.ModuleType("eve.client.script.ui.shared.infoPanels.locationArrivalIndicationSvc")
+        info_mod.LocationArrivalIndicationService = _InfoPanelArrivalSvc
+        info_mod.get_nearest_celestial_to_player = lambda: (
+            None if michelle_ref.GetBallpark(False) is None else ("celestial", 60003760)
+        )
+        sys.modules["eve.client.script.ui.shared.infoPanels.locationArrivalIndicationSvc"] = info_mod
+
+        class _SM(object):
+            def __init__(self, services):
+                self.services = services
+
+            def IsServiceRunning(self, name):
+                return name in self.services
+
+            def GetService(self, name):
+                return self.services[name]
+
+        self.info_panel_svc = _InfoPanelArrivalSvc()
+        self.sm = _SM(
+            {
+                "michelle": self.michelle,
+                "locationArrivalIndicationSvc": self.info_panel_svc,
+            }
+        )
+        builtins.sm = self.sm
+
+    def test_on_warp_finished_after_dock_or_release_ballpark_does_not_raise_type_error(self):
+        # Simulate LocationArrivalIndicationService initialized BEFORE guard runs (signal already connected).
+        self.LocationArrivalIndicationService.initialize()
+        svc = self.LocationArrivalIndicationService._instance
+        evomu_site._install_camera_dock_guard()
+
+        # Case 1: Docked in station (stationid set, ballpark released -> None)
+        self.session.stationid = 60003760
+        self.michelle._Michelle__bp = None
+        self.warp_signals.on_warp_finished(60003760)
+        self.assertIsNone(svc.tracked_slim_item)
+        self.assertEqual(self.indicated, [])
+
+        # Case 2: Docked in structure (structureid set, ballpark released -> None)
+        svc.tracked_slim_item = "prev"
+        self.session.stationid = None
+        self.session.structureid = 1040000000001
+        self.warp_signals.on_warp_finished(1040000000001)
+        self.assertIsNone(svc.tracked_slim_item)
+
+        # Case 3: OnReleaseBallpark fired in-flight just before session.stationid update
+        svc.tracked_slim_item = "prev"
+        self.session.structureid = None
+        self.michelle._Michelle__bp = None
+        self.warp_signals.on_warp_finished(60003760)
+        self.assertIsNone(svc.tracked_slim_item)
+        self.assertIsNone(svc.get_closest_location_slim_item())
+        self.assertEqual(self.michelle.GetBallsAndSlimItems(), [])
+
+    def test_info_panel_arrival_svc_and_nearest_celestial_guard_when_none(self):
+        evomu_site._install_camera_dock_guard()
+        self.michelle._Michelle__bp = None
+        self.session.stationid = 60003760
+
+        self.assertIsNone(self.info_panel_svc.on_warp_finished(60003760))
+        self.assertIsNone(self.info_panel_svc.tracked_slim_item)
+        info_mod = sys.modules["eve.client.script.ui.shared.infoPanels.locationArrivalIndicationSvc"]
+        self.assertIsNone(info_mod.get_nearest_celestial_to_player())
+
+    def test_in_space_valid_ballpark_arrival_indication_succeeds(self):
+        evomu_site._install_camera_dock_guard()
+        self.LocationArrivalIndicationService.initialize()
+        svc = self.LocationArrivalIndicationService._instance
+
+        class _Slim(object):
+            itemID = 60003760
+
+        slim = _Slim()
+        self.session.stationid = None
+        self.session.structureid = None
+        self.michelle._Michelle__bp = object()
+        self.michelle._balls_and_slims = [(object(), slim)]
+
+        self.warp_signals.on_warp_finished(60003760)
+        self.assertIs(svc.tracked_slim_item, slim)
+        self.assertEqual(self.indicated, [slim])
+
+
 if __name__ == "__main__":
     unittest.main()

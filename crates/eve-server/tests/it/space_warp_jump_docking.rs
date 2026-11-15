@@ -3429,7 +3429,7 @@ async fn test_1051_live_tcp_macho_dock_splits_warp_stop_and_session_change_settl
         let mut pkts = Vec::new();
         loop {
             let rep = tokio::time::timeout(
-                Duration::from_secs(5),
+                Duration::from_secs(10),
                 read_framed_pyrep(stream),
             )
             .await

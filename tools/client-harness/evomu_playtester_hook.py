@@ -2653,7 +2653,11 @@ def _execute_action(sm, action):
                         mich_d = sm.services.get("michelle") if hasattr(sm, "services") else None
                         bp_d = mich_d.GetBallpark() if (sid_d and mich_d is not None) else None
                         ball_d = bp_d.GetBall(sid_d) if (bp_d is not None and sid_d) else None
-                        if ball_d is not None and int(getattr(ball_d, "mode", 0) or 0) == 3:
+                        if (
+                            (ball_d is not None and int(getattr(ball_d, "mode", 0) or 0) == 3)
+                            or _WARP_TELEMETRY.get("in_warp")
+                            or H._WARP_SIGNAL_STATE.get("in_warp")
+                        ):
                             H._wait_warp_fx_settled(sm, timeout_sec=6.0)
                         H._wait_view_settled(sm)
                         try:

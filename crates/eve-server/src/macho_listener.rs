@@ -1809,11 +1809,11 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         )
                         .await
                         {
-                            if plan.stopped_now {
-                                let handle = ctx.systems.get_or_spawn(plan.sys_id);
-                                if let Ok((tick, events, updates_pyrep)) =
-                                    handle.drain_observer_updates(plan.ship_id).await
-                                {
+                            let handle = ctx.systems.get_or_spawn(plan.sys_id);
+                            if let Ok((tick, events, updates_pyrep)) =
+                                handle.drain_observer_updates(plan.ship_id).await
+                            {
+                                if !events.is_empty() || plan.stopped_now {
                                     if let Some(batch) = build_destiny_batch(
                                         &ctx,
                                         wire_state.current_epoch(),
@@ -1843,6 +1843,8 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                         }
                                     }
                                 }
+                            }
+                            if plan.stopped_now {
                                 let _ = handle.flush_peer_observer_updates(Some(plan.ship_id)).await;
                             }
                             if plan.settle_deadline > tokio::time::Instant::now() {

@@ -539,12 +539,11 @@ def _wait_warp_fx_settled(sm, timeout_sec=4.0, min_finished=0):
             if hasattr(sm, "services")
             else None
         )
-        deadline = time.time() + float(timeout_sec)
-        while time.time() < deadline:
-            sess = getattr(__builtin__, "session", None)
-            if getattr(sess, "stationid", None) is not None or getattr(sess, "structureid", None) is not None:
+        def _is_warp_settled():
+            cur_sess = getattr(__builtin__, "session", None)
+            if getattr(cur_sess, "stationid", None) is not None or getattr(cur_sess, "structureid", None) is not None:
                 _WARP_SIGNAL_STATE["in_warp"] = False
-                break
+                return True
             bp = michelle.GetBallpark() if (sid and michelle is not None) else None
             ball = bp.GetBall(sid) if (bp is not None and sid) else None
             warping_ball = ball is not None and int(getattr(ball, "mode", 0) or 0) == 3
@@ -576,7 +575,13 @@ def _wait_warp_fx_settled(sm, timeout_sec=4.0, min_finished=0):
                 not _WARP_SIGNAL_STATE["in_warp"]
                 and _WARP_SIGNAL_STATE["finished"] >= int(min_finished)
             )
-            if not warping_ball and not warping_fx and signals_settled:
+            return not warping_ball and not warping_fx and signals_settled
+
+        deadline = time.time() + float(timeout_sec)
+        settled = False
+        while time.time() < deadline:
+            if _is_warp_settled():
+                settled = True
                 break
             _sleep_sim_ms(100)
         sess = getattr(__builtin__, "session", None)
@@ -587,6 +592,12 @@ def _wait_warp_fx_settled(sm, timeout_sec=4.0, min_finished=0):
                 pass
             _sleep_sim_ms(1500)
             _sleep_ms(300)
+            if not settled:
+                post_deadline = time.time() + 4.0
+                while time.time() < post_deadline:
+                    if _is_warp_settled():
+                        break
+                    _sleep_sim_ms(100)
         if not _WARP_SIGNAL_STATE["hooked"]:
             _sleep_sim_ms(600)
         elif _WARP_SIGNAL_STATE["in_warp"]:

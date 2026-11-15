@@ -1538,9 +1538,10 @@ async fn handle_dock(
 }
 
 /// Delay between flushing warp-stop Destiny updates and completing dock session change so
-/// V24 `Warp.WarpLoop` (`blue.synchro.SleepSim(500)`) exits before `OnReleaseBallpark`.
+/// V24 `Warp.WarpLoop` deceleration (`OnWarpDecelerate` + `blue.synchro.SleepSim(500)`) exits
+/// before `OnReleaseBallpark`, including when `stationSvc.Dock` arrives ~2.6s after `AdvanceClock`.
 pub const WARP_DOCK_SETTLE_DURATION: std::time::Duration =
-    std::time::Duration::from_millis(1_200);
+    std::time::Duration::from_millis(3_500);
 
 pub(crate) struct DockWarpSettlePlan {
     pub sys_id: eve_sde::SolarSystemId,
