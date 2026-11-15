@@ -1635,21 +1635,21 @@ mod tests {
         // and fail loudly if missing (AGENTS.md & D-2)
         let full_path = SdeRegistry::default_db_path();
         let sde = SdeRegistry::open(&full_path).expect("data/evomu_sde.sqlite must open cleanly");
-        assert_eq!(sde.resources.len(), 213);
+        assert_eq!(sde.resources.len(), 215);
         assert_eq!(sde.categories.len(), 48);
-        assert_eq!(sde.groups.len(), 1611);
-        assert_eq!(sde.types.len(), 53_288);
-        assert_eq!(sde.dogma_attributes().len(), 2871);
-        assert_eq!(sde.dogma_effects().len(), 3427);
-        assert_eq!(sde.type_materials.len(), 9866);
-        assert_eq!(sde.blueprints.len(), 5100);
+        assert_eq!(sde.groups.len(), 1633);
+        assert_eq!(sde.types.len(), 53_925);
+        assert_eq!(sde.dogma_attributes().len(), 2928);
+        assert_eq!(sde.dogma_effects().len(), 3499);
+        assert_eq!(sde.type_materials.len(), 9935);
+        assert_eq!(sde.blueprints.len(), 5135);
         assert_eq!(sde.regions.len(), 114);
         assert_eq!(sde.constellations.len(), 1184);
         assert_eq!(sde.solar_systems.len(), 8490);
         assert!(sde.solar_systems.len() >= 5_000);
-        assert_eq!(sde.stations.len(), 5210);
-        assert_eq!(sde.stargates().len(), 13_978);
-        assert_eq!(sde.celestial_count, 475_859);
+        assert_eq!(sde.stations.len(), 5211);
+        assert_eq!(sde.stargates().len(), 13_982);
+        assert_eq!(sde.celestial_count, 475_863);
         assert_eq!(sde.races.len(), 11);
         assert_eq!(sde.bloodlines.len(), 18);
         assert_eq!(sde.ancestries.len(), 43);
@@ -1657,16 +1657,16 @@ mod tests {
         assert_eq!(sde.factions.len(), 27);
         assert_eq!(sde.npc_corporations.len(), 283);
         assert_eq!(sde.agents.len(), 10_972);
-        assert_eq!(sde.market_groups.len(), 2114);
+        assert_eq!(sde.market_groups.len(), 2125);
         assert_eq!(sde.planet_schematics.len(), 68);
         assert_eq!(sde.wormhole_types.len(), 132);
-        assert_eq!(sde.npc_spawn_groups.len(), 392);
+        assert_eq!(sde.npc_spawn_groups.len(), 405);
         assert_eq!(sde.fighter_abilities.len(), 36);
-        assert_eq!(sde.dbuff_collections.len(), 277);
+        assert_eq!(sde.dbuff_collections.len(), 373);
         assert_eq!(sde.dynamic_item_attributes.len(), 441);
-        assert_eq!(sde.compressible_types.len(), 212);
-        assert_eq!(sde.type_lists.len(), 469);
-        assert_eq!(sde.dungeon_asteroids.values().map(|v| v.len()).sum::<usize>(), 3054);
+        assert_eq!(sde.compressible_types.len(), 220);
+        assert_eq!(sde.type_lists.len(), 477);
+        assert_eq!(sde.dungeon_asteroids.values().map(|v| v.len()).sum::<usize>(), 3058);
         assert_eq!(sde.dungeon_gas_types.values().map(|v| v.len()).sum::<usize>(), 92);
         let skod = sde.dungeon_asteroids.get(&1347).expect("dungeon 1347 asteroid layout");
         assert!(skod.contains(&DungeonAsteroidEntry { room_id: 19522, type_id: 20, asteroid_count: 4 }));
@@ -1675,9 +1675,9 @@ mod tests {
         assert!(tl334.contains(sde.get_type(1230).unwrap()));
         assert!(!tl334.contains(sde.get_type(11396).unwrap()));
         assert_eq!(sde.clone_grades.len(), 4);
-        assert_eq!(sde.dungeons.len(), 5516);
+        assert_eq!(sde.dungeons.len(), 5653);
         assert_eq!(sde.missions.len(), 2892);
-        assert_eq!(sde.node_graphs.len(), 584);
+        assert_eq!(sde.node_graphs.len(), 594);
         assert_eq!(sde.epic_arcs.len(), 21);
         assert!(!sde.variations_of(587).is_empty());
         assert_eq!(sde.group(25).unwrap().name, "Frigate");
@@ -1751,7 +1751,7 @@ mod tests {
         let jita_celestials = sde.celestials_in_system(30000142);
         assert_eq!(jita_celestials.len(), 49);
         assert_eq!(sde.celestials_in_system_slice(30000142).len(), 49);
-        assert_eq!(sde.celestial_system_by_id.len(), 475_859);
+        assert_eq!(sde.celestial_system_by_id.len(), 475_863);
         assert_eq!(sde.stars.len(), 8_089);
         let jita_star = sde.star(jita_celestials[0].celestial_id).expect("Jita star in sde.stars");
         assert_eq!(jita_star.solar_system_id, 30000142);
@@ -1800,21 +1800,21 @@ mod tests {
         )
         .expect("parse data/sde_import_manifest.json");
         let tc = manifest_val.get("table_counts").expect("table_counts in sde_import_manifest.json");
-        assert_eq!(tc["sde_resources"].as_u64(), Some(213));
+        assert_eq!(tc["sde_resources"].as_u64(), Some(215));
         assert_eq!(tc["sde_categories"].as_u64(), Some(48));
-        assert_eq!(tc["sde_groups"].as_u64(), Some(1611));
-        assert_eq!(tc["sde_types"].as_u64(), Some(53_288));
-        assert_eq!(tc["sde_dogma_attributes"].as_u64(), Some(2871));
-        assert_eq!(tc["sde_dogma_effects"].as_u64(), Some(3427));
-        assert_eq!(tc["sde_type_materials"].as_u64(), Some(9866));
-        assert_eq!(tc["sde_blueprints"].as_u64(), Some(5100));
+        assert_eq!(tc["sde_groups"].as_u64(), Some(1633));
+        assert_eq!(tc["sde_types"].as_u64(), Some(53_925));
+        assert_eq!(tc["sde_dogma_attributes"].as_u64(), Some(2928));
+        assert_eq!(tc["sde_dogma_effects"].as_u64(), Some(3499));
+        assert_eq!(tc["sde_type_materials"].as_u64(), Some(9935));
+        assert_eq!(tc["sde_blueprints"].as_u64(), Some(5135));
         assert_eq!(tc["sde_regions"].as_u64(), Some(114));
         assert_eq!(tc["sde_constellations"].as_u64(), Some(1184));
         assert_eq!(tc["sde_solar_systems"].as_u64(), Some(8490));
-        assert_eq!(tc["sde_stargates"].as_u64(), Some(13_978));
-        assert_eq!(tc["sde_jumps"].as_u64(), Some(6989));
-        assert_eq!(tc["sde_stations"].as_u64(), Some(5210));
-        assert_eq!(tc["sde_celestials"].as_u64(), Some(475_859));
+        assert_eq!(tc["sde_stargates"].as_u64(), Some(13_982));
+        assert_eq!(tc["sde_jumps"].as_u64(), Some(6991));
+        assert_eq!(tc["sde_stations"].as_u64(), Some(5211));
+        assert_eq!(tc["sde_celestials"].as_u64(), Some(475_863));
         assert_eq!(tc["sde_races"].as_u64(), Some(11));
         assert_eq!(tc["sde_bloodlines"].as_u64(), Some(18));
         assert_eq!(tc["sde_ancestries"].as_u64(), Some(43));
@@ -1822,22 +1822,22 @@ mod tests {
         assert_eq!(tc["sde_factions"].as_u64(), Some(27));
         assert_eq!(tc["sde_npc_corporations"].as_u64(), Some(283));
         assert_eq!(tc["sde_agents"].as_u64(), Some(10_972));
-        assert_eq!(tc["sde_market_groups"].as_u64(), Some(2114));
-        assert_eq!(tc["sde_dungeons"].as_u64(), Some(5516));
+        assert_eq!(tc["sde_market_groups"].as_u64(), Some(2125));
+        assert_eq!(tc["sde_dungeons"].as_u64(), Some(5653));
         assert_eq!(tc["sde_missions"].as_u64(), Some(2892));
-        assert_eq!(tc["sde_node_graphs"].as_u64(), Some(584));
+        assert_eq!(tc["sde_node_graphs"].as_u64(), Some(594));
 
-        // 7. Directly open and decode raw client res:/staticdata/types.fsdbinary and verify all 53,288 records
+        // 7. Directly open and decode raw client res:/staticdata/types.fsdbinary and verify all 53,925 records
         let types_res = sde
             .resources
             .get("res:/staticdata/types.fsdbinary")
             .expect("types.fsdbinary must be indexed in sde_resources");
-        assert_eq!(types_res.md5, "c0ee9c292aa113737029c9ec63503233");
-        assert_eq!(types_res.byte_size, 9_169_272);
-        assert_eq!(types_res.record_count, 53_288);
+        assert_eq!(types_res.md5, "3238db13e1322ae90344d927e7f62c92");
+        assert_eq!(types_res.byte_size, 9_278_984);
+        assert_eq!(types_res.record_count, 53_925);
         let (raw_len, raw_types) = sde.load_raw_types_fsdbinary().expect("open raw client types.fsdbinary");
         assert_eq!(raw_len as u64, types_res.byte_size);
-        assert_eq!(raw_types.len(), 53_288);
+        assert_eq!(raw_types.len(), 53_925);
         for (&tid, rt) in &raw_types {
             let inv = sde.get_type(tid).expect("raw types.fsdbinary record in sde.types");
             assert_eq!(inv.group_id, rt.group_id);

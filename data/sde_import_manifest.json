@@ -1,138 +1,146 @@
 {
   "schema_version": 1,
-  "client_build": 3619879,
-  "client_release": "V24.01",
+  "client_build": 3698585,
+  "client_release": "V24.02",
   "table_counts": {
     "sde_agents": 10972,
     "sde_ancestries": 43,
     "sde_belt_asteroid_counts": 40928,
     "sde_bloodlines": 18,
-    "sde_blueprints": 5100,
+    "sde_blueprints": 5135,
     "sde_categories": 48,
-    "sde_celestials": 475859,
+    "sde_celestials": 475863,
     "sde_clone_grades": 4,
-    "sde_compressible_types": 212,
+    "sde_compressible_types": 220,
     "sde_constellations": 1184,
-    "sde_dbuff_collections": 277,
-    "sde_dogma_attributes": 2871,
-    "sde_dogma_effects": 3427,
-    "sde_dungeon_asteroid_counts": 3054,
+    "sde_dbuff_collections": 373,
+    "sde_dogma_attributes": 2928,
+    "sde_dogma_effects": 3499,
+    "sde_dungeon_asteroid_counts": 3058,
     "sde_dungeon_gas_types": 92,
-    "sde_dungeons": 5516,
+    "sde_dungeons": 5653,
     "sde_dynamic_item_attributes": 441,
     "sde_epic_arcs": 21,
     "sde_factions": 27,
     "sde_fighter_abilities": 36,
     "sde_fighter_abilities_by_type": 94,
-    "sde_groups": 1611,
-    "sde_jumps": 6989,
-    "sde_market_groups": 2114,
+    "sde_groups": 1633,
+    "sde_jumps": 6991,
+    "sde_market_groups": 2125,
     "sde_meta": 3,
     "sde_missions": 2892,
-    "sde_node_graphs": 584,
+    "sde_node_graphs": 594,
     "sde_npc_corporations": 283,
-    "sde_npc_spawn_groups": 392,
+    "sde_npc_spawn_groups": 405,
     "sde_planet_schematics": 68,
     "sde_races": 11,
     "sde_regions": 114,
-    "sde_resources": 213,
+    "sde_resources": 215,
     "sde_schools": 23,
-    "sde_skin_licenses": 11877,
-    "sde_skin_materials": 875,
-    "sde_skins": 7048,
+    "sde_skin_licenses": 11908,
+    "sde_skin_materials": 878,
+    "sde_skins": 7079,
     "sde_solar_systems": 8490,
-    "sde_space_components": 11238,
-    "sde_stargates": 13978,
+    "sde_space_components": 11491,
+    "sde_stargates": 13982,
     "sde_stars": 8089,
-    "sde_station_operations": 69,
+    "sde_station_operations": 70,
     "sde_station_services": 27,
-    "sde_stations": 5210,
+    "sde_stations": 5211,
     "sde_system_asteroid_types": 3974,
-    "sde_type_lists": 469,
-    "sde_type_materials": 9866,
-    "sde_types": 53288,
+    "sde_type_lists": 477,
+    "sde_type_materials": 9935,
+    "sde_types": 53925,
     "sde_wormhole_types": 132
   },
   "resources": [
     {
       "res_path": "res:/localizationfsd/localization_fsd_de.pickle",
-      "cdn_relative_path": "f7/f781e479bccfd00e_9bfa3342a109a5a30b7523af734daee5",
-      "md5": "9bfa3342a109a5a30b7523af734daee5",
-      "byte_size": 44737417,
+      "cdn_relative_path": "f7/f781e479bccfd00e_0ba0d09b312629e98cd87e8481dc727d",
+      "md5": "0ba0d09b312629e98cd87e8481dc727d",
+      "byte_size": 45168999,
       "format": "Pickle (protocol 0)",
-      "record_count": 305231
+      "record_count": 307842
     },
     {
       "res_path": "res:/localizationfsd/localization_fsd_en-us.pickle",
-      "cdn_relative_path": "2c/2c3038b3c38e91a1_7a753c9da2eeca4dcc7cf0c6655aaae0",
-      "md5": "7a753c9da2eeca4dcc7cf0c6655aaae0",
-      "byte_size": 40753078,
+      "cdn_relative_path": "2c/2c3038b3c38e91a1_ec36e6662e1fc7e9dfe2519e8459d0ec",
+      "md5": "ec36e6662e1fc7e9dfe2519e8459d0ec",
+      "byte_size": 41175459,
       "format": "Pickle (protocol 0)",
-      "record_count": 308657
+      "record_count": 311618
     },
     {
       "res_path": "res:/localizationfsd/localization_fsd_es.pickle",
-      "cdn_relative_path": "68/68766cf9c7eb3001_07b96ab4740f9b89347549f432a09228",
-      "md5": "07b96ab4740f9b89347549f432a09228",
-      "byte_size": 44059431,
+      "cdn_relative_path": "68/68766cf9c7eb3001_3a07ea08160daa74ad87cc383f4487db",
+      "md5": "3a07ea08160daa74ad87cc383f4487db",
+      "byte_size": 44507325,
       "format": "Pickle (protocol 0)",
-      "record_count": 305229
+      "record_count": 307840
     },
     {
       "res_path": "res:/localizationfsd/localization_fsd_fr.pickle",
-      "cdn_relative_path": "4a/4a0f5fe70b667169_eac42d7449d6083400e4da35ee998a03",
-      "md5": "eac42d7449d6083400e4da35ee998a03",
-      "byte_size": 46429727,
+      "cdn_relative_path": "4a/4a0f5fe70b667169_d425c3495668f80b0148ccd4efac8eb7",
+      "md5": "d425c3495668f80b0148ccd4efac8eb7",
+      "byte_size": 46875524,
       "format": "Pickle (protocol 0)",
-      "record_count": 305234
+      "record_count": 307844
     },
     {
       "res_path": "res:/localizationfsd/localization_fsd_it.pickle",
-      "cdn_relative_path": "9f/9f056f7130bc9bf8_2bafd91c1bc13ff34c615e5536baa74a",
-      "md5": "2bafd91c1bc13ff34c615e5536baa74a",
-      "byte_size": 1711389,
+      "cdn_relative_path": "9f/9f056f7130bc9bf8_d98e2583e5c5e70f21b74de44c305d04",
+      "md5": "d98e2583e5c5e70f21b74de44c305d04",
+      "byte_size": 1709047,
       "format": "Pickle (protocol 0)",
-      "record_count": 7452
+      "record_count": 7447
     },
     {
       "res_path": "res:/localizationfsd/localization_fsd_ja.pickle",
-      "cdn_relative_path": "82/82afc4ce93a0dc14_f401a04fc2313a2090e836d726245bec",
-      "md5": "f401a04fc2313a2090e836d726245bec",
-      "byte_size": 86414823,
+      "cdn_relative_path": "82/82afc4ce93a0dc14_4fb096782c7fdf9d2790aff11754dbac",
+      "md5": "4fb096782c7fdf9d2790aff11754dbac",
+      "byte_size": 87216223,
       "format": "Pickle (protocol 0)",
-      "record_count": 305234
+      "record_count": 307845
     },
     {
       "res_path": "res:/localizationfsd/localization_fsd_ko.pickle",
-      "cdn_relative_path": "f5/f5467fdb71de5d33_dc47cdaba73e5d3d58c2ba748fabe71a",
-      "md5": "dc47cdaba73e5d3d58c2ba748fabe71a",
-      "byte_size": 71125744,
+      "cdn_relative_path": "f5/f5467fdb71de5d33_c3f36d7f6022311da755ccd3aa35e69a",
+      "md5": "c3f36d7f6022311da755ccd3aa35e69a",
+      "byte_size": 71781183,
       "format": "Pickle (protocol 0)",
-      "record_count": 305231
+      "record_count": 307842
     },
     {
       "res_path": "res:/localizationfsd/localization_fsd_main.pickle",
-      "cdn_relative_path": "79/79a473897ae5f3b0_ee8726670ad947c75d7048f30acc9b35",
-      "md5": "ee8726670ad947c75d7048f30acc9b35",
-      "byte_size": 3344947,
+      "cdn_relative_path": "79/79a473897ae5f3b0_ba0ed8a6670b4cc6a063724478b1f9e6",
+      "md5": "ba0ed8a6670b4cc6a063724478b1f9e6",
+      "byte_size": 3477896,
       "format": "Pickle (protocol 0)",
       "record_count": 4
     },
     {
       "res_path": "res:/localizationfsd/localization_fsd_ru.pickle",
-      "cdn_relative_path": "4c/4c56e191aaa0e618_baede863986025489fe8970f0ab38ee5",
-      "md5": "baede863986025489fe8970f0ab38ee5",
-      "byte_size": 153500626,
+      "cdn_relative_path": "4c/4c56e191aaa0e618_50c76201c9e2e7ad60c92a078a1f7860",
+      "md5": "50c76201c9e2e7ad60c92a078a1f7860",
+      "byte_size": 154938270,
       "format": "Pickle (protocol 0)",
-      "record_count": 305234
+      "record_count": 307845
     },
     {
       "res_path": "res:/localizationfsd/localization_fsd_zh.pickle",
-      "cdn_relative_path": "87/87bfc3b6eab5e5d3_468af73100512587c6eab7ea5a1528ca",
-      "md5": "468af73100512587c6eab7ea5a1528ca",
-      "byte_size": 61334886,
+      "cdn_relative_path": "87/87bfc3b6eab5e5d3_443759647480c53db4d0234a503784b6",
+      "md5": "443759647480c53db4d0234a503784b6",
+      "byte_size": 61915481,
       "format": "Pickle (protocol 0)",
-      "record_count": 305235
+      "record_count": 307865
+    },
+    {
+      "res_path": "res:/staticdata/academyship.fsdbinary",
+      "cdn_relative_path": "d1/d1f85d349a62a0bd_0b1d68c831a01a2939b885ebd3d48a0e",
+      "md5": "0b1d68c831a01a2939b885ebd3d48a0e",
+      "byte_size": 775,
+      "format": "FSD Binary",
+      "record_count": 13
     },
     {
       "res_path": "res:/staticdata/accountingentrytypes.fsdbinary",
@@ -176,11 +184,11 @@
     },
     {
       "res_path": "res:/staticdata/agencyhelpvideos.fsdbinary",
-      "cdn_relative_path": "20/20bd123ce1486873_187ad91b9960af9cbaefad7406a0d835",
-      "md5": "187ad91b9960af9cbaefad7406a0d835",
-      "byte_size": 4211,
+      "cdn_relative_path": "20/20bd123ce1486873_a8b951d8cf8bf499de4ea209a690f574",
+      "md5": "a8b951d8cf8bf499de4ea209a690f574",
+      "byte_size": 4624,
       "format": "FSD Binary",
-      "record_count": 36
+      "record_count": 40
     },
     {
       "res_path": "res:/staticdata/agentsinspace.fsdbinary",
@@ -208,11 +216,11 @@
     },
     {
       "res_path": "res:/staticdata/archetypes.fsdbinary",
-      "cdn_relative_path": "4a/4a210b11f9110207_d6aeac91bdd7842fadf7b12cd84c856e",
-      "md5": "d6aeac91bdd7842fadf7b12cd84c856e",
-      "byte_size": 5563,
+      "cdn_relative_path": "4a/4a210b11f9110207_b4583355cb4872073002b13730209821",
+      "md5": "b4583355cb4872073002b13730209821",
+      "byte_size": 5712,
       "format": "FSD Binary",
-      "record_count": 71
+      "record_count": 73
     },
     {
       "res_path": "res:/staticdata/asteroidcountbytypeidbeltid.static",
@@ -224,33 +232,33 @@
     },
     {
       "res_path": "res:/staticdata/asteroidcountbytypeidroomiddungeonid.static",
-      "cdn_relative_path": "56/56135192ce1df942_1fae79ec0c78e7682b8ec1309af2dec7",
-      "md5": "1fae79ec0c78e7682b8ec1309af2dec7",
-      "byte_size": 91153,
+      "cdn_relative_path": "56/56135192ce1df942_44c9c91807762902e374cbca8f746965",
+      "md5": "44c9c91807762902e374cbca8f746965",
+      "byte_size": 91301,
       "format": "FSD Static (pickled schema header)",
-      "record_count": 1221
+      "record_count": 1224
     },
     {
       "res_path": "res:/staticdata/asteroidtypesbysolarsystemid.pickle",
-      "cdn_relative_path": "3f/3f555d74faee466f_8f9f9b1e28c0670a443b630c6408c590",
-      "md5": "8f9f9b1e28c0670a443b630c6408c590",
-      "byte_size": 96712,
+      "cdn_relative_path": "3f/3f555d74faee466f_3a649c2572f621d73ded8c7150b99060",
+      "md5": "3a649c2572f621d73ded8c7150b99060",
+      "byte_size": 96610,
       "format": "Pickle (protocol 2)",
       "record_count": 3974
     },
     {
       "res_path": "res:/staticdata/atoms.fsdbinary",
-      "cdn_relative_path": "fb/fbb84fe028009f1b_7157224e7f66d7b34479141a2472b2e9",
-      "md5": "7157224e7f66d7b34479141a2472b2e9",
-      "byte_size": 242304,
+      "cdn_relative_path": "fb/fbb84fe028009f1b_863e7ed4be3666c430e4c9ddfa5e0254",
+      "md5": "863e7ed4be3666c430e4c9ddfa5e0254",
+      "byte_size": 249336,
       "format": "FSD Binary",
-      "record_count": 580
+      "record_count": 600
     },
     {
       "res_path": "res:/staticdata/audiometadata.fsdbinary",
-      "cdn_relative_path": "7a/7a5727bdc2e00558_7cd1529bfae563976af43f5b818a869e",
-      "md5": "7cd1529bfae563976af43f5b818a869e",
-      "byte_size": 2699512,
+      "cdn_relative_path": "7a/7a5727bdc2e00558_df9059728758b50ef1ec3e66243f5be4",
+      "md5": "df9059728758b50ef1ec3e66243f5be4",
+      "byte_size": 2699432,
       "format": "FSD Binary",
       "record_count": 3
     },
@@ -280,27 +288,27 @@
     },
     {
       "res_path": "res:/staticdata/blueprints.static",
-      "cdn_relative_path": "f0/f016514b481ba503_c142b1ab411960075f24559ed2843109",
-      "md5": "c142b1ab411960075f24559ed2843109",
-      "byte_size": 4612096,
+      "cdn_relative_path": "f0/f016514b481ba503_36d180e19773cf174810d162fa956142",
+      "md5": "36d180e19773cf174810d162fa956142",
+      "byte_size": 4644864,
       "format": "SQLite3",
-      "record_count": 5100
+      "record_count": 5135
     },
     {
       "res_path": "res:/staticdata/blueprintsbymaterialtypeids.pickle",
-      "cdn_relative_path": "c5/c5b749387d56555f_d7128aa3e2572d1372afecf6d819f5b8",
-      "md5": "d7128aa3e2572d1372afecf6d819f5b8",
-      "byte_size": 131702,
+      "cdn_relative_path": "c5/c5b749387d56555f_e1aa2b0ded38e7739db23adbf8db61cc",
+      "md5": "e1aa2b0ded38e7739db23adbf8db61cc",
+      "byte_size": 133259,
       "format": "Pickle (protocol 2)",
-      "record_count": 1715
+      "record_count": 1728
     },
     {
       "res_path": "res:/staticdata/brackets.static",
-      "cdn_relative_path": "b1/b1cdddf09f0c7cfe_1352c0194023fdd015ec6123bdee6cea",
-      "md5": "1352c0194023fdd015ec6123bdee6cea",
-      "byte_size": 18455,
+      "cdn_relative_path": "b1/b1cdddf09f0c7cfe_c6ad40d960e97de2d0a13b8be1df67a9",
+      "md5": "c6ad40d960e97de2d0a13b8be1df67a9",
+      "byte_size": 18551,
       "format": "FSD Static (pickled schema header)",
-      "record_count": 166
+      "record_count": 167
     },
     {
       "res_path": "res:/staticdata/bracketsbycategory.static",
@@ -312,11 +320,11 @@
     },
     {
       "res_path": "res:/staticdata/bracketsbygroup.static",
-      "cdn_relative_path": "19/191f6d893742b1ae_80c2635242d5cee2cd63bb54f9b0a9d9",
-      "md5": "80c2635242d5cee2cd63bb54f9b0a9d9",
-      "byte_size": 9394,
+      "cdn_relative_path": "19/191f6d893742b1ae_79bbcb3056b27611ee9e319aeb6c8f0d",
+      "md5": "79bbcb3056b27611ee9e319aeb6c8f0d",
+      "byte_size": 9698,
       "format": "FSD Static (pickled schema header)",
-      "record_count": 547
+      "record_count": 566
     },
     {
       "res_path": "res:/staticdata/bracketsbytype.static",
@@ -328,9 +336,9 @@
     },
     {
       "res_path": "res:/staticdata/careerpaths.fsdbinary",
-      "cdn_relative_path": "09/09a50202a37e7a7f_0ff6705b8c800e74f1bf39b4f67b44b2",
-      "md5": "0ff6705b8c800e74f1bf39b4f67b44b2",
-      "byte_size": 283,
+      "cdn_relative_path": "09/09a50202a37e7a7f_ac9e43e08865f56fa1f8145f582db7b7",
+      "md5": "ac9e43e08865f56fa1f8145f582db7b7",
+      "byte_size": 272,
       "format": "FSD Binary",
       "record_count": 4
     },
@@ -344,9 +352,9 @@
     },
     {
       "res_path": "res:/staticdata/certificates.static",
-      "cdn_relative_path": "a8/a8ae8f1d778dfd07_5a4326db67028b6cf56e9df3ec90d560",
-      "md5": "5a4326db67028b6cf56e9df3ec90d560",
-      "byte_size": 161213,
+      "cdn_relative_path": "a8/a8ae8f1d778dfd07_3e8483264d9f6fb5e14ca6ff8083be8a",
+      "md5": "3e8483264d9f6fb5e14ca6ff8083be8a",
+      "byte_size": 165977,
       "format": "FSD Static (pickled schema header)",
       "record_count": 2
     },
@@ -408,11 +416,11 @@
     },
     {
       "res_path": "res:/staticdata/character_portraitresources.fsdbinary",
-      "cdn_relative_path": "4b/4bf99da1084f4a09_2c0738bd30d45af5272989fc6b0c89c6",
-      "md5": "2c0738bd30d45af5272989fc6b0c89c6",
-      "byte_size": 11430,
+      "cdn_relative_path": "4b/4bf99da1084f4a09_9fb07d773a96b8f92ba1326b3f369c05",
+      "md5": "9fb07d773a96b8f92ba1326b3f369c05",
+      "byte_size": 12638,
       "format": "FSD Binary",
-      "record_count": 103
+      "record_count": 114
     },
     {
       "res_path": "res:/staticdata/character_resources.fsdbinary",
@@ -448,8 +456,8 @@
     },
     {
       "res_path": "res:/staticdata/clonegrades.static",
-      "cdn_relative_path": "d6/d650a8ea71b2f13c_411f07a0276ee8f957d460953830597c",
-      "md5": "411f07a0276ee8f957d460953830597c",
+      "cdn_relative_path": "d6/d650a8ea71b2f13c_c8f1c14b9fd3b5dfdb7b643aa169732f",
+      "md5": "c8f1c14b9fd3b5dfdb7b643aa169732f",
       "byte_size": 49152,
       "format": "SQLite3",
       "record_count": 4
@@ -464,19 +472,19 @@
     },
     {
       "res_path": "res:/staticdata/community_track_templates.fsdbinary",
-      "cdn_relative_path": "52/528620806fbd0bba_91771921ed4acdce31dee2da9bcb67b6",
-      "md5": "91771921ed4acdce31dee2da9bcb67b6",
-      "byte_size": 224,
+      "cdn_relative_path": "52/528620806fbd0bba_5759b461273f973967ed58efbb482ba2",
+      "md5": "5759b461273f973967ed58efbb482ba2",
+      "byte_size": 208,
       "format": "FSD Binary",
       "record_count": 1
     },
     {
       "res_path": "res:/staticdata/compressibletypes.fsdbinary",
-      "cdn_relative_path": "12/1247e6a934b317e2_f1755fef79b786790691b9aef8eea694",
-      "md5": "f1755fef79b786790691b9aef8eea694",
-      "byte_size": 4296,
+      "cdn_relative_path": "12/1247e6a934b317e2_a893ebb87b5f1fa1561ee752233342b0",
+      "md5": "a893ebb87b5f1fa1561ee752233342b0",
+      "byte_size": 7096,
       "format": "FSD Binary",
-      "record_count": 212
+      "record_count": 220
     },
     {
       "res_path": "res:/staticdata/constellations.schema",
@@ -488,9 +496,9 @@
     },
     {
       "res_path": "res:/staticdata/constellations.static",
-      "cdn_relative_path": "f5/f5d54e32f23ee5df_3e823eedee3555ba314029c22bdfba10",
-      "md5": "3e823eedee3555ba314029c22bdfba10",
-      "byte_size": 135948,
+      "cdn_relative_path": "f5/f5d54e32f23ee5df_10dee3ee2c36bb73f388dfc315687f78",
+      "md5": "10dee3ee2c36bb73f388dfc315687f78",
+      "byte_size": 135964,
       "format": "FSD Static (external .schema)",
       "record_count": 1184
     },
@@ -544,11 +552,11 @@
     },
     {
       "res_path": "res:/staticdata/conversations.fsdbinary",
-      "cdn_relative_path": "b1/b182f5ecf3fa7471_c1e6da3bd83185bc67a90812504639b0",
-      "md5": "c1e6da3bd83185bc67a90812504639b0",
-      "byte_size": 319116,
+      "cdn_relative_path": "b1/b182f5ecf3fa7471_4101adb9f42a999e6366ba3c0b914627",
+      "md5": "4101adb9f42a999e6366ba3c0b914627",
+      "byte_size": 320850,
       "format": "FSD Binary",
-      "record_count": 1275
+      "record_count": 1283
     },
     {
       "res_path": "res:/staticdata/corporationactivities.fsdbinary",
@@ -576,11 +584,11 @@
     },
     {
       "res_path": "res:/staticdata/crates.fsdbinary",
-      "cdn_relative_path": "6a/6ae0d188c7d57d6b_5f5d1dca29bf7bbf6823e02772392d68",
-      "md5": "5f5d1dca29bf7bbf6823e02772392d68",
-      "byte_size": 133320,
+      "cdn_relative_path": "6a/6ae0d188c7d57d6b_f529b78d5e4105fa25e6b9f71a607590",
+      "md5": "f529b78d5e4105fa25e6b9f71a607590",
+      "byte_size": 135423,
       "format": "FSD Binary",
-      "record_count": 636
+      "record_count": 647
     },
     {
       "res_path": "res:/staticdata/currencybuckets.fsdbinary",
@@ -592,11 +600,11 @@
     },
     {
       "res_path": "res:/staticdata/dbuffcollections.static",
-      "cdn_relative_path": "f9/f9f241d8c3a11761_3379982d3adc3875b76e364fe3213838",
-      "md5": "3379982d3adc3875b76e364fe3213838",
-      "byte_size": 139264,
+      "cdn_relative_path": "f9/f9f241d8c3a11761_e03156e7cf5a1199c22ec3184e863f26",
+      "md5": "e03156e7cf5a1199c22ec3184e863f26",
+      "byte_size": 184320,
       "format": "SQLite3",
-      "record_count": 277
+      "record_count": 373
     },
     {
       "res_path": "res:/staticdata/defaultoverviews.fsdbinary",
@@ -616,11 +624,11 @@
     },
     {
       "res_path": "res:/staticdata/dialogs.static",
-      "cdn_relative_path": "e9/e9bad7ecd80e0d2c_fb291004ed6c80d8373b53391f0fd9c6",
-      "md5": "fb291004ed6c80d8373b53391f0fd9c6",
-      "byte_size": 317606,
+      "cdn_relative_path": "e9/e9bad7ecd80e0d2c_9faa7c7b81d66ab2d3f2e8faa44e6624",
+      "md5": "9faa7c7b81d66ab2d3f2e8faa44e6624",
+      "byte_size": 318420,
       "format": "FSD Static (external .schema)",
-      "record_count": 4223
+      "record_count": 4233
     },
     {
       "res_path": "res:/staticdata/dogmaattributecategories.fsdbinary",
@@ -632,19 +640,19 @@
     },
     {
       "res_path": "res:/staticdata/dogmaattributes.fsdbinary",
-      "cdn_relative_path": "c9/c951789095f4c052_8f658ee70ec0b2d603c1a52ba5419214",
-      "md5": "8f658ee70ec0b2d603c1a52ba5419214",
-      "byte_size": 451325,
+      "cdn_relative_path": "c9/c951789095f4c052_7e3f1f00e4a4239f23f78cdb0f68be72",
+      "md5": "7e3f1f00e4a4239f23f78cdb0f68be72",
+      "byte_size": 459424,
       "format": "FSD Binary",
-      "record_count": 2871
+      "record_count": 2928
     },
     {
       "res_path": "res:/staticdata/dogmaeffects.fsdbinary",
-      "cdn_relative_path": "5c/5c1c739beec2a6c5_51daaba4f96e32fc95768ec49aa20bec",
-      "md5": "51daaba4f96e32fc95768ec49aa20bec",
-      "byte_size": 877864,
+      "cdn_relative_path": "5c/5c1c739beec2a6c5_beb0202f2ad79ec6559d6710ca685f73",
+      "md5": "beb0202f2ad79ec6559d6710ca685f73",
+      "byte_size": 883744,
       "format": "FSD Binary",
-      "record_count": 3427
+      "record_count": 3499
     },
     {
       "res_path": "res:/staticdata/dogmaunits.fsdbinary",
@@ -656,27 +664,27 @@
     },
     {
       "res_path": "res:/staticdata/dungeonenvironmenttemplates.fsdbinary",
-      "cdn_relative_path": "6a/6a5d71136831ab3b_8f49bbe04d23f605d3982aae4b573601",
-      "md5": "8f49bbe04d23f605d3982aae4b573601",
-      "byte_size": 11816,
+      "cdn_relative_path": "6a/6a5d71136831ab3b_bb88b4e73bb93d6d34bdca1ec5675b5a",
+      "md5": "bb88b4e73bb93d6d34bdca1ec5675b5a",
+      "byte_size": 11408,
       "format": "FSD Binary",
-      "record_count": 114
+      "record_count": 115
     },
     {
       "res_path": "res:/staticdata/dungeonobjectives.fsdbinary",
-      "cdn_relative_path": "81/819e465925d4efd3_a9f9e9bf643e0411d983cdd8a3552ea5",
-      "md5": "a9f9e9bf643e0411d983cdd8a3552ea5",
-      "byte_size": 8024,
+      "cdn_relative_path": "81/819e465925d4efd3_d7063a59edd9dcbe08430f728e59c97f",
+      "md5": "d7063a59edd9dcbe08430f728e59c97f",
+      "byte_size": 8256,
       "format": "FSD Binary",
-      "record_count": 85
+      "record_count": 88
     },
     {
       "res_path": "res:/staticdata/dungeons.fsdbinary",
-      "cdn_relative_path": "f4/f4992887a8a2937e_2e5bc11b9de86e15181fca48e43b69ba",
-      "md5": "2e5bc11b9de86e15181fca48e43b69ba",
-      "byte_size": 52395840,
+      "cdn_relative_path": "f4/f4992887a8a2937e_2db3e3807d5d0e79b3d9472932aa69ec",
+      "md5": "2db3e3807d5d0e79b3d9472932aa69ec",
+      "byte_size": 52800752,
       "format": "FSD Binary",
-      "record_count": 5516
+      "record_count": 5653
     },
     {
       "res_path": "res:/staticdata/dusticons.static",
@@ -800,19 +808,19 @@
     },
     {
       "res_path": "res:/staticdata/explosionbucketids.fsdbinary",
-      "cdn_relative_path": "94/94d493514e49d904_6e1901ca533ddbf1a7be3d593bff6321",
-      "md5": "6e1901ca533ddbf1a7be3d593bff6321",
-      "byte_size": 16336,
+      "cdn_relative_path": "94/94d493514e49d904_a85dd8f413f6668743bdaf8bb3d38364",
+      "md5": "a85dd8f413f6668743bdaf8bb3d38364",
+      "byte_size": 16512,
       "format": "FSD Binary",
-      "record_count": 87
+      "record_count": 88
     },
     {
       "res_path": "res:/staticdata/explosionids.fsdbinary",
-      "cdn_relative_path": "ec/ec453bb82cde4926_ed9c3dcdea9b2b43ca54a5264fd8e5be",
-      "md5": "ed9c3dcdea9b2b43ca54a5264fd8e5be",
-      "byte_size": 9088,
+      "cdn_relative_path": "ec/ec453bb82cde4926_c3e2053d335396de50c459a8d0d87ed5",
+      "md5": "c3e2053d335396de50c459a8d0d87ed5",
+      "byte_size": 8754,
       "format": "FSD Binary",
-      "record_count": 55
+      "record_count": 56
     },
     {
       "res_path": "res:/staticdata/factions.fsdbinary",
@@ -840,24 +848,32 @@
     },
     {
       "res_path": "res:/staticdata/fighterabilities.static",
-      "cdn_relative_path": "4a/4a2d3f8fdea01bca_79df7cd57376f58758ac973adb7854d7",
-      "md5": "79df7cd57376f58758ac973adb7854d7",
+      "cdn_relative_path": "4a/4a2d3f8fdea01bca_67a76d3e3b0e8e1c2d7157c4df401b75",
+      "md5": "67a76d3e3b0e8e1c2d7157c4df401b75",
       "byte_size": 32768,
       "format": "SQLite3",
       "record_count": 36
     },
     {
       "res_path": "res:/staticdata/fighterabilitiesbytype.static",
-      "cdn_relative_path": "61/61e4f3091016e61b_16dd7659cf9671d61c47372454a37f46",
-      "md5": "16dd7659cf9671d61c47372454a37f46",
+      "cdn_relative_path": "61/61e4f3091016e61b_ab97eeaeb501766e3ed02ca85bcde02a",
+      "md5": "ab97eeaeb501766e3ed02ca85bcde02a",
       "byte_size": 45056,
       "format": "SQLite3",
       "record_count": 94
     },
     {
+      "res_path": "res:/staticdata/fittings.fsdbinary",
+      "cdn_relative_path": "18/18d60ef924de9dc7_eea53ba0363bc0e0a68858d9109929ff",
+      "md5": "eea53ba0363bc0e0a68858d9109929ff",
+      "byte_size": 11644,
+      "format": "FSD Binary",
+      "record_count": 50
+    },
+    {
       "res_path": "res:/staticdata/gastypesbydungeonid.static",
-      "cdn_relative_path": "59/5931efb3ede7c85f_cfb897bbf828bf286069bd78caa366e8",
-      "md5": "cfb897bbf828bf286069bd78caa366e8",
+      "cdn_relative_path": "59/5931efb3ede7c85f_1047a8e0bc73ba7e022a94c0855e0b65",
+      "md5": "1047a8e0bc73ba7e022a94c0855e0b65",
       "byte_size": 1958,
       "format": "FSD Static (pickled schema header)",
       "record_count": 83
@@ -880,11 +896,11 @@
     },
     {
       "res_path": "res:/staticdata/graphicids.fsdbinary",
-      "cdn_relative_path": "93/93b769c4ef6215a9_016ae914e50fa2839fe1082616d91ec4",
-      "md5": "016ae914e50fa2839fe1082616d91ec4",
-      "byte_size": 1535928,
+      "cdn_relative_path": "93/93b769c4ef6215a9_c0f3795c024ea7991a913962e06f93b0",
+      "md5": "c0f3795c024ea7991a913962e06f93b0",
+      "byte_size": 1545176,
       "format": "FSD Binary",
-      "record_count": 6159
+      "record_count": 6200
     },
     {
       "res_path": "res:/staticdata/graphiclocations.fsdbinary",
@@ -896,11 +912,11 @@
     },
     {
       "res_path": "res:/staticdata/graphicmaterialsets.fsdbinary",
-      "cdn_relative_path": "92/92b370a7f73925e9_64863474ca850a1652f71fbacfae5e0b",
-      "md5": "64863474ca850a1652f71fbacfae5e0b",
-      "byte_size": 243457,
+      "cdn_relative_path": "92/92b370a7f73925e9_cb6402e63e4ac3b1d757103b4b8a8bd5",
+      "md5": "cb6402e63e4ac3b1d757103b4b8a8bd5",
+      "byte_size": 245392,
       "format": "FSD Binary",
-      "record_count": 953
+      "record_count": 961
     },
     {
       "res_path": "res:/staticdata/groupgraphics.fsdbinary",
@@ -920,11 +936,11 @@
     },
     {
       "res_path": "res:/staticdata/groups.fsdbinary",
-      "cdn_relative_path": "b1/b198644fdc5397f3_4cf208f333399bca302f8c14921e1da4",
-      "md5": "4cf208f333399bca302f8c14921e1da4",
-      "byte_size": 70936,
+      "cdn_relative_path": "b1/b198644fdc5397f3_998721935770f7dfd60fc70df4a31a74",
+      "md5": "998721935770f7dfd60fc70df4a31a74",
+      "byte_size": 71912,
       "format": "FSD Binary",
-      "record_count": 1611
+      "record_count": 1633
     },
     {
       "res_path": "res:/staticdata/huecategories.fsdbinary",
@@ -944,67 +960,67 @@
     },
     {
       "res_path": "res:/staticdata/iconids.fsdbinary",
-      "cdn_relative_path": "ee/ee9645c859e4670e_52ac1339c7a1cd0270e8df2d4d9020a4",
-      "md5": "52ac1339c7a1cd0270e8df2d4d9020a4",
-      "byte_size": 546952,
+      "cdn_relative_path": "ee/ee9645c859e4670e_24014c26400c0259ad663418e6215b2a",
+      "md5": "24014c26400c0259ad663418e6215b2a",
+      "byte_size": 553236,
       "format": "FSD Binary",
-      "record_count": 4804
+      "record_count": 4908
     },
     {
       "res_path": "res:/staticdata/industry_activities.static",
-      "cdn_relative_path": "cf/cf39879e8576d0bb_c132b2aa352d18b5a685b6fcb96df95b",
-      "md5": "c132b2aa352d18b5a685b6fcb96df95b",
+      "cdn_relative_path": "cf/cf39879e8576d0bb_460a1a09796f4cae49f5900bb53afc5f",
+      "md5": "460a1a09796f4cae49f5900bb53afc5f",
       "byte_size": 24576,
       "format": "SQLite3",
       "record_count": 6
     },
     {
       "res_path": "res:/staticdata/industry_activity_modifier_sources.static",
-      "cdn_relative_path": "8d/8d0a225a112080f4_f57eed2f9502e5650be3018e8ff29aaf",
-      "md5": "f57eed2f9502e5650be3018e8ff29aaf",
+      "cdn_relative_path": "8d/8d0a225a112080f4_77b7baef1ff2caaa2e744f4431ad57b3",
+      "md5": "77b7baef1ff2caaa2e744f4431ad57b3",
       "byte_size": 77824,
       "format": "SQLite3",
       "record_count": 220
     },
     {
       "res_path": "res:/staticdata/industry_activity_target_filters.static",
-      "cdn_relative_path": "92/9299cb77f6cae635_8528df44ac28cb3da0bd31db1b608efc",
-      "md5": "8528df44ac28cb3da0bd31db1b608efc",
+      "cdn_relative_path": "92/9299cb77f6cae635_59d724530019adbf784d90873e5b6747",
+      "md5": "59d724530019adbf784d90873e5b6747",
       "byte_size": 24576,
       "format": "SQLite3",
       "record_count": 18
     },
     {
       "res_path": "res:/staticdata/industry_assembly_lines.static",
-      "cdn_relative_path": "25/2551232a8388c69e_57c25af25a9b2af8d50fa47ad0898cd1",
-      "md5": "57c25af25a9b2af8d50fa47ad0898cd1",
+      "cdn_relative_path": "25/2551232a8388c69e_b8ae4cc20e436a3c479e337a481f63a1",
+      "md5": "b8ae4cc20e436a3c479e337a481f63a1",
       "byte_size": 385024,
       "format": "SQLite3",
       "record_count": 146
     },
     {
       "res_path": "res:/staticdata/industry_installation_types.static",
-      "cdn_relative_path": "24/24cbb4648f9cff2c_2e748b84f826048db06068f9935289e6",
-      "md5": "2e748b84f826048db06068f9935289e6",
+      "cdn_relative_path": "24/24cbb4648f9cff2c_f1756d7247eeabbb09d33c643d2a8883",
+      "md5": "f1756d7247eeabbb09d33c643d2a8883",
       "byte_size": 40960,
       "format": "SQLite3",
       "record_count": 102
     },
     {
       "res_path": "res:/staticdata/infobubbles.static",
-      "cdn_relative_path": "07/07df8a3489660b9e_cf2212228051fb33526ffa1d0b19bca2",
-      "md5": "cf2212228051fb33526ffa1d0b19bca2",
-      "byte_size": 389120,
+      "cdn_relative_path": "07/07df8a3489660b9e_e4c69d0725a8278e5a2c3d9793bd6b89",
+      "md5": "e4c69d0725a8278e5a2c3d9793bd6b89",
+      "byte_size": 409600,
       "format": "SQLite3",
       "record_count": 5
     },
     {
       "res_path": "res:/staticdata/itemtraderrecipes.fsdbinary",
-      "cdn_relative_path": "57/573dc30dc35aaa37_f1f2a40ef0070eda09473d257d83d4e0",
-      "md5": "f1f2a40ef0070eda09473d257d83d4e0",
-      "byte_size": 104384,
+      "cdn_relative_path": "57/573dc30dc35aaa37_1bea31735420e4358f15c04ae8375e4e",
+      "md5": "1bea31735420e4358f15c04ae8375e4e",
+      "byte_size": 122256,
       "format": "FSD Binary",
-      "record_count": 544
+      "record_count": 636
     },
     {
       "res_path": "res:/staticdata/jumps.schema",
@@ -1016,11 +1032,11 @@
     },
     {
       "res_path": "res:/staticdata/jumps.static",
-      "cdn_relative_path": "cf/cf4829ec2741484c_ee3d12afbd4c05d628e0fb497aec990c",
-      "md5": "ee3d12afbd4c05d628e0fb497aec990c",
-      "byte_size": 454289,
+      "cdn_relative_path": "cf/cf4829ec2741484c_8c8f0868f98f4c6d79a499fcdcb948ea",
+      "md5": "8c8f0868f98f4c6d79a499fcdcb948ea",
+      "byte_size": 454419,
       "format": "FSD Static (external .schema)",
-      "record_count": 6989
+      "record_count": 6991
     },
     {
       "res_path": "res:/staticdata/landmarks.static",
@@ -1032,27 +1048,27 @@
     },
     {
       "res_path": "res:/staticdata/locationcache.static",
-      "cdn_relative_path": "77/7720ad06644c124a_e04d46f1623cbd9d95cbe396740a34a1",
-      "md5": "e04d46f1623cbd9d95cbe396740a34a1",
-      "byte_size": 5773406,
+      "cdn_relative_path": "77/7720ad06644c124a_b5583746be1862145ba24c5abac47f35",
+      "md5": "b5583746be1862145ba24c5abac47f35",
+      "byte_size": 5773466,
       "format": "FSD Static (pickled schema header)",
-      "record_count": 481068
+      "record_count": 481073
     },
     {
       "res_path": "res:/staticdata/manufacturableitems.fsdbinary",
-      "cdn_relative_path": "4e/4eb491e5ad07a063_89b40fd1c22f0c0e06458b36834cc2ce",
-      "md5": "89b40fd1c22f0c0e06458b36834cc2ce",
-      "byte_size": 19592,
+      "cdn_relative_path": "4e/4eb491e5ad07a063_d587466e16979f9d59bccc50f91a3aaf",
+      "md5": "d587466e16979f9d59bccc50f91a3aaf",
+      "byte_size": 19732,
       "format": "FSD Binary",
       "record_count": 1
     },
     {
       "res_path": "res:/staticdata/marketgroups.fsdbinary",
-      "cdn_relative_path": "5b/5be8d79bd5183137_e833d901399439ecca435d039a22c462",
-      "md5": "e833d901399439ecca435d039a22c462",
-      "byte_size": 76160,
+      "cdn_relative_path": "5b/5be8d79bd5183137_523c83adea8ddefa8ce0604532b37c46",
+      "md5": "523c83adea8ddefa8ce0604532b37c46",
+      "byte_size": 76564,
       "format": "FSD Binary",
-      "record_count": 2114
+      "record_count": 2125
     },
     {
       "res_path": "res:/staticdata/menuhighlights.fsdbinary",
@@ -1064,11 +1080,11 @@
     },
     {
       "res_path": "res:/staticdata/metagroups.fsdbinary",
-      "cdn_relative_path": "d7/d7393f79f4b57234_20d30e22d51debd9e46795d1da61a248",
-      "md5": "20d30e22d51debd9e46795d1da61a248",
-      "byte_size": 984,
+      "cdn_relative_path": "d7/d7393f79f4b57234_e5d7b9bc4ebba361b47482fc049ea4a4",
+      "md5": "e5d7b9bc4ebba361b47482fc049ea4a4",
+      "byte_size": 1177,
       "format": "FSD Binary",
-      "record_count": 13
+      "record_count": 15
     },
     {
       "res_path": "res:/staticdata/missions.fsdbinary",
@@ -1096,19 +1112,19 @@
     },
     {
       "res_path": "res:/staticdata/newfeatures.fsdbinary",
-      "cdn_relative_path": "17/17f40eeed2d111a6_873041b3df903830391a78722f27626d",
-      "md5": "873041b3df903830391a78722f27626d",
-      "byte_size": 45243,
+      "cdn_relative_path": "17/17f40eeed2d111a6_34986609db6b7db38a67117227092b6c",
+      "md5": "34986609db6b7db38a67117227092b6c",
+      "byte_size": 45723,
       "format": "FSD Binary",
-      "record_count": 197
+      "record_count": 199
     },
     {
       "res_path": "res:/staticdata/nodegraphs.fsdbinary",
-      "cdn_relative_path": "44/4459db12c57cef74_a59acb0775423a99b82cb8a3f8e697a6",
-      "md5": "a59acb0775423a99b82cb8a3f8e697a6",
-      "byte_size": 8254048,
+      "cdn_relative_path": "44/4459db12c57cef74_47f6dcd13c29d0dc8a0f0c0fb072ca3c",
+      "md5": "47f6dcd13c29d0dc8a0f0c0fb072ca3c",
+      "byte_size": 8326464,
       "format": "FSD Binary",
-      "record_count": 584
+      "record_count": 594
     },
     {
       "res_path": "res:/staticdata/nodetypes.fsdbinary",
@@ -1120,25 +1136,25 @@
     },
     {
       "res_path": "res:/staticdata/npccharacters.fsdbinary",
-      "cdn_relative_path": "11/1173a5d23f0b6098_9a5efb6a18648808dc9b1ccffd8259ac",
-      "md5": "9a5efb6a18648808dc9b1ccffd8259ac",
-      "byte_size": 1873264,
+      "cdn_relative_path": "11/1173a5d23f0b6098_6d3fbe7fa66a91272ba7079e9fb96eeb",
+      "md5": "6d3fbe7fa66a91272ba7079e9fb96eeb",
+      "byte_size": 1862672,
       "format": "FSD Binary",
-      "record_count": 11424
+      "record_count": 11430
     },
     {
       "res_path": "res:/staticdata/npccorporationdivisions.fsdbinary",
-      "cdn_relative_path": "4d/4d27ec7dbfe8a8ea_93187a5122247235d7f5b0e0d9c28719",
-      "md5": "93187a5122247235d7f5b0e0d9c28719",
-      "byte_size": 1075,
+      "cdn_relative_path": "4d/4d27ec7dbfe8a8ea_b2473565cf89a3db46284ff72545a133",
+      "md5": "b2473565cf89a3db46284ff72545a133",
+      "byte_size": 1064,
       "format": "FSD Binary",
       "record_count": 10
     },
     {
       "res_path": "res:/staticdata/npccorporations.fsdbinary",
-      "cdn_relative_path": "71/714922d2bf762025_e9d96d94be7659382d37b3d175c5a115",
-      "md5": "e9d96d94be7659382d37b3d175c5a115",
-      "byte_size": 713054,
+      "cdn_relative_path": "71/714922d2bf762025_52545db280225f4f920edd435b90c624",
+      "md5": "52545db280225f4f920edd435b90c624",
+      "byte_size": 725750,
       "format": "FSD Binary",
       "record_count": 283
     },
@@ -1160,11 +1176,11 @@
     },
     {
       "res_path": "res:/staticdata/objectivechains.fsdbinary",
-      "cdn_relative_path": "97/977c5f990677327a_26370e8225ff55f03f34a6101bbe3e60",
-      "md5": "26370e8225ff55f03f34a6101bbe3e60",
-      "byte_size": 239256,
+      "cdn_relative_path": "97/977c5f990677327a_79043335f254c6ecd4e14ea477b9e60b",
+      "md5": "79043335f254c6ecd4e14ea477b9e60b",
+      "byte_size": 243495,
       "format": "FSD Binary",
-      "record_count": 111
+      "record_count": 115
     },
     {
       "res_path": "res:/staticdata/objectives.fsdbinary",
@@ -1232,11 +1248,11 @@
     },
     {
       "res_path": "res:/staticdata/oretypesbydungeonid.static",
-      "cdn_relative_path": "2c/2ca016d009870be6_7ccd58c48605109b492fa98dee34f0d3",
-      "md5": "7ccd58c48605109b492fa98dee34f0d3",
-      "byte_size": 24674,
+      "cdn_relative_path": "2c/2ca016d009870be6_8aa940615ca45b1d1fff2bbf998e74c4",
+      "md5": "8aa940615ca45b1d1fff2bbf998e74c4",
+      "byte_size": 24738,
       "format": "FSD Static (pickled schema header)",
-      "record_count": 1120
+      "record_count": 1123
     },
     {
       "res_path": "res:/staticdata/paints.fsdbinary",
@@ -1248,11 +1264,11 @@
     },
     {
       "res_path": "res:/staticdata/paperdolls.fsdbinary",
-      "cdn_relative_path": "7a/7a4009deb8d60d63_93cd9062f2899b300414d0ae0a992058",
-      "md5": "93cd9062f2899b300414d0ae0a992058",
-      "byte_size": 13178168,
+      "cdn_relative_path": "7a/7a4009deb8d60d63_bb5507f6a885e5bd7451c020979c026b",
+      "md5": "bb5507f6a885e5bd7451c020979c026b",
+      "byte_size": 13196368,
       "format": "FSD Binary",
-      "record_count": 11291
+      "record_count": 11296
     },
     {
       "res_path": "res:/staticdata/petitionevents.fsdbinary",
@@ -1336,27 +1352,27 @@
     },
     {
       "res_path": "res:/staticdata/regions.static",
-      "cdn_relative_path": "a7/a74cde5df2632168_923dafe7fcfcf122b65e55bfe4974298",
-      "md5": "923dafe7fcfcf122b65e55bfe4974298",
-      "byte_size": 55704,
+      "cdn_relative_path": "a7/a74cde5df2632168_4c2246e1431dfec2bcf5b8df5e65028b",
+      "md5": "4c2246e1431dfec2bcf5b8df5e65028b",
+      "byte_size": 55712,
       "format": "FSD Static (external .schema)",
       "record_count": 114
     },
     {
       "res_path": "res:/staticdata/requiredskillsfortypes.fsdbinary",
-      "cdn_relative_path": "4f/4ffb0ff003a82e5a_58d4d940882dbe8af6531268679d87e4",
-      "md5": "58d4d940882dbe8af6531268679d87e4",
-      "byte_size": 863720,
+      "cdn_relative_path": "4f/4ffb0ff003a82e5a_509710bd1f6845cc660456724099e178",
+      "md5": "509710bd1f6845cc660456724099e178",
+      "byte_size": 875280,
       "format": "FSD Binary",
-      "record_count": 9573
+      "record_count": 9709
     },
     {
       "res_path": "res:/staticdata/requiredskillsindex.fsdbinary",
-      "cdn_relative_path": "09/09aa87b13429bd4a_d3d5a70e4b51d03b2bab6ae17857c6d0",
-      "md5": "d3d5a70e4b51d03b2bab6ae17857c6d0",
-      "byte_size": 266136,
+      "cdn_relative_path": "09/09aa87b13429bd4a_4e61bf17c3c66981c14d4443d4e016b7",
+      "md5": "4e61bf17c3c66981c14d4443d4e016b7",
+      "byte_size": 272216,
       "format": "FSD Binary",
-      "record_count": 421
+      "record_count": 422
     },
     {
       "res_path": "res:/staticdata/schematics.fsdbinary",
@@ -1384,11 +1400,11 @@
     },
     {
       "res_path": "res:/staticdata/seasonalcampaignsloginrewards.fsdbinary",
-      "cdn_relative_path": "8c/8ce67f2de2a6e775_6761598164933b945de712fa8fb3be37",
-      "md5": "6761598164933b945de712fa8fb3be37",
-      "byte_size": 227128,
+      "cdn_relative_path": "8c/8ce67f2de2a6e775_70811ecc345722f21ea6104dc9aaa366",
+      "md5": "70811ecc345722f21ea6104dc9aaa366",
+      "byte_size": 228579,
       "format": "FSD Binary",
-      "record_count": 129
+      "record_count": 131
     },
     {
       "res_path": "res:/staticdata/seasonselection.fsdbinary",
@@ -1416,9 +1432,9 @@
     },
     {
       "res_path": "res:/staticdata/ship_cosmetic_slot_configurations.fsdbinary",
-      "cdn_relative_path": "cb/cb0ffd0e7475ab52_e80fcb9f97f19c62bb4c699d9cfabae4",
-      "md5": "e80fcb9f97f19c62bb4c699d9cfabae4",
-      "byte_size": 952,
+      "cdn_relative_path": "cb/cb0ffd0e7475ab52_9352bb592d7a6a0ab35b2fb02e4ddb30",
+      "md5": "9352bb592d7a6a0ab35b2fb02e4ddb30",
+      "byte_size": 960,
       "format": "FSD Binary",
       "record_count": 4
     },
@@ -1464,19 +1480,19 @@
     },
     {
       "res_path": "res:/staticdata/ship_skin_design_components.fsdbinary",
-      "cdn_relative_path": "e8/e859a30fe5f91b67_8d7fe8dfba7cdfc2a2970e87dd03e27d",
-      "md5": "8d7fe8dfba7cdfc2a2970e87dd03e27d",
-      "byte_size": 216574,
+      "cdn_relative_path": "e8/e859a30fe5f91b67_c0315c9b8170d36064a6c5e71dbe2008",
+      "md5": "c0315c9b8170d36064a6c5e71dbe2008",
+      "byte_size": 222725,
       "format": "FSD Binary",
-      "record_count": 613
+      "record_count": 630
     },
     {
       "res_path": "res:/staticdata/ship_skin_design_components_post_process.fsdbinary",
-      "cdn_relative_path": "07/078958b593583fae_af4c8de790665114cfe09c5e7e739fd6",
-      "md5": "af4c8de790665114cfe09c5e7e739fd6",
-      "byte_size": 23848,
+      "cdn_relative_path": "07/078958b593583fae_70eb5be6dd4f699e5c4b6b9901882f80",
+      "md5": "70eb5be6dd4f699e5c4b6b9901882f80",
+      "byte_size": 24520,
       "format": "FSD Binary",
-      "record_count": 613
+      "record_count": 630
     },
     {
       "res_path": "res:/staticdata/ship_skin_design_tier_thresholds.fsdbinary",
@@ -1488,17 +1504,17 @@
     },
     {
       "res_path": "res:/staticdata/shipcosmeticlicenses.fsdbinary",
-      "cdn_relative_path": "e2/e26b5bd1e9cc3ae8_200f37bbeeb02381f51623c298c9e76b",
-      "md5": "200f37bbeeb02381f51623c298c9e76b",
-      "byte_size": 20800,
+      "cdn_relative_path": "e2/e26b5bd1e9cc3ae8_f6739d8da1a00ff884c7238e5e458de3",
+      "md5": "f6739d8da1a00ff884c7238e5e458de3",
+      "byte_size": 21008,
       "format": "FSD Binary",
-      "record_count": 830
+      "record_count": 838
     },
     {
       "res_path": "res:/staticdata/skillplans.fsdbinary",
-      "cdn_relative_path": "c7/c7def626ddcfd142_38da240ee9fa6fc94f4993218d5aac53",
-      "md5": "38da240ee9fa6fc94f4993218d5aac53",
-      "byte_size": 28788,
+      "cdn_relative_path": "c7/c7def626ddcfd142_90f65a037af19486b6abca27951b7602",
+      "md5": "90f65a037af19486b6abca27951b7602",
+      "byte_size": 28652,
       "format": "FSD Binary",
       "record_count": 40
     },
@@ -1520,27 +1536,27 @@
     },
     {
       "res_path": "res:/staticdata/skinlicenses.static",
-      "cdn_relative_path": "dd/ddec335c5166e1ce_b33d9b7807f5c1f6ee5a0b1356f5cefc",
-      "md5": "b33d9b7807f5c1f6ee5a0b1356f5cefc",
-      "byte_size": 1974272,
+      "cdn_relative_path": "dd/ddec335c5166e1ce_f709b5a1c5941a7d56b31ec645732aca",
+      "md5": "f709b5a1c5941a7d56b31ec645732aca",
+      "byte_size": 1982464,
       "format": "SQLite3",
-      "record_count": 11877
+      "record_count": 11908
     },
     {
       "res_path": "res:/staticdata/skinmaterials.static",
-      "cdn_relative_path": "04/04fe8caf2896e754_b45be968bcf4e622b04f7b7c66abedd2",
-      "md5": "b45be968bcf4e622b04f7b7c66abedd2",
-      "byte_size": 184320,
+      "cdn_relative_path": "04/04fe8caf2896e754_0e646a3c4c9c80e9a4697443b948f9c6",
+      "md5": "0e646a3c4c9c80e9a4697443b948f9c6",
+      "byte_size": 188416,
       "format": "SQLite3",
-      "record_count": 875
+      "record_count": 878
     },
     {
       "res_path": "res:/staticdata/skins.static",
-      "cdn_relative_path": "cb/cb291acd32af7f27_8766f6f7c2d721c998f9fcf9e7413506",
-      "md5": "8766f6f7c2d721c998f9fcf9e7413506",
-      "byte_size": 4087808,
+      "cdn_relative_path": "cb/cb291acd32af7f27_956290ee965ebec91b3b3bde95774dc6",
+      "md5": "956290ee965ebec91b3b3bde95774dc6",
+      "byte_size": 4096000,
       "format": "SQLite3",
-      "record_count": 7048
+      "record_count": 7079
     },
     {
       "res_path": "res:/staticdata/skyboxeffects.fsdbinary",
@@ -1552,27 +1568,27 @@
     },
     {
       "res_path": "res:/staticdata/solarsystemcontent.static",
-      "cdn_relative_path": "33/33c83a8c56c485e6_2ddb08422c48a5a0b7eabcece1e2fcf0",
-      "md5": "2ddb08422c48a5a0b7eabcece1e2fcf0",
-      "byte_size": 92396316,
+      "cdn_relative_path": "33/33c83a8c56c485e6_cd475121ad0b04d8aeae942275367e79",
+      "md5": "cd475121ad0b04d8aeae942275367e79",
+      "byte_size": 92396985,
       "format": "FSD Static (pickled schema header)",
       "record_count": 8490
     },
     {
       "res_path": "res:/staticdata/soundids.fsdbinary",
-      "cdn_relative_path": "97/971b7df9729eb54e_ee04e8241837c12838d952c3e5169494",
-      "md5": "ee04e8241837c12838d952c3e5169494",
-      "byte_size": 101640,
+      "cdn_relative_path": "97/971b7df9729eb54e_9b865521933943414c8b1b3119a6dcb5",
+      "md5": "9b865521933943414c8b1b3119a6dcb5",
+      "byte_size": 90076,
       "format": "FSD Binary",
-      "record_count": 1470
+      "record_count": 1473
     },
     {
       "res_path": "res:/staticdata/spacecomponentsbytype.fsdbinary",
-      "cdn_relative_path": "f2/f26def0295b69084_643351e4bc72beea1e4f1715c85ced6c",
-      "md5": "643351e4bc72beea1e4f1715c85ced6c",
-      "byte_size": 23733840,
+      "cdn_relative_path": "f2/f26def0295b69084_7ac3206aa5ae0b8d15bbed163633fa27",
+      "md5": "7ac3206aa5ae0b8d15bbed163633fa27",
+      "byte_size": 24222776,
       "format": "FSD Binary",
-      "record_count": 11238
+      "record_count": 11491
     },
     {
       "res_path": "res:/staticdata/spaceobjecthighlights.fsdbinary",
@@ -1584,19 +1600,19 @@
     },
     {
       "res_path": "res:/staticdata/starmapcache.pickle",
-      "cdn_relative_path": "2e/2edadfca55978bdf_a9831434566044a0d64837669f38e3ba",
-      "md5": "a9831434566044a0d64837669f38e3ba",
-      "byte_size": 2165420,
+      "cdn_relative_path": "2e/2edadfca55978bdf_cb17447f256b394f8806f843ddac8e73",
+      "md5": "cb17447f256b394f8806f843ddac8e73",
+      "byte_size": 2165580,
       "format": "Pickle (protocol 2)",
       "record_count": 4
     },
     {
       "res_path": "res:/staticdata/stationoperations.fsdbinary",
-      "cdn_relative_path": "1d/1d852c36f59d1b53_2cb6c08352df5edce329a0bd209689e3",
-      "md5": "2cb6c08352df5edce329a0bd209689e3",
-      "byte_size": 14984,
+      "cdn_relative_path": "1d/1d852c36f59d1b53_d42de2b536c0e789000f53820f3224e0",
+      "md5": "d42de2b536c0e789000f53820f3224e0",
+      "byte_size": 15144,
       "format": "FSD Binary",
-      "record_count": 69
+      "record_count": 70
     },
     {
       "res_path": "res:/staticdata/stationservices.fsdbinary",
@@ -1632,9 +1648,9 @@
     },
     {
       "res_path": "res:/staticdata/systems.static",
-      "cdn_relative_path": "89/893086ea542ec98f_040b16dee14ada60b51dbc0cc5560606",
-      "md5": "040b16dee14ada60b51dbc0cc5560606",
-      "byte_size": 1906081,
+      "cdn_relative_path": "89/893086ea542ec98f_c860c9d3c6b32fcaa966f7a933c2806b",
+      "md5": "c860c9d3c6b32fcaa966f7a933c2806b",
+      "byte_size": 1906117,
       "format": "FSD Static (external .schema)",
       "record_count": 8490
     },
@@ -1664,35 +1680,35 @@
     },
     {
       "res_path": "res:/staticdata/typedogma.fsdbinary",
-      "cdn_relative_path": "a5/a5dc877f4620b63d_e8b313eff5dcd9b701f711832ba872ac",
-      "md5": "e8b313eff5dcd9b701f711832ba872ac",
-      "byte_size": 12335088,
+      "cdn_relative_path": "a5/a5dc877f4620b63d_66e63210baf717a5fe611584a9e4f0e8",
+      "md5": "66e63210baf717a5fe611584a9e4f0e8",
+      "byte_size": 12529504,
       "format": "FSD Binary",
-      "record_count": 27160
+      "record_count": 27622
     },
     {
       "res_path": "res:/staticdata/typelist.fsdbinary",
-      "cdn_relative_path": "60/6037055f6c367f5b_a9b0d860d4a1e888d63433894a07a58c",
-      "md5": "a9b0d860d4a1e888d63433894a07a58c",
-      "byte_size": 152323,
+      "cdn_relative_path": "60/6037055f6c367f5b_59c14b762cc07b0e7a4dced263126b4b",
+      "md5": "59c14b762cc07b0e7a4dced263126b4b",
+      "byte_size": 155839,
       "format": "FSD Binary",
-      "record_count": 469
+      "record_count": 477
     },
     {
       "res_path": "res:/staticdata/typematerials.fsdbinary",
-      "cdn_relative_path": "66/66c8b3f32a0b893b_942b79afca25a92bb2cb246de8831579",
-      "md5": "942b79afca25a92bb2cb246de8831579",
-      "byte_size": 1127336,
+      "cdn_relative_path": "66/66c8b3f32a0b893b_96c00784f5f91a6499d3f9bc5893a995",
+      "md5": "96c00784f5f91a6499d3f9bc5893a995",
+      "byte_size": 1096056,
       "format": "FSD Binary",
-      "record_count": 9866
+      "record_count": 9935
     },
     {
       "res_path": "res:/staticdata/types.fsdbinary",
-      "cdn_relative_path": "3c/3cc5bf8ff5e9099a_c0ee9c292aa113737029c9ec63503233",
-      "md5": "c0ee9c292aa113737029c9ec63503233",
-      "byte_size": 9169272,
+      "cdn_relative_path": "3c/3cc5bf8ff5e9099a_3238db13e1322ae90344d927e7f62c92",
+      "md5": "3238db13e1322ae90344d927e7f62c92",
+      "byte_size": 9278984,
       "format": "FSD Binary",
-      "record_count": 53288
+      "record_count": 53925
     },
     {
       "res_path": "res:/staticdata/uiblinks.fsdbinary",
@@ -1712,11 +1728,11 @@
     },
     {
       "res_path": "res:/staticdata/uihelppointers.fsdbinary",
-      "cdn_relative_path": "dc/dcf815fc60f31b6e_c8e58b3105e7e641cd484dec5f2aaae2",
-      "md5": "c8e58b3105e7e641cd484dec5f2aaae2",
-      "byte_size": 34841,
+      "cdn_relative_path": "dc/dcf815fc60f31b6e_a38917b55b3ce3cb63009a36fc204da6",
+      "md5": "a38917b55b3ce3cb63009a36fc204da6",
+      "byte_size": 35579,
       "format": "FSD Binary",
-      "record_count": 193
+      "record_count": 197
     },
     {
       "res_path": "res:/staticdata/uihidingtemplates.fsdbinary",

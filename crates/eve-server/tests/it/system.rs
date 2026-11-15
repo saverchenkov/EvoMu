@@ -332,9 +332,9 @@ async fn test_sde_skins_static_and_cosmetics_validation() {
     sess.ship_id = Some(100_000_001);
     sess.role |= eve_machonet::service_roles::ROLE_GML;
 
-    assert_eq!(ctx.sde.skins.len(), 7_048);
-    assert_eq!(ctx.sde.skin_materials.len(), 875);
-    assert_eq!(ctx.sde.skin_licenses.len(), 11_877);
+    assert_eq!(ctx.sde.skins.len(), 7_079);
+    assert_eq!(ctx.sde.skin_materials.len(), 878);
+    assert_eq!(ctx.sde.skin_licenses.len(), 11_908);
 
     let skin5 = ctx.sde.skins.get(&5).expect("skin 5");
     assert_eq!(skin5.internal_name, "Megathron Quafe");

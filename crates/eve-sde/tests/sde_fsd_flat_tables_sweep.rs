@@ -205,8 +205,8 @@ fn test_t2_sde_fsdbinary_flat_corporation_character_and_economy_tables() {
         &sde,
         &t(
             "res:/staticdata/careerpaths.fsdbinary",
-            "0ff6705b8c800e74f1bf39b4f67b44b2",
-            283,
+            "ac9e43e08865f56fa1f8145f582db7b7",
+            272,
             true,
             24,
             None,
@@ -229,7 +229,7 @@ fn test_t2_sde_fsdbinary_flat_corporation_character_and_economy_tables() {
     assert_eq!(
         careers[&7],
         rec(&[
-            ("internalName", s("Soldier of Fortune")),
+            ("internalName", s("Soldier")),
             ("descriptionID", i(582_523)),
             ("nameID", i(582_522))
         ])
@@ -713,13 +713,13 @@ fn test_t2_sde_fsdbinary_flat_cosmetics_tags_and_onboarding_tables() {
         &sde,
         &t(
             "res:/staticdata/ship_skin_design_components_post_process.fsdbinary",
-            "af4c8de790665114cfe09c5e7e739fd6",
-            23_848,
+            "70eb5be6dd4f699e5c4b6b9901882f80",
+            24_520,
             true,
             16,
             None,
             &[("value", 's', 8, 0)],
-            613,
+            630,
         ),
     );
     assert_eq!(post[&53], rec(&[("value", s("#181643"))]));
@@ -732,8 +732,8 @@ fn test_t2_sde_fsdbinary_flat_cosmetics_tags_and_onboarding_tables() {
         &sde,
         &t(
             "res:/staticdata/shipcosmeticlicenses.fsdbinary",
-            "200f37bbeeb02381f51623c298c9e76b",
-            20_800,
+            "f6739d8da1a00ff884c7238e5e458de3",
+            21_008,
             false,
             20,
             None,
@@ -743,7 +743,7 @@ fn test_t2_sde_fsdbinary_flat_cosmetics_tags_and_onboarding_tables() {
                 ("shipTypeID", 'u', 12, 0),
                 ("slotGroup", 'u', 16, 0),
             ],
-            830,
+            838,
         ),
     );
     assert_eq!(

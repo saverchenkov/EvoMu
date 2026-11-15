@@ -36,8 +36,8 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
     .expect("parse data/sde_import_manifest.json");
 
     assert_eq!(manifest_val["schema_version"].as_i64(), Some(1));
-    assert_eq!(manifest_val["client_build"].as_i64(), Some(3_619_879));
-    assert_eq!(manifest_val["client_release"].as_str(), Some("V24.01"));
+    assert_eq!(manifest_val["client_build"].as_i64(), Some(3_698_585));
+    assert_eq!(manifest_val["client_release"].as_str(), Some("V24.02"));
 
     let catalog_path = root
         .join("docs")
@@ -47,7 +47,7 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
         &std::fs::read_to_string(&catalog_path).expect("read docs/index/staticdata_catalog.json"),
     )
     .expect("parse docs/index/staticdata_catalog.json");
-    assert_eq!(catalog_arr.len(), 213);
+    assert_eq!(catalog_arr.len(), 215);
     let catalog_by_res: HashMap<String, &serde_json::Value> = catalog_arr
         .iter()
         .map(|v| (v["res_path"].as_str().unwrap().to_string(), v))
@@ -56,8 +56,8 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
     let manifest_resources = manifest_val["resources"]
         .as_array()
         .expect("manifest resources array");
-    assert_eq!(manifest_resources.len(), 213);
-    assert_eq!(sde.resources.len(), 213);
+    assert_eq!(manifest_resources.len(), 215);
+    assert_eq!(sde.resources.len(), 215);
 
     let manifest_by_res: HashMap<String, &serde_json::Value> = manifest_resources
         .iter()
@@ -360,9 +360,9 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
             assert!(mat.quantity >= 1);
         }
     }
-    assert_eq!(valid_bp_products, 5_080);
-    assert_eq!(total_bp_mats, 27_123);
-    assert_eq!(valid_bp_mats, 27_122);
+    assert_eq!(valid_bp_products, 5_115);
+    assert_eq!(total_bp_mats, 27_401);
+    assert_eq!(valid_bp_mats, 27_400);
     let rifter_bp = &sde.blueprints[&691];
     assert_eq!(rifter_bp.product_type_id, 587);
     assert_eq!(rifter_bp.product_quantity, 1);
@@ -389,11 +389,11 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
             assert!(sde.npc_corporations.contains_key(&sta.owner_corporation_id));
         }
     }
-    assert_eq!(total_stations, 5_210);
+    assert_eq!(total_stations, 5_211);
 
     // parity: plan:D-2
     // SdeRegistry::stations indexed map for O(1) station lookups
-    assert_eq!(sde.stations.len(), 5_210);
+    assert_eq!(sde.stations.len(), 5_211);
     for (sid, sta) in &sde.stations {
         assert_eq!(*sid, sta.station_id);
         assert!(!sta.name.is_empty());
@@ -521,7 +521,7 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
     }
 
     // parity: sde:res:/staticdata/skins.static
-    assert_eq!(sde.skin_materials.len(), 875);
+    assert_eq!(sde.skin_materials.len(), 878);
     let mat1 = &sde.skin_materials[&1];
     assert_eq!(mat1.skin_material_id, 1);
     assert_eq!(mat1.display_name_id, Some(505346));
@@ -533,7 +533,7 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
             resolved_skin_licenses += 1;
         }
     }
-    assert_eq!(resolved_skin_licenses, 11_870);
+    assert_eq!(resolved_skin_licenses, 11_901);
     for sk in sde.skins.values() {
         assert!(!sk.internal_name.is_empty());
         assert!(!sk.types.is_empty());

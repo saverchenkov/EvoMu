@@ -78,7 +78,7 @@ pub fn verify_client_sqlite_static_map_rows(
     match res_path {
         "res:/staticdata/skinmaterials.static" => {
             assert_eq!(sde.skin_materials.len(), cache_cnt);
-            assert_eq!(cache_cnt, 875);
+            assert_eq!(cache_cnt, 878);
             for (key_str, row_json) in rows {
                 let skin_mat_id: u32 = key_str.parse().expect("skin material key u32");
                 let sm = sde
@@ -189,7 +189,7 @@ pub fn verify_client_sqlite_static_map_rows(
                 assert_eq!(actual, &expected);
                 total_entries += expected.len();
             }
-            assert_eq!(total_entries, 3_054);
+            assert_eq!(total_entries, 3_058);
             true
         }
         "res:/staticdata/gastypesbydungeonid.static" => {

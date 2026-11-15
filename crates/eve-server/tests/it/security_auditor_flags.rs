@@ -704,18 +704,18 @@ async fn test_serverops_lossless_static_data() {
             .unwrap_or_else(|e| panic!("Failed to count table {tbl}: {e}"))
     };
 
-    assert_eq!(count_table("sde_resources"), 213);
+    assert_eq!(count_table("sde_resources"), 215);
     assert!(count_table("sde_types") >= 40_000);
     assert_eq!(count_table("sde_solar_systems"), 8_490);
-    assert_eq!(count_table("sde_skin_materials"), 875);
-    assert_eq!(count_table("sde_skin_licenses"), 11_877);
-    assert_eq!(count_table("sde_skins"), 7_048);
-    assert_eq!(count_table("sde_space_components"), 11_238);
-    assert_eq!(count_table("sde_market_groups"), 2_114);
-    assert_eq!(count_table("sde_dogma_attributes"), 2_871);
-    assert_eq!(count_table("sde_dogma_effects"), 3_427);
-    assert_eq!(count_table("sde_blueprints"), 5_100);
-    assert_eq!(count_table("sde_npc_spawn_groups"), 392);
+    assert_eq!(count_table("sde_skin_materials"), 878);
+    assert_eq!(count_table("sde_skin_licenses"), 11_908);
+    assert_eq!(count_table("sde_skins"), 7_079);
+    assert_eq!(count_table("sde_space_components"), 11_491);
+    assert_eq!(count_table("sde_market_groups"), 2_125);
+    assert_eq!(count_table("sde_dogma_attributes"), 2_928);
+    assert_eq!(count_table("sde_dogma_effects"), 3_499);
+    assert_eq!(count_table("sde_blueprints"), 5_135);
+    assert_eq!(count_table("sde_npc_spawn_groups"), 405);
 
     // 2. Verify columns added in latest schema revisions exist and are queryable
     let type_desc_id: Option<i64> = conn
@@ -738,22 +738,22 @@ async fn test_serverops_lossless_static_data() {
 
     // 3. SdeRegistry in ServerContext verification
     let ctx = ServerContext::new();
-    assert_eq!(ctx.sde.resources.len(), 213);
+    assert_eq!(ctx.sde.resources.len(), 215);
     assert!(ctx.sde.solar_systems.contains_key(&30_000_142)); // Jita
     assert!(ctx.sde.solar_systems.contains_key(&30_000_144)); // Perimeter
-    assert_eq!(ctx.sde.attributes.len(), 2_871);
+    assert_eq!(ctx.sde.attributes.len(), 2_928);
     assert_eq!(
         ctx.sde.attributes.get(&54).map(|a| a.name.as_str()),
         Some("maxRange")
     );
-    assert_eq!(ctx.sde.effects.len(), 3_427);
+    assert_eq!(ctx.sde.effects.len(), 3_499);
     assert_eq!(
         ctx.sde.effects.get(&12).map(|e| e.name.as_str()),
         Some("hiPower")
     );
-    assert_eq!(ctx.sde.blueprints.len(), 5_100);
+    assert_eq!(ctx.sde.blueprints.len(), 5_135);
     assert!(ctx.sde.blueprints.contains_key(&691));
-    assert_eq!(ctx.sde.npc_spawn_groups.len(), 392);
+    assert_eq!(ctx.sde.npc_spawn_groups.len(), 405);
 
     // Rifter (587) verification
     let rifter = ctx.sde.types.get(&587).expect("Rifter (587) in SdeRegistry");
@@ -1013,13 +1013,13 @@ async fn test_auditor_flagged_rows_verification_suite() {
     let now = ctx.now_unix();
 
     // A. Static SDE lossless check (feat:serverops.static-data)
-    assert_eq!(ctx.sde.resources.len(), 213);
+    assert_eq!(ctx.sde.resources.len(), 215);
     assert!(!ctx.sde.types.is_empty());
     assert!(!ctx.sde.solar_systems.is_empty());
-    assert_eq!(ctx.sde.attributes.len(), 2_871);
-    assert_eq!(ctx.sde.effects.len(), 3_427);
-    assert_eq!(ctx.sde.blueprints.len(), 5_100);
-    assert_eq!(ctx.sde.npc_spawn_groups.len(), 392);
+    assert_eq!(ctx.sde.attributes.len(), 2_928);
+    assert_eq!(ctx.sde.effects.len(), 3_499);
+    assert_eq!(ctx.sde.blueprints.len(), 5_135);
+    assert_eq!(ctx.sde.npc_spawn_groups.len(), 405);
 
     // B. Role bitmasks and GM status loaded from DB via authentication.Login (feat:account.account-roles)
     ctx.db

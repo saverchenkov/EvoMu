@@ -176,14 +176,14 @@ const GROUP_A: &[Nested] = &[
     },
     Nested {
         path: "res:/staticdata/community_track_templates.fsdbinary",
-        md5: "91771921ed4acdce31dee2da9bcb67b6",
-        bytes: 224,
+        md5: "5759b461273f973967ed58efbb482ba2",
+        bytes: 208,
         stride: 32,
         str_key: false,
         count: 1,
         spots: &[(
             "1",
-            r#"{"goal":100,"name":"Vanguard Nemesis Event","tale_templates":[466,470,467,471,474,468,472,469,473,475,476,480,477,481,484,478,482,479,483,485]}"#,
+            r#"{"goal":100,"name":"Vanguard Nemesis Event","tale_templates":[488,489,491,492,490,493,494,495,496,497,498,499,501,502,503,504]}"#,
         )],
     },
     Nested {
@@ -239,8 +239,8 @@ const GROUP_B: &[Nested] = &[
     },
     Nested {
         path: "res:/staticdata/skillplans.fsdbinary",
-        md5: "38da240ee9fa6fc94f4993218d5aac53",
-        bytes: 28788,
+        md5: "90f65a037af19486b6abca27951b7602",
+        bytes: 28652,
         stride: 56,
         str_key: false,
         count: 40,
@@ -269,8 +269,8 @@ const GROUP_B: &[Nested] = &[
     },
     Nested {
         path: "res:/staticdata/ship_cosmetic_slot_configurations.fsdbinary",
-        md5: "e80fcb9f97f19c62bb4c699d9cfabae4",
-        bytes: 952,
+        md5: "9352bb592d7a6a0ab35b2fb02e4ddb30",
+        bytes: 960,
         stride: 48,
         str_key: false,
         count: 4,
@@ -380,11 +380,11 @@ const GROUP_B: &[Nested] = &[
 const GROUP_C: &[Nested] = &[
     Nested {
         path: "res:/staticdata/itemtraderrecipes.fsdbinary",
-        md5: "f1f2a40ef0070eda09473d257d83d4e0",
-        bytes: 104384,
+        md5: "1bea31735420e4358f15c04ae8375e4e",
+        bytes: 122256,
         stride: 72,
         str_key: false,
-        count: 544,
+        count: 636,
         spots: &[
             (
                 "9",
@@ -398,11 +398,11 @@ const GROUP_C: &[Nested] = &[
     },
     Nested {
         path: "res:/staticdata/archetypes.fsdbinary",
-        md5: "d6aeac91bdd7842fadf7b12cd84c856e",
-        bytes: 5563,
+        md5: "b4583355cb4872073002b13730209821",
+        bytes: 5712,
         stride: 40,
         str_key: false,
-        count: 71,
+        count: 73,
         spots: &[("0", r#"{}"#), ("38", r#"{}"#)],
     },
     Nested {
@@ -458,11 +458,11 @@ const GROUP_C: &[Nested] = &[
     },
     Nested {
         path: "res:/staticdata/seasonalcampaignsloginrewards.fsdbinary",
-        md5: "6761598164933b945de712fa8fb3be37",
-        bytes: 227128,
+        md5: "70811ecc345722f21ea6104dc9aaa366",
+        bytes: 228579,
         stride: 64,
         str_key: false,
-        count: 129,
+        count: 131,
         spots: &[
             (
                 "2215",
@@ -476,11 +476,11 @@ const GROUP_C: &[Nested] = &[
     },
     Nested {
         path: "res:/staticdata/ship_skin_design_components.fsdbinary",
-        md5: "8d7fe8dfba7cdfc2a2970e87dd03e27d",
-        bytes: 216574,
+        md5: "c0315c9b8170d36064a6c5e71dbe2008",
+        bytes: 222725,
         stride: 112,
         str_key: false,
-        count: 613,
+        count: 630,
         spots: &[
             (
                 "2056",
@@ -494,11 +494,11 @@ const GROUP_C: &[Nested] = &[
     },
     Nested {
         path: "res:/staticdata/crates.fsdbinary",
-        md5: "5f5d1dca29bf7bbf6823e02772392d68",
-        bytes: 133320,
+        md5: "f529b78d5e4105fa25e6b9f71a607590",
+        bytes: 135423,
         stride: 168,
         str_key: false,
-        count: 636,
+        count: 647,
         spots: &[
             (
                 "447",
@@ -512,8 +512,8 @@ const GROUP_C: &[Nested] = &[
     },
     Nested {
         path: "res:/staticdata/manufacturableitems.fsdbinary",
-        md5: "89b40fd1c22f0c0e06458b36834cc2ce",
-        bytes: 19592,
+        md5: "d587466e16979f9d59bccc50f91a3aaf",
+        bytes: 19732,
         stride: 16,
         str_key: true,
         count: 1,
@@ -524,11 +524,11 @@ const GROUP_C: &[Nested] = &[
 const GROUP_D: &[Nested] = &[
     Nested {
         path: "res:/staticdata/atoms.fsdbinary",
-        md5: "7157224e7f66d7b34479141a2472b2e9",
-        bytes: 242304,
+        md5: "863e7ed4be3666c430e4c9ddfa5e0254",
+        bytes: 249336,
         stride: 64,
         str_key: false,
-        count: 580,
+        count: 600,
         spots: &[
             (
                 "608",
@@ -560,11 +560,11 @@ const GROUP_D: &[Nested] = &[
     },
     Nested {
         path: "res:/staticdata/objectivechains.fsdbinary",
-        md5: "26370e8225ff55f03f34a6101bbe3e60",
-        bytes: 239256,
+        md5: "79043335f254c6ecd4e14ea477b9e60b",
+        bytes: 243495,
         stride: 40,
         str_key: false,
-        count: 111,
+        count: 115,
         spots: &[
             (
                 "102",
@@ -632,11 +632,11 @@ const GROUP_D: &[Nested] = &[
     },
     Nested {
         path: "res:/staticdata/conversations.fsdbinary",
-        md5: "c1e6da3bd83185bc67a90812504639b0",
-        bytes: 319116,
+        md5: "4101adb9f42a999e6366ba3c0b914627",
+        bytes: 320850,
         stride: 24,
         str_key: false,
-        count: 1275,
+        count: 1283,
         spots: &[
             (
                 "2648",
@@ -706,7 +706,7 @@ fn test_t2_sde_fsdbinary_nested_dicts_economy_and_content_tags() {
     }
     // npcstationtaxmodifier is keyed by an SDE station.
     assert!(sde.stations.contains_key(&60_015_187));
-    assert_eq!(ints(&t[6]["1"]["tale_templates"]).len(), 20);
+    assert_eq!(ints(&t[6]["1"]["tale_templates"]).len(), 16);
     // contenttags reference a contenttagtypes key.
     assert!(t[8]
         .values()
@@ -913,9 +913,9 @@ fn test_t2_sde_fsdbinary_nested_rewards_cosmetics_and_crates() {
     assert!(t[7].values().all(|r| sde
         .types
         .contains_key(&(r["typeID"].as_u64().unwrap() as u32))));
-    // manufacturableitems: one list (4,867 entries) of SDE blueprint product types.
+    // manufacturableitems: one list (4,902 entries) of SDE blueprint product types.
     let items = ints(&t[8]["ManufacturableItems"]);
-    assert_eq!(items.len(), 4_867);
+    assert_eq!(items.len(), 4_902);
     let products: BTreeSet<u64> = sde
         .blueprints
         .values()

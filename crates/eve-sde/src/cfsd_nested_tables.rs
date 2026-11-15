@@ -302,7 +302,7 @@ impl SdeRegistry {
         let raw = std::fs::read(&path)
             .map_err(|_| SdeError::MissingDatabase(path.display().to_string()))?;
         let buf = CfsdBuf(&raw);
-        for rec in buf.dict_entries(56, 1832)? {
+        for rec in buf.dict_entries(56, 1824)? {
             if buf.u32(rec)? == type_id {
                 let mut recipes = Vec::new();
                 let rel = buf.u64(rec + 464)?;
@@ -412,7 +412,7 @@ impl SdeRegistry {
         let mut starter_shipcasters = BTreeMap::new();
         let mut under_construction = BTreeMap::new();
 
-        for rec in buf.dict_entries(56, 1832)? {
+        for rec in buf.dict_entries(56, 1824)? {
             let tid = buf.u32(rec)?;
             let Some(comps) = self.space_components_by_type.get(&tid) else {
                 continue;

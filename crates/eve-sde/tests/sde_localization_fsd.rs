@@ -121,11 +121,11 @@ fn test_sde_localization_fsd_main_and_en_us_full_verification() {
     let sde = SdeRegistry::open(&SdeRegistry::default_db_path())
         .expect("SdeRegistry::open must succeed");
 
-    // 1. Verify localization_fsd_main.pickle against raw client file (3,344,947 bytes, 31,872 labels)
-    let main_path = resfiles_dir().join("79/79a473897ae5f3b0_ee8726670ad947c75d7048f30acc9b35");
+    // 1. Verify localization_fsd_main.pickle against raw client file (3,477,896 bytes, 32,801 labels)
+    let main_path = resfiles_dir().join("79/79a473897ae5f3b0_ba0ed8a6670b4cc6a063724478b1f9e6");
     let main_bytes = std::fs::read(&main_path).expect("read localization_fsd_main.pickle");
-    assert_eq!(main_bytes.len(), 3_344_947);
-    assert_eq!(md5_hex(&main_bytes), "ee8726670ad947c75d7048f30acc9b35");
+    assert_eq!(main_bytes.len(), 3_477_896);
+    assert_eq!(md5_hex(&main_bytes), "ba0ed8a6670b4cc6a063724478b1f9e6");
 
     let raw_main = unpickle(&main_bytes);
     let PyVal::Dict(main_dict_rc) = raw_main else {
@@ -154,11 +154,11 @@ fn test_sde_localization_fsd_main_and_en_us_full_verification() {
         panic!("main pickle must have 'labels' dict");
     };
     let raw_labels = labels_rc.borrow();
-    assert_eq!(raw_labels.len(), 31_872);
+    assert_eq!(raw_labels.len(), 32_801);
 
     let bundle = sde.load_localization_main().expect("load_localization_main");
     assert_eq!(bundle.languages, raw_langs);
-    assert_eq!(bundle.labels.len(), 31_872);
+    assert_eq!(bundle.labels.len(), 32_801);
     for (k, v) in raw_labels.iter() {
         let mid = k.as_int().expect("int messageID") as u32;
         let PyVal::Dict(f_rc) = v else {
@@ -174,14 +174,14 @@ fn test_sde_localization_fsd_main_and_en_us_full_verification() {
         assert_eq!(got.message_id, f_mid);
     }
 
-    // 2. Verify localization_fsd_en-us.pickle (40,753,078 bytes, 308,657 records)
+    // 2. Verify localization_fsd_en-us.pickle (41,175,459 bytes, 311,618 records)
     verify_language_pickle(
         &sde,
         "en-us",
-        "2c/2c3038b3c38e91a1_7a753c9da2eeca4dcc7cf0c6655aaae0",
-        40_753_078,
-        "7a753c9da2eeca4dcc7cf0c6655aaae0",
-        308_657,
+        "2c/2c3038b3c38e91a1_ec36e6662e1fc7e9dfe2519e8459d0ec",
+        41_175_459,
+        "ec36e6662e1fc7e9dfe2519e8459d0ec",
+        311_618,
     );
 
     let spot_ids: HashSet<u32> = [1, 524_288].into_iter().collect();
@@ -210,29 +210,29 @@ fn test_sde_localization_fsd_west_eu_locales_full_verification() {
     verify_language_pickle(
         &sde,
         "de",
-        "f7/f781e479bccfd00e_9bfa3342a109a5a30b7523af734daee5",
-        44_737_417,
-        "9bfa3342a109a5a30b7523af734daee5",
-        305_231,
+        "f7/f781e479bccfd00e_0ba0d09b312629e98cd87e8481dc727d",
+        45_168_999,
+        "0ba0d09b312629e98cd87e8481dc727d",
+        307_842,
     );
     assert_eq!(sde.localized_message("de", 1).as_deref(), Some("Passiv"));
 
     verify_language_pickle(
         &sde,
         "es",
-        "68/68766cf9c7eb3001_07b96ab4740f9b89347549f432a09228",
-        44_059_431,
-        "07b96ab4740f9b89347549f432a09228",
-        305_229,
+        "68/68766cf9c7eb3001_3a07ea08160daa74ad87cc383f4487db",
+        44_507_325,
+        "3a07ea08160daa74ad87cc383f4487db",
+        307_840,
     );
 
     verify_language_pickle(
         &sde,
         "fr",
-        "4a/4a0f5fe70b667169_eac42d7449d6083400e4da35ee998a03",
-        46_429_727,
-        "eac42d7449d6083400e4da35ee998a03",
-        305_234,
+        "4a/4a0f5fe70b667169_d425c3495668f80b0148ccd4efac8eb7",
+        46_875_524,
+        "d425c3495668f80b0148ccd4efac8eb7",
+        307_844,
     );
 }
 
@@ -252,34 +252,34 @@ fn test_sde_localization_fsd_cjk_ru_locales_full_verification() {
     verify_language_pickle(
         &sde,
         "ja",
-        "82/82afc4ce93a0dc14_f401a04fc2313a2090e836d726245bec",
-        86_414_823,
-        "f401a04fc2313a2090e836d726245bec",
-        305_234,
+        "82/82afc4ce93a0dc14_4fb096782c7fdf9d2790aff11754dbac",
+        87_216_223,
+        "4fb096782c7fdf9d2790aff11754dbac",
+        307_845,
     );
     verify_language_pickle(
         &sde,
         "ko",
-        "f5/f5467fdb71de5d33_dc47cdaba73e5d3d58c2ba748fabe71a",
-        71_125_744,
-        "dc47cdaba73e5d3d58c2ba748fabe71a",
-        305_231,
+        "f5/f5467fdb71de5d33_c3f36d7f6022311da755ccd3aa35e69a",
+        71_781_183,
+        "c3f36d7f6022311da755ccd3aa35e69a",
+        307_842,
     );
     verify_language_pickle(
         &sde,
         "ru",
-        "4c/4c56e191aaa0e618_baede863986025489fe8970f0ab38ee5",
-        153_500_626,
-        "baede863986025489fe8970f0ab38ee5",
-        305_234,
+        "4c/4c56e191aaa0e618_50c76201c9e2e7ad60c92a078a1f7860",
+        154_938_270,
+        "50c76201c9e2e7ad60c92a078a1f7860",
+        307_845,
     );
     verify_language_pickle(
         &sde,
         "zh",
-        "87/87bfc3b6eab5e5d3_468af73100512587c6eab7ea5a1528ca",
-        61_334_886,
-        "468af73100512587c6eab7ea5a1528ca",
-        305_235,
+        "87/87bfc3b6eab5e5d3_443759647480c53db4d0234a503784b6",
+        61_915_481,
+        "443759647480c53db4d0234a503784b6",
+        307_865,
     );
 }
 
@@ -291,14 +291,14 @@ fn test_sde_localization_fsd_it_locale_full_verification() {
     let sde = SdeRegistry::open(&SdeRegistry::default_db_path())
         .expect("SdeRegistry::open must succeed");
 
-    // Italian is a partial V24.01 localization pickle (7,452 legacy UI strings, not full type names).
+    // Italian is a partial V24.02 localization pickle (7,447 legacy UI strings, not full type names).
     verify_language_pickle_entries(
         &sde,
         "it",
-        "9f/9f056f7130bc9bf8_2bafd91c1bc13ff34c615e5536baa74a",
-        1_711_389,
-        "2bafd91c1bc13ff34c615e5536baa74a",
-        7_452,
+        "9f/9f056f7130bc9bf8_d98e2583e5c5e70f21b74de44c305d04",
+        1_709_047,
+        "d98e2583e5c5e70f21b74de44c305d04",
+        7_447,
     );
     assert_eq!(sde.localized_message("it", 47).as_deref(), Some("Gennaio"));
     assert_eq!(

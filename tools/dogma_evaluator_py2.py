@@ -264,7 +264,7 @@ def get_type(tid):
     if tid in _TYPE_CACHE:
         return _TYPE_CACHE[tid]
     row = cur.execute(
-        "SELECT type_id, group_id, category_id, name, attributes_json, effects_json, capacity FROM sde_types WHERE type_id = ?",
+        "SELECT type_id, group_id, category_id, name, attributes_json, effects_json, capacity, mass FROM sde_types WHERE type_id = ?",
         (tid,),
     ).fetchone()
     if not row:
@@ -277,6 +277,7 @@ def get_type(tid):
         "attributes": {int(k): float(v) for k, v in json.loads(row[4]).iteritems()},
         "effects": json.loads(row[5]),
         "capacity": float(row[6]),
+        "mass": float(row[7]),
     }
     _TYPE_CACHE[tid] = res
     return res
@@ -648,6 +649,7 @@ def evaluate_dogma_fit(ship_type_id, skills, modules, implants, boosters=None, g
     for aid, val in sorted(ship_type["attributes"].iteritems()):
         if aid not in (15, 49):
             ship.get_or_create_attr(aid, val)
+    ship.get_or_create_attr(4, ship_type["mass"])
     ship.get_or_create_attr(38, ship_type["capacity"])
 
     # Instantiate modules

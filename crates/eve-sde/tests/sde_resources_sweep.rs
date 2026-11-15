@@ -279,6 +279,7 @@ fn test_sde_sweep_group_1() {
         &sde,
         &conn,
     );
+    verify_resource_sweep("res:/staticdata/academyship.fsdbinary", &rf, &sde, &conn);
     verify_resource_sweep(
         "res:/staticdata/accountingentrytypes.fsdbinary",
         &rf,
@@ -601,6 +602,7 @@ fn test_sde_sweep_group_4() {
         &sde,
         &conn,
     );
+    verify_resource_sweep("res:/staticdata/fittings.fsdbinary", &rf, &sde, &conn);
     verify_resource_sweep("res:/staticdata/globaltypes.fsdbinary", &rf, &sde, &conn);
     verify_resource_sweep("res:/staticdata/goals.fsdbinary", &rf, &sde, &conn);
     verify_resource_sweep("res:/staticdata/graphicids.fsdbinary", &rf, &sde, &conn);

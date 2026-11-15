@@ -140,8 +140,8 @@ fn test_t2_sde_pickle_and_pickled_schema_static_raw_parse() {
             }
         }
     }
-    assert_eq!(formats.values().sum::<usize>(), 213);
-    assert_eq!(formats["FSD Binary"], 149);
+    assert_eq!(formats.values().sum::<usize>(), 215);
+    assert_eq!(formats["FSD Binary"], 151);
     assert_eq!(formats["SQLite3"], 14);
     assert_eq!(formats["FSD Static (pickled schema header)"], 25);
     assert_eq!(formats["FSD Static (external .schema)"], 6);
@@ -276,12 +276,12 @@ fn test_t2_sde_static_schema_and_pickle_domain_verification() {
         assert!(sde.factions.contains_key(&fid), "faction {fid} in sde.factions");
     }
 
-    // 2. `solarsystemcontent.static`: 8,490 solar systems + 13,978 stargates + planet lists.
+    // 2. `solarsystemcontent.static`: 8,490 solar systems + 13,982 stargates + planet lists.
     let ssc_raw = read_pinned_resource(
         &sde,
         "res:/staticdata/solarsystemcontent.static",
-        "2ddb08422c48a5a0b7eabcece1e2fcf0",
-        92_396_316,
+        "cd475121ad0b04d8aeae942275367e79",
+        92_396_985,
     );
     let ssc_sch_len = u32_at(&ssc_raw, 0) as usize;
     let ssc_schema = unpickle(&ssc_raw[4..4 + ssc_sch_len]);
@@ -370,19 +370,19 @@ fn test_t2_sde_static_schema_and_pickle_domain_verification() {
             total_gates += 1;
         }
     }
-    assert_eq!(total_gates, 13_978);
+    assert_eq!(total_gates, 13_982);
     assert_eq!(total_gates, sde.jumps.len());
 
-    // 3. `oretypesbydungeonid.static` (1,120 records) and `icetypesbydungeonid.static` (21 records).
+    // 3. `oretypesbydungeonid.static` (1,123 records) and `icetypesbydungeonid.static` (21 records).
     let ore_raw = read_pinned_resource(
         &sde,
         "res:/staticdata/oretypesbydungeonid.static",
-        "7ccd58c48605109b492fa98dee34f0d3",
-        24_674,
+        "8aa940615ca45b1d1fff2bbf998e74c4",
+        24_738,
     );
     let ore_sch_len = u32_at(&ore_raw, 0) as usize;
     let ore_entries = fsd_dict_entries(&ore_raw, 4 + ore_sch_len, 8);
-    assert_eq!(ore_entries.len(), 1_120);
+    assert_eq!(ore_entries.len(), 1_123);
     let mut total_ore_refs = 0usize;
     for (did, pos) in &ore_entries {
         let cnt = u32_at(&ore_raw, *pos) as usize;
@@ -395,13 +395,13 @@ fn test_t2_sde_static_schema_and_pickle_domain_verification() {
             "dungeon {did} ore types"
         );
     }
-    assert_eq!(total_ore_refs, 2_660);
+    assert_eq!(total_ore_refs, 2_667);
     assert_eq!(
         sde.dungeon_asteroids
             .keys()
             .filter(|&&did| sde.dungeon_ore_types(did).is_some())
             .count(),
-        1_120
+        1_123
     );
 
     let ice_raw = read_pinned_resource(
@@ -434,19 +434,19 @@ fn test_t2_sde_static_schema_and_pickle_domain_verification() {
         21
     );
 
-    // 4. `locationcache.static` (481,068 location_id -> solar_system_id entries).
+    // 4. `locationcache.static` (481,073 location_id -> solar_system_id entries).
     let loc_raw = read_pinned_resource(
         &sde,
         "res:/staticdata/locationcache.static",
-        "e04d46f1623cbd9d95cbe396740a34a1",
-        5_773_406,
+        "b5583746be1862145ba24c5abac47f35",
+        5_773_466,
     );
     let loc_sch_len = u32_at(&loc_raw, 0) as usize;
     let loc_entries = fsd_dict_entries(&loc_raw, 4 + loc_sch_len, 8);
-    assert_eq!(loc_entries.len(), 481_068);
+    assert_eq!(loc_entries.len(), 481_073);
     let sde_loc_map = sde.location_solar_system_map();
-    // `sde_loc_map` has all 481,068 `locationcache.static` entries plus Zarzakh station 60015187 (`mapObjects.db`).
-    assert_eq!(sde_loc_map.len(), 481_069);
+    // `sde_loc_map` has all 481,073 `locationcache.static` entries plus Zarzakh station 60015187 (`mapObjects.db`).
+    assert_eq!(sde_loc_map.len(), 481_074);
     for (loc_id, pos) in loc_entries {
         let sys_id = u32_at(&loc_raw, pos);
         assert_eq!(
@@ -458,19 +458,19 @@ fn test_t2_sde_static_schema_and_pickle_domain_verification() {
     assert_eq!(sde.location_solar_system(40_000_001), Some(30_000_001));
     assert_eq!(sde.location_solar_system(60_003_760), Some(30_000_142));
 
-    // 5. `blueprintsbymaterialtypeids.pickle` (1,715 material_type_id -> blueprint_type_ids).
+    // 5. `blueprintsbymaterialtypeids.pickle` (1,728 material_type_id -> blueprint_type_ids).
     let bpm_raw = read_pinned_resource(
         &sde,
         "res:/staticdata/blueprintsbymaterialtypeids.pickle",
-        "d7128aa3e2572d1372afecf6d819f5b8",
-        131_702,
+        "e1aa2b0ded38e7739db23adbf8db61cc",
+        133_259,
     );
     let PyVal::Dict(bpm_dict) = unpickle(&bpm_raw) else {
         panic!("blueprintsbymaterialtypeids must unpickle to a dict");
     };
     let sde_bpm = sde.blueprints_by_material_type();
-    assert_eq!(bpm_dict.borrow().len(), 1_715);
-    assert_eq!(sde_bpm.len(), 1_715);
+    assert_eq!(bpm_dict.borrow().len(), 1_728);
+    assert_eq!(sde_bpm.len(), 1_728);
     for (k, v) in bpm_dict.borrow().iter() {
         let mat_tid = k.as_int().expect("material type id") as u32;
         let PyVal::List(list) = v else {
@@ -489,12 +489,12 @@ fn test_t2_sde_static_schema_and_pickle_domain_verification() {
         );
     }
 
-    // 6. `starmapcache.pickle` (regions: 114, constellations: 1,184, solarSystems: 8,490, jumps: 6,989).
+    // 6. `starmapcache.pickle` (regions: 114, constellations: 1,184, solarSystems: 8,490, jumps: 6,991).
     let sm_raw = read_pinned_resource(
         &sde,
         "res:/staticdata/starmapcache.pickle",
-        "a9831434566044a0d64837669f38e3ba",
-        2_165_420,
+        "cb17447f256b394f8806f843ddac8e73",
+        2_165_580,
     );
     let sm_top = unpickle(&sm_raw);
     assert_eq!(sm_top.len(), Some(4));
@@ -562,7 +562,7 @@ fn test_t2_sde_static_schema_and_pickle_domain_verification() {
     let PyVal::List(sm_jumps) = sm_top.get("jumps").expect("jumps") else {
         panic!("starmapcache.jumps list");
     };
-    assert_eq!(sm_jumps.borrow().len(), 6_989);
+    assert_eq!(sm_jumps.borrow().len(), 6_991);
     assert_eq!(sm_jumps.borrow().len() * 2, sde.jumps.len());
     for j in sm_jumps.borrow().iter() {
         let from_sys = j.get("fromSystemID").and_then(|x| x.as_int()).expect("from") as u32;
@@ -602,7 +602,7 @@ fn test_t2_sde_sqlite_and_bracket_static_domain_verification() {
     let _ = read_pinned_resource(
         &sde,
         "res:/staticdata/industry_activities.static",
-        "c132b2aa352d18b5a685b6fcb96df95b",
+        "460a1a09796f4cae49f5900bb53afc5f",
         24_576,
     );
     let ind_acts = sde.load_industry_activities().expect("industry_activities");
@@ -616,7 +616,7 @@ fn test_t2_sde_sqlite_and_bracket_static_domain_verification() {
     let _ = read_pinned_resource(
         &sde,
         "res:/staticdata/industry_activity_target_filters.static",
-        "8528df44ac28cb3da0bd31db1b608efc",
+        "59d724530019adbf784d90873e5b6747",
         24_576,
     );
     let filters = sde
@@ -638,7 +638,7 @@ fn test_t2_sde_sqlite_and_bracket_static_domain_verification() {
     let _ = read_pinned_resource(
         &sde,
         "res:/staticdata/industry_activity_modifier_sources.static",
-        "f57eed2f9502e5650be3018e8ff29aaf",
+        "77b7baef1ff2caaa2e744f4431ad57b3",
         77_824,
     );
     let mod_sources = sde
@@ -663,7 +663,7 @@ fn test_t2_sde_sqlite_and_bracket_static_domain_verification() {
     let _ = read_pinned_resource(
         &sde,
         "res:/staticdata/industry_assembly_lines.static",
-        "57c25af25a9b2af8d50fa47ad0898cd1",
+        "b8ae4cc20e436a3c479e337a481f63a1",
         385_024,
     );
     let lines = sde
@@ -683,7 +683,7 @@ fn test_t2_sde_sqlite_and_bracket_static_domain_verification() {
     let _ = read_pinned_resource(
         &sde,
         "res:/staticdata/industry_installation_types.static",
-        "2e748b84f826048db06068f9935289e6",
+        "f1756d7247eeabbb09d33c643d2a8883",
         40_960,
     );
     let inst_types = sde
@@ -702,8 +702,8 @@ fn test_t2_sde_sqlite_and_bracket_static_domain_verification() {
     let _ = read_pinned_resource(
         &sde,
         "res:/staticdata/infobubbles.static",
-        "cf2212228051fb33526ffa1d0b19bca2",
-        389_120,
+        "e4c69d0725a8278e5a2c3d9793bd6b89",
+        409_600,
     );
     let bubbles = sde.load_info_bubbles().expect("infobubbles");
     assert_eq!(bubbles.len(), 5);
@@ -773,8 +773,8 @@ fn test_t2_sde_sqlite_and_bracket_static_domain_verification() {
     let ast_pickle_raw = read_pinned_resource(
         &sde,
         "res:/staticdata/asteroidtypesbysolarsystemid.pickle",
-        "8f9f9b1e28c0670a443b630c6408c590",
-        96_712,
+        "3a649c2572f621d73ded8c7150b99060",
+        96_610,
     );
     let PyVal::Dict(ast_py) = unpickle(&ast_pickle_raw) else {
         panic!("asteroidtypesbysolarsystemid dict");
@@ -801,15 +801,15 @@ fn test_t2_sde_sqlite_and_bracket_static_domain_verification() {
         assert_eq!(sys_asteroids.get(&sid), Some(&expected));
     }
 
-    // 4. brackets.static (166), bracketsbycategory.static (7), bracketsbygroup.static (547), bracketsbytype.static (1,221)
+    // 4. brackets.static (167), bracketsbycategory.static (7), bracketsbygroup.static (566), bracketsbytype.static (1,221)
     let _ = read_pinned_resource(
         &sde,
         "res:/staticdata/brackets.static",
-        "1352c0194023fdd015ec6123bdee6cea",
-        18_455,
+        "c6ad40d960e97de2d0a13b8be1df67a9",
+        18_551,
     );
     let brackets = sde.load_brackets().expect("brackets");
-    assert_eq!(brackets.len(), 166);
+    assert_eq!(brackets.len(), 167);
     assert_eq!(brackets[&2313].name, "Planet");
     assert_eq!(
         brackets[&2313].texture_path,
@@ -832,11 +832,11 @@ fn test_t2_sde_sqlite_and_bracket_static_domain_verification() {
     let _ = read_pinned_resource(
         &sde,
         "res:/staticdata/bracketsbygroup.static",
-        "80c2635242d5cee2cd63bb54f9b0a9d9",
-        9_394,
+        "79bbcb3056b27611ee9e319aeb6c8f0d",
+        9_698,
     );
     let by_grp = sde.load_brackets_by_group().expect("brackets_by_group");
-    assert_eq!(by_grp.len(), 547);
+    assert_eq!(by_grp.len(), 566);
     let mut resolved_grp_brackets = 0usize;
     for (&gid, &bid) in &by_grp {
         if sde.groups.contains_key(&gid) {
@@ -863,18 +863,18 @@ fn test_t2_sde_sqlite_and_bracket_static_domain_verification() {
     }
     assert!(resolved_type_brackets >= 1_100);
 
-    // 5. certificates.static (139 certificates, 477 ship masteries)
+    // 5. certificates.static (139 certificates, 496 ship masteries)
     let _ = read_pinned_resource(
         &sde,
         "res:/staticdata/certificates.static",
-        "5a4326db67028b6cf56e9df3ec90d560",
-        161_213,
+        "3e8483264d9f6fb5e14ca6ff8083be8a",
+        165_977,
     );
     let certs = sde
         .load_certificates_and_masteries()
         .expect("certificates_and_masteries");
     assert_eq!(certs.certificates.len(), 139);
-    assert_eq!(certs.masteries_by_ship_type.len(), 477);
+    assert_eq!(certs.masteries_by_ship_type.len(), 496);
     for c in certs.certificates.values() {
         assert!(sde.groups.contains_key(&c.group_id));
     }
@@ -1070,11 +1070,11 @@ fn test_t2_sde_ui_and_content_static_domain_verification() {
     let _ = read_pinned_resource(
         &sde,
         "res:/staticdata/dialogs.static",
-        "fb291004ed6c80d8373b53391f0fd9c6",
-        317_606,
+        "9faa7c7b81d66ab2d3f2e8faa44e6624",
+        318_420,
     );
     let dialogs = sde.load_dialogs().expect("dialogs");
-    assert_eq!(dialogs.len(), 4_223);
+    assert_eq!(dialogs.len(), 4_233);
     assert_eq!(dialogs["28DaysApplyCompleted"].dialog_id, 2_695);
     assert_eq!(dialogs["28DaysApplyCompleted"].dialog_type, 4);
     assert_eq!(dialogs["warning"].dialog_id, 1_796);
@@ -1083,7 +1083,7 @@ fn test_t2_sde_ui_and_content_static_domain_verification() {
     let _ = read_pinned_resource(
         &sde,
         "res:/staticdata/fighterabilities.static",
-        "79df7cd57376f58758ac973adb7854d7",
+        "67a76d3e3b0e8e1c2d7157c4df401b75",
         32_768,
     );
     let (fa_bytes, raw_fas) = sde

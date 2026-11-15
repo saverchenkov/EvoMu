@@ -276,8 +276,8 @@ fn test_t2_sde_fsdbinary_raw_client_verification_sweep() {
             "res:/staticdata/groups.fsdbinary",
             32,
         );
-        assert_eq!(recs.len(), 1_611);
-        assert_eq!(sde.groups.len(), 1_611);
+        assert_eq!(recs.len(), 1_633);
+        assert_eq!(sde.groups.len(), 1_633);
         for rec in recs {
             let gid = read_u32_le(&raw, rec);
             let cid = read_u32_le(&raw, rec + 4);
@@ -324,8 +324,8 @@ fn test_t2_sde_fsdbinary_raw_client_verification_sweep() {
             "res:/staticdata/dogmaattributes.fsdbinary",
             80,
         );
-        assert_eq!(recs.len(), 2_871);
-        assert_eq!(sde.attributes.len(), 2_871);
+        assert_eq!(recs.len(), 2_928);
+        assert_eq!(sde.attributes.len(), 2_928);
         for rec in recs {
             let aid = read_u64_le(&raw, rec) as u16;
             let name_rel = read_u64_le(&raw, rec + 16);
@@ -368,8 +368,8 @@ fn test_t2_sde_fsdbinary_raw_client_verification_sweep() {
             "res:/staticdata/dogmaeffects.fsdbinary",
             112,
         );
-        assert_eq!(recs.len(), 3_427);
-        assert_eq!(sde.effects.len(), 3_427);
+        assert_eq!(recs.len(), 3_499);
+        assert_eq!(sde.effects.len(), 3_499);
         let mut total_modifiers = 0usize;
         let mut effect_stopper_count = 0usize;
         for rec in recs {
@@ -482,12 +482,12 @@ fn test_t2_sde_fsdbinary_raw_client_verification_sweep() {
                 assert_eq!(actual_m.effect_id, exp_m.effect_id);
             }
         }
-        assert_eq!(total_modifiers, 5_178);
+        assert_eq!(total_modifiers, 5_308);
         assert_eq!(effect_stopper_count, 10);
         attested.push("sde:res:/staticdata/dogmaeffects.fsdbinary");
     }
 
-    // 5. types.fsdbinary (53,288 records, stride 152)
+    // 5. types.fsdbinary (53,925 records, stride 152)
     {
         let (types_raw, recs) = load_and_verify_cfsd_records(
             &resfiles_dir,
@@ -495,9 +495,9 @@ fn test_t2_sde_fsdbinary_raw_client_verification_sweep() {
             "res:/staticdata/types.fsdbinary",
             152,
         );
-        assert_eq!(recs.len(), 53_288);
-        assert_eq!(sde.types.len(), 53_288);
-        assert_eq!(sde.wrecks.len(), 5_703);
+        assert_eq!(recs.len(), 53_925);
+        assert_eq!(sde.types.len(), 53_925);
+        assert_eq!(sde.wrecks.len(), 5_777);
         for rec in recs {
             let tid = read_u64_le(&types_raw, rec) as u32;
             let bp = read_f64_le(&types_raw, rec + 8);
@@ -553,8 +553,8 @@ fn test_t2_sde_fsdbinary_raw_client_verification_sweep() {
             }
         }
         let (raw_bytes_len, raw_types_map) = sde.load_raw_types_fsdbinary().expect("load_raw_types_fsdbinary");
-        assert_eq!(raw_bytes_len, 9_169_272);
-        assert_eq!(raw_types_map.len(), 53_288);
+        assert_eq!(raw_bytes_len, 9_278_984);
+        assert_eq!(raw_types_map.len(), 53_925);
         let raven = &sde.types[&638];
         assert_eq!(raven.name, "Raven");
         assert_eq!(raven.group_id, 27);
@@ -587,8 +587,8 @@ fn test_t2_sde_fsdbinary_raw_client_verification_sweep() {
             "res:/staticdata/typematerials.fsdbinary",
             32,
         );
-        assert_eq!(recs.len(), 9_866);
-        assert_eq!(sde.type_materials.len(), 9_866);
+        assert_eq!(recs.len(), 9_935);
+        assert_eq!(sde.type_materials.len(), 9_935);
         assert!(!sde.type_materials.contains_key(&34));
         let mut non_empty = 0usize;
         for rec in recs {
@@ -616,11 +616,11 @@ fn test_t2_sde_fsdbinary_raw_client_verification_sweep() {
                 .expect("type_materials entry in sde");
             assert_eq!(actual, &expected);
         }
-        assert_eq!(non_empty, 9_556);
+        assert_eq!(non_empty, 9_625);
         attested.push("sde:res:/staticdata/typematerials.fsdbinary");
     }
 
-    // 7. compressibletypes.fsdbinary (212 records, stride 8)
+    // 7. compressibletypes.fsdbinary (220 records, stride 8)
     {
         let (raw, recs) = load_and_verify_cfsd_records(
             &resfiles_dir,
@@ -628,8 +628,8 @@ fn test_t2_sde_fsdbinary_raw_client_verification_sweep() {
             "res:/staticdata/compressibletypes.fsdbinary",
             8,
         );
-        assert_eq!(recs.len(), 212);
-        assert_eq!(sde.compressible_types.len(), 212);
+        assert_eq!(recs.len(), 220);
+        assert_eq!(sde.compressible_types.len(), 220);
         for rec in recs {
             let raw_tid = read_u32_le(&raw, rec);
             let comp_tid = read_u32_le(&raw, rec + 4);
@@ -648,7 +648,7 @@ fn test_t2_sde_fsdbinary_raw_client_verification_sweep() {
         attested.push("sde:res:/staticdata/compressibletypes.fsdbinary");
     }
 
-    // 8. typelist.fsdbinary (469 records, stride 88)
+    // 8. typelist.fsdbinary (477 records, stride 88)
     {
         let (raw, recs) = load_and_verify_cfsd_records(
             &resfiles_dir,
@@ -656,8 +656,8 @@ fn test_t2_sde_fsdbinary_raw_client_verification_sweep() {
             "res:/staticdata/typelist.fsdbinary",
             88,
         );
-        assert_eq!(recs.len(), 469);
-        assert_eq!(sde.type_lists.len(), 469);
+        assert_eq!(recs.len(), 477);
+        assert_eq!(sde.type_lists.len(), 477);
         let sorted_vec = |rel: u64| -> Vec<u32> {
             let mut v = read_cfsd_u32_vec(&raw, rel);
             v.sort_unstable();
@@ -962,8 +962,8 @@ fn test_t2_sde_fsdbinary_raw_client_verification_sweep() {
             "res:/staticdata/marketgroups.fsdbinary",
             28,
         );
-        assert_eq!(recs.len(), 2_114);
-        assert_eq!(sde.market_groups.len(), 2_114);
+        assert_eq!(recs.len(), 2_125);
+        assert_eq!(sde.market_groups.len(), 2_125);
         for rec in recs {
             let mgid = read_u32_le(&raw, rec);
             let icon_id = read_u32_le(&raw, rec + 8);
@@ -1059,8 +1059,8 @@ fn test_t2_sde_fsdbinary_raw_client_verification_sweep() {
             "res:/staticdata/stationoperations.fsdbinary",
             88,
         );
-        assert_eq!(recs.len(), 69);
-        assert_eq!(sde.station_operations.len(), 69);
+        assert_eq!(recs.len(), 70);
+        assert_eq!(sde.station_operations.len(), 70);
         for rec in recs {
             let oid = read_u64_le(&raw, rec) as u32;
             let svcs = read_cfsd_u32_vec(&raw, read_u64_le(&raw, rec + 24));
@@ -1170,7 +1170,7 @@ fn test_t2_sde_fsdbinary_raw_client_verification_sweep() {
         attested.push("sde:res:/staticdata/dynamicitemattributes.fsdbinary");
     }
 
-    // 20. spacecomponentsbytype.fsdbinary (11,238 records, stride 1832)
+    // 20. spacecomponentsbytype.fsdbinary (11,491 records, stride 1824)
     {
         const BIT_TO_COMP: &[(u32, &str)] = &[
             (0, "activate"),
@@ -1258,28 +1258,28 @@ fn test_t2_sde_fsdbinary_raw_client_verification_sweep() {
             (87, "structureJumpBridge"),
             (88, "systemDbuffEmitter"),
             (89, "systemWideEffects"),
-            (91, "targeting"),
-            (92, "towGameGoalpost"),
-            (93, "towGameObjective"),
-            (94, "towGameOperator"),
-            (95, "turboShield"),
-            (96, "underConstruction"),
-            (97, "visualProximityEffect"),
-            (98, "warpDisruption"),
+            (90, "targeting"),
+            (91, "towGameGoalpost"),
+            (92, "towGameObjective"),
+            (93, "towGameOperator"),
+            (94, "turboShield"),
+            (95, "underConstruction"),
+            (96, "visualProximityEffect"),
+            (97, "warpDisruption"),
         ];
         let (raw, recs) = load_and_verify_cfsd_records(
             &resfiles_dir,
             &sde,
             "res:/staticdata/spacecomponentsbytype.fsdbinary",
-            1832,
+            1824,
         );
-        assert_eq!(recs.len(), 11_238);
-        assert_eq!(sde.space_components_by_type.len(), 11_238);
+        assert_eq!(recs.len(), 11_491);
+        assert_eq!(sde.space_components_by_type.len(), 11_491);
         let mut non_empty = 0usize;
         for rec in recs {
             let tid = read_u64_le(&raw, rec) as u32;
-            let m0 = u128::from(read_u64_le(&raw, rec + 1816));
-            let m1 = u128::from(read_u64_le(&raw, rec + 1824));
+            let m0 = u128::from(read_u64_le(&raw, rec + 1808));
+            let m1 = u128::from(read_u64_le(&raw, rec + 1816));
             let mask128 = m0 | (m1 << 64);
             let expected: Vec<String> = BIT_TO_COMP
                 .iter()
@@ -1297,7 +1297,7 @@ fn test_t2_sde_fsdbinary_raw_client_verification_sweep() {
                 .expect("type in sde.space_components_by_type");
             assert_eq!(actual, &expected);
         }
-        assert_eq!(non_empty, 11_180);
+        assert_eq!(non_empty, 11_433);
         assert!(sde.space_components_by_type[&35832].contains(&"autoWarpScrambler".to_string()));
         attested.push("sde:res:/staticdata/spacecomponentsbytype.fsdbinary");
     }

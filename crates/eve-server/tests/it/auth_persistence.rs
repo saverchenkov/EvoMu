@@ -36,30 +36,30 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
         "D-1/D-2: local data/evomu_sde.sqlite must exist on disk (built via tools/sde-import)"
     );
     let real_sde = eve_sde::SdeRegistry::open(&sde_path).expect("open local data/evomu_sde.sqlite");
-    assert_eq!(real_sde.resources.len(), 213);
+    assert_eq!(real_sde.resources.len(), 215);
     assert!(real_sde.solar_systems.contains_key(&30_000_142));
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
 
-    // 1. D-1 & D-2: 213-resource SDE loaded at runtime from SQLite
-    assert_eq!(ctx.sde.resources.len(), 213);
+    // 1. D-1 & D-2: 215-resource SDE loaded at runtime from SQLite
+    assert_eq!(ctx.sde.resources.len(), 215);
     assert!(!ctx.sde.types.is_empty());
     assert!(!ctx.sde.solar_systems.is_empty());
-    assert_eq!(ctx.sde.market_groups.len(), 2114);
+    assert_eq!(ctx.sde.market_groups.len(), 2125);
     assert!(ctx.sde.market_groups.contains_key(&4));
-    assert_eq!(ctx.sde.attributes.len(), 2871);
+    assert_eq!(ctx.sde.attributes.len(), 2928);
     assert_eq!(
         ctx.sde.attributes.get(&54).map(|a| a.name.as_str()),
         Some("maxRange")
     );
-    assert_eq!(ctx.sde.effects.len(), 3427);
+    assert_eq!(ctx.sde.effects.len(), 3499);
     assert_eq!(
         ctx.sde.effects.get(&12).map(|e| e.name.as_str()),
         Some("hiPower")
     );
-    assert_eq!(ctx.sde.blueprints.len(), 5100);
+    assert_eq!(ctx.sde.blueprints.len(), 5135);
     assert!(
         ctx.sde.blueprints.contains_key(&691),
         "Rifter Blueprint (691) must be present in SdeRegistry::blueprints"
@@ -82,7 +82,7 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
     );
     assert_eq!(
         ctx.sde.npc_spawn_groups.len(),
-        392,
+        405,
         "DERIVED sde_npc_spawn_groups built deterministically from SDE category-11 NPC types"
     );
     assert!(

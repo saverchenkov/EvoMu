@@ -18,8 +18,8 @@ use std::collections::HashMap;
 /// (res path, ledger md5, ledger byte size) for every client file this test reads.
 const TYPEDOGMA: (&str, &str, u64) = (
     "res:/staticdata/typedogma.fsdbinary",
-    "e8b313eff5dcd9b701f711832ba872ac",
-    12_335_088,
+    "66e63210baf717a5fe611584a9e4f0e8",
+    12_529_504,
 );
 const MISSIONS: (&str, &str, u64) = (
     "res:/staticdata/missions.fsdbinary",
@@ -33,28 +33,28 @@ const EPICARCS: (&str, &str, u64) = (
 );
 const DUNGEONS: (&str, &str, u64) = (
     "res:/staticdata/dungeons.fsdbinary",
-    "2e5bc11b9de86e15181fca48e43b69ba",
-    52_395_840,
+    "2db3e3807d5d0e79b3d9472932aa69ec",
+    52_800_752,
 );
 const NODEGRAPHS: (&str, &str, u64) = (
     "res:/staticdata/nodegraphs.fsdbinary",
-    "a59acb0775423a99b82cb8a3f8e697a6",
-    8_254_048,
+    "47f6dcd13c29d0dc8a0f0c0fb072ca3c",
+    8_326_464,
 );
 const REQ_SKILLS_FOR_TYPES: (&str, &str, u64) = (
     "res:/staticdata/requiredskillsfortypes.fsdbinary",
-    "58d4d940882dbe8af6531268679d87e4",
-    863_720,
+    "509710bd1f6845cc660456724099e178",
+    875_280,
 );
 const REQ_SKILLS_INDEX: (&str, &str, u64) = (
     "res:/staticdata/requiredskillsindex.fsdbinary",
-    "d3d5a70e4b51d03b2bab6ae17857c6d0",
-    266_136,
+    "4e61bf17c3c66981c14d4443d4e016b7",
+    272_216,
 );
 const EN_US: (&str, &str, u64) = (
     "res:/localizationfsd/localization_fsd_en-us.pickle",
-    "7a753c9da2eeca4dcc7cf0c6655aaae0",
-    40_753_078,
+    "ec36e6662e1fc7e9dfe2519e8459d0ec",
+    41_175_459,
 );
 
 /// Walks a nested `cfsd` hash dict whose entries are 24-byte `(key u64, inner_dict_rel u64,
@@ -146,7 +146,7 @@ fn test_t2_sde_fsdbinary_dogma_and_content_raw_client_verification() {
     // Attribute entries are 16 bytes (value f64, attributeID u32); effect entries are 8 bytes
     // (effectID u32, isDefault u8).
     let td = load(&sde, TYPEDOGMA, 24);
-    assert_eq!(td.records.len(), 27_160);
+    assert_eq!(td.records.len(), 27_622);
     let mut in_typedogma = std::collections::HashSet::new();
     let mut attr_total = 0usize;
     let mut with_default = 0usize;
@@ -186,15 +186,15 @@ fn test_t2_sde_fsdbinary_dogma_and_content_raw_client_verification() {
         with_default += usize::from(default_effect.is_some());
         in_typedogma.insert(tid);
     }
-    assert_eq!(with_default, 8_755);
-    assert_eq!(attr_total, 648_726);
+    assert_eq!(with_default, 8_835);
+    assert_eq!(attr_total, 658_458);
     assert_eq!(ulp_off, 5, "float drift must stay at the known 5 values");
     let without: Vec<_> = sde
         .types
         .values()
         .filter(|t| !in_typedogma.contains(&t.type_id))
         .collect();
-    assert_eq!(without.len(), sde.types.len() - 27_160);
+    assert_eq!(without.len(), sde.types.len() - 27_622);
     for t in without {
         assert!(t.default_attributes.is_empty() && t.effect_ids.is_empty());
         assert_eq!(t.default_effect_id, None);
@@ -279,7 +279,7 @@ fn test_t2_sde_fsdbinary_dogma_and_content_raw_client_verification() {
     // dungeons: stride 120; archetypeID u32 @64, difficulty u32 @72, dungeonNameID u32 @80,
     // factionID u32 @92, mask u32 @112 (bit 4 difficulty, bit 7 factionID, bit 13 archetypeID).
     let du = load(&sde, DUNGEONS, 120);
-    assert_eq!(du.records.len(), 5_516);
+    assert_eq!(du.records.len(), 5_653);
     assert_eq!(sde.dungeons.len(), du.records.len());
     let mut unlabelled = 0usize;
     let mut decoded_43 = None;
@@ -316,7 +316,7 @@ fn test_t2_sde_fsdbinary_dogma_and_content_raw_client_verification() {
     // nodegraphs: stride 72; name string rel @16, nodes dict rel @24 + entry count @32, tags
     // list rel @56 (u64 string offsets), parentGraph u32 @64, mask u32 @68 (bit 1 parentGraph).
     let ng = load(&sde, NODEGRAPHS, 72);
-    assert_eq!(ng.records.len(), 584);
+    assert_eq!(ng.records.len(), 594);
     assert_eq!(sde.node_graphs.len(), ng.records.len());
     let mut decoded_1 = None;
     for &rec in &ng.records {
@@ -352,7 +352,7 @@ fn test_t2_sde_fsdbinary_dogma_and_content_raw_client_verification() {
     // requiredskillsfortypes: stride 24 (type_id u64, skills_dict rel u64, skills_dict len u64).
     // Inner dict entries are 8-byte (skill_type_id u32, level u32) pairs.
     let rft = load(&sde, REQ_SKILLS_FOR_TYPES, 24);
-    assert_eq!(rft.records.len(), 9_573);
+    assert_eq!(rft.records.len(), 9_709);
     let mut total_skill_reqs = 0usize;
     for &rec in &rft.records {
         let r = &rft.raw;
@@ -382,7 +382,7 @@ fn test_t2_sde_fsdbinary_dogma_and_content_raw_client_verification() {
             "required skills for type {tid}"
         );
     }
-    assert_eq!(total_skill_reqs, 12_432);
+    assert_eq!(total_skill_reqs, 12_579);
     assert_eq!(
         sde.required_skills_for_type(638),
         HashMap::from([(3338, 1)])
@@ -391,7 +391,7 @@ fn test_t2_sde_fsdbinary_dogma_and_content_raw_client_verification() {
     // requiredskillsindex: stride 24 (skill_type_id u64, level_dict rel u64, level_dict len u64).
     // Nested dicts map level -> root_market_group_id -> meta_group_id -> sorted Vec<type_id>.
     let rsi = load(&sde, REQ_SKILLS_INDEX, 24);
-    assert_eq!(rsi.records.len(), 421);
+    assert_eq!(rsi.records.len(), 422);
     let server_index = sde.required_skills_index();
     assert_eq!(server_index.len(), rsi.records.len());
     let mut indexed_type_entries = 0usize;
@@ -418,7 +418,7 @@ fn test_t2_sde_fsdbinary_dogma_and_content_raw_client_verification() {
             "requiredskillsindex mismatch for skill {sk_id}"
         );
     }
-    assert_eq!(indexed_type_entries, 16_970);
+    assert_eq!(indexed_type_entries, 17_060);
 
     eve_testkit::attest(&[
         "sde:res:/staticdata/typedogma.fsdbinary",
@@ -433,8 +433,8 @@ fn test_t2_sde_fsdbinary_dogma_and_content_raw_client_verification() {
 
 const TYPES_RES: (&str, &str, u64) = (
     "res:/staticdata/types.fsdbinary",
-    "c0ee9c292aa113737029c9ec63503233",
-    9_169_272,
+    "3238db13e1322ae90344d927e7f62c92",
+    9_278_984,
 );
 const AGENTS_IN_SPACE: (&str, &str, u64) = (
     "res:/staticdata/agentsinspace.fsdbinary",
@@ -443,8 +443,8 @@ const AGENTS_IN_SPACE: (&str, &str, u64) = (
 );
 const NPC_CHARACTERS: (&str, &str, u64) = (
     "res:/staticdata/npccharacters.fsdbinary",
-    "9a5efb6a18648808dc9b1ccffd8259ac",
-    1_873_264,
+    "6d3fbe7fa66a91272ba7079e9fb96eeb",
+    1_862_672,
 );
 const CORP_ACTIVITIES: (&str, &str, u64) = (
     "res:/staticdata/corporationactivities.fsdbinary",
@@ -453,8 +453,8 @@ const CORP_ACTIVITIES: (&str, &str, u64) = (
 );
 const NPC_CORP_DIVISIONS: (&str, &str, u64) = (
     "res:/staticdata/npccorporationdivisions.fsdbinary",
-    "93187a5122247235d7f5b0e0d9c28719",
-    1_075,
+    "b2473565cf89a3db46284ff72545a133",
+    1_064,
 );
 const CONTRABAND_TYPES: (&str, &str, u64) = (
     "res:/staticdata/contrabandtypes.fsdbinary",
@@ -478,23 +478,23 @@ const ACCOUNTING_KEYS: (&str, &str, u64) = (
 );
 const META_GROUPS: (&str, &str, u64) = (
     "res:/staticdata/metagroups.fsdbinary",
-    "20d30e22d51debd9e46795d1da61a248",
-    984,
+    "e5d7b9bc4ebba361b47482fc049ea4a4",
+    1_177,
 );
 const GRAPHIC_IDS: (&str, &str, u64) = (
     "res:/staticdata/graphicids.fsdbinary",
-    "016ae914e50fa2839fe1082616d91ec4",
-    1_535_928,
+    "c0f3795c024ea7991a913962e06f93b0",
+    1_545_176,
 );
 const ICON_IDS: (&str, &str, u64) = (
     "res:/staticdata/iconids.fsdbinary",
-    "52ac1339c7a1cd0270e8df2d4d9020a4",
-    546_952,
+    "24014c26400c0259ad663418e6215b2a",
+    553_236,
 );
 const SOUND_IDS: (&str, &str, u64) = (
     "res:/staticdata/soundids.fsdbinary",
-    "ee04e8241837c12838d952c3e5169494",
-    101_640,
+    "9b865521933943414c8b1b3119a6dcb5",
+    90_076,
 );
 
 #[test]
@@ -509,9 +509,9 @@ fn test_t2_sde_fsdbinary_characters_economy_and_assets_verification() {
     let sde = SdeRegistry::open(&SdeRegistry::default_db_path()).expect("real V24.01 SDE");
     let labels = load_en_us_labels(&sde);
 
-    // 1. types.fsdbinary localized typeNameID (@132) and descriptionID (@68) verification across all 53,288 types
+    // 1. types.fsdbinary localized typeNameID (@132) and descriptionID (@68) verification across all 53,925 types
     let tf = load(&sde, TYPES_RES, 152);
-    assert_eq!(tf.records.len(), 53_288);
+    assert_eq!(tf.records.len(), 53_925);
     let mut resolved_descriptions = 0usize;
     for &rec in &tf.records {
         let tid = u64_at(&tf.raw, rec) as u32;
@@ -531,7 +531,7 @@ fn test_t2_sde_fsdbinary_characters_economy_and_assets_verification() {
             }
         }
     }
-    assert_eq!(resolved_descriptions, 34_652);
+    assert_eq!(resolved_descriptions, 35_110);
 
     // 2. fighterabilities.static joined with fighterabilitiesbytype.static via SdeRegistry::fighter_ability_slots_with_info
     assert_eq!(sde.fighter_abilities.len(), 36);
@@ -583,11 +583,11 @@ fn test_t2_sde_fsdbinary_characters_economy_and_assets_verification() {
     assert_eq!(ais[&3_018_870].dungeon_id, 1_063);
     assert_eq!(ais[&3_018_870].type_id, 26_176);
 
-    // 4. npccharacters.fsdbinary (11,424 records, stride 136; 10,972 agents in sde.agents)
+    // 4. npccharacters.fsdbinary (11,430 records, stride 136; 10,972 agents in sde.agents)
     let nc_raw = load(&sde, NPC_CHARACTERS, 136);
     let nc = sde.load_npc_characters().expect("load_npc_characters");
-    assert_eq!(nc_raw.records.len(), 11_424);
-    assert_eq!(nc.len(), 11_424);
+    assert_eq!(nc_raw.records.len(), 11_430);
+    assert_eq!(nc.len(), 11_430);
     let mut agent_count = 0usize;
     for &rec in &nc_raw.records {
         let r = &nc_raw.raw;
@@ -711,11 +711,11 @@ fn test_t2_sde_fsdbinary_characters_economy_and_assets_verification() {
     assert_eq!(ak[&1000].currency.as_deref(), Some("ISK"));
     assert!(labels.contains_key(&ak[&1000].name_id));
 
-    // 11. metagroups.fsdbinary (13 records, stride 48)
+    // 11. metagroups.fsdbinary (15 records, stride 48)
     let mg_raw = load(&sde, META_GROUPS, 48);
     let mg = sde.load_meta_groups().expect("load_meta_groups");
-    assert_eq!(mg_raw.records.len(), 13);
-    assert_eq!(mg.len(), 13);
+    assert_eq!(mg_raw.records.len(), 15);
+    assert_eq!(mg.len(), 15);
     for m in mg.values() {
         assert!(labels.contains_key(&m.name_id));
     }
@@ -728,24 +728,24 @@ fn test_t2_sde_fsdbinary_characters_economy_and_assets_verification() {
     assert_eq!(labels[&mg[&2].name_id], "Tech II");
     assert_eq!(labels[&mg[&14].name_id], "Tech III");
 
-    // 12. graphicids.fsdbinary (6,159 records, stride 160), iconids.fsdbinary (4,804 records, stride 32), soundids.fsdbinary (1,470 records, stride 16)
+    // 12. graphicids.fsdbinary (6,200 records, stride 160), iconids.fsdbinary (4,908 records, stride 32), soundids.fsdbinary (1,473 records, stride 16)
     let gid_raw = load(&sde, GRAPHIC_IDS, 160);
     let gids = sde.load_graphic_ids().expect("load_graphic_ids");
-    assert_eq!(gid_raw.records.len(), 6_159);
-    assert_eq!(gids.len(), 6_159);
+    assert_eq!(gid_raw.records.len(), 6_200);
+    assert_eq!(gids.len(), 6_200);
 
     let iid_raw = load(&sde, ICON_IDS, 32);
     let iids = sde.load_icon_ids().expect("load_icon_ids");
-    assert_eq!(iid_raw.records.len(), 4_804);
-    assert_eq!(iids.len(), 4_804);
+    assert_eq!(iid_raw.records.len(), 4_908);
+    assert_eq!(iids.len(), 4_908);
     for ic in iids.values() {
         assert!(!ic.icon_file.is_empty());
     }
 
     let sid_raw = load(&sde, SOUND_IDS, 16);
     let sids = sde.load_sound_ids().expect("load_sound_ids");
-    assert_eq!(sid_raw.records.len(), 1_470);
-    assert_eq!(sids.len(), 1_470);
+    assert_eq!(sid_raw.records.len(), 1_473);
+    assert_eq!(sids.len(), 1_473);
 
     let mut resolved_type_graphics = 0usize;
     let mut resolved_type_icons = 0usize;
@@ -767,15 +767,15 @@ fn test_t2_sde_fsdbinary_characters_economy_and_assets_verification() {
             }
         }
     }
-    assert_eq!(resolved_type_graphics, 18_816);
-    assert_eq!(resolved_type_icons, 23_088);
-    assert_eq!(resolved_type_sounds, 5_091);
+    assert_eq!(resolved_type_graphics, 19_145);
+    assert_eq!(resolved_type_icons, 23_408);
+    assert_eq!(resolved_type_sounds, 5_166);
 
     // 13. graphiclocations.fsdbinary (68 records, stride 40) + station/Upwell undock locators
     let glocs = sde.load_graphic_locations().expect("load_graphic_locations");
     let gid_glocs = sde.load_graphic_location_ids().expect("load_graphic_location_ids");
     assert_eq!(glocs.len(), 68);
-    assert_eq!(gid_glocs.len(), 234);
+    assert_eq!(gid_glocs.len(), 235);
     assert_eq!(glocs[&2060].sof_hull_name, "jita");
     assert!(glocs[&2060].directional_locators.iter().any(|l| l.category == "undockPointSupercapital"));
     assert_eq!(sde.can_dock_by_graphic_locations(35_832, 587), Some(true));
