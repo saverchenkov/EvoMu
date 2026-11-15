@@ -979,6 +979,8 @@ async fn ships_mastery_board_eject_launch_killmark_repair_kill_all_mutants() {
             },
         );
     });
+    let uid = ctx.db.get_character(char_id).map(|c| c.user_id).unwrap_or(1);
+    let _ = ctx.db.acquire_online_lock(uid, Some(char_id), 10);
     let _ = ctx.drain_notifications_for_char(char_id);
     clear_session_change_timer(&ctx, char_id);
     let _ = handle_ships_mastery_and_fitting_ext(
