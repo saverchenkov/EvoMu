@@ -1091,8 +1091,7 @@ async fn test_gh_1070_docked_board_from_capsule_removes_capsule_and_refreshes_in
     let station_id = 60_003_760i64;
     let ship_id = 100_000_001i64;
 
-    let mut harness = common::new_wire_harness(&ctx, 88_070)
-        .with_mode(eve_testkit::ContractValidationMode::Ratcheted);
+    let mut harness = common::new_wire_harness(&ctx, 88_070);
     harness
         .call_ok(
             "authentication",
