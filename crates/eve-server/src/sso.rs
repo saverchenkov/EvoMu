@@ -178,7 +178,8 @@ pub(crate) async fn handle_http_connection_with_timeout(
     let body_end = (header_end + content_length).min(buf.len());
     let body = &buf[header_end..body_end];
 
-    let resp = handle_http_request_with_ctx(&ctx, &method, &target, &headers, body);
+    let peer_ip = stream.peer_addr().ok().map(|addr| addr.ip());
+    let resp = handle_http_request_with_ctx_and_peer(&ctx, &method, &target, &headers, body, peer_ip);
     stream.write_all(&resp.to_wire_bytes()).await?;
     stream.flush().await?;
     Ok(())
@@ -285,7 +286,19 @@ pub fn handle_http_request_with_ctx(
     headers: &HashMap<String, String>,
     body: &[u8],
 ) -> HttpResponse {
-    handle_http_request_inner(Some(Arc::clone(ctx)), ctx.as_ref(), method, target, headers, body)
+    handle_http_request_inner(Some(Arc::clone(ctx)), ctx.as_ref(), method, target, headers, body, None)
+}
+
+/// Dispatches an HTTP request with explicit peer IP metadata (used by TCP listener & ops tests).
+pub fn handle_http_request_with_ctx_and_peer(
+    ctx: &Arc<ServerContext>,
+    method: &str,
+    target: &str,
+    headers: &HashMap<String, String>,
+    body: &[u8],
+    peer_ip: Option<std::net::IpAddr>,
+) -> HttpResponse {
+    handle_http_request_inner(Some(Arc::clone(ctx)), ctx.as_ref(), method, target, headers, body, peer_ip)
 }
 
 /// Dispatches an HTTP request to the SSO / OAuth2 + PKCE (`S256`) or ESI verification handlers (`ESI-1`).
@@ -296,7 +309,19 @@ pub fn handle_http_request(
     headers: &HashMap<String, String>,
     body: &[u8],
 ) -> HttpResponse {
-    handle_http_request_inner(None, ctx, method, target, headers, body)
+    handle_http_request_inner(None, ctx, method, target, headers, body, None)
+}
+
+/// Dispatches an HTTP request with explicit peer IP metadata (`#1077 §A`).
+pub fn handle_http_request_with_peer(
+    ctx: &ServerContext,
+    method: &str,
+    target: &str,
+    headers: &HashMap<String, String>,
+    body: &[u8],
+    peer_ip: Option<std::net::IpAddr>,
+) -> HttpResponse {
+    handle_http_request_inner(None, ctx, method, target, headers, body, peer_ip)
 }
 
 fn handle_http_request_inner(
@@ -306,6 +331,7 @@ fn handle_http_request_inner(
     target: &str,
     headers: &HashMap<String, String>,
     body: &[u8],
+    peer_ip: Option<std::net::IpAddr>,
 ) -> HttpResponse {
     let (path, query_str) = match target.split_once('?') {
         Some((p, q)) => (p, q),
@@ -313,6 +339,9 @@ fn handle_http_request_inner(
     };
     if path == "/bugs/api" || path.starts_with("/bugs/api/") {
         return crate::bug_reporting::handle_bugs_http_request(ctx, method, path, headers, body);
+    }
+    if path == "/ops" || path.starts_with("/ops/") {
+        return crate::ops_metrics::handle_ops_http_request(ctx, method, path, headers, peer_ip);
     }
     let query_params = parse_urlencoded(query_str);
     let body_params = parse_request_body(headers, body);

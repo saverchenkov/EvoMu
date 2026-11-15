@@ -199,3 +199,157 @@ fn summarize_args_and_sanitize_pyrep_cover_all_types_and_truncation_bounds() {
     assert_eq!(s_trunc.chars().count(), MAX_ARGS_REPR_LEN);
     assert!(s_trunc.ends_with("...)"));
 }
+
+#[test]
+fn outbound_ledger_evicts_oldest_at_500_cap() {
+    let fr = FlightRecorder::new();
+    let total = MAX_OUTBOUND_LEDGER_PER_SESSION + 10;
+    for i in 0..total {
+        let disp = match i % 3 {
+            0 => OutboundDisposition::Sent,
+            1 => OutboundDisposition::Dropped,
+            _ => OutboundDisposition::Coalesced,
+        };
+        fr.record_outbound(
+            42,
+            disp,
+            "DoDestinyUpdate",
+            100 + i,
+            Some(i as u32),
+            &format!("reason_{i}"),
+            Some((i as u64) * 5),
+            i < 5,
+        );
+    }
+
+    let entries = fr.get_outbound_ledger(42, 1000);
+    assert_eq!(entries.len(), MAX_OUTBOUND_LEDGER_PER_SESSION);
+    assert_eq!(entries.first().unwrap().stamp, Some(10));
+    assert_eq!(entries.first().unwrap().reason, "reason_10");
+    assert_eq!(entries.last().unwrap().stamp, Some((total - 1) as u32));
+    assert_eq!(entries.last().unwrap().byte_size, 100 + total - 1);
+    assert_eq!(fr.get_outbound_ledger(42, 0).len(), 0);
+    assert_eq!(fr.get_outbound_ledger(999, 50).len(), 0);
+}
+
+#[test]
+fn destiny_stamp_triples_extract_and_evict_at_500_cap() {
+    let updates = PyRep::List(vec![
+        PyRep::Tuple(vec![
+            PyRep::Integer(100),
+            PyRep::Tuple(vec![
+                PyRep::String("SetState".into()),
+                PyRep::Tuple(vec![PyRep::keyval([("ego", PyRep::Integer(900_001))])]),
+            ]),
+        ]),
+        PyRep::Tuple(vec![
+            PyRep::Integer(101),
+            PyRep::Tuple(vec![
+                PyRep::String("GotoDirection".into()),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(900_001),
+                    PyRep::Real(1.0),
+                    PyRep::Real(0.0),
+                    PyRep::Real(0.0),
+                ]),
+            ]),
+        ]),
+        PyRep::Tuple(vec![
+            PyRep::Integer(102),
+            PyRep::Tuple(vec![
+                PyRep::String("RemoveBall".into()),
+                PyRep::Tuple(vec![PyRep::Integer(900_002)]),
+            ]),
+        ]),
+    ]);
+
+    let triples = extract_destiny_stamp_triples(99, &updates);
+    assert_eq!(triples.len(), 3);
+    assert_eq!(triples[0], (100, "SetState".into(), Some(900_001)));
+    assert_eq!(triples[1], (101, "GotoDirection".into(), Some(900_001)));
+    assert_eq!(triples[2], (102, "RemoveBall".into(), Some(900_002)));
+
+    let fr = FlightRecorder::new();
+    for i in 0..515 {
+        let single = PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(i),
+            PyRep::Tuple(vec![
+                PyRep::String("Stop".into()),
+                PyRep::Tuple(vec![PyRep::Integer(1000 + i)]),
+            ]),
+        ])]);
+        fr.record_destiny_update_stamps(7, i as u32, &single, Some((i as u64) + 10));
+    }
+
+    let recorded = fr.get_destiny_stamps(7, 1000);
+    assert_eq!(recorded.len(), MAX_DESTINY_STAMPS_PER_SESSION);
+    assert_eq!(recorded.first().unwrap().stamp, 15);
+    assert_eq!(recorded.first().unwrap().entity_id, Some(1015));
+    assert_eq!(recorded.first().unwrap().client_current_tick, Some(25));
+    assert_eq!(recorded.last().unwrap().stamp, 514);
+}
+
+#[test]
+fn latency_histogram_computes_p99_and_exports_json() {
+    let fr = FlightRecorder::new();
+    for us in 1..=100 {
+        fr.record_rpc_latency("beyonce", "MachoBindObject", Duration::from_micros(us * 100));
+    }
+    fr.record_rpc_latency("charUnboundMgr", "SelectCharacterID", Duration::from_millis(25));
+
+    let report = fr.latency_histogram_report();
+    assert_eq!(report.total_calls, 101);
+    assert_eq!(report.methods.len(), 2);
+    let select_char = report
+        .methods
+        .iter()
+        .find(|m| m.service == "charUnboundMgr" && m.method == "SelectCharacterID")
+        .unwrap();
+    assert_eq!(select_char.count, 1);
+    assert_eq!(select_char.p99_micros, 25_000);
+
+    let bind = report
+        .methods
+        .iter()
+        .find(|m| m.service == "beyonce" && m.method == "MachoBindObject")
+        .unwrap();
+    assert_eq!(bind.count, 100);
+    assert_eq!(bind.min_micros, 100);
+    assert_eq!(bind.p50_micros, 5_000);
+    assert_eq!(bind.p95_micros, 9_500);
+    assert_eq!(bind.p99_micros, 9_900);
+    assert_eq!(bind.max_micros, 10_000);
+
+    let out_path = std::env::temp_dir().join(format!(
+        "evomu_fr_hist_test_{}.json",
+        std::process::id()
+    ));
+    fr.export_latency_histogram_json(&out_path)
+        .expect("export latency histogram json");
+    let raw = std::fs::read_to_string(&out_path).expect("read exported json");
+    let parsed: LatencyHistogramReport =
+        serde_json::from_str(&raw).expect("parse exported json");
+    assert_eq!(parsed.total_calls, 101);
+    assert_eq!(parsed.methods.len(), 2);
+    let _ = std::fs::remove_file(&out_path);
+}
+
+#[test]
+fn packet_perf_warnings_bounded_at_200() {
+    let fr = FlightRecorder::new();
+    for i in 0..205 {
+        fr.record_packet_perf_warning(
+            11,
+            "stationSvc",
+            "Undock",
+            64 + i,
+            Duration::from_millis(120 + i as u64),
+            true,
+        );
+    }
+    let warnings = fr.recent_packet_perf_warnings(500);
+    assert_eq!(warnings.len(), 200);
+    assert_eq!(warnings.first().unwrap().arg_size, 69);
+    assert_eq!(warnings.last().unwrap().arg_size, 268);
+    assert!(warnings.last().unwrap().bootstrap);
+}

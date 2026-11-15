@@ -58,6 +58,9 @@ async fn main() -> Result<()> {
     {
         cfg.xmpp_port = cli_xmpp_port;
     }
+    if eve_server::config::ServerConfig::parse_cli_gm_flag(std::env::args().skip(1)) {
+        cfg.feature_flags.gm_mode = true;
+    }
     let xmpp_listener = TcpListener::bind((cfg.bind_address.as_str(), cfg.xmpp_port))
         .await
         .map_err(|e| anyhow::anyhow!("failed to bind XMPP listener on {}:{}: {e}", cfg.bind_address, cfg.xmpp_port))?;

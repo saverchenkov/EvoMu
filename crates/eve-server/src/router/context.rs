@@ -481,6 +481,22 @@ impl ServerContext {
             .clone()
     }
 
+    /// Returns `true` when `--gm` mode is enabled, unlocking loopback-only `/ops` endpoints (`#1077 §A`).
+    pub fn is_gm_ops_enabled(&self) -> bool {
+        self.feature_flags
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .gm_mode
+    }
+
+    /// Enables or disables `--gm` ops mode at runtime (primarily for tests, `#1077 §A`).
+    pub fn set_gm_ops_enabled(&self, enabled: bool) {
+        self.feature_flags
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .gm_mode = enabled;
+    }
+
     #[inline]
     pub fn esi_port(&self) -> u16 {
         self.esi_port.load(Ordering::Acquire)

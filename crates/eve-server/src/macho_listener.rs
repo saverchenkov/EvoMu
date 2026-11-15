@@ -286,6 +286,132 @@ async fn write_out_frames<W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
+fn is_bootstrap_rpc(service: &str, method: &str, was_live: bool, in_space: bool) -> bool {
+    matches!(
+        (service, method),
+        ("charUnboundMgr", "SelectCharacterID")
+            | ("charUnboundMgr", "GetCharacterInfo")
+            | ("character", "GetCharacterSelectionInfo")
+            | ("stationSvc", "Undock")
+            | ("structureDocking", "Undock")
+            | ("beyonce", "MachoBindObject")
+            | ("beyonce", "UpdateStateRequest")
+    ) || (in_space && !was_live)
+}
+
+fn out_frame_kind_and_stamp(frame: &crate::outbound_sequencer::OutFrame) -> (&'static str, Option<u32>) {
+    use crate::outbound_sequencer::OutFrame;
+    match frame {
+        OutFrame::CallRsp { .. } => ("CallRsp", None),
+        OutFrame::SessionChange { .. } => ("SessionChangeNotification", None),
+        OutFrame::DoDestinyUpdate { stamp, .. } => ("DoDestinyUpdate", Some(*stamp)),
+        OutFrame::Notification { .. } => ("Notification", None),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_out_frame_observability(
+    ctx: &ServerContext,
+    session_id: u64,
+    proxy_node_id: u64,
+    client_id: u64,
+    user_id: Option<u64>,
+    last_client_tick: Option<u64>,
+    frame: &crate::outbound_sequencer::OutFrame,
+    elapsed_since_request_micros: Option<u64>,
+    bootstrap: bool,
+    reason: &str,
+) {
+    let wire_pyrep = out_frame_to_wire_pyrep(proxy_node_id, client_id, user_id, frame);
+    let byte_size = eve_proto::marshal::encode(&wire_pyrep).len();
+    let (kind, stamp) = out_frame_kind_and_stamp(frame);
+    ctx.flight_recorder.record_outbound(
+        session_id,
+        crate::flight_recorder::OutboundDisposition::Sent,
+        kind,
+        byte_size,
+        stamp,
+        reason,
+        elapsed_since_request_micros,
+        bootstrap,
+    );
+    if let crate::outbound_sequencer::OutFrame::DoDestinyUpdate { stamp, updates, .. } = frame {
+        ctx.flight_recorder.record_destiny_update_stamps(
+            session_id,
+            *stamp,
+            updates,
+            last_client_tick,
+        );
+    }
+}
+
+fn record_sequencer_events(
+    ctx: &ServerContext,
+    session_id: u64,
+    events: &[crate::outbound_sequencer::SequencerLedgerEvent],
+    elapsed_since_request_micros: Option<u64>,
+    bootstrap: bool,
+) {
+    for ev in events {
+        let disposition = match ev.kind {
+            crate::outbound_sequencer::SequencerLedgerEventKind::Dropped => {
+                crate::flight_recorder::OutboundDisposition::Dropped
+            }
+            crate::outbound_sequencer::SequencerLedgerEventKind::Coalesced => {
+                crate::flight_recorder::OutboundDisposition::Coalesced
+            }
+        };
+        ctx.flight_recorder.record_outbound(
+            session_id,
+            disposition,
+            "DoDestinyUpdate",
+            0,
+            Some(ev.stamp),
+            &ev.reason,
+            elapsed_since_request_micros,
+            bootstrap,
+        );
+    }
+}
+
+async fn emit_tick_batch_with_observability<W: AsyncWriteExt + Unpin>(
+    ctx: &ServerContext,
+    wire_state: &mut crate::outbound_sequencer::SessionWireState,
+    writer: &mut W,
+    client_id: u64,
+    session: &SessionState,
+    batch: crate::outbound_sequencer::DestinyBatch,
+    reason: &str,
+) -> Result<()> {
+    let (frame_opt, ev_opt) = crate::outbound_sequencer::sequence_tick_with_event(wire_state, batch);
+    if let Some(ev) = ev_opt {
+        record_sequencer_events(ctx, session.session_id, &[ev], None, false);
+    }
+    if let Some(frame) = frame_opt {
+        record_out_frame_observability(
+            ctx,
+            session.session_id,
+            MACHO_PROXY_NODE_ID,
+            client_id,
+            session.user_id,
+            wire_state.last_client_tick,
+            &frame,
+            None,
+            false,
+            reason,
+        );
+        write_out_frames(
+            writer,
+            MACHO_PROXY_NODE_ID,
+            client_id,
+            session.user_id,
+            &[frame],
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 struct PendingDockCall {
     source: MachoAddress,
     destination: MachoAddress,
@@ -495,6 +621,8 @@ pub async fn execute_call_req_wire(
     call_args: &[PyRep],
     call_kwargs: &HashMap<String, PyRep>,
 ) -> CallReqWireOutcome {
+    let call_started_at = std::time::Instant::now();
+    let was_live_before_rpc = wire.wire_state.destiny.is_live();
     let mut drained_char_notifications = Vec::new();
     let mut pre_rpc_notifs = Vec::new();
     if let Some(cid) = session.character_id {
@@ -954,7 +1082,7 @@ pub async fn execute_call_req_wire(
         DestinyDrain::None
     };
 
-    let out_frames = crate::outbound_sequencer::sequence(
+    let sequence_outcome = crate::outbound_sequencer::sequence_with_events(
         wire.wire_state,
         RpcCompletion {
             call_id: 0,
@@ -965,6 +1093,47 @@ pub async fn execute_call_req_wire(
             notifications: typed_notifications,
         },
     );
+    let out_frames = sequence_outcome.frames;
+    let req_elapsed_micros = call_started_at.elapsed().as_micros().min(u64::MAX as u128) as u64;
+    let bootstrap = is_bootstrap_rpc(
+        service,
+        method,
+        was_live_before_rpc,
+        session.solar_system_id.is_some() && session.station_id.is_none() && session.structure_id.is_none(),
+    );
+    let reason_tag = format!("{service}.{method}");
+    record_sequencer_events(
+        ctx,
+        session.session_id,
+        &sequence_outcome.events,
+        Some(req_elapsed_micros),
+        bootstrap,
+    );
+    for frame in &out_frames {
+        record_out_frame_observability(
+            ctx,
+            session.session_id,
+            MACHO_PROXY_NODE_ID,
+            wire.client_id,
+            session.user_id,
+            wire.wire_state.last_client_tick,
+            frame,
+            Some(req_elapsed_micros),
+            bootstrap,
+            &reason_tag,
+        );
+    }
+    if bootstrap {
+        tracing::debug!(
+            target: "packet_perf",
+            session_id = session.session_id,
+            service = %service,
+            method = %method,
+            elapsed_micros = req_elapsed_micros,
+            out_frame_count = out_frames.len(),
+            "[PacketPerf] bootstrap outbound annotations"
+        );
+    }
 
     CallReqWireOutcome {
         rpc_result,
@@ -1217,22 +1386,19 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                     if let Ok((tick, obs_evs, updates_pyrep)) = sys_handle.drain_observer_updates(ship_id).await {
                                         let ep = wire_state.current_epoch();
                                         if let Some(batch) = build_destiny_batch(&ctx, ep, tick, &obs_evs, updates_pyrep, &[ship_id]) {
-                                            if let Some(frame) = crate::outbound_sequencer::sequence_tick(
+                                            if emit_tick_batch_with_observability(
+                                                &ctx,
                                                 &mut wire_state,
+                                                &mut writer,
+                                                client_id,
+                                                &session,
                                                 batch,
-                                            ) {
-                                                if write_out_frames(
-                                                    &mut writer,
-                                                    MACHO_PROXY_NODE_ID,
-                                                    client_id,
-                                                    session.user_id,
-                                                    &[frame],
-                                                )
-                                                .await
-                                                .is_err()
-                                                {
-                                                    break;
-                                                }
+                                                "lagged_resync_tick",
+                                            )
+                                            .await
+                                            .is_err()
+                                            {
+                                                break;
                                             }
                                         }
                                     }
@@ -1257,22 +1423,19 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                         .unwrap_or(&tick_msg.events);
                                     let ep = wire_state.current_epoch();
                                     if let Some(batch) = build_destiny_batch(&ctx, ep, tick_msg.tick, evs, updates_pyrep.clone(), &[ship_id]) {
-                                        if let Some(frame) = crate::outbound_sequencer::sequence_tick(
+                                        if emit_tick_batch_with_observability(
+                                            &ctx,
                                             &mut wire_state,
+                                            &mut writer,
+                                            client_id,
+                                            &session,
                                             batch,
-                                        ) {
-                                            if write_out_frames(
-                                                &mut writer,
-                                                MACHO_PROXY_NODE_ID,
-                                                client_id,
-                                                session.user_id,
-                                                &[frame],
-                                            )
-                                            .await
-                                            .is_err()
-                                            {
-                                                break;
-                                            }
+                                            "system_tick_broadcast",
+                                        )
+                                        .await
+                                        .is_err()
+                                        {
+                                            break;
                                         }
                                     }
                                 }
@@ -1418,22 +1581,19 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                             updates_pyrep,
                                             &suppressed_ids,
                                         ) {
-                                            if let Some(frame) = crate::outbound_sequencer::sequence_tick(
+                                            if emit_tick_batch_with_observability(
+                                                &ctx,
                                                 &mut wire_state,
+                                                &mut writer,
+                                                client_id,
+                                                &session,
                                                 batch,
-                                            ) {
-                                                if write_out_frames(
-                                                    &mut writer,
-                                                    MACHO_PROXY_NODE_ID,
-                                                    client_id,
-                                                    session.user_id,
-                                                    &[frame],
-                                                )
-                                                .await
-                                                .is_err()
-                                                {
-                                                    break;
-                                                }
+                                                "pending_session_change_tick",
+                                            )
+                                            .await
+                                            .is_err()
+                                            {
+                                                break;
                                             }
                                         }
                                     }
@@ -1822,24 +1982,19 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                         updates_pyrep,
                                         &[plan.ship_id],
                                     ) {
-                                        if let Some(frame) =
-                                            crate::outbound_sequencer::sequence_tick(
-                                                &mut wire_state,
-                                                batch,
-                                            )
+                                        if emit_tick_batch_with_observability(
+                                            &ctx,
+                                            &mut wire_state,
+                                            &mut writer,
+                                            client_id,
+                                            &session,
+                                            batch,
+                                            "pending_dock_settle_tick",
+                                        )
+                                        .await
+                                        .is_err()
                                         {
-                                            if write_out_frames(
-                                                &mut writer,
-                                                MACHO_PROXY_NODE_ID,
-                                                client_id,
-                                                session.user_id,
-                                                &[frame],
-                                            )
-                                            .await
-                                            .is_err()
-                                            {
-                                                break;
-                                            }
+                                            break;
                                         }
                                     }
                                 }
