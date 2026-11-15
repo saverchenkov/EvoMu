@@ -47,13 +47,13 @@ fn test_client_static_resources_lossless_sweep_and_spot_checks() {
     let db_path = SdeRegistry::default_db_path();
     let sde = SdeRegistry::open(&db_path).expect("Real V24.01 SDE SQLite database must open");
 
-    // 1. Verify all 213 resources from manifest & staticdata catalog
+    // 1. Verify all 215 resources from manifest & staticdata catalog
     let manifest_path = root.join("data").join("sde_import_manifest.json");
     let manifest_val: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(&manifest_path).expect("read data/sde_import_manifest.json"),
     )
     .expect("parse data/sde_import_manifest.json");
-    assert_eq!(manifest_val["client_release"].as_str(), Some("V24.01"));
+    assert_eq!(manifest_val["client_release"].as_str(), Some("V24.02"));
 
     let catalog_path = root
         .join("docs")
@@ -63,8 +63,8 @@ fn test_client_static_resources_lossless_sweep_and_spot_checks() {
         &std::fs::read_to_string(&catalog_path).expect("read docs/index/staticdata_catalog.json"),
     )
     .expect("parse docs/index/staticdata_catalog.json");
-    assert_eq!(catalog_arr.len(), 213);
-    assert_eq!(sde.resources.len(), 213);
+    assert_eq!(catalog_arr.len(), 215);
+    assert_eq!(sde.resources.len(), 215);
 
     // 2. Full-row domain entity counts and field completeness verification (D-1, Z-4)
     assert_eq!(sde.categories.len(), 48);
@@ -72,14 +72,14 @@ fn test_client_static_resources_lossless_sweep_and_spot_checks() {
         assert!(!cat.name.is_empty());
     }
 
-    assert_eq!(sde.groups.len(), 1_611);
+    assert_eq!(sde.groups.len(), 1_633);
     for grp in sde.groups.values() {
         assert!(!grp.name.is_empty());
         assert!(sde.categories.contains_key(&grp.category_id));
     }
 
     // Types full-row check
-    assert_eq!(sde.types.len(), 53_288);
+    assert_eq!(sde.types.len(), 53_925);
     let mut published_types = 0usize;
     let mut with_desc = 0usize;
     let mut with_icon = 0usize;
@@ -139,16 +139,16 @@ fn test_client_static_resources_lossless_sweep_and_spot_checks() {
         }
     }
 
-    assert_eq!(published_types, 27_309);
-    assert_eq!(with_desc, 35_030);
-    assert_eq!(with_icon, 23_088);
-    assert_eq!(with_graphic, 18_816);
-    assert_eq!(with_meta, 13_905);
-    assert_eq!(with_effects, 16_204);
-    assert_eq!(with_attrs, 26_927);
+    assert_eq!(published_types, 27_490);
+    assert_eq!(with_desc, 35_490);
+    assert_eq!(with_icon, 23_408);
+    assert_eq!(with_graphic, 19_145);
+    assert_eq!(with_meta, 14_126);
+    assert_eq!(with_effects, 16_447);
+    assert_eq!(with_attrs, 27_293);
 
     // Dogma Attributes full-row verification
-    assert_eq!(sde.attributes.len(), 2_871);
+    assert_eq!(sde.attributes.len(), 2_928);
     let mut published_attrs = 0usize;
     for attr in sde.attributes.values() {
         assert!(!attr.name.is_empty());
@@ -156,10 +156,10 @@ fn test_client_static_resources_lossless_sweep_and_spot_checks() {
             published_attrs += 1;
         }
     }
-    assert_eq!(published_attrs, 1_277);
+    assert_eq!(published_attrs, 1_319);
 
     // Dogma Effects full-row verification
-    assert_eq!(sde.effects.len(), 3_427);
+    assert_eq!(sde.effects.len(), 3_499);
     let mut published_effects = 0usize;
     let mut warp_safe_effects = 0usize;
     for eff in sde.effects.values() {
@@ -183,35 +183,35 @@ fn test_client_static_resources_lossless_sweep_and_spot_checks() {
     assert_eq!(sde.regions.len(), 114);
     assert_eq!(sde.constellations.len(), 1_184);
     assert_eq!(sde.solar_systems.len(), 8_490);
-    assert_eq!(sde.jumps.len(), 13_978);
-    assert_eq!(sde.stations.len(), 5_210);
-    assert_eq!(sde.celestial_count, 475_859);
+    assert_eq!(sde.jumps.len(), 13_982);
+    assert_eq!(sde.stations.len(), 5_211);
+    assert_eq!(sde.celestial_count, 475_863);
     assert_eq!(sde.factions.len(), 27);
     assert_eq!(sde.npc_corporations.len(), 283);
     assert_eq!(sde.agents.len(), 10_972);
-    assert_eq!(sde.market_groups.len(), 2_114);
+    assert_eq!(sde.market_groups.len(), 2_125);
     assert_eq!(sde.planet_schematics.len(), 68);
     assert_eq!(sde.wormhole_types.len(), 132);
-    assert_eq!(sde.npc_spawn_groups.len(), 392);
+    assert_eq!(sde.npc_spawn_groups.len(), 405);
     assert_eq!(sde.clone_grades.len(), 4);
-    assert_eq!(sde.dbuff_collections.len(), 277);
+    assert_eq!(sde.dbuff_collections.len(), 373);
     assert_eq!(sde.fighter_abilities.len(), 36);
     assert_eq!(sde.fighter_abilities_by_type.len(), 94);
-    assert_eq!(sde.wrecks.len(), 5_703);
-    assert_eq!(sde.compressible_types.len(), 212);
-    assert_eq!(sde.type_materials.len(), 9_866);
-    assert_eq!(sde.blueprints.len(), 5_100);
+    assert_eq!(sde.wrecks.len(), 5_777);
+    assert_eq!(sde.compressible_types.len(), 220);
+    assert_eq!(sde.type_materials.len(), 9_935);
+    assert_eq!(sde.blueprints.len(), 5_135);
     assert_eq!(sde.dynamic_item_attributes.len(), 441);
-    assert_eq!(sde.space_components_by_type.len(), 11_238);
+    assert_eq!(sde.space_components_by_type.len(), 11_491);
     assert_eq!(sde.missions.len(), 2_892);
-    assert_eq!(sde.dungeons.len(), 5_516);
+    assert_eq!(sde.dungeons.len(), 5_653);
     assert_eq!(sde.epic_arcs.len(), 21);
-    assert_eq!(sde.node_graphs.len(), 584);
-    assert_eq!(sde.station_operations.len(), 69);
+    assert_eq!(sde.node_graphs.len(), 594);
+    assert_eq!(sde.station_operations.len(), 70);
     assert_eq!(sde.station_services.len(), 27);
-    assert_eq!(sde.skin_licenses.len(), 11_877);
-    assert_eq!(sde.skin_materials.len(), 875);
-    assert_eq!(sde.skins.len(), 7_048);
+    assert_eq!(sde.skin_licenses.len(), 11_908);
+    assert_eq!(sde.skin_materials.len(), 878);
+    assert_eq!(sde.skins.len(), 7_079);
 
     // 3. Spot assertions verifying exact client data values across domains (D-1, Z-4)
     // Types spot checks
@@ -373,12 +373,12 @@ fn test_sweep_all_dogma_effects_across_sde_effects_table() {
     let effects_view_count: i64 = conn
         .query_row("SELECT count(*) FROM sde_effects", [], |r| r.get(0))
         .expect("query count from sde_effects view");
-    assert_eq!(effects_view_count, 3_427);
+    assert_eq!(effects_view_count, 3_499);
 
     let effects_tbl_count: i64 = conn
         .query_row("SELECT count(*) FROM sde_dogma_effects", [], |r| r.get(0))
         .expect("query count from sde_dogma_effects table");
-    assert_eq!(effects_tbl_count, 3_427);
+    assert_eq!(effects_tbl_count, 3_499);
 
     // 2. Representative type mapping for LocationGroupModifier
     let mut rep_type_for_group = HashMap::<u32, TypeId>::new();
@@ -386,7 +386,7 @@ fn test_sweep_all_dogma_effects_across_sde_effects_table() {
         rep_type_for_group.entry(tinfo.group_id).or_insert(tid);
     }
 
-    // 3. Sweep all 3,427 Dogma effects across sde.effects
+    // 3. Sweep all 3,499 Dogma effects across sde.effects
     let mut total_effects = 0usize;
     let mut total_modifiers = 0usize;
     let mut effects_with_modifiers = 0usize;
@@ -396,7 +396,7 @@ fn test_sweep_all_dogma_effects_across_sde_effects_table() {
     let mut domain_counts = HashMap::<DogmaDomain, usize>::new();
     let mut func_counts = HashMap::<DogmaModifierFunc, usize>::new();
     let mut op_counts = BTreeMap::<ModifierOperator, usize>::new();
-    let mut attested_effect_rows = Vec::<String>::with_capacity(3_427);
+    let mut attested_effect_rows = Vec::<String>::with_capacity(3_499);
 
     let mut sorted_eids: Vec<eve_sde::EffectId> = sde.effects.keys().copied().collect();
     sorted_eids.sort_unstable();
@@ -760,33 +760,33 @@ fn test_sweep_all_dogma_effects_across_sde_effects_table() {
         }
     }
 
-    assert_eq!(total_effects, 3_427);
-    assert_eq!(effects_with_modifiers, 3_210);
-    assert_eq!(effects_without_modifiers, 217);
-    assert_eq!(total_modifiers, 5_178);
+    assert_eq!(total_effects, 3_499);
+    assert_eq!(effects_with_modifiers, 3_281);
+    assert_eq!(effects_without_modifiers, 218);
+    assert_eq!(total_modifiers, 5_308);
     assert!(
         total_evaluations >= 4_000,
         "Expected at least 4,000 effect/modifier evaluations, got {total_evaluations}"
     );
-    assert_eq!(total_evaluations, 5_178);
+    assert_eq!(total_evaluations, 5_308);
 
     // Verify all 6 domains and all modifier functions were covered
     assert_eq!(domain_counts.len(), 6);
     assert!(domain_counts[&DogmaDomain::Ship] > 3_000);
     assert!(domain_counts[&DogmaDomain::Char] > 1_000);
     assert_eq!(func_counts.len(), 6);
-    assert_eq!(func_counts[&DogmaModifierFunc::ItemModifier], 1_800);
+    assert_eq!(func_counts[&DogmaModifierFunc::ItemModifier], 1_863);
     assert_eq!(func_counts[&DogmaModifierFunc::LocationModifier], 29);
-    assert_eq!(func_counts[&DogmaModifierFunc::LocationGroupModifier], 805);
+    assert_eq!(func_counts[&DogmaModifierFunc::LocationGroupModifier], 836);
     assert_eq!(
         func_counts[&DogmaModifierFunc::LocationRequiredSkillModifier],
-        1_611
+        1_623
     );
     assert_eq!(
         func_counts[&DogmaModifierFunc::OwnerRequiredSkillModifier],
-        923
+        947
     );
     assert_eq!(func_counts[&DogmaModifierFunc::EffectStopper], 10);
 
-    assert_eq!(attested_effect_rows.len(), 3_210);
+    assert_eq!(attested_effect_rows.len(), 3_281);
 }

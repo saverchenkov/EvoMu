@@ -526,7 +526,7 @@ fn test_parity_misc_plan_t2_sde_and_dogma_effects_sweep() {
         .load_localization_main()
         .expect("load localization_fsd_main.pickle");
     assert_eq!(main_loc.languages.len(), 9);
-    assert_eq!(main_loc.labels.len(), 31_872);
+    assert_eq!(main_loc.labels.len(), 32_801);
 
     let rifter = ctx.sde.get_type(587).expect("Rifter type 587");
     assert_eq!(rifter.group_id, 25);

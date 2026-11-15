@@ -462,7 +462,7 @@ fn test_b35_esi_localization_fsd_accept_language() {
     ]);
     let ctx = std::sync::Arc::new(build_ctx());
     let main_bundle = ctx.sde.load_localization_main().expect("load_localization_main");
-    assert_eq!(main_bundle.labels.len(), 31_872);
+    assert_eq!(main_bundle.labels.len(), 32_801);
     assert_eq!(main_bundle.languages.len(), 9);
     let router = eve_server::esi::EsiRouter::new(std::sync::Arc::clone(&ctx));
 

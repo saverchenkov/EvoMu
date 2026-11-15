@@ -139,7 +139,7 @@ fn item_trader_new_activities_wrappers_and_starter_shipcaster_systems() {
     sde.space_components_by_type
         .insert(40003, vec!["itemTrader".to_string()]);
 
-    // Build synthetic spacecomponentsbytype.fsdbinary with 2 records of stride 1832:
+    // Build synthetic spacecomponentsbytype.fsdbinary with 2 records of stride 1824:
     // rec 0: type 40001, recipes = [11, 22], range = 1000 (clamped to 2500.0)
     // rec 1: type 40002, recipes rel = 0, range = 6000 (kept as 6000.0)
     let mut sc_buf = vec![0u8; 64];
@@ -148,7 +148,7 @@ fn item_trader_new_activities_wrappers_and_starter_shipcaster_systems() {
     sc_buf.extend_from_slice(&2u64.to_le_bytes());
     let rec_abs = sc_buf.len();
     sc_buf[56..64].copy_from_slice(&((rec_abs - 32) as u64).to_le_bytes());
-    sc_buf.extend_from_slice(&vec![0u8; 1832 * 2]);
+    sc_buf.extend_from_slice(&vec![0u8; 1824 * 2]);
 
     // Allocate recipes list [11, 22] at end
     sc_buf.extend_from_slice(&2u64.to_le_bytes());
@@ -161,7 +161,7 @@ fn item_trader_new_activities_wrappers_and_starter_shipcaster_systems() {
     sc_buf[rec_abs + 464..rec_abs + 472].copy_from_slice(&list_rel.to_le_bytes());
     sc_buf[rec_abs + 472..rec_abs + 476].copy_from_slice(&1000u32.to_le_bytes());
 
-    let rec1_abs = rec_abs + 1832;
+    let rec1_abs = rec_abs + 1824;
     sc_buf[rec1_abs..rec1_abs + 4].copy_from_slice(&40002u32.to_le_bytes());
     sc_buf[rec1_abs + 464..rec1_abs + 472].copy_from_slice(&0u64.to_le_bytes());
     sc_buf[rec1_abs + 472..rec1_abs + 476].copy_from_slice(&6000u32.to_le_bytes());

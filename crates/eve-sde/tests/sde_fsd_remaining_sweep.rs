@@ -95,11 +95,11 @@ const REMAINING: &[Nested] = &[
     },
     Nested {
         path: "res:/staticdata/dungeonobjectives.fsdbinary",
-        md5: "a9f9e9bf643e0411d983cdd8a3552ea5",
-        bytes: 8024,
+        md5: "d7063a59edd9dcbe08430f728e59c97f",
+        bytes: 8256,
         stride: 56,
         str_key: false,
-        count: 85,
+        count: 88,
         spots: &[
             (
                 "1",
@@ -177,7 +177,7 @@ fn test_t2_sde_fsdbinary_contribution_methods_dungeon_objectives_and_surveys() {
     assert_eq!(t[2]["28"]["apiClassName"], "TwelveTraitsAPI");
     assert_eq!(t[2]["28"]["gracePeriod"], 30);
     assert_eq!(t[2]["28"]["minAccountAgeHours"], 24);
-    assert_eq!(sde.resources.len(), 213);
+    assert_eq!(sde.resources.len(), 215);
 
     eve_testkit::attest(&[
         "sde:res:/staticdata/contributionmethods.fsdbinary",

@@ -49,6 +49,17 @@ DEFAULT_MANIFEST = REPO_ROOT / "data" / "sde_import_manifest.json"
 STATIC_CATALOG = REPO_ROOT / "docs" / "index" / "staticdata_catalog.json"
 
 
+def parse_start_ini(ini_path: Path) -> dict[str, str]:
+    """Parses key=value pairs from the EVE client `start.ini` file."""
+    out: dict[str, str] = {}
+    for line in ini_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = line.strip()
+        if "=" in line and not line.startswith("[") and not line.startswith(";"):
+            k, v = line.split("=", 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
 def run_import(
     shared_cache: Path,
     out_db: Path,
@@ -67,6 +78,13 @@ def run_import(
 
     if not rfi_path.exists():
         raise FileNotFoundError(f"Missing EVE client resfileindex.txt at {rfi_path}")
+
+    start_ini_path = eve_build_dir / "start.ini"
+    if not start_ini_path.is_file():
+        raise FileNotFoundError(f"Missing EVE client start.ini at {start_ini_path}")
+    start_ini = parse_start_ini(start_ini_path)
+    client_build = int(start_ini["build"])
+    client_release = start_ini["codename"]
 
     work_dir = Path(tempfile.gettempdir()) / "evomu_sde_cfsd"
     py2_out_json = work_dir / "extracted_fsd.json"
@@ -633,8 +651,8 @@ def run_import(
             "INSERT INTO sde_meta VALUES (?, ?)",
             [
                 ("schema_version", "1"),
-                ("client_build", "3619879"),
-                ("client_release", "V24.01"),
+                ("client_build", str(client_build)),
+                ("client_release", client_release),
             ],
         )
         conn.executemany(
@@ -1245,15 +1263,15 @@ def run_import(
     ]
     manifest = {
         "schema_version": 1,
-        "client_build": 3619879,
-        "client_release": "V24.01",
+        "client_build": client_build,
+        "client_release": client_release,
         "table_counts": table_counts,
         "resources": manifest_resources,
     }
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
-    print("=== EvoMu Real V24.01 SDE Importer (D-1) ===")
+    print(f"=== EvoMu Real {client_release} SDE Importer (D-1) ===")
     print(f"Output SQLite DB: {out_db} ({out_db.stat().st_size:,} bytes)")
     for tname, cnt in table_counts.items():
         print(f"  {tname:32s}: {cnt:10,d} rows")
@@ -1289,9 +1307,9 @@ def write_belt_asteroid_tables(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Import V24.01 EVE Client Static Data into SQLite")
+    parser = argparse.ArgumentParser(description="Import EVE Client Static Data into SQLite")
     parser.add_argument("--shared-cache", type=Path, default=DEFAULT_SHARED_CACHE)
-    parser.add_argument("--out", type=Path, default=DEFAULT_OUT_DB)
+    parser.add_argument("--out", "--out-db", dest="out", type=Path, default=DEFAULT_OUT_DB)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--force-extract", action="store_true")
     args = parser.parse_args()

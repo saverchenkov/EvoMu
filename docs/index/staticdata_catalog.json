@@ -1,83 +1,111 @@
 [
   {
     "res_path": "res:/localizationfsd/localization_fsd_de.pickle",
-    "cdn_relative_path": "f7/f781e479bccfd00e_9bfa3342a109a5a30b7523af734daee5",
-    "md5": "9bfa3342a109a5a30b7523af734daee5",
-    "uncompressed_bytes": 44737417,
-    "compressed_bytes": 8880111,
-    "format": "Pickle/Binary"
+    "cdn_relative_path": "f7/f781e479bccfd00e_0ba0d09b312629e98cd87e8481dc727d",
+    "md5": "0ba0d09b312629e98cd87e8481dc727d",
+    "uncompressed_bytes": 45168999,
+    "compressed_bytes": 8996935,
+    "format": "Pickle/Binary",
+    "byte_size": 45168999,
+    "record_count": 307842
   },
   {
     "res_path": "res:/localizationfsd/localization_fsd_en-us.pickle",
-    "cdn_relative_path": "2c/2c3038b3c38e91a1_7a753c9da2eeca4dcc7cf0c6655aaae0",
-    "md5": "7a753c9da2eeca4dcc7cf0c6655aaae0",
-    "uncompressed_bytes": 40753078,
-    "compressed_bytes": 8075307,
-    "format": "Pickle/Binary"
+    "cdn_relative_path": "2c/2c3038b3c38e91a1_ec36e6662e1fc7e9dfe2519e8459d0ec",
+    "md5": "ec36e6662e1fc7e9dfe2519e8459d0ec",
+    "uncompressed_bytes": 41175459,
+    "compressed_bytes": 8191884,
+    "format": "Pickle/Binary",
+    "byte_size": 41175459,
+    "record_count": 311618
   },
   {
     "res_path": "res:/localizationfsd/localization_fsd_es.pickle",
-    "cdn_relative_path": "68/68766cf9c7eb3001_07b96ab4740f9b89347549f432a09228",
-    "md5": "07b96ab4740f9b89347549f432a09228",
-    "uncompressed_bytes": 44059431,
-    "compressed_bytes": 8377874,
-    "format": "Pickle/Binary"
+    "cdn_relative_path": "68/68766cf9c7eb3001_3a07ea08160daa74ad87cc383f4487db",
+    "md5": "3a07ea08160daa74ad87cc383f4487db",
+    "uncompressed_bytes": 44507325,
+    "compressed_bytes": 8490970,
+    "format": "Pickle/Binary",
+    "byte_size": 44507325,
+    "record_count": 307840
   },
   {
     "res_path": "res:/localizationfsd/localization_fsd_fr.pickle",
-    "cdn_relative_path": "4a/4a0f5fe70b667169_eac42d7449d6083400e4da35ee998a03",
-    "md5": "eac42d7449d6083400e4da35ee998a03",
-    "uncompressed_bytes": 46429727,
-    "compressed_bytes": 8942950,
-    "format": "Pickle/Binary"
+    "cdn_relative_path": "4a/4a0f5fe70b667169_d425c3495668f80b0148ccd4efac8eb7",
+    "md5": "d425c3495668f80b0148ccd4efac8eb7",
+    "uncompressed_bytes": 46875524,
+    "compressed_bytes": 9061553,
+    "format": "Pickle/Binary",
+    "byte_size": 46875524,
+    "record_count": 307844
   },
   {
     "res_path": "res:/localizationfsd/localization_fsd_it.pickle",
-    "cdn_relative_path": "9f/9f056f7130bc9bf8_2bafd91c1bc13ff34c615e5536baa74a",
-    "md5": "2bafd91c1bc13ff34c615e5536baa74a",
-    "uncompressed_bytes": 1711389,
-    "compressed_bytes": 305406,
-    "format": "Pickle/Binary"
+    "cdn_relative_path": "9f/9f056f7130bc9bf8_d98e2583e5c5e70f21b74de44c305d04",
+    "md5": "d98e2583e5c5e70f21b74de44c305d04",
+    "uncompressed_bytes": 1709047,
+    "compressed_bytes": 304775,
+    "format": "Pickle/Binary",
+    "byte_size": 1709047,
+    "record_count": 7447
   },
   {
     "res_path": "res:/localizationfsd/localization_fsd_ja.pickle",
-    "cdn_relative_path": "82/82afc4ce93a0dc14_f401a04fc2313a2090e836d726245bec",
-    "md5": "f401a04fc2313a2090e836d726245bec",
-    "uncompressed_bytes": 86414823,
-    "compressed_bytes": 10186352,
-    "format": "Pickle/Binary"
+    "cdn_relative_path": "82/82afc4ce93a0dc14_4fb096782c7fdf9d2790aff11754dbac",
+    "md5": "4fb096782c7fdf9d2790aff11754dbac",
+    "uncompressed_bytes": 87216223,
+    "compressed_bytes": 10319561,
+    "format": "Pickle/Binary",
+    "byte_size": 87216223,
+    "record_count": 307845
   },
   {
     "res_path": "res:/localizationfsd/localization_fsd_ko.pickle",
-    "cdn_relative_path": "f5/f5467fdb71de5d33_dc47cdaba73e5d3d58c2ba748fabe71a",
-    "md5": "dc47cdaba73e5d3d58c2ba748fabe71a",
-    "uncompressed_bytes": 71125744,
-    "compressed_bytes": 9203108,
-    "format": "Pickle/Binary"
+    "cdn_relative_path": "f5/f5467fdb71de5d33_c3f36d7f6022311da755ccd3aa35e69a",
+    "md5": "c3f36d7f6022311da755ccd3aa35e69a",
+    "uncompressed_bytes": 71781183,
+    "compressed_bytes": 9322001,
+    "format": "Pickle/Binary",
+    "byte_size": 71781183,
+    "record_count": 307842
   },
   {
     "res_path": "res:/localizationfsd/localization_fsd_main.pickle",
-    "cdn_relative_path": "79/79a473897ae5f3b0_ee8726670ad947c75d7048f30acc9b35",
-    "md5": "ee8726670ad947c75d7048f30acc9b35",
-    "uncompressed_bytes": 3344947,
-    "compressed_bytes": 752978,
-    "format": "Pickle/Binary"
+    "cdn_relative_path": "79/79a473897ae5f3b0_ba0ed8a6670b4cc6a063724478b1f9e6",
+    "md5": "ba0ed8a6670b4cc6a063724478b1f9e6",
+    "uncompressed_bytes": 3477896,
+    "compressed_bytes": 776654,
+    "format": "Pickle/Binary",
+    "byte_size": 3477896,
+    "record_count": 4
   },
   {
     "res_path": "res:/localizationfsd/localization_fsd_ru.pickle",
-    "cdn_relative_path": "4c/4c56e191aaa0e618_baede863986025489fe8970f0ab38ee5",
-    "md5": "baede863986025489fe8970f0ab38ee5",
-    "uncompressed_bytes": 153500626,
-    "compressed_bytes": 12378164,
-    "format": "Pickle/Binary"
+    "cdn_relative_path": "4c/4c56e191aaa0e618_50c76201c9e2e7ad60c92a078a1f7860",
+    "md5": "50c76201c9e2e7ad60c92a078a1f7860",
+    "uncompressed_bytes": 154938270,
+    "compressed_bytes": 12548924,
+    "format": "Pickle/Binary",
+    "byte_size": 154938270,
+    "record_count": 307845
   },
   {
     "res_path": "res:/localizationfsd/localization_fsd_zh.pickle",
-    "cdn_relative_path": "87/87bfc3b6eab5e5d3_468af73100512587c6eab7ea5a1528ca",
-    "md5": "468af73100512587c6eab7ea5a1528ca",
-    "uncompressed_bytes": 61334886,
-    "compressed_bytes": 9049966,
-    "format": "Pickle/Binary"
+    "cdn_relative_path": "87/87bfc3b6eab5e5d3_443759647480c53db4d0234a503784b6",
+    "md5": "443759647480c53db4d0234a503784b6",
+    "uncompressed_bytes": 61915481,
+    "compressed_bytes": 9173010,
+    "format": "Pickle/Binary",
+    "byte_size": 61915481,
+    "record_count": 307865
+  },
+  {
+    "res_path": "res:/staticdata/academyship.fsdbinary",
+    "format": "FSD Binary",
+    "cdn_relative_path": "d1/d1f85d349a62a0bd_0b1d68c831a01a2939b885ebd3d48a0e",
+    "md5": "0b1d68c831a01a2939b885ebd3d48a0e",
+    "byte_size": 775,
+    "uncompressed_bytes": 775
   },
   {
     "res_path": "res:/staticdata/accountingentrytypes.fsdbinary",
@@ -121,11 +149,12 @@
   },
   {
     "res_path": "res:/staticdata/agencyhelpvideos.fsdbinary",
-    "cdn_relative_path": "20/20bd123ce1486873_187ad91b9960af9cbaefad7406a0d835",
-    "md5": "187ad91b9960af9cbaefad7406a0d835",
-    "uncompressed_bytes": 4211,
-    "compressed_bytes": 1170,
-    "format": "FSD Binary"
+    "cdn_relative_path": "20/20bd123ce1486873_a8b951d8cf8bf499de4ea209a690f574",
+    "md5": "a8b951d8cf8bf499de4ea209a690f574",
+    "uncompressed_bytes": 4624,
+    "compressed_bytes": 1268,
+    "format": "FSD Binary",
+    "byte_size": 4624
   },
   {
     "res_path": "res:/staticdata/agentsinspace.fsdbinary",
@@ -153,11 +182,12 @@
   },
   {
     "res_path": "res:/staticdata/archetypes.fsdbinary",
-    "cdn_relative_path": "4a/4a210b11f9110207_d6aeac91bdd7842fadf7b12cd84c856e",
-    "md5": "d6aeac91bdd7842fadf7b12cd84c856e",
-    "uncompressed_bytes": 5563,
-    "compressed_bytes": 1438,
-    "format": "FSD Binary"
+    "cdn_relative_path": "4a/4a210b11f9110207_b4583355cb4872073002b13730209821",
+    "md5": "b4583355cb4872073002b13730209821",
+    "uncompressed_bytes": 5712,
+    "compressed_bytes": 1484,
+    "format": "FSD Binary",
+    "byte_size": 5712
   },
   {
     "res_path": "res:/staticdata/asteroidcountbytypeidbeltid.static",
@@ -169,35 +199,40 @@
   },
   {
     "res_path": "res:/staticdata/asteroidcountbytypeidroomiddungeonid.static",
-    "cdn_relative_path": "56/56135192ce1df942_1fae79ec0c78e7682b8ec1309af2dec7",
-    "md5": "1fae79ec0c78e7682b8ec1309af2dec7",
-    "uncompressed_bytes": 91153,
-    "compressed_bytes": 18171,
-    "format": "SQLite3"
+    "cdn_relative_path": "56/56135192ce1df942_44c9c91807762902e374cbca8f746965",
+    "md5": "44c9c91807762902e374cbca8f746965",
+    "uncompressed_bytes": 91301,
+    "compressed_bytes": 18251,
+    "format": "SQLite3",
+    "byte_size": 91301
   },
   {
     "res_path": "res:/staticdata/asteroidtypesbysolarsystemid.pickle",
-    "cdn_relative_path": "3f/3f555d74faee466f_8f9f9b1e28c0670a443b630c6408c590",
-    "md5": "8f9f9b1e28c0670a443b630c6408c590",
-    "uncompressed_bytes": 96712,
-    "compressed_bytes": 15496,
-    "format": "Pickle/Binary"
+    "cdn_relative_path": "3f/3f555d74faee466f_3a649c2572f621d73ded8c7150b99060",
+    "md5": "3a649c2572f621d73ded8c7150b99060",
+    "uncompressed_bytes": 96610,
+    "compressed_bytes": 15372,
+    "format": "Pickle/Binary",
+    "byte_size": 96610,
+    "record_count": 3974
   },
   {
     "res_path": "res:/staticdata/atoms.fsdbinary",
-    "cdn_relative_path": "fb/fbb84fe028009f1b_7157224e7f66d7b34479141a2472b2e9",
-    "md5": "7157224e7f66d7b34479141a2472b2e9",
-    "uncompressed_bytes": 242304,
-    "compressed_bytes": 55511,
-    "format": "FSD Binary"
+    "cdn_relative_path": "fb/fbb84fe028009f1b_863e7ed4be3666c430e4c9ddfa5e0254",
+    "md5": "863e7ed4be3666c430e4c9ddfa5e0254",
+    "uncompressed_bytes": 249336,
+    "compressed_bytes": 57402,
+    "format": "FSD Binary",
+    "byte_size": 249336
   },
   {
     "res_path": "res:/staticdata/audiometadata.fsdbinary",
-    "cdn_relative_path": "7a/7a5727bdc2e00558_7cd1529bfae563976af43f5b818a869e",
-    "md5": "7cd1529bfae563976af43f5b818a869e",
-    "uncompressed_bytes": 2699512,
-    "compressed_bytes": 776543,
-    "format": "FSD Binary"
+    "cdn_relative_path": "7a/7a5727bdc2e00558_df9059728758b50ef1ec3e66243f5be4",
+    "md5": "df9059728758b50ef1ec3e66243f5be4",
+    "uncompressed_bytes": 2699432,
+    "compressed_bytes": 778603,
+    "format": "FSD Binary",
+    "byte_size": 2699432
   },
   {
     "res_path": "res:/staticdata/billboards.fsdbinary",
@@ -225,27 +260,32 @@
   },
   {
     "res_path": "res:/staticdata/blueprints.static",
-    "cdn_relative_path": "f0/f016514b481ba503_c142b1ab411960075f24559ed2843109",
-    "md5": "c142b1ab411960075f24559ed2843109",
-    "uncompressed_bytes": 4612096,
-    "compressed_bytes": 557880,
-    "format": "SQLite3"
+    "cdn_relative_path": "f0/f016514b481ba503_36d180e19773cf174810d162fa956142",
+    "md5": "36d180e19773cf174810d162fa956142",
+    "uncompressed_bytes": 4644864,
+    "compressed_bytes": 563393,
+    "format": "SQLite3",
+    "byte_size": 4644864,
+    "record_count": 11518
   },
   {
     "res_path": "res:/staticdata/blueprintsbymaterialtypeids.pickle",
-    "cdn_relative_path": "c5/c5b749387d56555f_d7128aa3e2572d1372afecf6d819f5b8",
-    "md5": "d7128aa3e2572d1372afecf6d819f5b8",
-    "uncompressed_bytes": 131702,
-    "compressed_bytes": 57236,
-    "format": "Pickle/Binary"
+    "cdn_relative_path": "c5/c5b749387d56555f_e1aa2b0ded38e7739db23adbf8db61cc",
+    "md5": "e1aa2b0ded38e7739db23adbf8db61cc",
+    "uncompressed_bytes": 133259,
+    "compressed_bytes": 57722,
+    "format": "Pickle/Binary",
+    "byte_size": 133259,
+    "record_count": 1728
   },
   {
     "res_path": "res:/staticdata/brackets.static",
-    "cdn_relative_path": "b1/b1cdddf09f0c7cfe_1352c0194023fdd015ec6123bdee6cea",
-    "md5": "1352c0194023fdd015ec6123bdee6cea",
-    "uncompressed_bytes": 18455,
-    "compressed_bytes": 4838,
-    "format": "SQLite3"
+    "cdn_relative_path": "b1/b1cdddf09f0c7cfe_c6ad40d960e97de2d0a13b8be1df67a9",
+    "md5": "c6ad40d960e97de2d0a13b8be1df67a9",
+    "uncompressed_bytes": 18551,
+    "compressed_bytes": 4864,
+    "format": "SQLite3",
+    "byte_size": 18551
   },
   {
     "res_path": "res:/staticdata/bracketsbycategory.static",
@@ -257,11 +297,12 @@
   },
   {
     "res_path": "res:/staticdata/bracketsbygroup.static",
-    "cdn_relative_path": "19/191f6d893742b1ae_80c2635242d5cee2cd63bb54f9b0a9d9",
-    "md5": "80c2635242d5cee2cd63bb54f9b0a9d9",
-    "uncompressed_bytes": 9394,
-    "compressed_bytes": 3335,
-    "format": "SQLite3"
+    "cdn_relative_path": "19/191f6d893742b1ae_79bbcb3056b27611ee9e319aeb6c8f0d",
+    "md5": "79bbcb3056b27611ee9e319aeb6c8f0d",
+    "uncompressed_bytes": 9698,
+    "compressed_bytes": 3422,
+    "format": "SQLite3",
+    "byte_size": 9698
   },
   {
     "res_path": "res:/staticdata/bracketsbytype.static",
@@ -273,11 +314,12 @@
   },
   {
     "res_path": "res:/staticdata/careerpaths.fsdbinary",
-    "cdn_relative_path": "09/09a50202a37e7a7f_0ff6705b8c800e74f1bf39b4f67b44b2",
-    "md5": "0ff6705b8c800e74f1bf39b4f67b44b2",
-    "uncompressed_bytes": 283,
-    "compressed_bytes": 219,
-    "format": "FSD Binary"
+    "cdn_relative_path": "09/09a50202a37e7a7f_ac9e43e08865f56fa1f8145f582db7b7",
+    "md5": "ac9e43e08865f56fa1f8145f582db7b7",
+    "uncompressed_bytes": 272,
+    "compressed_bytes": 206,
+    "format": "FSD Binary",
+    "byte_size": 272
   },
   {
     "res_path": "res:/staticdata/categories.fsdbinary",
@@ -289,11 +331,12 @@
   },
   {
     "res_path": "res:/staticdata/certificates.static",
-    "cdn_relative_path": "a8/a8ae8f1d778dfd07_5a4326db67028b6cf56e9df3ec90d560",
-    "md5": "5a4326db67028b6cf56e9df3ec90d560",
-    "uncompressed_bytes": 161213,
-    "compressed_bytes": 19718,
-    "format": "SQLite3"
+    "cdn_relative_path": "a8/a8ae8f1d778dfd07_3e8483264d9f6fb5e14ca6ff8083be8a",
+    "md5": "3e8483264d9f6fb5e14ca6ff8083be8a",
+    "uncompressed_bytes": 165977,
+    "compressed_bytes": 20113,
+    "format": "SQLite3",
+    "byte_size": 165977
   },
   {
     "res_path": "res:/staticdata/challengeconditions.fsdbinary",
@@ -353,11 +396,12 @@
   },
   {
     "res_path": "res:/staticdata/character_portraitresources.fsdbinary",
-    "cdn_relative_path": "4b/4bf99da1084f4a09_2c0738bd30d45af5272989fc6b0c89c6",
-    "md5": "2c0738bd30d45af5272989fc6b0c89c6",
-    "uncompressed_bytes": 11430,
-    "compressed_bytes": 1433,
-    "format": "FSD Binary"
+    "cdn_relative_path": "4b/4bf99da1084f4a09_9fb07d773a96b8f92ba1326b3f369c05",
+    "md5": "9fb07d773a96b8f92ba1326b3f369c05",
+    "uncompressed_bytes": 12638,
+    "compressed_bytes": 1624,
+    "format": "FSD Binary",
+    "byte_size": 12638
   },
   {
     "res_path": "res:/staticdata/character_resources.fsdbinary",
@@ -393,11 +437,13 @@
   },
   {
     "res_path": "res:/staticdata/clonegrades.static",
-    "cdn_relative_path": "d6/d650a8ea71b2f13c_411f07a0276ee8f957d460953830597c",
-    "md5": "411f07a0276ee8f957d460953830597c",
+    "cdn_relative_path": "d6/d650a8ea71b2f13c_c8f1c14b9fd3b5dfdb7b643aa169732f",
+    "md5": "c8f1c14b9fd3b5dfdb7b643aa169732f",
     "uncompressed_bytes": 49152,
-    "compressed_bytes": 1632,
-    "format": "SQLite3"
+    "compressed_bytes": 1635,
+    "format": "SQLite3",
+    "byte_size": 49152,
+    "record_count": 4
   },
   {
     "res_path": "res:/staticdata/commandsets.fsdbinary",
@@ -409,19 +455,21 @@
   },
   {
     "res_path": "res:/staticdata/community_track_templates.fsdbinary",
-    "cdn_relative_path": "52/528620806fbd0bba_91771921ed4acdce31dee2da9bcb67b6",
-    "md5": "91771921ed4acdce31dee2da9bcb67b6",
-    "uncompressed_bytes": 224,
-    "compressed_bytes": 198,
-    "format": "FSD Binary"
+    "cdn_relative_path": "52/528620806fbd0bba_5759b461273f973967ed58efbb482ba2",
+    "md5": "5759b461273f973967ed58efbb482ba2",
+    "uncompressed_bytes": 208,
+    "compressed_bytes": 188,
+    "format": "FSD Binary",
+    "byte_size": 208
   },
   {
     "res_path": "res:/staticdata/compressibletypes.fsdbinary",
-    "cdn_relative_path": "12/1247e6a934b317e2_f1755fef79b786790691b9aef8eea694",
-    "md5": "f1755fef79b786790691b9aef8eea694",
-    "uncompressed_bytes": 4296,
-    "compressed_bytes": 1551,
-    "format": "FSD Binary"
+    "cdn_relative_path": "12/1247e6a934b317e2_a893ebb87b5f1fa1561ee752233342b0",
+    "md5": "a893ebb87b5f1fa1561ee752233342b0",
+    "uncompressed_bytes": 7096,
+    "compressed_bytes": 1913,
+    "format": "FSD Binary",
+    "byte_size": 7096
   },
   {
     "res_path": "res:/staticdata/constellations.schema",
@@ -433,11 +481,12 @@
   },
   {
     "res_path": "res:/staticdata/constellations.static",
-    "cdn_relative_path": "f5/f5d54e32f23ee5df_3e823eedee3555ba314029c22bdfba10",
-    "md5": "3e823eedee3555ba314029c22bdfba10",
-    "uncompressed_bytes": 135948,
-    "compressed_bytes": 64362,
-    "format": "SQLite3"
+    "cdn_relative_path": "f5/f5d54e32f23ee5df_10dee3ee2c36bb73f388dfc315687f78",
+    "md5": "10dee3ee2c36bb73f388dfc315687f78",
+    "uncompressed_bytes": 135964,
+    "compressed_bytes": 64388,
+    "format": "SQLite3",
+    "byte_size": 135964
   },
   {
     "res_path": "res:/staticdata/contenttags.fsdbinary",
@@ -489,11 +538,12 @@
   },
   {
     "res_path": "res:/staticdata/conversations.fsdbinary",
-    "cdn_relative_path": "b1/b182f5ecf3fa7471_c1e6da3bd83185bc67a90812504639b0",
-    "md5": "c1e6da3bd83185bc67a90812504639b0",
-    "uncompressed_bytes": 319116,
-    "compressed_bytes": 62195,
-    "format": "FSD Binary"
+    "cdn_relative_path": "b1/b182f5ecf3fa7471_4101adb9f42a999e6366ba3c0b914627",
+    "md5": "4101adb9f42a999e6366ba3c0b914627",
+    "uncompressed_bytes": 320850,
+    "compressed_bytes": 62567,
+    "format": "FSD Binary",
+    "byte_size": 320850
   },
   {
     "res_path": "res:/staticdata/corporationactivities.fsdbinary",
@@ -521,11 +571,12 @@
   },
   {
     "res_path": "res:/staticdata/crates.fsdbinary",
-    "cdn_relative_path": "6a/6ae0d188c7d57d6b_5f5d1dca29bf7bbf6823e02772392d68",
-    "md5": "5f5d1dca29bf7bbf6823e02772392d68",
-    "uncompressed_bytes": 133320,
-    "compressed_bytes": 18871,
-    "format": "FSD Binary"
+    "cdn_relative_path": "6a/6ae0d188c7d57d6b_f529b78d5e4105fa25e6b9f71a607590",
+    "md5": "f529b78d5e4105fa25e6b9f71a607590",
+    "uncompressed_bytes": 135423,
+    "compressed_bytes": 19294,
+    "format": "FSD Binary",
+    "byte_size": 135423
   },
   {
     "res_path": "res:/staticdata/currencybuckets.fsdbinary",
@@ -537,11 +588,13 @@
   },
   {
     "res_path": "res:/staticdata/dbuffcollections.static",
-    "cdn_relative_path": "f9/f9f241d8c3a11761_3379982d3adc3875b76e364fe3213838",
-    "md5": "3379982d3adc3875b76e364fe3213838",
-    "uncompressed_bytes": 139264,
-    "compressed_bytes": 14669,
-    "format": "SQLite3"
+    "cdn_relative_path": "f9/f9f241d8c3a11761_e03156e7cf5a1199c22ec3184e863f26",
+    "md5": "e03156e7cf5a1199c22ec3184e863f26",
+    "uncompressed_bytes": 184320,
+    "compressed_bytes": 22171,
+    "format": "SQLite3",
+    "byte_size": 184320,
+    "record_count": 373
   },
   {
     "res_path": "res:/staticdata/defaultoverviews.fsdbinary",
@@ -561,11 +614,12 @@
   },
   {
     "res_path": "res:/staticdata/dialogs.static",
-    "cdn_relative_path": "e9/e9bad7ecd80e0d2c_fb291004ed6c80d8373b53391f0fd9c6",
-    "md5": "fb291004ed6c80d8373b53391f0fd9c6",
-    "uncompressed_bytes": 317606,
-    "compressed_bytes": 91825,
-    "format": "SQLite3"
+    "cdn_relative_path": "e9/e9bad7ecd80e0d2c_9faa7c7b81d66ab2d3f2e8faa44e6624",
+    "md5": "9faa7c7b81d66ab2d3f2e8faa44e6624",
+    "uncompressed_bytes": 318420,
+    "compressed_bytes": 92038,
+    "format": "SQLite3",
+    "byte_size": 318420
   },
   {
     "res_path": "res:/staticdata/dogmaattributecategories.fsdbinary",
@@ -577,19 +631,21 @@
   },
   {
     "res_path": "res:/staticdata/dogmaattributes.fsdbinary",
-    "cdn_relative_path": "c9/c951789095f4c052_8f658ee70ec0b2d603c1a52ba5419214",
-    "md5": "8f658ee70ec0b2d603c1a52ba5419214",
-    "uncompressed_bytes": 451325,
-    "compressed_bytes": 106824,
-    "format": "FSD Binary"
+    "cdn_relative_path": "c9/c951789095f4c052_7e3f1f00e4a4239f23f78cdb0f68be72",
+    "md5": "7e3f1f00e4a4239f23f78cdb0f68be72",
+    "uncompressed_bytes": 459424,
+    "compressed_bytes": 108858,
+    "format": "FSD Binary",
+    "byte_size": 459424
   },
   {
     "res_path": "res:/staticdata/dogmaeffects.fsdbinary",
-    "cdn_relative_path": "5c/5c1c739beec2a6c5_51daaba4f96e32fc95768ec49aa20bec",
-    "md5": "51daaba4f96e32fc95768ec49aa20bec",
-    "uncompressed_bytes": 877864,
-    "compressed_bytes": 140814,
-    "format": "FSD Binary"
+    "cdn_relative_path": "5c/5c1c739beec2a6c5_beb0202f2ad79ec6559d6710ca685f73",
+    "md5": "beb0202f2ad79ec6559d6710ca685f73",
+    "uncompressed_bytes": 883744,
+    "compressed_bytes": 143130,
+    "format": "FSD Binary",
+    "byte_size": 883744
   },
   {
     "res_path": "res:/staticdata/dogmaunits.fsdbinary",
@@ -601,27 +657,30 @@
   },
   {
     "res_path": "res:/staticdata/dungeonenvironmenttemplates.fsdbinary",
-    "cdn_relative_path": "6a/6a5d71136831ab3b_8f49bbe04d23f605d3982aae4b573601",
-    "md5": "8f49bbe04d23f605d3982aae4b573601",
-    "uncompressed_bytes": 11816,
-    "compressed_bytes": 2371,
-    "format": "FSD Binary"
+    "cdn_relative_path": "6a/6a5d71136831ab3b_bb88b4e73bb93d6d34bdca1ec5675b5a",
+    "md5": "bb88b4e73bb93d6d34bdca1ec5675b5a",
+    "uncompressed_bytes": 11408,
+    "compressed_bytes": 2342,
+    "format": "FSD Binary",
+    "byte_size": 11408
   },
   {
     "res_path": "res:/staticdata/dungeonobjectives.fsdbinary",
-    "cdn_relative_path": "81/819e465925d4efd3_a9f9e9bf643e0411d983cdd8a3552ea5",
-    "md5": "a9f9e9bf643e0411d983cdd8a3552ea5",
-    "uncompressed_bytes": 8024,
-    "compressed_bytes": 1767,
-    "format": "FSD Binary"
+    "cdn_relative_path": "81/819e465925d4efd3_d7063a59edd9dcbe08430f728e59c97f",
+    "md5": "d7063a59edd9dcbe08430f728e59c97f",
+    "uncompressed_bytes": 8256,
+    "compressed_bytes": 1807,
+    "format": "FSD Binary",
+    "byte_size": 8256
   },
   {
     "res_path": "res:/staticdata/dungeons.fsdbinary",
-    "cdn_relative_path": "f4/f4992887a8a2937e_2e5bc11b9de86e15181fca48e43b69ba",
-    "md5": "2e5bc11b9de86e15181fca48e43b69ba",
-    "uncompressed_bytes": 52395840,
-    "compressed_bytes": 9125211,
-    "format": "FSD Binary"
+    "cdn_relative_path": "f4/f4992887a8a2937e_2db3e3807d5d0e79b3d9472932aa69ec",
+    "md5": "2db3e3807d5d0e79b3d9472932aa69ec",
+    "uncompressed_bytes": 52800752,
+    "compressed_bytes": 9198713,
+    "format": "FSD Binary",
+    "byte_size": 52800752
   },
   {
     "res_path": "res:/staticdata/dusticons.static",
@@ -745,19 +804,21 @@
   },
   {
     "res_path": "res:/staticdata/explosionbucketids.fsdbinary",
-    "cdn_relative_path": "94/94d493514e49d904_6e1901ca533ddbf1a7be3d593bff6321",
-    "md5": "6e1901ca533ddbf1a7be3d593bff6321",
-    "uncompressed_bytes": 16336,
-    "compressed_bytes": 3163,
-    "format": "FSD Binary"
+    "cdn_relative_path": "94/94d493514e49d904_a85dd8f413f6668743bdaf8bb3d38364",
+    "md5": "a85dd8f413f6668743bdaf8bb3d38364",
+    "uncompressed_bytes": 16512,
+    "compressed_bytes": 3196,
+    "format": "FSD Binary",
+    "byte_size": 16512
   },
   {
     "res_path": "res:/staticdata/explosionids.fsdbinary",
-    "cdn_relative_path": "ec/ec453bb82cde4926_ed9c3dcdea9b2b43ca54a5264fd8e5be",
-    "md5": "ed9c3dcdea9b2b43ca54a5264fd8e5be",
-    "uncompressed_bytes": 9088,
-    "compressed_bytes": 1851,
-    "format": "FSD Binary"
+    "cdn_relative_path": "ec/ec453bb82cde4926_c3e2053d335396de50c459a8d0d87ed5",
+    "md5": "c3e2053d335396de50c459a8d0d87ed5",
+    "uncompressed_bytes": 8754,
+    "compressed_bytes": 1818,
+    "format": "FSD Binary",
+    "byte_size": 8754
   },
   {
     "res_path": "res:/staticdata/factions.fsdbinary",
@@ -785,27 +846,40 @@
   },
   {
     "res_path": "res:/staticdata/fighterabilities.static",
-    "cdn_relative_path": "4a/4a2d3f8fdea01bca_79df7cd57376f58758ac973adb7854d7",
-    "md5": "79df7cd57376f58758ac973adb7854d7",
+    "cdn_relative_path": "4a/4a2d3f8fdea01bca_67a76d3e3b0e8e1c2d7157c4df401b75",
+    "md5": "67a76d3e3b0e8e1c2d7157c4df401b75",
     "uncompressed_bytes": 32768,
     "compressed_bytes": 1734,
-    "format": "SQLite3"
+    "format": "SQLite3",
+    "byte_size": 32768,
+    "record_count": 36
   },
   {
     "res_path": "res:/staticdata/fighterabilitiesbytype.static",
-    "cdn_relative_path": "61/61e4f3091016e61b_16dd7659cf9671d61c47372454a37f46",
-    "md5": "16dd7659cf9671d61c47372454a37f46",
+    "cdn_relative_path": "61/61e4f3091016e61b_ab97eeaeb501766e3ed02ca85bcde02a",
+    "md5": "ab97eeaeb501766e3ed02ca85bcde02a",
     "uncompressed_bytes": 45056,
-    "compressed_bytes": 2705,
-    "format": "SQLite3"
+    "compressed_bytes": 2711,
+    "format": "SQLite3",
+    "byte_size": 45056,
+    "record_count": 94
+  },
+  {
+    "res_path": "res:/staticdata/fittings.fsdbinary",
+    "format": "FSD Binary",
+    "cdn_relative_path": "18/18d60ef924de9dc7_eea53ba0363bc0e0a68858d9109929ff",
+    "md5": "eea53ba0363bc0e0a68858d9109929ff",
+    "byte_size": 11644,
+    "uncompressed_bytes": 11644
   },
   {
     "res_path": "res:/staticdata/gastypesbydungeonid.static",
-    "cdn_relative_path": "59/5931efb3ede7c85f_cfb897bbf828bf286069bd78caa366e8",
-    "md5": "cfb897bbf828bf286069bd78caa366e8",
+    "cdn_relative_path": "59/5931efb3ede7c85f_1047a8e0bc73ba7e022a94c0855e0b65",
+    "md5": "1047a8e0bc73ba7e022a94c0855e0b65",
     "uncompressed_bytes": 1958,
     "compressed_bytes": 890,
-    "format": "SQLite3"
+    "format": "SQLite3",
+    "byte_size": 1958
   },
   {
     "res_path": "res:/staticdata/globaltypes.fsdbinary",
@@ -825,11 +899,12 @@
   },
   {
     "res_path": "res:/staticdata/graphicids.fsdbinary",
-    "cdn_relative_path": "93/93b769c4ef6215a9_016ae914e50fa2839fe1082616d91ec4",
-    "md5": "016ae914e50fa2839fe1082616d91ec4",
-    "uncompressed_bytes": 1535928,
-    "compressed_bytes": 198669,
-    "format": "FSD Binary"
+    "cdn_relative_path": "93/93b769c4ef6215a9_c0f3795c024ea7991a913962e06f93b0",
+    "md5": "c0f3795c024ea7991a913962e06f93b0",
+    "uncompressed_bytes": 1545176,
+    "compressed_bytes": 200454,
+    "format": "FSD Binary",
+    "byte_size": 1545176
   },
   {
     "res_path": "res:/staticdata/graphiclocations.fsdbinary",
@@ -841,11 +916,12 @@
   },
   {
     "res_path": "res:/staticdata/graphicmaterialsets.fsdbinary",
-    "cdn_relative_path": "92/92b370a7f73925e9_64863474ca850a1652f71fbacfae5e0b",
-    "md5": "64863474ca850a1652f71fbacfae5e0b",
-    "uncompressed_bytes": 243457,
-    "compressed_bytes": 53709,
-    "format": "FSD Binary"
+    "cdn_relative_path": "92/92b370a7f73925e9_cb6402e63e4ac3b1d757103b4b8a8bd5",
+    "md5": "cb6402e63e4ac3b1d757103b4b8a8bd5",
+    "uncompressed_bytes": 245392,
+    "compressed_bytes": 53911,
+    "format": "FSD Binary",
+    "byte_size": 245392
   },
   {
     "res_path": "res:/staticdata/groupgraphics.fsdbinary",
@@ -865,11 +941,12 @@
   },
   {
     "res_path": "res:/staticdata/groups.fsdbinary",
-    "cdn_relative_path": "b1/b198644fdc5397f3_4cf208f333399bca302f8c14921e1da4",
-    "md5": "4cf208f333399bca302f8c14921e1da4",
-    "uncompressed_bytes": 70936,
-    "compressed_bytes": 15237,
-    "format": "FSD Binary"
+    "cdn_relative_path": "b1/b198644fdc5397f3_998721935770f7dfd60fc70df4a31a74",
+    "md5": "998721935770f7dfd60fc70df4a31a74",
+    "uncompressed_bytes": 71912,
+    "compressed_bytes": 15460,
+    "format": "FSD Binary",
+    "byte_size": 71912
   },
   {
     "res_path": "res:/staticdata/huecategories.fsdbinary",
@@ -889,67 +966,81 @@
   },
   {
     "res_path": "res:/staticdata/iconids.fsdbinary",
-    "cdn_relative_path": "ee/ee9645c859e4670e_52ac1339c7a1cd0270e8df2d4d9020a4",
-    "md5": "52ac1339c7a1cd0270e8df2d4d9020a4",
-    "uncompressed_bytes": 546952,
-    "compressed_bytes": 81264,
-    "format": "FSD Binary"
+    "cdn_relative_path": "ee/ee9645c859e4670e_24014c26400c0259ad663418e6215b2a",
+    "md5": "24014c26400c0259ad663418e6215b2a",
+    "uncompressed_bytes": 553236,
+    "compressed_bytes": 82324,
+    "format": "FSD Binary",
+    "byte_size": 553236
   },
   {
     "res_path": "res:/staticdata/industry_activities.static",
-    "cdn_relative_path": "cf/cf39879e8576d0bb_c132b2aa352d18b5a685b6fcb96df95b",
-    "md5": "c132b2aa352d18b5a685b6fcb96df95b",
+    "cdn_relative_path": "cf/cf39879e8576d0bb_460a1a09796f4cae49f5900bb53afc5f",
+    "md5": "460a1a09796f4cae49f5900bb53afc5f",
     "uncompressed_bytes": 24576,
-    "compressed_bytes": 840,
-    "format": "SQLite3"
+    "compressed_bytes": 835,
+    "format": "SQLite3",
+    "byte_size": 24576,
+    "record_count": 6
   },
   {
     "res_path": "res:/staticdata/industry_activity_modifier_sources.static",
-    "cdn_relative_path": "8d/8d0a225a112080f4_f57eed2f9502e5650be3018e8ff29aaf",
-    "md5": "f57eed2f9502e5650be3018e8ff29aaf",
+    "cdn_relative_path": "8d/8d0a225a112080f4_77b7baef1ff2caaa2e744f4431ad57b3",
+    "md5": "77b7baef1ff2caaa2e744f4431ad57b3",
     "uncompressed_bytes": 77824,
-    "compressed_bytes": 6070,
-    "format": "SQLite3"
+    "compressed_bytes": 6054,
+    "format": "SQLite3",
+    "byte_size": 77824,
+    "record_count": 220
   },
   {
     "res_path": "res:/staticdata/industry_activity_target_filters.static",
-    "cdn_relative_path": "92/9299cb77f6cae635_8528df44ac28cb3da0bd31db1b608efc",
-    "md5": "8528df44ac28cb3da0bd31db1b608efc",
+    "cdn_relative_path": "92/9299cb77f6cae635_59d724530019adbf784d90873e5b6747",
+    "md5": "59d724530019adbf784d90873e5b6747",
     "uncompressed_bytes": 24576,
     "compressed_bytes": 1261,
-    "format": "SQLite3"
+    "format": "SQLite3",
+    "byte_size": 24576,
+    "record_count": 18
   },
   {
     "res_path": "res:/staticdata/industry_assembly_lines.static",
-    "cdn_relative_path": "25/2551232a8388c69e_57c25af25a9b2af8d50fa47ad0898cd1",
-    "md5": "57c25af25a9b2af8d50fa47ad0898cd1",
+    "cdn_relative_path": "25/2551232a8388c69e_b8ae4cc20e436a3c479e337a481f63a1",
+    "md5": "b8ae4cc20e436a3c479e337a481f63a1",
     "uncompressed_bytes": 385024,
-    "compressed_bytes": 16430,
-    "format": "SQLite3"
+    "compressed_bytes": 16425,
+    "format": "SQLite3",
+    "byte_size": 385024,
+    "record_count": 146
   },
   {
     "res_path": "res:/staticdata/industry_installation_types.static",
-    "cdn_relative_path": "24/24cbb4648f9cff2c_2e748b84f826048db06068f9935289e6",
-    "md5": "2e748b84f826048db06068f9935289e6",
+    "cdn_relative_path": "24/24cbb4648f9cff2c_f1756d7247eeabbb09d33c643d2a8883",
+    "md5": "f1756d7247eeabbb09d33c643d2a8883",
     "uncompressed_bytes": 40960,
-    "compressed_bytes": 2928,
-    "format": "SQLite3"
+    "compressed_bytes": 2921,
+    "format": "SQLite3",
+    "byte_size": 40960,
+    "record_count": 102
   },
   {
     "res_path": "res:/staticdata/infobubbles.static",
-    "cdn_relative_path": "07/07df8a3489660b9e_cf2212228051fb33526ffa1d0b19bca2",
-    "md5": "cf2212228051fb33526ffa1d0b19bca2",
-    "uncompressed_bytes": 389120,
-    "compressed_bytes": 33440,
-    "format": "SQLite3"
+    "cdn_relative_path": "07/07df8a3489660b9e_e4c69d0725a8278e5a2c3d9793bd6b89",
+    "md5": "e4c69d0725a8278e5a2c3d9793bd6b89",
+    "uncompressed_bytes": 409600,
+    "compressed_bytes": 35003,
+    "format": "SQLite3",
+    "byte_size": 409600,
+    "record_count": 5
   },
   {
     "res_path": "res:/staticdata/itemtraderrecipes.fsdbinary",
-    "cdn_relative_path": "57/573dc30dc35aaa37_f1f2a40ef0070eda09473d257d83d4e0",
-    "md5": "f1f2a40ef0070eda09473d257d83d4e0",
-    "uncompressed_bytes": 104384,
-    "compressed_bytes": 21837,
-    "format": "FSD Binary"
+    "cdn_relative_path": "57/573dc30dc35aaa37_1bea31735420e4358f15c04ae8375e4e",
+    "md5": "1bea31735420e4358f15c04ae8375e4e",
+    "uncompressed_bytes": 122256,
+    "compressed_bytes": 25325,
+    "format": "FSD Binary",
+    "byte_size": 122256
   },
   {
     "res_path": "res:/staticdata/jumps.schema",
@@ -961,11 +1052,12 @@
   },
   {
     "res_path": "res:/staticdata/jumps.static",
-    "cdn_relative_path": "cf/cf4829ec2741484c_ee3d12afbd4c05d628e0fb497aec990c",
-    "md5": "ee3d12afbd4c05d628e0fb497aec990c",
-    "uncompressed_bytes": 454289,
-    "compressed_bytes": 243482,
-    "format": "SQLite3"
+    "cdn_relative_path": "cf/cf4829ec2741484c_8c8f0868f98f4c6d79a499fcdcb948ea",
+    "md5": "8c8f0868f98f4c6d79a499fcdcb948ea",
+    "uncompressed_bytes": 454419,
+    "compressed_bytes": 243573,
+    "format": "SQLite3",
+    "byte_size": 454419
   },
   {
     "res_path": "res:/staticdata/landmarks.static",
@@ -977,27 +1069,30 @@
   },
   {
     "res_path": "res:/staticdata/locationcache.static",
-    "cdn_relative_path": "77/7720ad06644c124a_e04d46f1623cbd9d95cbe396740a34a1",
-    "md5": "e04d46f1623cbd9d95cbe396740a34a1",
-    "uncompressed_bytes": 5773406,
-    "compressed_bytes": 1536933,
-    "format": "SQLite3"
+    "cdn_relative_path": "77/7720ad06644c124a_b5583746be1862145ba24c5abac47f35",
+    "md5": "b5583746be1862145ba24c5abac47f35",
+    "uncompressed_bytes": 5773466,
+    "compressed_bytes": 1537002,
+    "format": "SQLite3",
+    "byte_size": 5773466
   },
   {
     "res_path": "res:/staticdata/manufacturableitems.fsdbinary",
-    "cdn_relative_path": "4e/4eb491e5ad07a063_89b40fd1c22f0c0e06458b36834cc2ce",
-    "md5": "89b40fd1c22f0c0e06458b36834cc2ce",
-    "uncompressed_bytes": 19592,
-    "compressed_bytes": 10435,
-    "format": "FSD Binary"
+    "cdn_relative_path": "4e/4eb491e5ad07a063_d587466e16979f9d59bccc50f91a3aaf",
+    "md5": "d587466e16979f9d59bccc50f91a3aaf",
+    "uncompressed_bytes": 19732,
+    "compressed_bytes": 10537,
+    "format": "FSD Binary",
+    "byte_size": 19732
   },
   {
     "res_path": "res:/staticdata/marketgroups.fsdbinary",
-    "cdn_relative_path": "5b/5be8d79bd5183137_e833d901399439ecca435d039a22c462",
-    "md5": "e833d901399439ecca435d039a22c462",
-    "uncompressed_bytes": 76160,
-    "compressed_bytes": 24224,
-    "format": "FSD Binary"
+    "cdn_relative_path": "5b/5be8d79bd5183137_523c83adea8ddefa8ce0604532b37c46",
+    "md5": "523c83adea8ddefa8ce0604532b37c46",
+    "uncompressed_bytes": 76564,
+    "compressed_bytes": 24318,
+    "format": "FSD Binary",
+    "byte_size": 76564
   },
   {
     "res_path": "res:/staticdata/menuhighlights.fsdbinary",
@@ -1009,11 +1104,12 @@
   },
   {
     "res_path": "res:/staticdata/metagroups.fsdbinary",
-    "cdn_relative_path": "d7/d7393f79f4b57234_20d30e22d51debd9e46795d1da61a248",
-    "md5": "20d30e22d51debd9e46795d1da61a248",
-    "uncompressed_bytes": 984,
-    "compressed_bytes": 553,
-    "format": "FSD Binary"
+    "cdn_relative_path": "d7/d7393f79f4b57234_e5d7b9bc4ebba361b47482fc049ea4a4",
+    "md5": "e5d7b9bc4ebba361b47482fc049ea4a4",
+    "uncompressed_bytes": 1177,
+    "compressed_bytes": 647,
+    "format": "FSD Binary",
+    "byte_size": 1177
   },
   {
     "res_path": "res:/staticdata/missions.fsdbinary",
@@ -1041,19 +1137,21 @@
   },
   {
     "res_path": "res:/staticdata/newfeatures.fsdbinary",
-    "cdn_relative_path": "17/17f40eeed2d111a6_873041b3df903830391a78722f27626d",
-    "md5": "873041b3df903830391a78722f27626d",
-    "uncompressed_bytes": 45243,
-    "compressed_bytes": 10486,
-    "format": "FSD Binary"
+    "cdn_relative_path": "17/17f40eeed2d111a6_34986609db6b7db38a67117227092b6c",
+    "md5": "34986609db6b7db38a67117227092b6c",
+    "uncompressed_bytes": 45723,
+    "compressed_bytes": 10648,
+    "format": "FSD Binary",
+    "byte_size": 45723
   },
   {
     "res_path": "res:/staticdata/nodegraphs.fsdbinary",
-    "cdn_relative_path": "44/4459db12c57cef74_a59acb0775423a99b82cb8a3f8e697a6",
-    "md5": "a59acb0775423a99b82cb8a3f8e697a6",
-    "uncompressed_bytes": 8254048,
-    "compressed_bytes": 1774664,
-    "format": "FSD Binary"
+    "cdn_relative_path": "44/4459db12c57cef74_47f6dcd13c29d0dc8a0f0c0fb072ca3c",
+    "md5": "47f6dcd13c29d0dc8a0f0c0fb072ca3c",
+    "uncompressed_bytes": 8326464,
+    "compressed_bytes": 1790877,
+    "format": "FSD Binary",
+    "byte_size": 8326464
   },
   {
     "res_path": "res:/staticdata/nodetypes.fsdbinary",
@@ -1065,27 +1163,30 @@
   },
   {
     "res_path": "res:/staticdata/npccharacters.fsdbinary",
-    "cdn_relative_path": "11/1173a5d23f0b6098_9a5efb6a18648808dc9b1ccffd8259ac",
-    "md5": "9a5efb6a18648808dc9b1ccffd8259ac",
-    "uncompressed_bytes": 1873264,
-    "compressed_bytes": 316033,
-    "format": "FSD Binary"
+    "cdn_relative_path": "11/1173a5d23f0b6098_6d3fbe7fa66a91272ba7079e9fb96eeb",
+    "md5": "6d3fbe7fa66a91272ba7079e9fb96eeb",
+    "uncompressed_bytes": 1862672,
+    "compressed_bytes": 316712,
+    "format": "FSD Binary",
+    "byte_size": 1862672
   },
   {
     "res_path": "res:/staticdata/npccorporationdivisions.fsdbinary",
-    "cdn_relative_path": "4d/4d27ec7dbfe8a8ea_93187a5122247235d7f5b0e0d9c28719",
-    "md5": "93187a5122247235d7f5b0e0d9c28719",
-    "uncompressed_bytes": 1075,
-    "compressed_bytes": 537,
-    "format": "FSD Binary"
+    "cdn_relative_path": "4d/4d27ec7dbfe8a8ea_b2473565cf89a3db46284ff72545a133",
+    "md5": "b2473565cf89a3db46284ff72545a133",
+    "uncompressed_bytes": 1064,
+    "compressed_bytes": 532,
+    "format": "FSD Binary",
+    "byte_size": 1064
   },
   {
     "res_path": "res:/staticdata/npccorporations.fsdbinary",
-    "cdn_relative_path": "71/714922d2bf762025_e9d96d94be7659382d37b3d175c5a115",
-    "md5": "e9d96d94be7659382d37b3d175c5a115",
-    "uncompressed_bytes": 713054,
-    "compressed_bytes": 143563,
-    "format": "FSD Binary"
+    "cdn_relative_path": "71/714922d2bf762025_52545db280225f4f920edd435b90c624",
+    "md5": "52545db280225f4f920edd435b90c624",
+    "uncompressed_bytes": 725750,
+    "compressed_bytes": 144565,
+    "format": "FSD Binary",
+    "byte_size": 725750
   },
   {
     "res_path": "res:/staticdata/npcstationtaxmodifier.fsdbinary",
@@ -1105,11 +1206,12 @@
   },
   {
     "res_path": "res:/staticdata/objectivechains.fsdbinary",
-    "cdn_relative_path": "97/977c5f990677327a_26370e8225ff55f03f34a6101bbe3e60",
-    "md5": "26370e8225ff55f03f34a6101bbe3e60",
-    "uncompressed_bytes": 239256,
-    "compressed_bytes": 36746,
-    "format": "FSD Binary"
+    "cdn_relative_path": "97/977c5f990677327a_79043335f254c6ecd4e14ea477b9e60b",
+    "md5": "79043335f254c6ecd4e14ea477b9e60b",
+    "uncompressed_bytes": 243495,
+    "compressed_bytes": 37351,
+    "format": "FSD Binary",
+    "byte_size": 243495
   },
   {
     "res_path": "res:/staticdata/objectives.fsdbinary",
@@ -1177,11 +1279,12 @@
   },
   {
     "res_path": "res:/staticdata/oretypesbydungeonid.static",
-    "cdn_relative_path": "2c/2ca016d009870be6_7ccd58c48605109b492fa98dee34f0d3",
-    "md5": "7ccd58c48605109b492fa98dee34f0d3",
-    "uncompressed_bytes": 24674,
-    "compressed_bytes": 6623,
-    "format": "SQLite3"
+    "cdn_relative_path": "2c/2ca016d009870be6_8aa940615ca45b1d1fff2bbf998e74c4",
+    "md5": "8aa940615ca45b1d1fff2bbf998e74c4",
+    "uncompressed_bytes": 24738,
+    "compressed_bytes": 6634,
+    "format": "SQLite3",
+    "byte_size": 24738
   },
   {
     "res_path": "res:/staticdata/paints.fsdbinary",
@@ -1193,11 +1296,12 @@
   },
   {
     "res_path": "res:/staticdata/paperdolls.fsdbinary",
-    "cdn_relative_path": "7a/7a4009deb8d60d63_93cd9062f2899b300414d0ae0a992058",
-    "md5": "93cd9062f2899b300414d0ae0a992058",
-    "uncompressed_bytes": 13178168,
-    "compressed_bytes": 2229352,
-    "format": "FSD Binary"
+    "cdn_relative_path": "7a/7a4009deb8d60d63_bb5507f6a885e5bd7451c020979c026b",
+    "md5": "bb5507f6a885e5bd7451c020979c026b",
+    "uncompressed_bytes": 13196368,
+    "compressed_bytes": 2229636,
+    "format": "FSD Binary",
+    "byte_size": 13196368
   },
   {
     "res_path": "res:/staticdata/petitionevents.fsdbinary",
@@ -1281,27 +1385,30 @@
   },
   {
     "res_path": "res:/staticdata/regions.static",
-    "cdn_relative_path": "a7/a74cde5df2632168_923dafe7fcfcf122b65e55bfe4974298",
-    "md5": "923dafe7fcfcf122b65e55bfe4974298",
-    "uncompressed_bytes": 55704,
-    "compressed_bytes": 22110,
-    "format": "SQLite3"
+    "cdn_relative_path": "a7/a74cde5df2632168_4c2246e1431dfec2bcf5b8df5e65028b",
+    "md5": "4c2246e1431dfec2bcf5b8df5e65028b",
+    "uncompressed_bytes": 55712,
+    "compressed_bytes": 22116,
+    "format": "SQLite3",
+    "byte_size": 55712
   },
   {
     "res_path": "res:/staticdata/requiredskillsfortypes.fsdbinary",
-    "cdn_relative_path": "4f/4ffb0ff003a82e5a_58d4d940882dbe8af6531268679d87e4",
-    "md5": "58d4d940882dbe8af6531268679d87e4",
-    "uncompressed_bytes": 863720,
-    "compressed_bytes": 137391,
-    "format": "FSD Binary"
+    "cdn_relative_path": "4f/4ffb0ff003a82e5a_509710bd1f6845cc660456724099e178",
+    "md5": "509710bd1f6845cc660456724099e178",
+    "uncompressed_bytes": 875280,
+    "compressed_bytes": 139344,
+    "format": "FSD Binary",
+    "byte_size": 875280
   },
   {
     "res_path": "res:/staticdata/requiredskillsindex.fsdbinary",
-    "cdn_relative_path": "09/09aa87b13429bd4a_d3d5a70e4b51d03b2bab6ae17857c6d0",
-    "md5": "d3d5a70e4b51d03b2bab6ae17857c6d0",
-    "uncompressed_bytes": 266136,
-    "compressed_bytes": 68604,
-    "format": "FSD Binary"
+    "cdn_relative_path": "09/09aa87b13429bd4a_4e61bf17c3c66981c14d4443d4e016b7",
+    "md5": "4e61bf17c3c66981c14d4443d4e016b7",
+    "uncompressed_bytes": 272216,
+    "compressed_bytes": 70044,
+    "format": "FSD Binary",
+    "byte_size": 272216
   },
   {
     "res_path": "res:/staticdata/schematics.fsdbinary",
@@ -1329,11 +1436,12 @@
   },
   {
     "res_path": "res:/staticdata/seasonalcampaignsloginrewards.fsdbinary",
-    "cdn_relative_path": "8c/8ce67f2de2a6e775_6761598164933b945de712fa8fb3be37",
-    "md5": "6761598164933b945de712fa8fb3be37",
-    "uncompressed_bytes": 227128,
-    "compressed_bytes": 23543,
-    "format": "FSD Binary"
+    "cdn_relative_path": "8c/8ce67f2de2a6e775_70811ecc345722f21ea6104dc9aaa366",
+    "md5": "70811ecc345722f21ea6104dc9aaa366",
+    "uncompressed_bytes": 228579,
+    "compressed_bytes": 24059,
+    "format": "FSD Binary",
+    "byte_size": 228579
   },
   {
     "res_path": "res:/staticdata/seasonselection.fsdbinary",
@@ -1361,11 +1469,12 @@
   },
   {
     "res_path": "res:/staticdata/ship_cosmetic_slot_configurations.fsdbinary",
-    "cdn_relative_path": "cb/cb0ffd0e7475ab52_e80fcb9f97f19c62bb4c699d9cfabae4",
-    "md5": "e80fcb9f97f19c62bb4c699d9cfabae4",
-    "uncompressed_bytes": 952,
-    "compressed_bytes": 595,
-    "format": "FSD Binary"
+    "cdn_relative_path": "cb/cb0ffd0e7475ab52_9352bb592d7a6a0ab35b2fb02e4ddb30",
+    "md5": "9352bb592d7a6a0ab35b2fb02e4ddb30",
+    "uncompressed_bytes": 960,
+    "compressed_bytes": 599,
+    "format": "FSD Binary",
+    "byte_size": 960
   },
   {
     "res_path": "res:/staticdata/ship_cosmetic_slot_names.fsdbinary",
@@ -1409,19 +1518,21 @@
   },
   {
     "res_path": "res:/staticdata/ship_skin_design_components.fsdbinary",
-    "cdn_relative_path": "e8/e859a30fe5f91b67_8d7fe8dfba7cdfc2a2970e87dd03e27d",
-    "md5": "8d7fe8dfba7cdfc2a2970e87dd03e27d",
-    "uncompressed_bytes": 216574,
-    "compressed_bytes": 38771,
-    "format": "FSD Binary"
+    "cdn_relative_path": "e8/e859a30fe5f91b67_c0315c9b8170d36064a6c5e71dbe2008",
+    "md5": "c0315c9b8170d36064a6c5e71dbe2008",
+    "uncompressed_bytes": 222725,
+    "compressed_bytes": 39831,
+    "format": "FSD Binary",
+    "byte_size": 222725
   },
   {
     "res_path": "res:/staticdata/ship_skin_design_components_post_process.fsdbinary",
-    "cdn_relative_path": "07/078958b593583fae_af4c8de790665114cfe09c5e7e739fd6",
-    "md5": "af4c8de790665114cfe09c5e7e739fd6",
-    "uncompressed_bytes": 23848,
-    "compressed_bytes": 6354,
-    "format": "FSD Binary"
+    "cdn_relative_path": "07/078958b593583fae_70eb5be6dd4f699e5c4b6b9901882f80",
+    "md5": "70eb5be6dd4f699e5c4b6b9901882f80",
+    "uncompressed_bytes": 24520,
+    "compressed_bytes": 6529,
+    "format": "FSD Binary",
+    "byte_size": 24520
   },
   {
     "res_path": "res:/staticdata/ship_skin_design_tier_thresholds.fsdbinary",
@@ -1433,19 +1544,21 @@
   },
   {
     "res_path": "res:/staticdata/shipcosmeticlicenses.fsdbinary",
-    "cdn_relative_path": "e2/e26b5bd1e9cc3ae8_200f37bbeeb02381f51623c298c9e76b",
-    "md5": "200f37bbeeb02381f51623c298c9e76b",
-    "uncompressed_bytes": 20800,
-    "compressed_bytes": 6880,
-    "format": "FSD Binary"
+    "cdn_relative_path": "e2/e26b5bd1e9cc3ae8_f6739d8da1a00ff884c7238e5e458de3",
+    "md5": "f6739d8da1a00ff884c7238e5e458de3",
+    "uncompressed_bytes": 21008,
+    "compressed_bytes": 6941,
+    "format": "FSD Binary",
+    "byte_size": 21008
   },
   {
     "res_path": "res:/staticdata/skillplans.fsdbinary",
-    "cdn_relative_path": "c7/c7def626ddcfd142_38da240ee9fa6fc94f4993218d5aac53",
-    "md5": "38da240ee9fa6fc94f4993218d5aac53",
-    "uncompressed_bytes": 28788,
-    "compressed_bytes": 4253,
-    "format": "FSD Binary"
+    "cdn_relative_path": "c7/c7def626ddcfd142_90f65a037af19486b6abca27951b7602",
+    "md5": "90f65a037af19486b6abca27951b7602",
+    "uncompressed_bytes": 28652,
+    "compressed_bytes": 4255,
+    "format": "FSD Binary",
+    "byte_size": 28652
   },
   {
     "res_path": "res:/staticdata/skilltags.static",
@@ -1465,27 +1578,33 @@
   },
   {
     "res_path": "res:/staticdata/skinlicenses.static",
-    "cdn_relative_path": "dd/ddec335c5166e1ce_b33d9b7807f5c1f6ee5a0b1356f5cefc",
-    "md5": "b33d9b7807f5c1f6ee5a0b1356f5cefc",
-    "uncompressed_bytes": 1974272,
-    "compressed_bytes": 489879,
-    "format": "SQLite3"
+    "cdn_relative_path": "dd/ddec335c5166e1ce_f709b5a1c5941a7d56b31ec645732aca",
+    "md5": "f709b5a1c5941a7d56b31ec645732aca",
+    "uncompressed_bytes": 1982464,
+    "compressed_bytes": 489276,
+    "format": "SQLite3",
+    "byte_size": 1982464,
+    "record_count": 23816
   },
   {
     "res_path": "res:/staticdata/skinmaterials.static",
-    "cdn_relative_path": "04/04fe8caf2896e754_b45be968bcf4e622b04f7b7c66abedd2",
-    "md5": "b45be968bcf4e622b04f7b7c66abedd2",
-    "uncompressed_bytes": 184320,
-    "compressed_bytes": 41490,
-    "format": "SQLite3"
+    "cdn_relative_path": "04/04fe8caf2896e754_0e646a3c4c9c80e9a4697443b948f9c6",
+    "md5": "0e646a3c4c9c80e9a4697443b948f9c6",
+    "uncompressed_bytes": 188416,
+    "compressed_bytes": 41725,
+    "format": "SQLite3",
+    "byte_size": 188416,
+    "record_count": 1756
   },
   {
     "res_path": "res:/staticdata/skins.static",
-    "cdn_relative_path": "cb/cb291acd32af7f27_8766f6f7c2d721c998f9fcf9e7413506",
-    "md5": "8766f6f7c2d721c998f9fcf9e7413506",
-    "uncompressed_bytes": 4087808,
-    "compressed_bytes": 1036218,
-    "format": "SQLite3"
+    "cdn_relative_path": "cb/cb291acd32af7f27_956290ee965ebec91b3b3bde95774dc6",
+    "md5": "956290ee965ebec91b3b3bde95774dc6",
+    "uncompressed_bytes": 4096000,
+    "compressed_bytes": 1041896,
+    "format": "SQLite3",
+    "byte_size": 4096000,
+    "record_count": 43600
   },
   {
     "res_path": "res:/staticdata/skyboxeffects.fsdbinary",
@@ -1497,27 +1616,30 @@
   },
   {
     "res_path": "res:/staticdata/solarsystemcontent.static",
-    "cdn_relative_path": "33/33c83a8c56c485e6_2ddb08422c48a5a0b7eabcece1e2fcf0",
-    "md5": "2ddb08422c48a5a0b7eabcece1e2fcf0",
-    "uncompressed_bytes": 92396316,
-    "compressed_bytes": 46369920,
-    "format": "SQLite3"
+    "cdn_relative_path": "33/33c83a8c56c485e6_cd475121ad0b04d8aeae942275367e79",
+    "md5": "cd475121ad0b04d8aeae942275367e79",
+    "uncompressed_bytes": 92396985,
+    "compressed_bytes": 46370511,
+    "format": "SQLite3",
+    "byte_size": 92396985
   },
   {
     "res_path": "res:/staticdata/soundids.fsdbinary",
-    "cdn_relative_path": "97/971b7df9729eb54e_ee04e8241837c12838d952c3e5169494",
-    "md5": "ee04e8241837c12838d952c3e5169494",
-    "uncompressed_bytes": 101640,
-    "compressed_bytes": 20583,
-    "format": "FSD Binary"
+    "cdn_relative_path": "97/971b7df9729eb54e_9b865521933943414c8b1b3119a6dcb5",
+    "md5": "9b865521933943414c8b1b3119a6dcb5",
+    "uncompressed_bytes": 90076,
+    "compressed_bytes": 19456,
+    "format": "FSD Binary",
+    "byte_size": 90076
   },
   {
     "res_path": "res:/staticdata/spacecomponentsbytype.fsdbinary",
-    "cdn_relative_path": "f2/f26def0295b69084_643351e4bc72beea1e4f1715c85ced6c",
-    "md5": "643351e4bc72beea1e4f1715c85ced6c",
-    "uncompressed_bytes": 23733840,
-    "compressed_bytes": 1496747,
-    "format": "FSD Binary"
+    "cdn_relative_path": "f2/f26def0295b69084_7ac3206aa5ae0b8d15bbed163633fa27",
+    "md5": "7ac3206aa5ae0b8d15bbed163633fa27",
+    "uncompressed_bytes": 24222776,
+    "compressed_bytes": 1526841,
+    "format": "FSD Binary",
+    "byte_size": 24222776
   },
   {
     "res_path": "res:/staticdata/spaceobjecthighlights.fsdbinary",
@@ -1529,19 +1651,22 @@
   },
   {
     "res_path": "res:/staticdata/starmapcache.pickle",
-    "cdn_relative_path": "2e/2edadfca55978bdf_a9831434566044a0d64837669f38e3ba",
-    "md5": "a9831434566044a0d64837669f38e3ba",
-    "uncompressed_bytes": 2165420,
-    "compressed_bytes": 787098,
-    "format": "Pickle/Binary"
+    "cdn_relative_path": "2e/2edadfca55978bdf_cb17447f256b394f8806f843ddac8e73",
+    "md5": "cb17447f256b394f8806f843ddac8e73",
+    "uncompressed_bytes": 2165580,
+    "compressed_bytes": 787182,
+    "format": "Pickle/Binary",
+    "byte_size": 2165580,
+    "record_count": 4
   },
   {
     "res_path": "res:/staticdata/stationoperations.fsdbinary",
-    "cdn_relative_path": "1d/1d852c36f59d1b53_2cb6c08352df5edce329a0bd209689e3",
-    "md5": "2cb6c08352df5edce329a0bd209689e3",
-    "uncompressed_bytes": 14984,
-    "compressed_bytes": 2728,
-    "format": "FSD Binary"
+    "cdn_relative_path": "1d/1d852c36f59d1b53_d42de2b536c0e789000f53820f3224e0",
+    "md5": "d42de2b536c0e789000f53820f3224e0",
+    "uncompressed_bytes": 15144,
+    "compressed_bytes": 2747,
+    "format": "FSD Binary",
+    "byte_size": 15144
   },
   {
     "res_path": "res:/staticdata/stationservices.fsdbinary",
@@ -1577,11 +1702,12 @@
   },
   {
     "res_path": "res:/staticdata/systems.static",
-    "cdn_relative_path": "89/893086ea542ec98f_040b16dee14ada60b51dbc0cc5560606",
-    "md5": "040b16dee14ada60b51dbc0cc5560606",
-    "uncompressed_bytes": 1906081,
-    "compressed_bytes": 650208,
-    "format": "SQLite3"
+    "cdn_relative_path": "89/893086ea542ec98f_c860c9d3c6b32fcaa966f7a933c2806b",
+    "md5": "c860c9d3c6b32fcaa966f7a933c2806b",
+    "uncompressed_bytes": 1906117,
+    "compressed_bytes": 650218,
+    "format": "SQLite3",
+    "byte_size": 1906117
   },
   {
     "res_path": "res:/staticdata/tags.fsdbinary",
@@ -1609,35 +1735,39 @@
   },
   {
     "res_path": "res:/staticdata/typedogma.fsdbinary",
-    "cdn_relative_path": "a5/a5dc877f4620b63d_e8b313eff5dcd9b701f711832ba872ac",
-    "md5": "e8b313eff5dcd9b701f711832ba872ac",
-    "uncompressed_bytes": 12335088,
-    "compressed_bytes": 1316997,
-    "format": "FSD Binary"
+    "cdn_relative_path": "a5/a5dc877f4620b63d_66e63210baf717a5fe611584a9e4f0e8",
+    "md5": "66e63210baf717a5fe611584a9e4f0e8",
+    "uncompressed_bytes": 12529504,
+    "compressed_bytes": 1336948,
+    "format": "FSD Binary",
+    "byte_size": 12529504
   },
   {
     "res_path": "res:/staticdata/typelist.fsdbinary",
-    "cdn_relative_path": "60/6037055f6c367f5b_a9b0d860d4a1e888d63433894a07a58c",
-    "md5": "a9b0d860d4a1e888d63433894a07a58c",
-    "uncompressed_bytes": 152323,
-    "compressed_bytes": 39356,
-    "format": "FSD Binary"
+    "cdn_relative_path": "60/6037055f6c367f5b_59c14b762cc07b0e7a4dced263126b4b",
+    "md5": "59c14b762cc07b0e7a4dced263126b4b",
+    "uncompressed_bytes": 155839,
+    "compressed_bytes": 40430,
+    "format": "FSD Binary",
+    "byte_size": 155839
   },
   {
     "res_path": "res:/staticdata/typematerials.fsdbinary",
-    "cdn_relative_path": "66/66c8b3f32a0b893b_942b79afca25a92bb2cb246de8831579",
-    "md5": "942b79afca25a92bb2cb246de8831579",
-    "uncompressed_bytes": 1127336,
-    "compressed_bytes": 193450,
-    "format": "FSD Binary"
+    "cdn_relative_path": "66/66c8b3f32a0b893b_96c00784f5f91a6499d3f9bc5893a995",
+    "md5": "96c00784f5f91a6499d3f9bc5893a995",
+    "uncompressed_bytes": 1096056,
+    "compressed_bytes": 193347,
+    "format": "FSD Binary",
+    "byte_size": 1096056
   },
   {
     "res_path": "res:/staticdata/types.fsdbinary",
-    "cdn_relative_path": "3c/3cc5bf8ff5e9099a_c0ee9c292aa113737029c9ec63503233",
-    "md5": "c0ee9c292aa113737029c9ec63503233",
-    "uncompressed_bytes": 9169272,
-    "compressed_bytes": 1186461,
-    "format": "FSD Binary"
+    "cdn_relative_path": "3c/3cc5bf8ff5e9099a_3238db13e1322ae90344d927e7f62c92",
+    "md5": "3238db13e1322ae90344d927e7f62c92",
+    "uncompressed_bytes": 9278984,
+    "compressed_bytes": 1200305,
+    "format": "FSD Binary",
+    "byte_size": 9278984
   },
   {
     "res_path": "res:/staticdata/uiblinks.fsdbinary",
@@ -1657,11 +1787,12 @@
   },
   {
     "res_path": "res:/staticdata/uihelppointers.fsdbinary",
-    "cdn_relative_path": "dc/dcf815fc60f31b6e_c8e58b3105e7e641cd484dec5f2aaae2",
-    "md5": "c8e58b3105e7e641cd484dec5f2aaae2",
-    "uncompressed_bytes": 34841,
-    "compressed_bytes": 7990,
-    "format": "FSD Binary"
+    "cdn_relative_path": "dc/dcf815fc60f31b6e_a38917b55b3ce3cb63009a36fc204da6",
+    "md5": "a38917b55b3ce3cb63009a36fc204da6",
+    "uncompressed_bytes": 35579,
+    "compressed_bytes": 8176,
+    "format": "FSD Binary",
+    "byte_size": 35579
   },
   {
     "res_path": "res:/staticdata/uihidingtemplates.fsdbinary",

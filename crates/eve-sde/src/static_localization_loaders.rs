@@ -101,7 +101,7 @@ fn parse_localization_fsd_lang_bytes(
     raw_loc: &[u8],
     needed_ids: Option<&HashSet<u32>>,
 ) -> HashMap<u32, String> {
-    let cap = needed_ids.map_or(308_657, HashSet::len);
+    let cap = needed_ids.map_or(311_618, HashSet::len);
     let mut out = HashMap::with_capacity(cap);
     let lines: Vec<&[u8]> = raw_loc.split(|&b| b == b'\n').collect();
     for pair in lines.windows(2) {
@@ -199,7 +199,7 @@ fn parse_localization_fsd_main_bytes(raw_main: &[u8]) -> Result<LocalizationMain
                 .and_then(|s| s.strip_suffix(&[q]))
                 .and_then(|s| std::str::from_utf8(s).ok())
                 .ok_or_else(|| SdeError::InvalidSchema("invalid main pickle string".into()))?;
-            stack.push(MainPickleVal::Str(inner.to_string()));
+            stack.push(MainPickleVal::Str(unescape_pickle_p0_str(inner)));
         } else if let Some(memo_bytes) = rest.strip_prefix(b"p") {
             if let Ok(mid) = std::str::from_utf8(memo_bytes).unwrap_or("").parse::<u32>() {
                 if mid <= 64 {
@@ -273,6 +273,34 @@ fn parse_localization_fsd_main_bytes(raw_main: &[u8]) -> Result<LocalizationMain
         }
     }
     Ok(LocalizationMainBundle { languages, labels })
+}
+
+fn unescape_pickle_p0_str(s: &str) -> String {
+    if !s.contains('\\') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('t') => out.push('\t'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('\\') => out.push('\\'),
+            Some('\'') => out.push('\''),
+            Some('"') => out.push('"'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 struct FsdLocalizationIds {

@@ -566,12 +566,18 @@ where
     let mut last_eff_str: i64 = 20;
 
     for _step in 0..(grid_size * 12) {
+        let restorer = blockers
+            .iter()
+            .find(|(_, (k, _))| k == "RestorationNode")
+            .map(|(&t, _)| t);
         let suppressor = blockers
             .iter()
             .find(|(_, (k, _))| k == "VirusSuppressor")
             .map(|(&t, _)| t);
         let next_tile = if let Some((ct, _)) = core_tile.filter(|&(_, ccoh)| ccoh <= last_eff_str) {
             ct
+        } else if let Some(rt) = restorer {
+            rt
         } else if let Some((ct, _)) = core_tile {
             if let Some(st) = suppressor { st } else { ct }
         } else if let Some(t) = (0..grid_size)
@@ -594,11 +600,8 @@ where
             st
         } else if let Some((&t, _)) = blockers
             .iter()
-            .filter(|(_, (k, _))| k != "RestorationNode")
             .min_by_key(|(&t, (_, coh))| (*coh, t))
         {
-            t
-        } else if let Some((&t, _)) = blockers.iter().min_by_key(|(&t, (_, coh))| (*coh, t)) {
             t
         } else {
             break;

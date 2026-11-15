@@ -5177,24 +5177,24 @@ async fn test_plan_t2_z4_sde_and_dogma_effect_attestation() {
     let manifest: Value = serde_json::from_str(&manifest_str).expect("parse sde_import_manifest");
 
     assert_eq!(manifest["schema_version"].as_i64(), Some(1));
-    assert_eq!(manifest["client_build"].as_i64(), Some(3_619_879));
-    assert_eq!(manifest["client_release"].as_str(), Some("V24.01"));
+    assert_eq!(manifest["client_build"].as_i64(), Some(3_698_585));
+    assert_eq!(manifest["client_release"].as_str(), Some("V24.02"));
     let resources = manifest["resources"].as_array().expect("resources array");
-    assert_eq!(resources.len(), 213, "SDE manifest must list all 213 client resources");
+    assert_eq!(resources.len(), 215, "SDE manifest must list all 215 client resources");
 
     let tables = manifest["table_counts"].as_object().expect("table_counts object");
-    assert_eq!(tables.get("sde_types").and_then(|v| v.as_i64()), Some(53_288));
-    assert_eq!(tables.get("sde_dogma_effects").and_then(|v| v.as_i64()), Some(3_427));
-    assert_eq!(tables.get("sde_dogma_attributes").and_then(|v| v.as_i64()), Some(2_871));
-    assert_eq!(tables.get("sde_celestials").and_then(|v| v.as_i64()), Some(475_859));
+    assert_eq!(tables.get("sde_types").and_then(|v| v.as_i64()), Some(53_925));
+    assert_eq!(tables.get("sde_dogma_effects").and_then(|v| v.as_i64()), Some(3_499));
+    assert_eq!(tables.get("sde_dogma_attributes").and_then(|v| v.as_i64()), Some(2_928));
+    assert_eq!(tables.get("sde_celestials").and_then(|v| v.as_i64()), Some(475_863));
     assert_eq!(tables.get("sde_solar_systems").and_then(|v| v.as_i64()), Some(8_490));
-    assert_eq!(tables.get("sde_blueprints").and_then(|v| v.as_i64()), Some(5_100));
+    assert_eq!(tables.get("sde_blueprints").and_then(|v| v.as_i64()), Some(5_135));
     assert_eq!(tables.get("sde_missions").and_then(|v| v.as_i64()), Some(2_892));
 
     // 2. Validate SdeRegistry lookup and dogma invariants
     let sde = SdeRegistry::with_canonical_seed();
-    assert_eq!(sde.effects.len(), 3_427, "All 3,427 dogma effects loaded");
-    assert_eq!(sde.attributes.len(), 2_871, "All 2,871 dogma attributes loaded");
+    assert_eq!(sde.effects.len(), 3_499, "All 3,499 dogma effects loaded");
+    assert_eq!(sde.attributes.len(), 2_928, "All 2,928 dogma attributes loaded");
     assert!(sde.types.contains_key(&1230), "Veldspar (1230) exists");
     assert!(sde.types.contains_key(&34), "Tritanium (34) exists");
     assert!(sde.types.contains_key(&670), "Capsule (670) exists");

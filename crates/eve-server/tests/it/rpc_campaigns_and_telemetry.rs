@@ -564,7 +564,7 @@ async fn test_milestones_and_community_tracks() {
     let tid = 10_001_i64;
     assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.unwrap(), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(0)]));
 
-    // Event scheduler starts Vanguard Nemesis tale 466 in 30_000_142; starting alone does not advance track
+    // Event scheduler starts Vanguard Nemesis tale 488 in 30_000_142; starting alone does not advance track
     let encode_tale_req = |spawn_tpl: u64, sys_id: Option<u64>| -> Vec<u8> {
         let mut req = encode_seq_req(spawn_tpl);
         if let Some(sid) = sys_id {
@@ -574,13 +574,13 @@ async fn test_milestones_and_community_tracks() {
         }
         req
     };
-    assert_eq!(crate::quasar_progression_complete::quasar_rpc(&ctx, &mut gm_sess, "eve.tale.api.StartTaleRequest", encode_tale_req(466, Some(30_000_142))).await.status_code, 200);
+    assert_eq!(crate::quasar_progression_complete::quasar_rpc(&ctx, &mut gm_sess, "eve.tale.api.StartTaleRequest", encode_tale_req(488, Some(30_000_142))).await.status_code, 200);
     assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.unwrap(), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(0)]));
     rpc(&ctx, &mut sess, "publicGatewaySvc", "Subscribe", &[]).await.expect("Subscribe");
     let mut stream_rx = ctx.quasar_gateway.take_stream_receiver(sess.session_id).expect("stream");
     while stream_rx.try_recv().is_ok() {}
     ctx.quasar_gateway.progression.extra.on_system_tale_encounter_completed(30_000_142, "Data", 999_999, 1, ctx.now_unix(), &ctx.quasar_gateway);
-    assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.unwrap(), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(0)]), "mismatched Data site must not advance CombatAnomaly tale 466");
+    assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.unwrap(), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(0)]), "mismatched Data site must not advance CombatAnomaly tale 488");
     assert!(stream_rx.try_recv().is_err(), "mismatched site must not emit ProgressedNotice");
 
     // Non-admin pilot undocks in 30_000_142 and destroys live PvE anomaly waves via dogmaIM.Activate -> advances track (1, 0) -> (1, 1)
@@ -592,8 +592,8 @@ async fn test_milestones_and_community_tracks() {
         s.items.insert(sb_id, eve_db::InventoryItemRecord { item_id: sb_id, type_id: 3993, owner_id: PILOT_1, location_id: ship_id, flag: InventoryFlag::HiSlot1, quantity: 1, singleton: true, ..Default::default() });
         s.module_online_states.insert(sb_id, true);
     });
-    let active_tales = rpc(&ctx, &mut sess, "taleMgr", "get_active_tales_by_template", &[PyRep::Integer(466)]).await.expect("get_active_tales_by_template");
-    assert!(matches!(&active_tales, PyRep::List(items) if items.len() == 1), "non-admin pilot sees active tale 466");
+    let active_tales = rpc(&ctx, &mut sess, "taleMgr", "get_active_tales_by_template", &[PyRep::Integer(488)]).await.expect("get_active_tales_by_template");
+    assert!(matches!(&active_tales, PyRep::List(items) if items.len() == 1), "non-admin pilot sees active tale 488");
     let anoms = rpc(&ctx, &mut sess, "scanSvc", "GetCombatAnomalyInstances", &[PyRep::Integer(30_000_142)]).await.expect("GetCombatAnomalyInstances");
     let site_id = match &anoms {
         PyRep::List(items) => items.iter().find_map(|it| field(it, "siteID").as_str().map(String::from)).expect("combat anomaly in 30_000_142"),

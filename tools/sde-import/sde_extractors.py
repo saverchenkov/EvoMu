@@ -64,6 +64,8 @@ def build_cfsd_runner(eve_build_dir: Path, work_dir: Path) -> tuple[Path, Path]:
     else:
         libpy_src = bin64_dir / "libpython2.7.dylib"
         libpy_dst = work_dir / "libpython2.7.dylib"
+        if libpy_dst.is_symlink() and libpy_dst.resolve() != libpy_src.resolve():
+            libpy_dst.unlink()
         if not libpy_dst.exists():
             libpy_dst.symlink_to(libpy_src)
 
@@ -86,7 +88,7 @@ def build_cfsd_runner(eve_build_dir: Path, work_dir: Path) -> tuple[Path, Path]:
 
     code_ccp = eve_build_dir / "code.ccp"
     code_pyc_zip = work_dir / "code_pyc.zip"
-    if not code_pyc_zip.exists():
+    if not code_pyc_zip.exists() or code_ccp.stat().st_mtime > code_pyc_zip.stat().st_mtime:
         seen: set[str] = set()
         with zipfile.ZipFile(code_ccp, "r") as zsrc, zipfile.ZipFile(
             code_pyc_zip, "w", zipfile.ZIP_STORED

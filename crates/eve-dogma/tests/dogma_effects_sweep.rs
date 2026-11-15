@@ -42,8 +42,8 @@ fn test_t2_dogma_all_effects_and_modifier_info_sweep() {
     ]);
     let root = repo_root();
     let sde = SdeRegistry::with_canonical_seed();
-    assert_eq!(sde.effects.len(), 3_427);
-    assert_eq!(sde.attributes.len(), 2_871);
+    assert_eq!(sde.effects.len(), 3_499);
+    assert_eq!(sde.attributes.len(), 2_928);
 
     // 1. Validate docs/index/dogma_effects.json (2,854 Crucible/V24 effects + 75 VM opcodes + 250 sample_effects)
     let dogma_index_path = root.join("docs/index/dogma_effects.json");
@@ -76,16 +76,16 @@ fn test_t2_dogma_all_effects_and_modifier_info_sweep() {
         assert!(ecat <= 7, "Unexpected sample effectCategory {ecat} on {eid}");
     }
 
-    // 2. Sweep all 3,427 V24.01 Dogma effects in sde.effects (res:/staticdata/dogmaeffects.fsdbinary).
-    //    3,210 effects have modifierInfo entries (5,178 modifier specs total) and are evaluated
+    // 2. Sweep all 3,499 V24.02 Dogma effects in sde.effects (res:/staticdata/dogmaeffects.fsdbinary).
+    //    3,281 effects have modifierInfo entries (5,308 modifier specs total) and are evaluated
     //    both individually (verifying exact expected post-modifier value and domain/location isolation
     //    per modifier spec) and as combined effects (verifying per-effect application and removal).
-    //    The remaining 217 effects are engine/script/slot effects without modifierInfo entries.
+    //    The remaining 218 effects are engine/script/slot effects without modifierInfo entries.
     let mut sorted_eids: Vec<eve_sde::EffectId> = sde.effects.keys().copied().collect();
     sorted_eids.sort_unstable();
-    assert_eq!(sorted_eids.len(), 3_427);
+    assert_eq!(sorted_eids.len(), 3_499);
     assert_eq!(*sorted_eids.first().unwrap(), 4);
-    assert_eq!(*sorted_eids.last().unwrap(), 13_027);
+    assert_eq!(*sorted_eids.last().unwrap(), 13_078);
 
     let mut rep_type_for_group = std::collections::HashMap::<u32, TypeId>::new();
     for (&tid, tinfo) in &sde.types {
@@ -502,15 +502,15 @@ fn test_t2_dogma_all_effects_and_modifier_info_sweep() {
         }
     }
 
-    assert_eq!(attested_effects.len(), 3_427);
+    assert_eq!(attested_effects.len(), 3_499);
     let effect_refs: Vec<&str> = attested_effects.iter().map(|s| s.as_str()).collect();
     for chunk in effect_refs.chunks(500) {
         eve_testkit::attest(chunk);
     }
 
-    assert_eq!(effects_with_modifiers, 3_210);
-    assert_eq!(effects_without_modifiers, 217);
-    assert_eq!(total_modifiers, 5_178);
+    assert_eq!(effects_with_modifiers, 3_281);
+    assert_eq!(effects_without_modifiers, 218);
+    assert_eq!(total_modifiers, 5_308);
     assert_eq!(domain_counts.len(), 6);
     assert_eq!(func_counts.len(), 6);
     assert_eq!(func_counts[&DogmaModifierFunc::EffectStopper], 10);

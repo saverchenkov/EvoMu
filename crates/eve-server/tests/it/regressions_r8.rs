@@ -2112,7 +2112,7 @@ pub(crate) async fn run_planetary_industry_and_structure_regressions(
 
     // parity: plan:D-2
     // Verify O(1) indexed stations map in SdeRegistry and preserved columns
-    assert_eq!(ctx.sde.stations.len(), 5_210);
+    assert_eq!(ctx.sde.stations.len(), 5_211);
     let jita_sta = ctx.sde.stations.get(&60_003_760).expect("Jita 4-4 station");
     assert_eq!(jita_sta.station_id, 60_003_760);
     assert_eq!(jita_sta.solar_system_id, 30_000_142);
@@ -2193,7 +2193,7 @@ pub(crate) async fn run_planetary_industry_and_structure_regressions(
 
     // parity: sde:res:/staticdata/skins.static
     // Verify skin materials and expanded skin fields
-    assert_eq!(ctx.sde.skin_materials.len(), 875);
+    assert_eq!(ctx.sde.skin_materials.len(), 878);
     let smat1 = ctx.sde.skin_materials.get(&1).expect("skin material 1");
     assert_eq!(smat1.skin_material_id, 1);
     assert_eq!(smat1.display_name_id, Some(505346));

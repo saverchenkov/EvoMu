@@ -226,8 +226,8 @@ async fn quasar_community_progression_tales_and_goals() {
     assert!(!notifs.is_empty(), "Track notice should be emitted");
     assert_eq!(notifs[0].payload.as_ref().unwrap().normalized_type_name(), "eve_public.communitytrack.api.ProgressedNotice");
 
-    // Starting Vanguard Nemesis tale 466 emits StartedNotice only (does not advance track); stopping advances track once (+1 -> 26)
-    let start_rsp = quasar_rpc(&ctx, &mut sess, "eve.tale.api.StartTaleRequest", make_tale_start(466, 30_000_142)).await;
+    // Starting Vanguard Nemesis tale 488 emits StartedNotice only (does not advance track); stopping advances track once (+1 -> 26)
+    let start_rsp = quasar_rpc(&ctx, &mut sess, "eve.tale.api.StartTaleRequest", make_tale_start(488, 30_000_142)).await;
     assert_eq!(start_rsp.status_code, STATUS_OK);
     let tale_start_notifs = drain_notices(&mut stream_rx);
     assert_eq!(tale_start_notifs.len(), 1, "StartedNotice should be emitted");
@@ -239,7 +239,7 @@ async fn quasar_community_progression_tales_and_goals() {
     let count_wm = WireMessage::decode(&count_rsp.payload.unwrap().value).expect("decode count response");
     assert_eq!(count_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()), Some(1));
 
-    let stop_rsp = quasar_rpc(&ctx, &mut sess, "eve.tale.api.StopTalesRequest", make_sequential_id_request(466)).await;
+    let stop_rsp = quasar_rpc(&ctx, &mut sess, "eve.tale.api.StopTalesRequest", make_sequential_id_request(488)).await;
     assert_eq!(stop_rsp.status_code, STATUS_OK);
     let tale_stop_notifs = drain_notices(&mut stream_rx);
     assert_eq!(tale_stop_notifs.len(), 2, "ProgressedNotice + StoppedNotice should be emitted on StopTalesRequest");
