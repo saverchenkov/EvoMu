@@ -1217,30 +1217,39 @@ async fn test_gh_1070_docked_board_from_capsule_removes_capsule_and_refreshes_in
         sess_change_frame_idx < cap_item_change_frame_idx,
         "SessionChange frame (idx {sess_change_frame_idx}) must precede OnItemChange frame (idx {cap_item_change_frame_idx})"
     );
+    let is_capsule_tombstone = |args: &[PyRep], old_loc: i64, cap_id: i64| -> bool {
+        let Some(row) = args.first() else {
+            return false;
+        };
+        let item_id = row.dbrow_get("itemID").and_then(|v| v.as_i64());
+        let type_id = row.dbrow_get("typeID").and_then(|v| v.as_i64());
+        let new_loc = row.dbrow_get("locationID").and_then(|v| v.as_i64());
+        let new_flag = row.dbrow_get("flagID").and_then(|v| v.as_i64());
+        let new_qty = row.dbrow_get("quantity").and_then(|v| v.as_i64());
+        let Some(PyRep::Dict(entries)) = args.get(1) else {
+            return false;
+        };
+        let find_change = |ix: i64| {
+            entries
+                .iter()
+                .find_map(|(k, v)| (k == &PyRep::Integer(ix)).then(|| v.as_i64()).flatten())
+        };
+        item_id == Some(cap_id)
+            && type_id == Some(670)
+            && new_loc == Some(6)
+            && new_flag == Some(0)
+            && new_qty == Some(0)
+            && find_change(3) == Some(old_loc)
+            && find_change(4) == Some(4)
+            && find_change(9) == Some(1)
+            && find_change(5).is_none()
+    };
     let notifs = &board_out.notifications;
     assert!(
-        notifs.iter().any(|(ev, args)| {
-            if ev != "OnItemChange" {
-                return false;
-            }
-            let Some(row) = args.first() else {
-                return false;
-            };
-            let item_id = row.dbrow_get("itemID").and_then(|v| v.as_i64());
-            let type_id = row.dbrow_get("typeID").and_then(|v| v.as_i64());
-            let new_loc = row.dbrow_get("locationID").and_then(|v| v.as_i64());
-            let old_loc_ok = args
-                .get(1)
-                .and_then(|c| match c {
-                    PyRep::Dict(entries) => entries.iter().find_map(|(k, v)| {
-                        (k == &PyRep::Integer(3)).then(|| v.as_i64()).flatten()
-                    }),
-                    _ => None,
-                })
-                == Some(station_id);
-            item_id == Some(capsule_id) && type_id == Some(670) && new_loc == Some(6) && old_loc_ok
-        }),
-        "OnItemChange moving capsule to locationJunkyard (6) with ixLocationID (3) = station_id must be emitted"
+        notifs
+            .iter()
+            .any(|(ev, args)| ev == "OnItemChange" && is_capsule_tombstone(args, station_id, capsule_id)),
+        "Canonical OnItemChange tombstone moving capsule to locationJunkyard (6) with flagID=0, quantity=0, and changes {{3: station_id, 4: 4, 9: 1}} (without ixQuantity 5) must be emitted"
     );
 
     // 2. Upwell structure docked: LeaveShip -> Board also removes capsule and emits OnItemChange after SessionChange.
@@ -1310,14 +1319,10 @@ async fn test_gh_1070_docked_board_from_capsule_removes_capsule_and_refreshes_in
     assert!(struct_sess_frame_idx < struct_item_frame_idx);
     let struct_notifs = &struct_board_out.notifications;
     assert!(
-        struct_notifs.iter().any(|(ev, args)| {
-            ev == "OnItemChange"
-                && args.first().is_some_and(|row| {
-                    row.dbrow_get("itemID").and_then(|v| v.as_i64()) == Some(struct_cap_id)
-                        && row.dbrow_get("locationID").and_then(|v| v.as_i64()) == Some(6)
-                })
-        }),
-        "OnItemChange moving structure capsule to locationJunkyard (6)"
+        struct_notifs
+            .iter()
+            .any(|(ev, args)| ev == "OnItemChange" && is_capsule_tombstone(args, structure_id, struct_cap_id)),
+        "Canonical OnItemChange tombstone moving structure capsule to locationJunkyard (6)"
     );
 }
 
