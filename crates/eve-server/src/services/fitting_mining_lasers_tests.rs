@@ -449,8 +449,7 @@ async fn deactivate_active_armor_repairer_defers_removal_and_finishes_paid_cycle
                 flag: InventoryFlag::LoSlot1,
                 quantity: 1,
                 singleton: true,
-                custom_name: None,
-                dynamic_attributes: HashMap::new(),
+                ..Default::default()
             },
         );
         snap.module_online_states.insert(hull_rep_id, true);
