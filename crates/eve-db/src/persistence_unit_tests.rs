@@ -1000,7 +1000,7 @@ fn issue_874_tx_error_hooks_poison_short_circuit_and_next_entity_id_monotonicity
         "persist failure in try_with_mut_snapshot must notify tx error hook (#874)"
     );
     assert!(!repo.with_snapshot(|s| s.char_notes.contains_key(&(90_000_001, 3))));
-    let post_fail_id = repo.with_snapshot(|s| s.next_entity_id);
+    let post_fail_id = repo.entity_ids.current();
     assert!(
         post_fail_id >= allocated_during_fail && post_fail_id > pre_fail_id,
         "entity ID allocator must never reuse IDs from rolled-back try_with_mut_snapshot (pre={pre_fail_id}, alloc={allocated_during_fail}, post={post_fail_id})"
