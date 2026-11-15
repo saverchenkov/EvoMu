@@ -549,3 +549,4 @@ mod xmpp_social_tourney_edge_coverage;
 mod remediate_flagged_fake_pve_econ;
 mod remediate_flagged_fake_quasar_cosmetics;
 mod shadow_client_convergence;
+mod observability_sequencer_ops;

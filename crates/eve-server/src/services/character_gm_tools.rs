@@ -2354,6 +2354,139 @@ pub async fn handle_gm_slash_ext(
         return Some(Ok(PyRep::Real(clamped)));
     }
 
+    if cmd == "/session" || cmd.starts_with("/session ") {
+        let parts: Vec<&str> = cmd.split_whitespace().collect();
+        if parts.get(1).copied() != Some("ledger") {
+            return Some(Err(BridgeRpcError {
+                code: "InvalidArguments".into(),
+                message: "Usage: /session ledger <characterID|characterName|me> [limit]".into(),
+                client_error: None,
+            }));
+        }
+        let Some(target_arg) = parts.get(2).copied() else {
+            return Some(Err(BridgeRpcError {
+                code: "InvalidArguments".into(),
+                message: "Usage: /session ledger <characterID|characterName|me> [limit]".into(),
+                client_error: None,
+            }));
+        };
+        let limit = match parts.get(3) {
+            Some(raw) => match raw.parse::<usize>() {
+                Ok(n) if n > 0 => n.min(crate::flight_recorder::MAX_OUTBOUND_LEDGER_PER_SESSION),
+                _ => {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidArguments".into(),
+                        message: format!("Invalid ledger limit '{raw}'; expected positive integer"),
+                        client_error: None,
+                    }));
+                }
+            },
+            None => 50,
+        };
+
+        let resolved: Option<(i64, u64, String)> = if target_arg.eq_ignore_ascii_case("me") {
+            ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&cid)
+                    .map(|c| (c.character_id, c.user_id, c.name.clone()))
+            }).or_else(|| Some((cid, session.user_id.unwrap_or(0), format!("char:{cid}"))))
+        } else if let Ok(target_cid) = target_arg.parse::<i64>() {
+            ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&target_cid)
+                    .map(|c| (c.character_id, c.user_id, c.name.clone()))
+            })
+        } else {
+            ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .values()
+                    .find(|c| c.name.eq_ignore_ascii_case(target_arg))
+                    .map(|c| (c.character_id, c.user_id, c.name.clone()))
+            })
+        };
+
+        let Some((target_cid, target_uid, target_name)) = resolved else {
+            return Some(Err(BridgeRpcError {
+                code: "CharacterNotFound".into(),
+                message: format!("Character '{target_arg}' not found"),
+                client_error: None,
+            }));
+        };
+
+        let target_sid = if target_cid == cid {
+            Some(session.session_id)
+        } else {
+            ctx.db
+                .get_online_session(target_uid)
+                .filter(|os| os.character_id.is_none() || os.character_id == Some(target_cid))
+                .map(|os| os.session_id)
+        };
+        let Some(target_sid) = target_sid else {
+            return Some(Err(BridgeRpcError {
+                code: "SessionNotFound".into(),
+                message: format!("Character {target_cid} ({target_name}) has no active session"),
+                client_error: None,
+            }));
+        };
+
+        let ledger = ctx.flight_recorder.get_outbound_ledger(target_sid, limit);
+        let stamps = ctx.flight_recorder.get_destiny_stamps(target_sid, limit);
+        let entry_reps: Vec<PyRep> = ledger
+            .iter()
+            .map(|e| {
+                PyRep::keyval([
+                    ("timestampMillis", PyRep::Integer(e.timestamp_millis as i64)),
+                    ("disposition", PyRep::String(e.disposition.to_string())),
+                    ("packetKind", PyRep::String(e.packet_kind.clone())),
+                    ("byteSize", PyRep::Integer(e.byte_size as i64)),
+                    (
+                        "stamp",
+                        e.stamp.map(|s| PyRep::Integer(i64::from(s))).unwrap_or(PyRep::None),
+                    ),
+                    ("reason", PyRep::String(e.reason.clone())),
+                    (
+                        "elapsedMicros",
+                        e.elapsed_since_request_micros
+                            .map(|us| PyRep::Integer(us as i64))
+                            .unwrap_or(PyRep::None),
+                    ),
+                    ("bootstrap", PyRep::Bool(e.bootstrap)),
+                ])
+            })
+            .collect();
+        let stamp_reps: Vec<PyRep> = stamps
+            .iter()
+            .map(|s| {
+                PyRep::keyval([
+                    ("timestampMillis", PyRep::Integer(s.timestamp_millis as i64)),
+                    ("sessionID", PyRep::Integer(s.session_id as i64)),
+                    ("stamp", PyRep::Integer(i64::from(s.stamp))),
+                    ("action", PyRep::String(s.action.clone())),
+                    (
+                        "entityID",
+                        s.entity_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                    ),
+                    (
+                        "clientCurrentTick",
+                        s.client_current_tick
+                            .map(|t| PyRep::Integer(t as i64))
+                            .unwrap_or(PyRep::None),
+                    ),
+                ])
+            })
+            .collect();
+
+        return Some(Ok(PyRep::keyval([
+            ("command", PyRep::String(cmd.to_string())),
+            ("characterID", PyRep::Integer(target_cid)),
+            ("characterName", PyRep::String(target_name)),
+            ("sessionID", PyRep::Integer(target_sid as i64)),
+            ("count", PyRep::Integer(entry_reps.len() as i64)),
+            ("entries", PyRep::List(entry_reps)),
+            ("destinyStamps", PyRep::List(stamp_reps)),
+        ])));
+    }
+
     if let Some(res) = crate::services::notify_emitters_character_services::handle_batch3_gm_slash_cmd(ctx, cid, session.solar_system_id, cmd) {
         return Some(res);
     }

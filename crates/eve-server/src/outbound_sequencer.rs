@@ -68,6 +68,7 @@ pub struct SessionWireState {
     next_epoch: u32,
     pub solar_system_id: Option<u32>,
     pub in_space: bool,
+    pub last_client_tick: Option<u64>,
 }
 
 impl SessionWireState {
@@ -79,7 +80,15 @@ impl SessionWireState {
             next_epoch: 1,
             solar_system_id: None,
             in_space: false,
+            last_client_tick: None,
         }
+    }
+
+    pub fn note_client_tick(&mut self, tick: u64) {
+        self.last_client_tick = Some(match self.last_client_tick {
+            Some(prev) => prev.max(tick),
+            None => tick,
+        });
     }
 
     fn allocate_epoch(&mut self) -> u32 {
@@ -159,62 +168,135 @@ impl SessionWireState {
             }
         }
     }
+}
 
+/// Detailed outcome of evaluating a [`DestinyBatch`] against [`SessionWireState`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum AcceptDestinyOutcome {
+    Accepted(DestinyBatch),
+    Empty,
+    Dropped { epoch: u32, stamp: u32, reason: String },
+}
+
+/// Ledger event emitted by `outbound_sequencer` for flight-recorder attribution (`#1077 §A`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SequencerLedgerEventKind {
+    Dropped,
+    Coalesced,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SequencerLedgerEvent {
+    pub kind: SequencerLedgerEventKind,
+    pub epoch: u32,
+    pub stamp: u32,
+    pub reason: String,
+}
+
+/// Full sequencing output including both outbound wire frames and drop/coalesce ledger events.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SequenceOutcome {
+    pub frames: Vec<OutFrame>,
+    pub events: Vec<SequencerLedgerEvent>,
+}
+
+impl SessionWireState {
     /// Evaluates a candidate `DestinyBatch` against the `DestinyStream` state machine (`ORD-3`,
-    /// `#844`, `#845`), updating `self.destiny` and returning `Some(batch)` if and only if the
-    /// batch may be emitted on the wire.
-    pub fn accept_destiny_batch(&mut self, batch: DestinyBatch) -> Option<DestinyBatch> {
+    /// `#845`, `#1077 §A`), enforcing strict per-epoch stamp monotonicity for non-`SetState` batches.
+    pub fn accept_destiny_batch_with_reason(
+        &mut self,
+        batch: DestinyBatch,
+    ) -> AcceptDestinyOutcome {
         if batch.is_empty() {
-            return None;
+            return AcceptDestinyOutcome::Empty;
         }
+        let batch_epoch = batch.epoch;
+        let batch_stamp = batch.stamp;
         match self.destiny {
-            DestinyStream::Detached => None,
+            DestinyStream::Detached => AcceptDestinyOutcome::Dropped {
+                epoch: batch_epoch,
+                stamp: batch_stamp,
+                reason: "destiny_stream_detached".to_string(),
+            },
             DestinyStream::AwaitingSetState { epoch } => {
-                if batch.epoch != epoch {
-                    return None;
+                if batch_epoch != epoch {
+                    return AcceptDestinyOutcome::Dropped {
+                        epoch: batch_epoch,
+                        stamp: batch_stamp,
+                        reason: format!("epoch_mismatch:{batch_epoch}!={epoch}"),
+                    };
                 }
                 if !batch.has_set_state {
                     // #845 (B7): Do not emit pre-SetState deltas and do NOT reset back to Detached.
-                    return None;
+                    return AcceptDestinyOutcome::Dropped {
+                        epoch: batch_epoch,
+                        stamp: batch_stamp,
+                        reason: "awaiting_set_state".to_string(),
+                    };
                 }
                 self.destiny = DestinyStream::Live {
                     epoch,
-                    set_state_stamp: batch.stamp,
-                    last_stamp: batch.stamp,
+                    set_state_stamp: batch_stamp,
+                    last_stamp: batch_stamp,
                 };
-                Some(batch)
+                AcceptDestinyOutcome::Accepted(batch)
             }
             DestinyStream::Live {
                 epoch,
                 set_state_stamp,
                 last_stamp,
             } => {
-                if batch.epoch != epoch {
-                    return None;
+                if batch_epoch != epoch {
+                    return AcceptDestinyOutcome::Dropped {
+                        epoch: batch_epoch,
+                        stamp: batch_stamp,
+                        reason: format!("epoch_mismatch:{batch_epoch}!={epoch}"),
+                    };
                 }
                 if batch.has_set_state {
-                    let new_last = last_stamp.max(batch.stamp);
+                    let new_last = last_stamp.max(batch_stamp);
                     self.destiny = DestinyStream::Live {
                         epoch,
-                        set_state_stamp: batch.stamp,
+                        set_state_stamp: batch_stamp,
                         last_stamp: new_last,
                     };
-                    Some(batch)
+                    AcceptDestinyOutcome::Accepted(batch)
                 } else {
-                    // #844 (B6): Only drop non-SetState batches that predate the latest SetState
-                    // snapshot for this epoch. Never drop a tick broadcast merely because a direct
-                    // drain already observed a later tick stamp.
-                    if batch.stamp < set_state_stamp {
-                        return None;
+                    if batch_stamp < set_state_stamp {
+                        return AcceptDestinyOutcome::Dropped {
+                            epoch: batch_epoch,
+                            stamp: batch_stamp,
+                            reason: format!(
+                                "stamp_below_set_state:{batch_stamp}<{set_state_stamp}"
+                            ),
+                        };
+                    }
+                    // #1077 §A: Reject any non-SetState batch strictly below last_stamp for this session.
+                    if batch_stamp < last_stamp {
+                        return AcceptDestinyOutcome::Dropped {
+                            epoch: batch_epoch,
+                            stamp: batch_stamp,
+                            reason: format!("stamp_regression:{batch_stamp}<{last_stamp}"),
+                        };
                     }
                     self.destiny = DestinyStream::Live {
                         epoch,
                         set_state_stamp,
-                        last_stamp: last_stamp.max(batch.stamp),
+                        last_stamp: batch_stamp,
                     };
-                    Some(batch)
+                    AcceptDestinyOutcome::Accepted(batch)
                 }
             }
+        }
+    }
+
+    /// Evaluates a candidate `DestinyBatch` against the `DestinyStream` state machine (`ORD-3`,
+    /// `#845`, `#1077 §A`), updating `self.destiny` and returning `Some(batch)` if and only if the
+    /// batch may be emitted on the wire.
+    pub fn accept_destiny_batch(&mut self, batch: DestinyBatch) -> Option<DestinyBatch> {
+        match self.accept_destiny_batch_with_reason(batch) {
+            AcceptDestinyOutcome::Accepted(accepted) => Some(accepted),
+            AcceptDestinyOutcome::Empty | AcceptDestinyOutcome::Dropped { .. } => None,
         }
     }
 }
@@ -310,12 +392,100 @@ pub enum OutFrame {
     },
 }
 
+fn merge_destiny_updates_pyrep(existing: &mut PyRep, incoming: PyRep) -> usize {
+    let incoming_items = match incoming {
+        PyRep::List(items) | PyRep::Tuple(items) => items,
+        PyRep::None => return 0,
+        other => vec![other],
+    };
+    let merged_count = incoming_items.len();
+    match existing {
+        PyRep::List(items) | PyRep::Tuple(items) => {
+            items.extend(incoming_items);
+        }
+        other => {
+            let prev = std::mem::replace(other, PyRep::None);
+            let mut combined = if matches!(prev, PyRep::None) {
+                Vec::with_capacity(merged_count)
+            } else {
+                vec![prev]
+            };
+            combined.extend(incoming_items);
+            *other = PyRep::List(combined);
+        }
+    }
+    merged_count
+}
+
+fn eval_and_push_destiny_batch(
+    state: &mut SessionWireState,
+    batch: DestinyBatch,
+    out: &mut Vec<OutFrame>,
+    events: &mut Vec<SequencerLedgerEvent>,
+) {
+    match state.accept_destiny_batch_with_reason(batch) {
+        AcceptDestinyOutcome::Accepted(accepted) => {
+            if let Some(OutFrame::DoDestinyUpdate {
+                epoch,
+                stamp,
+                has_set_state,
+                updates,
+                wait_for_bubble,
+            }) = out.last_mut()
+            {
+                if *epoch == accepted.epoch && *stamp == accepted.stamp {
+                    *has_set_state |= accepted.has_set_state;
+                    *wait_for_bubble |= accepted.wait_for_bubble;
+                    let merged_entries = merge_destiny_updates_pyrep(updates, accepted.updates);
+                    events.push(SequencerLedgerEvent {
+                        kind: SequencerLedgerEventKind::Coalesced,
+                        epoch: accepted.epoch,
+                        stamp: accepted.stamp,
+                        reason: format!(
+                            "equal_stamp_merge:stamp={}:merged_{merged_entries}_entries",
+                            accepted.stamp
+                        ),
+                    });
+                    return;
+                }
+            }
+            out.push(OutFrame::DoDestinyUpdate {
+                epoch: accepted.epoch,
+                stamp: accepted.stamp,
+                has_set_state: accepted.has_set_state,
+                updates: accepted.updates,
+                wait_for_bubble: accepted.wait_for_bubble,
+            });
+        }
+        AcceptDestinyOutcome::Empty => {}
+        AcceptDestinyOutcome::Dropped {
+            epoch,
+            stamp,
+            reason,
+        } => {
+            events.push(SequencerLedgerEvent {
+                kind: SequencerLedgerEventKind::Dropped,
+                epoch,
+                stamp,
+                reason,
+            });
+        }
+    }
+}
+
 /// Pure function mapping `(SessionWireState, RpcCompletion)` to the exact sequence of outbound
 /// wire frames (`C-3`, `ORD-1..ORD-6`).
 pub fn sequence(state: &mut SessionWireState, done: RpcCompletion) -> Vec<OutFrame> {
+    sequence_with_events(state, done).frames
+}
+
+/// Full sequencing variant returning both outbound wire frames and `dropped` / `coalesced`
+/// ledger events for `FlightRecorder` attribution (`#1077 §A`).
+pub fn sequence_with_events(state: &mut SessionWireState, done: RpcCompletion) -> SequenceOutcome {
     let mut out = Vec::with_capacity(
         2 + done.pending_tick_batches.len() + done.notifications.len(),
     );
+    let mut events = Vec::new();
 
     let mut pending_call_rsp = Some(OutFrame::CallRsp {
         call_id: done.call_id,
@@ -330,26 +500,10 @@ pub fn sequence(state: &mut SessionWireState, done: RpcCompletion) -> Vec<OutFra
     if matches!(destiny_drain, DestinyDrain::Detach { .. }) {
         if let DestinyDrain::Detach { pre_detach } = std::mem::take(&mut destiny_drain) {
             for tick_batch in pending_ticks.drain(..) {
-                if let Some(accepted) = state.accept_destiny_batch(tick_batch) {
-                    out.push(OutFrame::DoDestinyUpdate {
-                        epoch: accepted.epoch,
-                        stamp: accepted.stamp,
-                        has_set_state: accepted.has_set_state,
-                        updates: accepted.updates,
-                        wait_for_bubble: accepted.wait_for_bubble,
-                    });
-                }
+                eval_and_push_destiny_batch(state, tick_batch, &mut out, &mut events);
             }
             if let Some(batch) = pre_detach {
-                if let Some(accepted) = state.accept_destiny_batch(batch) {
-                    out.push(OutFrame::DoDestinyUpdate {
-                        epoch: accepted.epoch,
-                        stamp: accepted.stamp,
-                        has_set_state: accepted.has_set_state,
-                        updates: accepted.updates,
-                        wait_for_bubble: accepted.wait_for_bubble,
-                    });
-                }
+                eval_and_push_destiny_batch(state, batch, &mut out, &mut events);
             }
             state.leave_space();
         }
@@ -376,17 +530,9 @@ pub fn sequence(state: &mut SessionWireState, done: RpcCompletion) -> Vec<OutFra
         }
     }
 
-    // 4. Buffered tick broadcasts followed by post-RPC direct destiny drain (ORD-3, #844, #845).
+    // 4. Buffered tick broadcasts followed by post-RPC direct destiny drain (ORD-3, #845, #1077 §A).
     for tick_batch in pending_ticks {
-        if let Some(accepted) = state.accept_destiny_batch(tick_batch) {
-            out.push(OutFrame::DoDestinyUpdate {
-                epoch: accepted.epoch,
-                stamp: accepted.stamp,
-                has_set_state: accepted.has_set_state,
-                updates: accepted.updates,
-                wait_for_bubble: accepted.wait_for_bubble,
-            });
-        }
+        eval_and_push_destiny_batch(state, tick_batch, &mut out, &mut events);
     }
 
     match destiny_drain {
@@ -395,26 +541,10 @@ pub fn sequence(state: &mut SessionWireState, done: RpcCompletion) -> Vec<OutFra
                 state.in_space = true;
                 state.destiny = DestinyStream::AwaitingSetState { epoch };
             }
-            if let Some(accepted) = state.accept_destiny_batch(set_state) {
-                out.push(OutFrame::DoDestinyUpdate {
-                    epoch: accepted.epoch,
-                    stamp: accepted.stamp,
-                    has_set_state: accepted.has_set_state,
-                    updates: accepted.updates,
-                    wait_for_bubble: accepted.wait_for_bubble,
-                });
-            }
+            eval_and_push_destiny_batch(state, set_state, &mut out, &mut events);
         }
         DestinyDrain::Updates(batch) => {
-            if let Some(accepted) = state.accept_destiny_batch(batch) {
-                out.push(OutFrame::DoDestinyUpdate {
-                    epoch: accepted.epoch,
-                    stamp: accepted.stamp,
-                    has_set_state: accepted.has_set_state,
-                    updates: accepted.updates,
-                    wait_for_bubble: accepted.wait_for_bubble,
-                });
-            }
+            eval_and_push_destiny_batch(state, batch, &mut out, &mut events);
         }
         DestinyDrain::None | DestinyDrain::Detach { .. } => {}
     }
@@ -434,20 +564,49 @@ pub fn sequence(state: &mut SessionWireState, done: RpcCompletion) -> Vec<OutFra
         });
     }
 
-    out
+    SequenceOutcome {
+        frames: out,
+        events,
+    }
 }
 
-/// Sequences a standalone 1 Hz tick broadcast batch against `SessionWireState` (`ORD-3`, `#844`, `#845`).
+/// Sequences a standalone 1 Hz tick broadcast batch against `SessionWireState` (`ORD-3`, `#845`, `#1077 §A`).
 pub fn sequence_tick(state: &mut SessionWireState, batch: DestinyBatch) -> Option<OutFrame> {
-    state
-        .accept_destiny_batch(batch)
-        .map(|accepted| OutFrame::DoDestinyUpdate {
-            epoch: accepted.epoch,
-            stamp: accepted.stamp,
-            has_set_state: accepted.has_set_state,
-            updates: accepted.updates,
-            wait_for_bubble: accepted.wait_for_bubble,
-        })
+    sequence_tick_with_event(state, batch).0
+}
+
+/// Sequences a standalone 1 Hz tick broadcast batch, returning an optional `Dropped` ledger event
+/// when the batch is rejected (`#1077 §A`).
+pub fn sequence_tick_with_event(
+    state: &mut SessionWireState,
+    batch: DestinyBatch,
+) -> (Option<OutFrame>, Option<SequencerLedgerEvent>) {
+    match state.accept_destiny_batch_with_reason(batch) {
+        AcceptDestinyOutcome::Accepted(accepted) => (
+            Some(OutFrame::DoDestinyUpdate {
+                epoch: accepted.epoch,
+                stamp: accepted.stamp,
+                has_set_state: accepted.has_set_state,
+                updates: accepted.updates,
+                wait_for_bubble: accepted.wait_for_bubble,
+            }),
+            None,
+        ),
+        AcceptDestinyOutcome::Empty => (None, None),
+        AcceptDestinyOutcome::Dropped {
+            epoch,
+            stamp,
+            reason,
+        } => (
+            None,
+            Some(SequencerLedgerEvent {
+                kind: SequencerLedgerEventKind::Dropped,
+                epoch,
+                stamp,
+                reason,
+            }),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -499,7 +658,7 @@ mod tests {
     }
 
     #[test]
-    fn destiny_stream_live_retains_tick_older_than_direct_drain_b6() {
+    fn destiny_stream_live_rejects_stamp_regression_and_coalesces_equal_stamp() {
         let mut wire = SessionWireState::new(2, 1002);
         let epoch = wire.enter_space(Some(30_000_142));
         let set_state = DestinyBatch::new(epoch, 100, true, dummy_updates("SetState", 100));
@@ -517,20 +676,73 @@ mod tests {
             }
         );
 
-        // #844 (B6): Tick broadcast from tick 104 (containing AddBalls / OnSpecialFX warp landing)
-        // arrives after direct drain at 105. Because 104 >= set_state_stamp (100), it MUST be emitted!
+        // #1077 §A: Tick broadcast strictly below last_sent (104 < 105) MUST be rejected with reason.
         let tick_104 = DestinyBatch::new(epoch, 104, false, dummy_updates("AddBalls2", 104));
-        let emitted = sequence_tick(&mut wire, tick_104);
+        let (emitted, drop_ev) = sequence_tick_with_event(&mut wire, tick_104);
         assert!(
-            emitted.is_some(),
-            "Tick broadcast newer than SetState must not be discarded when direct drain had higher stamp"
+            emitted.is_none(),
+            "Strict stamp regression (104 < 105) must be dropped"
+        );
+        let drop_ev = drop_ev.expect("drop event must be recorded");
+        assert_eq!(drop_ev.kind, SequencerLedgerEventKind::Dropped);
+        assert_eq!(drop_ev.stamp, 104);
+        assert!(
+            drop_ev.reason.contains("stamp_regression:104<105"),
+            "unexpected drop reason: {}",
+            drop_ev.reason
         );
 
-        // Only a stale batch older than set_state_stamp (e.g. stamp 99 < 100) or wrong epoch is dropped.
+        // A batch older than set_state_stamp (99 < 100) or wrong epoch is also dropped with reason.
         let stale_99 = DestinyBatch::new(epoch, 99, false, dummy_updates("Stop", 99));
-        assert!(sequence_tick(&mut wire, stale_99).is_none());
+        let (emitted_99, drop_99) = sequence_tick_with_event(&mut wire, stale_99);
+        assert!(emitted_99.is_none());
+        assert!(drop_99.unwrap().reason.contains("stamp_below_set_state"));
+
         let wrong_epoch = DestinyBatch::new(epoch + 1, 106, false, dummy_updates("Stop", 106));
-        assert!(sequence_tick(&mut wire, wrong_epoch).is_none());
+        let (emitted_ep, drop_ep) = sequence_tick_with_event(&mut wire, wrong_epoch);
+        assert!(emitted_ep.is_none());
+        assert!(drop_ep.unwrap().reason.contains("epoch_mismatch"));
+
+        // #1077 §A: Equal-stamp updates (pending tick 105 + direct drain 105) coalesce into one frame.
+        let pending_105 = DestinyBatch::new(epoch, 105, false, dummy_updates("AddBalls2", 105));
+        let direct_105 = DestinyBatch::new(epoch, 105, false, dummy_updates("OnSpecialFX", 105));
+        let outcome = sequence_with_events(
+            &mut wire,
+            RpcCompletion {
+                call_id: 77,
+                response_frame: PyRep::Integer(77),
+                session_change_frame: None,
+                pending_tick_batches: vec![pending_105],
+                destiny_drain: DestinyDrain::Updates(direct_105),
+                notifications: vec![],
+            },
+        );
+        let destiny_frames: Vec<&OutFrame> = outcome
+            .frames
+            .iter()
+            .filter(|f| matches!(f, OutFrame::DoDestinyUpdate { .. }))
+            .collect();
+        assert_eq!(
+            destiny_frames.len(),
+            1,
+            "equal-stamp updates must coalesce into a single DoDestinyUpdate frame"
+        );
+        if let OutFrame::DoDestinyUpdate {
+            stamp,
+            updates: PyRep::List(items),
+            ..
+        } = destiny_frames[0]
+        {
+            assert_eq!(*stamp, 105);
+            assert_eq!(items.len(), 2, "coalesced frame must preserve both updates");
+        } else {
+            panic!("expected DoDestinyUpdate with PyRep::List updates");
+        }
+        assert!(outcome.events.iter().any(|ev| {
+            ev.kind == SequencerLedgerEventKind::Coalesced
+                && ev.stamp == 105
+                && ev.reason.contains("equal_stamp_merge")
+        }));
     }
 
     #[test]

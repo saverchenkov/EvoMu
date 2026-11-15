@@ -6,7 +6,10 @@
 
 #![forbid(unsafe_code)]
 
-use crate::flight_recorder::FlightRecorderEntry;
+use crate::flight_recorder::{
+    DestinyStampRecord, FlightRecorderEntry, OutboundLedgerEntry,
+    MAX_DESTINY_STAMPS_PER_SESSION, MAX_OUTBOUND_LEDGER_PER_SESSION,
+};
 use crate::log_ring_buffer::global_log_ring;
 use crate::router::context::ServerContext;
 use crate::sso::HttpResponse;
@@ -349,6 +352,10 @@ pub struct BugIncidentBundle {
     pub manual_report: Option<ManualBugReportDetails>,
     pub session: BugSessionSnapshot,
     pub flight_recorder: Vec<FlightRecorderEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outbound_ledger: Vec<OutboundLedgerEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub destiny_stamps: Vec<DestinyStampRecord>,
     pub server_logs_before: Vec<String>,
     pub server_logs_after: Vec<String>,
 }
@@ -469,6 +476,12 @@ impl BugIncidentBundle {
         let flight_recorder = ctx
             .flight_recorder
             .get_history(session.session_id, now_millis, 20);
+        let outbound_ledger = ctx
+            .flight_recorder
+            .get_outbound_ledger(session.session_id, MAX_OUTBOUND_LEDGER_PER_SESSION);
+        let destiny_stamps = ctx
+            .flight_recorder
+            .get_destiny_stamps(session.session_id, MAX_DESTINY_STAMPS_PER_SESSION);
         let server_logs_before = global_log_ring().snapshot_recent(40);
 
         let trace_str: String = trace.into();
@@ -486,6 +499,8 @@ impl BugIncidentBundle {
             manual_report: None,
             session: sess_snap,
             flight_recorder,
+            outbound_ledger,
+            destiny_stamps,
             server_logs_before,
             server_logs_after: Vec::new(),
         }
@@ -902,6 +917,18 @@ fn handle_post_bug_issue(
     } else {
         (BugSessionSnapshot::default(), Vec::new(), None)
     };
+    let outbound_ledger = if sess_snap.session_id > 0 {
+        ctx.flight_recorder
+            .get_outbound_ledger(sess_snap.session_id, MAX_OUTBOUND_LEDGER_PER_SESSION)
+    } else {
+        Vec::new()
+    };
+    let destiny_stamps = if sess_snap.session_id > 0 {
+        ctx.flight_recorder
+            .get_destiny_stamps(sess_snap.session_id, MAX_DESTINY_STAMPS_PER_SESSION)
+    } else {
+        Vec::new()
+    };
     let server_logs_before = global_log_ring().snapshot_recent(40);
 
     let stack_key = format!("f12:{}:{}", category_id.to_ascii_lowercase(), title);
@@ -936,6 +963,8 @@ fn handle_post_bug_issue(
         }),
         session: sess_snap,
         flight_recorder,
+        outbound_ledger,
+        destiny_stamps,
         server_logs_before,
         server_logs_after: Vec::new(),
     };

@@ -77,6 +77,8 @@ pub struct FeatureFlagsConfig {
     pub starter_plex_balance: i64,
     #[serde(default)]
     pub allow_local_dev_gateway_jwt: bool,
+    #[serde(default)]
+    pub gm_mode: bool,
 }
 
 fn default_true() -> bool {
@@ -100,6 +102,7 @@ impl Default for FeatureFlagsConfig {
             free_fast_checkout_plex: false,
             starter_plex_balance: 0,
             allow_local_dev_gateway_jwt: false,
+            gm_mode: false,
         }
     }
 }
@@ -427,6 +430,24 @@ impl ServerConfig {
             }
         }
         Ok(out)
+    }
+
+    /// Parses optional `--gm` CLI flag enabling GM-only loopback ops endpoints (`#1077 §A`).
+    pub fn parse_cli_gm_flag<I, S>(args: I) -> bool
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        for raw in args {
+            let arg = raw.as_ref();
+            if arg == "--" {
+                break;
+            }
+            if arg == "--gm" {
+                return true;
+            }
+        }
+        false
     }
 }
 

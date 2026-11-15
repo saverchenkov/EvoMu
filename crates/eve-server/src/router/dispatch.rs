@@ -433,6 +433,40 @@ impl ServerContext {
         )
         .await;
         let duration = start_time.elapsed();
+        self.flight_recorder
+            .record_rpc_latency(service, method, duration);
+        if duration > std::time::Duration::from_millis(crate::flight_recorder::PACKET_PERF_WARN_THRESHOLD_MS)
+        {
+            let arg_size = crate::flight_recorder::encoded_args_byte_size(args, kwargs);
+            let is_bootstrap = matches!(
+                (service, method),
+                ("charUnboundMgr", "SelectCharacterID")
+                    | ("charUnboundMgr", "GetCharacterInfo")
+                    | ("character", "GetCharacterSelectionInfo")
+                    | ("stationSvc", "Undock")
+                    | ("structureDocking", "Undock")
+                    | ("beyonce", "MachoBindObject")
+                    | ("beyonce", "UpdateStateRequest")
+            );
+            tracing::warn!(
+                target: "packet_perf",
+                service = %service,
+                method = %method,
+                arg_size,
+                duration_ms = duration.as_millis() as u64,
+                session_id = session.session_id,
+                bootstrap = is_bootstrap,
+                "[PacketPerf] slow RPC handler"
+            );
+            self.flight_recorder.record_packet_perf_warning(
+                session.session_id,
+                service,
+                method,
+                arg_size,
+                duration,
+                is_bootstrap,
+            );
+        }
 
         let status_desc = match &res {
             Ok(rep) => format!("Ok({})", format_pyrep_summary(rep)),
