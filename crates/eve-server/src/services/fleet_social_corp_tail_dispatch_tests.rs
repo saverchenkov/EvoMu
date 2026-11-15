@@ -157,7 +157,7 @@ fn corp_gov_tail_settings_assets_and_applications() {
     let get_reinf = handle_corp_gov_tail(&ctx, &mut session, svc_reg, "GetStructureReinforceDefault", &[], corp_id, char_id, 1000)
         .unwrap()
         .unwrap();
-    assert_eq!(get_reinf, PyRep::Integer(20));
+    assert_eq!(get_reinf, PyRep::Tuple(vec![PyRep::Integer(20), PyRep::Integer(0)]));
 
     let divs = handle_corp_gov_tail(&ctx, &mut session, svc_reg, "GetDivisionNames", &[], corp_id, char_id, 1000)
         .unwrap()

@@ -100,38 +100,10 @@ fn normalize_macho_rpc_reply_exhaustive_fallback_and_non_empty_branches() {
         search_pre.dict_get("contracts"),
         Some(&PyRep::List(vec![prewrapped]))
     );
-
-    // corpmgr.AuditMember with non-empty Rowset and non-Rowset
-    let non_empty_rs = PyRep::rowset(vec!["col"], vec![vec![PyRep::Integer(123)]]);
-    let audit_rs =
-        normalize_macho_rpc_reply("corpmgr", "AuditMember", Ok(non_empty_rs.clone())).unwrap();
-    assert_eq!(audit_rs, PyRep::Tuple(vec![non_empty_rs.clone(), non_empty_rs]));
-    let audit_other =
-        normalize_macho_rpc_reply("corpmgr", "AuditMember", Ok(PyRep::Integer(9))).unwrap();
-    assert_eq!(audit_other, PyRep::Tuple(vec![PyRep::Integer(9), PyRep::Integer(9)]));
 }
 
 #[test]
-fn normalize_macho_rpc_reply_covers_dev_index_raffle_skill_station_and_store_variants() {
-    // devIndexManager.GetAllDevelopmentIndices with alternate keys ("military", "industrial", "strategic")
-    let dev = normalize_macho_rpc_reply(
-        "devIndexManager",
-        "GetAllDevelopmentIndices",
-        Ok(PyRep::List(vec![PyRep::keyval([
-            ("solarSystemID", PyRep::Integer(30_000_144)),
-            ("military", PyRep::Integer(4)),
-            ("industrial", PyRep::Integer(5)),
-            ("strategic", PyRep::Integer(1)),
-        ])])),
-    )
-    .unwrap();
-    let PyRep::List(dev_items) = dev else {
-        panic!("expected list");
-    };
-    assert_eq!(dev_items[0].dict_get("militaryPoints"), Some(&PyRep::Integer(4)));
-    assert_eq!(dev_items[0].dict_get("industrialPoints"), Some(&PyRep::Integer(5)));
-    assert_eq!(dev_items[0].dict_get("claimedFor"), Some(&PyRep::Integer(1)));
-
+fn normalize_macho_rpc_reply_covers_raffle_skill_station_and_store_variants() {
     // home_station.get_home_station_candidates empty list & non-Integer passthrough
     let hs_empty = normalize_macho_rpc_reply(
         "home_station",
@@ -467,4 +439,76 @@ async fn grpc_auth_expired_ban_revocation_gm_demotion_and_subscriber_guard_drop_
             .and_then(|v| v.to_str().ok()),
         Some("16")
     );
+}
+
+#[tokio::test]
+async fn c9_audit_member_and_dev_index_direct_handler_wire_shapes() {
+    let ctx = crate::router::ServerContext::new();
+    let (uid, corp_id) = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get(&90_000_001).unwrap();
+        let uid = ch.user_id;
+        let cid = ch.corporation_id;
+        snap.corp_governance.entry(cid).or_default().role_audit_log.push((
+            90_000_002,
+            90_000_001,
+            0,
+            1,
+            1_800_025_000,
+        ));
+        let st = snap.system_states.entry(30_000_144).or_default();
+        st.military_index = 4;
+        st.industrial_index = 5;
+        st.strategic_index = 1;
+        (uid, cid)
+    });
+    let mut sess = eve_machonet::SessionState {
+        user_id: Some(uid),
+        character_id: Some(90_000_001),
+        corporation_id: Some(corp_id),
+        corp_role: u64::MAX,
+        ..Default::default()
+    };
+    let kw = std::collections::HashMap::new();
+
+    let audit = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "corpmgr",
+            None,
+            "AuditMember",
+            &[PyRep::Integer(90_000_002)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("corpmgr.AuditMember");
+    let PyRep::Tuple(parts) = audit else {
+        panic!("expected 2-tuple from AuditMember");
+    };
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0], parts[1]);
+    assert!(matches!(&parts[0], PyRep::Rowset { rows, .. } if rows.len() == 1));
+
+    let dev = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "devIndexManager",
+            None,
+            "GetAllDevelopmentIndices",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("devIndexManager.GetAllDevelopmentIndices");
+    let PyRep::Dict(entries) = dev else {
+        panic!("expected Dict from GetAllDevelopmentIndices");
+    };
+    let (_, entry) = entries
+        .iter()
+        .find(|(k, _)| *k == PyRep::Integer(30_000_144))
+        .expect("system 30000144 dev index entry");
+    assert_eq!(entry.dict_get("militaryPoints"), Some(&PyRep::Integer(4_000)));
+    assert_eq!(entry.dict_get("industrialPoints"), Some(&PyRep::Integer(5_000)));
+    assert_eq!(entry.dict_get("claimedFor"), Some(&PyRep::Integer(1)));
 }

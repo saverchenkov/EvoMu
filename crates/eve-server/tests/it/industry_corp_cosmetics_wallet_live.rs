@@ -398,7 +398,7 @@ async fn test_live_corp_projects_audit_reinforce_and_npc_standings() {
     let def_hr = rpc(&ctx, &mut s2, "corpRegistry", "GetStructureReinforceDefault", &[])
         .await
         .expect("GetStructureReinforceDefault");
-    assert_eq!(def_hr.as_i64(), Some(21));
+    assert_eq!(def_hr, PyRep::Tuple(vec![PyRep::Integer(21), PyRep::Integer(0)]));
 
     let cur_roles = rpc(
         &ctx,
@@ -419,7 +419,11 @@ async fn test_live_corp_projects_audit_reinforce_and_npc_standings() {
     let audit_log = rpc(&ctx, &mut s1, "corpmgr", "AuditMember", &[PyRep::Integer(PILOT_2)])
         .await
         .expect("corpmgr.AuditMember");
-    let PyRep::Rowset { rows, .. } = audit_log else {
+    let PyRep::Tuple(audit_parts) = audit_log else {
+        panic!("AuditMember must return 2-tuple of Rowsets");
+    };
+    assert_eq!(audit_parts.len(), 2);
+    let PyRep::Rowset { rows, .. } = &audit_parts[0] else {
         panic!("AuditMember must return Rowset");
     };
     assert!(

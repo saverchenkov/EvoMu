@@ -398,7 +398,7 @@ async fn test_corp_registry_governance_structures_contacts_and_reinforce() {
     assert_eq!(set_reinf, PyRep::Integer(18));
 
     let get_reinf = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "GetStructureReinforceDefault", &[], &kw, None).await.expect("GetStructureReinforceDefault");
-    assert_eq!(get_reinf, PyRep::Integer(18));
+    assert_eq!(get_reinf, PyRep::Tuple(vec![PyRep::Integer(18), PyRep::Integer(0)]));
 
     // 8. Introspection methods (Unbind, plus client_local SetSessionCheck, clear_memoized, columns, header, itervalues -> UnimplementedRPC)
     let unb = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "Unbind", &[], &kw, None).await.expect("Unbind");

@@ -164,35 +164,7 @@ fn normalize_macho_rpc_reply_covers_char_contracts_corp_and_dev_indices() {
     .unwrap();
     assert_eq!(search_raw.dict_get("numFound"), Some(&PyRep::Integer(1)));
 
-    // corpRegistry & corpmgr & corporationSvc & devIndexManager
-    let leave = normalize_macho_rpc_reply(
-        "corpRegistry",
-        "CanLeaveCurrentCorporation",
-        Ok(PyRep::keyval([("canLeave", PyRep::Bool(true))])),
-    )
-    .unwrap();
-    if let PyRep::Tuple(parts) = leave {
-        assert_eq!(parts[0], PyRep::Bool(true));
-    } else {
-        panic!("expected tuple");
-    }
-
-    let reinf = normalize_macho_rpc_reply(
-        "corpRegistry",
-        "GetStructureReinforceDefault",
-        Ok(PyRep::Integer(18)),
-    )
-    .unwrap();
-    assert_eq!(reinf, PyRep::Tuple(vec![PyRep::Integer(18), PyRep::Integer(0)]));
-
-    let audit = normalize_macho_rpc_reply(
-        "corpmgr",
-        "AuditMember",
-        Ok(PyRep::rowset(vec!["a"], Vec::new())),
-    )
-    .unwrap();
-    assert!(matches!(audit, PyRep::Tuple(_)));
-
+    // corporationSvc
     let emp = normalize_macho_rpc_reply(
         "corporationSvc",
         "GetEmployementRecordAndCharacterTransfers",
@@ -203,18 +175,6 @@ fn normalize_macho_rpc_reply_covers_char_contracts_corp_and_dev_indices() {
     )
     .unwrap();
     assert!(matches!(emp, PyRep::Tuple(_)));
-
-    let dev = normalize_macho_rpc_reply(
-        "devIndexManager",
-        "GetAllDevelopmentIndices",
-        Ok(PyRep::List(Vec::new())),
-    )
-    .unwrap();
-    if let PyRep::List(items) = dev {
-        assert!(items.is_empty());
-    } else {
-        panic!("expected list");
-    }
 }
 
 #[test]
@@ -223,18 +183,6 @@ fn normalize_macho_rpc_reply_covers_dogma_map_planet_raffle_skill_war_and_store(
         normalize_macho_rpc_reply("dogmaIM", "OverloadRack", Ok(PyRep::Dict(Vec::new()))).unwrap(),
         PyRep::List(_)
     ));
-    assert_eq!(
-        normalize_macho_rpc_reply(
-            "fwVictoryPointMgr",
-            "GetLocalVictoryPointState",
-            Ok(PyRep::keyval([
-                ("solarSystemID", PyRep::Integer(30_000_142)),
-                ("state", PyRep::Integer(1))
-            ]))
-        )
-        .unwrap(),
-        PyRep::Tuple(vec![PyRep::Integer(30_000_142), PyRep::Integer(1)])
-    );
     let hs = normalize_macho_rpc_reply(
         "home_station",
         "get_home_station_candidates",
@@ -271,10 +219,6 @@ fn normalize_macho_rpc_reply_covers_dogma_map_planet_raffle_skill_war_and_store(
     assert!(normalize_macho_rpc_reply("map", "GetMyExtraMapInfoAgents", Ok(PyRep::None)).is_ok());
     assert!(normalize_macho_rpc_reply("map", "GetSecurityModifiedSystems", Ok(PyRep::None)).is_ok());
     assert!(normalize_macho_rpc_reply("paperDollServer", "GetPaperDollPortraitDataFor", Ok(PyRep::None)).is_ok());
-    assert_eq!(
-        normalize_macho_rpc_reply("peaceTreatyMgr", "GetPeaceTreatiesForSession", Ok(PyRep::List(Vec::new()))).unwrap(),
-        PyRep::Tuple(vec![PyRep::List(Vec::new()), PyRep::List(Vec::new())])
-    );
 
     let pet = normalize_macho_rpc_reply(
         "petitioner",
@@ -358,4 +302,128 @@ fn normalize_macho_rpc_reply_covers_dogma_map_planet_raffle_skill_war_and_store(
     if let PyRep::List(items) = store {
         assert!(matches!(items[0], PyRep::Dict(_)));
     }
+}
+
+#[tokio::test]
+async fn quasar_c9_typed_handlers_direct_dispatch_wire_shapes() {
+    let ctx = crate::router::ServerContext::new();
+    let (uid, corp_id) = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get(&90_000_001).unwrap();
+        let uid = ch.user_id;
+        let cid = ch.corporation_id;
+        snap.fw_system_occupations.insert(
+            30_000_142,
+            eve_db::FwSystemOccupationRecord {
+                solar_system_id: 30_000_142,
+                owner_faction_id: 500_001,
+                occupier_faction_id: 500_001,
+                victory_points: 1_500,
+                victory_points_threshold: 3_000,
+            },
+        );
+        (uid, cid)
+    });
+    let mut sess = eve_machonet::SessionState {
+        user_id: Some(uid),
+        character_id: Some(90_000_001),
+        corporation_id: Some(corp_id),
+        solar_system_id: Some(30_000_142),
+        corp_role: u64::MAX,
+        ..Default::default()
+    };
+    let kw = std::collections::HashMap::new();
+
+    let leave = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "corpRegistry",
+            None,
+            "CanLeaveCurrentCorporation",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("CanLeaveCurrentCorporation");
+    assert!(matches!(leave, PyRep::Tuple(parts) if parts.len() == 3));
+
+    let reinf = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "corpRegistry",
+            None,
+            "GetStructureReinforceDefault",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("GetStructureReinforceDefault");
+    assert_eq!(reinf, PyRep::Tuple(vec![PyRep::Integer(18), PyRep::Integer(0)]));
+
+    let audit = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "corpmgr",
+            None,
+            "AuditMember",
+            &[PyRep::Integer(90_000_001)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("corpmgr.AuditMember");
+    assert!(matches!(
+        audit,
+        PyRep::Tuple(parts) if parts.len() == 2 && matches!(&parts[0], PyRep::Rowset { .. })
+    ));
+
+    let dev = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "devIndexManager",
+            None,
+            "GetAllDevelopmentIndices",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("GetAllDevelopmentIndices");
+    assert!(matches!(dev, PyRep::Dict(_)));
+
+    let vp = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "fwVictoryPointMgr",
+            None,
+            "GetLocalVictoryPointState",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("GetLocalVictoryPointState");
+    let PyRep::Tuple(vp_parts) = vp else {
+        panic!("expected 2-tuple from GetLocalVictoryPointState");
+    };
+    assert_eq!(vp_parts[0], PyRep::Integer(30_000_142));
+    assert_eq!(vp_parts[1].dict_get("victoryPoints"), Some(&PyRep::Integer(1_500)));
+
+    let peace = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "peaceTreatyMgr",
+            None,
+            "GetPeaceTreatiesForSession",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("GetPeaceTreatiesForSession");
+    assert_eq!(
+        peace,
+        PyRep::Tuple(vec![PyRep::List(Vec::new()), PyRep::List(Vec::new())])
+    );
 }

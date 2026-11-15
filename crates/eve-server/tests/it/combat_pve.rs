@@ -2367,7 +2367,11 @@ async fn test_feat_corporation_member_audit_e2e() {
     let audit = rpc(&ctx, &mut sess1, "corpmgr", "AuditMember", &[PyRep::Integer(PILOT_2)])
         .await
         .expect("AuditMember");
-    let rows = rowset_rows(&audit);
+    let PyRep::Tuple(audit_parts) = audit else {
+        panic!("expected 2-tuple from AuditMember");
+    };
+    assert_eq!(audit_parts.len(), 2);
+    let rows = rowset_rows(&audit_parts[0]);
     assert_eq!(rows.len(), 2, "AuditMember must return both role changes for PILOT_2");
     assert_eq!(
         rows[0],
@@ -2480,7 +2484,7 @@ async fn test_feat_corporation_structure_reinforce_default_e2e() {
     )
     .await
     .expect("GetStructureReinforceDefault");
-    assert_eq!(get_rep, PyRep::Integer(19));
+    assert_eq!(get_rep, PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(0)]));
 
     spawn_ship_in_space(&ctx, PILOT_1, ship1, perimeter_sys, DVec3::new(50_000.0, 0.0, 0.0), None).await;
     ctx.db.with_mut_snapshot(|s| {

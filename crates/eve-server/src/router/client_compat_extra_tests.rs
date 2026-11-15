@@ -292,14 +292,6 @@ fn normalize_macho_rpc_reply_covers_all_service_adapters() {
         ])
     );
 
-    // fleetProxy.GetAvailableFleetAds
-    let ads = PyRep::Rowset {
-        columns: vec!["fleetID".into(), "fleetName".into()],
-        rows: vec![vec![PyRep::Integer(55), PyRep::String("Roam".into())]],
-    };
-    let ads_out = normalize_macho_rpc_reply("fleetProxy", "GetAvailableFleetAds", Ok(ads)).unwrap();
-    assert!(matches!(ads_out, PyRep::Dict(ref v) if v.len() == 1));
-
     // contractProxy.GetContract & GetContractInfo
     let c_out = normalize_macho_rpc_reply(
         "contractProxy",
@@ -335,32 +327,6 @@ fn normalize_macho_rpc_reply_covers_all_service_adapters() {
     )
     .unwrap();
     assert!(matches!(tickers, PyRep::ObjectEx { is_type_2: true, .. }));
-
-    // sovMgr.GetSovStructuresInfoForLocalSolarSystem & GetSovStructuresInfoForSolarSystem
-    let sov_with = normalize_macho_rpc_reply(
-        "sovMgr",
-        "GetSovStructuresInfoForLocalSolarSystem",
-        Ok(PyRep::keyval([("structures", PyRep::List(vec![PyRep::Integer(1)]))])),
-    )
-    .unwrap();
-    assert_eq!(sov_with, PyRep::List(vec![PyRep::Integer(1)]));
-
-    let sov_empty = normalize_macho_rpc_reply(
-        "sovMgr",
-        "GetSovStructuresInfoForSolarSystem",
-        Ok(PyRep::keyval(Vec::<(String, PyRep)>::new())),
-    )
-    .unwrap();
-    assert_eq!(sov_empty, PyRep::List(Vec::new()));
-
-    // corpmgr.GetCorporations & GetPublicInfo
-    let corp_row = normalize_macho_rpc_reply(
-        "corpmgr",
-        "GetPublicInfo",
-        Ok(PyRep::keyval([("corporationID", PyRep::Integer(1000125))])),
-    )
-    .unwrap();
-    assert!(matches!(corp_row, PyRep::Object { ref type_name, .. } if type_name == "util.Row"));
 
     // Error passthrough
     let err = BridgeRpcError {
@@ -1117,19 +1083,9 @@ fn w4_mutant_killers_untouched_services_helpers_and_defaults() {
     let PyRep::List(c_items) = c_def.dict_get("items").unwrap() else { panic!() };
     assert_eq!(c_items[0].dict_get("itemTypeID"), Some(&PyRep::Integer(0)));
 
-    // 4. Untouched service/method pairs: fleetProxy.GetFleetAdsForChar,
+    // 4. Untouched service/method pairs:
     //    map.GetIncursionGlobalReport, paperDollServer.GetPaperDollData, storeManager.get_categories/get_offers,
     //    agentMgr.GetOffer / GetAgentLocationWrap / GetMissionBriefingInfo / GetMissionObjectiveInfo
-    let fleet_ads = normalize_macho_rpc_reply(
-        "fleetProxy",
-        "GetFleetAdsForChar",
-        Ok(PyRep::Rowset {
-            columns: vec!["fleetID".into(), "fleetName".into()],
-            rows: vec![vec![PyRep::Integer(88), PyRep::String("Alpha".into())]],
-        }),
-    )
-    .unwrap();
-    assert!(matches!(fleet_ads, PyRep::Dict(ref d) if d.len() == 1));
 
     let incs = normalize_macho_rpc_reply(
         "map",
@@ -1861,4 +1817,150 @@ fn gh1023_mission_objective_owner_ids_reject_agent_and_character_ids() {
     let PyRep::Tuple(pf) = &p_objs[2] else { panic!() };
     let PyRep::Tuple(pf_v) = &pf[1] else { panic!() };
     assert_eq!(pf_v[0], PyRep::Integer(500_001));
+}
+
+#[tokio::test]
+async fn c9_typed_handlers_fleet_sov_corpmgr_emit_canonical_wire_shapes() {
+    let ctx = test_ctx();
+    let struct_id = 1_055_000_933_i64;
+    let (uid, corp_id) = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get(&90_000_001).unwrap();
+        let uid = ch.user_id;
+        let cid = ch.corporation_id;
+        snap.structures.insert(
+            struct_id,
+            UpwellStructureRecord {
+                structure_id: struct_id,
+                owner_corp_id: cid,
+                type_id: 32458,
+                name: "IHub".into(),
+                solar_system_id: 30_000_142,
+                position: [0.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 1000.0,
+                armor_hp: 1000.0,
+                hull_hp: 1000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        (uid, cid)
+    });
+    let fleet_id = 77_000_933_i64;
+    ctx.fleet_extras.lock().unwrap().adverts.insert(
+        fleet_id,
+        crate::services::fleet_social_fleets::FleetAdvertState {
+            fleet_id,
+            leader_id: 90_000_001,
+            fleet_name: "Roam".into(),
+            description: "C9 fleet advert".into(),
+            solar_system_id: 30_000_142,
+            invite_scope: 0,
+            auto_join: true,
+            min_standing: -10.0,
+            min_security: -10.0,
+            allowed_entities: std::collections::HashSet::new(),
+            _created_unix: 1_700_000_000,
+        },
+    );
+
+    let mut sess = SessionState {
+        user_id: Some(uid),
+        character_id: Some(90_000_001),
+        corporation_id: Some(corp_id),
+        solar_system_id: Some(30_000_142),
+        ..Default::default()
+    };
+    let kw = HashMap::new();
+
+    for method in ["GetAvailableFleetAds", "GetFleetAdsForChar"] {
+        let ads_out = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "fleetProxy",
+                None,
+                method,
+                &[],
+                &kw,
+                Some("machoNet:26000"),
+            )
+            .await
+            .unwrap();
+        let PyRep::Dict(entries) = ads_out else {
+            panic!("expected Dict from {method}");
+        };
+        let (_, ad_rep) = entries
+            .iter()
+            .find(|(k, _)| *k == PyRep::Integer(fleet_id))
+            .expect("advert present by fleetID");
+        assert_eq!(ad_rep.dict_get("fleetName"), Some(&PyRep::String("Roam".into())));
+        assert_eq!(ad_rep.dict_get("joinNeedsApproval"), Some(&PyRep::Bool(false)));
+        assert_eq!(ad_rep.dict_get("autoJoin"), Some(&PyRep::Bool(true)));
+        assert!(ad_rep.dict_get("leader").is_some());
+        assert!(ad_rep.dict_get("dateCreated").is_some());
+    }
+
+    let sov_local = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "sovMgr",
+            None,
+            "GetSovStructuresInfoForLocalSolarSystem",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .unwrap();
+    let PyRep::List(local_items) = sov_local else {
+        panic!("expected List from GetSovStructuresInfoForLocalSolarSystem");
+    };
+    assert!(local_items
+        .iter()
+        .any(|it| it.dict_get("structureID") == Some(&PyRep::Integer(struct_id))));
+
+    let sov_empty = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "sovMgr",
+            None,
+            "GetSovStructuresInfoForSolarSystem",
+            &[PyRep::Integer(30_000_144)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sov_empty, PyRep::List(Vec::new()));
+
+    for method in ["GetPublicInfo", "GetCorporations"] {
+        let corp_row = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "corpmgr",
+                None,
+                method,
+                &[PyRep::Integer(1_000_035)],
+                &kw,
+                Some("machoNet:26000"),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(&corp_row, PyRep::Object { type_name, .. } if type_name == "util.Row"),
+            "expected util.Row from corpmgr.{method}"
+        );
+        assert_eq!(
+            corp_row.dict_get("corporationID"),
+            Some(&PyRep::Integer(1_000_035))
+        );
+        assert!(corp_row
+            .dict_get("ceoID")
+            .and_then(PyRep::as_i64)
+            .is_some_and(|id| id > 0));
+    }
 }

@@ -695,31 +695,41 @@ async fn peace_treaties_expiry_alliance_and_client_compat_boundaries() {
         Some(&PyRep::Integer(peer_corp_2))
     );
 
-    // 3. client_compat: 2-tuple preserved, 1-tuple / non-tuple normalized to ([], [])
-    let valid_two = PyRep::Tuple(vec![
-        PyRep::List(vec![PyRep::Integer(1)]),
-        PyRep::List(vec![]),
-    ]);
-    assert_eq!(
-        normalize_macho_rpc_reply(
+    // 3. Router dispatch with live-client caller_trace preserves the 2-tuple directly from the handler
+    let zero_macho = ctx
+        .dispatch_rpc(
+            &mut sess_zero_ally,
             "peaceTreatyMgr",
+            None,
             "GetPeaceTreatiesForSession",
-            Ok(valid_two.clone())
+            &[],
+            &HashMap::new(),
+            Some("machoNet:26000"),
         )
-        .unwrap(),
-        valid_two
+        .await
+        .unwrap();
+    assert_eq!(
+        zero_macho,
+        PyRep::Tuple(vec![PyRep::List(vec![]), PyRep::List(vec![])])
     );
-    for bad in [
-        PyRep::Tuple(vec![PyRep::List(vec![])]),
-        PyRep::Tuple(vec![PyRep::None, PyRep::None, PyRep::None]),
-        PyRep::None,
-    ] {
-        assert_eq!(
-            normalize_macho_rpc_reply("peaceTreatyMgr", "GetPeaceTreatiesForSession", Ok(bad))
-                .unwrap(),
-            PyRep::Tuple(vec![PyRep::List(vec![]), PyRep::List(vec![])])
-        );
-    }
+    let ally_macho = ctx
+        .dispatch_rpc(
+            &mut sess_ally,
+            "peaceTreatyMgr",
+            None,
+            "GetPeaceTreatiesForSession",
+            &[],
+            &HashMap::new(),
+            Some("machoNet:26000"),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        &ally_macho,
+        PyRep::Tuple(parts) if parts.len() == 2
+            && matches!(&parts[0], PyRep::List(l) if l.len() == 1)
+            && matches!(&parts[1], PyRep::List(l) if l.len() == 1)
+    ));
 }
 
 #[test]

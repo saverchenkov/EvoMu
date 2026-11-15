@@ -38,7 +38,16 @@ fn keyval(rep: &PyRep) -> HashMap<String, PyRep> {
                 .filter_map(|(k, v)| k.as_str().map(|s| (s.to_owned(), v.clone())))
                 .collect(),
             PyRep::KeyVal(dict) => dict.clone(),
-            other => panic!("expected Object Dict/KeyVal args, got {other:?}"),
+            PyRep::Tuple(parts) if parts.len() == 2 => match (&parts[0], &parts[1]) {
+                (PyRep::List(header), PyRep::List(line)) => header
+                    .iter()
+                    .filter_map(|k| k.as_str())
+                    .zip(line.iter().cloned())
+                    .map(|(k, v)| (k.to_owned(), v))
+                    .collect(),
+                other => panic!("expected Object Tuple([List, List]) args, got {other:?}"),
+            },
+            other => panic!("expected Object Dict/KeyVal/RowTuple args, got {other:?}"),
         },
         other => panic!("expected KeyVal or Object, got {other:?}"),
     }
@@ -400,7 +409,11 @@ async fn test_corpmgr_attributes_and_queries() {
     )
     .await
     .expect("AuditMember");
-    let (_, aud_rows) = rows(&audit_rep);
+    let PyRep::Tuple(audit_parts) = audit_rep else {
+        panic!("expected 2-tuple from AuditMember, got {audit_rep:?}");
+    };
+    assert_eq!(audit_parts.len(), 2);
+    let (_, aud_rows) = rows(&audit_parts[0]);
     assert_eq!(aud_rows.len(), 1);
 }
 

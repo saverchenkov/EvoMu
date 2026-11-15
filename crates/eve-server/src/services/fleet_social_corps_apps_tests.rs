@@ -167,14 +167,20 @@ fn corp_applications_invitations_welcome_mail_and_resign_flows() {
     let ceo_can = handle_corps(&ctx, &mut ceo_sess, "corpRegistry", "CanLeaveCurrentCorporation", &[], &kw)
         .unwrap()
         .unwrap();
-    let PyRep::KeyVal(cc_kv) = ceo_can else { panic!() };
-    assert_eq!(cc_kv.get("canLeave").unwrap(), &PyRep::Bool(false));
+    let PyRep::Tuple(cc_parts) = ceo_can else { panic!() };
+    assert_eq!(cc_parts.len(), 3);
+    assert_eq!(cc_parts[0], PyRep::Bool(false));
+    assert_eq!(
+        cc_parts[1].dict_get("msg").and_then(PyRep::as_str),
+        Some("CrpCantQuitNotInStasis")
+    );
 
     let mem_can = handle_corps(&ctx, &mut mem_sess, "corpRegistry", "CanLeaveCurrentCorporation", &[], &kw)
         .unwrap()
         .unwrap();
-    let PyRep::KeyVal(mc_kv) = mem_can else { panic!() };
-    assert_eq!(mc_kv.get("canLeave").unwrap(), &PyRep::Bool(true));
+    let PyRep::Tuple(mc_parts) = mem_can else { panic!() };
+    assert_eq!(mc_parts.len(), 3);
+    assert_eq!(mc_parts[0], PyRep::Bool(true));
 
     assert_eq!(
         handle_corps(
@@ -862,14 +868,15 @@ fn wave2_application_offer_guards_invitations_leave_kick_and_session_transitions
     npc_sess.user_id = Some(90_000_099);
     npc_sess.character_id = Some(90_000_099);
     npc_sess.corporation_id = Some(1_000_035);
-    let PyRep::KeyVal(npc_kv) =
+    let PyRep::Tuple(npc_parts) =
         handle_corps(&ctx, &mut npc_sess, "corpRegistry", "CanLeaveCurrentCorporation", &[], &kw)
             .unwrap()
             .unwrap()
     else {
         panic!()
     };
-    assert_eq!(npc_kv.get("canLeave").and_then(|b| b.as_bool()), Some(false));
+    assert_eq!(npc_parts.len(), 3);
+    assert_eq!(npc_parts[0].as_bool(), Some(false));
 
     // Solo CEO with active war on alliance cannot leave until war deactivated
     ctx.db.with_mut_snapshot(|snap| {
@@ -898,20 +905,25 @@ fn wave2_application_offer_guards_invitations_leave_kick_and_session_transitions
     let res_war = handle_corps(&ctx, &mut beta_ceo, "corpRegistry", "CanLeaveCurrentCorporation", &[], &kw)
         .unwrap()
         .unwrap();
-    let PyRep::KeyVal(rw_kv) = res_war else { panic!() };
-    assert_eq!(rw_kv.get("canLeave").and_then(|b| b.as_bool()), Some(false));
-    assert_eq!(rw_kv.get("reason").and_then(|s| s.as_str()), Some("Corporation has active wars"));
+    let PyRep::Tuple(rw_parts) = res_war else { panic!() };
+    assert_eq!(rw_parts.len(), 3);
+    assert_eq!(rw_parts[0].as_bool(), Some(false));
+    assert_eq!(
+        rw_parts[1].dict_get("msg").and_then(|s| s.as_str()),
+        Some("CrpCantQuitNotInStasis")
+    );
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.wars.get_mut(&777_001).unwrap().active = false;
     });
-    let PyRep::KeyVal(ok_kv) =
+    let PyRep::Tuple(ok_parts) =
         handle_corps(&ctx, &mut beta_ceo, "corpRegistry", "CanLeaveCurrentCorporation", &[], &kw)
             .unwrap()
             .unwrap()
     else {
         panic!()
     };
-    assert_eq!(ok_kv.get("canLeave").and_then(|b| b.as_bool()), Some(true));
+    assert_eq!(ok_parts.len(), 3);
+    assert_eq!(ok_parts[0].as_bool(), Some(true));
 }
 

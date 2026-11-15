@@ -771,7 +771,7 @@ async fn test_corp_member_audit_reinforce_default_and_fleet_handover_formations(
     let def_hr = rpc(&ctx, &mut sess1, "corpRegistry", "GetStructureReinforceDefault", &[])
         .await
         .expect("GetStructureReinforceDefault");
-    assert_eq!(def_hr, PyRep::Integer(19));
+    assert_eq!(def_hr, PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(0)]));
 
     // 2. Role change via corpRegistry.UpdateMember -> corpmgr.AuditMember(char2) returns history with target & issuer
     ctx.db.with_mut_snapshot(|snap| {
@@ -808,8 +808,12 @@ async fn test_corp_member_audit_reinforce_default_and_fleet_handover_formations(
     let audit = rpc(&ctx, &mut sess1, "corpmgr", "AuditMember", &[PyRep::Integer(char2)])
         .await
         .expect("AuditMember");
-    let PyRep::Rowset { rows: lines, .. } = audit else {
-        panic!("expected Rowset from AuditMember, got {audit:?}");
+    let PyRep::Tuple(audit_parts) = audit else {
+        panic!("expected 2-tuple from AuditMember, got {audit:?}");
+    };
+    assert_eq!(audit_parts.len(), 2);
+    let PyRep::Rowset { rows: lines, .. } = &audit_parts[0] else {
+        panic!("expected Rowset from AuditMember, got {audit_parts:?}");
     };
     assert!(
         lines

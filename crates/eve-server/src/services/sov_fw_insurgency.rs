@@ -1100,61 +1100,64 @@ pub async fn handle(
                     client_error: None,
                 }));
             };
-            let (alliance_id, hub_id, prosp_lvl, structs_list) = ctx.db.with_snapshot(|snap| {
+            let structs_list = ctx.db.with_snapshot(|snap| {
                 let aid = snap
                     .system_states
                     .get(&sys_id)
                     .and_then(|s| s.sov_alliance_id);
-                let lvl = snap.sov_prospecting_levels.get(&sys_id).copied().unwrap_or(0);
-                let mut primary_hub = None;
-                let list: Vec<PyRep> = snap
-                    .structures
+                snap.structures
                     .values()
                     .filter(|s| {
                         s.solar_system_id == sys_id
                             && (s.type_id == 32226 || s.type_id == 32458)
                     })
                     .map(|s| {
-                        if s.type_id == 32458 {
-                            primary_hub = Some(s.structure_id);
-                        }
                         let vuln = snap
                             .structure_vulnerability_windows
                             .get(&s.structure_id)
                             .copied()
                             .unwrap_or((0, 0));
-                        PyRep::keyval([
-                            ("itemID", PyRep::Integer(s.structure_id)),
-                            ("structureID", PyRep::Integer(s.structure_id)),
-                            ("typeID", PyRep::Integer(s.type_id as i64)),
-                            ("corporationID", PyRep::Integer(s.owner_corp_id)),
-                            (
-                                "allianceID",
-                                aid.map(PyRep::Integer).unwrap_or(PyRep::None),
-                            ),
-                            ("solarSystemID", PyRep::Integer(sys_id as i64)),
-                            ("vulnerableStartTime", PyRep::Integer(vuln.0 as i64)),
-                            ("vulnerableEndTime", PyRep::Integer(vuln.1 as i64)),
-                            ("campaignState", PyRep::None),
-                        ])
+                        struct LocalSovStructureReply {
+                            structure_id: i64,
+                            type_id: u32,
+                            owner_corp_id: i64,
+                            alliance_id: Option<i64>,
+                            sys_id: u32,
+                            vuln_start: u32,
+                            vuln_end: u32,
+                        }
+                        impl LocalSovStructureReply {
+                            fn into_pyrep(self) -> PyRep {
+                                PyRep::keyval([
+                                    ("itemID", PyRep::Integer(self.structure_id)),
+                                    ("structureID", PyRep::Integer(self.structure_id)),
+                                    ("typeID", PyRep::Integer(self.type_id as i64)),
+                                    ("corporationID", PyRep::Integer(self.owner_corp_id)),
+                                    (
+                                        "allianceID",
+                                        self.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                                    ),
+                                    ("solarSystemID", PyRep::Integer(self.sys_id as i64)),
+                                    ("vulnerableStartTime", PyRep::Integer(self.vuln_start as i64)),
+                                    ("vulnerableEndTime", PyRep::Integer(self.vuln_end as i64)),
+                                    ("campaignState", PyRep::None),
+                                ])
+                            }
+                        }
+                        LocalSovStructureReply {
+                            structure_id: s.structure_id,
+                            type_id: s.type_id,
+                            owner_corp_id: s.owner_corp_id,
+                            alliance_id: aid,
+                            sys_id,
+                            vuln_start: vuln.0,
+                            vuln_end: vuln.1,
+                        }
+                        .into_pyrep()
                     })
-                    .collect();
-                (aid, primary_hub, lvl, list)
+                    .collect::<Vec<PyRep>>()
             });
-            Some(Ok(PyRep::keyval([
-                ("solarSystemID", PyRep::Integer(sys_id as i64)),
-                ("local", PyRep::Bool(true)),
-                (
-                    "allianceID",
-                    alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                ),
-                (
-                    "infrastructureHubID",
-                    hub_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                ),
-                ("prospectingLevel", PyRep::Integer(prosp_lvl as i64)),
-                ("structures", PyRep::List(structs_list)),
-            ])))
+            Some(Ok(PyRep::List(structs_list)))
         }
 
         _ => {

@@ -369,5 +369,5 @@ async fn test_kill_lp_award_split_rolling_stats_and_uncached_rpcs() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(vp_non_wz, PyRep::None);
+    assert_eq!(vp_non_wz, PyRep::Tuple(vec![PyRep::None, PyRep::Integer(0)]));
 }

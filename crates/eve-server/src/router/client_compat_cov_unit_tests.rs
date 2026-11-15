@@ -222,30 +222,7 @@ fn normalize_contract_corp_devindex_dogma_fw_homestation_inv_and_clones() {
     .expect("search contracts");
     assert_eq!(sc.dict_get("numFound"), Some(&PyRep::Integer(2)));
 
-    // corpRegistry, corpmgr, corporationSvc, devIndexManager
-    let leave = normalize_macho_rpc_reply(
-        "corpRegistry",
-        "CanLeaveCurrentCorporation",
-        Ok(PyRep::keyval([("canLeave", PyRep::Bool(false))])),
-    )
-    .expect("can leave");
-    assert!(matches!(leave, PyRep::Tuple(t) if t.len() == 3));
-
-    let reinf = normalize_macho_rpc_reply(
-        "corpRegistry",
-        "GetStructureReinforceDefault",
-        Ok(PyRep::Integer(18)),
-    )
-    .expect("reinforce");
-    assert_eq!(
-        reinf,
-        PyRep::Tuple(vec![PyRep::Integer(18), PyRep::Integer(0)])
-    );
-
-    let audit = normalize_macho_rpc_reply("corpmgr", "AuditMember", Ok(PyRep::Integer(9)))
-        .expect("audit");
-    assert_eq!(audit, PyRep::Tuple(vec![PyRep::Integer(9), PyRep::Integer(9)]));
-
+    // corporationSvc
     let emp1 = normalize_macho_rpc_reply(
         "corporationSvc",
         "GetEmployementRecordAndCharacterTransfers",
@@ -261,21 +238,7 @@ fn normalize_contract_corp_devindex_dogma_fw_homestation_inv_and_clones() {
     .expect("emp tuple");
     assert_eq!(emp2, PyRep::Tuple(vec![PyRep::Integer(1)]));
 
-    let dev = normalize_macho_rpc_reply(
-        "devIndexManager",
-        "GetAllDevelopmentIndices",
-        Ok(PyRep::List(vec![PyRep::keyval([
-            ("solarSystemID", PyRep::Integer(30_000_142)),
-            ("military", PyRep::Integer(5)),
-            ("industrial", PyRep::Integer(4)),
-            ("strategic", PyRep::Integer(3)),
-            ("adm", PyRep::Real(4.2)),
-        ])])),
-    )
-    .expect("dev index");
-    assert!(matches!(dev, PyRep::List(l) if l.len() == 1));
-
-    // dogmaIM.OverloadRack, fwVictoryPointMgr, home_station, invbroker, jumpCloneSvc
+    // dogmaIM.OverloadRack, home_station, invbroker, jumpCloneSvc
     let ov = normalize_macho_rpc_reply(
         "dogmaIM",
         "OverloadRack",
@@ -288,24 +251,6 @@ fn normalize_contract_corp_devindex_dogma_fw_homestation_inv_and_clones() {
     assert_eq!(
         ov,
         PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(1001), PyRep::Integer(27)])])
-    );
-
-    assert_eq!(
-        normalize_macho_rpc_reply("fwVictoryPointMgr", "GetLocalVictoryPointState", Ok(PyRep::None))
-            .expect("fw none"),
-        PyRep::Tuple(vec![PyRep::None, PyRep::Integer(0)])
-    );
-    assert_eq!(
-        normalize_macho_rpc_reply(
-            "fwVictoryPointMgr",
-            "GetLocalVictoryPointState",
-            Ok(PyRep::keyval([
-                ("solarSystemID", PyRep::Integer(30_002_001)),
-                ("state", PyRep::Integer(2)),
-            ]))
-        )
-        .expect("fw dict"),
-        PyRep::Tuple(vec![PyRep::Integer(30_002_001), PyRep::Integer(2)])
     );
 
     let hs = normalize_macho_rpc_reply(
@@ -425,11 +370,6 @@ fn normalize_map_paperdoll_peacetreaty_petitioner_planet_pos_raffle_reprocess_sc
             PyRep::Integer(0),
             PyRep::List(vec![PyRep::Integer(76), PyRep::Integer(77)]),
         ])
-    );
-    assert_eq!(
-        normalize_macho_rpc_reply("peaceTreatyMgr", "GetPeaceTreatiesForSession", Ok(PyRep::List(Vec::new())))
-            .expect("peace"),
-        PyRep::Tuple(vec![PyRep::List(Vec::new()), PyRep::List(Vec::new())])
     );
 
     // petitioner.GetCategoryHierarchicalInfo (None, Dict, List variants)
@@ -938,53 +878,6 @@ fn issue_771_and_776_get_members_paged_crowset_and_reprocess_list_compat() {
     assert_eq!(bm_list[0].dict_get("solarsystemID"), Some(&PyRep::Integer(30_000_142)));
     assert_eq!(bm_list[0].dict_get("solarSystemID"), Some(&PyRep::Integer(30_000_142)));
 
-    // #972: fwVictoryPointMgr.GetAllVictoryPointStates and GetLocalVictoryPointState populate VictoryPointState fields
-    let vp_local = normalize_macho_rpc_reply(
-        "fwVictoryPointMgr",
-        "GetLocalVictoryPointState",
-        Ok(PyRep::keyval([
-            ("solarSystemID", PyRep::Integer(30_002_537)),
-            ("victoryPoints", PyRep::Integer(1_500)),
-            ("contestedPercentage", PyRep::Real(50.0)),
-            ("threshold", PyRep::Integer(3_000)),
-        ])),
-    )
-    .expect("normalize GetLocalVictoryPointState");
-    let PyRep::Tuple(vp_pair) = vp_local else {
-        panic!("expected 2-tuple from GetLocalVictoryPointState");
-    };
-    assert_eq!(vp_pair[0], PyRep::Integer(30_002_537));
-    assert_eq!(vp_pair[1].dict_get("score"), Some(&PyRep::Integer(1_500)));
-    assert_eq!(vp_pair[1].dict_get("threshold"), Some(&PyRep::Integer(3_000)));
-    assert_eq!(vp_pair[1].dict_get("contestedFraction"), Some(&PyRep::Real(0.5)));
-    assert_eq!(vp_pair[1].dict_get("isContested"), Some(&PyRep::Bool(true)));
-    assert_eq!(vp_pair[1].dict_get("isVulnerable"), Some(&PyRep::Bool(false)));
-
-    let vp_all = normalize_macho_rpc_reply(
-        "fwVictoryPointMgr",
-        "GetAllVictoryPointStates",
-        Ok(PyRep::Dict(vec![(
-            PyRep::Integer(30_002_537),
-            PyRep::keyval([
-                ("victoryPoints", PyRep::Integer(3_000)),
-                ("contestedPercentage", PyRep::Real(100.0)),
-                ("threshold", PyRep::Integer(3_000)),
-            ]),
-        )])),
-    )
-    .expect("normalize GetAllVictoryPointStates");
-    let PyRep::Dict(vp_all_entries) = vp_all else {
-        panic!("expected Dict from GetAllVictoryPointStates");
-    };
-    assert_eq!(
-        vp_all_entries[0].1.dict_get("contestedFraction"),
-        Some(&PyRep::Real(1.0))
-    );
-    assert_eq!(
-        vp_all_entries[0].1.dict_get("isVulnerable"),
-        Some(&PyRep::Bool(true))
-    );
-
     // #952, #960, #963: OnDamageMessage, OnDamageMessages, OnCombatMessage, and OnGodmaPrimeItem sublocation 805
     assert!(should_suppress_macho_notification(
         "OnCombatMessage",
@@ -1263,4 +1156,232 @@ fn normalize_industry_job_promotes_elapsed_active_and_ready_paused_to_status_rea
     assert_eq!(rows[0].dict_get("status"), Some(&PyRep::Integer(3)));
     assert_eq!(rows[1].dict_get("status"), Some(&PyRep::Integer(1)));
     assert_eq!(rows[2].dict_get("status"), Some(&PyRep::Integer(101)));
+}
+
+#[tokio::test]
+async fn c9_typed_handlers_corp_dev_fw_peace_emit_canonical_wire_shapes() {
+    let ctx = crate::router::ServerContext::new();
+    let fw_sys = 30_002_537_u32;
+    let non_fw_sys = 30_000_142_u32;
+    let (uid, corp_id) = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get(&90_000_001).unwrap();
+        let uid = ch.user_id;
+        let cid = ch.corporation_id;
+        snap.corporations
+            .entry(cid)
+            .or_insert_with(|| eve_db::CorporationRecord::new(cid, "Alpha", "ALPH", 90_000_001))
+            .members
+            .extend([90_000_001, 90_000_002]);
+        snap.corp_governance.entry(cid).or_default().role_audit_log.push((
+            90_000_002,
+            90_000_001,
+            0,
+            8,
+            1_700_000_500,
+        ));
+        let st = snap.system_states.entry(non_fw_sys).or_default();
+        st.military_index = 5;
+        st.industrial_index = 4;
+        st.strategic_index = 3;
+        snap.fw_system_occupations.insert(
+            fw_sys,
+            eve_db::FwSystemOccupationRecord {
+                solar_system_id: fw_sys,
+                owner_faction_id: 500_001,
+                occupier_faction_id: 500_001,
+                victory_points: 1_500,
+                victory_points_threshold: 3_000,
+            },
+        );
+        snap.system_states.entry(fw_sys).or_default().fw_contested_pct = 50.0;
+        (uid, cid)
+    });
+    let mut sess = eve_machonet::SessionState {
+        user_id: Some(uid),
+        character_id: Some(90_000_001),
+        corporation_id: Some(corp_id),
+        solar_system_id: Some(non_fw_sys),
+        corp_role: u64::MAX,
+        ..Default::default()
+    };
+    let kw = HashMap::new();
+
+    // corpRegistry.CanLeaveCurrentCorporation -> (bool, UserError KeyVal, Dict)
+    let leave = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "corpRegistry",
+            None,
+            "CanLeaveCurrentCorporation",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("CanLeaveCurrentCorporation");
+    let PyRep::Tuple(leave_parts) = leave else {
+        panic!("expected 3-tuple from CanLeaveCurrentCorporation");
+    };
+    assert_eq!(leave_parts.len(), 3);
+    assert_eq!(leave_parts[0], PyRep::Bool(false));
+    assert_eq!(
+        leave_parts[1].dict_get("msg").and_then(PyRep::as_str),
+        Some("CrpCantQuitNotInStasis")
+    );
+    assert_eq!(
+        leave_parts[1].dict_get("__class__").and_then(PyRep::as_str),
+        Some("UserError")
+    );
+
+    // corpRegistry.GetStructureReinforceDefault -> (hour, 0), or scalar weekday
+    let reinf = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "corpRegistry",
+            None,
+            "GetStructureReinforceDefault",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("GetStructureReinforceDefault");
+    assert_eq!(reinf, PyRep::Tuple(vec![PyRep::Integer(18), PyRep::Integer(0)]));
+    let reinf_day = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "corpRegistry",
+            None,
+            "GetStructureReinforceDefault",
+            &[PyRep::String("weekday".into())],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("GetStructureReinforceDefault weekday");
+    assert_eq!(reinf_day, PyRep::Integer(5));
+
+    // corpmgr.AuditMember -> (Rowset, Rowset)
+    let audit = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "corpmgr",
+            None,
+            "AuditMember",
+            &[PyRep::Integer(90_000_002)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("AuditMember");
+    let PyRep::Tuple(audit_parts) = audit else {
+        panic!("expected 2-tuple from AuditMember");
+    };
+    assert_eq!(audit_parts.len(), 2);
+    assert_eq!(audit_parts[0], audit_parts[1]);
+    assert!(matches!(&audit_parts[0], PyRep::Rowset { rows, .. } if rows.len() == 1));
+
+    // devIndexManager.GetAllDevelopmentIndices -> Dict keyed by solarSystemID
+    let dev = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "devIndexManager",
+            None,
+            "GetAllDevelopmentIndices",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("GetAllDevelopmentIndices");
+    let PyRep::Dict(dev_entries) = dev else {
+        panic!("expected Dict from GetAllDevelopmentIndices");
+    };
+    let (_, jita_dev) = dev_entries
+        .iter()
+        .find(|(k, _)| *k == PyRep::Integer(i64::from(non_fw_sys)))
+        .expect("non_fw_sys dev index entry");
+    assert_eq!(jita_dev.dict_get("militaryPoints"), Some(&PyRep::Integer(5_000)));
+    assert_eq!(jita_dev.dict_get("industrialPoints"), Some(&PyRep::Integer(4_000)));
+    assert_eq!(jita_dev.dict_get("claimedFor"), Some(&PyRep::Integer(3)));
+    assert!(jita_dev.dict_get("adm").and_then(PyRep::as_f64).is_some());
+
+    // fwVictoryPointMgr.GetLocalVictoryPointState -> (None, 0) outside warzone, (sys_id, KeyVal) inside
+    let vp_none = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "fwVictoryPointMgr",
+            None,
+            "GetLocalVictoryPointState",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("GetLocalVictoryPointState non-FW");
+    assert_eq!(vp_none, PyRep::Tuple(vec![PyRep::None, PyRep::Integer(0)]));
+
+    sess.solar_system_id = Some(fw_sys);
+    let vp_local = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "fwVictoryPointMgr",
+            None,
+            "GetLocalVictoryPointState",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("GetLocalVictoryPointState FW");
+    let PyRep::Tuple(vp_pair) = vp_local else {
+        panic!("expected 2-tuple from GetLocalVictoryPointState");
+    };
+    assert_eq!(vp_pair[0], PyRep::Integer(i64::from(fw_sys)));
+    assert_eq!(vp_pair[1].dict_get("score"), Some(&PyRep::Integer(1_500)));
+    assert_eq!(vp_pair[1].dict_get("threshold"), Some(&PyRep::Integer(3_000)));
+    assert_eq!(vp_pair[1].dict_get("contestedFraction"), Some(&PyRep::Real(0.5)));
+    assert_eq!(vp_pair[1].dict_get("isContested"), Some(&PyRep::Bool(true)));
+    assert_eq!(vp_pair[1].dict_get("isVulnerable"), Some(&PyRep::Bool(false)));
+
+    let vp_all = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "fwVictoryPointMgr",
+            None,
+            "GetAllVictoryPointStates",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("GetAllVictoryPointStates");
+    let PyRep::Dict(vp_all_entries) = vp_all else {
+        panic!("expected Dict from GetAllVictoryPointStates");
+    };
+    let (_, fw_entry) = vp_all_entries
+        .iter()
+        .find(|(k, _)| *k == PyRep::Integer(i64::from(fw_sys)))
+        .expect("fw_sys entry in GetAllVictoryPointStates");
+    assert_eq!(fw_entry.dict_get("contestedFraction"), Some(&PyRep::Real(0.5)));
+    assert_eq!(fw_entry.dict_get("isContested"), Some(&PyRep::Bool(true)));
+    assert_eq!(fw_entry.dict_get("isVulnerable"), Some(&PyRep::Bool(false)));
+
+    // peaceTreatyMgr.GetPeaceTreatiesForSession -> (outgoing, incoming) 2-tuple
+    let peace = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "peaceTreatyMgr",
+            None,
+            "GetPeaceTreatiesForSession",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("GetPeaceTreatiesForSession");
+    assert_eq!(
+        peace,
+        PyRep::Tuple(vec![PyRep::List(Vec::new()), PyRep::List(Vec::new())])
+    );
 }

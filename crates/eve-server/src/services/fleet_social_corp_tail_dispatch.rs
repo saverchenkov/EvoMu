@@ -230,6 +230,19 @@ pub fn handle_corp_gov_tail(
         }
 
         ("corpRegistry", "GetStructureReinforceDefault") => {
+            struct StructureReinforceDefaultReply {
+                value: i64,
+                as_pair: bool,
+            }
+            impl StructureReinforceDefaultReply {
+                fn into_pyrep(self) -> PyRep {
+                    if self.as_pair {
+                        PyRep::Tuple(vec![PyRep::Integer(self.value), PyRep::Integer(0)])
+                    } else {
+                        PyRep::Integer(self.value)
+                    }
+                }
+            }
             if args.first().and_then(|a| a.as_str()) == Some("weekday") {
                 let weekday = ctx.db.with_snapshot(|snap| {
                     snap.corp_governance
@@ -237,7 +250,11 @@ pub fn handle_corp_gov_tail(
                         .map(|s| s.reinforce_weekday)
                         .unwrap_or(5)
                 });
-                Some(Ok(PyRep::Integer(weekday as i64)))
+                Some(Ok(StructureReinforceDefaultReply {
+                    value: weekday as i64,
+                    as_pair: false,
+                }
+                .into_pyrep()))
             } else {
                 let hour = ctx.db.with_snapshot(|snap| {
                     snap.corp_governance
@@ -245,7 +262,11 @@ pub fn handle_corp_gov_tail(
                         .map(|s| s.reinforce_hour)
                         .unwrap_or(18)
                 });
-                Some(Ok(PyRep::Integer(hour as i64)))
+                Some(Ok(StructureReinforceDefaultReply {
+                    value: hour as i64,
+                    as_pair: true,
+                }
+                .into_pyrep()))
             }
         }
 

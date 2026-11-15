@@ -889,6 +889,30 @@ pub async fn handle(
         }
 
         ("fwVictoryPointMgr", "GetLocalVictoryPointState") => {
+            struct VictoryPointStateReply {
+                solar_system_id: u32,
+                victory_points: i64,
+                contested_pct: f64,
+                threshold: i64,
+            }
+            impl VictoryPointStateReply {
+                fn into_keyval(self) -> PyRep {
+                    let contested_fraction = (self.contested_pct / 100.0).clamp(0.0, 1.0);
+                    PyRep::keyval([
+                        ("solarSystemID", PyRep::Integer(i64::from(self.solar_system_id))),
+                        ("victoryPoints", PyRep::Integer(self.victory_points)),
+                        ("score", PyRep::Integer(self.victory_points)),
+                        ("contestedPercentage", PyRep::Real(self.contested_pct)),
+                        ("contestedFraction", PyRep::Real(contested_fraction)),
+                        ("threshold", PyRep::Integer(self.threshold)),
+                        ("isContested", PyRep::Bool(self.victory_points > 0)),
+                        (
+                            "isVulnerable",
+                            PyRep::Bool(self.victory_points >= self.threshold),
+                        ),
+                    ])
+                }
+            }
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
@@ -912,25 +936,47 @@ pub async fn handle(
                     .unwrap_or_else(|| {
                         ((vp as f64 / (threshold as f64).max(1.0)) * 100.0).clamp(0.0, 100.0)
                     });
-                Some((vp, c, threshold))
+                Some(VictoryPointStateReply {
+                    solar_system_id: sys_id,
+                    victory_points: vp,
+                    contested_pct: c,
+                    threshold,
+                })
             });
-            let Some((vp, contested, threshold)) = opt_state else {
-                return Some(Ok(PyRep::None));
+            let Some(state) = opt_state else {
+                return Some(Ok(PyRep::Tuple(vec![PyRep::None, PyRep::Integer(0)])));
             };
-            let contested_fraction = (contested / 100.0).clamp(0.0, 1.0);
-            Some(Ok(PyRep::keyval([
-                ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
-                ("victoryPoints", PyRep::Integer(vp)),
-                ("score", PyRep::Integer(vp)),
-                ("contestedPercentage", PyRep::Real(contested)),
-                ("contestedFraction", PyRep::Real(contested_fraction)),
-                ("threshold", PyRep::Integer(threshold)),
-                ("isContested", PyRep::Bool(vp > 0)),
-                ("isVulnerable", PyRep::Bool(vp >= threshold)),
+            Some(Ok(PyRep::Tuple(vec![
+                PyRep::Integer(i64::from(sys_id)),
+                state.into_keyval(),
             ])))
         }
 
         ("fwVictoryPointMgr", "GetAllVictoryPointStates") => {
+            struct VictoryPointStateReply {
+                solar_system_id: u32,
+                victory_points: i64,
+                contested_pct: f64,
+                threshold: i64,
+            }
+            impl VictoryPointStateReply {
+                fn into_keyval(self) -> PyRep {
+                    let contested_fraction = (self.contested_pct / 100.0).clamp(0.0, 1.0);
+                    PyRep::keyval([
+                        ("solarSystemID", PyRep::Integer(i64::from(self.solar_system_id))),
+                        ("victoryPoints", PyRep::Integer(self.victory_points)),
+                        ("score", PyRep::Integer(self.victory_points)),
+                        ("contestedPercentage", PyRep::Real(self.contested_pct)),
+                        ("contestedFraction", PyRep::Real(contested_fraction)),
+                        ("threshold", PyRep::Integer(self.threshold)),
+                        ("isContested", PyRep::Bool(self.victory_points > 0)),
+                        (
+                            "isVulnerable",
+                            PyRep::Bool(self.victory_points >= self.threshold),
+                        ),
+                    ])
+                }
+            }
             let res = ctx.db.with_snapshot(|snap| {
                 let mut map = Vec::new();
                 for (&sys_id, occ) in &snap.fw_system_occupations {
@@ -948,19 +994,15 @@ pub async fn handle(
                         .unwrap_or_else(|| {
                             ((vp as f64 / (threshold as f64).max(1.0)) * 100.0).clamp(0.0, 100.0)
                         });
-                    let contested_fraction = (c / 100.0).clamp(0.0, 1.0);
                     map.push((
                         PyRep::Integer(i64::from(sys_id)),
-                        PyRep::keyval([
-                            ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
-                            ("victoryPoints", PyRep::Integer(vp)),
-                            ("score", PyRep::Integer(vp)),
-                            ("contestedPercentage", PyRep::Real(c)),
-                            ("contestedFraction", PyRep::Real(contested_fraction)),
-                            ("threshold", PyRep::Integer(threshold)),
-                            ("isContested", PyRep::Bool(vp > 0)),
-                            ("isVulnerable", PyRep::Bool(vp >= threshold)),
-                        ]),
+                        VictoryPointStateReply {
+                            solar_system_id: sys_id,
+                            victory_points: vp,
+                            contested_pct: c,
+                            threshold,
+                        }
+                        .into_keyval(),
                     ));
                 }
                 PyRep::Dict(map)

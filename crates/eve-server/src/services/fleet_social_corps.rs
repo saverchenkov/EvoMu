@@ -643,7 +643,25 @@ fn handle_audit_member(
     if let Some(max_rows) = limit {
         rows.truncate(max_rows);
     }
-    Some(Ok(PyRep::rowset(vec!["characterID", "issuerID", "oldRoles", "newRoles", "changeTime"], rows)))
+    struct AuditMemberReply {
+        rows: Vec<Vec<PyRep>>,
+    }
+    impl AuditMemberReply {
+        fn into_pyrep(self) -> PyRep {
+            let rowset = PyRep::rowset(
+                vec![
+                    "characterID",
+                    "issuerID",
+                    "oldRoles",
+                    "newRoles",
+                    "changeTime",
+                ],
+                self.rows,
+            );
+            PyRep::Tuple(vec![rowset.clone(), rowset])
+        }
+    }
+    Some(Ok(AuditMemberReply { rows }.into_pyrep()))
 }
 
 pub(super) fn handle_corps(
@@ -755,7 +773,33 @@ pub(super) fn handle_corps(
                     .map(|s| (s.logo, s.logo_extra_colors, s.applications_enabled.unwrap_or(true), s.friendly_fire_legal))
                     .unwrap_or(((1, 2, 3, 10), (0, 0), true, false))
             });
-            let creator_id = ceo_id.unwrap_or(cid);
+            struct CorpInfoReply {
+                entries: Vec<(String, PyRep)>,
+            }
+            impl CorpInfoReply {
+                fn into_keyval(self) -> PyRep {
+                    PyRep::KeyVal(self.entries.into_iter().collect())
+                }
+                fn into_util_row(self) -> PyRep {
+                    let map: std::collections::BTreeMap<String, PyRep> =
+                        self.entries.into_iter().collect();
+                    let mut header = Vec::with_capacity(map.len());
+                    let mut line = Vec::with_capacity(map.len());
+                    for (k, v) in map {
+                        header.push(PyRep::String(k));
+                        line.push(v);
+                    }
+                    PyRep::Object {
+                        type_name: "util.Row".into(),
+                        args: Box::new(PyRep::Tuple(vec![
+                            PyRep::List(header),
+                            PyRep::List(line),
+                        ])),
+                    }
+                }
+            }
+            let effective_ceo_id = ceo_id.filter(|&id| id > 0).or((cid > 0).then_some(cid));
+            let creator_id = effective_ceo_id.unwrap_or(cid);
             let default_h = ["1st Division", "2nd Division", "3rd Division", "4th Division", "5th Division", "6th Division", "7th Division"];
             let default_w = ["Master Wallet", "2nd Wallet", "3rd Wallet", "4th Wallet", "5th Wallet", "6th Wallet", "7th Wallet"];
             let mut entries = vec![
@@ -763,7 +807,7 @@ pub(super) fn handle_corps(
                 ("corporationName".into(), PyRep::String(name)),
                 ("ticker".into(), PyRep::String(ticker.clone())),
                 ("tickerName".into(), PyRep::String(ticker)),
-                ("ceoID".into(), ceo_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("ceoID".into(), effective_ceo_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
                 ("creatorID".into(), PyRep::Integer(creator_id)),
                 ("memberCount".into(), PyRep::Integer(m_count)),
                 ("memberLimit".into(), PyRep::Integer(m_limit)),
@@ -793,7 +837,12 @@ pub(super) fn handle_corps(
                 entries.push((format!("division{i}"), PyRep::String(h_name)));
                 entries.push((format!("walletDivision{i}"), PyRep::String(w_name)));
             }
-            Some(Ok(PyRep::KeyVal(entries.into_iter().collect())))
+            let reply = CorpInfoReply { entries };
+            if service == "corpmgr" {
+                Some(Ok(reply.into_util_row()))
+            } else {
+                Some(Ok(reply.into_keyval()))
+            }
         }
 
         ("corpmgr", "allianceID")
@@ -1682,10 +1731,29 @@ pub(super) fn handle_corps(
                 }
                 (true, "OK")
             });
-            Some(Ok(PyRep::keyval([
-                ("canLeave", PyRep::Bool(can_leave)),
-                ("reason", PyRep::String(reason.into())),
-            ])))
+            struct CanLeaveCorpReply {
+                can_leave: bool,
+                _reason: &'static str,
+            }
+            impl CanLeaveCorpReply {
+                fn into_pyrep(self) -> PyRep {
+                    let err_kv = PyRep::keyval([
+                        ("msg", PyRep::String("CrpCantQuitNotInStasis".into())),
+                        ("dict", PyRep::Dict(Vec::new())),
+                        ("__class__", PyRep::String("UserError".into())),
+                    ]);
+                    PyRep::Tuple(vec![
+                        PyRep::Bool(self.can_leave),
+                        err_kv,
+                        PyRep::Dict(Vec::new()),
+                    ])
+                }
+            }
+            Some(Ok(CanLeaveCorpReply {
+                can_leave,
+                _reason: reason,
+            }
+            .into_pyrep()))
         }
 
         ("corpRegistry", "CanBeKickedOut") => {

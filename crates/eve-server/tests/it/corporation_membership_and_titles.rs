@@ -170,14 +170,17 @@ async fn test_corp_creation_public_info_and_edit_details() {
     let pub_info = rpc(&ctx, &mut sess_outsider, "corpmgr", "GetPublicInfo", &[PyRep::Integer(new_corp_id)])
         .await
         .expect("corpmgr.GetPublicInfo");
-    let PyRep::KeyVal(info_kv) = pub_info else { panic!("expected KeyVal") };
-    assert_eq!(info_kv["corporationID"], PyRep::Integer(new_corp_id));
-    assert_eq!(info_kv["corporationName"], PyRep::String("Apex Industrial Logistics".into()));
-    assert_eq!(info_kv["tickerName"], PyRep::String("AILOG".into()));
-    assert_eq!(info_kv["ceoID"], PyRep::Integer(founder_id));
-    assert_eq!(info_kv["memberCount"], PyRep::Integer(1));
-    assert_eq!(info_kv["taxRate"], PyRep::Real(0.05));
-    assert_eq!(info_kv["stationID"], PyRep::Integer(JITA_STATION));
+    assert!(matches!(
+        &pub_info,
+        PyRep::Object { type_name, .. } if type_name == "util.Row"
+    ));
+    assert_eq!(pub_info.dict_get("corporationID"), Some(&PyRep::Integer(new_corp_id)));
+    assert_eq!(pub_info.dict_get("corporationName"), Some(&PyRep::String("Apex Industrial Logistics".into())));
+    assert_eq!(pub_info.dict_get("tickerName"), Some(&PyRep::String("AILOG".into())));
+    assert_eq!(pub_info.dict_get("ceoID"), Some(&PyRep::Integer(founder_id)));
+    assert_eq!(pub_info.dict_get("memberCount"), Some(&PyRep::Integer(1)));
+    assert_eq!(pub_info.dict_get("taxRate"), Some(&PyRep::Real(0.05)));
+    assert_eq!(pub_info.dict_get("stationID"), Some(&PyRep::Integer(JITA_STATION)));
 
     // Update session
     sess_founder.corporation_id = Some(new_corp_id);
@@ -431,8 +434,9 @@ async fn test_corp_invitations_and_leave_rules() {
     let can_leave_rep = rpc(&ctx, &mut sess_invitee, "corpRegistry", "CanLeaveCurrentCorporation", &[])
         .await
         .expect("CanLeaveCurrentCorporation");
-    let PyRep::KeyVal(can_leave_kv) = can_leave_rep else { panic!("expected KeyVal") };
-    assert_eq!(can_leave_kv["canLeave"], PyRep::Bool(true));
+    let PyRep::Tuple(can_leave_parts) = can_leave_rep else { panic!("expected 3-tuple") };
+    assert_eq!(can_leave_parts.len(), 3);
+    assert_eq!(can_leave_parts[0], PyRep::Bool(true));
 
     // rpc-lint: allow test helper
     rpc(&ctx, &mut sess_invitee, "corpRegistry", "LeaveCorporation", &[])
@@ -455,8 +459,9 @@ async fn test_corp_invitations_and_leave_rules() {
     let ceo_leave_check = rpc(&ctx, &mut sess_ceo, "corpRegistry", "CanLeaveCurrentCorporation", &[])
         .await
         .expect("CanLeave CEO");
-    let PyRep::KeyVal(ceo_leave_kv) = ceo_leave_check else { panic!("expected KeyVal") };
-    assert_eq!(ceo_leave_kv["canLeave"], PyRep::Bool(false));
+    let PyRep::Tuple(ceo_leave_parts) = ceo_leave_check else { panic!("expected 3-tuple") };
+    assert_eq!(ceo_leave_parts.len(), 3);
+    assert_eq!(ceo_leave_parts[0], PyRep::Bool(false));
 }
 
 // parity: feat:corporation.kick-member, feat:corporation.roles

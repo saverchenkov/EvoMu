@@ -53,7 +53,9 @@ async fn test_live_member_audit_history_and_corp_quit_cleanup() {
     let r2 = r1 | corp_roles::ROLE_TRADER;
     rpc(&ctx, &mut s1, "corpRegistry", "UpdateMember", &[PyRep::Integer(PILOT_2), PyRep::Integer(r2 as i64)]).await.expect("add Trader");
     let audit = rpc(&ctx, &mut s1, "corpmgr", "AuditMember", &[PyRep::Integer(PILOT_2)]).await.expect("AuditMember");
-    let PyRep::Rowset { columns, rows } = &audit else { panic!("AuditMember rowset, got {audit:?}") };
+    let PyRep::Tuple(audit_parts) = &audit else { panic!("AuditMember 2-tuple, got {audit:?}") };
+    assert_eq!(audit_parts.len(), 2);
+    let PyRep::Rowset { columns, rows } = &audit_parts[0] else { panic!("AuditMember rowset, got {audit:?}") };
     let col = |n: &str| columns.iter().position(|c| c == n).unwrap_or_else(|| panic!("column {n}"));
     let hist: Vec<(i64, i64, i64, i64, i64)> = rows
         .iter()
@@ -68,7 +70,10 @@ async fn test_live_member_audit_history_and_corp_quit_cleanup() {
         "audit rows carry target, issuer, old/new roles and change time"
     );
     let filtered = rpc(&ctx, &mut s1, "corpmgr", "AuditMember", &[PyRep::Integer(PILOT_1)]).await.expect("AuditMember CEO");
-    assert!(matches!(&filtered, PyRep::Rowset { rows, .. } if rows.is_empty()), "history is filtered by target, not issuer");
+    assert!(
+        matches!(&filtered, PyRep::Tuple(parts) if parts.len() == 2 && matches!(&parts[0], PyRep::Rowset { rows, .. } if rows.is_empty())),
+        "history is filtered by target, not issuer"
+    );
     let denied = rpc(&ctx, &mut s2, "corpmgr", "AuditMember", &[PyRep::Integer(PILOT_2)]).await.expect_err("non-director audit");
     assert_eq!(denied.code, "CorpRoleDenied");
 
@@ -137,7 +142,7 @@ async fn test_live_structure_reinforce_default_adopted_by_new_structure() {
     let set = rpc(&ctx, &mut s1, "corpRegistry", "SetStructureReinforceDefault", &[PyRep::Integer(19)]).await.expect("CEO sets default");
     assert_eq!(set.as_i64(), Some(19));
     let got = rpc(&ctx, &mut s2, "corpRegistry", "GetStructureReinforceDefault", &[]).await.expect("GetStructureReinforceDefault");
-    assert_eq!(got.as_i64(), Some(19));
+    assert_eq!(got, PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(0)]));
 
     let mut cargo = upwell_cargo(&ctx, 35_825, &[]);
     cargo.push((4_051, 200));

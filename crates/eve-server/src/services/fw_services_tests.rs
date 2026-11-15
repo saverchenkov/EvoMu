@@ -145,6 +145,10 @@ async fn fw_services_helpers_and_rpc_mutations() {
         .await
         .unwrap()
         .unwrap();
+    assert!(matches!(
+        &local_vp,
+        PyRep::Tuple(parts) if parts.len() == 2 && parts[0] == PyRep::Integer(i64::from(wz_sys_id))
+    ));
     assert_eq!(local_vp.dict_get("solarSystemID"), Some(&PyRep::Integer(i64::from(wz_sys_id))));
 
     let all_vp = handle(&ctx, &mut sess, "fwVictoryPointMgr", "GetAllVictoryPointStates", &[], &kw)

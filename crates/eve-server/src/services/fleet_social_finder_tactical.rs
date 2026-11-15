@@ -77,36 +77,114 @@ fn leader_keyval(leader_id: i64, leader_meta: Option<(i64, Option<i64>, f64)>) -
     ])
 }
 
+struct FleetAdvertReply {
+    fleet_id: i64,
+    leader_id: i64,
+    leader_meta: Option<(i64, Option<i64>, f64)>,
+    fleet_name: String,
+    description: String,
+    solar_system_id: u32,
+    invite_scope: u8,
+    auto_join: bool,
+    min_standing: f64,
+    min_security: f64,
+    allowed_entities: Vec<i64>,
+    num_members: i64,
+    date_created: i64,
+}
+
+impl FleetAdvertReply {
+    fn from_state(
+        ad: &FleetAdvertState,
+        num_members: i64,
+        leader_meta: Option<(i64, Option<i64>, f64)>,
+    ) -> Self {
+        let mut allowed: Vec<i64> = ad.allowed_entities.iter().copied().collect();
+        allowed.sort_unstable();
+        let date_created =
+            ((ad._created_unix as i64) + 11_644_473_600).saturating_mul(10_000_000);
+        Self {
+            fleet_id: ad.fleet_id,
+            leader_id: ad.leader_id,
+            leader_meta,
+            fleet_name: ad.fleet_name.clone(),
+            description: ad.description.clone(),
+            solar_system_id: ad.solar_system_id,
+            invite_scope: ad.invite_scope,
+            auto_join: ad.auto_join,
+            min_standing: ad.min_standing,
+            min_security: ad.min_security,
+            allowed_entities: allowed,
+            num_members,
+            date_created,
+        }
+    }
+
+    fn into_pyrep(self) -> PyRep {
+        PyRep::Dict(vec![
+            (PyRep::String("fleetID".into()), PyRep::Integer(self.fleet_id)),
+            (
+                PyRep::String("leaderID".into()),
+                PyRep::Integer(self.leader_id),
+            ),
+            (
+                PyRep::String("leader".into()),
+                leader_keyval(self.leader_id, self.leader_meta),
+            ),
+            (
+                PyRep::String("fleetName".into()),
+                PyRep::String(self.fleet_name),
+            ),
+            (
+                PyRep::String("description".into()),
+                PyRep::String(self.description),
+            ),
+            (
+                PyRep::String("solarSystemID".into()),
+                PyRep::Integer(self.solar_system_id as i64),
+            ),
+            (
+                PyRep::String("inviteScope".into()),
+                PyRep::Integer(self.invite_scope as i64),
+            ),
+            (
+                PyRep::String("joinNeedsApproval".into()),
+                PyRep::Bool(!self.auto_join),
+            ),
+            (
+                PyRep::String("autoJoin".into()),
+                PyRep::Bool(self.auto_join),
+            ),
+            (
+                PyRep::String("minStanding".into()),
+                PyRep::Real(self.min_standing),
+            ),
+            (
+                PyRep::String("minSecurity".into()),
+                PyRep::Real(self.min_security),
+            ),
+            (
+                PyRep::String("allowedEntities".into()),
+                PyRep::List(self.allowed_entities.into_iter().map(PyRep::Integer).collect()),
+            ),
+            (
+                PyRep::String("numMembers".into()),
+                PyRep::Integer(self.num_members),
+            ),
+            (
+                PyRep::String("dateCreated".into()),
+                PyRep::Integer(self.date_created),
+            ),
+        ])
+    }
+}
+
 fn advert_to_dict(
     ad: &FleetAdvertState,
     num_members: i64,
     leader_meta: Option<(i64, Option<i64>, f64)>,
 ) -> PyRep {
-    let mut allowed: Vec<i64> = ad.allowed_entities.iter().copied().collect();
-    allowed.sort_unstable();
-    let date_created = ((ad._created_unix as i64) + 11_644_473_600).saturating_mul(10_000_000);
-    PyRep::Dict(vec![
-        (PyRep::String("fleetID".into()), PyRep::Integer(ad.fleet_id)),
-        (PyRep::String("leaderID".into()), PyRep::Integer(ad.leader_id)),
-        (
-            PyRep::String("leader".into()),
-            leader_keyval(ad.leader_id, leader_meta),
-        ),
-        (PyRep::String("fleetName".into()), PyRep::String(ad.fleet_name.clone())),
-        (PyRep::String("description".into()), PyRep::String(ad.description.clone())),
-        (PyRep::String("solarSystemID".into()), PyRep::Integer(ad.solar_system_id as i64)),
-        (PyRep::String("inviteScope".into()), PyRep::Integer(ad.invite_scope as i64)),
-        (PyRep::String("joinNeedsApproval".into()), PyRep::Bool(!ad.auto_join)),
-        (PyRep::String("autoJoin".into()), PyRep::Bool(ad.auto_join)),
-        (PyRep::String("minStanding".into()), PyRep::Real(ad.min_standing)),
-        (PyRep::String("minSecurity".into()), PyRep::Real(ad.min_security)),
-        (
-            PyRep::String("allowedEntities".into()),
-            PyRep::List(allowed.into_iter().map(PyRep::Integer).collect()),
-        ),
-        (PyRep::String("numMembers".into()), PyRep::Integer(num_members)),
-        (PyRep::String("dateCreated".into()), PyRep::Integer(date_created)),
-    ])
+    FleetAdvertReply::from_state(ad, num_members, leader_meta).into_pyrep()
 }
 
 pub(crate) fn formation_name(formation_id: i64) -> &'static str {

@@ -967,9 +967,7 @@ async fn notify_batch9_diplomacy_fittings_offers_and_nes() {
     let pub_info = rpc(&ctx, &mut sess_a, "corpmgr", "GetPublicInfo", &[PyRep::Integer(corp_id)])
         .await
         .expect("GetPublicInfo");
-    if let PyRep::KeyVal(kv) = pub_info {
-        assert_eq!(kv.get("allowWar"), Some(&PyRep::Bool(false)));
-    }
+    assert_eq!(pub_info.dict_get("allowWar"), Some(&PyRep::Bool(false)));
     // Re-calling UpdateCorporation with same allowWar=false does NOT re-emit OnAllowWarUpdated
     let _ = rpc(
         &ctx,

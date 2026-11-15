@@ -349,16 +349,14 @@ async fn fw_direct_enlistment_and_sov_mgr_info_rpcs() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(
-        local_structs.dict_get("local").and_then(PyRep::as_bool),
-        Some(true)
-    );
-    assert_eq!(
-        local_structs
-            .dict_get("infrastructureHubID")
-            .and_then(PyRep::as_i64),
-        Some(hub_id)
-    );
+    assert_eq!(local_structs.row_count(), Some(2));
+    assert!(matches!(
+        &local_structs,
+        PyRep::List(items)
+            if items
+                .iter()
+                .any(|s| s.dict_get("structureID").and_then(PyRep::as_i64) == Some(hub_id))
+    ));
 
     // Reject unknown service or unknown method cleanly
     assert!(handle(&ctx, &mut sess, "", "", &[], &kw)
