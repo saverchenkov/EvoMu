@@ -772,25 +772,44 @@ fn schema_and_cold_stores_dropped_table_and_corrupt_paths() {
         assert!(sync_d6_corp_crimewatch(&tx, &cw_pop, &mut fp_cw).is_err());
     }
 
-    // notes_lp_sequence_store dropped tables & unknown sequence key
+    // notes_lp_sequence_store & notes_lp domain_rows dropped tables & unknown sequence key
     let c_notes = open_migrated_conn();
     c_notes.execute("INSERT INTO sp6_lifecycle_state (singleton_id, state_json) VALUES (1, '{\"next_alliance_id\":5}')", []).ok();
-    c_notes.execute("INSERT INTO corp_lp_balances (corporation_id, issuer_corp_id, lp_balance) VALUES (1, 2, 10)", []).unwrap();
-    c_notes.execute("INSERT INTO char_lp_logs (character_id, logs_json) VALUES (1, '[]')", []).unwrap();
+    c_notes.execute(
+        "INSERT INTO domain_rows (domain, key, value) VALUES (?1, '1|2', '10'), (?2, '1', '[]')",
+        rusqlite::params![
+            crate::sqlite_store::domain_rows::DOMAIN_CORP_LP_BALANCES,
+            crate::sqlite_store::domain_rows::DOMAIN_CHAR_LP_LOGS
+        ],
+    ).unwrap();
     let mut n_snap = WorldStateSnapshot::default();
     load_d6(&c_notes, &mut n_snap);
-    for t in ["owner_notes", "corp_lp_balances", "char_lp_logs", "sp6_lifecycle_state"] {
+    let _ = crate::sqlite_store::domain_rows::load_notes_lp_domain_rows(
+        &c_notes,
+        &mut n_snap,
+        &mut crate::sqlite_store::quarantine::LoadContext::quarantine_in_memory(),
+    )
+    .unwrap();
+    for t in ["sp6_lifecycle_state"] {
         let mut c2 = open_migrated_conn();
         c2.execute(&format!("DROP TABLE {t}"), []).unwrap();
         let mut s2 = WorldStateSnapshot::default();
         load_d6(&c2, &mut s2);
         let mut pop_n = WorldStateSnapshot::default();
-        pop_n.owner_notes.insert(1, OwnerNoteRecord { note_id: 1, character_id: 1, item_id: 1, label: "L".into(), note: "N".into(), timestamp_unix: 1 });
-        pop_n.corp_lp_balances.insert((1, 2), 10);
-        pop_n.char_lp_logs.insert(1, vec![]);
+        pop_n.sp6_lifecycle.last_downtime_day_idx = Some(1);
         let mut fp_n = TableFingerprints::default();
         let tx = c2.transaction().unwrap();
         assert!(sync_d6(&tx, &pop_n, &mut fp_n).is_err());
+    }
+    {
+        let mut c2 = open_migrated_conn();
+        c2.execute("DROP TABLE domain_rows", []).unwrap();
+        let mut pop_n = WorldStateSnapshot::default();
+        pop_n.owner_notes.insert(1, OwnerNoteRecord { note_id: 1, character_id: 1, item_id: 1, label: "L".into(), note: "N".into(), timestamp_unix: 1 });
+        pop_n.corp_lp_balances.insert((1, 2), 10);
+        pop_n.char_lp_logs.insert(1, vec![]);
+        let tx = c2.transaction().unwrap();
+        assert!(crate::sqlite_store::domain_rows::sync_notes_lp_domain_rows(&tx, &pop_n).is_err());
     }
 
     // industry_market_pve_store unknown key + dropped tables on load/sync/rollback

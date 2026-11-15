@@ -1,7 +1,10 @@
 //! Deep branch-coverage and mutation-killing unit tests for `notes_lp_sequence_store`,
 //! `ledger_store`, and `sync_ext`.
 
-use super::domain_rows::{load_ledger_domain_rows, sync_ledger_domain_rows};
+use super::domain_rows::{
+    load_ledger_domain_rows, load_notes_lp_domain_rows, sync_ledger_domain_rows,
+    sync_notes_lp_domain_rows,
+};
 use super::fingerprints::TableFingerprints;
 use super::load::load_snapshot_from_sqlite;
 use super::notes_lp_sequence_store::{
@@ -101,24 +104,16 @@ fn notes_lp_sequence_store_granular_mutations_deletions_and_selective_rollbacks(
     {
         let tx = conn.transaction().unwrap();
         assert!(sync_d6(&tx, &snap, &mut fp).unwrap());
+        assert!(sync_notes_lp_domain_rows(&tx, &snap).unwrap());
+        assert!(!sync_notes_lp_domain_rows(&tx, &snap).unwrap());
         tx.commit().unwrap();
     }
 
-    // 3. Test selective rollback_d6 for each individual dirty flag:
-    // 3a. Only owner_notes mutated in-place (same len, different content!)
+    // 3. Test selective rollback_d6 for `sp6_lifecycle` and verify Family 2 in-place mutations
+    //    sync cleanly via `domain_rows` and reload after deletion.
     snap.owner_notes.get_mut(&10).unwrap().note = "ModifiedInPlace".into();
-    rollback_d6(&conn, &mut snap, &fp).unwrap();
-    assert_eq!(snap.owner_notes[&10].note, "Body1");
-
-    // 3b. Only corp_lp_balances mutated
     snap.corp_lp_balances.insert((98_000_001, 1_000_125), 9_999);
-    rollback_d6(&conn, &mut snap, &fp).unwrap();
-    assert_eq!(snap.corp_lp_balances[&(98_000_001, 1_000_125)], 1_500);
-
-    // 3c. Only char_lp_logs mutated in-place (same len, different content!)
     snap.char_lp_logs.get_mut(&90_000_001).unwrap()[0].amount = 9_999;
-    rollback_d6(&conn, &mut snap, &fp).unwrap();
-    assert_eq!(snap.char_lp_logs[&90_000_001][0].amount, 300);
 
     // 3d. Only sp6_lifecycle mutated
     snap.sp6_lifecycle.last_downtime_day_idx = Some(99_999);
@@ -131,11 +126,17 @@ fn notes_lp_sequence_store_granular_mutations_deletions_and_selective_rollbacks(
     snap.char_lp_logs.remove(&90_000_001);
     {
         let tx = conn.transaction().unwrap();
-        assert!(sync_d6(&tx, &snap, &mut fp).unwrap());
+        assert!(sync_notes_lp_domain_rows(&tx, &snap).unwrap());
         tx.commit().unwrap();
     }
     let mut reloaded = WorldStateSnapshot::default();
     load_d6(&conn, &mut reloaded);
+    load_notes_lp_domain_rows(
+        &conn,
+        &mut reloaded,
+        &mut LoadContext::quarantine_in_memory(),
+    )
+    .unwrap();
     assert!(!reloaded.owner_notes.contains_key(&10));
     assert_eq!(reloaded.owner_notes[&20].label, "N2");
     assert!(!reloaded.corp_lp_balances.contains_key(&(98_000_001, 1_000_125)));

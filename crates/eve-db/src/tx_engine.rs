@@ -172,8 +172,8 @@ impl ChangeSet {
     /// Computes a `ChangeSet` between `before` and `after` snapshots (`O(k log N)` for `CowMap`s).
     pub fn diff(seq: u64, before: &WorldStateSnapshot, after: &WorldStateSnapshot) -> Self {
         use crate::sqlite_store::domain_rows::{
-            Persist, DOMAIN_ACCOUNT_PLEX_VAULT, DOMAIN_MARKET_TRANSACTIONS,
-            DOMAIN_WALLET_JOURNAL_META,
+            Persist, DOMAIN_ACCOUNT_PLEX_VAULT, DOMAIN_CHAR_LP_LOGS, DOMAIN_CORP_LP_BALANCES,
+            DOMAIN_MARKET_TRANSACTIONS, DOMAIN_OWNER_NOTES, DOMAIN_WALLET_JOURNAL_META,
         };
 
         let meta_changed = before.next_entity_id != after.next_entity_id
@@ -200,6 +200,21 @@ impl ChangeSet {
         before.account_plex_vault.collect_diff_ops(
             &after.account_plex_vault,
             DOMAIN_ACCOUNT_PLEX_VAULT,
+            &mut domain_rows,
+        );
+        before.owner_notes.collect_diff_ops(
+            &after.owner_notes,
+            DOMAIN_OWNER_NOTES,
+            &mut domain_rows,
+        );
+        before.corp_lp_balances.collect_diff_ops(
+            &after.corp_lp_balances,
+            DOMAIN_CORP_LP_BALANCES,
+            &mut domain_rows,
+        );
+        before.char_lp_logs.collect_diff_ops(
+            &after.char_lp_logs,
+            DOMAIN_CHAR_LP_LOGS,
             &mut domain_rows,
         );
 
@@ -305,10 +320,7 @@ fn compute_cold_domain_diff(before: &WorldStateSnapshot, after: &WorldStateSnaps
         || before.skill_history != after.skill_history
         || before.character_doll_info != after.character_doll_info;
 
-    let d6_notes_lp_seq = before.owner_notes != after.owner_notes
-        || before.corp_lp_balances != after.corp_lp_balances
-        || before.char_lp_logs != after.char_lp_logs
-        || before.next_alliance_id != after.next_alliance_id
+    let d6_notes_lp_seq = before.next_alliance_id != after.next_alliance_id
         || before.next_corporation_id != after.next_corporation_id
         || before.next_notification_id != after.next_notification_id
         || before.next_report_id != after.next_report_id

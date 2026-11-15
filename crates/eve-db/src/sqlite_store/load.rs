@@ -1377,6 +1377,8 @@ pub fn load_snapshot_from_sqlite_with_options(
 
     let had_legacy_ledger =
         super::domain_rows::load_ledger_domain_rows(conn, &mut snap, &mut ctx)?;
+    let had_legacy_notes_lp =
+        super::domain_rows::load_notes_lp_domain_rows(conn, &mut snap, &mut ctx)?;
     super::notes_lp_sequence_store::load_d6_checked(conn, &mut snap, &mut ctx)?;
     super::social_store::load_d6_social_into_snapshot_with_ctx(conn, &mut snap, &mut ctx)?;
     super::corp_crimewatch_store::load_d6_corp_crimewatch_checked(conn, &mut snap, &mut ctx)?;
@@ -1396,7 +1398,7 @@ pub fn load_snapshot_from_sqlite_with_options(
         st.solar_system_id = sid;
     }
     if conn.is_autocommit() && !conn.is_readonly(rusqlite::DatabaseName::Main).unwrap_or(false) {
-        if had_legacy_ledger {
+        if had_legacy_ledger || had_legacy_notes_lp {
             super::domain_rows::apply_domain_rows_migration(conn)?;
         }
         let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
@@ -1404,7 +1406,10 @@ pub fn load_snapshot_from_sqlite_with_options(
         if had_legacy_ledger {
             super::domain_rows::drop_legacy_ledger_tables(&tx)?;
         }
-        if delta.dirty || had_legacy_ledger {
+        if had_legacy_notes_lp {
+            super::domain_rows::drop_legacy_notes_lp_tables(&tx)?;
+        }
+        if delta.dirty || had_legacy_ledger || had_legacy_notes_lp {
             tx.commit().map_err(|e| e.to_string())?;
         }
     }

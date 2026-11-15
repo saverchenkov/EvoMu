@@ -1,11 +1,17 @@
 //! Comprehensive unit and mutation-killing tests for `sqlite_store::notes_lp_sequence_store`
-//! (`apply_d6_migration`, `compute_d6_fingerprints`, `load_d6`, `sync_d6`, and `rollback_d6`).
+//! (`apply_d6_migration`, `compute_d6_fingerprints`, `load_d6`, `sync_d6`, and `rollback_d6`)
+//! and Family 2 (`owner_notes`, `corp_lp_balances`, `char_lp_logs`) `domain_rows` persistence.
 
+use super::domain_rows::{
+    load_notes_lp_domain_rows, sync_notes_lp_domain_rows, DOMAIN_CHAR_LP_LOGS,
+    DOMAIN_CORP_LP_BALANCES, DOMAIN_OWNER_NOTES,
+};
 use super::fingerprints::{fp_sp6_lifecycle, TableFingerprints};
 use super::notes_lp_sequence_store::{
-    apply_d6_migration, compute_d6_fingerprints, fp_owner_note, load_d6, rollback_d6, sync_d6,
+    apply_d6_migration, compute_d6_fingerprints, load_d6, rollback_d6, sync_d6,
     D6Fingerprints, D6_SCHEMA_VERSION,
 };
+use super::quarantine::LoadContext;
 use super::schema::apply_migrations;
 use crate::snapshot_ext::LpRewardLogEntry;
 use crate::types::{AllianceRecord, OwnerNoteRecord, WorldStateSnapshot};
@@ -86,16 +92,23 @@ fn load_d6_reads_elevated_counters_skips_corrupt_json_and_reconciles_ids() {
             ('unknown_custom_meta_key', 777);",
     )
     .unwrap();
+    let valid_note_js = serde_json::to_string(&OwnerNoteRecord {
+        note_id: 501,
+        character_id: 90_000_011,
+        item_id: 60_003_760,
+        label: "FitLabel".into(),
+        note: "NoteText".into(),
+        timestamp_unix: 1_700_000_123,
+    })
+    .unwrap();
     conn.execute(
-        "INSERT INTO owner_notes (note_id, character_id, item_id, label, note, timestamp_unix)
-         VALUES (501, 90000011, 60003760, 'FitLabel', 'NoteText', 1700000123)",
-        [],
+        "INSERT INTO domain_rows (domain, key, value) VALUES (?1, '501', ?2)",
+        params![DOMAIN_OWNER_NOTES, valid_note_js],
     )
     .unwrap();
     conn.execute(
-        "INSERT INTO corp_lp_balances (corporation_id, issuer_corp_id, lp_balance)
-         VALUES (98000010, 1000125, 4200)",
-        [],
+        "INSERT INTO domain_rows (domain, key, value) VALUES (?1, '98000010|1000125', '4200')",
+        params![DOMAIN_CORP_LP_BALANCES],
     )
     .unwrap();
     let valid_log_js = serde_json::to_string(&vec![LpRewardLogEntry {
@@ -107,13 +120,13 @@ fn load_d6_reads_elevated_counters_skips_corrupt_json_and_reconciles_ids() {
     }])
     .unwrap();
     conn.execute(
-        "INSERT INTO char_lp_logs (character_id, logs_json) VALUES (90000011, ?1)",
-        params![valid_log_js],
+        "INSERT INTO domain_rows (domain, key, value) VALUES (?1, '90000011', ?2)",
+        params![DOMAIN_CHAR_LP_LOGS, valid_log_js],
     )
     .unwrap();
     conn.execute(
-        "INSERT INTO char_lp_logs (character_id, logs_json) VALUES (90000099, '{corrupt-json')",
-        [],
+        "INSERT INTO domain_rows (domain, key, value) VALUES (?1, '90000099', '{corrupt-json')",
+        params![DOMAIN_CHAR_LP_LOGS],
     )
     .unwrap();
     conn.execute(
@@ -125,6 +138,8 @@ fn load_d6_reads_elevated_counters_skips_corrupt_json_and_reconciles_ids() {
     let mut snap = WorldStateSnapshot::default();
     snap.sp6_lifecycle.last_downtime_day_idx = Some(123);
     load_d6(&conn, &mut snap);
+    load_notes_lp_domain_rows(&conn, &mut snap, &mut LoadContext::quarantine_in_memory())
+        .unwrap();
 
     // Exact elevated counters prove each match arm in `load_d6` ran (above default floors).
     assert_eq!(snap.next_alliance_id, 99_765_432);
@@ -192,22 +207,22 @@ fn sync_d6_isolated_change_flags_noop_idempotency_and_sql_errors() {
     );
     {
         let tx = conn.transaction().unwrap();
-        assert!(sync_d6(&tx, &snap, &mut fp).unwrap());
-        assert!(!sync_d6(&tx, &snap, &mut fp).unwrap());
+        assert!(sync_notes_lp_domain_rows(&tx, &snap).unwrap());
+        assert!(!sync_notes_lp_domain_rows(&tx, &snap).unwrap());
         tx.commit().unwrap();
     }
     snap.owner_notes.get_mut(&1).unwrap().note = "B1_updated".into();
     {
         let tx = conn.transaction().unwrap();
-        assert!(sync_d6(&tx, &snap, &mut fp).unwrap());
-        assert!(!sync_d6(&tx, &snap, &mut fp).unwrap());
+        assert!(sync_notes_lp_domain_rows(&tx, &snap).unwrap());
+        assert!(!sync_notes_lp_domain_rows(&tx, &snap).unwrap());
         tx.commit().unwrap();
     }
     snap.owner_notes.remove(&1);
     {
         let tx = conn.transaction().unwrap();
-        assert!(sync_d6(&tx, &snap, &mut fp).unwrap());
-        assert!(!sync_d6(&tx, &snap, &mut fp).unwrap());
+        assert!(sync_notes_lp_domain_rows(&tx, &snap).unwrap());
+        assert!(!sync_notes_lp_domain_rows(&tx, &snap).unwrap());
         tx.commit().unwrap();
     }
 
@@ -215,22 +230,22 @@ fn sync_d6_isolated_change_flags_noop_idempotency_and_sql_errors() {
     snap.corp_lp_balances.insert((98_000_001, 1_000_125), 500);
     {
         let tx = conn.transaction().unwrap();
-        assert!(sync_d6(&tx, &snap, &mut fp).unwrap());
-        assert!(!sync_d6(&tx, &snap, &mut fp).unwrap());
+        assert!(sync_notes_lp_domain_rows(&tx, &snap).unwrap());
+        assert!(!sync_notes_lp_domain_rows(&tx, &snap).unwrap());
         tx.commit().unwrap();
     }
     snap.corp_lp_balances.insert((98_000_001, 1_000_125), 750);
     {
         let tx = conn.transaction().unwrap();
-        assert!(sync_d6(&tx, &snap, &mut fp).unwrap());
-        assert!(!sync_d6(&tx, &snap, &mut fp).unwrap());
+        assert!(sync_notes_lp_domain_rows(&tx, &snap).unwrap());
+        assert!(!sync_notes_lp_domain_rows(&tx, &snap).unwrap());
         tx.commit().unwrap();
     }
     snap.corp_lp_balances.remove(&(98_000_001, 1_000_125));
     {
         let tx = conn.transaction().unwrap();
-        assert!(sync_d6(&tx, &snap, &mut fp).unwrap());
-        assert!(!sync_d6(&tx, &snap, &mut fp).unwrap());
+        assert!(sync_notes_lp_domain_rows(&tx, &snap).unwrap());
+        assert!(!sync_notes_lp_domain_rows(&tx, &snap).unwrap());
         tx.commit().unwrap();
     }
 
@@ -247,22 +262,22 @@ fn sync_d6_isolated_change_flags_noop_idempotency_and_sql_errors() {
     );
     {
         let tx = conn.transaction().unwrap();
-        assert!(sync_d6(&tx, &snap, &mut fp).unwrap());
-        assert!(!sync_d6(&tx, &snap, &mut fp).unwrap());
+        assert!(sync_notes_lp_domain_rows(&tx, &snap).unwrap());
+        assert!(!sync_notes_lp_domain_rows(&tx, &snap).unwrap());
         tx.commit().unwrap();
     }
     snap.char_lp_logs.get_mut(&90_000_001).unwrap()[0].amount = 250;
     {
         let tx = conn.transaction().unwrap();
-        assert!(sync_d6(&tx, &snap, &mut fp).unwrap());
-        assert!(!sync_d6(&tx, &snap, &mut fp).unwrap());
+        assert!(sync_notes_lp_domain_rows(&tx, &snap).unwrap());
+        assert!(!sync_notes_lp_domain_rows(&tx, &snap).unwrap());
         tx.commit().unwrap();
     }
     snap.char_lp_logs.remove(&90_000_001);
     {
         let tx = conn.transaction().unwrap();
-        assert!(sync_d6(&tx, &snap, &mut fp).unwrap());
-        assert!(!sync_d6(&tx, &snap, &mut fp).unwrap());
+        assert!(sync_notes_lp_domain_rows(&tx, &snap).unwrap());
+        assert!(!sync_notes_lp_domain_rows(&tx, &snap).unwrap());
         tx.commit().unwrap();
     }
 
@@ -277,9 +292,6 @@ fn sync_d6_isolated_change_flags_noop_idempotency_and_sql_errors() {
     assert_eq!(
         fp.d6,
         D6Fingerprints {
-            owner_notes: Default::default(),
-            corp_lp_balances: Default::default(),
-            char_lp_logs: Default::default(),
             next_alliance_id: snap.next_alliance_id,
             next_corporation_id: snap.next_corporation_id,
             next_notification_id: snap.next_notification_id,
@@ -288,7 +300,7 @@ fn sync_d6_isolated_change_flags_noop_idempotency_and_sql_errors() {
         }
     );
 
-    // 5. SQL error propagation on missing tables for each `sync_d6` write statement.
+    // 5. SQL error propagation on missing tables for `sync_d6` and `sync_notes_lp_domain_rows`.
     let mut bad_conn = Connection::open_in_memory().unwrap();
     {
         let mut s = snap.clone();
@@ -298,14 +310,6 @@ fn sync_d6_isolated_change_flags_noop_idempotency_and_sql_errors() {
         assert!(sync_d6(&tx, &s, &mut f).is_err());
     }
     {
-        // Delete error on `owner_notes`
-        let mut f = fp.clone();
-        f.d6.owner_notes.insert(99, 123);
-        let tx = bad_conn.transaction().unwrap();
-        assert!(sync_d6(&tx, &snap, &mut f).is_err());
-    }
-    {
-        // Insert error on `owner_notes`
         let mut s = snap.clone();
         s.owner_notes.insert(
             99,
@@ -318,36 +322,20 @@ fn sync_d6_isolated_change_flags_noop_idempotency_and_sql_errors() {
                 timestamp_unix: 3,
             },
         );
-        let mut f = fp.clone();
         let tx = bad_conn.transaction().unwrap();
-        assert!(sync_d6(&tx, &s, &mut f).is_err());
-    }
-    {
-        // Delete & insert errors on `corp_lp_balances`, `char_lp_logs`, and `sp6_lifecycle_state`
-        let mut f = fp.clone();
-        f.d6.corp_lp_balances.insert((1, 2), 10);
-        let tx = bad_conn.transaction().unwrap();
-        assert!(sync_d6(&tx, &snap, &mut f).is_err());
+        assert!(sync_notes_lp_domain_rows(&tx, &s).is_err());
     }
     {
         let mut s = snap.clone();
         s.corp_lp_balances.insert((1, 2), 10);
-        let mut f = fp.clone();
         let tx = bad_conn.transaction().unwrap();
-        assert!(sync_d6(&tx, &s, &mut f).is_err());
-    }
-    {
-        let mut f = fp.clone();
-        f.d6.char_lp_logs.insert(1, 10);
-        let tx = bad_conn.transaction().unwrap();
-        assert!(sync_d6(&tx, &snap, &mut f).is_err());
+        assert!(sync_notes_lp_domain_rows(&tx, &s).is_err());
     }
     {
         let mut s = snap.clone();
         s.char_lp_logs.insert(1, vec![]);
-        let mut f = fp.clone();
         let tx = bad_conn.transaction().unwrap();
-        assert!(sync_d6(&tx, &s, &mut f).is_err());
+        assert!(sync_notes_lp_domain_rows(&tx, &s).is_err());
     }
     {
         let mut s = snap.clone();
@@ -359,7 +347,7 @@ fn sync_d6_isolated_change_flags_noop_idempotency_and_sql_errors() {
 }
 
 #[test]
-fn rollback_d6_restores_counters_on_clean_maps_and_detects_deleted_keys() {
+fn rollback_d6_restores_counters_and_sp6_lifecycle() {
     let mut conn = Connection::open_in_memory().unwrap();
     apply_migrations(&conn).unwrap();
     apply_d6_migration(&conn).unwrap();
@@ -370,49 +358,6 @@ fn rollback_d6_restores_counters_on_clean_maps_and_detects_deleted_keys() {
     snap.next_corporation_id = 98_200_002;
     snap.next_notification_id = 940_300_003;
     snap.next_report_id = 400_004;
-    snap.owner_notes.insert(
-        1,
-        OwnerNoteRecord {
-            note_id: 1,
-            character_id: 90_000_001,
-            item_id: 60_003_760,
-            label: "A".into(),
-            note: "N_A".into(),
-            timestamp_unix: 10,
-        },
-    );
-    snap.owner_notes.insert(
-        2,
-        OwnerNoteRecord {
-            note_id: 2,
-            character_id: 90_000_001,
-            item_id: 60_003_760,
-            label: "B".into(),
-            note: "N_B".into(),
-            timestamp_unix: 20,
-        },
-    );
-    snap.corp_lp_balances.insert((98_000_001, 1_000_125), 900);
-    snap.char_lp_logs.insert(
-        90_000_001,
-        vec![LpRewardLogEntry {
-            log_id: 1,
-            corp_id: 1_000_125,
-            amount: 50,
-            reason: "a".into(),
-            timestamp_unix: 10,
-        }],
-    );
-    snap.char_lp_logs.insert(
-        90_000_002,
-        vec![LpRewardLogEntry {
-            log_id: 2,
-            corp_id: 1_000_125,
-            amount: 75,
-            reason: "b".into(),
-            timestamp_unix: 20,
-        }],
-    );
     snap.sp6_lifecycle.last_downtime_day_idx = Some(42);
 
     let mut fp = TableFingerprints::default();
@@ -421,10 +366,9 @@ fn rollback_d6_restores_counters_on_clean_maps_and_detects_deleted_keys() {
         assert!(sync_d6(&tx, &snap, &mut fp).unwrap());
         tx.commit().unwrap();
     }
-    assert_eq!(fp.d6.owner_notes[&1], fp_owner_note(&snap.owner_notes[&1]));
 
-    // 1. When ONLY ID counters are mutated (`!(dirty_notes || dirty_lp || dirty_logs || dirty_sp6)`),
-    // `rollback_d6` restores all 4 counters and returns early without reloading SQLite tables.
+    // 1. When ONLY ID counters are mutated (`!dirty_sp6`), `rollback_d6` restores all 4 counters
+    //    and returns early without reloading `sp6_lifecycle_state`.
     snap.next_alliance_id = 1;
     snap.next_corporation_id = 2;
     snap.next_notification_id = 3;
@@ -435,40 +379,7 @@ fn rollback_d6_restores_counters_on_clean_maps_and_detects_deleted_keys() {
     assert_eq!(snap.next_notification_id, 940_300_003);
     assert_eq!(snap.next_report_id, 400_004);
 
-    // 2. Deleting a key from `owner_notes` (remaining keys match `df.owner_notes`, only `len()` differs!)
-    // must trigger `dirty_notes` and restore the deleted note from SQLite.
-    snap.owner_notes.remove(&1);
-    assert_eq!(snap.owner_notes.len(), 1);
-    rollback_d6(&conn, &mut snap, &fp).unwrap();
-    assert_eq!(snap.owner_notes.len(), 2);
-    assert_eq!(snap.owner_notes[&1].note, "N_A");
-
-    // 3. Deleting a key from `char_lp_logs` (only `len()` differs!) must trigger `dirty_logs` and restore it.
-    snap.char_lp_logs.remove(&90_000_001);
-    assert_eq!(snap.char_lp_logs.len(), 1);
-    rollback_d6(&conn, &mut snap, &fp).unwrap();
-    assert_eq!(snap.char_lp_logs.len(), 2);
-    assert_eq!(snap.char_lp_logs[&90_000_001][0].amount, 50);
-
-    // 4. Isolated in-place mutations across ALL entries (preserving `len()`) must each trigger rollback.
-    for v in snap.owner_notes.values_mut() {
-        v.note = "MutatedAll".into();
-    }
-    rollback_d6(&conn, &mut snap, &fp).unwrap();
-    assert_eq!(snap.owner_notes[&1].note, "N_A");
-    assert_eq!(snap.owner_notes[&2].note, "N_B");
-
-    snap.corp_lp_balances.insert((98_000_001, 1_000_125), 12_345);
-    rollback_d6(&conn, &mut snap, &fp).unwrap();
-    assert_eq!(snap.corp_lp_balances[&(98_000_001, 1_000_125)], 900);
-
-    for logs in snap.char_lp_logs.values_mut() {
-        logs[0].amount = 99_999;
-    }
-    rollback_d6(&conn, &mut snap, &fp).unwrap();
-    assert_eq!(snap.char_lp_logs[&90_000_001][0].amount, 50);
-    assert_eq!(snap.char_lp_logs[&90_000_002][0].amount, 75);
-
+    // 2. Mutating `sp6_lifecycle` restores it from `sp6_lifecycle_state`.
     snap.sp6_lifecycle.last_downtime_day_idx = Some(999);
     rollback_d6(&conn, &mut snap, &fp).unwrap();
     assert_eq!(snap.sp6_lifecycle.last_downtime_day_idx, Some(42));
@@ -485,28 +396,6 @@ fn rollback_d6_fails_closed_without_partial_overwrite_or_counter_drift() {
     base.next_corporation_id = 98_200_002;
     base.next_notification_id = 940_300_003;
     base.next_report_id = 400_004;
-    base.owner_notes.insert(
-        1,
-        OwnerNoteRecord {
-            note_id: 1,
-            character_id: 90_000_001,
-            item_id: 60_003_760,
-            label: "A".into(),
-            note: "committed_note".into(),
-            timestamp_unix: 10,
-        },
-    );
-    base.corp_lp_balances.insert((98_000_001, 1_000_125), 900);
-    base.char_lp_logs.insert(
-        90_000_001,
-        vec![LpRewardLogEntry {
-            log_id: 1,
-            corp_id: 1_000_125,
-            amount: 50,
-            reason: "committed_lp".into(),
-            timestamp_unix: 10,
-        }],
-    );
     base.sp6_lifecycle.last_downtime_day_idx = Some(42);
 
     let mut fp = TableFingerprints::default();
@@ -516,52 +405,30 @@ fn rollback_d6_fails_closed_without_partial_overwrite_or_counter_drift() {
         tx.commit().unwrap();
     }
 
-    // Mutate counters AND every D6 table in memory.
     let mut dirty = base.clone();
     dirty.next_alliance_id = 777;
     dirty.next_corporation_id = 888;
-    dirty.owner_notes.get_mut(&1).unwrap().note = "uncommitted_note".into();
-    dirty.corp_lp_balances.insert((98_000_001, 1_000_125), 12_345);
-    dirty.char_lp_logs.get_mut(&90_000_001).unwrap()[0].amount = 99_999;
     dirty.sp6_lifecycle.last_downtime_day_idx = Some(999);
 
-    // 1. Corrupt `char_lp_logs` JSON later in the rollback pipeline: must fail closed and NOT
-    // partially overwrite counters, `owner_notes`, or `corp_lp_balances`.
+    // 1. Corrupt `sp6_lifecycle_state` JSON: must fail closed without touching counters.
     conn.execute(
-        "UPDATE char_lp_logs SET logs_json = '{corrupt' WHERE character_id = 90000001",
+        "UPDATE sp6_lifecycle_state SET state_json = '{corrupt' WHERE singleton_id = 1",
         [],
     )
     .unwrap();
     let failures_before = crate::persist_failures_total();
     let err = rollback_d6(&conn, &mut dirty, &fp).unwrap_err();
-    assert!(err.contains("char_lp_logs"), "unexpected err: {err}");
+    assert!(err.contains("sp6_lifecycle_state"), "unexpected err: {err}");
     assert!(crate::persist_failures_total() >= failures_before + 1);
     assert_eq!(dirty.next_alliance_id, 777);
     assert_eq!(dirty.next_corporation_id, 888);
-    assert_eq!(dirty.owner_notes[&1].note, "uncommitted_note");
-    assert_eq!(dirty.corp_lp_balances[&(98_000_001, 1_000_125)], 12_345);
-    assert_eq!(dirty.char_lp_logs[&90_000_001][0].amount, 99_999);
     assert_eq!(dirty.sp6_lifecycle.last_downtime_day_idx, Some(999));
 
-    // 2. Restore `char_lp_logs`, but delete the `sp6_lifecycle_state` singleton row while dirty:
-    // must fail closed without touching counters or maps.
-    conn.execute(
-        "UPDATE char_lp_logs SET logs_json = '[]' WHERE character_id = 90000001",
-        [],
-    )
-    .unwrap();
+    // 2. Delete the `sp6_lifecycle_state` singleton row while dirty: must fail closed.
     conn.execute("DELETE FROM sp6_lifecycle_state WHERE singleton_id = 1", [])
         .unwrap();
     let err2 = rollback_d6(&conn, &mut dirty, &fp).unwrap_err();
     assert!(err2.contains("sp6_lifecycle_state"), "unexpected err2: {err2}");
-    assert_eq!(dirty.owner_notes[&1].note, "uncommitted_note");
-    assert_eq!(dirty.corp_lp_balances[&(98_000_001, 1_000_125)], 12_345);
     assert_eq!(dirty.next_alliance_id, 777);
     assert_eq!(dirty.sp6_lifecycle.last_downtime_day_idx, Some(999));
-
-    // 3. Dropped `owner_notes` table must fail closed when `owner_notes` is dirty.
-    conn.execute("DROP TABLE owner_notes", []).unwrap();
-    let err3 = rollback_d6(&conn, &mut dirty, &fp).unwrap_err();
-    assert!(err3.contains("owner_notes"), "unexpected err3: {err3}");
-    assert_eq!(dirty.owner_notes[&1].note, "uncommitted_note");
 }

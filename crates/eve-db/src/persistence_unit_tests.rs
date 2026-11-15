@@ -850,12 +850,13 @@ fn w5a_p2_0e_fail_closed_loader_quarantine_unreadable_finite_floats_and_serde_de
     );
     assert!(repo.with_snapshot(|s| s.incursions.is_empty()));
 
-    // 2. Inject corrupt JSON into char_lp_logs and social_store (`char_contact_labels`), then verify
-    //    default `open_sqlite` fails closed naming the table and primary key (#906 / #856).
+    // 2. Inject corrupt JSON into `domain_rows` (`notes_lp.char_lp_logs`) and `social_store`
+    //    (`char_contact_labels`), then verify default `open_sqlite` fails closed naming the
+    //    domain/table and primary key (#906 / #856 / #916).
     repo.with_sqlite_conn(|conn| {
         conn.execute(
-            "INSERT OR REPLACE INTO char_lp_logs (character_id, logs_json) VALUES (90000088, '{corrupt')",
-            [],
+            "INSERT OR REPLACE INTO domain_rows (domain, key, value) VALUES (?1, '90000088', '{corrupt')",
+            [crate::sqlite_store::domain_rows::DOMAIN_CHAR_LP_LOGS],
         )
         .unwrap();
         conn.execute(
@@ -888,7 +889,7 @@ fn w5a_p2_0e_fail_closed_loader_quarantine_unreadable_finite_floats_and_serde_de
     assert_eq!(q_rows.len(), 2);
     assert!(q_rows
         .iter()
-        .any(|r| r.source_table == "char_lp_logs" && r.key == "90000088"));
+        .any(|r| r.source_table == "domain_rows" && r.key == "90000088"));
     assert!(q_rows
         .iter()
         .any(|r| r.source_table == "char_contact_labels" && r.key == "90000077"));
