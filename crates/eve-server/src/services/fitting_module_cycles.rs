@@ -1655,7 +1655,13 @@ pub(crate) async fn handle_module_cycles(
 
             if let Err(e) = sys.add_module_cycle(cycle).await {
                 ctx.remove_projected_ewar_by_module(ship_id, module_id);
-                let code = if e.contains("WarpScrambled") { "WarpScrambled" } else { "NotEnoughCapacitor" };
+                let code = if e.contains("WarpScrambled") {
+                    "WarpScrambled"
+                } else if e.contains("ModuleAlreadyActive") {
+                    "ModuleAlreadyActive"
+                } else {
+                    "NotEnoughCapacitor"
+                };
                 return Some(Err(BridgeRpcError { code: code.into(), message: e, client_error: None }));
             }
 

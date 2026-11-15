@@ -1025,7 +1025,10 @@ pub async fn handle_wrecks_killmails(
             }
             with_mut_combat_runtime(ctx, |rt| { rt.entropic_spools.remove(&(ship_id, module_id)); });
             if let Some(sys_id) = session.solar_system_id {
-                let _ = ctx.systems.get_or_spawn(sys_id).remove_module_cycle(ship_id, module_id).await;
+                let sys = ctx.systems.get_or_spawn(sys_id);
+                if !sys.request_cycle_deactivation(ship_id, module_id).await.unwrap_or(false) {
+                    let _ = sys.remove_module_cycle(ship_id, module_id).await;
+                }
             }
             ctx.db.with_mut_snapshot(|snap| {
                 snap.module_active_states.remove(&module_id);

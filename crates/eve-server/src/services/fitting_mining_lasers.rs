@@ -108,11 +108,6 @@ pub(crate) async fn handle_mining_and_deactivate(
                 .map(|t| matches!(t.group_id, 54 | 464 | 483 | 737 | 2004 | 4138) || t.default_attributes.contains_key(&77))
                 .unwrap_or(false);
 
-            let is_paid_cycle_deferred = mod_type_opt
-                .and_then(|tid| ctx.sde.types.get(&tid))
-                .is_some_and(|t| {
-                    matches!(t.group_id, 62 | 63 | 68 | 325 | 585 | 1199 | 1698)
-                });
             let mut removed_cycle_delay = None;
             if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
@@ -140,8 +135,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                         client_error: None,
                     }));
                 }
-                if is_paid_cycle_deferred
-                    && sys.request_cycle_deactivation(ship_id, module_id).await.unwrap_or(false)
+                if sys.request_cycle_deactivation(ship_id, module_id).await.unwrap_or(false)
                 {
                     ctx.emit_typed(
                         crate::router::NotificationTarget::Character(char_id),

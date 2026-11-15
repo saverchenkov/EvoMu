@@ -791,6 +791,17 @@ pub(crate) fn handle_add_module_cycle(
     deactivation_hook: Option<&ModuleDeactivationHook>,
     mut cycle: ActiveModuleCycle,
 ) -> Result<(), String> {
+    if let Some(existing) = active_module_cycles
+        .iter()
+        .find(|c| c.ship_id == cycle.ship_id && c.module_id == cycle.module_id)
+    {
+        if existing.mutadaptive_spool_step <= 0.0 && cycle.mutadaptive_spool_step <= 0.0 {
+            return Err(format!(
+                "ModuleAlreadyActive: Module {} is already active in a cycle",
+                cycle.module_id
+            ));
+        }
+    }
     if (cycle.weapon_is_turret || cycle.weapon_is_missile)
         && cycle.ammo_type_id.is_none()
         && (cycle.damage_vector.em - 20.0).abs() < 1e-6
@@ -812,8 +823,7 @@ pub(crate) fn handle_add_module_cycle(
             return Err("WarpScrambled: Propulsion module disabled by warp scrambler".to_string());
         }
     }
-    // Remove any existing cycle for this (ship_id, module_id) before re-adding
-    // Covers: mutadaptive spool preservation, emergency hull energizer, stasis grappler
+    // Remove any existing mutadaptive-spool cycle for this (ship_id, module_id) before re-adding
     if let Some(pos) = active_module_cycles
         .iter()
         .position(|c| c.ship_id == cycle.ship_id && c.module_id == cycle.module_id)

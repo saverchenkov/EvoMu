@@ -408,6 +408,7 @@ impl ServerContext {
                                 "PersistenceFailure"
                                     | "DatabasePersistenceError"
                                     | "ValidationError"
+                                    | "InternalError"
                             )
                         ) {
                             tx_poisoned = true;
