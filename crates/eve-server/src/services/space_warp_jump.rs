@@ -1083,49 +1083,47 @@ async fn handle_cmd_stargate_jump(
     ]))
 }
 
-/// Evaluates the unconditional `gate_radius + 2,500 m` EVE stargate jump perimeter,
-/// mirroring `evaluate_dock_perimeter`:
+const SURFACE_PERIMETER_METERS: f64 = 2_500.0;
+
+/// Returns the maximum center-to-center distance (`target_radius + ball.radius + 2,500 m`)
+/// corresponding to a `2,500 m` ball-to-ball surface perimeter.
+#[inline]
+fn max_center_dist_for_perimeter(ball: &eve_destiny::Ball, target_radius: f64) -> f64 {
+    target_radius.max(0.0) + ball.radius.max(0.0) + SURFACE_PERIMETER_METERS
+}
+
+/// Evaluates whether `ball` is inside the `2,500 m` ball-to-ball surface perimeter around
+/// `(target_pos, target_radius)`, including arriving `MovementMode::Warp` within `<= 4.0 s`
+/// of deceleration (`#1001`).
 ///
-/// - When `ball.mode` is `MovementMode::Warp`, jumping is permitted (`Ok(true)`, signalling
-///   that the active warp must be terminated on jump) only when `destination` lies inside
-///   `gate_radius + 2,500 m` of `gate_pos` AND the ship is either already inside that range or
-///   within the final `<= 4.0 s` of `WarpPhase::Decelerating` (`#1001`); all other warp states
-///   return `ShipInWarp`.
-/// - For non-warp movement modes, returns `OutsideStargateJumpRange` when `(dist - gate_radius).max(0.0) > 2_500.0`
-///   and `Ok(false)` otherwise.
-pub(crate) fn evaluate_stargate_jump_perimeter(
+/// Returns `Ok(true)` when an arriving warp must be terminated, `Ok(false)` when already inside
+/// the static perimeter in a non-warp mode, or builds the caller's error on mid-warp / out-of-range.
+fn evaluate_surface_perimeter(
     ball: &eve_destiny::Ball,
-    gate_pos: DVec3,
-    gate_radius: f64,
+    target_pos: DVec3,
+    target_radius: f64,
+    on_in_warp: impl FnOnce() -> BridgeRpcError,
+    on_outside: impl FnOnce(f64, f64, f64) -> BridgeRpcError,
 ) -> Result<bool, BridgeRpcError> {
-    let max_jump_dist = gate_radius + 2_500.0;
-    let dist = ball.position.distance(gate_pos);
+    let target_r = target_radius.max(0.0);
+    let ship_r = ball.radius.max(0.0);
+    let max_dist = max_center_dist_for_perimeter(ball, target_r);
+    let dist = ball.position.distance(target_pos);
     match ball.mode {
         MovementMode::Warp { destination, .. } => {
-            if destination.distance(gate_pos) <= max_jump_dist
-                && (dist <= max_jump_dist
+            if destination.distance(target_pos) <= max_dist
+                && (dist <= max_dist
                     || eve_destiny::physics::is_warp_finishing_within(ball, 4.0))
             {
                 Ok(true)
             } else {
-                Err(BridgeRpcError {
-                    code: "ShipInWarp".into(),
-                    message: "Cannot jump stargate while ship is still in warp".into(),
-                    client_error: None,
-                })
+                Err(on_in_warp())
             }
         }
         _ => {
-            let surface_dist = (dist - gate_radius).max(0.0);
-            if surface_dist > 2_500.0 {
-                Err(BridgeRpcError {
-                    code: "OutsideStargateJumpRange".into(),
-                    message: format!(
-                        "Ship is {:.1} m from stargate (must be <= 2500 m)",
-                        surface_dist
-                    ),
-                    client_error: None,
-                })
+            if dist > max_dist {
+                let surface_dist = (dist - ship_r - target_r).max(0.0);
+                Err(on_outside(dist, max_dist, surface_dist))
             } else {
                 Ok(false)
             }
@@ -1133,14 +1131,51 @@ pub(crate) fn evaluate_stargate_jump_perimeter(
     }
 }
 
-/// Evaluates the unconditional `target_radius + 2,500 m` EVE docking perimeter (`SP-4`) across
-/// `beyonce.CmdDock`, `stationSvc.Dock`, and `structureDocking.Dock`.
+/// Evaluates the unconditional `gate_radius + ball.radius + 2,500 m` EVE stargate jump
+/// perimeter (`surface_dist <= 2,500 m`), mirroring `evaluate_dock_perimeter`:
+///
+/// - When `ball.mode` is `MovementMode::Warp`, jumping is permitted (`Ok(true)`, signalling
+///   that the active warp must be terminated on jump) only when `destination` lies inside
+///   `gate_radius + ball.radius + 2,500 m` of `gate_pos` AND the ship is either already inside
+///   that range or within the final `<= 4.0 s` of `WarpPhase::Decelerating` (`#1001`); all other
+///   warp states return `ShipInWarp`.
+/// - For non-warp movement modes, returns `OutsideStargateJumpRange` when
+///   `(dist - ball.radius - gate_radius).max(0.0) > 2,500.0` and `Ok(false)` otherwise.
+pub(crate) fn evaluate_stargate_jump_perimeter(
+    ball: &eve_destiny::Ball,
+    gate_pos: DVec3,
+    gate_radius: f64,
+) -> Result<bool, BridgeRpcError> {
+    evaluate_surface_perimeter(
+        ball,
+        gate_pos,
+        gate_radius,
+        || BridgeRpcError {
+            code: "ShipInWarp".into(),
+            message: "Cannot jump stargate while ship is still in warp".into(),
+            client_error: None,
+        },
+        |_dist, _max_dist, surface_dist| BridgeRpcError {
+            code: "OutsideStargateJumpRange".into(),
+            message: format!(
+                "Ship is {:.1} m from stargate (must be <= 2500 m)",
+                surface_dist
+            ),
+            client_error: None,
+        },
+    )
+}
+
+/// Evaluates the unconditional `target_radius + ball.radius + 2,500 m` EVE docking perimeter
+/// (`surface_dist <= 2,500 m`, `SP-4`) across `beyonce.CmdDock`, `stationSvc.Dock`, and
+/// `structureDocking.Dock`.
 ///
 /// - When `ball.mode` is `MovementMode::Warp`, docking is permitted (`Ok(true)`, signalling that
-///   the active warp must be terminated) only when `destination` lies inside `target_radius + 2,500 m`
-///   of `target_pos` AND the ship is either already inside `max_dock_dist` or within the final
-///   `<= 4.0 s` of `WarpPhase::Decelerating` (`eve_destiny::physics::is_warp_finishing_within`, `#1001`);
-///   all other warp states return `ShipInWarp`.
+///   the active warp must be terminated) only when `destination` lies inside
+///   `target_radius + ball.radius + 2,500 m` of `target_pos` AND the ship is either already inside
+///   `max_dock_dist` or within the final `<= 4.0 s` of `WarpPhase::Decelerating`
+///   (`eve_destiny::physics::is_warp_finishing_within`, `#1001`); all other warp states return
+///   `ShipInWarp`.
 /// - For non-warp movement modes, returns `OutsideDockingPerimeter` when `dist > max_dock_dist`
 ///   and `Ok(false)` otherwise, regardless of `session.address`.
 pub(crate) fn evaluate_dock_perimeter(
@@ -1148,31 +1183,19 @@ pub(crate) fn evaluate_dock_perimeter(
     target_pos: DVec3,
     target_radius: f64,
 ) -> Result<bool, BridgeRpcError> {
-    let max_dock_dist = target_radius + 2_500.0;
-    let dist = ball.position.distance(target_pos);
-    match ball.mode {
-        MovementMode::Warp { destination, .. } => {
-            if destination.distance(target_pos) <= max_dock_dist
-                && (dist <= max_dock_dist
-                    || eve_destiny::physics::is_warp_finishing_within(ball, 4.0))
-            {
-                Ok(true)
-            } else {
-                Err(BridgeRpcError {
-                    code: "ShipInWarp".into(),
-                    message: "Cannot dock while ship is still in warp".into(),
-                    client_error: None,
-                })
-            }
-        }
-        _ => {
-            if dist > max_dock_dist {
-                Err(BridgeRpcError::outside_docking_perimeter(dist, max_dock_dist))
-            } else {
-                Ok(false)
-            }
-        }
-    }
+    evaluate_surface_perimeter(
+        ball,
+        target_pos,
+        target_radius,
+        || BridgeRpcError {
+            code: "ShipInWarp".into(),
+            message: "Cannot dock while ship is still in warp".into(),
+            client_error: None,
+        },
+        |dist, max_dock_dist, _surface_dist| {
+            BridgeRpcError::outside_docking_perimeter(dist, max_dock_dist)
+        },
+    )
 }
 
 async fn handle_dock(
@@ -1552,7 +1575,8 @@ pub(crate) struct DockWarpSettlePlan {
 
 /// Terminates an arriving warp before docking and clears `active_warps`, snapping the ball to
 /// the verified warp landing point when `is_warp_finishing_within(ball, 4.0)` accepted it outside
-/// the static `target_radius + 2,500 m` shell so post-settle perimeter checks remain valid.
+/// the static `target_radius + ball.radius + 2,500 m` shell so post-settle perimeter checks
+/// remain valid.
 pub(crate) fn stop_arriving_warp_for_dock(
     ctx: &ServerContext,
     handle: &crate::system_actor::SystemHandle,
@@ -1560,10 +1584,10 @@ pub(crate) fn stop_arriving_warp_for_dock(
     target_pos: DVec3,
     target_radius: f64,
 ) {
+    let max_dock_dist = max_center_dist_for_perimeter(ball, target_radius);
     let landing_pos = match ball.mode {
         MovementMode::Warp { destination, .. }
-            if ball.position.distance(target_pos) > target_radius + 2_500.0
-                && destination.is_finite() =>
+            if ball.position.distance(target_pos) > max_dock_dist && destination.is_finite() =>
         {
             Some(destination)
         }
