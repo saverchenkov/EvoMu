@@ -1359,6 +1359,7 @@ async fn test_live_playtest_keepstar_dock_hangar_view_state_wire_ratcheted() {
         "final Undock failed: {:?}",
         final_undock.result
     );
+}
 
 #[tokio::test]
 async fn test_1066_advancetime_partial_skill_training_pushes_notifications_and_aligned_queue_times() {
