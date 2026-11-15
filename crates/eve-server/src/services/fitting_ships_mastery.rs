@@ -367,15 +367,14 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 PyRep::String("shipid".to_string()),
                 PyRep::Tuple(vec![PyRep::Integer(old_ship_id), PyRep::Integer(capsule_id)]),
             )];
-            ctx.notify(
+            ctx.emit_typed_with_id_type(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnSessionChanged",
                 "clientID",
-                vec![
-                    PyRep::Bool(false),
-                    PyRep::Integer(session.session_id as i64),
-                    PyRep::Dict(changes),
-                ],
+                crate::router::notify_registry::OnSessionChanged {
+                    is_remote: false,
+                    session: PyRep::Integer(session.session_id as i64),
+                    change: PyRep::Dict(changes),
+                },
             );
             // `ProcessActiveShipChanged` is derived by the V24 client (`DogmaLocation.MakeShipActive`)
             // from the `shipid` session change; the server never sends it.
@@ -799,15 +798,14 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                                 PyRep::Integer(sid),
                             ]),
                         )];
-                        ctx.notify(
+                        ctx.emit_typed_with_id_type(
                             crate::router::NotificationTarget::Character(char_id),
-                            "OnSessionChanged",
                             "clientID",
-                            vec![
-                                PyRep::Bool(false),
-                                PyRep::Integer(session.session_id as i64),
-                                PyRep::Dict(changes),
-                            ],
+                            crate::router::notify_registry::OnSessionChanged {
+                                is_remote: false,
+                                session: PyRep::Integer(session.session_id as i64),
+                                change: PyRep::Dict(changes),
+                            },
                         );
                     }
                     crate::sp6_lifecycle::clear_safe_logoff(&ctx.db, char_id);
@@ -1028,11 +1026,12 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     },
                 )
                 .await;
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::SolarSystem(sys_id),
-                "DoBallsAdded",
-                "solarsystemid",
-                vec![PyRep::Integer(item_id), PyRep::Integer(type_id as i64)],
+                crate::router::notify_registry::DoBallsAddedShipRef {
+                    item_id,
+                    type_id: type_id as i64,
+                },
             );
             let (group_id, category_id) = ctx
                 .sde
@@ -1040,12 +1039,10 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 .get(&type_id)
                 .map(|t| (t.group_id, t.category_id))
                 .unwrap_or((0, 0));
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnItemChange",
-                "charid",
-                vec![
-                    PyRep::keyval([
+                crate::router::notify_registry::OnItemChange {
+                    item: PyRep::keyval([
                         ("itemID", PyRep::Integer(item_id)),
                         ("typeID", PyRep::Integer(type_id as i64)),
                         ("ownerID", PyRep::Integer(item_owner)),
@@ -1056,11 +1053,12 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         ("categoryID", PyRep::Integer(i64::from(category_id))),
                         ("singleton", PyRep::Bool(true)),
                     ]),
-                    PyRep::Dict(vec![
+                    change: PyRep::Dict(vec![
                         (PyRep::Integer(3), PyRep::Integer(old_loc)),
                         (PyRep::Integer(4), PyRep::Integer(old_flag)),
                     ]),
-                ],
+                    location: PyRep::None,
+                },
             );
             Some(Ok(PyRep::keyval([
                 ("launchedItemID", PyRep::Integer(item_id)),
@@ -1293,21 +1291,20 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         corvette_tid,
                     );
                     if prev_ship_id != corvette_id {
-                        ctx.notify(
+                        ctx.emit_typed_with_id_type(
                             crate::router::NotificationTarget::Character(char_id),
-                            "OnSessionChanged",
                             "clientID",
-                            vec![
-                                PyRep::Bool(false),
-                                PyRep::Integer(session.session_id as i64),
-                                PyRep::Dict(vec![(
+                            crate::router::notify_registry::OnSessionChanged {
+                                is_remote: false,
+                                session: PyRep::Integer(session.session_id as i64),
+                                change: PyRep::Dict(vec![(
                                     PyRep::String("shipid".to_string()),
                                     PyRep::Tuple(vec![
                                         PyRep::Integer(prev_ship_id),
                                         PyRep::Integer(corvette_id),
                                     ]),
                                 )]),
-                            ],
+                            },
                         );
                     }
                     // `ProcessActiveShipChanged` is derived by the V24 client (`DogmaLocation.MakeShipActive`)
@@ -1783,12 +1780,10 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     .map(|t| (t.group_id, t.category_id))
                     .unwrap_or((0, 0));
                 ctx.invalidate_ship_fitting(item_id);
-                ctx.notify(
+                ctx.emit_typed(
                     crate::router::NotificationTarget::Character(char_id),
-                    "OnItemChange",
-                    "charid",
-                    vec![
-                        PyRep::keyval([
+                    crate::router::notify_registry::OnItemChange {
+                        item: PyRep::keyval([
                             ("itemID", PyRep::Integer(item_id)),
                             ("typeID", PyRep::Integer(old_item.type_id as i64)),
                             ("ownerID", PyRep::Integer(old_item.owner_id)),
@@ -1806,8 +1801,9 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                             ("categoryID", PyRep::Integer(i64::from(category_id))),
                             ("singleton", PyRep::Bool(old_item.singleton)),
                         ]),
-                        PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(old_location_id))]),
-                    ],
+                        change: PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(old_location_id))]),
+                        location: PyRep::None,
+                    },
                 );
             }
             Some(Ok(PyRep::keyval([

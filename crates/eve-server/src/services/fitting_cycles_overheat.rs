@@ -237,11 +237,12 @@ pub async fn handle_active_overload_toggle(
         ctx.invalidate_and_push_fit(ship_id);
     }
     let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
-        "OnHeatAdded",
-        "charid",
-        vec![PyRep::Integer(module_id)],
+        crate::router::notify_registry::OnHeatAdded {
+            module_or_heat_id: module_id,
+            module_id: None,
+        },
     );
     PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)),

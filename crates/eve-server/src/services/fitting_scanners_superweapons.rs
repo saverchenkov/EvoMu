@@ -569,22 +569,23 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
                 (PyRep::String("containerID".into()), PyRep::Integer(target_id)),
                 (PyRep::String("targetID".into()), PyRep::Integer(target_id)),
             ]);
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnHackingStart",
-                "charid",
-                vec![start_event_data],
+                crate::router::notify_registry::OnHackingStart {
+                    event_data: start_event_data,
+                },
             );
             let virus_data = PyRep::keyval([
                 ("containerID", PyRep::Integer(target_id)),
                 ("coherence", PyRep::Real(coherence)),
                 ("strength", PyRep::Real(strength)),
             ]);
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnHackingVirusChanged",
-                "charid",
-                vec![virus_data, PyRep::Integer(1)],
+                crate::router::notify_registry::OnHackingVirusChanged {
+                    object_data: virus_data,
+                    event_id: 1,
+                },
             );
 
             Some(Ok(PyRep::keyval([
@@ -635,11 +636,11 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
                     })
             };
             if is_cargo_scan_immune {
-                ctx.notify(
-                    crate::router::NotificationTarget::Character(char_id),
-                    "OnCargoScanComplete",
-                    "charid",
-                    vec![PyRep::Integer(target_id), PyRep::List(Vec::new())],
+                crate::services::notify_emitters_combat_ess_progression::emit_cargo_scan_complete(
+                    ctx,
+                    char_id,
+                    target_id,
+                    Vec::new(),
                 );
                 return Some(Ok(PyRep::keyval([
                     ("moduleID", PyRep::Integer(module_id)),
@@ -670,20 +671,21 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
                 (list, sum_qty)
             });
             // DERIVED payload layout: client `shipUI.OnCargoScanComplete(shipID, cargoList)`.
-            let cargo_list: Vec<PyRep> = scanned_items
+            let cargo_list: Vec<(i32, i64)> = scanned_items
                 .iter()
                 .map(|e| {
-                    PyRep::Tuple(vec![
-                        e.dict_get("typeID").cloned().unwrap_or(PyRep::None),
-                        e.dict_get("quantity").cloned().unwrap_or(PyRep::None),
-                    ])
+                    (
+                        e.dict_get("typeID").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                        e.dict_get("quantity").and_then(|v| v.as_i64()).unwrap_or(0),
+                    )
                 })
                 .collect();
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnCargoScanComplete",
-                "charid",
-                vec![PyRep::Integer(target_id), PyRep::List(cargo_list)],
+                crate::router::notify_registry::OnCargoScanComplete {
+                    ship_id: target_id,
+                    cargo_list,
+                },
             );
             Some(Ok(PyRep::keyval([
                 ("moduleID", PyRep::Integer(module_id)),
@@ -745,26 +747,24 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
                 .unwrap_or_default();
             // DERIVED payload layout: client `shipUI.OnShipScanCompleted(shipID, capacitorCharge,
             // capacitorCapacity, hardwareList)`.
-            let hardware: Vec<PyRep> = fitted_mods
+            let hardware: Vec<(i32, i64)> = fitted_mods
                 .iter()
                 .chain(charges.iter())
                 .map(|e| {
-                    PyRep::Tuple(vec![
-                        e.dict_get("typeID").cloned().unwrap_or(PyRep::None),
-                        e.dict_get("quantity").cloned().unwrap_or(PyRep::Integer(1)),
-                    ])
+                    (
+                        e.dict_get("typeID").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                        e.dict_get("quantity").and_then(|v| v.as_i64()).unwrap_or(1),
+                    )
                 })
                 .collect();
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnShipScanCompleted",
-                "charid",
-                vec![
-                    PyRep::Integer(target_id),
-                    PyRep::Real(cs.capacitor),
-                    PyRep::Real(cs.max_capacitor),
-                    PyRep::List(hardware),
-                ],
+                crate::router::notify_registry::OnShipScanCompleted {
+                    ship_id: target_id,
+                    capacitor_charge: cs.capacitor,
+                    capacitor_capacity: cs.max_capacitor,
+                    hardware_list: hardware,
+                },
             );
             Some(Ok(PyRep::keyval([
                 ("moduleID", PyRep::Integer(module_id)),
@@ -973,11 +973,11 @@ fn handle_system_wide_effects(
                 if ship_id > 0 {
                     ctx.invalidate_ship_fitting(ship_id);
                 }
-                ctx.notify(
+                ctx.emit_typed(
                     crate::router::NotificationTarget::Character(char_id),
-                    "OnSystemWideEffectRemove",
-                    "charid",
-                    vec![PyRep::Integer(reset_sys as i64)],
+                    crate::router::notify_registry::OnSystemWideEffectRemove {
+                        source_item_id: reset_sys as i64,
+                    },
                 );
                 return Some(Ok(PyRep::keyval([
                     ("solarSystemID", PyRep::Integer(reset_sys as i64)),
@@ -1010,11 +1010,12 @@ fn handle_system_wide_effects(
                     if ship_id > 0 {
                         ctx.invalidate_and_push_fit(ship_id);
                     }
-                    ctx.notify(
+                    ctx.emit_typed(
                         crate::router::NotificationTarget::Character(char_id),
-                        "OnSystemWideEffectAdd",
-                        "charid",
-                        vec![PyRep::Integer(sys_id as i64), PyRep::Integer(req_tid as i64)],
+                        crate::router::notify_registry::OnSystemWideEffectAdd {
+                            source_item_id: sys_id as i64,
+                            source_type_id: req_tid as i64,
+                        },
                     );
                 }
             }
@@ -1441,22 +1442,20 @@ fn handle_dogma_dbuff_rpc(
         }
         for &tsid in &target_ships {
             ctx.invalidate_and_push_fit(tsid);
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnDbuffUpdated",
-                "charid",
-                vec![PyRep::Integer(tsid)],
+                crate::router::notify_registry::OnDbuffUpdated { ship_id: tsid },
             );
         }
     }
 
     let agg = get_aggregated_ship_dbuffs(ctx, ship_id, now_unix);
     if agg.is_empty() && ship_id > 0 {
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::Character(char_id),
-            "OnGodmaFlushLocation",
-            "charid",
-            vec![PyRep::Integer(ship_id)],
+            crate::router::notify_registry::OnGodmaFlushLocation {
+                location_id: ship_id,
+            },
         );
     }
     let entries: Vec<(PyRep, PyRep)> = agg

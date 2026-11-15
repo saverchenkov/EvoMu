@@ -596,15 +596,14 @@ pub(super) async fn handle_store_vessel(
             PyRep::String("shipid".into()),
             PyRep::Tuple(vec![PyRep::Integer(target_ship_id), PyRep::Integer(capsule_id)]),
         )];
-        ctx.notify(
+        ctx.emit_typed_with_id_type(
             crate::router::NotificationTarget::Character(char_id),
-            "OnSessionChanged",
             "clientID",
-            vec![
-                PyRep::Bool(false),
-                PyRep::Integer(session.session_id as i64),
-                PyRep::Dict(changes),
-            ],
+            crate::router::notify_registry::OnSessionChanged {
+                is_remote: false,
+                session: PyRep::Integer(session.session_id as i64),
+                change: PyRep::Dict(changes),
+            },
         );
         Ok(PyRep::keyval([
             ("storedShipID", PyRep::Integer(target_ship_id)),

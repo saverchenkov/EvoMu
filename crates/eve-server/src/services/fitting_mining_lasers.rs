@@ -143,11 +143,11 @@ pub(crate) async fn handle_mining_and_deactivate(
                 if is_paid_cycle_deferred
                     && sys.request_cycle_deactivation(ship_id, module_id).await.unwrap_or(false)
                 {
-                    ctx.notify(
+                    ctx.emit_typed(
                         crate::router::NotificationTarget::Character(char_id),
-                        "OnModulesDeactivating",
-                        "charid",
-                        vec![PyRep::List(vec![PyRep::Integer(module_id)])],
+                        crate::router::notify_registry::OnModulesDeactivating {
+                            module_ids: vec![module_id],
+                        },
                     );
                     let max_vel = ctx
                         .fit(char_id, ship_id)
@@ -203,11 +203,11 @@ pub(crate) async fn handle_mining_and_deactivate(
             crate::services::tactical_modules::remove_projected_remote_assistance(ctx, ship_id, module_id);
             crate::services::combat_weapons_spool::clear_entropic_spool(ctx, ship_id, module_id);
 
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnModulesDeactivating",
-                "charid",
-                vec![PyRep::List(vec![PyRep::Integer(module_id)])],
+                crate::router::notify_registry::OnModulesDeactivating {
+                    module_ids: vec![module_id],
+                },
             );
             if is_mining {
                 let (effect_id, guid, is_offensive) =
@@ -283,26 +283,24 @@ pub(crate) async fn handle_mining_and_deactivate(
                         )
                     {
                         let now = ctx.now_client_sim_filetime_ticks();
-                        ctx.notify(
+                        ctx.emit_typed(
                             crate::router::NotificationTarget::Character(char_id),
-                            "OnSpecialFX",
-                            "charid",
-                            vec![
-                                PyRep::Integer(ship_id),
-                                PyRep::Integer(module_id),
-                                PyRep::Integer(tid as i64),
-                                PyRep::None,
-                                PyRep::None,
-                                PyRep::String(sfx_guid),
-                                PyRep::Bool(is_offensive),
-                                PyRep::Integer(0),
-                                PyRep::Integer(0),
-                                PyRep::Real(0.0),
-                                PyRep::Integer(0),
-                                PyRep::Integer(now),
-                                PyRep::Real(0.0),
-                                PyRep::None,
-                            ],
+                            crate::router::notify_registry::OnSpecialFX {
+                                ship_id,
+                                module_id: Some(module_id),
+                                module_type_id: Some(tid as i64),
+                                target_id: None,
+                                other_type_id: None,
+                                guid: sfx_guid,
+                                is_offensive,
+                                start: 0,
+                                active: 0,
+                                duration: 0.0,
+                                repeat: 0,
+                                start_time: now,
+                                time_from_start: 0.0,
+                                graphic_info: None,
+                            },
                         );
                     }
                 }
@@ -428,26 +426,27 @@ pub(crate) async fn handle_mining_and_deactivate(
             }
             let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
 
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnHeatRemoved",
-                "charid",
-                vec![PyRep::Integer(module_id)],
+                crate::router::notify_registry::OnHeatRemoved {
+                    module_or_heat_id: module_id,
+                    module_id: None,
+                },
             );
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnModuleAttributeChanges",
-                "charid",
-                vec![PyRep::List(vec![PyRep::Tuple(vec![
-                    PyRep::String("OnModuleAttributeChange".into()),
-                    PyRep::Integer(char_id),
-                    PyRep::Integer(module_id),
-                    PyRep::Integer(eve_sde::attr_ids::DAMAGE as i64),
-                    PyRep::Integer(ctx.now_client_sim_filetime_ticks()),
-                    PyRep::Real(0.0),
-                    PyRep::Real(0.0),
-                    PyRep::None,
-                ])])],
+                crate::router::notify_registry::OnModuleAttributeChanges {
+                    changes: PyRep::List(vec![PyRep::Tuple(vec![
+                        PyRep::String("OnModuleAttributeChange".into()),
+                        PyRep::Integer(char_id),
+                        PyRep::Integer(module_id),
+                        PyRep::Integer(eve_sde::attr_ids::DAMAGE as i64),
+                        PyRep::Integer(ctx.now_client_sim_filetime_ticks()),
+                        PyRep::Real(0.0),
+                        PyRep::Real(0.0),
+                        PyRep::None,
+                    ])]),
+                },
             );
 
             Some(Ok(PyRep::keyval([
@@ -551,14 +550,24 @@ pub(crate) async fn handle_mining_and_deactivate(
             fit.recalculate_stats(&ctx.sde);
             ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
             ctx.invalidate_and_push_fit(ship_id);
-            let notif_name = if overloaded { "OnHeatAdded" } else { "OnHeatRemoved" };
             for &mid in &notified_modules {
-                ctx.notify(
-                    crate::router::NotificationTarget::Character(char_id),
-                    notif_name,
-                    "charid",
-                    vec![PyRep::Integer(mid)],
-                );
+                if overloaded {
+                    ctx.emit_typed(
+                        crate::router::NotificationTarget::Character(char_id),
+                        crate::router::notify_registry::OnHeatAdded {
+                            module_or_heat_id: mid,
+                            module_id: None,
+                        },
+                    );
+                } else {
+                    ctx.emit_typed(
+                        crate::router::NotificationTarget::Character(char_id),
+                        crate::router::notify_registry::OnHeatRemoved {
+                            module_or_heat_id: mid,
+                            module_id: None,
+                        },
+                    );
+                }
             }
 
             Some(Ok(PyRep::keyval([
@@ -798,11 +807,11 @@ pub(crate) async fn handle_mining_and_deactivate(
                 });
             }
 
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnMultiModuleRepairStarted",
-                "charid",
-                vec![PyRep::List(vec![PyRep::Integer(module_id)])],
+                crate::router::notify_registry::OnMultiModuleRepairStarted {
+                    module_ids: vec![PyRep::Integer(module_id)],
+                },
             );
 
             Some(Ok(PyRep::keyval([
@@ -863,11 +872,11 @@ pub(crate) async fn handle_mining_and_deactivate(
                     ctx.invalidate_and_push_fit(ship_id);
                 }
             }
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnRepairDone",
-                "charid",
-                vec![PyRep::List(vec![PyRep::Integer(module_id)])],
+                crate::router::notify_registry::OnRepairDone {
+                    item_ids: vec![module_id],
+                },
             );
             Some(Ok(PyRep::keyval([
                 ("moduleID", PyRep::Integer(module_id)),
@@ -946,15 +955,13 @@ pub(crate) async fn handle_mining_and_deactivate(
                 if dist <= scan_range || ship_pos == DVec3::ZERO {
                     let type_name = ctx.sde.types.get(&ast.type_id).map(|t| t.name.clone()).unwrap_or_else(|| format!("Asteroid {}", ast.type_id));
                     let vol = ctx.sde.types.get(&ast.type_id).map(|t| t.volume).unwrap_or(0.1);
-                    ctx.notify(
+                    ctx.emit_typed(
                         crate::router::NotificationTarget::Character(char_id),
-                        "OnAsteroidRevealed",
-                        "character",
-                        vec![
-                            PyRep::Integer(ast.asteroid_id),
-                            PyRep::Integer(ast.type_id as i64),
-                            PyRep::Integer(ast.quantity),
-                        ],
+                        crate::router::notify_registry::OnAsteroidRevealedDetailed {
+                            asteroid_id: ast.asteroid_id,
+                            type_id: ast.type_id as i64,
+                            quantity: ast.quantity,
+                        },
                     );
                     scanned_asteroids.push(PyRep::keyval([
                         ("asteroidID", PyRep::Integer(ast.asteroid_id)),

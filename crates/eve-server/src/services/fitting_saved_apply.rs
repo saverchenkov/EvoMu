@@ -1020,20 +1020,18 @@ pub(crate) fn validate_and_apply_fitting(
                     )
                 })
                 .collect();
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnMultipleItemChange",
-                "charid",
-                vec![
-                    PyRep::List(items_py),
-                    PyRep::Dict(vec![
+                crate::router::notify_registry::OnMultipleItemChange {
+                    items: items_py,
+                    change: PyRep::Dict(vec![
                         (PyRep::Integer(3), PyRep::Integer(station_id)),
                         (
                             PyRep::Integer(4),
                             PyRep::Integer(eve_db::InventoryFlag::Hangar as i64),
                         ),
                     ]),
-                ],
+                },
             );
         }
     }
