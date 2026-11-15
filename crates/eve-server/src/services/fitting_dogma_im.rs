@@ -732,26 +732,27 @@ pub(crate) async fn handle_dogma_im(
             .unwrap_or_else(|| i64::from(stance_type_id));
             ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
             ctx.invalidate_and_push_fit(ship_id);
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnStanceActive",
-                "charid",
-                vec![PyRep::Integer(ship_id), PyRep::Integer(active_stance_key)],
+                crate::router::notify_registry::OnStanceActive {
+                    ship_id,
+                    stance_id: active_stance_key,
+                },
             );
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnModuleAttributeChanges",
-                "charid",
-                vec![PyRep::List(vec![PyRep::Tuple(vec![
-                    PyRep::String("OnModuleAttributeChange".into()),
-                    PyRep::Integer(char_id),
-                    PyRep::Integer(ship_id),
-                    PyRep::Integer(eve_sde::attr_ids::MAX_VELOCITY as i64),
-                    PyRep::Integer(ctx.now_client_sim_filetime_ticks()),
-                    PyRep::Real(max_vel),
-                    PyRep::Real(max_vel),
-                    PyRep::None,
-                ])])],
+                crate::router::notify_registry::OnModuleAttributeChanges {
+                    changes: PyRep::List(vec![PyRep::Tuple(vec![
+                        PyRep::String("OnModuleAttributeChange".into()),
+                        PyRep::Integer(char_id),
+                        PyRep::Integer(ship_id),
+                        PyRep::Integer(eve_sde::attr_ids::MAX_VELOCITY as i64),
+                        PyRep::Integer(ctx.now_client_sim_filetime_ticks()),
+                        PyRep::Real(max_vel),
+                        PyRep::Real(max_vel),
+                        PyRep::None,
+                    ])]),
+                },
             );
             Some(Ok(PyRep::Integer(i64::from(stance_type_id))))
         }
@@ -1168,11 +1169,13 @@ pub(crate) async fn handle_dogma_im(
                     .with_snapshot(|s| s.items.get(&target_id).map(|i| i.owner_id))
                     .filter(|&oid| oid != char_id && oid > 0)
                 {
-                    ctx.notify(
+                    ctx.emit_typed(
                         crate::router::NotificationTarget::Character(target_owner_id),
-                        "OnTarget",
-                        "charid",
-                        vec![PyRep::Integer(ship_id), PyRep::String("targetedBy".into())],
+                        crate::router::notify_registry::OnTarget {
+                            arg0: PyRep::Integer(ship_id),
+                            arg1: PyRep::String("targetedBy".into()),
+                            reason: None,
+                        },
                     );
                 }
             }
@@ -1206,11 +1209,13 @@ pub(crate) async fn handle_dogma_im(
             crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, Some(target_id));
             crate::services::combat_weapons_spool::clear_entropic_spools_on_target_unlock(ctx, ship_id, char_id, Some(target_id));
             if removed {
-                ctx.notify(
+                ctx.emit_typed(
                     crate::router::NotificationTarget::Character(char_id),
-                    "OnTarget",
-                    "charid",
-                    vec![PyRep::Integer(target_id), PyRep::String("lost".into())],
+                    crate::router::notify_registry::OnTarget {
+                        arg0: PyRep::Integer(target_id),
+                        arg1: PyRep::String("lost".into()),
+                        reason: None,
+                    },
                 );
                 let _ = ctx.notify_target_events(char_id, &[("lost", target_id, "")]);
                 if let (Some(sys_id), Some(target_char)) = (
@@ -1272,11 +1277,11 @@ pub(crate) async fn handle_dogma_im(
                     let _ = ctx.notify_target_events(char_id, &[("clear", 0, "")]);
                 }
             }
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnTargetClear",
-                "charid",
-                vec![],
+                crate::router::notify_registry::OnTargetClear {
+                    targets_to_skip: None,
+                },
             );
             Some(Ok(PyRep::None))
         }

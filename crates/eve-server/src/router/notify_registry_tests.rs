@@ -173,6 +173,143 @@ fn typed_notification_into_args_preserves_registered_arity() {
         do_alert: Some(true),
     };
     assert_eq!(timer_max.into_args().len(), 3);
+
+    use super::notify_registry::{
+        DoBallsAddedShipRef, OnAsteroidRevealed, OnAsteroidRevealedDetailed, OnGodmaFlushLocation,
+        OnHeatAdded, OnHeatRemoved, OnMultiModuleRepairStarted, OnMultipleItemChange,
+        OnNewMoonProbe, OnRepairDone, OnShipInsured, OnSpecialFX, OnStanceActive,
+        OnSystemWideEffectAdd, OnSystemWideEffectRemove, OnTargetClear,
+    };
+    assert_eq!(OnAsteroidRevealed::DEFAULT_ID_TYPE, "character");
+    assert_eq!(OnAsteroidRevealed { asteroid_id: 100_000_900 }.into_args().len(), 1);
+    assert_eq!(OnAsteroidRevealedDetailed::EVENT, "OnAsteroidRevealed");
+    assert_eq!(OnAsteroidRevealedDetailed::DEFAULT_ID_TYPE, "character");
+    assert_eq!(
+        OnAsteroidRevealedDetailed {
+            asteroid_id: 100_000_900,
+            type_id: 1230,
+            quantity: 5000,
+        }
+        .into_args()
+        .len(),
+        3
+    );
+    assert_eq!(DoBallsAddedShipRef::EVENT, "DoBallsAdded");
+    assert_eq!(DoBallsAddedShipRef::DEFAULT_ID_TYPE, "solarsystemid");
+    assert_eq!(
+        DoBallsAddedShipRef {
+            item_id: 100_000_010,
+            type_id: 587,
+        }
+        .into_args()
+        .len(),
+        2
+    );
+    assert_eq!(OnGodmaFlushLocation { location_id: 100_000_010 }.into_args().len(), 1);
+    assert_eq!(
+        OnHeatAdded {
+            module_or_heat_id: 100_000_020,
+            module_id: None,
+        }
+        .into_args()
+        .len(),
+        1
+    );
+    assert_eq!(
+        OnHeatAdded {
+            module_or_heat_id: 1211,
+            module_id: Some(100_000_020),
+        }
+        .into_args()
+        .len(),
+        2
+    );
+    assert_eq!(
+        OnHeatRemoved {
+            module_or_heat_id: 100_000_020,
+            module_id: None,
+        }
+        .into_args()
+        .len(),
+        1
+    );
+    assert_eq!(
+        OnHeatRemoved {
+            module_or_heat_id: 1211,
+            module_id: Some(100_000_020),
+        }
+        .into_args()
+        .len(),
+        2
+    );
+    assert_eq!(
+        OnMultiModuleRepairStarted {
+            module_ids: vec![PyRep::Integer(100_000_020)],
+        }
+        .into_args()
+        .len(),
+        1
+    );
+    assert_eq!(
+        OnMultipleItemChange {
+            items: Vec::new(),
+            change: PyRep::Dict(Vec::new()),
+        }
+        .into_args()
+        .len(),
+        2
+    );
+    assert_eq!(
+        OnNewMoonProbe {
+            probe: PyRep::keyval([("probeID", PyRep::Integer(1))]),
+        }
+        .into_args()
+        .len(),
+        1
+    );
+    assert_eq!(OnRepairDone { item_ids: vec![100_000_020] }.into_args().len(), 1);
+    assert_eq!(OnShipInsured {}.into_args().len(), 0);
+    assert_eq!(
+        OnSpecialFX {
+            ship_id: 100_000_010,
+            module_id: Some(100_000_020),
+            module_type_id: Some(483),
+            target_id: None,
+            other_type_id: None,
+            guid: "effects.Laser".to_string(),
+            is_offensive: false,
+            start: 0,
+            active: 0,
+            duration: 0.0,
+            repeat: 0,
+            start_time: 1_335_000_000_000_000_00,
+            time_from_start: 0.0,
+            graphic_info: None,
+        }
+        .into_args()
+        .len(),
+        14
+    );
+    assert_eq!(OnStanceActive { ship_id: 100_000_010, stance_id: 1 }.into_args().len(), 2);
+    assert_eq!(
+        OnSystemWideEffectAdd {
+            source_item_id: 30_000_142,
+            source_type_id: 30_574,
+        }
+        .into_args()
+        .len(),
+        2
+    );
+    assert_eq!(OnSystemWideEffectRemove { source_item_id: 30_000_142 }.into_args().len(), 1);
+    assert_eq!(OnTargetClear { targets_to_skip: None }.into_args().len(), 0);
+    assert_eq!(
+        OnTargetClear {
+            targets_to_skip: Some(vec![100_000_010]),
+        }
+        .into_args()
+        .len(),
+        1
+    );
 }
 
 #[test]
@@ -300,6 +437,18 @@ fn raw_notify_ratchet_holds_and_migrated_files_stay_clean() {
         "services/industry_pi.rs",
         "services/fitting_ship_bays.rs",
         "services/fitting_containers_ships.rs",
+        "services/fitting_cycles_overheat.rs",
+        "services/fitting_dogma_im.rs",
+        "services/fitting_dogma_ops.rs",
+        "services/fitting_insurance_repair.rs",
+        "services/fitting_mining_lasers.rs",
+        "services/fitting_module_cycles.rs",
+        "services/fitting_module_cycles_helpers.rs",
+        "services/fitting_saved_apply.rs",
+        "services/fitting_saved_multifit.rs",
+        "services/fitting_scanners_superweapons.rs",
+        "services/fitting_ship_bays_store_ops.rs",
+        "services/fitting_ships_mastery.rs",
         "services/contracts_service.rs",
         "services/combat_npc_police.rs",
         "services/character_energy.rs",

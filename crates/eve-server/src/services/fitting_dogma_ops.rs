@@ -273,25 +273,25 @@ pub(crate) async fn handle_dogma_ops(
                 .with_snapshot(|s| s.items.get(&target_id).map(|i| i.owner_id))
                 .filter(|&oid| oid != char_id && oid > 0)
             {
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Character(target_owner_id),
-                    "OnTarget",
-                    "charid",
-                    vec![PyRep::Integer(source_id), PyRep::String("targetedBy".into())],
+                    crate::router::notify_registry::OnTarget {
+                        arg0: PyRep::Integer(source_id),
+                        arg1: PyRep::String("targetedBy".into()),
+                        reason: None,
+                    },
                 );
             }
 
             if is_assumed_structure {
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Character(char_id),
-                    "OnTargetOBO",
-                    "charid",
-                    vec![
-                        PyRep::String("add".into()),
-                        PyRep::Integer(source_id),
-                        PyRep::Integer(target_id),
-                        PyRep::None,
-                    ],
+                    crate::router::notify_registry::OnTargetOBO {
+                        what: "add".into(),
+                        sid: source_id,
+                        tid: Some(target_id),
+                        reason: None,
+                    },
                 );
             }
 
@@ -328,11 +328,13 @@ pub(crate) async fn handle_dogma_ops(
             }
             crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, Some(target_id));
             crate::services::combat_weapons_spool::clear_entropic_spools_on_target_unlock(ctx, ship_id, char_id, Some(target_id));
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(char_id),
-                "OnTarget",
-                "charid",
-                vec![PyRep::Integer(target_id), PyRep::String("lost".into())],
+                crate::router::notify_registry::OnTarget {
+                    arg0: PyRep::Integer(target_id),
+                    arg1: PyRep::String("lost".into()),
+                    reason: None,
+                },
             );
             if removed {
                 let _ = ctx.notify_target_events(char_id, &[("lost", target_id, "")]);
@@ -385,23 +387,23 @@ pub(crate) async fn handle_dogma_ops(
             }
             crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, source_id, Some(target_id));
             if is_assumed_structure {
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Character(char_id),
-                    "OnTargetOBO",
-                    "charid",
-                    vec![
-                        PyRep::String("lost".into()),
-                        PyRep::Integer(source_id),
-                        PyRep::Integer(target_id),
-                        PyRep::String("unlocked".into()),
-                    ],
+                    crate::router::notify_registry::OnTargetOBO {
+                        what: "lost".into(),
+                        sid: source_id,
+                        tid: Some(target_id),
+                        reason: Some(PyRep::String("unlocked".into())),
+                    },
                 );
             }
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(char_id),
-                "OnTarget",
-                "charid",
-                vec![PyRep::Integer(target_id), PyRep::String("lost".into())],
+                crate::router::notify_registry::OnTarget {
+                    arg0: PyRep::Integer(target_id),
+                    arg1: PyRep::String("lost".into()),
+                    reason: None,
+                },
             );
             Some(Ok(PyRep::None))
         }
@@ -426,22 +428,26 @@ pub(crate) async fn handle_dogma_ops(
                         if let Some(tid) = it.as_i64() {
                             let _ = sys.remove_target_lock(ship_id, tid).await;
                             crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, Some(tid));
-                            ctx.notify(
+                            ctx.emit_typed(
                                 NotificationTarget::Character(char_id),
-                                "OnTarget",
-                                "charid",
-                                vec![PyRep::Integer(tid), PyRep::String("lost".into())],
+                                crate::router::notify_registry::OnTarget {
+                                    arg0: PyRep::Integer(tid),
+                                    arg1: PyRep::String("lost".into()),
+                                    reason: None,
+                                },
                             );
                         }
                     }
                 } else if let Some(tid) = args.first().and_then(|a| a.as_i64()) {
                     let _ = sys.remove_target_lock(ship_id, tid).await;
                     crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, Some(tid));
-                    ctx.notify(
+                    ctx.emit_typed(
                         NotificationTarget::Character(char_id),
-                        "OnTarget",
-                        "charid",
-                        vec![PyRep::Integer(tid), PyRep::String("lost".into())],
+                        crate::router::notify_registry::OnTarget {
+                            arg0: PyRep::Integer(tid),
+                            arg1: PyRep::String("lost".into()),
+                            reason: None,
+                        },
                     );
                 } else {
                     let current_locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
@@ -449,11 +455,11 @@ pub(crate) async fn handle_dogma_ops(
                     for lock in current_locks {
                         crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, Some(lock.target_id));
                     }
-                    ctx.notify(
+                    ctx.emit_typed(
                         NotificationTarget::Character(char_id),
-                        "OnTargetClear",
-                        "charid",
-                        vec![],
+                        crate::router::notify_registry::OnTargetClear {
+                            targets_to_skip: None,
+                        },
                     );
                 }
             }
@@ -834,11 +840,11 @@ pub(crate) async fn handle_dogma_ops(
             }
 
             if !repaired.is_empty() {
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Character(char_id),
-                    "OnMultiModuleRepairStarted",
-                    "charid",
-                    vec![PyRep::List(repaired.clone())],
+                    crate::router::notify_registry::OnMultiModuleRepairStarted {
+                        module_ids: repaired.clone(),
+                    },
                 );
                 ctx.invalidate_ship_fitting(ship_id);
             }
@@ -952,12 +958,12 @@ pub(crate) async fn handle_dogma_ops(
                 );
             });
 
-            let setting_args = vec![PyRep::Bool(aggressive), PyRep::Bool(focus_fire)];
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(char_id),
-                "OnDroneSettingChanged",
-                "charid",
-                setting_args,
+                crate::router::notify_registry::OnDroneSettingChanged {
+                    aggressive,
+                    focus_fire,
+                },
             );
 
             let active_drones = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
@@ -968,21 +974,17 @@ pub(crate) async fn handle_dogma_ops(
                     .collect::<Vec<_>>()
             });
             for d in active_drones {
-                let target_rep = d.target_id.map(PyRep::Integer).unwrap_or(PyRep::None);
-                let notif_args = vec![
-                    PyRep::Integer(d.ball_id),
-                    PyRep::Integer(char_id),
-                    PyRep::Integer(d.parent_ship_id),
-                    PyRep::Integer(d.activity_state as i64),
-                    PyRep::Integer(d.type_id as i64),
-                    PyRep::Integer(char_id),
-                    target_rep,
-                ];
-                ctx.notify(
+                ctx.emit_typed(
                     NotificationTarget::Character(char_id),
-                    "OnDroneStateChange",
-                    "charid",
-                    notif_args,
+                    crate::router::notify_registry::OnDroneStateChange {
+                        drone_id: d.ball_id,
+                        owner_id: char_id,
+                        controller_id: d.parent_ship_id,
+                        activity_state: d.activity_state as i64,
+                        drone_type_id: d.type_id as i64,
+                        controller_owner_id: char_id,
+                        target_id: d.target_id,
+                    },
                 );
             }
 

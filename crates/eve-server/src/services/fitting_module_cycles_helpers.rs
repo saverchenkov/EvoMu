@@ -197,15 +197,13 @@ pub(crate) async fn handle_survey_scanner_activation_with_excluded_dbuffs(
                 .map(|t| t.name.clone())
                 .unwrap_or_else(|| format!("Asteroid {}", ast.type_id));
             let vol = ctx.sde.types.get(&ast.type_id).map(|t| t.volume).unwrap_or(0.1);
-            ctx.notify(
+            ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnAsteroidRevealed",
-                "character",
-                vec![
-                    PyRep::Integer(ast.asteroid_id),
-                    PyRep::Integer(ast.type_id as i64),
-                    PyRep::Integer(ast.quantity),
-                ],
+                crate::router::notify_registry::OnAsteroidRevealedDetailed {
+                    asteroid_id: ast.asteroid_id,
+                    type_id: ast.type_id as i64,
+                    quantity: ast.quantity,
+                },
             );
             scanned_asteroids.push(PyRep::keyval([
                 ("asteroidID", PyRep::Integer(ast.asteroid_id)),
@@ -641,11 +639,12 @@ pub(crate) fn emit_godma_charge_sublocation_prime(
     let subloc_key = charge_sublocation_key(ship_id, c_item.flag, c_item.type_id);
     let now_ft = ctx.now_client_sim_filetime_ticks();
     let keyval = build_charge_sublocation_keyval(subloc_key, c_attrs, now_ft);
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
-        "OnGodmaPrimeItem",
-        "charid",
-        vec![PyRep::Integer(ship_id), keyval],
+        crate::router::notify_registry::OnGodmaPrimeItem {
+            location_id: ship_id,
+            row: keyval,
+        },
     );
 }
 
@@ -665,20 +664,20 @@ pub(crate) fn emit_charge_sublocation_quantity_change(
     }
     let subloc_key = charge_sublocation_key(ship_id, flag, charge_type_id);
     let now_ft = ctx.now_client_sim_filetime_ticks();
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
-        "OnModuleAttributeChanges",
-        "charid",
-        vec![PyRep::List(vec![PyRep::Tuple(vec![
-            PyRep::String("OnModuleAttributeChange".into()),
-            PyRep::Integer(char_id),
-            subloc_key,
-            PyRep::Integer(i64::from(attr_ids::QUANTITY)),
-            PyRep::Integer(now_ft),
-            PyRep::Real(f64::from(new_qty)),
-            PyRep::Real(f64::from(old_qty)),
-            PyRep::None,
-        ])])],
+        crate::router::notify_registry::OnModuleAttributeChanges {
+            changes: PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::String("OnModuleAttributeChange".into()),
+                PyRep::Integer(char_id),
+                subloc_key,
+                PyRep::Integer(i64::from(attr_ids::QUANTITY)),
+                PyRep::Integer(now_ft),
+                PyRep::Real(f64::from(new_qty)),
+                PyRep::Real(f64::from(old_qty)),
+                PyRep::None,
+            ])]),
+        },
     );
 }
 
@@ -1676,11 +1675,11 @@ pub(crate) async fn handle_ecm_or_burst_jammer_activation(
                     })
             });
             if let Some(j_char) = jammed_owner_opt {
-                ctx.notify(
+                ctx.emit_typed(
                     crate::router::NotificationTarget::Character(j_char),
-                    "OnTargetClear",
-                    "charid",
-                    vec![],
+                    crate::router::notify_registry::OnTargetClear {
+                        targets_to_skip: None,
+                    },
                 );
             }
         }
@@ -1847,15 +1846,21 @@ async fn deactivate_repeating_cycle_after_action(
         } else {
             PyRep::String(effect_name.to_string())
         };
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::Character(cid),
-            "OnGodmaShipEffect",
-            "charid",
-            vec![
-                PyRep::Integer(module_id),
-                godma_effect,
-                PyRep::Bool(false),
-            ],
+            crate::router::notify_registry::OnGodmaShipEffect {
+                item_id: module_id,
+                effect: godma_effect,
+                start_or_time: PyRep::Bool(false),
+                start: None,
+                active: None,
+                environment: None,
+                start_time: None,
+                duration: None,
+                repeat: None,
+                error: None,
+                actual_stop_time: None,
+            },
         );
     }
 }
@@ -2040,11 +2045,11 @@ pub(crate) async fn execute_pending_cycle_actions_list(
                         (PyRep::String("attackType".into()), PyRep::String("me".into())),
                         (PyRep::String("isBanked".into()), PyRep::Bool(false)),
                     ]);
-                    ctx.notify(
+                    ctx.emit_typed(
                         crate::router::NotificationTarget::Character(attacker_char_id),
-                        "OnDamageMessage",
-                        "charid",
-                        vec![dmg_dict.clone()],
+                        crate::router::notify_registry::OnDamageMessage {
+                            damage_messages_args: dmg_dict.clone(),
+                        },
                     );
                     crate::services::notify_emitters_ess_bounties::emit_combat_message(
                         ctx,
@@ -2093,29 +2098,29 @@ pub(crate) async fn execute_pending_cycle_actions_list(
                             (PyRep::String("attackType".into()), PyRep::String("other".into())),
                             (PyRep::String("isBanked".into()), PyRep::Bool(false)),
                         ]);
-                        ctx.notify(
+                        ctx.emit_typed(
                             crate::router::NotificationTarget::Character(victim_char_id),
-                            "OnDamageMessage",
-                            "charid",
-                            vec![vic_dict.clone()],
+                            crate::router::notify_registry::OnDamageMessage {
+                                damage_messages_args: vic_dict.clone(),
+                            },
                         );
-                        ctx.notify(
+                        ctx.emit_typed(
                             crate::router::NotificationTarget::Character(victim_char_id),
-                            "OnDamageMessages",
-                            "charid",
-                            vec![PyRep::List(vec![PyRep::Tuple(vec![
-                                PyRep::String("AttackedBy".into()),
-                                vic_dict,
-                            ])])],
+                            crate::router::notify_registry::OnDamageMessages {
+                                dmgmsgs: vec![PyRep::Tuple(vec![
+                                    PyRep::String("AttackedBy".into()),
+                                    vic_dict,
+                                ])],
+                            },
                         );
                     }
                 }
                 if !msg_tuples.is_empty() {
-                    ctx.notify(
+                    ctx.emit_typed(
                         crate::router::NotificationTarget::Character(attacker_char_id),
-                        "OnDamageMessages",
-                        "charid",
-                        vec![PyRep::List(msg_tuples)],
+                        crate::router::notify_registry::OnDamageMessages {
+                            dmgmsgs: msg_tuples,
+                        },
                     );
                 }
             }
@@ -2160,20 +2165,20 @@ pub(crate) async fn execute_pending_cycle_actions_list(
                             (PyRep::String("isWrecking".into()), PyRep::Bool(false)),
                             (PyRep::String("isBanked".into()), PyRep::Bool(false)),
                         ]);
-                        ctx.notify(
+                        ctx.emit_typed(
                             crate::router::NotificationTarget::Character(acid),
-                            "OnDamageMessage",
-                            "charid",
-                            vec![dmg_dict.clone()],
+                            crate::router::notify_registry::OnDamageMessage {
+                                damage_messages_args: dmg_dict.clone(),
+                            },
                         );
-                        ctx.notify(
+                        ctx.emit_typed(
                             crate::router::NotificationTarget::Character(acid),
-                            "OnDamageMessages",
-                            "charid",
-                            vec![PyRep::List(vec![PyRep::Tuple(vec![
-                                PyRep::String("AttackHit".into()),
-                                dmg_dict,
-                            ])])],
+                            crate::router::notify_registry::OnDamageMessages {
+                                dmgmsgs: vec![PyRep::Tuple(vec![
+                                    PyRep::String("AttackHit".into()),
+                                    dmg_dict,
+                                ])],
+                            },
                         );
                     }
                     if let Some(vcid) = target_char_id.filter(|&c| c > 0 && c != owner_cid) {
@@ -2193,20 +2198,20 @@ pub(crate) async fn execute_pending_cycle_actions_list(
                             (PyRep::String("isWrecking".into()), PyRep::Bool(false)),
                             (PyRep::String("isBanked".into()), PyRep::Bool(false)),
                         ]);
-                        ctx.notify(
+                        ctx.emit_typed(
                             crate::router::NotificationTarget::Character(vcid),
-                            "OnDamageMessage",
-                            "charid",
-                            vec![vic_dict.clone()],
+                            crate::router::notify_registry::OnDamageMessage {
+                                damage_messages_args: vic_dict.clone(),
+                            },
                         );
-                        ctx.notify(
+                        ctx.emit_typed(
                             crate::router::NotificationTarget::Character(vcid),
-                            "OnDamageMessages",
-                            "charid",
-                            vec![PyRep::List(vec![PyRep::Tuple(vec![
-                                PyRep::String("AttackedBy".into()),
-                                vic_dict,
-                            ])])],
+                            crate::router::notify_registry::OnDamageMessages {
+                                dmgmsgs: vec![PyRep::Tuple(vec![
+                                    PyRep::String("AttackedBy".into()),
+                                    vic_dict,
+                                ])],
+                            },
                         );
                     }
                 }

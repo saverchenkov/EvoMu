@@ -1193,11 +1193,12 @@ pub(crate) async fn handle_ships_and_services(
                 Ok(space_sys) => {
                     ctx.esi_state.set_custom_item_name(item_id, label.to_string());
                     if let Some(sys_id) = space_sys {
-                        ctx.notify(
+                        ctx.emit_typed(
                             crate::router::NotificationTarget::SolarSystem(sys_id),
-                            "OnSlimItemChange",
-                            "solarsystemid",
-                            vec![PyRep::Integer(item_id), PyRep::String(label.to_string())],
+                            crate::router::notify_registry::OnSlimItemChange {
+                                old_slim: PyRep::Integer(item_id),
+                                new_slim: PyRep::String(label.to_string()),
+                            },
                         );
                     }
                     if let Some(it) = ctx.db.with_snapshot(|s| s.items.get(&item_id).cloned()) {

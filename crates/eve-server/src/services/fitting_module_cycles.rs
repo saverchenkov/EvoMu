@@ -703,16 +703,16 @@ pub(crate) async fn handle_module_cycles(
                     });
                 }
 
-                ctx.notify(
+                ctx.emit_typed(
                     crate::router::NotificationTarget::Character(char_id),
-                    "OnNewMoonProbe",
-                    "charid",
-                    vec![PyRep::keyval([
-                        ("probeID", PyRep::Integer(probe_id)),
-                        ("typeID", PyRep::Integer(probe_type_id as i64)),
-                        ("moonID", hit_moon_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                        ("expiry", PyRep::Integer(arrival_unix_secs as i64)),
-                    ])],
+                    crate::router::notify_registry::OnNewMoonProbe {
+                        probe: PyRep::keyval([
+                            ("probeID", PyRep::Integer(probe_id)),
+                            ("typeID", PyRep::Integer(probe_type_id as i64)),
+                            ("moonID", hit_moon_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                            ("expiry", PyRep::Integer(arrival_unix_secs as i64)),
+                        ]),
+                    },
                 );
 
                 return Some(Ok(PyRep::keyval([
@@ -1766,11 +1766,12 @@ pub(crate) async fn handle_module_cycles(
                 );
             }
             if is_overloaded {
-                ctx.notify(
+                ctx.emit_typed(
                     crate::router::NotificationTarget::Character(char_id),
-                    "OnHeatAdded",
-                    "charid",
-                    vec![PyRep::Integer(module_id)],
+                    crate::router::notify_registry::OnHeatAdded {
+                        module_or_heat_id: module_id,
+                        module_id: None,
+                    },
                 );
             }
             if !slot_still_has_charge {

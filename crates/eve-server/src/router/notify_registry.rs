@@ -3903,6 +3903,111 @@ define_notifications! {
             )]),
         ]],
     },
+    // === Fitting & Dogma Batch Events (#932) ===
+    OnAsteroidRevealed => "OnAsteroidRevealed" ("character") {
+        fields: { asteroid_id: i64 },
+        samples: || vec![vec![PyRep::Integer(100_000_900)]],
+    },
+    OnGodmaFlushLocation => "OnGodmaFlushLocation" ("charid") {
+        fields: { location_id: i64 },
+        samples: || vec![vec![PyRep::Integer(100_000_010)]],
+    },
+    OnHeatAdded => "OnHeatAdded" ("charid") {
+        fields: { module_or_heat_id: i64 },
+        optional: { module_id: Option<i64> },
+        samples: || vec![
+            vec![PyRep::Integer(100_000_020)],
+            vec![PyRep::Integer(1211), PyRep::Integer(100_000_020)],
+        ],
+    },
+    OnHeatRemoved => "OnHeatRemoved" ("charid") {
+        fields: { module_or_heat_id: i64 },
+        optional: { module_id: Option<i64> },
+        samples: || vec![
+            vec![PyRep::Integer(100_000_020)],
+            vec![PyRep::Integer(1211), PyRep::Integer(100_000_020)],
+        ],
+    },
+    OnMultiModuleRepairStarted => "OnMultiModuleRepairStarted" ("charid") {
+        fields: { module_ids: Vec<PyRep> },
+        samples: || vec![vec![PyRep::List(vec![PyRep::Integer(100_000_020)])]],
+    },
+    OnMultipleItemChange => "OnMultipleItemChange" ("charid") {
+        fields: { items: Vec<PyRep>, change: PyRep },
+        samples: || vec![vec![
+            PyRep::List(vec![sample_keyval_item()]),
+            PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(60_003_760))]),
+        ]],
+    },
+    OnNewMoonProbe => "OnNewMoonProbe" ("charid") {
+        fields: { probe: PyRep },
+        samples: || vec![vec![PyRep::keyval([
+            ("probeID", PyRep::Integer(1)),
+            ("typeID", PyRep::Integer(45_511)),
+            ("moonID", PyRep::Integer(40_000_001)),
+            ("expiry", PyRep::Integer(1_700_000_060)),
+        ])]],
+    },
+    OnRepairDone => "OnRepairDone" ("charid") {
+        fields: { item_ids: Vec<i64> },
+        samples: || vec![vec![PyRep::List(vec![PyRep::Integer(100_000_020)])]],
+    },
+    OnShipInsured => "OnShipInsured" ("charid") {
+        samples: || vec![vec![]],
+    },
+    OnSpecialFX => "OnSpecialFX" ("charid") {
+        fields: {
+            ship_id: i64,
+            module_id: Option<i64>,
+            module_type_id: Option<i64>,
+            target_id: Option<i64>,
+            other_type_id: Option<i64>,
+            guid: String,
+            is_offensive: bool,
+            start: i64,
+            active: i64,
+            duration: f64,
+            repeat: i64,
+            start_time: i64,
+            time_from_start: f64,
+            graphic_info: Option<PyRep>,
+        },
+        samples: || vec![vec![
+            PyRep::Integer(100_000_010),
+            PyRep::Integer(100_000_020),
+            PyRep::Integer(483),
+            PyRep::None,
+            PyRep::None,
+            PyRep::String("effects.Laser".into()),
+            PyRep::Bool(false),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+            PyRep::Real(0.0),
+            PyRep::Integer(0),
+            PyRep::Integer(1_335_000_000_000_000_00),
+            PyRep::Real(0.0),
+            PyRep::None,
+        ]],
+    },
+    OnStanceActive => "OnStanceActive" ("charid") {
+        fields: { ship_id: i64, stance_id: i64 },
+        samples: || vec![vec![PyRep::Integer(100_000_010), PyRep::Integer(1)]],
+    },
+    OnSystemWideEffectAdd => "OnSystemWideEffectAdd" ("charid") {
+        fields: { source_item_id: i64, source_type_id: i64 },
+        samples: || vec![vec![PyRep::Integer(30_000_142), PyRep::Integer(30_574)]],
+    },
+    OnSystemWideEffectRemove => "OnSystemWideEffectRemove" ("charid") {
+        fields: { source_item_id: i64 },
+        samples: || vec![vec![PyRep::Integer(30_000_142)]],
+    },
+    OnTargetClear => "OnTargetClear" ("charid") {
+        optional: { targets_to_skip: Option<Vec<i64>> },
+        samples: || vec![
+            vec![],
+            vec![PyRep::List(vec![PyRep::Integer(100_000_010)])],
+        ],
+    },
 }
 
 impl OnOwnOrdersChanged {
@@ -3990,4 +4095,16 @@ define_notification_item!(OnNotificationChange => "OnNotificationChange" ("chari
 define_notification_item!(OnInsurgencyCampaignUpdatedForLocationFallback => "OnInsurgencyCampaignUpdatedForLocation" ("solarsystemid") {
     fields: { campaign_id: i64, state: i64 },
     samples: || vec![vec![PyRep::Integer(1), PyRep::Integer(1)]],
+});
+define_notification_item!(DoBallsAddedShipRef => "DoBallsAdded" ("solarsystemid") {
+    fields: { item_id: i64, type_id: i64 },
+    samples: || vec![vec![PyRep::Integer(100_000_010), PyRep::Integer(587)]],
+});
+define_notification_item!(OnAsteroidRevealedDetailed => "OnAsteroidRevealed" ("character") {
+    fields: { asteroid_id: i64, type_id: i64, quantity: i64 },
+    samples: || vec![vec![
+        PyRep::Integer(100_000_900),
+        PyRep::Integer(1230),
+        PyRep::Integer(5000),
+    ]],
 });

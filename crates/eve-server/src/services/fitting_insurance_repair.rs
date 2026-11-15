@@ -322,11 +322,9 @@ pub(super) fn handle_insure_ship(
         ctx,
         rec.owner_id,
     );
-    ctx.notify(
+    ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
-        "OnShipInsured",
-        "charid",
-        vec![],
+        crate::router::notify_registry::OnShipInsured {},
     );
     if is_corp {
         let acct_key = if div_id == 1 {
@@ -334,15 +332,14 @@ pub(super) fn handle_insure_ship(
         } else {
             format!("cash{div_id}")
         };
-        ctx.notify(
+        ctx.emit_typed_with_id_type(
             crate::router::NotificationTarget::Corporation(rec.owner_id),
-            "OnAccountChange",
             "corpid",
-            vec![
-                PyRep::String(acct_key),
-                PyRep::Integer(rec.owner_id),
-                PyRep::Real(new_bal.to_wire_f64()),
-            ],
+            crate::router::notify_registry::OnAccountChange {
+                account_key: acct_key,
+                owner_id: rec.owner_id,
+                balance: new_bal.to_wire_f64(),
+            },
         );
     } else {
         let _ = ctx.notify_account_change(char_id, "cash", char_id, new_bal.to_wire_f64());
