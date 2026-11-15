@@ -106,8 +106,7 @@ async fn test_issue_874_ignored_try_with_mut_snapshot_failure_poisons_rpc_withou
     });
     ctx.db.with_sqlite_conn(|conn| {
         conn.execute_batch(
-            "CREATE TRIGGER abort_874_char_fee BEFORE UPDATE ON characters BEGIN SELECT RAISE(ABORT, 'abort_874_corp_ad_fee'); END;
-             CREATE TRIGGER abort_874_corp_fee BEFORE UPDATE ON corporations BEGIN SELECT RAISE(ABORT, 'abort_874_corp_ad_fee'); END;",
+            "CREATE TRIGGER abort_874_char_fee BEFORE UPDATE ON characters BEGIN SELECT RAISE(ABORT, 'abort_874_corp_ad_fee'); END;",
         )
         .unwrap();
     });
@@ -154,10 +153,8 @@ async fn test_issue_874_ignored_try_with_mut_snapshot_failure_poisons_rpc_withou
 
     // Clear the fault and verify subsequent independent RPCs on the same context/session succeed.
     ctx.db.with_sqlite_conn(|conn| {
-        conn.execute_batch(
-            "DROP TRIGGER abort_874_char_fee; DROP TRIGGER abort_874_corp_fee;",
-        )
-        .unwrap();
+        conn.execute_batch("DROP TRIGGER abort_874_char_fee;")
+            .unwrap();
     });
     let ok_res = ctx
         .dispatch_rpc(
