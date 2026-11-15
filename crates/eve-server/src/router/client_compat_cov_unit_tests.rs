@@ -1324,6 +1324,9 @@ async fn c9_typed_handlers_corp_dev_fw_peace_emit_canonical_wire_shapes() {
         .expect("GetLocalVictoryPointState non-FW");
     assert_eq!(vp_none, PyRep::Tuple(vec![PyRep::None, PyRep::Integer(0)]));
 
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&90_000_001).unwrap().solar_system_id = fw_sys;
+    });
     sess.solar_system_id = Some(fw_sys);
     let vp_local = ctx
         .dispatch_rpc(
