@@ -1,12 +1,12 @@
 # EvoMu
 
-An open-source EVE Online server, written from scratch in Rust, for the unmodified V24.01 client (build 3619879) on macOS and Windows.
+An open-source EVE Online server, written from scratch in Rust, for the unmodified V24.02 client (build 3698585) on macOS and Windows.
 
 EvoMu implements the three protocols the client talks: the classic MachoNet game services, the "Quasar" gRPC gateway, and the ESI web API with single sign-on. The repository contains no client code and no client data. You bring your own client.
 
 ## What EvoMu supports
 
-EvoMu aims to support 100% of the live game's functionality for the V24.01 client. Progress so far, counted as game features with passing server tests:
+EvoMu aims to support 100% of the live game's functionality for the V24.02 client. Progress so far, counted as game features with passing server tests:
 
 | Area | Includes | [Progress](./docs/ACTION_PLAN_STATUS.md#feature-progress-by-area) |
 | :--- | :--- | :--- |
@@ -27,7 +27,7 @@ EvoMu aims to support 100% of the live game's functionality for the V24.01 clien
 
 The numbers are generated from the test results; the per-feature list is in the [progress report](./docs/ACTION_PLAN_STATUS.md#feature-progress-by-area).
 
-The real V24.01 client plays against the server every day in automated sessions: logging in, docking and undocking, flying and warping, jumping through stargates, fitting ships, mining, trading on the market and fighting.
+The real V24.02 client plays against the server every day in automated sessions: logging in, docking and undocking, flying and warping, jumping through stargates, fitting ships, mining, trading on the market and fighting.
 
 ## Status
 
@@ -45,7 +45,7 @@ EvoMu is under active development. With the real client, some of the features ab
 
 - Rust 1.85 or newer
 - Python 3.9 or newer
-- An installed EVE Online V24.01 client, build 3619879
+- An installed EVE Online V24.02 client, build 3698585
 
 ### Import static data
 
@@ -127,8 +127,8 @@ Tests run at four levels against the imported static data (`data/evomu_sde.sqlit
 
 - **Unit tests (`--lib`):** Per-crate tests for wire encoding (`eve-proto`, `eve-machonet`), static-data queries (`eve-sde`), space physics and warp (`eve-destiny`), ship attributes and fitting (`eve-dogma`), world storage (`eve-db`), and server logic (`eve-server`).
 - **Integration tests (`--test it`):** Multi-client tests against an in-process server covering MachoNet RPCs, Quasar gRPC services, ESI routes, and client notifications.
-- **End-to-end client journeys:** [`tools/client-harness/run_journeys`](./tools/client-harness/run_journeys) runs the 29 scripted gameplay sessions from [`client_journeys.json`](./.agents/skills/evomu-adversarial-review/references/parity/client_journeys.json) either in headless bridge mode or inside the real V24.01 client.
-- **Live-client playtester:** [`tools/client-harness/playtester.py`](./tools/client-harness/playtester.py) drives a live V24.01 client through an in-client UI bridge (`127.0.0.1:26099`), background window capture (requires Xcode Command Line Tools on macOS, `xcode-select --install`), and automatic crash/bug reporting.
+- **End-to-end client journeys:** [`tools/client-harness/run_journeys`](./tools/client-harness/run_journeys) runs the 29 scripted gameplay sessions from [`client_journeys.json`](./.agents/skills/evomu-adversarial-review/references/parity/client_journeys.json) either in headless bridge mode or inside the real V24.02 client.
+- **Live-client playtester:** [`tools/client-harness/playtester.py`](./tools/client-harness/playtester.py) drives a live V24.02 client through an in-client UI bridge (`127.0.0.1:26099`), background window capture (requires Xcode Command Line Tools on macOS, `xcode-select --install`), and automatic crash/bug reporting.
 
 ```bash
 cargo test --workspace --lib                                      # unit tests
@@ -162,7 +162,7 @@ Please don't include files or data taken from the EVE client, or code copied fro
 
 ```mermaid
 flowchart LR
-    Client["EVE client V24.01"] -->|"MachoNet"| Server["eve-server"]
+    Client["EVE client V24.02"] -->|"MachoNet"| Server["eve-server"]
     Client -->|"Quasar gRPC"| Server
     Client -->|"ESI / SSO"| Server
     Server --> Proto["eve-proto, eve-machonet"]
@@ -193,6 +193,7 @@ flowchart LR
 | [Status](./docs/ACTION_PLAN_STATUS.md) | Detailed progress by task |
 | [Plan](./PLAN.md) | The overall plan and its sources |
 | [Code style](./CODE_STYLE.md) | Code conventions |
+| [Client update protocol](./docs/CLIENT_UPDATE_PROTOCOL.md) | Two-track procedure for handling new EVE client builds |
 
 ## Legal
 

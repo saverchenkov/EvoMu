@@ -1,10 +1,10 @@
-//! Regression tests for handshake mismatches found by running the real V24.01 client (T-6).
+//! Regression tests for handshake mismatches found by running the real V24.02 client (T-6).
 //!
 //! 1. The client's `GPS.Authenticate` reads `response[6]` (`update_info`) from the server's first
 //!    frame, so the server hello must be a 7-tuple; a 6-tuple raised `IndexError` in
 //!    `machoNet.GetServerStatus`.
 //! 2. The client compares `codename@region`, `boot.version` and `macho.version` for equality and
-//!    refuses a server whose build is newer than its own (`start.ini`: `V24.01@ccp`, build 3624425,
+//!    refuses a server whose build is newer than its own (`start.ini`: `V24.02@ccp`, build 3698585,
 //!    `machoVersion = 496`).
 //! 3. After `GetServerStatus` sends `(None, 'QC')`, the client keeps the half-open transport and
 //!    `ConnectToServer` begins by reading a fresh version tuple, so the server has to restart the
@@ -37,9 +37,9 @@ async fn spawn_listener() -> std::net::SocketAddr {
 fn real_client_request(build: i64, codename_at_region: &str) -> PyRep {
     PyRep::Tuple(vec![
         PyRep::Integer(170_472),
-        PyRep::Integer(496),
+        PyRep::Integer(i64::from(eve_machonet::V24_MACHO_VERSION)),
         PyRep::Integer(0),
-        PyRep::Real(24.01),
+        PyRep::Real(eve_machonet::V24_VERSION_NUMBER),
         PyRep::Integer(build),
         PyRep::ascii_bytes(codename_at_region),
     ])
@@ -55,14 +55,29 @@ async fn server_hello_is_v24_seven_tuple_and_qc_restarts_handshake() {
     };
     assert_eq!(items.len(), 7, "GPS.Authenticate reads response[6]");
     assert_eq!(items[0], PyRep::Integer(170_472));
-    assert_eq!(items[1], PyRep::Integer(496));
-    assert_eq!(items[3], PyRep::Real(24.01));
-    assert_eq!(items[4], PyRep::Integer(3_624_425));
-    assert_eq!(items[5].as_str(), Some("V24.01@ccp"));
+    assert_eq!(
+        items[1],
+        PyRep::Integer(i64::from(eve_machonet::V24_MACHO_VERSION))
+    );
+    assert_eq!(items[3], PyRep::Real(eve_machonet::V24_VERSION_NUMBER));
+    assert_eq!(
+        items[4],
+        PyRep::Integer(i64::from(eve_machonet::V24_BOOT_BUILD))
+    );
+    assert_eq!(
+        items[5].as_str(),
+        Some(eve_machonet::V24_CODENAME_AT_REGION)
+    );
     assert_eq!(items[6], PyRep::None);
 
     // GetServerStatus: version reply, then queue check.
-    write_framed_pyrep(&mut s, &real_client_request(3_624_425, "V24.01@ccp"))
+    write_framed_pyrep(
+        &mut s,
+        &real_client_request(
+            i64::from(eve_machonet::V24_BOOT_BUILD),
+            eve_machonet::V24_CODENAME_AT_REGION,
+        ),
+    )
         .await
         .unwrap();
     write_framed_pyrep(&mut s, &HandshakeCommand::QueueCheck.to_pyrep())
@@ -75,7 +90,13 @@ async fn server_hello_is_v24_seven_tuple_and_qc_restarts_handshake() {
     // ConnectToServer on the same transport reads a new version tuple first.
     let again = read_framed_pyrep(&mut s).await.unwrap().unwrap();
     assert_eq!(again, hello);
-    write_framed_pyrep(&mut s, &real_client_request(3_624_425, "V24.01@ccp"))
+    write_framed_pyrep(
+        &mut s,
+        &real_client_request(
+            i64::from(eve_machonet::V24_BOOT_BUILD),
+            eve_machonet::V24_CODENAME_AT_REGION,
+        ),
+    )
         .await
         .unwrap();
     write_framed_pyrep(&mut s, &HandshakeCommand::QueueCheck.to_pyrep())
@@ -90,12 +111,30 @@ async fn server_hello_is_v24_seven_tuple_and_qc_restarts_handshake() {
 #[tokio::test]
 async fn version_checks_follow_client_gps_semantics() {
     let addr = spawn_listener().await;
+    let current_build = i64::from(eve_machonet::V24_BOOT_BUILD);
+    let current_codename = eve_machonet::V24_CODENAME_AT_REGION
+        .split('@')
+        .next()
+        .unwrap_or("V24.02");
+    let wrong_region = format!("{current_codename}@optic");
     let cases: [(i64, &str, Option<&str>); 4] = [
         // Newer client build is accepted (server refuses only if its own build is newer).
-        (3_700_000, "V24.01@ccp", None),
-        (3_619_879, "V24.01@ccp", Some("HANDSHAKE_INCOMPATIBLEBUILD")),
-        (3_624_425, "EVE-EVE-TRANQUILITY@ccp", Some("HANDSHAKE_INCOMPATIBLERELEASE")),
-        (3_624_425, "V24.01@optic", Some("HANDSHAKE_INCOMPATIBLEREGION")),
+        (current_build + 10_000, eve_machonet::V24_CODENAME_AT_REGION, None),
+        (
+            current_build - 1,
+            eve_machonet::V24_CODENAME_AT_REGION,
+            Some("HANDSHAKE_INCOMPATIBLEBUILD"),
+        ),
+        (
+            current_build,
+            "EVE-EVE-TRANQUILITY@ccp",
+            Some("HANDSHAKE_INCOMPATIBLERELEASE"),
+        ),
+        (
+            current_build,
+            wrong_region.as_str(),
+            Some("HANDSHAKE_INCOMPATIBLEREGION"),
+        ),
     ];
     for (build, cr, expected) in cases {
         let mut s = TcpStream::connect(addr).await.unwrap();
@@ -122,7 +161,11 @@ async fn version_checks_follow_client_gps_semantics() {
         }
     }
     let d = VersionExchange::default();
-    assert_eq!((d.codename(), d.region()), ("V24.01", "ccp"));
+    let expected_codename = eve_machonet::V24_CODENAME_AT_REGION
+        .split('@')
+        .next()
+        .unwrap();
+    assert_eq!((d.codename(), d.region()), (expected_codename, "ccp"));
 }
 
 #[tokio::test]
@@ -132,7 +175,13 @@ async fn cryptoapi_session_key_request_is_refused_with_reason() {
     let addr = spawn_listener().await;
     let mut s = TcpStream::connect(addr).await.unwrap();
     let _ = read_framed_pyrep(&mut s).await.unwrap().unwrap();
-    write_framed_pyrep(&mut s, &real_client_request(3_624_425, "V24.01@ccp"))
+    write_framed_pyrep(
+        &mut s,
+        &real_client_request(
+            i64::from(eve_machonet::V24_BOOT_BUILD),
+            eve_machonet::V24_CODENAME_AT_REGION,
+        ),
+    )
         .await
         .unwrap();
     let mut req = eve_machonet::CryptoRequestPacket::placebo();
@@ -152,7 +201,13 @@ async fn cryptoapi_session_key_request_is_refused_with_reason() {
     // A Placebo context (empty params) is still accepted.
     let mut s2 = TcpStream::connect(addr).await.unwrap();
     let _ = read_framed_pyrep(&mut s2).await.unwrap().unwrap();
-    write_framed_pyrep(&mut s2, &real_client_request(3_624_425, "V24.01@ccp"))
+    write_framed_pyrep(
+        &mut s2,
+        &real_client_request(
+            i64::from(eve_machonet::V24_BOOT_BUILD),
+            eve_machonet::V24_CODENAME_AT_REGION,
+        ),
+    )
         .await
         .unwrap();
     write_framed_pyrep(&mut s2, &eve_machonet::CryptoRequestPacket::placebo().to_pyrep())

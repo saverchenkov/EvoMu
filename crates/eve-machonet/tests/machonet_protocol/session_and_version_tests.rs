@@ -2,8 +2,8 @@
 
 use eve_machonet::{
     extract_macho_call_req, service_roles, MachoPacketType, SessionState, VersionExchange,
-    HANDSHAKE_SECRET_KEY, SESSION_TYPE_GAME, V24_BOOT_BUILD,
-    V24_MACHO_VERSION,
+    HANDSHAKE_SECRET_KEY, SESSION_TYPE_GAME, V24_BOOT_BUILD, V24_CODENAME_AT_REGION,
+    V24_MACHO_VERSION, V24_VERSION_NUMBER,
 };
 use eve_proto::PyRep;
 use std::collections::HashMap;
@@ -13,8 +13,10 @@ fn test_version_exchange_parsing_and_validation() {
     let srv = VersionExchange::default();
     assert_eq!(srv.birthday, HANDSHAKE_SECRET_KEY);
     assert_eq!(srv.macho_version, V24_MACHO_VERSION);
+    assert!((srv.version_number - V24_VERSION_NUMBER).abs() < 1e-9);
     assert_eq!(srv.build_version, V24_BOOT_BUILD);
-    assert_eq!(srv.codename(), "V24.01");
+    assert_eq!(srv.project_version, V24_CODENAME_AT_REGION);
+    assert_eq!(srv.codename(), "V24.02");
     assert_eq!(srv.region(), "ccp");
 
     let no_at = VersionExchange {
@@ -85,7 +87,7 @@ fn test_version_exchange_parsing_and_validation() {
     );
 
     let mut bad_region = srv.clone();
-    bad_region.project_version = "V24.01@serenity".to_string();
+    bad_region.project_version = format!("{}@serenity", srv.codename());
     assert_eq!(
         srv.validate_client(&bad_region).unwrap_err().reason_code.as_deref(),
         Some("HANDSHAKE_INCOMPATIBLEREGION")

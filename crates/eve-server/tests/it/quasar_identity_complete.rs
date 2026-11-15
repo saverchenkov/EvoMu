@@ -1245,7 +1245,7 @@ async fn test_q3_legal_pii_cdn_localization() {
     let expected_patch = ctx.sde.solar_systems.len() as u64;
     if let Some(eve_proto::quasar::DynamicValue::Message(cp)) = dyn_space_cdn.get(1) {
         if let Some(eve_proto::quasar::DynamicValue::String(url)) = cp.get(1) {
-            assert!(url.contains("maptags/v24.1.") && url.ends_with("/universe.fb"), "unexpected url {url}");
+            assert!(url.contains("maptags/v24.2.") && url.ends_with("/universe.fb"), "unexpected url {url}");
         } else {
             panic!("Expected url in space CDN checkpoint");
         }

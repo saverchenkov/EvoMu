@@ -175,7 +175,7 @@ async fn test_quasar_thirdpartyapi_tournament_and_ui() {
         "tranquility",
         "/characters/90000001/assets",
         1,
-        "PyEveClient/24.01",
+        &format!("PyEveClient/{:.2}", eve_machonet::V24_VERSION_NUMBER),
         ctx.now_unix(),
     )
     .expect("publish thirdpartyapi notice");

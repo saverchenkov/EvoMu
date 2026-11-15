@@ -351,7 +351,7 @@ async fn test_bundle_snapshot_enrichment_and_http_bug_lifecycle() {
         "computerInfo": "macOS arm64",
         "originalReporterId": 1,
         "Server": "EvoMu-Local",
-        "Build": 3624425,
+        "Build": eve_machonet::V24_BOOT_BUILD,
         "labels": ["combat", "turrets"]
     }))
     .unwrap();
@@ -426,7 +426,10 @@ async fn test_bundle_snapshot_enrichment_and_http_bug_lifecycle() {
     let manual = staged_bundle.manual_report.as_ref().unwrap();
     assert_eq!(manual.description, "Turrets miss stationary target.");
     assert_eq!(manual.category_name, "Combat, Fitting & Dogma");
-    assert_eq!(manual.client_build, Some(3_624_425));
+    assert_eq!(
+        manual.client_build,
+        Some(i64::from(eve_machonet::V24_BOOT_BUILD))
+    );
     assert_eq!(
         manual.ship_fitting_eft.as_deref(),
         Some("[Tristan, Drone Fit]\nHobgoblin I")

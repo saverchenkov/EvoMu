@@ -238,12 +238,12 @@ async fn test_campaign_objective_track_requests_and_notices_from_mining() {
     let avail = subs(&get, 2);
     assert_eq!(uuid_of(&sub(&avail[0], 1)), objective_uuid(oid).to_vec());
     assert_eq!(string(&sub(&sub(&sub(&avail[0], 2), 13), 1), 1).as_deref(), Some("MineAsteroid"));
-    assert_eq!(varint(&sub(&get, 4), 1), Some(0), "current_campaign_progress");
-    let track = sub(&get, 5);
+    assert_eq!(varint(&sub(&get, 7), 1), Some(0), "current_campaign_progress");
+    let track = sub(&get, 4);
     assert_eq!(uuid_of(&sub(&track, 1)), track_uuid(tid).to_vec());
     assert_eq!(string(&sub(&track, 2), 1).as_deref(), Some("ore_delivered"));
     assert_eq!(varint(&sub(&track, 2), 3), Some(100_000));
-    assert_eq!(uuid_of(&sub(&get, 6)), objective_uuid(oid).to_vec());
+    assert_eq!(uuid_of(&sub(&get, 5)), objective_uuid(oid).to_vec());
     assert_eq!(varint(&ok(ctx, sess, "eve_public.campaign.api.GetLimitsRequest", Vec::new()).await, 1), Some(10));
 
     // Unauthenticated / malformed / unknown requests.

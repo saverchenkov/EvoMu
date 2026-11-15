@@ -501,19 +501,21 @@ pub struct VersionExchange {
     pub project_version: String,
 }
 
-/// `GPSTransport.__HANDSHAKE_SECRET_KEY` in V24.01 `carbon/common/script/net/GPS.pyj`.
+/// `GPSTransport.__HANDSHAKE_SECRET_KEY` in V24 `carbon/common/script/net/GPS.pyj`.
 pub const HANDSHAKE_SECRET_KEY: u32 = 170_472;
-/// `eveMachoNetVersion.machoVersion` in the installed V24.01 client
+/// `eveMachoNetVersion.machoVersion` in the installed V24.02 client
 /// (`eve/common/script/net/eveMachoNetVersion.pyj`, re-exported as `machobase.version`).
 pub const V24_MACHO_VERSION: u32 = 496;
-/// `[main] build` of the installed V24.01 client's `start.ini` (`boot.build`).
-pub const V24_BOOT_BUILD: u32 = 3_624_425;
-/// `[main] codename` + `@` + `[main] region` of the installed V24.01 client's `start.ini`.
-pub const V24_CODENAME_AT_REGION: &str = "V24.01@ccp";
+/// `[main] version` of the installed V24.02 client's `start.ini` (`boot.version`).
+pub const V24_VERSION_NUMBER: f64 = 24.02;
+/// `[main] build` of the installed V24.02 client's `start.ini` (`boot.build`).
+pub const V24_BOOT_BUILD: u32 = 3_698_585;
+/// `[main] codename` + `@` + `[main] region` of the installed V24.02 client's `start.ini`.
+pub const V24_CODENAME_AT_REGION: &str = "V24.02@ccp";
 
 impl Default for VersionExchange {
-    /// Defaults to the boot values of the installed V24.01 client (`start.ini`: `version = 24.01`,
-    /// `build = 3624425`, `codename = V24.01`, `region = ccp`) and `machoVersion = 496`.
+    /// Defaults to the boot values of the installed V24.02 client (`start.ini`: `version = 24.02`,
+    /// `build = 3698585`, `codename = V24.02`, `region = ccp`) and `machoVersion = 496`.
     /// `GPS.Authenticate` on the client rejects any server whose codename/region, version or macho
     /// version differ, or whose build is newer than its own.
     fn default() -> Self {
@@ -521,7 +523,7 @@ impl Default for VersionExchange {
             birthday: HANDSHAKE_SECRET_KEY,
             macho_version: V24_MACHO_VERSION,
             user_count: 1,
-            version_number: 24.01,
+            version_number: V24_VERSION_NUMBER,
             build_version: V24_BOOT_BUILD,
             project_version: V24_CODENAME_AT_REGION.to_string(),
         }

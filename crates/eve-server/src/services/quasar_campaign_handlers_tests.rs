@@ -565,7 +565,7 @@ fn campaign_handlers_cover_filtering_auth_not_found_and_rewards() {
     let ns_wire = WireMessage::decode(&ns_resp.value).unwrap();
     assert_eq!(wire_field_all_bytes(&ns_wire, 1).len(), 1); // only cid_active, not upcoming
 
-    // GetRequest puts active objectives in field 2 and all objective IDs in field 6
+    // GetRequest puts active objectives in field 2 (available_objectives) and all objective IDs in field 5 (V24.02 GetResponse.objectives)
     let get_resp = handlers["eve_public.campaign.api.GetRequest"](
         &auth_char,
         &any,
@@ -574,7 +574,7 @@ fn campaign_handlers_cover_filtering_auth_not_found_and_rewards() {
     .unwrap();
     let get_wire = WireMessage::decode(&get_resp.value).unwrap();
     assert_eq!(wire_field_all_bytes(&get_wire, 2).len(), 1);
-    assert_eq!(wire_field_all_bytes(&get_wire, 6).len(), 2);
+    assert_eq!(wire_field_all_bytes(&get_wire, 5).len(), 2);
 
     // Error paths for Get / GetStatus / GetStats / GetParticipantStats
     let bad_id = DynamicQuasarMessage::new("Bad");

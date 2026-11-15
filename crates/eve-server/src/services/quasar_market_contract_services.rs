@@ -288,7 +288,10 @@ pub fn register_handlers(
                         h.set("legacy_hash", 12345678i64)
                             .set("locale", "en_US")
                             .set("ram_mb", 16384i32)
-                            .set("client_version", "24.01.2024")
+                            .set(
+                                "client_version",
+                                format!("{:.2}.2024", eve_machonet::V24_VERSION_NUMBER),
+                            )
                     })
                     .must_to_any())
             }),

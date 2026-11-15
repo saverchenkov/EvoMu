@@ -462,7 +462,7 @@ async fn test_phase_2_p6_native_machonet_handshake_state_machine() {
         assert_eq!(srv_hello, VersionExchange::default().to_server_hello_pyrep());
 
         let mut bad_ver = VersionExchange::default();
-        bad_ver.build_version = 3_619_879;
+        bad_ver.build_version = eve_machonet::V24_BOOT_BUILD - 1;
         write_framed_pyrep(&mut s, &bad_ver.to_pyrep())
             .await
             .unwrap();
@@ -594,10 +594,10 @@ async fn test_phase_2_p6_native_machonet_handshake_state_machine() {
         let srv_hello = read_framed_pyrep(&mut s).await.unwrap().unwrap();
         let parsed_ver = VersionExchange::from_pyrep(&srv_hello).expect("server VersionExchange");
         assert_eq!(parsed_ver.birthday, 170_472);
-        assert_eq!(parsed_ver.macho_version, 496);
-        assert!((parsed_ver.version_number - 24.01).abs() < 1e-6);
-        assert_eq!(parsed_ver.build_version, 3_624_425);
-        assert_eq!(parsed_ver.project_version, "V24.01@ccp");
+        assert_eq!(parsed_ver.macho_version, eve_machonet::V24_MACHO_VERSION);
+        assert!((parsed_ver.version_number - eve_machonet::V24_VERSION_NUMBER).abs() < 1e-6);
+        assert_eq!(parsed_ver.build_version, eve_machonet::V24_BOOT_BUILD);
+        assert_eq!(parsed_ver.project_version, eve_machonet::V24_CODENAME_AT_REGION);
 
         // Step 1: Send VersionExchangeClient
         write_framed_pyrep(&mut s, &VersionExchange::default().to_pyrep())
@@ -655,9 +655,9 @@ async fn test_phase_2_p6_native_machonet_handshake_state_machine() {
             srv_hs.challenge_response_hash,
             placebo_crypto_hash(&attempt2.client_challenge)
         );
-        assert_eq!(srv_hs.macho_version, 496);
-        assert_eq!(srv_hs.boot_build, 3_624_425);
-        assert_eq!(srv_hs.boot_codename, "V24.01");
+        assert_eq!(srv_hs.macho_version, eve_machonet::V24_MACHO_VERSION);
+        assert_eq!(srv_hs.boot_build, eve_machonet::V24_BOOT_BUILD);
+        assert_eq!(srv_hs.boot_codename, "V24.02");
         assert_eq!(srv_hs.boot_region, "ccp");
 
         // Step 4: Send CryptoHandshakeResult -> receive CryptoHandshakeAck + SessionInitialStateNotification (18) + SessionChangeNotification (16)

@@ -531,6 +531,6 @@ async fn pirate_insurgency_corruption_suppression_and_space_cdn() {
     let cp_bytes = cdn_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()).expect("CDN ContentPackage");
     let cp_wm = WireMessage::decode(cp_bytes).unwrap();
     let cdn_url = std::str::from_utf8(cp_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()).expect("CDN URL")).unwrap();
-    assert!(cdn_url.contains("/maptags/v24.1."));
+    assert!(cdn_url.contains("/maptags/v24.2."));
     assert!(cdn_url.ends_with("/universe.fb"));
 }

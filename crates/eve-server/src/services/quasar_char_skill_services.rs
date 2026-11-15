@@ -800,13 +800,17 @@ pub fn register_handlers(
     router.register_handler(
         "eve.monolith.GetClusterInfoRequest",
         Arc::new(move |_ctx, _any, _msg| {
+            let ver = eve_machonet::VersionExchange::default();
             Ok(pb::message("eve.monolith.GetClusterInfoResponse")
                 .set_with("cluster", |c| {
                     c.set("cluster_name", "macho.tranquility")
-                        .set("branch", "release/v24.01")
-                        .set("build", "1024")
+                        .set(
+                            "branch",
+                            format!("release/{}", ver.codename().to_ascii_lowercase()),
+                        )
+                        .set("build", eve_machonet::V24_BOOT_BUILD.to_string())
                         .set("sync", "1")
-                        .set("version", "24.01")
+                        .set("version", format!("{:.2}", eve_machonet::V24_VERSION_NUMBER))
                 })
                 .add_with("nodes", |n| {
                     n.set("node_id", 1i32)

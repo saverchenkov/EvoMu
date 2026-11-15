@@ -17,7 +17,7 @@ fn listing_target_is_branded_and_default() {
 fn constants_and_durations_match_paragon_hub_spec() {
     assert_eq!(PARAGON_CORP_ID, 1_000_419);
     assert_eq!(GROUP_SHIP_SKIN_DESIGN_ELEMENT, 4726);
-    assert_eq!(BUYER_FEES_VERSION, "v24.01.1");
+    assert_eq!(BUYER_FEES_VERSION, "v24.02.1");
     assert_eq!(MAX_LISTING_PRICE_UNITS, 10_000_000_000_000);
     assert_eq!(MAX_LISTING_QUANTITY, 10_000);
     assert_eq!(

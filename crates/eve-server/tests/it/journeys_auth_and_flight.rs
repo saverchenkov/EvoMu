@@ -97,7 +97,7 @@ async fn test_journey_launch_login() {
         panic!("expected 7-tuple hello, got {hello:?}");
     };
     assert_eq!(hello_items.len(), 7);
-    assert_eq!(hello_items[5].as_str(), Some("V24.01@ccp"));
+    assert_eq!(hello_items[5].as_str(), Some(eve_machonet::V24_CODENAME_AT_REGION));
 
     write_framed_pyrep(&mut stream, &VersionExchange::default().to_pyrep()).await.unwrap();
     write_framed_pyrep(&mut stream, &CryptoRequestPacket::placebo().to_pyrep()).await.unwrap();

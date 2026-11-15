@@ -211,7 +211,12 @@ async fn test_quasar_cdn_client_and_constellation() {
         Some(DynamicValue::Message(m)) => m,
         _ => panic!("Expected host attributes in GetResponse"),
     };
-    assert_eq!(get_str(dyn_attrs, 10), Some("24.01.2024"), "Client version must match V24");
+    let expected_client_version = format!("{:.2}.2024", eve_machonet::V24_VERSION_NUMBER);
+    assert_eq!(
+        get_str(dyn_attrs, 10),
+        Some(expected_client_version.as_str()),
+        "Client version must match V24"
+    );
     assert_eq!(get_str(dyn_attrs, 2), Some("en_US"), "Locale must match en_US");
     assert_eq!(get_u64(dyn_attrs, 4), Some(16384), "RAM MB must match 16384");
 

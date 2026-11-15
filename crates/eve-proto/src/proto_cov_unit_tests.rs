@@ -118,7 +118,7 @@ fn pyrep_rowset_helpers_and_marshal_error_paths_covered() {
 
 #[test]
 fn quasar_registry_full_load_validation_and_deep_sampling() {
-    let reg = QuasarDescriptorRegistry::open_default().expect("open 1455 quasar descriptors");
+    let reg = QuasarDescriptorRegistry::open_default().expect("open 1464 quasar descriptors");
     assert_eq!(reg.files.len(), reg.manifest.descriptor_file_count);
     assert!(reg.get_file_by_pyj("nonexistent/path.pyj").is_none());
     assert!(reg.get_message("google.protobuf.Timestamp").is_some());

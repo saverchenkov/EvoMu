@@ -202,8 +202,8 @@ fn test_quasar_well_known_and_core_types_roundtrip() {
 
     let ver = SemanticVersionSpec {
         major: 24,
-        minor: 1,
-        patch: 3619879,
+        minor: 2,
+        patch: 3698585,
         prerelease_tags: vec!["rc1".into(), "hotfix".into()],
         build_tags: vec!["mac".into()],
     };

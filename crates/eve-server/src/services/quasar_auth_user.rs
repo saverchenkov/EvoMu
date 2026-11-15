@@ -433,7 +433,11 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
             let mut doc_fields = vec![WireField {
                 field_number: 1,
                 value: WireValue::LengthDelimited(
-                    b"EVE Online End User License Agreement V24.01".to_vec(),
+                    format!(
+                        "EVE Online End User License Agreement {}",
+                        eve_machonet::VersionExchange::default().codename()
+                    )
+                    .into_bytes(),
                 ),
             }];
             for ag in &accepted {

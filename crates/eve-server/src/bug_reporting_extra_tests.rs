@@ -264,7 +264,7 @@ async fn test_enrich_session_snapshot_in_space_coordinates_and_categories_route(
         "summary": "Window overlap",
         "description": "Details",
         "originalReporterId": "1",
-        "Build": "3624425"
+        "Build": eve_machonet::V24_BOOT_BUILD.to_string()
     }))
     .unwrap();
     let post_resp = handle_bugs_http_request(&ctx, "POST", "/bugs/api/issue/", &hdrs, &body);

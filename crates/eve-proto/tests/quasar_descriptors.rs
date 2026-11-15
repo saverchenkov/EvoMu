@@ -1,5 +1,5 @@
-//! Comprehensive integration tests for `Q-1` (V24.01 Quasar Protobuf extraction, 1,455-file
-//! `FileDescriptorProto` registry, dynamic wire round-tripping across all 6,741 message types,
+//! Comprehensive integration tests for `Q-1` (V24.02 Quasar Protobuf extraction, 1,464-file
+//! `FileDescriptorProto` registry, dynamic wire round-tripping across all 6,756 message types,
 //! static core primitive serialization, and deterministic Rust codegen).
 
 use eve_proto::quasar::{
@@ -19,36 +19,36 @@ const EMBEDDED_QUASAR_CATALOG_JSON: &str =
     include_str!("../../../docs/index/quasar_protobuf_catalog.json");
 
 #[test]
-fn q1_all_1455_descriptors_across_135_domains_load_and_match_manifest() {
+fn q1_all_quasar_descriptors_across_domains_load_and_match_manifest() {
     // parity: plan:Q-1
     eve_testkit::attest(&["plan:Q-1"]);
     let reg = QuasarDescriptorRegistry::open_default()
-        .expect("load 1,455 Quasar FileDescriptorProto schemas from data/quasar_descriptors.sqlite");
+        .expect("load 1,464 Quasar FileDescriptorProto schemas from data/quasar_descriptors.sqlite");
 
     assert_eq!(reg.files.len(), EXPECTED_QUASAR_FILE_COUNT);
-    assert_eq!(reg.manifest.descriptor_file_count, 1_455);
+    assert_eq!(reg.manifest.descriptor_file_count, 1_464);
     assert_eq!(reg.files_by_domain.len(), EXPECTED_QUASAR_DOMAIN_COUNT);
-    assert_eq!(reg.manifest.domain_count, 135);
-    assert_eq!(reg.manifest.unique_package_count, 1_270);
-    assert_eq!(reg.manifest.top_level_message_count, 5_786);
-    assert_eq!(reg.manifest.total_message_count, 6_741);
-    assert_eq!(reg.manifest.total_enum_count, 197);
+    assert_eq!(reg.manifest.domain_count, 136);
+    assert_eq!(reg.manifest.unique_package_count, 1_278);
+    assert_eq!(reg.manifest.top_level_message_count, 5_807);
+    assert_eq!(reg.manifest.total_message_count, 6_756);
+    assert_eq!(reg.manifest.total_enum_count, 200);
     assert_eq!(reg.manifest.total_service_count, 10);
-    assert_eq!(reg.manifest.total_field_count, 15_453);
-    assert_eq!(reg.manifest.total_serialized_pb_bytes, 1_260_412);
+    assert_eq!(reg.manifest.total_field_count, 15_510);
+    assert_eq!(reg.manifest.total_serialized_pb_bytes, 1_265_971);
     assert_eq!(
         reg.manifest.combined_serialized_pb_sha256,
-        "06a2d8bde8222e444dcb740932cc3ef5e208bb853693d33a6a48ec8664f068be"
+        "b0b7cb4e301173a59e025442d75e656793cf794fe908581618074a55a254b6fb"
     );
     assert_eq!(
         reg.manifest.combined_serialized_pb_md5,
-        "318048feebdaee6d35565c0e2d5b284c"
+        "7ec4fb8bbe4c6f5982d34eedce49dc67"
     );
 
     // Every single entry in docs/index/quasar_protobuf_catalog.json must be present in the registry
     let catalog: BTreeMap<String, Vec<String>> =
         serde_json::from_str(EMBEDDED_QUASAR_CATALOG_JSON).expect("parse quasar catalog");
-    assert_eq!(catalog.len(), 135);
+    assert_eq!(catalog.len(), EXPECTED_QUASAR_DOMAIN_COUNT);
     let mut total_catalog_files = 0usize;
     for (domain, paths) in &catalog {
         let domain_indices = reg
@@ -83,11 +83,11 @@ fn q1_all_1455_descriptors_across_135_domains_load_and_match_manifest() {
             assert_eq!(reparsed.services.len(), fd.services.len());
         }
     }
-    assert_eq!(total_catalog_files, 1_455);
+    assert_eq!(total_catalog_files, EXPECTED_QUASAR_FILE_COUNT);
 }
 
 #[test]
-fn q1_all_6741_quasar_messages_instantiate_encode_and_decode_roundtrip() {
+fn q1_all_quasar_messages_instantiate_encode_and_decode_roundtrip() {
     let reg = QuasarDescriptorRegistry::open_default().expect("open QuasarDescriptorRegistry");
 
     let mut message_count = 0usize;
@@ -183,12 +183,12 @@ fn q1_all_6741_quasar_messages_instantiate_encode_and_decode_roundtrip() {
     }
 
     assert_eq!(
-        message_count, 6_741,
-        "All 6,741 Quasar message descriptors across 1,455 files must be round-trip verified"
+        message_count, 6_756,
+        "All 6,756 Quasar message descriptors across 1,464 files must be round-trip verified"
     );
     assert!(
         packed_repeated_field_count > 0,
-        "Expected proto3 packed repeated scalar fields across 6,741 messages"
+        "Expected proto3 packed repeated scalar fields across 6,756 messages"
     );
 }
 

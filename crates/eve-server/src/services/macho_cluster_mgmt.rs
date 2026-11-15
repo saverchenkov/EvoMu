@@ -780,10 +780,13 @@ fn handle_macho_net(
                 .unwrap_or_else(|_| ("TRANQUILITY".into(), "LIVE".into()));
             let mut merged: std::collections::BTreeMap<String, PyRep> =
                 std::collections::BTreeMap::new();
-            merged.insert("machoVersion".into(), PyRep::Integer(496));
+            merged.insert(
+                "machoVersion".into(),
+                PyRep::Integer(eve_machonet::V24_MACHO_VERSION as i64),
+            );
             merged.insert(
                 "build".into(),
-                PyRep::Integer(crate::services::auth_cache::V24_01_BUILD),
+                PyRep::Integer(eve_machonet::V24_BOOT_BUILD as i64),
             );
             merged.insert("clusterName".into(), PyRep::String(cluster_name));
             merged.insert("clusterMode".into(), PyRep::String(cluster_mode));

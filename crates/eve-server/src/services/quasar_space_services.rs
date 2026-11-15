@@ -1150,7 +1150,9 @@ pub fn register_handlers(
                             .to_string(),
                     ));
                 }
-                let latest = cur_ver.unwrap_or((24u32, 1u32, sde_cdn.solar_systems.len() as u32));
+                let v_major = eve_machonet::V24_VERSION_NUMBER.trunc() as u32;
+                let v_minor = (eve_machonet::V24_VERSION_NUMBER.fract() * 100.0).round() as u32;
+                let latest = cur_ver.unwrap_or((v_major, v_minor, sde_cdn.solar_systems.len() as u32));
                 if (cur_ver.is_none() || cur_ver == Some(latest))
                     && any.type_url.starts_with("type.evetech.net/")
                     && std::env::var("EVOMU_CDN_BASE_URL")
@@ -1159,9 +1161,10 @@ pub fn register_handlers(
                         .is_none()
                 {
                     let fb = crate::services::quasar_achievements::empty_root_table_flatbuffer();
+                    let fb_ver = format!("{v_major}.{v_minor}.{}", eve_machonet::V24_BOOT_BUILD);
                     crate::services::quasar_achievements::ensure_client_flatbuffer_storage_seeded(
                         "content_map_tags",
-                        "24.1.5432",
+                        &fb_ver,
                         &fb,
                     );
                     return Ok(GoogleAny {
@@ -1218,10 +1221,12 @@ mod tests {
         sess.user_id = Some(1);
         sess.character_id = Some(90_000_001);
 
+        let v_major = eve_machonet::V24_VERSION_NUMBER.trunc() as u32;
+        let v_minor = (eve_machonet::V24_VERSION_NUMBER.fract() * 100.0).round() as u32;
         let req_bytes = pb::message("eve_public.space.api.cdn.GetUpdateRequest")
-            .set("current_version.major", 24u32)
-            .set("current_version.minor", 1u32)
-            .set("current_version.patch", 5432u32)
+            .set("current_version.major", v_major)
+            .set("current_version.minor", v_minor)
+            .set("current_version.patch", eve_machonet::V24_BOOT_BUILD)
             .must_encode();
 
         let pub_req = EvePublicRequest {
@@ -1234,7 +1239,7 @@ mod tests {
                 type_url: format!("{TYPE_EVETECH_PREFIX}eve_public.space.api.cdn.GetUpdateRequest"),
                 value: req_bytes,
             }),
-            external_origin: "eve-desktop-client/3619879 tq".into(),
+            external_origin: format!("eve-desktop-client/{} tq", eve_machonet::V24_BOOT_BUILD),
             application_instance_uuid: vec![2u8; 16],
             authoritative_context: None,
             trace_context: None,
