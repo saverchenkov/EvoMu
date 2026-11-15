@@ -1194,17 +1194,43 @@ async fn test_gh_1070_docked_board_from_capsule_removes_capsule_and_refreshes_in
         "Boarded ship {ship_id} must remain in station hangar: {rows_after:?}"
     );
 
-    // Verify notification ordering required by V24 Inventory.OnInvChangeAny:
-    // OnSessionChanged(shipid: (capsule_id, ship_id)) MUST precede OnItemChange moving capsule_id
-    // from station_id to locationJunkyard (6) so GetActiveShip() == ship_id when OnInvChangeAny runs.
+    // Verify wire frame ordering required by V24 Inventory.OnInvChangeAny:
+    // SessionChangeNotification (updating session.shipid from capsule_id -> ship_id; macho_listener
+    // suppresses duplicate OnSessionChanged in notifications when SessionChangeNotification is sent)
+    // MUST precede OnItemChange moving capsule_id from station_id to locationJunkyard (6)
+    // so GetActiveShip() == ship_id when OnInvChangeAny runs.
+    assert!(
+        !board_out.session_change_packets.is_empty(),
+        "SessionChangeNotification must be emitted on ship.Board"
+    );
+    let sess_change_frame_idx = board_out
+        .frames
+        .iter()
+        .position(|f| {
+            matches!(
+                f.kind,
+                eve_server::router::client_wire::ClientWireFrameKind::SessionChange { .. }
+            )
+        })
+        .expect("SessionChange frame must be present in board_out.frames");
+    let cap_item_change_frame_idx = board_out
+        .frames
+        .iter()
+        .position(|f| {
+            matches!(
+                &f.kind,
+                eve_server::router::client_wire::ClientWireFrameKind::Notification { event, .. }
+                    if event == "OnItemChange"
+            )
+        })
+        .expect("OnItemChange frame must be present in board_out.frames");
+    assert!(
+        sess_change_frame_idx < cap_item_change_frame_idx,
+        "SessionChange frame (idx {sess_change_frame_idx}) must precede OnItemChange frame (idx {cap_item_change_frame_idx})"
+    );
     let notifs = &board_out.notifications;
-    let sess_change_idx = notifs
-        .iter()
-        .position(|(ev, _)| ev == "OnSessionChanged")
-        .expect("OnSessionChanged must be emitted on ship.Board");
-    let cap_item_change_idx = notifs
-        .iter()
-        .position(|(ev, args)| {
+    assert!(
+        notifs.iter().any(|(ev, args)| {
             if ev != "OnItemChange" {
                 return false;
             }
@@ -1224,14 +1250,11 @@ async fn test_gh_1070_docked_board_from_capsule_removes_capsule_and_refreshes_in
                 })
                 == Some(station_id);
             item_id == Some(capsule_id) && type_id == Some(670) && new_loc == Some(6) && old_loc_ok
-        })
-        .expect("OnItemChange moving capsule to locationJunkyard (6) with ixLocationID (3) = station_id must be emitted");
-    assert!(
-        sess_change_idx < cap_item_change_idx,
-        "OnSessionChanged (idx {sess_change_idx}) must precede capsule OnItemChange (idx {cap_item_change_idx}) so Inventory.OnInvChangeAny sees GetActiveShip() == new ship"
+        }),
+        "OnItemChange moving capsule to locationJunkyard (6) with ixLocationID (3) = station_id must be emitted"
     );
 
-    // 2. Upwell structure docked: LeaveShip -> Board also removes capsule and emits OnItemChange after OnSessionChanged.
+    // 2. Upwell structure docked: LeaveShip -> Board also removes capsule and emits OnItemChange after SessionChange.
     let structure_id = 1_030_000_001_070i64;
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(
@@ -1285,22 +1308,39 @@ async fn test_gh_1070_docked_board_from_capsule_removes_capsule_and_refreshes_in
         ctx.db.with_snapshot(|s| !s.items.contains_key(&struct_cap_id)),
         "Structure-docked capsule {struct_cap_id} must be removed when boarding ship {ship_id}"
     );
+    let struct_sess_frame_idx = struct_board_out
+        .frames
+        .iter()
+        .position(|f| {
+            matches!(
+                f.kind,
+                eve_server::router::client_wire::ClientWireFrameKind::SessionChange { .. }
+            )
+        })
+        .expect("SessionChange frame on structure Board");
+    let struct_item_frame_idx = struct_board_out
+        .frames
+        .iter()
+        .position(|f| {
+            matches!(
+                &f.kind,
+                eve_server::router::client_wire::ClientWireFrameKind::Notification { event, .. }
+                    if event == "OnItemChange"
+            )
+        })
+        .expect("OnItemChange frame on structure Board");
+    assert!(struct_sess_frame_idx < struct_item_frame_idx);
     let struct_notifs = &struct_board_out.notifications;
-    let struct_sess_idx = struct_notifs
-        .iter()
-        .position(|(ev, _)| ev == "OnSessionChanged")
-        .expect("OnSessionChanged on structure Board");
-    let struct_item_idx = struct_notifs
-        .iter()
-        .position(|(ev, args)| {
+    assert!(
+        struct_notifs.iter().any(|(ev, args)| {
             ev == "OnItemChange"
                 && args.first().is_some_and(|row| {
                     row.dbrow_get("itemID").and_then(|v| v.as_i64()) == Some(struct_cap_id)
                         && row.dbrow_get("locationID").and_then(|v| v.as_i64()) == Some(6)
                 })
-        })
-        .expect("OnItemChange moving structure capsule to locationJunkyard (6)");
-    assert!(struct_sess_idx < struct_item_idx);
+        }),
+        "OnItemChange moving structure capsule to locationJunkyard (6)"
+    );
 }
 
 }
