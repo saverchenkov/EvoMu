@@ -2426,10 +2426,10 @@ async fn test_esi_p6_corp_contracts_live_rpc_auth_and_sqlite_persistence() {
         )
         .await
         .expect("CreateContract forCorp");
-    let PyRep::KeyVal(kv) = c_res else {
-        panic!("expected KeyVal");
+    let PyRep::List(c_ids) = c_res else {
+        panic!("expected List, got {c_res:?}");
     };
-    let cid = kv.get("contractID").unwrap().as_i64().unwrap();
+    let cid = c_ids[0].as_i64().unwrap();
 
     // Also create a personal contract (`forCorp` omitted/false) by `char1` to verify character vs corp isolation.
     let p_res = ctx
@@ -2461,10 +2461,10 @@ async fn test_esi_p6_corp_contracts_live_rpc_auth_and_sqlite_persistence() {
         )
         .await
         .expect("CreateContract personal");
-    let PyRep::KeyVal(p_kv) = p_res else {
-        panic!("expected KeyVal");
+    let PyRep::List(p_ids) = p_res else {
+        panic!("expected List, got {p_res:?}");
     };
-    let personal_cid = p_kv.get("contractID").unwrap().as_i64().unwrap();
+    let personal_cid = p_ids[0].as_i64().unwrap();
 
     ctx.dispatch_rpc(
         &mut sess2,
