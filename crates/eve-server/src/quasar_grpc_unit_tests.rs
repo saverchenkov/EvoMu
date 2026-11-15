@@ -126,44 +126,6 @@ fn normalize_macho_rpc_reply_covers_char_contracts_corp_and_dev_indices() {
         Some(&PyRep::Integer(90_000_001))
     );
 
-    // contractProxy methods
-    let clist = normalize_macho_rpc_reply(
-        "contractProxy",
-        "GetContractListForOwner",
-        Ok(PyRep::List(Vec::new())),
-    )
-    .unwrap();
-    assert!(clist.dict_get("contracts").is_some());
-    assert!(clist.dict_get("items").is_some());
-
-    let cnt = normalize_macho_rpc_reply(
-        "contractProxy",
-        "NumOutstandingContracts",
-        Ok(PyRep::Integer(4)),
-    )
-    .unwrap();
-    assert_eq!(cnt.dict_get("myCharTotal"), Some(&PyRep::Integer(4)));
-    assert_eq!(cnt.dict_get("nonCorpForMyChar"), Some(&PyRep::Integer(4)));
-
-    let search_empty = normalize_macho_rpc_reply(
-        "contractProxy",
-        "SearchContracts",
-        Ok(PyRep::List(Vec::new())),
-    )
-    .unwrap();
-    assert_eq!(search_empty.dict_get("numFound"), Some(&PyRep::Integer(0)));
-
-    let search_raw = normalize_macho_rpc_reply(
-        "contractProxy",
-        "SearchContracts",
-        Ok(PyRep::List(vec![PyRep::keyval([(
-            "contractID",
-            PyRep::Integer(77),
-        )])])),
-    )
-    .unwrap();
-    assert_eq!(search_raw.dict_get("numFound"), Some(&PyRep::Integer(1)));
-
     // corporationSvc
     let emp = normalize_macho_rpc_reply(
         "corporationSvc",

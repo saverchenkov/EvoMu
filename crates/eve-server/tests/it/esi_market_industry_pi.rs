@@ -1332,7 +1332,10 @@ async fn test_esi6_contracts_character_corporation_and_public_routes() {
         PyRep::Bool(true), // forCorp
     ];
     let pub_rep = rpc_call(&ctx, &mut issuer_sess, "contractProxy", "CreateContract", &pub_args).await;
-    let public_contract_id = pub_rep.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let public_contract_id = match &pub_rep {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => pub_rep.dict_get("contractID").and_then(|v| v.as_i64()).unwrap(),
+    };
 
     let personal_args = [
         PyRep::Integer(2), // Auction
@@ -1353,7 +1356,10 @@ async fn test_esi6_contracts_character_corporation_and_public_routes() {
         PyRep::Bool(false), // personal
     ];
     let personal_rep = rpc_call(&ctx, &mut issuer_sess, "contractProxy", "CreateContract", &personal_args).await;
-    let personal_contract_id = personal_rep.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let personal_contract_id = match &personal_rep {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => personal_rep.dict_get("contractID").and_then(|v| v.as_i64()).unwrap(),
+    };
 
     // 2. Place two bids from rival_char_id via contractProxy.PlaceBid and create a private personal contract
     let mut rival_sess = SessionState::new(9822);
@@ -1392,7 +1398,10 @@ async fn test_esi6_contracts_character_corporation_and_public_routes() {
         PyRep::Bool(false),
     ];
     let priv_rep = rpc_call(&ctx, &mut rival_sess, "contractProxy", "CreateContract", &priv_args).await;
-    let private_contract_id = priv_rep.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let private_contract_id = match &priv_rep {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => priv_rep.dict_get("contractID").and_then(|v| v.as_i64()).unwrap(),
+    };
 
     let token = issue_token_with_scopes(
         &ctx,
@@ -3121,7 +3130,10 @@ pub(crate) mod esi6_contracts_character_corporation_public {
             PyRep::Bool(true), // forCorp
         ];
         let pub_rep = rpc_call(&ctx, &mut issuer_sess, "contractProxy", "CreateContract", &pub_args).await;
-        let public_contract_id = pub_rep.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
+        let public_contract_id = match &pub_rep {
+            PyRep::List(ids) => ids[0].as_i64().unwrap(),
+            _ => pub_rep.dict_get("contractID").and_then(|v| v.as_i64()).unwrap(),
+        };
 
         let personal_args = [
             PyRep::Integer(2), // Auction
@@ -3142,7 +3154,10 @@ pub(crate) mod esi6_contracts_character_corporation_public {
             PyRep::Bool(false), // personal
         ];
         let personal_rep = rpc_call(&ctx, &mut issuer_sess, "contractProxy", "CreateContract", &personal_args).await;
-        let personal_contract_id = personal_rep.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
+        let personal_contract_id = match &personal_rep {
+            PyRep::List(ids) => ids[0].as_i64().unwrap(),
+            _ => personal_rep.dict_get("contractID").and_then(|v| v.as_i64()).unwrap(),
+        };
 
         // 2. Place two bids from rival_char_id via contractProxy.PlaceBid and create a private personal contract
         let mut rival_sess = SessionState::new(9822);
@@ -3181,7 +3196,10 @@ pub(crate) mod esi6_contracts_character_corporation_public {
             PyRep::Bool(false),
         ];
         let priv_rep = rpc_call(&ctx, &mut rival_sess, "contractProxy", "CreateContract", &priv_args).await;
-        let private_contract_id = priv_rep.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
+        let private_contract_id = match &priv_rep {
+            PyRep::List(ids) => ids[0].as_i64().unwrap(),
+            _ => priv_rep.dict_get("contractID").and_then(|v| v.as_i64()).unwrap(),
+        };
 
         let token = issue_token_with_scopes(
             &ctx,
@@ -6199,10 +6217,11 @@ pub(crate) mod esi_char_public_contracts_live {
             )
             .await
             .expect("CreateContract");
-        let PyRep::KeyVal(kv) = c_res else {
-            panic!("expected KeyVal from CreateContract");
+        let cid = match c_res {
+            PyRep::List(ids) => ids[0].as_i64().unwrap(),
+            PyRep::KeyVal(kv) => kv.get("contractID").unwrap().as_i64().unwrap(),
+            _ => panic!("expected List or KeyVal from CreateContract"),
         };
-        let cid = kv.get("contractID").unwrap().as_i64().unwrap();
 
         ctx.dispatch_rpc(
             &mut sess2,
@@ -6369,10 +6388,10 @@ pub(crate) mod esi_char_public_contracts_live {
             )
             .await
             .expect("CreateContract forCorp");
-        let PyRep::KeyVal(kv) = c_res else {
-            panic!("expected KeyVal");
+        let PyRep::List(c_ids) = c_res else {
+            panic!("expected List, got {c_res:?}");
         };
-        let cid = kv.get("contractID").unwrap().as_i64().unwrap();
+        let cid = c_ids[0].as_i64().unwrap();
 
         // Also create a personal contract (`forCorp` omitted/false) by `char1` to verify character vs corp isolation.
         let p_res = ctx
@@ -6404,10 +6423,10 @@ pub(crate) mod esi_char_public_contracts_live {
             )
             .await
             .expect("CreateContract personal");
-        let PyRep::KeyVal(p_kv) = p_res else {
-            panic!("expected KeyVal");
+        let PyRep::List(p_ids) = p_res else {
+            panic!("expected List, got {p_res:?}");
         };
-        let personal_cid = p_kv.get("contractID").unwrap().as_i64().unwrap();
+        let personal_cid = p_ids[0].as_i64().unwrap();
 
         ctx.dispatch_rpc(
             &mut sess2,
@@ -6869,7 +6888,7 @@ pub(crate) mod esi_char_contract_party_isolation {
         if for_corp {
             kw.insert("forCorp".to_string(), PyRep::Bool(true));
         }
-        let PyRep::KeyVal(kv) = ctx
+        let rep = ctx
             .dispatch_rpc(
                 sess,
                 "contractProxy",
@@ -6897,11 +6916,12 @@ pub(crate) mod esi_char_contract_party_isolation {
                 None,
             )
             .await
-            .expect("CreateContract")
-        else {
-            panic!("expected KeyVal from CreateContract");
-        };
-        kv.get("contractID").unwrap().as_i64().unwrap()
+            .expect("CreateContract");
+        match rep {
+            PyRep::List(ids) => ids[0].as_i64().unwrap(),
+            PyRep::KeyVal(kv) => kv.get("contractID").unwrap().as_i64().unwrap(),
+            _ => panic!("expected List or KeyVal from CreateContract"),
+        }
     }
 
     fn assert_204_valid(router: &EsiRouter, spec: &OpenApiSpec, target: impl Into<String>) {

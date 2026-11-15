@@ -417,7 +417,10 @@ async fn test_rpc_contract_proxy_lifecycle_and_auctions() {
         PyRep::Integer(JITA_44), PyRep::Integer(JITA_44), PyRep::Real(0.0), PyRep::Real(100_000.0), PyRep::Real(50_000.0),
         PyRep::String("Courier Test".into()), PyRep::String("Desc".into()), PyRep::List(vec![PyRep::Integer(884_001)]),
     ]).await;
-    let courier_id = courier_rep.as_i64().or_else(|| courier_rep.dict_get("contractID").and_then(|v| v.as_i64())).unwrap();
+    let courier_id = match &courier_rep {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => courier_rep.as_i64().or_else(|| courier_rep.dict_get("contractID").and_then(|v| v.as_i64())).unwrap(),
+    };
     assert!(courier_id > 0);
 
     let login_info = rpc(&ctx, &mut s2, "contractProxy", "GetLoginInfo", &[]).await;
@@ -438,7 +441,10 @@ async fn test_rpc_contract_proxy_lifecycle_and_auctions() {
         PyRep::Integer(JITA_44), PyRep::Integer(JITA_44), PyRep::Real(100_000.0), PyRep::Real(0.0), PyRep::Real(500_000.0),
         PyRep::String("Auction Test".into()), PyRep::String("".into()), PyRep::List(vec![PyRep::Integer(884_002)]),
     ]).await;
-    let auction_id = auction_rep.as_i64().or_else(|| auction_rep.dict_get("contractID").and_then(|v| v.as_i64())).unwrap();
+    let auction_id = match &auction_rep {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => auction_rep.as_i64().or_else(|| auction_rep.dict_get("contractID").and_then(|v| v.as_i64())).unwrap(),
+    };
     let bid_res = rpc(&ctx, &mut s2, "contractProxy", "PlaceBid", &[PyRep::Integer(auction_id), PyRep::Real(150_000.0)]).await;
     assert_eq!(bid_res.dict_get("currentBidISK"), Some(&PyRep::Real(150_000.0)));
 
@@ -447,7 +453,10 @@ async fn test_rpc_contract_proxy_lifecycle_and_auctions() {
         PyRep::Integer(JITA_44), PyRep::Integer(JITA_44), PyRep::Real(50_000.0), PyRep::Real(0.0), PyRep::Real(0.0),
         PyRep::String("Delete Test".into()), PyRep::String("".into()), PyRep::List(vec![PyRep::Integer(884_003)]),
     ]).await;
-    let del_id = del_rep.as_i64().or_else(|| del_rep.dict_get("contractID").and_then(|v| v.as_i64())).unwrap();
+    let del_id = match &del_rep {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => del_rep.as_i64().or_else(|| del_rep.dict_get("contractID").and_then(|v| v.as_i64())).unwrap(),
+    };
     let del_res = rpc(&ctx, &mut s1, "contractProxy", "DeleteContract", &[PyRep::Integer(del_id)]).await;
     assert_eq!(del_res.dict_get("status"), Some(&PyRep::String("Deleted".into())));
 

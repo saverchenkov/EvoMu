@@ -1054,4 +1054,75 @@ fn crossed_modify_fills_cover_corp_upwell_refund_shortfall_and_plex_vault_paths(
     assert_eq!(corp_rows[0][8], PyRep::Integer(1004));
     assert_eq!(corp_rows[0][11], PyRep::Integer(char_buyer));
     assert_eq!(corp_rows[0][12], PyRep::Real(60.0));
+
+    // Migrated from client_compat: verify CharGetTransactions and CorpGetTransactions emit canonical
+    // `CRowset` with `Real` price/credit directly from `handle_market_transactions_rpc`.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.market_transactions.insert(
+            9001,
+            MarketTransactionRecord {
+                transaction_id: 9001,
+                date_unix: now + 2,
+                type_id: 34,
+                quantity: 100,
+                price: IskCents::from_f64_isk(5.25),
+                location_id: JITA_STATION_ID,
+                buyer_id: char_buyer,
+                seller_id: corp_seller_id,
+                buyer_account_key: 1000,
+                seller_account_key: 1004,
+                journal_ref_id: 777,
+            },
+        );
+    });
+    let buyer_sess = auth_session(2, char_buyer, corp_seller_id + 1, 30_000_142);
+    for (method, sess, args, expected_credit) in [
+        (
+            "CharGetTransactions",
+            &buyer_sess,
+            vec![PyRep::Integer(now as i64 + 2)],
+            -525.0,
+        ),
+        (
+            "CorpGetTransactions",
+            &seller_sess,
+            vec![PyRep::Integer(now as i64 + 2), PyRep::Integer(1004)],
+            525.0,
+        ),
+    ] {
+        let res = handle_market_transactions_rpc(&ctx, sess, method, &args)
+            .unwrap()
+            .unwrap();
+        let normalized = crate::router::client_compat::normalize_macho_rpc_reply(
+            "marketProxy",
+            method,
+            Ok(res.clone()),
+        )
+        .unwrap();
+        assert_eq!(normalized, res, "expected identity passthrough for marketProxy.{method}");
+        let PyRep::ObjectEx { header, list, .. } = res else {
+            panic!("expected CRowset ObjectEx for {method}");
+        };
+        let PyRep::Tuple(h_parts) = *header else {
+            panic!("expected header tuple");
+        };
+        let PyRep::Tuple(class_parts) = &h_parts[0] else {
+            panic!("expected class tuple");
+        };
+        assert_eq!(
+            class_parts[0],
+            PyRep::Token("carbon.common.script.sys.crowset.CRowset".into())
+        );
+        assert_eq!(list.len(), 1);
+        let PyRep::DBRow { columns, .. } = &list[0] else {
+            panic!("expected packed blue.DBRow inside CRowset");
+        };
+        let by_col: std::collections::HashMap<&str, &PyRep> =
+            columns.iter().map(|(k, v)| (k.as_str(), v)).collect();
+        assert_eq!(by_col.get("transactionID"), Some(&&PyRep::Integer(9001)));
+        assert_eq!(by_col.get("typeID"), Some(&&PyRep::Integer(34)));
+        assert_eq!(by_col.get("quantity"), Some(&&PyRep::Integer(100)));
+        assert_eq!(by_col.get("price"), Some(&&PyRep::Real(5.25)));
+        assert_eq!(by_col.get("credit"), Some(&&PyRep::Real(expected_credit)));
+    }
 }

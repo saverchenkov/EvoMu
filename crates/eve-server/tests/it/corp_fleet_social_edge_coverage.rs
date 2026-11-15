@@ -1754,7 +1754,7 @@ async fn contracts_and_wallet_division_bill_trade_errors() {
     }
 
     // Private ItemExchange contract assigned to P2 (price 50M, > P2's 10M balance)
-    let c_exch = rpc(
+    let c_exch = match rpc(
         &ctx,
         &mut s1,
         "contractProxy",
@@ -1768,9 +1768,10 @@ async fn contracts_and_wallet_division_bill_trade_errors() {
     )
     .await
     .expect("Create private ItemExchange")
-    .dict_get("contractID")
-    .and_then(|v| v.as_i64())
-    .unwrap();
+    {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        rep => rep.dict_get("contractID").and_then(|v| v.as_i64()).unwrap(),
+    };
 
     // Issuer cannot accept own contract; P3 cannot accept P2's private contract; P2 lacks ISK
     let err = rpc(&ctx, &mut s1, "contractProxy", "AcceptContract", &[PyRep::Integer(c_exch)])
@@ -1794,7 +1795,7 @@ async fn contracts_and_wallet_division_bill_trade_errors() {
     assert_eq!(err.code, "ContractOwnershipViolation");
 
     // Create public Auction contract with starting price 20M, buyout 100M
-    let c_auc = rpc(
+    let c_auc = match rpc(
         &ctx,
         &mut s1,
         "contractProxy",
@@ -1808,9 +1809,10 @@ async fn contracts_and_wallet_division_bill_trade_errors() {
     )
     .await
     .expect("Create Auction")
-    .dict_get("contractID")
-    .and_then(|v| v.as_i64())
-    .unwrap();
+    {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        rep => rep.dict_get("contractID").and_then(|v| v.as_i64()).unwrap(),
+    };
 
     let err = rpc(&ctx, &mut s2, "contractProxy", "PlaceBid", &[PyRep::Integer(c_auc), PyRep::Real(-5.0)])
         .await

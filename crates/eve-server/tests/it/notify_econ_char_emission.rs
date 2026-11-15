@@ -3466,7 +3466,10 @@ async fn test_blueprints_and_contracts_notifications() {
         ],
     )
     .await;
-    let cid1 = c1_rep.dict_get("contractID").and_then(|v| v.as_i64()).expect("cid1");
+    let cid1 = match &c1_rep {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => c1_rep.dict_get("contractID").and_then(|v| v.as_i64()).expect("cid1"),
+    };
     let n_c1_p1 = ctx.drain_notifications_for_char(P1);
     let n_c1_p2 = ctx.drain_notifications_for_char(P2);
     assert_eq!(events_from(&n_c1_p1, "OnContractCreated"), vec![Vec::<PyRep>::new()]);
@@ -3505,7 +3508,10 @@ async fn test_blueprints_and_contracts_notifications() {
         ],
     )
     .await;
-    let cid2 = c2_rep.dict_get("contractID").and_then(|v| v.as_i64()).expect("cid2");
+    let cid2 = match &c2_rep {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => c2_rep.dict_get("contractID").and_then(|v| v.as_i64()).expect("cid2"),
+    };
     ctx.drain_notifications_for_char(P1);
     ctx.drain_notifications_for_char(P2);
     call(&ctx, &mut s2, "contractProxy", "RejectContract", &[PyRep::Integer(cid2)]).await;
@@ -3536,7 +3542,10 @@ async fn test_blueprints_and_contracts_notifications() {
         ],
     )
     .await;
-    let cid3 = c3_rep.dict_get("contractID").and_then(|v| v.as_i64()).expect("cid3");
+    let cid3 = match &c3_rep {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => c3_rep.dict_get("contractID").and_then(|v| v.as_i64()).expect("cid3"),
+    };
     call(&ctx, &mut s2, "contractProxy", "AcceptContract", &[PyRep::Integer(cid3)]).await;
     ctx.drain_notifications_for_char(P1);
     ctx.drain_notifications_for_char(P2);
@@ -3568,7 +3577,10 @@ async fn test_blueprints_and_contracts_notifications() {
         ],
     )
     .await;
-    let cid4 = c4_rep.dict_get("contractID").and_then(|v| v.as_i64()).expect("cid4");
+    let cid4 = match &c4_rep {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => c4_rep.dict_get("contractID").and_then(|v| v.as_i64()).expect("cid4"),
+    };
     ctx.drain_notifications_for_char(P1);
 
     call(&ctx, &mut s2, "contractProxy", "PlaceBid", &[PyRep::Integer(cid4), PyRep::Real(150_000.0)]).await;

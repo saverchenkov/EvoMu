@@ -37,7 +37,7 @@ fn want_to_buy_stack_split_auction_outbid_refund_and_delete_reject_fail_gm_expir
     )
     .unwrap()
     .unwrap();
-    let wtb_cid = dict_i64(&wtb, "contractID").unwrap();
+    let wtb_cid = created_cid(&wtb).unwrap();
 
     // Issuer cannot accept own contract -> CannotAcceptOwnContract
     let err_self = handle(
@@ -125,7 +125,7 @@ fn want_to_buy_stack_split_auction_outbid_refund_and_delete_reject_fail_gm_expir
     )
     .unwrap()
     .unwrap();
-    let auc_cid = dict_i64(&auc, "contractID").unwrap();
+    let auc_cid = created_cid(&auc).unwrap();
 
     // Opening bid below starting price -> BidTooLow
     let err_low1 = handle(
@@ -196,7 +196,7 @@ fn want_to_buy_stack_split_auction_outbid_refund_and_delete_reject_fail_gm_expir
     )
     .unwrap()
     .unwrap();
-    let priv_cid = dict_i64(&priv_c, "contractID").unwrap();
+    let priv_cid = created_cid(&priv_c).unwrap();
 
     // GetLoginInfo shows assignedToMe for acceptor
     let login_info = handle(&ctx, &mut acc_sess, "contractProxy", "GetLoginInfo", &[], &kw)
@@ -235,7 +235,7 @@ fn want_to_buy_stack_split_auction_outbid_refund_and_delete_reject_fail_gm_expir
     )
     .unwrap()
     .unwrap();
-    let cour_cid = dict_i64(&cour, "contractID").unwrap();
+    let cour_cid = created_cid(&cour).unwrap();
     handle(
         &ctx,
         &mut acc_sess,
@@ -304,7 +304,7 @@ fn want_to_buy_stack_split_auction_outbid_refund_and_delete_reject_fail_gm_expir
     )
     .unwrap()
     .unwrap();
-    assert!(matches!(expired_list, PyRep::List(ref l) if l.len() >= 3));
+    assert!(contract_entries(&expired_list).len() >= 3);
 }
 
 #[test]
@@ -339,25 +339,25 @@ fn accept_corp_item_exchange_role_flags_wallet_and_requested_item_filtering() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(920_100, make_fighter_item(920_100, 35, issuer_corp, station_id, InventoryFlag::CorpSAG1, 10));
     });
-    let cid = handle(
-        &ctx,
-        &mut issuer_sess,
-        "contractProxy",
-        "CreateContract",
-        &[PyRep::keyval([
-            ("contractType", PyRep::Integer(1)),
-            ("startStationID", PyRep::Integer(station_id)),
-            ("price", PyRep::Real(500_000.0)),
-            ("forCorp", PyRep::Bool(true)),
-            ("itemList", PyRep::Integer(920_100)),
-            ("requestedItems", PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(34), PyRep::Integer(25)])])),
-        ])],
-        &kw,
+    let cid = created_cid(
+        &handle(
+            &ctx,
+            &mut issuer_sess,
+            "contractProxy",
+            "CreateContract",
+            &[PyRep::keyval([
+                ("contractType", PyRep::Integer(1)),
+                ("startStationID", PyRep::Integer(station_id)),
+                ("price", PyRep::Real(500_000.0)),
+                ("forCorp", PyRep::Bool(true)),
+                ("itemList", PyRep::Integer(920_100)),
+                ("requestedItems", PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(34), PyRep::Integer(25)])])),
+            ])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
     )
-    .unwrap()
-    .unwrap()
-    .dict_get("contractID")
-    .and_then(|v| v.as_i64())
     .unwrap();
 
     // Seed ineligible & eligible type-34 items in CorpSAG3 (flag 117) of acc_corp:
@@ -505,26 +505,26 @@ fn accept_corp_item_exchange_role_flags_wallet_and_requested_item_filtering() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(920_102, make_fighter_item(920_102, 35, issuer_corp, station_id, InventoryFlag::CorpSAG1, 5));
     });
-    let priv_cid = handle(
-        &ctx,
-        &mut issuer_sess,
-        "contractProxy",
-        "CreateContract",
-        &[PyRep::keyval([
-            ("contractType", PyRep::Integer(1)),
-            ("availability", PyRep::String("Private".into())),
-            ("assigneeID", PyRep::Integer(acc_id)),
-            ("startStationID", PyRep::Integer(station_id)),
-            ("price", PyRep::Real(1000.0)),
-            ("itemList", PyRep::Integer(920_102)),
-            ("forCorp", PyRep::Bool(true)),
-        ])],
-        &kw,
+    let priv_cid = created_cid(
+        &handle(
+            &ctx,
+            &mut issuer_sess,
+            "contractProxy",
+            "CreateContract",
+            &[PyRep::keyval([
+                ("contractType", PyRep::Integer(1)),
+                ("availability", PyRep::String("Private".into())),
+                ("assigneeID", PyRep::Integer(acc_id)),
+                ("startStationID", PyRep::Integer(station_id)),
+                ("price", PyRep::Real(1000.0)),
+                ("itemList", PyRep::Integer(920_102)),
+                ("forCorp", PyRep::Bool(true)),
+            ])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
     )
-    .unwrap()
-    .unwrap()
-    .dict_get("contractID")
-    .and_then(|v| v.as_i64())
     .unwrap();
     assert_eq!(
         handle(&ctx, &mut wrong_loc_sess, "contractProxy", "AcceptContract", &[PyRep::Integer(priv_cid)], &kw)
@@ -575,25 +575,25 @@ fn delete_reject_fail_gm_expire_corp_rbac_and_orig_flag_restoration() {
         snap.items.insert(921_100, make_fighter_item(921_100, 34, corp_id, station_id, InventoryFlag::CorpSAG2, 10));
         snap.items.insert(921_101, make_fighter_item(921_101, 35, corp_id, station_id, InventoryFlag::CorpSAG4, 5));
     });
-    let cid_del = handle(
-        &ctx,
-        &mut ceo_sess,
-        "contractProxy",
-        "CreateContract",
-        &[PyRep::keyval([
-            ("contractType", PyRep::Integer(1)),
-            ("availability", PyRep::String("Public".into())),
-            ("startStationID", PyRep::Integer(station_id)),
-            ("reward", PyRep::Real(200_000.0)),
-            ("forCorp", PyRep::Bool(true)),
-            ("itemList", PyRep::Integer(921_100)),
-        ])],
-        &kw,
+    let cid_del = created_cid(
+        &handle(
+            &ctx,
+            &mut ceo_sess,
+            "contractProxy",
+            "CreateContract",
+            &[PyRep::keyval([
+                ("contractType", PyRep::Integer(1)),
+                ("availability", PyRep::String("Public".into())),
+                ("startStationID", PyRep::Integer(station_id)),
+                ("reward", PyRep::Real(200_000.0)),
+                ("forCorp", PyRep::Bool(true)),
+                ("itemList", PyRep::Integer(921_100)),
+            ])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
     )
-    .unwrap()
-    .unwrap()
-    .dict_get("contractID")
-    .and_then(|v| v.as_i64())
     .unwrap();
     // Simulate orphan item inside escrow contract location + check non-manager denied
     ctx.db.with_mut_snapshot(|snap| {
@@ -635,26 +635,26 @@ fn delete_reject_fail_gm_expire_corp_rbac_and_orig_flag_restoration() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(921_102, make_fighter_item(921_102, 34, corp_id, station_id, InventoryFlag::CorpSAG3, 10));
     });
-    let cid_rej = handle(
-        &ctx,
-        &mut ceo_sess,
-        "contractProxy",
-        "CreateContract",
-        &[PyRep::keyval([
-            ("contractType", PyRep::Integer(1)),
-            ("availability", PyRep::String("Private".into())),
-            ("assigneeID", PyRep::Integer(assignee_corp)),
-            ("startStationID", PyRep::Integer(station_id)),
-            ("reward", PyRep::Real(150_000.0)),
-            ("forCorp", PyRep::Bool(true)),
-            ("itemList", PyRep::Integer(921_102)),
-        ])],
-        &kw,
+    let cid_rej = created_cid(
+        &handle(
+            &ctx,
+            &mut ceo_sess,
+            "contractProxy",
+            "CreateContract",
+            &[PyRep::keyval([
+                ("contractType", PyRep::Integer(1)),
+                ("availability", PyRep::String("Private".into())),
+                ("assigneeID", PyRep::Integer(assignee_corp)),
+                ("startStationID", PyRep::Integer(station_id)),
+                ("reward", PyRep::Real(150_000.0)),
+                ("forCorp", PyRep::Bool(true)),
+                ("itemList", PyRep::Integer(921_102)),
+            ])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
     )
-    .unwrap()
-    .unwrap()
-    .dict_get("contractID")
-    .and_then(|v| v.as_i64())
     .unwrap();
     assert_eq!(
         handle(&ctx, &mut acc_sess, "contractProxy", "RejectContract", &[PyRep::Integer(cid_rej)], &kw)
@@ -676,25 +676,25 @@ fn delete_reject_fail_gm_expire_corp_rbac_and_orig_flag_restoration() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(921_103, make_fighter_item(921_103, 34, ceo_id, station_id, InventoryFlag::Hangar, 5));
     });
-    let cid_cour = handle(
-        &ctx,
-        &mut ceo_sess,
-        "contractProxy",
-        "CreateContract",
-        &[PyRep::keyval([
-            ("contractType", PyRep::Integer(3)),
-            ("startStationID", PyRep::Integer(station_id)),
-            ("endStationID", PyRep::Integer(dest_id)),
-            ("reward", PyRep::Real(50_000.0)),
-            ("collateral", PyRep::Real(400_000.0)),
-            ("itemList", PyRep::Integer(921_103)),
-        ])],
-        &kw,
+    let cid_cour = created_cid(
+        &handle(
+            &ctx,
+            &mut ceo_sess,
+            "contractProxy",
+            "CreateContract",
+            &[PyRep::keyval([
+                ("contractType", PyRep::Integer(3)),
+                ("startStationID", PyRep::Integer(station_id)),
+                ("endStationID", PyRep::Integer(dest_id)),
+                ("reward", PyRep::Real(50_000.0)),
+                ("collateral", PyRep::Real(400_000.0)),
+                ("itemList", PyRep::Integer(921_103)),
+            ])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
     )
-    .unwrap()
-    .unwrap()
-    .dict_get("contractID")
-    .and_then(|v| v.as_i64())
     .unwrap();
     // Non-InProgress FailContract -> InvalidContractState
     assert_eq!(
@@ -738,24 +738,24 @@ fn delete_reject_fail_gm_expire_corp_rbac_and_orig_flag_restoration() {
             a.role = corp_roles::ROLE_DIRECTOR;
         }
     });
-    let auc_nobid = handle(
-        &ctx,
-        &mut ceo_sess,
-        "contractProxy",
-        "CreateContract",
-        &[PyRep::keyval([
-            ("contractType", PyRep::Integer(2)),
-            ("startStationID", PyRep::Integer(station_id)),
-            ("price", PyRep::Real(50_000.0)),
-            ("forCorp", PyRep::Bool(true)),
-            ("itemList", PyRep::Integer(921_104)),
-        ])],
-        &kw,
+    let auc_nobid = created_cid(
+        &handle(
+            &ctx,
+            &mut ceo_sess,
+            "contractProxy",
+            "CreateContract",
+            &[PyRep::keyval([
+                ("contractType", PyRep::Integer(2)),
+                ("startStationID", PyRep::Integer(station_id)),
+                ("price", PyRep::Real(50_000.0)),
+                ("forCorp", PyRep::Bool(true)),
+                ("itemList", PyRep::Integer(921_104)),
+            ])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
     )
-    .unwrap()
-    .unwrap()
-    .dict_get("contractID")
-    .and_then(|v| v.as_i64())
     .unwrap();
     assert_eq!(
         handle(&ctx, &mut ceo_sess, "contractProxy", "GM_ExpireContract", &[PyRep::Integer(9_999_999)], &kw)
@@ -858,10 +858,12 @@ fn search_contracts_w2_structure_regions_item_types_visibility_and_owner_queries
     });
 
     let cids_from = |rep: PyRep| -> Vec<i64> {
-        let PyRep::List(items) = rep else { panic!("expected PyRep::List") };
-        items
+        contract_entries(&rep)
             .iter()
-            .filter_map(|r| dict_i64(r, "contractID"))
+            .filter_map(|r| {
+                dict_i64(r, "contractID")
+                    .or_else(|| r.dict_get("contract").and_then(|c| dict_i64(c, "contractID")))
+            })
             .collect()
     };
 

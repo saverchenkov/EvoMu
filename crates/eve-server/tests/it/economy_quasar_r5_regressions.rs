@@ -58,6 +58,7 @@ fn kv_i64(rep: &PyRep, key: &str) -> i64 {
     match rep {
         PyRep::KeyVal(kv) => kv.get(key).and_then(|v| v.as_i64()).unwrap(),
         PyRep::Dict(d) => d.iter().find(|(k, _)| k.as_str() == Some(key)).and_then(|(_, v)| v.as_i64()).unwrap(),
+        PyRep::List(items) if key == "contractID" => items[0].as_i64().unwrap(),
         PyRep::Integer(v) => *v,
         other => panic!("expected {key} in {other:?}"),
     }

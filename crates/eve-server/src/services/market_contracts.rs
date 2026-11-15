@@ -32,6 +32,34 @@ use super::market_trading::{
     unix_to_filetime, MarketOrderMeta,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OutstandingContractsReply {
+    pub my_char_total: i64,
+    pub my_corp_total: i64,
+    pub non_corp_for_my_char: i64,
+    pub non_corp_for_my_corp: i64,
+}
+
+impl OutstandingContractsReply {
+    pub(crate) fn for_character(count: i64) -> Self {
+        Self {
+            my_char_total: count,
+            my_corp_total: 0,
+            non_corp_for_my_char: count,
+            non_corp_for_my_corp: 0,
+        }
+    }
+
+    pub(crate) fn to_pyrep(self) -> PyRep {
+        PyRep::keyval([
+            ("myCharTotal", PyRep::Integer(self.my_char_total)),
+            ("myCorpTotal", PyRep::Integer(self.my_corp_total)),
+            ("nonCorpForMyChar", PyRep::Integer(self.non_corp_for_my_char)),
+            ("nonCorpForMyCorp", PyRep::Integer(self.non_corp_for_my_corp)),
+        ])
+    }
+}
+
 fn market_order_descriptor() -> DBRowDescriptor {
     DBRowDescriptor::market_order_header()
 }
@@ -1557,7 +1585,7 @@ pub fn handle(
         ("contractProxy", "NumOutstandingContracts") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let cnt = ctx.db.with_snapshot(|snap| snap.contracts.values().filter(|c| c.issuer_id == char_id && c.status == "Outstanding").count() as i64);
-            Some(Ok(PyRep::Integer(cnt)))
+            Some(Ok(OutstandingContractsReply::for_character(cnt).to_pyrep()))
         }
         ("contractProxy", "DeleteContractNotification")
         | ("contractProxy", "DeleteNotification") => {

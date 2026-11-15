@@ -481,7 +481,10 @@ async fn test_journey_contracts() {
     )
     .await
     .expect("CreateContract ItemExchange");
-    let c_ex_id = c_ex.dict_get("contractID").and_then(|v| v.as_i64()).or_else(|| c_ex.as_i64()).expect("contract id");
+    let c_ex_id = match &c_ex {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => c_ex.dict_get("contractID").and_then(|v| v.as_i64()).or_else(|| c_ex.as_i64()).expect("contract id"),
+    };
     call_rpc(&ctx, &mut sess2, "contractProxy", "AcceptContract", &[PyRep::Integer(c_ex_id), PyRep::Bool(false)])
         .await
         .expect("AcceptContract ItemExchange");
@@ -514,7 +517,10 @@ async fn test_journey_contracts() {
     )
     .await
     .expect("CreateContract Auction");
-    let c_auc_id = c_auc.dict_get("contractID").and_then(|v| v.as_i64()).or_else(|| c_auc.as_i64()).expect("auction id");
+    let c_auc_id = match &c_auc {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => c_auc.dict_get("contractID").and_then(|v| v.as_i64()).or_else(|| c_auc.as_i64()).expect("auction id"),
+    };
     let p2_wallet_before = ctx.db.with_snapshot(|s| s.characters[&90_000_002].balance);
     call_rpc(&ctx, &mut sess2, "contractProxy", "PlaceBid", &[PyRep::Integer(c_auc_id), PyRep::Real(600.0), PyRep::Bool(false)])
         .await
@@ -550,7 +556,10 @@ async fn test_journey_contracts() {
     )
     .await
     .expect("CreateContract Courier");
-    let c_cour_id = c_cour.dict_get("contractID").and_then(|v| v.as_i64()).or_else(|| c_cour.as_i64()).expect("courier id");
+    let c_cour_id = match &c_cour {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => c_cour.dict_get("contractID").and_then(|v| v.as_i64()).or_else(|| c_cour.as_i64()).expect("courier id"),
+    };
     call_rpc(&ctx, &mut sess2, "contractProxy", "AcceptContract", &[PyRep::Integer(c_cour_id), PyRep::Bool(false)])
         .await
         .expect("AcceptContract Courier");

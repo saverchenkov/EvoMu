@@ -228,9 +228,18 @@ fn test_405_and_406_contracts_corp_courier_and_public_deposit_refund() {
         ])],
         &kw,
     ).unwrap().unwrap();
-    let ie_cid = ie_create.dict_get("contractID").and_then(PyRep::as_i64).unwrap();
-    let expected_deposit_isk = ie_create.dict_get("depositISK").and_then(PyRep::as_f64).unwrap_or(10_000.0);
-    let expected_fee_isk = ie_create.dict_get("brokerFeeISK").and_then(PyRep::as_f64).unwrap_or(10_000.0);
+    let ie_cid = match ie_create {
+        PyRep::List(ref ids) => ids.first().and_then(PyRep::as_i64).unwrap(),
+        _ => ie_create.dict_get("contractID").and_then(PyRep::as_i64).unwrap(),
+    };
+    let expected_deposit_isk = ctx.db.with_snapshot(|s| {
+        s.fleet_and_social_ops
+            .contract_deposits
+            .get(&ie_cid)
+            .map(|&cents| cents as f64 / 100.0)
+            .unwrap_or(10_000.0)
+    });
+    let expected_fee_isk = 10_000.0_f64;
     crate::services::contracts_service::handle(
         &ctx, &mut hauler_sess, "contractProxy", "AcceptContract", &[PyRep::Integer(ie_cid)], &kw,
     ).unwrap().unwrap();
@@ -263,7 +272,10 @@ fn test_405_and_406_contracts_corp_courier_and_public_deposit_refund() {
         ])],
         &kw,
     ).unwrap().unwrap();
-    let cid_1 = c1_create.dict_get("contractID").and_then(PyRep::as_i64).unwrap();
+    let cid_1 = match c1_create {
+        PyRep::List(ref ids) => ids.first().and_then(PyRep::as_i64).unwrap(),
+        _ => c1_create.dict_get("contractID").and_then(PyRep::as_i64).unwrap(),
+    };
     crate::services::contracts_service::handle(
         &ctx, &mut hauler_sess, "contractProxy", "AcceptContract", &[PyRep::Integer(cid_1), PyRep::Bool(true)], &kw,
     ).unwrap().unwrap();
@@ -300,7 +312,10 @@ fn test_405_and_406_contracts_corp_courier_and_public_deposit_refund() {
         ])],
         &kw,
     ).unwrap().unwrap();
-    let cid_2 = c2_create.dict_get("contractID").and_then(PyRep::as_i64).unwrap();
+    let cid_2 = match c2_create {
+        PyRep::List(ref ids) => ids.first().and_then(PyRep::as_i64).unwrap(),
+        _ => c2_create.dict_get("contractID").and_then(PyRep::as_i64).unwrap(),
+    };
     crate::services::contracts_service::handle(
         &ctx, &mut hauler_sess, "contractProxy", "AcceptContract", &[PyRep::Integer(cid_2), PyRep::Bool(true)], &kw,
     ).unwrap().unwrap();

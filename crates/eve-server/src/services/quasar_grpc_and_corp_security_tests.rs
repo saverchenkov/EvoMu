@@ -364,10 +364,12 @@ async fn r6_t4_03_quasar_market_acl_redaction_and_esi_public_assigned_contracts(
         )
         .await
         .unwrap();
-    let created_cid = created_rep
-        .as_i64()
-        .or_else(|| created_rep.dict_get("contractID").and_then(|v| v.as_i64()))
-        .expect("created contractID");
+    let created_cid = match created_rep {
+        PyRep::List(ref ids) => ids.first().and_then(|v| v.as_i64()),
+        PyRep::Integer(cid) => Some(cid),
+        _ => created_rep.dict_get("contractID").and_then(|v| v.as_i64()),
+    }
+    .expect("created contractID");
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.contracts[&created_cid].assignee_id, outsider_cid);
         assert_eq!(snap.contracts[&created_cid].availability, "Personal");

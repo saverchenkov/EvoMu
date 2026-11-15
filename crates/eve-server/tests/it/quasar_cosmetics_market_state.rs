@@ -582,10 +582,11 @@ async fn break_plastic_wrap_requires_docked_at_wrap_station_and_combat_rng_seede
         )
         .await
         .expect("CreateContract");
-    let PyRep::KeyVal(ckv) = created else {
-        panic!("Expected KeyVal");
+    let contract_id = match created {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        PyRep::KeyVal(ckv) => ckv.get("contractID").and_then(|v| v.as_i64()).unwrap(),
+        _ => panic!("Expected List or KeyVal"),
     };
-    let contract_id = ckv.get("contractID").and_then(|v| v.as_i64()).unwrap();
 
     let accepted = ctx
         .dispatch_rpc(

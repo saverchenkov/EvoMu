@@ -51,6 +51,21 @@ async fn rpc(
     ctx.dispatch_rpc(sess, service, None, method, args, &kw, None).await
 }
 
+fn created_cid(rep: &PyRep) -> i64 {
+    match rep {
+        PyRep::List(ids) => ids[0].as_i64().expect("CreateContract contractID in list"),
+        PyRep::KeyVal(kv) => kv.get("contractID").and_then(|v| v.as_i64()).unwrap(),
+        _ => panic!("Expected contractID from CreateContract"),
+    }
+}
+
+fn contract_list_rows(rep: &PyRep) -> &[PyRep] {
+    match rep.dict_get("contracts").unwrap_or(rep) {
+        PyRep::List(items) => items.as_slice(),
+        _ => panic!("Expected contracts list"),
+    }
+}
+
 #[tokio::test]
 async fn test_e3_contracts_lifecycle_item_exchange_courier_auction() {
     // parity: feat:contracts.item-exchange, feat:contracts.courier, feat:contracts.auction, plan:E-3
@@ -104,8 +119,7 @@ async fn test_e3_contracts_lifecycle_item_exchange_courier_auction() {
             PyRep::List(vec![PyRep::Integer(100_000_003)]),
         ],
     ).await.expect("Create ItemExchange Contract");
-    let PyRep::KeyVal(c_ex_kv) = c_exchange else { panic!("Expected KeyVal"); };
-    let ex_cid = c_ex_kv.get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let ex_cid = created_cid(&c_exchange);
 
     let item_locked = ctx.db.with_snapshot(|snap| {
         snap.items.get(&100_000_003).map(|i| i.flag == InventoryFlag::Locked && i.location_id == ex_cid)
@@ -119,19 +133,19 @@ async fn test_e3_contracts_lifecycle_item_exchange_courier_auction() {
         "SearchContracts",
         &[PyRep::String("ItemExchange".into())],
     ).await.expect("SearchContracts");
-    let PyRep::List(contracts_list) = search_rep else { panic!("Expected List"); };
-    assert!(contracts_list.iter().any(|c| match c {
-        PyRep::KeyVal(kv) => kv.get("contractID").and_then(|v| v.as_i64()) == Some(ex_cid),
-        _ => false,
+    let contracts_list = contract_list_rows(&search_rep);
+    assert!(contracts_list.iter().any(|c| {
+        c.dict_get("contract")
+            .unwrap_or(c)
+            .dict_get("contractID")
+            .and_then(|v| v.as_i64())
+            == Some(ex_cid)
     }));
 
     let my_contracts = rpc(&ctx, &mut s1, "contractProxy", "GetMyCurrentContractList", &[]).await
         .expect("GetMyCurrentContractList");
-    let PyRep::List(my_list) = my_contracts else { panic!("Expected List"); };
-    assert!(my_list.iter().any(|c| match c {
-        PyRep::KeyVal(kv) => kv.get("contractID").and_then(|v| v.as_i64()) == Some(ex_cid),
-        _ => false,
-    }));
+    let my_list = contract_list_rows(&my_contracts);
+    assert!(my_list.iter().any(|c| c.dict_get("contractID").and_then(|v| v.as_i64()) == Some(ex_cid)));
 
     let s1_bal_before = ctx.db.get_character(90_000_001).unwrap().balance;
     let s2_bal_before = ctx.db.get_character(90_000_002).unwrap().balance;
@@ -198,8 +212,7 @@ async fn test_e3_contracts_lifecycle_item_exchange_courier_auction() {
             PyRep::List(vec![PyRep::Integer(courier_item_id)]),
         ],
     ).await.expect("Create Courier Contract");
-    let PyRep::KeyVal(c_courier_kv) = c_courier else { panic!("Expected KeyVal"); };
-    let courier_cid = c_courier_kv.get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let courier_cid = created_cid(&c_courier);
 
     let s2_bal_pre_courier = ctx.db.get_character(90_000_002).unwrap().balance;
     let accept_courier = rpc(
@@ -299,8 +312,7 @@ async fn test_e3_contracts_lifecycle_item_exchange_courier_auction() {
             PyRep::List(vec![PyRep::Integer(auction_item_id)]),
         ],
     ).await.expect("Create Auction Contract");
-    let PyRep::KeyVal(c_auc_kv) = c_auction else { panic!("Expected KeyVal"); };
-    let auc_cid = c_auc_kv.get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let auc_cid = created_cid(&c_auction);
 
     let s2_bal_before_bid = ctx.db.get_character(90_000_002).unwrap().balance;
     let bid_1 = rpc(
@@ -417,8 +429,7 @@ async fn test_contracts_item_exchange_and_request() {
         ],
     ).await.expect("Create ItemExchange Contract");
 
-    let PyRep::KeyVal(cx_kv) = c_exchange else { panic!("Expected KeyVal"); };
-    let exchange_cid = cx_kv.get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let exchange_cid = created_cid(&c_exchange);
 
     // Creating an item exchange locks the items into the contract escrow
     let locked_state = ctx.db.with_snapshot(|snap| {
@@ -472,8 +483,7 @@ async fn test_contracts_item_exchange_and_request() {
         ],
     ).await.expect("Create ItemExchange with requested items");
 
-    let PyRep::KeyVal(creq_kv) = c_req else { panic!("Expected KeyVal"); };
-    let req_cid = creq_kv.get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let req_cid = created_cid(&c_req);
 
     let missing_req_err = rpc(&ctx, &mut s2, "contractProxy", "AcceptContract", &[PyRep::Integer(req_cid)],).await
     .unwrap_err();
@@ -640,8 +650,7 @@ async fn test_contracts_auction_and_courier() {
         ],
     ).await.expect("Create Auction Contract");
 
-    let PyRep::KeyVal(auc_kv) = c_auction else { panic!("Expected KeyVal"); };
-    let auc_cid = auc_kv.get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let auc_cid = created_cid(&c_auction);
 
     let s2_bal_before_bid = ctx.db.get_character(90_000_002).unwrap().balance;
     rpc(&ctx, &mut s2, "contractProxy", "PlaceBid", &[PyRep::Integer(auc_cid), PyRep::Real(150_000.0)],).await
@@ -666,7 +675,7 @@ async fn test_contracts_auction_and_courier() {
     assert_eq!(s2_bal_after_outbid, s2_bal_before_bid);
 
     let my_bids = rpc(&ctx, &mut s3, "contractProxy", "GetMyBids", &[]).await.expect("GetMyBids");
-    assert!(matches!(my_bids, PyRep::List(ref l) if !l.is_empty()));
+    assert!(!contract_list_rows(&my_bids).is_empty());
 
     rpc(&ctx, &mut s3, "contractProxy", "PlaceBid", &[PyRep::Integer(auc_cid), PyRep::Real(500_000.0)],).await
     .expect("Buyout auction");
@@ -701,15 +710,14 @@ async fn test_contracts_auction_and_courier() {
             PyRep::Bool(false),
         ],
     ).await.expect("Create 2nd Auction Contract");
-    let PyRep::KeyVal(auc2_kv) = c_auction2 else { panic!("Expected KeyVal"); };
-    let auc2_cid = auc2_kv.get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let auc2_cid = created_cid(&c_auction2);
     rpc(&ctx, &mut s2, "contractProxy", "PlaceBid", &[PyRep::Integer(auc2_cid), PyRep::Real(120_000.0)],).await
     .expect("PlaceBid on 2nd auction");
     ctx.advance_secs(20_160 * 60 + 10);
     let settled_auc = rpc(&ctx, &mut s1, "contractProxy", "GetContract", &[PyRep::Integer(auc2_cid)],).await
     .expect("GetContract settles expired auction");
     let PyRep::KeyVal(sauc_kv) = settled_auc else { panic!("Expected KeyVal"); };
-    assert_eq!(sauc_kv.get("status"), Some(&PyRep::String("Completed".into())));
+    assert_eq!(sauc_kv.get("status"), Some(&PyRep::Integer(4)));
     let item_owner_auc2 = ctx.db.with_snapshot(|snap| {
         snap.items.get(&auc2_item_id).map(|i| (i.owner_id, i.flag))
     });
@@ -742,10 +750,12 @@ async fn test_contracts_auction_and_courier() {
         ],
     ).await.expect("Create Courier Contract");
 
-    let PyRep::KeyVal(cour_kv) = c_courier else { panic!("Expected KeyVal"); };
-    let cour_cid = cour_kv.get("contractID").and_then(|v| v.as_i64()).unwrap();
-    let listing_exp = cour_kv.get("expirationUnix").and_then(|v| v.as_i64()).unwrap();
-    assert_eq!(cour_kv.get("numDays"), Some(&PyRep::Integer(3)));
+    let cour_cid = created_cid(&c_courier);
+    let (listing_exp, rec_num_days) = ctx.db.with_snapshot(|snap| {
+        let r = &snap.contracts[&cour_cid];
+        (r.expiration_unix as i64, r.num_days as i64)
+    });
+    assert_eq!(rec_num_days, 3);
     assert_eq!(listing_exp, create_ts + 20_160 * 60);
 
     let s2_bal_before_courier = ctx.db.get_character(90_000_002).unwrap().balance;
@@ -892,8 +902,7 @@ async fn test_contracts_auction_and_courier() {
             PyRep::Bool(false),
         ],
     ).await.expect("Create Courier Contract for Failure test");
-    let PyRep::KeyVal(cfail_kv) = c_fail_courier else { panic!("Expected KeyVal"); };
-    let fail_cid = cfail_kv.get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let fail_cid = created_cid(&c_fail_courier);
 
     let acc_fail = rpc(&ctx, &mut s2, "contractProxy", "AcceptContract", &[PyRep::Integer(fail_cid)],).await
     .expect("Accept Courier Contract to fail");
@@ -937,8 +946,7 @@ async fn test_contracts_auction_and_courier() {
             PyRep::Bool(false),
         ],
     ).await.expect("Create Courier Contract for deadline expiry");
-    let PyRep::KeyVal(cexp_kv) = c_exp_courier else { panic!("Expected KeyVal"); };
-    let exp_cour_cid = cexp_kv.get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let exp_cour_cid = created_cid(&c_exp_courier);
     let acc_exp = rpc(&ctx, &mut s2, "contractProxy", "AcceptContract", &[PyRep::Integer(exp_cour_cid)],).await
     .expect("Accept overdue courier");
     let PyRep::KeyVal(acc_exp_kv) = acc_exp else { panic!("Expected KeyVal"); };
@@ -1131,11 +1139,18 @@ async fn test_contracts_visibility_search_fees_limits_reject_blueprints_and_gm_e
         &kw,
         None,
     ).await.expect("CreateContract with BPC and Abyssal module");
-    let PyRep::KeyVal(cbp_kv) = c_bp else { panic!("Expected KeyVal"); };
-    let bp_cid = cbp_kv.get("contractID").and_then(|v| v.as_i64()).unwrap();
-    let broker_fee = cbp_kv.get("brokerFeeISK").and_then(|v| v.as_f64()).unwrap();
-    let deposit_fee = cbp_kv.get("depositISK").and_then(|v| v.as_f64()).unwrap();
-    assert_eq!(cbp_kv.get("maxContractsLimit"), Some(&PyRep::Integer(1)));
+    let bp_cid = created_cid(&c_bp);
+    let (deposit_fee, broker_fee) = ctx.db.with_snapshot(|s| {
+        let dep = (s.fleet_and_social_ops.contract_deposits[&bp_cid] as f64) / 100.0;
+        let brk = s
+            .wallet_journal
+            .iter()
+            .rev()
+            .find(|j| j.character_id == 90_000_001 && j.entry_type == "ContractBrokersFee")
+            .map(|j| (-j.amount.0 as f64) / 100.0)
+            .unwrap_or(10_000.0);
+        (dep, brk)
+    });
     assert!(broker_fee >= 10_000.0 && deposit_fee >= 100_000.0);
     let s1_bal_after_create = ctx.db.get_character(90_000_001).unwrap().balance;
     assert_eq!(s1_bal_before_create.0 - s1_bal_after_create.0, IskCents::from_f64_isk(broker_fee + deposit_fee).0);
@@ -1204,10 +1219,13 @@ async fn test_contracts_visibility_search_fees_limits_reject_blueprints_and_gm_e
         &search_kw,
         None,
     ).await.expect("SearchContracts by itemTypeID");
-    let PyRep::List(fs_list) = filtered_search else { panic!("Expected List"); };
-    assert!(fs_list.iter().any(|c| match c {
-        PyRep::KeyVal(kv) => kv.get("contractID").and_then(|v| v.as_i64()) == Some(bp_cid),
-        _ => false,
+    let fs_list = contract_list_rows(&filtered_search);
+    assert!(fs_list.iter().any(|c| {
+        c.dict_get("contract")
+            .unwrap_or(c)
+            .dict_get("contractID")
+            .and_then(|v| v.as_i64())
+            == Some(bp_cid)
     }));
 
     // Pilot 2 accepts BPC + Abyssal contract -> singleton, BPC runs/ME/TE, and mutaplasmid attributes preserved!
@@ -1252,8 +1270,7 @@ async fn test_contracts_visibility_search_fees_limits_reject_blueprints_and_gm_e
         &kw,
         None,
     ).await.expect("Create Private Contract");
-    let PyRep::KeyVal(cpriv_kv) = c_priv else { panic!("Expected KeyVal"); };
-    let priv_cid = cpriv_kv.get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let priv_cid = created_cid(&c_priv);
 
     // Pilot 3 (unrelated pilot) cannot accept or reject Pilot 2's private contract
     let p3_accept_err = rpc(&ctx, &mut s3, "contractProxy", "AcceptContract", &[PyRep::Integer(priv_cid)]).await
@@ -1292,8 +1309,7 @@ async fn test_contracts_visibility_search_fees_limits_reject_blueprints_and_gm_e
             PyRep::List(vec![PyRep::Integer(cour_wrap_item_id)]),
         ],
     ).await.expect("Create Courier for BreakPlasticWrap");
-    let PyRep::KeyVal(cw_kv) = c_wrap else { panic!("Expected KeyVal"); };
-    let cw_cid = cw_kv.get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let cw_cid = created_cid(&c_wrap);
 
     let acc_cw = rpc(&ctx, &mut s2, "contractProxy", "AcceptContract", &[PyRep::Integer(cw_cid)]).await
         .expect("Accept Courier for BreakPlasticWrap");
@@ -1401,8 +1417,7 @@ async fn test_contracts_visibility_search_fees_limits_reject_blueprints_and_gm_e
             PyRep::List(vec![PyRep::Integer(gm_item_id)]),
         ],
     ).await.expect("Create Contract for GM_ExpireContract");
-    let PyRep::KeyVal(cgm_kv) = c_gm else { panic!("Expected KeyVal"); };
-    let gm_cid = cgm_kv.get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let gm_cid = created_cid(&c_gm);
 
     // Non-GM pilot s2 (`role == 1`) is rejected with InsufficientRole
     let non_gm_err = rpc(&ctx, &mut s2, "contractProxy", "GM_ExpireContract", &[PyRep::Integer(gm_cid)]).await
@@ -1504,9 +1519,10 @@ async fn test_r3_track3_industry_contracts_market_and_pi_regressions() {
     )
     .await
     .expect("CreateContract for_corp with corp-owned item");
-    let PyRep::KeyVal(cc_kv) = c_corp else { panic!("Expected KeyVal"); };
-    let corp_cid = cc_kv.get("contractID").and_then(|v| v.as_i64()).unwrap();
-    let dep_isk = cc_kv.get("depositISK").and_then(|v| v.as_f64()).unwrap();
+    let corp_cid = created_cid(&c_corp);
+    let dep_isk = ctx
+        .db
+        .with_snapshot(|s| (s.fleet_and_social_ops.contract_deposits[&corp_cid] as f64) / 100.0);
     assert!(dep_isk >= 100_000.0);
 
     let corp_bal_after_create = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet_balance());

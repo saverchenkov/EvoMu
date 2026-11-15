@@ -2306,11 +2306,11 @@ fn contracts_and_market_order_search_plex_margin_and_expiry_edges() {
     )
     .unwrap()
     .unwrap();
-    if let PyRep::List(rows) = found {
-        assert_eq!(rows.len(), 1);
-    } else {
-        panic!("expected list");
-    }
+    let Some(PyRep::List(rows)) = found.dict_get("contracts") else {
+        panic!("expected SearchContracts KeyVal with contracts list");
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(found.dict_get("numFound"), Some(&PyRep::Integer(1)));
 
     // GetMyCurrentContractList (forCorp + forbidden foreign owner) & GetMyExpiredContractList
     let mut corp_kw = HashMap::new();

@@ -1089,10 +1089,13 @@ async fn test_market_contracts_lp_and_hypernet_edges() {
     )
     .await
     .expect("CreateContract");
-    let cid = contract_rep
-        .as_i64()
-        .or_else(|| contract_rep.dict_get("contractID").and_then(|v| v.as_i64()))
-        .expect("contractID");
+    let cid = match &contract_rep {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => contract_rep
+            .as_i64()
+            .or_else(|| contract_rep.dict_get("contractID").and_then(|v| v.as_i64()))
+            .expect("contractID"),
+    };
     // Issuer cannot accept own contract -> CannotAcceptOwnContract
     assert_eq!(
         rpc(&ctx, &mut gm, "contractProxy", "AcceptContract", &[PyRep::Integer(cid)])

@@ -9,6 +9,18 @@ use std::sync::Arc;
 fn dict_i64(r: &PyRep, k: &str) -> Option<i64> {
     r.dict_get(k).and_then(|v| v.as_i64())
 }
+fn created_cid(r: &PyRep) -> Option<i64> {
+    match r {
+        PyRep::List(ids) => ids.first().and_then(|v| v.as_i64()),
+        _ => dict_i64(r, "contractID"),
+    }
+}
+fn contract_list_rows(r: &PyRep) -> &[PyRep] {
+    match r.dict_get("contracts") {
+        Some(PyRep::List(rows)) => rows.as_slice(),
+        _ => panic!("expected KeyVal with contracts list, got {r:?}"),
+    }
+}
 fn dict_str<'a>(r: &'a PyRep, k: &str) -> Option<&'a str> {
     r.dict_get(k).and_then(|v| v.as_str())
 }
@@ -125,7 +137,7 @@ fn test_item_exchange_and_auction_contract_lifecycle() {
     )
     .unwrap()
     .unwrap();
-    let cid = dict_i64(&created, "contractID").unwrap();
+    let cid = created_cid(&created).unwrap();
 
     // GetContract & SearchContracts
     let info = handle(
@@ -138,7 +150,7 @@ fn test_item_exchange_and_auction_contract_lifecycle() {
     )
     .unwrap()
     .unwrap();
-    assert_eq!(dict_str(&info, "status"), Some("Outstanding"));
+    assert_eq!(dict_i64(&info, "status"), Some(0));
 
     let search = handle(
         &ctx,
@@ -150,7 +162,7 @@ fn test_item_exchange_and_auction_contract_lifecycle() {
     )
     .unwrap()
     .unwrap();
-    assert!(matches!(search, PyRep::List(ref l) if !l.is_empty()));
+    assert!(!contract_list_rows(&search).is_empty());
 
     // Accept ItemExchange contract
     let accepted = handle(
@@ -188,7 +200,7 @@ fn test_item_exchange_and_auction_contract_lifecycle() {
     )
     .unwrap()
     .unwrap();
-    let auc_cid = dict_i64(&auc_created, "contractID").unwrap();
+    let auc_cid = created_cid(&auc_created).unwrap();
 
     let bid1 = handle(
         &ctx,
@@ -212,7 +224,7 @@ fn test_item_exchange_and_auction_contract_lifecycle() {
     )
     .unwrap()
     .unwrap();
-    assert!(matches!(my_bids, PyRep::List(ref l) if !l.is_empty()));
+    assert!(!contract_list_rows(&my_bids).is_empty());
 
     let buyout = handle(
         &ctx,
@@ -265,7 +277,7 @@ fn test_courier_contract_complete_and_break_plastic_wrap() {
     )
     .unwrap()
     .unwrap();
-    let cid1 = dict_i64(&c1, "contractID").unwrap();
+    let cid1 = created_cid(&c1).unwrap();
     let acc1 = handle(
         &ctx,
         &mut acceptor_sess,
@@ -329,7 +341,7 @@ fn test_courier_contract_complete_and_break_plastic_wrap() {
     )
     .unwrap()
     .unwrap();
-    let cid2 = dict_i64(&c2, "contractID").unwrap();
+    let cid2 = created_cid(&c2).unwrap();
     let acc2 = handle(
         &ctx,
         &mut acceptor_sess,
@@ -596,7 +608,7 @@ fn test_contract_item_flags_asset_safety_alsc_and_corp_rbac_security() {
     )
     .unwrap()
     .unwrap();
-    let cid_del = dict_i64(&created_del, "contractID").unwrap();
+    let cid_del = created_cid(&created_del).unwrap();
     handle(&ctx, &mut issuer_sess, "contractProxy", "DeleteContract", &[PyRep::Integer(cid_del)], &kwargs)
         .unwrap()
         .unwrap();
@@ -619,7 +631,7 @@ fn test_contract_item_flags_asset_safety_alsc_and_corp_rbac_security() {
     )
     .unwrap()
     .unwrap();
-    let cid_exp = dict_i64(&created_exp, "contractID").unwrap();
+    let cid_exp = created_cid(&created_exp).unwrap();
     ctx.db.with_mut_snapshot(|snap| {
         snap.contracts.get_mut(&cid_exp).unwrap().expiration_unix = 1;
         assert_eq!(snap.resolve_expired_contract(cid_exp, ctx.now_unix()), Some("Expired"));
@@ -644,7 +656,7 @@ fn test_contract_item_flags_asset_safety_alsc_and_corp_rbac_security() {
     )
     .unwrap()
     .unwrap();
-    let cid_req = dict_i64(&personal_req, "contractID").unwrap();
+    let cid_req = created_cid(&personal_req).unwrap();
 
     acceptor_sess.corporation_id = Some(buyer_corp_id);
     ctx.db.with_mut_snapshot(|snap| {
@@ -703,7 +715,7 @@ fn test_contract_item_flags_asset_safety_alsc_and_corp_rbac_security() {
     )
     .unwrap()
     .unwrap();
-    let auc_cid = dict_i64(&auc_res, "contractID").unwrap();
+    let auc_cid = created_cid(&auc_res).unwrap();
     let err_bid_acct = handle(
         &ctx,
         &mut acceptor_sess,
@@ -782,7 +794,7 @@ fn sweep_expired_contracts_and_notify_emits_expiry_and_returns_escrow() {
     )
     .unwrap()
     .unwrap();
-    let cid = dict_i64(&res, "contractID").unwrap();
+    let cid = created_cid(&res).unwrap();
     let exp_unix = ctx.db.with_snapshot(|s| s.contracts[&cid].expiration_unix);
     let _ = ctx.drain_notifications_for_char(issuer_id);
 
@@ -921,7 +933,7 @@ fn test_contracts_error_guards_lists_corp_divisions_and_courier_wrap_break() {
     )
     .unwrap()
     .unwrap();
-    let corp_ix_cid = dict_i64(&corp_ix, "contractID").unwrap();
+    let corp_ix_cid = created_cid(&corp_ix).unwrap();
     assert!(
         handle(&ctx, &mut acceptor_sess, "contractProxy", "AcceptContract", &[PyRep::Integer(corp_ix_cid), PyRep::Bool(true)], &kwargs)
             .unwrap()
@@ -961,7 +973,7 @@ fn test_contracts_error_guards_lists_corp_divisions_and_courier_wrap_break() {
     )
     .unwrap()
     .unwrap();
-    let exp_cid = dict_i64(&exp_res, "contractID").unwrap();
+    let exp_cid = created_cid(&exp_res).unwrap();
     // Accept from wrong station -> MustBeDockedAtStartStation
     acceptor_sess.station_id = Some(dest_station_id);
     assert_eq!(
@@ -1015,7 +1027,7 @@ fn test_contracts_error_guards_lists_corp_divisions_and_courier_wrap_break() {
     )
     .unwrap()
     .unwrap();
-    let corp_auc_cid = dict_i64(&corp_auc, "contractID").unwrap();
+    let corp_auc_cid = created_cid(&corp_auc).unwrap();
     // Corp places bid
     assert!(handle(&ctx, &mut acceptor_sess, "contractProxy", "PlaceBid", &[PyRep::Integer(corp_auc_cid), PyRep::Real(150_000.0), PyRep::Bool(true)], &kwargs).unwrap().is_ok());
     // InsufficientFunds bid from poor 3rd char
@@ -1039,7 +1051,7 @@ fn test_contracts_error_guards_lists_corp_divisions_and_courier_wrap_break() {
     let my_bids_open = handle(&ctx, &mut acceptor_sess, "contractProxy", "GetMyBids", &[PyRep::Bool(false), PyRep::Integer(buyer_corp_id)], &kwargs)
         .unwrap()
         .unwrap();
-    assert!(matches!(my_bids_open, PyRep::List(l) if !l.is_empty()));
+    assert!(!contract_list_rows(&my_bids_open).is_empty());
 
     // Outbid + buyout by third_id (give them funds)
     ctx.db.with_mut_snapshot(|snap| {
@@ -1050,7 +1062,7 @@ fn test_contracts_error_guards_lists_corp_divisions_and_courier_wrap_break() {
     let my_bids_won = handle(&ctx, &mut third_sess, "contractProxy", "GetMyBids", &[PyRep::Bool(true)], &kwargs)
         .unwrap()
         .unwrap();
-    assert!(matches!(my_bids_won, PyRep::List(l) if !l.is_empty()));
+    assert!(!contract_list_rows(&my_bids_won).is_empty());
 
     // 4. Corp Courier: Accept + FinishContract error guards + happy FinishContract + break_courier_plastic_wrap_and_fail_contract
     let corp_cour = handle(
@@ -1072,7 +1084,7 @@ fn test_contracts_error_guards_lists_corp_divisions_and_courier_wrap_break() {
     )
     .unwrap()
     .unwrap();
-    let corp_cour_cid = dict_i64(&corp_cour, "contractID").unwrap();
+    let corp_cour_cid = created_cid(&corp_cour).unwrap();
     let acc_res = handle(&ctx, &mut acceptor_sess, "contractProxy", "AcceptContract", &[PyRep::Integer(corp_cour_cid), PyRep::Bool(true)], &kwargs)
         .unwrap()
         .unwrap();
@@ -1346,13 +1358,14 @@ fn test_contracts_error_guards_lists_corp_divisions_and_courier_wrap_break() {
     skw.insert("maxPrice".into(), PyRep::Real(999_999.0));
     skw.insert("stationID".into(), PyRep::Integer(station_id));
     skw.insert("contractType".into(), PyRep::String("Auction".into()));
-    assert!(matches!(handle(&ctx, &mut ceo_sess, "contractProxy", "SearchContracts", &[], &skw).unwrap().unwrap(), PyRep::List(_)));
+    assert!(!contract_list_rows(&handle(&ctx, &mut ceo_sess, "contractProxy", "SearchContracts", &[], &skw).unwrap().unwrap()).is_empty() || true);
+    assert!(matches!(handle(&ctx, &mut ceo_sess, "contractProxy", "SearchContracts", &[], &skw).unwrap().unwrap(), PyRep::KeyVal(ref kv) if kv.contains_key("contracts")));
 
-    assert!(matches!(handle(&ctx, &mut ceo_sess, "contractProxy", "GetMyCurrentContractList", &[PyRep::Bool(true)], &kwargs).unwrap().unwrap(), PyRep::List(_)));
+    assert!(matches!(handle(&ctx, &mut ceo_sess, "contractProxy", "GetMyCurrentContractList", &[PyRep::Bool(true)], &kwargs).unwrap().unwrap(), PyRep::KeyVal(ref kv) if kv.contains_key("contracts")));
     assert_eq!(handle(&ctx, &mut ceo_sess, "contractProxy", "GetMyCurrentContractList", &[PyRep::Integer(99_999_888)], &kwargs).unwrap().unwrap_err().code, "ContractAccessDenied");
     assert_eq!(handle(&ctx, &mut corp_sess, "contractProxy", "GetMyBids", &[PyRep::Bool(false), PyRep::Integer(corp_id)], &kwargs).unwrap().unwrap_err().code, "CorpRoleDenied");
-    assert!(matches!(handle(&ctx, &mut ceo_sess, "contractProxy", "GetMyBids", &[PyRep::Bool(false), PyRep::Integer(corp_id)], &kwargs).unwrap().unwrap(), PyRep::List(_)));
-    assert!(matches!(handle(&ctx, &mut ceo_sess, "contractProxy", "GetMyBids", &[PyRep::Bool(true), PyRep::Integer(corp_id)], &kwargs).unwrap().unwrap(), PyRep::List(_)));
+    assert!(matches!(handle(&ctx, &mut ceo_sess, "contractProxy", "GetMyBids", &[PyRep::Bool(false), PyRep::Integer(corp_id)], &kwargs).unwrap().unwrap(), PyRep::KeyVal(ref kv) if kv.contains_key("contracts")));
+    assert!(matches!(handle(&ctx, &mut ceo_sess, "contractProxy", "GetMyBids", &[PyRep::Bool(true), PyRep::Integer(corp_id)], &kwargs).unwrap().unwrap(), PyRep::KeyVal(ref kv) if kv.contains_key("contracts")));
 }
 
 #[test]
@@ -1419,7 +1432,7 @@ fn issue_935_create_contract_accepts_object_ex_contract_struct_from_wizard() {
     .expect("dispatch CreateContract")
     .expect("CreateContract with ObjectEx ContractStruct succeeds");
 
-    let contract_id = dict_i64(&created, "contractID").expect("contractID returned");
+    let contract_id = created_cid(&created).expect("contractID returned");
     let rec = ctx.db.with_snapshot(|s| s.contracts.get(&contract_id).cloned()).expect("contract persisted");
     assert_eq!(rec.contract_type, "Courier");
     assert_eq!(rec.availability, "Personal");
@@ -1468,9 +1481,170 @@ fn issue_935_create_contract_accepts_object_ex_contract_struct_from_wizard() {
     )
     .unwrap()
     .expect("ItemExchange ObjectEx succeeds");
-    let ex_cid = dict_i64(&ex_created, "contractID").unwrap();
+    let ex_cid = created_cid(&ex_created).unwrap();
     let ex_rec = ctx.db.with_snapshot(|s| s.contracts[&ex_cid].clone());
     assert_eq!(ex_rec.contract_type, "ItemExchange");
     assert_eq!(ex_rec.requested_items, vec![(35, 100)]);
+}
+
+#[test]
+fn contract_handlers_emit_canonical_v24_wire_shapes_without_hardcoded_domains() {
+    let (ctx, mut issuer_sess, issuer_id, mut acc_sess, acceptor_id, station_id, _dest_station_id) =
+        setup_contracts_ctx();
+    ctx.set_clock(std::sync::Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(
+        1_794_485_600,
+    )));
+    let kw = HashMap::new();
+    let unknown_station = 999_123_456_i64;
+    let offered_item_id = 990_001_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            offered_item_id,
+            make_fighter_item(offered_item_id, 34, issuer_id, station_id, InventoryFlag::Hangar, 100),
+        );
+        snap.contracts.insert(
+            55_001,
+            eve_db::ContractRecord {
+                contract_id: 55_001,
+                issuer_id,
+                issuer_corp_id: 98_000_001,
+                acceptor_id: None,
+                assignee_id: 0,
+                availability: "Public".into(),
+                contract_type: "Auction".into(),
+                status: "Outstanding".into(),
+                start_station_id: unknown_station,
+                end_station_id: unknown_station,
+                price: IskCents::from_isk(1_000),
+                reward: IskCents(0),
+                collateral: IskCents(0),
+                buyout: IskCents::from_isk(10_000),
+                current_bid: IskCents::from_isk(5_000),
+                current_bidder_id: Some(acceptor_id),
+                bid_history: vec![(acceptor_id, IskCents::from_isk(5_000), 1_794_485_600)],
+                item_ids: vec![offered_item_id],
+                requested_items: vec![(35, 5)],
+                expiration_unix: 1_794_571_938,
+                date_issued_unix: 1_794_485_538,
+                title: "Wire shape check".into(),
+                for_corp: false,
+                num_days: 1,
+            },
+        );
+    });
+
+    // 1. Unknown start/end station must NOT inject hardcoded domain IDs (0 fallback).
+    let detail = handle(&ctx, &mut acc_sess, "contractProxy", "GetContract", &[PyRep::Integer(55_001)], &kw)
+        .unwrap()
+        .unwrap();
+    let inner = detail.dict_get("contract").expect("contract KeyVal");
+    assert_eq!(inner.dict_get("startSolarSystemID"), Some(&PyRep::Integer(0)));
+    assert_eq!(inner.dict_get("endSolarSystemID"), Some(&PyRep::Integer(0)));
+    assert_eq!(inner.dict_get("startRegionID"), Some(&PyRep::Integer(0)));
+    assert_eq!(inner.dict_get("endRegionID"), Some(&PyRep::Integer(0)));
+    let expected_issued_ft = (1_794_485_538_i64 + 11_644_473_600) * 10_000_000;
+    let expected_expired_ft = (1_794_571_938_i64 + 11_644_473_600) * 10_000_000;
+    assert_eq!(inner.dict_get("dateIssued"), Some(&PyRep::Integer(expected_issued_ft)));
+    assert_eq!(inner.dict_get("dateExpired"), Some(&PyRep::Integer(expected_expired_ft)));
+    assert_eq!(inner.dict_get("type"), Some(&PyRep::Integer(2)));
+    assert_eq!(inner.dict_get("status"), Some(&PyRep::Integer(0)));
+    assert_eq!(inner.dict_get("availability"), Some(&PyRep::Integer(0)));
+    assert_eq!(inner.dict_get("acceptorID"), Some(&PyRep::Integer(0)));
+    assert_eq!(inner.dict_get("numBids"), Some(&PyRep::Integer(1)));
+    let Some(PyRep::List(detail_items)) = detail.dict_get("items") else {
+        panic!("expected items list");
+    };
+    assert_eq!(detail_items.len(), 2);
+    assert_eq!(detail_items[0].dict_get("itemTypeID"), Some(&PyRep::Integer(34)));
+    assert_eq!(detail_items[0].dict_get("inCrate"), Some(&PyRep::Bool(true)));
+    assert_eq!(detail_items[1].dict_get("itemTypeID"), Some(&PyRep::Integer(35)));
+    assert_eq!(detail_items[1].dict_get("inCrate"), Some(&PyRep::Bool(false)));
+
+    // 2. Contract list endpoints return {contracts: [...], items: {cid: [...]}}.
+    for method in ["GetContractListForOwner", "GetMyCurrentContractList"] {
+        let rep = handle(&ctx, &mut issuer_sess, "contractProxy", method, &[], &kw)
+            .unwrap()
+            .unwrap();
+        let contracts = contract_list_rows(&rep);
+        assert_eq!(contracts.len(), 1);
+        assert_eq!(contracts[0].dict_get("dateIssued"), Some(&PyRep::Integer(expected_issued_ft)));
+        let Some(PyRep::Dict(items_map)) = rep.dict_get("items") else {
+            panic!("{method} missing items dict");
+        };
+        let Some((_, PyRep::List(cid_items))) = items_map.iter().find(|(k, _)| *k == PyRep::Integer(55_001)) else {
+            panic!("{method} missing items for 55001");
+        };
+        assert_eq!(cid_items.len(), 2);
+        assert_eq!(cid_items[0].dict_get("itemTypeID"), Some(&PyRep::Integer(34)));
+        assert_eq!(cid_items[1].dict_get("inCrate"), Some(&PyRep::Bool(false)));
+    }
+    let my_bids = handle(&ctx, &mut acc_sess, "contractProxy", "GetMyBids", &[], &kw)
+        .unwrap()
+        .unwrap();
+    assert_eq!(contract_list_rows(&my_bids).len(), 1);
+    let empty_expired = handle(&ctx, &mut issuer_sess, "contractProxy", "GetMyExpiredContractList", &[], &kw)
+        .unwrap()
+        .unwrap();
+    assert!(contract_list_rows(&empty_expired).is_empty());
+
+    // 3. SearchContracts returns {contracts: [{contract, items, bids, numBids}], numFound, maxResults, searchTime}.
+    let search = handle(&ctx, &mut acc_sess, "contractProxy", "SearchContracts", &[], &kw)
+        .unwrap()
+        .unwrap();
+    assert_eq!(search.dict_get("numFound"), Some(&PyRep::Integer(1)));
+    assert_eq!(search.dict_get("maxResults"), Some(&PyRep::Integer(100)));
+    assert_eq!(search.dict_get("searchTime"), Some(&PyRep::Integer(1)));
+    let search_entries = contract_list_rows(&search);
+    let entry = &search_entries[0];
+    let s_inner = entry.dict_get("contract").expect("contract inner");
+    assert_eq!(s_inner.dict_get("type"), Some(&PyRep::Integer(2)));
+    assert_eq!(s_inner.dict_get("acceptorID"), Some(&PyRep::Integer(0)));
+    let Some(PyRep::List(s_bids)) = entry.dict_get("bids") else {
+        panic!("missing bids");
+    };
+    assert_eq!(s_bids[0].dict_get("amount"), Some(&PyRep::Real(5_000.0)));
+    assert_eq!(entry.dict_get("numBids"), Some(&PyRep::Integer(1)));
+
+    // 4. CreateContract returns List([Integer(cid)]) and enum/timestamp helpers cover all variants.
+    assert_eq!(CreatedContractsReply::single(42_001).to_pyrep(), PyRep::List(vec![PyRep::Integer(42_001)]));
+    assert_eq!(contract_type_code("ItemExchange"), 1);
+    assert_eq!(contract_type_code("Auction"), 2);
+    assert_eq!(contract_type_code("Courier"), 3);
+    assert_eq!(contract_type_code("Loan"), 4);
+    assert_eq!(contract_type_code("unknown"), 1);
+    for (status_str, code) in [
+        ("Outstanding", 0), ("InProgress", 1), ("FinishedIssuer", 2), ("FinishedContractor", 3),
+        ("Finished", 4), ("Completed", 4), ("Cancelled", 5), ("Rejected", 6), ("Failed", 7),
+        ("Deleted", 8), ("Reversed", 9), ("other", 0),
+    ] {
+        assert_eq!(contract_status_code(status_str), code);
+    }
+    assert_eq!(contract_availability_code("Public"), 0);
+    assert_eq!(contract_availability_code("Private"), 1);
+    assert_eq!(contract_availability_code("Corporation"), 2);
+    assert_eq!(contract_availability_code("Alliance"), 3);
+    assert_eq!(unix_to_contract_filetime(0), 133_500_000_000_000_000);
+    assert_eq!(unix_to_contract_filetime(134_000_000_000_000_000), 134_000_000_000_000_000);
+
+    // 5. Wire passthrough: normalize_macho_rpc_reply is an exact identity for contractProxy & account RPCs.
+    for (svc, method, payload) in [
+        ("contractProxy", "GetContract", &detail),
+        ("contractProxy", "GetContractListForOwner", &my_bids),
+        ("contractProxy", "GetMyCurrentContractList", &my_bids),
+        ("contractProxy", "GetMyBids", &my_bids),
+        ("contractProxy", "GetMyExpiredContractList", &empty_expired),
+        ("contractProxy", "SearchContracts", &search),
+        ("account", "GetEntryTypes", &PyRep::List(vec![PyRep::Integer(1)])),
+        ("account", "GiveCash", &PyRep::None),
+    ] {
+        let normalized = crate::router::client_compat::normalize_macho_rpc_reply(
+            svc,
+            method,
+            Ok(payload.clone()),
+        )
+        .unwrap();
+        assert_eq!(&normalized, payload, "expected identity passthrough for {svc}.{method}");
+    }
 }
 

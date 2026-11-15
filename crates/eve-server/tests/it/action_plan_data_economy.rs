@@ -761,6 +761,7 @@ async fn test_plan_e3_contracts_item_exchange_and_courier() {
 
     let exchange_contract_id = match create_exchange {
         PyRep::Integer(id) => id,
+        PyRep::List(ref ids) => ids[0].as_i64().unwrap(),
         PyRep::KeyVal(kv) => kv.get("contractID").and_then(|v| v.as_i64()).unwrap(),
         _ => panic!("Expected contract ID"),
     };
@@ -836,6 +837,7 @@ async fn test_plan_e3_contracts_item_exchange_and_courier() {
 
     let courier_contract_id = match create_courier {
         PyRep::Integer(id) => id,
+        PyRep::List(ref ids) => ids[0].as_i64().unwrap(),
         PyRep::KeyVal(kv) => kv.get("contractID").and_then(|v| v.as_i64()).unwrap(),
         _ => panic!("Expected contract ID"),
     };

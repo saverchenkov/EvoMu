@@ -69,6 +69,13 @@ fn item(ctx: &ServerContext, id: i64) -> Option<InventoryItemRecord> {
 }
 
 fn int(rep: &PyRep, key: &str) -> i64 {
+    if key == "contractID" {
+        if let PyRep::List(ids) = rep {
+            if let Some(id) = ids.first().and_then(|v| v.as_i64()) {
+                return id;
+            }
+        }
+    }
     rep.dict_get(key).and_then(|v| v.as_i64()).unwrap_or_else(|| panic!("missing {key} in {rep:?}"))
 }
 

@@ -159,55 +159,7 @@ fn inv_keyval_scan_result_and_anomaly_normalizers() {
 
 #[test]
 fn contract_reply_and_skill_queue_rowset_normalizers() {
-    assert_eq!(normalize_contract_reply(PyRep::Integer(0)), PyRep::Integer(0));
     assert_eq!(normalize_skill_queue_rowset(PyRep::Integer(0)), PyRep::Integer(0));
-
-    for (typ, exp_type) in [("ItemExchange", 1), ("Auction", 2), ("Courier", 3), ("unknown", 1)] {
-        let out = normalize_contract_reply(PyRep::keyval([
-            ("type", PyRep::String(typ.into())),
-            ("status", PyRep::String("Outstanding".into())),
-            ("availability", PyRep::String("Private".into())),
-            ("dateIssued", PyRep::Integer(134_000_000_000_000_000)),
-            ("dateExpired", PyRep::Integer(0)),
-            ("dateAccepted", PyRep::Integer(1_700_000_100)),
-            ("items", PyRep::List(vec![PyRep::keyval([("typeID", PyRep::Integer(587)), ("quantity", PyRep::Integer(0))])])),
-        ]));
-        let contract = out.dict_get("contract").unwrap();
-        assert_eq!(contract.dict_get("type"), Some(&PyRep::Integer(exp_type)));
-        assert_eq!(contract.dict_get("availability"), Some(&PyRep::Integer(1)));
-        assert_eq!(contract.dict_get("dateIssued"), Some(&PyRep::Integer(134_000_000_000_000_000)));
-        assert_eq!(contract.dict_get("dateExpired"), Some(&PyRep::Integer(133_500_000_000_000_000)));
-        assert_eq!(
-            contract.dict_get("dateAccepted"),
-            Some(&PyRep::Integer((1_700_000_100 + 11_644_473_600) * 10_000_000))
-        );
-        let PyRep::List(items) = out.dict_get("items").unwrap() else { panic!() };
-        assert_eq!(items[0].dict_get("itemTypeID"), Some(&PyRep::Integer(587)));
-        assert_eq!(items[0].dict_get("quantity"), Some(&PyRep::Integer(1)));
-        assert_eq!(items[0].dict_get("inCrate"), Some(&PyRep::Bool(true)));
-        assert_eq!(out.dict_get("bids"), Some(&PyRep::List(Vec::new())));
-    }
-
-    for (status_str, exp_status) in [
-        ("InProgress", 1),
-        ("FinishedIssuer", 2),
-        ("FinishedContractor", 3),
-        ("Finished", 4),
-        ("Cancelled", 5),
-        ("Rejected", 6),
-        ("Failed", 7),
-        ("Deleted", 8),
-        ("Reversed", 9),
-        ("other", 0),
-    ] {
-        let out = normalize_contract_reply(PyRep::keyval([
-            ("status", PyRep::String(status_str.into())),
-            ("availability", PyRep::String("Public".into())),
-        ]));
-        let contract = out.dict_get("contract").unwrap();
-        assert_eq!(contract.dict_get("status"), Some(&PyRep::Integer(exp_status)));
-        assert_eq!(contract.dict_get("availability"), Some(&PyRep::Integer(0)));
-    }
 
     // Skill queue rowset: normalized into List of KeyVal entries.
     let already = PyRep::Rowset {
@@ -263,15 +215,6 @@ fn normalize_macho_rpc_reply_covers_all_service_adapters() {
             PyRep::String("constellation_20000020".into()),
         ])
     );
-
-    // contractProxy.GetContract & GetContractInfo
-    let c_out = normalize_macho_rpc_reply(
-        "contractProxy",
-        "GetContract",
-        Ok(PyRep::keyval([("type", PyRep::String("Auction".into()))])),
-    )
-    .unwrap();
-    assert!(c_out.dict_get("contract").is_some());
 
     // skillMgr2.GetSkillQueue & GetSkillQueueAndFreePoints
     let sq = PyRep::Rowset {
@@ -1042,19 +985,6 @@ fn w4_mutant_killers_untouched_services_helpers_and_defaults() {
     assert_eq!(extract_table_rows(&objex), vec![PyRep::Integer(11), PyRep::Integer(22)]);
     assert!(extract_table_rows(&PyRep::Integer(5)).is_empty());
 
-    // 3. contract default fallbacks (startSolarSystemID=0, itemTypeID=0, non-zero negative dateExpired)
-    let c_def = normalize_contract_reply(PyRep::keyval([(
-        "items",
-        PyRep::List(vec![PyRep::keyval(Vec::<(String, PyRep)>::new())]),
-    )]));
-    let c_inner = c_def.dict_get("contract").unwrap();
-    assert_eq!(c_inner.dict_get("startSolarSystemID"), Some(&PyRep::Integer(0)));
-    assert_eq!(c_inner.dict_get("endSolarSystemID"), Some(&PyRep::Integer(0)));
-    assert_eq!(c_inner.dict_get("startRegionID"), Some(&PyRep::Integer(0)));
-    assert_eq!(c_inner.dict_get("endRegionID"), Some(&PyRep::Integer(0)));
-    let PyRep::List(c_items) = c_def.dict_get("items").unwrap() else { panic!() };
-    assert_eq!(c_items[0].dict_get("itemTypeID"), Some(&PyRep::Integer(0)));
-
     // 4. Untouched service/method pairs:
     //    map.GetIncursionGlobalReport, paperDollServer.GetPaperDollData, storeManager.get_categories/get_offers,
     //    agentMgr.GetOffer / GetAgentLocationWrap / GetMissionBriefingInfo / GetMissionObjectiveInfo
@@ -1380,161 +1310,6 @@ fn w4_mutant_killers_all_remaining_notifications() {
             PyRep::Tuple(vec![PyRep::Integer(60_003_760)]),
         ])])]
     );
-}
-
-#[test]
-fn issue_935_and_969_contract_wire_compat_shapes() {
-    // #935: contractProxy.CreateContract must return a sequence of contractIDs for V24 ShowCreatedContracts.
-    let created = normalize_macho_rpc_reply(
-        "contractProxy",
-        "CreateContract",
-        Ok(PyRep::keyval([
-            ("contractID", PyRep::Integer(42_001)),
-            ("status", PyRep::String("Outstanding".into())),
-        ])),
-    )
-    .expect("CreateContract keyval");
-    assert_eq!(created, PyRep::List(vec![PyRep::Integer(42_001)]));
-
-    let created_scalar = normalize_macho_rpc_reply(
-        "contractProxy",
-        "CreateContract",
-        Ok(PyRep::Integer(42_002)),
-    )
-    .expect("CreateContract scalar");
-    assert_eq!(created_scalar, PyRep::List(vec![PyRep::Integer(42_002)]));
-
-    // #969: contract_to_pyrep emits dateIssuedUnix/expirationUnix, string enums, None acceptorID,
-    // items with typeID (no itemTypeID/inCrate), requestedItems, and bids with amountISK (no amount).
-    let inner_kv = PyRep::keyval([
-        ("contractID", PyRep::Integer(55_001)),
-        ("type", PyRep::String("Auction".into())),
-        ("status", PyRep::String("Outstanding".into())),
-        ("availability", PyRep::String("Public".into())),
-        ("issuerID", PyRep::Integer(90_000_001)),
-        ("issuerCorpID", PyRep::Integer(98_000_001)),
-        ("assigneeID", PyRep::Integer(0)),
-        ("acceptorID", PyRep::None),
-        ("forCorp", PyRep::Bool(false)),
-        ("startStationID", PyRep::Integer(60_003_760)),
-        ("endStationID", PyRep::Integer(60_003_760)),
-        ("startSolarSystemID", PyRep::Integer(30_000_142)),
-        ("endSolarSystemID", PyRep::Integer(0)),
-        ("dateIssuedUnix", PyRep::Integer(1_794_485_538)),
-        ("expirationUnix", PyRep::Integer(1_794_571_938)),
-    ]);
-    let raw_contract = PyRep::keyval([
-        ("contractID", PyRep::Integer(55_001)),
-        ("type", PyRep::String("Auction".into())),
-        ("status", PyRep::String("Outstanding".into())),
-        ("availability", PyRep::String("Public".into())),
-        ("issuerID", PyRep::Integer(90_000_001)),
-        ("issuerCorpID", PyRep::Integer(98_000_001)),
-        ("assigneeID", PyRep::Integer(0)),
-        ("acceptorID", PyRep::None),
-        ("forCorp", PyRep::Bool(false)),
-        ("startStationID", PyRep::Integer(60_003_760)),
-        ("endStationID", PyRep::Integer(60_003_760)),
-        ("startSolarSystemID", PyRep::Integer(30_000_142)),
-        ("endSolarSystemID", PyRep::Integer(0)),
-        ("dateIssuedUnix", PyRep::Integer(1_794_485_538)),
-        ("expirationUnix", PyRep::Integer(1_794_571_938)),
-        (
-            "items",
-            PyRep::List(vec![PyRep::keyval([
-                ("itemID", PyRep::Integer(200_246_971)),
-                ("typeID", PyRep::Integer(34)),
-                ("quantity", PyRep::Integer(100)),
-            ])]),
-        ),
-        (
-            "requestedItems",
-            PyRep::List(vec![PyRep::keyval([
-                ("typeID", PyRep::Integer(35)),
-                ("quantity", PyRep::Integer(5)),
-            ])]),
-        ),
-        (
-            "bids",
-            PyRep::List(vec![PyRep::keyval([
-                ("bidderID", PyRep::Integer(90_000_002)),
-                ("amountISK", PyRep::Real(5_000.0)),
-            ])]),
-        ),
-        ("contract", inner_kv),
-    ]);
-
-    let expected_issued_ft = (1_794_485_538_i64 + 11_644_473_600) * 10_000_000;
-    let expected_expired_ft = (1_794_571_938_i64 + 11_644_473_600) * 10_000_000;
-
-    for method in [
-        "GetContractListForOwner",
-        "GetMyCurrentContractList",
-        "GetMyExpiredContractList",
-        "GetMyBids",
-    ] {
-        let rep = normalize_macho_rpc_reply(
-            "contractProxy",
-            method,
-            Ok(PyRep::List(vec![raw_contract.clone()])),
-        )
-        .unwrap_or_else(|e| panic!("{method} failed: {e:?}"));
-        let Some(PyRep::List(contracts)) = rep.dict_get("contracts") else {
-            panic!("{method} must return contracts list");
-        };
-        assert_eq!(contracts.len(), 1);
-        let c = &contracts[0];
-        assert_eq!(c.dict_get("dateIssued"), Some(&PyRep::Integer(expected_issued_ft)));
-        assert_eq!(c.dict_get("dateExpired"), Some(&PyRep::Integer(expected_expired_ft)));
-        assert_eq!(c.dict_get("type"), Some(&PyRep::Integer(2)));
-        assert_eq!(c.dict_get("status"), Some(&PyRep::Integer(0)));
-        assert_eq!(c.dict_get("availability"), Some(&PyRep::Integer(0)));
-        assert_eq!(c.dict_get("acceptorID"), Some(&PyRep::Integer(0)));
-        assert_eq!(c.dict_get("endSolarSystemID"), Some(&PyRep::Integer(30_000_142)));
-        assert_eq!(c.dict_get("numBids"), Some(&PyRep::Integer(1)));
-
-        let Some(PyRep::Dict(items_map)) = rep.dict_get("items") else {
-            panic!("{method} must return items dict keyed by contractID");
-        };
-        let Some((_, PyRep::List(cid_items))) = items_map
-            .iter()
-            .find(|(k, _)| *k == PyRep::Integer(55_001))
-        else {
-            panic!("{method} items dict missing contractID 55001");
-        };
-        assert_eq!(cid_items.len(), 2);
-        assert_eq!(cid_items[0].dict_get("itemTypeID"), Some(&PyRep::Integer(34)));
-        assert_eq!(cid_items[0].dict_get("inCrate"), Some(&PyRep::Bool(true)));
-        assert_eq!(cid_items[1].dict_get("itemTypeID"), Some(&PyRep::Integer(35)));
-        assert_eq!(cid_items[1].dict_get("inCrate"), Some(&PyRep::Bool(false)));
-    }
-
-    let search = normalize_macho_rpc_reply(
-        "contractProxy",
-        "SearchContracts",
-        Ok(PyRep::List(vec![raw_contract])),
-    )
-    .expect("SearchContracts");
-    let Some(PyRep::List(search_contracts)) = search.dict_get("contracts") else {
-        panic!("SearchContracts must return contracts list");
-    };
-    assert_eq!(search_contracts.len(), 1);
-    let entry = &search_contracts[0];
-    let inner = entry.dict_get("contract").expect("contract inner");
-    assert_eq!(inner.dict_get("dateIssued"), Some(&PyRep::Integer(expected_issued_ft)));
-    assert_eq!(inner.dict_get("dateExpired"), Some(&PyRep::Integer(expected_expired_ft)));
-    assert_eq!(inner.dict_get("type"), Some(&PyRep::Integer(2)));
-    assert_eq!(inner.dict_get("acceptorID"), Some(&PyRep::Integer(0)));
-    let Some(PyRep::List(search_items)) = entry.dict_get("items") else {
-        panic!("SearchContracts entry missing items list");
-    };
-    assert_eq!(search_items[0].dict_get("itemTypeID"), Some(&PyRep::Integer(34)));
-    assert_eq!(search_items[0].dict_get("inCrate"), Some(&PyRep::Bool(true)));
-    let Some(PyRep::List(search_bids)) = entry.dict_get("bids") else {
-        panic!("SearchContracts entry missing bids list");
-    };
-    assert_eq!(search_bids[0].dict_get("amount"), Some(&PyRep::Real(5_000.0)));
-    assert_eq!(entry.dict_get("numBids"), Some(&PyRep::Integer(1)));
 }
 
 #[test]

@@ -22,6 +22,18 @@ use std::sync::Arc;
 pub(super) fn dict_i64(r: &PyRep, k: &str) -> Option<i64> {
     r.dict_get(k).and_then(|v| v.as_i64())
 }
+pub(super) fn created_cid(r: &PyRep) -> Option<i64> {
+    match r {
+        PyRep::List(ids) => ids.first().and_then(|v| v.as_i64()),
+        _ => dict_i64(r, "contractID"),
+    }
+}
+pub(super) fn contract_entries(r: &PyRep) -> &[PyRep] {
+    match r.dict_get("contracts") {
+        Some(PyRep::List(rows)) => rows.as_slice(),
+        _ => panic!("expected KeyVal with contracts list, got {r:?}"),
+    }
+}
 pub(super) fn dict_str<'a>(r: &'a PyRep, k: &str) -> Option<&'a str> {
     r.dict_get(k).and_then(|v| v.as_str())
 }
@@ -342,7 +354,7 @@ fn create_contract_validation_errors_and_slot_limits() {
     )
     .unwrap()
     .unwrap();
-    assert_eq!(dict_i64(&wtb, "maxContractsLimit"), Some(1));
+    assert!(created_cid(&wtb).is_some());
 
     let err_limit = handle(
         &ctx,
@@ -501,7 +513,7 @@ fn contract_notify_delta_acl_deposit_courier_expiry_break_wrap_and_search_edges(
         ])],
         &kw,
     ).unwrap().unwrap();
-    let corp_cid = dict_i64(&ok_div3, "contractID").unwrap();
+    let corp_cid = created_cid(&ok_div3).unwrap();
     issuer_sess.corp_account_key = 1000;
     ctx.db.with_snapshot(|snap| {
         let div3_rem = snap.corporations[&corp_id].division_balance(3);
@@ -574,7 +586,7 @@ fn contract_notify_delta_acl_deposit_courier_expiry_break_wrap_and_search_edges(
         ])],
         &kw,
     ).unwrap().unwrap();
-    let wtb_cid = dict_i64(&wtb_res, "contractID").unwrap();
+    let wtb_cid = created_cid(&wtb_res).unwrap();
     let _ = ctx.drain_notifications_for_char(acceptor_id);
     let _ = ctx.drain_notifications_for_char(issuer_id);
     let wtb_acc = handle(
@@ -678,7 +690,7 @@ fn contract_notify_delta_acl_deposit_courier_expiry_break_wrap_and_search_edges(
         ])],
         &kw,
     ).unwrap().unwrap();
-    let cour_cid = dict_i64(&cour_res, "contractID").unwrap();
+    let cour_cid = created_cid(&cour_res).unwrap();
     let wrap_id = handle(&ctx, &mut acceptor_sess, "contractProxy", "AcceptContract", &[PyRep::Integer(cour_cid)], &kw)
         .unwrap().unwrap().dict_get("courierPackageID").and_then(|v| v.as_i64()).unwrap();
     assert_eq!(
@@ -751,12 +763,14 @@ fn contract_notify_delta_acl_deposit_courier_expiry_break_wrap_and_search_edges(
         ("minPrice".into(), PyRep::Real(77_777.0)),
         ("maxPrice".into(), PyRep::Real(77_777.0)),
     ].into_iter().collect();
-    let PyRep::List(ghost_rows) = handle(&ctx, &mut acceptor_sess, "contractProxy", "SearchContracts", &[], &srch_kw).unwrap().unwrap() else { panic!("list") };
-    assert!(ghost_rows.iter().any(|r| dict_i64(r, "contractID") == Some(ghost_cid)));
-    assert!(!ghost_rows.iter().any(|r| dict_i64(r, "contractID") == Some(corp_cid)));
-    let ghost_row = ghost_rows.iter().find(|r| dict_i64(r, "contractID") == Some(ghost_cid)).unwrap();
-    assert_eq!(dict_i64(ghost_row, "startSolarSystemID"), Some(0));
-    assert_eq!(dict_i64(ghost_row, "startRegionID"), Some(0));
+    let search_res = handle(&ctx, &mut acceptor_sess, "contractProxy", "SearchContracts", &[], &srch_kw).unwrap().unwrap();
+    let ghost_rows = contract_entries(&search_res);
+    assert!(ghost_rows.iter().any(|r| r.dict_get("contract").and_then(|c| dict_i64(c, "contractID")) == Some(ghost_cid)));
+    assert!(!ghost_rows.iter().any(|r| r.dict_get("contract").and_then(|c| dict_i64(c, "contractID")) == Some(corp_cid)));
+    let ghost_row = ghost_rows.iter().find(|r| r.dict_get("contract").and_then(|c| dict_i64(c, "contractID")) == Some(ghost_cid)).unwrap();
+    let ghost_contract = ghost_row.dict_get("contract").unwrap();
+    assert_eq!(dict_i64(ghost_contract, "startSolarSystemID"), Some(0));
+    assert_eq!(dict_i64(ghost_contract, "startRegionID"), Some(0));
 
     // 6. sweep_expired_contracts_and_notify: no-due fast path, corp Courier Failed (issuer != acceptor + unknown acceptor char skipped),
     //    Auction Completed (char bidder vs corp bidder fallback notify_char), ItemExchange Expired with untracked location_id==cid item!
