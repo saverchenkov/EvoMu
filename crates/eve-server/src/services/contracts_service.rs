@@ -340,7 +340,7 @@ pub(crate) struct ContractItemReply {
     pub copy: bool,
     pub material_efficiency: i64,
     pub time_efficiency: i64,
-    pub runs_remaining: Option<u32>,
+    pub runs_remaining: Option<i32>,
     pub damage: f64,
     pub source_mutaplasmid_id: Option<u32>,
     pub dynamic_attributes: Vec<(i64, f64)>,
@@ -375,7 +375,7 @@ impl ContractItemReply {
         }
     }
 
-    pub(crate) fn requested(type_id: u32, quantity: u32) -> Self {
+    pub(crate) fn requested(type_id: u32, quantity: i32) -> Self {
         Self {
             item_id: 0,
             type_id: i64::from(type_id),
@@ -488,7 +488,7 @@ pub(crate) struct ContractReply {
     pub crate_id: i64,
     pub item_ids: Vec<i64>,
     pub items: Vec<ContractItemReply>,
-    pub requested_items: Vec<(u32, u32)>,
+    pub requested_items: Vec<(u32, i32)>,
     pub bids: Vec<ContractBidReply>,
     pub date_issued_ft: i64,
     pub date_expired_ft: i64,
@@ -502,7 +502,7 @@ pub(crate) struct ContractReply {
     pub primary_copy: bool,
     pub primary_me: i64,
     pub primary_te: i64,
-    pub primary_runs: Option<u32>,
+    pub primary_runs: Option<i32>,
     pub primary_dmg: f64,
     pub primary_mutaplasmid_id: Option<u32>,
 }
