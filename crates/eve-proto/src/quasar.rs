@@ -1,12 +1,12 @@
-//! `quasar` — V24.01 Quasar Protobuf Wire Codec, `FileDescriptorProto` Registry,
+//! `quasar` — V24.02 Quasar Protobuf Wire Codec, `FileDescriptorProto` Registry,
 //! Dynamic Message Codec, Deterministic Rust Codegen, and Gateway Core Types (`Q-1`, `Q-2`).
 //!
-//! Loads all 1,455 `google.protobuf.FileDescriptorProto` binary schemas extracted from the
-//! V24.01 EVE client's `code.ccp` into local gitignored `data/quasar_descriptors.sqlite`,
+//! Loads all 1,464 `google.protobuf.FileDescriptorProto` binary schemas extracted from the
+//! V24.02 EVE client's `code.ccp` into local gitignored `data/quasar_descriptors.sqlite`,
 //! verifies the tracked `data/quasar_descriptor_manifest.json` SHA-256 and MD5 checksums and
-//! per-domain file counts (135 domains, 1,455 files, 6,741 messages), and provides both:
+//! per-domain file counts (136 domains, 1,464 files, 6,756 messages), and provides both:
 //! - Dynamic schema-driven encoding, decoding, validation, and sample instantiation for every
-//!   message across all 1,455 files;
+//!   message across all 1,464 files;
 //! - Static strongly-typed Rust structs for the Quasar public/internal gateway envelopes and
 //!   shared core types (`eve_public.Request`, `eve_public.Response`, `eve_public.Notice`,
 //!   `eve_public.Event`, `eve_public.AuthoritativeContext`, `eve.Request`, `eve.Response`, etc.).
@@ -23,8 +23,8 @@ use thiserror::Error;
 
 use crate::{MAX_COLLECTION_LEN, MAX_FRAME_SIZE, MAX_RECURSION_DEPTH};
 
-pub const EXPECTED_QUASAR_DOMAIN_COUNT: usize = 135;
-pub const EXPECTED_QUASAR_FILE_COUNT: usize = 1_455;
+pub const EXPECTED_QUASAR_DOMAIN_COUNT: usize = 136;
+pub const EXPECTED_QUASAR_FILE_COUNT: usize = 1_464;
 pub const TYPE_GOOGLEAPIS_PREFIX: &str = "type.googleapis.com/";
 pub const TYPE_EVETECH_PREFIX: &str = "type.evetech.net/";
 

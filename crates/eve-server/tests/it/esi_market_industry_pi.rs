@@ -8229,7 +8229,7 @@ pub(crate) mod esi_corp_blueprints_structures_live {
         let space_cp = field(&space_rsp.payload.unwrap().value, 1).expect("space checkpoint");
         let space_url = String::from_utf8(field(&space_cp, 1).unwrap()).unwrap();
         let space_path = space_url.strip_prefix("http://127.0.0.1:26004").expect("local ESI HTTP URL");
-        assert_eq!(space_path, format!("/cdn/maptags/v24.1.{}/universe.fb", ctx.sde.solar_systems.len()));
+        assert_eq!(space_path, format!("/cdn/maptags/v24.2.{}/universe.fb", ctx.sde.solar_systems.len()));
         let map_http = router.handle_request(&EsiHttpRequest::new("GET", space_path));
         assert_eq!(map_http.status_code, 404);
 

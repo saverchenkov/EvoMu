@@ -152,7 +152,10 @@ async fn machonet_cache_authentication_and_subscription_rpcs() {
             .await
             .unwrap()
             .unwrap(),
-        PyRep::Tuple(vec![PyRep::Real(V24_01_VERSION), PyRep::Integer(V24_01_BUILD)])
+        PyRep::Tuple(vec![
+            PyRep::Real(eve_machonet::V24_VERSION_NUMBER),
+            PyRep::Integer(eve_machonet::V24_BOOT_BUILD as i64),
+        ])
     );
     for tbl in ["roles", "races", "factions", "bloodlines", "ancestries"] {
         assert!(handle(

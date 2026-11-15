@@ -1269,7 +1269,7 @@ mod tests {
                         type_url,
                         value: payload_bytes.clone(),
                     }),
-                    external_origin: "eve-desktop-client/3619879 tq".into(),
+                    external_origin: format!("eve-desktop-client/{} tq", eve_machonet::V24_BOOT_BUILD),
                     application_instance_uuid: app_uuid.as_bytes().to_vec(),
                     authoritative_context: Some(AuthoritativeContext::for_session_at(
                         Some(1),
@@ -1312,7 +1312,7 @@ mod tests {
                     ),
                     value: Vec::new(),
                 }),
-                external_origin: "eve-desktop-client/3619879 tq".into(),
+                external_origin: format!("eve-desktop-client/{} tq", eve_machonet::V24_BOOT_BUILD),
                 application_instance_uuid: app_uuid.as_bytes().to_vec(),
                 authoritative_context: Some(AuthoritativeContext::for_session_at(
                     Some(1),
@@ -1411,7 +1411,7 @@ mod tests {
                     type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.app.eveonline.ui.OpenedEvent"),
                     value: Vec::new(),
                 }),
-                external_origin: "eve-desktop-client/3619879 tq".into(),
+                external_origin: format!("eve-desktop-client/{} tq", eve_machonet::V24_BOOT_BUILD),
                 application_instance_uuid: app_uuid.as_bytes().to_vec(),
                 authoritative_context: None,
                 ..Default::default()
@@ -1749,7 +1749,7 @@ mod tests {
                     type_url,
                     value: req_bytes.clone(),
                 }),
-                external_origin: "eve-desktop-client/3619879 tq".into(),
+                external_origin: format!("eve-desktop-client/{} tq", eve_machonet::V24_BOOT_BUILD),
                 application_instance_uuid: app_uuid.as_bytes().to_vec(),
                 authoritative_context: Some(AuthoritativeContext::for_session_at(
                     Some(1),

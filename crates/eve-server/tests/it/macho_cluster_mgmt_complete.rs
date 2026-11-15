@@ -85,8 +85,14 @@ async fn test_macho_net_cluster_mgmt_rpcs() {
         .dispatch_rpc(&mut regular_sess, "machoNet", None, "GetGlobalConfig", &[], &kw, None)
         .await
         .expect("GetGlobalConfig should succeed");
-    assert_eq!(get_dict_entry(&res, "machoVersion"), Some(&PyRep::Integer(496)));
-    assert_eq!(get_dict_entry(&res, "build"), Some(&PyRep::Integer(3_624_425)));
+    assert_eq!(
+        get_dict_entry(&res, "machoVersion"),
+        Some(&PyRep::Integer(i64::from(eve_machonet::V24_MACHO_VERSION)))
+    );
+    assert_eq!(
+        get_dict_entry(&res, "build"),
+        Some(&PyRep::Integer(i64::from(eve_machonet::V24_BOOT_BUILD)))
+    );
     assert_eq!(
         get_dict_entry(&res, "clusterName"),
         Some(&PyRep::String("TRANQUILITY".into()))

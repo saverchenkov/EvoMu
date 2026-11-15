@@ -707,7 +707,8 @@ fn market_contract_services_edge_branches_decoding_and_mutants() {
     assert_eq!(host_attrs.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_varint(), Some(12345678));
     assert_eq!(host_attrs.fields.iter().find(|f| f.field_number == 2).unwrap().value.as_str().unwrap(), Some("en_US"));
     assert_eq!(host_attrs.fields.iter().find(|f| f.field_number == 4).unwrap().value.as_varint(), Some(16384));
-    assert_eq!(host_attrs.fields.iter().find(|f| f.field_number == 10).unwrap().value.as_str().unwrap(), Some("24.01.2024"));
+    let expected_client_ver = format!("{:.2}.2024", eve_machonet::V24_VERSION_NUMBER);
+    assert_eq!(host_attrs.fields.iter().find(|f| f.field_number == 10).unwrap().value.as_str().unwrap(), Some(expected_client_ver.as_str()));
 
     let disc = dispatch_raw(&buyer_ctx, "DisconnectRequest", vec![], DynamicQuasarMessage::new("test")).unwrap();
     assert_eq!(disc.type_url, format!("{TYPE_GOOGLEAPIS_PREFIX}google.protobuf.Empty"));

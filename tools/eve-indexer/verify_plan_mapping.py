@@ -40,7 +40,7 @@ DOMAIN_ASSIGNMENTS = [
             "voiceMgr", "worldSpaceServer", "zActionServer",
         ],
         [
-            "app", "auth", "botdetection", "cdn", "client", "color", "csat", "debug",
+            "app", "auth", "botdetection", "cdn", "client", "color", "csat", "customer", "debug",
             "device", "entitlement", "eve", "eve_public_root", "graphics", "id", "idempotency",
             "legacy", "legal", "localization", "login", "math", "monolith", "network",
             "pii", "presence", "quasar", "search", "thirdpartyapi", "ui", "user", "vanguard",
@@ -216,7 +216,7 @@ CLIENT_ONLY_SERVICES_ALLOWLIST = {
 
 def render_markdown_table(total_rpc, v24_active, legacy_only, total_quasar):
     lines = [
-        "| Domain Module (`crates/eve-server/src/services/`) | Assigned `machoNet` Remote Services & Monikers (`%d` Cataloged: `%d` V24.01 Active + `%d` Crucible Legacy-Only) | Assigned Quasar Protobuf Domains (`%d` Total: `69` `eve_public.*` + `66` `eve.*` Internal) |"
+        "| Domain Module (`crates/eve-server/src/services/`) | Assigned `machoNet` Remote Services & Monikers (`%d` Cataloged: `%d` V24.01 Active + `%d` Crucible Legacy-Only) | Assigned Quasar Protobuf Domains (`%d` Total: `69` `eve_public.*` + `67` `eve.*` Internal) |"
         % (total_rpc, v24_active, legacy_only, total_quasar),
         "|---|---|---|",
     ]

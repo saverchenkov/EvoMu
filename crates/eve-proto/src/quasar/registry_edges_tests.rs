@@ -153,9 +153,10 @@ fn registry_open_error_paths_and_synthetic_full_manifest_verification() {
         .unwrap();
     }
     let err_cnt = QuasarDescriptorRegistry::open(&db_path, &manifest_path).unwrap_err();
-    assert!(matches!(err_cnt, QuasarError::ManifestMismatch(ref m) if m.contains("Expected 1455")));
+    let expected_prefix = format!("Expected {EXPECTED_QUASAR_FILE_COUNT}");
+    assert!(matches!(err_cnt, QuasarError::ManifestMismatch(ref m) if m.contains(&expected_prefix)));
 
-    // 8. Synthetic 1455-file / 135-domain SQLite DB to test domain-mismatch, combined sha/md5 mismatch, and full Ok load!
+    // 8. Synthetic EXPECTED_QUASAR_FILE_COUNT-file / EXPECTED_QUASAR_DOMAIN_COUNT-domain SQLite DB to test domain-mismatch, combined sha/md5 mismatch, and full Ok load!
     let mut rows_meta: Vec<(String, String, String, String, Vec<u8>)> =
         Vec::with_capacity(EXPECTED_QUASAR_FILE_COUNT);
     let mut per_domain_counts: BTreeMap<String, usize> = BTreeMap::new();

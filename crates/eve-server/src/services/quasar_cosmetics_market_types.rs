@@ -10,7 +10,7 @@ pub const PARAGON_CORP_ID: u64 = 1_000_419;
 /// SDE group ID for `Ship SKIN Design Element` (`sde_groups.group_id = 4726`).
 pub(super) const GROUP_SHIP_SKIN_DESIGN_ELEMENT: u32 = 4726;
 /// Current Paragon Hub buyer fee schedule version string.
-pub const BUYER_FEES_VERSION: &str = "v24.01.1";
+pub const BUYER_FEES_VERSION: &str = "v24.02.1";
 /// Maximum allowed unit or total price in ISK or PLEX cents (`10_000_000_000_000` = 10 trillion).
 pub const MAX_LISTING_PRICE_UNITS: u64 = 10_000_000_000_000;
 /// Maximum allowed listing or purchase quantity (`10_000`).

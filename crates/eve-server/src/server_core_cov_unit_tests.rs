@@ -228,7 +228,7 @@ async fn bug_reporting_authenticated_submission_attachments_zip_and_eviction() {
         "summary": "Auth bug submission",
         "description": format!("Details\n\nSession Info:\nCharacter: Test Pilot ({cid})"),
         "stackTrace": stack,
-        "clientVersion": "24.01",
+        "clientVersion": format!("{:.2}", eve_machonet::V24_VERSION_NUMBER),
     });
     let ok_resp = handle_bugs_http_request(
         &ctx,

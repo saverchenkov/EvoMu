@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch the EVE Online V24.01 client against an EvoMu server.
+"""Launch the EVE Online V24.02 client against an EvoMu server.
 
 The installed client encrypts its login so that only CCP's servers can read it.
 EvoMu uses the client's built-in "Placebo" setting instead, which has to be
@@ -81,7 +81,7 @@ def server_is_listening(host, port):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Launch the EVE Online V24.01 client against an EvoMu server.",
+        description="Launch the EVE Online V24.02 client against an EvoMu server.",
         epilog="Anything after -- is passed to the client unchanged.",
     )
     parser.add_argument("--login", metavar="USER:PASSWORD", help="account to log in with (required to launch)")

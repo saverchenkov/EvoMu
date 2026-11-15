@@ -205,12 +205,13 @@ fn crypto_challenge_packet_roundtrip_password_extraction_and_validation() {
     );
 
     // Alternative representations in from_pyrep (String/Buffer challenge, Integer boot_version, ObjectEx password)
+    let default_ver = VersionExchange::default();
     let alt_dict = PyRep::Dict(vec![
-        (PyRep::String("macho_version".into()), PyRep::Integer(496)),
+        (PyRep::String("macho_version".into()), PyRep::Integer(crate::V24_MACHO_VERSION as i64)),
         (PyRep::String("boot_version".into()), PyRep::Integer(24)),
-        (PyRep::String("boot_build".into()), PyRep::Integer(3_624_425)),
-        (PyRep::String("boot_codename".into()), PyRep::String("V24.01".into())),
-        (PyRep::String("boot_region".into()), PyRep::String("ccp".into())),
+        (PyRep::String("boot_build".into()), PyRep::Integer(crate::V24_BOOT_BUILD as i64)),
+        (PyRep::String("boot_codename".into()), PyRep::String(default_ver.codename().into())),
+        (PyRep::String("boot_region".into()), PyRep::String(default_ver.region().into())),
         (
             PyRep::String("user_password".into()),
             PyRep::ObjectEx {
@@ -681,7 +682,7 @@ fn crypto_challenge_server_hs_and_ack_fallback_branches() {
         CryptoChallengePacket::from_pyrep(&PyRep::Tuple(vec![
             PyRep::Buffer(vec![1, 2]),
             PyRep::Dict(vec![
-                (PyRep::String("macho_version".into()), PyRep::Integer(496)),
+                (PyRep::String("macho_version".into()), PyRep::Integer(crate::V24_MACHO_VERSION as i64)),
                 (PyRep::String("boot_version".into()), PyRep::String("bad".into())),
             ]),
         ])),
@@ -724,11 +725,11 @@ fn crypto_challenge_server_hs_and_ack_fallback_branches() {
         PyRep::None,
         PyRep::Dict(vec![
             (PyRep::String("challenge_responsehash".into()), PyRep::String("h".into())),
-            (PyRep::String("macho_version".into()), PyRep::Integer(496)),
+            (PyRep::String("macho_version".into()), PyRep::Integer(crate::V24_MACHO_VERSION as i64)),
             (PyRep::String("boot_version".into()), PyRep::Integer(24)),
-            (PyRep::String("boot_build".into()), PyRep::Integer(3624425)),
-            (PyRep::String("boot_codename".into()), PyRep::String("V24.01".into())),
-            (PyRep::String("boot_region".into()), PyRep::String("ccp".into())),
+            (PyRep::String("boot_build".into()), PyRep::Integer(crate::V24_BOOT_BUILD as i64)),
+            (PyRep::String("boot_codename".into()), PyRep::String(expected.codename().into())),
+            (PyRep::String("boot_region".into()), PyRep::String(expected.region().into())),
         ]),
     ]);
     let parsed_sh = CryptoServerHandshake::from_pyrep(&sh_minimal);

@@ -1,5 +1,5 @@
 use super::*;
-use crate::{V24_BOOT_BUILD, V24_MACHO_VERSION};
+use crate::{V24_BOOT_BUILD, V24_MACHO_VERSION, V24_VERSION_NUMBER, VersionExchange};
 use std::collections::HashMap;
 
 fn dict(pairs: Vec<(&str, PyRep)>) -> PyRep {
@@ -12,12 +12,13 @@ fn dict(pairs: Vec<(&str, PyRep)>) -> PyRep {
 }
 
 fn make_valid_challenge_dict() -> PyRep {
+    let ver = VersionExchange::default();
     dict(vec![
         ("macho_version", PyRep::Integer(V24_MACHO_VERSION as i64)),
-        ("boot_version", PyRep::Real(24.01)),
+        ("boot_version", PyRep::Real(V24_VERSION_NUMBER)),
         ("boot_build", PyRep::Integer(V24_BOOT_BUILD as i64)),
-        ("boot_codename", PyRep::String("V24.01".into())),
-        ("boot_region", PyRep::String("ccp".into())),
+        ("boot_codename", PyRep::String(ver.codename().into())),
+        ("boot_region", PyRep::String(ver.region().into())),
         ("user_name", PyRep::String("pilot_edge".into())),
         ("user_password", PyRep::String("secret_pw".into())),
         ("user_languageid", PyRep::String("EN".into())),

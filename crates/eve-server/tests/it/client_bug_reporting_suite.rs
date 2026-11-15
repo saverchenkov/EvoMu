@@ -374,7 +374,10 @@ async fn test_macho_handshake_and_global_config_enable_v24_f12_bug_button() {
         .expect("cache.GetServerVersionAndBuild");
     assert_eq!(
         ver_tuple,
-        PyRep::Tuple(vec![PyRep::Real(24.01), PyRep::Integer(3_624_425)])
+        PyRep::Tuple(vec![
+            PyRep::Real(eve_machonet::V24_VERSION_NUMBER),
+            PyRep::Integer(i64::from(eve_machonet::V24_BOOT_BUILD)),
+        ])
     );
 }
 
@@ -483,7 +486,7 @@ async fn test_f12_bugreporter_http_endpoints_zip_extraction_and_security_guards(
         "computerInfo": "Windows 11 Pro 24H2 / RTX 4080 / DX12",
         "originalReporterId": "1",
         "Server": "EvoMu-LAN",
-        "Build": 3624425,
+        "Build": eve_machonet::V24_BOOT_BUILD,
         "labels": ["Client"]
     });
     let issue_bytes = serde_json::to_vec(&issue_payload).unwrap();
@@ -714,7 +717,7 @@ fn test_sync_bugs_cli_dry_run_supports_both_crashes_and_f12_reports() {
             "reproduction_steps": "1. Undock from Jita 4-4",
             "computer_info": "Win11 DX12",
             "server_name": "EvoMu",
-            "client_build": 3624425,
+            "client_build": eve_machonet::V24_BOOT_BUILD,
             "labels": ["Client"],
             "attachments": ["attachments/EBR-0001-ABCDEF/igbr_0.jpg"],
             "ship_fitting_eft": "[Merlin, Fit]\nLight Neutron Blaster II",

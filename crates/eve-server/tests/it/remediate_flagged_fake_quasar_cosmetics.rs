@@ -210,7 +210,7 @@ impl GrpcClient {
                 },
                 value: payload_bytes,
             }),
-            external_origin: "eve-desktop-client/3619879 tq".into(),
+            external_origin: format!("eve-desktop-client/{} tq", eve_machonet::V24_BOOT_BUILD),
             application_instance_uuid: self.app_uuid.to_vec(),
             authoritative_context: None,
             trace_context: None,
@@ -297,7 +297,7 @@ impl GrpcClient {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{full_type}"),
                 value: Vec::new(),
             }),
-            external_origin: "eve-desktop-client/3619879 tq".into(),
+            external_origin: format!("eve-desktop-client/{} tq", eve_machonet::V24_BOOT_BUILD),
             application_instance_uuid: self.app_uuid.to_vec(),
             authoritative_context: Some(AuthoritativeContext::for_session_at(
                 Some(self.user_id as i32),

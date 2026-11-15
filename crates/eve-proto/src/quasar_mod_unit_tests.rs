@@ -4,8 +4,8 @@ use super::*;
 
 #[test]
 fn quasar_type_url_prefixes_and_rfc_hash_vectors() {
-    assert_eq!(EXPECTED_QUASAR_DOMAIN_COUNT, 135);
-    assert_eq!(EXPECTED_QUASAR_FILE_COUNT, 1_455);
+    assert_eq!(EXPECTED_QUASAR_DOMAIN_COUNT, 136);
+    assert_eq!(EXPECTED_QUASAR_FILE_COUNT, 1_464);
 
     assert!(has_quasar_type_url_prefix(
         "type.googleapis.com/eve_public.Request"

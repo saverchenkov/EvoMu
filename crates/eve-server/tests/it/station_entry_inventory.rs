@@ -677,11 +677,11 @@ async fn native_client_undock_and_space_entry_delivers_set_state_and_destiny_upd
     let _hello = read_framed_pyrep(&mut s).await.unwrap().unwrap();
     let client_ver = PyRep::Tuple(vec![
         PyRep::Integer(170_472),
-        PyRep::Integer(496),
+        PyRep::Integer(i64::from(eve_machonet::V24_MACHO_VERSION)),
         PyRep::Integer(0),
-        PyRep::Real(24.01),
-        PyRep::Integer(3_624_425),
-        PyRep::ascii_bytes("V24.01@ccp"),
+        PyRep::Real(eve_machonet::V24_VERSION_NUMBER),
+        PyRep::Integer(i64::from(eve_machonet::V24_BOOT_BUILD)),
+        PyRep::ascii_bytes(eve_machonet::V24_CODENAME_AT_REGION),
     ]);
     write_framed_pyrep(&mut s, &client_ver).await.unwrap();
     write_framed_pyrep(&mut s, &CryptoRequestPacket::placebo().to_pyrep())

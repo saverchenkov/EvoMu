@@ -87,10 +87,10 @@ fn ip_address_trace_context_and_semver_roundtrip() {
 
     assert_quasar_roundtrip(&SemanticVersionSpec {
         major: 24,
-        minor: 1,
+        minor: 2,
         patch: 3,
         prerelease_tags: vec!["rc1".into(), "alpha".into()],
-        build_tags: vec!["3624425".into()],
+        build_tags: vec!["3698585".into()],
     });
 }
 

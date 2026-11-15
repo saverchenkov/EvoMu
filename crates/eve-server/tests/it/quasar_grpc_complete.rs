@@ -382,20 +382,29 @@ async fn q1_q2_gateway_golden_wire_codec_and_descriptor_acceptance() {
     let reg = QuasarDescriptorRegistry::open_default()
         .expect("load data/quasar_descriptors.sqlite");
 
-    // Q-1 Acceptance: All 1,455 descriptors extracted with recorded checksum
-    assert_eq!(reg.files.len(), 1_455);
-    assert_eq!(reg.manifest.descriptor_file_count, 1_455);
-    assert_eq!(reg.files_by_domain.len(), 135);
-    assert_eq!(reg.manifest.domain_count, 135);
-    assert_eq!(reg.manifest.unique_package_count, 1_270);
-    assert_eq!(reg.manifest.total_message_count, 6_741);
+    // Q-1 Acceptance: All 1,464 descriptors extracted with recorded checksum
+    assert_eq!(reg.files.len(), eve_proto::quasar::EXPECTED_QUASAR_FILE_COUNT);
+    assert_eq!(
+        reg.manifest.descriptor_file_count,
+        eve_proto::quasar::EXPECTED_QUASAR_FILE_COUNT
+    );
+    assert_eq!(
+        reg.files_by_domain.len(),
+        eve_proto::quasar::EXPECTED_QUASAR_DOMAIN_COUNT
+    );
+    assert_eq!(
+        reg.manifest.domain_count,
+        eve_proto::quasar::EXPECTED_QUASAR_DOMAIN_COUNT
+    );
+    assert_eq!(reg.manifest.unique_package_count, 1_278);
+    assert_eq!(reg.manifest.total_message_count, 6_756);
     assert_eq!(
         reg.manifest.combined_serialized_pb_sha256,
-        "06a2d8bde8222e444dcb740932cc3ef5e208bb853693d33a6a48ec8664f068be"
+        "b0b7cb4e301173a59e025442d75e656793cf794fe908581618074a55a254b6fb"
     );
     assert_eq!(
         reg.manifest.combined_serialized_pb_md5,
-        "318048feebdaee6d35565c0e2d5b284c"
+        "7ec4fb8bbe4c6f5982d34eedce49dc67"
     );
 
     // Q-2 Acceptance: Golden wire tests pass against client's own gateway codec

@@ -10,9 +10,6 @@ use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
 use std::collections::HashMap;
 
-const V24_01_VERSION: f64 = 24.01;
-pub const V24_01_BUILD: i64 = 3_624_425;
-
 pub fn get_init_vals(ctx: &ServerContext) -> PyRep {
     let mut sorted_svcs: Vec<&String> = ctx.cataloged_services.iter().collect();
     sorted_svcs.sort();
@@ -303,8 +300,8 @@ pub async fn handle(
             // V24 `eve/client/script/ui/services/bugReporting.pyj:218` (`CollectData`):
             // `serverVersion, serverBuild = sm.RemoteSvc('cache').GetServerVersionAndBuild()`
             Some(Ok(PyRep::Tuple(vec![
-                PyRep::Real(V24_01_VERSION),
-                PyRep::Integer(V24_01_BUILD),
+                PyRep::Real(eve_machonet::V24_VERSION_NUMBER),
+                PyRep::Integer(eve_machonet::V24_BOOT_BUILD as i64),
             ])))
         }
 

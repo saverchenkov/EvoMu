@@ -485,7 +485,10 @@ async fn test_rpc_auth_cache_char_settings_and_login_services() {
     let ver = rpc(&ctx, &mut s1, "cache", "GetServerVersionAndBuild", &[]).await;
     assert_eq!(
         ver,
-        PyRep::Tuple(vec![PyRep::Real(24.01), PyRep::Integer(3_624_425)])
+        PyRep::Tuple(vec![
+            PyRep::Real(eve_machonet::V24_VERSION_NUMBER),
+            PyRep::Integer(i64::from(eve_machonet::V24_BOOT_BUILD)),
+        ])
     );
     assert_eq!(rpc(&ctx, &mut s1, "charMgr", "GetCharacterSettings", &[]).await, PyRep::Dict(vec![]));
     assert_eq!(rpc(&ctx, &mut s1, "localizationServer", "GetAllTextChanges", &[]).await, PyRep::None);

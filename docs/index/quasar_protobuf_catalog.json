@@ -1,6 +1,7 @@
 {
   "academy": [
     "eveProto/generated/eve/academy/ships/events_pb2.pyj",
+    "eveProto/generated/eve_public/academy/ships/api/notices_pb2.pyj",
     "eveProto/generated/eve_public/academy/ships/events_pb2.pyj"
   ],
   "accounting": [
@@ -125,6 +126,7 @@
     "eveProto/generated/eve_public/app/eveonline/operation/recommendation/ui/analytics_pb2.pyj",
     "eveProto/generated/eve_public/app/eveonline/operation/recommendation/ui_pb2.pyj",
     "eveProto/generated/eve_public/app/eveonline/planetaryproduction/planet_pb2.pyj",
+    "eveProto/generated/eve_public/app/eveonline/settings/api/events_pb2.pyj",
     "eveProto/generated/eve_public/app/eveonline/settings/featurepreview/analytics_pb2.pyj",
     "eveProto/generated/eve_public/app/eveonline/skill/plan/certified/analytics_pb2.pyj",
     "eveProto/generated/eve_public/app/eveonline/slash/api/events_pb2.pyj",
@@ -133,6 +135,7 @@
     "eveProto/generated/eve_public/app/launcher/application/api/events_pb2.pyj",
     "eveProto/generated/eve_public/app/launcher/application/application_pb2.pyj",
     "eveProto/generated/eve_public/app/launcher/authentication/authentication_pb2.pyj",
+    "eveProto/generated/eve_public/app/launcher/carbon_resources/api/events_pb2.pyj",
     "eveProto/generated/eve_public/app/launcher/code_redemption/api/events_pb2.pyj",
     "eveProto/generated/eve_public/app/launcher/code_redemption/code_redemption_pb2.pyj",
     "eveProto/generated/eve_public/app/launcher/context/context_pb2.pyj",
@@ -577,6 +580,7 @@
     "eveProto/generated/eve/cosmetic/market/transaction/transaction_pb2.pyj",
     "eveProto/generated/eve/cosmetic/ship/logo/logo_pb2.pyj",
     "eveProto/generated/eve/cosmetic/ship/ship_pb2.pyj",
+    "eveProto/generated/eve/cosmetic/ship/skin/api/events_pb2.pyj",
     "eveProto/generated/eve/cosmetic/ship/skin/firstparty/api/events_pb2.pyj",
     "eveProto/generated/eve/cosmetic/ship/skin/firstparty/api/requests_pb2.pyj",
     "eveProto/generated/eve/cosmetic/ship/skin/firstparty/firstparty_pb2.pyj",
@@ -687,6 +691,10 @@
   ],
   "csat": [
     "eveProto/generated/eve/csat/survey_pb2.pyj"
+  ],
+  "customer": [
+    "eveProto/generated/eve/customer/api/requests_pb2.pyj",
+    "eveProto/generated/eve/customer/customer_pb2.pyj"
   ],
   "dailygoal": [
     "eveProto/generated/eve/dailygoal/api/admin/requests_pb2.pyj",
@@ -831,6 +839,8 @@
     "eveProto/generated/eve/factionwarfare/leaderboard/factions_pb2.pyj",
     "eveProto/generated/eve/factionwarfare/membership/api/events_pb2.pyj",
     "eveProto/generated/eve/factionwarfare/siege/api/events_pb2.pyj",
+    "eveProto/generated/eve/factionwarfare/siege/conquestengine/api/events_pb2.pyj",
+    "eveProto/generated/eve/factionwarfare/siege/conquestengine/conquestengine_pb2.pyj",
     "eveProto/generated/eve/factionwarfare/stats/api_pb2.pyj",
     "eveProto/generated/eve/factionwarfare/stats/character_pb2.pyj",
     "eveProto/generated/eve/factionwarfare/stats/corporation_pb2.pyj",
@@ -1676,6 +1686,7 @@
     "eveProto/generated/eve/user/subscription/api/api_pb2.pyj",
     "eveProto/generated/eve/user/subscription/log_pb2.pyj",
     "eveProto/generated/eve/user/subscription/subscription_pb2.pyj",
+    "eveProto/generated/eve/user/tag/api/events_pb2.pyj",
     "eveProto/generated/eve/user/tag/api/requests_pb2.pyj",
     "eveProto/generated/eve/user/tag_pb2.pyj",
     "eveProto/generated/eve/user/twofactor/api/admin/requests_pb2.pyj",

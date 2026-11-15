@@ -250,8 +250,10 @@ fn macho_address_and_packet_variants_roundtrip_and_reject_invalid() {
 #[test]
 fn version_exchange_and_extract_macho_call_req_edge_cases() {
     let mut ver = VersionExchange::default();
-    assert_eq!(ver.codename(), "V24.01");
+    assert_eq!(ver.codename(), "V24.02");
     assert_eq!(ver.region(), "ccp");
+    assert_eq!(ver.project_version, V24_CODENAME_AT_REGION);
+    assert!((ver.version_number - V24_VERSION_NUMBER).abs() < 1e-9);
 
     let hello = ver.to_server_hello_pyrep();
     assert_eq!(VersionExchange::from_pyrep(&hello), Some(ver.clone()));
@@ -298,7 +300,7 @@ fn version_exchange_and_extract_macho_call_req_edge_cases() {
     );
 
     let mut c_reg = base.clone();
-    c_reg.project_version = "V24.01@other".into();
+    c_reg.project_version = format!("{}@other", base.codename());
     assert_eq!(
         base.validate_client(&c_reg).unwrap_err().reason_code.as_deref(),
         Some("HANDSHAKE_INCOMPATIBLEREGION")

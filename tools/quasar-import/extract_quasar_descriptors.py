@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-tools/quasar-import/extract_quasar_descriptors.py — V24.01 Quasar FileDescriptorProto Extractor & Codegen.
+tools/quasar-import/extract_quasar_descriptors.py — V24.02 Quasar FileDescriptorProto Extractor & Codegen.
 
-Extracts all 1,455 serialized `google.protobuf.FileDescriptorProto` binary blobs (`serialized_pb`)
-embedded inside the V24.01 EVE client's `code.ccp` (`eveProto/generated/*_pb2.pyj` across 135 domains
-listed in `.agents/skills/evomu-adversarial-review/references/parity/sources/quasar_protobuf_catalog.json`).
+Extracts all 1,464 serialized `google.protobuf.FileDescriptorProto` binary blobs (`serialized_pb`)
+embedded inside the V24.02 EVE client's `code.ccp` (`eveProto/generated/*_pb2.pyj` across 136 domains
+listed in `docs/index/quasar_protobuf_catalog.json`).
 
 In compliance with AGENTS.md ("Client-derived data and the public repository"):
 - Raw `FileDescriptorProto` blobs are written ONLY to local gitignored `data/quasar_descriptors.sqlite`.
@@ -309,7 +309,7 @@ def extract_all_descriptors(
 ) -> dict:
     if not os.path.isfile(code_ccp_path):
         raise FileNotFoundError(
-            f"V24.01 client code.ccp archive not found at {code_ccp_path}"
+            f"V24.02 client code.ccp archive not found at {code_ccp_path}"
         )
     if not os.path.isfile(catalog_path):
         raise FileNotFoundError(
@@ -475,19 +475,15 @@ def main() -> int:
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     default_catalog = os.path.join(
         repo_root,
-        ".agents",
-        "skills",
-        "evomu-adversarial-review",
-        "references",
-        "parity",
-        "sources",
+        "docs",
+        "index",
         "quasar_protobuf_catalog.json",
     )
     default_sqlite = os.path.join(repo_root, "data", "quasar_descriptors.sqlite")
     default_manifest = os.path.join(repo_root, "data", "quasar_descriptor_manifest.json")
 
     parser = argparse.ArgumentParser(
-        description="Extract 1,455 Quasar FileDescriptorProto schemas from V24.01 code.ccp"
+        description="Extract Quasar FileDescriptorProto schemas from client code.ccp"
     )
     parser.add_argument(
         "--shared-cache",
@@ -497,7 +493,7 @@ def main() -> int:
     parser.add_argument(
         "--code-ccp",
         default=None,
-        help="Explicit path to V24.01 client code.ccp archive (overrides --shared-cache)",
+        help="Explicit path to V24.02 client code.ccp archive (overrides --shared-cache)",
     )
     parser.add_argument(
         "--catalog",

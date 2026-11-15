@@ -484,7 +484,7 @@ async fn test_parity_misc_plan_q7_and_q8_quasar_space_and_sovereignty() {
             _ => None,
         })
         .expect("cdn url");
-    assert!(cdn_url.starts_with("http://127.0.0.1:26004/cdn/maptags/v24.1."));
+    assert!(cdn_url.starts_with("http://127.0.0.1:26004/cdn/maptags/v24.2."));
 
     let q8_resp = quasar_rpc(
         &ctx,
